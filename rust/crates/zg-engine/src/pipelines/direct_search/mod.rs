@@ -24,8 +24,8 @@ use crate::{
 };
 
 use self::structure::{
-    EnrichedLexicalMatch, RG_STRUCTURE_ENRICH_FILE_LIMIT, StructureEnrichmentResult,
-    enrich_lexical_matches_with_structure,
+    EnrichedLexicalMatch, StructureEnrichmentResult, enrich_lexical_matches_with_structure,
+    lexical_matches_without_structure,
 };
 
 const DEFAULT_MAX_CONCURRENT_SEARCHES: usize = 2;
@@ -44,8 +44,7 @@ impl DirectSearchService {
     }
 
     pub(crate) async fn context(&self, options: ContextOptions) -> EngineResult<ContextResult> {
-        self.context_with_selected_files(options, None, RG_STRUCTURE_ENRICH_FILE_LIMIT)
-            .await
+        self.context_with_selected_files(options, None).await
     }
 
     pub(super) async fn context_selected_files(
@@ -54,15 +53,14 @@ impl DirectSearchService {
         files: Vec<PathBuf>,
         structure_file_limit: usize,
     ) -> EngineResult<ContextResult> {
-        self.context_with_selected_files(options, Some(files), structure_file_limit)
+        self.context_with_selected_files(options, Some((files, structure_file_limit)))
             .await
     }
 
     async fn context_with_selected_files(
         &self,
         options: ContextOptions,
-        selected_files: Option<Vec<PathBuf>>,
-        structure_file_limit: usize,
+        selected_files: Option<(Vec<PathBuf>, usize)>,
     ) -> EngineResult<ContextResult> {
         let root = std::path::absolute(options.root.as_deref().unwrap_or_else(|| Path::new(".")))
             .map_err(|error| {
@@ -79,13 +77,17 @@ impl DirectSearchService {
         let modified_before_epoch_ms = options.rg_options.modified_before_epoch_ms;
         // Path lookup groups fragment hits by their complete owning entity.
         let use_entity_ranges = selected_files.is_some();
+        let (paths, structure_file_limit) = selected_files
+            .map_or((options.rg_paths, None), |(paths, limit)| {
+                (paths, Some(limit))
+            });
         let request = LexicalSearchRequest {
             signal: options.signal.clone(),
             root: Some(root.clone()),
             patterns: normalized.patterns,
             pattern_files: options.rg_options.pattern_files.clone(),
-            paths_selected: selected_files.is_some(),
-            paths: selected_files.unwrap_or(options.rg_paths),
+            paths_selected: use_entity_ranges,
+            paths,
             limit: options.limit,
             options: LexicalOptions {
                 matching: options.rg_options,
@@ -105,27 +107,28 @@ impl DirectSearchService {
         };
         let mut reply = self.lexical.search(&root, &request).await?;
         let structure_started = Instant::now();
-        let enrichment = enrich_lexical_matches_with_structure(
-            &root,
-            std::mem::take(&mut reply.matches),
-            structure_max_file_size_bytes,
-            structure_file_limit,
-        );
-        let structure_duration = structure_started.elapsed();
+        let enrichment = structure_file_limit.map(|file_limit| {
+            enrich_lexical_matches_with_structure(
+                &root,
+                std::mem::take(&mut reply.matches),
+                structure_max_file_size_bytes,
+                file_limit,
+            )
+        });
+        let structure_duration = enrichment.as_ref().map(|_| structure_started.elapsed());
         let mut result = context_from_lexical(
             normalized.display_query,
             reply,
             enrichment,
             use_entity_ranges,
         );
-        result.diagnostics.timings.push(TimingEntry {
-            name: "structure_enrichment".to_owned(),
-            duration_micros: structure_duration
-                .as_micros()
-                .try_into()
-                .unwrap_or(u64::MAX),
-            count: None,
-        });
+        if let Some(duration) = structure_duration {
+            result.diagnostics.timings.push(TimingEntry {
+                name: "structure_enrichment".to_owned(),
+                duration_micros: duration.as_micros().try_into().unwrap_or(u64::MAX),
+                count: None,
+            });
+        }
         Ok(result)
     }
 }
@@ -193,10 +196,23 @@ fn normalize_request(options: &ContextOptions) -> EngineResult<NormalizedRequest
 fn context_from_lexical(
     query: String,
     reply: LexicalSearchReply,
-    enrichment: StructureEnrichmentResult,
+    enrichment: Option<StructureEnrichmentResult>,
     use_entity_ranges: bool,
 ) -> ContextResult {
-    let hits_returned = enrichment.items.len();
+    let convert = |item| context_item(item, use_entity_ranges);
+    let (items, structure): (Vec<_>, _) = match enrichment {
+        Some(enrichment) => (
+            enrichment.items.into_iter().map(convert).collect(),
+            Some(enrichment.diagnostics),
+        ),
+        None => (
+            lexical_matches_without_structure(reply.matches)
+                .map(convert)
+                .collect(),
+            None,
+        ),
+    };
+    let hits_returned = items.len();
     let empty_reason = (hits_returned == 0).then_some({
         if !reply.diagnostics.missing_paths.is_empty()
             && reply.diagnostics.searched_paths.is_empty()
@@ -218,50 +234,7 @@ fn context_from_lexical(
             LexicalCoverage::Truncated => ContextCoverage::RgTruncated,
         },
         workspace_index: None,
-        items: enrichment
-            .items
-            .into_iter()
-            .map(
-                |EnrichedLexicalMatch {
-                     matched: item,
-                     container,
-                 }| ContextItem {
-                    kind: ContextItemKind::LexicalMatch,
-                    rank: item.rank,
-                    absolute_path: item.absolute_path,
-                    relative_path: item.relative_path,
-                    range: item.range.into(),
-                    excerpt_range: item.excerpt_range.map(Into::into),
-                    content_range: item.content_range.into(),
-                    match_ranges: item.match_ranges.into_iter().map(Into::into).collect(),
-                    content: item.content,
-                    outline: None,
-                    content_role: Some(ContextContentRole::Source),
-                    status: ContextItemStatus::Fresh,
-                    score: None,
-                    matched_by: MatchedBy::Lexical,
-                    metadata: container
-                        .as_ref()
-                        .and_then(|value| value.metadata.as_ref())
-                        .cloned(),
-                    entity_id: None,
-                    container: container.map(|value| ContextContainer {
-                        entity_id: None,
-                        range: if use_entity_ranges {
-                            value.entity_range
-                        } else {
-                            value.range
-                        }
-                        .into(),
-                        metadata: value.metadata,
-                    }),
-                    trace: None,
-                    query_groups: Vec::new(),
-                    selection_reason: None,
-                    coverage_group: None,
-                },
-            )
-            .collect(),
+        items,
         group_results: Vec::new(),
         diagnostics: ContextDiagnostics {
             empty_reason,
@@ -276,9 +249,60 @@ fn context_from_lexical(
                 limit: reply.diagnostics.limit,
                 truncated: reply.diagnostics.truncated,
             }),
-            structure: Some(enrichment.diagnostics),
+            structure,
             timings: Vec::new(),
         },
+    }
+}
+
+fn context_item(enriched: EnrichedLexicalMatch, use_entity_ranges: bool) -> ContextItem {
+    let EnrichedLexicalMatch {
+        mut matched,
+        container,
+    } = enriched;
+    let rank = matched.rank;
+    let range = matched.range.into();
+    let excerpt_range = matched.excerpt_range.map(Into::into);
+    let content_range = matched.content_range.into();
+    let match_ranges = std::mem::take(&mut matched.match_ranges)
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    let (absolute_path, relative_path, content) = matched.into_paths_and_content();
+    ContextItem {
+        kind: ContextItemKind::LexicalMatch,
+        rank,
+        absolute_path,
+        relative_path,
+        range,
+        excerpt_range,
+        content_range,
+        match_ranges,
+        content,
+        outline: None,
+        content_role: Some(ContextContentRole::Source),
+        status: ContextItemStatus::Fresh,
+        score: None,
+        matched_by: MatchedBy::Lexical,
+        metadata: container
+            .as_ref()
+            .and_then(|value| value.metadata.as_ref())
+            .cloned(),
+        entity_id: None,
+        container: container.map(|value| ContextContainer {
+            entity_id: None,
+            range: if use_entity_ranges {
+                value.entity_range
+            } else {
+                value.range
+            }
+            .into(),
+            metadata: value.metadata,
+        }),
+        trace: None,
+        query_groups: Vec::new(),
+        selection_reason: None,
+        coverage_group: None,
     }
 }
 
@@ -289,8 +313,135 @@ mod tests {
     use super::{ContextOptions, normalize_request};
 
     #[tokio::test]
-    async fn direct_search_returns_structure_without_index_identity() {
-        use crate::api::context::result::{ContentRange, EntityMetadata};
+    async fn shared_source_results_preserve_order_context_and_limits() {
+        use crate::api::context::result::{ContentRange, ContextCoverage};
+
+        let directory = tempfile::tempdir().expect("source directory");
+        let source = "中 needle 一\r\nneedle two\r\n尾 needle";
+        for path in ["a.txt", "z.txt"] {
+            std::fs::write(directory.path().join(path), source).expect("source");
+        }
+        for threads in [1, 2] {
+            for context in [0, 1] {
+                for limit in [None, Some(5)] {
+                    let engine = crate::ZvecGrep::new();
+                    let result = engine
+                        .context(ContextOptions {
+                            root: Some(directory.path().to_path_buf()),
+                            rg: true,
+                            query: Some("needle".into()),
+                            rg_paths: vec!["z.txt".into(), "a.txt".into(), "a.txt".into()],
+                            limit,
+                            rg_options: RgOptions {
+                                threads: Some(threads),
+                                before_context: context,
+                                after_context: context,
+                                ..RgOptions::default()
+                            },
+                            ..ContextOptions::default()
+                        })
+                        .await
+                        .expect("plain results");
+                    engine.close();
+                    let expected = if context == 0 {
+                        ["中 needle 一", "needle two", "尾 needle"]
+                    } else {
+                        [
+                            "中 needle 一\r\nneedle two",
+                            source,
+                            "needle two\r\n尾 needle",
+                        ]
+                    };
+                    assert_eq!(result.items.len(), if limit.is_some() { 3 } else { 6 });
+                    assert_eq!(
+                        result.coverage,
+                        if limit.is_some() {
+                            ContextCoverage::RgTruncated
+                        } else {
+                            ContextCoverage::RgExhaustive
+                        }
+                    );
+                    for (index, item) in result.items.iter().enumerate() {
+                        let path = if index < 3 { "a.txt" } else { "z.txt" };
+                        assert_eq!(item.rank, index + 1);
+                        assert_eq!(item.relative_path, std::path::Path::new(path));
+                        assert_eq!(item.absolute_path, directory.path().join(path));
+                        assert_eq!(item.content, expected[index % 3]);
+                        let ContentRange::Text {
+                            start_byte_offset,
+                            end_byte_offset,
+                            ..
+                        } = item.content_range
+                        else {
+                            panic!("text coordinates")
+                        };
+                        assert_eq!(&source[start_byte_offset..end_byte_offset], item.content);
+                        let ContentRange::Text {
+                            start_byte_offset,
+                            end_byte_offset,
+                            ..
+                        } = item.excerpt_range.as_ref().unwrap_or(&item.range)
+                        else {
+                            panic!("matched coordinates")
+                        };
+                        assert_eq!(&source[*start_byte_offset..*end_byte_offset], "needle");
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_rg_preserves_matches_and_context_without_structure() {
+        let directory = tempfile::tempdir().expect("source directory");
+        std::fs::write(
+            directory.path().join("source.rs"),
+            "pub fn orchard() {\n    let fruit = \"needle\";\n}\n",
+        )
+        .expect("source file");
+        let engine = crate::ZvecGrep::new();
+        let options = ContextOptions {
+            root: Some(directory.path().to_path_buf()),
+            rg: true,
+            query: Some("needle".into()),
+            rg_paths: vec!["source.rs".into(), "source.rs".into()],
+            rg_options: RgOptions {
+                before_context: 1,
+                after_context: 1,
+                ..RgOptions::default()
+            },
+            ..ContextOptions::default()
+        };
+        let mut expected = super::DirectSearchService::new()
+            .context_selected_files(
+                options.clone(),
+                options.rg_paths.clone(),
+                options.rg_paths.len(),
+            )
+            .await
+            .expect("selected-file path lookup");
+        assert_eq!(expected.items.len(), 1);
+        assert!(expected.items[0].container.is_some());
+        for item in &mut expected.items {
+            item.metadata = None;
+            item.container = None;
+        }
+        expected.diagnostics.structure = None;
+        expected.diagnostics.timings.clear();
+
+        let options = serde_json::from_value(serde_json::to_value(options).expect("request"))
+            .expect("serialized request");
+        let plain = engine.context(options).await.expect("plain rg");
+        assert_eq!(
+            serde_json::to_value(plain).expect("plain results"),
+            serde_json::to_value(expected).expect("expected matches")
+        );
+        engine.close();
+    }
+
+    #[tokio::test]
+    async fn direct_rg_returns_plain_matches_without_index_identity() {
+        use crate::api::context::result::ContentRange;
 
         let directory = tempfile::tempdir().expect("source directory");
         let source = "pub fn orchard() {\n    let fruit = \"needle\";\n}\n";
@@ -321,25 +472,10 @@ mod tests {
         assert_eq!(&source[start_byte_offset..end_byte_offset], item.content);
         assert!(item.entity_id.is_none());
         assert!(item.content.contains("needle"));
-        let container = item.container.as_ref().expect("function container");
-        assert!(container.entity_id.is_none());
-        assert!(matches!(
-            &container.metadata,
-            Some(EntityMetadata::Code(metadata))
-                if metadata.symbol_name.as_deref() == Some("orchard")
-        ));
-        assert!(matches!(
-            container.range,
-            ContentRange::Text {
-                start_line: 1,
-                end_line: 3,
-                start_byte_offset: 0,
-                end_byte_offset,
-                ..
-            } if end_byte_offset == source.trim_end().len()
-        ));
-        let serialized = serde_json::to_value(container).expect("serialize container");
-        assert_eq!(serialized.get("entity_id"), Some(&serde_json::Value::Null));
+        assert!(item.container.is_none());
+        assert!(item.metadata.is_none());
+        assert!(result.diagnostics.structure.is_none());
+        assert!(result.diagnostics.timings.is_empty());
         assert!(!directory.path().join(".zvec-grep").exists());
         engine.close();
     }

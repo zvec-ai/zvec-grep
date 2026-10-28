@@ -74,7 +74,11 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         }
         _ => {}
     }
-    install_darwin_metal_residency_mitigation()?;
+    let lexical_only = matches!(&plan, CliPlan::Files { .. })
+        || matches!(&plan, CliPlan::Query { request, .. } if request.rg);
+    if !lexical_only {
+        install_darwin_metal_residency_mitigation()?;
+    }
     // Emit after a possible re-exec so macOS prints each warning only once.
     warn();
     if let Some(warning) = positional_warning {
@@ -90,7 +94,12 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         init_tracing(debug);
     }
 
-    let runtime = Builder::new_multi_thread().enable_all().build()?;
+    // The grep walker owns its search threads; a Tokio worker pool would duplicate them.
+    let runtime = if lexical_only {
+        Builder::new_current_thread().enable_all().build()?
+    } else {
+        Builder::new_multi_thread().enable_all().build()?
+    };
 
     runtime.block_on(Box::pin(execute_plan(plan)))
 }
@@ -768,12 +777,14 @@ async fn execute_direct_context(
             .and_then(zg_engine::api::context::result::ContextIndexingStatus::from_stats);
     }
     engine.close();
+    let mut stdout = io::BufWriter::new(zg_cli::stdout());
     zg_cli::write_context_with_options(
-        zg_cli::stdout(),
+        &mut stdout,
         &result,
         output,
         zg_cli::stdout_supports_ansi(),
     )?;
+    stdout.flush()?;
     zg_cli::write_context_status(io::stderr().lock(), &result)?;
     if output.debug {
         eprintln!(

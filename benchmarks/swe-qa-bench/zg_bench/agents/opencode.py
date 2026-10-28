@@ -13,6 +13,11 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 from zg_bench.agents.opencode_usage import USAGE_SQL, summarize_session_usage
+from zg_bench.agents.ripgrep import (
+    RIPGREP_ARCHIVE_SHA256, RIPGREP_ARCHIVE_URL, RIPGREP_PREFLIGHT_FILENAME,
+    parse_ripgrep_preflight, ripgrep_install_command, ripgrep_preflight_command,
+    validate_ripgrep_preflight,
+)
 
 _INSTALL_ATTEMPTS = 3
 _USAGE_CAPTURE_TIMEOUT_SECONDS = 30
@@ -60,11 +65,40 @@ class ResilientOpenCode(OpenCode):
         self._usage_capture_complete = False
         self._usage_capture_error: str | None = None
         self._usage_collection_wall_seconds = 0.0
+        self._ripgrep_install_wall_seconds = 0.0
+
+    async def _verify_ripgrep(self, environment: BaseEnvironment) -> None:
+        started = time.monotonic()
+        evidence = {"schema_version": 1, "status": "failed"}
+        try:
+            result = await self.exec_as_agent(
+                environment, command=ripgrep_preflight_command(), timeout_sec=30,
+            )
+            evidence = parse_ripgrep_preflight(result.stdout)
+            validate_ripgrep_preflight(evidence)
+        except BaseException as exc:
+            evidence["status"] = "failed"
+            evidence["validation_error"] = type(exc).__name__
+            raise
+        finally:
+            evidence.update(
+                archive_url=RIPGREP_ARCHIVE_URL,
+                archive_sha256=RIPGREP_ARCHIVE_SHA256,
+                install_wall_seconds=self._ripgrep_install_wall_seconds,
+                preflight_wall_seconds=time.monotonic() - started,
+            )
+            self.logs_dir.mkdir(parents=True, exist_ok=True)
+            (self.logs_dir / RIPGREP_PREFLIGHT_FILENAME).write_text(
+                json.dumps(evidence, indent=2, sort_keys=True) + "\n"
+            )
 
     @override
     async def run(
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
     ) -> None:
+        # Before creating any model session; descendants inherit this unchanged
+        # container filesystem and OpenCode's original environment.
+        await self._verify_ripgrep(environment)
         if not self._collect_session_usage:
             await super().run(instruction, environment, context)
             return
@@ -148,6 +182,11 @@ class ResilientOpenCode(OpenCode):
             command="apt-get update && apt-get install -y curl",
             env={"DEBIAN_FRONTEND": "noninteractive"},
         )
+        rg_started = time.monotonic()
+        try:
+            await self.exec_as_root(environment, command=ripgrep_install_command())
+        finally:
+            self._ripgrep_install_wall_seconds = time.monotonic() - rg_started
 
         version_spec = f"@{self._version}" if self._version else "@latest"
         package_spec = shlex.quote(f"opencode-ai{version_spec}")

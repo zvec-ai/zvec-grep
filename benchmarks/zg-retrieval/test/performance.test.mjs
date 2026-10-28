@@ -218,7 +218,7 @@ test("final tables pool raw RT/RSS samples and report missing phase coverage", (
   assert.equal(result.query.fts.total_ms.mean, null);
   const text = markdownPerformance(result);
   assert.match(text, /Index \| 2\/3/);
-  assert.match(text, /26.50 \/ 100.00 \/ 100.00/);
+  assert.match(text, /26.50 \/ 2.50 \/ 100.00 \/ 100.00/);
   assert.match(text, /RSS mean \/ p95 \/ p99/);
   assert.match(text, /Generated index size/);
   assert.doesNotMatch(text, /Index RT|index_write|per-file diagnostics/);

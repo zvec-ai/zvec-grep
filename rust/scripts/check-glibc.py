@@ -17,7 +17,7 @@ def required_versions(symbols):
         if needs:
             requirement = re.search(r"Name: (GLIBC_\S+)\s+Flags: (.*?)\s+Version:", line)
             if requirement and "WEAK" not in requirement[2].upper().split():
-                version = requirement[1].removeprefix("GLIBC_")
+                version = requirement[1][len("GLIBC_"):]
                 if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)+", version):
                     raise RuntimeError(f"Cannot establish a glibc baseline for {requirement[1]}")
                 versions.add(tuple(map(int, version.split("."))))

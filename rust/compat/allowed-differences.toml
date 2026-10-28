@@ -2,6 +2,12 @@
 # reason and removal condition.
 
 [[difference]]
+id = "managed-rg-plain-text"
+owner = "CLI/engine/MCP"
+reason = "Rust CLI, API and MCP rg searches return plain source matches without code or Markdown extraction, structural containers or symbol headings. This removes parsing work from exhaustive text search. File grouping, source coordinates, matching/context markers, output bounds and Direct/Server semantics remain shared. Current-file path lookup retains structural entity grouping. Validation: direct_search, lexical_modes and rg_format regression tests."
+removal_condition = "TypeScript adopts plain rg results or its compatibility surface is retired."
+
+[[difference]]
 id = "cli-server-options-before-action"
 owner = "CLI"
 reason = "Rust already accepts server options before the action. TypeScript requires the action first. For --home and --token-file, Rust keeps an explicit value after the action ahead of one before the action, then uses the environment value or default. The server-option-precedence fixture records the TypeScript parse errors and the expected Rust values for those options."
