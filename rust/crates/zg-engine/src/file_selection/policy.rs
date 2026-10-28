@@ -319,9 +319,12 @@ impl ScanPolicy {
                         })?;
                 }
             }
-            Err(error)
-                if error.kind() == ErrorKind::NotFound
-                    || (!explicit && error.kind() == ErrorKind::NotADirectory) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                if explicit {
+                    validate_ignore_parent(path)?;
+                }
+            }
+            Err(error) if !explicit && error.kind() == ErrorKind::NotADirectory => {}
             Err(error) => {
                 return Err(HostError::storage_failure(
                     "file-selection",
@@ -456,6 +459,28 @@ impl PathPolicy for ScanPolicy {
         );
         self.load_explicit_rules()
     }
+}
+
+// Windows can report NotFound when a parent is a regular file. Only a genuinely
+// missing path may be skipped; follow directory symlinks as File::open does.
+fn validate_ignore_parent(path: &Path) -> Result<(), HostError> {
+    for parent in path.ancestors().skip(1) {
+        let error = match std::fs::metadata(parent) {
+            Ok(metadata) if metadata.is_dir() => return Ok(()),
+            Ok(_) => std::io::Error::from(ErrorKind::NotADirectory),
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => error,
+        };
+        return Err(HostError::storage_failure(
+            "file-selection",
+            format!(
+                "could not open ignore file {}: parent {}: {error}",
+                path.display(),
+                parent.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 // Preserve the final component so replacing an ignore-file symlink stays observable.

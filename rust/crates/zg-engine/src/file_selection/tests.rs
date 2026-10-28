@@ -533,7 +533,12 @@ fn missing_explicit_ignore_files_are_skipped_and_reloaded() {
     let base = fs::canonicalize(temporary.path()).expect("canonical fixture");
     let root = base.join("source");
     fs::create_dir(&root).expect("empty source root");
-    for path in [PathBuf::from("local.ignore"), base.join("external.ignore")] {
+    for path in [
+        PathBuf::from("local.ignore"),
+        PathBuf::from("missing/nested/local.ignore"),
+        base.join("external.ignore"),
+        base.join("missing/nested/external.ignore"),
+    ] {
         let absolute = root.join(&path);
         let rules = ScanRulesUpdate {
             ignore_files: Some(vec![path.clone()]),
@@ -549,6 +554,7 @@ fn missing_explicit_ignore_files_are_skipped_and_reloaded() {
                 .includes_file(&root.join("main.rs"))
                 .expect("included")
         );
+        fs::create_dir_all(absolute.parent().expect("ignore parent")).expect("ignore directories");
         fs::write(&absolute, "main.rs\n").expect("create rules");
         assert_eq!(
             policy
@@ -612,15 +618,20 @@ fn explicit_ignore_files_below_regular_files_are_rejected() {
     let temporary = tempfile::tempdir().expect("workspace");
     let root = temporary.path();
     write(root, "source.rs", "source");
-    let rules = ScanRulesUpdate {
-        ignore_files: Some(vec![root.join("source.rs/required.ignore")]),
-        ..ScanRulesUpdate::default()
+    for path in [
+        "source.rs/required.ignore",
+        "source.rs/missing/nested/required.ignore",
+    ] {
+        let rules = ScanRulesUpdate {
+            ignore_files: Some(vec![root.join(path)]),
+            ..ScanRulesUpdate::default()
+        }
+        .apply(&ScanRules::default())
+        .expect("scan rules");
+        let error = make_policy(root, &[], &rules)
+            .expect_err("an explicit ignore file must not be treated as absent directory rules");
+        assert!(error.message().contains("required.ignore"));
     }
-    .apply(&ScanRules::default())
-    .expect("scan rules");
-    let error = make_policy(root, &[], &rules)
-        .expect_err("an explicit ignore file must not be treated as absent directory rules");
-    assert!(error.message().contains("required.ignore"));
 }
 
 #[test]
