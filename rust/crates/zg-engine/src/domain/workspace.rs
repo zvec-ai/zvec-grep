@@ -1,15 +1,10 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
-use relative_path::{PathExt, RelativePathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     EngineError, EngineResult,
-    storage::PathRecord,
-    utils::{directory_exists, file_exists},
+    utils::{current_username, directory_exists, file_exists, resolve_directory},
 };
 
 use super::{FileFormat, GlobRule, IndexState, SourcePath};
@@ -17,9 +12,9 @@ use super::{FileFormat, GlobRule, IndexState, SourcePath};
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Workspace {
+    source_root: SourceRoot,
     #[serde(skip)]
     layout: WorkspaceLayout,
-    source_root: SourceRoot,
     scan: ScanRules,
     /// Storage format version used by the index.
     index_version: Option<u32>,
@@ -37,18 +32,17 @@ impl Workspace {
     pub(crate) fn new(
         source_root: &Path,
         layout: WorkspaceLayout,
-        mut scan: ScanRules,
+        scan: ScanRules,
         index_version: Option<u32>,
         storage_generation: Option<String>,
         created_epoch_ms: u64,
         updated_epoch_ms: u64,
         index: IndexState,
     ) -> EngineResult<Self> {
-        let source_root = SourceRoot::new(source_root, &layout)?;
-        scan.normalize_ignore_paths(&source_root.resolved)?;
+        let source_root = SourceRoot::new(source_root)?;
         let workspace = Self {
-            layout,
             source_root,
+            layout,
             scan,
             index_version,
             storage_generation,
@@ -62,8 +56,8 @@ impl Workspace {
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_manifest(
-        layout: WorkspaceLayout,
         source_root: SourceRoot,
+        layout: WorkspaceLayout,
         scan: ScanRules,
         index_version: Option<u32>,
         storage_generation: Option<String>,
@@ -73,8 +67,8 @@ impl Workspace {
     ) -> EngineResult<Self> {
         let changed = source_root.environment_changed();
         let mut workspace = Self {
-            layout,
             source_root,
+            layout,
             scan,
             index_version,
             storage_generation,
@@ -84,7 +78,6 @@ impl Workspace {
         };
         workspace.validate()?;
         if changed {
-            workspace.scan.invalidate_external_ignores();
             workspace.index.invalidate_runtime_settings();
         }
         Ok(workspace)
@@ -104,30 +97,33 @@ impl Workspace {
                     self.source_root().display(),
                 )));
             }
-            if self.storage_generation.is_none() {
-                return Err(EngineError::invalid_argument(format!(
+            let generation = self.storage_generation.as_deref().ok_or_else(|| {
+                EngineError::invalid_argument(format!(
                     "workspace {}: index is enabled but storageGeneration is missing",
                     self.source_root().display(),
-                )));
-            }
+                ))
+            })?;
+            uuid::Uuid::parse_str(generation).map_err(|_| {
+                EngineError::invalid_argument(format!(
+                    "workspace {}: storageGeneration must be a UUID, got {generation:?}",
+                    self.source_root().display(),
+                ))
+            })?;
         } else if self.index_version.is_some() || self.storage_generation.is_some() {
             return Err(EngineError::invalid_argument(format!(
                 "workspace {}: an unbuilt index cannot have indexVersion or storageGeneration",
                 self.source_root().display(),
             )));
         }
-        if let Some(generation) = &self.storage_generation {
-            validate_generation(self.source_root(), generation)?;
-        }
         Ok(())
+    }
+
+    pub(crate) fn source_root(&self) -> &Path {
+        &self.source_root.current_path
     }
 
     pub(crate) fn layout(&self) -> &WorkspaceLayout {
         &self.layout
-    }
-
-    pub(crate) fn source_root(&self) -> &Path {
-        &self.source_root.resolved
     }
 
     pub(crate) fn scan(&self) -> &ScanRules {
@@ -168,109 +164,46 @@ impl Workspace {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct SourceRoot {
+    /// Current canonical source directory used at runtime; not persisted.
     #[serde(skip)]
-    resolved: PathBuf,
-    relative: RelativePathBuf,
-    absolute: String,
-    username: Option<String>,
+    current_path: PathBuf,
+    /// Source path recorded when saved, used to detect environment changes.
+    /// Never used to locate the workspace or its files.
+    recorded_path: String,
+    /// Username recorded when saved, used to detect environment changes.
+    /// None when the username was unavailable.
+    recorded_username: Option<String>,
 }
 
 impl SourceRoot {
     #[allow(clippy::unnecessary_debug_formatting)] // Keep control characters in paths escaped.
-    fn new(source_root: &Path, layout: &WorkspaceLayout) -> EngineResult<Self> {
+    fn new(source_root: &Path) -> EngineResult<Self> {
         if !source_root.is_absolute() {
             return Err(EngineError::invalid_argument(format!(
                 "workspace source root {source_root:?} must be an absolute path",
             )));
         }
-        let source_root = crate::utils::resolve_directory(Some(source_root))?;
-        let storage_dir = match (
-            layout.storage_dir().parent(),
-            layout.storage_dir().file_name(),
-        ) {
-            (Some(parent), Some(name)) => crate::utils::resolve_directory(Some(parent))?.join(name),
-            _ => crate::utils::resolve_directory(Some(layout.storage_dir()))?,
-        };
-        let relative = source_root
-            .relative_to(&storage_dir)
-            .map_err(|error| {
-                EngineError::invalid_argument(format!(
-                    "cannot express workspace source root relative to its storage directory: {error}",
-                ))
-            })?
-            .normalize();
+        let source_root = resolve_directory(Some(source_root))?;
         Ok(Self {
-            absolute: source_root.to_string_lossy().into_owned(),
-            resolved: source_root,
-            relative,
-            username: current_username(),
+            recorded_path: source_root.to_string_lossy().into_owned(),
+            current_path: source_root,
+            recorded_username: current_username(),
         })
     }
 
-    pub(crate) fn resolve(
-        &mut self,
-        layout: &WorkspaceLayout,
-        expected_source_root: &Path,
-    ) -> EngineResult<()> {
-        let value = self.relative.as_str();
-        if value.is_empty() || value.starts_with('/') || value.contains(['\\', ':', '\0']) {
-            return Err(EngineError::invalid_argument(format!(
-                "workspace manifest '{}': sourceRoot.relative must be a relative path using '/' separators, got {value:?}",
-                layout.manifest_path().display(),
-            )));
-        }
-        let resolved = crate::utils::resolve_directory(Some(
-            &self.relative.to_logical_path(layout.storage_dir()),
-        ))
-        .map_err(|error| {
-            EngineError::invalid_argument(format!(
-                "workspace manifest '{}': cannot resolve sourceRoot.relative {value:?}: {error}",
-                layout.manifest_path().display(),
-            ))
-        })?;
-        let expected = crate::utils::resolve_directory(Some(expected_source_root))?;
-        if resolved != expected {
-            return Err(EngineError::invalid_argument(format!(
-                "workspace manifest '{}': sourceRoot.relative {value:?} resolves to '{}', expected source directory '{}'",
-                layout.manifest_path().display(),
-                resolved.display(),
-                expected.display(),
-            )));
-        }
-        self.resolved = resolved;
+    pub(crate) fn set_current_path(&mut self, path: &Path) -> EngineResult<()> {
+        self.current_path = resolve_directory(Some(path))?;
         Ok(())
     }
 
     fn environment_changed(&self) -> bool {
         let username = current_username();
-        self.absolute != self.resolved.to_string_lossy().as_ref()
+        self.recorded_path != self.current_path.to_string_lossy().as_ref()
             || username.is_none()
-            || self.username != username
+            || self.recorded_username != username
     }
-}
-
-fn current_username() -> Option<String> {
-    let names = if cfg!(windows) {
-        ["USERNAME", "USER"]
-    } else {
-        ["USER", "USERNAME"]
-    };
-    names.into_iter().find_map(|name| {
-        std::env::var(name)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-    })
-}
-
-fn validate_generation(source_root: &Path, generation: &str) -> EngineResult<()> {
-    uuid::Uuid::parse_str(generation).map(|_| ()).map_err(|_| {
-        EngineError::invalid_argument(format!(
-            "workspace {}: storageGeneration must be a UUID, got {generation:?}",
-            source_root.display(),
-        ))
-    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -431,19 +364,16 @@ pub struct ScanRules {
     include_hidden: bool,
     follow_symlinks: bool,
     max_depth: Option<usize>,
-    #[serde(deserialize_with = "deserialize_max_file_size")]
     max_file_size_bytes: Option<u64>,
     use_default_ignores: bool,
-    ignore_files: Vec<StoredIgnorePath>,
-    #[serde(skip)]
-    invalidated_external_ignores: bool,
+    ignore_files: Vec<IgnorePath>,
     /// Traverse child Git repositories, including submodules and worktrees.
     nested_git: bool,
 }
 
 impl ScanRules {
     /// # Errors
-    /// Returns an error if the scan rules are invalid.
+    /// Returns an error if the rules are invalid.
     #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     pub fn new(
         globs: Vec<GlobRule>,
@@ -457,11 +387,10 @@ impl ScanRules {
         ignore_files: Vec<PathBuf>,
         nested_git: bool,
     ) -> EngineResult<Self> {
-        let max_file_size_bytes = validate_max_file_size(max_file_size_bytes)?;
         let ignore_files = ignore_files
             .into_iter()
-            .map(StoredIgnorePath::from_path)
-            .collect();
+            .map(IgnorePath::from_path)
+            .collect::<EngineResult<_>>()?;
         Ok(Self {
             globs,
             included_formats,
@@ -472,7 +401,6 @@ impl ScanRules {
             max_file_size_bytes,
             use_default_ignores,
             ignore_files,
-            invalidated_external_ignores: false,
             nested_git,
         })
     }
@@ -519,7 +447,7 @@ impl ScanRules {
     }
 
     pub fn ignore_files(&self) -> impl ExactSizeIterator<Item = &Path> {
-        self.ignore_files.iter().map(StoredIgnorePath::as_path)
+        self.ignore_files.iter().map(IgnorePath::as_path)
     }
 
     #[must_use]
@@ -527,79 +455,16 @@ impl ScanRules {
         self.nested_git
     }
 
-    pub(crate) fn normalize_ignore_paths(&mut self, root: &Path) -> EngineResult<()> {
-        if self.ignore_files.is_empty() {
-            return Ok(());
-        }
-        let canonical_root = fs::canonicalize(root)
-            .map_err(|error| EngineError::from_io("resolve workspace root", &error))?;
-        self.ignore_files = self
-            .resolve_ignore_files(root)?
-            .into_iter()
-            .map(|path| {
-                let relative = path
-                    .strip_prefix(root)
-                    .or_else(|_| path.strip_prefix(&canonical_root))
-                    .ok();
-                if let Some(relative) = relative
-                    && PathRecord::from_path(relative).is_ok()
-                {
-                    return Ok(StoredIgnorePath::from_path(relative.to_path_buf()));
-                }
-                let file_name = path.file_name().ok_or_else(|| {
-                    EngineError::invalid_argument(format!(
-                        "ignore file path must name a file: {}",
-                        path.display(),
-                    ))
-                })?;
-                // Keep the selected file alias so replacing its symlink remains observable.
-                let absolute =
-                    match fs::canonicalize(path.parent().expect("absolute ignore file parent")) {
-                        Ok(parent) => parent.join(file_name),
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => path,
-                        Err(error) => {
-                            return Err(EngineError::from_io("resolve ignore file path", &error));
-                        }
-                    };
-                let path = absolute
-                    .strip_prefix(&canonical_root)
-                    .map_or_else(|_| absolute.clone(), Path::to_path_buf);
-                if path.is_absolute() && path.to_str().is_none() {
-                    return Err(EngineError::invalid_argument(
-                        "external ignore file path must be Unicode to serialize it",
-                    ));
-                }
-                Ok(StoredIgnorePath::from_path(path))
-            })
-            .collect::<EngineResult<_>>()?;
-        Ok(())
-    }
-
-    pub(crate) fn invalidate_external_ignores(&mut self) {
-        self.invalidated_external_ignores = self
-            .ignore_files
-            .iter()
-            .any(|file| matches!(file, StoredIgnorePath::External { .. }));
-    }
-
     pub(crate) fn inherit_ignore_files(&mut self, current: &Self) {
         self.ignore_files.clone_from(&current.ignore_files);
-        self.invalidated_external_ignores = current.invalidated_external_ignores;
     }
 
-    pub(crate) fn resolve_ignore_files(&self, root: &Path) -> EngineResult<Vec<PathBuf>> {
+    pub(crate) fn resolve_ignore_files(&self, root: &Path) -> Vec<PathBuf> {
         self.ignore_files
             .iter()
-            .map(|file| {
-                if let StoredIgnorePath::External { platform, path } = file
-                    && (self.invalidated_external_ignores || platform != path_platform())
-                {
-                    return Err(EngineError::invalid_argument(format!(
-                        "saved external ignore file {path:?} needs to be configured again for workspace {}; use --ignore-file or --reset-paths",
-                        root.display(),
-                    )));
-                }
-                Ok(root.join(file.as_path()))
+            .filter_map(|file| match file {
+                IgnorePath::Workspace { path } => Some(root.join(path.as_path())),
+                IgnorePath::External { path } => path.is_absolute().then(|| path.clone()),
             })
             .collect()
     }
@@ -617,7 +482,6 @@ impl Default for ScanRules {
             max_file_size_bytes: None,
             use_default_ignores: true,
             ignore_files: Vec::new(),
-            invalidated_external_ignores: false,
             nested_git: true,
         }
     }
@@ -625,237 +489,151 @@ impl Default for ScanRules {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "location", rename_all = "snake_case", deny_unknown_fields)]
-enum StoredIgnorePath {
-    Workspace {
-        #[serde(with = "relative_ignore_path")]
-        path: PathBuf,
-    },
-    External {
-        platform: String,
-        path: PathBuf,
-    },
+enum IgnorePath {
+    Workspace { path: SourcePath },
+    External { path: PathBuf },
 }
 
-impl StoredIgnorePath {
-    fn from_path(path: PathBuf) -> Self {
-        if PathRecord::from_path(&path).is_ok() {
-            return Self::Workspace { path };
+impl IgnorePath {
+    fn from_path(path: PathBuf) -> EngineResult<Self> {
+        if !path.is_absolute() {
+            return Ok(Self::Workspace {
+                path: SourcePath::new(path)?,
+            });
         }
-        Self::External {
-            platform: path_platform().into(),
-            path,
+        if path.to_str().is_none() {
+            return Err(EngineError::invalid_argument(
+                "external ignore file path must be Unicode to serialize it",
+            ));
         }
+        Ok(Self::External { path })
     }
 
     fn as_path(&self) -> &Path {
         match self {
-            Self::Workspace { path } | Self::External { path, .. } => path,
+            Self::Workspace { path } => path.as_path(),
+            Self::External { path } => path,
         }
     }
-}
-
-fn path_platform() -> &'static str {
-    if cfg!(windows) { "windows" } else { "unix" }
-}
-
-mod relative_ignore_path {
-    use std::path::{Path, PathBuf};
-
-    use serde::{Deserialize, Serialize};
-
-    use crate::storage::PathRecord;
-
-    pub(super) fn serialize<S: serde::Serializer>(
-        path: &Path,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        PathRecord::from_path(path)
-            .map_err(serde::ser::Error::custom)?
-            .serialize(serializer)
-    }
-
-    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<PathBuf, D::Error> {
-        PathRecord::deserialize(deserializer)?
-            .into_path()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-fn validate_max_file_size(value: Option<u64>) -> EngineResult<Option<u64>> {
-    if value == Some(0) {
-        return Err(EngineError::invalid_argument(
-            "max_file_size_bytes must be greater than zero",
-        ));
-    }
-    Ok(value)
-}
-
-fn deserialize_max_file_size<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<u64>, D::Error> {
-    validate_max_file_size(Option::<u64>::deserialize(deserializer)?)
-        .map_err(serde::de::Error::custom)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{collections::BTreeMap, fs, path::Path};
 
-    use super::ScanRules;
-    use crate::api::index::options::ScanRulesUpdate;
+    use serde_json::Value;
+
+    use super::{ScanRules, SourceRoot, Workspace, WorkspaceLayout};
+    use crate::domain::{
+        ContentKind, FTS_CONFIG, FileFormat, IndexDescriptor, IndexState, SourcePath,
+        model::{EmbeddingMetric, EmbeddingModelInfo, ModelInfo},
+    };
+
+    fn workspace(root: &Path) -> Workspace {
+        let scan = ScanRules::new(
+            vec!["*.rs".into()],
+            vec![FileFormat::Rust],
+            vec![FileFormat::Cpp],
+            true,
+            true,
+            Some(3),
+            Some(1024),
+            false,
+            vec!["config/rules.ignore".into()],
+            false,
+        )
+        .expect("scan rules");
+        let model =
+            ModelInfo::new("local", "test-model", [ContentKind::Code], 1).expect("model metadata");
+        let embedding = EmbeddingModelInfo::new(model, 8, EmbeddingMetric::Cosine, None, None)
+            .expect("embedding metadata");
+        let index = IndexDescriptor::new(embedding, BTreeMap::new(), BTreeMap::new(), FTS_CONFIG)
+            .expect("index descriptor");
+        Workspace::new(
+            root,
+            WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout"),
+            scan,
+            Some(2),
+            Some(uuid::Uuid::new_v4().to_string()),
+            10,
+            20,
+            IndexState::Enabled(Box::new(index)),
+        )
+        .expect("workspace")
+    }
+
+    fn restore_workspace(saved: &Value, root: &Path) -> Workspace {
+        let mut source: SourceRoot =
+            serde_json::from_value(saved["sourceRoot"].clone()).expect("source root fields");
+        source.set_current_path(root).expect("current source path");
+        Workspace::from_manifest(
+            source,
+            WorkspaceLayout::new(root.join(".zvec-grep")).expect("current layout"),
+            serde_json::from_value(saved["scan"].clone()).expect("scan fields"),
+            serde_json::from_value(saved["indexVersion"].clone()).expect("index version"),
+            serde_json::from_value(saved["storageGeneration"].clone()).expect("storage generation"),
+            serde_json::from_value(saved["createdTime"].clone()).expect("created time"),
+            serde_json::from_value(saved["updatedTime"].clone()).expect("updated time"),
+            serde_json::from_value(saved["index"].clone()).expect("index fields"),
+        )
+        .expect("workspace from manifest")
+    }
 
     #[test]
-    fn source_root_remains_relative_after_move() {
-        use std::fs;
+    fn workspace_round_trips_through_manifest() {
+        let directory = tempfile::tempdir().expect("workspace directory");
+        let root = directory.path().canonicalize().expect("source root");
+        let workspace = workspace(&root);
+        assert_eq!(workspace.source_root(), root);
+        assert_eq!(workspace.layout().storage_dir(), root.join(".zvec-grep"));
+        assert!(workspace.index_enabled());
 
-        use super::{SourceRoot, WorkspaceLayout};
+        let json = serde_json::to_string(&workspace).expect("serialize workspace");
+        let saved: Value = serde_json::from_str(&json).expect("deserialize manifest");
+        assert!(saved.get("layout").is_none());
+        assert!(saved["sourceRoot"].get("currentPath").is_none());
+        assert_eq!(
+            saved["sourceRoot"]["recordedPath"],
+            root.to_string_lossy().as_ref()
+        );
+        assert_eq!(restore_workspace(&saved, &root), workspace);
+    }
 
-        let directory = tempfile::tempdir().expect("directory");
+    #[test]
+    fn workspace_restores_from_manifest_after_move() {
+        let directory = tempfile::tempdir().expect("workspace directories");
         let original = directory.path().join("original");
-        fs::create_dir(&original).expect("source directory");
-        let source_path = fs::canonicalize(&original).expect("source path");
-        #[cfg(unix)]
-        let source_path = {
-            let alias = directory.path().join("alias");
-            std::os::unix::fs::symlink(&source_path, &alias).expect("source alias");
-            alias
-        };
-        let layout = WorkspaceLayout::new(source_path.join(".zvec-grep")).expect("layout");
-        let source = SourceRoot::new(&source_path, &layout).expect("source root");
-        fs::create_dir(layout.storage_dir()).expect("storage directory");
-
-        let mut loaded: SourceRoot =
-            serde_json::from_value(serde_json::to_value(source).expect("serialize"))
-                .expect("deserialize");
-        loaded
-            .resolve(&layout, &source_path)
-            .expect("resolve source root");
-        let rebuilt = SourceRoot::new(&loaded.resolved, &layout).expect("rebuild source root");
-        assert_eq!(rebuilt.relative.as_str(), "..");
-        let saved = serde_json::to_value(rebuilt).expect("serialize rebuilt source root");
-        assert!(saved.get("resolved").is_none());
+        fs::create_dir_all(original.join(".zvec-grep")).expect("storage directory");
+        fs::create_dir(original.join("config")).expect("configuration directory");
+        fs::write(original.join("config/rules.ignore"), "*.tmp\n").expect("ignore file");
+        fs::write(original.join("main.rs"), "fn main() {}\n").expect("source file");
+        let original = original.canonicalize().expect("original source root");
+        let workspace = workspace(&original);
+        let saved = serde_json::to_value(&workspace).expect("serialize workspace");
 
         let moved = directory.path().join("moved");
-        fs::rename(original, &moved).expect("move source and storage");
-        let moved = fs::canonicalize(moved).expect("moved source");
-        let moved_layout = WorkspaceLayout::new(moved.join(".zvec-grep")).expect("moved layout");
-        let mut reloaded: SourceRoot =
-            serde_json::from_value(saved).expect("read moved source root");
-        reloaded
-            .resolve(&moved_layout, &moved)
-            .expect("resolve moved source root");
-        assert_eq!(reloaded.resolved, moved);
-    }
-
-    #[test]
-    fn external_paths_are_checked_only_when_used() {
-        let foreign = if cfg!(windows) { "unix" } else { "windows" };
-        let json = format!(
-            r#"{{"ignore_files":[{{"location":"external","platform":"{foreign}","path":"foreign.ignore"}}]}}"#,
-        );
-        let scan: ScanRules = serde_json::from_str(&json).expect("read saved path");
-        assert!(scan.resolve_ignore_files(Path::new("/workspace")).is_err());
-        let replacement = ScanRulesUpdate {
-            ignore_files: Some(vec!["local.ignore".into()]),
-            ..Default::default()
-        }
-        .apply(&scan)
-        .expect("replace saved path");
-        assert!(
-            replacement
-                .resolve_ignore_files(Path::new("/workspace"))
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn unrelated_updates_preserve_invalidated_paths() {
-        let mut scan = ScanRules::new(
-            vec![],
-            vec![],
-            vec![],
-            false,
-            false,
-            None,
-            None,
-            true,
-            vec![std::path::absolute("external.ignore").expect("absolute path")],
-            true,
-        )
-        .expect("scan rules");
-        scan.invalidate_external_ignores();
-        let updated = ScanRulesUpdate {
-            include_hidden: Some(true),
-            ..Default::default()
-        }
-        .apply(&scan)
-        .expect("update hidden files");
-        assert!(
-            updated
-                .resolve_ignore_files(Path::new("/workspace"))
-                .is_err()
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn internal_ignore_paths_preserve_file_aliases() {
-        use std::{fs, os::unix::fs::symlink};
-        let directory = tempfile::tempdir().expect("source");
-        let root = fs::canonicalize(directory.path()).expect("root");
-        let first = root.join("first.ignore");
-        let second = root.join("second.ignore");
-        fs::write(&first, "first\n").expect("first rules");
-        fs::write(&second, "second\n").expect("second rules");
-        let alias = root.join("rules.ignore");
-        symlink(&first, &alias).expect("file alias");
-        let mut scan = ScanRules::new(
-            vec![],
-            vec![],
-            vec![],
-            false,
-            false,
-            None,
-            None,
-            true,
-            vec![alias.clone()],
-            true,
-        )
-        .expect("scan rules");
-        scan.normalize_ignore_paths(&root).expect("relative path");
-        let saved = serde_json::to_string(&scan).expect("save path");
-        let restored: ScanRules = serde_json::from_str(&saved).expect("read path");
-        fs::remove_file(&alias).expect("remove alias");
-        symlink(&second, &alias).expect("replace alias");
-        let paths = restored
-            .resolve_ignore_files(&root)
-            .expect("resolve relative path");
+        fs::rename(&original, &moved).expect("move source and storage");
+        let moved = moved.canonicalize().expect("moved source root");
+        let restored = restore_workspace(&saved, &moved);
+        assert_eq!(restored.source_root(), moved);
+        assert_eq!(restored.layout().storage_dir(), moved.join(".zvec-grep"));
+        assert!(restored.layout().storage_dir().is_dir());
         assert_eq!(
-            fs::read_to_string(&paths[0]).expect("read selected alias"),
-            "second\n"
+            serde_json::to_value(&restored).expect("saved metadata"),
+            saved
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn internal_ignore_paths_preserve_non_unicode_names() {
-        use std::{ffi::OsStr, fs, os::unix::ffi::OsStrExt};
-
-        let directory = tempfile::tempdir().expect("source");
-        let root = fs::canonicalize(directory.path()).expect("root");
-        let relative = Path::new("config").join(OsStr::from_bytes(b"rules-\xff.ignore"));
-        let mut scan = ScanRulesUpdate {
-            ignore_files: Some(vec![root.join(&relative)]),
-            ..Default::default()
-        }
-        .apply(&ScanRules::default())
-        .expect("scan rules");
-        scan.normalize_ignore_paths(&root).expect("relative path");
-        assert_eq!(scan.ignore_files().next(), Some(relative.as_path()));
-        let saved = serde_json::to_string(&scan).expect("save native path");
-        let restored: ScanRules = serde_json::from_str(&saved).expect("read native path");
-        assert_eq!(restored, scan);
+        assert_eq!(
+            fs::read_to_string(
+                restored.source_path(&SourcePath::new("main.rs").expect("source path"))
+            )
+            .expect("read moved source"),
+            "fn main() {}\n"
+        );
+        let ignore_files = restored.scan().resolve_ignore_files(restored.source_root());
+        assert_eq!(ignore_files, [moved.join("config/rules.ignore")]);
+        assert_eq!(
+            fs::read_to_string(&ignore_files[0]).expect("read moved rules"),
+            "*.tmp\n"
+        );
     }
 }

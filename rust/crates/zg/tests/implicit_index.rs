@@ -60,10 +60,6 @@ impl Fixture {
             .env("USERPROFILE", self.user.path())
             .env("ZVEC_GREP_HOME", self.user.path().join("runtime"))
             .env("ZVEC_GREP_MODEL_CACHE", self.user.path().join("models"))
-            .env(
-                "ZVEC_GREP_AUTHORIZATION_KEY_FILE",
-                self.user.path().join("key"),
-            )
             .env_remove("DASHSCOPE_API_KEY")
             .env_remove("QWEN_API_KEY")
             .args(args);
@@ -727,9 +723,8 @@ fn disabled_workspace_is_not_rebuilt_from_a_nested_query_directory() {
         home.join("manifest.json"),
         serde_json::to_vec(&json!({
             "sourceRoot": {
-                "relative": "..",
-                "absolute": root.to_string_lossy(),
-                "username": std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).ok(),
+                "recordedPath": root.to_string_lossy(),
+                "recordedUsername": std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).ok(),
             },
             "scan": {},
             "indexVersion": null,

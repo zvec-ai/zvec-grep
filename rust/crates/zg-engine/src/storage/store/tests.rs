@@ -205,7 +205,7 @@ fn directory_and_filename_filters_match_both_retrieval_collections() {
             .expect("no stale vectors")
             .is_empty()
     );
-    storage.close().expect("checkpoint");
+    storage.close().expect("close storage");
     let reader = open(directory.path(), true);
     assert!(
         reader
@@ -228,7 +228,7 @@ fn file_id_reservations_survive_reopen_and_rebuilds_are_independent() {
     let reserved = first
         .resolve_file_ids(&[PathBuf::from("pending.rs")])
         .expect("reserve")[0];
-    first.close().expect("checkpoint");
+    first.close().expect("close storage");
     let reopened = open(&first_home, false);
     assert_eq!(
         reopened
@@ -277,7 +277,7 @@ fn deleting_a_record_releases_its_path_but_never_reuses_a_live_id() {
     )
     .expect("file record");
     assert!(storage.replace_fixture_file(&mismatched, &[entry]).is_err());
-    storage.close().expect("checkpoint");
+    storage.close().expect("close storage");
     let reopened = open(temporary.path(), false);
     assert_eq!(
         reopened
@@ -307,7 +307,7 @@ fn failed_files_retain_queryable_paths_and_directory_ownership() {
         storage.list_file_paths().expect("paths"),
         [(file.id(), file.relative_path().to_path_buf())]
     );
-    storage.close().expect("checkpoint");
+    storage.close().expect("close storage");
 
     let path = temporary.path().join("files");
     let mut options = zvec_rust::CollectionOptions::new().expect("options");
@@ -362,7 +362,7 @@ fn query_attributes_follow_replacement_failure_deletion_and_reopen() {
         storage.list_file_attributes().expect("updated attributes"),
         [StoredFileAttributes::from(&file)]
     );
-    storage.close().expect("checkpoint");
+    storage.close().expect("close storage");
 
     let reopened = open(temporary.path(), false);
     assert_eq!(
@@ -851,7 +851,7 @@ fn deletion_rejects_an_external_storage_lock_and_succeeds_after_release() {
 }
 
 #[test]
-fn checkpoint_preserves_failure_status() {
+fn close_preserves_failure_status() {
     let directory = tempfile::tempdir().expect("fixture directory");
     let home = directory.path();
     let storage = open(home, false);
@@ -863,10 +863,8 @@ fn checkpoint_preserves_failure_status() {
     storage
         .mark_file_failed(&failed, "fixture failure")
         .expect("failed source");
-    storage.checkpoint().expect("explicit checkpoint");
-    storage
-        .checkpoint()
-        .expect("empty checkpoint is idempotent");
+    storage.close().expect("close storage");
+    storage.close().expect("close is idempotent");
     drop(storage);
 
     let reader = open(home, true);
@@ -1092,7 +1090,7 @@ fn invalid_file_states_and_owners_leave_storage_unchanged() {
     storage
         .replace_fixture_file(&file, &[])
         .expect("successful empty extraction");
-    storage.close().expect("checkpoint empty result");
+    storage.close().expect("close empty storage");
     let reader = open(directory.path(), true);
     let files = reader.list_files().expect("read empty indexed source");
     assert_eq!(files.len(), 1);
@@ -1200,13 +1198,13 @@ fn reopened_readers_detect_non_unicode_names_without_loading_the_allocation_cach
         .mark_file_failed(&file, "fixture")
         .expect("file record");
     assert!(storage.has_non_unicode_file_names().expect("writer"));
-    storage.close().expect("checkpoint");
+    storage.close().expect("close storage");
     let reader = open(temporary.path(), true);
     assert!(reader.has_non_unicode_file_names().expect("reader"));
     reader.close().expect("close");
     let writer = open(temporary.path(), false);
     writer.delete_file(file.id()).expect("delete");
-    writer.close().expect("checkpoint");
+    writer.close().expect("close storage");
     let reader = open(temporary.path(), true);
     assert!(!reader.has_non_unicode_file_names().expect("empty reader"));
     reader.close().expect("close");
@@ -1220,7 +1218,7 @@ fn directory_collection_preserves_membership_after_reopen_and_replacement() {
     storage
         .replace_fixture_file(&file, &[entry])
         .expect("indexed source");
-    storage.close().expect("checkpoint");
+    storage.close().expect("close storage");
     assert!(home.path().join("directories").is_dir());
     let filter = StorageSearchFilter {
         path: Some(StoragePathFilter::Directory(
@@ -1242,7 +1240,7 @@ fn directory_collection_preserves_membership_after_reopen_and_replacement() {
     writer
         .replace_fixture_file(&file, &[entry])
         .expect("reindex source");
-    writer.close().expect("checkpoint recovered source");
+    writer.close().expect("close recovered storage");
     let reader = open(home.path(), true);
     assert_eq!(
         reader
@@ -1394,7 +1392,7 @@ fn model_tables_partition_fragments_and_failed_files_clear_every_partition() {
     writer
         .replace_fixture_file(&file, &entries)
         .expect("complete file");
-    writer.close().expect("checkpoint");
+    writer.close().expect("close storage");
 
     let storage_path = home.path();
     let mut collections = fs::read_dir(storage_path)
@@ -1493,7 +1491,9 @@ fn model_tables_partition_fragments_and_failed_files_clear_every_partition() {
 #[test]
 fn model_set_changes_require_rebuild_and_order_does_not() {
     let home = tempfile::tempdir().expect("workspace");
-    open_multi_model(home.path()).close().expect("checkpoint");
+    open_multi_model(home.path())
+        .close()
+        .expect("close storage");
     let mut reversed = multi_model_schema();
     reversed.reverse();
     IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {

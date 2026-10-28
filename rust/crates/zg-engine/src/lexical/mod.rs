@@ -601,6 +601,9 @@ fn search_file(
     results: &mut Vec<LexicalMatch>,
     count_truncated: &AtomicBool,
 ) -> Result<(), EngineError> {
+    if request.options.max_file_size_bytes == Some(0) {
+        return Ok(());
+    }
     let absolute_path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     let relative_path = absolute_path
         .strip_prefix(root)
@@ -1219,6 +1222,26 @@ mod tests {
             worker_threads_for_search(&root.path().join("a.txt"), &request("needle"), 8),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn zero_size_limit_skips_explicit_search_paths() {
+        let root = TempDir::new().expect("workspace");
+        fs::write(root.path().join("source.txt"), "needle\n").expect("source file");
+        fs::write(root.path().join("empty.txt"), "").expect("empty file");
+        for threads in [1, 2] {
+            let service = LexicalSearchService::new().with_worker_threads(threads);
+            for paths in [
+                Vec::new(),
+                vec![PathBuf::from("source.txt"), PathBuf::from("empty.txt")],
+            ] {
+                let mut request = request("needle");
+                request.paths = paths;
+                request.options.max_file_size_bytes = Some(0);
+                let reply = search(&service, root.path(), &request).await;
+                assert!(reply.matches.is_empty());
+            }
+        }
     }
 
     #[tokio::test]

@@ -159,9 +159,8 @@ fn explicit_routes_continue_to_indexed_search() {
         home.join("manifest.json"),
         serde_json::to_vec(&serde_json::json!({
             "sourceRoot": {
-                "relative": "..",
-                "absolute": std::fs::canonicalize(root.path()).expect("source root").to_string_lossy(),
-                "username": std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).ok(),
+                "recordedPath": std::fs::canonicalize(root.path()).expect("source root").to_string_lossy(),
+                "recordedUsername": std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).ok(),
             },
             "scan": {},
             "createdTime": 0,

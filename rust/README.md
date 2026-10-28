@@ -165,9 +165,10 @@ The native engine supports indexing, indexed FTS and vector search, `zg --rg`,
 workspace discovery, `info`, and idempotent `drop_index`.
 
 Search and status discover the nearest enclosing `.zvec-grep` directory. Its
-manifest stores source-relative paths, and the active data lives at
-`.zvec-grep/index`; moving or copying the source directory together with
-`.zvec-grep` preserves the index without registration or a workspace name.
+parent is the source directory, and the active data lives at `.zvec-grep/index`.
+Moving or copying the source directory together with `.zvec-grep` preserves the
+index without registration or a workspace name. The manifest records the previous
+absolute source location for environment checks; it does not locate the source.
 
 First builds and rebuilds prepare data in `.zvec-grep/temp/new`, retaining the
 previous index until publication succeeds. An interrupted directory swap is
@@ -175,8 +176,10 @@ recovered before readers enter; successful publication keeps the fixed `index/`
 path and clears temporary data.
 
 Stored file paths and internal ignore-file references move with the workspace.
-External ignore files must remain available or be replaced, and invalid path
-components or filename collisions on the destination filesystem produce errors.
+Missing ignore files and external paths that are not absolute on the current
+platform are skipped without removing their saved references. Other read errors,
+invalid rules, invalid path components, and filename collisions on the destination
+filesystem produce errors.
 Incomplete scans do not apply deletions, cancelled file preparation preserves
 existing content, and content-identical updates refresh timestamps without
 embedding again.
@@ -387,28 +390,27 @@ saved credentials; this key does not grant permission to send data remotely.
 Without `--embedding`, grant uses the existing index model, then
 `ZVEC_GREP_EMBEDDING`, then the configured default model. `--endpoint` overrides
 the stored index endpoint, per-model endpoint configuration, `ZVEC_GREP_ENDPOINT`,
-and provider default. The signed grant at
-`.zvec-grep/authorization.json` binds the canonical workspace root, model, and
-endpoint. Moving the workspace or changing its model or endpoint requires a new
-grant, and copied grants are not trusted on a machine with a different signing
-key. The signing key lives at
-`$ZVEC_GREP_HOME/authorization.key` (default `~/.zvec-grep/authorization.key`),
-or the path selected by `ZVEC_GREP_AUTHORIZATION_KEY_FILE`.
+and provider default. The grant at `.zvec-grep/authorization.json` binds the
+canonical source root, username, model, and endpoint. A change to any of these
+requires a matching grant. A copied grant remains valid on another machine when
+the source path and username match. No authorization state or signing key is
+stored in the user home directory, and no machine fingerprint is used.
 
-Prepare the outer directory before initializing a custom signing-key location.
-For example, with `ZVEC_GREP_HOME=/data/apps/zg`, `/data/apps` must already exist;
-the engine creates `zg`. For an explicit key-file path, the engine can create its
-direct parent directory, but that directory's parent must already exist.
+Authorization records describe the user's saved consent; they are not signed or
+protected against deliberate edits. Only explicit authorization updates the
+recorded path and username; index updates and manifest writes do not. When the
+username cannot be determined, use single-operation consent instead of a
+persistent grant.
 
-Direct CLI, server CLI, and MCP read the same authorization on each operation;
-configure them to use the same signing key. Revocation takes effect for new
+Direct CLI, server CLI, and MCP read the same workspace authorization on each
+operation. Revocation takes effect for new
 operations without restarting the server. `--allow-remote` on `zg --index` or
 `zg <query>` grants consent for that operation only, including its synchronous
 refresh, and never authorizes later watcher jobs. MCP reuses existing workspace
 grants and otherwise asks form-capable clients for explicit consent before index
 or search sends data remotely. The form discloses the root, source roots, model,
 endpoint and data categories. Choose `once` for this operation, `workspace` for a
-signed persistent grant, or `cancel` to deny transmission. Search also offers
+persistent grant, or `cancel` to deny transmission. Search also offers
 `fts_only`, which disables vector retrieval and refresh. Unsupported clients,
 invalid responses, declined forms, cancellation and timeouts never grant consent.
 Cancelling the originating request also sends a cancellation notification for its
@@ -485,8 +487,9 @@ Search never changes persisted scan policy: `includeHidden`, `useDefaultIgnores`
 `maxDepth`, `maxFileSizeBytes` and `follow` belong on index requests. Node's
 indexed-search path ignores its scanning options; Rust rejects them explicitly.
 `useDefaultIgnores` controls built-in exclusions and discovered ignore files;
-explicit `ignoreFiles` always apply and must exist. Scan rules are validated
-before index mutations, and `maxFileSizeBytes` must be positive when set.
+explicit `ignoreFiles` remain enabled independently of that switch. Missing files
+are skipped and their paths remain saved; other read errors and invalid rules fail
+before index mutations. `maxFileSizeBytes: 0` excludes all files, including empty files.
 Unknown search/index fields and public nulls are rejected, except index
 `maxDepth: null` / `maxFileSizeBytes: null`, which clear saved limits.
 Existing typed globs, `includedFormats`/`excludedFormats`, categories, `enum`,

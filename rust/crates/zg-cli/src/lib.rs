@@ -3090,6 +3090,7 @@ mod tests {
 
     #[test]
     fn typescript_size_and_time_forms() {
+        assert_eq!(parse_byte_size("0").expect("size"), 0);
         assert_eq!(parse_byte_size("2M").expect("size"), 2 * 1024 * 1024);
         assert_eq!(
             parse_modified_time("1700000000000").expect("epoch"),

@@ -62,7 +62,7 @@ impl ScanPolicy {
     ) -> EngineResult<Self> {
         let matcher = GlobMatcher::new(root, options.globs())?;
         let ignore_files = options
-            .resolve_ignore_files(root)?
+            .resolve_ignore_files(root)
             .iter()
             .map(|path| control_alias(path))
             .collect::<Vec<_>>();
@@ -320,8 +320,8 @@ impl ScanPolicy {
                 }
             }
             Err(error)
-                if !explicit
-                    && matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {}
+                if error.kind() == ErrorKind::NotFound
+                    || (!explicit && error.kind() == ErrorKind::NotADirectory) => {}
             Err(error) => {
                 return Err(HostError::storage_failure(
                     "file-selection",

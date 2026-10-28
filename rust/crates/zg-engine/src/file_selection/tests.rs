@@ -422,6 +422,56 @@ fn ignore_control_changes_invalidate_rules_even_when_not_selected() {
 }
 
 #[test]
+fn saved_ignore_files_preserve_internal_external_precedence() {
+    let temporary = tempfile::tempdir().expect("fixture");
+    let base = fs::canonicalize(temporary.path()).expect("canonical fixture");
+    let root = base.join("workspace");
+    for path in ["one.rs", "two.rs", "three.rs"] {
+        write(&root, path, "source");
+    }
+    write(&root, "first.ignore", "one.rs\ntwo.rs\nthree.rs\n");
+    write(&base, "shared.ignore", "!one.rs\n!two.rs\n");
+    write(&root, "last.ignore", "one.rs\n");
+    let mut ignore_files = vec![
+        PathBuf::from("first.ignore"),
+        base.join("shared.ignore"),
+        PathBuf::from("last.ignore"),
+    ];
+
+    for includes_one in [false, true] {
+        let rules = ScanRulesUpdate {
+            use_default_ignores: Some(false),
+            ignore_files: Some(ignore_files.clone()),
+            ..ScanRulesUpdate::default()
+        }
+        .apply(&ScanRules::default())
+        .expect("scan rules");
+        let saved = serde_json::to_vec(&rules).expect("save scan rules");
+        let restored: ScanRules = serde_json::from_slice(&saved).expect("restore scan rules");
+        assert_eq!(
+            restored.ignore_files().collect::<Vec<_>>(),
+            ignore_files
+                .iter()
+                .map(PathBuf::as_path)
+                .collect::<Vec<_>>()
+        );
+        let policy = make_policy(&root, &[], &restored).expect("restored policy");
+        assert_eq!(
+            policy.includes_file(&root.join("one.rs")).expect("one.rs"),
+            includes_one,
+            "the last matching ignore file must win: {ignore_files:?}"
+        );
+        assert!(policy.includes_file(&root.join("two.rs")).expect("two.rs"));
+        assert!(
+            !policy
+                .includes_file(&root.join("three.rs"))
+                .expect("three.rs")
+        );
+        ignore_files.swap(1, 2);
+    }
+}
+
+#[test]
 fn adversarial_globs_are_bounded_and_do_not_use_backtracking_regex() {
     let globs = vec![format!("{}Z", "**".repeat(20)).into()];
     let matcher = GlobMatcher::new(Path::new("/workspace"), &globs).expect("bounded glob");
@@ -478,23 +528,83 @@ fn large_ignore_files_fail_explicitly_instead_of_unbounded_compilation() {
 }
 
 #[test]
-fn explicit_ignore_files_are_required_even_without_files_or_with_whitelist_globs() {
+fn missing_explicit_ignore_files_are_skipped_and_reloaded() {
     let temporary = tempfile::tempdir().expect("fixture");
-    let root = temporary.path().join("source");
+    let base = fs::canonicalize(temporary.path()).expect("canonical fixture");
+    let root = base.join("source");
     fs::create_dir(&root).expect("empty source root");
-    let missing = temporary.path().join("required.ignore");
+    for path in [PathBuf::from("local.ignore"), base.join("external.ignore")] {
+        let absolute = root.join(&path);
+        let rules = ScanRulesUpdate {
+            ignore_files: Some(vec![path.clone()]),
+            ..ScanRulesUpdate::default()
+        }
+        .apply(&ScanRules::default())
+        .expect("scan rules");
+        let policy = make_policy(&root, &[], &rules).expect("missing rules are skipped");
+        assert_eq!(rules.ignore_files().collect::<Vec<_>>(), [path.as_path()]);
+        assert!(policy.control_paths().contains(&absolute));
+        assert!(
+            policy
+                .includes_file(&root.join("main.rs"))
+                .expect("included")
+        );
+        fs::write(&absolute, "main.rs\n").expect("create rules");
+        assert_eq!(
+            policy
+                .control_file_changed(&absolute)
+                .expect("created rules"),
+            Some(PathBuf::new())
+        );
+        assert!(
+            !policy
+                .includes_file(&root.join("main.rs"))
+                .expect("excluded")
+        );
+        fs::remove_file(&absolute).expect("delete rules");
+        policy
+            .control_file_changed(&absolute)
+            .expect("deleted rules");
+        assert!(
+            policy
+                .includes_file(&root.join("main.rs"))
+                .expect("included")
+        );
+        assert!(policy.control_paths().contains(&absolute));
+        fs::write(&absolute, "main.rs\n").expect("restore rules");
+        policy
+            .control_file_changed(&absolute)
+            .expect("restored rules");
+        assert!(
+            !policy
+                .includes_file(&root.join("main.rs"))
+                .expect("excluded")
+        );
+    }
+}
+
+#[test]
+fn invalid_explicit_ignore_files_are_rejected_even_with_whitelist_globs() {
+    let temporary = tempfile::tempdir().expect("fixture");
+    let root = temporary.path();
+    let path = root.join("invalid.ignore");
     let rules = ScanRulesUpdate {
-        ignore_files: Some(vec![missing]),
+        ignore_files: Some(vec![path.clone()]),
         ..ScanRulesUpdate::default()
     }
     .apply(&ScanRules::default())
     .expect("scan rules");
-    let error = make_policy(&root, &[], &rules).expect_err("empty root still needs its rules");
-    assert!(error.message().contains("required.ignore"));
-    write(&root, "main.rs", "source");
-    let error = make_policy(&root, &["*.rs".into()], &rules)
-        .expect_err("whitelisted files must not bypass invalid scan configuration");
-    assert!(error.message().contains("required.ignore"));
+    for (contents, message) in [
+        (&b"\xff"[..], "could not read ignore file"),
+        (&b"[z-a]\n"[..], "invalid ignore rule"),
+    ] {
+        fs::write(&path, contents).expect("invalid rules");
+        for globs in [vec![], vec!["*.rs".into()]] {
+            let error = make_policy(root, &globs, &rules).expect_err("invalid rules");
+            assert!(error.message().contains(message));
+            assert!(error.message().contains("invalid.ignore"));
+        }
+    }
 }
 
 #[test]
@@ -520,35 +630,35 @@ fn external_ignore_aliases_match_canonical_change_events() {
     let root = base.join("workspace");
     fs::create_dir(&root).expect("workspace");
     write(&base, "rules.ignore", "blocked/\n");
+    let mut update = ScanRulesUpdate {
+        use_default_ignores: Some(false),
+        ignore_files: Some(vec![PathBuf::from("../rules.ignore")]),
+        ..ScanRulesUpdate::default()
+    };
+    update
+        .normalize_ignore_paths(&root)
+        .expect("normalize external ignore path");
     let policy = make_policy(
         &root,
         &[],
-        &ScanRulesUpdate {
-            use_default_ignores: Some(false),
-            ignore_files: Some(vec![PathBuf::from("../rules.ignore")]),
-            ..ScanRulesUpdate::default()
-        }
-        .apply(&ScanRules::default())
-        .expect("scan rules"),
+        &update.apply(&ScanRules::default()).expect("scan rules"),
     )
     .expect("policy");
     let rules = base.join("rules.ignore");
     assert!(policy.control_paths().contains(&rules));
     assert!(!policy.can_descend(&root.join("blocked")).expect("excluded"));
     fs::remove_file(&rules).expect("delete rules");
-    let error = policy
-        .control_file_changed(&rules)
-        .expect_err("deleted explicit rules fail at invalidation");
-    assert!(error.to_string().contains("rules.ignore"));
-    let error = policy
-        .can_descend(&root.join("blocked"))
-        .expect_err("deleted explicit rules must not silently broaden the scan");
-    assert!(error.to_string().contains("rules.ignore"));
-    fs::write(&rules, "").expect("restore explicit ignore file");
+    assert_eq!(
+        policy.control_file_changed(&rules).expect("deleted rules"),
+        Some(PathBuf::new())
+    );
+    assert!(policy.can_descend(&root.join("blocked")).expect("included"));
+    assert!(policy.control_paths().contains(&rules));
+    fs::write(&rules, "blocked/\n").expect("restore explicit ignore file");
     policy
         .control_file_changed(&rules)
         .expect("restored rules event");
-    assert!(policy.can_descend(&root.join("blocked")).expect("included"));
+    assert!(!policy.can_descend(&root.join("blocked")).expect("excluded"));
 }
 
 #[cfg(unix)]

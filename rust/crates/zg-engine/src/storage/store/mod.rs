@@ -405,17 +405,8 @@ impl IndexStore {
         })
     }
 
-    /// Flush accepted writes, including any unfinished file's retry state.
-    pub(crate) fn checkpoint(&self) -> EngineResult<()> {
-        if self.read_only {
-            return Ok(());
-        }
-        self.write(|state| flush(state))
-    }
-
-    /// Persist retry state before building indexes and compacting accepted writes.
+    /// Build indexes and compact accepted writes when needed.
     pub(crate) fn finalize_writes(&self) -> EngineResult<()> {
-        self.checkpoint()?;
         if self.read_only {
             return Ok(());
         }
@@ -433,7 +424,7 @@ impl IndexStore {
     }
 
     pub(crate) fn close(&self) -> EngineResult<()> {
-        // Serialize concurrent closes through the final checkpoint as well as
+        // Serialize concurrent closes through the final flush as well as
         // taking the lease, so none can return while its writes are persisting.
         let mut lease = self
             .shared
@@ -449,12 +440,12 @@ impl IndexStore {
         // Reject a write that acquired its Arc before close but is still waiting
         // for this lock. A successful close commits every accepted write.
         state.closed = true;
-        let checkpoint = flush(&state);
+        let flush_result = flush(&state);
         let graph_close = state
             .graph
             .take()
             .map_or(Ok(()), |graph| graph.close().map_err(graph_error));
-        checkpoint.and(graph_close)
+        flush_result.and(graph_close)
     }
 }
 

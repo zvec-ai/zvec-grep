@@ -1,4 +1,4 @@
-//! Shared encoding, filesystem, hashing, and text utilities.
+//! Shared utilities.
 
 pub(crate) mod base64_bytes;
 mod encoding;
@@ -34,3 +34,16 @@ pub(crate) use text::slice_text;
 pub(crate) use text::take_utf16;
 pub(crate) use text::text_range_from_offsets;
 pub(crate) use text::utf16_len;
+
+pub(crate) fn current_username() -> Option<String> {
+    let names = if cfg!(windows) {
+        ["USERNAME", "USER"]
+    } else {
+        ["USER", "USERNAME"]
+    };
+    names.into_iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    })
+}

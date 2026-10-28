@@ -89,9 +89,8 @@ pub fn configure_remote_model(root: &Path, address: SocketAddr) -> std::io::Resu
     let generation = uuid::Uuid::new_v4().to_string();
     let manifest = json!({
         "sourceRoot": {
-            "relative": "..",
-            "absolute": fs::canonicalize(root)?.to_string_lossy(),
-            "username": std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).ok(),
+            "recordedPath": fs::canonicalize(root)?.to_string_lossy(),
+            "recordedUsername": std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).ok(),
         },
         "scan": {},
         "indexVersion": 2,

@@ -96,6 +96,7 @@ impl WorkspaceIndexService {
         let existing = inspect_workspace_manifest(&requested_root, &layout)?
             .into_workspace(options.rebuild)?;
         // Validate selection before recovery, storage, or model mutations.
+        options.scan.normalize_ignore_paths(&requested_root)?;
         let scan = resolve_scan(existing.as_ref().map(Workspace::scan), &options)?;
         crate::file_selection::ScanPolicy::new(&requested_root, &scan)?;
         if options.rebuild {
@@ -231,15 +232,17 @@ impl WorkspaceIndexService {
         .await;
         #[cfg(test)]
         let result = result.and_then(|indexed| {
-            // Exercise service cleanup when the indexing pipeline reports a failed checkpoint.
+            // Exercise service cleanup when the indexing pipeline fails to finalize storage.
             if self.fail_index_completion {
-                Err(EngineError::storage_failure("injected checkpoint failure"))
+                Err(EngineError::storage_failure(
+                    "injected finalization failure",
+                ))
             } else {
                 Ok(indexed)
             }
         });
-        // Closing precedes publication: all checkpoints and native handles belong
-        // to the completed generation before the active manifest can select it.
+        // Flush writes and close storage before the active manifest can select
+        // the completed generation.
         writer.retire().await;
         let close_result = writer.session.storage.close();
         let indexed = result?;
@@ -1352,12 +1355,9 @@ mod tests {
             .await
             .expect("initial index");
         let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
-        let manifest = super::read_workspace_manifest(
-            layout.storage_dir().parent().expect("source root"),
-            &layout,
-        )
-        .expect("read")
-        .expect("manifest");
+        let manifest = super::read_workspace_manifest(directory.path(), &layout)
+            .expect("read")
+            .expect("manifest");
         let request = crate::api::context::ContextOptions {
             device: Some(Device::Auto),
             model_cache: Some(directory.path().join("temporary-models")),
@@ -1368,12 +1368,9 @@ mod tests {
             directory.path().to_path_buf(),
         );
         service.index(&models, options).await.expect("refresh");
-        let refreshed = super::read_workspace_manifest(
-            layout.storage_dir().parent().expect("source root"),
-            &layout,
-        )
-        .expect("read")
-        .expect("manifest");
+        let refreshed = super::read_workspace_manifest(directory.path(), &layout)
+            .expect("read")
+            .expect("manifest");
         assert_eq!(
             refreshed
                 .index()
@@ -1398,12 +1395,9 @@ mod tests {
             )
             .await
             .expect("explicit configuration update");
-        let configured = super::read_workspace_manifest(
-            layout.storage_dir().parent().expect("source root"),
-            &layout,
-        )
-        .expect("read")
-        .expect("manifest");
+        let configured = super::read_workspace_manifest(directory.path(), &layout)
+            .expect("read")
+            .expect("manifest");
         assert_eq!(
             configured.storage_generation(),
             manifest.storage_generation()
@@ -1432,12 +1426,9 @@ mod tests {
             )
             .await
             .expect("replace saved cache preference");
-        let replaced = super::read_workspace_manifest(
-            layout.storage_dir().parent().expect("source root"),
-            &layout,
-        )
-        .expect("read")
-        .expect("manifest");
+        let replaced = super::read_workspace_manifest(directory.path(), &layout)
+            .expect("read")
+            .expect("manifest");
         assert_eq!(
             replaced.storage_generation(),
             configured.storage_generation()
@@ -1517,10 +1508,13 @@ mod tests {
         let abandoned = target;
         super::prepare_build(&abandoned).expect("crashed build");
         std::fs::write(
-            abandoned.layout().staged_index_dir().join("checkpoint"),
+            abandoned
+                .layout()
+                .staged_index_dir()
+                .join("unfinished-data"),
             "discard me",
         )
-        .expect("checkpoint");
+        .expect("unfinished build data");
         service
             .index(&models, options.clone())
             .await
@@ -1596,7 +1590,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_checkpoint_does_not_publish_an_incomplete_rebuild() {
+    async fn failed_finalization_does_not_publish_an_incomplete_rebuild() {
         let directory = tempdir().expect("workspace");
         let mut service = WorkspaceIndexService::new();
         let models = ModelRuntimeManager::new();
@@ -1627,8 +1621,8 @@ mod tests {
                 },
             )
             .await
-            .expect_err("checkpoint fails");
-        assert!(error.message().contains("checkpoint"));
+            .expect_err("finalization fails");
+        assert!(error.message().contains("finalization"));
         assert_eq!(
             super::read_workspace_manifest(
                 layout.storage_dir().parent().expect("source root"),
@@ -1976,21 +1970,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn index_normalizes_requested_ignore_paths_before_saving() {
+        let directory = tempdir().expect("workspace");
+        let root = directory.path().join("source");
+        std::fs::create_dir_all(root.join("config")).expect("source directory");
+        let root = root.canonicalize().expect("source root");
+        let external = root.parent().expect("parent").join("external.ignore");
+        std::fs::write(&external, "").expect("external rules");
+        std::fs::write(root.join("config/rules.ignore"), "*\n").expect("internal rules");
+        let service = WorkspaceIndexService::new();
+        let models = ModelRuntimeManager::new();
+        service
+            .index(
+                &models,
+                IndexOptions {
+                    scan: ScanRulesUpdate {
+                        ignore_files: Some(vec![
+                            "../external.ignore".into(),
+                            root.join("config/rules.ignore"),
+                            "missing.ignore".into(),
+                            "../missing.ignore".into(),
+                        ]),
+                        ..ScanRulesUpdate::default()
+                    },
+                    ..empty_index_options(&root)
+                },
+            )
+            .await
+            .expect("index with normalized ignore paths");
+        let layout = WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout");
+        let manifest = super::read_workspace_manifest(&root, &layout)
+            .expect("read manifest")
+            .expect("published workspace");
+        let missing_external = external.with_file_name("missing.ignore");
+        assert_eq!(
+            manifest.scan().ignore_files().collect::<Vec<_>>(),
+            [
+                external.as_path(),
+                Path::new("config/rules.ignore"),
+                Path::new("missing.ignore"),
+                missing_external.as_path(),
+            ]
+        );
+        models.close();
+    }
+
+    #[tokio::test]
+    async fn zero_size_limit_persists_and_indexes_no_files() {
+        let directory = tempdir().expect("workspace");
+        std::fs::write(directory.path().join("source.txt"), "source text").expect("source file");
+        std::fs::write(directory.path().join("empty.txt"), "").expect("empty file");
+        let service = WorkspaceIndexService::new();
+        let models = ModelRuntimeManager::new();
+        let result = service
+            .index(
+                &models,
+                IndexOptions {
+                    scan: ScanRulesUpdate {
+                        max_file_size_bytes: Some(Some(0)),
+                        ..ScanRulesUpdate::default()
+                    },
+                    ..empty_index_options(directory.path())
+                },
+            )
+            .await
+            .expect("index with zero size limit");
+        assert_eq!(result.files_added, 0);
+        assert_eq!(result.files_failed, 0);
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        let manifest = super::read_workspace_manifest(directory.path(), &layout)
+            .expect("read manifest")
+            .expect("published workspace");
+        assert_eq!(manifest.scan().max_file_size_bytes(), Some(0));
+        let result = service
+            .index(&models, empty_index_options(directory.path()))
+            .await
+            .expect("reuse saved zero limit");
+        assert_eq!(result.files_added, 0);
+        assert_eq!(result.files_failed, 0);
+        models.close();
+    }
+
+    #[tokio::test]
     async fn invalid_scan_rules_do_not_create_index_or_acquire_models() {
         let directory = tempdir().expect("workspace");
+        std::fs::write(directory.path().join("invalid.ignore"), "[z-a]\n")
+            .expect("invalid ignore rules");
         let service = WorkspaceIndexService::new();
         let models = ModelRuntimeManager::new();
         for scan in [
-            ScanRulesUpdate {
-                max_file_size_bytes: Some(Some(0)),
-                ..ScanRulesUpdate::default()
-            },
             ScanRulesUpdate {
                 globs: Some(vec!["[".into()]),
                 ..ScanRulesUpdate::default()
             },
             ScanRulesUpdate {
-                ignore_files: Some(vec!["missing.ignore".into()]),
+                ignore_files: Some(vec!["invalid.ignore".into()]),
                 ..ScanRulesUpdate::default()
             },
         ] {
@@ -2032,19 +2106,21 @@ mod tests {
         .expect("active index");
         let pending = build_target(&active);
         super::prepare_build(&pending).expect("pending rebuild");
+        std::fs::write(directory.path().join("invalid.ignore"), "[z-a]\n")
+            .expect("invalid ignore rules");
         let error = service
             .index(
                 &models,
                 IndexOptions {
                     scan: ScanRulesUpdate {
-                        ignore_files: Some(vec!["missing.ignore".into()]),
+                        ignore_files: Some(vec!["invalid.ignore".into()]),
                         ..ScanRulesUpdate::default()
                     },
                     ..empty_index_options(directory.path())
                 },
             )
             .await
-            .expect_err("missing explicit ignore file");
+            .expect_err("invalid explicit ignore rules");
         assert_eq!(error.code(), crate::EngineError::INVALID_ARGUMENT);
         assert_eq!(
             super::read_workspace_manifest(

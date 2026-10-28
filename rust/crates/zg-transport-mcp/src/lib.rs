@@ -853,7 +853,7 @@ pub struct IndexInput {
     pub ignore_files: Option<PathListInput>,
     #[serde(default, deserialize_with = "deserialize_optional_update")]
     pub max_depth: Option<Option<usize>>,
-    #[schemars(range(min = 1))]
+    /// Maximum file size in bytes; zero excludes all files, null clears the saved limit.
     #[serde(default, deserialize_with = "deserialize_optional_update")]
     pub max_file_size_bytes: Option<Option<u64>>,
     #[serde(rename = "follow", alias = "followSymlinks")]
@@ -1645,9 +1645,6 @@ impl IndexInput {
         }
         if self.embedding_concurrency == Some(0) {
             return Err("embeddingConcurrency must be greater than zero".to_owned());
-        }
-        if self.max_file_size_bytes == Some(Some(0)) {
-            return Err("maxFileSizeBytes must be greater than zero".to_owned());
         }
         if let Some(endpoint) = &self.endpoint {
             validate_text("endpoint", endpoint, 1, 2_048)?;
@@ -2944,7 +2941,7 @@ mod tests {
                         assert!(types.contains(&serde_json::json!("null")));
                         assert!(!required.contains(&serde_json::json!(field)));
                     }
-                    assert_eq!(schema["properties"]["maxFileSizeBytes"]["minimum"], 1);
+                    assert_eq!(schema["properties"]["maxFileSizeBytes"]["minimum"], 0);
                 }
             }
         }
@@ -3065,7 +3062,7 @@ mod tests {
     }
 
     #[test]
-    fn index_updates_preserve_omitted_empty_false_and_null_values() {
+    fn index_updates_preserve_explicit_values() {
         let parsed: IndexInput = serde_json::from_value(serde_json::json!({
             "root": test_root(), "globs": [], "includedFormats": [], "excludedFormats": [],
             "includeHidden": false, "followSymlinks": false, "nestedGit": false, "ignoreFiles": [],
@@ -3087,6 +3084,16 @@ mod tests {
         assert_eq!(options.scan.ignore_files, Some(Vec::new()));
         assert_eq!(options.scan.max_depth, Some(None));
         assert_eq!(options.scan.max_file_size_bytes, Some(None));
+
+        let parsed: IndexInput = serde_json::from_value(serde_json::json!({
+            "root": test_root(), "maxFileSizeBytes": 0
+        }))
+        .expect("zero file size");
+        let IndexToolRequest::Index { options, .. } = parsed.into_request().expect("index request")
+        else {
+            panic!("index");
+        };
+        assert_eq!(options.scan.max_file_size_bytes, Some(Some(0)));
     }
 
     #[test]

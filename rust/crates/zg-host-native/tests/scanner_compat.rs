@@ -166,6 +166,25 @@ async fn scanner_applies_depth_and_size_limits_without_classifying_contents() ->
 }
 
 #[tokio::test]
+async fn scanner_zero_size_limit_excludes_all_files() -> TestResult {
+    let temporary = tempdir()?;
+    let root = temporary.path();
+    fs::create_dir(root.join("nested"))?;
+    fs::write(root.join("empty.txt"), [])?;
+    fs::write(root.join("file.txt"), "contents")?;
+    fs::write(root.join("nested/file.txt"), "nested contents")?;
+    let mut root_spec = root_spec(root);
+    root_spec.max_file_size_bytes = Some(0);
+
+    let snapshot = discover(&NativeScanner::default(), root_spec).await?;
+
+    assert!(snapshot.files.is_empty());
+    assert_eq!(snapshot.diagnostics.skipped_by_reason.empty, 1);
+    assert_eq!(snapshot.diagnostics.skipped_by_reason.too_large, 2);
+    Ok(())
+}
+
+#[tokio::test]
 async fn scanner_rejects_overlapping_roots() -> TestResult {
     let temporary = tempdir()?;
     let root = temporary.path();

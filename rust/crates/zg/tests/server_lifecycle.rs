@@ -686,9 +686,7 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
         "resident workspace manager\n",
     )?;
     // The mock provider requires the same explicit workspace consent as real providers.
-    let signing_key = home.path().join("authorization.key");
     let consent = Command::new(&binary)
-        .env("ZVEC_GREP_AUTHORIZATION_KEY_FILE", &signing_key)
         .args([
             "--auth",
             "grant",
@@ -705,9 +703,7 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
         .output()?;
     assert_command_success(&consent);
     let (mut guard, output) = start_server(&binary, &home, "full", None, |command| {
-        command
-            .env("ZVEC_GREP_API_KEY", "local-test-key")
-            .env("ZVEC_GREP_AUTHORIZATION_KEY_FILE", &signing_key);
+        command.env("ZVEC_GREP_API_KEY", "local-test-key");
     })?;
     let port = guard.listen.parse::<SocketAddr>()?.port();
     assert!(String::from_utf8_lossy(&output.stdout).contains("MCP toolset: full"));
@@ -1114,9 +1110,7 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
         ])
         .output()?;
     assert_command_success(&indexed);
-    let signing_key = home.path().join("authorization.key");
     let consent = Command::new(&binary)
-        .env("ZVEC_GREP_AUTHORIZATION_KEY_FILE", &signing_key)
         .args([
             "--auth",
             "grant",
@@ -1133,9 +1127,7 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
         .output()?;
     assert_command_success(&consent);
     let (mut guard, _) = start_server(&binary, &home, toolset, None, |command| {
-        command
-            .env("ZVEC_GREP_AUTHORIZATION_KEY_FILE", &signing_key)
-            .env("ZVEC_GREP_API_KEY", "local-test-key");
+        command.env("ZVEC_GREP_API_KEY", "local-test-key");
     })?;
     let port = guard.listen.parse::<SocketAddr>()?.port();
     let response = post_json(
@@ -1517,10 +1509,14 @@ fn stdio_remote_consent(protocol: &str) -> Result<(), Box<dyn Error>> {
         workspace.path().join("sample.md"),
         "# Consent\nremote consent fixture\n",
     )?;
-    let signing_key = home.path().join("authorization.key");
+    let authorization = workspace.path().join(".zvec-grep/authorization.json");
     let (mut guard, _) = start_server(&binary, &home, "full", None, |command| {
         command
-            .env("ZVEC_GREP_AUTHORIZATION_KEY_FILE", &signing_key)
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env("ZVEC_GREP_HOME", home.path())
+            .env("USER", "consent-user")
+            .env("USERNAME", "consent-user")
             .env("ZVEC_GREP_API_KEY", "test-key");
     })?;
     let mut bridge = StdioBridge::spawn(&binary, home.path(), &guard.listen)?;
@@ -1549,7 +1545,7 @@ fn stdio_remote_consent(protocol: &str) -> Result<(), Box<dyn Error>> {
     assert_eq!(prompts, 1);
     assert_eq!(declined["result"]["isError"], true);
     assert_eq!(embedding.requests.load(Ordering::SeqCst), 0);
-    assert!(!signing_key.exists());
+    assert!(!authorization.exists());
     let (indexed, prompts) = bridge.request_with_consent(&index(3), "once")?;
     assert_eq!(prompts, 1);
     assert_eq!(indexed["result"]["isError"], false, "{indexed}");
@@ -1561,8 +1557,8 @@ fn stdio_remote_consent(protocol: &str) -> Result<(), Box<dyn Error>> {
     let indexed_requests = embedding.requests.load(Ordering::SeqCst);
     assert!(indexed_requests > 0);
     assert!(
-        !signing_key.exists(),
-        "one-operation consent must not create a signing key"
+        !authorization.exists(),
+        "one-operation consent must not persist a workspace grant"
     );
     let search = |id| {
         json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {
@@ -1576,7 +1572,12 @@ fn stdio_remote_consent(protocol: &str) -> Result<(), Box<dyn Error>> {
     let (persisted, prompts) = bridge.request_with_consent(&index(5), "workspace")?;
     assert_eq!(prompts, 1);
     assert_eq!(persisted["result"]["isError"], false, "{persisted}");
-    assert!(signing_key.exists());
+    let grants: serde_json::Value = serde_json::from_slice(&std::fs::read(&authorization)?)?;
+    assert_eq!(grants.as_array().map(Vec::len), Some(1));
+    assert_eq!(grants[0]["root"], json!(workspace.path().canonicalize()?));
+    assert_eq!(grants[0]["username"], "consent-user");
+    assert!(!home.path().join("authorization.key").exists());
+    assert!(!home.path().join(".zvec-grep").exists());
     let (queried, prompts) = bridge.request_with_consent(&search(6), "cancel")?;
     assert_eq!(prompts, 0, "valid workspace grants must skip elicitation");
     assert_eq!(queried["result"]["isError"], false, "{queried}");

@@ -637,7 +637,7 @@ const AUTH_HELP: &str = r"Usage:
   zg --auth status [root]
   zg --auth revoke [root]
 
-Manage the signed Remote Embedding grant stored in the Workspace under
+Manage the Remote Embedding grant stored in the Workspace under
 .zvec-grep/authorization.json. Workspace grants are shared by zg CLI and zg MCP.
 
 --embedding selects the Remote Embedding model to authorize; it does not run
@@ -646,7 +646,9 @@ ZVEC_GREP_EMBEDDING.
 
 --endpoint selects the exact provider URL to authorize; otherwise the stored
 index endpoint, ZVEC_GREP_ENDPOINT, or provider default is used. Grants bind the
-canonical workspace root, model, and endpoint. Granting sends no remote data.
+canonical source root, username, model, and endpoint. Moving the source or changing
+the username requires authorization again. A matching path and username can reuse
+the grant on another machine. Granting sends no remote data.
 
 Output:
   --color <auto|always|never>       Color output (default: auto)
@@ -663,8 +665,7 @@ configure a provider but do not grant permission.
 Environment used by auth grant:
   ZVEC_GREP_EMBEDDING               Default model for new indexes and auth grant
   ZVEC_GREP_API_KEY                 Embedding provider credential fallback
-  ZVEC_GREP_ENDPOINT                Remote Embedding endpoint fallback
-  ZVEC_GREP_AUTHORIZATION_KEY_FILE  Workspace grant signing-key file (advanced)";
+  ZVEC_GREP_ENDPOINT                Remote Embedding endpoint fallback";
 
 const SERVER_HELP: &str = r"Usage:
   zg --server --stdio [--token-file <path>] [--mcp-toolset <agent|full>]
@@ -897,9 +898,8 @@ Qwen credential aliases:
   DASHSCOPE_API_KEY  Qwen credential fallback after ZVEC_GREP_API_KEY
   QWEN_API_KEY       Qwen credential fallback after DASHSCOPE_API_KEY
 
-State and authorization:
+State:
   ZVEC_GREP_HOME                    Runtime and daemon state directory; Workspace indexes stay under <root>/.zvec-grep
-  ZVEC_GREP_AUTHORIZATION_KEY_FILE  Workspace grant signing-key file (advanced)
 
 Advanced:
   ZVEC_GREP_METAL_KEEP_RESIDENCY       Set to 1 to keep llama.cpp Metal residency enabled (advanced)

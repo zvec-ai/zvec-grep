@@ -1,4 +1,4 @@
-//! Signed workspace consent shared by direct, daemon, and MCP operations.
+//! Workspace-local consent shared by direct, daemon, and MCP operations.
 //!
 //! Consent preflight and grant-file management are the explicit exception to
 //! the `ZvecGrep` operation boundary described in `rust/CONTRIBUTING.md`.
@@ -9,8 +9,8 @@ use crate::{
     domain::{Workspace, WorkspaceLayout},
     models::{EmbeddingCatalogEntry, get_embedding_model_catalog_entry},
     utils::{
-        atomic_write, ensure_directory, file_exists, reject_symlink, resolve_directory,
-        sync_directory,
+        atomic_write, current_username, ensure_directory, file_exists, reject_symlink,
+        resolve_directory, sync_directory,
     },
     workspace::{
         find_nearest_workspace,
@@ -19,9 +19,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    env,
-    fs::{self, OpenOptions},
-    io::Write,
+    env, fs,
     path::{Path, PathBuf},
 };
 
@@ -35,7 +33,7 @@ pub struct IndexAuthorization {
     pub endpoint_host: String,
 }
 
-/// Verified workspace consent, without terminal presentation details.
+/// Workspace consent matching the current environment, without terminal presentation details.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthorizationStatus {
     pub root: PathBuf,
@@ -43,7 +41,7 @@ pub struct AuthorizationStatus {
     pub grants: Vec<AuthorizationGrantStatus>,
 }
 
-/// A verified remote destination approved for a workspace.
+/// A remote destination approved for a workspace.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthorizationGrantStatus {
     pub model: String,
@@ -54,7 +52,7 @@ pub struct AuthorizationGrantStatus {
 /// Resolves required consent without loading models, writing state, or sending data.
 ///
 /// # Errors
-/// Returns errors for invalid workspace state, models, endpoints, or signed grants.
+/// Returns errors for invalid workspace state, models, endpoints, or authorization records.
 pub fn index_authorization(
     options: &crate::api::index::IndexOptions,
 ) -> Result<Option<IndexAuthorization>, EngineError> {
@@ -152,7 +150,7 @@ pub struct QueryAuthorization {
 
 /// Resolves query consent without embedding text or updating the index.
 /// # Errors
-/// Returns invalid request, workspace, endpoint, or signed grant errors.
+/// Returns invalid request, workspace, endpoint, or authorization record errors.
 pub fn query_authorization(
     options: &crate::api::context::ContextOptions,
 ) -> Result<Option<QueryAuthorization>, EngineError> {
@@ -227,13 +225,14 @@ pub fn query_authorizations(
 /// Persists a destination explicitly approved by the terminal user.
 ///
 /// # Errors
-/// Returns errors for invalid destinations or inaccessible signing state.
+/// Returns errors for invalid destinations, an unknown username, or inaccessible consent.
 pub fn grant_index(target: &IndexAuthorization) -> Result<(), EngineError> {
     let root = fs::canonicalize(&target.root).map_err(io)?;
     let endpoint = remote_endpoint(&target.model, Some(&target.endpoint))?;
     persist_grant(Grant {
         version: 1,
         root,
+        username: authorization_username()?,
         capability: "embedding".into(),
         scope: "workspace".into(),
         model: target.model.clone(),
@@ -242,28 +241,24 @@ pub fn grant_index(target: &IndexAuthorization) -> Result<(), EngineError> {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Grant {
     version: u32,
     root: PathBuf,
+    /// Username at explicit authorization; independent of manifest updates.
+    username: String,
     capability: String,
     scope: String,
     model: String,
     endpoint: String,
 }
 
-#[derive(Serialize, Deserialize)]
-struct SignedGrant {
-    grant: Grant,
-    #[serde(default)]
-    key_id: String,
-    signature: Vec<u8>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum SignedGrants {
-    One(SignedGrant),
-    Many(Vec<SignedGrant>),
+fn authorization_username() -> Result<String, EngineError> {
+    current_username().ok_or_else(|| {
+        EngineError::invalid_argument(
+            "Cannot determine the current username for persistent authorization; pass --allow-remote for this command only",
+        )
+    })
 }
 
 #[allow(
@@ -303,86 +298,6 @@ fn root_path(root: &Path) -> Result<PathBuf, EngineError> {
     }
 }
 
-fn key_path() -> Result<PathBuf, EngineError> {
-    if let Some(path) = env::var_os("ZVEC_GREP_AUTHORIZATION_KEY_FILE") {
-        return Ok(path.into());
-    }
-    let home = env::var_os("ZVEC_GREP_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".zvec-grep")))
-        .ok_or_else(|| {
-            EngineError::invalid_argument("Set ZVEC_GREP_AUTHORIZATION_KEY_FILE or HOME")
-        })?;
-    Ok(home.join("authorization.key"))
-}
-
-fn private_write(path: &Path, data: &[u8]) -> Result<(), EngineError> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path).map_err(io)?;
-    file.write_all(data).map_err(io)?;
-    file.sync_all().map_err(io)
-}
-
-fn signing_key(create: bool) -> Result<Vec<u8>, EngineError> {
-    let path = key_path()?;
-    if create && !path.exists() {
-        let parent = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        let mut builder = fs::DirBuilder::new();
-        builder.recursive(false);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        if let Err(error) = builder.create(parent)
-            && !(error.kind() == std::io::ErrorKind::AlreadyExists && parent.is_dir())
-        {
-            return Err(EngineError::from_io(
-                format!(
-                    "create authorization key directory '{}' (parent must already exist)",
-                    parent.display()
-                ),
-                &error,
-            ));
-        }
-        sync_directory(parent)?;
-        if parent.file_name().is_some() {
-            sync_directory(parent.parent().unwrap_or(parent))?;
-        }
-        let temporary = parent.join(format!(".authorization-key-{}", uuid::Uuid::new_v4()));
-        let key = [
-            uuid::Uuid::new_v4().as_bytes().as_slice(),
-            uuid::Uuid::new_v4().as_bytes().as_slice(),
-        ]
-        .concat();
-        private_write(&temporary, &key)?;
-        let result = fs::hard_link(&temporary, &path);
-        let _ = fs::remove_file(&temporary);
-        if let Err(error) = result
-            && error.kind() != std::io::ErrorKind::AlreadyExists
-        {
-            return Err(io(error));
-        }
-        sync_directory(parent)?;
-    }
-    let key = fs::read(path).map_err(io)?;
-    if key.len() < 32 {
-        return Err(EngineError::invalid_argument(
-            "Authorization signing key must contain at least 32 bytes",
-        ));
-    }
-    Ok(key)
-}
-
 pub(crate) fn remote_endpoint(
     reference: &str,
     endpoint: Option<&str>,
@@ -412,7 +327,7 @@ pub(crate) fn remote_endpoint(
         ));
     }
     // SDK examples provide an API base URL. Resolve it before consent is
-    // checked so the signed destination and the actual request URL agree.
+    // checked so the approved destination and the actual request URL agree.
     let path = url.path().trim_end_matches('/');
     if entry.kind == "text" && path.ends_with("/v1") {
         url.set_path(&format!("{path}/embeddings"));
@@ -423,7 +338,7 @@ pub(crate) fn remote_endpoint(
 /// Persists explicit workspace consent without loading a model or contacting a provider.
 ///
 /// # Errors
-/// Returns an error for invalid models, roots, or inaccessible signing state.
+/// Returns an error for invalid models, roots, an unknown username, or inaccessible consent.
 pub fn grant(
     root: &Path,
     model: Option<&str>,
@@ -466,6 +381,7 @@ pub fn grant(
     let grant = Grant {
         version: 1,
         root: root.clone(),
+        username: authorization_username()?,
         capability: "embedding".into(),
         scope: "workspace".into(),
         model,
@@ -486,25 +402,7 @@ fn persist_grant(grant: Grant) -> Result<(), EngineError> {
     let mut grants = read_grants(&grant.root)?;
     grants.retain(|previous| previous.model != grant.model || previous.endpoint != grant.endpoint);
     grants.push(grant);
-    let key = signing_key(true)?;
-    let signed = grants
-        .into_iter()
-        .map(|grant| {
-            let signature =
-                hmac_sha256::HMAC::mac(serde_json::to_vec(&grant).map_err(json)?, &key).to_vec();
-            Ok(SignedGrant {
-                grant,
-                key_id: crate::utils::sha256_hex(&key),
-                signature,
-            })
-        })
-        .collect::<Result<Vec<_>, EngineError>>()?;
-    let bytes = if signed.len() == 1 {
-        serde_json::to_vec_pretty(&signed[0])
-    } else {
-        serde_json::to_vec_pretty(&signed)
-    }
-    .map_err(json)?;
+    let bytes = serde_json::to_vec_pretty(&grants).map_err(json)?;
     atomic_write(layout.authorization_path(), &bytes)?;
     sync_directory(layout.storage_dir())
 }
@@ -518,65 +416,37 @@ fn read_grants(root: &Path) -> Result<Vec<Grant>, EngineError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(io(e)),
     };
-    let records: SignedGrants = serde_json::from_slice(&bytes).map_err(|error| {
+    let records: Vec<Grant> = serde_json::from_slice(&bytes).map_err(|error| {
         EngineError::invalid_argument(format!(
             "Invalid workspace authorization format: {error}; run `zg --auth revoke \"{}\"`, then authorize again with `zg --auth grant`",
             root.display()
         ))
     })?;
-    let records = match records {
-        SignedGrants::One(record) => vec![record],
-        SignedGrants::Many(records) => records,
-    };
-    let Ok(path) = key_path() else {
+    let Some(username) = current_username() else {
         return Ok(Vec::new());
     };
-    let key = match fs::read(path) {
-        Ok(key) => key,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(io(error)),
-    };
-    if key.len() < 32 {
-        return Err(EngineError::invalid_argument(
-            "Authorization signing key must contain at least 32 bytes",
-        ));
-    }
-    let key_id = crate::utils::sha256_hex(&key);
     records
         .into_iter()
-        .filter(|signed| signed.key_id == key_id && signed.grant.root == root)
-        .map(|signed| {
-            let expected = hmac_sha256::HMAC::mac(
-                serde_json::to_vec(&signed.grant).map_err(json)?,
-                &key,
-            );
-            let valid = signed.signature.len() == expected.len()
-                && signed
-                    .signature
-                    .iter()
-                    .zip(expected)
-                    .fold(0_u8, |diff, (a, b)| diff | (a ^ b))
-                    == 0;
-            if !valid
-                || signed.grant.version != 1
-                || signed.grant.root != root
-                || signed.grant.capability != "embedding"
-                || signed.grant.scope != "workspace"
+        .filter(|grant| grant.root == root && grant.username == username)
+        .map(|grant| {
+            if grant.version != 1
+                || grant.capability != "embedding"
+                || grant.scope != "workspace"
             {
                 return Err(EngineError::permission_denied(format!(
-                    "Invalid workspace authorization signature or scope; run `zg --auth revoke \"{}\"`, then authorize again with `zg --auth grant`",
+                    "Invalid workspace authorization version, capability, or scope; run `zg --auth revoke \"{}\"`, then authorize again with `zg --auth grant`",
                     root.display()
                 )));
             }
-            Ok(signed.grant)
+            Ok(grant)
         })
         .collect()
 }
 
-/// Reports verified consent without creating any state.
+/// Reports consent matching the current environment without creating any state.
 ///
 /// # Errors
-/// Returns an error if existing consent cannot be verified.
+/// Returns an error if existing consent cannot be read or validated.
 pub fn status_snapshot(root: &Path) -> Result<AuthorizationStatus, EngineError> {
     let root = root_path(root)?;
     let grants = read_grants(&root)?
@@ -600,10 +470,10 @@ pub fn status_snapshot(root: &Path) -> Result<AuthorizationStatus, EngineError> 
     })
 }
 
-/// Reports verified consent without creating any state.
+/// Reports consent matching the current environment without creating any state.
 ///
 /// # Errors
-/// Returns an error if existing consent cannot be verified.
+/// Returns an error if existing consent cannot be read or validated.
 pub fn status(root: &Path) -> Result<String, EngineError> {
     let status = status_snapshot(root)?;
     if status.grants.is_empty() {
@@ -638,7 +508,7 @@ pub fn revoke(root: &Path) -> Result<String, EngineError> {
 }
 
 /// Removes all workspace grants and reports how many records were removed.
-/// Invalid consent can still be removed without a working signing key.
+/// Invalid consent can still be removed without a matching environment.
 /// Returns `None` when removed consent could not be read or parsed to count records.
 ///
 /// # Errors
@@ -656,9 +526,8 @@ pub fn revoke_all(root: &Path) -> Result<Option<usize>, EngineError> {
         "authorization.revoke",
     )?;
     let count = match fs::read(path) {
-        Ok(bytes) => match serde_json::from_slice::<SignedGrants>(&bytes) {
-            Ok(SignedGrants::Many(records)) => Some(records.len()),
-            Ok(SignedGrants::One(_)) => Some(1),
+        Ok(bytes) => match serde_json::from_slice::<Vec<Grant>>(&bytes) {
+            Ok(records) => Some(records.len()),
             // Explicit revocation remains the recovery path for malformed consent.
             Err(_) => None,
         },
@@ -799,6 +668,7 @@ mod tests {
                 persist_grant(Grant {
                     version: 1,
                     root,
+                    username: "authorization-test".into(),
                     capability: "embedding".into(),
                     scope: "workspace".into(),
                     model: "qwen/text-embedding-v4".into(),
@@ -825,7 +695,7 @@ mod tests {
         if let Some(root) = env::var_os(FIXTURE_ENV) {
             return Some(PathBuf::from(root));
         }
-        // Child-process configuration keeps signing keys and global settings isolated
+        // Child-process configuration keeps usernames and global settings isolated
         // without changing environment variables while other unit tests are running.
         let workspace = tempfile::tempdir().expect("workspace");
         let state = tempfile::tempdir().expect("authorization state");
@@ -834,7 +704,8 @@ mod tests {
             .env(FIXTURE_ENV, workspace.path())
             .env("HOME", state.path())
             .env("USERPROFILE", state.path())
-            .env("ZVEC_GREP_AUTHORIZATION_KEY_FILE", state.path().join("key"))
+            .env("USER", "authorization-test")
+            .env("USERNAME", "authorization-test")
             .env_remove("ZVEC_GREP_EMBEDDING")
             .env_remove("ZVEC_GREP_ENDPOINT")
             .output()
@@ -859,6 +730,7 @@ mod tests {
         persist_grant(Grant {
             version: 1,
             root: root.clone(),
+            username: authorization_username().expect("username"),
             capability: "embedding".into(),
             scope: "workspace".into(),
             model: "qwen/text-embedding-v4".into(),
@@ -1066,9 +938,9 @@ mod tests {
     }
 
     #[test]
-    fn invalid_signature_or_scope_explains_revoke_before_regrant() {
+    fn invalid_version_capability_or_scope_explains_revoke_before_regrant() {
         let Some(root) = isolated_authorization_root(
-            "authorization::tests::invalid_signature_or_scope_explains_revoke_before_regrant",
+            "authorization::tests::invalid_version_capability_or_scope_explains_revoke_before_regrant",
         ) else {
             return;
         };
@@ -1077,26 +949,21 @@ mod tests {
             .expect("layout")
             .authorization_path()
             .to_path_buf();
-        for invalid_scope in [false, true] {
+        for field in ["version", "capability", "scope"] {
             grant(
                 &root,
                 Some("qwen/text-embedding-v4"),
                 Some("https://provider.test/embeddings"),
             )
             .expect("valid authorization");
-            let mut signed: SignedGrant =
-                serde_json::from_slice(&fs::read(&path).expect("grant")).expect("signed grant");
-            if invalid_scope {
-                signed.grant.scope = "once".into();
-                signed.signature = hmac_sha256::HMAC::mac(
-                    serde_json::to_vec(&signed.grant).expect("grant JSON"),
-                    signing_key(false).expect("test signing key"),
-                )
-                .to_vec();
-            } else {
-                signed.signature[0] ^= 1;
+            let mut records: Vec<Grant> =
+                serde_json::from_slice(&fs::read(&path).expect("grant")).expect("grant list");
+            match field {
+                "version" => records[0].version = 0,
+                "capability" => records[0].capability = "unknown".into(),
+                _ => records[0].scope = "once".into(),
             }
-            let bytes = serde_json::to_vec(&signed).expect("invalid authorization fixture");
+            let bytes = serde_json::to_vec(&records).expect("invalid authorization fixture");
             fs::write(&path, &bytes).expect("invalid authorization");
             let error = read_grants(&root)
                 .err()
@@ -1393,6 +1260,49 @@ mod tests {
             )),
         )
         .expect("manifest")
+    }
+
+    #[test]
+    fn saving_a_moved_workspace_does_not_refresh_authorization() {
+        let Some(directory) = isolated_authorization_root(
+            "authorization::tests::saving_a_moved_workspace_does_not_refresh_authorization",
+        ) else {
+            return;
+        };
+        let original = directory.join("original");
+        fs::create_dir(&original).expect("source directory");
+        let endpoint = "https://provider.test/embeddings";
+        grant(&original, Some("qwen/text-embedding-v4"), Some(endpoint)).expect("original consent");
+        let moved = directory.join("moved");
+        fs::rename(original, &moved).expect("move source and storage");
+        let layout = WorkspaceLayout::new(moved.join(".zvec-grep")).expect("moved layout");
+        let before = fs::read(layout.authorization_path()).expect("carried consent");
+
+        // Saving current source history must not approve the new location.
+        let workspace = remote_workspace(layout.clone(), endpoint);
+        crate::workspace::manifest::write_workspace_manifest(layout.manifest_path(), &workspace)
+            .expect("save current environment");
+        let options = IndexOptions {
+            root: Some(moved.clone()),
+            ..IndexOptions::default()
+        };
+        assert_eq!(
+            index_authorizations(&options)
+                .expect("new consent needed")
+                .len(),
+            1
+        );
+        assert_eq!(
+            fs::read(layout.authorization_path()).expect("unchanged consent"),
+            before
+        );
+
+        grant(&moved, None, None).expect("explicitly approve new location");
+        assert!(
+            index_authorizations(&options)
+                .expect("new grant applies")
+                .is_empty()
+        );
     }
 
     #[test]

@@ -167,7 +167,7 @@ fn write_text(layout: &WorkspaceLayout, storage_home: &Path, text: &str) {
             }],
         )
         .expect("replace indexed text");
-    storage.close().expect("checkpoint");
+    storage.close().expect("close storage");
 }
 
 fn cache() -> ReadSessionCache {

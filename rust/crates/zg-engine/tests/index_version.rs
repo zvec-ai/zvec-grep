@@ -130,7 +130,7 @@ async fn assert_current_index(engine: &ZvecGrep, root: &Path) -> TestResult<Valu
     let manifest: Value =
         serde_json::from_slice(&fs::read(root.join(".zvec-grep/manifest.json"))?)?;
     assert_eq!(manifest["indexVersion"], 2);
-    assert_eq!(manifest["sourceRoot"]["relative"], "..");
+    assert!(manifest["sourceRoot"].get("relative").is_none());
     assert_eq!(manifest["index"]["state"], "enabled");
     for field in [
         "format",

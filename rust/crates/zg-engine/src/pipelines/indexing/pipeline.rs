@@ -3095,7 +3095,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replacement_errors_abort_without_file_retry_or_checkpoint() {
+    async fn replacement_errors_abort_without_file_retry_or_finalization() {
         // Zero-byte files are skipped by scanning; whitespace reaches the no-fragment commit.
         for (source, embedding_calls) in [("indexable text", 1), (" \n", 0)] {
             let directory = tempdir().expect("workspace");
@@ -4250,7 +4250,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restoring_default_size_limits_rechecks_unchanged_files() {
+    async fn tighter_size_limits_recheck_unchanged_files() {
         let directory = tempdir().expect("temporary directory");
         std::fs::write(directory.path().join("large.rs"), "fn main() {}\n")
             .expect("source for format validation");
@@ -4297,28 +4297,33 @@ mod tests {
             1
         );
 
-        workspace = with_scan_rules(
-            &workspace,
-            &crate::api::index::options::ScanRulesUpdate {
-                max_file_size_bytes: Some(None),
-                ..Default::default()
-            },
-        );
-        let (scanned, skipped) = classify_files(
-            &workspace,
-            vec![discovered],
-            std::slice::from_ref(&stored),
-            &control,
-        )
-        .await
-        .expect("default limit");
-        assert!(scanned.is_empty());
-        assert_eq!(skipped[0].reason, SkippedFileReason::TooLarge);
-        assert_eq!(skipped[0].limit_bytes, Some(MIN_DEFAULT_FILE_SIZE_BYTES));
-        assert_eq!(
-            compute_diff(scanned, std::slice::from_ref(&stored)).deleted,
-            [stored]
-        );
+        for maximum in [None, Some(0)] {
+            workspace = with_scan_rules(
+                &workspace,
+                &crate::api::index::options::ScanRulesUpdate {
+                    max_file_size_bytes: Some(maximum),
+                    ..Default::default()
+                },
+            );
+            let (scanned, skipped) = classify_files(
+                &workspace,
+                vec![discovered.clone()],
+                std::slice::from_ref(&stored),
+                &control,
+            )
+            .await
+            .expect("tighter size limit");
+            assert!(scanned.is_empty());
+            assert_eq!(skipped[0].reason, SkippedFileReason::TooLarge);
+            assert_eq!(
+                skipped[0].limit_bytes,
+                Some(maximum.unwrap_or(MIN_DEFAULT_FILE_SIZE_BYTES))
+            );
+            assert_eq!(
+                compute_diff(scanned, std::slice::from_ref(&stored)).deleted,
+                std::slice::from_ref(&stored)
+            );
+        }
     }
 
     #[tokio::test]

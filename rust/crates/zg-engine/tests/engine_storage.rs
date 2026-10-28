@@ -1222,9 +1222,9 @@ async fn public_engine_reuses_relative_files_after_moving_workspace() -> TestRes
     assert!(entity_id.is_some());
     let manifest_bytes = fs::read(original_root.join(".zvec-grep/manifest.json"))?;
     let manifest: Value = serde_json::from_slice(&manifest_bytes)?;
-    assert_eq!(manifest["sourceRoot"]["relative"], "..");
+    assert!(manifest["sourceRoot"].get("relative").is_none());
     assert_eq!(
-        manifest["sourceRoot"]["absolute"],
+        manifest["sourceRoot"]["recordedPath"],
         original_root.to_string_lossy().as_ref()
     );
     for field in ["root", "path", "name"] {

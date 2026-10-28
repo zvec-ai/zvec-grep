@@ -33,7 +33,6 @@ notify = "8.2.0"
 # Keep the published binding's safety fixes while loading the separately pinned
 # ORT 1.21.0 runtime through API 21; do not enable automatic runtime downloads.
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["api-21", "load-dynamic", "std"] }
-relative-path = { version = "2.0.2", features = ["serde"] }
 rmcp = { version = "3.1.4", features = ["macros", "schemars", "server", "transport-streamable-http-server"] }
 same-file = "1.0.6"
 schemars = "1"

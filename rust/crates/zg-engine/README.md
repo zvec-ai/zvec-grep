@@ -50,7 +50,7 @@ A workspace is a directory of files that zg indexes and searches as a unit, with
 
 ### Index storage
 
-By default, saved settings live in `.zvec-grep` within the workspace, with active index data in `.zvec-grep/index`. Moving or copying the source directory together with `.zvec-grep` preserves the index; downloaded models are cached separately and shared across workspaces.
+Saved settings live in the source directory's fixed `.zvec-grep` child, with active index data in `.zvec-grep/index`. Moving or copying the source directory together with `.zvec-grep` preserves the index; downloaded models are cached separately and shared across workspaces.
 
 ### File selection
 
@@ -58,7 +58,7 @@ Scanning respects ignore rules, excludes hidden files, does not follow symlinks,
 
 ### Moving workspaces
 
-File paths and ignore files inside the workspace are saved relative to its source directory. A change in the saved source location or username resets saved device and model-cache preferences; external ignore files must be configured again before scanning or updating. Queries with refresh disabled do not require those ignore files. Incompatible filenames and conflicting paths on the destination filesystem are reported.
+File paths and ignore files inside the workspace are saved relative to its source directory. A change in the saved source location or username resets saved device and model-cache preferences. External ignore files continue to use their saved paths when those paths are absolute on the current platform. Missing ignore files and incompatible external paths are skipped without removing their saved references; other read errors and invalid rules are reported. Incompatible filenames and conflicting paths on the destination filesystem are also reported.
 
 ### Index lifecycle
 
@@ -78,7 +78,7 @@ Explicit device and model-cache choices made when indexing become workspace defa
 
 ### Credentials and authorization
 
-API keys explicitly supplied when indexing are encrypted in workspace settings; keys inherited from environment variables or global configuration are not copied there. The decryption key travels with `.zvec-grep`, so sharing that directory also shares access to its saved credentials. Remote-use consent is separate, bound to the workspace location and a machine-local signing key, and must be confirmed again after relocation or a machine change.
+API keys explicitly supplied when indexing are encrypted in workspace settings; keys inherited from environment variables or global configuration are not copied there. The decryption key travels with `.zvec-grep`, so sharing that directory also shares access to its saved credentials. Remote-use consent is stored separately in the workspace and binds the canonical source root, username, model, and endpoint. Matching paths and usernames can reuse copied grants across machines. Grants have no signature, machine fingerprint, or home-directory key; they record consent rather than prove it against deliberate edits. Only explicit authorization updates their saved environment, independently of manifest writes.
 
 ## Modules
 

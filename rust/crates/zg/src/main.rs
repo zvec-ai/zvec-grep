@@ -1174,14 +1174,13 @@ mod query_authorization_tests {
     async fn query_choices_apply_to_execution_and_workspace_consent_is_reused() {
         const FIXTURE_ENV: &str = "ZG_QUERY_AUTHORIZATION_TEST_ROOT";
         let Some(root) = std::env::var_os(FIXTURE_ENV) else {
-            // Isolate signing and global configuration without mutating process environment.
+            // Isolate global configuration without mutating process environment.
             let workspace = tempfile::tempdir().expect("workspace");
             let state = tempfile::tempdir().expect("state");
             let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
                 .args(["--exact", "query_authorization_tests::query_choices_apply_to_execution_and_workspace_consent_is_reused", "--nocapture"])
                 .env(FIXTURE_ENV, workspace.path())
                 .env("HOME", state.path()).env("USERPROFILE", state.path())
-                .env("ZVEC_GREP_AUTHORIZATION_KEY_FILE", state.path().join("key"))
                 .env_remove("ZVEC_GREP_API_KEY").env_remove("ZVEC_GREP_ENDPOINT")
                 .env_remove("ZVEC_GREP_EMBEDDING").env_remove("DASHSCOPE_API_KEY").env_remove("QWEN_API_KEY")
                 .output().expect("isolated test");
