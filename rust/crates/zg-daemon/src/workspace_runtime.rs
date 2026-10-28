@@ -1338,6 +1338,7 @@ fn index_template(options: &IndexOptions) -> IndexOptions {
     template.on_progress = None;
     template.allow_remote = false;
     template.authorized_remote.clear();
+    template.runtime_api_key = None;
     template.runtime_device = None;
     template.runtime_model_cache = None;
     template.model_cache = None;
@@ -1452,6 +1453,7 @@ mod tests {
             endpoint: Some("https://example.test/embeddings".into()),
             device: Some(Device::Cpu),
             model_cache: Some("saved-cache".into()),
+            runtime_api_key: Some("temporary-key".into()),
             runtime_device: Some(Device::Auto),
             runtime_model_cache: Some("temporary-cache".into()),
             embedding: Some(EmbeddingModelSpec {
@@ -1463,6 +1465,7 @@ mod tests {
             }),
             ..IndexOptions::default()
         });
+        assert!(template.runtime_api_key.is_none());
         assert!(template.runtime_device.is_none());
         assert!(template.runtime_model_cache.is_none());
         assert!(template.model_cache.is_none());

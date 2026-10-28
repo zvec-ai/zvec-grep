@@ -76,11 +76,13 @@ mod tests {
         use zg_engine::api::index::IndexOptions;
         let command = DaemonCommand::Index(IndexOptions {
             root: Some("/workspace".into()),
+            runtime_api_key: Some("temporary-key".into()),
             ..IndexOptions::default()
         });
         let mut encoded = serde_json::to_value(&command).expect("serialize command");
         assert!(encoded["request"].get("name").is_none());
         assert_eq!(encoded["request"]["root"], "/workspace");
+        assert_eq!(encoded["request"]["runtime_api_key"], "temporary-key");
         let decoded: DaemonCommand =
             serde_json::from_value(encoded.clone()).expect("deserialize command");
         assert_eq!(decoded, command);

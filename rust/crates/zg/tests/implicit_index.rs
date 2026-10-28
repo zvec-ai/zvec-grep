@@ -1022,8 +1022,9 @@ fn remote_authorization_can_return_to_model_selection_without_sending_data() {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-#[test]
-fn remote_allow_once_covers_the_cli_build_and_following_query_without_a_grant() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_allow_once_keeps_query_credentials_temporary_through_build_and_query() {
+    let embedding = GatedEmbedding::start_with_credential(Some("setup-test-secret".into())).await;
     for mode in ["direct", "server"] {
         let mut fixture = Fixture::new();
         fixture.success(&[
@@ -1033,23 +1034,41 @@ fn remote_allow_once_covers_the_cli_build_and_following_query_without_a_grant() 
             "qwen/text-embedding-v4",
             "--default",
             "--endpoint",
-            "http://127.0.0.1:1/no-requests",
+            &embedding.endpoint,
         ]);
+        fs::write(
+            fixture.root.path().join("needle.txt"),
+            "needle workspace documentation",
+        )
+        .expect("source file");
         if mode == "server" {
             fixture.start_server();
         }
-        let output = success(terminal::run(
-            fixture.command(&[
-                "--mode",
-                mode,
-                "--fts",
-                "needle",
-                "--api-key",
-                "setup-test-secret",
-                "--no-color",
-            ]),
-            &[("Enter Continue", b"\r"), ("Enter Confirm", b"\r")],
-        ));
+        let command = fixture.command(&[
+            "--mode",
+            mode,
+            "needle",
+            "--api-key",
+            "setup-test-secret",
+            "--refresh",
+            "off",
+            "--no-color",
+        ]);
+        let before = embedding.authorized_requests.load(Ordering::SeqCst);
+        let output = success(
+            tokio::task::spawn_blocking(move || {
+                terminal::run(
+                    command,
+                    &[("Enter Continue", b"\r"), ("Enter Confirm", b"\r")],
+                )
+            })
+            .await
+            .expect("interactive setup"),
+        );
+        assert!(
+            embedding.authorized_requests.load(Ordering::SeqCst) >= before + 2,
+            "the build and subsequent query must both use the temporary credential"
+        );
         fixture.assert_model(mode, "qwen/text-embedding-v4");
         assert!(
             !fixture
@@ -1058,7 +1077,25 @@ fn remote_allow_once_covers_the_cli_build_and_following_query_without_a_grant() 
                 .join(".zvec-grep/authorization.json")
                 .exists()
         );
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "No matches.\n");
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("manifest"),
+        )
+        .expect("manifest JSON");
+        assert!(
+            manifest["index"]["descriptor"]["embeddingConfigs"]["qwen/text-embedding-v4"]
+                .get("apiKey")
+                .is_none()
+        );
+        assert!(
+            !fixture
+                .root
+                .path()
+                .join(".zvec-grep/credentials.key")
+                .exists()
+        );
+        assert!(!manifest.to_string().contains("setup-test-secret"));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("needle.txt"));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("setup-test-secret"));
         assert!(!String::from_utf8_lossy(&output.stderr).contains("setup-test-secret"));
     }
 }

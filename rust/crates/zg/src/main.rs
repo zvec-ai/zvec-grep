@@ -577,8 +577,8 @@ async fn select_query_index(
                 endpoint: None,
                 device: zg_engine::api::index::options::Device::Auto,
             }),
-            // Remote credentials are only forwarded after an explicit model selection.
-            api_key: if model.local {
+            // Query credentials remain temporary during the implicit build.
+            runtime_api_key: if model.local {
                 None
             } else {
                 request.api_key.clone()

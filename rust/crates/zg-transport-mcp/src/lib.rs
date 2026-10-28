@@ -814,7 +814,8 @@ pub struct IndexInput {
     /// Absolute workspace root visible to the daemon.
     #[schemars(length(min = 1, max = 1024))]
     pub root: String,
-    /// One-request embedding provider API key override.
+    /// Saves the embedding provider API key encrypted in this workspace for subsequent operations.
+    /// The decryption key is stored in the same workspace; copying it preserves access to the credential.
     #[schemars(length(min = 1, max = 8192))]
     pub api_key: Option<String>,
     /// Saves the local embedding device preference for this workspace.
@@ -2932,6 +2933,13 @@ mod tests {
                     assert_eq!(schema["properties"]["limit"]["minimum"], 1);
                     assert_eq!(schema["properties"]["limit"]["maximum"], 50);
                 } else {
+                    let key_description = schema["properties"]["apiKey"]["description"]
+                        .as_str()
+                        .expect("API key persistence description");
+                    assert!(key_description.contains("for subsequent operations"));
+                    assert!(
+                        key_description.contains("decryption key is stored in the same workspace")
+                    );
                     // Explicit null clears these settings, unlike ordinary Option<T>.
                     for field in ["maxDepth", "maxFileSizeBytes"] {
                         let types = schema["properties"][field]["type"]

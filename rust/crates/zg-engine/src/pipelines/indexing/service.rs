@@ -523,10 +523,8 @@ fn acquire_model(
     existing: Option<&Workspace>,
     options: &IndexOptions,
 ) -> Result<ModelRuntimeLease, EngineError> {
-    if options
-        .embedding
-        .as_ref()
-        .is_some_and(|embedding| embedding.revision.is_some())
+    if let Some(embedding) = &options.embedding
+        && embedding.revision.is_some()
     {
         return Err(EngineError::unsupported(
             "embedding revision overrides are not supported by the catalog-backed runtime",
@@ -544,7 +542,11 @@ fn acquire_model(
     let existing_index = existing.and_then(|workspace| workspace.index().descriptor());
     let existing_runtime =
         existing_index.and_then(|index| index.embedding_configs().get(&reference));
-    let saved_key = if local || options.api_key.is_some() {
+    let requested_key = options
+        .runtime_api_key
+        .as_ref()
+        .or(options.api_key.as_ref());
+    let saved_key = if local || requested_key.is_some() {
         None
     } else if let (Some(workspace), Some(runtime)) = (existing, existing_runtime) {
         runtime
@@ -558,9 +560,8 @@ fn acquire_model(
     let api_key = if local {
         None
     } else {
-        options
-            .api_key
-            .clone()
+        requested_key
+            .cloned()
             .or(saved_key)
             .or_else(|| crate::config::string(&config, &["providers", provider, "apiKey"]))
             .or_else(environment_api_key)
@@ -980,9 +981,20 @@ mod tests {
             .err()
             .expect("selected saved key must decrypt");
         assert!(error.message().contains("credentials.key"));
-        request.api_key = Some("override-private-token".into());
-        super::acquire_model(&models, Some(&loaded), &request)
-            .expect("explicit key bypasses missing saved key");
+        request.runtime_api_key = Some("override-private-token".into());
+        let model = super::acquire_model(&models, Some(&loaded), &request)
+            .expect("runtime key bypasses missing saved key");
+        let stored = super::saved_embedding_config(&layout, Some(&loaded), &request, &model)
+            .expect("runtime key preserves saved settings");
+        assert_eq!(
+            Some(&stored),
+            loaded
+                .index()
+                .descriptor()
+                .expect("descriptor")
+                .embedding_configs()
+                .get("qwen/text-embedding-v4")
+        );
         assert_eq!(
             std::fs::read_to_string(layout.manifest_path()).expect("unchanged manifest"),
             bytes

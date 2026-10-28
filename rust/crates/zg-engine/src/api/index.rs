@@ -49,8 +49,12 @@ pub mod options {
         /// Separate from the explicit blanket `allow_remote` option.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub authorized_remote: Vec<crate::authorization::IndexAuthorization>,
+        /// Encrypts and saves a remote API key in the workspace for subsequent operations.
         #[serde(default)]
         pub api_key: Option<String>,
+        /// API key override for this operation only; never saved. Takes precedence over `api_key`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub runtime_api_key: Option<String>,
         #[serde(default)]
         pub endpoint: Option<String>,
         /// Updates the workspace's saved device preference when supplied.

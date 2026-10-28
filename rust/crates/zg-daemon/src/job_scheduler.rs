@@ -679,6 +679,7 @@ fn merge_runtime_options(current: &mut IndexOptions, incoming: &mut IndexOptions
         current.allow_remote = incoming.allow_remote;
         current.authorized_remote.clear();
         current.api_key = None;
+        current.runtime_api_key = None;
         current.endpoint = None;
     }
     // Runtime/model settings are explicit updates too. A filter-only request
@@ -686,6 +687,10 @@ fn merge_runtime_options(current: &mut IndexOptions, incoming: &mut IndexOptions
     merge_update(&mut current.root, incoming.root.take());
     merge_update(&mut current.embedding, incoming.embedding.take());
     merge_update(&mut current.api_key, incoming.api_key.take());
+    merge_update(
+        &mut current.runtime_api_key,
+        incoming.runtime_api_key.take(),
+    );
     merge_update(&mut current.endpoint, incoming.endpoint.take());
     merge_update(&mut current.device, incoming.device.take());
     merge_update(&mut current.runtime_device, incoming.runtime_device.take());
@@ -1849,6 +1854,7 @@ mod tests {
             &mut pending,
             IndexOptions {
                 authorized_remote: vec![target.clone()],
+                runtime_api_key: Some("temporary-key".into()),
                 runtime_device: Some(zg_engine::api::index::options::Device::Cpu),
                 runtime_model_cache: Some("temporary-cache".into()),
                 ..IndexOptions::default()
@@ -1857,6 +1863,8 @@ mod tests {
         let merged = pending.as_ref().expect("merged");
         assert_eq!(merged.authorized_remote, [target]);
         assert!(!merged.allow_remote);
+        assert!(merged.api_key.is_none());
+        assert_eq!(merged.runtime_api_key.as_deref(), Some("temporary-key"));
         assert!(merged.device.is_none());
         assert!(merged.model_cache.is_none());
         assert_eq!(
@@ -1888,6 +1896,7 @@ mod tests {
         for model_changed in [false, true] {
             let mut pending = Some(IndexOptions {
                 api_key: Some("provider-a-key".into()),
+                runtime_api_key: Some("provider-a-temporary-key".into()),
                 endpoint: Some("https://a.test".into()),
                 allow_remote: true,
                 ..IndexOptions::default()
@@ -1913,6 +1922,7 @@ mod tests {
             let merged = pending.expect("merged destination");
             assert!(!merged.allow_remote);
             assert!(merged.api_key.is_none());
+            assert!(merged.runtime_api_key.is_none());
             assert_eq!(
                 merged.endpoint.as_deref(),
                 if model_changed {
@@ -1931,6 +1941,7 @@ mod tests {
             rebuild: true,
             allow_remote: true,
             api_key: Some("test-key".into()),
+            runtime_api_key: Some("temporary-key".into()),
             endpoint: Some("https://example.test/embeddings".into()),
             device: Some(Device::Cpu),
             model_cache: Some("/models".into()),
@@ -1964,6 +1975,7 @@ mod tests {
             "qwen/new-model"
         );
         assert_eq!(merged.api_key.as_deref(), Some("test-key"));
+        assert_eq!(merged.runtime_api_key.as_deref(), Some("temporary-key"));
         assert_eq!(
             merged.endpoint.as_deref(),
             Some("https://example.test/embeddings")
