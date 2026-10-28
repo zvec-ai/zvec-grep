@@ -238,9 +238,6 @@ jobs:
           ZVEC_GREP_API_KEY: ${{ secrets.QWEN_EMBEDDING_API_KEY }}
           ZVEC_GREP_ENDPOINT: ${{ vars.QWEN_EMBEDDING_ENDPOINT }}
         run: |
-          # Bulk indexing holds more open files than the runner's default
-          # soft limit (1024); RocksDB keeps every SST table reader open.
-          ulimit -Sn 8192
           node benchmarks/zg-retrieval/expansion/run.mjs \
             --suite beir \
             --package "$RUNNER_TEMP/package/candidate.tgz" \
@@ -317,9 +314,6 @@ jobs:
           ZVEC_GREP_API_KEY: ${{ secrets.QWEN_EMBEDDING_API_KEY }}
           ZVEC_GREP_ENDPOINT: ${{ vars.QWEN_EMBEDDING_ENDPOINT }}
         run: |
-          # Bulk indexing holds more open files than the runner's default
-          # soft limit (1024); RocksDB keeps every SST table reader open.
-          ulimit -Sn 8192
           node benchmarks/zg-retrieval/expansion/run.mjs \
             --suite duretrieval \
             --package "$RUNNER_TEMP/package/candidate.tgz" \
