@@ -8,6 +8,7 @@ mod managed_rg;
 mod management;
 mod path_lookup;
 mod paths;
+pub mod preview;
 mod progress;
 mod render;
 mod setup;

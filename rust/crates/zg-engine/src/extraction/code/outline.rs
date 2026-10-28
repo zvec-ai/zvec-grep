@@ -6,7 +6,7 @@ use super::{
     adapter::{LanguageAdapter, named_children, resolve_adapter},
     grammar,
 };
-use crate::domain::{Content, EntityMetadata, FileFormat, SymbolType};
+use crate::domain::{Content, EntityMetadata, FileFormat, Language, SymbolType};
 use tree_sitter::{Node, Parser};
 
 const MAX_CALLS: usize = 24;
@@ -32,20 +32,7 @@ pub(crate) fn code_outline(
     let (Content::Code(source) | Content::Text(source)) = content else {
         return None;
     };
-    let formats = FileFormat::from_file_name(path.file_name()?);
-    let format = if formats.contains(&FileFormat::Cpp) {
-        FileFormat::Cpp
-    } else if formats
-        .iter()
-        .any(|format| matches!(format, FileFormat::Vue | FileFormat::Svelte))
-    {
-        // Component entities already contain extracted script source.
-        FileFormat::TypeScript
-    } else {
-        *formats
-            .iter()
-            .find(|format| resolve_adapter(**format).is_some())?
-    };
+    let format = outline_format(path, metadata.language)?;
     let adapter = resolve_adapter(format)?;
     let jsx = path
         .extension()
@@ -100,6 +87,37 @@ pub(crate) fn code_outline(
         format!("{header}\n\n{}", details.join("\n"))
     };
     Some(clip(outline.trim(), MAX_OUTLINE_CHARS))
+}
+
+fn outline_format(path: &Path, language: Option<Language>) -> Option<FileFormat> {
+    if let Some(language) = language {
+        return Some(match language {
+            Language::C => FileFormat::C,
+            Language::Cpp => FileFormat::Cpp,
+            Language::Go => FileFormat::Go,
+            Language::Java => FileFormat::Java,
+            Language::JavaScript => FileFormat::JavaScript,
+            Language::Python => FileFormat::Python,
+            Language::Rust => FileFormat::Rust,
+            Language::TypeScript => FileFormat::TypeScript,
+        });
+    }
+    // Older indexes lack language metadata. Keep filename-based parsing without
+    // reading live files; extensionless entries need reindexing to recover it.
+    let formats = FileFormat::from_file_name(path.file_name()?);
+    if formats.contains(&FileFormat::Cpp) {
+        Some(FileFormat::Cpp)
+    } else if formats
+        .iter()
+        .any(|format| matches!(format, FileFormat::Vue | FileFormat::Svelte))
+    {
+        // Component entities already contain extracted script source.
+        Some(FileFormat::TypeScript)
+    } else {
+        formats
+            .into_iter()
+            .find(|format| resolve_adapter(*format).is_some())
+    }
 }
 
 fn find_entity<'a>(
@@ -223,6 +241,44 @@ mod tests {
             visibility: None,
             language: None,
         })
+    }
+
+    #[test]
+    fn legacy_metadata_without_language_keeps_filename_fallback() {
+        for language in [None, Some(serde_json::Value::Null)] {
+            let mut value = serde_json::json!({
+                "kind": "code", "symbol_type": "function", "symbol_name": "load"
+            });
+            if let Some(language) = language {
+                value["language"] = language;
+            }
+            let legacy: EntityMetadata = serde_json::from_value(value).expect("legacy metadata");
+            let source = Content::Code("def load():\n    return refresh()".into());
+            assert!(
+                code_outline(Path::new("tool.py"), &source, Some(&legacy))
+                    .expect("filename fallback")
+                    .ends_with("calls: refresh")
+            );
+            assert!(code_outline(Path::new("bin/tool"), &source, Some(&legacy)).is_none());
+        }
+    }
+
+    #[test]
+    fn stored_language_takes_precedence_over_filename() {
+        let mut metadata = metadata(SymbolType::Function, "load");
+        let EntityMetadata::Code(code) = &mut metadata else {
+            unreachable!()
+        };
+        code.language = Some(Language::Python);
+        assert!(
+            code_outline(
+                Path::new("tool.js"),
+                &Content::Code("def load():\n    return refresh()".into()),
+                Some(&metadata),
+            )
+            .expect("stored language")
+            .ends_with("calls: refresh")
+        );
     }
 
     #[test]

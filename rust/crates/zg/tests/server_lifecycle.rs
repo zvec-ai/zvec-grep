@@ -1469,8 +1469,8 @@ fn indexed_fragment_coordinates_survive_direct_server_and_mcp() -> Result<(), Bo
                 .output()?;
             assert_command_success(&reply);
             let text = String::from_utf8(reply.stdout)?;
-            assert!(text.contains("\n2\txxx"), "{mode} {preview}: {text}");
-            assert!(!text.contains("\n1\txxx"), "{mode} {preview}: {text}");
+            assert!(text.contains("\n  2: xxx"), "{mode} {preview}: {text}");
+            assert!(!text.contains("\n  1: xxx"), "{mode} {preview}: {text}");
             outputs.push(text);
         }
         assert_eq!(outputs[0], outputs[1], "direct/server {preview}");

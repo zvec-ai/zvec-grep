@@ -1,9 +1,10 @@
+mod compact;
 mod context;
 
 #[cfg(test)]
 use crate::highlight::QueryHighlighter;
 #[cfg(test)]
-use context::write_item_preview;
+use compact::write_item_preview;
 #[cfg(test)]
 use zg_engine::api::context::result::{
     CodeMetadata, ContextItemStatus, EntityMetadata, MarkdownMetadata,
@@ -317,12 +318,12 @@ Result options:
                                     In direct mode, background warns and falls back to off
   --mode <direct|server|auto>       Select indexed query transport (default: auto)
 
-Preview modes: none keeps one source line; short shows bounded source and outline;
-full shows all returned content; detail adds metadata and file grouping.
+Preview modes: none keeps one source line; short uses compact bounded source;
+full uses compact full source; detail adds metadata, outlines, and file grouping.
 Full previews do not retrieve an entire function or file. TTY affects only color.
 
-Indexed results are shown by query group, preserving each group's own rank.
-A result that matches more than one group is shown in each matching group.
+All preview modes preserve query groups, their ranks, and matched content.
+A result appears in each matching group; only --fuse combines groups.
 
 Embedding runtime:
   --api-key <key>                   Embedding provider API key
@@ -1002,12 +1003,7 @@ mod output_tests {
             .expect("context output");
             let text = String::from_utf8(bytes).expect("UTF-8");
             assert!(text.contains(expected));
-            let separator = if source == ContextSource::Rg {
-                ": "
-            } else {
-                "\t"
-            };
-            assert!(text.contains(&format!("1{separator}{path}")));
+            assert!(text.contains(&format!("1: {path}")));
         }
         result.source = original.source;
         assert_eq!(result, original);
@@ -1066,14 +1062,11 @@ mod output_tests {
                     )
                     .expect("source preview");
                     let expected = if whole_entity {
-                        "matched: 2\nsource:\n1\t# Heading\n2\tprefix needle\n"
+                        "  1: # Heading\n  2: prefix needle\n"
                     } else {
-                        "matched: 2\nsource:\n2\tneedle\n"
+                        "  2: needle\n"
                     };
-                    assert_eq!(
-                        String::from_utf8(output).expect("UTF-8"),
-                        format!("{expected}{}", if trailing_newline { "3\t\n" } else { "" })
-                    );
+                    assert_eq!(String::from_utf8(output).expect("UTF-8"), expected);
                 }
             }
         }
@@ -1147,11 +1140,11 @@ mod output_tests {
         assert!(minimal.contains("1\tline1"));
         assert!(!minimal.contains("2\tline2"));
         let short = render(PreviewMode::Short, false);
-        assert!(short.contains("10\tline10"));
-        assert!(!short.contains("11\tline11"));
+        assert!(short.contains("10: line10"));
+        assert!(!short.contains("11: line11"));
         let full = render(PreviewMode::Full, true);
-        assert!(full.contains("20\tline20"));
-        assert!(full.contains("score=0.7500"));
+        assert!(full.contains("20: line20"));
+        assert!(full.contains("score: 0.7500"));
 
         result.items[0].range = ContentRange::Text {
             start_line: 1,

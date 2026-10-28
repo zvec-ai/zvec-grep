@@ -29,6 +29,73 @@ use zg_engine::{
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 #[tokio::test]
+async fn extensionless_scripts_preserve_outline_language_across_reopen() -> TestResult {
+    let temporary = tempdir()?;
+    let root = temporary.path();
+    let server = EmbeddingServer::start()?;
+    configure_remote_model(root, server.address)?;
+    fs::create_dir(root.join("bin"))?;
+    for (name, source) in [
+        (
+            "python-tool",
+            "#!/usr/bin/env python3\nclass Probe:\n    def outline_probe(self):\n        return stored_call()\n",
+        ),
+        (
+            "node-tool",
+            "#!/usr/bin/env node\nclass Probe {\n    outline_probe() { return stored_call(); }\n}\n",
+        ),
+    ] {
+        fs::write(root.join("bin").join(name), source)?;
+    }
+    let engine = ZvecGrep::new();
+    let indexed = engine.index(index_options(root)).await?;
+    assert_eq!((indexed.files_added, indexed.files_failed), (2, 0));
+    engine.close();
+
+    // Both language and outline must describe stored source, not current files.
+    for name in ["python-tool", "node-tool"] {
+        fs::write(root.join("bin").join(name), "#!/bin/sh\necho changed\n")?;
+    }
+    let engine = ZvecGrep::new();
+    let result = engine
+        .context(ContextOptions {
+            root: Some(root.to_path_buf()),
+            routes: vec![ContextRoute {
+                mode: ContextRouteMode::Fts,
+                query: "outline_probe".into(),
+            }],
+            auto_update: false,
+            allow_remote: true,
+            limit: Some(10),
+            ..ContextOptions::default()
+        })
+        .await?;
+    for (name, language) in [("python-tool", "python"), ("node-tool", "javascript")] {
+        for (kind, symbol, summary) in [
+            (SymbolType::Function, "outline_probe", "calls: stored_call"),
+            (SymbolType::Class, "Probe", "members:"),
+        ] {
+            let item = result.items.iter().find(|item| {
+                item.relative_path == Path::new("bin").join(name)
+                    && matches!(&item.metadata, Some(EntityMetadata::Code(code))
+                        if code.symbol_type == Some(kind) && code.symbol_name.as_deref() == Some(symbol))
+            }).expect("stored script entity");
+            assert_eq!(serde_json::to_value(&item.metadata)?["language"], language);
+            assert!(
+                item.outline
+                    .as_deref()
+                    .is_some_and(|outline| outline.contains(summary)),
+                "{name}: {:?}",
+                item.outline
+            );
+        }
+    }
+    engine.drop_index(info_options(root)).await?;
+    engine.close();
+    Ok(())
+}
+
+#[tokio::test]
 async fn text_and_code_share_one_model_and_support_incremental_search() -> TestResult {
     let temporary = tempdir()?;
     let root = temporary.path();

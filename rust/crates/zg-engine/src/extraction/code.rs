@@ -165,6 +165,7 @@ fn fallback(source: &TextSource, max_chars: usize, overlap_chars: usize) -> Vec<
 #[derive(Debug)]
 struct CodeEntity<'tree> {
     node: Node<'tree>,
+    language: crate::domain::Language,
     name: Option<String>,
     symbol_type: Option<SymbolType>,
     breadcrumb: Vec<String>,
@@ -188,6 +189,7 @@ fn walk_code_node<'tree>(
                 let entity_breadcrumb = adapter.scope_breadcrumb(entity, source, breadcrumb);
                 out.push(CodeEntity {
                     node: entity,
+                    language: adapter.language(),
                     name,
                     symbol_type: adapter.classify(entity),
                     breadcrumb: entity_breadcrumb,
@@ -259,7 +261,7 @@ fn code_entity_metadata(entity: &CodeEntity<'_>) -> EntityMetadata {
         signature: entity.signature.clone(),
         documentation: entity.documentation.clone(),
         visibility: None,
-        language: None,
+        language: Some(entity.language),
     })
 }
 
@@ -414,7 +416,8 @@ mod tests {
     use std::collections::HashSet;
 
     use crate::domain::{
-        CodeMetadata, Content, EntityMetadata, FileFormat, Range, SymbolType, TextRange,
+        CodeMetadata, Content, EntityMetadata, FileFormat, Language as CodeLanguage, Range,
+        SymbolType, TextRange,
     };
 
     use super::super::{test_content, test_metadata};
@@ -532,7 +535,7 @@ mod tests {
                 scope: None,
                 signature: Some("async function add(value: number): Promise<number>".to_owned()),
                 visibility: None,
-                language: None,
+                language: Some(CodeLanguage::TypeScript),
                 documentation: Some("Adds one.".to_owned()),
             }))
         );
@@ -548,7 +551,7 @@ mod tests {
                 scope: Some("Box".to_owned()),
                 signature: Some("static create()".to_owned()),
                 visibility: None,
-                language: None,
+                language: Some(CodeLanguage::TypeScript),
                 documentation: None,
             }))
         );
@@ -592,7 +595,7 @@ mod tests {
                 scope: None,
                 signature: Some("typedef struct Widget {} Widget".to_owned()),
                 visibility: None,
-                language: None,
+                language: Some(CodeLanguage::C),
                 documentation: None,
             }))
         );
@@ -621,7 +624,7 @@ mod tests {
                 scope: Some("Widget".to_owned()),
                 signature: Some("func (w *Widget) Value() int".to_owned()),
                 visibility: None,
-                language: None,
+                language: Some(CodeLanguage::Go),
                 documentation: None,
             }))
         );
@@ -651,7 +654,7 @@ mod tests {
                 scope: Some("Service".to_owned()),
                 signature: Some("async def fetch(value: str) -> str:".to_owned()),
                 visibility: None,
-                language: None,
+                language: Some(CodeLanguage::Python),
                 documentation: None,
             }))
         );

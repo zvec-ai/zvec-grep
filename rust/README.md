@@ -194,9 +194,12 @@ use a compatible client or explicitly stop that daemon first. Index format
 compatibility remains separate and may require `zg --index --rebuild`.
 
 Searches default to `--preview short` in terminals, pipes, and redirected files.
-Use `none` for a one-line source summary, `short` for bounded source and outline,
-`full` for all returned content, or `detail` for full previews with metadata and
-file/hit grouping. Full previews do not retrieve an entire function or file.
+Use `none` for a one-line source summary, `short` for compact bounded source,
+`full` for compact full source, or `detail` for full previews with metadata,
+outlines, and file/hit grouping. Short and full preserve the original Rust compact
+per-hit layout, including indented `line: source` rows. Every preview preserves query
+groups, their ranks and matched content; only `--fuse` combines groups. Full previews
+do not retrieve an entire function or file.
 Terminal detection affects automatic colors only. The former `--compact` and
 `--human` options are no longer accepted.
 

@@ -14,7 +14,11 @@ use zg_engine::api::context::{
 };
 
 use crate::{
-    OutputOptions, PreviewMode, highlight::QueryHighlighter, output_path, theme::StatusTheme,
+    OutputOptions, PreviewMode,
+    highlight::QueryHighlighter,
+    output_path,
+    preview::{source_preview, split_lines, truncate_utf16 as truncate},
+    theme::StatusTheme,
 };
 
 pub(super) fn write(
@@ -60,6 +64,9 @@ fn write_items(
     options: OutputOptions,
     theme: StatusTheme,
 ) -> io::Result<()> {
+    if matches!(options.preview, PreviewMode::Short | PreviewMode::Full) {
+        return super::compact::write_items(writer, items, query, options, theme);
+    }
     if items.is_empty() {
         return writeln!(writer, "No matches.");
     }
@@ -419,12 +426,7 @@ fn outline_lines(item: &ContextItem, preview: PreviewMode) -> Vec<String> {
     else {
         return Vec::new();
     };
-    let mut lines: Vec<_> = split_lines(outline).map(str::to_owned).collect();
-    if preview == PreviewMode::Short && lines.len() > 7 {
-        lines.truncate(7);
-        lines.push("...".into());
-    }
-    lines
+    split_lines(outline).map(str::to_owned).collect()
 }
 
 fn source_lines(
@@ -432,78 +434,21 @@ fn source_lines(
     preview: PreviewMode,
     highlighter: &QueryHighlighter,
 ) -> Vec<String> {
-    if item.content.is_empty() {
-        return Vec::new();
-    }
-    let content: Vec<_> = split_lines(&item.content).collect();
+    let source = source_preview(item, (preview == PreviewMode::None).then_some(1));
     let first = item.content_range.start_line();
-    let anchor = item
-        .excerpt_range
-        .as_ref()
-        .and_then(ContentRange::start_line)
-        .zip(first)
-        .map_or(0, |(line, first)| line.saturating_sub(first));
-    let anchor = if anchor < content.len() { anchor } else { 0 };
-    let (start, end) = match preview {
-        PreviewMode::None => (anchor, anchor + 1),
-        PreviewMode::Short if content.len() > 10 => {
-            let before = if item
-                .excerpt_range
-                .as_ref()
-                .is_some_and(|range| range.line_count().is_some_and(|count| count >= 10))
-            {
-                0
+    source
+        .window
+        .map(|offset| {
+            let prefix = first.map_or(String::new(), |first| (first + offset).to_string());
+            let line = source.lines[offset];
+            let text = if preview == PreviewMode::None {
+                truncate(line, 160)
             } else {
-                2
+                line.to_owned()
             };
-            let start = anchor.saturating_sub(before).min(content.len() - 10);
-            (start, start + 10)
-        }
-        _ => (0, content.len()),
-    };
-    let mut lines = Vec::new();
-    if preview == PreviewMode::Short && start > 0 {
-        lines.push("...".into());
-    }
-    for (offset, line) in content.iter().enumerate().take(end).skip(start) {
-        let prefix = first.map_or(String::new(), |first| (first + offset).to_string());
-        let text = if matches!(preview, PreviewMode::Full | PreviewMode::Detail) {
-            (*line).to_owned()
-        } else {
-            truncate(line, 160)
-        };
-        lines.push(format!("{prefix}\t{}", highlighter.highlight(&text)));
-    }
-    if preview == PreviewMode::Short && end < content.len() {
-        lines.push("...".into());
-    }
-    lines
-}
-
-fn split_lines(content: &str) -> impl Iterator<Item = &str> {
-    // Preserve the final empty source line, matching the Node.js formatter.
-    content
-        .split_inclusive('\n')
-        .map(|line| {
-            line.strip_suffix('\n')
-                .map_or(line, |line| line.strip_suffix('\r').unwrap_or(line))
+            format!("{prefix}\t{}", highlighter.highlight(&text))
         })
-        .chain((content.is_empty() || content.ends_with('\n')).then_some(""))
-}
-
-fn truncate(value: &str, max: usize) -> String {
-    if value.encode_utf16().count() <= max {
-        return value.to_owned();
-    }
-    let mut units = 0;
-    let prefix: String = value
-        .chars()
-        .take_while(|character| {
-            units += character.len_utf16();
-            units < max
-        })
-        .collect();
-    format!("{prefix}...")
+        .collect()
 }
 
 fn matched_range(item: &ContextItem) -> Option<&ContentRange> {

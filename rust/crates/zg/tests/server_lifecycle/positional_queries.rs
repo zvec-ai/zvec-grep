@@ -16,6 +16,22 @@ fn positional_queries_merge_and_warn_consistently_in_direct_and_server_modes()
         workspace.path().join("probe.ts"),
         "function outlineProbe() {\n  const value = first();\n  second(value);\n  return value;\n}\n",
     )?;
+    std::fs::write(
+        workspace.path().join("checkpoint.ts"),
+        "function checkpoint() {\n  return workspace();\n}\n",
+    )?;
+    for (name, source) in [
+        (
+            "python-tool",
+            "#!/usr/bin/env python3\ndef python_probe():\n    return stored_call()\n",
+        ),
+        (
+            "node-tool",
+            "#!/usr/bin/env node\nfunction node_probe() { return stored_call(); }\n",
+        ),
+    ] {
+        std::fs::write(workspace.path().join(name), source)?;
+    }
     let configure = |command: &mut Command| {
         for (key, _) in std::env::vars_os() {
             if key.to_string_lossy().starts_with("ZVEC_GREP_") {
@@ -50,7 +66,40 @@ fn positional_queries_merge_and_warn_consistently_in_direct_and_server_modes()
     ])?);
     let (_guard, _) = start_server(&binary, &home, "agent", None, configure)?;
     verify_positional_queries(&run, home.path())?;
-    verify_previews(&run, home.path())
+    verify_previews(&run, home.path())?;
+    verify_script_outlines(&run, home.path())?;
+    verify_query_groups(&run, home.path())
+}
+
+fn verify_script_outlines(
+    run: &impl Fn(&[&str]) -> std::io::Result<Output>,
+    home: &Path,
+) -> Result<(), Box<dyn Error>> {
+    for (query, path) in [("python_probe", "python-tool"), ("node_probe", "node-tool")] {
+        let mut outputs = Vec::new();
+        for mode in ["direct", "server"] {
+            let output = run(&[
+                "--mode",
+                mode,
+                "--home",
+                path_text(home)?,
+                "--fts",
+                query,
+                "--preview",
+                "detail",
+                "--refresh",
+                "off",
+                "--no-color",
+            ])?;
+            assert_command_success(&output);
+            let text = String::from_utf8(output.stdout)?;
+            assert!(text.contains(path), "{text}");
+            assert!(text.contains("calls: stored_call"), "{text}");
+            outputs.push(text);
+        }
+        assert_eq!(outputs[0], outputs[1], "{path}");
+    }
+    Ok(())
 }
 
 fn verify_positional_queries(
@@ -116,6 +165,12 @@ fn verify_positional_queries(
                 assert!(text.contains("[primary]: connection pool"), "{text}");
                 assert!(text.contains("[primary]: socket timeout"), "{text}");
             } else {
+                let limited_output = if words.contains(&"--limit=3") {
+                    Some(search(&["connection pool timeout", "--limit=3"])?)
+                } else {
+                    None
+                };
+                let expected = limited_output.as_ref().unwrap_or(&expected);
                 let query = words
                     .iter()
                     .filter(|word| !word.starts_with("--"))
@@ -170,10 +225,8 @@ fn verify_previews(
             assert_command_success(&output);
             let text = String::from_utf8(output.stdout)?;
             assert!(text.contains("probe.ts"), "{text}");
-            if preview != Some("none") {
-                assert!(text.contains("calls: first, second"), "{text}");
-            }
             if preview == Some("detail") {
+                assert!(text.contains("calls: first, second"), "{text}");
                 for field in [
                     "Range:",
                     "Status: fresh",
@@ -186,6 +239,12 @@ fn verify_previews(
                     assert!(text.contains(field), "missing {field}: {text}");
                 }
             }
+            if matches!(preview, None | Some("short" | "full")) {
+                assert!(text.contains("\n  1: function outlineProbe() {"), "{text}");
+                assert!(!text.contains("outline:"), "{text}");
+                assert!(!text.contains("source:"), "{text}");
+                assert!(text.contains("query groups (1):"), "{text}");
+            }
             outputs.push(text);
         }
         assert_eq!(outputs[0], outputs[1], "preview={preview:?}");
@@ -194,6 +253,61 @@ fn verify_previews(
         }
         if preview == Some("short") {
             assert_eq!(default_output.as_ref(), Some(&outputs[0]));
+        }
+    }
+    Ok(())
+}
+
+fn verify_query_groups(
+    run: &impl Fn(&[&str]) -> std::io::Result<Output>,
+    home: &Path,
+) -> Result<(), Box<dyn Error>> {
+    for preview in ["none", "short", "full", "detail"] {
+        for fuse in [false, true] {
+            let mut outputs = Vec::new();
+            for mode in ["direct", "server"] {
+                let mut args = vec![
+                    "--mode",
+                    mode,
+                    "--home",
+                    path_text(home)?,
+                    "--hybrid",
+                    "checkpoint",
+                    "--fts",
+                    "workspace",
+                    "--preview",
+                    preview,
+                    "--allow-remote",
+                    "--refresh",
+                    "off",
+                    "--no-color",
+                ];
+                if fuse {
+                    args.push("--fuse");
+                }
+                let output = run(&args)?;
+                assert_command_success(&output);
+                let text = String::from_utf8(output.stdout)?;
+                let count = if fuse { 1 } else { 2 };
+                let heading = if preview == "detail" {
+                    format!("Groups: {count}")
+                } else {
+                    format!("query groups ({count}):")
+                };
+                assert!(
+                    text.contains(&heading),
+                    "{mode} {preview} fuse={fuse}: {text}"
+                );
+                assert!(text.contains("Q1 [primary]"), "{text}");
+                assert_eq!(text.contains("Q2 [supplemental]"), !fuse, "{text}");
+                assert_eq!(
+                    text.matches("checkpoint.ts").count(),
+                    count,
+                    "{mode} {preview} fuse={fuse}: {text}"
+                );
+                outputs.push(text);
+            }
+            assert_eq!(outputs[0], outputs[1], "{preview} fuse={fuse}");
         }
     }
     Ok(())
