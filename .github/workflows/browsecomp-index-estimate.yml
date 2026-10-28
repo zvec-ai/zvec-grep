@@ -1,0 +1,95 @@
+name: BrowseComp index time scout
+run-name: Index estimate / 256 + 1024 / Node 0.2.2 vs Rust main
+
+on:
+  push:
+    branches: [dev/browsecomp-index-estimate]
+    paths:
+      - .github/workflows/browsecomp-index-estimate.yml
+      - benchmarks/browse-comp-plus-retrieval/estimate/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RETRIEVAL_EMBEDDING: local
+  # Source pin is intentionally distinct from this stacked harness's PR head.
+  RUST_COMMIT: 3c2936aa599b2354b6bcf431449e762fa1fc4d11
+
+jobs:
+  estimate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Require repository maintainer push or dispatch
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const {data} = await github.rest.repos.getCollaboratorPermissionLevel({
+              ...context.repo, username: context.actor,
+            });
+            if (data.permission !== 'admin' && !['admin', 'maintain'].includes(data.role_name)) {
+              throw new Error('Index scout requires repository maintainer or administrator.');
+            }
+      - name: Download the pinned official Node package
+        run: node benchmarks/shared/retrieval-package.mjs download-node --output "$RUNNER_TEMP/packages/node"
+      - name: Reserve disk for source, compiler and corpus
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h .
+      - name: Build the exact current-main Rust source
+        uses: ./.github/actions/rust-candidate-package
+        with:
+          candidate_repository: zvec-ai/zvec-grep
+          candidate_ref: ${{ env.RUST_COMMIT }}
+          cache_namespace: browsecomp-index-scout-rust
+      - name: Install the pinned Parquet reader
+        run: python -m pip install --requirement benchmarks/browse-comp-plus-retrieval/requirements.txt
+      - name: Materialize the complete frozen source (outside Index)
+        run: |
+          python benchmarks/browse-comp-plus-retrieval/prepare.py \
+            --source "$RUNNER_TEMP/browsecomp-source" --output "$RUNNER_TEMP/browsecomp-prepared"
+      - name: Freeze length-stratified, byte-calibrated samples
+        run: |
+          python benchmarks/browse-comp-plus-retrieval/estimate/sample.py \
+            --prepared "$RUNNER_TEMP/browsecomp-prepared" --output "$RUNNER_TEMP/browsecomp-samples"
+      - name: Complete four independent fresh indexes on this one Linux runner
+        run: |
+          node benchmarks/browse-comp-plus-retrieval/estimate/run.mjs \
+            --samples "$RUNNER_TEMP/browsecomp-samples" \
+            --node-package "$RUNNER_TEMP/packages/node/candidate.tgz" \
+            --rust-package "$RUNNER_TEMP/rust-package-cache/candidate.tgz" \
+            --rust-commit "$RUST_COMMIT" --harness-commit "$GITHUB_SHA" \
+            --model-cache "$RUNNER_TEMP/browsecomp-model-cache" \
+            --output "$RUNNER_TEMP/browsecomp-estimate"
+      - name: Publish phase results even after a failed sample
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/browsecomp-estimate/summary.md" ]; then
+            cat "$RUNNER_TEMP/browsecomp-estimate/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Preserve manifests, logs, phase timers, CPU, IO and RSS evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browsecomp-index-estimate
+          path: |
+            ${{ runner.temp }}/browsecomp-estimate/
+            ${{ runner.temp }}/browsecomp-samples/samples.json
+            ${{ runner.temp }}/browsecomp-prepared/dataset.json
+            !${{ runner.temp }}/browsecomp-estimate/**/consumer/**
+            !${{ runner.temp }}/browsecomp-estimate/**/corpus/**
+            !${{ runner.temp }}/browsecomp-estimate/warmups/**
+            !${{ runner.temp }}/browsecomp-estimate/runtime-homes/**
+          if-no-files-found: warn
+          retention-days: 30
