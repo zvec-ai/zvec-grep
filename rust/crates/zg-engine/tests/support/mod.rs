@@ -88,11 +88,35 @@ pub fn configure_remote_model(root: &Path, address: SocketAddr) -> std::io::Resu
     fs::create_dir_all(&home)?;
     let generation = uuid::Uuid::new_v4().to_string();
     let manifest = json!({
-        "format": "zg-workspace", "sourceRoot": "..", "scan": {},
-        "indexPolicy": "enabled", "defaultEmbeddingModel": { "model": { "provider": "qwen", "name": "text-embedding-v4", "contentKinds": ["text", "code"], "maxBatchSize": 10 }, "dimension": 1024, "metric": "cosine", "maxInputTokens": 8192, "maxImageBytes": null },
-        "embeddingRoutes": {},
-        "indexVersion": 2, "storageGeneration": generation, "createdTime": 1, "updatedTime": 1,
-        "embeddingRuntimes": { "qwen/text-embedding-v4": { "endpoint": format!("http://{address}/embeddings") } }
+        "sourceRoot": {
+            "relative": "..",
+            "absolute": fs::canonicalize(root)?.to_string_lossy(),
+            "username": std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).ok(),
+        },
+        "scan": {},
+        "indexVersion": 2,
+        "storageGeneration": generation,
+        "createdTime": 1,
+        "updatedTime": 1,
+        "index": {
+            "state": "enabled",
+            "descriptor": {
+                "defaultEmbeddingModel": {
+                    "model": {
+                        "provider": "qwen", "name": "text-embedding-v4",
+                        "contentKinds": ["text", "code"], "maxBatchSize": 10
+                    },
+                    "dimension": 1024, "metric": "cosine",
+                    "maxInputTokens": 8192, "maxImageBytes": null
+                },
+                "embeddingRoutes": {},
+                "embeddingConfigs": {
+                    "qwen/text-embedding-v4": {
+                        "endpoint": format!("http://{address}/embeddings")
+                    }
+                }
+            }
+        }
     });
     fs::write(home.join("manifest.json"), serde_json::to_vec(&manifest)?)
 }

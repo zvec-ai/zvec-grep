@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn credentials_round_trip() {
         let directory = tempfile::tempdir().expect("directory");
-        let layout = WorkspaceLayout::new(directory.path().to_path_buf()).expect("layout");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
         fs::create_dir(layout.storage_dir()).expect("storage directory");
 
         let original = encrypt_api_key(&layout, "remote/model", "secret").expect("encrypt");
@@ -168,7 +168,7 @@ mod tests {
     #[test]
     fn invalid_credentials_are_rejected() {
         let directory = tempfile::tempdir().expect("directory");
-        let layout = WorkspaceLayout::new(directory.path().to_path_buf()).expect("layout");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
         fs::create_dir(layout.storage_dir()).expect("storage directory");
 
         for value in ["", " \t\n"] {

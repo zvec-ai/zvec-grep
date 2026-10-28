@@ -11,7 +11,7 @@ use std::{
 use tokio::sync::Notify;
 
 use crate::{
-    domain::Workspace, models::ModelRuntimeLease, storage::IndexStore, workspace::lock::FileLock,
+    domain::Workspace, models::ModelRuntimeLease, storage::IndexStore, workspace::lock::LockGuard,
 };
 
 #[derive(Clone, Default)]
@@ -26,7 +26,7 @@ pub(crate) struct WriterSession {
     pub(crate) workspace: Workspace,
     active: AtomicUsize,
     drained: Notify,
-    _home_lock: Arc<FileLock>,
+    _home_lock: Arc<LockGuard>,
 }
 
 pub(crate) struct WriterRegistration {
@@ -43,7 +43,7 @@ impl WriterSession {
         storage: IndexStore,
         models: Vec<ModelRuntimeLease>,
         workspace: Workspace,
-        home_lock: Arc<FileLock>,
+        home_lock: Arc<LockGuard>,
     ) -> Self {
         Self {
             storage,
@@ -74,16 +74,12 @@ impl WriterContexts {
         }
     }
 
-    pub(crate) fn borrow(&self, home: &Path, generation: &str) -> Option<WriterLease> {
+    pub(crate) fn borrow(&self, home: &Path) -> Option<WriterLease> {
         let entries = self
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let session = entries.get(home)?.upgrade()?;
-        // Never expose a rebuild's unpublished generation or a different index.
-        if session.workspace.storage_generation() != Some(generation) {
-            return None;
-        }
         session.active.fetch_add(1, Ordering::AcqRel);
         Some(WriterLease { session })
     }

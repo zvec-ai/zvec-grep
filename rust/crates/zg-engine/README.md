@@ -58,7 +58,7 @@ Scanning respects ignore rules, excludes hidden files, does not follow symlinks,
 
 ### Moving workspaces
 
-File paths and ignore files inside the workspace are saved relative to its source directory. External ignore files remain explicit dependencies and must be available or replaced after a move; incompatible filenames and conflicting paths on the destination filesystem are reported.
+File paths and ignore files inside the workspace are saved relative to its source directory. A change in the saved source location or username resets saved device and model-cache preferences; external ignore files must be configured again before scanning or updating. Queries with refresh disabled do not require those ignore files. Incompatible filenames and conflicting paths on the destination filesystem are reported.
 
 ### Index lifecycle
 
@@ -74,7 +74,7 @@ Each workspace uses an embedding model for semantic search. Local models run on 
 
 ### Runtime settings
 
-Explicit device and model-cache choices made when indexing become workspace defaults; omitted options retain their saved values. Each operation resolves these settings from request options, environment variables, workspace defaults, global configuration, then backend defaults. Query overrides remain temporary, and moving a workspace may require overriding its saved device or cache path.
+Explicit device and model-cache choices made when indexing become workspace defaults; omitted options retain their saved values. Each operation resolves these settings from request options, environment variables, workspace defaults, global configuration, then backend defaults, skipping a saved cache path unless it is absolute and names an existing directory. Explicit replacements take precedence, while query overrides remain temporary.
 
 ### Credentials and authorization
 

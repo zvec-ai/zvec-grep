@@ -347,15 +347,12 @@ pub(crate) fn scan_filters(scan: &ScanRules) -> String {
     if !scan.use_default_ignores() {
         filters.push("no-ignore".into());
     }
-    if !scan.ignore_files().is_empty() {
-        filters.push(format!(
-            "ignore-file={}",
-            scan.ignore_files()
-                .iter()
-                .map(|path| output_path(path).display().to_string())
-                .collect::<Vec<_>>()
-                .join("|")
-        ));
+    let ignore_files = scan
+        .ignore_files()
+        .map(|path| output_path(path).display().to_string())
+        .collect::<Vec<_>>();
+    if !ignore_files.is_empty() {
+        filters.push(format!("ignore-file={}", ignore_files.join("|")));
     }
     if let Some(depth) = scan.max_depth() {
         filters.push(format!("max-depth={depth}"));

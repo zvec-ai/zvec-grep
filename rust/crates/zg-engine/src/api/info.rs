@@ -224,7 +224,7 @@ impl result::WorkspaceIndexInfo {
     pub(crate) fn from_workspace(workspace: &crate::domain::Workspace) -> Self {
         Self {
             path: workspace.layout().storage_dir().to_path_buf(),
-            root: workspace.layout().source_root().to_path_buf(),
+            root: workspace.source_root().to_path_buf(),
             scan: workspace.scan().clone(),
             policy: workspace.index().into(),
             embedding: workspace

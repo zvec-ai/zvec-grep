@@ -726,12 +726,16 @@ fn disabled_workspace_is_not_rebuilt_from_a_nested_query_directory() {
     fs::write(
         home.join("manifest.json"),
         serde_json::to_vec(&json!({
-            "format": "zg-workspace",
-            "sourceRoot": "..",
-            "indexPolicy": "disabled",
+            "sourceRoot": {
+                "relative": "..",
+                "absolute": root.to_string_lossy(),
+                "username": std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).ok(),
+            },
+            "scan": {},
             "indexVersion": null,
             "createdTime": 0,
-            "updatedTime": 0
+            "updatedTime": 0,
+            "index": { "state": "disabled" }
         }))
         .expect("disabled metadata"),
     )
@@ -866,7 +870,8 @@ fn implicit_build_does_not_persist_local_overrides_or_query_credentials() {
             &fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("manifest"),
         )
         .expect("manifest JSON");
-        let runtime = &manifest["embeddingRuntimes"]["local/potion-code-16m-v2"];
+        let runtime =
+            &manifest["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"];
         assert!(runtime.get("device").is_none());
         assert!(runtime.get("cacheDir").is_none());
         assert!(runtime.get("apiKey").is_none());
@@ -897,7 +902,7 @@ fn query_refresh_keeps_saved_model_preferences() {
             serde_json::from_slice(&fs::read(&manifest_path).expect("saved manifest"))
                 .expect("manifest JSON");
         assert_eq!(
-            saved["embeddingRuntimes"]["local/potion-code-16m-v2"]["device"],
+            saved["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"]["device"],
             "cpu"
         );
         if mode == "server" {
@@ -927,7 +932,10 @@ fn query_refresh_keeps_saved_model_preferences() {
         let updated: serde_json::Value =
             serde_json::from_slice(&fs::read(&manifest_path).expect("updated manifest"))
                 .expect("manifest JSON");
-        assert_eq!(updated["embeddingRuntimes"], saved["embeddingRuntimes"]);
+        assert_eq!(
+            updated["index"]["descriptor"]["embeddingConfigs"],
+            saved["index"]["descriptor"]["embeddingConfigs"]
+        );
         assert_eq!(updated["storageGeneration"], saved["storageGeneration"]);
     }
 }
@@ -1010,7 +1018,7 @@ fn remote_authorization_can_return_to_model_selection_without_sending_data() {
     )
     .expect("manifest JSON");
     assert!(
-        manifest["embeddingRuntimes"]["local/potion-code-16m-v2"]
+        manifest["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"]
             .get("device")
             .is_none()
     );

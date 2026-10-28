@@ -19,6 +19,7 @@ use crate::{
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct BuildRecord {
+    index_version: u32,
     generation: String,
     previous_manifest: Option<String>,
     had_index: bool,
@@ -27,6 +28,13 @@ struct BuildRecord {
 
 impl BuildRecord {
     fn validate(&self) -> Result<(), EngineError> {
+        if self.index_version != super::CURRENT_INDEX_VERSION {
+            return Err(EngineError::storage_failure(format!(
+                "unsupported workspace build index version {}; expected {}",
+                self.index_version,
+                super::CURRENT_INDEX_VERSION,
+            )));
+        }
         if Uuid::parse_str(&self.generation).is_err() {
             return Err(EngineError::storage_failure(
                 "invalid workspace build ownership record",
@@ -98,7 +106,7 @@ pub(crate) fn prepare_build(target: &Workspace) -> Result<(), EngineError> {
     let generation = target.storage_generation().ok_or_else(|| {
         EngineError::invalid_argument(format!(
             "workspace {}: preparing an index build requires an enabled index",
-            target.layout().source_root().display(),
+            target.source_root().display(),
         ))
     })?;
     ensure_directory(target.layout().storage_dir())?;
@@ -111,6 +119,7 @@ pub(crate) fn prepare_build(target: &Workspace) -> Result<(), EngineError> {
         ));
     }
     let record = BuildRecord {
+        index_version: super::CURRENT_INDEX_VERSION,
         generation: generation.to_owned(),
         previous_manifest: read_optional(target.layout().manifest_path())?
             .as_deref()
@@ -344,7 +353,8 @@ mod tests {
     fn manifest(root: &Path) -> Workspace {
         let root = fs::canonicalize(root).expect("canonical fixture root");
         Workspace::new(
-            WorkspaceLayout::new(root).expect("layout"),
+            &root,
+            WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout"),
             crate::domain::ScanRules::default(),
             Some(crate::workspace::CURRENT_INDEX_VERSION),
             Some(Uuid::new_v4().to_string()),
@@ -391,6 +401,7 @@ mod tests {
 
     fn build_target(active: &Workspace) -> Workspace {
         Workspace::new(
+            active.source_root(),
             active.layout().clone(),
             active.scan().clone(),
             active.index_version(),
@@ -463,7 +474,8 @@ mod tests {
                 assert_eq!(active.layout().index_dir().join("old").exists(), had_index);
                 assert!(!active.layout().index_dir().join("new").exists());
                 assert_eq!(
-                    read_workspace_manifest(active.layout()).expect("manifest"),
+                    read_workspace_manifest(active.source_root(), active.layout())
+                        .expect("manifest"),
                     had_index.then_some(active)
                 );
             }
@@ -490,7 +502,12 @@ mod tests {
         .expect("install");
         let _reader = LockWait::new(None, None)
             .expect("wait")
-            .acquire(active.layout(), LockMode::Read, "test.read")
+            .acquire(
+                active.source_root(),
+                active.layout(),
+                LockMode::Shared,
+                "test.read",
+            )
             .await
             .expect("recovered read");
         assert!(active.layout().index_dir().join("old").exists());
@@ -534,7 +551,7 @@ mod tests {
         let build = stage(&active);
         publish_build_with(build.clone(), 3, &fail_cleanup)
             .expect("committed despite cleanup failure");
-        let mut committed = read_workspace_manifest(active.layout())
+        let mut committed = read_workspace_manifest(active.source_root(), active.layout())
             .expect("read")
             .expect("manifest");
         assert_eq!(committed.storage_generation(), build.storage_generation());
@@ -550,7 +567,7 @@ mod tests {
         assert!(committed.layout().index_dir().join("new").exists());
         assert!(!committed.layout().index_dir().join("old").exists());
         assert_eq!(
-            read_workspace_manifest(active.layout()).expect("read"),
+            read_workspace_manifest(active.source_root(), active.layout()).expect("read"),
             Some(committed)
         );
     }
@@ -571,10 +588,48 @@ mod tests {
         .expect("backup");
         let moved = directory.path().join("moved");
         fs::rename(&original, &moved).expect("move workspace");
-        let layout = WorkspaceLayout::new(moved).expect("layout");
+        let layout = WorkspaceLayout::new(moved.join(".zvec-grep")).expect("layout");
         recover_build(&layout).expect("recover relocated index");
         assert!(layout.index_dir().join("old").exists());
         assert!(!layout.temp_dir().exists());
+    }
+
+    #[test]
+    fn automatic_recovery_rejects_unknown_versions_before_moving_index_data() {
+        let directory = tempdir().expect("workspace");
+        let active = manifest(directory.path());
+        write_active(&active);
+        let build = stage(&active);
+        begin_publication(&build).expect("pending publication");
+        let layout = active.layout();
+        move_index(layout.index_dir(), layout.backup_index_dir()).expect("backup");
+        move_index(layout.staged_index_dir(), layout.index_dir()).expect("install");
+        let original = fs::read(layout.manifest_path()).expect("manifest");
+        let mut future: serde_json::Value = serde_json::from_slice(&original).expect("JSON");
+        future["indexVersion"] = serde_json::json!(super::super::CURRENT_INDEX_VERSION + 1);
+        fs::write(layout.manifest_path(), future.to_string()).expect("future version");
+        let error = crate::workspace::lock::try_acquire_workspace_read(
+            active.source_root(),
+            layout,
+            "test.recovery",
+        )
+        .expect_err("unsupported manifest must not recover");
+        assert!(error.message().contains("unsupported index version"));
+        assert!(layout.index_dir().join("new").exists());
+        assert!(layout.backup_index_dir().join("old").exists());
+        fs::write(layout.manifest_path(), original).expect("restore manifest");
+        recover_build(layout).expect("recover current format");
+        assert!(layout.index_dir().join("old").exists());
+
+        let build = stage(&active);
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(layout.build_record_path()).expect("build record"))
+                .expect("record JSON");
+        record["index_version"] = serde_json::json!(super::super::CURRENT_INDEX_VERSION + 1);
+        fs::write(layout.build_record_path(), record.to_string()).expect("future build record");
+        assert!(recover_build(layout).is_err());
+        assert!(build.layout().staged_index_dir().join("new").exists());
+        assert!(layout.index_dir().join("old").exists());
     }
 
     #[test]
@@ -678,6 +733,7 @@ mod tests {
         )
         .expect("descriptor");
         crate::domain::Workspace::new(
+            workspace.source_root(),
             workspace.layout().clone(),
             workspace.scan().clone(),
             workspace.index_version(),
@@ -712,7 +768,7 @@ mod tests {
         )
         .expect("install");
         discard_build(&build).expect("rollback");
-        let restored = read_workspace_manifest(active.layout())
+        let restored = read_workspace_manifest(active.source_root(), active.layout())
             .expect("read")
             .expect("manifest");
         assert_eq!(restored, active);
@@ -739,7 +795,7 @@ mod tests {
         );
         let build = stage(&target);
         publish_build(build, 3).expect("publish replacement");
-        let replaced = read_workspace_manifest(active.layout())
+        let replaced = read_workspace_manifest(active.source_root(), active.layout())
             .expect("read")
             .expect("manifest");
         assert_eq!(

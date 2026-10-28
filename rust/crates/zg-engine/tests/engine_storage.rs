@@ -23,6 +23,7 @@ use zg_engine::{
             result::{ContextItemStatus, EntityMetadata},
         },
         index::{IndexOptions, options::WorkspaceChange},
+        info::InfoOptions,
     },
 };
 
@@ -173,10 +174,13 @@ async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -
     assert!(manifest.get("manifestVersion").is_none());
     assert_eq!(manifest["indexVersion"], 2);
     assert_eq!(
-        manifest["defaultEmbeddingModel"]["model"]["name"],
+        manifest["index"]["descriptor"]["defaultEmbeddingModel"]["model"]["name"],
         "text-embedding-v4"
     );
-    assert_eq!(manifest["embeddingRoutes"], json!({}));
+    assert_eq!(
+        manifest["index"]["descriptor"]["embeddingRoutes"],
+        json!({})
+    );
     assert_eq!(
         fts_paths(&engine, root, "orchard").await?,
         [PathBuf::from("note.txt")]
@@ -1120,6 +1124,75 @@ async fn public_engine_recovers_pending_files_without_skipping_unchanged_sources
 }
 
 #[tokio::test]
+async fn unavailable_ignore_files_do_not_block_existing_index_queries() -> TestResult {
+    let temporary = tempdir()?;
+    let root = temporary.path().join("source");
+    fs::create_dir(&root)?;
+    let root = fs::canonicalize(root)?;
+    let ignored = temporary.path().join("external.ignore");
+    fs::write(&ignored, "*.log\n")?;
+    fs::write(
+        root.join("note.txt"),
+        "Orchard search survives missing scan dependencies.\n",
+    )?;
+    let server = EmbeddingServer::start()?;
+    configure_remote_model(&root, server.address)?;
+    let engine = ZvecGrep::new();
+    engine
+        .index(IndexOptions {
+            scan: zg_engine::api::index::options::ScanRulesUpdate {
+                ignore_files: Some(vec![ignored.clone()]),
+                ..Default::default()
+            },
+            ..index_options(&root)
+        })
+        .await?;
+    let manifest_path = root.join(".zvec-grep/manifest.json");
+    let before = fs::read(&manifest_path)?;
+    fs::remove_file(ignored)?;
+
+    assert!(
+        engine
+            .info(InfoOptions {
+                include_status: false,
+                ..info_options(&root)
+            })
+            .await?
+            .indexed
+    );
+    let results = engine
+        .context(ContextOptions {
+            root: Some(root.clone()),
+            routes: vec![ContextRoute {
+                mode: ContextRouteMode::Fts,
+                query: "orchard".into(),
+            }],
+            auto_update: false,
+            ..ContextOptions::default()
+        })
+        .await?;
+    assert_eq!(results.items.len(), 1);
+    let error = engine
+        .index(index_options(&root))
+        .await
+        .expect_err("scanning requires its ignore file");
+    assert!(error.message().contains("ignore file"));
+    assert_eq!(fs::read(&manifest_path)?, before);
+
+    engine
+        .index(IndexOptions {
+            scan: zg_engine::api::index::options::ScanRulesUpdate {
+                ignore_files: Some(Vec::new()),
+                ..Default::default()
+            },
+            ..index_options(&root)
+        })
+        .await?;
+    engine.close();
+    Ok(())
+}
+
+#[tokio::test]
 async fn public_engine_reuses_relative_files_after_moving_workspace() -> TestResult {
     let temporary = tempdir()?;
     let original_root = temporary.path().join("original");
@@ -1149,11 +1222,18 @@ async fn public_engine_reuses_relative_files_after_moving_workspace() -> TestRes
     assert!(entity_id.is_some());
     let manifest_bytes = fs::read(original_root.join(".zvec-grep/manifest.json"))?;
     let manifest: Value = serde_json::from_slice(&manifest_bytes)?;
-    assert_eq!(manifest["sourceRoot"], "..");
+    assert_eq!(manifest["sourceRoot"]["relative"], "..");
+    assert_eq!(
+        manifest["sourceRoot"]["absolute"],
+        original_root.to_string_lossy().as_ref()
+    );
     for field in ["root", "path", "name"] {
         assert!(manifest.get(field).is_none());
     }
-    assert!(manifest["embeddingRuntimes"]["qwen/text-embedding-v4"]["apiKey"].is_object());
+    assert!(
+        manifest["index"]["descriptor"]["embeddingConfigs"]["qwen/text-embedding-v4"]["apiKey"]
+            .is_object()
+    );
     assert!(!String::from_utf8_lossy(&manifest_bytes).contains("local-test-key"));
     engine.close();
     drop(engine);

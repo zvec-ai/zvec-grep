@@ -147,7 +147,7 @@ pub mod options {
                 }));
                 globs = rules;
             }
-            ScanRules::new(
+            let mut scan = ScanRules::new(
                 globs,
                 self.included_formats
                     .clone()
@@ -164,11 +164,13 @@ pub mod options {
                     .unwrap_or_else(|| current.max_file_size_bytes()),
                 self.use_default_ignores
                     .unwrap_or_else(|| current.use_default_ignores()),
-                self.ignore_files
-                    .clone()
-                    .unwrap_or_else(|| current.ignore_files().to_vec()),
+                self.ignore_files.clone().unwrap_or_default(),
                 self.nested_git.unwrap_or_else(|| current.nested_git()),
-            )
+            )?;
+            if self.ignore_files.is_none() {
+                scan.inherit_ignore_files(current);
+            }
+            Ok(scan)
         }
     }
 

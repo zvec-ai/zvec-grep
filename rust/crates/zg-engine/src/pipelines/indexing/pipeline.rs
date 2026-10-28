@@ -225,7 +225,7 @@ pub(crate) async fn get_workspace_index_status(
     detailed: bool,
 ) -> Result<IndexStats, EngineError> {
     let stored_files = storage.list_files()?;
-    crate::file_selection::verify_source_paths(workspace.layout().source_root(), &stored_files)?;
+    crate::file_selection::verify_source_paths(workspace.source_root(), &stored_files)?;
     let control = task_control(signal);
     let snapshot = scanner
         .discover(
@@ -392,7 +392,7 @@ async fn run_index_pass(
         },
     );
 
-    let root = context.workspace.layout().source_root();
+    let root = context.workspace.source_root();
     let mut scope = if progress_base.is_some() {
         ChangeScope::Paths(retry_paths.iter().map(|path| root.join(path)).collect())
     } else {
@@ -1874,7 +1874,7 @@ fn validate_context(context: &IndexingContext<'_>) -> Result<(), EngineError> {
 }
 
 fn host_root(workspace: &Workspace) -> Result<RootSpec, EngineError> {
-    ScanPolicy::root_spec(workspace.layout().source_root(), workspace.scan())
+    ScanPolicy::root_spec(workspace.source_root(), workspace.scan())
 }
 
 async fn classify_files(
@@ -1910,7 +1910,7 @@ fn scanned_files(
     throw_if_cancelled(Some(signal))?;
     for discovered in files {
         throw_if_cancelled(Some(signal))?;
-        if discovered.root.as_path() != workspace.layout().source_root() {
+        if discovered.root.as_path() != workspace.source_root() {
             return Err(EngineError::invalid_argument(
                 "discovered file must belong to the workspace root",
             ));
@@ -3040,7 +3040,8 @@ mod tests {
 
     fn workspace(root: &Path) -> Workspace {
         Workspace::new(
-            crate::domain::WorkspaceLayout::new(root.to_path_buf()).expect("layout"),
+            root,
+            crate::domain::WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout"),
             crate::domain::ScanRules::default(),
             Some(crate::workspace::CURRENT_INDEX_VERSION),
             Some(uuid::Uuid::new_v4().to_string()),
@@ -3081,6 +3082,7 @@ mod tests {
         update: &crate::api::index::options::ScanRulesUpdate,
     ) -> Workspace {
         Workspace::new(
+            workspace.source_root(),
             workspace.layout().clone(),
             update.apply(workspace.scan()).expect("scan rules"),
             workspace.index_version(),
@@ -3171,7 +3173,7 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(
             requests[1].scope_paths,
-            vec![directory.path().join("file.txt")]
+            vec![workspace.source_root().join("file.txt")]
         );
         let files = storage.list_files().expect("stored files");
         let FileIndexStatus::Failed { error } = files[0].index_status() else {
@@ -3580,6 +3582,7 @@ mod tests {
                     .expect("index descriptor"),
                 ));
                 crate::domain::Workspace::new(
+                    workspace.source_root(),
                     workspace.layout().clone(),
                     workspace.scan().clone(),
                     if matches!(index, crate::domain::IndexState::Enabled(_)) {
@@ -3708,17 +3711,17 @@ mod tests {
         let paths = [b"source-\xff.txt".as_slice(), b"source-\xfe.txt".as_slice()]
             .map(|bytes| PathBuf::from(std::ffi::OsStr::from_bytes(bytes)));
         assert_eq!(paths[0].to_string_lossy(), paths[1].to_string_lossy());
+        let workspace = workspace(directory.path());
         let discovered = paths
             .iter()
             .map(|path| DiscoveredFile {
-                root: directory.path().to_path_buf(),
+                root: workspace.source_root().to_path_buf(),
                 relative_path: path.clone(),
                 size_bytes: 4,
                 modified_epoch_ms: None,
                 source_fingerprint: String::new(),
             })
             .collect::<Vec<_>>();
-        let workspace = workspace(directory.path());
         let control = TaskControl::default();
         let (first, _) = classify_files(&workspace, discovered.clone(), &[], &control)
             .await
@@ -3873,8 +3876,9 @@ mod tests {
     #[tokio::test]
     async fn changed_paths_limit_diff_and_storage_mutation_scope() {
         let directory = tempdir().expect("temporary directory");
-        let first_path = directory.path().join("first.txt");
-        let second_path = directory.path().join("second.txt");
+        let root = directory.path().canonicalize().expect("source root");
+        let first_path = root.join("first.txt");
+        let second_path = root.join("second.txt");
         std::fs::write(&first_path, "first").expect("first fixture");
         std::fs::write(&second_path, "second").expect("second fixture");
         let workspace = workspace(directory.path());
@@ -3936,7 +3940,7 @@ mod tests {
     #[tokio::test]
     async fn scoped_index_repairs_unfinished_files_and_completes_deletions() {
         let directory = tempdir().expect("temporary directory");
-        let root = directory.path();
+        let root = directory.path().canonicalize().expect("source root");
         for name in [
             "requested",
             "repair",
@@ -3947,7 +3951,7 @@ mod tests {
         ] {
             std::fs::write(root.join(format!("{name}.txt")), name).expect("fixture file");
         }
-        let mut workspace = workspace(root);
+        let mut workspace = workspace(&root);
         let scanner = RecordingScanner::new();
         let storage = MemoryStorage::default();
         let model = ConcurrentModel::new();
@@ -4117,7 +4121,7 @@ mod tests {
         std::fs::write(&path, "#!/bin/sh\necho hello\n").expect("fixture");
         let workspace = workspace(directory.path());
         let discovered = DiscoveredFile {
-            root: directory.path().to_path_buf(),
+            root: workspace.source_root().to_path_buf(),
             relative_path: PathBuf::from("fixture"),
             size_bytes: 21,
             modified_epoch_ms: None,
@@ -4177,7 +4181,7 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
         let workspace = workspace(directory.path());
         let discovered = DiscoveredFile {
-            root: directory.path().to_path_buf(),
+            root: workspace.source_root().to_path_buf(),
             relative_path: PathBuf::from("no-extension"),
             size_bytes: 4,
             modified_epoch_ms: Some(1),
@@ -4259,7 +4263,7 @@ mod tests {
             },
         );
         let discovered = DiscoveredFile {
-            root: directory.path().to_path_buf(),
+            root: workspace.source_root().to_path_buf(),
             relative_path: PathBuf::from("large.rs"),
             size_bytes: 2 * MIN_DEFAULT_FILE_SIZE_BYTES,
             modified_epoch_ms: Some(1),
@@ -4328,7 +4332,7 @@ mod tests {
         )
         .expect("extensionless text");
         let discovered = DiscoveredFile {
-            root: directory.path().to_path_buf(),
+            root: workspace.source_root().to_path_buf(),
             relative_path: PathBuf::from("notes"),
             size_bytes: size,
             modified_epoch_ms: Some(1),

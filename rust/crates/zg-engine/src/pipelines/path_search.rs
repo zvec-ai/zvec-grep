@@ -203,13 +203,10 @@ fn matching_paths(
 
 fn workspace_scan(root: Option<&Path>) -> EngineResult<(PathBuf, ScanRules)> {
     let requested = resolve_directory(root)?;
-    let layout = find_nearest_workspace(&requested)?;
-    let manifest = layout
-        .as_ref()
-        .map(read_workspace_manifest)
-        .transpose()?
-        .flatten();
-    let root = layout.map_or(requested, |layout| layout.source_root().to_path_buf());
+    let Some((root, layout)) = find_nearest_workspace(&requested)? else {
+        return Ok((requested, ScanRules::default()));
+    };
+    let manifest = read_workspace_manifest(&root, &layout)?;
     let scan = manifest.map_or_else(ScanRules::default, |manifest| manifest.scan().clone());
     Ok((root, scan))
 }
@@ -305,9 +302,18 @@ mod tests {
 
     fn save_scan(root: &Path, scan: ScanRules) {
         let root = fs::canonicalize(root).expect("canonical root");
-        let layout = WorkspaceLayout::new(root).expect("layout");
-        let manifest = Workspace::new(layout, scan, None, None, 0, 0, IndexState::Uninitialized)
-            .expect("manifest");
+        let layout = WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout");
+        let manifest = Workspace::new(
+            &root,
+            layout,
+            scan,
+            None,
+            None,
+            0,
+            0,
+            IndexState::Uninitialized,
+        )
+        .expect("manifest");
         write_workspace_manifest(manifest.layout().manifest_path(), &manifest)
             .expect("save scan rules");
     }

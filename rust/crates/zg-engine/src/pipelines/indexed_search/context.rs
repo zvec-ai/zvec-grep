@@ -160,7 +160,7 @@ pub(crate) async fn context_from_index(
     for group in &groups {
         searches.push(
             search_workspace_index(
-                workspace.layout().source_root(),
+                workspace.source_root(),
                 SearchPlan {
                     routes: group.routes.clone(),
                     limit: Some(limit),
@@ -188,9 +188,7 @@ fn build_context_result(
     let group_items = searches
         .iter()
         .zip(groups)
-        .map(|(search, group)| {
-            search_plan_to_context_items(search, workspace.layout().source_root(), group)
-        })
+        .map(|(search, group)| search_plan_to_context_items(search, workspace.source_root(), group))
         .collect::<Result<Vec<_>, _>>()?;
     let coverage_groups = groups
         .iter()
@@ -216,7 +214,7 @@ fn build_context_result(
         source: ContextSource::Index,
         coverage: ContextCoverage::RankedSample,
         workspace_index: Some(ContextWorkspaceIndex {
-            root: workspace.layout().source_root().to_path_buf(),
+            root: workspace.source_root().to_path_buf(),
             path: workspace.layout().storage_dir().to_path_buf(),
         }),
         items,
@@ -807,8 +805,9 @@ mod tests {
         };
 
         let directory = tempfile::tempdir().expect("temporary directory");
-        let original_root = directory.path().join("original");
-        let moved_root = directory.path().join("moved");
+        let base = directory.path().canonicalize().expect("source parent");
+        let original_root = base.join("original");
+        let moved_root = base.join("moved");
         std::fs::create_dir_all(original_root.join("src")).expect("source directory");
         let content = "source contents";
         std::fs::write(original_root.join("src/file.txt"), content).expect("source file");
@@ -890,7 +889,8 @@ mod tests {
                 std::fs::rename(&original_root, &moved_root).expect("move workspace");
             }
             let workspace = Workspace::new(
-                WorkspaceLayout::new(root.clone()).expect("layout"),
+                root,
+                WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout"),
                 crate::domain::ScanRules::default(),
                 Some(crate::workspace::CURRENT_INDEX_VERSION),
                 Some(generation.clone()),

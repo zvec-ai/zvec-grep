@@ -61,10 +61,10 @@ impl ScanPolicy {
         exclude_defaults: bool,
     ) -> EngineResult<Self> {
         let matcher = GlobMatcher::new(root, options.globs())?;
-        let ignore_files: Vec<_> = options
-            .ignore_files()
+        let ignore_files = options
+            .resolve_ignore_files(root)?
             .iter()
-            .map(|path| control_alias(&root.join(path)))
+            .map(|path| control_alias(path))
             .collect();
         let mut defaults = GitignoreBuilder::new(root);
         if exclude_defaults {

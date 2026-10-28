@@ -2307,7 +2307,6 @@ impl RootSpecOutput {
             nested_git: scan.nested_git(),
             ignore_files: scan
                 .ignore_files()
-                .iter()
                 .map(|path| output_path(path).display().to_string())
                 .collect(),
             max_depth: scan.max_depth(),

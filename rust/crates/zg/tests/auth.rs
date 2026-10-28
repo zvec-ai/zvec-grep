@@ -377,7 +377,10 @@ fn api_base_url_grants_match_resolved_index_endpoints() {
                 &fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("manifest"),
             )
             .expect("workspace manifest");
-            assert_eq!(manifest["embeddingRuntimes"][model]["endpoint"], endpoint);
+            assert_eq!(
+                manifest["index"]["descriptor"]["embeddingConfigs"][model]["endpoint"],
+                endpoint
+            );
         }
     }
 }

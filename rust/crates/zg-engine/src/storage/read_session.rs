@@ -14,7 +14,7 @@ use std::{
 use crate::{
     EngineError, EngineResult,
     domain::WorkspaceLayout,
-    workspace::lock::{FileLock, LockMode, acquire_read_write_lock, workspace_allows_cached_reads},
+    workspace::lock::{LockGuard, LockMode, can_retain_read_cache, try_acquire_file_lock},
 };
 
 use super::{IndexStore, types::WorkspaceIndexStorageOptions};
@@ -62,7 +62,7 @@ struct ReadSession {
     storage_home: PathBuf,
     generation: String,
     validated_source_roots: Mutex<HashSet<PathBuf>>,
-    _residency: Option<FileLock>,
+    _residency: Option<LockGuard>,
 }
 
 pub(crate) struct ReadSessionLease {
@@ -151,9 +151,9 @@ impl ReadSessionCache {
             entry.take();
         }
         if entry.is_none() {
-            let residency = acquire_read_write_lock(
+            let residency = try_acquire_file_lock(
                 layout.read_cache_lock_path(),
-                LockMode::Read,
+                LockMode::Shared,
                 "context.cache",
             )?;
             let storage = open()?;
@@ -249,7 +249,7 @@ impl CacheInner {
                 // A writer first owns the workspace lock, then waits for residency locks.
                 // Releasing on any probe failure is conservative and never serves old data.
                 if now.saturating_duration_since(cached.last_used) < self.idle_timeout
-                    && workspace_allows_cached_reads(&cached.layout)
+                    && can_retain_read_cache(&cached.layout)
                 {
                     continue;
                 }

@@ -158,11 +158,15 @@ fn explicit_routes_continue_to_indexed_search() {
     std::fs::write(
         home.join("manifest.json"),
         serde_json::to_vec(&serde_json::json!({
-            "format": "zg-workspace",
-            "sourceRoot": "..",
-            "indexPolicy": "disabled",
+            "sourceRoot": {
+                "relative": "..",
+                "absolute": std::fs::canonicalize(root.path()).expect("source root").to_string_lossy(),
+                "username": std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).ok(),
+            },
+            "scan": {},
             "createdTime": 0,
             "updatedTime": 0,
+            "index": { "state": "disabled" },
         }))
         .expect("manifest json"),
     )

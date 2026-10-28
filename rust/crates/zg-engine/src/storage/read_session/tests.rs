@@ -30,7 +30,7 @@ impl Fixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().expect("workspace");
         let root = directory.path().canonicalize().expect("canonical root");
-        let layout = WorkspaceLayout::new(root).expect("layout");
+        let layout = WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout");
         let storage_home = layout.index_dir().to_path_buf();
         fs::create_dir_all(&storage_home).expect("generation");
         let fixture = Self {
@@ -42,9 +42,9 @@ impl Fixture {
         fixture
     }
 
-    fn read(&self, cache: &ReadSessionCache) -> (FileLock, ReadSessionLease) {
-        let home_lock =
-            acquire_workspace_lock(&self.layout, LockMode::Read, "test.query").expect("read lock");
+    fn read(&self, cache: &ReadSessionCache) -> (LockGuard, ReadSessionLease) {
+        let home_lock = acquire_workspace_lock(&self.layout, LockMode::Shared, "test.query")
+            .expect("read lock");
         let lease = cache
             .acquire(&self.layout, &self.storage_home, "initial")
             .expect("read session");
@@ -52,8 +52,9 @@ impl Fixture {
     }
 
     fn publish(&self) -> (Workspace, ContextOptions) {
-        let root = self.layout.source_root();
+        let root = self.layout.storage_dir().parent().expect("source root");
         let manifest = Workspace::new(
+            root,
             self.layout.clone(),
             crate::domain::ScanRules::default(),
             Some(CURRENT_INDEX_VERSION),
@@ -107,8 +108,8 @@ fn schema() -> EmbeddingModelInfo {
 }
 
 fn write_text(layout: &WorkspaceLayout, storage_home: &Path, text: &str) {
-    let _lock =
-        acquire_workspace_lock(layout, LockMode::Write, "test.write").expect("writer drains cache");
+    let _lock = acquire_workspace_lock(layout, LockMode::Exclusive, "test.write")
+        .expect("writer drains cache");
     let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         storage_path: storage_home.to_path_buf(),
         embeddings: vec![schema()],
@@ -118,7 +119,15 @@ fn write_text(layout: &WorkspaceLayout, storage_home: &Path, text: &str) {
     let id = storage
         .resolve_file_ids(&[relative_path.to_path_buf()])
         .expect("file ID")[0];
-    fs::write(layout.source_root().join("source.txt"), text).expect("source file");
+    fs::write(
+        layout
+            .storage_dir()
+            .parent()
+            .expect("source root")
+            .join("source.txt"),
+        text,
+    )
+    .expect("source file");
     let file = FileRecord::new(
         id,
         relative_path,
@@ -416,12 +425,12 @@ fn generation_replacement_and_shutdown_preserve_inflight_readers() {
             .is_err()
     );
     assert!(second.storage().list_files().is_ok());
-    assert!(acquire_workspace_lock(&fixture.layout, LockMode::Write, "test.write").is_err());
+    assert!(acquire_workspace_lock(&fixture.layout, LockMode::Exclusive, "test.write").is_err());
     drop(first);
     drop(second);
     drop(home_lock);
     assert_eq!(previous.strong_count(), 0);
-    let _writer = acquire_workspace_lock(&fixture.layout, LockMode::Write, "test.write")
+    let _writer = acquire_workspace_lock(&fixture.layout, LockMode::Exclusive, "test.write")
         .expect("readers drained");
     IndexStore::delete(&fixture.storage_home).expect("drop old storage");
     IndexStore::delete(&replacement).expect("drop new storage");
@@ -464,13 +473,13 @@ fn failed_open_can_be_retried_without_leaking_a_residency_lock() {
     let cache = cache();
     let missing = fixture.layout.staged_index_dir().to_path_buf();
     let reader =
-        acquire_workspace_lock(&fixture.layout, LockMode::Read, "test.query").expect("reader");
+        acquire_workspace_lock(&fixture.layout, LockMode::Shared, "test.query").expect("reader");
     assert!(cache.acquire(&fixture.layout, &missing, "missing").is_err());
     drop(reader);
     fs::create_dir_all(&missing).expect("new generation");
     write_text(&fixture.layout, &missing, "vineyard");
     let _reader =
-        acquire_workspace_lock(&fixture.layout, LockMode::Read, "test.query").expect("reader");
+        acquire_workspace_lock(&fixture.layout, LockMode::Shared, "test.query").expect("reader");
     let lease = cache
         .acquire(&fixture.layout, &missing, "missing")
         .expect("retry opens published storage");
@@ -522,6 +531,7 @@ async fn indexed_queries_reuse_storage_but_resolve_the_current_manifest() {
     manifest = {
         let index = IndexState::Disabled;
         crate::domain::Workspace::new(
+            manifest.source_root(),
             manifest.layout().clone(),
             manifest.scan().clone(),
             if matches!(index, crate::domain::IndexState::Enabled(_)) {
@@ -544,6 +554,7 @@ async fn indexed_queries_reuse_storage_but_resolve_the_current_manifest() {
     };
 
     manifest = crate::domain::Workspace::new(
+        manifest.source_root(),
         manifest.layout().clone(),
         manifest.scan().clone(),
         manifest.index_version(),
@@ -554,7 +565,7 @@ async fn indexed_queries_reuse_storage_but_resolve_the_current_manifest() {
     )
     .expect("workspace");
     {
-        let _writer = acquire_workspace_lock(&fixture.layout, LockMode::Write, "test.disable")
+        let _writer = acquire_workspace_lock(&fixture.layout, LockMode::Exclusive, "test.disable")
             .expect("writer");
         write_workspace_manifest(fixture.layout.manifest_path(), &manifest).expect("disable index");
     }
@@ -611,7 +622,7 @@ fn cold_open_does_not_block_another_workspaces_cache_hit() {
         let cache = &cache;
         scope.spawn(move || {
             let _home =
-                acquire_workspace_lock(&cold.layout, LockMode::Read, "cold").expect("reader");
+                acquire_workspace_lock(&cold.layout, LockMode::Shared, "cold").expect("reader");
             cache
                 .acquire_with(&cold.layout, &cold.storage_home, "initial", || {
                     started.send(()).expect("opening");

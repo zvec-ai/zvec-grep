@@ -338,10 +338,10 @@ fn config_merges_settings_and_index_consumes_model_defaults() {
     )
     .expect("JSON");
     assert_eq!(
-        manifest["defaultEmbeddingModel"]["model"]["name"],
+        manifest["index"]["descriptor"]["defaultEmbeddingModel"]["model"]["name"],
         "potion-code-16m-v2"
     );
-    let runtime = &manifest["embeddingRuntimes"]["local/potion-code-16m-v2"];
+    let runtime = &manifest["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"];
     assert!(runtime.get("device").is_none());
     assert_eq!(runtime["cacheDir"], json!(cache));
     assert!(
@@ -441,10 +441,12 @@ fn explicit_remote_credentials_and_consent_reach_index_execution() {
     )
     .expect("JSON");
     assert_eq!(
-        manifest["embeddingRuntimes"]["qwen/text-embedding-v4"]["endpoint"],
+        manifest["index"]["descriptor"]["embeddingConfigs"]["qwen/text-embedding-v4"]["endpoint"],
         "https://example.test/embeddings"
     );
-    let credentials = manifest["embeddingRuntimes"]["qwen/text-embedding-v4"]["apiKey"].clone();
+    let credentials = manifest["index"]["descriptor"]["embeddingConfigs"]["qwen/text-embedding-v4"]
+        ["apiKey"]
+        .clone();
     assert!(credentials["nonce"].is_string());
     assert!(credentials["ciphertext"].is_string());
     assert!(
@@ -471,14 +473,14 @@ fn explicit_remote_credentials_and_consent_reach_index_execution() {
     )
     .expect("JSON");
     assert_eq!(
-        manifest["embeddingRuntimes"]["qwen/text-embedding-v4"]["endpoint"],
+        manifest["index"]["descriptor"]["embeddingConfigs"]["qwen/text-embedding-v4"]["endpoint"],
         "https://example.test/updated"
     );
     assert_eq!(
-        manifest["embeddingRuntimes"]["qwen/text-embedding-v4"]["apiKey"],
+        manifest["index"]["descriptor"]["embeddingConfigs"]["qwen/text-embedding-v4"]["apiKey"],
         credentials
     );
-    let runtimes = manifest["embeddingRuntimes"].clone();
+    let runtimes = manifest["index"]["descriptor"]["embeddingConfigs"].clone();
     fs::write(fixture.root.path().join("empty.txt"), "")
         .expect("trigger refresh without embedding");
     let query = fixture.run(&[
@@ -502,7 +504,7 @@ fn explicit_remote_credentials_and_consent_reach_index_execution() {
     let after = fs::read(fixture.root.path().join(".zvec-grep/manifest.json"))
         .expect("manifest after refresh");
     let after: serde_json::Value = serde_json::from_slice(&after).expect("manifest JSON");
-    assert_eq!(after["embeddingRuntimes"], runtimes);
+    assert_eq!(after["index"]["descriptor"]["embeddingConfigs"], runtimes);
     assert!(
         !serde_json::to_string(&after)
             .expect("manifest JSON")
@@ -543,7 +545,7 @@ fn environment_and_global_api_keys_are_not_copied_into_the_workspace() {
             fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("manifest");
         let manifest: serde_json::Value = serde_json::from_slice(&bytes).expect("manifest JSON");
         assert!(
-            manifest["embeddingRuntimes"]["qwen/text-embedding-v4"]
+            manifest["index"]["descriptor"]["embeddingConfigs"]["qwen/text-embedding-v4"]
                 .get("apiKey")
                 .is_none()
         );
@@ -618,7 +620,7 @@ fn local_model_preferences_save_only_explicit_index_options() {
     fixture.success(&["--index", "--mode", "direct"]);
     let original = manifest();
     assert_eq!(
-        original["embeddingRuntimes"]["local/potion-code-16m-v2"],
+        original["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"],
         json!({})
     );
     let saved_cache = fixture.user.path().join("saved-models");
@@ -633,7 +635,7 @@ fn local_model_preferences_save_only_explicit_index_options() {
     ]);
     let saved = manifest();
     assert_eq!(
-        saved["embeddingRuntimes"]["local/potion-code-16m-v2"],
+        saved["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"],
         json!({
             "device": "cpu", "cacheDir": saved_cache
         })
@@ -652,11 +654,14 @@ fn local_model_preferences_save_only_explicit_index_options() {
         "{}",
         String::from_utf8_lossy(&inherited.stderr)
     );
-    assert_eq!(manifest()["embeddingRuntimes"], saved["embeddingRuntimes"]);
+    assert_eq!(
+        manifest()["index"]["descriptor"]["embeddingConfigs"],
+        saved["index"]["descriptor"]["embeddingConfigs"]
+    );
 
     fixture.success(&["--index", "--mode", "direct", "--device", "auto"]);
     assert_eq!(
-        manifest()["embeddingRuntimes"]["local/potion-code-16m-v2"],
+        manifest()["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"],
         json!({
             "device": "auto", "cacheDir": saved_cache
         })
@@ -671,7 +676,7 @@ fn local_model_preferences_save_only_explicit_index_options() {
     ]);
     let updated = manifest();
     assert_eq!(
-        updated["embeddingRuntimes"]["local/potion-code-16m-v2"],
+        updated["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"],
         json!({
             "device": "auto", "cacheDir": replacement_cache
         })

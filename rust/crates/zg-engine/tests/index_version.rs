@@ -130,9 +130,16 @@ async fn assert_current_index(engine: &ZvecGrep, root: &Path) -> TestResult<Valu
     let manifest: Value =
         serde_json::from_slice(&fs::read(root.join(".zvec-grep/manifest.json"))?)?;
     assert_eq!(manifest["indexVersion"], 2);
-    assert_eq!(manifest["format"], "zg-workspace");
-    assert_eq!(manifest["sourceRoot"], "..");
-    for field in ["manifestVersion", "root", "path", "name"] {
+    assert_eq!(manifest["sourceRoot"]["relative"], "..");
+    assert_eq!(manifest["index"]["state"], "enabled");
+    for field in [
+        "format",
+        "manifestVersion",
+        "indexPolicy",
+        "root",
+        "path",
+        "name",
+    ] {
         assert!(manifest.get(field).is_none());
     }
     assert!(manifest["storageGeneration"].as_str().is_some());
@@ -299,11 +306,11 @@ async fn rebuilding_node_index_preserves_unrelated_files() -> TestResult {
     assert_eq!(server.inputs.load(Ordering::Acquire), 1);
     let current = assert_current_index(&engine, root).await?;
     assert_eq!(
-        current["defaultEmbeddingModel"]["model"]["provider"],
+        current["index"]["descriptor"]["defaultEmbeddingModel"]["model"]["provider"],
         "qwen"
     );
     assert_eq!(
-        current["defaultEmbeddingModel"]["model"]["name"],
+        current["index"]["descriptor"]["defaultEmbeddingModel"]["model"]["name"],
         "text-embedding-v4"
     );
     assert!(current.get("rootPaths").is_none());
