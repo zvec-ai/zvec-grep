@@ -55,7 +55,7 @@ Index stdout/stderr stream to disk. Observed file-count checkpoints occur every 
 | --- | --- |
 | Historical Index builder | Full build time and exact regular-file bytes: total/mean/p95/p99; RSS mean/p95/p99/sampled peak and coverage |
 | Current Query | Mean/p50/p95/p99 public MCP RT, 50 samples per mode/version; group total and RSS distribution |
-| Quality | Original gold-document Hit@1/5/10, MRR@10 and binary nDCG@10 |
+| Quality | Original Evidence-document Hit@1/5/10, MRR@10 and binary nDCG@10 |
 
 **Cached Index timings are historical builder measurements**, with builder SHA, environment, Artifact and run provenance. Reuse creates neither a fresh observation nor a synthetic zero regression. Each full build provides one observation, so its percentiles do not estimate run-to-run variation.
 
@@ -76,7 +76,9 @@ Inputs follow the [BrowseComp+ integration at `c1299bf2`](https://github.com/zve
 - Each `<docid>.md` contains exact source UTF-8 `text`, without title/URL injection. Size cap: 64 MiB. Public ready-status must cover every document.
 - Embedding: **`local/potion-multilingual-128m`, CPU**. Fresh Rust model content hash: `1d2c04d6b5a9ef342e46e32745357f6c09a594f5b99554d8048db83820f0d123`; the lock lists all three files. Weights/tokenizer match the scout, while Rust generates its own minimal tokenizer config instead of inheriting Node's config from a shared cache.
 
-Quality averages five calls per question, then equally averages ten original questions. Preserve native top-ten chunk ranks without document deduplication. These scores measure document localization; repetitions are not additional independent questions. The full 830-question answer evaluation is outside this workflow.
+All quality metrics use the original `evidence_docids` as relevance labels. Hit@k checks whether any Evidence document appears in the first k native chunk ranks; MRR@10 and binary nDCG@10 use those same labels. Quality averages five calls per question, then equally averages ten original questions. Preserve native top-ten chunk ranks without document deduplication. These scores measure document localization; repetitions are not additional independent questions. The full 830-question answer evaluation is outside this workflow.
+
+Datasets and comparison reports declare `quality_target: "evidence"`; audits reject Gold targets or older unmarked quality reports. Gold IDs remain only in the frozen source audit, without a separate score. Each query run prepares current Evidence targets independently of the historical Index report, so this scoring change reuses existing index Artifacts and does not change storage keys.
 
 ## Local checks
 

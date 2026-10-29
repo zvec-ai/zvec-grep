@@ -62,10 +62,17 @@ async function fixture(t) {
   return { source, commit, lock };
 }
 
-test("PR/query/test changes reuse the same index; storage changes invalidate it", async (t) => {
+test("PR/query/test/relevance-label changes reuse the same index; storage changes invalidate it", async (t) => {
   const { source, commit, lock } = await fixture(t);
   const base = await indexIdentity(source, lock);
   await writeFile(join(source, "query.rs"), "new ranking implementation");
+  await mkdir(join(source, "benchmarks/browse-comp-plus-retrieval"), {
+    recursive: true,
+  });
+  await writeFile(
+    join(source, "benchmarks/browse-comp-plus-retrieval/prepare.py"),
+    'quality_target = "evidence"\n',
+  );
   await writeFile(
     join(source, "rust/crates/zg-engine/src/storage/tests.rs"),
     "different tests",

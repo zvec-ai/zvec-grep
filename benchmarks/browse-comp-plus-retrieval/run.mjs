@@ -33,7 +33,7 @@ import {
 } from "../zg-retrieval/reports/performance.mjs";
 import { runStage } from "./stages.mjs";
 import { runCandidate, verifyModelCacheLocation } from "./runtime.mjs";
-import { auditArm, MODES } from "./report.mjs";
+import { auditArm, MODES, QUALITY_TARGET } from "./report.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -42,6 +42,7 @@ export async function loadDataset(directory) {
   const selection = await readJson(join(here, "suites/ci-selection.json"));
   const dataset = await readJson(join(directory, "dataset.json"));
   assert.equal(dataset.schema_version, 1);
+  assert.equal(dataset.quality_target, QUALITY_TARGET);
   assert.equal(
     dataset.source_lock_sha256,
     await fileHash(join(here, "source.lock.json")),
@@ -64,7 +65,7 @@ export async function loadDataset(directory) {
     assert.deepEqual(task.evidence_docids, selection.cases[i].evidence_docids);
     assert.deepEqual(
       task.targets,
-      task.gold_docids.map((id) => ({ path: `${id}.md` })),
+      task.evidence_docids.map((id) => ({ path: `${id}.md` })),
     );
     assert.ok(typeof task.query === "string" && task.query.trim());
   }

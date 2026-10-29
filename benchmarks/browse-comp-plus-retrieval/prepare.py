@@ -100,7 +100,7 @@ def selected_tasks(files: list[Path], lock: dict, selection: dict) -> list[dict]
                     "query": row["query"],
                     "gold_docids": gold,
                     "evidence_docids": evidence,
-                    "targets": [{"path": f"{docid}.md"} for docid in gold],
+                    "targets": [{"path": f"{docid}.md"} for docid in evidence],
                 }
     if len(seen) != lock["queries"]["count"]:
         raise ValueError("incomplete original query set")
@@ -190,7 +190,9 @@ def prepare(output: Path, source: Path) -> None:
     for task in tasks:
         for target in task["targets"]:
             if not (root / target["path"]).is_file():
-                raise ValueError("annotated gold document is missing from the corpus")
+                raise ValueError(
+                    "annotated Evidence document is missing from the corpus"
+                )
     subprocess.run(["git", "init", "--quiet", str(root)], check=True)
     subprocess.run(
         ["git", "-C", str(root), "-c", "core.hooksPath=/dev/null", "add", "--", "*.md"],
@@ -198,6 +200,7 @@ def prepare(output: Path, source: Path) -> None:
     )
     dataset = {
         "schema_version": 1,
+        "quality_target": "evidence",
         "source_lock_sha256": sha256_file(HERE / "source.lock.json"),
         "selection_sha256": sha256_file(HERE / "suites/ci-selection.json"),
         "corpus": corpus,
