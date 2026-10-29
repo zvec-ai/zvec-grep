@@ -222,6 +222,19 @@ retained with the GPU evidence, including on failure. This chain runs for
 `publish=false,cuda=true`, without compiling or publishing anything. Public
 registry smoke remains a separate post-publication check.
 
+Post-publication registry smoke runs on all six native CPU platforms. It invokes
+the installed npm command (Unix symlink or Windows PowerShell shim), not the
+package's internal executable. Fresh and upgraded candidates must index and
+search with Potion, GGUF and ONNX, exercise incremental add/delete, query through
+the daemon and complete MCP stdio search. It also checks default CPU installation
+for unintended CUDA downloads before the explicit plugin-fetch check. Per-command
+logs and model results are retained in `registry-smoke-evidence-<target>` even on
+failure. All six jobs must succeed before the workflow can promote `latest`.
+Run `node --test scripts/npm-*.test.mjs npm/meta/install.test.cjs` for deterministic
+packaging, npm entry and gate regression coverage. Real registry smoke requires
+published candidates and model-download access; it never builds or repairs the
+installed package.
+
 Both platforms run the same CLI index, readiness and vector-search test with
 GGUF `local/embeddinggemma-300m` and ONNX `local/all-minilm-l6-v2`, explicitly
 requesting CUDA with indexing concurrency 2. A successful command alone is not

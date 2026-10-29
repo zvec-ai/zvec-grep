@@ -232,12 +232,18 @@ Release order:
    registry alone, so npm must select its native optional dependency. These jobs
    download only the small `rust-verification-<version>` artifact for the release
    inventory, not another copy of all platforms' native/CUDA tarballs.
-5. Verify CLI startup, managed-rg, daemon startup and IPC, then update from a
-   distinct published baseline version and roll back to that version. On the
-   CUDA targets also force a registry plugin installation and verify its hashes
-   and core identity; CPU fallback must not hide a plugin-fetch failure.
+5. Execute npm's `bin/zg` symlink on Unix and `zg.ps1` entry on Windows, without
+   resolving them to the package binary. Verify startup, managed-rg and daemon
+   IPC, plus real CPU indexing and vector/FTS/hybrid search with Potion, GGUF and
+   ONNX on all six platforms. Check incremental updates and MCP stdio search.
+   Repeat the candidate probes after updating from a distinct published baseline,
+   then roll back. Default CPU installation must leave no CUDA plugins/cache or
+   npm CUDA download attempts. Separately, force a registry plugin installation
+   on CUDA-capable targets and verify hashes and core identity; CPU fallback
+   must not hide a plugin-fetch failure. Retain per-command and model evidence
+   on failures as well as successes.
 6. Promote native `latest` tags and then the meta `latest` tag in a separate job,
-   only after all six registry install/update/rollback jobs pass.
+   only after all six registry entry/model/install/update/rollback jobs pass.
 
 `.github/workflows/rust-publish.yml` builds and packs the selected targets once on
 their native runners in parallel, collects the candidates into a downloadable

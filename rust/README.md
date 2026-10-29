@@ -1073,6 +1073,16 @@ Registry install/update/rollback runs on ordinary CPU runners and explicitly
 checks exact component versions, payload hashes and the assembled runtime in
 addition to registry tarball integrity; a CPU-only CLI success cannot hide a
 missing CUDA component. Real GPU execution is validated before publication.
+Every registry platform also runs Potion, GGUF and ONNX CPU indexing, vector/FTS/
+hybrid queries, incremental updates and MCP stdio search after fresh installation
+and after upgrade. All commands use npm's Unix `zg` symlink or Windows `zg.ps1`
+entry, including baseline/rollback version checks. The executable path is never
+canonicalized by the test runner. The ONNX loader itself resolves executable
+symlinks before locating its sibling libraries. Default CPU installs are checked
+for unwanted CUDA components, plugin caches and npm download attempts before
+the deliberate CUDA rebuild check. Model caches are reused; command output,
+MCP responses and per-model results are uploaded even on failure. The `latest`
+promotion job requires the entire six-platform registry matrix to succeed.
 `release:publish` validates the collected files before publishing native packages
 and then the meta package under `rust-canary` with npm provenance. An already published version is
 reused only when its tarball integrity matches, allowing a partial publication

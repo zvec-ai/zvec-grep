@@ -24,7 +24,7 @@ on:
           - darwin-arm64
           - darwin-x64
       dist_tag:
-        description: rust-canary allows main or a tag; latest requires a tag and passing registry checks.
+        description: rust-canary allows main or a tag; latest requires a tag and all six npm entry/model/update/rollback checks.
         type: choice
         options: [rust-canary, latest]
         default: rust-canary
@@ -375,11 +375,11 @@ jobs:
         run: npm run release:publish
 
   registry-smoke:
-    name: Verify registry install/update/rollback (${{ matrix.target }})
+    name: Verify npm entry, models and update/rollback (${{ matrix.target }})
     if: github.event_name == 'workflow_dispatch' && inputs.publish
     needs: [source, publish]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 45
     permissions:
       contents: read
     strategy:
@@ -413,15 +413,40 @@ jobs:
           # Registry smoke installs from npm; only release.json is read locally.
           name: rust-verification-${{ needs.source.outputs.version }}
           path: rust/dist/npm/release/tarballs
-      - name: Test registry packages without explicit native-package installation
+      - name: Restore verified model downloads
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/zvec-grep-model-cache
+          key: registry-models-${{ matrix.target }}-${{ hashFiles('rust/crates/zg-engine/src/models/catalog/entries.rs') }}
+      - name: Test installed npm commands and real models on this platform
         working-directory: rust
         env:
           NPM_ROLLBACK_VERSION: ${{ needs.publish.outputs.baseline }}
+          ZG_RELEASE_MODEL_CACHE: ${{ runner.temp }}/zvec-grep-model-cache
         run: npm run release:registry-smoke
+      - name: Retain registry install and runtime evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: registry-smoke-evidence-${{ matrix.target }}
+          path: |
+            rust/dist/npm/release/registry-smoke/results.json
+            rust/dist/npm/release/registry-smoke/installation.json
+            rust/dist/npm/release/registry-smoke/cpu-downloads.json
+            rust/dist/npm/release/registry-smoke/cache/_logs/
+            rust/dist/npm/release/registry-smoke/*-workspace/logs/
+            rust/dist/npm/release/registry-smoke/*-models/results.json
+            rust/dist/npm/release/registry-smoke/*-models/*/logs/
+            rust/dist/npm/release/registry-smoke/*-models/*/home/daemon/logs/
+          if-no-files-found: warn
+          retention-days: 7
 
   promote:
     name: Promote the verified registry release to latest
-    if: github.event_name == 'workflow_dispatch' && inputs.publish && inputs.dist_tag == 'latest'
+    if: >-
+      ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.publish &&
+          inputs.dist_tag == 'latest' && needs.source.result == 'success' &&
+          needs.publish.result == 'success' && needs.registry-smoke.result == 'success' }}
     needs: [source, publish, registry-smoke]
     runs-on: ubuntu-22.04
     permissions:

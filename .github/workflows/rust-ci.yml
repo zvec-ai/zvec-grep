@@ -143,7 +143,7 @@ jobs:
           python3 scripts/test-prepare-onnxruntime.py
           python3 scripts/test-check-glibc.py
       - name: Test npm packaging
-        run: node --test scripts/npm-local.test.mjs scripts/npm-release-*.test.mjs npm/meta/install.test.cjs
+        run: node --test scripts/npm-*.test.mjs npm/meta/install.test.cjs
 
   ort-glibc:
     name: ORT on glibc 2.31 (${{ matrix.target }})

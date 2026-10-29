@@ -73,8 +73,16 @@ fn uses_bundle_override_or_executable_directory_without_cwd_lookup() {
     let override_path =
         runtime_path(None, Some("bundle".into()), Some("bin/zg".into())).expect("bundle runtime");
     assert_eq!(override_path.parent(), Some(std::path::Path::new("bundle")));
-    let adjacent = runtime_path(None, None, Some("bin/zg".into())).expect("adjacent runtime");
-    assert_eq!(adjacent.parent(), Some(std::path::Path::new("bin")));
+    let root = tempfile::tempdir().expect("temporary executable");
+    let bin = root.path().join("bin");
+    std::fs::create_dir(&bin).expect("bin directory");
+    let executable = bin.join("zg");
+    std::fs::write(&executable, "executable").expect("executable");
+    let adjacent = runtime_path(None, None, Some(executable)).expect("adjacent runtime");
+    assert_eq!(
+        adjacent.parent(),
+        Some(bin.canonicalize().expect("canonical bin").as_path())
+    );
     assert_eq!(adjacent.file_name(), override_path.file_name());
 }
 
@@ -87,8 +95,9 @@ fn packaged_executable_uses_sibling_lib_directory() {
     std::fs::create_dir_all(&lib).expect("lib directory");
     let expected = runtime_path(None, Some(lib.clone()), None).expect("library filename");
     std::fs::write(&expected, b"runtime").expect("packaged library");
+    std::fs::write(bin.join("zg"), "executable").expect("executable");
     let runtime = runtime_path(None, None, Some(bin.join("zg"))).expect("packaged runtime");
-    assert_eq!(runtime, expected);
+    assert_eq!(runtime, expected.canonicalize().expect("canonical runtime"));
 }
 
 #[test]
@@ -101,6 +110,8 @@ fn unrelated_sibling_directory_does_not_hide_the_adjacent_runtime() {
     let expected = runtime_path(None, Some(deps.clone()), None).expect("library filename");
     std::fs::write(&expected, b"runtime").expect("adjacent library");
     let executable = deps.join("model_test");
+    std::fs::write(&executable, "executable").expect("executable");
+    let expected = expected.canonicalize().expect("canonical runtime");
     assert_eq!(
         runtime_path(None, None, Some(executable.clone())).expect("adjacent runtime"),
         expected
@@ -111,6 +122,49 @@ fn unrelated_sibling_directory_does_not_hide_the_adjacent_runtime() {
     assert_eq!(
         runtime_path(None, None, Some(executable)).expect("runtime"),
         expected
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn npm_symlink_uses_the_real_packages_lib_not_the_global_prefix() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().expect("temporary npm prefix");
+    let global_bin = root.path().join("bin");
+    let package = root.path().join("lib/node_modules/@zvec/zvec-grep");
+    std::fs::create_dir_all(&global_bin).expect("global bin");
+    std::fs::create_dir_all(package.join("bin")).expect("package bin");
+    std::fs::create_dir_all(package.join("lib")).expect("package lib");
+    std::fs::write(package.join("bin/zg.exe"), "executable").expect("executable");
+    let expected = runtime_path(None, Some(package.join("lib")), None).expect("library filename");
+    std::fs::write(&expected, b"runtime").expect("packaged library");
+    symlink(
+        "../lib/node_modules/@zvec/zvec-grep/bin/zg.exe",
+        global_bin.join("zg"),
+    )
+    .expect("npm symlink");
+
+    let through_npm = runtime_path(None, None, Some(global_bin.join("zg"))).expect("npm runtime");
+    let direct =
+        runtime_path(None, None, Some(package.join("bin/zg.exe"))).expect("direct runtime");
+    assert_eq!(through_npm, direct);
+    assert_eq!(
+        through_npm.parent(),
+        Some(
+            package
+                .join("lib")
+                .canonicalize()
+                .expect("canonical lib")
+                .as_path()
+        )
+    );
+
+    std::fs::remove_file(package.join("bin/zg.exe")).expect("remove target");
+    assert!(
+        runtime_path(None, None, Some(global_bin.join("zg")))
+            .expect_err("broken npm symlink must not select a different runtime")
+            .contains("Unable to resolve the packaged executable")
     );
 }
 

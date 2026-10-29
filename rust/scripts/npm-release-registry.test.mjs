@@ -306,6 +306,7 @@ test("verification metadata preserves collected bytes and supports registry smok
     },
     verifyInstalled: async () => { await mkdir(prefixRoot, { recursive: true }); return { components: [] }; },
     probe: async () => { probes++; },
+    modelProbe: async () => {},
     probePrevious: async () => {},
   });
   assert.equal(verifiedPackages, release.packages.length);

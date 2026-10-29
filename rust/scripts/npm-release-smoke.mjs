@@ -16,6 +16,8 @@ import {
 } from "./npm-package-core.mjs";
 import { checkPublishedPackage } from "./npm-release-registry.mjs";
 import { resolvePlatformRoot, verifyInstallation } from "../npm/meta/install.cjs";
+import { installedCliEnvironment, runInstalledCli } from "./npm-installed-cli.mjs";
+import { smokeInstalledModels } from "./npm-model-smoke.mjs";
 
 export function installedPackageRoot(prefix, packageName) {
   const modules =
@@ -77,17 +79,16 @@ export async function smokeInstalledPackage({
     join(fixtureRoot, "fixture.txt"),
     "rust-release-smoke-marker\n",
   );
+  let commandIndex = 0;
   const execute = (args, mode = "direct") =>
-    run(binary, args, {
-      capture: true,
-      timeout: 30_000,
+    runInstalledCli(prefix, args, {
       cwd: fixtureRoot,
-      env: {
-        ...process.env,
-        ZVEC_GREP_HOME: join(fixtureRoot, "home"),
+      logRoot: join(fixtureRoot, "logs"),
+      label: `cli-${commandIndex++}-${args[0].replace(/^--/, "")}`,
+      env: installedCliEnvironment(prefix, join(fixtureRoot, "home"), {
         ZVEC_GREP_MODE: mode,
-      },
-    });
+      }),
+    }).stdout;
   if (execute(["--version"]).trim() !== version) {
     throw new Error(`installed zg version does not match ${version}`);
   }
@@ -265,6 +266,28 @@ async function assertCpuInstallation({ installation, entry, prefixRoot, bundle }
   if (cache.length) throw new Error("CPU artifact installation attempted to populate the CUDA cache");
 }
 
+export async function assertNoRegistryCudaDownloads(prefixRoot, entry) {
+  const directory = join(prefixRoot, "cache", "_logs");
+  const names = await readdir(directory).catch((error) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
+  const requests = [];
+  for (const name of names.filter((name) => name.endsWith(".log"))) {
+    const contents = await readFile(join(directory, name), "utf8");
+    for (const line of contents.split("\n")) {
+      if (!/http fetch|verbose title npm pack/i.test(line)) continue;
+      let decoded = line;
+      try { decoded = decodeURIComponent(line); } catch { /* Keep non-URL log text. */ }
+      if ((entry.components ?? []).some((component) => decoded.toLowerCase().includes(component.package.toLowerCase()))) {
+        requests.push({ log: name, line });
+      }
+    }
+  }
+  await writeFile(join(prefixRoot, "cpu-downloads.json"), `${JSON.stringify({ checkedLogs: names, requests }, null, 2)}\n`);
+  if (requests.length) throw new Error("Default registry CPU installation requested CUDA components");
+}
+
 export async function installArtifactRelease({
   manifest, release, tarballRoot, prefixRoot, target,
   accelerator = "auto", expectCpu = false, expectCuda = false,
@@ -424,6 +447,7 @@ export async function smokeRegistryRelease({
   registryFetch = fetch,
   runNpm = run,
   probe = smokeInstalledPackage,
+  modelProbe = smokeInstalledModels,
   probePrevious,
   verifyInstalled = verifyInstalledRelease,
 }) {
@@ -447,8 +471,10 @@ export async function smokeRegistryRelease({
     process.arch,
     process.report?.getReport().header ?? {},
   );
-  const environment = { ...npmEnvironment(join(prefixRoot, "cache")), ZG_INSTALL_ACCELERATOR: "cpu",
+  const environment = { ...npmEnvironment(join(prefixRoot, "cache")),
     ZG_PLUGIN_DIR: "", ZG_PLUGIN_CACHE: join(prefixRoot, "plugin-cache"), ZG_INSTALL_OFFLINE: "0" };
+  delete environment.ZG_INSTALL_ACCELERATOR;
+  environment.ZG_INSTALL_SKIP_AGENT_UPGRADE = "1";
   // Resolve optional dependencies from the public registry, without installing
   // a platform tarball explicitly or reusing a local candidate's npm cache.
   const install = (prefix, version) =>
@@ -476,17 +502,9 @@ export async function smokeRegistryRelease({
       );
       if (metadata.version !== baseline)
         throw new Error("rollback package version differs from the baseline");
-      const bin =
-        typeof metadata.bin === "string" ? metadata.bin : metadata.bin?.zg;
-      if (!bin) throw new Error("rollback package has no zg executable");
-      const path = join(root, bin);
-      const command =
-        path.endsWith(".js") || path.endsWith(".cjs") || path.endsWith(".mjs")
-          ? process.execPath
-          : path;
-      const args =
-        command === process.execPath ? [path, "--version"] : ["--version"];
-      if (run(command, args, { capture: true }).trim() !== baseline)
+      if (runInstalledCli(prefix, ["--version"], {
+        env: installedCliEnvironment(prefix, join(prefixRoot, "baseline-home")),
+      }).stdout.trim() !== baseline)
         throw new Error(
           "rollback executable version differs from the baseline",
         );
@@ -496,6 +514,9 @@ export async function smokeRegistryRelease({
   await rm(prefixRoot, { recursive: true, force: true });
   await install(fresh, release.version);
   const installation = await verifyInstalled({ manifest, entry, version: release.version, prefix: fresh });
+  await assertCpuInstallation({ installation, entry, prefixRoot,
+    bundle: installedPackageRoot(fresh, manifest.metaPackage) });
+  await assertNoRegistryCudaDownloads(prefixRoot, entry);
   await writeFile(join(prefixRoot, "installation.json"), `${JSON.stringify(installation, null, 2)}\n`);
   await probe({
     manifest,
@@ -504,6 +525,7 @@ export async function smokeRegistryRelease({
     prefix: fresh,
     fixtureRoot: join(prefixRoot, "fresh-workspace"),
   });
+  await modelProbe({ prefix: fresh, fixtureRoot: join(prefixRoot, "fresh-models") });
   if (entry.components?.length) {
     // Explicit registry fetch on a CPU runner: auto fallback cannot conceal a
     // missing artifact, wrong ABI, integrity error or authentication failure.
@@ -523,9 +545,14 @@ export async function smokeRegistryRelease({
     prefix: update,
     fixtureRoot: join(prefixRoot, "update-workspace"),
   });
+  await modelProbe({ prefix: update, fixtureRoot: join(prefixRoot, "update-models") });
   await install(update, baseline);
   await verifyPrevious(update);
   console.log(
     `registry install/update/rollback passed: ${baseline} -> ${release.version} -> ${baseline} (${entry.target})`,
   );
+  await writeFile(join(prefixRoot, "results.json"), `${JSON.stringify({
+    target: entry.target, version: release.version, commit: release.commit, baseline,
+    passed: true, entry: "npm zg", models: ["potion", "gguf", "onnx"],
+  }, null, 2)}\n`);
 }

@@ -95,8 +95,12 @@ fn runtime_path(
     if let Some(directory) = directory {
         return Ok(directory.join(filename));
     }
-    let executable =
-        executable.ok_or_else(|| "Unable to locate the packaged ONNX Runtime".to_owned())?;
+    // macOS current_exe() may retain npm's global bin/zg symlink. Resolve
+    // it before locating the package's sibling lib directory.
+    let executable = executable
+        .ok_or_else(|| "Unable to locate the packaged ONNX Runtime".to_owned())?
+        .canonicalize()
+        .map_err(|error| format!("Unable to resolve the packaged executable: {error}"))?;
     let adjacent = executable
         .parent()
         .ok_or_else(|| "Unable to locate the packaged ONNX Runtime".to_owned())?;

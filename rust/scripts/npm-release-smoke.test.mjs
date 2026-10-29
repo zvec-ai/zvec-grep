@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { defaultReleaseVariant, loadReleaseManifest, nativePackageEntries, run, selectPlatform, sha256File } from "./npm-package-core.mjs";
-import { installArtifactRelease, rebuildArtifactRelease, installedPackageRoot, rollbackVersion, smokeArtifactRelease, smokeRegistryRelease, verifyInstalledRelease } from "./npm-release-smoke.mjs";
+import { assertNoRegistryCudaDownloads, installArtifactRelease, rebuildArtifactRelease, installedPackageRoot, rollbackVersion, smokeArtifactRelease, smokeRegistryRelease, verifyInstalledRelease } from "./npm-release-smoke.mjs";
 import { materialize } from "../npm/meta/install.cjs";
 import { coreIdentity, detectNvidia } from "../npm/meta/plugins.cjs";
 
@@ -429,9 +429,10 @@ test("registry smoke installs only the meta package and exercises a distinct upd
         dist: { integrity: release.packages[0].integrity },
       }),
     }),
-    runNpm: (_, args) => {
+    runNpm: (_, args, { env }) => {
       assert.ok(args.includes("--registry=https://registry.npmjs.org"));
       assert.ok(!args.some((arg) => arg.endsWith(".tgz")));
+      assert.equal(env.ZG_INSTALL_ACCELERATOR, args[0] === "rebuild" ? "cuda" : undefined);
       events.push(args[0] === "rebuild" ? "explicit registry plugin fetch" : args.at(-1));
     },
     verifyInstalled: async ({ version }) => {
@@ -441,12 +442,14 @@ test("registry smoke installs only the meta package and exercises a distinct upd
       return { version, components: [] };
     },
     probe: async () => events.push("candidate IPC verified"),
+    modelProbe: async () => events.push("candidate models verified through npm"),
     probePrevious: async () => events.push("baseline verified"),
   });
   assert.deepEqual(events, [
     "@zvec/zvec-grep@0.0.1",
     "installed components verified",
     "candidate IPC verified",
+    "candidate models verified through npm",
     ...(selectPlatform(manifest, process.platform, process.arch, process.report?.getReport().header ?? {}).components?.length
       ? ["explicit registry plugin fetch", "installed components verified"] : []),
     "@zvec/zvec-grep@0.2.2",
@@ -454,6 +457,7 @@ test("registry smoke installs only the meta package and exercises a distinct upd
     "@zvec/zvec-grep@0.0.1",
     "installed components verified",
     "candidate IPC verified",
+    "candidate models verified through npm",
     "@zvec/zvec-grep@0.2.2",
     "baseline verified",
   ]);
@@ -470,6 +474,37 @@ test("a missing registry candidate fails before any npm installation", async () 
     }),
     /registry candidate is missing/,
   );
+});
+
+test("registry model failure prevents update, rollback and a success report", async (t) => {
+  const prefixRoot = await mkdtemp(join(tmpdir(), "zg-registry-model-failure-"));
+  t.after(() => rm(prefixRoot, { recursive: true, force: true }));
+  const installs = [];
+  await assert.rejects(smokeRegistryRelease({
+    manifest, release, baseline: "0.2.2", prefixRoot,
+    registryFetch: async () => ({ ok: true, json: async () => ({ dist: { integrity: release.packages[0].integrity } }) }),
+    runNpm: (_, args) => installs.push(args.at(-1)),
+    verifyInstalled: async () => { await mkdir(prefixRoot, { recursive: true }); return { components: [] }; },
+    probe: async () => {},
+    modelProbe: async () => { throw new Error("ONNX runtime missing through npm entry"); },
+    probePrevious: async () => assert.fail("must stop before baseline installation"),
+  }), /ONNX runtime missing through npm entry/);
+  assert.deepEqual(installs, ["@zvec/zvec-grep@0.0.1"]);
+  await assert.rejects(readFile(join(prefixRoot, "results.json")), { code: "ENOENT" });
+});
+
+test("CPU registry validation rejects even a failed CUDA download attempt", async (t) => {
+  const prefixRoot = await mkdtemp(join(tmpdir(), "zg-registry-downloads-"));
+  t.after(() => rm(prefixRoot, { recursive: true, force: true }));
+  const entry = manifest.platforms.find(({ target }) => target === "linux-x64-gnu");
+  await mkdir(join(prefixRoot, "cache/_logs"), { recursive: true });
+  const log = join(prefixRoot, "cache/_logs/install.log");
+  await writeFile(log, `http fetch GET 200 https://registry.npmjs.org/${encodeURIComponent(entry.package)}\n`);
+  await assertNoRegistryCudaDownloads(prefixRoot, entry);
+  await writeFile(log, `http fetch GET 503 https://registry.npmjs.org/${encodeURIComponent(entry.components[0].package)}\n`);
+  await assert.rejects(assertNoRegistryCudaDownloads(prefixRoot, entry), /requested CUDA components/);
+  const evidence = JSON.parse(await readFile(join(prefixRoot, "cpu-downloads.json"), "utf8"));
+  assert.equal(evidence.requests.length, 1);
 });
 
 test("the candidate cannot serve as its own rollback baseline", async () => {
