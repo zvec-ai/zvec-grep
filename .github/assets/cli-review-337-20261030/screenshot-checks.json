@@ -1,0 +1,344 @@
+[
+  {
+    "name": "index-lifecycle",
+    "width": 1120,
+    "height": 1275,
+    "overflow": 0
+  },
+  {
+    "name": "command-output",
+    "width": 1120,
+    "height": 1795,
+    "overflow": 0
+  },
+  {
+    "name": "interaction",
+    "width": 1120,
+    "height": 1865,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-help-01",
+    "width": 1120,
+    "height": 1637,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-help-02",
+    "width": 1120,
+    "height": 1801,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-help-03",
+    "width": 1120,
+    "height": 1637,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-help-04",
+    "width": 1120,
+    "height": 2744,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-help-05",
+    "width": 1120,
+    "height": 2770,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-help-06",
+    "width": 1120,
+    "height": 1142,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-help-07",
+    "width": 1120,
+    "height": 1216,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-help-08",
+    "width": 1120,
+    "height": 1058,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-help-09",
+    "width": 1120,
+    "height": 1637,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-help-10",
+    "width": 1120,
+    "height": 1200,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-help-11",
+    "width": 1120,
+    "height": 1031,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-help-12",
+    "width": 1120,
+    "height": 2428,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-help-13",
+    "width": 1120,
+    "height": 2217,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-help-14",
+    "width": 1120,
+    "height": 2217,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-help-15",
+    "width": 1120,
+    "height": 900,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-help-16",
+    "width": 1120,
+    "height": 2770,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-help-17",
+    "width": 1120,
+    "height": 2770,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-cli-failures-01",
+    "width": 1120,
+    "height": 900,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-cli-failures-02",
+    "width": 1120,
+    "height": 900,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-integrations-01",
+    "width": 1120,
+    "height": 1337,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-integrations-02",
+    "width": 1120,
+    "height": 1403,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-integrations-03",
+    "width": 1120,
+    "height": 1752,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-integrations-04",
+    "width": 1120,
+    "height": 922,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-server-01",
+    "width": 1120,
+    "height": 1100,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-server-02",
+    "width": 1120,
+    "height": 900,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-query-01",
+    "width": 1120,
+    "height": 1353,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-query-02",
+    "width": 1120,
+    "height": 1353,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-query-03",
+    "width": 1120,
+    "height": 1727,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-query-04",
+    "width": 1120,
+    "height": 1600,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-query-05",
+    "width": 1120,
+    "height": 1438,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-paths-01",
+    "width": 1120,
+    "height": 1396,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-paths-02",
+    "width": 1120,
+    "height": 1265,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-paths-03",
+    "width": 1120,
+    "height": 916,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-errors-01",
+    "width": 1120,
+    "height": 962,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-errors-02",
+    "width": 1120,
+    "height": 929,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-errors-03",
+    "width": 1120,
+    "height": 968,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-errors-04",
+    "width": 1120,
+    "height": 1146,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-errors-05",
+    "width": 1120,
+    "height": 900,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-status-01",
+    "width": 1120,
+    "height": 1806,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-status-02",
+    "width": 1120,
+    "height": 1574,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-status-03",
+    "width": 1120,
+    "height": 931,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-index-01",
+    "width": 1120,
+    "height": 900,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-index-02",
+    "width": 1120,
+    "height": 1047,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-index-03",
+    "width": 1120,
+    "height": 1100,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-index-04",
+    "width": 1120,
+    "height": 1159,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-index-05",
+    "width": 1120,
+    "height": 900,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-configuration-01",
+    "width": 1120,
+    "height": 1126,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-configuration-02",
+    "width": 1120,
+    "height": 900,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-configuration-03",
+    "width": 1120,
+    "height": 1027,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-prompts-01",
+    "width": 1120,
+    "height": 1542,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-prompts-02",
+    "width": 1120,
+    "height": 1595,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-prompts-03",
+    "width": 1120,
+    "height": 1412,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-prompts-04",
+    "width": 1120,
+    "height": 1228,
+    "overflow": 0
+  },
+  {
+    "name": "catalog-prompts-05",
+    "width": 1120,
+    "height": 1682,
+    "overflow": 0
+  }
+]
