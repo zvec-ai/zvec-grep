@@ -505,7 +505,7 @@ impl ZvecGrepMcpServer {
 
     #[tool(
         name = "zvec_grep_rg",
-        description = "Run exhaustive ripgrep across workspace material without an index. Use `rg --files` to list paths without reading file contents. Pass a command starting with `rg`; it is parsed as arguments and never executed by a shell. Results are exhaustive unless a trailing `| head -N` explicitly bounds them.",
+        description = "Run exhaustive ripgrep across workspace material without an index. Pass a command starting with `rg`; it is parsed as arguments and never executed by a shell. Results are exhaustive unless a trailing `| head -N` explicitly bounds them.",
         annotations(
             title = "Search with managed ripgrep",
             read_only_hint = true,
@@ -1757,6 +1757,11 @@ impl RgInput {
         let (args, limit) = parse_rg_command(&self.command)?;
         let mut parsed = parse_rg_args(&args, true).map_err(|error| error.to_string())?;
         let request = &mut parsed.request;
+        if request.follow {
+            return Err(
+                "rg command option \"--follow\" (-L) is not supported by the MCP tool".to_owned(),
+            );
+        }
         request.limit = limit;
         validate_scoped_paths(&root, &request.rg_paths, "search path")?;
         if !parsed.files {
@@ -3577,6 +3582,41 @@ mod tests {
                 .is_err(),
                 "{command}"
             );
+        }
+    }
+
+    #[test]
+    fn rg_rejects_symlink_following_for_content_search_and_file_listing() {
+        for command in [
+            "rg -L needle .",
+            "rg --follow needle .",
+            "rg -nL needle .",
+            "rg --files -L",
+            "rg --files --follow",
+        ] {
+            let error = RgInput {
+                root: test_root().display().to_string(),
+                command: command.to_owned(),
+            }
+            .into_request()
+            .err()
+            .expect("MCP rg rejects symlink following");
+            assert!(error.contains("--follow"), "{command}: {error}");
+        }
+        for command in [
+            "rg -e --follow .",
+            "rg -e -L .",
+            "rg --files -- --follow",
+            "rg --files -- -L",
+            "rg --no-follow needle .",
+        ] {
+            let parsed = RgInput {
+                root: test_root().display().to_string(),
+                command: command.to_owned(),
+            }
+            .into_request()
+            .expect("literal patterns and paths do not enable symlink following");
+            assert!(!parsed.request.follow, "{command}");
         }
     }
 

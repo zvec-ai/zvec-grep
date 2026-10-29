@@ -130,6 +130,25 @@ mod tests {
                 server.serve(server_io).await.expect("server").waiting().await
             });
             let client = ().serve(client_io).await.expect("client");
+            for command in [
+                "rg -L needle .",
+                "rg --follow needle .",
+                "rg --files -L",
+                "rg --files --follow",
+            ] {
+                let mut request = CallToolRequestParams::new("zvec_grep_rg");
+                request.arguments = serde_json::json!({
+                    "root": directory.path(),
+                    "command": command
+                })
+                .as_object()
+                .cloned();
+                let error = client
+                    .call_tool(request)
+                    .await
+                    .expect_err("MCP rg rejects symlink following");
+                assert!(error.to_string().contains("--follow"), "{error}");
+            }
             let mut files_request = CallToolRequestParams::new("zvec_grep_rg");
             files_request.arguments = serde_json::json!({
                 "root": directory.path(),
