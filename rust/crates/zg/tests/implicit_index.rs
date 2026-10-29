@@ -627,6 +627,45 @@ fn noninteractive_missing_index_requires_explicit_creation() {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
+fn implicit_query_index_progress_does_not_blank_the_live_line() {
+    for (mode, server) in [
+        ("direct", false),
+        ("auto", false),
+        ("server", true),
+        ("auto", true),
+    ] {
+        let mut fixture = Fixture::new();
+        if server {
+            fixture.start_server();
+        }
+        let output = success(terminal::run(
+            fixture.command(&["--mode", mode, "--fts", "needle", "--no-color"]),
+            &[("Enter Build", b"\r")],
+        ));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let progress = stderr
+            .split_once("Building index")
+            .and_then(|(_, remainder)| remainder.split_once("Index ready"))
+            .map(|(progress, _)| progress)
+            .expect("index progress between selection and query");
+        assert!(
+            progress.contains("Scanning workspace") || progress.contains("Indexing files"),
+            "{mode}: {stderr}"
+        );
+        assert!(
+            !progress.contains("\r\x1b[2K"),
+            "{mode}: index progress clears the live line before repainting it: {stderr}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "query groups (1):\nQ1 [supplemental]: needle\nhits: 0\n\nNo matches.\n",
+            "{mode}"
+        );
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
 fn configured_local_models_follow_environment_then_global_default_precedence() {
     for (configured, environment, expected) in [
         (

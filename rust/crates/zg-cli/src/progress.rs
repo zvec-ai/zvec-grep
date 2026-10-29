@@ -1,4 +1,5 @@
 use crate::ColorMode;
+use crossterm::terminal;
 use std::fmt::Write as _;
 use std::{
     io::{self, Write},
@@ -72,7 +73,20 @@ impl ProgressOutput {
         }
         let (stage, plain) = format_progress(progress, self.terminal);
         let line = if self.terminal {
-            format_terminal_progress(progress, self.last_indexing.as_ref(), self.color)
+            format_terminal_progress(
+                progress,
+                self.last_indexing.as_ref(),
+                self.color,
+                terminal::size().map_or_else(
+                    |_| {
+                        std::env::var("COLUMNS")
+                            .ok()
+                            .and_then(|value| value.parse::<usize>().ok())
+                            .unwrap_or(100)
+                    },
+                    |(columns, _)| usize::from(columns),
+                ),
+            )
         } else {
             plain
         };
@@ -97,11 +111,11 @@ impl ProgressOutput {
             return Ok(());
         }
         if self.terminal {
-            write!(self.writer, "\r\x1b[2K")?;
-        }
-        write!(self.writer, "{line}")?;
-        if !self.terminal {
-            writeln!(self.writer)?;
+            // Replace the visible text before clearing any leftover characters.
+            let frame = format!("\r{line}\x1b[K");
+            self.writer.write_all(frame.as_bytes())?;
+        } else {
+            writeln!(self.writer, "{line}")?;
         }
         self.writer.flush()?;
         self.last = Some((stage, now, line));
@@ -158,6 +172,7 @@ fn format_terminal_progress(
     progress: &IndexProgress,
     previous: Option<&IndexProgress>,
     color: bool,
+    columns: usize,
 ) -> String {
     let unicode = !cfg!(windows) && std::env::var("TERM").as_deref() != Ok("linux");
     let rail = if unicode { "│" } else { "|" };
@@ -176,19 +191,25 @@ fn format_terminal_progress(
             .files_total
             .filter(|count| *count > 0)
             .map_or_else(String::new, |count| format!("  {count} files"));
-        return format!(
-            "{rail}  {} Scanning workspace{count}",
-            green(spinner[0], color)
+        return fit_terminal_line(
+            &format!(
+                "{rail}  {} Scanning workspace{count}",
+                green(spinner[0], color)
+            ),
+            columns,
         );
     }
     if let Some(embedding) = &progress.embedding
         && embedding.stage.is_some()
     {
         let index = usize::try_from(embedding.downloaded_bytes.unwrap_or(0) % 6).unwrap_or(0);
-        return format!(
-            "{rail}  {} {}",
-            green(spinner[index], color),
-            format_progress(progress, true).1
+        return fit_terminal_line(
+            &format!(
+                "{rail}  {} {}",
+                green(spinner[index], color),
+                format_progress(progress, true).1
+            ),
+            columns,
         );
     }
     let done = progress.phase == IndexProgressPhase::Done;
@@ -215,15 +236,45 @@ fn format_terminal_progress(
         } else {
             "Indexing files"
         };
-        return format!("{rail}  {} {}", green(glyph, color), clean(label, true));
+        return fit_terminal_line(
+            &format!("{rail}  {} {}", green(glyph, color), clean(label, true)),
+            columns,
+        );
     }
     let percent = (indexed as u128 * 100 + total as u128 / 2) / total as u128;
     let core = format!("  {percent:>3}%  {indexed}/{total}");
+    let metadata = indexing_metadata(effective);
+    let mut suffix = format!("{core}{metadata}");
+    let available = |suffix: &str| columns.saturating_sub(22 + suffix.chars().count());
+    if available(&core) == 0 {
+        return fit_terminal_line(
+            &format!(
+                "{rail}  {} {indexed}/{total} ({percent}%)",
+                green(glyph, color)
+            ),
+            columns,
+        );
+    }
+    if available(&suffix) < 8 {
+        suffix = core;
+    }
+    let width = available(&suffix).min(25);
+    let filled = usize::try_from((width as u128 * percent + 50) / 100).unwrap_or(width);
+    fit_terminal_line(
+        &format!(
+            "{prefix}{}{suffix}",
+            gradient_bar(filled, width, color, unicode)
+        ),
+        columns,
+    )
+}
+
+fn indexing_metadata(progress: &IndexProgress) -> String {
     let mut metadata = Vec::new();
-    if let Some(failed) = effective.files_failed.filter(|count| *count > 0) {
+    if let Some(failed) = progress.files_failed.filter(|count| *count > 0) {
         metadata.push(format!("{failed} failed"));
     }
-    if let Some(embedding) = &effective.embedding {
+    if let Some(embedding) = &progress.embedding {
         if let Some(retries) = embedding.retryable_failures.filter(|count| *count > 0) {
             metadata.push(format!("{retries} retries"));
         }
@@ -231,26 +282,54 @@ fn format_terminal_progress(
             metadata.push(format!("{workers} workers"));
         }
     }
-    let metadata = if metadata.is_empty() {
+    if metadata.is_empty() {
         String::new()
     } else {
         format!("  {}", metadata.join(" · "))
-    };
-    let columns = std::env::var("COLUMNS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(100);
-    let mut suffix = format!("{core}{metadata}");
-    let available = |suffix: &str| columns.saturating_sub(22 + suffix.chars().count());
-    if available(&suffix) < 8 {
-        suffix = core;
     }
-    let width = available(&suffix).clamp(8, 25);
-    let filled = usize::try_from((width as u128 * percent + 50) / 100).unwrap_or(width);
-    format!(
-        "{prefix}{}{suffix}",
-        gradient_bar(filled, width, color, unicode)
-    )
+}
+
+fn fit_terminal_line(line: &str, columns: usize) -> String {
+    let mut fitted = String::with_capacity(line.len());
+    let mut characters = line.chars().peekable();
+    let mut occupied = 0;
+    let limit = columns.saturating_sub(1);
+    let mut clipped = false;
+    while let Some(character) = characters.next() {
+        if character == '\x1b' && characters.peek() == Some(&'[') {
+            fitted.push(character);
+            fitted.push(characters.next().expect("CSI introducer"));
+            for code in characters.by_ref() {
+                fitted.push(code);
+                if ('@'..='~').contains(&code) {
+                    break;
+                }
+            }
+            continue;
+        }
+        let width = if character.is_control() {
+            0
+        } else if character.is_ascii()
+            || matches!(
+                character,
+                '│' | '·' | '✢' | '✳' | '✶' | '✻' | '✽' | '◆' | '█' | '░'
+            )
+        {
+            1
+        } else {
+            2
+        };
+        if occupied + width > limit {
+            clipped = true;
+            break;
+        }
+        fitted.push(character);
+        occupied += width;
+    }
+    if clipped && fitted.contains("\x1b[") {
+        fitted.push_str("\x1b[0m");
+    }
+    fitted
 }
 
 fn format_progress(progress: &IndexProgress, terminal: bool) -> (String, String) {
@@ -355,6 +434,28 @@ mod tests {
     }
 
     #[test]
+    fn terminal_progress_fits_a_narrow_window() {
+        let progress = IndexProgress {
+            phase: IndexProgressPhase::Indexing,
+            files_total: Some(8),
+            files_indexed: Some(3),
+            files_failed: None,
+            detail: None,
+            embedding: None,
+        };
+        let line = format_terminal_progress(&progress, None, false, 40);
+        assert!(
+            line.chars().count() < 40,
+            "progress wraps in a 40-column terminal: {line}"
+        );
+        let compact = format_terminal_progress(&progress, None, false, 24);
+        assert!(
+            compact.contains("3/8"),
+            "narrow progress loses the indexed count: {compact}"
+        );
+    }
+
+    #[test]
     fn output_is_throttled_and_live_line_finishes_on_drop() {
         for terminal in [false, true] {
             let buffer = Arc::new(Mutex::new(Vec::new()));
@@ -380,7 +481,8 @@ mod tests {
             assert_eq!(output.matches("Scanning").count(), 1);
             assert!(output.contains(if terminal { "100%" } else { "Index complete" }));
             assert!(output.ends_with('\n'));
-            assert_eq!(output.contains("\r\x1b[2K"), terminal);
+            assert_eq!(output.contains("\x1b[K"), terminal);
+            assert!(!output.contains("\r\x1b[2K"));
             assert!(!output.contains("\x1b[36m"));
         }
     }
@@ -408,7 +510,7 @@ mod tests {
             drop(display);
             let output = String::from_utf8(buffer.lock().expect("capture").clone()).expect("UTF-8");
             if terminal {
-                assert!(output.contains(&warning.chars().take(100).collect::<String>()));
+                assert!(output.contains("Transformers cuda"));
                 assert!(!output.contains(warning));
             } else {
                 assert!(output.contains(warning));
