@@ -8,7 +8,7 @@
     <img src="./.github/assets/zg-logo.svg" width="150" alt="zg logo" />
   </picture>
   <p><strong>Know the words—or don’t. Just zg.</strong></p>
-  <p>面向人与 Agent 的本地优先统一检索层。</p>
+  <p>面向人与 Agent 的本地优先搜索工具。</p>
 
   <p>
     <a href="https://www.npmjs.com/package/@zvec/zvec-grep"><img src="https://img.shields.io/npm/v/@zvec/zvec-grep.svg" alt="npm 版本" /></a>
