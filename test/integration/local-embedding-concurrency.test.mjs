@@ -79,8 +79,7 @@ test("Direct automatic indexing applies the index environment to Potion batches"
     else process.env.ZVEC_GREP_EMBEDDING = previousEmbedding;
     if (previousConcurrency === undefined)
       delete process.env.ZVEC_GREP_EMBEDDING_CONCURRENCY;
-    else
-      process.env.ZVEC_GREP_EMBEDDING_CONCURRENCY = previousConcurrency;
+    else process.env.ZVEC_GREP_EMBEDDING_CONCURRENCY = previousConcurrency;
     await service.close();
   }
 });
