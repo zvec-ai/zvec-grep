@@ -357,7 +357,7 @@ impl ZvecGrepMcpServer {
 impl ZvecGrepMcpServer {
     #[tool(
         name = "zvec_grep_search",
-        description = "Search a workspace index for semantic, relational, cross-file, or multi-hop evidence such as architecture, call chains, dependencies, lifecycle, data or control flow, design rationale, and comparisons. Use it when exact lookup alone cannot answer a workspace-grounded question. Results include bounded source snippets by default and query-group metadata; set preview: \"full\" to return all available content of each retrieved item without changing retrieval or ranking. Treat sufficient returned content as already-read evidence. Use native Grep or rg instead when exact lookup alone is sufficient. Read freshness and background_refresh from the response without a status preflight; when results are served_from_current_index, use them if sufficient. A missing index can request user model selection and authorization; accepted setup starts a background build and returns indexing status. Retry after completion.",
+        description = "For queries, fts and vector, use `\"text\"` for one query or `[\"a\",\"b\"]` for multiple queries. Do not JSON-stringify arrays. Search a workspace index for semantic, relational, cross-file, or multi-hop evidence such as architecture, call chains, dependencies, lifecycle, data or control flow, design rationale, and comparisons. Use it when exact lookup alone cannot answer a workspace-grounded question. Results include bounded source snippets by default and query-group metadata; set preview: \"full\" to return all available content of each retrieved item without changing retrieval or ranking. Treat sufficient returned content as already-read evidence. Use native Grep or rg instead when exact lookup alone is sufficient. Read freshness and background_refresh from the response without a status preflight; when results are served_from_current_index, use them if sufficient. A missing index can request user model selection and authorization; accepted setup starts a background build and returns indexing status. Retry after completion.",
         annotations(
             title = "Search with zvec-grep",
             read_only_hint = false,
@@ -749,11 +749,11 @@ pub struct SearchInput {
     /// One primary hybrid-search group.
     #[schemars(length(max = 4000))]
     pub query: Option<String>,
-    /// One or more primary hybrid-search groups.
+    /// Primary hybrid-search groups: `"text"` or `["a","b"]`. Do not JSON-stringify arrays.
     pub queries: Option<QueryListInput>,
-    /// Supplemental lexical-route groups.
+    /// Supplemental lexical-route groups: `"text"` or `["a","b"]`. Do not JSON-stringify arrays.
     pub fts: Option<QueryListInput>,
-    /// Supplemental semantic/vector-route groups.
+    /// Supplemental semantic/vector-route groups: `"text"` or `["a","b"]`. Do not JSON-stringify arrays.
     pub vector: Option<QueryListInput>,
     /// Maximum returned items per query group or fused plan.
     #[schemars(range(min = 1, max = 50), extend("type" = "integer"))]
@@ -1230,10 +1230,13 @@ struct ModelStatusOutput {
     active_leases: usize,
 }
 
+/// A string is one literal query; an array creates one query per string.
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum QueryListInput {
+    /// One literal query. JSON text is not decoded into multiple queries.
     One(#[schemars(length(max = 4000))] String),
+    /// Multiple queries. Pass an array of strings directly, e.g. `["a","b"]`.
     Many(#[schemars(length(max = 32), inner(length(max = 4000)))] Vec<String>),
 }
 
@@ -2852,12 +2855,53 @@ mod tests {
             let description = search.description.expect("search description");
             assert!(description.contains("accepted setup starts a background build"));
             let legacy_description = description
+                .replace("For queries, fts and vector, use `\"text\"` for one query or `[\"a\",\"b\"]` for multiple queries. Do not JSON-stringify arrays. ", "")
                 .replace("Search a workspace index", "Search an existing workspace index")
                 .replace(" A missing index can request user model selection and authorization; accepted setup starts a background build and returns indexing status. Retry after completion.", "");
             assert_eq!(
                 Some(legacy_description.as_str()),
                 expected[profile]["search_description"].as_str()
             );
+        }
+    }
+
+    #[test]
+    fn query_list_descriptions_preserve_string_and_array_semantics() {
+        let server = ZvecGrepMcpServer::agent_direct(Arc::new(ZvecGrep::new()));
+        let tool = server
+            .listed_tools()
+            .into_iter()
+            .next()
+            .expect("search tool");
+        assert!(
+            tool.description
+                .as_deref()
+                .expect("search description")
+                .contains("Do not JSON-stringify arrays.")
+        );
+        let schema = serde_json::to_value(&tool.input_schema).expect("input schema");
+        for field in ["queries", "fts", "vector"] {
+            assert!(
+                schema["properties"][field]["description"]
+                    .as_str()
+                    .expect("query-list description")
+                    .contains("Do not JSON-stringify arrays.")
+            );
+            for (value, expected) in [
+                (serde_json::json!("one"), vec!["one"]),
+                (serde_json::json!(["one", "two"]), vec!["one", "two"]),
+                (
+                    serde_json::json!(r#"["one","two"]"#),
+                    vec![r#"["one","two"]"#],
+                ),
+            ] {
+                let parsed: super::QueryListInput =
+                    serde_json::from_value(value).expect("string or array");
+                assert_eq!(
+                    parsed.normalized(field).expect("valid query list"),
+                    expected
+                );
+            }
         }
     }
 
