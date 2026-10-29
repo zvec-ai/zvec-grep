@@ -43,6 +43,8 @@ Isolated public-response format failures still fail CI, but the overview display
 
 All four suites and base/head comparisons include an **Index & Query performance** section. Index embedding and public query concurrency are fixed at a limit of **4 per suite process**; independent suite jobs can run simultaneously. The product retains its native batch size, commit scheduling and throttling behavior. The query plan and saved evidence order remain deterministic; completion order can differ. This concurrency policy changes the protocol identity to v8, so use a matching harness for comparisons.
 
+For each installed Rust candidate, the harness reads `zg --help index` and selects `--embedding-concurrency`, falling back to the legacy `--index-embedding-concurrency` when advertised. Both spellings enforce the same limit of four, so old and new candidates can share a frozen comparison harness. Candidates advertising neither option fail before indexing.
+
 | Measurement | Scope |
 | --- | --- |
 | Query RT | One public MCP tool call, measured before parsing, scoring and saving its response |

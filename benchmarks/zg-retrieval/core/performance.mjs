@@ -12,11 +12,12 @@ export const MEMORY_SAMPLE_INTERVAL_MS = 100;
 const execute = promisify(execFile);
 
 export function indexConcurrencyArguments(help) {
-  const flag = "--index-embedding-concurrency";
-  assert.ok(
-    help.includes(flag),
-    "candidate cannot fix index embedding concurrency",
-  );
+  const options = new Set(help.match(/--[\w-]+/g));
+  const flag = [
+    "--embedding-concurrency",
+    "--index-embedding-concurrency",
+  ].find((option) => options.has(option));
+  assert.ok(flag, "candidate cannot fix index embedding concurrency");
   return [flag, String(BENCHMARK_CONCURRENCY)];
 }
 

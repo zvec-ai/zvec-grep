@@ -44,12 +44,37 @@ test("percentiles use nearest rank and preserve empty/zero populations", () => {
   assert.equal(samples[0], 100);
 });
 
-test("the Rust public index flag explicitly caps concurrency at four", () => {
+test("new and legacy Rust index flags both cap concurrency at four", () => {
+  assert.deepEqual(
+    indexConcurrencyArguments(
+      "  --embedding-concurrency <n>        Positive embedding concurrency (index only)\n",
+    ),
+    ["--embedding-concurrency", "4"],
+  );
   assert.deepEqual(
     indexConcurrencyArguments("--index-embedding-concurrency <n>"),
     ["--index-embedding-concurrency", "4"],
   );
-  assert.throws(() => indexConcurrencyArguments("unsupported"), /cannot fix/);
+});
+
+test("the current index flag takes precedence when both names are advertised", () => {
+  assert.deepEqual(
+    indexConcurrencyArguments(
+      "--index-embedding-concurrency <n>\n--embedding-concurrency <n>",
+    ),
+    ["--embedding-concurrency", "4"],
+  );
+});
+
+test("missing or lookalike index flags cannot silently use default concurrency", () => {
+  for (const help of [
+    "",
+    "unsupported",
+    "--embedding-concurrency-extra <n>",
+    "--index-embedding-concurrency-extra <n>",
+  ]) {
+    assert.throws(() => indexConcurrencyArguments(help), /cannot fix/);
+  }
 });
 
 test("four requests can overlap, finish out of order and retain plan order", async () => {
