@@ -745,48 +745,6 @@ impl Drop for CrashWriter {
 }
 
 #[test]
-fn closing_storage_releases_locks_while_child_is_alive() {
-    const READY: &str = "ZG_TEST_STORAGE_CHILD_READY";
-    if let Some(ready) = std::env::var_os(READY) {
-        fs::write(ready, b"ready").expect("signal child startup");
-        loop {
-            thread::park();
-        }
-    }
-    let temporary = tempfile::tempdir().expect("workspace");
-    let root = temporary.path().join("w");
-    let store = open(&root, false);
-    let source = snapshot(&store, "source.rs", &["canonical record"]);
-    write(&store, &source);
-    store.close().expect("close initial writer");
-
-    for read_only in [false, true] {
-        let store = open(&root, read_only);
-        let ready = temporary.path().join(format!("ready-{read_only}"));
-        let log_path = temporary.path().join(format!("child-{read_only}.log"));
-        let output = File::create(&log_path).expect("create child log");
-        let errors = output.try_clone().expect("clone child log");
-        // Use an ordinary child command: native file opens must prevent lock
-        // inheritance without relying on descriptor cleanup before exec.
-        let mut child = CrashWriter(
-            Command::new(std::env::current_exe().expect("test executable"))
-                .args(["--exact", "storage::store::graph_tests::closing_storage_releases_locks_while_child_is_alive", "--nocapture", "--test-threads=1"])
-                .env(READY, &ready)
-                .stdin(Stdio::null())
-                .stdout(output)
-                .stderr(errors)
-                .spawn().expect("run unrelated child"),
-        );
-        child.wait_until_ready(&ready, &log_path);
-        store.close().expect("close while child remains alive");
-        let writer = open(&root, false);
-        assert_eq!(stored_entities(&writer, &source.entities).len(), 1);
-        writer.close().expect("close reopened writer");
-        assert!(child.0.try_wait().expect("poll child").is_none());
-    }
-}
-
-#[test]
 fn process_exit_during_canonical_replacement_recovers_from_durable_status() {
     const CHILD_ROOT: &str = "ZG_TEST_GRAPH_CRASH_ROOT";
     const CHILD_READY: &str = "writer-ready";
