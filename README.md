@@ -8,7 +8,6 @@
     <img src="./.github/assets/zg-logo.svg" width="150" alt="zg logo" />
   </picture>
   <p><strong>Know the words—or don’t. Just zg.</strong></p>
-  <p>The local-first search tool for humans and agents.</p>
 
   <p>
     <a href="https://www.npmjs.com/package/@zvec/zvec-grep"><img src="https://img.shields.io/npm/v/@zvec/zvec-grep.svg" alt="npm version" /></a>
