@@ -113,13 +113,8 @@ jobs:
           version="$(cargo metadata --locked --no-deps --format-version 1 | node -e 'let s=""; process.stdin.on("data", d => s+=d).on("end", () => console.log(JSON.parse(s).packages.find(p => p.name === "zg").version))')"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           if [[ "$PUBLISH" == "true" ]]; then
-            if [[ "$RELEASE_REF" != "refs/heads/main" ]]; then
-              echo "::error::npm publishing must run from main"
-              exit 1
-            fi
-            tag_commit="$(git rev-parse --verify "refs/tags/rust-v$version^{commit}")"
-            if [[ "$tag_commit" != "$GITHUB_SHA" ]]; then
-              echo "::error::rust-v$version must point to the commit being published"
+            if [[ "$RELEASE_REF" != "refs/heads/main" && "$RELEASE_REF" != refs/tags/* ]]; then
+              echo "::error::npm publishing must run from main or a tag"
               exit 1
             fi
           fi

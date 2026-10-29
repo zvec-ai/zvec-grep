@@ -18,12 +18,43 @@ import {
   publishRelease,
 } from "./npm-release-registry.mjs";
 
+// Test fixtures must never append release notes to the real Actions summary.
+delete process.env.GITHUB_STEP_SUMMARY;
+
 const entry = {
   name: "@zvec/zvec-grep",
   version: "0.0.1",
   integrity: "sha512-verified-tarball",
 };
 const projectLicense = await readFile(new URL("../../LICENSE", import.meta.url), "utf8");
+
+test("release fixtures do not write to an inherited Actions summary", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "zg-release-summary-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const summaryPath = join(root, "summary.md");
+  const originalSummary = "Existing workflow summary\n";
+  await writeFile(summaryPath, originalSummary);
+  const env = { ...process.env, GITHUB_STEP_SUMMARY: summaryPath };
+  // Start an independent test runner instead of inheriting the parent IPC mode.
+  delete env.NODE_TEST_CONTEXT;
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--test",
+      "--test-name-pattern=^default collection still requires every platform",
+      fileURLToPath(import.meta.url),
+    ],
+    {
+      env,
+      encoding: "utf8",
+      timeout: 60_000,
+    },
+  );
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /collected \d+ verified packages/);
+  assert.equal(await readFile(summaryPath, "utf8"), originalSummary);
+});
 
 test("allows an unpublished version and an identical partial-release retry", async () => {
   assert.equal(

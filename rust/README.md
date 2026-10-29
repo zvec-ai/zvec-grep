@@ -1023,9 +1023,14 @@ real GGUF/ONNX indexing and vector queries using both explicit CPU selection and
 default automatic CPU fallback. Logs are retained as `cpu-artifact-evidence-*`.
 Failure blocks npm publication; the candidate artifact is kept for diagnosis.
 
-To publish, update the Rust workspace version, tag the release commit on `main`
-as `rust-v<version>`, and manually run the workflow with `publish` enabled. The
-publishing repository must have an npm trusted publisher configured for all 14
+To publish, update the Rust workspace version and manually run the workflow from
+`main` or a release tag with `publish` enabled. Tag names are unrestricted; for
+example, use `v0.3.0` for the 0.3.0 release. The package version always comes from
+Cargo, not the tag name. From the CLI, select a tag with
+`gh workflow run rust-publish.yml --ref v0.3.0 -f publish=true`.
+The selected ref must contain the updated workflow; rerunning a historical run
+does not apply workflow fixes from newer commits.
+The publishing repository must have an npm trusted publisher configured for all 14
 packages with both **Allow npm publish** and the independent **Allow npm
 dist-tag** permission enabled, or provide an eligible `NPM_TOKEN` secret.
 Publishing and promotion install npm 11.21.0 explicitly for OIDC dist-tag support.
