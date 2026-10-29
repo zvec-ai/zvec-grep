@@ -41,6 +41,9 @@ This README and the [documentation](./docs/README.md) describe the TypeScript /
 Node.js implementation. The Rust implementation is developed separately in
 [`rust/`](./rust/README.md).
 
+**Install**: `npm install -g @zvec/zvec-grep`, or via Homebrew (macOS/Linux):
+`brew install zvec-grep`
+
 <a id="tour"></a>
 
 ## 🎬 See it in action
@@ -148,7 +151,7 @@ left with the key (sherlock-holmes.txt:5464-5470, 5527-5528).
 Search the same bookshelf directly, without an agent:
 
 ```bash
-zg query --human "An unseen creature left a few marks. What did the detective infer?" --limit 3
+zg --preview detail "An unseen creature left a few marks. What did the detective infer?" --limit 3
 ```
 
 zg returns the relevant passages from `sherlock-holmes.txt`, ranked ahead of

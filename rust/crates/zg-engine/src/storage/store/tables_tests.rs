@@ -194,7 +194,9 @@ fn stores_shared_metadata_once_and_filters_windows_by_owner_fields() {
     store
         .apply_fixture_records(&source, &entities, &entries)
         .expect("write file");
-    store.checkpoint().expect("flush storage");
+    store
+        .write(|state| super::flush(state))
+        .expect("flush storage");
     let owner = &entities[0];
     let entity_doc = entity_document(&store, owner.id().as_str());
     assert_eq!(
@@ -289,7 +291,9 @@ fn retrieval_defers_corrupt_metadata_until_selected_details_are_loaded() {
     store
         .write(|state| state.entities.write(&[doc]))
         .expect("write corrupt metadata");
-    store.checkpoint().expect("flush storage");
+    store
+        .write(|state| super::flush(state))
+        .expect("flush storage");
 
     for hits in [
         store
@@ -326,7 +330,9 @@ fn native_search_and_loading_preserve_compact_ids_without_reencoding() {
     store
         .apply_fixture_records(&source, &entities, &entries)
         .expect("write compact IDs");
-    store.checkpoint().expect("flush storage");
+    store
+        .write(|state| super::flush(state))
+        .expect("flush storage");
     let filter = StorageSearchFilter {
         entity_ids: Some(vec![entity_id.clone()]),
         ..StorageSearchFilter::default()
@@ -566,7 +572,9 @@ fn interrupted_replacements_remain_readable_and_retry_removes_stale_fragments() 
             state.files.put(&unfinished, &directories)
         })
         .expect("retry state");
-    store.checkpoint().expect("persist interrupted state");
+    store
+        .write(|state| super::flush(state))
+        .expect("persist interrupted state");
     drop(store);
 
     let store = metadata_store(home.path());
@@ -637,7 +645,9 @@ fn interrupted_deletions_keep_identity_until_retry_finishes() {
     store
         .write(|state| state.entities.delete_file(source.id()))
         .expect("delete entities");
-    store.checkpoint().expect("persist interruption");
+    store
+        .write(|state| super::flush(state))
+        .expect("persist interruption");
     drop(store);
 
     let store = metadata_store(home.path());
@@ -707,8 +717,7 @@ fn maximum_u32_directory_id_survives_reopen_and_filters_both_retrieval_collectio
     metadata_store(temporary.path())
         .close()
         .expect("create tables");
-    let directory_table =
-        Directories::open(&temporary.path().join("storage"), false).expect("directory table");
+    let directory_table = Directories::open(temporary.path(), false).expect("directory table");
     let mut doc = Doc::new().expect("directory doc");
     doc.set_pk(&format!("d{}", u32::MAX));
     doc.add_u32("directory_id", u32::MAX).expect("directory ID");
@@ -738,7 +747,6 @@ fn maximum_u32_directory_id_survives_reopen_and_filters_both_retrieval_collectio
     store
         .apply_fixture_records(&source, &entities, &entries)
         .expect("maximum membership");
-    store.checkpoint().expect("checkpoint");
     store
         .write(|state| {
             native(state.files.collection().optimize(), "optimize files")?;

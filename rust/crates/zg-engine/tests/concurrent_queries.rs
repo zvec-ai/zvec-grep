@@ -15,7 +15,11 @@ use zg_engine::{
             ContextOptions, ContextResult,
             options::{ContextRoute, ContextRouteMode, RefreshPolicy},
         },
-        index::{IndexOptions, options::EmbeddingModelSpec},
+        index::{
+            IndexOptions,
+            options::EmbeddingModelSpec,
+            progress::{IndexProgressPhase, IndexProgressReporter},
+        },
     },
 };
 
@@ -49,6 +53,7 @@ impl Gate {
 struct Fixture {
     root: TempDir,
     engine: Arc<ZvecGrep>,
+    endpoint: String,
     index_gate: Arc<Gate>,
     query_gate: Arc<Gate>,
     server: JoinHandle<()>,
@@ -102,7 +107,7 @@ impl Fixture {
                     endpoint: None,
                     device: zg_engine::api::index::options::Device::Cpu,
                 }),
-                endpoint: Some(endpoint),
+                endpoint: Some(endpoint.clone()),
                 api_key: Some("local-test-key".into()),
                 allow_remote: true,
                 ..IndexOptions::default()
@@ -112,6 +117,7 @@ impl Fixture {
         Self {
             root,
             engine,
+            endpoint,
             index_gate,
             query_gate,
             server,
@@ -231,15 +237,17 @@ async fn respond(
 }
 
 #[tokio::test]
-async fn compatible_current_index_queries_borrow_writer_but_wait_does_not() -> TestResult {
+async fn fts_queries_borrow_writer_without_credentials_but_wait_does_not() -> TestResult {
     let fixture = Fixture::new().await;
     let update = fixture.start_update(false).await;
+    std::fs::remove_file(fixture.root.path().join(".zvec-grep/credentials.key"))?;
     for policy in [RefreshPolicy::Off, RefreshPolicy::Background] {
-        let result = tokio::time::timeout(
-            Duration::from_secs(2),
-            fixture.engine.context(fixture.query(policy)),
-        )
-        .await??;
+        let mut query = fixture.query(policy);
+        query.api_key = None;
+        query.allow_remote = false;
+        query.lock_timeout_ms = Some(100);
+        let result =
+            tokio::time::timeout(Duration::from_secs(2), fixture.engine.context(query)).await??;
         assert_eq!(result.items[0].relative_path, PathBuf::from("anchor.txt"));
         assert!(!update.is_finished());
     }
@@ -275,6 +283,7 @@ async fn mismatched_models_and_rebuilds_wait_instead_of_borrowing() -> TestResul
         ),
     ] {
         let mut query = fixture.query(RefreshPolicy::Off);
+        query.routes[0].mode = ContextRouteMode::Vector;
         if api_key.is_some() {
             query.api_key = api_key;
         }
@@ -305,6 +314,112 @@ async fn mismatched_models_and_rebuilds_wait_instead_of_borrowing() -> TestResul
     );
     fixture.index_gate.release.add_permits(1);
     update.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn queries_wait_while_rebuild_repairs_invalid_metadata() -> TestResult {
+    let fixture = Fixture::new().await;
+    let manifest_path = fixture.root.path().join(".zvec-grep/manifest.json");
+    let mut previous: Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
+    previous["indexVersion"] = json!(1);
+    for invalid in [serde_json::to_vec(&previous)?, b"{".to_vec()] {
+        std::fs::write(&manifest_path, invalid)?;
+        std::fs::write(
+            fixture.root.path().join("changing.txt"),
+            "hold-index vineyard documentation",
+        )?;
+        let options = IndexOptions {
+            root: Some(fixture.root.path().to_path_buf()),
+            rebuild: true,
+            embedding: Some(EmbeddingModelSpec {
+                reference: "qwen/text-embedding-v4".into(),
+                revision: None,
+                cache_dir: None,
+                endpoint: None,
+                device: zg_engine::api::index::options::Device::Cpu,
+            }),
+            endpoint: Some(fixture.endpoint.clone()),
+            api_key: Some("local-test-key".into()),
+            allow_remote: true,
+            ..IndexOptions::default()
+        };
+        let mut update = tokio::spawn({
+            let engine = fixture.engine.clone();
+            async move { engine.index(options).await }
+        });
+        tokio::select! {
+            () = fixture.index_gate.wait() => {},
+            result = &mut update => panic!("rebuild completed before gate: {result:?}"),
+        }
+        for policy in [RefreshPolicy::Off, RefreshPolicy::Background] {
+            let mut query = fixture.query(policy);
+            query.lock_timeout_ms = Some(20);
+            let error = fixture
+                .engine
+                .context(query)
+                .await
+                .expect_err("wait for rebuild");
+            assert_eq!(error.code(), EngineError::RESOURCE_BUSY);
+            assert!(error.message().contains("timed out"));
+        }
+        fixture.index_gate.release.add_permits(1);
+        update.await??;
+        assert!(
+            !fixture
+                .engine
+                .context(fixture.query(RefreshPolicy::Off))
+                .await?
+                .items
+                .is_empty()
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn query_admission_gets_a_fresh_timeout_after_refresh() -> TestResult {
+    let fixture = Fixture::new().await;
+    std::fs::write(
+        fixture.root.path().join("changing.txt"),
+        "hold-index vineyard documentation",
+    )?;
+    let completed = Arc::new(Semaphore::new(0));
+    let mut query = fixture.query(RefreshPolicy::Wait);
+    query.lock_timeout_ms = Some(500);
+    query.on_progress = Some(IndexProgressReporter::new({
+        let completed = completed.clone();
+        move |progress| {
+            if progress.phase == IndexProgressPhase::Done {
+                completed.add_permits(1);
+            }
+        }
+    }));
+    let mut reading = tokio::spawn({
+        let engine = fixture.engine.clone();
+        async move { engine.context(query).await }
+    });
+    tokio::select! {
+        () = fixture.index_gate.wait() => {},
+        result = &mut reading => panic!("refresh completed before gate: {result:?}"),
+    }
+    let intent = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(fixture.root.path().join(".zvec-grep/locks/write-intent"))?;
+    intent.try_lock_shared()?;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    fixture.index_gate.release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(30), completed.acquire())
+        .await??
+        .forget();
+    assert!(
+        !reading.is_finished(),
+        "query waits instead of reusing the expired refresh budget"
+    );
+    drop(intent);
+    let result = tokio::time::timeout(Duration::from_secs(5), reading).await???;
+    assert!(!result.items.is_empty());
     Ok(())
 }
 

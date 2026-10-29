@@ -13,7 +13,8 @@ Node.js 的 `src/cli/format/status.ts` 是工作区状态、索引完成摘要�
 | `zg --auth revoke` | 已撤销授权数量，或没有授权 | 统一结果文案，保留重复撤销的幂等行为 |
 | `zg --server on/off/status` | `Server:`、`PID:`、`URL:`、`MCP toolset:` | 已符合 Node.js 风格，保留原有展示 |
 | `zg --config provider/model set` | 配置类型及引用；`Global config:` 路径 | 已符合 Node.js 风格，保留原有展示 |
-| 搜索、`--rg` | 终端按文件和命中分组，管道输出紧凑结果 | 另有较大差异，未纳入本次管理命令对齐 |
+| 索引搜索 | `--preview none/short/full/detail`，终端和管道统一默认 `short` | `detail` 的详细字段和结构摘要对齐；`short/full` 保留各自原有 compact 布局；direct/server 共用渲染器 |
+| `--rg` | 固定简洁布局，使用 `-A/-B/-C` 控制上下文 | 不接受索引搜索的 `--preview`，不再根据终端切换布局 |
 | `zg --help`、`--version` | 纯文本帮助及版本号 | 保留纯文本；帮助内容继续反映各实现实际支持的选项 |
 
 ## 状态布局约定
@@ -54,11 +55,20 @@ Rust 的工作区状态回复没有 Node.js 服务端回复中的实时任务状
 授权展示只消费授权校验结果，不改变签名验证、作用域匹配或异常的退出行为。端点仅在展示时简写为主机及端口；保存的目标和授权范围不变。
 授权模块作为 `ZvecGrep` 操作边界的明确例外，其范围和约束见 `rust/CONTRIBUTING.md`。授权提示和状态展示共用端点主机格式化逻辑。
 
-搜索方面，Node.js 还有 query group、文件分组、命中高亮、Outline、Matched、Source 和细分的空结果说明；Rust 当前格式不能仅通过修改标题就完整对齐。应单独按结果模型和 direct/server 一致性测试推进。
+索引搜索使用 `--preview` 统一控制展示，移除 `--compact` 和内部 `human` 开关。`detail` 展示查询组、文件分组、元数据、Outline、Matched 和完整 Source；其余三档采用简洁布局。TTY 仅影响自动颜色选择。
+
+`short` 和 `full` 保留原先 compact 的单条命中排版。Rust 保留命中标题、符号摘要和缩进的 `行号: 源码`，不增加 Outline、Matched 或 Source 标题；Node.js 保留其原有的 compact 输出，两种实现的紧凑排版仍有差异。`short` 展示有界的多行片段，`full` 展示完整返回内容。
+
+四档 preview 都使用各组独立的结果，保留组内排名、命中片段、空组和查询词高亮；同一实体命中不同查询组时分别展示。compact 渲染器只负责组内排版，不使用跨组去重排序后的汇总 `items` 替代各组结果。只有显式 `--fuse` 才合并查询组。
+
+Rust 的 Outline 从索引保存的源码生成，包含有界的调用列表或直接成员摘要，不读取当前磁盘源码，也不改变检索和排序。可选元数据缺失时省略；Rust 当前没有 Node.js 的 `modifiers` 列表，不伪造该字段。公开 MCP 的 `short/full` 参数保持不变。
+
+新索引保存解析器识别出的语言，无扩展名的 Python/Node shebang 脚本也能生成摘要。旧记录缺少语言信息时按文件名回退；旧索引中的无扩展名脚本需要执行 `zg --index --rebuild` 补齐，避免从当前磁盘文件推断已存源码的语言。CLI 的 none/detail 与 MCP 共用分行、预览窗口和 UTF-16 截断逻辑，各自负责行号、标记与高亮；Rust compact 保留原有预览规则。
 
 ## 回归检查位置
 
 - Node.js 基准：`test/unit/cli-format.test.mjs` 中工作区状态、覆盖率、索引摘要和授权状态测试。
+- 搜索共享基准：`rust/compat/cli-search-presentation.json`；Node.js 格式测试验证四档输出，Rust `search_presentation.rs` 验证 `none/detail` 对齐、`short/full` 的 compact 单条格式，以及四档的分组、重复命中、空组、高亮和 TTY 一致性。
 - Rust 状态格式：`rust/crates/zg-cli/src/status.rs` 中的单元测试。
 - Rust 命令行为：`rust/crates/zg/tests/implicit_index.rs` 覆盖无索引、就绪、待更新、颜色参数、路径简写和 `--check-ready`；`server_lifecycle.rs` 覆盖服务端状态入口。
 - Rust 索引与授权命令：`rust/crates/zg/tests/index_progress.rs`、`auth.rs`。

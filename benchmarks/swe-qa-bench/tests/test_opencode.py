@@ -70,7 +70,9 @@ class ResilientOpenCodeTests(unittest.IsolatedAsyncioTestCase):
         ) as sleep:
             await agent.install(object())
 
-        self.assertEqual(len(agent.root_commands), 1)
+        self.assertEqual(len(agent.root_commands), 2)
+        self.assertEqual(agent.root_commands[0], "apt-get update && apt-get install -y curl")
+        self.assertIn("/usr/local/bin/rg", agent.root_commands[1])
         self.assertEqual(len(agent.agent_commands), 3)
         self.assertEqual(sleep.await_count, 2)
         command = agent.agent_commands[0]
@@ -97,6 +99,7 @@ class ResilientOpenCodeTests(unittest.IsolatedAsyncioTestCase):
                 agent = ResilientOpenCode(logs_dir=Path(temp), collect_session_usage=True)
                 context = AgentContext()
                 with (
+                    patch.object(agent, "_verify_ripgrep", new=AsyncMock()),
                     patch.object(OpenCode, "run", new=AsyncMock(side_effect=error)),
                     patch.object(agent, "exec_as_agent", new=AsyncMock()) as export,
                 ):
@@ -116,6 +119,7 @@ class ResilientOpenCodeTests(unittest.IsolatedAsyncioTestCase):
             agent = ResilientOpenCode(logs_dir=Path(temp), collect_session_usage=True)
             context = AgentContext()
             with (
+                patch.object(agent, "_verify_ripgrep", new=AsyncMock()),
                 patch.object(OpenCode, "run", new=AsyncMock(side_effect=ValueError("original"))),
                 patch.object(agent, "exec_as_agent", new=AsyncMock(side_effect=TimeoutError())),
                 self.assertRaisesRegex(ValueError, "original"),

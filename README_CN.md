@@ -39,6 +39,9 @@
 本 README 和[使用文档](./docs/README.md)以 TypeScript / Node.js 实现为主。
 Rust 实现位于独立的 [`rust/`](./rust/README.md) 目录。
 
+**安装**：`npm install -g @zvec/zvec-grep`，或通过 Homebrew（macOS/Linux）：
+`brew install zvec-grep`
+
 <a id="tour"></a>
 
 ## 🎬 功能演示
@@ -142,7 +145,7 @@ left with the key (sherlock-holmes.txt:5464-5470, 5527-5528).
 不通过 Agent，直接搜索同一个书架：
 
 ```bash
-zg query --human "An unseen creature left a few marks. What did the detective infer?" --limit 3
+zg --preview detail "An unseen creature left a few marks. What did the detective infer?" --limit 3
 ```
 
 zg 会将 `sherlock-holmes.txt` 中的相关段落排在

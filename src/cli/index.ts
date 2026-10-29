@@ -22,9 +22,6 @@ async function main(): Promise<void> {
 
     const parsed = parseArgs(args);
     installStdoutErrorHandler(parsed);
-    if (parsed.command === "query" && parsed.options.human === undefined) {
-      parsed.options.human = process.stdout.isTTY === true;
-    }
     debug = parsed.options.debug === true;
 
     if (parsed.command === "version") {

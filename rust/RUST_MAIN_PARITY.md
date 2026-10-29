@@ -169,7 +169,7 @@ Relevant code: [CLI parser](crates/zg-cli/src/lib.rs),
 [MCP transport](crates/zg-transport-mcp/src/lib.rs).
 
 - [ ] Make search the default CLI action and support main's flag-based actions, including `--index`, `--status`, `--install`, and `--server`.
-- [ ] Match handling and warnings for legacy command-shaped search inputs, `--` literal input, default human-readable output, and `--compact`.
+- [x] Match handling and warnings for legacy command-shaped search inputs and `--` literal input. Search presentation uses `--preview none|short|full|detail`, defaulting to `short` independently of stdout; `--compact` and `--human` are removed.
 - [ ] Implement first-search local index creation and main's local-model selection behavior, preserving remote authorization checks and `indexPolicy=disabled` in direct and server modes.
 - [ ] Update generated install commands, help, errors, and examples with the CLI interface.
 - [ ] Remove `apiKey` and `device` from public MCP search schemas and strip caller-supplied values as main does; retain appropriate administrator/CLI overrides.

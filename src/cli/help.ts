@@ -138,8 +138,7 @@ Search routes:
 
 Result options:
   --limit <n>                       Maximum results per group (default: 7)
-  --compact                         Force compact output intended for pipes
-  --preview <none|short|full>       Indexed preview size (default: terminal=full, pipe=none)
+  --preview <none|short|full|detail> Indexed output detail (default: short)
   --debug                           Print diagnostics to stderr
   --trace                           Include per-hit indexed search trace
   --refresh <background|wait|off>   Refresh policy (defaults: server=background, direct=off)
@@ -179,7 +178,9 @@ ${formatEnvironmentVariables([
 ])}
 
 If no index exists, zg creates one with a local embedding model before searching.
-Terminal output is human-readable by default; redirected output is compact.
+Terminal, redirected, and piped output all default to --preview short.
+Use none for a single source line, full for all returned content, or detail for
+full content with detailed metadata and file grouping. TTY affects only color.
 
 See zg --help environment for precedence and Server-mode scope.`;
     case "index":

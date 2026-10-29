@@ -23,7 +23,10 @@ pub(crate) async fn index_setup(options: IndexSetupOptions) -> Result<IndexSetup
             "Unsupported default embedding model; run zg --help models",
         ));
     }
-    let cache = config::model_cache(&config, options.model_cache, None);
+    let cache = config::model_cache(&config, options.model_cache, None)
+        .map(std::path::absolute)
+        .transpose()
+        .map_err(|error| EngineError::from_io("failed to resolve model cache directory", &error))?;
     let mut models = Vec::new();
     for entry in list_embedding_models() {
         let reference = entry.reference();

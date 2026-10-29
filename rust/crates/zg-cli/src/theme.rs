@@ -86,18 +86,11 @@ fn relative_to_home(path: &Path, home: &Path) -> Option<PathBuf> {
     if let Ok(relative) = output_path(path).strip_prefix(output_path(home)) {
         return Some(relative.to_path_buf());
     }
-    // Windows can report the same directory as C:\... and \\?\C:\...,
-    // or with short (8.3) names. Compare existing paths in the same form.
-    #[cfg(windows)]
-    {
-        let path = path.canonicalize().ok()?;
-        let home = home.canonicalize().ok()?;
-        path.strip_prefix(home).ok().map(Path::to_path_buf)
-    }
-    #[cfg(not(windows))]
-    {
-        None
-    }
+    // Existing paths can use filesystem aliases, such as /var and /private/var
+    // on macOS or ordinary, verbatim, and short (8.3) names on Windows.
+    let path = path.canonicalize().ok()?;
+    let home = home.canonicalize().ok()?;
+    path.strip_prefix(home).ok().map(Path::to_path_buf)
 }
 
 pub(crate) fn storage_path(path: &Path, root: &Path) -> String {
@@ -142,8 +135,8 @@ mod tests {
         );
         let root = home.join("repo");
         assert_eq!(
-            storage_path(&root.join(".zvec-grep/storage"), &root),
-            Path::new(".zvec-grep/storage").display().to_string()
+            storage_path(&root.join(".zvec-grep/index"), &root),
+            Path::new(".zvec-grep/index").display().to_string()
         );
         assert_eq!(
             storage_path(Path::new("/elsewhere/storage"), &root),
@@ -177,6 +170,31 @@ mod tests {
         assert_eq!(format_count(999), "999");
         assert_eq!(format_count(1234), "1,234");
         assert_eq!(format_count(u64::MAX), "18,446,744,073,709,551,615");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn home_display_accepts_symlink_aliases_in_both_directions() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let home = temporary.path().join("home");
+        let alias = temporary.path().join("home-alias");
+        let unrelated = temporary.path().join("home-unrelated");
+        std::fs::create_dir_all(home.join("repo")).expect("home and nested directory");
+        std::fs::create_dir(&unrelated).expect("unrelated directory");
+        std::os::unix::fs::symlink(&home, &alias).expect("home alias");
+        let canonical = home.canonicalize().expect("canonical home");
+
+        for (path, home) in [(&canonical, &alias), (&alias, &canonical)] {
+            assert_eq!(display_path_with_home(path, Some(home)), "~");
+            assert_eq!(
+                display_path_with_home(&path.join("repo"), Some(home)),
+                "~/repo"
+            );
+            assert_eq!(
+                display_path_with_home(&unrelated, Some(home)),
+                unrelated.display().to_string()
+            );
+        }
     }
 
     #[cfg(windows)]

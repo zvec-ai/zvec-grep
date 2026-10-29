@@ -1,218 +1,95 @@
-use crate::domain::model::ModelConfig;
-#[cfg(test)]
-use crate::domain::model::{Device, EmbeddingMetric};
+use serde::Deserialize;
+use std::{fs, path::Path};
+
 use crate::{
     EngineError,
-    domain::{
-        ContentKind, IndexDescriptor, IndexState, ScanRules, Workspace, model::EmbeddingModelInfo,
-    },
-    utils::{atomic_write, sync_directory},
-};
-use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::{Path, PathBuf},
+    domain::{IndexState, ScanRules, SourceRoot, Workspace, WorkspaceLayout},
+    utils::{atomic_write, directory_exists, ensure_directory, reject_symlink, sync_directory},
 };
 
-pub(crate) const WORKSPACE_MANIFEST_FILE: &str = "manifest.json";
-
-/// Disk metadata owns layout/versioning; domain workspace owns its logical state.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(try_from = "ManifestData", into = "ManifestData")]
-pub(crate) struct WorkspaceManifest {
-    pub workspace: Workspace,
-    pub path: PathBuf,
-    pub index_version: Option<u32>,
-    pub storage_generation: Option<String>,
-    pub embedding_runtimes: BTreeMap<String, ModelConfig>,
-}
-
-// Serialized policy is a disk concern; domain enabled state always has a descriptor.
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum IndexPolicy {
-    Uninitialized,
-    Enabled,
-    Disabled,
-}
-
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ManifestData {
-    // Accept the obsolete field without retaining or writing a workspace name.
-    #[serde(default, rename = "name", skip_serializing)]
-    _legacy_name: serde::de::IgnoredAny,
-    path: PathBuf,
-    root: PathBuf,
-    #[serde(default)]
+struct ManifestFields {
+    source_root: SourceRoot,
     scan: ScanRules,
-    index_policy: IndexPolicy,
-    #[serde(default)]
-    default_embedding_model: Option<EmbeddingModelInfo>,
-    #[serde(default)]
-    embedding_routes: BTreeMap<ContentKind, EmbeddingModelInfo>,
     index_version: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     storage_generation: Option<String>,
     created_time: u64,
     updated_time: u64,
-    #[serde(default)]
-    embedding_runtimes: BTreeMap<String, ModelConfig>,
+    index: IndexState,
 }
 
-impl TryFrom<ManifestData> for WorkspaceManifest {
-    type Error = String;
-    fn try_from(input: ManifestData) -> Result<Self, Self::Error> {
-        let index = match input.index_policy {
-            IndexPolicy::Disabled => IndexState::Disabled,
-            IndexPolicy::Uninitialized => IndexState::Uninitialized,
-            IndexPolicy::Enabled => IndexState::Enabled(Box::new(
-                IndexDescriptor::new(
-                    input.default_embedding_model.ok_or_else(|| {
-                        "enabled workspace requires defaultEmbeddingModel".to_owned()
-                    })?,
-                    input.embedding_routes,
-                    crate::domain::FTS_CONFIG,
-                )
-                .map_err(|error| error.to_string())?,
-            )),
-        };
-        let manifest = Self {
-            workspace: Workspace {
-                root: input.root,
-                scan: input.scan,
-                index,
-                created_epoch_ms: input.created_time,
-                updated_epoch_ms: input.updated_time,
-            },
-            path: input.path,
-            index_version: input.index_version,
-            storage_generation: input.storage_generation,
-            embedding_runtimes: input.embedding_runtimes,
-        };
-        manifest
-            .validate_published()
-            .map_err(|error| error.to_string())?;
-        Ok(manifest)
-    }
-}
-
-impl From<WorkspaceManifest> for ManifestData {
-    fn from(manifest: WorkspaceManifest) -> Self {
-        let workspace = manifest.workspace;
-        Self {
-            _legacy_name: serde::de::IgnoredAny,
-            path: manifest.path,
-            root: workspace.root,
-            scan: workspace.scan,
-            index_policy: match &workspace.index {
-                IndexState::Uninitialized => IndexPolicy::Uninitialized,
-                IndexState::Disabled => IndexPolicy::Disabled,
-                IndexState::Enabled(_) => IndexPolicy::Enabled,
-            },
-            default_embedding_model: workspace
-                .index
-                .descriptor()
-                .map(|index| index.default_embedding_model().clone()),
-            embedding_routes: workspace
-                .index
-                .descriptor()
-                .map_or_else(BTreeMap::new, |index| index.embedding_routes().clone()),
-            index_version: manifest.index_version,
-            storage_generation: manifest.storage_generation,
-            created_time: workspace.created_epoch_ms,
-            updated_time: workspace.updated_epoch_ms,
-            embedding_runtimes: manifest.embedding_runtimes,
-        }
-    }
-}
-
-impl WorkspaceManifest {
-    pub(crate) fn new(
-        workspace: Workspace,
-        home: PathBuf,
-        index_version: Option<u32>,
-        embedding_runtimes: BTreeMap<String, ModelConfig>,
-    ) -> Result<Self, EngineError> {
-        let manifest = Self {
-            path: home,
-            workspace,
-            index_version,
-            storage_generation: None,
-            embedding_runtimes,
-        };
-        manifest.validate()?;
-        Ok(manifest)
-    }
-
-    pub(crate) fn storage_home(&self) -> PathBuf {
-        self.storage_generation.as_ref().map_or_else(
-            || self.path.clone(),
-            |generation| self.path.join("generations").join(generation),
+impl ManifestFields {
+    fn into_workspace(
+        mut self,
+        source_root: &Path,
+        layout: &WorkspaceLayout,
+    ) -> Result<Workspace, EngineError> {
+        self.source_root.set_current_path(source_root)?;
+        Workspace::from_manifest(
+            self.source_root,
+            layout.clone(),
+            self.scan,
+            self.index_version,
+            self.storage_generation,
+            self.created_time,
+            self.updated_time,
+            self.index,
         )
     }
+}
 
-    pub(crate) fn embedding(&self) -> Option<&EmbeddingModelInfo> {
-        self.workspace
-            .index
-            .descriptor()
-            .map(IndexDescriptor::default_embedding_model)
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManifestHeader {
+    source_root: Option<serde_json::Value>,
+    index_version: Option<serde_json::Value>,
+    storage_generation: Option<serde_json::Value>,
+    index: Option<serde_json::Value>,
+}
+
+impl ManifestHeader {
+    fn validate_source_root(
+        &self,
+        source_root: &Path,
+        layout: &WorkspaceLayout,
+    ) -> Result<(), EngineError> {
+        let mut source: SourceRoot =
+            serde_json::from_value(self.source_root.clone().unwrap_or(serde_json::Value::Null))
+                .map_err(|error| {
+                    rebuild_required(format!(
+                        "invalid workspace manifest '{}': {error}",
+                        layout.manifest_path().display(),
+                    ))
+                })?;
+        source.set_current_path(source_root)
     }
 
-    pub(crate) fn embeddings(&self) -> Vec<&EmbeddingModelInfo> {
-        self.workspace
-            .index
-            .descriptor()
-            .map_or_else(Vec::new, IndexDescriptor::embeddings)
+    fn version(&self) -> Option<u32> {
+        self.index_version
+            .as_ref()
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|version| u32::try_from(version).ok())
     }
 
-    pub(crate) fn record_update(&mut self, updated_epoch_ms: u64) {
-        self.workspace.updated_epoch_ms = updated_epoch_ms;
-    }
-
-    /// Persisted enabled indexes always select a generation; drafts may omit it.
-    fn validate_published(&self) -> Result<(), EngineError> {
-        self.validate()?;
-        if self.workspace.index_enabled() && self.storage_generation.is_none() {
-            return Err(invalid_manifest(
-                "enabled workspace requires storageGeneration",
-            ));
-        }
-        Ok(())
-    }
-
-    pub(crate) fn validate(&self) -> Result<(), EngineError> {
-        if self.workspace.index_enabled() {
-            require_current_index_version(self.index_version)?;
-        } else if self.index_version.is_some() || self.storage_generation.is_some() {
-            return Err(invalid_manifest(
-                "an unbuilt workspace cannot select an index version or storage generation",
-            ));
-        }
-        if let Some(generation) = &self.storage_generation
-            && uuid::Uuid::parse_str(generation).is_err()
-        {
-            return Err(invalid_manifest("storageGeneration must be a UUID"));
-        }
-        if !self.path.is_absolute() {
-            return Err(invalid_manifest("path must be an absolute workspace home"));
-        }
-        self.workspace
-            .validate()
-            .map_err(|error| invalid_manifest(error.message()))
+    fn compatibility_error(&self) -> Option<String> {
+        let unbuilt = self.index_version.is_none()
+            && self.storage_generation.is_none()
+            && matches!(
+                self.index
+                    .as_ref()
+                    .and_then(|index| index["state"].as_str()),
+                Some("disabled" | "uninitialized")
+            );
+        (!unbuilt && self.version() != Some(super::CURRENT_INDEX_VERSION))
+            .then(|| version_mismatch(self.version()))
     }
 }
 
-pub(crate) fn workspace_manifest_path(home: &Path) -> PathBuf {
-    home.join(WORKSPACE_MANIFEST_FILE)
-}
-
-/// Inspect the format header without asking a current-format decoder to read an old index.
 #[derive(Debug)]
 pub(crate) enum ManifestState {
     Missing,
-    Current(Box<WorkspaceManifest>),
+    Current(Box<Workspace>),
     RebuildRequired {
         actual_version: Option<u32>,
         reason: String,
@@ -220,12 +97,8 @@ pub(crate) enum ManifestState {
 }
 
 impl ManifestState {
-    /// Explicit rebuild uses current configuration only when it is readable.
-    /// Incompatible data is never decoded or migrated to recover old settings.
-    pub(crate) fn into_manifest(
-        self,
-        rebuild: bool,
-    ) -> Result<Option<WorkspaceManifest>, EngineError> {
+    /// Explicit rebuild uses readable settings without migrating incompatible data.
+    pub(crate) fn into_workspace(self, rebuild: bool) -> Result<Option<Workspace>, EngineError> {
         match self {
             Self::Missing => Ok(None),
             Self::Current(manifest) => Ok(Some(*manifest)),
@@ -256,109 +129,147 @@ fn rebuild_required(reason: impl std::fmt::Display) -> EngineError {
     ))
 }
 
-pub(crate) fn inspect_workspace_manifest(home: &Path) -> Result<ManifestState, EngineError> {
-    let path = workspace_manifest_path(home);
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(ManifestState::Missing);
+pub(crate) fn inspect_workspace_manifest(
+    source_root: &Path,
+    layout: &WorkspaceLayout,
+) -> Result<ManifestState, EngineError> {
+    let Some(bytes) = read_manifest_bytes(layout)? else {
+        if directory_exists(layout.index_dir())? && !layout.has_build_record()? {
+            return Ok(ManifestState::RebuildRequired {
+                actual_version: None,
+                reason: format!(
+                    "workspace index '{}' has no manifest",
+                    layout.index_dir().display(),
+                ),
+            });
         }
-        Err(error) => return Err(manifest_io("read", &path, &error)),
+        return Ok(ManifestState::Missing);
     };
-    let value: serde_json::Value = match serde_json::from_slice(&bytes) {
-        Ok(value) => value,
+    let header: ManifestHeader = match serde_json::from_slice(&bytes) {
+        Ok(header) => header,
         Err(error) => {
             return Ok(ManifestState::RebuildRequired {
                 actual_version: None,
-                reason: format!("invalid workspace manifest: {error}"),
+                reason: format!(
+                    "invalid workspace manifest '{}': {error}",
+                    layout.manifest_path().display()
+                ),
             });
         }
     };
-    let version = value
-        .get("indexVersion")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|version| u32::try_from(version).ok());
-    // Only an explicitly unbuilt workspace may omit the version. An enabled index
-    // with a missing version must never be silently replaced by ordinary indexing.
-    let unbuilt = value
-        .get("indexVersion")
-        .is_none_or(serde_json::Value::is_null)
-        && matches!(
-            value.get("indexPolicy").and_then(serde_json::Value::as_str),
-            Some("disabled" | "uninitialized")
-        )
-        && value
-            .get("storageGeneration")
-            .is_none_or(serde_json::Value::is_null);
-    if !unbuilt && version != Some(super::CURRENT_INDEX_VERSION) {
+    let version = header.version();
+    if let Some(reason) = header.compatibility_error() {
         return Ok(ManifestState::RebuildRequired {
             actual_version: version,
-            reason: version_mismatch(version),
+            reason: format!(
+                "workspace manifest '{}': {reason}",
+                layout.manifest_path().display()
+            ),
         });
     }
-    let mut manifest: WorkspaceManifest = match serde_json::from_value(value) {
-        Ok(manifest) => manifest,
+    let fields: ManifestFields = match serde_json::from_slice(&bytes) {
+        Ok(fields) => fields,
         Err(error) => {
             return Ok(ManifestState::RebuildRequired {
                 actual_version: version,
-                reason: format!("invalid workspace manifest: {error}"),
+                reason: format!(
+                    "invalid workspace manifest '{}': {error}",
+                    layout.manifest_path().display()
+                ),
             });
         }
     };
-    // The directory containing the manifest defines the workspace location.
-    // Persisted absolute paths may refer to where the workspace lived before a move.
-    manifest.path = std::path::absolute(home)
-        .map_err(|error| manifest_io("resolve directory for", home, &error))?;
-    manifest.workspace.root = manifest
-        .path
-        .parent()
-        .ok_or_else(|| invalid_manifest("workspace home has no parent directory"))?
-        .to_path_buf();
-    Ok(ManifestState::Current(Box::new(manifest)))
+    let workspace = match fields.into_workspace(source_root, layout) {
+        Ok(workspace) => workspace,
+        Err(error) if error.code() != EngineError::INVALID_ARGUMENT => return Err(error),
+        Err(error) => {
+            return Ok(ManifestState::RebuildRequired {
+                actual_version: version,
+                reason: format!(
+                    "invalid workspace manifest '{}': {error}",
+                    layout.manifest_path().display()
+                ),
+            });
+        }
+    };
+    Ok(ManifestState::Current(Box::new(workspace)))
 }
 
-pub(crate) fn read_workspace_manifest(
-    home: &Path,
-) -> Result<Option<WorkspaceManifest>, EngineError> {
-    inspect_workspace_manifest(home)?.into_manifest(false)
-}
-
-pub(crate) fn write_workspace_manifest(
-    home: &Path,
-    manifest: &WorkspaceManifest,
+pub(super) fn require_compatible_manifest(
+    source_root: &Path,
+    layout: &WorkspaceLayout,
 ) -> Result<(), EngineError> {
-    manifest.validate_published()?;
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    if let Err(error) = builder.create(home)
-        && !(error.kind() == std::io::ErrorKind::AlreadyExists && home.is_dir())
-    {
-        return Err(manifest_io("create directory for", home, &error));
-    }
-    let path = workspace_manifest_path(home);
-    let mut bytes = serde_json::to_vec_pretty(manifest).map_err(|error| {
-        EngineError::internal(format!("failed to encode workspace manifest: {error}"))
-    })?;
-    bytes.push(b'\n');
-    atomic_write(&path, &bytes)?;
-    if home.file_name().is_some() {
-        sync_directory(home.parent().unwrap_or(home))?;
+    if let Some(bytes) = read_manifest_bytes(layout)? {
+        let header: ManifestHeader = match serde_json::from_slice(&bytes) {
+            Ok(header) => header,
+            Err(error) => {
+                return Err(rebuild_required(format!(
+                    "invalid workspace manifest '{}': {error}",
+                    layout.manifest_path().display()
+                )));
+            }
+        };
+        if let Some(reason) = header.compatibility_error() {
+            return Err(rebuild_required(format!(
+                "workspace manifest '{}': {reason}",
+                layout.manifest_path().display()
+            )));
+        }
+        header.validate_source_root(source_root, layout)?;
     }
     Ok(())
 }
 
-pub(crate) fn delete_workspace_manifest(home: &Path) -> Result<(), EngineError> {
-    let path = workspace_manifest_path(home);
-    match fs::remove_file(&path) {
-        Ok(()) => sync_directory(home),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(manifest_io("delete", &path, &error)),
+fn read_manifest_bytes(layout: &WorkspaceLayout) -> Result<Option<Vec<u8>>, EngineError> {
+    let path = layout.manifest_path();
+    reject_symlink(path)?;
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(manifest_io("read", path, &error)),
     }
+}
+
+pub(crate) fn read_workspace_manifest(
+    source_root: &Path,
+    layout: &WorkspaceLayout,
+) -> Result<Option<Workspace>, EngineError> {
+    inspect_workspace_manifest(source_root, layout)?.into_workspace(false)
+}
+
+pub(crate) fn write_workspace_manifest(
+    path: &Path,
+    manifest: &Workspace,
+) -> Result<(), EngineError> {
+    if manifest.index_enabled() {
+        require_current_index_version(manifest.index_version())?;
+    }
+    let parent_dir = manifest_home(path)?;
+    ensure_directory(parent_dir)?;
+    let mut bytes = serde_json::to_vec_pretty(manifest).map_err(|error| {
+        EngineError::internal(format!("failed to encode workspace manifest: {error}"))
+    })?;
+    bytes.push(b'\n');
+    atomic_write(path, &bytes)?;
+    if parent_dir.file_name().is_some() {
+        sync_directory(parent_dir.parent().unwrap_or(parent_dir))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn delete_workspace_manifest(layout: &WorkspaceLayout) -> Result<(), EngineError> {
+    let path = layout.manifest_path();
+    reject_symlink(path)?;
+    match fs::remove_file(path) {
+        Ok(()) => sync_directory(layout.storage_dir()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(manifest_io("delete", path, &error)),
+    }
+}
+
+fn manifest_home(path: &Path) -> Result<&Path, EngineError> {
+    path.parent()
+        .ok_or_else(|| invalid_manifest("manifest path must have a parent directory"))
 }
 
 #[track_caller]
@@ -380,148 +291,331 @@ fn manifest_io(operation: &str, path: &Path, error: &std::io::Error) -> EngineEr
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
+    use zg_host_native::PathPolicy;
 
     use super::*;
+    use crate::domain::model::{EmbeddingMetric, EmbeddingModelInfo, ModelConfig};
+    use crate::domain::{ContentKind, IndexDescriptor};
+    use std::collections::BTreeMap;
 
-    fn fixture_manifest(home: &Path) -> WorkspaceManifest {
-        let mut manifest = WorkspaceManifest::new(
-            Workspace {
-                root: home.parent().expect("workspace root").to_path_buf(),
-                scan: crate::api::index::options::ScanRulesUpdate {
-                    included_formats: Some(vec![crate::domain::FileFormat::Rust]),
-                    excluded_formats: Some(vec![crate::domain::FileFormat::Cpp]),
-                    globs: Some(vec!["*.rs".into()]),
-                    ..crate::api::index::options::ScanRulesUpdate::default()
-                }
-                .apply(&ScanRules::default())
-                .expect("scan rules"),
-                index: IndexState::Enabled(Box::new(
-                    IndexDescriptor::new(
-                        EmbeddingModelInfo::new(
-                            crate::domain::model::ModelInfo::new(
-                                "local",
-                                "minilm",
-                                [
-                                    crate::domain::ContentKind::Text,
-                                    crate::domain::ContentKind::Code,
-                                    crate::domain::ContentKind::Image,
-                                ],
-                                32,
-                            )
-                            .expect("valid model metadata"),
-                            384,
-                            EmbeddingMetric::Cosine,
-                            Some(8192),
-                            Some(1_048_576),
-                        )
-                        .expect("valid embedding metadata"),
-                        std::collections::BTreeMap::new(),
-                        crate::domain::FTS_CONFIG,
-                    )
-                    .expect("index descriptor"),
-                )),
-                created_epoch_ms: 10,
-                updated_epoch_ms: 20,
-            },
-            home.to_path_buf(),
+    fn decode_manifest(
+        value: &serde_json::Value,
+        layout: &WorkspaceLayout,
+    ) -> Result<Workspace, String> {
+        let bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+        let fields: ManifestFields =
+            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        fields
+            .into_workspace(layout.storage_dir().parent().expect("source root"), layout)
+            .map_err(|error| error.to_string())
+    }
+
+    fn fixture_manifest(layout: &WorkspaceLayout) -> Workspace {
+        Workspace::new(
+            layout.storage_dir().parent().expect("source root"),
+            layout.clone(),
+            crate::api::index::options::ScanRulesUpdate {
+                included_formats: Some(vec![crate::domain::FileFormat::Rust]),
+                excluded_formats: Some(vec![crate::domain::FileFormat::Cpp]),
+                globs: Some(vec!["*.rs".into()]),
+                ..crate::api::index::options::ScanRulesUpdate::default()
+            }
+            .apply(&ScanRules::default())
+            .expect("scan rules"),
             Some(crate::workspace::CURRENT_INDEX_VERSION),
-            BTreeMap::from([(
-                "local/minilm".into(),
-                ModelConfig {
-                    device: Some(Device::Cpu),
-                    cache_dir: Some(home.join("models")),
-                    ..ModelConfig::default()
-                },
-            )]),
+            Some(uuid::Uuid::new_v4().to_string()),
+            10,
+            20,
+            IndexState::Enabled(Box::new(
+                IndexDescriptor::new(
+                    EmbeddingModelInfo::new(
+                        crate::domain::model::ModelInfo::new(
+                            "local",
+                            "minilm",
+                            [
+                                crate::domain::ContentKind::Text,
+                                crate::domain::ContentKind::Code,
+                                crate::domain::ContentKind::Image,
+                            ],
+                            32,
+                        )
+                        .expect("valid model metadata"),
+                        384,
+                        EmbeddingMetric::Cosine,
+                        Some(8192),
+                        Some(1_048_576),
+                    )
+                    .expect("valid embedding metadata"),
+                    std::collections::BTreeMap::new(),
+                    BTreeMap::from([("local/minilm".into(), ModelConfig::default())]),
+                    crate::domain::FTS_CONFIG,
+                )
+                .expect("index descriptor"),
+            )),
         )
-        .expect("fixture manifest");
-        manifest.storage_generation = Some(uuid::Uuid::new_v4().to_string());
-        manifest
+        .expect("fixture manifest")
     }
 
     #[test]
-    fn enabled_manifests_require_a_generation_at_persistence_boundaries() {
+    fn saved_model_configs_belong_to_the_index_without_changing_compatibility() {
         let directory = tempdir().expect("workspace");
-        let home = directory.path().join(".zvec-grep");
-        let mut draft = fixture_manifest(&home);
-        draft.storage_generation = None;
-        draft
-            .validate()
-            .expect("draft may await generation allocation");
-        let error = write_workspace_manifest(&home, &draft)
-            .expect_err("draft must not be published without a generation");
-        assert!(error.message().contains("storageGeneration"));
-        assert!(!workspace_manifest_path(&home).exists());
-        let value = serde_json::to_value(&draft).expect("draft JSON");
-        assert!(value.get("storageGeneration").is_none());
-        for null_generation in [false, true] {
-            let mut missing_generation = value.clone();
-            if null_generation {
-                missing_generation["storageGeneration"] = serde_json::Value::Null;
-            }
-            let error = serde_json::from_value::<WorkspaceManifest>(missing_generation.clone())
-                .expect_err("enabled manifest requires a generation");
-            assert!(error.to_string().contains("storageGeneration"));
-        }
-        fs::create_dir(&home).expect("workspace home");
-        let build = crate::workspace::build::prepare_build(draft).expect("allocate generation");
-        assert!(build.target.storage_generation.is_some());
-        assert!(build.target.storage_home().is_dir());
-        write_workspace_manifest(&home, &build.target).expect("publish allocated generation");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        let workspace = fixture_manifest(&layout);
+        fs::create_dir(layout.storage_dir()).expect("storage directory");
+        let mut value = serde_json::to_value(&workspace).expect("manifest");
+        value["index"]["descriptor"]["embeddingConfigs"]["local/minilm"]["endpoint"] =
+            serde_json::json!("https://example.test/embeddings");
+        let updated = decode_manifest(&value, &layout).expect("updated connection");
+        workspace
+            .index()
+            .descriptor()
+            .expect("index")
+            .ensure_index_compatible(updated.index().descriptor().expect("index"))
+            .expect("connection settings do not change index compatibility");
+        value["index"]["descriptor"]["embeddingConfigs"]["remote/unused"] = serde_json::json!({});
+        assert!(
+            decode_manifest(&value, &layout)
+                .expect_err("unknown model configuration")
+                .contains("not referenced by defaultEmbeddingModel or embeddingRoutes")
+        );
+        value["index"]["state"] = serde_json::json!("uninitialized");
+        value["indexVersion"] = serde_json::Value::Null;
+        value["storageGeneration"] = serde_json::Value::Null;
+        assert!(decode_manifest(&value, &layout).is_err());
+    }
+
+    #[test]
+    fn credentials_follow_the_workspace_without_exposing_plaintext() {
+        let directory = tempfile::tempdir().expect("directory");
+        let original = directory.path().join("original");
+        fs::create_dir(&original).expect("source root");
+        let original_layout = WorkspaceLayout::new(original.join(".zvec-grep")).expect("layout");
+        fs::create_dir(original_layout.storage_dir()).expect("storage directory");
+        let stored = crate::domain::model::ModelConfig {
+            api_key: Some(
+                crate::workspace::credentials::encrypt_api_key(
+                    &original_layout,
+                    "remote/model",
+                    "example-secret",
+                )
+                .expect("encrypted key"),
+            ),
+            endpoint: Some("https://example.com".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&stored).expect("JSON");
+        assert!(!json.contains("example-secret"));
+        assert!(!json.contains("device"));
+        assert!(!json.contains("cacheDir"));
+        let moved = directory.path().join("moved");
+        fs::rename(&original, &moved).expect("move");
+        let moved_layout = WorkspaceLayout::new(moved.join(".zvec-grep")).expect("layout");
         assert_eq!(
-            read_workspace_manifest(&home).expect("read manifest"),
-            Some(build.target)
+            stored
+                .api_key
+                .as_ref()
+                .map(|key| crate::workspace::credentials::decrypt_api_key(
+                    key,
+                    &moved_layout,
+                    "remote/model"
+                ))
+                .transpose()
+                .expect("decrypt"),
+            Some("example-secret".into())
+        );
+        assert!(
+            stored
+                .api_key
+                .as_ref()
+                .map(|key| crate::workspace::credentials::decrypt_api_key(
+                    key,
+                    &moved_layout,
+                    "remote/other"
+                ))
+                .transpose()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn preparing_a_replacement_does_not_rotate_the_existing_key() {
+        let directory = tempfile::tempdir().expect("directory");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        fs::create_dir(layout.storage_dir()).expect("storage directory");
+        let original = crate::domain::model::ModelConfig {
+            api_key: Some(
+                crate::workspace::credentials::encrypt_api_key(
+                    &layout,
+                    "remote/model",
+                    "old-secret",
+                )
+                .expect("encrypted key"),
+            ),
+            endpoint: None,
+            ..Default::default()
+        };
+        let key = fs::read(layout.credentials_key_path()).expect("key");
+        let replacement = crate::domain::model::ModelConfig {
+            api_key: Some(
+                crate::workspace::credentials::encrypt_api_key(
+                    &layout,
+                    "remote/model",
+                    "new-secret",
+                )
+                .expect("encrypted key"),
+            ),
+            endpoint: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            fs::read(layout.credentials_key_path()).expect("same key"),
+            key
+        );
+        assert_eq!(
+            original
+                .api_key
+                .as_ref()
+                .map(|key| crate::workspace::credentials::decrypt_api_key(
+                    key,
+                    &layout,
+                    "remote/model"
+                ))
+                .transpose()
+                .expect("old key"),
+            Some("old-secret".into())
+        );
+        assert_eq!(
+            replacement
+                .api_key
+                .as_ref()
+                .map(|key| crate::workspace::credentials::decrypt_api_key(
+                    key,
+                    &layout,
+                    "remote/model"
+                ))
+                .transpose()
+                .expect("new key"),
+            Some("new-secret".into())
+        );
+    }
+
+    #[test]
+    fn enabled_workspaces_require_a_valid_generation() {
+        let directory = tempdir().expect("workspace");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        let manifest = fixture_manifest(&layout);
+        for generation in [None, Some("invalid".to_owned())] {
+            let error = Workspace::new(
+                directory.path(),
+                layout.clone(),
+                manifest.scan().clone(),
+                manifest.index_version(),
+                generation,
+                manifest.created_epoch_ms(),
+                manifest.updated_epoch_ms(),
+                manifest.index().clone(),
+            )
+            .expect_err("enabled workspace requires a valid generation");
+            assert!(error.message().contains("storageGeneration"));
+        }
+        assert!(!layout.manifest_path().exists());
+
+        write_workspace_manifest(layout.manifest_path(), &manifest).expect("write manifest");
+        for generation in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!("invalid")),
+        ] {
+            let mut value = serde_json::to_value(&manifest).expect("manifest JSON");
+            if let Some(generation) = generation {
+                value["storageGeneration"] = generation;
+            } else {
+                value
+                    .as_object_mut()
+                    .expect("manifest object")
+                    .remove("storageGeneration");
+            }
+            fs::write(
+                layout.manifest_path(),
+                serde_json::to_vec(&value).expect("JSON"),
+            )
+            .expect("write invalid manifest");
+            let error = read_workspace_manifest(directory.path(), &layout)
+                .expect_err("enabled manifest requires a valid generation");
+            assert!(error.message().contains("storageGeneration"));
+        }
+        write_workspace_manifest(layout.manifest_path(), &manifest).expect("write valid manifest");
+        assert_eq!(
+            read_workspace_manifest(directory.path(), &layout).expect("read manifest"),
+            Some(manifest)
         );
     }
 
     #[test]
     fn manifest_requires_current_fields_without_migration_aliases() {
         let directory = tempdir().expect("workspace");
-        let manifest = fixture_manifest(&directory.path().join(".zvec-grep"));
+        let manifest = fixture_manifest(
+            &WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout"),
+        );
         let value = serde_json::to_value(&manifest).expect("manifest");
         for (field, extra) in [
             ("id", serde_json::json!(uuid::Uuid::new_v4())),
+            ("name", serde_json::json!("docs")),
             (
                 "rootPaths",
                 serde_json::json!([{"absolutePath": directory.path(), "recursive": true}]),
             ),
-            ("embedding", value["defaultEmbeddingModel"].clone()),
+            (
+                "embedding",
+                value["index"]["descriptor"]["defaultEmbeddingModel"].clone(),
+            ),
             (
                 "embeddingRuntime",
-                value["embeddingRuntimes"]["local/minilm"].clone(),
+                value["index"]["descriptor"]["embeddingConfigs"]["local/minilm"].clone(),
             ),
         ] {
             let mut unsupported = value.clone();
             unsupported[field] = extra;
-            let error = serde_json::from_value::<WorkspaceManifest>(unsupported)
+            let error = decode_manifest(&unsupported, manifest.layout())
                 .expect_err("unsupported manifest field");
-            assert!(error.to_string().contains(field));
+            assert!(error.contains(field));
         }
         let mut missing_root = value;
         missing_root
             .as_object_mut()
             .expect("manifest object")
-            .remove("root");
-        let error = serde_json::from_value::<WorkspaceManifest>(missing_root)
-            .expect_err("root is required");
-        assert!(error.to_string().contains("root"));
+            .remove("sourceRoot");
+        let error =
+            decode_manifest(&missing_root, manifest.layout()).expect_err("sourceRoot is required");
+        assert!(error.contains("sourceRoot"));
     }
 
     #[test]
     fn manifest_validates_content_routes_and_shared_model_definitions() {
         let directory = tempdir().expect("workspace");
-        let manifest = fixture_manifest(&directory.path().join(".zvec-grep"));
+        let manifest = fixture_manifest(
+            &WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout"),
+        );
+        fs::create_dir(manifest.layout().storage_dir()).expect("storage directory");
         let value = serde_json::to_value(&manifest).expect("manifest");
         let mut routed = value.clone();
-        let mut second = value["defaultEmbeddingModel"].clone();
+        let mut second = value["index"]["descriptor"]["defaultEmbeddingModel"].clone();
         second["model"]["name"] = serde_json::json!("second-model");
-        routed["embeddingRoutes"]["image"] = second;
-        let routed: WorkspaceManifest = serde_json::from_value(routed).expect("typed image route");
-        assert_eq!(routed.embeddings().len(), 2);
+        routed["index"]["descriptor"]["embeddingRoutes"]["image"] = second;
+        let routed: Workspace =
+            decode_manifest(&routed, manifest.layout()).expect("typed image route");
         assert_eq!(
             routed
-                .workspace
-                .index
+                .index()
+                .descriptor()
+                .expect("index")
+                .embeddings()
+                .len(),
+            2
+        );
+        assert_eq!(
+            routed
+                .index()
                 .descriptor()
                 .expect("index")
                 .model_for(ContentKind::Image)
@@ -532,77 +626,88 @@ mod tests {
         );
         for kind in ["code", "image"] {
             let mut unsupported = value.clone();
-            let mut embedding = value["defaultEmbeddingModel"].clone();
+            let mut embedding = value["index"]["descriptor"]["defaultEmbeddingModel"].clone();
             embedding["model"]["contentKinds"] = serde_json::json!(["text"]);
-            unsupported["embeddingRoutes"][kind] = embedding;
-            assert!(serde_json::from_value::<WorkspaceManifest>(unsupported).is_err());
+            unsupported["index"]["descriptor"]["embeddingRoutes"][kind] = embedding;
+            assert!(decode_manifest(&unsupported, manifest.layout()).is_err());
         }
         let mut conflicting = value.clone();
-        let mut embedding = value["defaultEmbeddingModel"].clone();
+        let mut embedding = value["index"]["descriptor"]["defaultEmbeddingModel"].clone();
         embedding["dimension"] = serde_json::json!(32);
-        conflicting["embeddingRoutes"]["code"] = embedding;
-        assert!(serde_json::from_value::<WorkspaceManifest>(conflicting).is_err());
+        conflicting["index"]["descriptor"]["embeddingRoutes"]["code"] = embedding;
+        assert!(decode_manifest(&conflicting, manifest.layout()).is_err());
     }
 
     #[test]
     fn enabled_manifest_requires_a_descriptor_and_does_not_persist_runtime_status() {
         let directory = tempdir().expect("workspace");
-        let manifest = fixture_manifest(&directory.path().join(".zvec-grep"));
+        let manifest = fixture_manifest(
+            &WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout"),
+        );
+        fs::create_dir(manifest.layout().storage_dir()).expect("storage directory");
         let mut json = serde_json::to_value(&manifest).expect("serialize");
-        json["defaultEmbeddingModel"] = serde_json::Value::Null;
-        assert!(serde_json::from_value::<WorkspaceManifest>(json).is_err());
+        json["index"]["descriptor"]["defaultEmbeddingModel"] = serde_json::Value::Null;
+        assert!(decode_manifest(&json, manifest.layout()).is_err());
         for index in [
             IndexState::Uninitialized,
             IndexState::Disabled,
-            manifest.workspace.index.clone(),
+            manifest.index().clone(),
         ] {
             let mut manifest = manifest.clone();
-            manifest.workspace.index = index;
-            if !manifest.workspace.index_enabled() {
-                manifest.index_version = None;
-                manifest.storage_generation = None;
+            manifest = {
+                crate::domain::Workspace::new(
+                    directory.path(),
+                    manifest.layout().clone(),
+                    manifest.scan().clone(),
+                    if matches!(index, crate::domain::IndexState::Enabled(_)) {
+                        manifest
+                            .index_version()
+                            .or(Some(crate::workspace::CURRENT_INDEX_VERSION))
+                    } else {
+                        None
+                    },
+                    if matches!(index, crate::domain::IndexState::Enabled(_)) {
+                        manifest.storage_generation().map(str::to_owned)
+                    } else {
+                        None
+                    },
+                    manifest.created_epoch_ms(),
+                    manifest.updated_epoch_ms(),
+                    index,
+                )
+                .expect("workspace")
+            };
+            if !manifest.index_enabled() {
+                manifest = crate::domain::Workspace::new(
+                    directory.path(),
+                    manifest.layout().clone(),
+                    manifest.scan().clone(),
+                    manifest.index_version(),
+                    None,
+                    manifest.created_epoch_ms(),
+                    manifest.updated_epoch_ms(),
+                    manifest.index().clone(),
+                )
+                .expect("workspace");
             }
             let json = serde_json::to_value(&manifest).expect("serialize");
             assert!(json.get("status").is_none());
             assert!(json.get("indexStatus").is_none());
             assert_eq!(
-                serde_json::from_value::<WorkspaceManifest>(json).expect("deserialize"),
+                decode_manifest(&json, manifest.layout()).expect("deserialize"),
                 manifest
             );
         }
     }
 
     #[test]
-    fn preserves_the_resolved_workspace_home() {
-        let directory = tempdir().expect("workspace");
-        let home = directory.path().join("custom-index");
-        let mut manifest = fixture_manifest(&home);
-
-        assert_eq!(manifest.path, home);
-        assert_eq!(manifest.workspace.root, directory.path());
-        let generation = uuid::Uuid::new_v4().to_string();
-        manifest.storage_generation = Some(generation.clone());
-        assert_eq!(
-            manifest.storage_home(),
-            home.join("generations").join(generation)
-        );
-
-        write_workspace_manifest(&home, &manifest).expect("persist at resolved home");
-        assert_eq!(
-            read_workspace_manifest(&home).expect("read resolved home"),
-            Some(manifest)
-        );
-        assert!(!directory.path().join(".zvec-grep").exists());
-    }
-
-    #[test]
     fn writes_and_reads_a_single_workspace_root() {
         let directory = tempdir().expect("temporary directory");
-        let home = directory.path().join(".zvec-grep");
-        let manifest = fixture_manifest(&home);
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        let manifest = fixture_manifest(&layout);
 
-        write_workspace_manifest(&home, &manifest).expect("write manifest");
-        let text = fs::read_to_string(workspace_manifest_path(&home)).expect("manifest text");
+        write_workspace_manifest(layout.manifest_path(), &manifest).expect("write manifest");
+        let text = fs::read_to_string(layout.manifest_path()).expect("manifest text");
         let json: serde_json::Value = serde_json::from_str(&text).expect("manifest json");
 
         assert!(json.get("manifestVersion").is_none());
@@ -612,112 +717,457 @@ mod tests {
         );
         assert!(json.get("id").is_none());
         assert!(json.get("rootPaths").is_none());
-        assert_eq!(json["root"], directory.path().to_string_lossy().as_ref());
+        assert!(json.get("root").is_none());
+        assert!(json.get("path").is_none());
+        assert!(json["sourceRoot"].get("relative").is_none());
+        assert!(json["sourceRoot"].get("currentPath").is_none());
+        assert_eq!(
+            json["sourceRoot"]["recordedPath"],
+            manifest.source_root().to_string_lossy().as_ref()
+        );
+        assert!(json.get("format").is_none());
+        let fields = [
+            "sourceRoot",
+            "scan",
+            "indexVersion",
+            "storageGeneration",
+            "createdTime",
+            "updatedTime",
+            "index",
+        ];
+        let positions: Vec<_> = fields
+            .iter()
+            .map(|field| text.find(&format!("\"{field}\":")).expect("manifest field"))
+            .collect();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
         assert_eq!(json["scan"]["globs"][0]["pattern"], "*.rs");
         assert_eq!(
             json["scan"]["included_formats"],
             serde_json::json!(["rust"])
         );
         assert_eq!(json["scan"]["excluded_formats"], serde_json::json!(["cpp"]));
-        assert_eq!(json["embeddingRuntimes"]["local/minilm"]["device"], "cpu");
+        assert!(
+            json["index"]["descriptor"]["embeddingConfigs"]["local/minilm"]
+                .get("device")
+                .is_none()
+        );
+        assert!(
+            json["index"]["descriptor"]["embeddingConfigs"]["local/minilm"]
+                .get("cacheDir")
+                .is_none()
+        );
         assert!(json.get("generation").is_none());
         assert_eq!(
-            json["embeddingRuntimes"]["local/minilm"]["cacheDir"],
-            home.join("models").to_string_lossy().as_ref()
-        );
-        assert_eq!(
-            read_workspace_manifest(&home).expect("read manifest"),
+            read_workspace_manifest(directory.path(), &layout).expect("read manifest"),
             Some(manifest)
-        );
-        let mut without_cache = json;
-        without_cache["embeddingRuntimes"]["local/minilm"]
-            .as_object_mut()
-            .expect("runtime object")
-            .remove("cacheDir");
-        let without_cache: WorkspaceManifest =
-            serde_json::from_value(without_cache).expect("optional runtime cache");
-        assert_eq!(
-            without_cache.embedding_runtimes["local/minilm"].cache_dir,
-            None
         );
     }
 
     #[test]
     fn removed_selection_fields_are_rejected_instead_of_widening_scan_scope() {
         let directory = tempdir().expect("workspace");
-        let manifest = fixture_manifest(&directory.path().join(".zvec-grep"));
+        let manifest = fixture_manifest(
+            &WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout"),
+        );
         let value = serde_json::to_value(&manifest).expect("manifest JSON");
         let mut split_filter = value.clone();
         split_filter["filter"] = serde_json::json!({"globs": ["*.rs"]});
-        assert!(serde_json::from_value::<WorkspaceManifest>(split_filter).is_err());
+        assert!(decode_manifest(&split_filter, manifest.layout()).is_err());
         let mut query_constraint = value;
         query_constraint["scan"]["categories"] = serde_json::json!(["code"]);
-        assert!(serde_json::from_value::<WorkspaceManifest>(query_constraint).is_err());
+        assert!(decode_manifest(&query_constraint, manifest.layout()).is_err());
     }
 
     #[test]
-    fn reading_a_moved_workspace_rebases_only_its_location() {
+    fn moving_a_workspace_preserves_the_recorded_location() {
         let directory = tempdir().expect("temporary directory");
         let original = directory.path().join("original");
         let moved = directory.path().join("moved");
         fs::create_dir(&original).expect("original workspace");
-        let mut manifest = fixture_manifest(&original.join(".zvec-grep"));
-        write_workspace_manifest(&manifest.path, &manifest).expect("original manifest");
+        let manifest =
+            fixture_manifest(&WorkspaceLayout::new(original.join(".zvec-grep")).expect("layout"));
+        write_workspace_manifest(manifest.layout().manifest_path(), &manifest).expect("manifest");
+        let saved = fs::read(manifest.layout().manifest_path()).expect("saved bytes");
         fs::rename(&original, &moved).expect("move workspace");
-        let relocated = read_workspace_manifest(&moved.join(".zvec-grep"))
-            .expect("relocated manifest read")
-            .expect("manifest");
-        manifest.workspace.root = moved.clone();
-        manifest.path = moved.join(".zvec-grep");
-        assert_eq!(relocated, manifest);
+        let relocated = read_workspace_manifest(
+            &moved,
+            &WorkspaceLayout::new(moved.join(".zvec-grep")).expect("layout"),
+        )
+        .expect("read moved workspace")
+        .expect("manifest");
+        assert_eq!(
+            relocated.source_root(),
+            moved.canonicalize().expect("moved root")
+        );
+        assert_eq!(relocated.index(), manifest.index());
+        assert_eq!(relocated.scan(), manifest.scan());
+        let json = serde_json::to_value(&relocated).expect("JSON");
+        assert_eq!(
+            json["sourceRoot"]["recordedPath"],
+            manifest.source_root().to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            fs::read(relocated.layout().manifest_path()).expect("unchanged manifest"),
+            saved
+        );
     }
 
     #[test]
-    fn legacy_names_are_ignored_and_not_persisted() {
+    fn missing_current_source_directory_returns_not_found() {
         let directory = tempdir().expect("workspace");
-        let home = directory.path().join(".zvec-grep");
-        let manifest = fixture_manifest(&home);
-        let mut json = serde_json::to_value(&manifest).expect("manifest JSON");
-        assert!(json.get("name").is_none());
-        for name in [
-            serde_json::json!("docs"),
-            serde_json::json!(""),
-            serde_json::json!({"obsolete": true}),
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        let manifest = fixture_manifest(&layout);
+        write_workspace_manifest(layout.manifest_path(), &manifest).expect("manifest");
+
+        let error = inspect_workspace_manifest(&directory.path().join("missing"), &layout)
+            .expect_err("source directory is unavailable");
+        assert_eq!(error.code(), EngineError::NOT_FOUND);
+    }
+
+    #[test]
+    fn historical_source_locations_do_not_change_the_discovered_root() {
+        let directory = tempdir().expect("workspace");
+        let other = directory.path().join("another-project");
+        fs::create_dir(&other).expect("other source root");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        let manifest = fixture_manifest(&layout);
+        write_workspace_manifest(layout.manifest_path(), &manifest).expect("manifest");
+        for source in [
+            other.to_string_lossy().into_owned(),
+            directory
+                .path()
+                .join("missing")
+                .to_string_lossy()
+                .into_owned(),
+            r"C:\source".to_owned(),
         ] {
-            json["name"] = name;
-            let restored: WorkspaceManifest =
-                serde_json::from_value(json.clone()).expect("legacy metadata");
-            assert_eq!(restored, manifest);
-            write_workspace_manifest(&home, &restored).expect("save manifest");
-            let saved: serde_json::Value = serde_json::from_slice(
-                &fs::read(workspace_manifest_path(&home)).expect("saved manifest"),
-            )
-            .expect("JSON");
-            assert!(saved.get("name").is_none());
+            let mut json = serde_json::to_value(&manifest).expect("JSON");
+            json["sourceRoot"]["recordedPath"] = serde_json::json!(source);
+            fs::write(layout.manifest_path(), json.to_string()).expect("saved location");
+            let loaded = read_workspace_manifest(directory.path(), &layout)
+                .expect("load at discovered location")
+                .expect("workspace");
+            assert_eq!(loaded.source_root(), manifest.source_root());
+            assert_eq!(
+                serde_json::to_value(loaded).expect("saved history")["sourceRoot"]["recordedPath"],
+                source
+            );
+            require_compatible_manifest(directory.path(), &layout)
+                .expect("historical location does not prevent recovery");
         }
+    }
+
+    #[test]
+    fn obsolete_relative_source_locations_require_rebuild() {
+        let directory = tempdir().expect("workspace");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        let manifest = fixture_manifest(&layout);
+        write_workspace_manifest(layout.manifest_path(), &manifest).expect("manifest");
+        let mut json = serde_json::to_value(&manifest).expect("JSON");
+        json["sourceRoot"]["relative"] = serde_json::json!("..");
+        fs::write(layout.manifest_path(), json.to_string()).expect("old development format");
+
+        let error =
+            read_workspace_manifest(directory.path(), &layout).expect_err("rebuild required");
+        assert!(error.message().contains("relative"));
+        assert!(error.message().contains("zg --index --rebuild"));
+        assert!(
+            inspect_workspace_manifest(directory.path(), &layout)
+                .expect("inspect")
+                .into_workspace(true)
+                .expect("rebuild can replace obsolete metadata")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn duplicate_manifest_and_scan_fields_are_rejected() {
+        let directory = tempdir().expect("workspace");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        let manifest = fixture_manifest(&layout);
+        let json = serde_json::to_string(&manifest).expect("JSON");
+        for duplicate in [
+            json.replacen("\"scan\":", "\"scan\":{},\"scan\":", 1),
+            json.replacen(
+                "\"include_hidden\":false",
+                "\"include_hidden\":true,\"include_hidden\":false",
+                1,
+            ),
+        ] {
+            let error = serde_json::from_slice::<ManifestFields>(duplicate.as_bytes())
+                .err()
+                .expect("duplicate field");
+            assert!(error.to_string().contains("duplicate field"));
+        }
+    }
+
+    #[test]
+    fn internal_ignore_paths_move_with_the_source() {
+        let directory = tempdir().expect("directory");
+        let original = directory.path().join("original");
+        fs::create_dir_all(original.join("config")).expect("source");
+        fs::write(original.join("config/ignore"), "*.log\n").expect("ignore");
+        let mut manifest =
+            fixture_manifest(&WorkspaceLayout::new(original.join(".zvec-grep")).expect("layout"));
+        let mut update = crate::api::index::options::ScanRulesUpdate {
+            ignore_files: Some(vec![original.join("config/ignore")]),
+            ..Default::default()
+        };
+        update
+            .normalize_ignore_paths(manifest.source_root())
+            .expect("normalize requested paths");
+        manifest = crate::domain::Workspace::new(
+            &original,
+            manifest.layout().clone(),
+            update.apply(manifest.scan()).expect("scan"),
+            manifest.index_version(),
+            manifest.storage_generation().map(str::to_owned),
+            manifest.created_epoch_ms(),
+            manifest.updated_epoch_ms(),
+            manifest.index().clone(),
+        )
+        .expect("workspace");
+        write_workspace_manifest(manifest.layout().manifest_path(), &manifest).expect("write");
+        let json = serde_json::to_value(&manifest).expect("JSON");
+        assert_eq!(json["scan"]["ignore_files"][0]["location"], "workspace");
+        assert_eq!(
+            json["sourceRoot"]["recordedPath"],
+            manifest.source_root().to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            json["scan"]["ignore_files"][0]["path"]["components"],
+            serde_json::json!(["config", "ignore"])
+        );
+        let moved = directory.path().join("moved");
+        fs::rename(&original, &moved).expect("move");
+        let loaded = read_workspace_manifest(
+            &moved,
+            &WorkspaceLayout::new(moved.join(".zvec-grep")).expect("layout"),
+        )
+        .expect("read")
+        .expect("manifest");
+        let ignore_files = loaded.scan().ignore_files().collect::<Vec<_>>();
+        assert_eq!(ignore_files, vec![Path::new("config/ignore")]);
+        assert!(loaded.source_root().join(ignore_files[0]).is_file());
+        assert_eq!(
+            loaded.scan().included_formats(),
+            manifest.scan().included_formats()
+        );
+        assert_eq!(
+            loaded.scan().excluded_formats(),
+            manifest.scan().excluded_formats()
+        );
+    }
+
+    #[test]
+    fn missing_external_ignore_files_remain_saved_and_apply_when_restored() {
+        let directory = tempdir().expect("directory");
+        let root = directory.path().join("source");
+        fs::create_dir(&root).expect("source");
+        let external = directory.path().join("external.ignore");
+        fs::write(&external, "blocked.rs\n").expect("external ignore");
+        let manifest =
+            fixture_manifest(&WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout"));
+        let scan = crate::api::index::options::ScanRulesUpdate {
+            globs: Some(Vec::new()),
+            ignore_files: Some(vec![external.clone()]),
+            ..Default::default()
+        }
+        .apply(manifest.scan())
+        .expect("scan");
+        let manifest = Workspace::new(
+            &root,
+            manifest.layout().clone(),
+            scan,
+            manifest.index_version(),
+            manifest.storage_generation().map(str::to_owned),
+            manifest.created_epoch_ms(),
+            manifest.updated_epoch_ms(),
+            manifest.index().clone(),
+        )
+        .expect("workspace");
+        write_workspace_manifest(manifest.layout().manifest_path(), &manifest).expect("write");
+        fs::remove_file(&external).expect("remove dependency");
+        let loaded = read_workspace_manifest(manifest.source_root(), manifest.layout())
+            .expect("read metadata")
+            .expect("manifest");
+        assert_eq!(loaded.scan(), manifest.scan());
+        let policy = crate::file_selection::ScanPolicy::new(loaded.source_root(), loaded.scan())
+            .expect("missing rules are skipped");
+        let source = loaded.source_root().join("blocked.rs");
+        assert!(policy.includes_file(&source).expect("no rule applies"));
+        write_workspace_manifest(loaded.layout().manifest_path(), &loaded).expect("save metadata");
+        let reloaded = read_workspace_manifest(manifest.source_root(), manifest.layout())
+            .expect("read saved metadata")
+            .expect("manifest");
+        assert_eq!(reloaded.scan(), manifest.scan());
+        fs::write(&external, "blocked.rs\n").expect("restore ignore file");
+        let policy =
+            crate::file_selection::ScanPolicy::new(reloaded.source_root(), reloaded.scan())
+                .expect("restored rules");
+        assert!(
+            !policy
+                .includes_file(&source)
+                .expect("restored rule applies")
+        );
+    }
+
+    #[test]
+    fn relocation_invalidates_environment_settings_without_changing_the_index() {
+        let directory = tempdir().expect("directory");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        let external = tempfile::NamedTempFile::new().expect("external ignore");
+        fs::write(external.path(), "external.rs\n").expect("external rules");
+        fs::write(directory.path().join("local.ignore"), "*.log\n").expect("local ignore");
+        let manifest = fixture_manifest(&layout);
+        let scan = crate::api::index::options::ScanRulesUpdate {
+            globs: Some(Vec::new()),
+            ignore_files: Some(vec!["local.ignore".into(), external.path().to_path_buf()]),
+            ..Default::default()
+        }
+        .apply(manifest.scan())
+        .expect("scan");
+        let manifest = Workspace::new(
+            directory.path(),
+            layout.clone(),
+            scan,
+            manifest.index_version(),
+            manifest.storage_generation().map(str::to_owned),
+            manifest.created_epoch_ms(),
+            manifest.updated_epoch_ms(),
+            manifest.index().clone(),
+        )
+        .expect("workspace");
+        write_workspace_manifest(layout.manifest_path(), &manifest).expect("write manifest");
+        let mut original = serde_json::to_value(&manifest).expect("JSON");
+        let key = crate::domain::model::EncryptedApiKey {
+            nonce: vec![1; 24],
+            ciphertext: vec![2; 32],
+        };
+        original["index"]["descriptor"]["embeddingConfigs"]["local/minilm"] =
+            serde_json::to_value(ModelConfig {
+                api_key: Some(key.clone()),
+                endpoint: Some("https://example.test/embeddings".into()),
+                device: Some(crate::domain::model::Device::Cpu),
+                cache_dir: Some(directory.path().join("models")),
+            })
+            .expect("saved settings");
+        for field in ["recordedPath", "recordedUsername"] {
+            let mut changed = original.clone();
+            changed["sourceRoot"][field] = serde_json::json!(format!("changed-{field}"));
+            fs::write(layout.manifest_path(), changed.to_string()).expect("changed environment");
+            let bytes = fs::read(layout.manifest_path()).expect("saved bytes");
+            let loaded = read_workspace_manifest(directory.path(), &layout)
+                .expect("load relocated metadata")
+                .expect("manifest");
+            let descriptor = loaded.index().descriptor().expect("enabled index");
+            let config = &descriptor.embedding_configs()["local/minilm"];
+            assert_eq!(config.device, None);
+            assert_eq!(config.cache_dir, None);
+            assert_eq!(config.api_key, Some(key.clone()));
+            assert_eq!(
+                config.endpoint.as_deref(),
+                Some("https://example.test/embeddings")
+            );
+            assert_eq!(
+                descriptor.default_embedding_model(),
+                manifest
+                    .index()
+                    .descriptor()
+                    .expect("original index")
+                    .default_embedding_model()
+            );
+            assert_eq!(loaded.storage_generation(), manifest.storage_generation());
+            assert_eq!(loaded.index_version(), manifest.index_version());
+            assert_eq!(
+                fs::read(layout.manifest_path()).expect("read-only load"),
+                bytes
+            );
+            assert_eq!(loaded.scan(), manifest.scan());
+            let policy =
+                crate::file_selection::ScanPolicy::new(manifest.source_root(), loaded.scan())
+                    .expect("external rules survive environment changes");
+            assert!(
+                !policy
+                    .includes_file(&loaded.source_root().join("external.rs"))
+                    .expect("external rule applies")
+            );
+            write_workspace_manifest(layout.manifest_path(), &loaded).expect("rewrite metadata");
+            let reloaded = read_workspace_manifest(directory.path(), &layout)
+                .expect("read again")
+                .expect("manifest");
+            assert_eq!(reloaded.scan(), manifest.scan());
+            assert_eq!(
+                serde_json::to_value(&reloaded).expect("JSON")["sourceRoot"],
+                changed["sourceRoot"]
+            );
+        }
+    }
+
+    #[test]
+    fn model_preferences_round_trip_without_changing_index_compatibility() {
+        let directory = tempdir().expect("directory");
+        let manifest = fixture_manifest(
+            &WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout"),
+        );
+        fs::create_dir(manifest.layout().storage_dir()).expect("storage directory");
+        let mut json = serde_json::to_value(&manifest).expect("JSON");
+        json["index"]["descriptor"]["embeddingConfigs"]["local/minilm"]["device"] =
+            serde_json::json!("cpu");
+        json["index"]["descriptor"]["embeddingConfigs"]["local/minilm"]["cacheDir"] =
+            serde_json::json!(directory.path().join("models"));
+        let restored = decode_manifest(&json, manifest.layout()).expect("saved preferences");
+        let mut expected = json.clone();
+        if expected["sourceRoot"]["recordedUsername"].is_null() {
+            let config = expected["index"]["descriptor"]["embeddingConfigs"]["local/minilm"]
+                .as_object_mut()
+                .expect("saved configuration");
+            config.remove("device");
+            config.remove("cacheDir");
+        }
+        assert_eq!(serde_json::to_value(&restored).expect("JSON"), expected);
+        manifest
+            .index()
+            .descriptor()
+            .expect("index")
+            .ensure_index_compatible(restored.index().descriptor().expect("index"))
+            .expect("runtime preferences do not require rebuilding");
+        json["index"]["descriptor"]["embeddingConfigs"]["local/minilm"]["apiKey"] =
+            serde_json::json!("plaintext-secret");
+        assert!(decode_manifest(&json, manifest.layout()).is_err());
     }
 
     #[test]
     fn rejects_other_index_versions_before_decoding_the_manifest_schema() {
         let directory = tempdir().expect("temporary directory");
-        let home = directory.path().join(".zvec-grep");
-        fs::create_dir_all(&home).expect("workspace home");
-        fs::write(workspace_manifest_path(&home), r#"{"indexVersion":2}"#)
-            .expect("invalid manifest");
-        assert!(read_workspace_manifest(&home).is_err());
-        let current = fixture_manifest(&home);
-        write_workspace_manifest(&home, &current).expect("current manifest");
-        let bytes = fs::read(workspace_manifest_path(&home)).expect("persisted manifest");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        let storage_dir = layout.storage_dir().to_path_buf();
+        fs::create_dir_all(&storage_dir).expect("workspace home");
+        fs::write(layout.manifest_path(), r#"{"indexVersion":2}"#).expect("invalid manifest");
+        assert!(read_workspace_manifest(directory.path(), &layout).is_err());
+        let current = fixture_manifest(&layout);
+        write_workspace_manifest(layout.manifest_path(), &current).expect("current manifest");
+        let bytes = fs::read(layout.manifest_path()).expect("persisted manifest");
         for version in [0, 1, 3, 4, 5, u32::MAX] {
             let mut unsupported = current.clone();
-            unsupported.index_version = Some(version);
-            assert!(write_workspace_manifest(&home, &unsupported).is_err());
+            unsupported = crate::domain::Workspace::new(
+                directory.path(),
+                unsupported.layout().clone(),
+                unsupported.scan().clone(),
+                Some(version),
+                unsupported.storage_generation().map(str::to_owned),
+                unsupported.created_epoch_ms(),
+                unsupported.updated_epoch_ms(),
+                unsupported.index().clone(),
+            )
+            .expect("workspace");
+            assert!(write_workspace_manifest(layout.manifest_path(), &unsupported).is_err());
             assert_eq!(
-                fs::read(workspace_manifest_path(&home)).expect("preserved manifest"),
+                fs::read(layout.manifest_path()).expect("preserved manifest"),
                 bytes
             );
             fs::write(
-                workspace_manifest_path(&home),
+                layout.manifest_path(),
                 // Deliberately omit all current-format fields. The version header
                 // must win over schema errors, including Node.js format version 1.
                 serde_json::to_vec(&serde_json::json!({
@@ -728,7 +1178,8 @@ mod tests {
                 .expect("unsupported manifest JSON"),
             )
             .expect("unsupported manifest");
-            let error = read_workspace_manifest(&home).expect_err("unsupported index version");
+            let error = read_workspace_manifest(directory.path(), &layout)
+                .expect_err("unsupported index version");
             assert!(
                 error
                     .message()
@@ -736,19 +1187,18 @@ mod tests {
             );
             assert!(error.message().contains("expected 2"));
             assert!(error.message().contains("zg --index --rebuild"));
-            fs::write(workspace_manifest_path(&home), &bytes).expect("restore current manifest");
+            fs::write(layout.manifest_path(), &bytes).expect("restore current manifest");
         }
     }
 
     #[test]
     fn enabled_indexes_cannot_omit_the_version_and_rebuild_can_replace_invalid_metadata() {
         let directory = tempdir().expect("workspace");
-        let home = directory.path().join(".zvec-grep");
-        let mut manifest = fixture_manifest(&home);
-        write_workspace_manifest(&home, &manifest).expect("current manifest");
-        manifest.index_version = None;
-        assert!(write_workspace_manifest(&home, &manifest).is_err());
-        let value = serde_json::to_value(&manifest).expect("manifest JSON");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        let manifest = fixture_manifest(&layout);
+        write_workspace_manifest(layout.manifest_path(), &manifest).expect("current manifest");
+        let mut value = serde_json::to_value(&manifest).expect("manifest JSON");
+        value["indexVersion"] = serde_json::Value::Null;
         for missing in [false, true] {
             let mut invalid = value.clone();
             if missing {
@@ -757,27 +1207,27 @@ mod tests {
                     .expect("object")
                     .remove("indexVersion");
             }
-            fs::write(workspace_manifest_path(&home), invalid.to_string()).expect("raw manifest");
+            fs::write(layout.manifest_path(), invalid.to_string()).expect("raw manifest");
             assert!(
-                read_workspace_manifest(&home)
+                read_workspace_manifest(directory.path(), &layout)
                     .expect_err("version required")
                     .message()
                     .contains("rebuild")
             );
             assert!(
-                inspect_workspace_manifest(&home)
+                inspect_workspace_manifest(directory.path(), &layout)
                     .expect("inspect")
-                    .into_manifest(true)
+                    .into_workspace(true)
                     .expect("rebuild bypasses old data")
                     .is_none()
             );
         }
-        fs::write(workspace_manifest_path(&home), "{broken").expect("corrupt JSON");
-        assert!(read_workspace_manifest(&home).is_err());
+        fs::write(layout.manifest_path(), "{broken").expect("corrupt JSON");
+        assert!(read_workspace_manifest(directory.path(), &layout).is_err());
         assert!(
-            inspect_workspace_manifest(&home)
+            inspect_workspace_manifest(directory.path(), &layout)
                 .expect("inspect")
-                .into_manifest(true)
+                .into_workspace(true)
                 .expect("rebuild bypasses corrupt data")
                 .is_none()
         );
@@ -786,16 +1236,19 @@ mod tests {
     #[test]
     fn rejects_invalid_embedding_limits_read_from_manifest() {
         let directory = tempdir().expect("workspace");
-        let manifest = fixture_manifest(&directory.path().join(".zvec-grep"));
+        let manifest = fixture_manifest(
+            &WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout"),
+        );
         for field in ["maxBatchSize", "maxInputTokens", "maxImageBytes"] {
             let mut json = serde_json::to_value(&manifest).expect("manifest JSON");
             if field == "maxBatchSize" {
-                json["defaultEmbeddingModel"]["model"][field] = serde_json::json!(0);
+                json["index"]["descriptor"]["defaultEmbeddingModel"]["model"][field] =
+                    serde_json::json!(0);
             } else {
-                json["defaultEmbeddingModel"][field] = serde_json::json!(0);
+                json["index"]["descriptor"]["defaultEmbeddingModel"][field] = serde_json::json!(0);
             }
             assert!(
-                serde_json::from_value::<WorkspaceManifest>(json).is_err(),
+                decode_manifest(&json, manifest.layout()).is_err(),
                 "{field}"
             );
         }
@@ -804,30 +1257,110 @@ mod tests {
     #[test]
     fn deleting_a_missing_manifest_is_idempotent() {
         let directory = tempdir().expect("temporary directory");
-        assert!(delete_workspace_manifest(directory.path()).is_ok());
-        assert!(delete_workspace_manifest(&directory.path().join("missing")).is_ok());
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        fs::create_dir(layout.storage_dir()).expect("workspace directory");
+        assert!(delete_workspace_manifest(&layout).is_ok());
+        let missing = WorkspaceLayout::new(directory.path().join("missing").join(".zvec-grep"))
+            .expect("layout");
+        assert!(delete_workspace_manifest(&missing).is_ok());
     }
 
     #[cfg(unix)]
     #[test]
-    fn manifest_and_workspace_permissions_are_private() {
+    fn manifest_operations_ignore_unrelated_storage_paths() {
+        let directory = tempdir().expect("workspace");
+        let external = tempdir().expect("external data");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        let storage_dir = layout.storage_dir().to_path_buf();
+        fs::create_dir(&storage_dir).expect("workspace home");
+        for name in ["index", "temp"] {
+            std::os::unix::fs::symlink(external.path(), storage_dir.join(name))
+                .expect("storage alias");
+        }
+        fs::write(external.path().join("keep"), b"unchanged").expect("external file");
+
+        let manifest = fixture_manifest(&layout);
+        write_workspace_manifest(layout.manifest_path(), &manifest).expect("write metadata");
+        assert_eq!(
+            read_workspace_manifest(directory.path(), &layout).expect("read metadata"),
+            Some(manifest)
+        );
+        delete_workspace_manifest(&layout).expect("delete metadata");
+        assert!(!layout.manifest_path().exists());
+        assert_eq!(
+            fs::read(external.path().join("keep")).expect("external file preserved"),
+            b"unchanged"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manifest_operations_reject_a_symlinked_manifest() {
+        let directory = tempdir().expect("workspace");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        let manifest = fixture_manifest(&layout);
+        write_workspace_manifest(layout.manifest_path(), &manifest).expect("initial manifest");
+        let target = directory.path().join("saved-manifest.json");
+        let path = layout.manifest_path().to_path_buf();
+        fs::rename(&path, &target).expect("move manifest");
+        let original = fs::read(&target).expect("saved bytes");
+        std::os::unix::fs::symlink(&target, &path).expect("manifest alias");
+
+        assert!(read_workspace_manifest(directory.path(), &layout).is_err());
+        assert!(write_workspace_manifest(layout.manifest_path(), &manifest).is_err());
+        assert!(delete_workspace_manifest(&layout).is_err());
+        assert_eq!(fs::read(&target).expect("preserved bytes"), original);
+        assert!(fs::symlink_metadata(&path).expect("alias").is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_manifest_writes_reject_a_symlinked_temporary_directory() {
+        let directory = tempdir().expect("workspace");
+        let external = tempdir().expect("external data");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        fs::create_dir(layout.storage_dir()).expect("workspace storage directory");
+        std::os::unix::fs::symlink(external.path(), layout.temp_dir()).expect("temporary alias");
+        let external_manifest = external.path().join("manifest.json");
+        fs::write(&external_manifest, b"external data").expect("external manifest");
+        let manifest = fixture_manifest(&layout);
+
+        assert!(write_workspace_manifest(layout.staged_manifest_path(), &manifest).is_err());
+        assert_eq!(
+            fs::read(external_manifest).expect("preserved external manifest"),
+            b"external data"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_uses_default_directory_permissions_and_manifest_is_private() {
         use std::os::unix::fs::PermissionsExt;
 
         let directory = tempdir().expect("temporary directory");
-        let home = directory.path().join(".zvec-grep");
-        write_workspace_manifest(&home, &fixture_manifest(&home)).expect("write manifest");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        let storage_dir = layout.storage_dir().to_path_buf();
+        let reference_dir = directory.path().join("reference");
+        fs::create_dir(&reference_dir).expect("directory with default permissions");
+        write_workspace_manifest(layout.manifest_path(), &fixture_manifest(&layout))
+            .expect("write manifest");
 
-        let directory_mode = fs::metadata(&home)
+        let directory_mode = fs::metadata(&storage_dir)
             .expect("workspace metadata")
             .permissions()
             .mode()
             & 0o777;
-        let file_mode = fs::metadata(workspace_manifest_path(&home))
+        let file_mode = fs::metadata(layout.manifest_path())
             .expect("manifest metadata")
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(directory_mode, 0o700);
+        let default_mode = fs::metadata(reference_dir)
+            .expect("reference metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(directory_mode, default_mode);
         assert_eq!(file_mode, 0o600);
     }
 
@@ -837,20 +1370,21 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let directory = tempdir().expect("temporary directory");
-        let home = directory.path().join(".zvec-grep");
-        let mut manifest = fixture_manifest(&home);
-        write_workspace_manifest(&home, &manifest).expect("initial manifest");
-        let path = workspace_manifest_path(&home);
-        fs::set_permissions(&home, fs::Permissions::from_mode(0o750))
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        let storage_dir = layout.storage_dir().to_path_buf();
+        let mut manifest = fixture_manifest(&layout);
+        write_workspace_manifest(layout.manifest_path(), &manifest).expect("initial manifest");
+        let path = layout.manifest_path().to_path_buf();
+        fs::set_permissions(&storage_dir, fs::Permissions::from_mode(0o750))
             .expect("custom workspace permissions");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o640))
             .expect("custom manifest permissions");
 
         manifest.record_update(30);
-        write_workspace_manifest(&home, &manifest).expect("replace manifest");
+        write_workspace_manifest(layout.manifest_path(), &manifest).expect("replace manifest");
 
         assert_eq!(
-            fs::metadata(&home)
+            fs::metadata(&storage_dir)
                 .expect("workspace metadata")
                 .permissions()
                 .mode()
@@ -866,7 +1400,7 @@ mod tests {
             0o640
         );
         assert_eq!(
-            read_workspace_manifest(&home).expect("updated manifest"),
+            read_workspace_manifest(directory.path(), &layout).expect("updated manifest"),
             Some(manifest)
         );
     }

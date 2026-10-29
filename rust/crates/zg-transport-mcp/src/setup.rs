@@ -279,8 +279,8 @@ impl SetupState {
                             endpoint: None,
                             device: zg_engine::api::index::options::Device::Auto,
                         }),
-                        model_cache: request.model_cache.clone(),
-                        device: if choice.local { request.device } else { None },
+                        runtime_model_cache: request.model_cache.clone(),
+                        runtime_device: if choice.local { request.device } else { None },
                         embedding_concurrency: request.embedding_concurrency,
                         ..Default::default()
                     };

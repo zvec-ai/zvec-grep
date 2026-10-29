@@ -68,8 +68,7 @@ Result controls:
 | Option | Meaning |
 | --- | --- |
 | `--limit <n>` | Maximum returned items per group |
-| `--compact` | Force compact output intended for pipes |
-| `--preview none\|short\|full` | Indexed source preview size |
+| `--preview none\|short\|full\|detail` | Indexed output detail (default: `short`) |
 | `--refresh background\|wait\|off` | Index refresh policy |
 | `--mode direct\|server\|auto` | Execution transport |
 | `--debug` | Print diagnostics to stderr |
@@ -79,10 +78,36 @@ Result controls:
 | `--modified-after <time>` | Search files modified after a time |
 | `--modified-before <time>` | Search files modified before a time |
 
-Indexed CLI results are separated by query group and preserve the rank assigned
-inside that group. The CLI does not apply the MCP response's cross-group
-coverage/global-fill presentation. A result recalled by several groups appears
-under each of those groups. `--limit` continues to bound each group.
+Terminal, redirected, and piped output use the same layout and default to
+`--preview short`. Terminal detection affects automatic color selection only.
+`--compact` and `--human` have been removed.
+
+| Preview | Behavior |
+| --- | --- |
+| `none` | Minimal layout with one source line; no expanded context or outline |
+| `short` | Compact layout with bounded source snippets (default) |
+| `full` | Compact layout with all returned source content |
+| `detail` | Detailed metadata and file/hit grouping, with full source and available outlines |
+
+`short` and `full` retain the previous compact per-hit layouts. Node.js retains
+available outlines; Rust retains its compact hit/symbol summaries and indented
+`line: source` rows. All modes preserve query groups. Detailed output parity is
+provided by `detail`.
+
+Rust builds outlines from stored source using the language identified during
+indexing. Older records without language metadata fall back to the filename;
+extensionless scripts in an old index need `zg --index --rebuild` to gain outlines.
+
+`full` and `detail` display already-returned content; they do not retrieve an entire
+function or file. Preview selection does not change ranking or result limits.
+These options apply to indexed search. `--rg` still uses `-A/-B/-C` for context,
+and public MCP search continues to accept `short` and `full`.
+
+Indexed CLI results in every preview mode are separated by query group and preserve
+the rank assigned inside that group. The CLI does not apply the MCP response's
+cross-group coverage/global-fill presentation. A result recalled by several groups
+appears under each of those groups, using that group's matched content and query
+highlighting. `--limit` continues to bound each group; only `--fuse` combines groups.
 
 Valid symbol types are `module`, `class`, `interface`, `function`, `value`, and
 `alias`.

@@ -161,6 +161,10 @@ pub(super) fn resolve_adapter(format: FileFormat) -> Option<&'static LanguageAda
 }
 
 impl LanguageAdapter {
+    pub(super) const fn language(self) -> Language {
+        self.kind
+    }
+
     pub(super) fn is_entity(self, node: Node<'_>) -> bool {
         self.entity_types.contains(&node.kind()) && self.should_index_entity(node)
     }

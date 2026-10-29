@@ -30,7 +30,7 @@ Do not add a generic `Core`, command bus, operation envelope, adapter registry o
 transport executor to connect an in-process method to its implementation.
 
 `zg_engine::authorization` is an explicit exception for remote-consent preflight
-and signed grant-file management. CLI, daemon and MCP callers must be able to
+and workspace grant-file management. CLI, daemon and MCP callers must be able to
 resolve destinations and inspect, grant or revoke consent before starting an
 engine operation. These functions use workspace metadata and authorization files;
 they do not require a `ZvecGrep` instance, acquire model runtimes, open index

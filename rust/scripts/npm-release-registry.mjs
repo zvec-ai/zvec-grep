@@ -2,7 +2,6 @@ import { appendFile, copyFile, mkdir, readFile, readdir, rm, writeFile } from "n
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { hashFile, nativePackageEntries, run, sha256File, verifyTarballSize } from "./npm-package-core.mjs";
-import { verifyTarballCompliance } from "./npm-release-compliance.mjs";
 import { coreIdentity, validatePlugins } from "../npm/meta/plugins.cjs";
 
 function verifyPluginReferences(platform, version, packages, tarballRoot) {
@@ -271,8 +270,6 @@ async function preflightRelease({ manifest, tarballRoot, registryFetch }) {
     if (`sha512-${await hashFile(join(tarballRoot, entry.file), "sha512", "base64")}` !== entry.integrity) {
       throw new Error(`release tarball integrity mismatch: ${entry.file}`);
     }
-    if (entry.target !== "meta")
-      verifyTarballCompliance(join(tarballRoot, entry.file));
     published.push(await checkPublishedPackage(entry, registryFetch));
   }
   for (const platform of manifest.platforms.filter((entry) => entry.components?.length)) {

@@ -1,0 +1,737 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "long-source-and-rank-order",
+      "result": {
+        "query": "call chain",
+        "freshness": "fresh",
+        "background_refresh": null,
+        "root": "workspace",
+        "source": "index",
+        "coverage": "ranked_sample",
+        "workspace_index": null,
+        "items": [
+          {
+            "kind": "indexed_entity",
+            "rank": 2,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 33,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 3301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": null,
+            "content": "retrieved-source-line-1\nlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\nretrieved-source-line-3\nretrieved-source-line-4\nretrieved-source-line-5\nretrieved-source-line-6\nretrieved-source-line-7\nretrieved-source-line-8\nretrieved-source-line-9\nretrieved-source-line-10\nretrieved-source-line-11\nretrieved-source-line-12\nretrieved-source-line-13\nretrieved-source-line-14\nretrieved-source-line-15\nretrieved-source-line-16\nretrieved-source-line-17\nretrieved-source-line-18\nretrieved-source-line-19\nretrieved-source-line-20\nretrieved-source-line-21\nretrieved-source-line-22\nretrieved-source-line-23\nretrieved-source-line-24",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "fts+vector",
+            "metadata": null,
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null,
+            "content_range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 33,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 3301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
+          },
+          {
+            "kind": "indexed_entity",
+            "rank": 1,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 33,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 3301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": null,
+            "content": "retrieved-source-line-1\nlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\nretrieved-source-line-3\nretrieved-source-line-4\nretrieved-source-line-5\nretrieved-source-line-6\nretrieved-source-line-7\nretrieved-source-line-8\nretrieved-source-line-9\nretrieved-source-line-10\nretrieved-source-line-11\nretrieved-source-line-12\nretrieved-source-line-13\nretrieved-source-line-14\nretrieved-source-line-15\nretrieved-source-line-16\nretrieved-source-line-17\nretrieved-source-line-18\nretrieved-source-line-19\nretrieved-source-line-20\nretrieved-source-line-21\nretrieved-source-line-22\nretrieved-source-line-23\nretrieved-source-line-24",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "fts+vector",
+            "metadata": null,
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null,
+            "content_range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 33,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 3301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
+          }
+        ],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": null,
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected_none": "#1 matchedBy=fts+vector src/sample.ts:10-33\n10\tretrieved-source-line-1\n\n#2 matchedBy=fts+vector src/sample.ts:10-33\n10\tretrieved-source-line-1",
+      "expected_short": "#1 matchedBy=fts+vector src/sample.ts:10-33\nsource:\n10\tretrieved-source-line-1\n11\tlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...\n12\tretrieved-source-line-3\n13\tretrieved-source-line-4\n14\tretrieved-source-line-5\n15\tretrieved-source-line-6\n16\tretrieved-source-line-7\n17\tretrieved-source-line-8\n18\tretrieved-source-line-9\n19\tretrieved-source-line-10\n...\n\n#2 matchedBy=fts+vector src/sample.ts:10-33\nsource:\n10\tretrieved-source-line-1\n11\tlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...\n12\tretrieved-source-line-3\n13\tretrieved-source-line-4\n14\tretrieved-source-line-5\n15\tretrieved-source-line-6\n16\tretrieved-source-line-7\n17\tretrieved-source-line-8\n18\tretrieved-source-line-9\n19\tretrieved-source-line-10\n...",
+      "expected_full": "#1 matchedBy=fts+vector src/sample.ts:10-33\nsource:\n10\tretrieved-source-line-1\n11\tlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\n12\tretrieved-source-line-3\n13\tretrieved-source-line-4\n14\tretrieved-source-line-5\n15\tretrieved-source-line-6\n16\tretrieved-source-line-7\n17\tretrieved-source-line-8\n18\tretrieved-source-line-9\n19\tretrieved-source-line-10\n20\tretrieved-source-line-11\n21\tretrieved-source-line-12\n22\tretrieved-source-line-13\n23\tretrieved-source-line-14\n24\tretrieved-source-line-15\n25\tretrieved-source-line-16\n26\tretrieved-source-line-17\n27\tretrieved-source-line-18\n28\tretrieved-source-line-19\n29\tretrieved-source-line-20\n30\tretrieved-source-line-21\n31\tretrieved-source-line-22\n32\tretrieved-source-line-23\n33\tretrieved-source-line-24\n\n#2 matchedBy=fts+vector src/sample.ts:10-33\nsource:\n10\tretrieved-source-line-1\n11\tlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\n12\tretrieved-source-line-3\n13\tretrieved-source-line-4\n14\tretrieved-source-line-5\n15\tretrieved-source-line-6\n16\tretrieved-source-line-7\n17\tretrieved-source-line-8\n18\tretrieved-source-line-9\n19\tretrieved-source-line-10\n20\tretrieved-source-line-11\n21\tretrieved-source-line-12\n22\tretrieved-source-line-13\n23\tretrieved-source-line-14\n24\tretrieved-source-line-15\n25\tretrieved-source-line-16\n26\tretrieved-source-line-17\n27\tretrieved-source-line-18\n28\tretrieved-source-line-19\n29\tretrieved-source-line-20\n30\tretrieved-source-line-21\n31\tretrieved-source-line-22\n32\tretrieved-source-line-23\n33\tretrieved-source-line-24",
+      "expected_detail": "Context: workspace index\nQuery: call chain\nCoverage: ranked_sample\nFiles: 1\nHits: 2\n\nFile: src/sample.ts\nHits: 2\n\n  #1 indexed_entity matchedBy=fts+vector score=0.8000\n  Range: 10-33  Status: fresh\n  Source:\n    10\tretrieved-source-line-1\n    11\tlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\n    12\tretrieved-source-line-3\n    13\tretrieved-source-line-4\n    14\tretrieved-source-line-5\n    15\tretrieved-source-line-6\n    16\tretrieved-source-line-7\n    17\tretrieved-source-line-8\n    18\tretrieved-source-line-9\n    19\tretrieved-source-line-10\n    20\tretrieved-source-line-11\n    21\tretrieved-source-line-12\n    22\tretrieved-source-line-13\n    23\tretrieved-source-line-14\n    24\tretrieved-source-line-15\n    25\tretrieved-source-line-16\n    26\tretrieved-source-line-17\n    27\tretrieved-source-line-18\n    28\tretrieved-source-line-19\n    29\tretrieved-source-line-20\n    30\tretrieved-source-line-21\n    31\tretrieved-source-line-22\n    32\tretrieved-source-line-23\n    33\tretrieved-source-line-24\n\n  #2 indexed_entity matchedBy=fts+vector score=0.8000\n  Range: 10-33  Status: fresh\n  Source:\n    10\tretrieved-source-line-1\n    11\tlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\n    12\tretrieved-source-line-3\n    13\tretrieved-source-line-4\n    14\tretrieved-source-line-5\n    15\tretrieved-source-line-6\n    16\tretrieved-source-line-7\n    17\tretrieved-source-line-8\n    18\tretrieved-source-line-9\n    19\tretrieved-source-line-10\n    20\tretrieved-source-line-11\n    21\tretrieved-source-line-12\n    22\tretrieved-source-line-13\n    23\tretrieved-source-line-14\n    24\tretrieved-source-line-15\n    25\tretrieved-source-line-16\n    26\tretrieved-source-line-17\n    27\tretrieved-source-line-18\n    28\tretrieved-source-line-19\n    29\tretrieved-source-line-20\n    30\tretrieved-source-line-21\n    31\tretrieved-source-line-22\n    32\tretrieved-source-line-23\n    33\tretrieved-source-line-24"
+    },
+    {
+      "id": "groups-outline-and-matched-window",
+      "result": {
+        "query": "call chain",
+        "freshness": "possibly_stale",
+        "background_refresh": "running (12/20)",
+        "root": "workspace",
+        "source": "index",
+        "coverage": "ranked_sample",
+        "workspace_index": null,
+        "items": [
+          {
+            "kind": "indexed_entity",
+            "rank": 1,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 33,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 3301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": {
+              "kind": "text",
+              "start_line": 20,
+              "end_line": 21,
+              "start_byte_offset": 2000,
+              "end_byte_offset": 2101,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "content": "retrieved-source-line-1\nlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\nretrieved-source-line-3\nretrieved-source-line-4\nretrieved-source-line-5\nretrieved-source-line-6\nretrieved-source-line-7\nretrieved-source-line-8\nretrieved-source-line-9\nretrieved-source-line-10\nretrieved-source-line-11\nretrieved-source-line-12\nretrieved-source-line-13\nretrieved-source-line-14\nretrieved-source-line-15\nretrieved-source-line-16\nretrieved-source-line-17\nretrieved-source-line-18\nretrieved-source-line-19\nretrieved-source-line-20\nretrieved-source-line-21\nretrieved-source-line-22\nretrieved-source-line-23\nretrieved-source-line-24",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "fts+vector",
+            "metadata": {
+              "kind": "code",
+              "symbol_type": "function",
+              "symbol_name": "resolveContext",
+              "scope": "Workspace",
+              "signature": "function resolveContext(query: string): ContextResult",
+              "documentation": null
+            },
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null,
+            "outline": "function resolveContext(query: string) {\n\ncalls: loadIndex, search",
+            "content_range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 33,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 3301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
+          },
+          {
+            "kind": "indexed_entity",
+            "rank": 2,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "notes/design.md",
+            "range": {
+              "kind": "file"
+            },
+            "excerpt_range": null,
+            "content": "# Design\r\n\r\nRetain local evidence.\r\n\r\n",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "fts+vector",
+            "metadata": {
+              "kind": "markdown",
+              "heading": "Design",
+              "level": 1,
+              "scope": "Search / Design"
+            },
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null,
+            "content_range": {
+              "kind": "file"
+            }
+          }
+        ],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": {
+            "hits_returned": 2,
+            "query_groups": [],
+            "routes": []
+          },
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected_none": "#1 matchedBy=fts+vector src/sample.ts:10-33\nsymbol: function resolveContext scope: Workspace\n20\tretrieved-source-line-11\n\n#2 matchedBy=fts+vector notes/design.md:file\nheading: Design\nheading_level: 1\nscope: Search / Design\n\t# Design",
+      "expected_short": "#1 matchedBy=fts+vector src/sample.ts:10-33\noutline:\nfunction resolveContext(query: string) {\n\ncalls: loadIndex, search\nmatched: 20-21\nsource:\n...\n18\tretrieved-source-line-9\n19\tretrieved-source-line-10\n20\tretrieved-source-line-11\n21\tretrieved-source-line-12\n22\tretrieved-source-line-13\n23\tretrieved-source-line-14\n24\tretrieved-source-line-15\n25\tretrieved-source-line-16\n26\tretrieved-source-line-17\n27\tretrieved-source-line-18\n...\n\n#2 matchedBy=fts+vector notes/design.md:file\nheading: Design\nheading_level: 1\nscope: Search / Design\nsource:\n\t# Design\n\t\n\tRetain local evidence.\n\t\n\t",
+      "expected_full": "#1 matchedBy=fts+vector src/sample.ts:10-33\noutline:\nfunction resolveContext(query: string) {\n\ncalls: loadIndex, search\nmatched: 20-21\nsource:\n10\tretrieved-source-line-1\n11\tlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\n12\tretrieved-source-line-3\n13\tretrieved-source-line-4\n14\tretrieved-source-line-5\n15\tretrieved-source-line-6\n16\tretrieved-source-line-7\n17\tretrieved-source-line-8\n18\tretrieved-source-line-9\n19\tretrieved-source-line-10\n20\tretrieved-source-line-11\n21\tretrieved-source-line-12\n22\tretrieved-source-line-13\n23\tretrieved-source-line-14\n24\tretrieved-source-line-15\n25\tretrieved-source-line-16\n26\tretrieved-source-line-17\n27\tretrieved-source-line-18\n28\tretrieved-source-line-19\n29\tretrieved-source-line-20\n30\tretrieved-source-line-21\n31\tretrieved-source-line-22\n32\tretrieved-source-line-23\n33\tretrieved-source-line-24\n\n#2 matchedBy=fts+vector notes/design.md:file\nheading: Design\nheading_level: 1\nscope: Search / Design\nsource:\n\t# Design\n\t\n\tRetain local evidence.\n\t\n\t",
+      "expected_detail": "Context: workspace index\nQuery: call chain\nCoverage: ranked_sample\nFiles: 2\nHits: 2\n\nFile: src/sample.ts\nHits: 1\n\n  #1 function resolveContext matchedBy=fts+vector score=0.8000\n  Range: 10-33  Status: fresh\n  Matched: 20-21\n  Kind: code/function\n  Symbol: resolveContext\n  Scope: Workspace\n  Signature: function resolveContext(query: string): ContextResult\n  Outline:\n    function resolveContext(query: string) {\n    \n    calls: loadIndex, search\n  Source:\n    10\tretrieved-source-line-1\n    11\tlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\n    12\tretrieved-source-line-3\n    13\tretrieved-source-line-4\n    14\tretrieved-source-line-5\n    15\tretrieved-source-line-6\n    16\tretrieved-source-line-7\n    17\tretrieved-source-line-8\n    18\tretrieved-source-line-9\n    19\tretrieved-source-line-10\n    20\tretrieved-source-line-11\n    21\tretrieved-source-line-12\n    22\tretrieved-source-line-13\n    23\tretrieved-source-line-14\n    24\tretrieved-source-line-15\n    25\tretrieved-source-line-16\n    26\tretrieved-source-line-17\n    27\tretrieved-source-line-18\n    28\tretrieved-source-line-19\n    29\tretrieved-source-line-20\n    30\tretrieved-source-line-21\n    31\tretrieved-source-line-22\n    32\tretrieved-source-line-23\n    33\tretrieved-source-line-24\n\nFile: notes/design.md\nHits: 1\n\n  #2 heading Design matchedBy=fts+vector score=0.8000\n  Range: file  Status: fresh\n  Kind: markdown\n  Heading: Design\n  Heading level: 1\n  Scope: Search / Design\n  Source:\n    \t# Design\n    \t\n    \tRetain local evidence.\n    \t\n    \t"
+    },
+    {
+      "id": "excerpt-only-source-and-redundant-symbol",
+      "result": {
+        "query": "call chain",
+        "freshness": "fresh",
+        "background_refresh": null,
+        "root": "workspace",
+        "source": "index",
+        "coverage": "ranked_sample",
+        "workspace_index": null,
+        "items": [
+          {
+            "kind": "indexed_entity",
+            "rank": 1,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 1,
+              "end_line": 100,
+              "start_byte_offset": 100,
+              "end_byte_offset": 10001,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": {
+              "kind": "text",
+              "start_line": 50,
+              "end_line": 52,
+              "start_byte_offset": 5000,
+              "end_byte_offset": 5201,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "content": "function resolveContext() {\r\n  return true;\r\n}\r\n",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "fts+vector",
+            "metadata": {
+              "kind": "code",
+              "symbol_type": "function",
+              "symbol_name": "resolveContext",
+              "scope": null,
+              "signature": null,
+              "documentation": null
+            },
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null,
+            "content_range": {
+              "kind": "text",
+              "start_line": 50,
+              "end_line": 52,
+              "start_byte_offset": 5000,
+              "end_byte_offset": 5201,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
+          }
+        ],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": null,
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected_none": "#1 matchedBy=fts+vector src/sample.ts:1-100\n50\tfunction resolveContext() {",
+      "expected_short": "#1 matchedBy=fts+vector src/sample.ts:1-100\nmatched: 50-52\nsource:\n50\tfunction resolveContext() {\n51\t  return true;\n52\t}\n53\t",
+      "expected_full": "#1 matchedBy=fts+vector src/sample.ts:1-100\nmatched: 50-52\nsource:\n50\tfunction resolveContext() {\n51\t  return true;\n52\t}\n53\t",
+      "expected_detail": "Context: workspace index\nQuery: call chain\nCoverage: ranked_sample\nFiles: 1\nHits: 1\n\nFile: src/sample.ts\nHits: 1\n\n  #1 function resolveContext matchedBy=fts+vector score=0.8000\n  Range: 1-100  Status: fresh\n  Matched: 50-52\n  Kind: code/function\n  Symbol: resolveContext\n  Source:\n    50\tfunction resolveContext() {\n    51\t  return true;\n    52\t}\n    53\t"
+    },
+    {
+      "id": "empty-stale-index",
+      "result": {
+        "query": "call chain",
+        "freshness": "possibly_stale",
+        "background_refresh": "queued",
+        "root": "workspace",
+        "source": "index",
+        "coverage": "ranked_sample",
+        "workspace_index": null,
+        "items": [],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": null,
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected_none": "No matches.",
+      "expected_short": "No matches.",
+      "expected_full": "No matches.",
+      "expected_detail": "Context: workspace index\nQuery: call chain\nCoverage: ranked_sample\nFiles: 0\nHits: 0\nReason: No matches"
+    },
+    {
+      "id": "no-searchable-files",
+      "result": {
+        "query": "call chain",
+        "freshness": "fresh",
+        "background_refresh": null,
+        "root": "workspace",
+        "source": "index",
+        "coverage": "ranked_sample",
+        "workspace_index": null,
+        "items": [],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": "no_searchable_files",
+          "index": null,
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected_none": "No searchable files.",
+      "expected_short": "No searchable files.",
+      "expected_full": "No searchable files.",
+      "expected_detail": "Context: workspace index\nQuery: call chain\nCoverage: ranked_sample\nFiles: 0\nHits: 0\nReason: No searchable files"
+    },
+    {
+      "id": "query-groups-with-empty-group",
+      "result": {
+        "query": "call chain",
+        "freshness": "possibly_stale",
+        "background_refresh": "running (12/20)",
+        "root": "workspace",
+        "source": "index",
+        "coverage": "ranked_sample",
+        "workspace_index": {
+          "root": "workspace",
+          "path": "workspace/.zvec-grep"
+        },
+        "items": [
+          {
+            "kind": "indexed_entity",
+            "rank": 1,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 33,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 3301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": {
+              "kind": "text",
+              "start_line": 20,
+              "end_line": 21,
+              "start_byte_offset": 2000,
+              "end_byte_offset": 2101,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "content": "retrieved-source-line-1\nlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\nretrieved-source-line-3\nretrieved-source-line-4\nretrieved-source-line-5\nretrieved-source-line-6\nretrieved-source-line-7\nretrieved-source-line-8\nretrieved-source-line-9\nretrieved-source-line-10\nretrieved-source-line-11\nretrieved-source-line-12\nretrieved-source-line-13\nretrieved-source-line-14\nretrieved-source-line-15\nretrieved-source-line-16\nretrieved-source-line-17\nretrieved-source-line-18\nretrieved-source-line-19\nretrieved-source-line-20\nretrieved-source-line-21\nretrieved-source-line-22\nretrieved-source-line-23\nretrieved-source-line-24",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "fts+vector",
+            "metadata": {
+              "kind": "code",
+              "symbol_type": "function",
+              "symbol_name": "resolveContext",
+              "scope": "Workspace",
+              "signature": "function resolveContext(query: string): ContextResult",
+              "documentation": null
+            },
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null,
+            "outline": "function resolveContext(query: string) {\n\ncalls: loadIndex, search",
+            "content_range": {
+              "kind": "text",
+              "start_line": 10,
+              "end_line": 33,
+              "start_byte_offset": 1000,
+              "end_byte_offset": 3301,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
+          },
+          {
+            "kind": "indexed_entity",
+            "rank": 2,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "notes/design.md",
+            "range": {
+              "kind": "file"
+            },
+            "excerpt_range": null,
+            "content": "# Design\r\n\r\nRetain local evidence.\r\n\r\n",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "fts+vector",
+            "metadata": {
+              "kind": "markdown",
+              "heading": "Design",
+              "level": 1,
+              "scope": "Search / Design"
+            },
+            "entity_id": null,
+            "container": null,
+            "trace": null,
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null,
+            "content_range": {
+              "kind": "file"
+            }
+          }
+        ],
+        "group_results": [
+          {
+            "id": "q0",
+            "query": "missing",
+            "role": "primary",
+            "items": []
+          },
+          {
+            "id": "q1",
+            "query": "call chain",
+            "role": "primary",
+            "items": [
+              {
+                "kind": "indexed_entity",
+                "rank": 1,
+                "absolute_path": "workspace/src/sample.ts",
+                "relative_path": "src/sample.ts",
+                "range": {
+                  "kind": "text",
+                  "start_line": 10,
+                  "end_line": 33,
+                  "start_byte_offset": 1000,
+                  "end_byte_offset": 3301,
+                  "start_byte_column": 0,
+                  "end_byte_column": 1
+                },
+                "excerpt_range": {
+                  "kind": "text",
+                  "start_line": 20,
+                  "end_line": 21,
+                  "start_byte_offset": 2000,
+                  "end_byte_offset": 2101,
+                  "start_byte_column": 0,
+                  "end_byte_column": 1
+                },
+                "content": "retrieved-source-line-1\nlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\nretrieved-source-line-3\nretrieved-source-line-4\nretrieved-source-line-5\nretrieved-source-line-6\nretrieved-source-line-7\nretrieved-source-line-8\nretrieved-source-line-9\nretrieved-source-line-10\nretrieved-source-line-11\nretrieved-source-line-12\nretrieved-source-line-13\nretrieved-source-line-14\nretrieved-source-line-15\nretrieved-source-line-16\nretrieved-source-line-17\nretrieved-source-line-18\nretrieved-source-line-19\nretrieved-source-line-20\nretrieved-source-line-21\nretrieved-source-line-22\nretrieved-source-line-23\nretrieved-source-line-24",
+                "content_role": "source",
+                "status": "fresh",
+                "score": 0.8,
+                "matched_by": "fts+vector",
+                "metadata": {
+                  "kind": "code",
+                  "symbol_type": "function",
+                  "symbol_name": "resolveContext",
+                  "scope": "Workspace",
+                  "signature": "function resolveContext(query: string): ContextResult",
+                  "documentation": null
+                },
+                "entity_id": null,
+                "container": null,
+                "trace": null,
+                "query_groups": [],
+                "selection_reason": null,
+                "coverage_group": null,
+                "outline": "function resolveContext(query: string) {\n\ncalls: loadIndex, search",
+                "content_range": {
+                  "kind": "text",
+                  "start_line": 10,
+                  "end_line": 33,
+                  "start_byte_offset": 1000,
+                  "end_byte_offset": 3301,
+                  "start_byte_column": 0,
+                  "end_byte_column": 1
+                }
+              },
+              {
+                "kind": "indexed_entity",
+                "rank": 2,
+                "absolute_path": "workspace/src/sample.ts",
+                "relative_path": "notes/design.md",
+                "range": {
+                  "kind": "file"
+                },
+                "excerpt_range": null,
+                "content": "# Design\r\n\r\nRetain local evidence.\r\n\r\n",
+                "content_role": "source",
+                "status": "fresh",
+                "score": 0.8,
+                "matched_by": "fts+vector",
+                "metadata": {
+                  "kind": "markdown",
+                  "heading": "Design",
+                  "level": 1,
+                  "scope": "Search / Design"
+                },
+                "entity_id": null,
+                "container": null,
+                "trace": null,
+                "query_groups": [],
+                "selection_reason": null,
+                "coverage_group": null,
+                "content_range": {
+                  "kind": "file"
+                }
+              }
+            ]
+          },
+          {
+            "id": "fts1",
+            "query": "refresh",
+            "role": "supplemental",
+            "items": [
+              {
+                "kind": "indexed_entity",
+                "rank": 1,
+                "absolute_path": "workspace/src/sample.ts",
+                "relative_path": "src/sample.ts",
+                "range": {
+                  "kind": "text",
+                  "start_line": 10,
+                  "end_line": 33,
+                  "start_byte_offset": 1000,
+                  "end_byte_offset": 3301,
+                  "start_byte_column": 0,
+                  "end_byte_column": 1
+                },
+                "excerpt_range": {
+                  "kind": "text",
+                  "start_line": 20,
+                  "end_line": 21,
+                  "start_byte_offset": 2000,
+                  "end_byte_offset": 2101,
+                  "start_byte_column": 0,
+                  "end_byte_column": 1
+                },
+                "content": "retrieved-source-line-1\nlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\nretrieved-source-line-3\nretrieved-source-line-4\nretrieved-source-line-5\nretrieved-source-line-6\nretrieved-source-line-7\nretrieved-source-line-8\nretrieved-source-line-9\nretrieved-source-line-10\nretrieved-source-line-11\nretrieved-source-line-12\nretrieved-source-line-13\nretrieved-source-line-14\nretrieved-source-line-15\nretrieved-source-line-16\nretrieved-source-line-17\nretrieved-source-line-18\nretrieved-source-line-19\nretrieved-source-line-20\nretrieved-source-line-21\nretrieved-source-line-22\nretrieved-source-line-23\nretrieved-source-line-24",
+                "content_role": "source",
+                "status": "fresh",
+                "score": 0.8,
+                "matched_by": "fts+vector",
+                "metadata": {
+                  "kind": "code",
+                  "symbol_type": "function",
+                  "symbol_name": "resolveContext",
+                  "scope": "Workspace",
+                  "signature": "function resolveContext(query: string): ContextResult",
+                  "documentation": null
+                },
+                "entity_id": null,
+                "container": null,
+                "trace": null,
+                "query_groups": [],
+                "selection_reason": null,
+                "coverage_group": null,
+                "outline": "function resolveContext(query: string) {\n\ncalls: loadIndex, search",
+                "content_range": {
+                  "kind": "text",
+                  "start_line": 10,
+                  "end_line": 33,
+                  "start_byte_offset": 1000,
+                  "end_byte_offset": 3301,
+                  "start_byte_column": 0,
+                  "end_byte_column": 1
+                }
+              }
+            ]
+          }
+        ],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": {
+            "hits_returned": 2,
+            "query_groups": [],
+            "routes": [
+              {
+                "id": "fts1",
+                "mode": "fts",
+                "query": "refresh"
+              }
+            ]
+          },
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "expected_none": "query groups (3):\nq0 [primary]: missing\nhits: 0\n\nNo matches.\n\nq1 [primary]: call chain\nhits: 2\n\n#1 matchedBy=fts+vector src/sample.ts:10-33\nsymbol: function resolveContext scope: Workspace\n20\tretrieved-source-line-11\n\n#2 matchedBy=fts+vector notes/design.md:file\nheading: Design\nheading_level: 1\nscope: Search / Design\n\t# Design\n\nfts1 [supplemental]: refresh\nhits: 1\n\n#1 matchedBy=fts+vector src/sample.ts:10-33\nsymbol: function resolveContext scope: Workspace\n20\tretrieved-source-line-11",
+      "expected_short": "query groups (3):\nq0 [primary]: missing\nhits: 0\n\nNo matches.\n\nq1 [primary]: call chain\nhits: 2\n\n#1 matchedBy=fts+vector src/sample.ts:10-33\noutline:\nfunction resolveContext(query: string) {\n\ncalls: loadIndex, search\nmatched: 20-21\nsource:\n...\n18\tretrieved-source-line-9\n19\tretrieved-source-line-10\n20\tretrieved-source-line-11\n21\tretrieved-source-line-12\n22\tretrieved-source-line-13\n23\tretrieved-source-line-14\n24\tretrieved-source-line-15\n25\tretrieved-source-line-16\n26\tretrieved-source-line-17\n27\tretrieved-source-line-18\n...\n\n#2 matchedBy=fts+vector notes/design.md:file\nheading: Design\nheading_level: 1\nscope: Search / Design\nsource:\n\t# Design\n\t\n\tRetain local evidence.\n\t\n\t\n\nfts1 [supplemental]: refresh\nhits: 1\n\n#1 matchedBy=fts+vector src/sample.ts:10-33\noutline:\nfunction resolveContext(query: string) {\n\ncalls: loadIndex, search\nmatched: 20-21\nsource:\n...\n18\tretrieved-source-line-9\n19\tretrieved-source-line-10\n20\tretrieved-source-line-11\n21\tretrieved-source-line-12\n22\tretrieved-source-line-13\n23\tretrieved-source-line-14\n24\tretrieved-source-line-15\n25\tretrieved-source-line-16\n26\tretrieved-source-line-17\n27\tretrieved-source-line-18\n...",
+      "expected_full": "query groups (3):\nq0 [primary]: missing\nhits: 0\n\nNo matches.\n\nq1 [primary]: call chain\nhits: 2\n\n#1 matchedBy=fts+vector src/sample.ts:10-33\noutline:\nfunction resolveContext(query: string) {\n\ncalls: loadIndex, search\nmatched: 20-21\nsource:\n10\tretrieved-source-line-1\n11\tlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\n12\tretrieved-source-line-3\n13\tretrieved-source-line-4\n14\tretrieved-source-line-5\n15\tretrieved-source-line-6\n16\tretrieved-source-line-7\n17\tretrieved-source-line-8\n18\tretrieved-source-line-9\n19\tretrieved-source-line-10\n20\tretrieved-source-line-11\n21\tretrieved-source-line-12\n22\tretrieved-source-line-13\n23\tretrieved-source-line-14\n24\tretrieved-source-line-15\n25\tretrieved-source-line-16\n26\tretrieved-source-line-17\n27\tretrieved-source-line-18\n28\tretrieved-source-line-19\n29\tretrieved-source-line-20\n30\tretrieved-source-line-21\n31\tretrieved-source-line-22\n32\tretrieved-source-line-23\n33\tretrieved-source-line-24\n\n#2 matchedBy=fts+vector notes/design.md:file\nheading: Design\nheading_level: 1\nscope: Search / Design\nsource:\n\t# Design\n\t\n\tRetain local evidence.\n\t\n\t\n\nfts1 [supplemental]: refresh\nhits: 1\n\n#1 matchedBy=fts+vector src/sample.ts:10-33\noutline:\nfunction resolveContext(query: string) {\n\ncalls: loadIndex, search\nmatched: 20-21\nsource:\n10\tretrieved-source-line-1\n11\tlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\n12\tretrieved-source-line-3\n13\tretrieved-source-line-4\n14\tretrieved-source-line-5\n15\tretrieved-source-line-6\n16\tretrieved-source-line-7\n17\tretrieved-source-line-8\n18\tretrieved-source-line-9\n19\tretrieved-source-line-10\n20\tretrieved-source-line-11\n21\tretrieved-source-line-12\n22\tretrieved-source-line-13\n23\tretrieved-source-line-14\n24\tretrieved-source-line-15\n25\tretrieved-source-line-16\n26\tretrieved-source-line-17\n27\tretrieved-source-line-18\n28\tretrieved-source-line-19\n29\tretrieved-source-line-20\n30\tretrieved-source-line-21\n31\tretrieved-source-line-22\n32\tretrieved-source-line-23\n33\tretrieved-source-line-24",
+      "expected_detail": "Context: workspace workspace index\nQuery: call chain\nRoutes: fts:refresh\nCoverage: ranked_sample\nGroups: 3\nFiles: 2\nHits: 3\n\nGroup: q0 [primary]\nQuery: missing\nHits: 0\nReason: No matches\n\nGroup: q1 [primary]\nQuery: call chain\nHits: 2\n\nFile: src/sample.ts\nHits: 1\n\n  #1 function resolveContext matchedBy=fts+vector score=0.8000\n  Range: 10-33  Status: fresh\n  Matched: 20-21\n  Kind: code/function\n  Symbol: resolveContext\n  Scope: Workspace\n  Signature: function resolveContext(query: string): ContextResult\n  Outline:\n    function resolveContext(query: string) {\n    \n    calls: loadIndex, search\n  Source:\n    10\tretrieved-source-line-1\n    11\tlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\n    12\tretrieved-source-line-3\n    13\tretrieved-source-line-4\n    14\tretrieved-source-line-5\n    15\tretrieved-source-line-6\n    16\tretrieved-source-line-7\n    17\tretrieved-source-line-8\n    18\tretrieved-source-line-9\n    19\tretrieved-source-line-10\n    20\tretrieved-source-line-11\n    21\tretrieved-source-line-12\n    22\tretrieved-source-line-13\n    23\tretrieved-source-line-14\n    24\tretrieved-source-line-15\n    25\tretrieved-source-line-16\n    26\tretrieved-source-line-17\n    27\tretrieved-source-line-18\n    28\tretrieved-source-line-19\n    29\tretrieved-source-line-20\n    30\tretrieved-source-line-21\n    31\tretrieved-source-line-22\n    32\tretrieved-source-line-23\n    33\tretrieved-source-line-24\n\nFile: notes/design.md\nHits: 1\n\n  #2 heading Design matchedBy=fts+vector score=0.8000\n  Range: file  Status: fresh\n  Kind: markdown\n  Heading: Design\n  Heading level: 1\n  Scope: Search / Design\n  Source:\n    \t# Design\n    \t\n    \tRetain local evidence.\n    \t\n    \t\n\nGroup: fts1 [supplemental]\nQuery: refresh\nHits: 1\n\nFile: src/sample.ts\nHits: 1\n\n  #1 function resolveContext matchedBy=fts+vector score=0.8000\n  Range: 10-33  Status: fresh\n  Matched: 20-21\n  Kind: code/function\n  Symbol: resolveContext\n  Scope: Workspace\n  Signature: function resolveContext(query: string): ContextResult\n  Outline:\n    function resolveContext(query: string) {\n    \n    calls: loadIndex, search\n  Source:\n    10\tretrieved-source-line-1\n    11\tlong-line-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-end\n    12\tretrieved-source-line-3\n    13\tretrieved-source-line-4\n    14\tretrieved-source-line-5\n    15\tretrieved-source-line-6\n    16\tretrieved-source-line-7\n    17\tretrieved-source-line-8\n    18\tretrieved-source-line-9\n    19\tretrieved-source-line-10\n    20\tretrieved-source-line-11\n    21\tretrieved-source-line-12\n    22\tretrieved-source-line-13\n    23\tretrieved-source-line-14\n    24\tretrieved-source-line-15\n    25\tretrieved-source-line-16\n    26\tretrieved-source-line-17\n    27\tretrieved-source-line-18\n    28\tretrieved-source-line-19\n    29\tretrieved-source-line-20\n    30\tretrieved-source-line-21\n    31\tretrieved-source-line-22\n    32\tretrieved-source-line-23\n    33\tretrieved-source-line-24"
+    },
+    {
+      "id": "trace-with-found-and-missing-routes",
+      "result": {
+        "query": "call chain",
+        "freshness": "fresh",
+        "background_refresh": null,
+        "root": "workspace",
+        "source": "index",
+        "coverage": "ranked_sample",
+        "workspace_index": null,
+        "items": [
+          {
+            "kind": "indexed_entity",
+            "rank": 1,
+            "absolute_path": "workspace/src/sample.ts",
+            "relative_path": "src/sample.ts",
+            "range": {
+              "kind": "text",
+              "start_line": 1,
+              "end_line": 100,
+              "start_byte_offset": 100,
+              "end_byte_offset": 10001,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "excerpt_range": {
+              "kind": "text",
+              "start_line": 50,
+              "end_line": 52,
+              "start_byte_offset": 5000,
+              "end_byte_offset": 5201,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            },
+            "content": "function resolveContext() {\r\n  return true;\r\n}\r\n",
+            "content_role": "source",
+            "status": "fresh",
+            "score": 0.8,
+            "matched_by": "fts+vector",
+            "metadata": {
+              "kind": "code",
+              "symbol_type": "function",
+              "symbol_name": "resolveContext",
+              "scope": null,
+              "signature": null,
+              "documentation": null
+            },
+            "entity_id": null,
+            "container": null,
+            "trace": {
+              "recall": [
+                {
+                  "path": "fts",
+                  "route_id": "fts1",
+                  "query": "call chain",
+                  "found": true,
+                  "rank": 2,
+                  "score": 0.8,
+                  "forced": false,
+                  "reason": null
+                },
+                {
+                  "path": "vector",
+                  "route_id": "vector",
+                  "query": "call chain",
+                  "found": false,
+                  "rank": null,
+                  "score": null,
+                  "forced": false,
+                  "reason": null
+                }
+              ],
+              "fusion": {
+                "rank": 1,
+                "score": 0.8,
+                "forced": true
+              },
+              "ranking": null,
+              "final_selection": {
+                "returned_by_limit": true,
+                "cutoff_rank": 7
+              }
+            },
+            "query_groups": [],
+            "selection_reason": null,
+            "coverage_group": null,
+            "content_range": {
+              "kind": "text",
+              "start_line": 50,
+              "end_line": 52,
+              "start_byte_offset": 5000,
+              "end_byte_offset": 5201,
+              "start_byte_column": 0,
+              "end_byte_column": 1
+            }
+          }
+        ],
+        "group_results": [],
+        "diagnostics": {
+          "empty_reason": null,
+          "index": null,
+          "rg": null,
+          "structure": null,
+          "timings": []
+        }
+      },
+      "trace": true,
+      "expected_none": "#1 matchedBy=fts+vector score=0.8000 src/sample.ts:1-100\n50\tfunction resolveContext() {\ntrace: query \"call chain\": fts1/fts #2, vector missing; fused #1 forced",
+      "expected_short": "#1 matchedBy=fts+vector score=0.8000 src/sample.ts:1-100\nmatched: 50-52\nsource:\n50\tfunction resolveContext() {\n51\t  return true;\n52\t}\n53\t\ntrace: query \"call chain\": fts1/fts #2, vector missing; fused #1 forced",
+      "expected_full": "#1 matchedBy=fts+vector score=0.8000 src/sample.ts:1-100\nmatched: 50-52\nsource:\n50\tfunction resolveContext() {\n51\t  return true;\n52\t}\n53\t\ntrace: query \"call chain\": fts1/fts #2, vector missing; fused #1 forced",
+      "expected_detail": "Context: workspace index\nQuery: call chain\nCoverage: ranked_sample\nFiles: 1\nHits: 1\n\nFile: src/sample.ts\nHits: 1\n\n  #1 function resolveContext matchedBy=fts+vector score=0.8000\n  Range: 1-100  Status: fresh\n  Matched: 50-52\n  Kind: code/function\n  Symbol: resolveContext\n  Source:\n    50\tfunction resolveContext() {\n    51\t  return true;\n    52\t}\n    53\t\n  Trace: query \"call chain\": fts1/fts #2, vector missing; fused #1 forced"
+    }
+  ]
+}
