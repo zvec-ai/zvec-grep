@@ -236,6 +236,7 @@ pub(in crate::pipelines) fn refresh_options(
 ) -> IndexOptions {
     IndexOptions {
         root: Some(root),
+        require_existing_index: true,
         // Refresh reconciles the active index against the whole source tree.
         changes: vec![crate::api::index::options::WorkspaceChange::Rescan],
         on_progress: options.on_progress.clone(),

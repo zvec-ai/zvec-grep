@@ -78,6 +78,9 @@ impl WorkspaceIndexService {
         let requested_root = resolve_directory(options.root.as_deref())?;
         let layout = WorkspaceLayout::new(requested_root.join(".zvec-grep"))?;
         options.root = Some(requested_root.clone());
+        if options.require_existing_index && !layout.has_manifest()? {
+            return Err(missing_refresh_index(&requested_root));
+        }
         let home_lock = Arc::new(
             LockWait::new(options.signal.as_ref(), options.lock_timeout_ms)?
                 .acquire(
@@ -93,8 +96,7 @@ impl WorkspaceIndexService {
                 .await?,
         );
         // Check the on-disk version before any recovery or storage mutation.
-        let existing = inspect_workspace_manifest(&requested_root, &layout)?
-            .into_workspace(options.rebuild)?;
+        let existing = load_index_workspace(&requested_root, &layout, &options)?;
         // Validate selection before recovery, storage, or model mutations.
         options.scan.normalize_ignore_paths(&requested_root)?;
         let scan = resolve_scan(existing.as_ref().map(Workspace::scan), &options)?;
@@ -388,6 +390,26 @@ impl WorkspaceIndexService {
         }
         Ok(has_data)
     }
+}
+
+fn load_index_workspace(
+    root: &Path,
+    layout: &WorkspaceLayout,
+    options: &IndexOptions,
+) -> Result<Option<Workspace>, EngineError> {
+    let existing = inspect_workspace_manifest(root, layout)?.into_workspace(options.rebuild)?;
+    // Recheck after admission: a queued refresh must not become a first build.
+    if options.require_existing_index && !existing.as_ref().is_some_and(Workspace::index_enabled) {
+        return Err(missing_refresh_index(root));
+    }
+    Ok(existing)
+}
+
+fn missing_refresh_index(root: &Path) -> EngineError {
+    EngineError::not_found(format!(
+        "No index found in {}. Run `zg --index --embedding <model>` to build it before refreshing.",
+        root.display()
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1720,6 +1742,65 @@ mod tests {
             }),
             ..IndexOptions::default()
         }
+    }
+
+    #[tokio::test]
+    async fn automatic_refresh_does_not_create_a_missing_index() {
+        let directory = tempdir().expect("workspace");
+        let service = WorkspaceIndexService::new();
+        let models = ModelRuntimeManager::new();
+        let refresh = crate::pipelines::indexed_search::service::refresh_options(
+            &crate::api::context::ContextOptions::default(),
+            directory.path().to_path_buf(),
+        );
+        let error = service
+            .index(&models, refresh)
+            .await
+            .expect_err("refresh needs an existing index");
+        assert_eq!(error.code(), crate::EngineError::NOT_FOUND);
+        assert!(!directory.path().join(".zvec-grep").exists());
+        models.close();
+    }
+
+    #[tokio::test]
+    async fn automatic_refresh_rechecks_index_after_waiting_for_a_writer() {
+        let directory = tempdir().expect("workspace");
+        let service = WorkspaceIndexService::new();
+        let models = ModelRuntimeManager::new();
+        service
+            .index(&models, empty_index_options(directory.path()))
+            .await
+            .expect("initial index");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        let writer = super::LockWait::new(None, None)
+            .expect("lock wait")
+            .acquire(
+                directory.path(),
+                &layout,
+                super::LockMode::Exclusive,
+                "fixture writer",
+            )
+            .await
+            .expect("hold writer admission");
+        let options = crate::pipelines::indexed_search::service::refresh_options(
+            &crate::api::context::ContextOptions::default(),
+            directory.path().to_path_buf(),
+        );
+        let refresh = service.index(&models, options);
+        tokio::pin!(refresh);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), refresh.as_mut())
+                .await
+                .is_err(),
+            "refresh must wait for the writer"
+        );
+        std::fs::remove_dir_all(layout.storage_dir()).expect("delete queued refresh's index");
+        drop(writer);
+
+        let error = refresh.await.expect_err("index disappeared while queued");
+        assert_eq!(error.code(), crate::EngineError::NOT_FOUND);
+        assert!(!layout.manifest_path().exists());
+        models.close();
     }
 
     #[tokio::test]

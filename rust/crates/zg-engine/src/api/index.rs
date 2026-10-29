@@ -25,6 +25,10 @@ pub mod options {
         pub root: Option<PathBuf>,
         /// Build from empty storage and replace the active index only after success.
         pub rebuild: bool,
+        /// Automatic refreshes require an existing enabled index instead of creating one.
+        /// This admission policy is runtime-only and never accepted from transport requests.
+        #[serde(skip)]
+        pub require_existing_index: bool,
         /// Resets saved scan rules before applying this request's updates.
         pub reset_paths: bool,
         /// Normalized watcher changes for a narrow incremental index operation.
