@@ -15,7 +15,7 @@ use std::{
 };
 
 use crossterm::{
-    cursor::{Hide, MoveToColumn, MoveUp, Show},
+    cursor::{Hide, MoveDown, MoveToColumn, MoveUp, Show},
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     queue,
     terminal::{self, Clear, ClearType},
@@ -65,14 +65,17 @@ fn clean(value: &str) -> String {
 
 #[derive(Default)]
 struct Screen {
-    lines: u16,
+    lines: Vec<String>,
 }
 
 impl Screen {
     fn rewind(&self, output: &mut impl Write) -> io::Result<()> {
         queue!(output, MoveToColumn(0))?;
-        if self.lines > 0 {
-            queue!(output, MoveUp(self.lines))?;
+        if !self.lines.is_empty() {
+            queue!(
+                output,
+                MoveUp(u16::try_from(self.lines.len()).unwrap_or(u16::MAX))
+            )?;
         }
         queue!(output, Clear(ClearType::FromCursorDown))
     }
@@ -81,31 +84,74 @@ impl Screen {
         let mut output = io::stderr().lock();
         self.rewind(&mut output)?;
         output.flush()?;
-        self.lines = 0;
+        self.lines.clear();
         Ok(())
     }
 
     fn draw(&mut self, lines: &[String], color: ColorMode) -> io::Result<()> {
         let mut output = io::stderr().lock();
-        self.rewind(&mut output)?;
         let columns = terminal::size()
             .map_or(80, |(columns, _)| columns)
             .saturating_sub(1);
+        self.draw_to(&mut output, lines, columns, color)
+    }
+
+    fn draw_to(
+        &mut self,
+        output: &mut impl Write,
+        lines: &[String],
+        columns: u16,
+        color: ColorMode,
+    ) -> io::Result<()> {
         let use_color = color == ColorMode::Always
             || (color == ColorMode::Auto && std::env::var_os("NO_COLOR").is_none());
-        for line in lines {
-            let line = clean(line)
-                .chars()
-                .take(usize::from(columns))
-                .collect::<String>();
-            if use_color && line.trim_start().starts_with('›') {
-                write!(output, "\x1b[38;2;134;239;172m{line}\x1b[0m\r\n")?;
-            } else {
-                write!(output, "{line}\r\n")?;
+        let rendered = lines
+            .iter()
+            .map(|line| {
+                let line = clean(line)
+                    .chars()
+                    .take(usize::from(columns))
+                    .collect::<String>();
+                if use_color && line.trim_start().starts_with('›') {
+                    format!("\x1b[38;2;134;239;172m{line}\x1b[0m")
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>();
+        let previous_len = self.lines.len();
+        let mut frame = Vec::new();
+        // Repaint only changed rows so navigation never blanks the whole prompt.
+        for (index, line) in rendered.iter().enumerate().take(previous_len) {
+            if self.lines[index] == *line {
+                continue;
             }
+            let distance = u16::try_from(previous_len - index).unwrap_or(u16::MAX);
+            queue!(frame, MoveToColumn(0), MoveUp(distance))?;
+            write!(frame, "{line}")?;
+            queue!(
+                frame,
+                Clear(ClearType::UntilNewLine),
+                MoveToColumn(0),
+                MoveDown(distance)
+            )?;
         }
-        output.flush()?;
-        self.lines = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+        for line in rendered.iter().skip(previous_len) {
+            write!(frame, "{line}\r\n")?;
+        }
+        if previous_len > rendered.len() {
+            queue!(
+                frame,
+                MoveToColumn(0),
+                MoveUp(u16::try_from(previous_len - rendered.len()).unwrap_or(u16::MAX)),
+                Clear(ClearType::FromCursorDown)
+            )?;
+        }
+        if !frame.is_empty() {
+            output.write_all(&frame)?;
+            output.flush()?;
+        }
+        self.lines = rendered;
         Ok(())
     }
 }
@@ -530,5 +576,49 @@ mod tests {
         assert!(lines.contains("Select an embedding model to build zg index:"));
         assert!(!lines.contains("local/one"));
         assert!(lines.contains("Esc Exit"));
+    }
+
+    #[test]
+    fn redraw_does_not_blank_the_prompt_before_painting() {
+        let mut picker = ModelSelection::new(&setup());
+        let mut screen = Screen::default();
+        screen
+            .draw_to(
+                &mut Vec::new(),
+                &picker.lines(Path::new("/workspace"), 24),
+                80,
+                ColorMode::Never,
+            )
+            .expect("draw prompt");
+        picker.key(key(KeyCode::Down));
+        let mut output = Vec::new();
+        screen
+            .draw_to(
+                &mut output,
+                &picker.lines(Path::new("/workspace"), 24),
+                80,
+                ColorMode::Never,
+            )
+            .expect("redraw prompt");
+        let erased = {
+            let mut bytes = Vec::new();
+            queue!(bytes, Clear(ClearType::FromCursorDown)).expect("erase sequence");
+            bytes
+        };
+        assert!(
+            !output.windows(erased.len()).any(|window| window == erased),
+            "redraw clears the whole prompt before repainting it"
+        );
+        assert!(!output.is_empty(), "selection change must be rendered");
+        let mut unchanged = Vec::new();
+        screen
+            .draw_to(
+                &mut unchanged,
+                &picker.lines(Path::new("/workspace"), 24),
+                80,
+                ColorMode::Never,
+            )
+            .expect("redraw unchanged prompt");
+        assert!(unchanged.is_empty(), "unchanged prompt must not repaint");
     }
 }
