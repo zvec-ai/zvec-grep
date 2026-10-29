@@ -33,15 +33,8 @@
 </div>
 
 **zg**（**z**vec-**g**rep），由 [zvec](https://github.com/alibaba/zvec) 驱动，
-将 ripgrep、BM25 与向量检索统一在一个[本地优先的检索入口](https://zvec.org/zh/docs/zvec-grep/)中。
+将 ripgrep、BM25 与向量检索统一在一个本地优先的检索入口中。
 既可以由人在终端中搜索，也可以让 Agent 根据问题选择合适的本地检索方式。
-
-zg 是使用 Rust 实现的原生 CLI，支持本地 MCP 集成。用户指南统一维护在
-[Zvec 官网](https://zvec.org/zh/docs/zvec-grep/)；构建与开发说明位于
-[`rust/`](./rust/README.md)。
-
-**安装**：`npm install -g @zvec/zvec-grep`，或通过 Homebrew（macOS/Linux）：
-`brew install zvec-grep`
 
 <a id="tour"></a>
 

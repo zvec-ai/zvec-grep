@@ -34,15 +34,8 @@
 
 **zg** (**z**vec-**g**rep), powered by [zvec](https://github.com/alibaba/zvec),
 unifies ripgrep, BM25, and vector search behind
-[one local-first interface](https://zvec.org/en/docs/zvec-grep/). Use it directly from the
+one local-first interface. Use it directly from the
 terminal, or let your agent use it for you.
-
-zg is a native Rust CLI with local MCP integrations. User guides live on the
-[Zvec website](https://zvec.org/en/docs/zvec-grep/); build and development instructions
-live in [`rust/`](./rust/README.md).
-
-**Install**: `npm install -g @zvec/zvec-grep`, or via Homebrew (macOS/Linux):
-`brew install zvec-grep`
 
 <a id="tour"></a>
 
