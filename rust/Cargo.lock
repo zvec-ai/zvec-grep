@@ -4258,7 +4258,7 @@ dependencies = [
 
 [[package]]
 name = "zg"
-version = "0.0.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "cc",
  "clap",
@@ -4282,7 +4282,7 @@ dependencies = [
 
 [[package]]
 name = "zg-cli"
-version = "0.0.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "chrono",
  "clap",
@@ -4302,7 +4302,7 @@ dependencies = [
 
 [[package]]
 name = "zg-daemon"
-version = "0.0.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -4332,7 +4332,7 @@ dependencies = [
 
 [[package]]
 name = "zg-daemon-protocol"
-version = "0.0.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4341,7 +4341,7 @@ dependencies = [
 
 [[package]]
 name = "zg-engine"
-version = "0.0.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4392,7 +4392,7 @@ dependencies = [
 
 [[package]]
 name = "zg-engine-macros"
-version = "0.0.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4401,7 +4401,7 @@ dependencies = [
 
 [[package]]
 name = "zg-host-native"
-version = "0.0.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "async-trait",
  "notify",
@@ -4415,7 +4415,7 @@ dependencies = [
 
 [[package]]
 name = "zg-llama-native"
-version = "0.0.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "libloading 0.8.9",
  "llama-cpp-sys-2",
@@ -4424,7 +4424,7 @@ dependencies = [
 
 [[package]]
 name = "zg-testkit"
-version = "0.0.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4436,7 +4436,7 @@ dependencies = [
 
 [[package]]
 name = "zg-transport-mcp"
-version = "0.0.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "async-trait",
  "chrono",
