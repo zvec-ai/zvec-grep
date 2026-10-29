@@ -178,7 +178,8 @@ test("MCP failures fail the gate and still stop each daemon", async (t) => {
 });
 
 test("latest requires successful completion of the full six-platform registry matrix", async () => {
-  const workflow = await readFile(new URL("../../.github/workflows/rust-publish.yml", import.meta.url), "utf8");
+  const workflow = (await readFile(new URL("../../.github/workflows/rust-publish.yml", import.meta.url), "utf8"))
+    .replaceAll("\r\n", "\n");
   const registry = workflow.split("\n  registry-smoke:\n")[1].split("\n  promote:\n")[0];
   const manifest = JSON.parse(await readFile(new URL("../npm/platforms.json", import.meta.url), "utf8"));
   assert.deepEqual([...registry.matchAll(/- target: ([\w-]+)/g)].map((match) => match[1]).sort(),
