@@ -347,6 +347,38 @@ unpack, and baseline-copy costs still occur once per run; hosted runners do not
 persist the restored files across workflow runs.
 Embeddings use runner CPU; even `smoke` incurs agent and judge API costs.
 
+**Latest restored five-case CI (2026-10-28):** [run 40681729330](https://github.com/zvec-ai/zvec-grep/actions/runs/40681729330)
+passed on harness `0acd5b85` and candidate `4e557cd9`, using OpenCode 1.18.4 +
+`custom-openai/qwen3.8-max`. All 10 answers and 10 matching judges were verified
+from downloaded case/aggregate seals, selected/attempt bytes, judge hashes,
+sequential A/B order, and aggregate completeness. All trials used `attempt-001`;
+there were no failed/incomplete agent attempts or unknown agent/judge usage.
+The completed wrong baseline answer on 628 was retained without a rerun.
+
+| Latest five-case means/result | Baseline | zvec-grep | zg change |
+| --- | ---: | ---: | ---: |
+| Score | 4/5 (80%) | 5/5 (100%) | +20 percentage points |
+| Total agent tokens, including cached input | 2,600,356.8 | 2,470,849.4 | −4.98% |
+| Agent seconds, excluding preparation and judging | 892.81 | 801.31 | −10.25% |
+
+Workflow elapsed **1h17m13s**. The shared execution job took 1h12m12s, including
+one snapshot download (11m26s), one restore (3m01s), restored-index validation
+(14s), and isolated execution including judging (54m21s). The credential-free
+candidate job took 4m36s; aggregation took 16s. Shared daemon startup/warmup was
+4.18s inside execution, counted once. Five case-profile preparations bring the
+runtime-preparation total to 5.41s; six sessions do not mean six index warmups.
+Ten judges used 29,783 tokens and 88.41s summed wall time, separately from agents.
+Model preflight and runner setup are outside agent averages.
+
+Only cases 241 and 700 were faster with zg; the other three were slower. Four
+of five treatment trials invoked zg, totaling two successful calls and two failed
+calls. These errors remain visible despite all treatment answers being correct.
+This fixed five-case, single-trial sample does not establish general gains or a
+workflow speedup: download latency and model tails vary between runs. Reported
+tokens include cached input and are not equivalent to uncached billable tokens.
+The earlier incomplete ten-case experiment and its failed/unknown costs are
+recorded separately above and excluded from these means.
+
 **Measured shared-job CI (2026-10-27):** the [two-case iteration](https://github.com/zvec-ai/zvec-grep/actions/runs/40539457579)
 passed before the [then-five-case CI](https://github.com/zvec-ai/zvec-grep/actions/runs/40552240366),
 both on harness `0bb4e773` and candidate `4e557cd9`. The five-case run completed

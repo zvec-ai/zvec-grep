@@ -245,6 +245,31 @@ BrowseComp-Plus 路由无需 `pr_number`；既有 retrieval 路由仍校验该�
 解压和 baseline 复制；普通托管 runner 不会跨 workflow 保留已恢复文件。
 Embedding 使用 runner CPU；`smoke` 同样产生 Agent 和评审 API 费用。
 
+**最新恢复五题实测（2026-10-28）：** [运行 40681729330](https://github.com/zvec-ai/zvec-grep/actions/runs/40681729330)
+使用 harness `0acd5b85`、candidate `4e557cd9`，答题和评审均为 OpenCode 1.18.4 +
+`custom-openai/qwen3.8-max`。10 份答案、10 份匹配评审完整；下载后的每题与汇总 checksum、
+selected/attempt 字节、评审输入哈希、同题 A/B 顺序和完整性检查全部通过。
+所有 trial 仅有 `attempt-001`，无失败或未完成尝试、无未知 Agent/评审用量；
+628 的 baseline 错误答案原样保留，未因答错重跑。
+
+| 本轮五题均值或结果 | Baseline | zvec-grep | zg 变化 |
+| --- | ---: | ---: | ---: |
+| 正确率 | 4/5（80%） | 5/5（100%） | +20 个百分点 |
+| Agent 总 tokens，含缓存输入 | 2,600,356.8 | 2,470,849.4 | −4.98% |
+| Agent 耗时，不含准备与评审 | 892.81 秒 | 801.31 秒 | −10.25% |
+
+Workflow 共 **1 小时 17 分 13 秒**。共享执行 job 共 1 小时 12 分 12 秒，包含一次下载
+11 分 26 秒、一次恢复 3 分 01 秒、恢复后索引校验 14 秒、答题及评审 54 分 21 秒。
+无模型凭据的候选 job 共 4 分 36 秒，聚合 16 秒。共享 daemon 启动与预热 4.18 秒，
+包含在执行阶段且只计一次；加上 5 题各自 profile 准备后 runtime 准备共 5.41 秒，
+6 个 sessions 不代表 6 次索引预热。10 次评审另用 29,783 tokens、累计 88.41 秒；
+模型预检、runner 准备与评审均不计入 Agent 均值。
+
+只有 241、700 两题 zg 更快，其余三题更慢。4/5 题实际调用 zg，共 4 次调用，2 次成功、
+2 次失败；即使 zg 侧答案全部正确，工具错误仍保留。这是固定五题、每题一次的小样本，
+不能推断总体收益或 workflow 加速幅度；下载波动和模型长尾仍明显。tokens 含缓存输入，
+不等同于未缓存计费量。此前未完成十题的完成、失败与未知成本在上文单列，不计入本轮均值。
+
 **单 job CI 实测（2026-10-27）：** 先完成[两题 iteration](https://github.com/zvec-ai/zvec-grep/actions/runs/40539457579)，
 再通过[当时的五题 CI](https://github.com/zvec-ai/zvec-grep/actions/runs/40552240366)，
 两轮均使用 harness `0bb4e773`、candidate `4e557cd9`。五题共完成 10 份答案和 10 份评审；
