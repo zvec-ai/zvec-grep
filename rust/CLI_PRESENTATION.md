@@ -80,24 +80,56 @@ These are test references, not a claim that a particular build has passed.
 
 ## Review images
 
-The images use the actual Rust formatters with labeled sample results. Progress
-frames come from the running renderer, including the real optimization timer.
-The model and installation pickers were captured from the CLI in a PTY, then
-cancelled with Esc; neither capture installs, downloads or authorizes anything.
-The surrounding cards are review annotations, not terminal borders.
+The [command coverage table](../.github/assets/cli-style/coverage.md) enumerates
+all public command families, subcommands, help topics and interactive entry
+points. The [full gallery](../.github/assets/cli-style/catalog.md) links each
+captured state to its screenshot, provenance and recorded exit code.
+
+- **Real PTY**: executed CLI output, including validation failures, temporary
+  daemon lifecycle, isolated OpenCode installation/removal and cancelled pickers.
+- **Renderer fixture**: sample results passed through production Rust formatters.
+  These cover search, index/status, configuration, authorization, upgrade and
+  error variants without claiming that the corresponding operation was executed.
+- **PTY renderer fixture**: production credential/consent prompts with synthetic
+  data, cancelled before any credential or authorization is accepted.
+
+Only OpenCode integration outcomes are executed in the capture script; other
+installation targets share presentation but have separate implementation tests.
+MCP stdout and redirected byte-stream contracts are checked by tests, not
+screenshots. This inventory is not every possible flag, provider, model, operating
+system or failure-message combination. Still images do not verify animation
+performance or readiness; the tests above cover those properties.
+
+The surrounding cards, commands and evidence labels are review annotations, not
+terminal borders. NUL separators are shown as `␀` and explicitly annotated;
+the JSON source retains their original bytes. Progress frames come from the
+running renderer, including its real optimization timer. Temporary directories
+may be normalized for publication only when the card says so.
+
+Representative sheets:
 
 - [Index lifecycle and error](../.github/assets/cli-style/index-lifecycle.png)
 - [Command output](../.github/assets/cli-style/command-output.png)
 - [Keyboard interactions](../.github/assets/cli-style/interaction.png)
 
-Generate fresh formatter captures from `rust/`:
+Generate fresh captures from `rust/` (the PTY scripts require Unix):
 
 ```sh
+cargo build --locked -p zg -p zg-cli --examples
 TERM=xterm-256color COLUMNS=100 cargo run --locked -p zg-cli --example presentation > /tmp/zg-presentation.json
-node scripts/render-cli-style.mjs /tmp/zg-presentation.json /tmp/zg-review ../.github/assets/cli-style/interactions.json
+python3 scripts/capture-cli-catalog.py --include-daemon --output /tmp/zg-commands.json
+python3 scripts/capture-cli-interactions.py --output /tmp/zg-prompts.json
+node scripts/render-cli-style.mjs /tmp/zg-presentation.json /tmp/zg-review ../.github/assets/cli-style/interactions.json /tmp/zg-commands.json /tmp/zg-prompts.json
 ```
 
-Open the resulting HTML files at a viewport width of 1120 pixels and take
+Build the `zg` binary separately with `cargo build --locked -p zg` if it is not
+already present. Copy the inventory `coverage.json` into the output directory
+before rendering to regenerate the linked coverage table too. The legacy model
+and install picker captures are retained in `interactions.json`; their titles
+identify them as real PTY captures cancelled before confirming a selection.
+
+Open the generated HTML sheets at a viewport width of 1120 pixels and take
 full-page screenshots. The converter preserves captured text and SGR colors;
-only cursor-control sequences are removed for static display. Recorded inputs
-are in [cli-style](../.github/assets/cli-style/).
+only cursor-control sequences are removed for static display. Recorded inputs,
+the sheet manifest and the coverage inventory are in
+[cli-style](../.github/assets/cli-style/).

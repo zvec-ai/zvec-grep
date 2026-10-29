@@ -44,6 +44,13 @@ use zg_engine::{
     authorization::{AuthorizationGrantStatus, AuthorizationStatus, IndexAuthorization},
 };
 
+#[path = "presentation/failures.rs"]
+mod failures;
+#[path = "presentation/search.rs"]
+mod search;
+#[path = "presentation/upgrade.rs"]
+mod upgrade;
+
 #[derive(Serialize)]
 struct Fixture {
     id: &'static str,
@@ -62,6 +69,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     fixtures.extend(index_fixtures(&root)?);
     fixtures.extend(management_fixtures(&root, &home)?);
     fixtures.extend(interaction_fixtures(&root)?);
+    fixtures.extend(search::fixtures(&root)?);
+    fixtures.extend(failures::fixtures(&root)?);
+    fixtures.extend(upgrade::fixtures(&root)?);
     let mut output = io::stdout().lock();
     serde_json::to_writer_pretty(&mut output, &fixtures)?;
     writeln!(output)?;
@@ -378,10 +388,36 @@ fn interaction_fixtures(root: &Path) -> io::Result<Vec<Fixture>> {
             },
         )?,
         render(
+            "consent-query",
+            "Query consent with FTS-only fallback · fixture",
+            "zg --hybrid 'index progress'",
+            |output| {
+                let _decision = zg_cli::prompt_query_authorization(
+                    &target,
+                    true,
+                    true,
+                    Cursor::new(b"\n"),
+                    output,
+                )?;
+                Ok(())
+            },
+        )?,
+        render(
             "refresh",
             "Query freshness · fixture",
             "zg --refresh background 'index progress'",
             |output| zg_cli::write_context_status_with_options(output, &query, options(), true),
+        )?,
+        render(
+            "refresh-off",
+            "Stale index with refresh disabled · fixture",
+            "zg --refresh off 'index progress'",
+            |output| {
+                let mut query = query.clone();
+                query.indexing = None;
+                query.background_refresh = Some("off".into());
+                zg_cli::write_context_status_with_options(output, &query, options(), true)
+            },
         )?,
     ])
 }

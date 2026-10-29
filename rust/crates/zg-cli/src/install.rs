@@ -21,7 +21,10 @@ use crate::{
 };
 
 mod upgrade;
-pub use upgrade::execute_upgrade_installed;
+pub use upgrade::{
+    IntegrationUpgradeEntryKind, IntegrationUpgradeSummary, execute_upgrade_installed,
+    write_integration_upgrade_entry, write_integration_upgrade_summary,
+};
 
 const CONFIG_START: &str = "# ZVEC_GREP_START";
 const CONFIG_END: &str = "# ZVEC_GREP_END";

@@ -15,7 +15,10 @@ use super::{
     qoder_ide_path, resolve_atomic_target, resolve_opencode_config, resolve_pi_home,
     resolve_qwen_home, vscode_config_paths,
 };
-use crate::{InstallArgs, theme::clean};
+use crate::{
+    ColorMode, InstallArgs,
+    theme::{StatusTheme, clean},
+};
 
 struct ConfigFile {
     path: PathBuf,
@@ -31,12 +34,39 @@ enum Format {
     Toml,
 }
 
-#[derive(Default)]
-struct Report {
-    updated: usize,
-    compatible: usize,
-    manual: usize,
-    failed: usize,
+/// Counts displayed after inspecting or upgrading installed integrations.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct IntegrationUpgradeSummary {
+    pub updated: usize,
+    pub compatible: usize,
+    pub manual: usize,
+    pub failed: usize,
+}
+
+type Report = IntegrationUpgradeSummary;
+
+/// The presentation category of one inspected integration or its backup.
+#[derive(Clone, Copy, Debug)]
+pub enum IntegrationUpgradeEntryKind {
+    Upgraded,
+    Preview,
+    Compatible,
+    Manual,
+    Failed,
+    Backup,
+}
+
+impl IntegrationUpgradeEntryKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Upgraded => "upgraded",
+            Self::Preview => "would upgrade",
+            Self::Compatible => "compatible",
+            Self::Manual => "manual",
+            Self::Failed => "failed",
+            Self::Backup => "backup",
+        }
+    }
 }
 
 enum Launch {
@@ -80,7 +110,7 @@ pub fn execute_upgrade_installed(args: &InstallArgs) -> Result<(), InstallError>
         });
         if let Err(error) = result {
             report.failed += 1;
-            write_entry("failed", &error.to_string())?;
+            write_entry(IntegrationUpgradeEntryKind::Failed, &error.to_string())?;
         }
     }
     write_report(
@@ -114,6 +144,20 @@ fn write_report(
     dry_run: bool,
     terminal: bool,
 ) -> io::Result<()> {
+    write_integration_upgrade_summary(output, report, dry_run, ColorMode::Auto, terminal)
+}
+
+/// Renders upgrade counts without inspecting or modifying configuration files.
+///
+/// # Errors
+/// Returns output writer errors.
+pub fn write_integration_upgrade_summary(
+    mut output: impl Write,
+    report: &IntegrationUpgradeSummary,
+    dry_run: bool,
+    color: ColorMode,
+    terminal: bool,
+) -> io::Result<()> {
     if !terminal {
         return writeln!(
             output,
@@ -125,7 +169,7 @@ fn write_report(
             report.failed
         );
     }
-    let theme = install_theme();
+    let theme = StatusTheme::new(color, terminal);
     let (marker, title) = if report.updated + report.compatible + report.manual + report.failed == 0
     {
         (theme.muted("·"), "No existing integrations found")
@@ -156,20 +200,42 @@ fn write_report(
     Ok(())
 }
 
-fn write_entry(status: &str, detail: &str) -> io::Result<()> {
-    let mut output = crate::stdout();
+fn write_entry(kind: IntegrationUpgradeEntryKind, detail: &str) -> io::Result<()> {
+    write_integration_upgrade_entry(
+        crate::stdout(),
+        kind,
+        detail,
+        ColorMode::Auto,
+        crate::stdout_supports_ansi(),
+    )
+}
+
+/// Renders one integration outcome without performing an installation or upgrade.
+///
+/// # Errors
+/// Returns output writer errors.
+pub fn write_integration_upgrade_entry(
+    mut output: impl Write,
+    kind: IntegrationUpgradeEntryKind,
+    detail: &str,
+    color: ColorMode,
+    terminal: bool,
+) -> io::Result<()> {
+    let status = kind.label();
     let detail = clean(detail);
-    if !crate::stdout_supports_ansi() {
+    if !terminal {
         return writeln!(output, "  {status}: {detail}");
     }
-    let theme = install_theme();
-    let (marker, title) = match status {
-        "upgraded" => (theme.success("✓"), "Integration upgraded"),
-        "would upgrade" => (theme.muted("·"), "Would upgrade integration"),
-        "compatible" => (theme.success("✓"), "Integration compatible"),
-        "manual" => (theme.warning("!"), "Manual update required"),
-        "failed" => (theme.danger("×"), "Integration upgrade failed"),
-        _ => return writeln!(output, "  {}", theme.muted(&format!("{status}: {detail}"))),
+    let theme = StatusTheme::new(color, terminal);
+    let (marker, title) = match kind {
+        IntegrationUpgradeEntryKind::Upgraded => (theme.success("✓"), "Integration upgraded"),
+        IntegrationUpgradeEntryKind::Preview => (theme.muted("·"), "Would upgrade integration"),
+        IntegrationUpgradeEntryKind::Compatible => (theme.success("✓"), "Integration compatible"),
+        IntegrationUpgradeEntryKind::Manual => (theme.warning("!"), "Manual update required"),
+        IntegrationUpgradeEntryKind::Failed => (theme.danger("×"), "Integration upgrade failed"),
+        IntegrationUpgradeEntryKind::Backup => {
+            return writeln!(output, "  {}", theme.muted(&format!("{status}: {detail}")));
+        }
     };
     writeln!(output, "{marker} {title}\n  {}", theme.muted(&detail))
 }
@@ -269,7 +335,11 @@ fn upgrade_file(
         }
         report.updated += changes;
         write_entry(
-            if dry_run { "would upgrade" } else { "upgraded" },
+            if dry_run {
+                IntegrationUpgradeEntryKind::Preview
+            } else {
+                IntegrationUpgradeEntryKind::Upgraded
+            },
             &format!("{} ({changes} entries)", file.path.display()),
         )?;
     }
@@ -300,7 +370,10 @@ fn write_upgrade(target: &Path, source: &str, next: &str) -> Result<(), InstallE
         ));
     }
     atomic_write(target, next)?;
-    write_entry("backup", &backup.display().to_string())?;
+    write_entry(
+        IntegrationUpgradeEntryKind::Backup,
+        &backup.display().to_string(),
+    )?;
     Ok(())
 }
 
@@ -442,12 +515,15 @@ fn note_launch(
     match launch {
         Launch::Compatible => {
             report.compatible += 1;
-            write_entry("compatible", &format!("{} [{name}]", path.display()))?;
+            write_entry(
+                IntegrationUpgradeEntryKind::Compatible,
+                &format!("{} [{name}]", path.display()),
+            )?;
         }
         Launch::Manual => {
             report.manual += 1;
             write_entry(
-                "manual",
+                IntegrationUpgradeEntryKind::Manual,
                 &format!(
                     "{} [{name}] has an unsupported launcher; use zg --server --stdio for stdio MCP",
                     path.display()
@@ -635,6 +711,62 @@ fn upgrade_toml(
 #[cfg(test)]
 mod presentation_tests {
     use super::*;
+
+    #[test]
+    fn public_entry_renderer_preserves_plain_labels_and_sanitizes_details() {
+        for (kind, label) in [
+            (IntegrationUpgradeEntryKind::Upgraded, "upgraded"),
+            (IntegrationUpgradeEntryKind::Preview, "would upgrade"),
+            (IntegrationUpgradeEntryKind::Compatible, "compatible"),
+            (IntegrationUpgradeEntryKind::Manual, "manual"),
+            (IntegrationUpgradeEntryKind::Failed, "failed"),
+            (IntegrationUpgradeEntryKind::Backup, "backup"),
+        ] {
+            let mut output = Vec::new();
+            write_integration_upgrade_entry(
+                &mut output,
+                kind,
+                "fixture\x1b[2J\npath",
+                ColorMode::Always,
+                false,
+            )
+            .expect("plain entry");
+            assert_eq!(
+                String::from_utf8(output).expect("UTF-8 entry"),
+                format!("  {label}: fixture [2J path\n")
+            );
+        }
+    }
+
+    #[test]
+    fn public_upgrade_renderers_respect_explicit_color_policy() {
+        for color in [ColorMode::Never, ColorMode::Always] {
+            let mut output = Vec::new();
+            write_integration_upgrade_entry(
+                &mut output,
+                IntegrationUpgradeEntryKind::Upgraded,
+                "fixture",
+                color,
+                true,
+            )
+            .expect("terminal entry");
+            write_integration_upgrade_summary(
+                &mut output,
+                &IntegrationUpgradeSummary {
+                    updated: 1,
+                    ..Default::default()
+                },
+                false,
+                color,
+                true,
+            )
+            .expect("terminal summary");
+            let output = String::from_utf8(output).expect("UTF-8 report");
+            assert_eq!(output.contains("\x1b["), color == ColorMode::Always);
+            assert!(output.contains("Integration upgraded"));
+            assert!(output.contains("Integrations up to date"));
+        }
+    }
 
     #[test]
     fn upgrade_preview_and_partial_failure_never_report_success() {

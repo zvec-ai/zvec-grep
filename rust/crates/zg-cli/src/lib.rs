@@ -64,8 +64,9 @@ pub use authorization::{
 };
 
 pub use install::{
-    InstallError, InstallOutcome, execute_install, execute_uninstall, execute_upgrade_installed,
-    resolve_server_listen, resolve_server_url,
+    InstallError, InstallOutcome, IntegrationUpgradeEntryKind, IntegrationUpgradeSummary,
+    execute_install, execute_uninstall, execute_upgrade_installed, resolve_server_listen,
+    resolve_server_url, write_integration_upgrade_entry, write_integration_upgrade_summary,
 };
 pub use managed_rg::{
     ManagedRgArgumentError, ParsedRgArgs, files_options, parse_managed_rg_args, parse_rg_args,
