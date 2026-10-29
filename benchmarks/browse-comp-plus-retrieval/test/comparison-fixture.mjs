@@ -25,6 +25,7 @@ export function comparisonFixture() {
     },
   });
   const arm = (commit, scale) => ({
+    quality_target: "evidence",
     commit,
     status: "success",
     calls: 150,
@@ -82,6 +83,7 @@ export function comparisonFixture() {
   return {
     schema_version: 1,
     kind: "browsecomp-doc-comparison",
+    quality_target: "evidence",
     status: "success",
     harness_commit: requestFixture.harness_commit,
     document_count: 100195,

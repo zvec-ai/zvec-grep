@@ -165,6 +165,19 @@ test("typed results update the running comment and expose historical index prove
   assert.match(x.comments[0].body, /-50\.0%/);
   assert.match(x.comments[0].body, /same sealed full-corpus index/);
   assert.match(x.comments[0].body, /## Query/);
+  assert.match(x.comments[0].body, /## Retrieval quality · Evidence/);
+  assert.doesNotMatch(x.comments[0].body, /Recall@|Gold/);
+});
+
+test("older Gold summaries cannot publish an Evidence comparison", async (t) => {
+  const x = await fixture(t);
+  await prepareDoc(x);
+  x.env.BCP_REQUEST = JSON.stringify(x.outputs);
+  const report = comparisonFixture();
+  delete report.quality_target;
+  await writeFile(join(x.directory, "summary.json"), JSON.stringify(report));
+  await assert.rejects(finishDoc(x), /validation failed/);
+  assert.doesNotMatch(x.comments[0].body, /✅|## Retrieval quality · Evidence/);
 });
 
 test("missing/failed jobs never publish green and malformed success data replaces queued with failure", async (t) => {
@@ -194,6 +207,10 @@ test("percentiles and identities are validated before rendering untrusted report
   validateComparison(report, requestFixture);
   assert.match(markdownReport(report), /Historical Index time, RSS, size/);
   for (const mutate of [
+    (r) => delete r.quality_target,
+    (r) => (r.quality_target = "gold"),
+    (r) => delete r.baseline.quality_target,
+    (r) => (r.candidate.quality_target = "gold"),
     (r) => (r.model_sha256 = "f".repeat(64)),
     (r) => (r.candidate.performance.query.fts.latency_ms.count = 49),
     (r) => (r.baseline.performance.query.hybrid.latency_ms.p95 = "<script>"),

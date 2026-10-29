@@ -17,9 +17,15 @@ async function fixture(t) {
   const task = {
     id: "1",
     query: "original fixture query",
-    targets: [{ path: "1.md" }],
+    gold_docids: ["2"],
+    evidence_docids: ["1", "2"],
+    targets: [{ path: "1.md" }, { path: "2.md" }],
   };
-  const dataset = { tasks: [task], corpus: { count: 1 } };
+  const dataset = {
+    quality_target: "evidence",
+    tasks: [task],
+    corpus: { count: 2 },
+  };
   const stage = () => ({
     status: "success",
     concurrency: 4,
@@ -117,10 +123,42 @@ test("saved MCP evidence rebuilds all quality and performance metrics", async (t
   const { directory, arm, dataset } = await fixture(t);
   const result = await auditArm(arm, dataset, directory);
   assert.equal(result.calls, 15);
-  assert.ok(result.quality.every((row) => row.metrics.file_hit_at_10 === 1));
+  assert.equal(result.quality_target, "evidence");
+  for (const row of result.quality) {
+    for (const key of [
+      "file_hit_at_1",
+      "file_hit_at_5",
+      "file_hit_at_10",
+      "file_mrr_at_10",
+    ])
+      assert.equal(row.metrics[key], 1);
+    assert.ok(
+      Math.abs(row.metrics.ndcg_at_10 - 1 / (1 + 1 / Math.log2(3))) < 1e-12,
+    );
+  }
   assert.equal(result.performance.query.hybrid.latency_ms.p50, 30);
   assert.equal(result.performance.query.fts.latency_ms.p99, 50);
   assert.equal(result.performance.index.index_bytes.total, 2048);
+});
+
+test("Evidence audit rejects unmarked reports and Gold targets even when their scores are consistent", async (t) => {
+  const { directory, arm, dataset } = await fixture(t);
+  for (const quality_target of [undefined, "gold"]) {
+    await assert.rejects(
+      auditArm(arm, { ...dataset, quality_target }, directory),
+    );
+  }
+  const targets = [{ path: "2.md" }];
+  dataset.tasks[0].targets = targets;
+  for (const row of arm.rows) {
+    row.targets = targets;
+    row.quality_mean = summarizeRepeatedQuality(row.calls, targets);
+    assert.equal(row.quality_mean.file.hit_at_10, 0);
+  }
+  await assert.rejects(
+    auditArm(arm, dataset, directory),
+    /original Evidence documents/,
+  );
 });
 
 test("replay rejects rewritten queries, altered scores, missing RSS and substituted evidence", async (t) => {

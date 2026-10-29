@@ -78,6 +78,29 @@ class IndexArtifactTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "complete"):
             self.pack()
 
+    def test_legacy_gold_labels_do_not_invalidate_sealed_index(self):
+        path = self.root / "report.json"
+        build = json.loads(path.read_text())
+        build["dataset"] = {
+            "schema_version": 1,
+            "tasks": [
+                {
+                    "gold_docids": ["1"],
+                    "evidence_docids": ["1", "2"],
+                    "targets": [{"path": "1.md"}],
+                }
+            ],
+        }
+        path.write_text(json.dumps(build))
+        original = self.pack()
+        restored = artifact.verify(
+            self.root / "sealed", self.key, self.root / "restored"
+        )
+        self.assertEqual(original, restored)
+        self.assertEqual(restored["key"], self.key)
+        self.assertEqual(restored["build"]["dataset"], build["dataset"])
+        self.assertEqual((self.root / "restored/index/data").read_bytes(), b"index")
+
     def test_unsafe_tar_names_links_and_duplicate_files_are_rejected(self):
         self.pack()
         for name, kind in [

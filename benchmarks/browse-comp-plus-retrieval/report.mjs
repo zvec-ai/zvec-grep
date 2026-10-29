@@ -14,12 +14,22 @@ import { summarizePilotRows } from "../zg-retrieval/expansion/run.mjs";
 import { summarizePerformance } from "../zg-retrieval/reports/performance.mjs";
 
 export const MODES = ["hybrid", "fts", "vector"];
+export const QUALITY_TARGET = "evidence";
 const sourceLock = await readJson(
   new URL("./source.lock.json", import.meta.url),
 );
 
 /** Reparse saved public responses and recompute quality/performance aggregates. */
 export async function auditArm(arm, dataset, directory) {
+  assert.equal(dataset.quality_target, QUALITY_TARGET);
+  for (const task of dataset.tasks) {
+    assert.ok(task.evidence_docids?.length > 0, "missing Evidence labels");
+    assert.deepEqual(
+      task.targets,
+      task.evidence_docids.map((id) => ({ path: `${id}.md` })),
+      "quality targets must be the original Evidence documents",
+    );
+  }
   assert.equal(arm.rows.length, dataset.tasks.length * MODES.length);
   assert.equal(arm.failures.length, 0, "product or preparation failures");
   for (const key of [
@@ -121,6 +131,7 @@ export async function auditArm(arm, dataset, directory) {
       "missing reusable index identity",
     );
   return {
+    quality_target: QUALITY_TARGET,
     calls: arm.rows.reduce((sum, row) => sum + row.calls.length, 0),
     quality: summarizePilotRows(arm.rows, MODES, dataset.tasks.length),
     performance: summarizePerformance(arm.performance_groups),
@@ -145,6 +156,7 @@ const pair = (a, b, divisor = 1) =>
 export function validateComparison(report, request) {
   assert.equal(report.schema_version, 1);
   assert.equal(report.kind, "browsecomp-doc-comparison");
+  assert.equal(report.quality_target, QUALITY_TARGET);
   assert.equal(report.harness_commit, request.harness_commit);
   assert.equal(
     report.repository_url,
@@ -158,6 +170,7 @@ export function validateComparison(report, request) {
   assert.equal(report.model_sha256, sourceLock.model_artifacts_sha256);
   for (const name of ["baseline", "candidate"]) {
     const arm = report[name];
+    assert.equal(arm.quality_target, QUALITY_TARGET);
     assert.equal(arm.commit, request[`${name}_sha`]);
     assert.match(arm.commit, /^[a-f0-9]{40}$/);
     assert.equal(arm.status, "success");
@@ -328,7 +341,7 @@ export function markdownReport(report) {
     "",
     "</details>",
     "",
-    "## Retrieval quality",
+    "## Retrieval quality · Evidence",
     "",
     "| Mode | Doc Hit@1 | Doc Hit@5 | Doc Hit@10 | MRR@10 | nDCG@10 |",
     "| --- | ---: | ---: | ---: | ---: | ---: |",
@@ -342,7 +355,7 @@ export function markdownReport(report) {
   }
   lines.push(
     "",
-    "Original gold/evidence and native chunk ranks are preserved. Scores measure document localization, not BrowseComp answer accuracy. Repeated calls are not independent questions.",
+    "All quality metrics use the original Evidence document labels. Hit@k checks whether any Evidence document appears in the first k native chunk ranks; MRR@10 and binary nDCG@10 use the same labels. Native ranks are preserved without document deduplication. Scores measure document localization, not BrowseComp answer accuracy. Repeated calls are not independent questions.",
     "",
     "Both Query versions execute sequentially on the same Linux host with identical model bytes. First-call/model/page-cache effects remain. RT excludes response parsing/capture; group totals include it. RSS sums product process trees and resident daemons at a 1000 ms target interval; shared pages may be counted twice and short peaks may be missed. No per-file write RT is invented.",
     "",
@@ -355,6 +368,7 @@ export async function combine({ baseline, candidate, request, output }) {
   const comparison = {
     schema_version: 1,
     kind: "browsecomp-doc-comparison",
+    quality_target: QUALITY_TARGET,
     status: "failed",
     harness_commit: request.harness_commit,
     document_count: 100195,

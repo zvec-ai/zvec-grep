@@ -82,7 +82,7 @@ class PrepareTests(unittest.TestCase):
                 "query": f"Original query {i}—文本\nunchanged?",
                 "answer": "fixture answer",
                 "gold_docs": [{"docid": str(i)}],
-                "evidence_docs": [{"docid": str(i)}],
+                "evidence_docs": [{"docid": str(i)}, {"docid": str(i + 10)}],
             }
             for i in range(1, 4)
         ]
@@ -101,7 +101,9 @@ class PrepareTests(unittest.TestCase):
                 {
                     "query_id": row["query_id"],
                     "gold_docids": [row["query_id"]],
-                    "evidence_docids": [row["query_id"]],
+                    "evidence_docids": sorted(
+                        [row["query_id"], str(int(row["query_id"]) + 10)]
+                    ),
                 }
                 for row in ordered[:2]
             ],
@@ -125,7 +127,16 @@ class PrepareTests(unittest.TestCase):
             for task in tasks:
                 original = next(row for row in rows if row["query_id"] == task["id"])
                 self.assertEqual(task["query"].encode(), original["query"].encode())
-                self.assertEqual(task["targets"], [{"path": task["id"] + ".md"}])
+                self.assertEqual(
+                    task["targets"],
+                    [
+                        {"path": f"{docid}.md"}
+                        for docid in sorted(
+                            doc["docid"] for doc in original["evidence_docs"]
+                        )
+                    ],
+                )
+                self.assertNotEqual(task["evidence_docids"], task["gold_docids"])
                 self.assertNotIn("answer", task)
 
     def test_substituted_queries_gold_order_and_incomplete_sources_are_rejected(self):
@@ -136,6 +147,7 @@ class PrepareTests(unittest.TestCase):
                 lambda spec, _: spec["queries"].update(count=4),
                 lambda _, audit: audit["cases"].reverse(),
                 lambda _, audit: audit["cases"][0].update(gold_docids=["999"]),
+                lambda _, audit: audit["cases"][0].update(evidence_docids=["999"]),
             ]:
                 spec, audit = copy.deepcopy(lock), copy.deepcopy(selection)
                 mutate(spec, audit)
