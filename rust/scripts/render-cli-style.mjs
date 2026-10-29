@@ -103,10 +103,13 @@ for (const [group, title, accepts] of categories) {
 await writeFile(join(destination, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
 const cell = value => String(value).replaceAll('|', '\\|').replaceAll('\n', ' ');
 const rows = manifest.filter(page => !page.overview).flatMap(page => page.cards.map(card => `| [${card.id}](${page.image}) | \`${cell(card.command)}\` | ${card.provenance} | ${card.exitCode ?? '—'} |`));
-await writeFile(join(destination, 'catalog.md'), `# CLI review gallery\n\nEvery captured card is listed below. Review annotations are outside the terminal.\n\n- **real PTY**: the CLI command was executed; its exit code is recorded.\n- **renderer fixture**: the production formatter rendered sample data; this does not claim a successful business operation.\n- **PTY renderer fixture**: a production interactive prompt was invoked with sample data and cancelled, without saving credentials or granting access.\n- Protocol-only entry points and shared target variants are explained in the [command coverage table](coverage.md) and [machine-readable inventory](coverage.json).\n\n| Screenshot / card | Command or prompt entry point | Evidence | Exit |\n| --- | --- | --- | --- |\n${rows.join('\n')}\n`);
 let coverage;
 try { coverage = JSON.parse(await readFile(join(destination, 'coverage.json'), 'utf8')); }
 catch (error) { if (error.code !== 'ENOENT') throw error; }
+const coverageNote = coverage
+  ? '\n- Protocol-only entry points and shared target variants are explained in the [command coverage table](coverage.md) and [machine-readable inventory](coverage.json).'
+  : '';
+await writeFile(join(destination, 'catalog.md'), `# CLI review gallery\n\nEvery captured card is listed below. Review annotations are outside the terminal.\n\n- **real PTY**: the CLI command was executed; its exit code is recorded.\n- **renderer fixture**: the production formatter rendered sample data; this does not claim a successful business operation.\n- **PTY renderer fixture**: a production interactive prompt was invoked with sample data and cancelled, without saving credentials or granting access.${coverageNote}\n\n| Screenshot / card | Command or prompt entry point | Evidence | Exit |\n| --- | --- | --- | --- |\n${rows.join('\n')}\n`);
 if (coverage) {
   const cardImages = new Map(manifest.filter(page => !page.overview).flatMap(page => page.cards.map(card => [card.id, page.image])));
   const coverageRows = coverage.coverage.map(row => {

@@ -27,9 +27,29 @@ enum ProgressState {
 #[derive(Default)]
 struct PendingProgress {
     latest: Option<IndexProgress>,
+    files_total: Option<usize>,
+    files_indexed: Option<usize>,
+    files_failed: Option<usize>,
     warnings: Vec<IndexProgress>,
     started: bool,
     finished: bool,
+}
+
+impl PendingProgress {
+    fn update_latest(&mut self, mut progress: IndexProgress) {
+        // Keep counts across both coalesced events and consumed frames. Scanning
+        // resets them, even when that event is replaced before the next frame.
+        // Stage, detail, and embedding always belong to the newest event.
+        if progress.phase != IndexProgressPhase::Scanning {
+            progress.files_total = progress.files_total.or(self.files_total);
+            progress.files_indexed = progress.files_indexed.or(self.files_indexed);
+            progress.files_failed = progress.files_failed.or(self.files_failed);
+        }
+        self.files_total = progress.files_total;
+        self.files_indexed = progress.files_indexed;
+        self.files_failed = progress.files_failed;
+        self.latest = Some(progress);
+    }
 }
 
 struct PlainOutput {
@@ -94,12 +114,13 @@ impl IndexProgressDisplay {
                     if pending.finished {
                         return;
                     }
-                    // The producer only moves owned events. Formatting, terminal size
-                    // queries, and I/O happen on the renderer, outside this short lock.
+                    // The producer merges scalar counts and moves owned events.
+                    // Formatting, terminal size queries, and I/O happen on the
+                    // renderer, outside this short lock.
                     if Stage::of(&progress) == Stage::Warning {
                         pending.warnings.push(progress);
                     } else {
-                        pending.latest = Some(progress);
+                        pending.update_latest(progress);
                     }
                     if !pending.started {
                         pending.started = true;
@@ -295,14 +316,7 @@ impl TerminalOutput {
         now: Instant,
         finished: bool,
     ) -> io::Result<()> {
-        if let Some(mut progress) = latest {
-            if let Some(previous) = &self.latest
-                && progress.phase != IndexProgressPhase::Scanning
-            {
-                progress.files_total = progress.files_total.or(previous.files_total);
-                progress.files_indexed = progress.files_indexed.or(previous.files_indexed);
-                progress.files_failed = progress.files_failed.or(previous.files_failed);
-            }
+        if let Some(progress) = latest {
             let stage = Stage::of(&progress);
             if self.stage != Some(stage) {
                 self.stage_started = now;
@@ -688,6 +702,217 @@ mod tests {
             detail: None,
             embedding: None,
         }
+    }
+
+    fn queued_display() -> IndexProgressDisplay {
+        // Consume no events until the test inspects them, so every report lands
+        // in the same frame without depending on renderer thread scheduling.
+        IndexProgressDisplay {
+            state: ProgressState::Terminal(Arc::new((
+                Mutex::new(PendingProgress::default()),
+                Condvar::new(),
+            ))),
+            worker: Mutex::new(None),
+        }
+    }
+
+    fn latest_pending(display: &IndexProgressDisplay) -> IndexProgress {
+        let ProgressState::Terminal(state) = &display.state else {
+            panic!("expected terminal progress");
+        };
+        state
+            .0
+            .lock()
+            .expect("pending progress")
+            .latest
+            .clone()
+            .expect("queued progress")
+    }
+
+    #[test]
+    fn pending_counts_survive_embedding_and_partial_events() {
+        let display = queued_display();
+        let reporter = display.reporter();
+        reporter.report(IndexProgress {
+            files_failed: Some(2),
+            detail: Some("reading src/first.rs".into()),
+            ..indexing(25, 100)
+        });
+        let partial = IndexProgress {
+            phase: IndexProgressPhase::Indexing,
+            files_total: None,
+            files_indexed: None,
+            files_failed: None,
+            detail: None,
+            embedding: None,
+        };
+        reporter.report(IndexProgress {
+            embedding: Some(IndexEmbeddingProgress {
+                stage: Some(IndexEmbeddingStage::Preparing),
+                ..IndexEmbeddingProgress::default()
+            }),
+            ..partial.clone()
+        });
+        let model = latest_pending(&display);
+        assert_eq!(
+            (model.files_total, model.files_indexed, model.files_failed),
+            (Some(100), Some(25), Some(2))
+        );
+        assert!(model.detail.is_none());
+        assert!(Stage::of(&model) == Stage::Preparing);
+
+        reporter.report(partial);
+        let latest = latest_pending(&display);
+        assert_eq!(
+            (
+                latest.files_total,
+                latest.files_indexed,
+                latest.files_failed
+            ),
+            (Some(100), Some(25), Some(2))
+        );
+        assert!(latest.detail.is_none());
+        assert!(latest.embedding.is_none());
+        assert!(Stage::of(&latest) == Stage::Indexing);
+        let mut line = String::new();
+        format_terminal_progress(&mut line, &latest, false, true, 100, Duration::ZERO, 0);
+        assert!(line.contains("25/100"), "lost pending counts: {line}");
+    }
+
+    #[test]
+    fn pending_split_counts_keep_explicit_zero_and_the_latest_stage() {
+        let display = queued_display();
+        let reporter = display.reporter();
+        let partial = IndexProgress {
+            phase: IndexProgressPhase::Indexing,
+            files_total: None,
+            files_indexed: None,
+            files_failed: None,
+            detail: None,
+            embedding: None,
+        };
+        reporter.report(IndexProgress {
+            files_total: Some(100),
+            ..partial.clone()
+        });
+        reporter.report(IndexProgress {
+            files_indexed: Some(42),
+            ..partial.clone()
+        });
+        reporter.report(IndexProgress {
+            files_failed: Some(3),
+            detail: Some("saving index".into()),
+            ..partial.clone()
+        });
+        let saving = latest_pending(&display);
+        assert_eq!(
+            (
+                saving.files_total,
+                saving.files_indexed,
+                saving.files_failed
+            ),
+            (Some(100), Some(42), Some(3))
+        );
+        assert!(Stage::of(&saving) == Stage::Saving);
+
+        reporter.report(IndexProgress {
+            files_total: Some(0),
+            files_failed: Some(0),
+            ..partial.clone()
+        });
+        let reset = latest_pending(&display);
+        assert_eq!(
+            (reset.files_total, reset.files_indexed, reset.files_failed),
+            (Some(0), Some(42), Some(0))
+        );
+        assert!(reset.detail.is_none());
+        assert!(Stage::of(&reset) == Stage::Indexing);
+
+        reporter.report(IndexProgress {
+            phase: IndexProgressPhase::Done,
+            files_indexed: Some(0),
+            ..partial
+        });
+        let done = latest_pending(&display);
+        assert_eq!(
+            (done.files_total, done.files_indexed, done.files_failed),
+            (Some(0), Some(0), Some(0))
+        );
+        assert_eq!(done.phase, IndexProgressPhase::Done);
+        assert!(done.detail.is_none());
+        assert!(done.embedding.is_none());
+        assert!(Stage::of(&done) == Stage::Finishing);
+    }
+
+    #[test]
+    fn pending_scan_reset_survives_coalescing_after_a_rendered_frame() {
+        let display = queued_display();
+        let reporter = display.reporter();
+        let ProgressState::Terminal(state) = &display.state else {
+            panic!("expected terminal progress");
+        };
+        let capture = Capture::default();
+        let now = Instant::now();
+        let mut output = TerminalOutput {
+            writer: Box::new(capture.clone()),
+            color: false,
+            unicode: true,
+            latest: None,
+            stage: None,
+            stage_started: now,
+            frame: String::new(),
+            visible: false,
+            columns: 100,
+            width_checked: Some(now),
+            tick: 0,
+        };
+        let mut render_pending = || {
+            let latest = state.0.lock().expect("pending progress").latest.take();
+            output
+                .render(latest, Vec::new(), now, false)
+                .expect("render queued progress");
+            output.latest.clone().expect("rendered progress")
+        };
+        reporter.report(indexing(50, 100));
+        render_pending();
+        let partial = IndexProgress {
+            phase: IndexProgressPhase::Indexing,
+            files_total: None,
+            files_indexed: None,
+            files_failed: Some(4),
+            detail: None,
+            embedding: None,
+        };
+        reporter.report(partial.clone());
+        let inherited = render_pending();
+        assert_eq!(
+            (
+                inherited.files_total,
+                inherited.files_indexed,
+                inherited.files_failed
+            ),
+            (Some(100), Some(50), Some(4))
+        );
+
+        reporter.report(IndexProgress {
+            phase: IndexProgressPhase::Scanning,
+            files_failed: None,
+            ..partial.clone()
+        });
+        reporter.report(IndexProgress {
+            files_failed: None,
+            ..partial
+        });
+        let reset = render_pending();
+        assert_eq!(
+            (reset.files_total, reset.files_indexed, reset.files_failed),
+            (None, None, None)
+        );
+        assert!(Stage::of(&reset) == Stage::Indexing);
+        let frames = capture.frames();
+        let last = String::from_utf8_lossy(frames.last().expect("reset frame"));
+        assert!(!last.contains("50/100"));
+        assert!(!last.contains("failed"));
     }
 
     #[test]
