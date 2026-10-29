@@ -1026,11 +1026,11 @@ packages with both **Allow npm publish** and the independent **Allow npm
 dist-tag** permission enabled, or provide an eligible `NPM_TOKEN` secret.
 Publishing and promotion install npm 11.21.0 explicitly for OIDC dist-tag support.
 
-Registry publication is currently blocked until reviewed license texts and
-SPDX SBOMs are supplied for every target and CUDA component in [`npm/compliance/`](npm/compliance/README.md).
-Candidate downloads remain available while these inputs are prepared.
+Supplemental license collections and SPDX SBOMs in [`npm/compliance/`](npm/compliance/README.md)
+are optional. Every release package includes the project `LICENSE`, and bundled
+upstream notices are preserved.
 Every publication uses `rust-canary`, letting users opt into Rust with
-`npm install --global @zvec/zvec-grep@rust-canary`. Five native runners then
+`npm install --global @zvec/zvec-grep@rust-canary`. Six native runners then
 install only the meta package from the registry, test actual daemon IPC, and
 exercise update and rollback with a distinct previously published version.
 Selecting `latest` requests a separate promotion job that changes the default

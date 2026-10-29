@@ -4461,7 +4461,7 @@ dependencies = [
 
 [[package]]
 name = "zg-zvec-fp16"
-version = "0.0.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "half",
  "tempfile",
