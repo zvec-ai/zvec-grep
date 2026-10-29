@@ -11,14 +11,13 @@
   <p>面向人与 Agent 的本地优先统一检索层。</p>
 
   <p>
-    <a href="https://www.npmjs.com/package/@zvec/zvec-grep"><img src="https://img.shields.io/npm/v/@zvec/zvec-grep.svg" alt="npm 版本" /></a>
-    <a href="https://github.com/zvec-ai/zvec-grep/actions/workflows/ci.yml"><img src="https://github.com/zvec-ai/zvec-grep/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+    <a href="https://www.npmjs.com/package/@zvec/zvec-grep"><img src="https://img.shields.io/npm/v/@zvec/zvec-grep.svg" alt="npm 版本（旧版 TypeScript）" /></a>
+    <a href="https://github.com/zvec-ai/zvec-grep/actions/workflows/rust-ci.yml"><img src="https://github.com/zvec-ai/zvec-grep/actions/workflows/rust-ci.yml/badge.svg" alt="Rust CI" /></a>
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 许可证" /></a>
-    <img src="https://img.shields.io/badge/node-%3E%3D22-blue.svg" alt="Node.js 22 或更新版本" />
+    <img src="https://img.shields.io/badge/built_with-Rust-orange.svg" alt="使用 Rust 构建" />
   </p>
 
   <p>
-    <a href="https://trendshift.io/repositories/200612?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-200612" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/200612/daily?language=TypeScript" alt="zvec-ai/zvec-grep | Trendshift TypeScript 日榜" width="250" height="55" /></a>
     <a href="https://trendshift.io/repositories/200612?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-200612" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/200612/daily" alt="zvec-ai/zvec-grep | Trendshift 全语言日榜" width="250" height="55" /></a>
   </p>
 
@@ -36,12 +35,14 @@
 将 ripgrep、BM25 与向量检索统一在一个[本地优先的检索入口](https://zvec.org/zh/docs/zvec-grep/)中。
 既可以由人在终端中搜索，也可以让 Agent 根据问题选择合适的本地检索方式。
 
-本 README 以 TypeScript / Node.js 实现为主；Rust 实现见
-[`rust/`](./rust/README.md)。用户文档统一维护在
-[Zvec 官网](https://zvec.org/zh/docs/zvec-grep/)。
+zg 是使用 Rust 实现的原生 CLI，支持本地 MCP 集成。用户指南统一维护在
+[Zvec 官网](https://zvec.org/zh/docs/zvec-grep/)；构建与开发说明位于
+[`rust/`](./rust/README.md)。
 
-**安装**：`npm install -g @zvec/zvec-grep`，或通过 Homebrew（macOS/Linux）：
-`brew install zvec-grep`
+**安装 Rust CLI**：[从源码构建](./rust/README.md#local-npm-installation)。
+当前已发布的 [npm](https://www.npmjs.com/package/@zvec/zvec-grep) 和
+[Homebrew](https://formulae.brew.sh/formula/zvec-grep) 包仍是旧版 TypeScript 实现，
+以下示例以 Rust 版本为准。
 
 <a id="tour"></a>
 
@@ -75,26 +76,31 @@
 
 ### 1. 准备示例书架
 
+从本仓库安装原生 CLI。源码构建需要仓库锁定的 Rust 工具链、用于打包脚本的
+Node.js 20 或更新版本，以及[原生构建依赖](./rust/README.md#native-and-cuda-builds)。
+
 ```bash
-# 需要 Node.js 22 或更新版本。
-npm install -g @zvec/zvec-grep
+git clone https://github.com/zvec-ai/zvec-grep.git
+cd zvec-grep/rust
+npm run install:local
+cd ../..
 
 mkdir zg-mystery && cd zg-mystery
 curl --retry 3 --retry-all-errors --progress-bar -fL \
   -o alice-in-wonderland.txt https://raw.githubusercontent.com/GITenberg/Alice-s-Adventures-in-Wonderland_11/master/11.txt \
   -o sherlock-holmes.txt https://raw.githubusercontent.com/GITenberg/The-Memoirs-of-Sherlock-Holmes_834/master/834.txt
 
-zg index --embedding local/potion-retrieval-32m
+zg --index --embedding local/potion-retrieval-32m
 ```
 
 > [!NOTE]
 > 索引保存在被索引项目根目录的 `.zvec-grep/` 中。
 
 > [!TIP]
-> `zg index` 或 `zg query` 失败时，在原命令后加 `--debug` 重跑，查看诊断信息（direct 和 server 模式均支持）。
-> 在同一项目下，可用 `zg status --mode direct --debug` 或
-> `zg status --mode server --debug` 查看已记录的索引错误。
-> Server 连接失败时，检查 `zg server status` 和[服务日志](https://zvec.org/zh/docs/zvec-grep/server/)。
+> 索引或搜索失败时，在原命令后加 `--debug` 重跑，查看诊断信息（direct 和 server 模式均支持）。
+> 在同一项目下，可用 `zg --status --mode direct --debug` 或
+> `zg --status --mode server --debug` 查看已记录的索引错误。
+> Server 连接失败时，检查 `zg --server status` 和[服务日志](https://zvec.org/zh/docs/zvec-grep/server/)。
 
 ### 2. 选择检索方式
 
@@ -103,7 +109,7 @@ zg index --embedding local/potion-retrieval-32m
 配置好 [OpenCode](https://opencode.ai/) 后：
 
 ```bash
-zg install --target opencode --yes
+zg --install --target opencode --yes
 opencode models
 opencode run --model opencode/nemotron-3-ultra-free \
   "An unseen creature left a few marks. What did the detective infer? Cite local evidence."
@@ -152,7 +158,11 @@ zg --preview detail "An unseen creature left a few marks. What did the detective
 zg 会将 `sherlock-holmes.txt` 中的相关段落排在
 `alice-in-wonderland.txt` 前面。
 
-### 索引 Embedding 并发与 GPU 错误
+### 模型与故障排查
+
+每个工作区使用一个 Embedding 模型处理文本与代码；图片及其他不支持的二进制
+格式会被跳过。已有索引保留原模型，切换模型需运行
+`zg --index --rebuild --embedding <model>`。
 
 `zg --index --embedding-concurrency <n>` 和
 `ZVEC_GREP_EMBEDDING_CONCURRENCY` 控制构建或更新索引时的 Embedding
@@ -160,50 +170,15 @@ zg 会将 `sherlock-holmes.txt` 中的相关段落排在
 不影响查询文本的向量推理。
 CLI 参数仅与 `--index` 一起使用。
 
-对于 llama.cpp，上限控制索引模型实例的 context 数；对于 Transformers.js，
-控制同一缓存 pipeline 中尚未完成的调用数，不保证原生运行时或 GPU 同时执行。
-这两个后端取正整数，超过 **8** 按 8 处理。对于 Potion/model2vec，上限控制
-并发 Embedding 批次数，没有该 8 路限制；默认为 **2**，CPU worker 池还有独立
-容量上限。对于远程模型，CLI 参数和环境变量均控制并发批次数，也不额外限制为
-8；原有自适应调度及默认值保持不变，遇到限流或可重试错误时可能降低并发。
+安装后的 Rust CLI 运行时不需要 Node.js。本地安装会链接到源码构建产物
+`rust/dist/npm/zvec-grep-local`，请保留该目录。独立 tarball 的打包方式见
+[本地安装说明](./rust/README.md#local-npm-installation)；发布包的安装脚本与
+CPU/CUDA 选项见[原生包说明](./rust/npm/meta/README.md)。
 
-优先级为：显式 CLI/API 索引参数 > 索引环境变量 >
-`ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM`（仅 llama.cpp 索引阶段）> 自动默认值。
-
-对于 llama.cpp 和 Transformers.js，未显式设置时，CPU 或没有显存查询接口的
-运行时使用 1。Transformers.js 目前没有该接口，因此自动上限为 1。
-GPU 运行时提供空闲显存时，按
-`floor(空闲显存 × 0.25 / 150 MiB)` 计算，并限制在 1–8；查询失败或返回
-无效值时使用 2。这里沿用原有的 150 MiB 启发式估算，不保证模型一定能装入显存。
-
-遇到 CUDA 错误、内存不足或原生运行时崩溃时，可将上限设为 1 后重试索引。
-以下示例使用直接执行模式，使新的环境变量立即生效：
-
-```bash
-export ZVEC_GREP_EMBEDDING_CONCURRENCY=1
-zg --index --mode direct
-```
-
-Windows PowerShell：
-
-```powershell
-$env:ZVEC_GREP_EMBEDDING_CONCURRENCY = "1"
-zg --index --mode direct
-```
-
-显式 CLI 参数会在本次索引操作中覆盖环境变量，使用后台服务时也会生效，
-无需为 CLI 参数重启后台服务：
-
-```bash
-export ZVEC_GREP_EMBEDDING_CONCURRENCY=8
-zg --index --embedding-concurrency 1
-```
-
-若要修改后台服务的环境变量默认值，需更新其启动环境，然后在该环境中运行
-`zg --server off` 和 `zg --server on`。如果由 Agent 启动 zg，还需更新其环境并重启
-Agent/MCP 连接。JavaScript 异常可以捕获，但原生 abort 可能在 CPU 回退之前
-直接结束进程。将上限设为 1 可以降低并发，但不能避免所有 GPU 故障；也可使用
-`--device cpu` 重试。
+通过 `zg --help search`、`zg --help index` 或 `zg --help models` 查看当前版本的
+接口。模型配置、索引并发与 GPU 排障说明见
+[Embedding 模型](https://zvec.org/zh/docs/zvec-grep/embedding-models/)和
+[故障排查](https://zvec.org/zh/docs/zvec-grep/troubleshooting/)。
 
 <a id="benchmarks"></a>
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Generate the deterministic terminal tour used by the project READMEs.
 
-The install scene mirrors the interactive UI and output implemented in
-src/cli/install.ts. Run with:
+The scenes use the Rust CLI syntax with deterministic sample terminal output.
+Run with:
 
   uv run --with pillow .github/scripts/readme-demo.py
   uv run --with pillow .github/scripts/readme-demo.py --theme dark
@@ -311,9 +311,11 @@ def progress_line(indexed, total, spinner):
 
 def install_scene(frames):
     lines = []
-    type_command(frames, lines, "npm install -g @zvec/zvec-grep", stride=2)
+    type_command(frames, lines, "git clone https://github.com/zvec-ai/zvec-grep.git", stride=2)
+    type_command(frames, lines, "cd zvec-grep/rust", stride=2)
+    type_command(frames, lines, "npm run install:local", stride=2)
     lines.append(plain())
-    type_command(frames, lines, "zg install")
+    type_command(frames, lines, "zg --install")
 
     reveal(
         frames,
@@ -367,11 +369,11 @@ def index_scene(frames, lines):
     repository_title = "zvec-grep — ~/code/your-repository"
     lines.append(plain())
     hold(frames, lines, 6, SHELL_TITLE)
-    type_command(frames, lines, "cd your-repository", stride=2, title=SHELL_TITLE)
+    type_command(frames, lines, "cd ~/code/your-repository", stride=2, title=SHELL_TITLE)
     type_command(
         frames,
         lines,
-        "zg index",
+        "zg --index --embedding local/potion-code-16m-v2",
         stride=2,
         title=repository_title,
     )
