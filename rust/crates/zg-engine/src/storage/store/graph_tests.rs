@@ -12,7 +12,7 @@ use crate::storage::graph::{
 };
 use rusqlite::Connection;
 use std::{
-    process::{Child, Stdio},
+    process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -766,8 +766,10 @@ fn closing_storage_releases_locks_while_child_is_alive() {
         let log_path = temporary.path().join(format!("child-{read_only}.log"));
         let output = File::create(&log_path).expect("create child log");
         let errors = output.try_clone().expect("clone child log");
+        // Use an ordinary child command: native file opens must prevent lock
+        // inheritance without relying on descriptor cleanup before exec.
         let mut child = CrashWriter(
-            zg_test_process::command(std::env::current_exe().expect("test executable"))
+            Command::new(std::env::current_exe().expect("test executable"))
                 .args(["--exact", "storage::store::graph_tests::closing_storage_releases_locks_while_child_is_alive", "--nocapture", "--test-threads=1"])
                 .env(READY, &ready)
                 .stdin(Stdio::null())
@@ -845,7 +847,7 @@ fn process_exit_during_canonical_replacement_recovers_from_durable_status() {
     let output = File::create(&log_path).expect("create child log");
     let errors = output.try_clone().expect("clone child log");
     let mut child = CrashWriter(
-        zg_test_process::command(std::env::current_exe().expect("test executable"))
+        Command::new(std::env::current_exe().expect("test executable"))
             .args(["--exact", "storage::store::graph_tests::process_exit_during_canonical_replacement_recovers_from_durable_status", "--nocapture", "--test-threads=1"])
             .env(CHILD_ROOT, &root)
             .stdin(Stdio::null())

@@ -2,6 +2,7 @@ use std::{
     env,
     hint::black_box,
     path::PathBuf,
+    process::Command,
     time::{Duration, Instant},
 };
 
@@ -204,7 +205,7 @@ fn count_as_f64(value: usize, label: &str) -> f64 {
 }
 
 fn current_rss_bytes() -> u64 {
-    let output = zg_test_process::command("ps")
+    let output = Command::new("ps")
         .args(["-o", "rss=", "-p", &std::process::id().to_string()])
         .output()
         .expect("ps should report benchmark RSS");

@@ -699,7 +699,7 @@ mod tests {
         // without changing environment variables while other unit tests are running.
         let workspace = tempfile::tempdir().expect("workspace");
         let state = tempfile::tempdir().expect("authorization state");
-        let output = zg_test_process::command(env::current_exe().expect("test executable"))
+        let output = std::process::Command::new(env::current_exe().expect("test executable"))
             .args(["--exact", test_name, "--nocapture"])
             .env(FIXTURE_ENV, workspace.path())
             .env("HOME", state.path())
