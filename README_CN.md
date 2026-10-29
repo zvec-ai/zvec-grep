@@ -23,7 +23,6 @@
   </p>
 
   <p>
-    <a href="#tour">🎬 <strong>功能演示</strong></a> |
     <a href="#features">💫 <strong>核心特性</strong></a> |
     <a href="#try-it-yourself">🚀 <strong>动手体验</strong></a> |
     <a href="https://zvec.org/zh/docs/zvec-grep/">📚 <strong>文档</strong></a> |
