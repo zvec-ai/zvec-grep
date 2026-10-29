@@ -46,19 +46,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Workspaces
 
-A workspace is a directory of files that zg indexes and searches as a unit. Each workspace is identified by its canonical root path and has its own scanning rules, model settings, and index.
+A workspace is a directory of files that zg indexes and searches as a unit, with its own scanning rules, model settings, and index. Search and status from a subdirectory discover the nearest enclosing workspace; a Git repository is not required.
 
 ### Index storage
 
-Workspace indexes and saved settings use a configurable storage location, defaulting to a `.zvec-grep` directory within the workspace. Downloaded models are cached separately and shared across workspaces. Moving or copying the source root together with `.zvec-grep` preserves the index.
+Saved settings live in the source directory's fixed `.zvec-grep` child, with active index data in `.zvec-grep/index`. Moving or copying the source directory together with `.zvec-grep` preserves the index; downloaded models are cached separately and shared across workspaces.
 
 ### File selection
 
 Scanning respects ignore rules, excludes hidden files, does not follow symlinks, and traverses nested Git repositories by default. File formats inferred from names, path patterns, additional ignore files, depth limits, and file size limits let you adjust the scope. These rules are saved with the workspace and reused for future indexing.
 
+### Moving workspaces
+
+File paths and ignore files inside the workspace are saved relative to its source directory. A change in the saved source location or username resets saved device and model-cache preferences. External ignore files continue to use their saved paths when those paths are absolute on the current platform. Missing ignore files and incompatible external paths are skipped without removing their saved references; other read errors and invalid rules are reported. Incompatible filenames and conflicting paths on the destination filesystem are also reported.
+
 ### Index lifecycle
 
-An index is created on the first indexing run and updated as files are added, changed, or removed. It can be rebuilt from scratch when needed, or deleted without removing source files or shared model caches. Indexing can complete with individual file failures, which are reported separately.
+An index is created on the first indexing run and updated as files are added, changed, or removed; unchanged content avoids repeat embedding. Rebuilds prepare a replacement separately and recover interrupted publication before readers enter, while incomplete scans and cancelled preparation preserve existing indexed content. Individual file failures are reported separately, and deleting an index leaves source files and shared model caches intact.
 
 ### Search
 
@@ -67,6 +71,14 @@ Indexed search combines full-text and vector retrieval to return relevant source
 ### Embedding models
 
 Each workspace uses an embedding model for semantic search. Local models run on your machine and may need an initial download; remote models send content or queries to an external service and require authorization. Changing the model or encountering an incompatible index format requires rebuilding the index.
+
+### Runtime settings
+
+Explicit device and model-cache choices made when indexing become workspace defaults; omitted options retain their saved values. Each operation resolves these settings from request options, environment variables, workspace defaults, global configuration, then backend defaults, skipping a saved cache path unless it is absolute and names an existing directory. Explicit replacements take precedence, while query overrides remain temporary.
+
+### Credentials and authorization
+
+API keys explicitly supplied when indexing are encrypted in workspace settings; keys inherited from environment variables or global configuration are not copied there. The decryption key travels with `.zvec-grep`, so sharing that directory also shares access to its saved credentials. Remote-use consent is stored separately in the workspace and binds the canonical source root, username, model, and endpoint. Matching paths and usernames can reuse copied grants across machines. Grants have no signature, machine fingerprint, or home-directory key; they record consent rather than prove it against deliberate edits. Only explicit authorization updates their saved environment, independently of manifest writes.
 
 ## Modules
 
@@ -78,6 +90,6 @@ Each workspace uses an embedding model for semantic search. Local models run on 
 | [Extraction](src/extraction/mod.rs) and [lexical search](src/lexical/mod.rs) | Source-preserving extraction and direct ripgrep search. |
 | [Pipelines](src/pipelines/README.md) | Indexing, indexed retrieval, and direct search; [ranking](src/pipelines/indexed_search/ranking/README.md) combines retrieval evidence. |
 | [Models](src/models/mod.rs) | Model catalogs, embedding backends, downloads, and reusable runtimes. |
-| [Storage](src/storage/mod.rs) and [workspace](src/workspace/README.md) | Collection schemas and operations; manifests, root paths, locks, and publication. |
+| [Storage](src/storage/mod.rs) and [workspace](src/workspace/README.md) | Collection schemas and operations; workspace discovery, manifests, locks, and publication. |
 | [Authorization](src/authorization.rs) and [config](src/config.rs) | Remote-service consent and configuration resolution. |
 | [Errors](src/error.rs) and [utilities](src/utils/mod.rs) | Diagnostics and shared text, encoding, hashing, and filesystem helpers. |

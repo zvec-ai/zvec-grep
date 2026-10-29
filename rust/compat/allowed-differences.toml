@@ -64,7 +64,7 @@ removal_condition = "The TypeScript CLI also skips option values during action a
 [[difference]]
 id = "mcp-indexed-scan-options-explicit-rejection"
 owner = "MCP/file-selection"
-reason = "Node.js contextFromOpenWorkspaceIndex 不向 searchPlan 传递扫描选项；Rust 对搜索请求中的扫描选项返回 invalid params 并指向 index 工具。Rust index 使用 includeHidden/useDefaultIgnores/ignoreFiles/maxDepth/maxFileSizeBytes/follow；useDefaultIgnores 控制默认与自动发现的忽略规则，显式 ignoreFiles 始终生效且必须存在，maxFileSizeBytes 非空时必须大于零。查询不修改持久扫描配置。验证：search_accepts_ordered_globs_and_engine_formats_and_rejects_scan_options、公用 handler 参数校验及 file_selection 测试。"
+reason = "Node.js contextFromOpenWorkspaceIndex 不向 searchPlan 传递扫描选项；Rust 对搜索请求中的扫描选项返回 invalid params 并指向 index 工具。Rust index 使用 includeHidden/useDefaultIgnores/ignoreFiles/maxDepth/maxFileSizeBytes/follow；useDefaultIgnores 控制默认与自动发现的忽略规则，显式 ignoreFiles 不受该开关影响，缺失文件或当前平台无法作为绝对路径使用的外部路径会跳过并保留配置，其他读取及规则错误仍报错，maxFileSizeBytes 允许为零，表示排除所有文件。查询不修改持久扫描配置。验证：search_accepts_ordered_globs_and_engine_formats_and_rejects_scan_options、公用 handler 参数校验及 file_selection 测试。"
 removal_condition = "Node.js 为这些 indexed-search 参数提供实际语义后重新对照；不得仅为 schema 相同而忽略参数。"
 
 [[difference]]
@@ -94,8 +94,8 @@ removal_condition = "rmcp 提供 SessionManager 错误到 HTTP 状态的稳定�
 [[difference]]
 id = "mcp-workspace-status-storage-metadata"
 owner = "MCP/storage"
-reason = "Rust workspace_index.id 使用持久工作区名称而非 Node 的内部标识格式；调用方应将其视为不透明标识。Rust 尚未持久化 embedding 输入截断统计，因此不虚构 truncated_fragments=0，保留现有真实 status 统计。验证：status 序列化和引擎 info 回归；scan_diagnostics 的完整计数独立于有界样本。"
-removal_condition = "底层存储支持截断统计或统一工作区标识后补齐字段，并添加真实索引回归。"
+reason = "Rust 通过规范化源码 root 和工作区本地元数据定位索引，不使用工作区名称或全局注册表；status 提供 root 而非 Node 的内部标识。Rust 尚未持久化 embedding 输入截断统计，因此不虚构 truncated_fragments=0，保留现有真实 status 统计。验证：status 序列化和引擎 info 回归；scan_diagnostics 的完整计数独立于有界样本。"
+removal_condition = "Node.js 采用相同工作区定位方式或底层存储支持截断统计时重新评估，并添加真实索引回归。"
 
 [[difference]]
 id = "cli-path-lookup-local-admission"

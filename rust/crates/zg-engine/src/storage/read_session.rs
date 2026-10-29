@@ -1,7 +1,7 @@
 //! Resident read handles, leased per query and retired before workspace writes.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, OnceLock, Weak,
@@ -13,7 +13,8 @@ use std::{
 
 use crate::{
     EngineError, EngineResult,
-    workspace::lock::{FileLock, LockMode, acquire_read_write_lock, home_allows_cached_reads},
+    domain::WorkspaceLayout,
+    workspace::lock::{LockGuard, LockMode, can_retain_read_cache, try_acquire_file_lock},
 };
 
 use super::{IndexStore, types::WorkspaceIndexStorageOptions};
@@ -50,6 +51,7 @@ struct SessionSlot {
 }
 
 struct CachedSession {
+    layout: WorkspaceLayout,
     session: Arc<ReadSession>,
     last_used: Instant,
 }
@@ -58,7 +60,9 @@ struct ReadSession {
     // Native handles must close before releasing the residency lock.
     storage: IndexStore,
     storage_home: PathBuf,
-    _residency: Option<FileLock>,
+    generation: String,
+    validated_source_roots: Mutex<HashSet<PathBuf>>,
+    _residency: Option<LockGuard>,
 }
 
 pub(crate) struct ReadSessionLease {
@@ -98,13 +102,14 @@ impl ReadSessionCache {
         })
     }
 
-    /// The caller holds the workspace home read lock throughout the lease.
+    /// The caller holds the workspace read lock throughout the lease.
     pub(crate) fn acquire(
         &self,
-        home: &Path,
+        layout: &WorkspaceLayout,
         storage_home: &Path,
+        generation: &str,
     ) -> EngineResult<ReadSessionLease> {
-        self.acquire_with(home, storage_home, || {
+        self.acquire_with(layout, storage_home, generation, || {
             IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
                 storage_path: storage_home.to_path_buf(),
             })
@@ -113,8 +118,9 @@ impl ReadSessionCache {
 
     fn acquire_with(
         &self,
-        home: &Path,
+        layout: &WorkspaceLayout,
         storage_home: &Path,
+        generation: &str,
         open: impl FnOnce() -> EngineResult<IndexStore>,
     ) -> EngineResult<ReadSessionLease> {
         let slot = {
@@ -124,7 +130,12 @@ impl ReadSessionCache {
                     "index read cache has been closed",
                 ));
             }
-            Arc::clone(state.entries.entry(home.to_path_buf()).or_default())
+            Arc::clone(
+                state
+                    .entries
+                    .entry(layout.storage_dir().to_path_buf())
+                    .or_default(),
+            )
         };
         // Only this workspace waits for native open/close; the map owns entries,
         // never native I/O. Concurrent misses for one workspace share this slot.
@@ -134,23 +145,25 @@ impl ReadSessionCache {
                 "index read cache has been closed",
             ));
         }
-        if entry
-            .as_ref()
-            .is_some_and(|entry| entry.session.storage_home != storage_home)
-        {
+        if entry.as_ref().is_some_and(|entry| {
+            entry.session.storage_home != storage_home || entry.session.generation != generation
+        }) {
             entry.take();
         }
         if entry.is_none() {
-            let residency = acquire_read_write_lock(
-                &home.join("locks/read-cache"),
-                LockMode::Read,
+            let residency = try_acquire_file_lock(
+                layout.read_cache_lock_path(),
+                LockMode::Shared,
                 "context.cache",
             )?;
             let storage = open()?;
             *entry = Some(CachedSession {
+                layout: layout.clone(),
                 session: Arc::new(ReadSession {
                     storage,
                     storage_home: storage_home.to_path_buf(),
+                    generation: generation.to_owned(),
+                    validated_source_roots: Mutex::new(HashSet::new()),
                     _residency: Some(residency),
                 }),
                 last_used: Instant::now(),
@@ -233,10 +246,10 @@ impl CacheInner {
                 if Arc::strong_count(&cached.session) > 1 {
                     continue;
                 }
-                // A writer first owns the home lock, then waits for residency locks.
+                // A writer first owns the workspace lock, then waits for residency locks.
                 // Releasing on any probe failure is conservative and never serves old data.
                 if now.saturating_duration_since(cached.last_used) < self.idle_timeout
-                    && home_allows_cached_reads(&home)
+                    && can_retain_read_cache(&cached.layout)
                 {
                     continue;
                 }
@@ -265,6 +278,8 @@ impl ReadSessionLease {
                     storage_path: storage_home.to_path_buf(),
                 })?,
                 storage_home: storage_home.to_path_buf(),
+                generation: String::new(),
+                validated_source_roots: Mutex::new(HashSet::new()),
                 _residency: None,
             }),
             cache: Weak::new(),
@@ -274,6 +289,15 @@ impl ReadSessionLease {
 
     pub(crate) fn storage(&self) -> &IndexStore {
         &self.session.storage
+    }
+
+    pub(crate) fn verify_source_root(&self, root: &Path) -> EngineResult<()> {
+        let mut roots = lock(&self.session.validated_source_roots);
+        if !roots.contains(root) {
+            crate::file_selection::verify_source_paths(root, &self.session.storage.list_files()?)?;
+            roots.insert(root.to_path_buf());
+        }
+        Ok(())
     }
 
     pub(crate) fn close(self) -> EngineResult<()> {
@@ -298,7 +322,7 @@ impl Drop for ReadSessionLease {
     }
 }
 
-/// Called after acquiring the exclusive home lock, before waiting for remote caches.
+/// Called after acquiring the exclusive workspace lock, before waiting for remote caches.
 pub(crate) fn release_for_write(home: &Path) {
     let Some(caches) = CACHES.get() else {
         return;

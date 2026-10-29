@@ -679,17 +679,49 @@ fn merge_runtime_options(current: &mut IndexOptions, incoming: &mut IndexOptions
         current.allow_remote = incoming.allow_remote;
         current.authorized_remote.clear();
         current.api_key = None;
+        current.runtime_api_key = None;
         current.endpoint = None;
+    }
+    // A later saved setting replaces an earlier operation's temporary override.
+    // Incoming temporary values are merged below and still win within that request.
+    if incoming.api_key.is_some() {
+        current.runtime_api_key = None;
+    }
+    if incoming.device.is_some()
+        || (current.device.is_none()
+            && incoming
+                .embedding
+                .as_ref()
+                .is_some_and(|model| model.device != zg_engine::api::index::options::Device::Auto))
+    {
+        current.runtime_device = None;
+    }
+    if incoming.model_cache.is_some()
+        || (current.model_cache.is_none()
+            && incoming
+                .embedding
+                .as_ref()
+                .is_some_and(|model| model.cache_dir.is_some()))
+    {
+        current.runtime_model_cache = None;
     }
     // Runtime/model settings are explicit updates too. A filter-only request
     // must not erase the model or credentials of an already queued manual job.
     merge_update(&mut current.root, incoming.root.take());
     merge_update(&mut current.embedding, incoming.embedding.take());
     merge_update(&mut current.api_key, incoming.api_key.take());
+    merge_update(
+        &mut current.runtime_api_key,
+        incoming.runtime_api_key.take(),
+    );
     merge_update(&mut current.endpoint, incoming.endpoint.take());
     merge_update(&mut current.device, incoming.device.take());
     merge_update(&mut current.runtime_device, incoming.runtime_device.take());
     merge_update(&mut current.model_cache, incoming.model_cache.take());
+    merge_update(
+        &mut current.runtime_model_cache,
+        incoming.runtime_model_cache.take(),
+    );
     merge_update(
         &mut current.lock_timeout_ms,
         incoming.lock_timeout_ms.take(),
@@ -1825,6 +1857,107 @@ mod tests {
     }
 
     #[test]
+    fn later_saved_settings_replace_pending_runtime_overrides() {
+        use zg_engine::api::index::options::{Device, EmbeddingModelSpec};
+
+        for embedding_settings in [false, true] {
+            for replacement_runtime in [false, true] {
+                let mut pending = Some(IndexOptions {
+                    runtime_api_key: Some("old-temporary-key".into()),
+                    runtime_device: Some(Device::Cpu),
+                    runtime_model_cache: Some("old-temporary-cache".into()),
+                    ..IndexOptions::default()
+                });
+                let mut incoming = IndexOptions {
+                    api_key: Some("new-saved-key".into()),
+                    ..IndexOptions::default()
+                };
+                if embedding_settings {
+                    incoming.embedding = Some(EmbeddingModelSpec {
+                        reference: "local/potion-code-16m-v2".into(),
+                        revision: None,
+                        cache_dir: Some("new-saved-cache".into()),
+                        endpoint: None,
+                        device: Device::Cuda,
+                    });
+                } else {
+                    incoming.device = Some(Device::Cuda);
+                    incoming.model_cache = Some("new-saved-cache".into());
+                }
+                if replacement_runtime {
+                    incoming.runtime_api_key = Some("new-temporary-key".into());
+                    incoming.runtime_device = Some(Device::Auto);
+                    incoming.runtime_model_cache = Some("new-temporary-cache".into());
+                }
+                super::merge_options(&mut pending, incoming);
+                let merged = pending.expect("merged settings");
+                assert_eq!(merged.api_key.as_deref(), Some("new-saved-key"));
+                assert_eq!(
+                    merged.runtime_api_key.as_deref(),
+                    replacement_runtime.then_some("new-temporary-key")
+                );
+                assert_eq!(
+                    merged.runtime_device,
+                    replacement_runtime.then_some(Device::Auto)
+                );
+                assert_eq!(
+                    merged.runtime_model_cache.as_deref(),
+                    replacement_runtime.then_some(std::path::Path::new("new-temporary-cache"))
+                );
+                let saved_device = merged
+                    .device
+                    .or_else(|| merged.embedding.as_ref().map(|model| model.device));
+                let saved_cache = merged.model_cache.as_deref().or_else(|| {
+                    merged
+                        .embedding
+                        .as_ref()
+                        .and_then(|model| model.cache_dir.as_deref())
+                });
+                assert_eq!(saved_device, Some(Device::Cuda));
+                assert_eq!(saved_cache, Some(std::path::Path::new("new-saved-cache")));
+            }
+        }
+    }
+
+    #[test]
+    fn model_defaults_do_not_discard_pending_runtime_overrides() {
+        use zg_engine::api::index::options::{Device, EmbeddingModelSpec};
+
+        for saved_settings in [false, true] {
+            let mut pending = Some(IndexOptions {
+                device: saved_settings.then_some(Device::Cuda),
+                model_cache: saved_settings.then(|| "saved-cache".into()),
+                runtime_device: Some(Device::Cpu),
+                runtime_model_cache: Some("temporary-cache".into()),
+                ..IndexOptions::default()
+            });
+            super::merge_options(
+                &mut pending,
+                IndexOptions {
+                    embedding: Some(EmbeddingModelSpec {
+                        reference: "local/potion-code-16m-v2".into(),
+                        revision: None,
+                        cache_dir: saved_settings.then(|| "lower-priority-cache".into()),
+                        endpoint: None,
+                        device: if saved_settings {
+                            Device::Metal
+                        } else {
+                            Device::Auto
+                        },
+                    }),
+                    ..IndexOptions::default()
+                },
+            );
+            let merged = pending.expect("merged defaults");
+            assert_eq!(merged.runtime_device, Some(Device::Cpu));
+            assert_eq!(
+                merged.runtime_model_cache.as_deref(),
+                Some(std::path::Path::new("temporary-cache"))
+            );
+        }
+    }
+
+    #[test]
     fn merged_refresh_preserves_target_scoped_once_consent() {
         let target = zg_engine::authorization::IndexAuthorization {
             root: std::env::temp_dir(),
@@ -1845,14 +1978,23 @@ mod tests {
             &mut pending,
             IndexOptions {
                 authorized_remote: vec![target.clone()],
+                runtime_api_key: Some("temporary-key".into()),
                 runtime_device: Some(zg_engine::api::index::options::Device::Cpu),
+                runtime_model_cache: Some("temporary-cache".into()),
                 ..IndexOptions::default()
             },
         );
         let merged = pending.as_ref().expect("merged");
         assert_eq!(merged.authorized_remote, [target]);
         assert!(!merged.allow_remote);
+        assert!(merged.api_key.is_none());
+        assert_eq!(merged.runtime_api_key.as_deref(), Some("temporary-key"));
         assert!(merged.device.is_none());
+        assert!(merged.model_cache.is_none());
+        assert_eq!(
+            merged.runtime_model_cache.as_deref(),
+            Some(std::path::Path::new("temporary-cache"))
+        );
         assert_eq!(
             merged.runtime_device,
             Some(zg_engine::api::index::options::Device::Cpu)
@@ -1878,6 +2020,7 @@ mod tests {
         for model_changed in [false, true] {
             let mut pending = Some(IndexOptions {
                 api_key: Some("provider-a-key".into()),
+                runtime_api_key: Some("provider-a-temporary-key".into()),
                 endpoint: Some("https://a.test".into()),
                 allow_remote: true,
                 ..IndexOptions::default()
@@ -1903,6 +2046,7 @@ mod tests {
             let merged = pending.expect("merged destination");
             assert!(!merged.allow_remote);
             assert!(merged.api_key.is_none());
+            assert!(merged.runtime_api_key.is_none());
             assert_eq!(
                 merged.endpoint.as_deref(),
                 if model_changed {
@@ -1921,6 +2065,9 @@ mod tests {
             rebuild: true,
             allow_remote: true,
             api_key: Some("test-key".into()),
+            runtime_api_key: Some("temporary-key".into()),
+            runtime_device: Some(Device::Auto),
+            runtime_model_cache: Some("temporary-cache".into()),
             endpoint: Some("https://example.test/embeddings".into()),
             device: Some(Device::Cpu),
             model_cache: Some("/models".into()),
@@ -1954,6 +2101,12 @@ mod tests {
             "qwen/new-model"
         );
         assert_eq!(merged.api_key.as_deref(), Some("test-key"));
+        assert_eq!(merged.runtime_api_key.as_deref(), Some("temporary-key"));
+        assert_eq!(merged.runtime_device, Some(Device::Auto));
+        assert_eq!(
+            merged.runtime_model_cache.as_deref(),
+            Some(std::path::Path::new("temporary-cache"))
+        );
         assert_eq!(
             merged.endpoint.as_deref(),
             Some("https://example.test/embeddings")

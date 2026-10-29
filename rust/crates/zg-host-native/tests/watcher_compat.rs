@@ -269,20 +269,24 @@ async fn wait_for_change(
     control: &TaskControl,
     expected: WorkspaceChange,
 ) -> TestResult {
+    let mut observed = Vec::new();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let batch = session.next_changes(control).await?;
-            if batch
+            let matched = batch
                 .changes
                 .iter()
-                .any(|actual| covers_change(actual, &expected))
-            {
+                .any(|actual| covers_change(actual, &expected));
+            observed.extend(batch.changes);
+            if matched {
                 return Ok::<_, HostError>(());
             }
         }
     })
     .await
-    .map_err(|error| format!("waiting for {expected:?}: {error}"))??;
+    .map_err(|error| {
+        format!("waiting for {expected:?}: {error}; observed changes: {observed:?}")
+    })??;
     Ok(())
 }
 
@@ -329,6 +333,159 @@ async fn native_watcher_tracks_external_file_symlinks_at_the_depth_limit() -> Te
         WorkspaceChange::Upsert(PathBuf::from("linked.rs")),
     )
     .await?;
+    session.close().await?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn polling_ignores_excluded_symlink_loops_and_keeps_selected_aliases_live() -> TestResult {
+    let temporary = tempdir_in(std::env::current_dir()?)?;
+    let root = temporary.path().join("workspace");
+    let outside = temporary.path().join("external");
+    fs::create_dir(&root)?;
+    fs::create_dir(&outside)?;
+    let directory_file = outside.join("source.rs");
+    let file_target = temporary.path().join("target.rs");
+    let retargeted_file = temporary.path().join("retargeted.rs");
+    fs::write(&directory_file, "directory before")?;
+    fs::write(&file_target, "file before")?;
+    fs::write(&retargeted_file, "retargeted before")?;
+    std::os::unix::fs::symlink(&outside, root.join("linked"))?;
+    std::os::unix::fs::symlink(&file_target, root.join("linked.rs"))?;
+    std::os::unix::fs::symlink("blocked", root.join("blocked"))?;
+    let factory = NativeWatcherFactory::default().with_config(NativeWatcherConfig {
+        debounce: Duration::from_millis(20),
+        max_wait: Duration::from_millis(80),
+        reconcile_interval: None,
+        resume_check_interval: None,
+        poll_interval: Some(Duration::from_millis(20)),
+        ..NativeWatcherConfig::default()
+    });
+    let mut spec = RootSpec::new(root.clone(), Arc::new(BlockSubtree(root.join("blocked"))));
+    spec.follow = true;
+    let control = TaskControl::default();
+    let session = factory
+        .watch(&WatchRequest { root: spec }, &control)
+        .await?;
+    // Registration and subsequent backend polls must both ignore the broken link.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::timeout(Duration::from_secs(2), session.flush()).await??;
+    wait_for_change(&session, &control, WorkspaceChange::Rescan).await?;
+
+    for (target, alias) in [
+        (&directory_file, Path::new("linked/source.rs")),
+        (&file_target, Path::new("linked.rs")),
+    ] {
+        fs::write(target, "changed target contents")?;
+        wait_for_change(
+            &session,
+            &control,
+            WorkspaceChange::Upsert(alias.to_path_buf()),
+        )
+        .await?;
+        fs::remove_file(target)?;
+        wait_for_change(
+            &session,
+            &control,
+            WorkspaceChange::Delete(alias.to_path_buf()),
+        )
+        .await?;
+        fs::write(target, "recreated target")?;
+        wait_for_change(
+            &session,
+            &control,
+            WorkspaceChange::Upsert(alias.to_path_buf()),
+        )
+        .await?;
+        tokio::time::timeout(Duration::from_secs(2), session.flush_pending()).await??;
+    }
+    // Retarget without waiting for notify's second-resolution symlink mtime.
+    fs::remove_file(root.join("linked.rs"))?;
+    std::os::unix::fs::symlink(&retargeted_file, root.join("linked.rs"))?;
+    wait_for_change(
+        &session,
+        &control,
+        WorkspaceChange::Upsert("linked.rs".into()),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    fs::write(&retargeted_file, "changed after same-second retarget")?;
+    wait_for_change(
+        &session,
+        &control,
+        WorkspaceChange::Upsert("linked.rs".into()),
+    )
+    .await?;
+    tokio::time::timeout(Duration::from_secs(2), session.flush_pending()).await??;
+    session.close().await?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn polling_tracks_control_symlink_targets_without_following_source_links() -> TestResult {
+    let temporary = tempdir_in(std::env::current_dir()?)?;
+    let root = temporary.path().join("workspace");
+    let config = temporary.path().join("config");
+    let targets = temporary.path().join("targets");
+    fs::create_dir(&root)?;
+    fs::create_dir(&config)?;
+    fs::create_dir(&targets)?;
+    let first = targets.join("first.rules");
+    let second = targets.join("second.rules");
+    let control_path = config.join("rules");
+    fs::write(&first, "disabled")?;
+    fs::write(&second, "disabled")?;
+    std::os::unix::fs::symlink(&first, &control_path)?;
+    let policy = Arc::new(MutablePolicy {
+        blocked: root.join("blocked"),
+        control: control_path.clone(),
+        enabled: std::sync::atomic::AtomicBool::new(false),
+    });
+    let factory = NativeWatcherFactory::default().with_config(NativeWatcherConfig {
+        debounce: Duration::from_millis(20),
+        max_wait: Duration::from_millis(80),
+        reconcile_interval: None,
+        resume_check_interval: None,
+        poll_interval: Some(Duration::from_millis(20)),
+        ..NativeWatcherConfig::default()
+    });
+    let control = TaskControl::default();
+    let session = factory
+        .watch(
+            &WatchRequest {
+                root: RootSpec::new(root, policy.clone()),
+            },
+            &control,
+        )
+        .await?;
+    fs::write(&first, "enabled")?;
+    wait_for_change(
+        &session,
+        &control,
+        WorkspaceChange::RescanDirectory(PathBuf::new()),
+    )
+    .await?;
+    assert!(policy.enabled.load(std::sync::atomic::Ordering::Acquire));
+    fs::remove_file(&control_path)?;
+    std::os::unix::fs::symlink(&second, &control_path)?;
+    wait_for_change(
+        &session,
+        &control,
+        WorkspaceChange::RescanDirectory(PathBuf::new()),
+    )
+    .await?;
+    assert!(!policy.enabled.load(std::sync::atomic::Ordering::Acquire));
+    fs::write(&second, "enabled")?;
+    wait_for_change(
+        &session,
+        &control,
+        WorkspaceChange::RescanDirectory(PathBuf::new()),
+    )
+    .await?;
+    assert!(policy.enabled.load(std::sync::atomic::Ordering::Acquire));
+    tokio::time::timeout(Duration::from_secs(2), session.flush_pending()).await??;
     session.close().await?;
     Ok(())
 }
@@ -401,7 +558,14 @@ fn covers_change(actual: &WorkspaceChange, expected: &WorkspaceChange) -> bool {
             (WorkspaceChange::Rescan, _) => true,
             (
                 WorkspaceChange::RescanDirectory(parent),
-                WorkspaceChange::Upsert(path) | WorkspaceChange::RescanDirectory(path),
+                WorkspaceChange::Upsert(path)
+                | WorkspaceChange::Delete(path)
+                | WorkspaceChange::RescanDirectory(path)
+                | WorkspaceChange::DeletePrefix(path),
+            )
+            | (
+                WorkspaceChange::DeletePrefix(parent),
+                WorkspaceChange::Delete(path) | WorkspaceChange::DeletePrefix(path),
             ) => path.starts_with(parent),
             _ => false,
         }

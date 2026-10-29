@@ -205,7 +205,7 @@ fn directory_and_filename_filters_match_both_retrieval_collections() {
             .expect("no stale vectors")
             .is_empty()
     );
-    storage.close().expect("checkpoint");
+    storage.close().expect("close storage");
     let reader = open(directory.path(), true);
     assert!(
         reader
@@ -218,7 +218,7 @@ fn directory_and_filename_filters_match_both_retrieval_collections() {
 }
 
 #[test]
-fn file_ids_are_local_to_index_records_and_rebuilds_are_independent() {
+fn file_id_reservations_survive_reopen_and_rebuilds_are_independent() {
     let temporary = tempfile::tempdir().expect("workspace");
     let first_home = temporary.path().join("first");
     let second_home = temporary.path().join("second");
@@ -228,7 +228,7 @@ fn file_ids_are_local_to_index_records_and_rebuilds_are_independent() {
     let reserved = first
         .resolve_file_ids(&[PathBuf::from("pending.rs")])
         .expect("reserve")[0];
-    first.close().expect("checkpoint");
+    first.close().expect("close storage");
     let reopened = open(&first_home, false);
     assert_eq!(
         reopened
@@ -236,12 +236,12 @@ fn file_ids_are_local_to_index_records_and_rebuilds_are_independent() {
             .expect("stored ID"),
         [file.id()]
     );
-    // An unstored reservation is not a durable source record.
+    // Reservations remain consumed even without a stored file record.
     assert_eq!(
         reopened
             .resolve_file_ids(&[PathBuf::from("different.rs")])
             .expect("new ID"),
-        [reserved]
+        [FileId::new(reserved.get() + 1)]
     );
     reopened.close().expect("close");
     let second = open(&second_home, false);
@@ -277,7 +277,7 @@ fn deleting_a_record_releases_its_path_but_never_reuses_a_live_id() {
     )
     .expect("file record");
     assert!(storage.replace_fixture_file(&mismatched, &[entry]).is_err());
-    storage.close().expect("checkpoint");
+    storage.close().expect("close storage");
     let reopened = open(temporary.path(), false);
     assert_eq!(
         reopened
@@ -307,9 +307,9 @@ fn failed_files_retain_queryable_paths_and_directory_ownership() {
         storage.list_file_paths().expect("paths"),
         [(file.id(), file.relative_path().to_path_buf())]
     );
-    storage.close().expect("checkpoint");
+    storage.close().expect("close storage");
 
-    let path = temporary.path().join("storage/files");
+    let path = temporary.path().join("files");
     let mut options = zvec_rust::CollectionOptions::new().expect("options");
     options.set_read_only(true).expect("read only");
     #[cfg(windows)]
@@ -362,7 +362,7 @@ fn query_attributes_follow_replacement_failure_deletion_and_reopen() {
         storage.list_file_attributes().expect("updated attributes"),
         [StoredFileAttributes::from(&file)]
     );
-    storage.close().expect("checkpoint");
+    storage.close().expect("close storage");
 
     let reopened = open(temporary.path(), false);
     assert_eq!(
@@ -421,10 +421,13 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
     .expect("create index")
     .close()
     .expect("close index");
-    let descriptor = home.join("storage/schema.json");
+    let descriptor = home.join("schema.json");
     let persisted = fs::read(&descriptor).expect("read descriptor");
     let record: serde_json::Value = serde_json::from_slice(&persisted).expect("descriptor JSON");
-    assert_eq!(record, serde_json::json!({"embeddings": [original]}));
+    assert_eq!(
+        record,
+        serde_json::json!({"path_encoding": "components", "embeddings": [original]})
+    );
     assert_eq!(
         read_json::<SchemaRecord>(&descriptor)
             .expect("read model info")
@@ -492,8 +495,7 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
 #[test]
 fn rejects_corrupt_embedding_limits_before_opening_native_storage() {
     let directory = tempfile::tempdir().expect("fixture directory");
-    let path = directory.path().join("storage");
-    fs::create_dir(&path).expect("storage directory");
+    let path = directory.path();
     for field in ["maxBatchSize", "maxInputTokens", "maxImageBytes"] {
         let mut record =
             serde_json::to_value(SchemaRecord::new(&[schema()])).expect("descriptor JSON");
@@ -521,14 +523,13 @@ fn rejects_corrupt_embedding_limits_before_opening_native_storage() {
             assert!(error.message().contains("schema.json"));
         }
     }
-    assert_eq!(fs::read_dir(path).expect("storage files").count(), 1);
+    assert_eq!(fs::read_dir(path).expect("storage files").count(), 2);
 }
 
 #[test]
 fn initializes_schema_only_in_empty_storage() {
     let directory = tempfile::tempdir().expect("fixture directory");
-    let path = directory.path().join("storage");
-    fs::create_dir(&path).expect("empty storage directory");
+    let path = directory.path();
     open(directory.path(), false)
         .close()
         .expect("initialize empty storage");
@@ -542,7 +543,7 @@ fn initializes_schema_only_in_empty_storage() {
 fn rejects_existing_collections_without_schema_before_opening_them() {
     for collection in ["files", "directories", "entities", "fragments_existing"] {
         let directory = tempfile::tempdir().expect("fixture directory");
-        let path = directory.path().join("storage");
+        let path = directory.path();
         let collection_path = path.join(collection);
         fs::create_dir_all(&collection_path).expect("existing collection");
         let marker = collection_path.join("preserved");
@@ -824,11 +825,33 @@ fn persists_filters_and_replaces_complete_files() {
     assert!(IndexStore::delete(home).is_err());
     second_reader.close().expect("close other reader");
     IndexStore::delete(home).expect("drop storage");
-    assert!(!IndexStore::exists(home).expect("absence"));
+    assert!(!directory_exists(home).expect("absence"));
 }
 
 #[test]
-fn checkpoint_preserves_failure_status() {
+fn deletion_rejects_an_external_storage_lock_and_succeeds_after_release() {
+    let directory = tempfile::tempdir().expect("workspace");
+    let home = directory.path().join("index");
+    fs::create_dir(&home).expect("index directory");
+    let record = home.join("record");
+    fs::write(&record, b"preserve while locked").expect("stored record");
+
+    let reader = acquire_storage_lock(&home, true).expect("external reader lock");
+    let error = IndexStore::delete(&home).expect_err("active reader prevents deletion");
+    assert_eq!(error.code(), EngineError::RESOURCE_BUSY);
+    assert_eq!(
+        fs::read(&record).expect("preserved record"),
+        b"preserve while locked"
+    );
+    drop(reader);
+
+    IndexStore::delete(&home).expect("delete closed storage");
+    assert!(!home.exists());
+    IndexStore::delete(&home).expect("deletion is idempotent");
+}
+
+#[test]
+fn close_preserves_failure_status() {
     let directory = tempfile::tempdir().expect("fixture directory");
     let home = directory.path();
     let storage = open(home, false);
@@ -840,10 +863,8 @@ fn checkpoint_preserves_failure_status() {
     storage
         .mark_file_failed(&failed, "fixture failure")
         .expect("failed source");
-    storage.checkpoint().expect("explicit checkpoint");
-    storage
-        .checkpoint()
-        .expect("empty checkpoint is idempotent");
+    storage.close().expect("close storage");
+    storage.close().expect("close is idempotent");
     drop(storage);
 
     let reader = open(home, true);
@@ -1069,7 +1090,7 @@ fn invalid_file_states_and_owners_leave_storage_unchanged() {
     storage
         .replace_fixture_file(&file, &[])
         .expect("successful empty extraction");
-    storage.close().expect("checkpoint empty result");
+    storage.close().expect("close empty storage");
     let reader = open(directory.path(), true);
     let files = reader.list_files().expect("read empty indexed source");
     assert_eq!(files.len(), 1);
@@ -1177,13 +1198,13 @@ fn reopened_readers_detect_non_unicode_names_without_loading_the_allocation_cach
         .mark_file_failed(&file, "fixture")
         .expect("file record");
     assert!(storage.has_non_unicode_file_names().expect("writer"));
-    storage.close().expect("checkpoint");
+    storage.close().expect("close storage");
     let reader = open(temporary.path(), true);
     assert!(reader.has_non_unicode_file_names().expect("reader"));
     reader.close().expect("close");
     let writer = open(temporary.path(), false);
     writer.delete_file(file.id()).expect("delete");
-    writer.close().expect("checkpoint");
+    writer.close().expect("close storage");
     let reader = open(temporary.path(), true);
     assert!(!reader.has_non_unicode_file_names().expect("empty reader"));
     reader.close().expect("close");
@@ -1197,8 +1218,8 @@ fn directory_collection_preserves_membership_after_reopen_and_replacement() {
     storage
         .replace_fixture_file(&file, &[entry])
         .expect("indexed source");
-    storage.close().expect("checkpoint");
-    assert!(home.path().join("storage/directories").is_dir());
+    storage.close().expect("close storage");
+    assert!(home.path().join("directories").is_dir());
     let filter = StorageSearchFilter {
         path: Some(StoragePathFilter::Directory(
             crate::domain::SourcePath::new("src").expect("path"),
@@ -1219,7 +1240,7 @@ fn directory_collection_preserves_membership_after_reopen_and_replacement() {
     writer
         .replace_fixture_file(&file, &[entry])
         .expect("reindex source");
-    writer.close().expect("checkpoint recovered source");
+    writer.close().expect("close recovered storage");
     let reader = open(home.path(), true);
     assert_eq!(
         reader
@@ -1371,10 +1392,10 @@ fn model_tables_partition_fragments_and_failed_files_clear_every_partition() {
     writer
         .replace_fixture_file(&file, &entries)
         .expect("complete file");
-    writer.close().expect("checkpoint");
+    writer.close().expect("close storage");
 
-    let storage_path = home.path().join("storage");
-    let mut collections = fs::read_dir(&storage_path)
+    let storage_path = home.path();
+    let mut collections = fs::read_dir(storage_path)
         .expect("storage layout")
         .map(|entry| entry.expect("directory entry"))
         .filter(|entry| entry.file_type().expect("type").is_dir())
@@ -1385,6 +1406,7 @@ fn model_tables_partition_fragments_and_failed_files_clear_every_partition() {
         "directories".to_owned(),
         "files".to_owned(),
         "entities".to_owned(),
+        "graph".to_owned(),
     ];
     expected.extend(
         multi_model_schema()
@@ -1394,7 +1416,7 @@ fn model_tables_partition_fragments_and_failed_files_clear_every_partition() {
     expected.sort();
     assert_eq!(
         collections, expected,
-        "three canonical collections plus one per model"
+        "three canonical collections, one per model, and the graph directory"
     );
 
     let reader = open(home.path(), true);
@@ -1469,7 +1491,9 @@ fn model_tables_partition_fragments_and_failed_files_clear_every_partition() {
 #[test]
 fn model_set_changes_require_rebuild_and_order_does_not() {
     let home = tempfile::tempdir().expect("workspace");
-    open_multi_model(home.path()).close().expect("checkpoint");
+    open_multi_model(home.path())
+        .close()
+        .expect("close storage");
     let mut reversed = multi_model_schema();
     reversed.reverse();
     IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
@@ -1486,6 +1510,215 @@ fn model_set_changes_require_rebuild_and_order_does_not() {
                 embeddings,
             })
             .is_err()
+        );
+    }
+}
+
+#[test]
+fn deleting_the_highest_id_does_not_reuse_it_after_reopen() {
+    let root = tempfile::tempdir().expect("workspace");
+    let store = open(root.path(), false);
+    let (first, first_entry) = file_at(&store, "first.txt");
+    let (last, last_entry) = file_at(&store, "last.txt");
+    store
+        .replace_fixture_file(&first, &[first_entry])
+        .expect("first");
+    store
+        .replace_fixture_file(&last, &[last_entry])
+        .expect("last");
+    store.delete_file(last.id()).expect("delete highest ID");
+    store.close().expect("close");
+
+    let reopened = open(root.path(), false);
+    let next = reopened
+        .resolve_file_ids(&["next.txt".into()])
+        .expect("next")[0];
+    assert!(next > last.id());
+    reopened
+        .delete_file(first.id())
+        .expect("delete remaining file");
+    reopened.close().expect("close empty index");
+    let empty = open(root.path(), false);
+    assert!(empty.list_files().expect("files").is_empty());
+    let fresh = empty
+        .resolve_file_ids(&["fresh.txt".into()])
+        .expect("fresh")[0];
+    assert!(fresh > next);
+    empty.close().expect("close");
+}
+
+#[test]
+fn relocated_storage_preserves_identity_and_updates_only_the_snapshot() {
+    let root = tempfile::tempdir().expect("workspace");
+    let original = root.path().join("original");
+    let relocated = root.path().join("relocated");
+    let store = open(&original, false);
+    let (file, entry) = file_at(&store, "rooms/客厅/design.txt");
+    store
+        .replace_fixture_file(&file, std::slice::from_ref(&entry))
+        .expect("file");
+    let reserved = store
+        .resolve_file_ids(&["pending.txt".into()])
+        .expect("reserve")[0];
+    store.close().expect("close");
+    fs::rename(&original, &relocated).expect("move index");
+
+    let writer = open(&relocated, false);
+    assert_eq!(
+        writer
+            .resolve_file_ids(&[file.relative_path().to_path_buf()])
+            .expect("same ID"),
+        [file.id()]
+    );
+    let filter = StorageSearchFilter {
+        path: Some(StoragePathFilter::Directory(
+            SourcePath::new("rooms/客厅").expect("directory"),
+        )),
+        ..StorageSearchFilter::default()
+    };
+    let hits = writer
+        .search_fts("orchard", 10, Some(&filter))
+        .expect("directory query");
+    assert_eq!(hits.len(), 1);
+    let stored = writer.load_search_hits(&hits).expect("entity");
+    assert_eq!(stored.entities[entry.entity.id()].entity, entry.entity);
+    let mut refreshed = stored.entities[entry.entity.id()].file.clone();
+    refreshed
+        .set_snapshot(FileSnapshot {
+            modified_epoch_ms: Some(123_456),
+            ..refreshed.snapshot().clone()
+        })
+        .expect("snapshot");
+    writer
+        .update_file_snapshot(&refreshed)
+        .expect("refresh timestamp");
+    let updated = writer.load_search_hits(&hits).expect("preserved entity");
+    assert_eq!(updated.entities[entry.entity.id()].file, refreshed);
+    assert_eq!(updated.entities[entry.entity.id()].entity, entry.entity);
+    assert_eq!(
+        writer.list_file_attributes().expect("attributes")[0].modified_epoch_ms,
+        Some(123_456)
+    );
+    let mut changed = refreshed.clone();
+    changed
+        .set_snapshot(FileSnapshot {
+            content_hash: Some("different content".into()),
+            ..changed.snapshot().clone()
+        })
+        .expect("different content");
+    assert!(writer.update_file_snapshot(&changed).is_err());
+    let mut changed = refreshed.clone();
+    changed
+        .set_snapshot(FileSnapshot {
+            size_bytes: changed.snapshot().size_bytes + 1,
+            ..changed.snapshot().clone()
+        })
+        .expect("different size");
+    assert!(writer.update_file_snapshot(&changed).is_err());
+    assert_eq!(
+        writer.load_search_hits(&hits).expect("unchanged").entities[entry.entity.id()].file,
+        refreshed
+    );
+    let next = writer
+        .resolve_file_ids(&["new.txt".into()])
+        .expect("new ID")[0];
+    assert!(next > reserved);
+    writer.close().expect("close");
+    let reader = open(&relocated, true);
+    assert_eq!(
+        reader.list_files().expect("persisted snapshot"),
+        [refreshed]
+    );
+    reader.close().expect("close reader");
+}
+
+#[test]
+fn native_path_schema_requires_rebuild_without_mutating_collections() {
+    let root = tempfile::tempdir().expect("workspace");
+    let bytes =
+        serde_json::to_vec(&serde_json::json!({"embeddings": [schema()]})).expect("old schema");
+    let path = root.path().join("schema.json");
+    fs::write(&path, &bytes).expect("old descriptor");
+    for options in [
+        WorkspaceIndexStorageOptions::ReadOnly {
+            storage_path: root.path().to_owned(),
+        },
+        WorkspaceIndexStorageOptions::ReadWrite {
+            storage_path: root.path().to_owned(),
+            embeddings: vec![schema()],
+        },
+    ] {
+        let error = IndexStore::open(options)
+            .err()
+            .expect("reject old encoding");
+        assert!(error.message().contains("rebuild the index"));
+        assert_eq!(fs::read(&path).expect("unchanged descriptor"), bytes);
+        assert!(!root.path().join("files").exists());
+    }
+}
+
+#[test]
+fn missing_or_malformed_collections_are_not_recreated() {
+    let root = tempfile::tempdir().expect("workspace");
+    open(root.path(), false).close().expect("create index");
+    let missing = root.path().join("directories");
+    fs::remove_dir_all(&missing).expect("remove collection");
+    for malformed in [false, true] {
+        if malformed {
+            fs::write(&missing, b"not a directory").expect("invalid collection entry");
+        }
+        for options in [
+            WorkspaceIndexStorageOptions::ReadOnly {
+                storage_path: root.path().to_owned(),
+            },
+            WorkspaceIndexStorageOptions::ReadWrite {
+                storage_path: root.path().to_owned(),
+                embeddings: vec![schema()],
+            },
+        ] {
+            let error = IndexStore::open(options)
+                .err()
+                .expect("reject incomplete storage");
+            if malformed {
+                assert_eq!(error.code(), EngineError::INVALID_ARGUMENT);
+                assert_eq!(
+                    fs::read(&missing).expect("unchanged entry"),
+                    b"not a directory"
+                );
+            } else {
+                assert!(error.message().contains("rebuild the index"));
+                assert!(!missing.exists());
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn critical_storage_symlinks_are_rejected_before_opening_the_target() {
+    let root = tempfile::tempdir().expect("workspace");
+    let outside = root.path().join("outside");
+    fs::create_dir(&outside).expect("outside");
+    for name in ["storage.lock", "schema.json", "file-ids.json"] {
+        let index = root.path().join(name.replace('.', "-"));
+        fs::create_dir(&index).expect("index directory");
+        if name == "file-ids.json" {
+            open(&index, false).close().expect("create index");
+            fs::remove_file(index.join(name)).expect("remove allocation");
+        }
+        let target = outside.join(name);
+        fs::write(&target, "preserve").expect("outside record");
+        std::os::unix::fs::symlink(&target, index.join(name)).expect("alias");
+        let error = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+            storage_path: index,
+            embeddings: vec![schema()],
+        })
+        .err()
+        .expect("reject storage alias");
+        assert!(error.message().contains("symbolic link"));
+        assert_eq!(
+            fs::read_to_string(target).expect("preserved target"),
+            "preserve"
         );
     }
 }

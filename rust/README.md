@@ -149,7 +149,7 @@ incremental writer when the effective model configuration matches (including
 credentials, endpoint, device and model cache). Borrowed queries keep storage,
 models and the home lock alive; publication waits for them to finish. `Wait` and
 legacy synchronous auto-update queries never borrow partial writer state. A
-rebuild's unpublished generation remains private. The daemon preserves the refresh
+rebuild's unpublished replacement remains private. The daemon preserves the refresh
 policy when invoking the engine and also bounds cancellable waits for scheduled jobs.
 
 The daemon retires workspace runtimes and watchers after four hours without a
@@ -163,6 +163,34 @@ remain shared at engine scope and follow their own lease lifetime.
 
 The native engine supports indexing, indexed FTS and vector search, `zg --rg`,
 workspace discovery, `info`, and idempotent `drop_index`.
+
+Search and status discover the nearest enclosing `.zvec-grep` directory. Its
+parent is the source directory, and the active data lives at `.zvec-grep/index`.
+Moving or copying the source directory together with `.zvec-grep` preserves the
+index without registration or a workspace name. The manifest records the previous
+absolute source location for environment checks; it does not locate the source.
+
+First builds and rebuilds prepare data in `.zvec-grep/temp/new`, retaining the
+previous index until publication succeeds. An interrupted directory swap is
+recovered before readers enter; successful publication keeps the fixed `index/`
+path and clears temporary data.
+
+Stored file paths and internal ignore-file references move with the workspace.
+Missing ignore files and external paths that are not absolute on the current
+platform are skipped without removing their saved references. Other read errors,
+invalid rules, invalid path components, and filename collisions on the destination
+filesystem produce errors.
+Incomplete scans do not apply deletions, cancelled file preparation preserves
+existing content, and content-identical updates refresh timestamps without
+embedding again.
+
+Explicit index device and model-cache options are saved as workspace defaults;
+omitted options preserve them. Each operation resolves these settings from
+explicit options, environment, workspace defaults, global configuration, then
+backend defaults. After moving a workspace, override incompatible preferences
+with `zg --index --device cpu --model-cache <path>`; no rebuild is required.
+Query overrides remain temporary and are not written back by automatic refresh
+or retained by watchers.
 
 Search directly with `zg "where authentication is validated"`, `zg --fts
 "AuthService"`, or `zg --rg -F "AuthService" src`. Management uses flags:
@@ -251,7 +279,7 @@ either full content or UTF-8 byte offsets relative to the entity's content. Sour
 locations, including line and column numbers, are calculated when needed;
 fragments do not duplicate content or source coordinates.
 Model collections store the text and vectors needed for retrieval, with entity
-metadata included in search projections. Index format 5 uses this layout.
+metadata included in search projections. Index format 2 uses this layout.
 
 Lexical search runs in-process with ripgrep's `grep` and `ignore` crates; the
 binary and ordinary CI jobs do not require a system `rg` executable.
@@ -355,31 +383,39 @@ zg --auth revoke /path/to/workspace
 Granting consent does not send data, load a model, or build an index. Subsequent
 remote indexing and semantic search may send workspace content and query text
 to the selected endpoint and incur provider charges. API credentials remain
-separate: use `ZVEC_GREP_API_KEY` or `--api-key` for actual operations.
+separate: use `ZVEC_GREP_API_KEY`, global model settings, or `--api-key` for
+actual operations. An API key explicitly supplied when indexing is encrypted in
+the manifest; inherited environment/global credentials and query-only keys are
+not persisted.
+
+The decryption key is stored in `.zvec-grep/credentials.key` and must travel with
+the workspace. Copying the complete directory therefore copies access to its
+saved credentials; this key does not grant permission to send data remotely.
 
 Without `--embedding`, grant uses the existing index model, then
 `ZVEC_GREP_EMBEDDING`, then the configured default model. `--endpoint` overrides
 the stored index endpoint, per-model endpoint configuration, `ZVEC_GREP_ENDPOINT`,
-and provider default. The signed grant at
-`.zvec-grep/authorization.json` binds the canonical workspace root, model, and
-endpoint. Changing any of them requires a new grant. The signing key lives at
-`$ZVEC_GREP_HOME/authorization.key` (default `~/.zvec-grep/authorization.key`),
-or the path selected by `ZVEC_GREP_AUTHORIZATION_KEY_FILE`.
+and provider default. The grant at `.zvec-grep/authorization.json` binds the
+canonical source root, username, model, and endpoint. A change to any of these
+requires a matching grant. A copied grant remains valid on another machine when
+the source path and username match. No authorization state or signing key is
+stored in the user home directory, and no machine fingerprint is used.
 
-Prepare the outer directory before initializing a custom signing-key location.
-For example, with `ZVEC_GREP_HOME=/data/apps/zg`, `/data/apps` must already exist;
-the engine creates `zg`. For an explicit key-file path, the engine can create its
-direct parent directory, but that directory's parent must already exist.
+Authorization records describe the user's saved consent; they are not signed or
+protected against deliberate edits. Only explicit authorization updates the
+recorded path and username; index updates and manifest writes do not. When the
+username cannot be determined, use single-operation consent instead of a
+persistent grant.
 
-Direct CLI, server CLI, and MCP read the same authorization on each operation;
-configure them to use the same signing key. Revocation takes effect for new
+Direct CLI, server CLI, and MCP read the same workspace authorization on each
+operation. Revocation takes effect for new
 operations without restarting the server. `--allow-remote` on `zg --index` or
 `zg <query>` grants consent for that operation only, including its synchronous
 refresh, and never authorizes later watcher jobs. MCP reuses existing workspace
 grants and otherwise asks form-capable clients for explicit consent before index
 or search sends data remotely. The form discloses the root, source roots, model,
 endpoint and data categories. Choose `once` for this operation, `workspace` for a
-signed persistent grant, or `cancel` to deny transmission. Search also offers
+persistent grant, or `cancel` to deny transmission. Search also offers
 `fts_only`, which disables vector retrieval and refresh. Unsupported clients,
 invalid responses, declined forms, cancellation and timeouts never grant consent.
 Cancelling the originating request also sends a cancellation notification for its
@@ -396,7 +432,9 @@ establish a reconciliation proof. Public search freshness requires observed
 file-change evidence independently of reconciliation or background activity.
 Native `flush_pending` drains delivered events without forcing a
 scan, while explicit `flush` and periodic/recovery checks retain full rescans.
-Explicit `info` inspection still reads current disk status.
+Explicit `info` inspection still reads current disk status and compares changed
+files with saved content hashes. Automatic refresh checks use metadata first,
+and the indexing pass resolves unchanged content before embedding.
 
 For protocol `2026-07-28`, remote consent uses `input_required`. Echo the exact
 `requestState` and unchanged tool arguments with
@@ -454,8 +492,9 @@ Search never changes persisted scan policy: `includeHidden`, `useDefaultIgnores`
 `maxDepth`, `maxFileSizeBytes` and `follow` belong on index requests. Node's
 indexed-search path ignores its scanning options; Rust rejects them explicitly.
 `useDefaultIgnores` controls built-in exclusions and discovered ignore files;
-explicit `ignoreFiles` always apply and must exist. Scan rules are validated
-before index mutations, and `maxFileSizeBytes` must be positive when set.
+explicit `ignoreFiles` remain enabled independently of that switch. Missing files
+are skipped and their paths remain saved; other read errors and invalid rules fail
+before index mutations. `maxFileSizeBytes: 0` excludes all files, including empty files.
 Unknown search/index fields and public nulls are rejected, except index
 `maxDepth: null` / `maxFileSizeBytes: null`, which clear saved limits.
 Existing typed globs, `includedFormats`/`excludedFormats`, categories, `enum`,

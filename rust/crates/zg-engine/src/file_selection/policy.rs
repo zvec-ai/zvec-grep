@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::File,
-    io::Read,
+    io::{ErrorKind, Read},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -29,6 +29,7 @@ const IGNORE_NAMES: [&str; 3] = [".gitignore", ".ignore", ".rgignore"];
 #[derive(Debug)]
 pub(crate) struct ScanPolicy {
     root: PathBuf,
+    index_path: PathBuf,
     options: ScanRules,
     ignore_files: Vec<PathBuf>,
     matcher: GlobMatcher,
@@ -60,11 +61,11 @@ impl ScanPolicy {
         exclude_defaults: bool,
     ) -> EngineResult<Self> {
         let matcher = GlobMatcher::new(root, options.globs())?;
-        let ignore_files: Vec<_> = options
-            .ignore_files()
+        let ignore_files = options
+            .resolve_ignore_files(root)
             .iter()
-            .map(|path| control_alias(&root.join(path)))
-            .collect();
+            .map(|path| control_alias(path))
+            .collect::<Vec<_>>();
         let mut defaults = GitignoreBuilder::new(root);
         if exclude_defaults {
             for name in DEFAULT_IGNORED_DIRECTORY_NAMES {
@@ -81,6 +82,8 @@ impl ScanPolicy {
         let control_paths = control_paths(root, options.use_default_ignores(), &ignore_files);
         let policy = Self {
             root: root.to_path_buf(),
+            index_path: std::fs::canonicalize(root.join(".zvec-grep"))
+                .unwrap_or_else(|_| root.join(".zvec-grep")),
             options: options.clone(),
             ignore_files,
             matcher,
@@ -105,6 +108,12 @@ impl ScanPolicy {
     }
 
     fn selected(&self, path: &Path, directory: bool) -> Result<bool, HostError> {
+        if path.starts_with(&self.index_path)
+            || (self.options.follow_symlinks()
+                && std::fs::canonicalize(path).is_ok_and(|path| path.starts_with(&self.index_path)))
+        {
+            return Ok(false);
+        }
         let Ok(relative) = path.strip_prefix(&self.root) else {
             return Ok(false);
         };
@@ -210,7 +219,12 @@ impl ScanPolicy {
         let marker = directory.join(".git");
         let nested = match std::fs::symlink_metadata(&marker) {
             Ok(_) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            // Link selection may test the directory policy before knowing the target type.
+            Err(error)
+                if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) =>
+            {
+                false
+            }
             Err(error) => {
                 return Err(HostError::storage_failure(
                     "file-selection",
@@ -305,7 +319,12 @@ impl ScanPolicy {
                         })?;
                 }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !explicit => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                if explicit {
+                    validate_ignore_parent(path)?;
+                }
+            }
+            Err(error) if !explicit && error.kind() == ErrorKind::NotADirectory => {}
             Err(error) => {
                 return Err(HostError::storage_failure(
                     "file-selection",
@@ -440,6 +459,28 @@ impl PathPolicy for ScanPolicy {
         );
         self.load_explicit_rules()
     }
+}
+
+// Windows can report NotFound when a parent is a regular file. Only a genuinely
+// missing path may be skipped; follow directory symlinks as File::open does.
+fn validate_ignore_parent(path: &Path) -> Result<(), HostError> {
+    for parent in path.ancestors().skip(1) {
+        let error = match std::fs::metadata(parent) {
+            Ok(metadata) if metadata.is_dir() => return Ok(()),
+            Ok(_) => std::io::Error::from(ErrorKind::NotADirectory),
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => error,
+        };
+        return Err(HostError::storage_failure(
+            "file-selection",
+            format!(
+                "could not open ignore file {}: parent {}: {error}",
+                path.display(),
+                parent.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 // Preserve the final component so replacing an ignore-file symlink stays observable.

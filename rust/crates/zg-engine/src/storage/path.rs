@@ -1,31 +1,26 @@
 //! Lossless identity keys and optional Unicode query projections are separate.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::{EngineError, EngineResult, domain::SourcePath};
 
 use super::zvec::{native, scalar, wildcard_string};
 use crate::domain::{DirectoryId, FileRecord};
-use serde::{Deserialize, Serialize};
 use zvec_rust::{CollectionSchema, DataType, Doc};
 
 pub(super) fn encode_path(path: &SourcePath) -> EngineResult<String> {
-    // Component collection unifies accepted Windows separator spellings while
-    // leaving Unix backslashes and platform-native non-Unicode names intact.
-    let canonical: PathBuf = path.components().collect();
-    serde_json::to_string(&PathRecord::from_path(&canonical)?).map_err(|error| {
+    serde_json::to_string(path).map_err(|error| {
         EngineError::storage_failure(format!("cannot encode identity path: {error}"))
     })
 }
 
 pub(super) fn decode_path(value: &str) -> EngineResult<SourcePath> {
-    let record: PathRecord = serde_json::from_str(value).map_err(|error| {
+    serde_json::from_str(value).map_err(|error| {
         EngineError::storage_failure(format!("cannot decode identity path: {error}"))
-    })?;
-    SourcePath::new(record.into_path()?)
+    })
 }
 
-/// Hex preserves the full native representation and needs no SQL escaping.
+/// Hex preserves the portable identity representation and needs no SQL escaping.
 pub(super) fn path_key(path: &SourcePath) -> EngineResult<String> {
     Ok(hex::encode(encode_path(path)?.as_bytes()))
 }
@@ -37,78 +32,6 @@ pub(super) fn query_path(path: &Path) -> Option<String> {
     return Some(value.replace('\\', "/"));
     #[cfg(not(windows))]
     Some(value.to_owned())
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "encoding", content = "value", rename_all = "snake_case")]
-pub(super) enum PathRecord {
-    Utf8(String),
-    UnixBytes(Vec<u8>),
-    WindowsWide(Vec<u16>),
-}
-
-impl PathRecord {
-    pub(super) fn from_path(path: &Path) -> EngineResult<Self> {
-        validate_path(path)?;
-        if let Some(value) = path.to_str() {
-            return Ok(Self::Utf8(value.to_owned()));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStrExt;
-            Ok(Self::UnixBytes(path.as_os_str().as_bytes().to_vec()))
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::ffi::OsStrExt;
-            Ok(Self::WindowsWide(path.as_os_str().encode_wide().collect()))
-        }
-        #[cfg(not(any(unix, windows)))]
-        Err(EngineError::storage_failure(
-            "cannot store a non-Unicode path on this platform",
-        ))
-    }
-
-    pub(super) fn into_path(self) -> EngineResult<PathBuf> {
-        match self {
-            Self::Utf8(value) => Ok(PathBuf::from(value)),
-            Self::UnixBytes(bytes) => {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::ffi::OsStringExt;
-                    Ok(std::ffi::OsString::from_vec(bytes).into())
-                }
-                #[cfg(not(unix))]
-                String::from_utf8(bytes).map(PathBuf::from).map_err(|_| {
-                    EngineError::invalid_argument(
-                        "stored Unix path cannot be represented on this platform",
-                    )
-                })
-            }
-            Self::WindowsWide(units) => {
-                #[cfg(windows)]
-                {
-                    use std::os::windows::ffi::OsStringExt;
-                    Ok(std::ffi::OsString::from_wide(&units).into())
-                }
-                #[cfg(not(windows))]
-                String::from_utf16(&units).map(PathBuf::from).map_err(|_| {
-                    EngineError::invalid_argument(
-                        "stored Windows path cannot be represented on this platform",
-                    )
-                })
-            }
-        }
-    }
-}
-
-fn validate_path(path: &Path) -> EngineResult<()> {
-    if path.as_os_str().as_encoded_bytes().contains(&0) {
-        return Err(EngineError::invalid_argument(
-            "source file path must not contain NUL",
-        ));
-    }
-    Ok(())
 }
 
 pub(super) fn file_membership_schema(schema: &mut CollectionSchema) -> EngineResult<()> {
@@ -143,4 +66,24 @@ pub(super) fn file_membership_doc(
         .unwrap_or("");
     native(doc.add_string("file_name", name), "encode file name")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_keys_and_query_projections_use_portable_components() {
+        let path = SourcePath::new(Path::new("images").join("中文 房间").join("living.jpg"))
+            .expect("source path");
+        let encoded = r#"{"components":["images","中文 房间","living.jpg"]}"#;
+        assert_eq!(
+            path_key(&path).expect("identity"),
+            hex::encode(encoded.as_bytes())
+        );
+        assert_eq!(
+            query_path(&path),
+            Some("images/中文 房间/living.jpg".into())
+        );
+    }
 }

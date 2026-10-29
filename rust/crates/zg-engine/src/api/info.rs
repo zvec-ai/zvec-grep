@@ -221,27 +221,23 @@ impl From<&crate::domain::IndexState> for result::WorkspaceIndexPolicy {
 }
 
 impl result::WorkspaceIndexInfo {
-    pub(crate) fn from_workspace(
-        workspace: &crate::domain::Workspace,
-        home: &std::path::Path,
-        index_version: Option<u32>,
-    ) -> Self {
+    pub(crate) fn from_workspace(workspace: &crate::domain::Workspace) -> Self {
         Self {
-            path: home.to_path_buf(),
-            root: workspace.root.clone(),
-            scan: workspace.scan.clone(),
-            policy: (&workspace.index).into(),
+            path: workspace.layout().storage_dir().to_path_buf(),
+            root: workspace.source_root().to_path_buf(),
+            scan: workspace.scan().clone(),
+            policy: workspace.index().into(),
             embedding: workspace
-                .index
+                .index()
                 .descriptor()
                 .map(|index| index.default_embedding_model().into()),
             fts: workspace
-                .index
+                .index()
                 .descriptor()
                 .map(|index| (&index.fts()).into()),
-            index_version,
-            created_epoch_ms: workspace.created_epoch_ms,
-            updated_epoch_ms: workspace.updated_epoch_ms,
+            index_version: workspace.index_version(),
+            created_epoch_ms: workspace.created_epoch_ms(),
+            updated_epoch_ms: workspace.updated_epoch_ms(),
         }
     }
 }
@@ -286,7 +282,7 @@ mod tests {
             compatibility: IndexCompatibility::Compatible { version: 2 },
             index_policy: WorkspaceIndexPolicy::Enabled,
             home: "/workspace/.zvec-grep".into(),
-            index_path: "/workspace/.zvec-grep/storage".into(),
+            index_path: "/workspace/.zvec-grep/index".into(),
             source: InfoSource::Index,
             workspace_index: None,
             status: Some(IndexStats::default()),

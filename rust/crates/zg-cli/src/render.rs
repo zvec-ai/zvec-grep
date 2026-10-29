@@ -331,6 +331,9 @@ Embedding runtime:
   --device <device>                 auto, cpu, metal, vulkan, cuda
   --allow-remote                    Allow Remote Embedding for this command only
 
+Device and model-cache overrides apply to this query and its refresh only;
+they do not change saved workspace settings.
+
 File filters:
   -g, --glob <glob>                 Include paths; prefix with ! to exclude; repeatable
   --iglob <glob>                    Case-insensitive path glob; repeatable
@@ -386,6 +389,10 @@ Embedding options:
   --device <device>                 auto, cpu, metal, vulkan, cuda
   --index-embedding-concurrency <n>  Positive index embedding concurrency
   --allow-remote                    Allow Remote Embedding for this command only
+
+Explicit --device and --model-cache values are saved after successful indexing;
+omitted options keep their saved values. Changes do not require --rebuild.
+Precedence: CLI > Environment > Workspace > Global config > Backend default.
 
 Index embedding concurrency:
   Applies only to index construction and updates, including automatic indexing
@@ -489,7 +496,7 @@ const AUTH_HELP: &str = r"Usage:
   zg --auth status [root]
   zg --auth revoke [root]
 
-Manage the signed Remote Embedding grant stored in the Workspace under
+Manage the Remote Embedding grant stored in the Workspace under
 .zvec-grep/authorization.json. Workspace grants are shared by zg CLI and zg MCP.
 
 --embedding selects the Remote Embedding model to authorize; it does not run
@@ -498,7 +505,9 @@ ZVEC_GREP_EMBEDDING.
 
 --endpoint selects the exact provider URL to authorize; otherwise the stored
 index endpoint, ZVEC_GREP_ENDPOINT, or provider default is used. Grants bind the
-canonical workspace root, model, and endpoint. Granting sends no remote data.
+canonical source root, username, model, and endpoint. Moving the source or changing
+the username requires authorization again. A matching path and username can reuse
+the grant on another machine. Granting sends no remote data.
 
 Output:
   --color <auto|always|never>       Color output (default: auto)
@@ -515,8 +524,7 @@ configure a provider but do not grant permission.
 Environment used by auth grant:
   ZVEC_GREP_EMBEDDING               Default model for new indexes and auth grant
   ZVEC_GREP_API_KEY                 Embedding provider credential fallback
-  ZVEC_GREP_ENDPOINT                Remote Embedding endpoint fallback
-  ZVEC_GREP_AUTHORIZATION_KEY_FILE  Workspace grant signing-key file (advanced)";
+  ZVEC_GREP_ENDPOINT                Remote Embedding endpoint fallback";
 
 const SERVER_HELP: &str = r"Usage:
   zg --server --stdio [--token-file <path>] [--mcp-toolset <agent|full>]
@@ -749,9 +757,8 @@ Qwen credential aliases:
   DASHSCOPE_API_KEY  Qwen credential fallback after ZVEC_GREP_API_KEY
   QWEN_API_KEY       Qwen credential fallback after DASHSCOPE_API_KEY
 
-State and authorization:
+State:
   ZVEC_GREP_HOME                    Runtime and daemon state directory; Workspace indexes stay under <root>/.zvec-grep
-  ZVEC_GREP_AUTHORIZATION_KEY_FILE  Workspace grant signing-key file (advanced)
 
 Advanced:
   ZVEC_GREP_METAL_KEEP_RESIDENCY       Set to 1 to keep llama.cpp Metal residency enabled (advanced)
@@ -775,7 +782,8 @@ Agent integration paths:
   VSCODE_APPDATA        Base directory for VS Code release channels
 
 Precedence:
-  Embedding runtime                 CLI > Workspace snapshot > Global config > Environment
+  Remote credentials               CLI > Workspace snapshot > Global config > Environment
+  Device/model cache               CLI > Environment > Workspace > Global config > Backend default
   New-index model                  --embedding > ZVEC_GREP_EMBEDDING > Global config
   Client mode                      --mode > ZVEC_GREP_MODE > Global config
   Qwen environment credential      ZVEC_GREP_API_KEY > DASHSCOPE_API_KEY > QWEN_API_KEY

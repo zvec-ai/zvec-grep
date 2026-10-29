@@ -2,7 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs::{self, DirBuilder, File, OpenOptions},
+    fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
     time::{SystemTime, UNIX_EPOCH},
@@ -13,7 +13,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     EngineError, EngineResult,
     domain::{Entity, FileId, FileIndexStatus, FileRecord},
-    utils::{atomic_write as write_record, sync_directory},
+    utils::{
+        atomic_write as write_record, directory_exists, ensure_directory, file_exists,
+        reject_symlink, sync_directory,
+    },
 };
 
 use super::{
@@ -62,12 +65,20 @@ pub(crate) struct IndexStore {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SchemaRecord {
+    path_encoding: PathEncoding,
     embeddings: Vec<EmbeddingModelInfo>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PathEncoding {
+    Components,
 }
 
 impl SchemaRecord {
     fn new(embeddings: &[EmbeddingModelInfo]) -> Self {
         Self {
+            path_encoding: PathEncoding::Components,
             embeddings: embeddings.to_vec(),
         }
     }
@@ -121,23 +132,13 @@ impl IndexStore {
             .file_name()
             .and_then(|_| home.parent())
             .map(Path::to_path_buf);
-        if !read_only {
-            let mut builder = DirBuilder::new();
-            builder.recursive(false);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
-            if let Err(error) = builder.create(home)
-                && !(error.kind() == std::io::ErrorKind::AlreadyExists && home.is_dir())
-            {
-                return Err(io_error("create index directory", home, &error));
-            }
+        if read_only {
+            directory_exists(home)?;
+        } else {
+            ensure_directory(home)?;
         }
-        let home = fs::canonicalize(home)
+        let path = fs::canonicalize(home)
             .map_err(|error| io_error("locate index directory", home, &error))?;
-        let path = home.join("storage");
         let mut registry = registry()?;
         if let Some(shared) = registry.get(&path).and_then(Weak::upgrade) {
             if read_only && shared.read_only {
@@ -150,7 +151,7 @@ impl IndexStore {
                 "workspace storage is already open",
             ));
         }
-        let (lock, schema) = prepare_storage(&home, &path, options)?;
+        let (lock, schema) = prepare_storage(&path, options)?;
         let files = Files::open(&path, read_only)?;
         let directories = Directories::open(&path, read_only)?;
         let entities = Entities::open(&path, read_only)?;
@@ -159,12 +160,12 @@ impl IndexStore {
         let graph = if read_only {
             None
         } else {
-            let graph_path = home.join("graph").join("graph.sqlite");
+            let graph_path = path.join("graph").join("graph.sqlite");
             // Current extractors produce no graph, so pre-graph indexes can
             // initialize an empty database without rebuilding canonical data.
             let graph =
                 SqliteGraphStorage::open(&graph_path, OpenMode::ReadWrite).map_err(graph_error)?;
-            sync_directory(&home.join("graph"))?;
+            sync_directory(&path.join("graph"))?;
             Some(graph)
         };
         if !read_only {
@@ -173,7 +174,6 @@ impl IndexStore {
         if !read_only {
             // Repeat the same range after failures that leave directories in place.
             sync_directory(&path)?;
-            sync_directory(&home)?;
             if let Some(outer) = outer {
                 sync_directory(&outer)?;
             }
@@ -199,37 +199,26 @@ impl IndexStore {
         })
     }
 
-    pub(crate) fn exists(storage_path: &Path) -> EngineResult<bool> {
-        match fs::metadata(storage_path.join("storage")) {
-            Ok(metadata) => Ok(metadata.is_dir()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(io_error("inspect storage", storage_path, &error)),
-        }
-    }
-
     pub(crate) fn delete(storage_path: &Path) -> EngineResult<()> {
-        if !Self::exists(storage_path)? {
+        if !directory_exists(storage_path)? {
             return Ok(());
         }
         let home = fs::canonicalize(storage_path)
             .map_err(|error| io_error("locate storage", storage_path, &error))?;
-        let path = home.join("storage");
+        let path = home.clone();
         let mut registry = registry()?;
         if registry.get(&path).and_then(Weak::upgrade).is_some() {
             return Err(EngineError::resource_busy(
                 "cannot delete open workspace storage",
             ));
         }
-        let _lock = acquire_storage_lock(&home, false)?;
-        let graph_path = home.join("graph");
-        match fs::remove_dir_all(&graph_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(io_error("delete workspace graph", &graph_path, &error)),
-        }
+        // The caller's workspace write lock prevents new opens while this inner lock is closed.
+        drop(acquire_storage_lock(&home, false)?);
         fs::remove_dir_all(&path)
             .map_err(|error| io_error("delete workspace storage", &path, &error))?;
-        sync_directory(&home)?;
+        if let Some(parent) = home.parent() {
+            sync_directory(parent)?;
+        }
         registry.remove(&path);
         Ok(())
     }
@@ -379,6 +368,26 @@ impl IndexStore {
         self.write(|state| replace_file(state, &file, &[], &[], &FileGraphResult::default()))
     }
 
+    pub(crate) fn update_file_snapshot(&self, file: &FileRecord) -> EngineResult<()> {
+        self.write(|state| {
+            let existing = state.files.fetch(&[file.id()])?.remove(&file.id());
+            let valid = existing.as_ref().is_some_and(|existing| {
+                existing.index_status().is_indexed()
+                    && existing.index_status() == file.index_status()
+                    && existing.relative_path() == file.relative_path()
+                    && existing.snapshot().size_bytes == file.snapshot().size_bytes
+                    && existing.snapshot().content_hash == file.snapshot().content_hash
+            });
+            if !valid {
+                return Err(EngineError::invalid_argument(
+                    "snapshot refresh requires the same indexed file, content hash and size",
+                ));
+            }
+            let directories = state.directories.ensure(file.relative_path())?;
+            state.files.put(file, &directories)
+        })
+    }
+
     pub(crate) fn delete_file(&self, file_id: FileId) -> EngineResult<()> {
         self.write(|state| {
             state.needs_optimize = true;
@@ -396,17 +405,8 @@ impl IndexStore {
         })
     }
 
-    /// Flush accepted writes, including any unfinished file's retry state.
-    pub(crate) fn checkpoint(&self) -> EngineResult<()> {
-        if self.read_only {
-            return Ok(());
-        }
-        self.write(|state| flush(state))
-    }
-
-    /// Persist retry state before building indexes and compacting accepted writes.
+    /// Build indexes and compact accepted writes when needed.
     pub(crate) fn finalize_writes(&self) -> EngineResult<()> {
-        self.checkpoint()?;
         if self.read_only {
             return Ok(());
         }
@@ -424,7 +424,7 @@ impl IndexStore {
     }
 
     pub(crate) fn close(&self) -> EngineResult<()> {
-        // Serialize concurrent closes through the final checkpoint as well as
+        // Serialize concurrent closes through the final flush as well as
         // taking the lease, so none can return while its writes are persisting.
         let mut lease = self
             .shared
@@ -440,12 +440,12 @@ impl IndexStore {
         // Reject a write that acquired its Arc before close but is still waiting
         // for this lock. A successful close commits every accepted write.
         state.closed = true;
-        let checkpoint = flush(&state);
+        let flush_result = flush(&state);
         let graph_close = state
             .graph
             .take()
             .map_or(Ok(()), |graph| graph.close().map_err(graph_error));
-        checkpoint.and(graph_close)
+        flush_result.and(graph_close)
     }
 }
 
@@ -630,8 +630,14 @@ fn load_schema(
     options: WorkspaceIndexStorageOptions,
 ) -> EngineResult<Vec<EmbeddingModelInfo>> {
     let descriptor = path.join("schema.json");
-    if descriptor.exists() {
-        let schema = read_json::<SchemaRecord>(&descriptor)?.embeddings()?;
+    if file_exists(&descriptor)? {
+        let schema = read_json::<SchemaRecord>(&descriptor)
+            .map_err(|error| {
+                EngineError::storage_failure(format!(
+                    "unsupported or invalid storage schema: {error}; rebuild the index"
+                ))
+            })?
+            .embeddings()?;
         if let WorkspaceIndexStorageOptions::ReadWrite { embeddings, .. } = &options {
             if schema.len() != embeddings.len() {
                 return Err(EngineError::invalid_argument(
@@ -650,11 +656,30 @@ fn load_schema(
                 })?;
             }
         }
+        for collection in [
+            "files".to_owned(),
+            "directories".to_owned(),
+            "entities".to_owned(),
+        ]
+        .into_iter()
+        .chain(schema.iter().map(fragments::fragment_collection_name))
+        {
+            let collection_path = path.join(&collection);
+            if !directory_exists(&collection_path)? {
+                return Err(EngineError::storage_failure(format!(
+                    "index collection {collection} is missing; rebuild the index"
+                )));
+            }
+        }
         return Ok(schema);
     }
     if fs::read_dir(path)
         .map_err(|error| io_error("inspect storage directory", path, &error))?
-        .next()
+        .find(|entry| {
+            entry
+                .as_ref()
+                .map_or(true, |entry| entry.file_name() != "storage.lock")
+        })
         .transpose()
         .map_err(|error| io_error("inspect storage entry", path, &error))?
         .is_some()
@@ -693,30 +718,16 @@ fn lock_state(shared: &SharedStore) -> EngineResult<MutexGuard<'_, StoreState>> 
 }
 
 fn prepare_storage(
-    home: &Path,
     path: &Path,
     options: WorkspaceIndexStorageOptions,
 ) -> EngineResult<(File, Vec<EmbeddingModelInfo>)> {
-    let lock = acquire_storage_lock(home, options.is_read_only())?;
-    if !options.is_read_only() {
-        let mut builder = DirBuilder::new();
-        builder.recursive(false);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        if let Err(error) = builder.create(path)
-            && !(error.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir())
-        {
-            return Err(io_error("create storage directory", path, &error));
-        }
-    }
+    let lock = acquire_storage_lock(path, options.is_read_only())?;
     Ok((lock, load_schema(path, options)?))
 }
 
 fn acquire_storage_lock(home: &Path, shared: bool) -> EngineResult<File> {
     let path = home.join("storage.lock");
+    reject_symlink(&path)?;
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)

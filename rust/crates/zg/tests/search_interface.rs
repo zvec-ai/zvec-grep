@@ -155,16 +155,17 @@ fn explicit_routes_continue_to_indexed_search() {
     std::fs::write(root.path().join("auth.ts"), "export const auth = true;").expect("source");
     let home = root.path().join(".zvec-grep");
     std::fs::create_dir(&home).expect("workspace home");
-    let canonical_root = std::fs::canonicalize(root.path()).expect("canonical root");
     std::fs::write(
         home.join("manifest.json"),
         serde_json::to_vec(&serde_json::json!({
-            "name": "path-fallback",
-            "root": canonical_root,
-            "path": home,
-            "indexPolicy": "disabled",
+            "sourceRoot": {
+                "recordedPath": std::fs::canonicalize(root.path()).expect("source root").to_string_lossy(),
+                "recordedUsername": std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).ok(),
+            },
+            "scan": {},
             "createdTime": 0,
             "updatedTime": 0,
+            "index": { "state": "disabled" },
         }))
         .expect("manifest json"),
     )
@@ -185,7 +186,14 @@ fn explicit_routes_continue_to_indexed_search() {
         assert!(!output.status.success(), "{args:?}: {stdout}");
         assert!(!stdout.contains("auth.ts"), "{stdout}");
         assert!(!stderr.contains("No index found"), "{stderr}");
-        assert!(stderr.contains("ZG.ENGINE.NOT_FOUND"), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("ZG.ENGINE.UNSUPPORTED"),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            stderr.contains("workspace indexing is disabled"),
+            "{args:?}: {stderr}"
+        );
         assert!(
             !stderr.contains("automatically performing path lookup"),
             "{stderr}"
