@@ -64,7 +64,9 @@ pub use install::{
     InstallError, InstallOutcome, execute_install, execute_uninstall, execute_upgrade_installed,
     resolve_server_listen, resolve_server_url,
 };
-pub use managed_rg::{ManagedRgArgumentError, parse_managed_rg_args};
+pub use managed_rg::{
+    ManagedRgArgumentError, ParsedRgArgs, files_options, parse_managed_rg_args, parse_rg_args,
+};
 pub use path_lookup::write_path_lookup_result;
 pub use render::{
     HelpTopicError, help_text, print_help, write_context_result, write_context_status,

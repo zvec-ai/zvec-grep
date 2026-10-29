@@ -394,7 +394,12 @@ Exit status is 0 when files are found, 1 for an empty list, and 2 for a discover
 error; traversal errors go to stderr while accessible paths remain on stdout.
 Like managed content search, recursive discovery skips `.git` and `.zvec-grep`;
 explicit file inputs are still listed.
-This is a CLI entry point; the MCP rg tool retains its content-search contract.
+The MCP `zvec_grep_rg` tool accepts the same discovery options in `rg --files`
+commands. Its first text block contains the selected paths, including NUL
+delimiters when requested. A trailing `| head -N` explicitly bounds the paths
+and adds a separate truncation notice when more files exist. Empty lists return
+successful empty text; traversal failures set `isError` and retain accessible
+paths alongside separate error text blocks.
 
 ## Remote embedding authorization
 

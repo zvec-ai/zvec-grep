@@ -29,13 +29,20 @@ pub fn parse_managed_rg_args(args: &[String]) -> Result<ContextOptions, ManagedR
     Ok(parse_rg_args(args, false)?.request)
 }
 
-pub(crate) struct ParsedRgArgs {
+/// Parsed content-search or metadata-only file-listing arguments.
+pub struct ParsedRgArgs {
     pub request: ContextOptions,
     pub files: bool,
     pub null: bool,
 }
 
-pub(crate) fn parse_rg_args(
+/// Parses managed-ripgrep arguments, optionally allowing file-listing output.
+///
+/// # Errors
+///
+/// Returns [`ManagedRgArgumentError`] for missing patterns, invalid values,
+/// unsupported options, or output options unavailable in the selected mode.
+pub fn parse_rg_args(
     args: &[String],
     allow_files: bool,
 ) -> Result<ParsedRgArgs, ManagedRgArgumentError> {
@@ -128,7 +135,9 @@ pub(crate) fn parse_rg_args(
     })
 }
 
-pub(crate) fn files_options(request: ContextOptions) -> zg_engine::api::files::FilesOptions {
+/// Extracts the file-selection options used by metadata-only file discovery.
+#[must_use]
+pub fn files_options(request: ContextOptions) -> zg_engine::api::files::FilesOptions {
     let options = request.rg_options;
     zg_engine::api::files::FilesOptions {
         root: request.root,

@@ -146,6 +146,121 @@ fn modern_http_discovery_tools_errors_and_remote_continuation() -> Result<(), Bo
 }
 
 #[test]
+fn modern_http_rg_files_matches_direct_listing_without_an_index() -> Result<(), Box<dyn Error>> {
+    let _permit = server_test_permit();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
+    let home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+    std::fs::create_dir(workspace.path().join("src"))?;
+    for index in 0..24 {
+        std::fs::write(
+            workspace.path().join(format!("src/file-{index:02}.rs")),
+            b"\0\xff",
+        )?;
+    }
+    for name in [
+        "space name.rs",
+        "中文.rs",
+        "--files",
+        ".hidden.rs",
+        "ignored.rs",
+    ] {
+        std::fs::write(workspace.path().join(name), b"\0\xff")?;
+    }
+    std::fs::write(workspace.path().join(".ignore"), "ignored.rs\n")?;
+    let (mut guard, _) = start_server(&binary, &home, "full", None, |_| {})?;
+    let port = guard.listen.parse::<SocketAddr>()?.port();
+    let cases: &[&[&str]] = &[
+        &[],
+        &["src", "-g", "*.rs", "-g", "!file-00.rs"],
+        &["-t", "rust", "--max-depth", "1"],
+        &["-uu", "-t", "rust"],
+        &["--null"],
+        &["-0", "-g", "*.rs"],
+        &["-g", "missing-*"],
+        &["--", "--files"],
+        &["missing", "src/file-00.rs"],
+        &["missing"],
+        &["-e", "[", "-f", "missing-patterns", "src/file-00.rs"],
+    ];
+    for args in cases {
+        let direct = Command::new(&binary)
+            .current_dir(workspace.path())
+            .args(["--mode", "direct", "--rg", "--files"])
+            .args(*args)
+            .env("ZVEC_GREP_HOME", home.path())
+            .output()?;
+        let command = std::iter::once("rg --files".to_owned())
+            .chain(args.iter().map(|arg| format!("'{arg}'")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let reply = rpc(&modern_post(
+            port,
+            "tools/call",
+            json!({"name": "zvec_grep_rg", "arguments": {"root": workspace.path(), "command": command}}),
+            "",
+        )?);
+        assert!(reply["error"].is_null(), "{command}: {reply}");
+        assert_eq!(
+            reply["result"]["content"][0]["text"],
+            String::from_utf8(direct.stdout)?,
+            "{command}: {reply}"
+        );
+        let failed = direct.status.code() == Some(2);
+        assert_eq!(reply["result"]["isError"] == true, failed, "{reply}");
+        if failed {
+            assert!(
+                reply["result"]["content"][1]["text"]
+                    .as_str()
+                    .expect("traversal error")
+                    .contains("missing")
+            );
+        }
+    }
+    check_rg_file_bounds(port, workspace.path())?;
+    assert!(!workspace.path().join(".zvec-grep").exists());
+    assert!(!home.path().join("models").exists());
+    assert_command_success(&guard.stop()?);
+    Ok(())
+}
+
+fn check_rg_file_bounds(port: u16, workspace: &Path) -> Result<(), Box<dyn Error>> {
+    for (command, expected, truncated) in [
+        ("rg --files src | head -2", 2, true),
+        ("rg --files src | head -24", 24, false),
+    ] {
+        let reply = rpc(&modern_post(
+            port,
+            "tools/call",
+            json!({"name": "zvec_grep_rg", "arguments": {"root": workspace, "command": command}}),
+            "",
+        )?);
+        assert!(reply["error"].is_null(), "{reply}");
+        assert_ne!(reply["result"]["isError"], true, "{reply}");
+        let content = reply["result"]["content"].as_array().expect("text output");
+        let paths = content[0]["text"].as_str().expect("file paths");
+        assert_eq!(paths.lines().count(), expected);
+        let expected_paths = (0..expected)
+            .map(|index| PathBuf::from(format!("src/file-{index:02}.rs")))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths.lines().map(PathBuf::from).collect::<Vec<_>>(),
+            expected_paths
+        );
+        assert_eq!(content.len(), if truncated { 2 } else { 1 });
+        if truncated {
+            assert!(
+                content[1]["text"]
+                    .as_str()
+                    .expect("notice")
+                    .contains("More files were omitted")
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn modern_http_missing_index_requires_selection_and_survives_request_completion()
 -> Result<(), Box<dyn Error>> {
     let _permit = server_test_permit();
