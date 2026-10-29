@@ -35,6 +35,7 @@ tempfile.workspace = true
 zvec-rust-build.workspace = true
 
 [dev-dependencies]
+toml.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true

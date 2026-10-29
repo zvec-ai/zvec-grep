@@ -151,7 +151,7 @@ left with the key (sherlock-holmes.txt:5464-5470, 5527-5528).
 Search the same bookshelf directly, without an agent:
 
 ```bash
-zg query --human "An unseen creature left a few marks. What did the detective infer?" --limit 3
+zg --preview detail "An unseen creature left a few marks. What did the detective infer?" --limit 3
 ```
 
 zg returns the relevant passages from `sherlock-holmes.txt`, ranked ahead of

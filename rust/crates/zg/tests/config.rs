@@ -394,17 +394,10 @@ fn invalid_config_commands_leave_no_config_file() {
 }
 
 #[test]
-fn binary_consumes_compact_color_and_debug_options() {
+fn binary_consumes_color_and_debug_options() {
     let fixture = Fixture::new();
     fs::write(fixture.root.path().join("sample.txt"), "needle\n").expect("source");
-    let output = fixture.success(&[
-        "--rg",
-        "--compact",
-        "--color",
-        "always",
-        "--debug",
-        "needle",
-    ]);
+    let output = fixture.success(&["--rg", "--color", "always", "--debug", "needle"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(!stdout.contains("Context"));
     assert!(stdout.contains("sample.txt"));

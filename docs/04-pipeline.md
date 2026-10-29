@@ -216,18 +216,19 @@ between `auto`, `server`, `direct`, and `--refresh`.
 
 ## Output for agents and people
 
-When stdout is a terminal, indexed CLI output is human-readable and includes a
-full source preview by default. When stdout is redirected, output is compact,
-grouped by query group, and omits previews unless requested:
+Indexed CLI output defaults to `--preview short`, with the same layout and
+bounded previews in terminals, pipes, and redirected files. Results are grouped
+by query group; terminal detection affects automatic colors only:
 
 ```bash
 zg "plugin lifecycle" --preview short --limit 5
 ```
 
-Use `--compact` to request the pipe-oriented form even in a terminal:
+Use `--preview none` for one-line source summaries, `full` for all returned
+content, or `detail` for full previews with metadata and file/hit grouping:
 
 ```bash
-zg --compact "plugin lifecycle" --limit 5
+zg "plugin lifecycle" --preview detail --limit 5
 ```
 
 Use `--debug` for query diagnostics and `--trace` for per-hit indexed search

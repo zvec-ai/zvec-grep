@@ -4,7 +4,7 @@ import type { McpToolset } from "../mcp/toolset.js";
 
 export type ColorMode = "auto" | "always" | "never";
 
-export type PreviewMode = "none" | "short" | "full";
+export type PreviewMode = "none" | "short" | "full" | "detail";
 
 export type QueryRefreshMode = "background" | "wait" | "off";
 
@@ -35,7 +35,6 @@ export type CliOptions = {
   rgPaths?: string[];
   debug?: boolean;
   trace?: boolean;
-  human?: boolean;
   checkReady?: boolean;
   preview?: PreviewMode;
   color?: ColorMode;

@@ -145,7 +145,7 @@ left with the key (sherlock-holmes.txt:5464-5470, 5527-5528).
 不通过 Agent，直接搜索同一个书架：
 
 ```bash
-zg query --human "An unseen creature left a few marks. What did the detective infer?" --limit 3
+zg --preview detail "An unseen creature left a few marks. What did the detective infer?" --limit 3
 ```
 
 zg 会将 `sherlock-holmes.txt` 中的相关段落排在

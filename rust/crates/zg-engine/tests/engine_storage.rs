@@ -30,6 +30,73 @@ use zg_engine::{
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 #[tokio::test]
+async fn extensionless_scripts_preserve_outline_language_across_reopen() -> TestResult {
+    let temporary = tempdir()?;
+    let root = temporary.path();
+    let server = EmbeddingServer::start()?;
+    configure_remote_model(root, server.address)?;
+    fs::create_dir(root.join("bin"))?;
+    for (name, source) in [
+        (
+            "python-tool",
+            "#!/usr/bin/env python3\nclass Probe:\n    def outline_probe(self):\n        return stored_call()\n",
+        ),
+        (
+            "node-tool",
+            "#!/usr/bin/env node\nclass Probe {\n    outline_probe() { return stored_call(); }\n}\n",
+        ),
+    ] {
+        fs::write(root.join("bin").join(name), source)?;
+    }
+    let engine = ZvecGrep::new();
+    let indexed = engine.index(index_options(root)).await?;
+    assert_eq!((indexed.files_added, indexed.files_failed), (2, 0));
+    engine.close();
+
+    // Both language and outline must describe stored source, not current files.
+    for name in ["python-tool", "node-tool"] {
+        fs::write(root.join("bin").join(name), "#!/bin/sh\necho changed\n")?;
+    }
+    let engine = ZvecGrep::new();
+    let result = engine
+        .context(ContextOptions {
+            root: Some(root.to_path_buf()),
+            routes: vec![ContextRoute {
+                mode: ContextRouteMode::Fts,
+                query: "outline_probe".into(),
+            }],
+            auto_update: false,
+            allow_remote: true,
+            limit: Some(10),
+            ..ContextOptions::default()
+        })
+        .await?;
+    for (name, language) in [("python-tool", "python"), ("node-tool", "javascript")] {
+        for (kind, symbol, summary) in [
+            (SymbolType::Function, "outline_probe", "calls: stored_call"),
+            (SymbolType::Class, "Probe", "members:"),
+        ] {
+            let item = result.items.iter().find(|item| {
+                item.relative_path == Path::new("bin").join(name)
+                    && matches!(&item.metadata, Some(EntityMetadata::Code(code))
+                        if code.symbol_type == Some(kind) && code.symbol_name.as_deref() == Some(symbol))
+            }).expect("stored script entity");
+            assert_eq!(serde_json::to_value(&item.metadata)?["language"], language);
+            assert!(
+                item.outline
+                    .as_deref()
+                    .is_some_and(|outline| outline.contains(summary)),
+                "{name}: {:?}",
+                item.outline
+            );
+        }
+    }
+    engine.drop_index(info_options(root)).await?;
+    engine.close();
+    Ok(())
+}
+
+#[tokio::test]
 async fn text_and_code_share_one_model_and_support_incremental_search() -> TestResult {
     let temporary = tempdir()?;
     let root = temporary.path();
@@ -1199,6 +1266,90 @@ async fn missing_ignore_files_are_skipped_and_restored_rules_apply() -> TestResu
         [PathBuf::from("note.txt")]
     );
     engine.close();
+    Ok(())
+}
+
+#[tokio::test]
+async fn case_distinct_stored_paths_allow_queries_updates_and_rebuilds() -> TestResult {
+    let server = EmbeddingServer::start()?;
+    for rebuild in [false, true] {
+        let temporary = tempdir()?;
+        let root = temporary.path();
+        configure_remote_model(root, server.address)?;
+        fs::write(root.join("Room.txt"), "Orchard original documentation.\n")?;
+        let engine = ZvecGrep::new();
+        let initial = engine.index(index_options(root)).await?;
+        assert_eq!((initial.files_added, initial.files_failed), (1, 0));
+
+        // A scoped update preserves the old spelling outside its exact path scope.
+        // Both records then resolve to one source on case-insensitive filesystems.
+        fs::rename(root.join("Room.txt"), root.join("temporary.tmp"))?;
+        fs::rename(root.join("temporary.tmp"), root.join("room.txt"))?;
+        let renamed = engine
+            .index(IndexOptions {
+                changes: vec![WorkspaceChange::Upsert(PathBuf::from("room.txt"))],
+                ..index_options(root)
+            })
+            .await?;
+        assert_eq!(
+            (
+                renamed.files_added,
+                renamed.files_deleted,
+                renamed.files_failed
+            ),
+            (1, 0, 0)
+        );
+        engine.close();
+        drop(engine);
+
+        let index_path = root.join(".zvec-grep/index");
+        let records = native_file_records(&index_path)?;
+        assert_eq!(records.len(), 2);
+        let paths = records
+            .iter()
+            .map(|record| {
+                record["relative_path"]["components"][0]
+                    .as_str()
+                    .expect("stored source name")
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(paths, BTreeSet::from(["Room.txt", "room.txt"]));
+
+        let engine = ZvecGrep::new();
+        assert!(
+            fts_paths(&engine, root, "orchard")
+                .await?
+                .contains(&PathBuf::from("room.txt"))
+        );
+        let info = engine.info(info_options(root)).await?;
+        assert!(info.indexed);
+        assert_eq!(info.status.expect("index status").files_failed, 0);
+
+        fs::write(
+            root.join("room.txt"),
+            "Vineyard replacement documentation with current content.\n",
+        )?;
+        let updated = engine
+            .index(IndexOptions {
+                rebuild,
+                ..index_options(root)
+            })
+            .await?;
+        assert_eq!((updated.files_failed, updated.files_pending), (0, 0));
+        let records = native_file_records(&index_path)?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0]["relative_path"],
+            json!({"components": ["room.txt"]})
+        );
+        assert_eq!(
+            fts_paths(&engine, root, "vineyard").await?,
+            [PathBuf::from("room.txt")]
+        );
+        assert!(fts_paths(&engine, root, "orchard").await?.is_empty());
+        engine.drop_index(info_options(root)).await?;
+        engine.close();
+    }
     Ok(())
 }
 

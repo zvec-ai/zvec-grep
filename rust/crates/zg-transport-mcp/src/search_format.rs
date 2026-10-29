@@ -2,10 +2,11 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use zg_cli::preview::{source_preview, split_lines, truncate_utf16};
 use zg_engine::api::context::{
     ContextResult,
     result::{
-        ContentRange, ContextItem, ContextItemKind, ContextItemStatus, ContextQueryGroupRole,
+        ContextItem, ContextItemKind, ContextItemStatus, ContextQueryGroupRole,
         ContextSelectionReason, EmptyReason, EntityMetadata,
     },
 };
@@ -191,39 +192,16 @@ fn outline_lines(item: &ContextItem, preview: SearchPreview) -> Vec<String> {
 }
 
 fn source_lines(item: &ContextItem, preview: SearchPreview) -> Vec<String> {
-    if item.content.is_empty() {
-        return Vec::new();
-    }
-    let content: Vec<_> = split_lines(&item.content).collect();
+    let source = source_preview(item, (preview == SearchPreview::Short).then_some(10));
     let first = item.content_range.start_line();
-    let (start, end) = if preview == SearchPreview::Short && content.len() > 10 {
-        let anchor = item
-            .excerpt_range
-            .as_ref()
-            .and_then(ContentRange::start_line)
-            .map_or(0, |line| {
-                first.map_or(0, |first| line.saturating_sub(first))
-            });
-        let anchor = if anchor < content.len() { anchor } else { 0 };
-        let before = if item
-            .excerpt_range
-            .as_ref()
-            .is_some_and(|range| range.line_count().is_some_and(|count| count >= 10))
-        {
-            0
-        } else {
-            2
-        };
-        let start = anchor.saturating_sub(before).min(content.len() - 10);
-        (start, start + 10)
-    } else {
-        (0, content.len())
-    };
+    let start = source.window.start;
+    let end = source.window.end;
     let mut lines = Vec::new();
     if start > 0 {
         lines.push("...".to_owned());
     }
-    for (offset, line) in content.iter().enumerate().take(end).skip(start) {
+    for offset in source.window {
+        let line = source.lines[offset];
         let number = first.map(|first| first + offset);
         let prefix = number.map_or(String::new(), |number| number.to_string());
         let marker = if item.kind == ContextItemKind::LexicalMatch && number.is_some() {
@@ -238,42 +216,16 @@ fn source_lines(item: &ContextItem, preview: SearchPreview) -> Vec<String> {
             ""
         };
         let text = if preview == SearchPreview::Full {
-            (*line).to_owned()
+            line.to_owned()
         } else {
-            truncate_source(line)
+            truncate_utf16(line, 160)
         };
         lines.push(format!("{prefix}{marker}\t{text}"));
     }
-    if end < content.len() {
+    if end < source.lines.len() {
         lines.push("...".to_owned());
     }
     lines
-}
-
-fn split_lines(content: &str) -> impl Iterator<Item = &str> {
-    // Match the Node.js splitter, including a final empty source line.
-    content
-        .split_inclusive('\n')
-        .map(|line| {
-            line.strip_suffix('\n')
-                .map_or(line, |line| line.strip_suffix('\r').unwrap_or(line))
-        })
-        .chain((content.is_empty() || content.ends_with('\n')).then_some(""))
-}
-
-fn truncate_source(line: &str) -> String {
-    if line.encode_utf16().count() <= 160 {
-        return line.to_owned();
-    }
-    let mut units = 0;
-    let prefix: String = line
-        .chars()
-        .take_while(|character| {
-            units += character.len_utf16();
-            units <= 159
-        })
-        .collect();
-    format!("{prefix}...")
 }
 
 const fn group_role(role: ContextQueryGroupRole) -> &'static str {

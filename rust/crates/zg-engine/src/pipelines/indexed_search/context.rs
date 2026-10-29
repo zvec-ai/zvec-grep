@@ -288,7 +288,11 @@ fn search_plan_to_context_items(
                 content_range: target.content_range,
                 match_ranges: Vec::new(),
                 content: target.content,
-                outline: None,
+                outline: crate::extraction::code_outline(
+                    hit.file.relative_path().as_ref(),
+                    hit.entity.content(),
+                    hit.entity.metadata(),
+                ),
                 content_role: Some(target.content_role),
                 status: file_freshness_status(workspace_root, &hit.file),
                 score: Some(hit.score),

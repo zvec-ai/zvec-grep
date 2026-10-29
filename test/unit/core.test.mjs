@@ -58,7 +58,6 @@ import { contextOptionsFromRgInput } from "../../dist/mcp/input-normalization.js
 
 test("CLI argument parser handles command, provider, path, and rg options", () => {
   const parsed = parseArgs([
-    "--compact",
     "--trace",
     "--preview",
     "short",
@@ -74,7 +73,6 @@ test("CLI argument parser handles command, provider, path, and rg options", () =
   ]);
   assert.equal(parsed.command, "query");
   assert.deepEqual(parsed.positionals, ["query text"]);
-  assert.equal(parsed.options.human, false);
   assert.equal(parsed.options.trace, true);
   assert.equal(parsed.options.preview, "short");
   assert.equal(parsed.options.limit, 7);
@@ -209,6 +207,17 @@ test("CLI parsers reject invalid values and normalize supported values", () => {
   );
   assert.throws(() => parseArgs(["--json", "query"]), /not supported/);
   assert.throws(() => parseArgs(["--human", "query"]), /removed/);
+  assert.throws(() => parseArgs(["--compact", "query"]), /removed.*--preview/);
+  for (const preview of ["none", "short", "full", "detail"]) {
+    assert.equal(
+      parseArgs(["--preview", preview, "needle"]).options.preview,
+      preview,
+    );
+    assert.equal(
+      parseArgs([`--preview=${preview}`, "needle"]).options.preview,
+      preview,
+    );
+  }
   assert.throws(
     () => parseArgs(["--embedding", "local/embeddinggemma-300m", "query"]),
     /--embedding is not supported while searching/,
@@ -454,7 +463,6 @@ test("CLI parser covers utility commands, provider controls, routes, and equals 
 
   const query = parseArgs([
     "--debug",
-    "--compact",
     "--preview=full",
     "--refresh=off",
     "--prefer-symbol",
@@ -485,7 +493,6 @@ test("CLI parser covers utility commands, provider controls, routes, and equals 
     "-literal-query",
   ]);
   assert.equal(query.options.debug, true);
-  assert.equal(query.options.human, false);
   assert.deepEqual(query.options.hybridQueries, ["zero"]);
   assert.deepEqual(query.options.routes, [
     { mode: "fts", query: "one" },

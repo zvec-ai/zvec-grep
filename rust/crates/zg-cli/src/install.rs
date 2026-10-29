@@ -17,6 +17,9 @@ use uuid::Uuid;
 
 use crate::{InstallArgs, McpInstallTransport, McpToolset, UninstallArgs};
 
+mod upgrade;
+pub use upgrade::execute_upgrade_installed;
+
 const CONFIG_START: &str = "# ZVEC_GREP_START";
 const CONFIG_END: &str = "# ZVEC_GREP_END";
 const GROK_PERMISSION_START: &str = "# ZVEC_GREP_PERMISSION_START";

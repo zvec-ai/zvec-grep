@@ -60,7 +60,7 @@ fn literal_flags_and_command_words_do_not_warn_or_run_actions() {
         for pattern_option in ["--", "-e", "-Fe", "--regexp"] {
             let mut arguments = vec!["--rg", pattern_option, word, "source.txt"];
             if pattern_option != "--" {
-                arguments.extend(["--limit", "3", "--compact"]);
+                arguments.extend(["--limit", "3"]);
             }
             let output = run(root.path(), &arguments);
             let stderr = String::from_utf8_lossy(&output.stderr);

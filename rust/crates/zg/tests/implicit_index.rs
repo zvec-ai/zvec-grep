@@ -599,7 +599,10 @@ fn direct_search_warns_about_unmatched_index_drift_on_stderr() {
         "off",
         "--no-color",
     ]);
-    assert_eq!(String::from_utf8_lossy(&stale.stdout), "No matches.\n");
+    assert_eq!(
+        String::from_utf8_lossy(&stale.stdout),
+        "query groups (1):\nQ1 [supplemental]: needle\nhits: 0\n\nNo matches.\n"
+    );
     assert!(String::from_utf8_lossy(&stale.stderr).contains("status: possibly_stale\nresults: served_from_current_index\nbackground_refresh: idle (0/1)\n"), "{}", String::from_utf8_lossy(&stale.stderr));
 }
 
@@ -695,7 +698,10 @@ fn auto_and_server_build_at_the_query_root_not_the_daemon_working_directory() {
             "{stderr}"
         );
         assert!(stderr.contains("Index ready"), "{stderr}");
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "No matches.\n");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "query groups (1):\nQ1 [supplemental]: needle\nhits: 0\n\nNo matches.\n"
+        );
         let status = success(
             fixture
                 .command(&["--status", "--mode", mode, "--no-color"])
@@ -815,7 +821,10 @@ fn existing_local_and_remote_indexes_are_reused_from_nested_directories() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(!stderr.contains("No index found"), "{stderr}");
             assert!(!stderr.contains("Index ready"), "{stderr}");
-            assert_eq!(String::from_utf8_lossy(&output.stdout), "No matches.\n");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                "query groups (1):\nQ1 [supplemental]: needle\nhits: 0\n\nNo matches.\n"
+            );
             fixture.assert_model(mode, reference);
             assert!(!nested.join(".zvec-grep").exists());
         }
@@ -1018,7 +1027,10 @@ fn remote_authorization_can_return_to_model_selection_without_sending_data() {
             .is_none()
     );
     assert!(!String::from_utf8_lossy(&output.stderr).contains("setup-test-secret"));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "No matches.\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "query groups (1):\nQ1 [supplemental]: needle\nhits: 0\n\nNo matches.\n"
+    );
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1094,8 +1106,10 @@ async fn remote_allow_once_keeps_query_credentials_temporary_through_build_and_q
                 .exists()
         );
         assert!(!manifest.to_string().contains("setup-test-secret"));
-        assert!(String::from_utf8_lossy(&output.stdout).contains("needle.txt"));
-        assert!(!String::from_utf8_lossy(&output.stdout).contains("setup-test-secret"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.starts_with("query groups (1):\n"), "{stdout}");
+        assert!(stdout.contains("needle.txt"));
+        assert!(!stdout.contains("setup-test-secret"));
         assert!(!String::from_utf8_lossy(&output.stderr).contains("setup-test-secret"));
     }
 }
@@ -1284,7 +1298,10 @@ fn matching_workspace_consent_skips_the_remote_authorization_screen() {
     ));
     fixture.assert_model("direct", "qwen/text-embedding-v4");
     assert!(!String::from_utf8_lossy(&output.stderr).contains("Remote embedding authorization"));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "No matches.\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "query groups (1):\nQ1 [supplemental]: needle\nhits: 0\n\nNo matches.\n"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

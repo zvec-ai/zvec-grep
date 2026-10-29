@@ -2,11 +2,9 @@
 
 mod matcher;
 mod policy;
-mod portable_paths;
 
 pub(crate) use matcher::GlobMatcher;
 pub(crate) use policy::ScanPolicy;
-pub(crate) use portable_paths::verify_source_paths;
 
 #[cfg(test)]
 mod tests;

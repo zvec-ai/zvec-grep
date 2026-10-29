@@ -294,10 +294,12 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       options.trace = true;
     } else if (arg === "--human") {
       throw new Error(
-        "--human has been removed; terminal output is human-readable by default",
+        "--human has been removed; use --preview detail for detailed output",
       );
     } else if (arg === "--compact") {
-      options.human = false;
+      throw new Error(
+        "--compact has been removed; use --preview none, short, or full",
+      );
     } else if (arg === "--check-ready") {
       options.checkReady = true;
     } else if (isLongOptionWithValue(arg, "--preview")) {
@@ -308,7 +310,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       );
     } else if (arg === "--json") {
       throw new Error(
-        "--json is not supported; redirect output or use --compact for compact markdown",
+        "--json is not supported; use --preview none, short, full, or detail for text output",
       );
     } else if (arg === "--no-color") {
       options.color = "never";
@@ -711,7 +713,6 @@ function validateCliShape(
     [options.routes?.length, "--fts/--vector"],
     [options.fuse, "--fuse"],
     [options.trace, "--trace"],
-    [options.human, "--compact"],
     [options.preview, "--preview"],
     [options.limit, "--limit"],
     [options.refresh, "--refresh"],
@@ -1417,7 +1418,12 @@ function parseColorMode(value: string): ColorMode {
 }
 
 function parsePreviewMode(value: string): PreviewMode {
-  if (value === "none" || value === "short" || value === "full") {
+  if (
+    value === "none" ||
+    value === "short" ||
+    value === "full" ||
+    value === "detail"
+  ) {
     return value;
   }
 
