@@ -220,13 +220,7 @@ fn assert_suggestions(
 
 fn seed_persisted_call(root: &std::path::Path) -> Result<(), Box<dyn Error>> {
     let home = root.join(".zvec-grep");
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(home.join("manifest.json"))?)?;
-    let storage = home.join("generations").join(
-        manifest["storageGeneration"]
-            .as_str()
-            .ok_or("storage generation")?,
-    );
+    let storage = home.join("index");
     let config = zvec_rust::ConfigBuilder::new()
         .num_threads(2)
         .memory_limit(512 * 1024 * 1024)
@@ -234,7 +228,7 @@ fn seed_persisted_call(root: &std::path::Path) -> Result<(), Box<dyn Error>> {
     zvec_rust::initialize(Some(&config))?;
     let mut options = zvec_rust::CollectionOptions::new()?;
     options.set_read_only(true)?;
-    let entities_path = storage.join("storage/entities");
+    let entities_path = storage.join("entities");
     let entities =
         zvec_rust::Collection::open(entities_path.to_str().ok_or("entity path")?, Some(&options))?;
     let mut query = zvec_rust::SearchQuery::scalar(100)?;
