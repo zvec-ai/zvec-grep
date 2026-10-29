@@ -544,7 +544,7 @@ fn readonly_connections_reopen_data_and_never_create_or_write() {
 }
 
 #[test]
-fn schemas_reject_foreign_and_newer_databases_without_rewriting_versions() {
+fn schemas_reject_foreign_databases_and_other_owners_without_rewriting_identity() {
     let dir = tempfile::tempdir().expect("tempdir");
     let foreign = dir.path().join("foreign.sqlite");
     Connection::open(&foreign)
@@ -555,21 +555,30 @@ fn schemas_reject_foreign_and_newer_databases_without_rewriting_versions() {
         SqliteGraphStorage::open(&foreign, OpenMode::ReadWrite),
         Err(Error::ForeignDatabase)
     ));
-    let path = dir.path().join("newer.sqlite");
+    let path = dir.path().join("unrelated.sqlite");
     open(&path).close().expect("init");
     let raw = Connection::open(&path).expect("raw");
-    raw.pragma_update(None, "user_version", 999)
-        .expect("new version");
-    for mode in [OpenMode::ReadOnly, OpenMode::ReadWrite] {
-        assert!(matches!(
-            SqliteGraphStorage::open(&path, mode),
-            Err(Error::UnsupportedSchema { version: 999, .. })
-        ));
-    }
+    // Version compatibility belongs to the workspace manifest, so the user version
+    // stays untouched and never gates opening the database.
     assert_eq!(
         raw.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .expect("version"),
-        999
+        0
+    );
+    raw.pragma_update(None, "application_id", 1_514_623_569)
+        .expect("other application");
+    for mode in [OpenMode::ReadOnly, OpenMode::ReadWrite] {
+        assert!(matches!(
+            SqliteGraphStorage::open(&path, mode),
+            Err(Error::UnsupportedSchema {
+                application_id: 1_514_623_569
+            })
+        ));
+    }
+    assert_eq!(
+        raw.query_row("PRAGMA application_id", [], |row| row.get::<_, i64>(0))
+            .expect("application"),
+        1_514_623_569
     );
 }
 
@@ -823,17 +832,20 @@ fn graph_queries_skip_unrelated_resolved_edges() {
 }
 
 #[test]
-fn previous_development_schema_requires_rebuild_without_mutation() {
+fn previous_development_schema_fails_the_structure_check_without_mutation() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("old.sqlite");
     let raw = Connection::open(&path).expect("raw");
+    // Owned by this application, but carrying the pre-release table layout: the
+    // identity check passes and the structure check is what refuses the database.
     raw.execute_batch("PRAGMA application_id = 1514623568; PRAGMA user_version = 10; CREATE TABLE pending_refs (id INTEGER PRIMARY KEY);").expect("old schema");
     for mode in [OpenMode::ReadOnly, OpenMode::ReadWrite] {
         assert!(matches!(
             SqliteGraphStorage::open(&path, mode),
-            Err(Error::UnsupportedSchema { version: 10, .. })
+            Err(Error::IncompleteSchema)
         ));
     }
+    // Neither the user version nor the foreign schema is rewritten on rejection.
     assert_eq!(
         raw.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .expect("version"),

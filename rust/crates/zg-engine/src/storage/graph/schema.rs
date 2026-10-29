@@ -1,36 +1,33 @@
 use rusqlite::{Connection, TransactionBehavior};
 
 use super::{Error, Result};
-use crate::domain::CURRENT_INDEX_VERSION;
 
-// Unsupported versions require an index rebuild; no schema migration is provided.
-// The user version mirrors the workspace index version so one indexing pass writes
-// a single version into both stores; v2 admits `declares` edges produced by the
-// walk-time collector.
+// Unsupported databases require an index rebuild; no schema migration is provided.
+// Version compatibility belongs to the workspace manifest, which rebuilds the whole
+// index when the index version changes; this database only proves ownership.
 pub(crate) const APPLICATION_ID: i64 = 0x5a47_5250;
 
-fn user_version() -> i64 {
-    i64::from(CURRENT_INDEX_VERSION)
-}
-
 pub(crate) fn validate(connection: &Connection) -> Result<()> {
-    let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let application_id: i64 =
         connection.query_row("PRAGMA application_id", [], |row| row.get(0))?;
-    if version != user_version() || application_id != APPLICATION_ID {
-        return Err(Error::UnsupportedSchema {
-            version,
-            application_id,
-        });
+    if application_id != APPLICATION_ID {
+        return Err(Error::UnsupportedSchema { application_id });
+    }
+    let edges: i64 = connection.query_row(
+        "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = 'edges'",
+        [],
+        |row| row.get(0),
+    )?;
+    if edges != 1 {
+        return Err(Error::IncompleteSchema);
     }
     Ok(())
 }
 
 pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let application_id: i64 = tx.query_row("PRAGMA application_id", [], |row| row.get(0))?;
-    if version == 0 && application_id == 0 {
+    if application_id == 0 {
         let objects: i64 = tx.query_row(
             "SELECT count(*) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'",
             [],
@@ -40,7 +37,6 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
             return Err(Error::ForeignDatabase);
         }
         tx.execute_batch(SCHEMA)?;
-        tx.pragma_update(None, "user_version", user_version())?;
         tx.pragma_update(None, "application_id", APPLICATION_ID)?;
     } else {
         validate(&tx)?;
