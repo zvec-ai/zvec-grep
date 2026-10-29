@@ -111,8 +111,11 @@ impl ProgressOutput {
             return Ok(());
         }
         if self.terminal {
-            // Replace the visible text before clearing any leftover characters.
-            let frame = format!("\r{line}\x1b[K");
+            let frame = self.last.as_ref().and_then(|(_, _, previous)| {
+                terminal_change_start(previous, &line)
+                    .map(|(byte, column)| format!("\x1b[{}G{}\x1b[K", column + 1, &line[byte..]))
+            });
+            let frame = frame.unwrap_or_else(|| format!("\r{line}\x1b[K"));
             self.writer.write_all(frame.as_bytes())?;
         } else {
             writeln!(self.writer, "{line}")?;
@@ -148,12 +151,12 @@ pub(crate) fn gradient_bar(filled: usize, width: usize, color: bool, unicode: bo
     }
     let mut bar = String::new();
     for index in 0..filled {
-        // Match the reference's rounded interpolation across the filled portion.
+        // Keep each cell's color stable as the bar fills.
         let interpolate = |start: usize, end: usize| {
-            if filled <= 1 {
+            if width <= 1 {
                 end
             } else {
-                start + ((end - start) * index + (filled - 1) / 2) / (filled - 1)
+                start + ((end - start) * index + (width - 1) / 2) / (width - 1)
             }
         };
         let _ = write!(
@@ -227,7 +230,7 @@ fn format_terminal_progress(
     let glyph = if done {
         if unicode { "◆" } else { "*" }
     } else {
-        spinner[indexed % spinner.len()]
+        spinner[0]
     };
     let prefix = format!("{rail}  {} Indexing files  ", green(glyph, color));
     if total == 0 {
@@ -307,18 +310,7 @@ fn fit_terminal_line(line: &str, columns: usize) -> String {
             }
             continue;
         }
-        let width = if character.is_control() {
-            0
-        } else if character.is_ascii()
-            || matches!(
-                character,
-                '│' | '·' | '✢' | '✳' | '✶' | '✻' | '✽' | '◆' | '█' | '░'
-            )
-        {
-            1
-        } else {
-            2
-        };
+        let width = terminal_character_width(character).unwrap_or(2);
         if occupied + width > limit {
             clipped = true;
             break;
@@ -330,6 +322,57 @@ fn fit_terminal_line(line: &str, columns: usize) -> String {
         fitted.push_str("\x1b[0m");
     }
     fitted
+}
+
+fn terminal_change_start(previous: &str, next: &str) -> Option<(usize, usize)> {
+    let mut common = 0;
+    for (left, right) in previous.chars().zip(next.chars()) {
+        if left != right {
+            break;
+        }
+        common += left.len_utf8();
+    }
+    let start = next[..common].rfind("\x1b[").unwrap_or(common);
+    let column = terminal_visible_width(&next[..start])?;
+    (column > 0).then_some((start, column))
+}
+
+fn terminal_visible_width(value: &str) -> Option<usize> {
+    let mut characters = value.chars().peekable();
+    let mut width = 0;
+    while let Some(character) = characters.next() {
+        if character == '\x1b' && characters.peek() == Some(&'[') {
+            characters.next();
+            let mut complete = false;
+            for code in characters.by_ref() {
+                if ('@'..='~').contains(&code) {
+                    complete = true;
+                    break;
+                }
+            }
+            if !complete {
+                return None;
+            }
+        } else {
+            width += terminal_character_width(character)?;
+        }
+    }
+    Some(width)
+}
+
+fn terminal_character_width(character: char) -> Option<usize> {
+    if character.is_control() {
+        Some(0)
+    } else if character.is_ascii()
+        || matches!(
+            character,
+            '│' | '·' | '✢' | '✳' | '✶' | '✻' | '✽' | '◆' | '█' | '░'
+        )
+    {
+        Some(1)
+    } else {
+        None
+    }
 }
 
 fn format_progress(progress: &IndexProgress, terminal: bool) -> (String, String) {
@@ -426,11 +469,16 @@ mod tests {
         let bar = gradient_bar(3, 5, true, true);
         assert_eq!(
             bar,
-            "\x1b[38;2;22;163;74m█\x1b[38;2;78;201;123m█\x1b[38;2;134;239;172m█\x1b[0m\x1b[2m░░\x1b[0m"
+            "\x1b[38;2;22;163;74m█\x1b[38;2;50;182;99m█\x1b[38;2;78;201;123m█\x1b[0m\x1b[2m░░\x1b[0m"
         );
         assert_eq!(gradient_bar(3, 5, false, true), "███░░");
         assert_eq!(gradient_bar(3, 5, false, false), "###--");
-        assert!(gradient_bar(1, 2, true, true).starts_with("\x1b[38;2;134;239;172m"));
+        assert!(gradient_bar(1, 2, true, true).starts_with("\x1b[38;2;22;163;74m"));
+        let existing_fill = bar.split("\x1b[0m").next().expect("colored fill");
+        assert!(
+            gradient_bar(4, 5, true, true).starts_with(existing_fill),
+            "existing bar cells should keep their color as the bar grows"
+        );
     }
 
     #[test]
@@ -484,6 +532,44 @@ mod tests {
             assert_eq!(output.contains("\x1b[K"), terminal);
             assert!(!output.contains("\r\x1b[2K"));
             assert!(!output.contains("\x1b[36m"));
+        }
+    }
+
+    #[test]
+    fn indexing_updates_do_not_repaint_the_stable_progress_prefix() {
+        for color in [false, true] {
+            let buffer = Arc::new(Mutex::new(Vec::new()));
+            let mut output = ProgressOutput {
+                writer: Box::new(Capture(buffer.clone())),
+                terminal: true,
+                color,
+                last: None,
+                finished: false,
+                last_indexing: None,
+            };
+            let progress = IndexProgress {
+                phase: IndexProgressPhase::Indexing,
+                files_total: Some(1045),
+                files_indexed: Some(670),
+                files_failed: None,
+                detail: None,
+                embedding: None,
+            };
+            output.report(&progress).expect("first progress frame");
+            buffer.lock().expect("capture").clear();
+            output.last.as_mut().expect("last frame").1 =
+                Instant::now() - Duration::from_millis(200);
+            output
+                .report(&IndexProgress {
+                    files_indexed: Some(671),
+                    ..progress
+                })
+                .expect("next progress frame");
+            let frame = String::from_utf8(buffer.lock().expect("capture").clone())
+                .expect("UTF-8 progress frame");
+            assert!(!frame.contains("Indexing files"), "{frame:?}");
+            assert!(frame.starts_with("\x1b["), "{frame:?}");
+            assert!(frame.contains("1/1045"), "{frame:?}");
         }
     }
 
