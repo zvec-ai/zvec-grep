@@ -541,7 +541,7 @@ mod tests {
         if std::env::var_os(CHILD).is_none() {
             for environment in [None, Some("environment-models")] {
                 let mut command =
-                    std::process::Command::new(std::env::current_exe().expect("test executable"));
+                    zg_test_process::command(std::env::current_exe().expect("test executable"));
                 command
                     .args([
                         "--exact",

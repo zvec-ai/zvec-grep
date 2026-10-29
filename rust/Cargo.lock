@@ -450,6 +450,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "close_fds"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3bc416f33de9d59e79e57560f450d21ff8393adcf1cdfc3e6d8fb93d5f88a2ed"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4389,6 +4399,7 @@ dependencies = [
  "zg-engine-macros",
  "zg-host-native",
  "zg-llama-native",
+ "zg-test-process",
  "zg-zvec-fp16",
  "zvec-rust",
 ]
@@ -4422,6 +4433,14 @@ version = "0.3.0-rc.1"
 dependencies = [
  "libloading 0.8.9",
  "llama-cpp-sys-2",
+ "tempfile",
+]
+
+[[package]]
+name = "zg-test-process"
+version = "0.3.0-rc.1"
+dependencies = [
+ "close_fds",
  "tempfile",
 ]
 

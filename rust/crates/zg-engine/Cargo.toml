@@ -81,6 +81,7 @@ ort = { workspace = true, features = ["directml"] }
 rusqlite = { version = "0.37", features = ["hooks"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing-subscriber.workspace = true
+zg-test-process = { path = "../zg-test-process" }
 
 [lints]
 workspace = true

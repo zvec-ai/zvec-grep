@@ -174,6 +174,12 @@ fn cache() -> ReadSessionCache {
     ReadSessionCache::new(Duration::from_secs(60)).expect("cache worker")
 }
 
+fn manually_reaped_cache() -> ReadSessionCache {
+    // Tests that advance time or assert one reap's result must own maintenance.
+    // A concurrent worker can hold the slot, making that pass skip it correctly.
+    ReadSessionCache::spawn(Duration::from_secs(60), |_| {}).expect("manual cache")
+}
+
 fn assert_shutdown_waits_for_maintenance(shutdown: fn(ReadSessionCache), callers: usize) {
     let (started, running) = std::sync::mpsc::channel();
     let (release, released) = std::sync::mpsc::channel();
@@ -302,7 +308,7 @@ fn sequential_and_concurrent_queries_reuse_the_session() {
 #[test]
 fn expiry_starts_at_final_release_and_protects_active_queries() {
     let fixture = Fixture::new();
-    let cache = cache();
+    let cache = manually_reaped_cache();
     let (home_lock, lease) = fixture.read(&cache);
     let session = Arc::downgrade(&lease.session);
     cache
@@ -374,7 +380,7 @@ fn maintenance_expires_idle_handles_without_another_request() {
 #[test]
 fn maintenance_does_not_recreate_removed_lock_files() {
     let fixture = Fixture::new();
-    let cache = cache();
+    let cache = manually_reaped_cache();
     let (home_lock, lease) = fixture.read(&cache);
     let session = Arc::downgrade(&lease.session);
     drop(lease);
@@ -387,6 +393,24 @@ fn maintenance_does_not_recreate_removed_lock_files() {
         "maintenance must not recreate deleted workspace paths"
     );
     assert_eq!(session.strong_count(), 0);
+}
+
+#[test]
+fn maintenance_retries_busy_slots_on_the_next_pass() {
+    let fixture = Fixture::new();
+    let cache = manually_reaped_cache();
+    let (home_lock, lease) = fixture.read(&cache);
+    let session = Arc::downgrade(&lease.session);
+    drop(lease);
+    drop(home_lock);
+    let slot = Arc::clone(&lock(&cache.owner.inner.state).entries[fixture.layout.storage_dir()]);
+    let busy = lock(&slot.entry);
+    let expired = Instant::now() + Duration::from_secs(120);
+    cache.owner.inner.reap(expired);
+    assert_eq!(session.strong_count(), 1, "busy slot is skipped");
+    drop(busy);
+    cache.owner.inner.reap(expired);
+    assert_eq!(session.strong_count(), 0, "next pass retires idle storage");
 }
 
 #[test]

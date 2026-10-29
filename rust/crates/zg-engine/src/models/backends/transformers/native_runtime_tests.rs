@@ -35,7 +35,7 @@ fn sessions_can_reload_and_process_exits_cleanly() {
     }
     // rc.13 + ORT 1.21 can report a passing test, then SIGSEGV while exiting.
     // Assert the child process's status, not just the inference result.
-    let output = std::process::Command::new(env::current_exe().expect("test binary"))
+    let output = zg_test_process::command(env::current_exe().expect("test binary"))
         .args([
             "--exact",
             "models::backends::transformers::native_runtime::tests::sessions_can_reload_and_process_exits_cleanly",
