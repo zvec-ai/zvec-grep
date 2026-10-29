@@ -178,8 +178,9 @@ path and clears temporary data.
 Stored file paths and internal ignore-file references move with the workspace.
 Missing ignore files and external paths that are not absolute on the current
 platform are skipped without removing their saved references. Other read errors,
-invalid rules, invalid path components, and filename collisions on the destination
-filesystem produce errors.
+invalid rules, and invalid path components produce errors. Filename collisions
+introduced by moving to a different filesystem are not detected; rebuild the
+index to match the files present at the destination.
 Incomplete scans do not apply deletions, cancelled file preparation preserves
 existing content, and content-identical updates refresh timestamps without
 embedding again.

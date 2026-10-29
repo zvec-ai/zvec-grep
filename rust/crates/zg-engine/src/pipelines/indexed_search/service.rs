@@ -118,7 +118,6 @@ pub(crate) async fn context(
         )?,
         None => ReadSessionLease::open(workspace.layout().index_dir())?,
     };
-    storage.verify_source_root(&source_root)?;
     let result = query_storage(&acquired, &workspace, storage.storage(), options, &request).await;
     let close = storage.close();
     let result = result?;

@@ -225,7 +225,6 @@ pub(crate) async fn get_workspace_index_status(
     detailed: bool,
 ) -> Result<IndexStats, EngineError> {
     let stored_files = storage.list_files()?;
-    crate::file_selection::verify_source_paths(workspace.source_root(), &stored_files)?;
     let control = task_control(signal);
     let snapshot = scanner
         .discover(
@@ -399,7 +398,6 @@ async fn run_index_pass(
         ChangeScope::from_changes(root, context.changes)?
     };
     let all_stored = context.storage.list_files()?;
-    crate::file_selection::verify_source_paths(root, &all_stored)?;
     scope.include_unfinished(root, &all_stored);
     let existing = scope.filter_stored(root, &all_stored);
     let scan_started = Instant::now();

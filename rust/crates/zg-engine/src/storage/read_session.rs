@@ -1,7 +1,7 @@
 //! Resident read handles, leased per query and retired before workspace writes.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, OnceLock, Weak,
@@ -61,7 +61,6 @@ struct ReadSession {
     storage: IndexStore,
     storage_home: PathBuf,
     generation: String,
-    validated_source_roots: Mutex<HashSet<PathBuf>>,
     _residency: Option<LockGuard>,
 }
 
@@ -163,7 +162,6 @@ impl ReadSessionCache {
                     storage,
                     storage_home: storage_home.to_path_buf(),
                     generation: generation.to_owned(),
-                    validated_source_roots: Mutex::new(HashSet::new()),
                     _residency: Some(residency),
                 }),
                 last_used: Instant::now(),
@@ -279,7 +277,6 @@ impl ReadSessionLease {
                 })?,
                 storage_home: storage_home.to_path_buf(),
                 generation: String::new(),
-                validated_source_roots: Mutex::new(HashSet::new()),
                 _residency: None,
             }),
             cache: Weak::new(),
@@ -289,15 +286,6 @@ impl ReadSessionLease {
 
     pub(crate) fn storage(&self) -> &IndexStore {
         &self.session.storage
-    }
-
-    pub(crate) fn verify_source_root(&self, root: &Path) -> EngineResult<()> {
-        let mut roots = lock(&self.session.validated_source_roots);
-        if !roots.contains(root) {
-            crate::file_selection::verify_source_paths(root, &self.session.storage.list_files()?)?;
-            roots.insert(root.to_path_buf());
-        }
-        Ok(())
     }
 
     pub(crate) fn close(self) -> EngineResult<()> {

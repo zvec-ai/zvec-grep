@@ -1203,6 +1203,90 @@ async fn missing_ignore_files_are_skipped_and_restored_rules_apply() -> TestResu
 }
 
 #[tokio::test]
+async fn case_distinct_stored_paths_allow_queries_updates_and_rebuilds() -> TestResult {
+    let server = EmbeddingServer::start()?;
+    for rebuild in [false, true] {
+        let temporary = tempdir()?;
+        let root = temporary.path();
+        configure_remote_model(root, server.address)?;
+        fs::write(root.join("Room.txt"), "Orchard original documentation.\n")?;
+        let engine = ZvecGrep::new();
+        let initial = engine.index(index_options(root)).await?;
+        assert_eq!((initial.files_added, initial.files_failed), (1, 0));
+
+        // A scoped update preserves the old spelling outside its exact path scope.
+        // Both records then resolve to one source on case-insensitive filesystems.
+        fs::rename(root.join("Room.txt"), root.join("temporary.tmp"))?;
+        fs::rename(root.join("temporary.tmp"), root.join("room.txt"))?;
+        let renamed = engine
+            .index(IndexOptions {
+                changes: vec![WorkspaceChange::Upsert(PathBuf::from("room.txt"))],
+                ..index_options(root)
+            })
+            .await?;
+        assert_eq!(
+            (
+                renamed.files_added,
+                renamed.files_deleted,
+                renamed.files_failed
+            ),
+            (1, 0, 0)
+        );
+        engine.close();
+        drop(engine);
+
+        let index_path = root.join(".zvec-grep/index");
+        let records = native_file_records(&index_path)?;
+        assert_eq!(records.len(), 2);
+        let paths = records
+            .iter()
+            .map(|record| {
+                record["relative_path"]["components"][0]
+                    .as_str()
+                    .expect("stored source name")
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(paths, BTreeSet::from(["Room.txt", "room.txt"]));
+
+        let engine = ZvecGrep::new();
+        assert!(
+            fts_paths(&engine, root, "orchard")
+                .await?
+                .contains(&PathBuf::from("room.txt"))
+        );
+        let info = engine.info(info_options(root)).await?;
+        assert!(info.indexed);
+        assert_eq!(info.status.expect("index status").files_failed, 0);
+
+        fs::write(
+            root.join("room.txt"),
+            "Vineyard replacement documentation with current content.\n",
+        )?;
+        let updated = engine
+            .index(IndexOptions {
+                rebuild,
+                ..index_options(root)
+            })
+            .await?;
+        assert_eq!((updated.files_failed, updated.files_pending), (0, 0));
+        let records = native_file_records(&index_path)?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0]["relative_path"],
+            json!({"components": ["room.txt"]})
+        );
+        assert_eq!(
+            fts_paths(&engine, root, "vineyard").await?,
+            [PathBuf::from("room.txt")]
+        );
+        assert!(fts_paths(&engine, root, "orchard").await?.is_empty());
+        engine.drop_index(info_options(root)).await?;
+        engine.close();
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn public_engine_reuses_relative_files_after_moving_workspace() -> TestResult {
     let temporary = tempdir()?;
     let original_root = temporary.path().join("original");
