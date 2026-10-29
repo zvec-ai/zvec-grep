@@ -340,7 +340,7 @@ impl ZvecGrepMcpServer {
         for name in ["zvec_grep_callers", "zvec_grep_callees"] {
             let route = router.map.get_mut(name).expect("relationship route");
             route.attr.description = route.attr.description.as_ref().map(|description| {
-                format!("{description} Queries matching more than {MAX_SYMBOL_MATCHES} indexed definitions fail; narrow the scope or pass path to select a workspace-relative file or directory.").into()
+                format!("{description} Queries matching more than {MAX_SYMBOL_MATCHES} indexed definitions fail; narrow the scope or use globs to filter workspace-relative definition paths.").into()
             });
         }
         if toolset == McpToolset::Full {
@@ -851,9 +851,11 @@ pub struct RelationshipInput {
     /// Symbol name or scope-qualified name, such as `Class::method` or `Class.method` (as shown by rg); `::name` selects only top-level definitions.
     #[schemars(length(min = 1, max = MAX_RELATIONSHIP_SYMBOL_CHARS))]
     pub symbol: String,
-    /// Restrict definitions and suggestions to a workspace-relative file or directory; call-site files remain unrestricted.
-    #[schemars(length(min = 1, max = 1024))]
-    pub path: Option<PathBuf>,
+    /// Ordered workspace-relative glob rules for definitions and suggestions; call-site files remain unrestricted.
+    #[schemars(length(max = 128))]
+    pub globs: Option<GlobListInput>,
+    /// Ordered case-insensitive glob rules, applied after globs, as in search.
+    pub insensitive_globs: Option<PathListInput>,
     /// Maximum edges per matching symbol; defaults to 20.
     #[schemars(range(min = 1), extend("type" = "integer"))]
     pub limit: Option<usize>,
@@ -1691,7 +1693,7 @@ impl RelationshipInput {
         let request = RelationshipOptions {
             root: Some(root),
             symbol: self.symbol,
-            path: self.path,
+            globs: normalize_globs(self.globs, self.insensitive_globs)?.unwrap_or_default(),
             limit: self.limit,
             ..RelationshipOptions::default()
         };

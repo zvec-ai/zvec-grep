@@ -84,7 +84,7 @@ mod tests {
         let options = RelationshipOptions {
             root: Some("/workspace".into()),
             symbol: "Module::run".into(),
-            path: Some("src/main.rs".into()),
+            globs: vec!["src/main.rs".into()],
             limit: Some(2),
             ..RelationshipOptions::default()
         };
@@ -95,7 +95,7 @@ mod tests {
             let encoded = serde_json::to_value(&command).expect("relationship command");
             assert!(encoded["request"].get("signal").is_none());
             assert_eq!(encoded["request"]["symbol"], "Module::run");
-            assert_eq!(encoded["request"]["path"], "src/main.rs");
+            assert_eq!(encoded["request"]["globs"][0]["pattern"], "src/main.rs");
             assert_eq!(
                 serde_json::from_value::<DaemonCommand>(encoded).expect("decode command"),
                 command

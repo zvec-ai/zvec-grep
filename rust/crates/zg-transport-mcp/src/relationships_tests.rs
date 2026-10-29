@@ -16,7 +16,8 @@ fn relationship_inputs_preserve_engine_values_and_reject_unsafe_or_unknown_optio
         root: root(),
         symbol: "  Class::method  ".into(),
         limit: None,
-        path: None,
+        globs: None,
+        insensitive_globs: None,
     }
     .into_request()
     .expect("valid relationship request");
@@ -26,9 +27,32 @@ fn relationship_inputs_preserve_engine_values_and_reject_unsafe_or_unknown_optio
         json!({"root": root(), "symbol": "run", "limit": -1}),
         json!({"root": root(), "symbol": "run", "autoUpdate": true}),
         json!({"root": root(), "symbol": "run", "refresh": "wait"}),
+        json!({"root": root(), "symbol": "run", "path": "src/main.rs"}),
     ] {
         assert!(serde_json::from_value::<RelationshipInput>(input).is_err());
     }
+}
+
+#[test]
+fn relationship_globs_use_search_input_normalization() {
+    let filters = json!({
+        "root": root(),
+        "globs": ["src/**", "!src/tests/**"],
+        "insensitiveGlobs": ["*.RS"]
+    });
+    let mut search = filters.clone();
+    search["query"] = json!("run");
+    let mut relationship = filters;
+    relationship["symbol"] = json!("run");
+    let search = serde_json::from_value::<SearchInput>(search)
+        .expect("search input")
+        .into_request()
+        .expect("search request");
+    let relationship = serde_json::from_value::<RelationshipInput>(relationship)
+        .expect("relationship input")
+        .into_request()
+        .expect("relationship request");
+    assert_eq!(relationship.globs, search.filter.globs);
 }
 
 #[test]
@@ -108,7 +132,7 @@ impl IndexOperationProvider for RelationshipsOnly {
 
 impl RelationshipsOnly {
     fn read(&self, incoming: bool, request: RelationshipOptions) -> RelationshipResult {
-        assert_eq!(request.path, Some("src/subject.rs".into()));
+        assert_eq!(request.globs, vec!["src/subject.rs".into()]);
         assert!(
             request
                 .signal
@@ -190,10 +214,9 @@ async fn relationship_wire_calls_route_without_indexing_and_return_matching_json
                 json!({"root": root(), "symbol": "::"}),
                 json!({"root": root(), "symbol": "Foo."}),
                 json!({"root": root(), "symbol": "run", "limit": 0}),
-                json!({"root": root(), "symbol": "run", "path": ""}),
-                json!({"root": root(), "symbol": "run", "path": root()}),
-                json!({"root": root(), "symbol": "run", "path": "../main.rs"}),
-                json!({"root": root(), "symbol": "run", "path": "src/../main.rs"}),
+                json!({"root": root(), "symbol": "run", "globs": [{"pattern": ""}]}),
+                json!({"root": root(), "symbol": "run", "globs": "!"}),
+                json!({"root": root(), "symbol": "run", "globs": "["}),
             ] {
                 let error = client.call_tool(CallToolRequestParams::new(name)
                     .with_arguments(arguments.as_object().expect("arguments").clone()))
@@ -207,7 +230,7 @@ async fn relationship_wire_calls_route_without_indexing_and_return_matching_json
             let response = client
                 .call_tool(
                     CallToolRequestParams::new(name).with_arguments(
-                        json!({"root": root(), "symbol": " Subject::run ", "path": "src/subject.rs", "limit": 2})
+                        json!({"root": root(), "symbol": " Subject::run ", "globs": "src/subject.rs", "limit": 2})
                             .as_object()
                             .expect("arguments")
                             .clone(),

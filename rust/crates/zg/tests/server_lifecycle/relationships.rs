@@ -109,13 +109,13 @@ fn persisted_calls_match_across_direct_daemon_and_mcp() -> Result<(), Box<dyn Er
         assert_eq!(mcp["result"]["structuredContent"], replies[0]);
     }
     assert_suggestions(&binary, home.path(), workspace.path(), &mut bridge)?;
-    assert_path_filters(&binary, home.path(), workspace.path(), &mut bridge)?;
+    assert_glob_filters(&binary, home.path(), workspace.path(), &mut bridge)?;
     bridge.close()?;
     assert_command_success(&guard.stop()?);
     Ok(())
 }
 
-fn assert_path_filters(
+fn assert_glob_filters(
     binary: &Path,
     home: &Path,
     workspace: &Path,
@@ -129,7 +129,7 @@ fn assert_path_filters(
                 .current_dir(workspace)
                 .args(["--callers", "target"])
                 .arg(workspace)
-                .args(["--path", path, "--mode", mode, "--home"])
+                .args(["--glob", path, "--mode", mode, "--home"])
                 .arg(home)
                 .output()?;
             assert_command_success(&output);
@@ -141,7 +141,7 @@ fn assert_path_filters(
         }
         let mcp = bridge.request(&json!({
             "jsonrpc": "2.0", "id": id, "method": "tools/call",
-            "params": {"name": "zvec_grep_callers", "arguments": {"root": workspace, "symbol": "target", "path": path}}
+            "params": {"name": "zvec_grep_callers", "arguments": {"root": workspace, "symbol": "target", "globs": path}}
         }))?;
         assert_eq!(
             mcp["result"]["structuredContent"]["matches"]
@@ -155,14 +155,14 @@ fn assert_path_filters(
         ("direct", "nested_entry", "main.py", "src/main.py", false),
         ("server", "nested_entry", "main.py", "src/main.py", false),
         ("server", "NESTED_ENTRY", "main.py", "src/main.py", true),
-        ("direct", "target", "../calls.py", "calls.py", false),
+        ("direct", "target", "calls.py", "calls.py", false),
     ] {
         let output = Command::new(binary)
             .current_dir(&nested)
             .args([
                 "--callers",
                 symbol,
-                "--path",
+                "--glob",
                 path,
                 "--mode",
                 mode,

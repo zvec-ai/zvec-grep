@@ -410,11 +410,14 @@ const RELATIONSHIP_HELP: &str = r"Usage:
   zg --callees <symbol> [root] [options]
 
 Options:
-  --path <PATH>                    File or directory relative to the current directory
+  -g, --glob <GLOB>                Workspace-relative glob; prefix ! to exclude; repeatable
+  --iglob <GLOB>                   Case-insensitive glob; repeatable
   --limit <N>                      Maximum edges per matching symbol (default: 20)
   --mode <direct|server|auto>       Select the execution mode (default: auto)
   --home <PATH>                    Runtime and daemon state directory
 
+Globs follow the same ordered rules as ordinary search and filter definitions
+and suggestions, not call-site files.
 Names may be scope-qualified, such as Class::method. Same-name definitions are
 returned as separate JSON matches. truncated indicates additional visible call sites beyond the limit.
 Each edge's filePath, line, and column identify the call site in the caller file,
@@ -463,6 +466,7 @@ Result options:
   --refresh <background|wait|off>   Refresh policy (defaults: server=background, direct=off)
                                     In direct mode, background warns and falls back to off
   --mode <direct|server|auto>       Select indexed query transport (default: auto)
+  --home <PATH>                    Runtime and daemon state directory
 
 Preview modes: none keeps one source line; short uses compact bounded source;
 full uses compact full source; detail adds metadata, outlines, and file grouping.
