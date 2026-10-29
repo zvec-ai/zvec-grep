@@ -344,7 +344,9 @@ Use `--limit N` to cap call sites per matching definition and
 `Class::method` are supported. Same-name definitions remain separate, and repeated
 call sites retain their locations; `truncated` indicates additional visible call
 sites beyond the per-symbol limit. Endpoint visibility is checked before the limit;
-queries do not compute an exact total.
+queries do not compute an exact total. Each definition and its call sites share a
+read snapshot; indexing may advance between definitions. Definitions changed since
+initial selection are skipped until the next query.
 Each edge has a caller `filePath` independently of its optional `symbol` metadata.
 Both MCP toolsets expose `zvec_grep_callers` and `zvec_grep_callees` with an absolute `root`, `symbol`,
 and optional `globs`, `insensitiveGlobs`, and `limit`, using the same glob inputs as
