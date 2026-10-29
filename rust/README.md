@@ -73,11 +73,15 @@ models alive, while unused variants are released when switching configurations.
 `zg --install --upgrade-installed` migrates existing user-level MCP launchers
 from 0.2.x without selecting agents or installing new integrations. It changes
 `zg server --stdio` to `zg --server --stdio` and replaces recognized Node/JS
-entrypoints with the running native executable. Known config-directory overrides
-are respected; project files are not searched. HTTP connections, toolsets,
-timeouts, environment variables, disabled state, permissions and guidance remain
-unchanged. JSONC and TOML comments are preserved. Only existing entries are
-changed, including when related clients use separate config files.
+entrypoints with the running native executable. Legacy `zg` launchers that specify
+an executable path also switch to the running native executable, so an old npm
+prefix cannot keep invoking the Node.js version. Bare `zg` commands retain PATH
+lookup, and launchers already using native syntax retain their executable paths.
+Known config-directory overrides are respected; project files are not searched.
+HTTP connections, toolsets, timeouts, environment variables, disabled state,
+permissions and guidance remain unchanged. JSONC and TOML comments are preserved.
+Only existing entries are changed, including when related clients use separate
+config files.
 
 Use `zg --install --upgrade-installed --dry-run` to preview. Each changed file
 gets a unique adjacent `.zg-upgrade-*.bak` backup before atomic replacement.

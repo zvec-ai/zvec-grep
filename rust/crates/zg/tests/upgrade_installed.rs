@@ -92,6 +92,13 @@ fn read_json(path: &Path) -> Value {
     serde_json::from_str(&fs::read_to_string(path).expect("read")).expect("JSON")
 }
 
+fn assert_running_executable(command: &str) {
+    assert_eq!(
+        fs::canonicalize(command).expect("native path"),
+        fs::canonicalize(env!("CARGO_BIN_EXE_zg")).expect("binary")
+    );
+}
+
 #[test]
 fn empty_upgrade_creates_no_configuration_or_daemon() {
     let fixture = Fixture::new();
@@ -249,6 +256,159 @@ fn covers_json_locations_and_preserves_http_entries_byte_for_byte() {
     assert!(backups(&path).is_empty());
     assert!(!fixture.path(".claude/settings.json").exists());
     assert!(!fixture.path(".copilot/instructions").exists());
+}
+
+#[test]
+fn legacy_zg_json_paths_use_the_running_executable() {
+    let fixture = Fixture::new();
+    let old_binary = fixture.write("old npm prefix/bin/zg", "retained old installation");
+    let mut expected = json!({"mcpServers":{}});
+    for (name, command) in [
+        ("absolute", old_binary.to_str().expect("path")),
+        ("windows", r"C:\old npm prefix\zg.cmd"),
+        ("relative", "./old-prefix/zg"),
+    ] {
+        expected["mcpServers"][name] = json!({
+            "command":command, "args":["server", "--stdio", "--mcp-toolset", "full"],
+            "env":{"CUSTOM":"preserved"}, "disabled":true
+        });
+    }
+    let source = expected.to_string();
+    let path = fixture.write(".cursor/mcp.json", &source);
+    assert!(success(&fixture.run(true)).contains("Would upgrade: 3"));
+    assert_eq!(fs::read_to_string(&path).expect("preview"), source);
+    assert!(backups(&path).is_empty());
+
+    assert!(success(&fixture.run(false)).contains("Upgraded: 3"));
+    let actual = read_json(&path);
+    for name in ["absolute", "windows", "relative"] {
+        let command = actual["mcpServers"][name]["command"]
+            .as_str()
+            .expect("command");
+        assert_running_executable(command);
+        expected["mcpServers"][name]["command"] = json!(command);
+        expected["mcpServers"][name]["args"][0] = json!("--server");
+    }
+    assert_eq!(actual, expected);
+    assert_eq!(
+        fs::read_to_string(old_binary).expect("old binary"),
+        "retained old installation"
+    );
+    let saved = backups(&path);
+    assert_eq!(saved.len(), 1);
+    assert_eq!(fs::read_to_string(&saved[0]).expect("backup"), source);
+    let updated = fs::read_to_string(&path).expect("updated");
+    assert!(success(&fixture.run(false)).contains("Upgraded: 0, compatible: 3"));
+    assert_eq!(fs::read_to_string(&path).expect("repeat"), updated);
+    assert_eq!(backups(&path), saved);
+}
+
+#[test]
+fn legacy_zg_command_arrays_use_the_running_executable() {
+    let fixture = Fixture::new();
+    let old_command =
+        serde_json::to_string(&fixture.path("old npm prefix/bin/zg")).expect("old command");
+    let source = format!(
+        r#"{{ // keep file comment
+  "mcp": {{
+    "zvec_grep": {{"type":"local", "command": [/* keep executable comment */ {old_command}, /* keep action comment */ "server", "--stdio", "--mcp-toolset", "full"], "enabled":false,}},
+  }},
+}}
+"#
+    );
+    let path = fixture.write(".config/opencode/opencode.jsonc", &source);
+    assert!(success(&fixture.run(false)).contains("Upgraded: 1"));
+    let updated = fs::read_to_string(&path).expect("updated");
+    let command_literal = updated
+        .split("/* keep executable comment */ ")
+        .nth(1)
+        .expect("executable comment")
+        .split(", /* keep action comment */")
+        .next()
+        .expect("command");
+    let command: String = serde_json::from_str(command_literal).expect("executable string");
+    assert_running_executable(&command);
+    assert_eq!(
+        updated,
+        source
+            .replace(&old_command, command_literal)
+            .replace("\"server\"", "\"--server\"")
+    );
+    let saved = backups(&path);
+    assert_eq!(saved.len(), 1);
+    assert_eq!(fs::read_to_string(&saved[0]).expect("backup"), source);
+    assert!(success(&fixture.run(false)).contains("Upgraded: 0, compatible: 1"));
+    assert_eq!(fs::read_to_string(&path).expect("repeat"), updated);
+    assert_eq!(backups(&path), saved);
+}
+
+#[test]
+fn legacy_zg_toml_paths_use_the_running_executable() {
+    let fixture = Fixture::new();
+    let old_command = toml::Value::String(
+        fixture
+            .path("old npm prefix/bin/zg")
+            .to_string_lossy()
+            .into_owned(),
+    )
+    .to_string();
+    let source = format!(
+        "# keep settings\n[mcp_servers.zvec_grep]\ncommand = {old_command} # keep executable comment\nargs = ['server', '--stdio', '--mcp-toolset', 'full'] # keep arguments\nenabled = false\n"
+    );
+    let path = fixture.write(".grok/config.toml", &source);
+    assert!(success(&fixture.run(false)).contains("Upgraded: 1"));
+    let updated = fs::read_to_string(&path).expect("updated");
+    let actual: toml::Value = toml::from_str(&updated).expect("TOML");
+    let command = actual["mcp_servers"]["zvec_grep"]["command"]
+        .as_str()
+        .expect("command");
+    assert_running_executable(command);
+    assert_eq!(
+        updated,
+        source
+            .replace(
+                &old_command,
+                &toml::Value::String(command.to_owned()).to_string()
+            )
+            .replace("'server'", "\"--server\"")
+    );
+    let saved = backups(&path);
+    assert_eq!(saved.len(), 1);
+    assert_eq!(fs::read_to_string(&saved[0]).expect("backup"), source);
+    assert!(success(&fixture.run(false)).contains("Upgraded: 0, compatible: 1"));
+    assert_eq!(fs::read_to_string(&path).expect("repeat"), updated);
+    assert_eq!(backups(&path), saved);
+}
+
+#[test]
+fn native_zg_paths_are_preserved_in_all_configuration_forms() {
+    let fixture = Fixture::new();
+    let command = fixture.path("native npm prefix/bin/zg");
+    let json_source =
+        json!({"mcpServers":{"zvec_grep":{"command":command, "args":["--server", "--stdio"]}}})
+            .to_string();
+    let array_source =
+        json!({"mcp":{"zvec_grep":{"command":[command, "--server", "--stdio"]}}}).to_string();
+    let toml_source = format!(
+        "[mcp_servers.zvec_grep]\ncommand = {}\nargs = ['--server', '--stdio']\n",
+        toml::Value::String(command.to_string_lossy().into_owned())
+    );
+    let sources = [
+        (fixture.write(".cursor/mcp.json", &json_source), json_source),
+        (
+            fixture.write(".config/opencode/opencode.json", &array_source),
+            array_source,
+        ),
+        (
+            fixture.write(".grok/config.toml", &toml_source),
+            toml_source,
+        ),
+    ];
+    assert!(success(&fixture.run(false)).contains("Upgraded: 0, compatible: 3"));
+    for (path, source) in sources {
+        assert_eq!(fs::read_to_string(&path).expect("unchanged"), source);
+        assert!(backups(&path).is_empty());
+    }
 }
 
 #[test]
@@ -496,14 +656,20 @@ fn migrates_the_managed_npm_bin_path_even_after_it_has_become_a_native_binary() 
 
 #[test]
 fn ambiguous_duplicate_properties_are_reported_without_writing() {
-    let fixture = Fixture::new();
-    let source = r#"{"mcpServers":{"zvec_grep":{"command":"zg","args":["server","--stdio"],"args":["server","--stdio"]}}}"#;
-    let path = fixture.write(".cursor/mcp.json", source);
-    let output = fixture.run(false);
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("Ambiguous configuration properties"));
-    assert_eq!(fs::read_to_string(&path).expect("unchanged"), source);
-    assert!(backups(&path).is_empty());
+    for source in [
+        r#"{"mcpServers":{"zvec_grep":{"command":"zg","args":["server","--stdio"],"args":["server","--stdio"]}}}"#,
+        r#"{"mcpServers":{"zvec_grep":{"command":"/old-prefix/bin/zg","command":"/old-prefix/bin/zg","args":["server","--stdio"]}}}"#,
+    ] {
+        let fixture = Fixture::new();
+        let path = fixture.write(".cursor/mcp.json", source);
+        let output = fixture.run(false);
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("Ambiguous configuration properties")
+        );
+        assert_eq!(fs::read_to_string(&path).expect("unchanged"), source);
+        assert!(backups(&path).is_empty());
+    }
 }
 
 #[test]

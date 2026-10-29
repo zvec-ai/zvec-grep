@@ -47,6 +47,7 @@ enum Launch {
         array: &'static str,
         action_index: usize,
         script: Option<String>,
+        replace_executable: bool,
     },
 }
 
@@ -302,16 +303,22 @@ fn launch(name: &str, server: &Value) -> Launch {
             fallback
         };
     }
-    let (array, args, action_index, script) =
+    let (array, args, action_index, script, replace_executable) =
         if let Some(command) = server.get("command").and_then(Value::as_array) {
-            if !command
+            let Some(executable) = command
                 .first()
                 .and_then(Value::as_str)
-                .is_some_and(zg_executable)
-            {
+                .filter(|command| zg_executable(command))
+            else {
                 return fallback;
-            }
-            ("command", &command[1..], 1, None)
+            };
+            (
+                "command",
+                &command[1..],
+                1,
+                None,
+                executable_name(executable) != executable,
+            )
         } else {
             let Some(command) = server.get("command").and_then(Value::as_str) else {
                 return fallback;
@@ -320,7 +327,13 @@ fn launch(name: &str, server: &Value) -> Launch {
                 return fallback;
             };
             if zg_executable(command) {
-                ("args", args.as_slice(), 0, None)
+                (
+                    "args",
+                    args.as_slice(),
+                    0,
+                    None,
+                    executable_name(command) != command,
+                )
             } else if matches!(executable_name(command), "node" | "node.exe" | "nodejs") {
                 let Some(script) = args.first().and_then(Value::as_str) else {
                     return fallback;
@@ -337,7 +350,7 @@ fn launch(name: &str, server: &Value) -> Launch {
                 if !package_entry && !managed_bin {
                     return fallback;
                 }
-                ("args", &args[1..], 1, Some(script.to_owned()))
+                ("args", &args[1..], 1, Some(script.to_owned()), true)
             } else {
                 return fallback;
             }
@@ -355,6 +368,7 @@ fn launch(name: &str, server: &Value) -> Launch {
         array,
         action_index,
         script,
+        replace_executable,
     }
 }
 
@@ -403,6 +417,7 @@ fn upgrade_json(
             array,
             action_index,
             script,
+            replace_executable,
         } = launch
         {
             let path = &[file.container, name.as_str(), array];
@@ -412,20 +427,35 @@ fn upgrade_json(
                 next = crate::jsonc::remove_first_array_string(&next, path, &script)
                     .map_err(|error| InstallError::Message(error.to_string()))?
                     .0;
-                next = jsonc_set_path(
-                    &next,
-                    &[file.container, name, "command"],
-                    &json!(env::current_exe()?.to_string_lossy()),
-                )?;
             }
-            upgraded.push(name);
+            if replace_executable {
+                let executable = env::current_exe()?.to_string_lossy().into_owned();
+                next = if array == "command" {
+                    crate::jsonc::replace_array_string(&next, path, 0, &executable)
+                        .map_err(|error| InstallError::Message(error.to_string()))?
+                } else {
+                    jsonc_set_path(
+                        &next,
+                        &[file.container, name, "command"],
+                        &json!(executable),
+                    )?
+                };
+            }
+            upgraded.push((name, replace_executable));
         }
     }
     if !upgraded.is_empty() {
         let updated = read_json_config(&next, file)?;
-        for name in &upgraded {
+        for (name, replace_executable) in &upgraded {
             let server = &updated[file.container][name.as_str()];
-            if !matches!(launch(name, server), Launch::Compatible) {
+            let executable = server.get("command").and_then(|command| {
+                command
+                    .as_str()
+                    .or_else(|| command.as_array()?.first()?.as_str())
+            });
+            let executable_matches = !replace_executable
+                || executable == Some(env::current_exe()?.to_string_lossy().as_ref());
+            if !executable_matches || !matches!(launch(name, server), Launch::Compatible) {
                 return Err(InstallError::Message(
                     "Ambiguous configuration properties; original file left unchanged.".to_owned(),
                 ));
@@ -492,6 +522,7 @@ fn upgrade_toml(
         if let Launch::Update {
             action_index,
             script,
+            replace_executable,
             ..
         } = launch
         {
@@ -516,6 +547,8 @@ fn upgrade_toml(
                     .expect("validated array separator");
                 edits.push((first, String::new()));
                 edits.push((comma..comma + 1, String::new()));
+            }
+            if replace_executable {
                 edits.push((
                     server
                         .command
