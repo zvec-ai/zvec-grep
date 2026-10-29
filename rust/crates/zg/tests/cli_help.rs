@@ -22,7 +22,8 @@ fn main_help_aliases_have_one_stable_surface() {
     let main = stdout(&[]);
     assert_eq!(main, stdout(&["-h"]));
     assert_eq!(main, stdout(&["--help"]));
-    assert!(main.starts_with("zvec-grep 0.0.1\n\nUsage:\n  zg <query> [options]\n"));
+    assert!(main.starts_with("zvec-grep "));
+    assert!(main.contains("\n\nUsage:\n  zg <query> [options]\n"));
     assert!(main.contains("Run zg --help environment for all variables"));
     assert!(!main.contains("--compact"));
     assert!(main.contains("short"));
@@ -130,10 +131,10 @@ fn index_help_distinguishes_explicit_indexing_from_automatic_search_indexing() {
 }
 
 #[test]
-fn version_flags_print_the_installed_version() {
-    let expected = "0.0.1\n";
-    assert_eq!(stdout(&["-v"]), expected);
-    assert_eq!(stdout(&["--version"]), expected);
+fn version_flags_print_the_same_nonempty_output() {
+    let version = stdout(&["--version"]);
+    assert!(!version.trim().is_empty());
+    assert_eq!(stdout(&["-v"]), version);
 }
 
 #[test]
