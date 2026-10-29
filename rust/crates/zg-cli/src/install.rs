@@ -16,8 +16,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    ColorMode, InstallArgs, McpInstallTransport, McpToolset, UninstallArgs,
+    ColorMode, InstallArgs, McpInstallTransport, McpToolset, MessageKind, UninstallArgs,
     theme::{StatusTheme, clean, display_path},
+    write_message,
 };
 
 mod upgrade;
@@ -177,7 +178,7 @@ pub fn execute_install(args: &InstallArgs) -> Result<InstallOutcome, InstallErro
             result.config_path.as_deref(),
             result.config_note.as_deref(),
             crate::stdout_supports_ansi(),
-            install_theme(),
+            ColorMode::Auto,
         )?;
     }
 
@@ -236,16 +237,19 @@ fn write_installed(
     path: Option<&Path>,
     note: Option<&str>,
     terminal: bool,
-    theme: StatusTheme,
+    color: ColorMode,
 ) -> io::Result<()> {
     if terminal {
-        writeln!(output, "{} {} configured", theme.success("✓"), clean(agent))?;
-        if let Some(path) = path {
-            writeln!(output, "  {}", theme.path(&clean(&display_path(path))))?;
-        }
-        if let Some(note) = note {
-            writeln!(output, "  {}", theme.muted(&clean(note)))?;
-        }
+        let path = path.map(display_path);
+        let details = path.as_deref().into_iter().chain(note).collect::<Vec<_>>();
+        write_message(
+            &mut *output,
+            MessageKind::Success,
+            &format!("{agent} configured"),
+            &details,
+            color,
+            terminal,
+        )?;
     } else {
         writeln!(output, "  ✓ {}", clean(agent))?;
         writeln!(output, "    MCP       configured")?;
@@ -3434,7 +3438,6 @@ mod tests {
 
     #[test]
     fn install_result_is_compact_on_terminal_and_preserves_plain_fields() {
-        let theme = StatusTheme::new(ColorMode::Never, true);
         let path = Path::new("/config/agent.json");
         let mut terminal = Vec::new();
         write_installed(
@@ -3443,17 +3446,32 @@ mod tests {
             Some(path),
             Some("note\x1b[2J\nfake"),
             true,
-            theme,
+            ColorMode::Never,
         )
         .expect("terminal result");
         let terminal = String::from_utf8(terminal).expect("UTF-8 result");
-        assert!(terminal.starts_with("✓ Agent configured\n  "));
+        let marker = if crate::theme::unicode_supported() {
+            "✓"
+        } else {
+            "+"
+        };
+        assert!(terminal.starts_with(&format!("{marker} Agent configured\n  ")));
         assert!(!terminal.contains('\x1b'));
         assert!(!terminal.contains("\nfake"));
         assert!(!terminal.contains("MCP"));
         let mut plain = Vec::new();
-        write_installed(&mut plain, "Agent", Some(path), None, false, theme).expect("plain result");
+        write_installed(
+            &mut plain,
+            "Agent",
+            Some(path),
+            None,
+            false,
+            ColorMode::Always,
+        )
+        .expect("plain result");
         let plain = String::from_utf8(plain).expect("UTF-8 result");
+        assert!(plain.starts_with("  ✓ Agent\n"));
+        assert!(!plain.contains('\x1b'));
         assert!(plain.contains("MCP       configured"));
         assert!(plain.contains(&format!("Config    {}", path.display())));
     }

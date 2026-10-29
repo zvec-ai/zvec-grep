@@ -16,8 +16,9 @@ use super::{
     resolve_qwen_home, vscode_config_paths,
 };
 use crate::{
-    ColorMode, InstallArgs,
+    ColorMode, InstallArgs, MessageKind,
     theme::{StatusTheme, clean},
+    write_message,
 };
 
 struct ConfigFile {
@@ -169,18 +170,16 @@ pub fn write_integration_upgrade_summary(
             report.failed
         );
     }
-    let theme = StatusTheme::new(color, terminal);
-    let (marker, title) = if report.updated + report.compatible + report.manual + report.failed == 0
-    {
-        (theme.muted("·"), "No existing integrations found")
+    let (kind, title) = if report.updated + report.compatible + report.manual + report.failed == 0 {
+        (MessageKind::Info, "No existing integrations found")
     } else if report.failed > 0 || report.manual > 0 {
-        (theme.warning("!"), "Integration upgrade needs attention")
+        (MessageKind::Warning, "Integration upgrade needs attention")
     } else if dry_run {
-        (theme.muted("·"), "Integration upgrade preview")
+        (MessageKind::Info, "Integration upgrade preview")
     } else {
-        (theme.success("✓"), "Integrations up to date")
+        (MessageKind::Success, "Integrations up to date")
     };
-    writeln!(output, "{marker} {title}")?;
+    write_message(&mut output, kind, title, &[], color, terminal)?;
     let counts = [
         (
             report.updated,
@@ -222,22 +221,25 @@ pub fn write_integration_upgrade_entry(
     terminal: bool,
 ) -> io::Result<()> {
     let status = kind.label();
-    let detail = clean(detail);
     if !terminal {
-        return writeln!(output, "  {status}: {detail}");
+        return writeln!(output, "  {status}: {}", clean(detail));
     }
-    let theme = StatusTheme::new(color, terminal);
-    let (marker, title) = match kind {
-        IntegrationUpgradeEntryKind::Upgraded => (theme.success("✓"), "Integration upgraded"),
-        IntegrationUpgradeEntryKind::Preview => (theme.muted("·"), "Would upgrade integration"),
-        IntegrationUpgradeEntryKind::Compatible => (theme.success("✓"), "Integration compatible"),
-        IntegrationUpgradeEntryKind::Manual => (theme.warning("!"), "Manual update required"),
-        IntegrationUpgradeEntryKind::Failed => (theme.danger("×"), "Integration upgrade failed"),
+    let (kind, title) = match kind {
+        IntegrationUpgradeEntryKind::Upgraded => (MessageKind::Success, "Integration upgraded"),
+        IntegrationUpgradeEntryKind::Preview => (MessageKind::Info, "Would upgrade integration"),
+        IntegrationUpgradeEntryKind::Compatible => (MessageKind::Success, "Integration compatible"),
+        IntegrationUpgradeEntryKind::Manual => (MessageKind::Warning, "Manual update required"),
+        IntegrationUpgradeEntryKind::Failed => (MessageKind::Error, "Integration upgrade failed"),
         IntegrationUpgradeEntryKind::Backup => {
-            return writeln!(output, "  {}", theme.muted(&format!("{status}: {detail}")));
+            let theme = StatusTheme::new(color, terminal);
+            return writeln!(
+                output,
+                "  {}",
+                theme.muted(&format!("{status}: {}", clean(detail)))
+            );
         }
     };
-    writeln!(output, "{marker} {title}\n  {}", theme.muted(&detail))
+    write_message(output, kind, title, &[detail], color, terminal)
 }
 
 fn configuration_files() -> Vec<Result<ConfigFile, InstallError>> {
@@ -750,6 +752,14 @@ mod presentation_tests {
                 true,
             )
             .expect("terminal entry");
+            write_integration_upgrade_entry(
+                &mut output,
+                IntegrationUpgradeEntryKind::Failed,
+                "fixture",
+                color,
+                true,
+            )
+            .expect("terminal failure");
             write_integration_upgrade_summary(
                 &mut output,
                 &IntegrationUpgradeSummary {
@@ -763,8 +773,15 @@ mod presentation_tests {
             .expect("terminal summary");
             let output = String::from_utf8(output).expect("UTF-8 report");
             assert_eq!(output.contains("\x1b["), color == ColorMode::Always);
-            assert!(output.contains("Integration upgraded"));
-            assert!(output.contains("Integrations up to date"));
+            let theme = StatusTheme::new(color, true);
+            let unicode = crate::theme::unicode_supported();
+            let marker = theme.success(if unicode { "✓" } else { "+" });
+            assert!(output.starts_with(&format!("{marker} Integration upgraded\n")));
+            assert!(output.contains(&format!("\n{marker} Integrations up to date\n")));
+            assert!(output.contains(&format!(
+                "\n{} Integration upgrade failed\n",
+                theme.danger(if unicode { "×" } else { "x" })
+            )));
         }
     }
 
@@ -784,7 +801,13 @@ mod presentation_tests {
         let preview = String::from_utf8(preview).expect("UTF-8 preview");
         assert!(preview.contains("Integration upgrade preview"));
         assert!(preview.contains("2 would upgrade"));
-        assert!(!preview.contains('✓'));
+        let theme = StatusTheme::new(ColorMode::Auto, true);
+        let marker = theme.muted(if crate::theme::unicode_supported() {
+            "·"
+        } else {
+            "-"
+        });
+        assert!(preview.starts_with(&format!("{marker} Integration upgrade preview\n")));
 
         let mut partial = Vec::new();
         write_report(
@@ -802,7 +825,10 @@ mod presentation_tests {
         let partial = String::from_utf8(partial).expect("UTF-8 partial failure");
         assert!(partial.contains("Integration upgrade needs attention"));
         assert!(partial.contains("2 upgraded · 1 manual · 1 failed"));
-        assert!(!partial.contains('✓'));
+        assert!(partial.starts_with(&format!(
+            "{} Integration upgrade needs attention\n",
+            theme.warning("!")
+        )));
     }
 
     #[test]

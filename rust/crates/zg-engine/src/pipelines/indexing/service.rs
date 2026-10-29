@@ -13,7 +13,11 @@ use zg_host_native::NativeScanner;
 use crate::{
     EngineError,
     api::{
-        index::{IndexOptions, IndexResult, options::EmbeddingModelSpec, progress::IndexProgress},
+        index::{
+            IndexOptions, IndexResult,
+            options::EmbeddingModelSpec,
+            progress::{DETAIL_SAVING_INDEX, IndexProgress},
+        },
         info::{
             InfoOptions, InfoResult,
             result::{IndexCompatibility, InfoSource, WorkspaceIndexInfo, WorkspaceIndexPolicy},
@@ -255,7 +259,7 @@ impl WorkspaceIndexService {
             // Done before the active generation is durable.
             reporter.report(IndexProgress {
                 phase: crate::api::index::progress::IndexProgressPhase::Indexing,
-                detail: Some("saving index".to_owned()),
+                detail: Some(DETAIL_SAVING_INDEX.to_owned()),
                 ..progress.clone()
             });
         }
@@ -1116,7 +1120,9 @@ mod tests {
 
     #[tokio::test]
     async fn completion_progress_is_sent_only_after_successful_publication() {
-        use crate::api::index::progress::{IndexProgressPhase, IndexProgressReporter};
+        use crate::api::index::progress::{
+            DETAIL_FINALIZING_INDEX, DETAIL_SAVING_INDEX, IndexProgressPhase, IndexProgressReporter,
+        };
         for fail in [false, true] {
             let directory = tempdir().expect("workspace");
             let mut service = WorkspaceIndexService::new();
@@ -1138,10 +1144,9 @@ mod tests {
                             device: Device::Cpu,
                         }),
                         on_progress: Some(IndexProgressReporter::new(move |progress| {
-                            if progress.detail.as_deref() == Some("saving index") {
+                            if progress.detail.as_deref() == Some(DETAIL_SAVING_INDEX) {
                                 assert_eq!(progress.phase, IndexProgressPhase::Indexing);
                                 assert!(!layout.manifest_path().exists());
-                                captured.lock().expect("observed progress").push("saving");
                             }
                             if progress.phase == IndexProgressPhase::Done {
                                 assert!(
@@ -1152,7 +1157,17 @@ mod tests {
                                     .expect("published metadata")
                                     .is_some()
                                 );
-                                captured.lock().expect("observed progress").push("done");
+                            }
+                            if matches!(
+                                progress.detail.as_deref(),
+                                Some(DETAIL_FINALIZING_INDEX | DETAIL_SAVING_INDEX)
+                            ) || progress.phase == IndexProgressPhase::Done
+                            {
+                                captured.lock().expect("observed progress").push(
+                                    serde_json::to_value(&progress).expect("progress wire value")
+                                        ["detail"]
+                                        .clone(),
+                                );
                             }
                         })),
                         ..Default::default()
@@ -1162,7 +1177,15 @@ mod tests {
             assert_eq!(result.is_err(), fail);
             assert_eq!(
                 *observed.lock().expect("observed progress"),
-                if fail { vec![] } else { vec!["saving", "done"] }
+                if fail {
+                    vec![serde_json::json!("finalizing index")]
+                } else {
+                    vec![
+                        serde_json::json!("finalizing index"),
+                        serde_json::json!("saving index"),
+                        serde_json::json!("indexing complete"),
+                    ]
+                }
             );
             models.close();
         }

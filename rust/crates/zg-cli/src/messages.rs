@@ -2,13 +2,10 @@
 
 use crate::{
     ColorMode, OutputOptions,
-    theme::{StatusTheme, clean, display_path, unicode_supported},
+    theme::{StatusTheme, clean, unicode_supported},
 };
-use std::{
-    io::{self, Write},
-    path::Path,
-};
-use zg_engine::{EngineError, ErrorReport};
+use std::io::{self, Write};
+use zg_engine::ErrorReport;
 
 #[derive(Clone, Copy)]
 pub enum MessageKind {
@@ -72,34 +69,8 @@ pub fn write_error_report(
         }
         return Ok(());
     }
-    // Extract only the recovery action already provided by the engine. Never
-    // infer a rebuild for unrelated storage failures (e.g. full disk or permissions).
-    let (message, help) = if report.code == EngineError::STORAGE_FAILURE
-        && let Some(reason) = report
-            .message
-            .strip_suffix("; rebuild the index with `zg --index --rebuild`")
-    {
-        (reason, Some("Run: zg --index --rebuild"))
-    } else {
-        (report.message.as_str(), report.help.as_deref())
-    };
-    if let Some(path) = message
-        .strip_prefix("workspace index '")
-        .and_then(|value| value.strip_suffix("' has no manifest"))
-        .filter(|_| report.code == EngineError::STORAGE_FAILURE)
-    {
-        write_message(
-            &mut writer,
-            MessageKind::Error,
-            "Index metadata is missing",
-            &[&display_path(Path::new(path))],
-            options.color,
-            terminal,
-        )?;
-    } else {
-        write_error_message(&mut writer, message, options, terminal)?;
-    }
-    if let Some(help) = help {
+    write_error_message(&mut writer, &report.message, options, terminal)?;
+    if let Some(help) = &report.help {
         writeln!(writer, "  {}", clean(help))?;
     }
     Ok(())
@@ -141,36 +112,50 @@ pub fn write_error_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zg_engine::EngineError;
+
     #[test]
-    fn manifest_error_is_actionable_and_debug_retains_diagnostics() {
-        let report = EngineError::storage_failure("workspace index '/repo/.zvec-grep/index' has no manifest; rebuild the index with `zg --index --rebuild`").report();
-        for (terminal, debug) in [(true, false), (true, true), (false, false)] {
-            let mut bytes = Vec::new();
-            write_error_report(
-                &mut bytes,
-                &report,
-                Some(false),
-                OutputOptions {
-                    debug,
-                    color: ColorMode::Never,
-                    ..Default::default()
-                },
-                terminal,
-            )
-            .expect("render");
-            let text = String::from_utf8(bytes).expect("text");
-            assert!(text.contains("zg --index --rebuild"));
-            assert_eq!(text.contains("error location:"), !terminal || debug);
-            assert_eq!(text.contains("retryable: false"), !terminal || debug);
-            if terminal && !debug {
-                assert!(
-                    text.contains("Index metadata is missing\n  /repo/.zvec-grep/index\n  Run:")
-                );
-                assert!(!text.contains(EngineError::STORAGE_FAILURE));
+    fn error_reports_preserve_engine_text_and_explicit_help() {
+        let manifest_message = "workspace index '/repo/.zvec-grep/index' has no manifest; rebuild the index with `zg --index --rebuild`";
+        for report in [
+            EngineError::not_found("Index metadata is unavailable")
+                .with_help("Restore the metadata from a backup.")
+                .report(),
+            EngineError::storage_failure(manifest_message)
+                .with_help("Check the workspace location before rebuilding.")
+                .report(),
+            EngineError::storage_failure(manifest_message).report(),
+        ] {
+            for (terminal, debug) in [(true, false), (true, true), (false, false), (false, true)] {
+                let mut bytes = Vec::new();
+                write_error_report(
+                    &mut bytes,
+                    &report,
+                    Some(false),
+                    OutputOptions {
+                        debug,
+                        color: ColorMode::Never,
+                        ..Default::default()
+                    },
+                    terminal,
+                )
+                .expect("render");
+                let text = String::from_utf8(bytes).expect("text");
+                let expected = if terminal && !debug {
+                    let glyph = if unicode_supported() { "×" } else { "x" };
+                    let help = report
+                        .help
+                        .as_ref()
+                        .map_or_else(String::new, |help| format!("  {help}\n"));
+                    format!("{glyph} {}\n{help}", report.message)
+                } else {
+                    format!("{report}\nretryable: false\n")
+                };
+                assert_eq!(text, expected);
             }
-            assert!(!text.contains('\x1b'));
         }
     }
+
     #[test]
     fn arbitrary_storage_errors_keep_cause_without_inventing_recovery() {
         let report = EngineError::storage_failure("disk full\ncaused by: volume\x1b[2J").report();

@@ -520,6 +520,15 @@ pub mod progress {
 
     use serde::{Deserialize, Serialize};
 
+    // These detail values identify lifecycle steps across producers and renderers.
+    // Keep their wire values stable; renderers choose the user-facing labels.
+    /// Detail identifying index storage optimization.
+    pub const DETAIL_FINALIZING_INDEX: &str = "finalizing index";
+    /// Detail identifying storage cleanup and manifest publication.
+    pub const DETAIL_SAVING_INDEX: &str = "saving index";
+    /// Detail identifying successful index completion.
+    pub const DETAIL_INDEXING_COMPLETE: &str = "indexing complete";
+
     /// Thread-safe callback used by the in-process indexing API.
     #[derive(Clone)]
     pub struct IndexProgressReporter(Arc<dyn Fn(IndexProgress) + Send + Sync + 'static>);

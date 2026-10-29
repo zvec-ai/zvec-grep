@@ -7,7 +7,8 @@ use std::{
     time::{Duration, Instant},
 };
 use zg_engine::api::index::progress::{
-    IndexEmbeddingStage, IndexProgress, IndexProgressPhase, IndexProgressReporter,
+    DETAIL_FINALIZING_INDEX, DETAIL_INDEXING_COMPLETE, DETAIL_SAVING_INDEX, IndexEmbeddingStage,
+    IndexProgress, IndexProgressPhase, IndexProgressReporter,
 };
 
 /// Owns terminal progress state and finishes the live line on success or failure.
@@ -235,8 +236,8 @@ impl Stage {
             };
         }
         match (progress.phase, progress.detail.as_deref()) {
-            (_, Some("finalizing index")) => Self::Optimizing,
-            (_, Some("saving index")) => Self::Saving,
+            (_, Some(DETAIL_FINALIZING_INDEX)) => Self::Optimizing,
+            (_, Some(DETAIL_SAVING_INDEX)) => Self::Saving,
             (IndexProgressPhase::Scanning, _) => Self::Scanning,
             _ => Self::Indexing,
         }
@@ -620,9 +621,9 @@ fn format_progress(progress: &IndexProgress, terminal: bool) -> (String, String)
         let _ = write!(line, ", {failed} failed");
     }
     if let Some(detail) = &progress.detail
-        && detail != "finalizing index"
-        && detail != "saving index"
-        && detail != "indexing complete"
+        && detail != DETAIL_FINALIZING_INDEX
+        && detail != DETAIL_SAVING_INDEX
+        && detail != DETAIL_INDEXING_COMPLETE
     {
         let _ = write!(line, " — {}", clean(detail, terminal));
     }
@@ -800,7 +801,7 @@ mod tests {
         });
         reporter.report(IndexProgress {
             files_failed: Some(3),
-            detail: Some("saving index".into()),
+            detail: Some(DETAIL_SAVING_INDEX.into()),
             ..partial.clone()
         });
         let saving = latest_pending(&display);
@@ -954,7 +955,7 @@ mod tests {
                 for progress in [
                     indexing(usize::MAX - 1, usize::MAX),
                     IndexProgress {
-                        detail: Some("finalizing index".into()),
+                        detail: Some(DETAIL_FINALIZING_INDEX.into()),
                         ..indexing(10, 10)
                     },
                     IndexProgress {
@@ -1077,7 +1078,7 @@ mod tests {
         for indexed in 0..10_000 {
             reporter.report(indexing(indexed, 10_000));
         }
-        for detail in ["finalizing index", "saving index"] {
+        for detail in [DETAIL_FINALIZING_INDEX, DETAIL_SAVING_INDEX] {
             reporter.report(IndexProgress {
                 detail: Some(detail.into()),
                 ..indexing(10_000, 10_000)
@@ -1138,7 +1139,7 @@ mod tests {
         let capture = Capture::default();
         let display = IndexProgressDisplay::terminal(capture.clone(), ColorMode::Never, true);
         display.reporter().report(IndexProgress {
-            detail: Some("finalizing index".into()),
+            detail: Some(DETAIL_FINALIZING_INDEX.into()),
             ..indexing(10, 10)
         });
         capture.wait_for_frames(3);

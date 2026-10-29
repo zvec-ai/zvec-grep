@@ -31,7 +31,9 @@ use zg_engine::{
         index::{
             IndexResult,
             options::ScanRules,
-            progress::{IndexProgress, IndexProgressPhase},
+            progress::{
+                DETAIL_FINALIZING_INDEX, DETAIL_SAVING_INDEX, IndexProgress, IndexProgressPhase,
+            },
         },
         info::{
             InfoResult,
@@ -180,7 +182,7 @@ fn progress_fixtures() -> io::Result<Vec<Fixture>> {
             .wait_for(|frame| frame.contains("Indexing files") && frame.contains("51%"))?,
     }];
     progress.files_indexed = progress.files_total;
-    progress.detail = Some("finalizing index".into());
+    progress.detail = Some(DETAIL_FINALIZING_INDEX.into());
     reporter.report(progress.clone());
     fixtures.push(Fixture {
         id: "optimizing",
@@ -196,7 +198,7 @@ fn progress_fixtures() -> io::Result<Vec<Fixture>> {
                 })
         })?,
     });
-    progress.detail = Some("saving index".into());
+    progress.detail = Some(DETAIL_SAVING_INDEX.into());
     reporter.report(progress.clone());
     fixtures.push(Fixture {
         id: "saving",
