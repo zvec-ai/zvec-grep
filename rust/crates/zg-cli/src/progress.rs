@@ -332,7 +332,11 @@ fn terminal_change_start(previous: &str, next: &str) -> Option<(usize, usize)> {
         }
         common += left.len_utf8();
     }
-    let start = next[..common].rfind("\x1b[").unwrap_or(common);
+    // A completed reset needs no replay because each previous frame ends in the default style.
+    let start = next[..common]
+        .rfind("\x1b[")
+        .filter(|&escape| !next[escape..common].starts_with("\x1b[0m"))
+        .unwrap_or(common);
     let column = terminal_visible_width(&next[..start])?;
     (column > 0).then_some((start, column))
 }
@@ -538,38 +542,48 @@ mod tests {
     #[test]
     fn indexing_updates_do_not_repaint_the_stable_progress_prefix() {
         for color in [false, true] {
-            let buffer = Arc::new(Mutex::new(Vec::new()));
-            let mut output = ProgressOutput {
-                writer: Box::new(Capture(buffer.clone())),
-                terminal: true,
-                color,
-                last: None,
-                finished: false,
-                last_indexing: None,
-            };
-            let progress = IndexProgress {
-                phase: IndexProgressPhase::Indexing,
-                files_total: Some(1045),
-                files_indexed: Some(670),
-                files_failed: None,
-                detail: None,
-                embedding: None,
-            };
-            output.report(&progress).expect("first progress frame");
-            buffer.lock().expect("capture").clear();
-            output.last.as_mut().expect("last frame").1 =
-                Instant::now() - Duration::from_millis(200);
-            output
-                .report(&IndexProgress {
-                    files_indexed: Some(671),
-                    ..progress
-                })
-                .expect("next progress frame");
-            let frame = String::from_utf8(buffer.lock().expect("capture").clone())
-                .expect("UTF-8 progress frame");
-            assert!(!frame.contains("Indexing files"), "{frame:?}");
-            assert!(frame.starts_with("\x1b["), "{frame:?}");
-            assert!(frame.contains("1/1045"), "{frame:?}");
+            for (indexed, total, changed_suffix) in [(670, 1045, "1/1045"), (892, 20936, "3/20936")]
+            {
+                let buffer = Arc::new(Mutex::new(Vec::new()));
+                let mut output = ProgressOutput {
+                    writer: Box::new(Capture(buffer.clone())),
+                    terminal: true,
+                    color,
+                    last: None,
+                    finished: false,
+                    last_indexing: None,
+                };
+                let progress = IndexProgress {
+                    phase: IndexProgressPhase::Indexing,
+                    files_total: Some(total),
+                    files_indexed: Some(indexed),
+                    files_failed: None,
+                    detail: None,
+                    embedding: None,
+                };
+                output.report(&progress).expect("first progress frame");
+                buffer.lock().expect("capture").clear();
+                output.last.as_mut().expect("last frame").1 =
+                    Instant::now() - Duration::from_millis(200);
+                output
+                    .report(&IndexProgress {
+                        files_indexed: Some(indexed + 1),
+                        ..progress
+                    })
+                    .expect("next progress frame");
+                let frame = String::from_utf8(buffer.lock().expect("capture").clone())
+                    .expect("UTF-8 progress frame");
+                assert!(frame.starts_with("\x1b["), "{frame:?}");
+                assert!(
+                    frame.ends_with(&format!("{changed_suffix}\x1b[K")),
+                    "{frame:?}"
+                );
+                assert!(!frame.contains("Indexing files"), "{frame:?}");
+                assert!(!frame.contains('█'), "{frame:?}");
+                assert!(!frame.contains('░'), "{frame:?}");
+                assert!(!frame.contains('%'), "{frame:?}");
+                assert!(!frame.contains("\x1b[0m"), "{frame:?}");
+            }
         }
     }
 
