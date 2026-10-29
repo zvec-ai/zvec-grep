@@ -15,7 +15,7 @@ use std::{
 };
 
 use crossterm::{
-    cursor::{Hide, MoveDown, MoveToColumn, MoveUp, Show},
+    cursor::{Hide, MoveDown, MoveTo, MoveToColumn, MoveUp, Show},
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     queue,
     terminal::{self, Clear, ClearType},
@@ -26,7 +26,7 @@ use zg_engine::{
     authorization::IndexAuthorization,
 };
 
-use crate::ColorMode;
+use crate::{ColorMode, terminal::terminal_character_width};
 
 struct TerminalSession {
     was_raw: bool,
@@ -63,9 +63,24 @@ fn clean(value: &str) -> String {
         .collect()
 }
 
+fn fit_terminal_row(value: &str, columns: u16) -> String {
+    let mut fitted = String::new();
+    let mut occupied = 0;
+    for character in clean(value).chars() {
+        let width = terminal_character_width(character).unwrap_or(2);
+        if occupied + width > usize::from(columns) {
+            break;
+        }
+        fitted.push(character);
+        occupied += width;
+    }
+    fitted
+}
+
 #[derive(Default)]
 struct Screen {
     lines: Vec<String>,
+    size: Option<(u16, u16)>,
 }
 
 impl Screen {
@@ -90,10 +105,8 @@ impl Screen {
 
     fn draw(&mut self, lines: &[String], color: ColorMode) -> io::Result<()> {
         let mut output = io::stderr().lock();
-        let columns = terminal::size()
-            .map_or(80, |(columns, _)| columns)
-            .saturating_sub(1);
-        self.draw_to(&mut output, lines, columns, color)
+        let (columns, rows) = terminal::size().unwrap_or((80, 24));
+        self.draw_to(&mut output, lines, columns.saturating_sub(1), rows, color)
     }
 
     fn draw_to(
@@ -101,6 +114,7 @@ impl Screen {
         output: &mut impl Write,
         lines: &[String],
         columns: u16,
+        rows: u16,
         color: ColorMode,
     ) -> io::Result<()> {
         let use_color = color == ColorMode::Always
@@ -108,10 +122,7 @@ impl Screen {
         let rendered = lines
             .iter()
             .map(|line| {
-                let line = clean(line)
-                    .chars()
-                    .take(usize::from(columns))
-                    .collect::<String>();
+                let line = fit_terminal_row(line, columns);
                 if use_color && line.trim_start().starts_with('›') {
                     format!("\x1b[38;2;134;239;172m{line}\x1b[0m")
                 } else {
@@ -119,8 +130,12 @@ impl Screen {
                 }
             })
             .collect::<Vec<_>>();
-        let previous_len = self.lines.len();
+        let resized = self.size.is_some_and(|size| size != (columns, rows));
+        let previous_len = if resized { 0 } else { self.lines.len() };
         let mut frame = Vec::new();
+        if resized {
+            queue!(frame, MoveTo(0, 0), Clear(ClearType::FromCursorDown))?;
+        }
         // Repaint only changed rows so navigation never blanks the whole prompt.
         for (index, line) in rendered.iter().enumerate().take(previous_len) {
             if self.lines[index] == *line {
@@ -152,6 +167,7 @@ impl Screen {
             output.flush()?;
         }
         self.lines = rendered;
+        self.size = Some((columns, rows));
         Ok(())
     }
 }
@@ -235,6 +251,25 @@ impl ModelSelection {
     }
 
     fn lines(&self, root: &Path, height: u16) -> Vec<String> {
+        let choices = self.choices();
+        let active = self.positions[self.tab];
+        if height <= 11 {
+            let selected = choices.get(active).map_or_else(
+                || "No supported models".to_owned(),
+                |model| format!("› {}", model.reference),
+            );
+            let mut lines = vec![selected];
+            if height >= 3 {
+                lines.insert(0, "Select an embedding model:".into());
+            }
+            if height >= 4 {
+                lines.push(format!(
+                    "↑/↓ Select · Tab Switch · Enter {} · Esc Exit",
+                    if self.tab == 0 { "Build" } else { "Continue" }
+                ));
+            }
+            return lines;
+        }
         let mut lines = vec![
             format!(
                 "No index found in {}.",
@@ -251,9 +286,7 @@ impl ModelSelection {
             .into(),
             String::new(),
         ];
-        let choices = self.choices();
         let visible = usize::from(height.saturating_sub(11)).clamp(1, 12);
-        let active = self.positions[self.tab];
         let start = active.saturating_sub(visible - 1);
         let width = choices
             .iter()
@@ -587,6 +620,7 @@ mod tests {
                 &mut Vec::new(),
                 &picker.lines(Path::new("/workspace"), 24),
                 80,
+                24,
                 ColorMode::Never,
             )
             .expect("draw prompt");
@@ -597,6 +631,7 @@ mod tests {
                 &mut output,
                 &picker.lines(Path::new("/workspace"), 24),
                 80,
+                24,
                 ColorMode::Never,
             )
             .expect("redraw prompt");
@@ -616,9 +651,88 @@ mod tests {
                 &mut unchanged,
                 &picker.lines(Path::new("/workspace"), 24),
                 80,
+                24,
                 ColorMode::Never,
             )
             .expect("redraw unchanged prompt");
         assert!(unchanged.is_empty(), "unchanged prompt must not repaint");
+    }
+
+    #[test]
+    fn shrinking_terminal_repaints_visible_model_from_a_new_origin() {
+        let mut setup = setup();
+        let model = setup
+            .models
+            .iter()
+            .find(|model| model.local)
+            .expect("local model")
+            .clone();
+        setup.models = (0..11)
+            .map(|index| EmbeddingChoice {
+                reference: format!("local/{index:02}"),
+                ..model.clone()
+            })
+            .collect();
+        setup.default_model = Some("local/00".into());
+        let picker = ModelSelection::new(&setup);
+        let mut screen = Screen::default();
+        screen
+            .draw_to(
+                &mut Vec::new(),
+                &picker.lines(Path::new("/workspace"), 30),
+                80,
+                30,
+                ColorMode::Never,
+            )
+            .expect("draw tall prompt");
+        let mut resized = Vec::new();
+        screen
+            .draw_to(
+                &mut resized,
+                &picker.lines(Path::new("/workspace"), 12),
+                80,
+                12,
+                ColorMode::Never,
+            )
+            .expect("draw short prompt");
+        let frame = String::from_utf8(resized).expect("UTF-8 redraw");
+        assert!(
+            frame.contains("No index found"),
+            "prompt header was not repainted: {frame:?}"
+        );
+        assert!(
+            frame.contains("› local/00"),
+            "selected model was not repainted: {frame:?}"
+        );
+    }
+
+    #[test]
+    fn wide_characters_do_not_wrap_a_picker_row() {
+        let mut screen = Screen::default();
+        let mut output = Vec::new();
+        screen
+            .draw_to(&mut output, &["界".repeat(20)], 20, 24, ColorMode::Never)
+            .expect("draw wide characters");
+        let frame = String::from_utf8(output).expect("UTF-8 redraw");
+        assert_eq!(
+            frame.matches('界').count(),
+            10,
+            "wide row exceeds terminal columns"
+        );
+    }
+
+    #[test]
+    fn compact_picker_keeps_the_selected_model_in_short_terminals() {
+        let mut setup = setup();
+        setup.default_model = Some("local/one".into());
+        let picker = ModelSelection::new(&setup);
+        for height in [3, 8, 10, 11] {
+            let lines = picker.lines(Path::new("/workspace"), height);
+            assert!(lines.len() < usize::from(height), "{height}: {lines:?}");
+            assert!(
+                lines.iter().any(|line| line.contains("› local/one")),
+                "{height}: {lines:?}"
+            );
+        }
     }
 }

@@ -1,4 +1,4 @@
-use crate::ColorMode;
+use crate::{ColorMode, terminal::terminal_character_width};
 use crossterm::terminal;
 use std::fmt::Write as _;
 use std::{
@@ -365,21 +365,6 @@ fn terminal_visible_width(value: &str) -> Option<usize> {
     Some(width)
 }
 
-fn terminal_character_width(character: char) -> Option<usize> {
-    if character.is_control() {
-        Some(0)
-    } else if character.is_ascii()
-        || matches!(
-            character,
-            '│' | '·' | '✢' | '✳' | '✶' | '✻' | '✽' | '◆' | '█' | '░'
-        )
-    {
-        Some(1)
-    } else {
-        None
-    }
-}
-
 fn format_progress(progress: &IndexProgress, terminal: bool) -> (String, String) {
     if let Some(embedding) = &progress.embedding
         && let Some(stage) = embedding.stage
@@ -564,8 +549,9 @@ mod tests {
                 };
                 output.report(&progress).expect("first progress frame");
                 buffer.lock().expect("capture").clear();
-                output.last.as_mut().expect("last frame").1 =
-                    Instant::now() - Duration::from_millis(200);
+                output.last.as_mut().expect("last frame").1 = Instant::now()
+                    .checked_sub(Duration::from_millis(200))
+                    .expect("test clock supports 200 ms subtraction");
                 output
                     .report(&IndexProgress {
                         files_indexed: Some(indexed + 1),
@@ -609,7 +595,9 @@ mod tests {
         };
         output.report(&indexing).expect("indexing progress");
         buffer.lock().expect("capture").clear();
-        output.last.as_mut().expect("last frame").1 = Instant::now() - Duration::from_millis(200);
+        output.last.as_mut().expect("last frame").1 = Instant::now()
+            .checked_sub(Duration::from_millis(200))
+            .expect("test clock supports 200 ms subtraction");
         let batch = IndexProgress {
             files_total: None,
             files_indexed: None,
@@ -623,7 +611,10 @@ mod tests {
         };
         output.report(&batch).expect("embedding batch progress");
         let line = &output.last.as_ref().expect("last frame").2;
-        assert!(line.contains('█'), "{line:?}");
+        assert!(
+            line.contains(if cfg!(windows) { '#' } else { '█' }),
+            "{line:?}"
+        );
         assert!(line.contains("892/20936"), "{line:?}");
         assert!(buffer.lock().expect("capture").is_empty());
         assert_eq!(
@@ -634,7 +625,9 @@ mod tests {
                 .files_indexed,
             Some(892)
         );
-        output.last.as_mut().expect("last frame").1 = Instant::now() - Duration::from_millis(200);
+        output.last.as_mut().expect("last frame").1 = Instant::now()
+            .checked_sub(Duration::from_millis(200))
+            .expect("test clock supports 200 ms subtraction");
         output
             .report(&IndexProgress {
                 embedding: Some(IndexEmbeddingProgress {

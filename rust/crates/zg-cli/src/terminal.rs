@@ -1,5 +1,33 @@
 use std::io::{self, IsTerminal};
 
+pub(crate) fn terminal_character_width(character: char) -> Option<usize> {
+    if character.is_control() {
+        Some(0)
+    } else if character.is_ascii()
+        || matches!(
+            character,
+            '│' | '·'
+                | '›'
+                | '↑'
+                | '↓'
+                | '←'
+                | '→'
+                | '✢'
+                | '✳'
+                | '✶'
+                | '✻'
+                | '✽'
+                | '◆'
+                | '█'
+                | '░'
+        )
+    {
+        Some(1)
+    } else {
+        None
+    }
+}
+
 #[cfg(windows)]
 use winapi_util::{HandleRef, console};
 
