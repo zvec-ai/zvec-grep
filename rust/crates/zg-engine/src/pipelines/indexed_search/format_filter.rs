@@ -9,7 +9,7 @@ use crate::{
     api::context::options::QueryFilter, domain::FileFormat, storage::types::StoragePathFilter,
 };
 
-use crate::storage::path_filter::{all, any, negate};
+use super::path_filter::{all, any, negate};
 
 pub(in crate::pipelines) fn compile_format_filter(
     filter: &QueryFilter,
