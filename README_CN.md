@@ -13,7 +13,6 @@
     <a href="https://www.npmjs.com/package/@zvec/zvec-grep"><img src="https://img.shields.io/npm/v/@zvec/zvec-grep.svg" alt="npm 版本" /></a>
     <a href="https://github.com/zvec-ai/zvec-grep/actions/workflows/rust-ci.yml"><img src="https://github.com/zvec-ai/zvec-grep/actions/workflows/rust-ci.yml/badge.svg" alt="Rust CI" /></a>
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 许可证" /></a>
-    <img src="https://img.shields.io/badge/built_with-Rust-orange.svg" alt="使用 Rust 构建" />
   </p>
 
   <p>
