@@ -285,6 +285,11 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Test installed npm command lifecycle on this OS
+        run: node --test scripts/npm-installed-cli.test.mjs
       - name: Use a short Windows Cargo home
         if: runner.os == 'Windows'
         shell: python

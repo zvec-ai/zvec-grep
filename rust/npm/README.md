@@ -237,11 +237,14 @@ Release order:
    IPC, plus real CPU indexing and vector/FTS/hybrid search with Potion, GGUF and
    ONNX on all six platforms. Check incremental updates and MCP stdio search.
    Repeat the candidate probes after updating from a distinct published baseline,
-   then roll back. Default CPU installation must leave no CUDA plugins/cache or
-   npm CUDA download attempts. Separately, force a registry plugin installation
+   then roll back. Both fresh and upgraded CPU installations must leave no CUDA
+   plugins/cache or npm CUDA download attempts. After rollback, use separate caches
+   to force a registry plugin installation
    on CUDA-capable targets and verify hashes and core identity; CPU fallback
    must not hide a plugin-fetch failure. Retain per-command and model evidence
-   on failures as well as successes.
+   on failures as well as successes. Command timeouts terminate the npm entry's
+   process tree (including PowerShell children on Windows); MCP EOF shutdown must
+   complete successfully within a bounded wait before continuing.
 6. Promote native `latest` tags and then the meta `latest` tag in a separate job,
    only after all six registry entry/model/install/update/rollback jobs pass.
 

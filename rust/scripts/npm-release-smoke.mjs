@@ -80,37 +80,37 @@ export async function smokeInstalledPackage({
     "rust-release-smoke-marker\n",
   );
   let commandIndex = 0;
-  const execute = (args, mode = "direct") =>
-    runInstalledCli(prefix, args, {
+  const execute = async (args, mode = "direct") =>
+    (await runInstalledCli(prefix, args, {
       cwd: fixtureRoot,
       logRoot: join(fixtureRoot, "logs"),
       label: `cli-${commandIndex++}-${args[0].replace(/^--/, "")}`,
       env: installedCliEnvironment(prefix, join(fixtureRoot, "home"), {
         ZVEC_GREP_MODE: mode,
       }),
-    }).stdout;
-  if (execute(["--version"]).trim() !== version) {
+    })).stdout;
+  if ((await execute(["--version"])).trim() !== version) {
     throw new Error(`installed zg version does not match ${version}`);
   }
   if (
-    !execute([
+    !(await execute([
       "--rg",
       "-F",
       "rust-release-smoke-marker",
       "fixture.txt",
-    ]).includes("rust-release-smoke-marker")
+    ])).includes("rust-release-smoke-marker")
   ) {
     throw new Error("packaged zg managed-rg search failed");
   }
-  const direct = execute(["--status", "--no-color"]);
+  const direct = await execute(["--status", "--no-color"]);
   try {
-    execute([
+    await execute([
       "--server",
       "on",
       "--listen",
       `127.0.0.1:${await availablePort()}`,
     ]);
-    const status = execute(["--server", "status", "--check-ready"]);
+    const status = await execute(["--server", "status", "--check-ready"]);
     if (
       !status.includes("Server: ready") ||
       !status.includes("PID:") ||
@@ -120,18 +120,18 @@ export async function smokeInstalledPackage({
     }
     // Unlike managed --rg, workspace status in server mode crosses the IPC
     // boundary and exercises the packaged daemon's command endpoint.
-    const server = execute(["--status", "--no-color"], "server");
+    const server = await execute(["--status", "--no-color"], "server");
     if (direct !== server)
       throw new Error("packaged direct/server workspace status differs");
   } finally {
-    execute(["--server", "off"]);
+    await execute(["--server", "off"]);
   }
-  if (!execute(["--server", "status"]).includes("Server: stopped")) {
+  if (!(await execute(["--server", "status"])).includes("Server: stopped")) {
     throw new Error("packaged daemon did not stop");
   }
   let unavailable = false;
   try {
-    execute(["--status", "--no-color"], "server");
+    await execute(["--status", "--no-color"], "server");
   } catch {
     unavailable = true;
   }
@@ -502,9 +502,9 @@ export async function smokeRegistryRelease({
       );
       if (metadata.version !== baseline)
         throw new Error("rollback package version differs from the baseline");
-      if (runInstalledCli(prefix, ["--version"], {
+      if ((await runInstalledCli(prefix, ["--version"], {
         env: installedCliEnvironment(prefix, join(prefixRoot, "baseline-home")),
-      }).stdout.trim() !== baseline)
+      })).stdout.trim() !== baseline)
         throw new Error(
           "rollback executable version differs from the baseline",
         );
@@ -526,18 +526,14 @@ export async function smokeRegistryRelease({
     fixtureRoot: join(prefixRoot, "fresh-workspace"),
   });
   await modelProbe({ prefix: fresh, fixtureRoot: join(prefixRoot, "fresh-models") });
-  if (entry.components?.length) {
-    // Explicit registry fetch on a CPU runner: auto fallback cannot conceal a
-    // missing artifact, wrong ABI, integrity error or authentication failure.
-    await runNpm("npm", ["rebuild", "--global", "--prefix", fresh,
-      "--registry=https://registry.npmjs.org", `--allow-scripts=${manifest.metaPackage}`, manifest.metaPackage, "--foreground-scripts"],
-    { env: { ...environment, ZG_INSTALL_ACCELERATOR: "cuda" } });
-    await verifyInstalled({ manifest, entry, version: release.version, prefix: fresh, requireCuda: true });
-  }
   await install(update, baseline);
   await verifyPrevious(update);
   await install(update, release.version);
-  await verifyInstalled({ manifest, entry, version: release.version, prefix: update });
+  const upgraded = await verifyInstalled({ manifest, entry, version: release.version, prefix: update });
+  await writeFile(join(prefixRoot, "update-installation.json"), `${JSON.stringify(upgraded, null, 2)}\n`);
+  await assertCpuInstallation({ installation: upgraded, entry, prefixRoot,
+    bundle: installedPackageRoot(update, manifest.metaPackage) });
+  await assertNoRegistryCudaDownloads(prefixRoot, entry);
   await probe({
     manifest,
     entry,
@@ -548,6 +544,16 @@ export async function smokeRegistryRelease({
   await modelProbe({ prefix: update, fixtureRoot: join(prefixRoot, "update-models") });
   await install(update, baseline);
   await verifyPrevious(update);
+  await assertNoRegistryCudaDownloads(prefixRoot, entry);
+  if (entry.components?.length) {
+    // Run explicit CUDA verification only after all default CPU installations,
+    // with separate caches so it cannot mask unexpected upgrade downloads.
+    await runNpm("npm", ["rebuild", "--global", "--prefix", fresh,
+      "--registry=https://registry.npmjs.org", `--allow-scripts=${manifest.metaPackage}`, manifest.metaPackage, "--foreground-scripts"],
+    { env: { ...environment, ZG_INSTALL_ACCELERATOR: "cuda",
+      npm_config_cache: join(prefixRoot, "cuda-cache"), ZG_PLUGIN_CACHE: join(prefixRoot, "cuda-plugin-cache") } });
+    await verifyInstalled({ manifest, entry, version: release.version, prefix: fresh, requireCuda: true });
+  }
   console.log(
     `registry install/update/rollback passed: ${baseline} -> ${release.version} -> ${baseline} (${entry.target})`,
   );

@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
-import { installedCliEnvironment, installedCliInvocation, runInstalledCli } from "./npm-installed-cli.mjs";
+import { closeInstalledCli, installedCliEnvironment, installedCliInvocation, runInstalledCli, spawnInstalledCli, terminateInstalledCli } from "./npm-installed-cli.mjs";
 import { npmEnvironment, run } from "./npm-package-core.mjs";
-import { smokeInstalledModels, smokeModels } from "./npm-model-smoke.mjs";
+import { smokeInstalledMcp, smokeInstalledModels, smokeModels } from "./npm-model-smoke.mjs";
 
 async function temporary(t) {
   const root = await mkdtemp(join(tmpdir(), "zg-npm-cli-"));
@@ -13,7 +14,7 @@ async function temporary(t) {
   return root;
 }
 
-test("executes npm's real global entry, preserving spaced arguments and retaining native failures", async (t) => {
+async function installedFixture(t, body) {
   const root = await temporary(t);
   const source = join(root, "fixture");
   const prefix = join(root, "prefix with spaces");
@@ -21,20 +22,106 @@ test("executes npm's real global entry, preserving spaced arguments and retainin
   await writeFile(join(source, "package.json"), JSON.stringify({
     name: "zg-entry-fixture", version: "1.0.0", bin: { zg: "cli.cjs" },
   }));
-  await writeFile(join(source, "cli.cjs"), `#!/usr/bin/env node
-console.log(JSON.stringify({args: process.argv.slice(2), home: process.env.ZVEC_GREP_HOME}));
-if (process.argv.includes("--fail")) { console.error("fixture native failure"); process.exit(7); }
-`, { mode: 0o755 });
+  await writeFile(join(source, "cli.cjs"), `#!/usr/bin/env node\n${body}`, { mode: 0o755 });
   run("npm", ["install", "--global", "--prefix", prefix, "--offline", "--ignore-scripts", "--no-audit", "--no-fund", source],
     { env: npmEnvironment(join(root, "npm-cache")), capture: true });
-  const env = installedCliEnvironment(prefix, join(root, "runtime"));
-  const result = runInstalledCli(prefix, ["two words", "中文路径"], { env });
+  return { root, prefix, env: installedCliEnvironment(prefix, join(root, "runtime")) };
+}
+
+test("executes npm's real global entry, preserving spaced arguments and retaining native failures", async (t) => {
+  const { root, prefix, env } = await installedFixture(t, `
+console.log(JSON.stringify({args: process.argv.slice(2), home: process.env.ZVEC_GREP_HOME}));
+if (process.argv.includes("--fail")) { console.error("fixture native failure"); process.exit(7); }
+`);
+  const result = await runInstalledCli(prefix, ["two words", "中文路径"], { env });
   assert.deepEqual(JSON.parse(result.stdout), { args: ["two words", "中文路径"], home: join(root, "runtime") });
   const logRoot = join(root, "logs");
-  assert.throws(() => runInstalledCli(prefix, ["--fail"], { env, logRoot, label: "failure" }), /fixture native failure/);
+  await assert.rejects(runInstalledCli(prefix, ["--fail"], { env, logRoot, label: "failure" }), /failed \(7\).*fixture native failure/s);
   assert.match(await readFile(join(logRoot, "failure.stderr"), "utf8"), /fixture native failure/);
+  await assert.rejects(runInstalledCli(prefix, [], { env, cwd: join(root, "missing"), logRoot, label: "spawn" }), /ENOENT/);
+  assert.equal(await readFile(join(logRoot, "spawn.stdout"), "utf8"), "");
   await rm(installedCliInvocation(prefix, []).entry);
-  assert.throws(() => runInstalledCli(prefix, ["--version"], { env }), /ENOENT/);
+  await assert.rejects(runInstalledCli(prefix, ["--version"], { env }), /ENOENT/);
+});
+
+const hangingTree = `
+const { spawn } = require("node:child_process");
+spawn(process.execPath, ["-e", 'console.log("descendant:" + process.pid); process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'],
+  { stdio: ["ignore", "inherit", "inherit"] });
+process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+`;
+
+async function assertExited(pid) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try { process.kill(pid, 0); }
+    catch (error) { assert.equal(error.code, "ESRCH"); return; }
+    await delay(50);
+  }
+  assert.fail(`descendant ${pid} survived npm entry cleanup`);
+}
+
+test("command timeout terminates the npm shim and native descendants, retaining output", { timeout: 30_000 }, async (t) => {
+  const { root, prefix, env } = await installedFixture(t, hangingTree);
+  const logRoot = join(root, "logs");
+  await assert.rejects(runInstalledCli(prefix, [], { env, logRoot, label: "timeout", timeout: 5_000 }), /timed out/);
+  const output = await readFile(join(logRoot, "timeout.stdout"), "utf8");
+  assert.match(output, /descendant:\d+/);
+  await assertExited(Number(output.match(/descendant:(\d+)/)[1]));
+});
+
+test("excessive output fails with bounded evidence and cleans up the command", async (t) => {
+  const { root, prefix, env } = await installedFixture(t, `
+console.log("pid:" + process.pid);
+process.stdout.write("x".repeat(4096));
+setInterval(() => {}, 1000);
+`);
+  const logRoot = join(root, "logs");
+  await assert.rejects(runInstalledCli(prefix, [], { env, logRoot, label: "overflow", maxBuffer: 64 }), /exceeded maxBuffer/);
+  const output = await readFile(join(logRoot, "overflow.stdout"), "utf8");
+  assert.equal(Buffer.byteLength(output), 64);
+  await assertExited(Number(output.match(/pid:(\d+)/)[1]));
+});
+
+test("MCP EOF cleanup terminates a stuck npm process tree before rejecting", { timeout: 30_000 }, async (t) => {
+  const { prefix, env } = await installedFixture(t, hangingTree);
+  const child = spawnInstalledCli(prefix, [], { env, stdio: "pipe" });
+  t.after(() => terminateInstalledCli(child));
+  child.stdin.on("error", () => {});
+  child.stderr.resume();
+  const pid = await new Promise((resolve, reject) => {
+    let output = "";
+    child.on("error", reject);
+    child.stdout.on("data", (data) => {
+      output += data;
+      const match = output.match(/descendant:(\d+)/);
+      if (match) resolve(Number(match[1]));
+    });
+  });
+  await assert.rejects(closeInstalledCli(child, { timeout: 100 }), /did not exit/);
+  await assertExited(pid);
+});
+
+test("MCP waits for EOF shutdown and rejects nonzero exit after a successful response", async (t) => {
+  const { root, prefix, env } = await installedFixture(t, `
+const lines = require("node:readline").createInterface({ input: process.stdin });
+lines.on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  const result = request.method === "tools/list" ? { tools: [{ name: "zvec_grep_search" }] }
+    : request.method === "tools/call" ? { content: [{ type: "text", text: "releaseobservatorymarker" }] } : {};
+  console.log(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }));
+});
+lines.on("close", () => { console.error("EOF shutdown"); process.exit(Number(process.env.FIXTURE_EXIT_CODE)); });
+`);
+  for (const code of [0, 7]) {
+    const logRoot = join(root, `logs-${code}`);
+    const probe = smokeInstalledMcp({ prefix, cwd: root, env: { ...env, FIXTURE_EXIT_CODE: String(code) }, logRoot });
+    if (code === 0) await probe;
+    else await assert.rejects(probe, /exited with 7/);
+    assert.match(await readFile(join(logRoot, "mcp.stderr"), "utf8"), /EOF shutdown/);
+    assert.equal(JSON.parse(await readFile(join(logRoot, "mcp.json"), "utf8")).length, 3);
+  }
 });
 
 test("Windows executes the npm PowerShell shim, not the package executable", () => {

@@ -3,7 +3,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { installedCliEnvironment, runInstalledCli, spawnInstalledCli } from "./npm-installed-cli.mjs";
+import { closeInstalledCli, installedCliEnvironment, runInstalledCli, spawnInstalledCli } from "./npm-installed-cli.mjs";
 
 export const smokeModels = [
   ["potion", "local/potion-code-16m-v2"],
@@ -69,13 +69,15 @@ export async function smokeInstalledMcp({ prefix, cwd, env, logRoot }) {
     if (result.isError) throw new Error(JSON.stringify(result));
     requireOutput(JSON.stringify(result), marker);
   } finally {
-    lines.close();
-    child.stdin.end();
-    // Only the stdio client is terminated here; the caller stops its isolated daemon.
-    if (child.exitCode === null) child.kill();
-    await mkdir(logRoot, { recursive: true });
-    await writeFile(join(logRoot, "mcp.json"), `${JSON.stringify(transcript, null, 2)}\n`);
-    await writeFile(join(logRoot, "mcp.stderr"), stderr);
+    try {
+      // Wait for EOF shutdown; a stuck shim/native child requires tree cleanup.
+      await closeInstalledCli(child);
+    } finally {
+      lines.close();
+      await mkdir(logRoot, { recursive: true });
+      await writeFile(join(logRoot, "mcp.json"), `${JSON.stringify(transcript, null, 2)}\n`);
+      await writeFile(join(logRoot, "mcp.stderr"), stderr);
+    }
   }
 }
 
@@ -107,31 +109,31 @@ export async function smokeInstalledModels({ prefix, fixtureRoot, modelCache,
     const runtime = ["--device", "cpu", "--model-cache", modelCache, "--debug", "--no-color"];
     let started = false;
     try {
-      const index = run("index", ["--index", "--embedding", model, ...runtime]);
+      const index = await run("index", ["--index", "--embedding", model, ...runtime]);
       requireOutput(index.stderr, "Index complete");
-      requireOutput(run("status", ["--status", "--check-ready", "--no-color"]).stdout, model);
+      requireOutput((await run("status", ["--status", "--check-ready", "--no-color"])).stdout, model);
       const vector = ["--vector", "Which component calibrates the telescope?", "--refresh", "off",
         "--limit", "1", "--preview", "full", ...runtime];
-      requireOutput(run("vector", vector).stdout, marker);
-      requireOutput(run("fts", ["--fts", marker, "--refresh", "off", "--preview", "full"]).stdout, marker);
-      requireOutput(run("hybrid", ["Which component calibrates the telescope?", "--refresh", "off",
-        "--limit", "1", "--preview", "full", ...runtime]).stdout, marker);
+      requireOutput((await run("vector", vector)).stdout, marker);
+      requireOutput((await run("fts", ["--fts", marker, "--refresh", "off", "--preview", "full"])).stdout, marker);
+      requireOutput((await run("hybrid", ["Which component calibrates the telescope?", "--refresh", "off",
+        "--limit", "1", "--preview", "full", ...runtime])).stdout, marker);
 
       await writeFile(join(cwd, "update.md"), "releaseincrementalmarker calibrates the telescope.\n");
-      run("update-index", ["--index", ...runtime]);
-      requireOutput(run("update-query", ["--fts", "releaseincrementalmarker", "--refresh", "off", "--preview", "full"]).stdout,
+      await run("update-index", ["--index", ...runtime]);
+      requireOutput((await run("update-query", ["--fts", "releaseincrementalmarker", "--refresh", "off", "--preview", "full"])).stdout,
         "update.md");
       await rm(join(cwd, "update.md"));
-      run("delete-index", ["--index", ...runtime]);
-      const removed = run("delete-query", ["--fts", "releaseincrementalmarker", "--refresh", "off"]).stdout;
+      await run("delete-index", ["--index", ...runtime]);
+      const removed = (await run("delete-query", ["--fts", "releaseincrementalmarker", "--refresh", "off"])).stdout;
       if (removed.includes("update.md")) throw new Error("deleted file remains searchable");
 
       const port = await availablePort();
       env.ZVEC_GREP_SERVER_URL = `http://127.0.0.1:${port}/mcp`;
       started = true; // Cleanup also covers a partially failed startup.
-      run("server-on", ["--server", "on", "--listen", `127.0.0.1:${port}`]);
-      requireOutput(run("server-ready", ["--server", "status", "--check-ready"]).stdout, "Server: ready");
-      requireOutput(run("server-vector", vector, "server").stdout, marker);
+      await run("server-on", ["--server", "on", "--listen", `127.0.0.1:${port}`]);
+      requireOutput((await run("server-ready", ["--server", "status", "--check-ready"])).stdout, "Server: ready");
+      requireOutput((await run("server-vector", vector, "server")).stdout, marker);
       await mcpProbe({ prefix, cwd, env, logRoot });
       results.push({ backend, model, passed: true });
     } catch (error) {
@@ -139,8 +141,8 @@ export async function smokeInstalledModels({ prefix, fixtureRoot, modelCache,
     } finally {
       if (started) {
         try {
-          run("server-off", ["--server", "off"]);
-          requireOutput(run("server-stopped", ["--server", "status"]).stdout, "Server: stopped");
+          await run("server-off", ["--server", "off"]);
+          requireOutput((await run("server-stopped", ["--server", "status"])).stdout, "Server: stopped");
         } catch (error) { results.push({ backend, passed: false, error: `daemon cleanup: ${error.message}` }); }
       }
       await writeFile(join(fixtureRoot, "results.json"), `${JSON.stringify(results, null, 2)}\n`);

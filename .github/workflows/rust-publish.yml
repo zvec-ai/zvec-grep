@@ -432,8 +432,10 @@ jobs:
           path: |
             rust/dist/npm/release/registry-smoke/results.json
             rust/dist/npm/release/registry-smoke/installation.json
+            rust/dist/npm/release/registry-smoke/update-installation.json
             rust/dist/npm/release/registry-smoke/cpu-downloads.json
             rust/dist/npm/release/registry-smoke/cache/_logs/
+            rust/dist/npm/release/registry-smoke/cuda-cache/_logs/
             rust/dist/npm/release/registry-smoke/*-workspace/logs/
             rust/dist/npm/release/registry-smoke/*-models/results.json
             rust/dist/npm/release/registry-smoke/*-models/*/logs/
