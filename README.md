@@ -23,7 +23,6 @@
   </p>
 
   <p>
-    <a href="#tour">🎬 <strong>Tour</strong></a> |
     <a href="#features">💫 <strong>Features</strong></a> |
     <a href="#try-it-yourself">🚀 <strong>Try it yourself</strong></a> |
     <a href="https://zvec.org/en/docs/zvec-grep/">📚 <strong>Docs</strong></a> |
