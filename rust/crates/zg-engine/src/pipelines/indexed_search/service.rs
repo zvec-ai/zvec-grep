@@ -144,25 +144,24 @@ async fn try_writer_context(
     if !active.index_enabled() || active.storage_generation() != workspace.storage_generation() {
         return Ok(None);
     }
-    let schema = workspace
-        .index()
-        .descriptor()
-        .map(crate::domain::IndexDescriptor::default_embedding_model)
-        .ok_or_else(|| {
-            workspace_index_unavailable(source_root, "writer model information is missing")
-        })?;
-    let model_request = search_model_request(workspace, schema, options, uses_vectors(request))?;
-    if !writer
-        .session
-        .models
-        .first()
-        .is_some_and(|model| model.matches_query_request(&model_request))
-    {
-        return Ok(None);
-    }
-    // Use the exact configuration that passed the writer-key check, including
-    // authorization, rather than resolving mutable configuration a second time.
     let acquired = if uses_vectors(request) {
+        let schema = workspace
+            .index()
+            .descriptor()
+            .map(crate::domain::IndexDescriptor::default_embedding_model)
+            .ok_or_else(|| {
+                workspace_index_unavailable(source_root, "writer model information is missing")
+            })?;
+        let model_request = search_model_request(workspace, schema, options)?;
+        if !writer
+            .session
+            .models
+            .first()
+            .is_some_and(|model| model.matches_query_request(&model_request))
+        {
+            return Ok(None);
+        }
+        // Reuse the configuration that passed authorization and the writer-key check.
         let model = models
             .acquire(model_request)
             .map_err(ModelError::into_engine_error)?;
@@ -277,7 +276,7 @@ fn acquire_search_model_for(
     options: &ContextOptions,
 ) -> Result<ModelRuntimeLease, EngineError> {
     models
-        .acquire(search_model_request(workspace, schema, options, true)?)
+        .acquire(search_model_request(workspace, schema, options)?)
         .map_err(ModelError::into_engine_error)
 }
 
@@ -285,7 +284,6 @@ fn search_model_request(
     workspace: &Workspace,
     schema: &crate::domain::EmbeddingModelInfo,
     options: &ContextOptions,
-    authorize: bool,
 ) -> Result<ModelRuntimeRequest, EngineError> {
     let reference = schema.model().reference();
     if options
@@ -317,15 +315,13 @@ fn search_model_request(
             &reference,
             options.endpoint.as_deref().or(runtime.endpoint.as_deref()),
         )?;
-        if authorize {
-            crate::authorization::require_with_targets(
-                workspace.source_root(),
-                &reference,
-                &endpoint,
-                options.allow_remote,
-                &options.authorized_remote,
-            )?;
-        }
+        crate::authorization::require_with_targets(
+            workspace.source_root(),
+            &reference,
+            &endpoint,
+            options.allow_remote,
+            &options.authorized_remote,
+        )?;
         Some(endpoint)
     };
     let saved_key = if local || options.api_key.is_some() {

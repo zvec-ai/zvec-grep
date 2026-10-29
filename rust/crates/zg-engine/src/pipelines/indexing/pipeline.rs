@@ -622,10 +622,6 @@ enum PreparedCandidate {
 type EmbeddingFuture<'context> =
     Pin<Box<dyn Future<Output = Result<EmbeddingBatchOutcome, ModelError>> + Send + 'context>>;
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the bounded prepare/schedule/drain loop is clearest as one linear orchestration"
-)]
 async fn index_candidates(
     context: &IndexingContext<'_>,
     control: &TaskControl,
@@ -634,6 +630,36 @@ async fn index_candidates(
     progress_base: Option<ProgressBase>,
     model_prepared: &mut bool,
 ) -> Result<IndexWriteStats, EngineError> {
+    let mut running = FuturesUnordered::new();
+    let result = index_candidates_inner(
+        context,
+        control,
+        diff,
+        timings,
+        progress_base,
+        model_prepared,
+        &mut running,
+    )
+    .await;
+    // Preparation and storage failures must also settle already-started native work
+    // before the service releases model permits and the workspace writer.
+    drain_embedding_futures(&mut running).await;
+    result
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the bounded prepare/schedule/drain loop is clearest as one linear orchestration"
+)]
+async fn index_candidates_inner<'context>(
+    context: &'context IndexingContext<'context>,
+    control: &TaskControl,
+    diff: &mut DiffPlan,
+    timings: &mut TimingCollector,
+    progress_base: Option<ProgressBase>,
+    model_prepared: &mut bool,
+    running: &mut FuturesUnordered<EmbeddingFuture<'context>>,
+) -> Result<IndexWriteStats, EngineError> {
     let policy =
         resolve_index_batch_policy(context.embedding_concurrency, context.embedding_models[0])?;
     let scheduler = Arc::new(EmbeddingScheduler::new(policy));
@@ -641,7 +667,6 @@ async fn index_candidates(
     let mut stats = IndexWriteStats::default();
     let mut current_batch = Vec::new();
     let mut current_fragments = 0;
-    let mut running: FuturesUnordered<EmbeddingFuture<'_>> = FuturesUnordered::new();
 
     report_indexing(
         context,
@@ -654,10 +679,7 @@ async fn index_candidates(
 
     let candidates = std::mem::take(&mut diff.candidates);
     for mut candidate in candidates {
-        if let Err(error) = throw_if_cancelled(context.signal.as_ref()) {
-            drain_embedding_futures(&mut running).await;
-            return Err(error);
-        }
+        throw_if_cancelled(context.signal.as_ref())?;
         report_indexing(
             context,
             &stats,
@@ -676,10 +698,7 @@ async fn index_candidates(
             prepare_candidate(context, control, &candidate).await
         };
         timings.record("index_prepare", prepare_started.elapsed(), 1);
-        if let Err(error) = throw_if_cancelled(context.signal.as_ref()) {
-            drain_embedding_futures(&mut running).await;
-            return Err(error);
-        }
+        throw_if_cancelled(context.signal.as_ref())?;
         let prepared = match prepared {
             Ok(PreparedCandidate::Unchanged(file)) => {
                 context.storage.update_file_snapshot(&file)?;
@@ -688,7 +707,6 @@ async fn index_candidates(
             }
             Ok(PreparedCandidate::File(prepared)) => *prepared,
             Err(error) if error.code() == EngineError::CANCELLED => {
-                drain_embedding_futures(&mut running).await;
                 return Err(error);
             }
             Err(error) => {
@@ -722,7 +740,7 @@ async fn index_candidates(
             if !current_batch.is_empty() {
                 ensure_model_prepared(context, model_prepared).await?;
                 push_embedding(
-                    &mut running,
+                    running,
                     std::mem::take(&mut current_batch),
                     context,
                     Arc::clone(&scheduler),
@@ -730,19 +748,14 @@ async fn index_candidates(
                 current_fragments = 0;
             }
             ensure_model_prepared(context, model_prepared).await?;
-            push_embedding(
-                &mut running,
-                vec![prepared],
-                context,
-                Arc::clone(&scheduler),
-            );
+            push_embedding(running, vec![prepared], context, Arc::clone(&scheduler));
         } else {
             if current_fragments > 0
                 && current_fragments + prepared.fragments.len() > max_batch_size
             {
                 ensure_model_prepared(context, model_prepared).await?;
                 push_embedding(
-                    &mut running,
+                    running,
                     std::mem::take(&mut current_batch),
                     context,
                     Arc::clone(&scheduler),
@@ -754,7 +767,7 @@ async fn index_candidates(
             if current_fragments == max_batch_size {
                 ensure_model_prepared(context, model_prepared).await?;
                 push_embedding(
-                    &mut running,
+                    running,
                     std::mem::take(&mut current_batch),
                     context,
                     Arc::clone(&scheduler),
@@ -765,25 +778,17 @@ async fn index_candidates(
 
         if running.len() >= scheduler.task_concurrency()
             && let Some(outcome) = running.next().await
-            && let Err(error) =
-                apply_embedding_outcome(context, diff, progress_base, timings, &mut stats, outcome)
         {
-            drain_embedding_futures(&mut running).await;
-            return Err(error);
+            apply_embedding_outcome(context, diff, progress_base, timings, &mut stats, outcome)?;
         }
     }
 
     if !current_batch.is_empty() {
         ensure_model_prepared(context, model_prepared).await?;
-        push_embedding(&mut running, current_batch, context, Arc::clone(&scheduler));
+        push_embedding(running, current_batch, context, Arc::clone(&scheduler));
     }
     while let Some(outcome) = running.next().await {
-        if let Err(error) =
-            apply_embedding_outcome(context, diff, progress_base, timings, &mut stats, outcome)
-        {
-            drain_embedding_futures(&mut running).await;
-            return Err(error);
-        }
+        apply_embedding_outcome(context, diff, progress_base, timings, &mut stats, outcome)?;
     }
     throw_if_cancelled(context.signal.as_ref())?;
     Ok(stats)
@@ -2468,6 +2473,8 @@ mod tests {
         finalized: AtomicUsize,
         failed_markers: AtomicUsize,
         fail_replacements_once: Mutex<HashSet<FileId>>,
+        fail_snapshot_updates: AtomicBool,
+        snapshot_update_failed: Notify,
     }
 
     #[test]
@@ -2645,6 +2652,12 @@ mod tests {
         }
 
         fn update_file_snapshot(&self, file: &FileRecord) -> EngineResult<()> {
+            if self.fail_snapshot_updates.load(Ordering::Acquire) {
+                self.snapshot_update_failed.notify_one();
+                return Err(EngineError::storage_failure(
+                    "injected snapshot update failure",
+                ));
+            }
             let mut files = self.files.lock().expect("files");
             let stored = files
                 .iter_mut()
@@ -2758,6 +2771,7 @@ mod tests {
 
     struct DrainingFailureModel {
         info: EmbeddingModelInfo,
+        fail_first: bool,
         calls: AtomicUsize,
         active: AtomicUsize,
         calls_changed: Notify,
@@ -2834,6 +2848,7 @@ mod tests {
     impl DrainingFailureModel {
         fn new() -> Self {
             Self {
+                fail_first: true,
                 info: EmbeddingModelInfo::new(
                     crate::domain::model::ModelInfo::new(
                         "local".to_owned(),
@@ -3007,6 +3022,12 @@ mod tests {
 
             if call == 0 {
                 self.active.fetch_sub(1, Ordering::AcqRel);
+                if !self.fail_first {
+                    return Ok(EmbeddingResult {
+                        vectors: contents.iter().map(|_| vec![1.0, 0.0]).collect(),
+                        truncated: Vec::new(),
+                    });
+                }
                 self.failure_emitted.store(true, Ordering::Release);
                 self.failure_changed.notify_waiters();
                 return Err(ModelError::storage_failure(
@@ -3311,6 +3332,71 @@ mod tests {
             .await
             .expect_err("the original terminal failure must be returned");
         assert_eq!(error.code(), EngineError::STORAGE_FAILURE);
+        assert_eq!(model.active.load(Ordering::Acquire), 0);
+        assert_eq!(storage.finalized.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn snapshot_failure_drains_other_index_batches_before_returning() {
+        let directory = tempdir().expect("workspace");
+        for (name, text) in [
+            ("first.txt", "first text"),
+            ("second.txt", "second text"),
+            ("third.txt", "unchanged text"),
+        ] {
+            std::fs::write(directory.path().join(name), text).expect("source");
+        }
+        let workspace = workspace(directory.path());
+        let scanner = NativeScanner::default();
+        let storage = MemoryStorage::default();
+        let id = storage
+            .resolve_file_ids(&[PathBuf::from("third.txt")])
+            .expect("existing file ID")[0];
+        storage.files.lock().expect("files").push(
+            FileRecord::new(
+                id,
+                SourcePath::new("third.txt").expect("path"),
+                FileSnapshot {
+                    size_bytes: 14,
+                    modified_epoch_ms: Some(1),
+                    content_hash: Some(sha256_hex(b"unchanged text")),
+                },
+                FileIndexStatus::Indexed {
+                    indexed_epoch_ms: 1,
+                    entity_count: 0,
+                },
+            )
+            .expect("existing file"),
+        );
+        storage.fail_snapshot_updates.store(true, Ordering::Release);
+        let mut model = DrainingFailureModel::new();
+        model.fail_first = false;
+        let context = IndexingContext {
+            workspace: &workspace,
+            storage: &storage,
+            scanner: &scanner,
+            embedding_models: &[&model],
+            embedding_concurrency: Some(2),
+            on_progress: None,
+            signal: None,
+            changes: &[],
+        };
+        let operation = index_workspace(&context);
+        tokio::pin!(operation);
+        tokio::select! {
+            result = operation.as_mut() => {
+                panic!("indexing returned before the other embedding batch settled: {result:?}");
+            }
+            () = storage.snapshot_update_failed.notified() => {}
+        }
+        assert_eq!(model.calls.load(Ordering::Acquire), 2);
+        assert_eq!(model.active.load(Ordering::Acquire), 1);
+        assert!(operation.as_mut().now_or_never().is_none());
+
+        model.release();
+        let error = operation.await.expect_err("snapshot update failure");
+        assert_eq!(error.code(), EngineError::STORAGE_FAILURE);
+        assert!(error.message().contains("injected snapshot update failure"));
         assert_eq!(model.active.load(Ordering::Acquire), 0);
         assert_eq!(storage.finalized.load(Ordering::Acquire), 0);
     }

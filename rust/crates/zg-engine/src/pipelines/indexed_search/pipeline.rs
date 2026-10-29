@@ -353,7 +353,6 @@ fn collect_adaptive_recall(
 ) -> Result<(), EngineError> {
     let recall_routes = build_recall_routes(routes, filter, prefer_symbol);
     let target = (limit * RECALL_TARGET_FACTOR).max(RECALL_MIN_TARGET_CANDIDATES);
-    let mut previous_depth = 0;
     let mut depth = RECALL_INITIAL_DEPTH;
     loop {
         let mut saturated = false;
@@ -377,12 +376,11 @@ fn collect_adaptive_recall(
                     )?,
             };
             saturated |= hits.len() >= depth;
-            add_recall_hits(candidates, &hits, &route.route, previous_depth)?;
+            add_recall_hits(candidates, &hits, &route.route)?;
         }
         if candidates.len() >= target || !saturated || depth >= RECALL_MAX_DEPTH {
             return Ok(());
         }
-        previous_depth = depth;
         depth = (depth * RECALL_GROWTH_FACTOR).min(RECALL_MAX_DEPTH);
     }
 }
@@ -437,9 +435,9 @@ fn add_recall_hits(
     candidates: &mut HashMap<EntityId, Candidate>,
     hits: &[StorageSearchHit],
     route: &ResolvedSearchRoute,
-    start_index: usize,
 ) -> Result<(), EngineError> {
-    for (index, hit) in hits.iter().enumerate().skip(start_index) {
+    // Increasing top-k can change its prefix, including which fragments appear there.
+    for (index, hit) in hits.iter().enumerate() {
         let rank = index + 1;
         let candidate = candidates
             .entry(hit.entity_id.clone())
@@ -458,12 +456,23 @@ fn add_recall_hits(
             ));
         }
         candidate.sources.insert(route.mode);
-        candidate.evidence.push(InternalEvidence {
-            hit: hit.clone(),
-            path: route.mode,
-            route_id: route.id.clone(),
-            rank,
-        });
+        if let Some(existing) = candidate.evidence.iter_mut().find(|evidence| {
+            evidence.path == route.mode
+                && evidence.route_id == route.id
+                && evidence.hit.document_id == hit.document_id
+        }) {
+            if rank < existing.rank {
+                existing.hit = hit.clone();
+                existing.rank = rank;
+            }
+        } else {
+            candidate.evidence.push(InternalEvidence {
+                hit: hit.clone(),
+                path: route.mode,
+                route_id: route.id.clone(),
+                rank,
+            });
+        }
         add_or_update_recall(
             &mut candidate.recall,
             SearchRecallTrace {
@@ -841,7 +850,7 @@ fn timing(name: &str, duration: std::time::Duration) -> TimingEntry {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashMap,
+        collections::{HashMap, HashSet},
         path::{Path, PathBuf},
         sync::{Arc, Mutex},
     };
@@ -920,6 +929,7 @@ mod tests {
         entities: HashMap<String, StoredEntity>,
         fts: HashMap<String, Vec<FixtureHit>>,
         vector: Vec<FixtureHit>,
+        reorder_deeper_vector_results: bool,
         filters: Arc<Mutex<Vec<Option<StorageSearchFilter>>>>,
         load_batches: Mutex<Vec<Vec<StorageSearchHit>>>,
     }
@@ -1062,7 +1072,11 @@ mod tests {
             limit: usize,
             filter: Option<&StorageSearchFilter>,
         ) -> EngineResult<Vec<StorageSearchHit>> {
-            Ok(self.hits_with_filter(&self.vector, limit, filter))
+            let mut hits = self.hits_with_filter(&self.vector, limit, filter);
+            if self.reorder_deeper_vector_results && limit > super::RECALL_INITIAL_DEPTH {
+                hits.reverse();
+            }
+            Ok(hits)
         }
     }
 
@@ -1143,6 +1157,7 @@ mod tests {
             ]),
             fts: HashMap::from([("alpha".to_owned(), vec![a_fts, b_fts])]),
             vector: vec![b_vector, a_vector],
+            reorder_deeper_vector_results: false,
             filters: Arc::new(Mutex::new(Vec::new())),
             load_batches: Mutex::default(),
         };
@@ -1191,16 +1206,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn keeps_best_recall_evidence_separate_for_each_route() {
+        let owner = entity(&file(1, "src/lib.rs", 100), "source");
+        let first = hit(&owner, 0, StorageSearchPath::Fts, 3.0).hit;
+        let later = hit(&owner, 1, StorageSearchPath::Fts, 2.0).hit;
+        let improved = hit(&owner, 1, StorageSearchPath::Fts, 4.0).hit;
+        let route = super::ResolvedSearchRoute {
+            id: "first".into(),
+            mode: SearchRouteMode::Fts,
+            query: "first query".into(),
+        };
+        let mut candidates = HashMap::new();
+        for hits in [
+            [first.clone(), later.clone()],
+            [improved.clone(), first.clone()],
+            [first, later],
+        ] {
+            super::add_recall_hits(&mut candidates, &hits, &route).expect("recall round");
+        }
+        let other_route = super::ResolvedSearchRoute {
+            id: "second".into(),
+            query: "second query".into(),
+            ..route
+        };
+        super::add_recall_hits(
+            &mut candidates,
+            std::slice::from_ref(&improved),
+            &other_route,
+        )
+        .expect("independent route");
+
+        let candidate = &candidates[owner.entity.id()];
+        assert_eq!(candidate.evidence.len(), 3);
+        let evidence = candidate
+            .evidence
+            .iter()
+            .filter(|evidence| evidence.hit.document_id == improved.document_id)
+            .collect::<Vec<_>>();
+        assert_eq!(evidence.len(), 2);
+        assert_ne!(evidence[0].route_id, evidence[1].route_id);
+        for evidence in evidence {
+            assert_eq!(evidence.rank, 1);
+            assert!((evidence.hit.score - improved.score).abs() < f64::EPSILON);
+        }
+        assert_eq!(candidate.recall.len(), 2);
+    }
+
     #[tokio::test]
-    async fn loads_all_candidates_once_before_rule_ranking() {
+    async fn loads_reordered_recall_candidates_once_before_rule_ranking() {
         let source = file(1, "src/lib.rs", 100);
         let selected = entity(&source, "selected source");
         let discarded = entity(&source, "discarded source");
         let discarded_id = discarded.entity.id().clone();
-        let mut fts = (0..205)
-            .map(|index| hit(&selected, index, StorageSearchPath::Fts, 1.0))
+        let mut vector = (0..205)
+            .map(|index| hit(&selected, index, StorageSearchPath::Vector, 1.0))
             .collect::<Vec<_>>();
-        fts.push(hit(&discarded, 0, StorageSearchPath::Fts, 0.5));
+        vector.push(hit(&discarded, 0, StorageSearchPath::Vector, 1.0));
         let mut storage = pushdown_storage();
         storage.files.push(source.clone());
         storage
@@ -1209,8 +1271,12 @@ mod tests {
         storage
             .entities
             .insert(discarded.entity.id().as_str().to_owned(), discarded);
-        storage.fts.insert("query".to_owned(), fts);
-        storage.vector = vec![hit(&selected, 0, StorageSearchPath::Vector, 0.9)];
+        storage.fts.insert(
+            "query".to_owned(),
+            vec![hit(&selected, 0, StorageSearchPath::Fts, 1.0)],
+        );
+        storage.vector = vector;
+        storage.reorder_deeper_vector_results = true;
         let mut plan = plan(vec![
             SearchRoute {
                 mode: SearchRouteMode::Fts,
@@ -1236,14 +1302,29 @@ mod tests {
         assert_eq!(result.hits.len(), 1);
         let selected_hit = &result.hits[0];
         assert_eq!(selected_hit.entity.id(), selected.entity.id());
+        assert_eq!(
+            selected_hit
+                .evidence
+                .iter()
+                .map(|evidence| &evidence.fragment.id)
+                .collect::<HashSet<_>>()
+                .len(),
+            205,
+            "deeper top-k must retain fragments that enter the old prefix",
+        );
         assert_eq!(selected_hit.evidence.len(), 206);
         assert_eq!(
             selected_hit.evidence[0].fragment.id,
             FragmentId::new(selected.entity.id(), 0)
         );
         assert_eq!(
-            selected_hit.evidence[1].fragment.id,
-            FragmentId::new(selected.entity.id(), 0)
+            selected_hit
+                .evidence
+                .iter()
+                .filter(|evidence| evidence.fragment.id == FragmentId::new(selected.entity.id(), 0))
+                .count(),
+            2,
+            "the same fragment remains evidence for both routes",
         );
         let trace = selected_hit.trace.as_ref().expect("trace");
         assert_eq!(trace.recall.len(), 2);
@@ -1353,6 +1434,7 @@ mod tests {
                 vec![hit(&owner, 0, StorageSearchPath::Fts, 2.0)],
             )]),
             vector: Vec::new(),
+            reorder_deeper_vector_results: false,
             filters: Arc::new(Mutex::new(Vec::new())),
             load_batches: Mutex::default(),
         };
@@ -1406,6 +1488,7 @@ mod tests {
                 ],
             )]),
             vector: Vec::new(),
+            reorder_deeper_vector_results: false,
             filters: Arc::clone(&filters),
             load_batches: Mutex::default(),
         };
@@ -1487,6 +1570,7 @@ mod tests {
             entities: HashMap::new(),
             fts: HashMap::new(),
             vector: Vec::new(),
+            reorder_deeper_vector_results: false,
             filters: Arc::default(),
             load_batches: Mutex::default(),
         }

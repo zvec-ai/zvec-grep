@@ -237,15 +237,17 @@ async fn respond(
 }
 
 #[tokio::test]
-async fn compatible_current_index_queries_borrow_writer_but_wait_does_not() -> TestResult {
+async fn fts_queries_borrow_writer_without_credentials_but_wait_does_not() -> TestResult {
     let fixture = Fixture::new().await;
     let update = fixture.start_update(false).await;
+    std::fs::remove_file(fixture.root.path().join(".zvec-grep/credentials.key"))?;
     for policy in [RefreshPolicy::Off, RefreshPolicy::Background] {
-        let result = tokio::time::timeout(
-            Duration::from_secs(2),
-            fixture.engine.context(fixture.query(policy)),
-        )
-        .await??;
+        let mut query = fixture.query(policy);
+        query.api_key = None;
+        query.allow_remote = false;
+        query.lock_timeout_ms = Some(100);
+        let result =
+            tokio::time::timeout(Duration::from_secs(2), fixture.engine.context(query)).await??;
         assert_eq!(result.items[0].relative_path, PathBuf::from("anchor.txt"));
         assert!(!update.is_finished());
     }
@@ -281,6 +283,7 @@ async fn mismatched_models_and_rebuilds_wait_instead_of_borrowing() -> TestResul
         ),
     ] {
         let mut query = fixture.query(RefreshPolicy::Off);
+        query.routes[0].mode = ContextRouteMode::Vector;
         if api_key.is_some() {
             query.api_key = api_key;
         }
