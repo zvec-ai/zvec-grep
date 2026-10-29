@@ -1310,6 +1310,43 @@ fn vector_index_completeness(storage: &IndexStore, model: &str) -> f32 {
 }
 
 #[test]
+fn parallel_optimization_joins_every_collection_after_success_or_failure() {
+    use std::sync::{
+        Barrier,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    for fail in [false, true] {
+        let started = Barrier::new(4);
+        let completed = AtomicUsize::new(0);
+        let optimize = |index| {
+            started.wait();
+            completed.fetch_add(1, Ordering::SeqCst);
+            if fail && index == 0 {
+                Err(EngineError::storage_failure("injected optimize failure"))
+            } else {
+                Ok(())
+            }
+        };
+        let result =
+            optimize_collections([&|| optimize(0), &|| optimize(1), &|| optimize(2), &|| {
+                optimize(3)
+            }]);
+        assert_eq!(completed.load(Ordering::SeqCst), 4);
+        if fail {
+            assert!(
+                result
+                    .expect_err("optimize failure")
+                    .message()
+                    .contains("injected")
+            );
+        } else {
+            result.expect("all collections optimized");
+        }
+    }
+}
+
+#[test]
 fn finalization_builds_every_model_index_in_reopened_flush_only_storage() {
     let home = tempfile::tempdir().expect("workspace");
     let writer = open_multi_model(home.path());

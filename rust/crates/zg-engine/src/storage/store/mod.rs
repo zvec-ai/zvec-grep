@@ -413,10 +413,12 @@ impl IndexStore {
         self.write(|state| {
             // Also finish indexes created by versions that only flushed writes.
             if state.needs_optimize || state.fragments.needs_optimize()? {
-                state.directories.optimize()?;
-                state.entities.optimize()?;
-                state.files.optimize()?;
-                state.fragments.optimize()?;
+                optimize_collections([
+                    &|| state.directories.optimize(),
+                    &|| state.entities.optimize(),
+                    &|| state.files.optimize(),
+                    &|| state.fragments.optimize(),
+                ])?;
                 state.needs_optimize = false;
             }
             Ok(())
@@ -447,6 +449,23 @@ impl IndexStore {
             .map_or(Ok(()), |graph| graph.close().map_err(graph_error));
         flush_result.and(graph_close)
     }
+}
+
+fn optimize_collections(
+    operations: [&(dyn Fn() -> EngineResult<()> + Sync); 4],
+) -> EngineResult<()> {
+    std::thread::scope(|scope| {
+        let workers = operations.map(|optimize| scope.spawn(optimize));
+        let mut result = Ok(());
+        // Keep the store locked until every collection settles, even after an error.
+        for worker in workers {
+            let next = worker.join().unwrap_or_else(|_| {
+                Err(EngineError::internal("collection optimize worker panicked"))
+            });
+            result = result.and(next);
+        }
+        result
+    })
 }
 
 // Cross-table writes stay under the store's single writer lock.
