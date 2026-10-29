@@ -26,7 +26,7 @@
     <a href="#tour">🎬 <strong>Tour</strong></a> |
     <a href="#features">💫 <strong>Features</strong></a> |
     <a href="#try-it-yourself">🚀 <strong>Try it yourself</strong></a> |
-    <a href="./docs/README.md">📚 <strong>Docs</strong></a> |
+    <a href="https://zvec.org/en/docs/zvec-grep/">📚 <strong>Docs</strong></a> |
     <a href="#benchmarks">📊 <strong>Benchmarks</strong></a> |
     <a href="#community">🤝 <strong>Community</strong></a>
   </p>
@@ -34,12 +34,12 @@
 
 **zg** (**z**vec-**g**rep), powered by [zvec](https://github.com/alibaba/zvec),
 unifies ripgrep, BM25, and vector search behind
-[one local-first interface](./docs/05-architecture.md). Use it directly from the
+[one local-first interface](https://zvec.org/en/docs/zvec-grep/). Use it directly from the
 terminal, or let your agent use it for you.
 
-This README and the [documentation](./docs/README.md) describe the TypeScript /
-Node.js implementation. The Rust implementation is developed separately in
-[`rust/`](./rust/README.md).
+This README describes the TypeScript / Node.js implementation. For the Rust
+implementation, see [`rust/`](./rust/README.md). User documentation is maintained
+on the [Zvec website](https://zvec.org/en/docs/zvec-grep/).
 
 **Install**: `npm install -g @zvec/zvec-grep`, or via Homebrew (macOS/Linux):
 `brew install zvec-grep`
@@ -99,7 +99,7 @@ zg index --embedding local/potion-retrieval-32m
 > fatal errors. Use
 > `zg status --mode server --debug` to inspect recorded server indexing errors.
 > For server connection failures, check `zg server status` and the
-> [server logs](./docs/06-server.md#logs-and-state).
+> [server logs](https://zvec.org/en/docs/zvec-grep/server/).
 
 ### 2. Choose how to search
 
@@ -294,16 +294,19 @@ Embedding.
 
 ## 📚 Documentation
 
+User documentation is maintained on [zvec.org](https://zvec.org/en/docs/zvec-grep/).
+
 | Guide | What you can do |
 | :--- | :--- |
-| [Agent integrations](./docs/01-agents.md) | Connect zg to Codex, Claude Code, Qwen Code, Qoder, Cursor, GitHub Copilot, VS Code, Grok Build, or OpenCode and verify that it works. |
-| [CLI guide](./docs/02-cli.md) | Search, index, and manage your local workspaces from the terminal. |
-| [MCP guide](./docs/03-mcp.md) | Understand which zg tools your agent can use and how access is secured. |
-| [Retrieval pipeline](./docs/04-pipeline.md) | Choose what to index, keep it fresh, and get better search results. |
-| [Architecture](./docs/05-architecture.md) | See how zg handles your query and where your data stays. |
-| [Server and execution modes](./docs/06-server.md) | Choose between one-off commands and a long-running local server. |
-| [Embedding models](./docs/07-embedding.md) | Pick the right model for speed, search quality, privacy, and your hardware. |
-| [Roadmap](./docs/08-roadmap.md) | See what is coming next and help shape zg's priorities. |
+| [Quickstart](https://zvec.org/en/docs/zvec-grep/quickstart/) | Install zg, build an index, and run your first search. |
+| [Agent integrations](https://zvec.org/en/docs/zvec-grep/agents/) | Connect an agent through MCP and understand retrieval routing. |
+| [CLI reference](https://zvec.org/en/docs/zvec-grep/cli/) | Find commands and options. |
+| [Search guide](https://zvec.org/en/docs/zvec-grep/search/) | Choose retrieval routes, filters, and output options. |
+| [Manage an index](https://zvec.org/en/docs/zvec-grep/indexing/) | Create, update, rebuild, or remove a workspace index. |
+| [Supported content](https://zvec.org/en/docs/zvec-grep/supported-content/) | Check text and code extraction boundaries. |
+| [Local server](https://zvec.org/en/docs/zvec-grep/server/) | Configure execution modes and the resident service. |
+| [Embedding models](https://zvec.org/en/docs/zvec-grep/embedding-models/) | Choose and configure local or remote models. |
+| [Troubleshooting](https://zvec.org/en/docs/zvec-grep/troubleshooting/) | Diagnose installation, indexing, and connection problems. |
 
 <a id="community"></a>
 
