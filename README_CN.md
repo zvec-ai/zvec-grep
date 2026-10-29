@@ -82,12 +82,6 @@ zg --index --embedding local/potion-retrieval-32m
 > [!NOTE]
 > 索引保存在被索引项目根目录的 `.zvec-grep/` 中。
 
-> [!TIP]
-> 索引或搜索失败时，在原命令后加 `--debug` 重跑，查看诊断信息（direct 和 server 模式均支持）。
-> 在同一项目下，可用 `zg --status --mode direct --debug` 或
-> `zg --status --mode server --debug` 查看已记录的索引错误。
-> Server 连接失败时，检查 `zg --server status` 和[服务日志](https://zvec.org/zh/docs/zvec-grep/server/)。
-
 ### 2. 选择检索方式
 
 #### Agent：通过 OpenCode 提问
