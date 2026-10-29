@@ -311,9 +311,7 @@ def progress_line(indexed, total, spinner):
 
 def install_scene(frames):
     lines = []
-    type_command(frames, lines, "git clone https://github.com/zvec-ai/zvec-grep.git", stride=2)
-    type_command(frames, lines, "cd zvec-grep/rust", stride=2)
-    type_command(frames, lines, "npm run install:local", stride=2)
+    type_command(frames, lines, "npm install -g @zvec/zvec-grep", stride=2)
     lines.append(plain())
     type_command(frames, lines, "zg --install")
 
@@ -369,11 +367,11 @@ def index_scene(frames, lines):
     repository_title = "zvec-grep — ~/code/your-repository"
     lines.append(plain())
     hold(frames, lines, 6, SHELL_TITLE)
-    type_command(frames, lines, "cd ~/code/your-repository", stride=2, title=SHELL_TITLE)
+    type_command(frames, lines, "cd your-repository", stride=2, title=SHELL_TITLE)
     type_command(
         frames,
         lines,
-        "zg --index --embedding local/potion-code-16m-v2",
+        "zg --index",
         stride=2,
         title=repository_title,
     )

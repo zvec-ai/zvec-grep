@@ -11,13 +11,14 @@
   <p>The local-first search layer for humans and agents.</p>
 
   <p>
-    <a href="https://www.npmjs.com/package/@zvec/zvec-grep"><img src="https://img.shields.io/npm/v/@zvec/zvec-grep.svg" alt="npm version (legacy TypeScript)" /></a>
+    <a href="https://www.npmjs.com/package/@zvec/zvec-grep"><img src="https://img.shields.io/npm/v/@zvec/zvec-grep.svg" alt="npm version" /></a>
     <a href="https://github.com/zvec-ai/zvec-grep/actions/workflows/rust-ci.yml"><img src="https://github.com/zvec-ai/zvec-grep/actions/workflows/rust-ci.yml/badge.svg" alt="Rust CI" /></a>
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 license" /></a>
     <img src="https://img.shields.io/badge/built_with-Rust-orange.svg" alt="Built with Rust" />
   </p>
 
   <p>
+    <a href="https://trendshift.io/repositories/200612?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-200612" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/200612/daily?language=TypeScript" alt="zvec-ai/zvec-grep | Trendshift TypeScript daily ranking" width="250" height="55" /></a>
     <a href="https://trendshift.io/repositories/200612?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-200612" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/200612/daily" alt="zvec-ai/zvec-grep | Trendshift all-language daily ranking" width="250" height="55" /></a>
   </p>
 
@@ -40,10 +41,8 @@ zg is a native Rust CLI with local MCP integrations. User guides live on the
 [Zvec website](https://zvec.org/en/docs/zvec-grep/); build and development instructions
 live in [`rust/`](./rust/README.md).
 
-**Install the Rust CLI**: [build from source](./rust/README.md#local-npm-installation).
-The published [npm](https://www.npmjs.com/package/@zvec/zvec-grep) and
-[Homebrew](https://formulae.brew.sh/formula/zvec-grep) packages currently provide
-the legacy TypeScript version. The examples below target Rust.
+**Install**: `npm install -g @zvec/zvec-grep`, or via Homebrew (macOS/Linux):
+`brew install zvec-grep`
 
 <a id="tour"></a>
 
@@ -77,15 +76,8 @@ the legacy TypeScript version. The examples below target Rust.
 
 ### 1. Set up a sample bookshelf
 
-Install the native CLI from this repository. Source builds require the pinned
-Rust toolchain, Node.js 20 or newer for the packaging scripts, and the
-[native build prerequisites](./rust/README.md#native-and-cuda-builds).
-
 ```bash
-git clone https://github.com/zvec-ai/zvec-grep.git
-cd zvec-grep/rust
-npm run install:local
-cd ../..
+npm install -g @zvec/zvec-grep
 
 mkdir zg-mystery && cd zg-mystery
 curl --retry 3 --retry-all-errors --progress-bar -fL \
@@ -164,29 +156,6 @@ zg --preview detail "An unseen creature left a few marks. What did the detective
 zg returns the relevant passages from `sherlock-holmes.txt`, ranked ahead of
 `alice-in-wonderland.txt`.
 
-### Models and troubleshooting
-
-Each workspace uses one embedding model for text and code. Images and other
-unsupported binary formats are skipped. Existing indexes retain their model;
-changing it requires `zg --index --rebuild --embedding <model>`.
-
-`zg --index --embedding-concurrency <n>` and
-`ZVEC_GREP_EMBEDDING_CONCURRENCY` control embedding concurrency while
-building or updating an index, for both local and remote models. The environment
-variable also applies to automatic indexing and refresh. These controls do not
-change query-vector inference. The CLI option is accepted only with `--index`.
-
-The installed Rust CLI runs without Node.js. Keep the source build's
-`rust/dist/npm/zvec-grep-local` directory: the local installation is linked to it.
-See [local installation](./rust/README.md#local-npm-installation) for packaging a
-self-contained tarball, and the [native package notes](./rust/npm/meta/README.md)
-for the release wrapper's installation scripts and CPU/CUDA options.
-
-Use `zg --help search`, `zg --help index`, or `zg --help models` to inspect the
-installed interface. See [Embedding Models](https://zvec.org/en/docs/zvec-grep/embedding-models/)
-and [Troubleshooting](https://zvec.org/en/docs/zvec-grep/troubleshooting/) for
-configuration, indexing concurrency, and GPU diagnostics.
-
 <a id="benchmarks"></a>
 
 ## 📊 Benchmarks
@@ -261,22 +230,6 @@ Embedding.
 > unknown, especially for call-chain, data-flow, and architectural questions.
 > Since agents decide when and how to use it, results vary by model and run;
 > repeated-run averages are more reliable.
-
-## 📚 Documentation
-
-User documentation is maintained on [zvec.org](https://zvec.org/en/docs/zvec-grep/).
-
-| Guide | What you can do |
-| :--- | :--- |
-| [Quickstart](https://zvec.org/en/docs/zvec-grep/quickstart/) | Install zg, build an index, and run your first search. |
-| [Agent integrations](https://zvec.org/en/docs/zvec-grep/agents/) | Connect an agent through MCP and understand retrieval routing. |
-| [CLI reference](https://zvec.org/en/docs/zvec-grep/cli/) | Find commands and options. |
-| [Search guide](https://zvec.org/en/docs/zvec-grep/search/) | Choose retrieval routes, filters, and output options. |
-| [Manage an index](https://zvec.org/en/docs/zvec-grep/indexing/) | Create, update, rebuild, or remove a workspace index. |
-| [Supported content](https://zvec.org/en/docs/zvec-grep/supported-content/) | Check text and code extraction boundaries. |
-| [Local server](https://zvec.org/en/docs/zvec-grep/server/) | Configure execution modes and the resident service. |
-| [Embedding models](https://zvec.org/en/docs/zvec-grep/embedding-models/) | Choose and configure local or remote models. |
-| [Troubleshooting](https://zvec.org/en/docs/zvec-grep/troubleshooting/) | Diagnose installation, indexing, and connection problems. |
 
 <a id="community"></a>
 

@@ -11,13 +11,14 @@
   <p>面向人与 Agent 的本地优先统一检索层。</p>
 
   <p>
-    <a href="https://www.npmjs.com/package/@zvec/zvec-grep"><img src="https://img.shields.io/npm/v/@zvec/zvec-grep.svg" alt="npm 版本（旧版 TypeScript）" /></a>
+    <a href="https://www.npmjs.com/package/@zvec/zvec-grep"><img src="https://img.shields.io/npm/v/@zvec/zvec-grep.svg" alt="npm 版本" /></a>
     <a href="https://github.com/zvec-ai/zvec-grep/actions/workflows/rust-ci.yml"><img src="https://github.com/zvec-ai/zvec-grep/actions/workflows/rust-ci.yml/badge.svg" alt="Rust CI" /></a>
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 许可证" /></a>
     <img src="https://img.shields.io/badge/built_with-Rust-orange.svg" alt="使用 Rust 构建" />
   </p>
 
   <p>
+    <a href="https://trendshift.io/repositories/200612?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-200612" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/200612/daily?language=TypeScript" alt="zvec-ai/zvec-grep | Trendshift TypeScript 日榜" width="250" height="55" /></a>
     <a href="https://trendshift.io/repositories/200612?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-200612" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/200612/daily" alt="zvec-ai/zvec-grep | Trendshift 全语言日榜" width="250" height="55" /></a>
   </p>
 
@@ -39,10 +40,8 @@ zg 是使用 Rust 实现的原生 CLI，支持本地 MCP 集成。用户指南�
 [Zvec 官网](https://zvec.org/zh/docs/zvec-grep/)；构建与开发说明位于
 [`rust/`](./rust/README.md)。
 
-**安装 Rust CLI**：[从源码构建](./rust/README.md#local-npm-installation)。
-当前已发布的 [npm](https://www.npmjs.com/package/@zvec/zvec-grep) 和
-[Homebrew](https://formulae.brew.sh/formula/zvec-grep) 包仍是旧版 TypeScript 实现，
-以下示例以 Rust 版本为准。
+**安装**：`npm install -g @zvec/zvec-grep`，或通过 Homebrew（macOS/Linux）：
+`brew install zvec-grep`
 
 <a id="tour"></a>
 
@@ -76,14 +75,8 @@ zg 是使用 Rust 实现的原生 CLI，支持本地 MCP 集成。用户指南�
 
 ### 1. 准备示例书架
 
-从本仓库安装原生 CLI。源码构建需要仓库锁定的 Rust 工具链、用于打包脚本的
-Node.js 20 或更新版本，以及[原生构建依赖](./rust/README.md#native-and-cuda-builds)。
-
 ```bash
-git clone https://github.com/zvec-ai/zvec-grep.git
-cd zvec-grep/rust
-npm run install:local
-cd ../..
+npm install -g @zvec/zvec-grep
 
 mkdir zg-mystery && cd zg-mystery
 curl --retry 3 --retry-all-errors --progress-bar -fL \
@@ -158,28 +151,6 @@ zg --preview detail "An unseen creature left a few marks. What did the detective
 zg 会将 `sherlock-holmes.txt` 中的相关段落排在
 `alice-in-wonderland.txt` 前面。
 
-### 模型与故障排查
-
-每个工作区使用一个 Embedding 模型处理文本与代码；图片及其他不支持的二进制
-格式会被跳过。已有索引保留原模型，切换模型需运行
-`zg --index --rebuild --embedding <model>`。
-
-`zg --index --embedding-concurrency <n>` 和
-`ZVEC_GREP_EMBEDDING_CONCURRENCY` 控制构建或更新索引时的 Embedding
-并发，对本地和远程模型均生效。环境变量也适用于自动建索引和刷新；这些设置
-不影响查询文本的向量推理。
-CLI 参数仅与 `--index` 一起使用。
-
-安装后的 Rust CLI 运行时不需要 Node.js。本地安装会链接到源码构建产物
-`rust/dist/npm/zvec-grep-local`，请保留该目录。独立 tarball 的打包方式见
-[本地安装说明](./rust/README.md#local-npm-installation)；发布包的安装脚本与
-CPU/CUDA 选项见[原生包说明](./rust/npm/meta/README.md)。
-
-通过 `zg --help search`、`zg --help index` 或 `zg --help models` 查看当前版本的
-接口。模型配置、索引并发与 GPU 排障说明见
-[Embedding 模型](https://zvec.org/zh/docs/zvec-grep/embedding-models/)和
-[故障排查](https://zvec.org/zh/docs/zvec-grep/troubleshooting/)。
-
 <a id="benchmarks"></a>
 
 ## 📊 性能测试
@@ -245,22 +216,6 @@ Profile 均使用 Qwen3.7 Text Embedding。
 
 > zg 最适合目标位置未知、证据跨文件或模块分布的调用链、数据流和架构问题。
 > Agent 会自主决定何时及如何调用，结果因此会随模型和运行波动；多次运行均值更可靠。
-
-## 📚 文档
-
-用户文档统一维护在 [zvec.org](https://zvec.org/zh/docs/zvec-grep/)。
-
-| 指南 | 你可以完成什么 |
-| :--- | :--- |
-| [快速开始](https://zvec.org/zh/docs/zvec-grep/quickstart/) | 安装 zg、构建索引并完成第一次搜索。 |
-| [Agent 集成](https://zvec.org/zh/docs/zvec-grep/agents/) | 通过 MCP 接入 Agent，了解检索路由。 |
-| [CLI 参考](https://zvec.org/zh/docs/zvec-grep/cli/) | 查找命令与参数。 |
-| [检索指南](https://zvec.org/zh/docs/zvec-grep/search/) | 选择检索方式、过滤条件与输出格式。 |
-| [管理索引](https://zvec.org/zh/docs/zvec-grep/indexing/) | 创建、更新、重建或删除工作区索引。 |
-| [支持的内容](https://zvec.org/zh/docs/zvec-grep/supported-content/) | 了解文本与代码的提取边界。 |
-| [本地 Server](https://zvec.org/zh/docs/zvec-grep/server/) | 配置执行模式与常驻服务。 |
-| [Embedding 模型](https://zvec.org/zh/docs/zvec-grep/embedding-models/) | 选择并配置本地或远程模型。 |
-| [故障排查](https://zvec.org/zh/docs/zvec-grep/troubleshooting/) | 诊断安装、索引与连接问题。 |
 
 <a id="community"></a>
 
