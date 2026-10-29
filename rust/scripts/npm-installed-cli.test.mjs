@@ -136,7 +136,7 @@ function successfulCli(calls) {
     calls.push({ prefix, args, ...options });
     return {
       stdout: `releaseobservatorymarker\n${smokeModels.map(([, model]) => model).join("\n")}\nServer: ready\nServer: stopped\n${args.includes("releaseincrementalmarker") && options.label === "update-query" ? "update.md" : ""}`,
-      stderr: "Index complete",
+      stderr: "Optimizing index: 2/2 files\nSaving index: 2/2 files\nFinishing index: 2/2 files\n",
     };
   };
 }
@@ -164,6 +164,25 @@ test("a successful exit with wrong vector results fails the model gate", async (
   }), /npm entry model smoke failed/);
   const results = JSON.parse(await readFile(join(root, "results.json"), "utf8"));
   assert.equal(results.filter(({ passed }) => !passed).length, 3);
+});
+
+test("the model gate rejects missing or reordered finalization stages", async (t) => {
+  for (const [name, stderr] of [
+    ["missing", "Optimizing index: 2/2 files\nFinishing index: 2/2 files\n"],
+    ["reordered", "Finishing index: 2/2 files\nSaving index: 2/2 files\nOptimizing index: 2/2 files\n"],
+  ]) {
+    const root = join(await temporary(t), name);
+    const calls = [];
+    const execute = successfulCli(calls);
+    await assert.rejects(smokeInstalledModels({ prefix: root, fixtureRoot: root,
+      execute: (...args) => ({ ...execute(...args), stderr }),
+      mcpProbe: async () => assert.fail("must reject invalid index progress before MCP"),
+    }), /npm entry model smoke failed/);
+    assert.ok(calls.every(({ label }) => label === "index"));
+    const results = JSON.parse(await readFile(join(root, "results.json"), "utf8"));
+    assert.equal(results.length, smokeModels.length);
+    assert.ok(results.every(({ passed, error }) => !passed && error.includes("index progress stage")));
+  }
 });
 
 test("MCP failures fail the gate and still stop each daemon", async (t) => {

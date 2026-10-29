@@ -16,6 +16,18 @@ function requireOutput(output, expected) {
   if (!output.includes(expected)) throw new Error(`npm zg output is missing ${expected}:\n${output.slice(-4000)}`);
 }
 
+function requireIndexProgress(output) {
+  // Progress is not a readiness verdict: keep the --check-ready and real query
+  // checks below after validating the non-TTY finalization stage sequence.
+  const lines = output.split(/\r?\n/);
+  let cursor = 0;
+  for (const stage of ["Optimizing index", "Saving index", "Finishing index"]) {
+    while (cursor < lines.length && lines[cursor] !== stage && !lines[cursor].startsWith(`${stage}: `)) cursor++;
+    if (cursor === lines.length) throw new Error(`npm zg output has a missing or out-of-order index progress stage: ${stage}\n${output.slice(-4000)}`);
+    cursor++;
+  }
+}
+
 async function availablePort() {
   const server = createServer();
   await new Promise((resolve, reject) => {
@@ -110,7 +122,7 @@ export async function smokeInstalledModels({ prefix, fixtureRoot, modelCache,
     let started = false;
     try {
       const index = await run("index", ["--index", "--embedding", model, ...runtime]);
-      requireOutput(index.stderr, "Index complete");
+      requireIndexProgress(index.stderr);
       requireOutput((await run("status", ["--status", "--check-ready", "--no-color"])).stdout, model);
       const vector = ["--vector", "Which component calibrates the telescope?", "--refresh", "off",
         "--limit", "1", "--preview", "full", ...runtime];
