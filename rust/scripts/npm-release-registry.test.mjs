@@ -540,26 +540,28 @@ test("oversized candidates fail collection and publication before any npm mutati
   const fixture = await releaseFixture(t);
   // Inflate the final tarball as a sparse file: no hundreds-of-MiB fixture data.
   await truncate(join(fixture.tarballRoot, fixture.packages.at(-1).file), MAX_NPM_TARBALL_BYTES + 1);
-  await assert.rejects(collectRelease({ ...fixture, version: entry.version }), /exceeds 350 MiB/);
+  await assert.rejects(collectRelease({ ...fixture, version: entry.version }), /exceeds 180 MiB/);
   for (const action of [publishRelease, promoteRelease]) {
     await assert.rejects(action({ ...fixture,
       registryFetch: publishedRegistry(fixture.packages),
       runNpm: () => assert.fail("must not mutate npm"),
-    }), /exceeds 350 MiB/);
+    }), /exceeds 180 MiB/);
   }
 });
 
-test("collection requires every referenced component and rejects mandatory CUDA dependencies", async (t) => {
-  const targets = ["linux-x64-gnu"];
-  const missing = await releaseFixture(t, { targets });
-  const component = missing.packages.find((pkg) => pkg.component?.endsWith("ort-cuda-part2"));
-  await rm(join(missing.tarballRoot, component.file));
-  await assert.rejects(collectRelease({ ...missing, version: entry.version, targets }), /do not cover exactly/);
-  const wrongVersion = await releaseFixture(t, { targets, mutateMetadata: (_, metadata) => {
-    if (metadata.name === "@zvec/zvec-grep-linux-x64-gnu") metadata.dependencies = { "@zvec/zvec-grep-linux-x64-gnu-ggml-cuda13": "0.0.2" };
-  } });
-  await assert.rejects(collectRelease({ ...wrongVersion, version: entry.version, targets }), /does not lock every runtime component/);
-});
+for (const target of ["linux-x64-gnu", "win32-x64-msvc"]) {
+  test(`${target} collection requires every referenced component and rejects mandatory CUDA dependencies`, async (t) => {
+    const targets = [target];
+    const missing = await releaseFixture(t, { targets });
+    const component = missing.packages.find((pkg) => pkg.component?.endsWith("ort-cuda-part2"));
+    await rm(join(missing.tarballRoot, component.file));
+    await assert.rejects(collectRelease({ ...missing, version: entry.version, targets }), /do not cover exactly/);
+    const wrongVersion = await releaseFixture(t, { targets, mutateMetadata: (_, metadata) => {
+      if (metadata.name === `@zvec/zvec-grep-${target}`) metadata.dependencies = { [`${metadata.name}-ggml-cuda13`]: "0.0.2" };
+    } });
+    await assert.rejects(collectRelease({ ...wrongVersion, version: entry.version, targets }), /does not lock every runtime component/);
+  });
+}
 
 test("components publish before the base package that depends on them", async (t) => {
   const fixture = await releaseFixture(t);

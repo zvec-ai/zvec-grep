@@ -802,7 +802,7 @@ are pinned in `plugins.json`, not mandatory npm dependencies. Postinstall instal
 CPU first and, by default, fetches the complete CUDA component set when NVIDIA
 detection succeeds. `ZG_INSTALL_ACCELERATOR=cpu` skips detection/downloads;
 `cuda` forces installation, including on GPU-free builders. Installation requires
-no CUDA compiler. Linux ORT is transported as two
+no CUDA compiler. Linux and Windows ORT are each transported as two
 fragments and reconstructed with a full-library SHA256 check. The installed
 `bin/`, `lib/` and `lib/cuda12/` layout is unchanged. Local packaging follows the
 build policy above: no toolkit produces a CPU-only package. Use
@@ -1032,7 +1032,7 @@ request a stable release with
 `gh workflow run rust-publish.yml --ref v0.3.0 -f publish=true -f dist_tag=latest`.
 The selected ref must contain the updated workflow; rerunning a historical run
 does not apply workflow fixes from newer commits.
-The publishing repository must have an npm trusted publisher configured for all 14
+The publishing repository must have an npm trusted publisher configured for all 15
 packages with both **Allow npm publish** and the independent **Allow npm
 dist-tag** permission enabled, or provide an eligible `NPM_TOKEN` secret.
 Publishing and promotion install npm 11.21.0 explicitly for OIDC dist-tag support.
@@ -1047,8 +1047,10 @@ exercise update and rollback with a distinct previously published version.
 Selecting `latest` requests a separate promotion job that changes the default
 installation only after all registry checks pass.
 
-Each compressed tarball must be at most 350 MiB. Packing, collection and
+Each compressed tarball must be at most 180 MiB. Packing, collection and
 publication preflight all enforce this budget before any npm publication.
+Plugin validation shares the same limit. This project budget accounts for
+base64 expansion in npm's upload request; it is not a registry size guarantee.
 Use `--output-dir <path>` with release commands to keep inspection artifacts
 separate from `dist/npm/release/`.
 

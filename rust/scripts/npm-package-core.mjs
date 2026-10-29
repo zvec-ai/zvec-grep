@@ -5,18 +5,18 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { pipeline } from "node:stream/promises";
+import { MAX_NPM_TARBALL_BYTES } from "../npm/meta/plugins.cjs";
+
+export { MAX_NPM_TARBALL_BYTES };
 
 const scriptPath = fileURLToPath(import.meta.url);
 export const workspaceDir = resolve(dirname(scriptPath), "..");
 export const npmManifestPath = join(workspaceDir, "npm", "platforms.json");
-// npm embeds tarballs as base64 in a JSON string. Stay comfortably below the
-// ~384 MiB tarball ceiling imposed by 64-bit Node's ~512 MiB string limit.
-export const MAX_NPM_TARBALL_BYTES = 350 * 1024 * 1024;
 
 export async function verifyTarballSize(path) {
   const { size } = await stat(path);
   if (size > MAX_NPM_TARBALL_BYTES) {
-    throw new Error(`npm tarball exceeds 350 MiB publication budget: ${path} (${size} bytes); split the payload before publishing`);
+    throw new Error(`npm tarball exceeds ${MAX_NPM_TARBALL_BYTES / 1024 / 1024} MiB publication budget: ${path} (${size} bytes); split the payload before publishing`);
   }
   return size;
 }

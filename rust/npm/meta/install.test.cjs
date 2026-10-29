@@ -21,7 +21,7 @@ const { spawn, spawnSync } = require("node:child_process");
 const { createServer } = require("node:http");
 
 const { installPackage, upgradeInstalledAgents, materialize, selectPlatform, verifyPayload, verifyInstallation } = require("./install.cjs");
-const { coreIdentity, packageFilename, componentArchive, settings } = require("./plugins.cjs");
+const { MAX_NPM_TARBALL_BYTES, coreIdentity, packageFilename, componentArchive, settings, validatePlugins } = require("./plugins.cjs");
 
 const entry = {
   target: "darwin-arm64",
@@ -185,36 +185,50 @@ for (const target of ["linux-x64-gnu", "win32-x64-msvc"]) {
   });
 }
 
-for (const failure of ["missing", "version", "corrupt", "swapped", "unexpected-manifest-file", "traversal"]) {
-  test(`rejects ${failure} optional components without replacing the CPU installation`, (t) => {
-    const paths = optionalFixture(t, "linux-x64-gnu", ({ source, component, paths }) => {
-      const parts = paths.entry.components.filter((candidate) => candidate.payload.startsWith("parts/"));
-      if (component !== parts[0]) return;
-      const checksums = JSON.parse(readFileSync(join(source, "checksums.json"), "utf8"));
-      if (failure === "version") writeFileSync(join(source, "package.json"), JSON.stringify({ name: component.package, version: "0.0.2" }));
-      if (failure === "corrupt") writeFileSync(join(source, component.payload), "corrupt");
-      if (failure === "unexpected-manifest-file") checksums.files["parts/untracked"] = { bytes: 0, sha256: sha256("") };
-      if (failure === "traversal") checksums.files = { "parts/../../outside": checksums.files[component.payload] };
-      if (failure === "swapped") {
-        // Both the archive and fragment hashes are valid. Only the reconstructed
-        // whole-library hash can detect a fragment in the wrong position.
-        const wrong = readFileSync(join(paths.root, "component-sources", parts[1].package, parts[1].payload));
-        writeFileSync(join(source, component.payload), wrong);
-        checksums.files[component.payload] = { bytes: wrong.length, sha256: sha256(wrong) };
-      }
-      writeFileSync(join(source, "checksums.json"), JSON.stringify(checksums));
-      if (failure === "swapped") return checksums.files[component.payload];
+for (const target of ["linux-x64-gnu", "win32-x64-msvc"]) {
+  for (const failure of ["missing", "version", "corrupt", "swapped", "unexpected-manifest-file", "traversal"]) {
+    test(`rejects ${failure} ${target} optional components without replacing the CPU installation`, (t) => {
+      const paths = optionalFixture(t, target, ({ source, component, paths }) => {
+        const parts = paths.entry.components.filter((candidate) => candidate.payload.startsWith("parts/"));
+        if (component !== parts[0]) return;
+        const checksums = JSON.parse(readFileSync(join(source, "checksums.json"), "utf8"));
+        if (failure === "version") writeFileSync(join(source, "package.json"), JSON.stringify({ name: component.package, version: "0.0.2" }));
+        if (failure === "corrupt") writeFileSync(join(source, component.payload), "corrupt");
+        if (failure === "unexpected-manifest-file") checksums.files["parts/untracked"] = { bytes: 0, sha256: sha256("") };
+        if (failure === "traversal") checksums.files = { "parts/../../outside": checksums.files[component.payload] };
+        if (failure === "swapped") {
+          // Both the archive and fragment hashes are valid. Only the reconstructed
+          // whole-library hash can detect a fragment in the wrong position.
+          const wrong = readFileSync(join(paths.root, "component-sources", parts[1].package, parts[1].payload));
+          writeFileSync(join(source, component.payload), wrong);
+          checksums.files[component.payload] = { bytes: wrong.length, sha256: sha256(wrong) };
+        }
+        writeFileSync(join(source, "checksums.json"), JSON.stringify(checksums));
+        if (failure === "swapped") return checksums.files[component.payload];
+      });
+      if (failure === "missing") rmSync(join(paths.config.directory, paths.plugins.components.at(-1).tarball));
+      materialize(paths);
+      const before = installedBaseSnapshot(paths);
+      assert.throws(() => materialize({ ...paths, config: { ...paths.config, mode: "cuda" } }),
+        /missing|mismatch|checksum|manifest|ENOENT/);
+      assert.deepEqual(installedBaseSnapshot(paths), before);
+      assert.deepEqual(verifyInstallation(paths).components, []);
+      for (const file of paths.originals.keys()) assert.equal(existsSync(join(paths.metaRoot, file)), false);
     });
-    if (failure === "missing") rmSync(join(paths.config.directory, paths.plugins.components.at(-1).tarball));
-    materialize(paths);
-    const before = installedBaseSnapshot(paths);
-    assert.throws(() => materialize({ ...paths, config: { ...paths.config, mode: "cuda" } }),
-      /missing|mismatch|checksum|manifest|ENOENT/);
-    assert.deepEqual(installedBaseSnapshot(paths), before);
-    assert.deepEqual(verifyInstallation(paths).components, []);
-    for (const file of paths.originals.keys()) assert.equal(existsSync(join(paths.metaRoot, file)), false);
-  });
+  }
 }
+
+test("plugin manifests enforce the publication size budget before downloading", (t) => {
+  const fixture = optionalFixture(t, "win32-x64-msvc");
+  const validate = () => validatePlugins(fixture.plugins, fixture.entry, fixture.expectedVersion, fixture.plugins.coreId);
+  const component = fixture.plugins.components.at(-1);
+  component.archiveBytes = MAX_NPM_TARBALL_BYTES;
+  assert.doesNotThrow(validate);
+  component.archiveBytes++;
+  assert.throws(validate, /invalid pinned plugin/);
+  component.archiveBytes = 202_400_000;
+  assert.throws(validate, /invalid pinned plugin/);
+});
 
 test("rejects the unpublished schema 2 without changing the existing installation", (t) => {
   const paths = fixture();
