@@ -112,7 +112,7 @@ fn index_help_uses_root_paths_without_workspace_names() {
 fn index_help_distinguishes_explicit_indexing_from_automatic_search_indexing() {
     let help = stdout(&["--help", "index"]);
     assert!(
-        help.contains("Explicit zg --index requires --embedding"),
+        help.contains("falling back to local/potion-code-16m-v2"),
         "{help}"
     );
     assert!(

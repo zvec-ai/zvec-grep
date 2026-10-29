@@ -433,8 +433,8 @@ cancel. Non-interactive indexing requires --allow-remote or a workspace grant.
 Workspaces are identified by their root paths; different roots may share a directory name.
 
 This version indexes text only with one embedding model per workspace.
-Explicit zg --index requires --embedding, ZVEC_GREP_EMBEDDING, or a configured
-default when creating a new index.
+For a new index, zg --index uses --embedding, then ZVEC_GREP_EMBEDDING, then
+the configured default, falling back to local/potion-code-16m-v2.
 Interactive searches prompt to select an embedding model before creating a
 missing index. Local and remote models have separate tabs; downloaded local
 models and configured remote models appear first. Use arrows or Tab to switch,
