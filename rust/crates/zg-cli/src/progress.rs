@@ -91,6 +91,7 @@ impl ProgressOutput {
             plain
         };
         if progress.phase == IndexProgressPhase::Indexing
+            && progress.files_total.is_some()
             && progress
                 .embedding
                 .as_ref()
@@ -216,7 +217,7 @@ fn format_terminal_progress(
         );
     }
     let done = progress.phase == IndexProgressPhase::Done;
-    let effective = if done {
+    let effective = if done || progress.files_total.is_none() {
         previous.unwrap_or(progress)
     } else {
         progress
@@ -585,6 +586,75 @@ mod tests {
                 assert!(!frame.contains("\x1b[0m"), "{frame:?}");
             }
         }
+    }
+
+    #[test]
+    fn embedding_batch_progress_keeps_the_indexing_bar_visible() {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let mut output = ProgressOutput {
+            writer: Box::new(Capture(buffer.clone())),
+            terminal: true,
+            color: true,
+            last: None,
+            finished: false,
+            last_indexing: None,
+        };
+        let indexing = IndexProgress {
+            phase: IndexProgressPhase::Indexing,
+            files_total: Some(20_936),
+            files_indexed: Some(892),
+            files_failed: Some(0),
+            detail: None,
+            embedding: None,
+        };
+        output.report(&indexing).expect("indexing progress");
+        buffer.lock().expect("capture").clear();
+        output.last.as_mut().expect("last frame").1 = Instant::now() - Duration::from_millis(200);
+        let batch = IndexProgress {
+            files_total: None,
+            files_indexed: None,
+            files_failed: None,
+            detail: Some("embedding files".into()),
+            embedding: Some(IndexEmbeddingProgress {
+                concurrency: Some(8),
+                ..IndexEmbeddingProgress::default()
+            }),
+            ..indexing.clone()
+        };
+        output.report(&batch).expect("embedding batch progress");
+        let line = &output.last.as_ref().expect("last frame").2;
+        assert!(line.contains('█'), "{line:?}");
+        assert!(line.contains("892/20936"), "{line:?}");
+        assert!(buffer.lock().expect("capture").is_empty());
+        assert_eq!(
+            output
+                .last_indexing
+                .as_ref()
+                .expect("indexed counts")
+                .files_indexed,
+            Some(892)
+        );
+        output.last.as_mut().expect("last frame").1 = Instant::now() - Duration::from_millis(200);
+        output
+            .report(&IndexProgress {
+                embedding: Some(IndexEmbeddingProgress {
+                    concurrency: Some(7),
+                    ..IndexEmbeddingProgress::default()
+                }),
+                ..batch
+            })
+            .expect("next embedding batch progress");
+        assert!(buffer.lock().expect("capture").is_empty());
+        output
+            .report(&IndexProgress {
+                files_indexed: Some(893),
+                ..indexing
+            })
+            .expect("next indexed count");
+        let frame = String::from_utf8(buffer.lock().expect("capture").clone())
+            .expect("UTF-8 progress frame");
+        assert!(frame.contains("3/20936"), "{frame:?}");
+        assert!(!frame.contains("Indexing files"), "{frame:?}");
     }
 
     #[test]
