@@ -68,7 +68,18 @@ pub(crate) fn code_outline(
             details.insert(0, "members:".into());
         }
     } else {
-        collect_calls(root, bytes, &mut details);
+        let call_root = if format == FileFormat::Go {
+            // Standalone interface method signatures can parse as call expressions.
+            // Only Go functions and methods with bodies can contribute calls.
+            find_entity(root, adapter, bytes, metadata.symbol_name.as_deref())
+                .filter(|node| {
+                    matches!(node.kind(), "function_declaration" | "method_declaration")
+                })?
+                .child_by_field_name("body")?
+        } else {
+            root
+        };
+        collect_calls(call_root, bytes, &mut details);
         if details.is_empty() {
             return None;
         }
@@ -471,6 +482,59 @@ mod tests {
             } else {
                 assert!(outline.is_none(), "{declaration}: {outline:?}");
             }
+        }
+    }
+
+    #[test]
+    fn go_interface_methods_have_no_call_outline() {
+        for (name, declaration) in [
+            ("Read", "Read()"),
+            ("Close", "Close() error"),
+            ("Apply", "Apply(fn func()) interface{}"),
+        ] {
+            let source = format!("package p\ntype Reader interface {{\n{declaration}\n}}");
+            let mut entity = indexed_entity("reader.go", &source, SymbolType::Function, name);
+            assert_eq!(entity.content, Content::Code(declaration.into()));
+            for legacy in [false, true] {
+                if legacy && let Some(EntityMetadata::Code(code)) = &mut entity.metadata {
+                    code.language = None;
+                }
+                let outline = code_outline(
+                    Path::new("reader.go"),
+                    &entity.content,
+                    entity.metadata.as_ref(),
+                );
+                assert!(
+                    outline.is_none(),
+                    "{declaration}, legacy={legacy}: {outline:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn go_function_and_method_bodies_keep_real_calls() {
+        for (name, declaration, expected) in [
+            (
+                "Read",
+                "func Read() { Read(); consume() }",
+                "calls: Read, consume",
+            ),
+            (
+                "Close",
+                "func (r *Reader) Close() error { flush(); return r.Close() }",
+                "calls: flush, r.Close",
+            ),
+        ] {
+            let source = format!("package p\n{declaration}");
+            let entity = indexed_entity("reader.go", &source, SymbolType::Function, name);
+            let outline = code_outline(
+                Path::new("reader.go"),
+                &entity.content,
+                entity.metadata.as_ref(),
+            )
+            .expect("Go function outline");
+            assert!(outline.ends_with(expected), "{outline}");
         }
     }
 
