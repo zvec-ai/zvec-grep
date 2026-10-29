@@ -357,10 +357,9 @@ impl TerminalOutput {
                     .unwrap_or(80);
                 self.width_checked = Some(now);
             }
-            if !self.visible {
-                self.frame.push_str("\x1b[?25l");
-                self.visible = true;
-            }
+            // Signals can terminate explicit indexing without running Drop.
+            // Preserve cursor visibility; interactive sessions own that state.
+            self.visible = true;
             self.frame.push('\r');
             format_terminal_progress(
                 &mut self.frame,
@@ -386,7 +385,7 @@ impl TerminalOutput {
     fn finish(&mut self) -> io::Result<()> {
         if self.visible {
             self.visible = false;
-            self.writer.write_all(b"\r\x1b[K\x1b[?25h")?;
+            self.writer.write_all(b"\r\x1b[K")?;
             self.writer.flush()?;
         }
         Ok(())
@@ -1098,7 +1097,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_coalesces_bursts_and_restores_cursor_on_drop() {
+    fn terminal_coalesces_bursts_and_clears_line_on_drop() {
         let capture = Capture::default();
         let display = IndexProgressDisplay::terminal(capture.clone(), ColorMode::Never, true);
         let reporter = display.reporter();
@@ -1116,10 +1115,10 @@ mod tests {
             "unthrottled frame count: {}",
             frames.len()
         );
-        assert_eq!(frames.last().expect("cleanup"), b"\r\x1b[K\x1b[?25h");
+        assert_eq!(frames.last().expect("cleanup"), b"\r\x1b[K");
         let text = capture.text();
-        assert_eq!(text.matches("\x1b[?25l").count(), 1);
-        assert_eq!(text.matches("\x1b[?25h").count(), 1);
+        assert!(!text.contains("\x1b[?25l"));
+        assert!(!text.contains("\x1b[?25h"));
         assert!(!text.contains("\x1b[2K"));
         for frame in &frames[..frames.len() - 1] {
             let frame = String::from_utf8_lossy(frame);
@@ -1151,7 +1150,8 @@ mod tests {
         assert!(text.contains("Optimizing index"));
         assert!(text.contains("elapsed"));
         assert!(!text.contains("100%"));
-        assert_eq!(text.matches("\x1b[?25h").count(), 1);
+        assert!(!text.contains("\x1b[?25l"));
+        assert!(!text.contains("\x1b[?25h"));
     }
 
     #[test]

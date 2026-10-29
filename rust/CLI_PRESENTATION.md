@@ -55,7 +55,9 @@ Install/uninstall targets remain `codex`, `claude`, `qwen`, `qoder`, `opencode`,
   File processing at 100% does not itself imply `Index ready`.
 - Coalesce terminal updates before formatting, cap refreshes at eight per
   second, and write each complete frame together. Static summaries and errors
-  render once. Restore cursor visibility on completion, cancellation and drop.
+  render once. Progress never changes cursor visibility, so process signals
+  cannot leave a cursor hidden by the live line. Interactive setup sessions own
+  their raw mode and cursor restoration on normal completion or cancellation.
 - Respect color policy and `NO_COLOR`; use plain fallbacks when terminal
   capabilities are unavailable. Non-TTY progress is throttled line-oriented
   logging, without animation or cursor movement.
@@ -71,12 +73,12 @@ These are test references, not a claim that a particular build has passed.
 
 | Area | Tests |
 | --- | --- |
-| Progress frames, throttling, heartbeat, cursor restoration and warnings | [progress.rs](crates/zg-cli/src/progress.rs), especially `terminal_coalesces_bursts_and_restores_cursor_on_drop`, `heartbeat_animates_optimization_without_producer_events`, `a_blocked_terminal_write_does_not_block_progress_producers` and `warnings_are_durable_complete_and_survive_coalescing`. |
+| Progress frames, throttling, heartbeat, unchanged cursor visibility and warnings | [progress.rs](crates/zg-cli/src/progress.rs), especially `terminal_coalesces_bursts_and_clears_line_on_drop`, `heartbeat_animates_optimization_without_producer_events`, `a_blocked_terminal_write_does_not_block_progress_producers` and `warnings_are_durable_complete_and_survive_coalescing`. |
 | Status and summaries | [status.rs](crates/zg-cli/src/status.rs), `terminal_status_has_compact_heading_and_retains_nonzero_attention_counts`; [management.rs](crates/zg-cli/src/management.rs), existing scan-rule, retry/failure, duration and color-policy tests. |
 | Search and path compatibility | [render.rs](crates/zg-cli/src/render.rs), preview/highlighting, native path bytes and `terminal_freshness_keeps_refresh_counts_and_redirected_contract`; [path_lookup.rs](crates/zg-cli/src/path_lookup.rs), `terminal_warning_changes_only_diagnostics_not_search_data`. |
 | Errors | [messages.rs](crates/zg-cli/src/messages.rs), manifest recovery, debug diagnostics, control-character sanitization and unrelated storage failures. |
 | Pickers and consent | [setup.rs](crates/zg-cli/src/setup.rs), [setup/credential.rs](crates/zg-cli/src/setup/credential.rs), [authorization.rs](crates/zg-cli/src/authorization.rs), and [install.rs](crates/zg-cli/src/install.rs): navigation, cancellation, consent, screen clipping and one-write redraw. |
-| Direct/server and process behavior | [index_progress.rs](crates/zg/tests/index_progress.rs), [implicit_index.rs](crates/zg/tests/implicit_index.rs) and [server_lifecycle.rs](crates/zg/tests/server_lifecycle.rs): diagnostic streams, saved scope, readiness exit codes, closed pipes, setup cancellation and daemon/MCP behavior. |
+| Direct/server and process behavior | [index_progress.rs](crates/zg/tests/index_progress.rs), [implicit_index.rs](crates/zg/tests/implicit_index.rs) and [server_lifecycle.rs](crates/zg/tests/server_lifecycle.rs): diagnostic streams, saved scope, readiness exit codes, closed pipes, setup cancellation, explicit-index SIGINT cursor visibility and daemon/MCP behavior. |
 
 ## Review images
 
