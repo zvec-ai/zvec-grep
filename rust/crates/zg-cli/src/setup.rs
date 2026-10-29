@@ -63,7 +63,7 @@ fn clean(value: &str) -> String {
         .collect()
 }
 
-fn fit_terminal_row(value: &str, columns: u16) -> String {
+fn fit_terminal_row(value: &str, columns: u16) -> (String, usize) {
     let mut fitted = String::new();
     let mut occupied = 0;
     for character in clean(value).chars() {
@@ -74,22 +74,41 @@ fn fit_terminal_row(value: &str, columns: u16) -> String {
         fitted.push(character);
         occupied += width;
     }
-    fitted
+    (fitted, occupied)
+}
+
+struct RenderedLine {
+    text: String,
+    columns: usize,
 }
 
 #[derive(Default)]
 struct Screen {
-    lines: Vec<String>,
+    lines: Vec<RenderedLine>,
     size: Option<(u16, u16)>,
 }
 
 impl Screen {
-    fn rewind(&self, output: &mut impl Write) -> io::Result<()> {
+    fn rewind(&self, output: &mut impl Write, columns: u16, rows: u16) -> io::Result<()> {
+        let columns = usize::from(columns).max(1);
+        let reflowed = self
+            .size
+            .is_some_and(|(previous, _)| usize::from(previous.saturating_add(1)) != columns);
+        // A width change can reflow printed rows before redraw or exit.
+        let previous_rows = if reflowed {
+            self.lines
+                .iter()
+                .map(|line| line.columns.div_ceil(columns).max(1))
+                .sum()
+        } else {
+            self.lines.len()
+        };
+        let visible_previous = previous_rows.min(usize::from(rows.saturating_sub(1)));
         queue!(output, MoveToColumn(0))?;
-        if !self.lines.is_empty() {
+        if visible_previous > 0 {
             queue!(
                 output,
-                MoveUp(u16::try_from(self.lines.len()).unwrap_or(u16::MAX))
+                MoveUp(u16::try_from(visible_previous).unwrap_or(u16::MAX))
             )?;
         }
         queue!(output, Clear(ClearType::FromCursorDown))
@@ -97,7 +116,12 @@ impl Screen {
 
     fn clear(&mut self) -> io::Result<()> {
         let mut output = io::stderr().lock();
-        self.rewind(&mut output)?;
+        let (columns, rows) = terminal::size().unwrap_or_else(|_| {
+            self.size.map_or((80, 24), |(columns, rows)| {
+                (columns.saturating_add(1), rows)
+            })
+        });
+        self.rewind(&mut output, columns, rows)?;
         output.flush()?;
         self.lines.clear();
         Ok(())
@@ -122,36 +146,29 @@ impl Screen {
         let rendered = lines
             .iter()
             .map(|line| {
-                let line = fit_terminal_row(line, columns);
-                if use_color && line.trim_start().starts_with('›') {
+                let (line, columns) = fit_terminal_row(line, columns);
+                let text = if use_color && line.trim_start().starts_with('›') {
                     format!("\x1b[38;2;134;239;172m{line}\x1b[0m")
                 } else {
                     line
-                }
+                };
+                RenderedLine { text, columns }
             })
             .collect::<Vec<_>>();
         let resized = self.size.is_some_and(|size| size != (columns, rows));
         let previous_len = if resized { 0 } else { self.lines.len() };
         let mut frame = Vec::new();
         if resized {
-            let visible_previous = self.lines.len().min(usize::from(rows.saturating_sub(1)));
-            queue!(frame, MoveToColumn(0))?;
-            if visible_previous > 0 {
-                queue!(
-                    frame,
-                    MoveUp(u16::try_from(visible_previous).unwrap_or(u16::MAX))
-                )?;
-            }
-            queue!(frame, Clear(ClearType::FromCursorDown))?;
+            self.rewind(&mut frame, columns.saturating_add(1), rows)?;
         }
         // Repaint only changed rows so navigation never blanks the whole prompt.
         for (index, line) in rendered.iter().enumerate().take(previous_len) {
-            if self.lines[index] == *line {
+            if self.lines[index].text == line.text {
                 continue;
             }
             let distance = u16::try_from(previous_len - index).unwrap_or(u16::MAX);
             queue!(frame, MoveToColumn(0), MoveUp(distance))?;
-            write!(frame, "{line}")?;
+            write!(frame, "{}", line.text)?;
             queue!(
                 frame,
                 Clear(ClearType::UntilNewLine),
@@ -160,7 +177,7 @@ impl Screen {
             )?;
         }
         for line in rendered.iter().skip(previous_len) {
-            write!(frame, "{line}\r\n")?;
+            write!(frame, "{}\r\n", line.text)?;
         }
         if previous_len > rendered.len() {
             queue!(
@@ -736,6 +753,36 @@ mod tests {
         assert!(
             resized.starts_with(&expected_prefix),
             "resize cleared output above the prompt: {resized:?}"
+        );
+    }
+
+    #[test]
+    fn shrinking_width_rewinds_wrapped_picker_rows() {
+        let mut screen = Screen::default();
+        let lines = ["H".repeat(70), format!("› {}", "M".repeat(68))];
+        screen
+            .draw_to(&mut Vec::new(), &lines, 79, 30, ColorMode::Always)
+            .expect("draw wide prompt");
+        let mut expected_prefix = Vec::new();
+        queue!(
+            expected_prefix,
+            MoveToColumn(0),
+            MoveUp(4),
+            Clear(ClearType::FromCursorDown)
+        )
+        .expect("wrapped prompt clear");
+        let mut cleared = Vec::new();
+        screen
+            .rewind(&mut cleared, 40, 30)
+            .expect("clear after width shrink");
+        assert_eq!(cleared, expected_prefix, "exit left wrapped rows behind");
+        let mut resized = Vec::new();
+        screen
+            .draw_to(&mut resized, &lines, 39, 30, ColorMode::Always)
+            .expect("redraw narrow prompt");
+        assert!(
+            resized.starts_with(&expected_prefix),
+            "width shrink left old wrapped picker rows behind: {resized:?}"
         );
     }
 
