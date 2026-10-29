@@ -1,7 +1,10 @@
-# Rust rewrite contributor guide
+# Rust contributor guide
 
 The Rust workspace lives in `rust/`. Run the commands in this guide from that
-directory; the repository root contains the TypeScript / Node.js implementation.
+directory. The repository root retains the legacy TypeScript implementation and
+its separate checks. User documentation lives in
+[zvec-web](https://github.com/zvec-ai/zvec-web/tree/main/content/docs), published
+on [zvec.org](https://zvec.org/en/docs/zvec-grep/).
 
 ## Start
 
@@ -46,15 +49,27 @@ Native dependency types remain in their owning crate. Daemon framing and wire
 commands remain in `zg-daemon-protocol`; MCP schemas remain in
 `zg-transport-mcp`. Transport handlers call public `ZvecGrep` methods directly.
 
+Create a separate native crate only when the component is independently useful
+or testable. Keep its library types and runtime policy in that crate. When
+integrating it, reuse typed engine options and results, put orchestration behind
+a private engine service, call it from `ZvecGrep`, and map failures to
+`EngineError`. Add shared abstractions only for multiple real implementations.
+
 If a private engine service needs code currently living in another crate,
 prefer moving that concrete implementation behind the engine boundary. Do not
 make an engine-internal module public solely to avoid a crate dependency cycle.
 
+Check cancellation during expensive work, bound processes and queues, preserve
+deterministic output order, clean up partial artifacts, and record native
+revisions and artifact fingerprints where applicable.
+
 ## Compatibility
 
-The TypeScript implementation in the repository root is the behavioral oracle
-during the rewrite. Store stable, machine-readable cases under `compat/` and normalize
-paths, random identifiers and timings in the runner.
+The TypeScript implementation and captured fixtures remain comparison baselines
+where parity is required. Current Rust APIs and regression tests define the Rust
+interface. Store stable, machine-readable cases under `compat/`, normalize paths,
+random identifiers and timings in the runner, and document intentional behavior
+differences. Keep fixtures consumed by tests when retiring migration notes.
 
 ## Verification
 

@@ -1,8 +1,11 @@
-# zvec-grep Rust rewrite
+# zvec-grep Rust workspace
 
-This directory contains the Rust implementation of zvec-grep. The TypeScript /
-Node.js implementation remains at the repository root; the [main README](../README.md)
-and [user documentation](../docs/README.md) describe that implementation.
+This directory contains the native zvec-grep CLI, engine, daemon, and MCP
+transport. Start with the [main README](../README.md) or the
+[user documentation](https://zvec.org/en/docs/zvec-grep/) for installation and
+everyday use. This page covers implementation behavior, native builds, and
+packaging. The repository root retains the legacy TypeScript implementation and
+its separate checks.
 
 Run the development commands below from `rust/` (`cd rust` from the repository
 root). See the [contributor guide](CONTRIBUTING.md) for checks and conventions.
@@ -125,7 +128,8 @@ stable ownership marker, so changing the daemon URL does not leave stale
 managed entries. Use `/reload` or a new session. Native filesystem paths are
 required for the directory override; file URIs and Windows shell drive paths
 are rejected. Pi's built-in MCP currently needs user-managed `zg --auth grant`
-authorization for Remote Embedding; see the [integration guide](../docs/01-agents.md).
+authorization for Remote Embedding; see the
+[integration guide](https://zvec.org/en/docs/zvec-grep/agents/).
 
 `ZvecGrep` is normally shared for the lifetime of a process. Workspace root is
 request state, so the same instance can serve multiple workspaces. It exposes
@@ -492,10 +496,10 @@ MCP use these coordinates for source numbering; preview never infers a range fro
 the number of content lines. The engine also interprets half-open line bounds.
 The required field changes the internal daemon reply contract. Native ripgrep
 type filters apply to queries; persisted scan rules support path globs and file
-formats using the same filename rules as indexed queries. Version 14 separates
-case-sensitive and case-insensitive glob updates on the daemon wire.
-Version 15 distinguishes complete ordered glob replacement from category updates.
-Restart older resident daemons when updating the CLI; replies without
+formats using the same filename rules as indexed queries. The daemon wire
+distinguishes complete ordered glob replacement from case-category updates.
+The instance record uses `daemonProtocolVersion: 1`; see the daemon migration
+notes above when replacing older resident processes. Replies without
 `content_range` are rejected during deserialization. Direct and server rendering
 consume the same engine contract.
 
@@ -525,10 +529,10 @@ indexed-search path ignores its scanning options; Rust rejects them explicitly.
 explicit `ignoreFiles` remain enabled independently of that switch. Missing files
 are skipped and their paths remain saved; other read errors and invalid rules fail
 before index mutations. `maxFileSizeBytes: 0` excludes all files, including empty files.
-Unknown search/index fields and public nulls are rejected, except index
-`maxDepth: null` / `maxFileSizeBytes: null`, which clear saved limits.
+Unknown search/index fields are rejected. Index `maxDepth: null` and
+`maxFileSizeBytes: null` clear saved limits.
 Existing typed globs, `includedFormats`/`excludedFormats`, categories, `enum`,
-`name`, `nestedGit`, diagnostic extensions and their compatibility boundaries are recorded in
+`nestedGit`, diagnostic extensions and their compatibility boundaries are recorded in
 [`allowed-differences.toml`](compat/allowed-differences.toml).
 
 Managed rg uses a file/line/context presentation and preserves all requested
@@ -782,8 +786,8 @@ The registry distribution is prepared as one meta package plus exact-version
 native optional dependencies declared in `npm/platforms.json`. The meta package
 uses Node only during `postinstall` to verify and materialize the native
 executable and conditionally migrate existing agent configurations; running `zg`
-enters that executable directly. Published installs
-support Node.js 14.14 and newer.
+enters that executable directly. The native meta package requires Node.js 14.14
+or newer during installation.
 
 Validate the release manifest and build the current platform dry-run packages:
 

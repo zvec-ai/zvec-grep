@@ -406,7 +406,7 @@ jobs:
               export LD_LIBRARY_PATH="${native_dirs}:${LD_LIBRARY_PATH:-}"
               export ORT_DYLIB_PATH=/work/rust/target/debug/libonnxruntime.so.1
               cargo nextest run --locked --workspace --all-targets --features zg/cuda --no-fail-fast
-              ./target/debug/zg --rg "zvec-grep Rust rewrite" README.md
+              ./target/debug/zg --rg "zvec-grep Rust workspace" README.md
             '
       - name: Build and exercise the original Windows Cargo CLI without library overrides
         if: matrix.cuda && runner.os == 'Windows'
@@ -473,7 +473,7 @@ jobs:
         run: |
           import os, pathlib, subprocess
           binary = pathlib.Path("target/debug") / ("zg.exe" if os.name == "nt" else "zg")
-          subprocess.run([str(binary.resolve()), "--rg", "zvec-grep Rust rewrite", "README.md"], check=True)
+          subprocess.run([str(binary.resolve()), "--rg", "zvec-grep Rust workspace", "README.md"], check=True)
       - name: Bundle Windows CUDA tests without compiler or build cache
         if: matrix.cuda && runner.os == 'Windows'
         shell: python
