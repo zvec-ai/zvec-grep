@@ -15,7 +15,7 @@ use std::{
 };
 
 use crossterm::{
-    cursor::{Hide, MoveDown, MoveTo, MoveToColumn, MoveUp, Show},
+    cursor::{Hide, MoveDown, MoveToColumn, MoveUp, Show},
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     queue,
     terminal::{self, Clear, ClearType},
@@ -134,7 +134,15 @@ impl Screen {
         let previous_len = if resized { 0 } else { self.lines.len() };
         let mut frame = Vec::new();
         if resized {
-            queue!(frame, MoveTo(0, 0), Clear(ClearType::FromCursorDown))?;
+            let visible_previous = self.lines.len().min(usize::from(rows.saturating_sub(1)));
+            queue!(frame, MoveToColumn(0))?;
+            if visible_previous > 0 {
+                queue!(
+                    frame,
+                    MoveUp(u16::try_from(visible_previous).unwrap_or(u16::MAX))
+                )?;
+            }
+            queue!(frame, Clear(ClearType::FromCursorDown))?;
         }
         // Repaint only changed rows so navigation never blanks the whole prompt.
         for (index, line) in rendered.iter().enumerate().take(previous_len) {
@@ -703,6 +711,31 @@ mod tests {
         assert!(
             frame.contains("› local/00"),
             "selected model was not repainted: {frame:?}"
+        );
+    }
+
+    #[test]
+    fn resizing_a_short_prompt_preserves_output_above_it() {
+        let mut screen = Screen::default();
+        let lines = ["Select an embedding model:".into(), "› local/one".into()];
+        screen
+            .draw_to(&mut Vec::new(), &lines, 80, 30, ColorMode::Never)
+            .expect("draw prompt");
+        let mut resized = Vec::new();
+        screen
+            .draw_to(&mut resized, &lines, 80, 20, ColorMode::Never)
+            .expect("redraw prompt");
+        let mut expected_prefix = Vec::new();
+        queue!(
+            expected_prefix,
+            MoveToColumn(0),
+            MoveUp(2),
+            Clear(ClearType::FromCursorDown)
+        )
+        .expect("prompt-only clear");
+        assert!(
+            resized.starts_with(&expected_prefix),
+            "resize cleared output above the prompt: {resized:?}"
         );
     }
 

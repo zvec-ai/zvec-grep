@@ -612,7 +612,13 @@ mod tests {
         output.report(&batch).expect("embedding batch progress");
         let line = &output.last.as_ref().expect("last frame").2;
         assert!(
-            line.contains(if cfg!(windows) { '#' } else { '█' }),
+            line.contains(
+                if cfg!(windows) || std::env::var("TERM").as_deref() == Ok("linux") {
+                    '#'
+                } else {
+                    '█'
+                }
+            ),
             "{line:?}"
         );
         assert!(line.contains("892/20936"), "{line:?}");
