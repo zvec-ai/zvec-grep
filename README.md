@@ -83,16 +83,6 @@ zg --index --embedding local/potion-retrieval-32m
 > [!NOTE]
 > The index is stored in `.zvec-grep/` under the indexed project root.
 
-> [!TIP]
-> If indexing or search fails, rerun the same command with `--debug`
-> for diagnostics (supported in both direct and server modes).
-> `zg --status --mode direct --debug` reports per-file failures stored in an
-> existing index; rerun a failed direct command to diagnose command-level
-> fatal errors. Use
-> `zg --status --mode server --debug` to inspect recorded server indexing errors.
-> For server connection failures, check `zg --server status` and the
-> [server logs](https://zvec.org/en/docs/zvec-grep/server/).
-
 ### 2. Choose how to search
 
 #### For agents: ask with OpenCode
