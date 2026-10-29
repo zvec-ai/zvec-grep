@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  INDEX_EMBEDDING_CONCURRENCY_ENV,
+  EMBEDDING_CONCURRENCY_ENV,
   normalizeLocalEmbeddingConcurrency,
   resolveLocalEmbeddingParallelism,
   resolveIndexEmbeddingConcurrencyOverride,
@@ -11,7 +11,7 @@ const LEGACY_LLAMA_PARALLELISM_ENV = "ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM";
 
 test("index concurrency prefers explicit values and leaves backend caps to the caller", (t) => {
   resetParallelismEnvironment(t);
-  process.env[INDEX_EMBEDDING_CONCURRENCY_ENV] = "invalid";
+  process.env[EMBEDDING_CONCURRENCY_ENV] = "invalid";
   process.env[LEGACY_LLAMA_PARALLELISM_ENV] = "8";
   const warnings = [];
   t.mock.method(process.stderr, "write", (message) => {
@@ -47,7 +47,7 @@ test("index concurrency prefers explicit values and leaves backend caps to the c
 
 test("backend concurrency validates and caps explicit values without reading index or legacy environment", (t) => {
   resetParallelismEnvironment(t);
-  process.env[INDEX_EMBEDDING_CONCURRENCY_ENV] = "8";
+  process.env[EMBEDDING_CONCURRENCY_ENV] = "8";
   process.env[LEGACY_LLAMA_PARALLELISM_ENV] = "8";
   assert.equal(normalizeLocalEmbeddingConcurrency(), undefined);
   assert.equal(normalizeLocalEmbeddingConcurrency(1), 1);
@@ -70,7 +70,7 @@ test("backend concurrency validates and caps explicit values without reading ind
 
 function resetParallelismEnvironment(t) {
   for (const name of [
-    INDEX_EMBEDDING_CONCURRENCY_ENV,
+    EMBEDDING_CONCURRENCY_ENV,
     LEGACY_LLAMA_PARALLELISM_ENV,
   ]) {
     const previous = process.env[name];
@@ -96,14 +96,14 @@ test("index embedding parallelism prefers the shared override and makes legacy o
     3,
   );
 
-  process.env[INDEX_EMBEDDING_CONCURRENCY_ENV] = " 5 ";
+  process.env.ZVEC_GREP_EMBEDDING_CONCURRENCY = " 5 ";
   assert.equal(resolveIndexEmbeddingConcurrencyOverride(), 5);
   assert.equal(
     resolveIndexEmbeddingConcurrencyOverride({ legacyLlama: true }),
     5,
   );
 
-  process.env[INDEX_EMBEDDING_CONCURRENCY_ENV] = " \t ";
+  process.env[EMBEDDING_CONCURRENCY_ENV] = " \t ";
   assert.equal(resolveIndexEmbeddingConcurrencyOverride(), undefined);
   assert.equal(
     resolveIndexEmbeddingConcurrencyOverride({ legacyLlama: true }),
@@ -129,20 +129,20 @@ test("index embedding parallelism accepts uncapped positive safe integers", (t) 
     "NaN",
     "9".repeat(400),
   ]) {
-    process.env[INDEX_EMBEDDING_CONCURRENCY_ENV] = value;
+    process.env[EMBEDDING_CONCURRENCY_ENV] = value;
     assert.equal(resolveIndexEmbeddingConcurrencyOverride(), undefined);
     assert.match(warnings.at(-1), /using automatic parallelism/);
-    assert.ok(warnings.at(-1).includes(INDEX_EMBEDDING_CONCURRENCY_ENV));
+    assert.ok(warnings.at(-1).includes(EMBEDDING_CONCURRENCY_ENV));
   }
   assert.equal(warnings.length, 8);
 
   for (const value of ["8", "99", String(Number.MAX_SAFE_INTEGER)]) {
-    process.env[INDEX_EMBEDDING_CONCURRENCY_ENV] = value;
+    process.env[EMBEDDING_CONCURRENCY_ENV] = value;
     assert.equal(resolveIndexEmbeddingConcurrencyOverride(), Number(value));
   }
-  process.env[INDEX_EMBEDDING_CONCURRENCY_ENV] = "1";
+  process.env[EMBEDDING_CONCURRENCY_ENV] = "1";
   assert.equal(resolveIndexEmbeddingConcurrencyOverride(), 1);
-  process.env[INDEX_EMBEDDING_CONCURRENCY_ENV] = "03";
+  process.env[EMBEDDING_CONCURRENCY_ENV] = "03";
   assert.equal(resolveIndexEmbeddingConcurrencyOverride(), 3);
   assert.equal(warnings.length, 8);
 });
@@ -154,15 +154,15 @@ test("an invalid shared override selects automatic mode instead of the legacy ov
     warnings.push(String(message));
     return true;
   });
-  process.env[INDEX_EMBEDDING_CONCURRENCY_ENV] = "invalid";
+  process.env[EMBEDDING_CONCURRENCY_ENV] = "invalid";
   process.env[LEGACY_LLAMA_PARALLELISM_ENV] = "3";
   assert.equal(
     resolveIndexEmbeddingConcurrencyOverride({ legacyLlama: true }),
     undefined,
   );
-  assert.ok(warnings[0].includes(INDEX_EMBEDDING_CONCURRENCY_ENV));
+  assert.ok(warnings[0].includes(EMBEDDING_CONCURRENCY_ENV));
 
-  delete process.env[INDEX_EMBEDDING_CONCURRENCY_ENV];
+  delete process.env[EMBEDDING_CONCURRENCY_ENV];
   process.env[LEGACY_LLAMA_PARALLELISM_ENV] = "2.5";
   assert.equal(
     resolveIndexEmbeddingConcurrencyOverride({ legacyLlama: true }),

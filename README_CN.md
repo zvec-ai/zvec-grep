@@ -153,8 +153,8 @@ zg 会将 `sherlock-holmes.txt` 中的相关段落排在
 
 ### 索引 Embedding 并发与 GPU 错误
 
-`zg --index --index-embedding-concurrency <n>` 和
-`ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY` 控制构建或更新索引时的 Embedding
+`zg --index --embedding-concurrency <n>` 和
+`ZVEC_GREP_EMBEDDING_CONCURRENCY` 控制构建或更新索引时的 Embedding
 并发，对本地和远程模型均生效。环境变量也适用于自动建索引和刷新；这些设置
 不影响查询文本的向量推理。
 CLI 参数仅与 `--index` 一起使用。
@@ -179,14 +179,14 @@ GPU 运行时提供空闲显存时，按
 以下示例使用直接执行模式，使新的环境变量立即生效：
 
 ```bash
-export ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY=1
+export ZVEC_GREP_EMBEDDING_CONCURRENCY=1
 zg --index --mode direct
 ```
 
 Windows PowerShell：
 
 ```powershell
-$env:ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY = "1"
+$env:ZVEC_GREP_EMBEDDING_CONCURRENCY = "1"
 zg --index --mode direct
 ```
 
@@ -194,8 +194,8 @@ zg --index --mode direct
 无需为 CLI 参数重启后台服务：
 
 ```bash
-export ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY=8
-zg --index --index-embedding-concurrency 1
+export ZVEC_GREP_EMBEDDING_CONCURRENCY=8
+zg --index --embedding-concurrency 1
 ```
 
 若要修改后台服务的环境变量默认值，需更新其启动环境，然后在该环境中运行

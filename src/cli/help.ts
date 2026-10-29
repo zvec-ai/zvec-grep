@@ -40,7 +40,7 @@ const ENVIRONMENT_VARIABLES = {
   ZVEC_GREP_ENDPOINT: "Remote Embedding endpoint fallback",
   ZVEC_GREP_MODEL_CACHE: "Local embedding model cache directory",
   ZVEC_GREP_DEVICE: "Local embedding device: auto, cpu, metal, vulkan, or cuda",
-  ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY:
+  ZVEC_GREP_EMBEDDING_CONCURRENCY:
     "Local/remote index-build/update embedding concurrency; explicit index CLI option takes precedence",
   DASHSCOPE_API_KEY: "Qwen credential fallback after ZVEC_GREP_API_KEY",
   QWEN_API_KEY: "Qwen credential fallback after DASHSCOPE_API_KEY",
@@ -201,7 +201,7 @@ Embedding options:
   --endpoint <url>                  Embedding provider endpoint
   --model-cache <path>              Local model cache directory
   --device <device>                 auto, cpu, metal, vulkan, cuda
-  --index-embedding-concurrency <n> Index embedding concurrency limit
+  --embedding-concurrency <n>       Embedding concurrency limit (index only)
   --allow-remote                    Allow Remote Embedding for this command only
 
 Index concurrency limits llama.cpp contexts, Transformers.js calls in flight,
@@ -232,7 +232,7 @@ ${formatEnvironmentVariables([
   "ZVEC_GREP_ENDPOINT",
   "ZVEC_GREP_MODEL_CACHE",
   "ZVEC_GREP_DEVICE",
-  "ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY",
+  "ZVEC_GREP_EMBEDDING_CONCURRENCY",
 ])}
 
 See zg --help environment for precedence and Server-mode scope.`;
@@ -569,7 +569,7 @@ ${formatEnvironmentVariables([
   "ZVEC_GREP_ENDPOINT",
   "ZVEC_GREP_MODEL_CACHE",
   "ZVEC_GREP_DEVICE",
-  "ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY",
+  "ZVEC_GREP_EMBEDDING_CONCURRENCY",
 ])}
 
 Qwen credential aliases:
@@ -610,7 +610,7 @@ Precedence:
 
 Server scope:
   zg --index forwards its ZVEC_GREP_EMBEDDING default to Server and auto modes.
-  Explicit --index-embedding-concurrency is forwarded without restarting the daemon.
+  Explicit --embedding-concurrency is forwarded without restarting the daemon.
   The index concurrency environment also applies to automatic indexing and refresh.
   Index concurrency controls do not affect query-vector inference.
   Direct MCP calls use the embedding environment inherited by the daemon.

@@ -93,7 +93,7 @@ test("CLI argument parser handles command, provider, path, and rg options", () =
     "/tmp/models",
     "--device",
     "CUDA",
-    "--index-embedding-concurrency",
+    "--embedding-concurrency",
     "4",
   ]);
   assert.equal(index.options.embedding, "qwen/text-embedding-v4");
@@ -135,40 +135,76 @@ test("CLI argument parser handles command, provider, path, and rg options", () =
 });
 
 test("CLI index concurrency is accepted only for indexing", () => {
-  const flag = "--index-embedding-concurrency";
-  assert.equal(
-    parseArgs(["--index", flag, "12"]).options.embeddingConcurrency,
-    12,
-  );
-  for (const value of ["0", "-1", "1.5", "invalid"]) {
-    assert.throws(
-      () => parseArgs(["--index", flag, value]),
-      /positive integer/,
-    );
+  const flag = "--embedding-concurrency";
+  for (const mode of ["direct", "server", "auto"]) {
+    for (const args of [
+      ["--index", flag, "12"],
+      [flag, "12", "--index"],
+      ["--index", `${flag}=12`],
+      [`${flag}=12`, "--index"],
+    ]) {
+      assert.equal(
+        parseArgs([...args, "--mode", mode]).options.embeddingConcurrency,
+        12,
+      );
+    }
   }
+  for (const value of ["0", "-1", "1.5", "invalid"]) {
+    for (const option of [[flag, value], [`${flag}=${value}`]]) {
+      assert.throws(
+        () => parseArgs(["--index", ...option]),
+        /positive integer/,
+      );
+    }
+  }
+  assert.throws(() => parseArgs(["--index", flag]), /requires a value/);
   for (const command of [
+    [],
     ["query text"],
     ["--vector", "query text"],
     ["--refresh", "wait", "query text"],
     ["--rg", "query text"],
     ["--status"],
     ["--server", "on"],
+    ["--config", "model", "set"],
+    ["--auth", "status"],
     ["--install"],
+    ["--uninstall"],
   ]) {
-    assert.throws(
-      () => parseArgs([...command, flag, "2"]),
-      /only be used with zg --index/,
-      [...command, flag, "2"].join(" "),
-    );
+    for (const option of [
+      [flag, "2"],
+      [`${flag}=2`],
+      [flag],
+      [flag, "invalid"],
+    ]) {
+      assert.throws(
+        () => parseArgs([...command, ...option]),
+        { message: "--embedding-concurrency can only be used with zg --index" },
+        [...command, ...option].join(" "),
+      );
+    }
   }
 });
 
-test("CLI rejects the old embedding concurrency option as unknown", () => {
+test("CLI rejects the old index concurrency option as unknown", () => {
   for (const command of [["--index"], ["query text"], ["--rg", "query text"]]) {
-    assert.throws(
-      () => parseArgs([...command, "--embedding-concurrency", "2"]),
-      { message: "Unknown option: --embedding-concurrency" },
-    );
+    for (const option of [
+      "--index-embedding-concurrency",
+      "--index-embedding-concurrency=2",
+    ]) {
+      assert.throws(() => parseArgs([...command, option]), {
+        message: `Unknown option: ${option}`,
+      });
+    }
+  }
+});
+
+test("CLI accepts embedding concurrency flag names as literal search text", () => {
+  for (const option of [
+    "--embedding-concurrency",
+    "--index-embedding-concurrency",
+  ]) {
+    assert.deepEqual(parseArgs(["--", option]).positionals, [option]);
   }
 });
 
@@ -631,7 +667,7 @@ test("CLI shape validation rejects every incompatible command family", () => {
     [["--rg", "query", "--prefer-symbol"], /indexed symbol options/],
     [["--rg", "query", "--refresh", "off"], /indexed refresh options/],
     [
-      ["--rg", "query", "--index-embedding-concurrency", "2"],
+      ["--rg", "query", "--embedding-concurrency", "2"],
       /only be used with zg --index/,
     ],
     [["--reset-paths", "query"], /only be used with zg --index/],

@@ -48,9 +48,9 @@ or Markdown structure. CLI and MCP rg searches share this behavior; current-file
 path lookup keeps its structural entity grouping.
 
 Index embedding concurrency is configured with
-`zg --index --index-embedding-concurrency <n>`; the old
-`--embedding-concurrency` spelling is rejected. For automatic indexing and
-refreshes as well, set `ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY=<n>`. Values must be
+`zg --index --embedding-concurrency <n>`.
+The option is rejected outside `--index`. For automatic indexing and
+refreshes as well, set `ZVEC_GREP_EMBEDDING_CONCURRENCY=<n>`. Values must be
 positive integers. Explicit CLI/API index settings take precedence over this
 environment variable, followed by the legacy
 `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` for llama.cpp indexing, then backend defaults.

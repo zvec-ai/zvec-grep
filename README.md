@@ -159,8 +159,8 @@ zg returns the relevant passages from `sherlock-holmes.txt`, ranked ahead of
 
 ### Index embedding concurrency and GPU errors
 
-`zg --index --index-embedding-concurrency <n>` and
-`ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY` control embedding concurrency while
+`zg --index --embedding-concurrency <n>` and
+`ZVEC_GREP_EMBEDDING_CONCURRENCY` control embedding concurrency while
 building or updating an index, for both local and remote models. The environment
 variable also applies to automatic indexing and refresh. These controls do not
 change query-vector inference. The CLI option is accepted only with `--index`.
@@ -190,14 +190,14 @@ retry the index. These examples run directly so the new environment takes
 effect immediately:
 
 ```bash
-export ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY=1
+export ZVEC_GREP_EMBEDDING_CONCURRENCY=1
 zg --index --mode direct
 ```
 
 Windows PowerShell:
 
 ```powershell
-$env:ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY = "1"
+$env:ZVEC_GREP_EMBEDDING_CONCURRENCY = "1"
 zg --index --mode direct
 ```
 
@@ -205,8 +205,8 @@ An explicit CLI option overrides the environment for that index operation,
 including when using the daemon; no daemon restart is needed for the CLI option:
 
 ```bash
-export ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY=8
-zg --index --index-embedding-concurrency 1
+export ZVEC_GREP_EMBEDDING_CONCURRENCY=8
+zg --index --embedding-concurrency 1
 ```
 
 To change the daemon's environment-variable default, update its startup

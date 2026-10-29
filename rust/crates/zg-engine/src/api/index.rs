@@ -36,7 +36,7 @@ pub mod options {
         pub embedding: Option<EmbeddingModelSpec>,
         /// Index-only embedding concurrency: llama.cpp contexts, local inference
         /// batches, or remote requests. Local native limits are capped at eight.
-        /// Omitted values use `ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY`, the legacy
+        /// Omitted values use `ZVEC_GREP_EMBEDDING_CONCURRENCY`, the legacy
         /// llama.cpp index override, then the backend default; never persisted.
         pub embedding_concurrency: Option<usize>,
         /// Maximum time to wait for workspace admission, in milliseconds (default: 30 seconds).

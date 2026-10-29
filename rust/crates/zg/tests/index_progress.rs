@@ -68,7 +68,7 @@ fn direct_and_server_report_index_progress_on_stderr() {
             "local/potion-code-16m-v2",
             "--device",
             "cpu",
-            "--index-embedding-concurrency",
+            "--embedding-concurrency",
             "4",
             "--no-color",
         ]);

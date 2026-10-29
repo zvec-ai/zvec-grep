@@ -24,7 +24,7 @@ import {
 } from "../artifact-downloader.js";
 import type { LlamaCppEmbeddingCatalogEntry } from "../catalog.js";
 import {
-  INDEX_EMBEDDING_CONCURRENCY_ENV,
+  EMBEDDING_CONCURRENCY_ENV,
   normalizeLocalEmbeddingConcurrency,
   resolveLocalEmbeddingParallelism,
 } from "../local-embedding-parallelism.js";
@@ -219,7 +219,7 @@ export class LlamaCppEmbeddingModel extends BaseEmbeddingModel {
     } catch (cause) {
       throw new EngineError("llama.cpp embedding failed", {
         code: "ZVEC_GREP.ENGINE.MODELS.LLAMA_CPP_EMBED_FAILED",
-        context: `model=${this.entry.reference}${this.gpu !== false ? `; for GPU errors, retry with --device cpu${options.purpose === "document" ? ` or index with --index-embedding-concurrency 1 (environment fallback: ${INDEX_EMBEDDING_CONCURRENCY_ENV}=1)` : ""}` : ""}`,
+        context: `model=${this.entry.reference}${this.gpu !== false ? `; for GPU errors, retry with --device cpu${options.purpose === "document" ? ` or index with --embedding-concurrency 1 (environment fallback: ${EMBEDDING_CONCURRENCY_ENV}=1)` : ""}` : ""}`,
         cause,
       });
     }

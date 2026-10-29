@@ -131,11 +131,13 @@ Core options:
 | `--endpoint <url>` | Remote provider endpoint |
 | `--model-cache <path>` | Local model cache directory |
 | `--device <device>` | `auto`, `cpu`, `metal`, `vulkan`, or `cuda` |
-| `--index-embedding-concurrency <n>` | Concurrent Embedding tasks |
+| `--embedding-concurrency <n>` | Positive embedding concurrency; only accepted with `--index` |
 | `--allow-remote` | Authorize Remote Embedding for this command |
 
 Local Potion embedding tasks run on worker threads. They default to two workers;
-`--index-embedding-concurrencyy` can override that value for larger machines.
+`--embedding-concurrency` can override that value for larger machines.
+`ZVEC_GREP_EMBEDDING_CONCURRENCY` supplies the default for indexing, including
+automatic builds and refreshes. Neither setting changes query-vector inference.
 
 File discovery accepts `-g/--glob`, `--iglob`, `-t/--type`, `-T/--type-not`,
 `--hidden`, `--no-ignore`, `--ignore-file`, `--max-depth`, `--max-filesize`, and

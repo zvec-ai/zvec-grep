@@ -115,7 +115,7 @@ function createArtifactResolver(
 
 function setParallelismEnvironment(t, value, legacyValue) {
   for (const [name, next] of [
-    ["ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY", value],
+    ["ZVEC_GREP_EMBEDDING_CONCURRENCY", value],
     ["ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM", legacyValue],
   ]) {
     const previous = process.env[name];

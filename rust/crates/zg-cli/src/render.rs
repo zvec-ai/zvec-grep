@@ -528,7 +528,7 @@ Embedding options:
   --endpoint <url>                  Embedding provider endpoint
   --model-cache <path>              Local model cache directory
   --device <device>                 auto, cpu, metal, vulkan, cuda
-  --index-embedding-concurrency <n>  Positive index embedding concurrency
+  --embedding-concurrency <n>        Positive embedding concurrency (index only)
   --allow-remote                    Allow Remote Embedding for this command only
 
 Explicit --device and --model-cache values are saved after successful indexing;
@@ -546,7 +546,7 @@ Index embedding concurrency:
     CPU worker-pool capacity. No cap of 8 is applied.
   Remote: concurrent requests; adaptive scheduling may reduce the limit after
     failures or rate limits. No cap of 8 is applied.
-  Precedence: CLI/API override, ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY, legacy
+  Precedence: CLI/API override, ZVEC_GREP_EMBEDDING_CONCURRENCY, legacy
     ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM for llama.cpp indexing, then defaults.
   Explicit CLI overrides work without restarting the Server. Environment
     changes require restarting the Server so it inherits the new value.
@@ -596,7 +596,7 @@ Environment:
   ZVEC_GREP_DEVICE       Local embedding device: auto, cpu, metal, vulkan, or cuda
 
 Index-only embedding concurrency:
-  ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY  Positive index/update concurrency override
+  ZVEC_GREP_EMBEDDING_CONCURRENCY  Positive index/update concurrency override
   Applies to automatic indexing and refresh, never query-vector inference.
   Explicit CLI/API index settings take precedence. Invalid values warn and use
   automatic selection. Server mode reads the Server process environment;
@@ -887,7 +887,7 @@ Embedding:
   ZVEC_GREP_DEVICE       Local embedding device: auto, cpu, metal, vulkan, or cuda
 
 Index-only embedding concurrency:
-  ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY  Positive index/update concurrency override
+  ZVEC_GREP_EMBEDDING_CONCURRENCY  Positive index/update concurrency override
   Applies to automatic indexing and refresh, never query-vector inference.
   Precedence: explicit CLI/API index setting, this variable, legacy llama.cpp
   index setting, then backend defaults. Invalid values warn and use defaults.

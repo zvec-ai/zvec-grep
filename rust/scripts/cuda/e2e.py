@@ -259,7 +259,7 @@ def run_case(binary, model_cache, work, logs, backend, model, expected_gguf_cuda
         return cpu_evidence(stderr, backend, device)
     _, index_err = run_zg(binary, workspace, logs, "index", [
         "--index", "--mode", "direct",
-        "--embedding", model, "--index-embedding-concurrency", "2", *runtime_args,
+        "--embedding", model, "--embedding-concurrency", "2", *runtime_args,
     ], env)
     require(index_err, "Index complete")
     index_evidence = evidence(index_err)

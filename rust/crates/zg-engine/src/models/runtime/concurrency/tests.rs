@@ -3,7 +3,7 @@ use super::*;
 fn resolve(
     reference: &str,
     requested: Option<usize>,
-    index: &str,
+    embedding: &str,
     legacy: &str,
 ) -> (Option<usize>, Vec<String>) {
     let mut warnings = Vec::new();
@@ -12,8 +12,8 @@ fn resolve(
         requested,
         |name| {
             Some(
-                if name == INDEX_CONCURRENCY_ENV {
-                    index
+                if name == EMBEDDING_CONCURRENCY_ENV {
+                    embedding
                 } else {
                     legacy
                 }
@@ -24,6 +24,21 @@ fn resolve(
     )
     .expect("valid explicit override");
     (value, warnings)
+}
+
+#[test]
+fn renamed_environment_controls_index_concurrency() {
+    let value = resolve_override(
+        "local/potion-code-16m-v2",
+        None,
+        |name| match name {
+            "ZVEC_GREP_EMBEDDING_CONCURRENCY" => Some("12".to_owned()),
+            _ => None,
+        },
+        |_| panic!("valid environment value"),
+    )
+    .expect("index concurrency");
+    assert_eq!(value, Some(12));
 }
 
 #[test]
@@ -56,7 +71,7 @@ fn invalid_environment_warns_and_uses_auto_without_legacy_retry() {
         let (limit, warnings) = resolve("local/embeddinggemma-300m", None, value, "4");
         assert_eq!(limit, None, "{value}");
         assert_eq!(warnings.len(), 1, "{value}");
-        assert!(warnings[0].contains(INDEX_CONCURRENCY_ENV));
+        assert!(warnings[0].contains(EMBEDDING_CONCURRENCY_ENV));
         assert!(
             resolve("local/embeddinggemma-300m", Some(1), value, "4")
                 .1
