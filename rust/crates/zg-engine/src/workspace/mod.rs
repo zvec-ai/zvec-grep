@@ -9,8 +9,9 @@ pub(crate) mod index;
 pub(crate) mod lock;
 pub(crate) mod manifest;
 
-/// Compatibility version of the workspace index contents.
-pub(crate) const CURRENT_INDEX_VERSION: u32 = 2;
+// Compatibility version of the workspace index contents, shared with the SQLite
+// graph schema that stores the same value in `PRAGMA user_version`.
+pub(crate) use crate::domain::CURRENT_INDEX_VERSION;
 
 /// Finds the nearest workspace at or above the given directory.
 pub(crate) fn find_nearest_workspace(

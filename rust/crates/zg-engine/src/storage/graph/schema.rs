@@ -1,17 +1,23 @@
 use rusqlite::{Connection, TransactionBehavior};
 
 use super::{Error, Result};
+use crate::domain::CURRENT_INDEX_VERSION;
 
 // Unsupported versions require an index rebuild; no schema migration is provided.
-// v2 admits `declares` edges produced by the walk-time collector.
-pub(crate) const VERSION: i64 = 2;
+// The user version mirrors the workspace index version so one indexing pass writes
+// a single version into both stores; v2 admits `declares` edges produced by the
+// walk-time collector.
 pub(crate) const APPLICATION_ID: i64 = 0x5a47_5250;
+
+fn user_version() -> i64 {
+    i64::from(CURRENT_INDEX_VERSION)
+}
 
 pub(crate) fn validate(connection: &Connection) -> Result<()> {
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let application_id: i64 =
         connection.query_row("PRAGMA application_id", [], |row| row.get(0))?;
-    if version != VERSION || application_id != APPLICATION_ID {
+    if version != user_version() || application_id != APPLICATION_ID {
         return Err(Error::UnsupportedSchema {
             version,
             application_id,
@@ -34,7 +40,7 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
             return Err(Error::ForeignDatabase);
         }
         tx.execute_batch(SCHEMA)?;
-        tx.pragma_update(None, "user_version", VERSION)?;
+        tx.pragma_update(None, "user_version", user_version())?;
         tx.pragma_update(None, "application_id", APPLICATION_ID)?;
     } else {
         validate(&tx)?;

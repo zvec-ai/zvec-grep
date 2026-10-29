@@ -25,6 +25,7 @@ pub(crate) use entity::FragmentId;
 pub use glob::GlobRule;
 
 // Indexes.
+pub(crate) use index::CURRENT_INDEX_VERSION;
 pub(crate) use index::FTS_CONFIG;
 pub(crate) use index::FtsConfig;
 pub(crate) use index::IndexDescriptor;
