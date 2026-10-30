@@ -79,7 +79,7 @@ pub(super) fn assemble_file_graph(
                 edge.receiver_name.as_deref(),
             );
             edges.push(FileEdge {
-                kind: edge.ref_kind.into(),
+                kind: edge.ref_kind,
                 source,
                 target,
                 line: Some(edge.line),
@@ -112,7 +112,7 @@ pub(super) fn assemble_file_graph(
                 owner_id,
                 ref_name: reference.ref_name.clone(),
                 receiver_name: reference.receiver_name.clone(),
-                ref_kind: reference.ref_kind.into(),
+                ref_kind: reference.ref_kind,
                 arity: reference.arity,
                 line: reference.line,
                 column: reference.column,

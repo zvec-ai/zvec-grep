@@ -6,7 +6,16 @@ use serde::{Deserialize, Serialize};
 
 use super::metadata::SymbolType;
 
-/// Edge kinds produced by the extraction layer.
+/// Kinds produced by the extraction layer.
+///
+/// Resolved edges and buffered name references share this vocabulary because
+/// they become rows of the same table: the pending queue stores the kind the
+/// resolved edge will carry. Resolution state is therefore structural, not a
+/// kind — a [`PendingRef`] has no target, a [`FileEdge`] requires one — and the
+/// store keeps the same split in its `status` column.
+///
+/// `Contains` comes only from containment, which is collected as a resolved
+/// edge during the walk, so a buffered name reference never carries it.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum GraphEdgeKind {
@@ -16,30 +25,6 @@ pub(crate) enum GraphEdgeKind {
     Extends,
     Implements,
     Declares,
-}
-
-/// Kinds of buffered name references. Each pending ref is resolved into the
-/// [`GraphEdgeKind`] with the same name.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum GraphRefKind {
-    Calls,
-    Imports,
-    Extends,
-    Implements,
-    Declares,
-}
-
-impl From<GraphRefKind> for GraphEdgeKind {
-    fn from(kind: GraphRefKind) -> Self {
-        match kind {
-            GraphRefKind::Calls => Self::Calls,
-            GraphRefKind::Imports => Self::Imports,
-            GraphRefKind::Extends => Self::Extends,
-            GraphRefKind::Implements => Self::Implements,
-            GraphRefKind::Declares => Self::Declares,
-        }
-    }
 }
 
 /// Evidence provenance recorded on persisted edges.

@@ -1956,7 +1956,7 @@ public class Service {
     fn walk_collects_contains_edges_and_pending_references() {
         use super::super::graph::FILE_SCOPE_INDEX;
         use super::{Parser, WalkContext, grammar, resolve_adapter};
-        use crate::domain::GraphRefKind;
+        use crate::domain::GraphEdgeKind;
 
         let source = test_source(
             FileFormat::TypeScript,
@@ -2017,13 +2017,13 @@ public class Service {
         let names = graph_context.name_edges();
         assert_eq!(names.len(), 5);
         // Imports belong to the file scope.
-        assert_eq!(names[0].ref_kind, GraphRefKind::Imports);
+        assert_eq!(names[0].ref_kind, GraphEdgeKind::Imports);
         assert_eq!(names[0].owner_index, FILE_SCOPE_INDEX);
         assert_eq!(names[0].ref_name, "./utils.js");
         assert_eq!((names[0].line, names[0].column), (1, 0));
         // The extends clause is collected from the class node; positions
         // point at the clause itself, not the inherited expression.
-        assert_eq!(names[1].ref_kind, GraphRefKind::Extends);
+        assert_eq!(names[1].ref_kind, GraphEdgeKind::Extends);
         assert_eq!(
             (names[1].owner_index, names[1].ref_name.as_str()),
             (0, "Base")
@@ -2034,14 +2034,14 @@ public class Service {
         // itself; the sites differ, so each `this.init` spelling stays.
         // The class-level scan skips member subtrees, so the class no
         // longer duplicates the same call sites.
-        assert_eq!(names[2].ref_kind, GraphRefKind::Calls);
+        assert_eq!(names[2].ref_kind, GraphEdgeKind::Calls);
         assert_eq!(
             (names[2].owner_index, names[2].ref_name.as_str()),
             (1, "init")
         );
         assert_eq!(names[2].arity, Some(2));
         assert_eq!((names[2].line, names[2].column), (5, 4));
-        assert_eq!(names[3].ref_kind, GraphRefKind::Calls);
+        assert_eq!(names[3].ref_kind, GraphEdgeKind::Calls);
         assert_eq!(
             (names[3].owner_index, names[3].ref_name.as_str()),
             (1, "init")
@@ -2049,7 +2049,7 @@ public class Service {
         assert_eq!(names[3].arity, Some(1));
         assert_eq!((names[3].line, names[3].column), (6, 4));
         // Top-level function scan.
-        assert_eq!(names[4].ref_kind, GraphRefKind::Calls);
+        assert_eq!(names[4].ref_kind, GraphEdgeKind::Calls);
         assert_eq!(
             (names[4].owner_index, names[4].ref_name.as_str()),
             (2, "helper")
@@ -2061,7 +2061,7 @@ public class Service {
     fn walk_collects_rust_imports_and_calls() {
         use super::super::graph::FILE_SCOPE_INDEX;
         use super::{Parser, WalkContext, grammar, resolve_adapter};
-        use crate::domain::GraphRefKind;
+        use crate::domain::GraphEdgeKind;
 
         let source = test_source(
             FileFormat::Rust,
@@ -2096,11 +2096,11 @@ public class Service {
         // `use a::b;` module paths come from the text fallback.
         let names = graph_context.name_edges();
         assert_eq!(names.len(), 2);
-        assert_eq!(names[0].ref_kind, GraphRefKind::Imports);
+        assert_eq!(names[0].ref_kind, GraphEdgeKind::Imports);
         assert_eq!(names[0].owner_index, FILE_SCOPE_INDEX);
         assert_eq!(names[0].ref_name, "std::collections::HashMap");
         // Qualified callees split into receiver and member name.
-        assert_eq!(names[1].ref_kind, GraphRefKind::Calls);
+        assert_eq!(names[1].ref_kind, GraphEdgeKind::Calls);
         assert_eq!(names[1].owner_index, 0);
         assert_eq!(names[1].ref_name, "new");
         assert_eq!(names[1].receiver_name.as_deref(), Some("HashMap"));
@@ -2109,7 +2109,7 @@ public class Service {
     #[test]
     fn partitions_in_file_references_after_the_walk() {
         use super::super::graph::FILE_SCOPE_INDEX;
-        use crate::domain::{EdgeProvenance, GraphRefKind};
+        use crate::domain::{EdgeProvenance, GraphEdgeKind};
 
         let source = test_source(
             FileFormat::TypeScript,
@@ -2154,7 +2154,7 @@ public class Service {
         // even though the call site sits inside the declaration's own body.
         assert_eq!(graph.resolved.len(), 1);
         let resolved = &graph.resolved[0];
-        assert_eq!(resolved.ref_kind, GraphRefKind::Calls);
+        assert_eq!(resolved.ref_kind, GraphEdgeKind::Calls);
         assert_eq!((resolved.source_index, resolved.target_index), (2, 2));
         assert_eq!(resolved.provenance, EdgeProvenance::FileLocal);
         assert_eq!(resolved.raw_text.as_deref(), Some("main"));
@@ -2165,12 +2165,12 @@ public class Service {
         // to the constructor, and the imported-but-undeclared `helper`.
         let pending = &graph.pending;
         assert_eq!(pending.len(), 4);
-        assert_eq!(pending[0].ref_kind, GraphRefKind::Imports);
+        assert_eq!(pending[0].ref_kind, GraphEdgeKind::Imports);
         assert_eq!(pending[0].owner_index, FILE_SCOPE_INDEX);
         assert_eq!(pending[0].ref_name, "./utils.js");
         assert_eq!(
             (pending[1].ref_kind, pending[1].ref_name.as_str()),
-            (GraphRefKind::Extends, "Base")
+            (GraphEdgeKind::Extends, "Base")
         );
         assert_eq!(
             (pending[2].owner_index, pending[2].ref_name.as_str()),
@@ -2184,7 +2184,7 @@ public class Service {
 
     #[test]
     fn c_include_forms_specialize_import_references() {
-        use crate::domain::GraphRefKind;
+        use crate::domain::GraphEdgeKind;
 
         let source = test_source(
             FileFormat::Cpp,
@@ -2206,7 +2206,7 @@ public class Service {
         let imports: Vec<&str> = graph
             .pending
             .iter()
-            .filter(|edge| edge.ref_kind == GraphRefKind::Imports)
+            .filter(|edge| edge.ref_kind == GraphEdgeKind::Imports)
             .map(|edge| edge.ref_name.as_str())
             .collect();
         // Angle-bracket includes keep their form (the resolver terminates
@@ -2226,7 +2226,7 @@ public class Service {
     fn dump_walk_graph_over_graph_rs() {
         use super::super::graph::FILE_SCOPE_INDEX;
         use super::{Parser, WalkContext, grammar, resolve_adapter};
-        use crate::domain::GraphRefKind;
+        use crate::domain::GraphEdgeKind;
 
         let path =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/extraction/graph.rs");
@@ -2293,7 +2293,7 @@ public class Service {
         assert!(
             names
                 .iter()
-                .any(|edge| edge.ref_kind == GraphRefKind::Imports)
+                .any(|edge| edge.ref_kind == GraphEdgeKind::Imports)
         );
     }
 

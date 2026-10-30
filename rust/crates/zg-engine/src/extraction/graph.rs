@@ -40,7 +40,7 @@ pub(crate) use partition::{PartitionedGraph, partition_walk};
 
 use std::collections::{HashMap, HashSet};
 
-use crate::domain::GraphRefKind;
+use crate::domain::GraphEdgeKind;
 
 /// Owner index standing in for file scope. Import references belong to the
 /// file, not to any entity; the TypeScript original passes the file ID here.
@@ -66,7 +66,7 @@ pub(crate) struct WalkEdge {
 /// resolvable ones become edges, the rest become pending refs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct NameEdge {
-    pub ref_kind: GraphRefKind,
+    pub ref_kind: GraphEdgeKind,
     /// Entity index owning the reference ([`FILE_SCOPE_INDEX`] for imports).
     pub owner_index: usize,
     /// Short name of the referenced symbol (last segment for `a.b()`).
@@ -95,7 +95,7 @@ pub(crate) struct WalkContext {
     /// innermost-scope shadow table: a call inside `outer` that names
     /// `work` binds the nested `outer::work` before any file-level name.
     scoped_symbols: HashMap<usize, HashMap<String, usize>>,
-    seen_name_edges: HashSet<(GraphRefKind, usize, Option<String>, String, usize, usize)>,
+    seen_name_edges: HashSet<(GraphEdgeKind, usize, Option<String>, String, usize, usize)>,
     /// Factory return types this file spells: `Some` answers a bare-call
     /// initializer (`x = makeX()`), `None` marks a name registered with two
     /// different types whose factory answer is ambiguous.
@@ -198,6 +198,13 @@ impl WalkContext {
     /// metadata. Distinct receivers stay separate: `left_api.work()` and
     /// `right_api.work()` can bind different declarations.
     pub(crate) fn add_name_edge(&mut self, edge: NameEdge) {
+        // Containment uses its own buffer ([`Self::add_contains_edge`]); every
+        // name reference is a call, import, inheritance clause, or binding.
+        debug_assert_ne!(
+            edge.ref_kind,
+            GraphEdgeKind::Contains,
+            "name references never carry containment"
+        );
         // The site coordinates close the key: two calls of one shape at
         // different sites are distinct evidence (`x.foo()` before and after
         // `x = new Y()` bind different types), while a twice-collected site
@@ -231,7 +238,7 @@ impl WalkContext {
         column: usize,
     ) {
         self.add_name_edge(NameEdge {
-            ref_kind: GraphRefKind::Calls,
+            ref_kind: GraphEdgeKind::Calls,
             owner_index,
             ref_name: ref_name.to_owned(),
             receiver_name: receiver_name.map(str::to_owned),
@@ -261,7 +268,7 @@ impl WalkContext {
         // line, and identical redeclarations collapse harmlessly at
         // resolution time.
         self.name_edges.push(NameEdge {
-            ref_kind: GraphRefKind::Declares,
+            ref_kind: GraphEdgeKind::Declares,
             owner_index,
             ref_name: name.to_owned(),
             receiver_name: None,
@@ -302,7 +309,7 @@ impl WalkContext {
         column: usize,
     ) {
         self.add_name_edge(NameEdge {
-            ref_kind: GraphRefKind::Imports,
+            ref_kind: GraphEdgeKind::Imports,
             owner_index: FILE_SCOPE_INDEX,
             ref_name: module_path.to_owned(),
             receiver_name: None,
@@ -317,7 +324,7 @@ impl WalkContext {
     /// Convenience wrapper for buffered `extends`/`implements` references.
     pub(crate) fn add_inheritance_edge(
         &mut self,
-        ref_kind: GraphRefKind,
+        ref_kind: GraphEdgeKind,
         owner_index: usize,
         ref_name: &str,
         raw_text: Option<&str>,
@@ -326,7 +333,7 @@ impl WalkContext {
     ) {
         debug_assert!(matches!(
             ref_kind,
-            GraphRefKind::Extends | GraphRefKind::Implements
+            GraphEdgeKind::Extends | GraphEdgeKind::Implements
         ));
         self.add_name_edge(NameEdge {
             ref_kind,
@@ -446,14 +453,14 @@ mod tests {
             11,
         );
         context.add_import_edge("./utils.js", Some("import './utils.js'"), 1, 0);
-        context.add_inheritance_edge(GraphRefKind::Extends, owner, "Animal", None, 2, 5);
-        context.add_inheritance_edge(GraphRefKind::Implements, owner, "Runnable", None, 2, 5);
+        context.add_inheritance_edge(GraphEdgeKind::Extends, owner, "Animal", None, 2, 5);
+        context.add_inheritance_edge(GraphEdgeKind::Implements, owner, "Runnable", None, 2, 5);
 
         let edges = context.name_edges();
         assert_eq!(
             edges[0],
             NameEdge {
-                ref_kind: GraphRefKind::Calls,
+                ref_kind: GraphEdgeKind::Calls,
                 owner_index: owner,
                 ref_name: "bark".to_owned(),
                 receiver_name: Some("dog".to_owned()),
@@ -464,10 +471,10 @@ mod tests {
                 column: 11,
             }
         );
-        assert_eq!(edges[1].ref_kind, GraphRefKind::Imports);
+        assert_eq!(edges[1].ref_kind, GraphEdgeKind::Imports);
         assert_eq!(edges[1].owner_index, FILE_SCOPE_INDEX);
         assert_eq!(edges[1].ref_name, "./utils.js");
-        assert_eq!(edges[2].ref_kind, GraphRefKind::Extends);
-        assert_eq!(edges[3].ref_kind, GraphRefKind::Implements);
+        assert_eq!(edges[2].ref_kind, GraphEdgeKind::Extends);
+        assert_eq!(edges[3].ref_kind, GraphEdgeKind::Implements);
     }
 }

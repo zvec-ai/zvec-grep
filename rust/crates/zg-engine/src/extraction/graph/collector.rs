@@ -7,7 +7,7 @@
 
 use tree_sitter::Node;
 
-use crate::domain::{FileFormat, GraphRefKind};
+use crate::domain::{FileFormat, GraphEdgeKind};
 use crate::utils::collapse_whitespace;
 
 use super::WalkContext;
@@ -1081,9 +1081,9 @@ pub(crate) fn collect_inheritance_edges(
             .into_iter()
             .filter_map(|descendant| {
                 if extends_types.contains(&descendant.kind()) {
-                    Some((GraphRefKind::Extends, descendant))
+                    Some((GraphEdgeKind::Extends, descendant))
                 } else if implements_types.contains(&descendant.kind()) {
-                    Some((GraphRefKind::Implements, descendant))
+                    Some((GraphEdgeKind::Implements, descendant))
                 } else {
                     None
                 }
@@ -1097,12 +1097,12 @@ pub(crate) fn collect_inheritance_edges(
             .filter_map(|field| {
                 entity_node
                     .child_by_field_name(field)
-                    .map(|clause| (GraphRefKind::Extends, clause))
+                    .map(|clause| (GraphEdgeKind::Extends, clause))
             })
             .chain(implements.iter().filter_map(|field| {
                 entity_node
                     .child_by_field_name(field)
-                    .map(|clause| (GraphRefKind::Implements, clause))
+                    .map(|clause| (GraphEdgeKind::Implements, clause))
             }))
             .collect(),
     };

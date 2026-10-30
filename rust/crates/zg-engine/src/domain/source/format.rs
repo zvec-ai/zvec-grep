@@ -156,30 +156,17 @@ impl FileFormat {
     }
 }
 
-/// Formats that could own `path`'s file name, by longest registered
-/// extension. Paths without a registered extension return an empty slice.
+/// Formats that could own `path`, resolved with the same file-name rules as
+/// [`FileFormat::from_file_name`].
+///
+/// A name that matches no rule reports [`FileFormat::Unknown`] instead of an
+/// empty result, and a path without a file name cannot be classified at all,
+/// so it reports the same marker. Callers that must distinguish "no rule" from
+/// a real match compare against `[FileFormat::Unknown]`.
 #[allow(dead_code)]
-pub(crate) fn formats_for_path(path: &str) -> &'static [FileFormat] {
-    let file_name = path.rsplit(['/', '\\']).next().unwrap_or(path);
-    match_longest_extension(std::ffi::OsStr::new(file_name))
-}
-
-/// Whether a name reference written in `reference` may bind to an entity
-/// whose file formats include `candidate`. Pure-text resolution carries no
-/// cross-language evidence — imports and FFI are invisible to the index —
-/// so a cross-language bare-name match is coincidence, not resolution. The
-/// bridges below are the only exceptions: identical formats, C/C++ shared
-/// headers, and TypeScript/JavaScript interop.
-#[allow(dead_code)]
-pub(crate) fn reference_compatible_with(reference: FileFormat, candidate: FileFormat) -> bool {
-    reference == candidate
-        || matches!(
-            (reference, candidate),
-            (FileFormat::C, FileFormat::Cpp)
-                | (FileFormat::Cpp, FileFormat::C)
-                | (FileFormat::TypeScript, FileFormat::JavaScript)
-                | (FileFormat::JavaScript, FileFormat::TypeScript)
-        )
+pub(crate) fn formats_for_path(path: &Path) -> Vec<FileFormat> {
+    path.file_name()
+        .map_or_else(|| vec![FileFormat::Unknown], FileFormat::from_file_name)
 }
 
 fn match_longest_extension(file_name: &OsStr) -> &'static [FileFormat] {

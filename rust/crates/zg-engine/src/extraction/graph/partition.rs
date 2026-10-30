@@ -15,14 +15,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::domain::{EdgeProvenance, GraphRefKind};
+use crate::domain::{EdgeProvenance, GraphEdgeKind};
 
 use super::{NameEdge, WalkContext, WalkEdge};
 
 /// A name reference resolved against this file's own symbol table.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedNameEdge {
-    pub ref_kind: GraphRefKind,
+    pub ref_kind: GraphEdgeKind,
     pub source_index: usize,
     pub target_index: usize,
     /// Original reference text as written in the source, for edge metadata.
@@ -37,7 +37,7 @@ pub(crate) struct ResolvedNameEdge {
 /// A name reference that left this file unresolved.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PendingNameRef {
-    pub ref_kind: GraphRefKind,
+    pub ref_kind: GraphEdgeKind,
     /// Entity ordinal owning the reference; [`FILE_SCOPE_INDEX`] for imports.
     pub owner_index: usize,
     pub ref_name: String,
@@ -74,7 +74,7 @@ pub(crate) struct PartitionedGraph {
 fn alias_table(name_edges: &[NameEdge]) -> HashMap<(usize, String), String> {
     name_edges
         .iter()
-        .filter(|edge| edge.ref_kind == GraphRefKind::Declares)
+        .filter(|edge| edge.ref_kind == GraphEdgeKind::Declares)
         .filter_map(|edge| {
             edge.bound_type
                 .clone()
@@ -92,7 +92,7 @@ fn rebinding_receivers(name_edges: &[NameEdge]) -> HashSet<(usize, String)> {
     let mut binding_types: HashMap<(usize, String), HashSet<&str>> = HashMap::new();
     for edge in name_edges
         .iter()
-        .filter(|edge| edge.ref_kind == GraphRefKind::Declares)
+        .filter(|edge| edge.ref_kind == GraphEdgeKind::Declares)
     {
         if let Some(bound) = edge.bound_type.as_deref() {
             binding_types
@@ -136,13 +136,13 @@ pub(crate) fn partition_walk(
     };
     let aliases = alias_table(&name_edges);
     let rebinding_receivers = rebinding_receivers(&name_edges);
-    let mut collapsed: HashSet<(GraphRefKind, usize, Option<String>, String)> = HashSet::new();
+    let mut collapsed: HashSet<(GraphEdgeKind, usize, Option<String>, String)> = HashSet::new();
     for edge in name_edges {
-        let rebinding_call = edge.ref_kind == GraphRefKind::Calls
+        let rebinding_call = edge.ref_kind == GraphEdgeKind::Calls
             && edge.receiver_name.as_deref().is_some_and(|receiver| {
                 rebinding_receivers.contains(&(edge.owner_index, receiver.to_owned()))
             });
-        if !rebinding_call && edge.ref_kind != GraphRefKind::Declares {
+        if !rebinding_call && edge.ref_kind != GraphEdgeKind::Declares {
             // Binding rows never collapse: the resolver's binding table
             // orders them by line, so a rebinding row is load-bearing even
             // when an earlier row binds the same name.
@@ -157,17 +157,18 @@ pub(crate) fn partition_walk(
             }
         }
         let resolved_target = match edge.ref_kind {
-            // Imports stay pending for the resolver. Declares edges bind a
-            // variable to its type name; the name is not an entity in this
-            // file's symbol table, and the type entity may live elsewhere —
-            // the cross-file resolver consumes them.
-            GraphRefKind::Imports | GraphRefKind::Declares => None,
-            GraphRefKind::Calls if edge.receiver_name.is_some() => None,
+            // Containment is emitted as a resolved edge during the walk, so it
+            // normally never reaches this queue; if one does, it stays pending.
+            // Imports stay pending because their target is another file by
+            // definition, and Declares edges bind a variable to a type name that
+            // may live elsewhere — the cross-file resolver consumes all three.
+            GraphEdgeKind::Contains | GraphEdgeKind::Imports | GraphEdgeKind::Declares => None,
+            GraphEdgeKind::Calls if edge.receiver_name.is_some() => None,
             // A bare call resolves through, in order: its owner's alias
             // initializers, its owner's local name table (the nested
             // spelling an entity declares in its body shadows any
             // file-level name inside it), then the file-level table.
-            GraphRefKind::Calls => aliases
+            GraphEdgeKind::Calls => aliases
                 .get(&(edge.owner_index, edge.ref_name.clone()))
                 .and_then(|bound| {
                     symbols
@@ -185,7 +186,7 @@ pub(crate) fn partition_walk(
                         .get(&edge.ref_name)
                         .and_then(|indices| (indices.len() == 1).then(|| indices[0]))
                 }),
-            GraphRefKind::Extends | GraphRefKind::Implements => symbols
+            GraphEdgeKind::Extends | GraphEdgeKind::Implements => symbols
                 .get(&edge.ref_name)
                 .and_then(|indices| (indices.len() == 1).then(|| indices[0])),
         };
@@ -239,7 +240,7 @@ mod tests {
         assert_eq!(
             graph.resolved,
             vec![ResolvedNameEdge {
-                ref_kind: GraphRefKind::Calls,
+                ref_kind: GraphEdgeKind::Calls,
                 source_index: 0,
                 target_index: 1,
                 raw_text: None,
@@ -298,8 +299,8 @@ mod tests {
         assert!(graph.resolved.is_empty());
         assert_eq!(graph.pending.len(), 2);
         assert_eq!(graph.pending[0].owner_index, FILE_SCOPE_INDEX);
-        assert_eq!(graph.pending[0].ref_kind, GraphRefKind::Imports);
-        assert_eq!(graph.pending[1].ref_kind, GraphRefKind::Calls);
+        assert_eq!(graph.pending[0].ref_kind, GraphEdgeKind::Imports);
+        assert_eq!(graph.pending[1].ref_kind, GraphEdgeKind::Calls);
     }
 
     #[test]
