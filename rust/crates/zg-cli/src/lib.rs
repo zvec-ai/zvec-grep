@@ -994,7 +994,7 @@ pub fn compatibility_warning_for_args(arguments: &[OsString]) -> Option<String> 
     Some(if let Some(purpose) = purpose {
         format!("{warning}\n         {purpose}, use `zg --{first}`.")
     } else if !remaining.is_empty() {
-        format!("{warning}\n         To search for {remaining:?} only, use `zg {remaining}`.")
+        format!("{warning}\n         To search for {remaining:?} only, use `zg -- {remaining}`.")
     } else {
         warning
     })
@@ -2148,6 +2148,10 @@ mod tests {
                     vec!["connection pool", "timeout"],
                     "connection pool timeout",
                 ),
+                (
+                    vec!["as", "--", "--index", "--drop", "--yes"],
+                    "as --index --drop --yes",
+                ),
             ] {
                 let arguments = std::iter::once(word)
                     .chain(suffix)
@@ -2156,10 +2160,30 @@ mod tests {
                 assert_eq!(
                     super::compatibility_warning_for_args(&arguments).expect("migration warning"),
                     format!(
-                        "Warning: `{word}` is not a subcommand; the full search text is \"{word} {remaining}\".\n         To search for \"{remaining}\" only, use `zg {remaining}`."
+                        "Warning: `{word}` is not a subcommand; the full search text is \"{word} {remaining}\".\n         To search for \"{remaining}\" only, use `zg -- {remaining}`."
                     )
                 );
             }
+        }
+    }
+
+    #[test]
+    fn suggested_search_commands_preserve_literal_management_flags() {
+        for word in ["query", "search"] {
+            let arguments = [word, "as", "--", "--index", "--drop", "--yes"].map(OsString::from);
+            let warning =
+                super::compatibility_warning_for_args(&arguments).expect("migration warning");
+            let command = warning.rsplit('`').nth(1).expect("suggested command");
+            let arguments = command.split_whitespace().collect::<Vec<_>>();
+            let CliPlan::Query { request, .. } = plan(&arguments) else {
+                panic!("the suggested command must search, not run a management action")
+            };
+            assert_eq!(request.queries, ["as --index --drop --yes"]);
+            let arguments = arguments[1..]
+                .iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>();
+            assert!(super::compatibility_warning_for_args(&arguments).is_none());
         }
     }
 
