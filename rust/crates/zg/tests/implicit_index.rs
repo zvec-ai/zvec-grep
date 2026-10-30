@@ -189,6 +189,60 @@ fn status_shows_only_four_fields_and_respects_explicit_color_policy() {
     );
 }
 
+// macOS filesystems reject non-UTF-8 names before the CLI can observe them.
+#[cfg(target_os = "linux")]
+#[test]
+fn status_debug_preserves_exit_behavior_in_non_utf8_workspace() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+    let fixture = Fixture::new();
+    let root = fixture
+        .root
+        .path()
+        .join(OsString::from_vec(b"workspace-\xff".to_vec()));
+    fs::create_dir(&root).expect("non-UTF-8 workspace");
+    let root = fs::canonicalize(root).expect("canonical workspace");
+    for check_ready in [false, true] {
+        let mut args = vec!["--status", "--mode", "direct", "--color", "never"];
+        if check_ready {
+            args.push("--check-ready");
+        }
+        let plain = fixture
+            .command(&args)
+            .current_dir(&root)
+            .output()
+            .expect("normal status");
+        args.push("--debug");
+        let debug = fixture
+            .command(&args)
+            .current_dir(&root)
+            .output()
+            .expect("debug status");
+        let stderr = String::from_utf8(debug.stderr).expect("UTF-8 diagnostics");
+        assert_eq!(plain.status.code(), Some(i32::from(check_ready)));
+        assert_eq!(debug.status.code(), plain.status.code(), "{stderr}");
+        assert_eq!(debug.stdout, plain.stdout);
+        let diagnostics = stderr
+            .lines()
+            .find_map(|line| line.strip_prefix("Status diagnostics: "))
+            .expect("status diagnostics");
+        let diagnostics: serde_json::Value =
+            serde_json::from_str(diagnostics).expect("JSON diagnostics");
+        assert_eq!(diagnostics["state"], "uninitialized");
+        assert_eq!(diagnostics["info"]["root"], root.to_string_lossy().as_ref());
+        assert_eq!(
+            diagnostics["info"]["index_path"],
+            root.join(".zvec-grep/index").to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            stderr.contains("Error: workspace index is not ready"),
+            check_ready,
+            "{stderr}"
+        );
+    }
+    assert!(!root.join(".zvec-grep").exists());
+}
+
 #[test]
 fn status_check_ready_keeps_direct_and_server_exit_semantics() {
     let mut fixture = Fixture::new();
