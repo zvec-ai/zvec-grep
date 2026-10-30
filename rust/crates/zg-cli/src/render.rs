@@ -414,7 +414,6 @@ Options:
   --iglob <GLOB>                   Case-insensitive glob; repeatable
   --limit <N>                      Maximum edges per matching symbol (default: 20)
   --mode <direct|server|auto>       Select the execution mode (default: auto)
-  --home <PATH>                    Runtime and daemon state directory
 
 Globs follow the same ordered rules as ordinary search and filter definitions
 and suggestions, not call-site files.
