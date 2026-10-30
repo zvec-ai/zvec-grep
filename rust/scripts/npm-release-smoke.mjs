@@ -14,7 +14,7 @@ import {
   sha256File,
   workspaceDir,
 } from "./npm-package-core.mjs";
-import { checkPublishedPackage } from "./npm-release-registry.mjs";
+import { waitForPublishedPackages } from "./npm-release-registry.mjs";
 import { resolvePlatformRoot, verifyInstallation } from "../npm/meta/install.cjs";
 import { installedCliEnvironment, runInstalledCli } from "./npm-installed-cli.mjs";
 import { smokeInstalledModels } from "./npm-model-smoke.mjs";
@@ -445,6 +445,7 @@ export async function smokeRegistryRelease({
   baseline,
   prefixRoot,
   registryFetch = fetch,
+  registryWait,
   runNpm = run,
   probe = smokeInstalledPackage,
   modelProbe = smokeInstalledModels,
@@ -459,12 +460,7 @@ export async function smokeRegistryRelease({
       "registry update/rollback smoke requires a distinct baseline version",
     );
   }
-  for (const entry of release.packages) {
-    if (!(await checkPublishedPackage(entry, registryFetch)))
-      throw new Error(
-        `registry candidate is missing: ${entry.name}@${entry.version}`,
-      );
-  }
+  await waitForPublishedPackages(release.packages, { ...registryWait, registryFetch });
   const entry = selectPlatform(
     manifest,
     process.platform,

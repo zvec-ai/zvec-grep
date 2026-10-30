@@ -508,16 +508,47 @@ for (const contamination of ["receipt", "library", "cache", "download"]) {
   });
 }
 
-test("a missing registry candidate fails before any npm installation", async () => {
+test("registry smoke waits for delayed metadata for every package before installing", async (t) => {
+  const prefixRoot = await mkdtemp(join(tmpdir(), "zg-registry-propagation-"));
+  t.after(() => rm(prefixRoot, { recursive: true, force: true }));
+  const component = {
+    name: "@zvec/zvec-grep-win32-x64-msvc-ort-cuda-part1",
+    version: release.version,
+    integrity: "sha512-component",
+  };
+  const candidate = { ...release, packages: [...release.packages, component] };
+  const requests = new Map();
+  await assert.rejects(smokeRegistryRelease({
+    manifest, release: candidate, baseline: "0.2.2", prefixRoot,
+    registryWait: { timeoutMs: 1_000, intervalMs: 0 },
+    registryFetch: async (url) => {
+      const pkg = candidate.packages.find((pkg) =>
+        url.endsWith(`/${encodeURIComponent(pkg.name)}/${pkg.version}`));
+      assert.ok(pkg);
+      const count = (requests.get(pkg.name) ?? 0) + 1;
+      requests.set(pkg.name, count);
+      if (pkg === component && count < 3) return { status: 404 };
+      return { ok: true, json: async () => ({ dist: { integrity: pkg.integrity } }) };
+    },
+    runNpm: () => {
+      assert.equal(requests.get(component.name), 3);
+      throw new Error("reached registry installation");
+    },
+  }), /reached registry installation/);
+  assert.equal(requests.get(release.packages[0].name), 1);
+});
+
+test("a missing registry candidate times out before any npm installation", async () => {
   await assert.rejects(
     smokeRegistryRelease({
       manifest,
       release,
       baseline: "0.2.2",
+      registryWait: { timeoutMs: 20 },
       registryFetch: async () => ({ status: 404 }),
       runNpm: () => assert.fail("must not install"),
     }),
-    /registry candidate is missing/,
+    /timed out.*registry candidate is missing: @zvec\/zvec-grep@0.0.1/,
   );
 });
 

@@ -12,6 +12,7 @@ import { materialize, verifyInstallation } from "../npm/meta/install.cjs";
 import { smokeRegistryRelease } from "./npm-release-smoke.mjs";
 import {
   checkPublishedPackage,
+  waitForPublishedPackages,
   collectRelease,
   stageVerificationMetadata,
   promoteRelease,
@@ -85,6 +86,39 @@ test("does not treat a registry outage as an unpublished version", async () => {
     checkPublishedPackage(entry, async () => ({ status: 503, ok: false })),
     /registry returned 503/,
   );
+});
+
+test("registry metadata polling fails immediately on integrity or HTTP errors", async () => {
+  for (const [response, message] of [
+    [{ ok: true, json: async () => ({ dist: { integrity: "sha512-wrong" } }) }, /different bytes/],
+    [{ status: 403 }, /registry returned 403/],
+    [{ status: 503 }, /registry returned 503/],
+  ]) {
+    let requests = 0;
+    await assert.rejects(waitForPublishedPackages([entry], {
+      intervalMs: 0,
+      registryFetch: async () => { requests++; return response; },
+    }), message);
+    assert.equal(requests, 1);
+  }
+});
+
+test("registry metadata polling aborts an in-flight request at the shared deadline", async () => {
+  await assert.rejects(waitForPublishedPackages([entry], {
+    timeoutMs: 20,
+    registryFetch: async (_, { signal }) => {
+      // Keep the request alive like a socket, and honor its cancellation.
+      const timer = setTimeout(() => assert.fail("request was not aborted"), 1_000);
+      try {
+        await new Promise((_, reject) => {
+          signal.throwIfAborted();
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  }), /timed out.*registry candidate is missing: @zvec\/zvec-grep@0.0.1/);
 });
 
 async function releaseFixture(

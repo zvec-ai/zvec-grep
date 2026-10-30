@@ -1,6 +1,7 @@
 import { appendFile, copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
 import { hashFile, MAX_NPM_TARBALL_BYTES, nativePackageEntries, run, sha256File, verifyTarballSize } from "./npm-package-core.mjs";
 import { coreIdentity, validatePlugins } from "../npm/meta/plugins.cjs";
 
@@ -211,10 +212,12 @@ export async function collectRelease({ manifest, version, tarballRoot, targets }
   return release;
 }
 
-export async function checkPublishedPackage(entry, registryFetch = fetch) {
+export async function checkPublishedPackage(entry, registryFetch = fetch, signal) {
   const url = `https://registry.npmjs.org/${encodeURIComponent(entry.name)}/${encodeURIComponent(entry.version)}`;
   const response = await registryFetch(url, {
-    signal: AbortSignal.timeout(30_000),
+    signal: signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(30_000)])
+      : AbortSignal.timeout(30_000),
   });
   if (response.status === 404) return false;
   if (!response.ok)
@@ -228,6 +231,40 @@ export async function checkPublishedPackage(entry, registryFetch = fetch) {
     );
   }
   return true;
+}
+
+export async function waitForPublishedPackages(packages, {
+  registryFetch = fetch,
+  timeoutMs = 600_000,
+  intervalMs = 10_000,
+} = {}) {
+  const signal = AbortSignal.timeout(timeoutMs);
+  const pending = [...packages];
+  try {
+    // Publication can succeed before every registry replica serves the metadata.
+    // Share one deadline across all packages and retain successful integrity checks.
+    while (pending.length) {
+      for (const entry of [...pending]) {
+        signal.throwIfAborted();
+        if (await checkPublishedPackage(entry, registryFetch, signal)) {
+          pending.splice(pending.indexOf(entry), 1);
+        }
+      }
+      if (pending.length) {
+        console.log(`Waiting for npm registry metadata (${pending.length} packages): ${
+          pending.map((entry) => `${entry.name}@${entry.version}`).join(", ")
+        }; retrying in ${intervalMs} ms`);
+        await sleep(intervalMs, undefined, { signal });
+      }
+    }
+  } catch (error) {
+    if (signal.aborted) {
+      throw new Error(`timed out after ${timeoutMs} ms waiting for npm registry metadata; registry candidate is missing: ${
+        pending.map((entry) => `${entry.name}@${entry.version}`).join(", ")
+      }`, { cause: error });
+    }
+    throw error;
+  }
 }
 
 async function preflightRelease({ manifest, tarballRoot, registryFetch }) {

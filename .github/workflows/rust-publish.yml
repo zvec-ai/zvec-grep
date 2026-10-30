@@ -418,7 +418,7 @@ jobs:
         with:
           path: ${{ runner.temp }}/zvec-grep-model-cache
           key: registry-models-${{ matrix.target }}-${{ hashFiles('rust/crates/zg-engine/src/models/catalog/entries.rs') }}
-      - name: Test installed npm commands and real models on this platform
+      - name: Wait for npm metadata, then test installed commands and real models
         working-directory: rust
         env:
           NPM_ROLLBACK_VERSION: ${{ needs.publish.outputs.baseline }}
