@@ -44,7 +44,7 @@ class BenchmarkWorkflowTests(unittest.TestCase):
 
     def test_task_scope_and_trial_count_use_versioned_data(self) -> None:
         config = json.loads((BENCHMARK / "ci-config.json").read_text())
-        self.assertEqual(config["trials_per_profile"], 5)
+        self.assertEqual(config["trials_per_profile"], 10)
         self.assertEqual(config["max_retries"], 2)
         self.assertEqual(
             config["embedding_models"],

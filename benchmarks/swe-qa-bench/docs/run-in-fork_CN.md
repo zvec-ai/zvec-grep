@@ -6,7 +6,7 @@
 2. 在百炼创建可调用所选 `glm-5.2` 或 `qwen3.8-max` 模型的业务空间 API Key。在 fork 的 **Settings → Secrets and variables → Actions** 中新增仓库 secret `GLM_API_KEY`。两个模型沿用这一已有名称，执行与评审共用该密钥。不要把密钥提交到仓库或写入命令行。使用 GitHub CLI 时可执行 `gh secret set GLM_API_KEY --repo OWNER/zvec-grep`，然后交互式输入密钥。
 3. 在同一页面新增仓库 **variable** `SWE_QA_MODEL_BASE_URL`，例如 `https://YOUR-WORKSPACE.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`。填入**你自己业务空间**的 OpenAI 兼容地址，确保区域与密钥匹配；执行与评审都会使用它。如未配置，工作流会继续使用代码中原维护者的 endpoint，你的密钥未必可用。
 4. 默认的 `embedding=local` 使用 `local/potion-code-16m-v2`，无需 Embedding 密钥。若选择 `embedding=remote`，还需配置仓库 secret `QWEN_EMBEDDING_API_KEY` 和仓库 variable `QWEN_EMBEDDING_ENDPOINT`；工作流与 Retrieval-only 一样使用 `qwen/qwen3.7-text-embedding`。远端模式会将源码内容发送到该 endpoint。
-5. 进入 **Actions → SWE-QA Bench → Run workflow**，选择 harness 分支并设置 `candidate_ref`、`model`、`embedding`、`scope`。建议先运行 `repro-3`：3 题 × 2 组 × 5 次，共 30 个 trial。`smoke` 是 5 题 / 50 个 trial；`all-full` 是 20 题 / 200 个 trial。失败的 trial 最多额外重试两次，可能产生更多模型调用。执行和评审使用同一个所选模型，默认 `glm-5.2`。
+5. 进入 **Actions → SWE-QA Bench → Run workflow**，选择 harness 分支并设置 `candidate_ref`、`model`、`embedding`、`scope`。建议先运行 `repro-3`：3 题 × 2 组 × 10 次，共 60 个 trial。`smoke` 是 5 题 / 100 个 trial；`all-full` 是 20 题 / 400 个 trial。失败的 trial 最多额外重试两次，可能产生更多模型调用。执行和评审使用同一个所选模型，默认 `glm-5.2`。
 
 固定 trial 次数、失败重试上限以及每种 Embedding runtime 对应的模型由版本化的 [`ci-config.json`](../ci-config.json) 指定。要修改这些实验规则，应在 harness 分支修改此文件；workflow 输入只选择其中一个已定义 runtime，环境变量传递 endpoint 和密钥。
 

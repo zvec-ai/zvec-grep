@@ -39,7 +39,7 @@ Baseline 与 zvec-grep 除工具访问外保持完全相同。索引构建单独
 
 ## 指标与报告
 
-Job Summary 单元格使用 `baseline / zvec-grep / change`。每个任务的 baseline 和 zvec-grep 数值是对应 profile 配置次数的 trial 平均值（CI 为五次）。
+Job Summary 单元格使用 `baseline / zvec-grep / change`。每个任务的 baseline 和 zvec-grep 数值是对应 profile 配置次数的 trial 平均值（CI 筛选前为十次）。
 
 | 指标 | 变化 | 含义 |
 | --- | --- | --- |
@@ -58,19 +58,18 @@ Job Summary 单元格使用 `baseline / zvec-grep / change`。每个任务的 ba
 
 没有会话导出的历史数据保留为 `legacy-root`，其子代理 token 和工具用量未知，可能漏计。采集和报告聚合均拒绝将它与新口径混用，包括没有标记统计口径的旧报告。旧版输入/输出 token 的组成也不同，不能把新旧资源差值当作同口径比较。失败尝试仍单独保存在 `.retry-history/`，不计入最终成功 trial 的均值。
 
-Aggregate 汇总放在最前面，先于任务明细。每轮 workflow 独立筛选任务，两个条件均使用对应 profile 的 trial 平均值：
+Aggregate 展示三层结果：**原始值（Raw）**、**得分截尾后、整题筛选前**、**MAD 整题筛选后**。每层同时列出得分、时间、input token 和工具调用，以及各 profile 样本数和最终题集覆盖率。逐题表保留全部已完成题目并标注整题筛选状态；排除原因列出触发的 profile、指标、离散度、median、MAD 和 modified Z。
 
-- Judge 分差：`zvec-grep - baseline`，单位为分。分差严格超出 `[-10, +10]` 的任务会被排除；恰好等于 `-10` 或 `+10` 仍保留。这里比较的是评分分差，不是百分比。
-- 输入 token 变化率：`(zvec-grep - baseline) / baseline * 100`。变化率严格超出 `[-100%, +100%]` 的任务会被排除；恰好等于 `-100%` 或 `+100%` 仍保留。输入 token 非负，因此实际只有涨幅超过 `100%` 能触发这个阈值。baseline 为零、zvec-grep 大于零时，变化率未定义，该任务也会被排除；两者均为零则保留。
+- 按「模型 × 题目 × profile」分别处理原始成功样本。按 `(judge.total, trial_index)` 升序排列，一次性去掉首尾各一个 trial。缺少 `trial_index` 时使用从 1 开始的原始位置。同分按 trial 顺序处理：低分端去掉编号最小的一次，高分端去掉编号最大的一次，不根据时间或 token 挑选。
+- 每组 10 次保留 8 次。这是固定数量截尾，不是固定百分比或离群阈值；即使所有得分相同，也会去掉两次不同的执行。例如 `[90, 87, 87, 56, 88]` 去掉 56 和 90 后保留 `[87, 87, 88]`。少于 3 次时不截尾，全部保留，标记为 `unavailable_insufficient_trials`，并继续展示实际样本数。
+- 剔除某次 trial 时，其得分、时间、输入/输出 token、工具调用、成本及会话用量一起退出均值；不依据时间或 token 另外剔除单次 trial。原有按组间分差 ±10 分或 token 变化 ±100% 剔除整题的规则仍然移除。
+- 基于截尾后的同批样本，计算每题每组的得分样本标准差，以及时间、input token 的变异系数 CV（样本标准差 / 均值）。对每项指标，取**当前报告各 profile 中的最大离散度**；再在题目之间计算这些最大值的 median，以及 `MAD = median(abs(最大离散度 - median))`。
+- 任一可计算指标满足 `modified Z = 0.6745 × (最大离散度 - median) / MAD > 3.5`，便将该题从**所有 profile、所有最终指标**中同时排除，保持共同题集。只做一次上尾筛选，不剔除低离散度，也不在排除后重算参考。默认 CI 使用当轮 baseline / zvec-grep 两组；历史两轮三组的六组回放需要显式输入，不能暗中混入当前 CI。
+- 不足 5 题时不做整题筛选；这是工程保护，并非官方统计样本阈值。某指标只要有任一题、任一 profile 缺少有效离散度（如无逐次证据、样本不足、资源均值为零），或跨题 MAD 为零，该指标整套筛选即不可用；其他可用指标仍可执行。报告记录不可用状态及关联题目，不将缺失值当成零离散度。
+- 每层先计算每题每组均值，再对该层题目等权平均。前两层涵盖全部已完成题目，最终层仅使用共同保留题集。质量与资源指标口径一致；资源值为均值而非总和，变化率由展示的聚合值计算。
+- 报告 schema 4 保留原始 `cases`、`trials` 及 profile 均值。`aggregate.raw` 对应第一层，`aggregate.trimmed` 对应第二层，`aggregate.profiles` / `comparison` 对应最终层。`aggregate.filter` 记录得分截尾；`aggregate.task_filter` 记录整题判定、参考统计量和三阶段样本数；`aggregate.task_statistics` 保留全部逐题均值与离散度。旧报告从原始 trial 重新计算；缺少逐次证据的历史数据明确标记为未筛选，样本数显示 `N/A`。
 
-满足任一排除条件的任务，会从所有 Aggregate 指标和主结果表中整项移除；同时满足两个条件的任务只计为一项。Judge 分差超限的任务会单独列表，展示 baseline 与 zvec-grep 的平均评分、分差和排除原因；报告也会列明因输入 token 条件被排除的任务。
-
-- Judge 数值是保留任务的等权平均值。
-- Baseline 和 zvec-grep 的效率数值是保留任务各 profile 平均值之和；展示的变化率直接由这两个汇总值计算，不再平均任务级百分比。
-- 某项效率指标的汇总 baseline 分母为零时，变化率为 `N/A`。若没有任务保留，则 Aggregate 各项数值均为 `N/A`。
-- JSON 的 `cases` 及原始产物仍保留全部任务和子代理用量，包括被排除的任务。
-
-这是敏感性筛选，不能据此认定被排除的数据有误。所有选中任务仍须执行，并完成规定的 trial 和评审调用；筛选不能让未完成的 benchmark 通过。`all-full` 每轮仍运行 20 题 × 2 个 profile × 5 次。若任务均已完成，仅因筛选后没有剩余任务，工作流仍可成功。
+[NIST 的 modified-Z 说明](https://www.itl.nist.gov/div898/handbook/eda/section3/eda35h.htm) 使用绝对值超过 3.5 标记候选离群值。本 benchmark 将其上尾用于任务离散度筛选，属于报告规则，不是 p 值，也不证明被排除执行无效。最终均值描述保留题集，原始与仅得分截尾后的结果继续展示。实际 Judge 调用、费用及完成性门槛保留全部原始 trial 和任务；两阶段筛选均不能掩盖超时、重试耗尽或缺失任务，也不会补跑替代样本。`all-full` 每个模型/embedding 配置运行 20 题 × 2 个 profile × 10 次 = 400 个 trial。
 
 ## GitHub Actions
 
@@ -82,7 +81,7 @@ Aggregate 汇总放在最前面，先于任务明细。每轮 workflow 独立筛
 
 `workflow_dispatch` 默认选择 `repro-3`（3 题），也可选择 `all-full`（20 题）或 `smoke`（5 题）。`candidate_ref` 默认是 `main`，指定要单独检出并打包的 Rust 源码分支、标签或提交；benchmark harness 与候选源码分开。`model` 输入默认是 `glm-5.2`，也可选择 `qwen3.8-max`；所选模型同时用于执行和评审。独立的 `embedding` 输入默认是 `local`，对应 `local/potion-code-16m-v2`；选择 `remote` 时使用与 Retrieval-only 工作流一致的 `qwen/qwen3.7-text-embedding`。
 
-`repro-3` 固定运行 3 题 × 2 个 profile × 5 次 = 30 个 trial，供小规模复现与迭代。任务按[运行 35206585943](https://github.com/Cuiyus/zvec-grep/actions/runs/35206585943) 中的调查路径和评分波动选取。下表范围均来自该轮最终成功的五次测试：
+`repro-3` 固定运行 3 题 × 2 个 profile × 10 次 = 60 个 trial，供小规模复现与迭代。任务按[运行 35206585943](https://github.com/Cuiyus/zvec-grep/actions/runs/35206585943) 中的调查路径和评分波动选取。下表范围均来自该轮最终成功的五次测试：
 
 | 相对波动 | 任务 | Baseline 评分 / 工具次数 | zvec-grep 评分 / 工具次数 |
 |---|---|---|---|
@@ -92,13 +91,13 @@ Aggregate 汇总放在最前面，先于任务明细。每轮 workflow 独立筛
 
 此分层是历史样本的描述，不是统计显著性标准，也不是模型的固有随机性等级。低波动组仍存在路径变化；高波动组的一次 baseline 使用子代理，主轨迹未展开其内部调用。新一轮应与历史同三题比较，失败尝试的开销单独计入。
 
-CI 默认使用 OpenCode `1.18.4`、`custom-openai/glm-5.2` 和本地 Embedding，每个任务、每个 profile 独立运行 5 次。请在仓库的 Actions secret 中配置 `GLM_API_KEY`，用于 Agent 执行和评审。两个执行模型沿用同一个 secret 名称；其中的百炼业务空间 API Key 需要具有所选模型的调用权限。远端 Embedding 还需要 Actions secret `QWEN_EMBEDDING_API_KEY` 和仓库 variable `QWEN_EMBEDDING_ENDPOINT`；只有选择 `embedding=remote` 时才会将源码内容发送到该远端 Embedding endpoint。上文的 Claude Code 配置对应已发布的本地测试协议。
+CI 默认使用 OpenCode `1.18.4`、`custom-openai/glm-5.2` 和本地 Embedding，每个任务、每个 profile 独立运行 10 次。请在仓库的 Actions secret 中配置 `GLM_API_KEY`，用于 Agent 执行和评审。两个执行模型沿用同一个 secret 名称；其中的百炼业务空间 API Key 需要具有所选模型的调用权限。远端 Embedding 还需要 Actions secret `QWEN_EMBEDDING_API_KEY` 和仓库 variable `QWEN_EMBEDDING_ENDPOINT`；只有选择 `embedding=remote` 时才会将源码内容发送到该远端 Embedding endpoint。上文的 Claude Code 配置对应已发布的本地测试协议。
 
 CI 的固定 trial 次数、失败重试上限及 local/remote Embedding 模型映射由版本化的 [`ci-config.json`](ci-config.json) 指定。执行模型、Embedding runtime、任务范围和 Rust 源码是手动运行的输入；密钥与 endpoint 属于运行环境配置。
 
 SWE-QA suite 显式配置版本化的 [`index.ignore`](zg_bench/swe_qa/data/index.ignore)。其中只列出 3 个后缀为文本、实际内容为 PNG 或损坏 UTF-16/32 数据的固定 benchmark fixture。ignore 文件摘要会计入本地索引种子的身份；其他索引失败仍会使任务失败并出现在结果中。该设置属于 suite，其他 runner suite 不会继承。
 
-完整运行包含 20 题 × 2 个 profile × 5 次 = 200 个独立 trial。CI 通过 `--max-retries 2` 为异常失败（包括 Agent 超时）的 trial 最多额外重试 2 次；API 使用额度耗尽不重试。成功的 trial 和低分答案不重跑，重试次数不计入每组 5 次的样本数。本地运行默认不重试，可显式传入 `--max-retries` 开启。
+完整运行包含 20 题 × 2 个 profile × 10 次 = 400 个独立 trial。CI 通过 `--max-retries 2` 为异常失败（包括 Agent 超时）的 trial 最多额外重试 2 次；API 使用额度耗尽不重试。成功的 trial 和低分答案不重跑，重试次数不计入每组 10 次的样本数。本地运行默认不重试，可显式传入 `--max-retries` 开启。
 
 每次失败的日志和轨迹保存在 Harbor job 的 `.retry-history/` 下，并随原始证据上传；Job Summary 展示重试次数和最终错误数。报告中的 token、工具调用、耗时及费用仅统计每个 trial 最终成功的那次执行，不包含失败尝试的额外开销；这些开销可在归档证据中查看。用尽重试次数仍失败时，该任务保持失败。每个任务 job 的总时限为 6 小时，包含准备和重试时间。
 
