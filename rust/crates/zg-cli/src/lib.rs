@@ -947,10 +947,27 @@ fn action_for_flag(value: &OsStr) -> Option<&'static str> {
 #[must_use]
 pub fn compatibility_warning_for_args(arguments: &[OsString]) -> Option<String> {
     let first = arguments.first()?.to_str()?;
-    if matches!(first, "query" | "search" | "index") {
-        let parts = Cli::try_parse_from(
-            std::iter::once(OsString::from("zg")).chain(arguments.iter().cloned()),
-        )
+    let purpose = match first {
+        "query" | "search" => None,
+        "index" => Some("To build the index"),
+        "status" => Some("To show workspace and index status"),
+        "install" => Some("To install agent integrations"),
+        "uninstall" => Some("To remove agent integrations"),
+        "config" => Some("To manage configuration"),
+        "auth" => Some("To manage workspace authorization"),
+        "server" => Some("To manage the server"),
+        "help" => Some("To display help"),
+        "version" => Some("To display the CLI version"),
+        _ => return None,
+    };
+    let parsed =
+        Cli::try_parse_from(std::iter::once(OsString::from("zg")).chain(arguments.iter().cloned()));
+    if let Ok(cli) = &parsed
+        && !matches!(&cli.command, Some(CommandLine::Query(_)))
+    {
+        return None;
+    }
+    let parts = parsed
         .ok()
         .and_then(|cli| {
             let Some(CommandLine::Query(args)) = cli.command else {
@@ -965,37 +982,22 @@ pub fn compatibility_warning_for_args(arguments: &[OsString]) -> Option<String> 
             })
         })
         .unwrap_or_else(|| vec![first.to_owned()]);
-        let text = parts.join(" ");
-        let remaining = parts[1..].join(" ");
-        let full = if first != "index" && !remaining.is_empty() {
-            "full "
-        } else {
-            ""
-        };
-        let warning =
-            format!("Warning: `{first}` is not a subcommand; the {full}search text is {text:?}.");
-        return Some(if first == "index" {
-            format!("{warning}\n         To build the index, use `zg --index`.")
-        } else if !remaining.is_empty() {
-            format!("{warning}\n         To search for {remaining:?} only, use `zg {remaining}`.")
-        } else {
-            warning
-        });
-    }
-    if matches!(
-        first,
-        "status" | "install" | "uninstall" | "config" | "auth" | "server" | "help" | "version"
-    ) {
-        let purpose = if first == "version" {
-            "To display the CLI version"
-        } else {
-            "To run this command"
-        };
-        return Some(format!(
-            "Warning: `zg {first}` is legacy syntax and now searches for \"{first}\".\n         {purpose}, use `zg --{first}`."
-        ));
-    }
-    None
+    let text = parts.join(" ");
+    let remaining = parts[1..].join(" ");
+    let full = if purpose.is_none() && !remaining.is_empty() {
+        "full "
+    } else {
+        ""
+    };
+    let warning =
+        format!("Warning: `{first}` is not a subcommand; the {full}search text is {text:?}.");
+    Some(if let Some(purpose) = purpose {
+        format!("{warning}\n         {purpose}, use `zg --{first}`.")
+    } else if !remaining.is_empty() {
+        format!("{warning}\n         To search for {remaining:?} only, use `zg {remaining}`.")
+    } else {
+        warning
+    })
 }
 
 fn index_concurrency_flag(text: &str) -> bool {
@@ -2087,11 +2089,9 @@ mod tests {
             let arguments = [word.into(), "second".into()];
             let warning =
                 super::compatibility_warning_for_args(&arguments).expect("migration warning");
-            if matches!(word, "query" | "search" | "index") {
-                assert!(warning.contains(&format!("`{word}` is not a subcommand;")));
-                assert!(warning.contains(&format!("search text is \"{word} second\".")));
-            } else {
-                assert!(warning.contains(&format!("now searches for \"{word}\".")));
+            assert!(warning.contains(&format!("`{word}` is not a subcommand;")));
+            assert!(warning.contains(&format!("search text is \"{word} second\".")));
+            if !matches!(word, "query" | "search") {
                 assert!(warning.contains(&format!("`zg --{word}`")));
             }
         }
@@ -2158,6 +2158,63 @@ mod tests {
                 super::compatibility_warning_for_args(&arguments).expect("migration warning"),
                 "Warning: `index` is not a subcommand; the search text is \"index\".\n         To build the index, use `zg --index`."
             );
+        }
+    }
+
+    #[test]
+    fn management_warnings_show_the_search_text_and_specific_action() {
+        for (word, purpose) in [
+            ("status", "To show workspace and index status"),
+            ("install", "To install agent integrations"),
+            ("uninstall", "To remove agent integrations"),
+            ("config", "To manage configuration"),
+            ("auth", "To manage workspace authorization"),
+            ("server", "To manage the server"),
+            ("help", "To display help"),
+            ("version", "To display the CLI version"),
+        ] {
+            for (suffix, tail) in [
+                (vec![], ""),
+                (vec!["--limit", "3"], ""),
+                (vec!["second", "--limit", "3"], " second"),
+                (vec!["--rg", "source.txt"], ""),
+            ] {
+                let arguments = std::iter::once(word)
+                    .chain(suffix)
+                    .map(OsString::from)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    super::compatibility_warning_for_args(&arguments).expect("migration warning"),
+                    format!(
+                        "Warning: `{word}` is not a subcommand; the search text is \"{word}{tail}\".\n         {purpose}, use `zg --{word}`."
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn action_and_help_flags_do_not_warn_about_search_text() {
+        for word in [
+            "query",
+            "search",
+            "index",
+            "status",
+            "install",
+            "uninstall",
+            "config",
+            "auth",
+            "server",
+            "help",
+            "version",
+        ] {
+            for flag in ["--help", "--status", "--index"] {
+                let arguments = [word.into(), flag.into()];
+                assert!(
+                    super::compatibility_warning_for_args(&arguments).is_none(),
+                    "{arguments:?}"
+                );
+            }
         }
     }
 
