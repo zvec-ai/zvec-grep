@@ -275,8 +275,9 @@ def run_case(binary, model_cache, work, logs, backend, model, expected_gguf_cuda
     status, _ = run_zg(binary, workspace, logs, "status", [
         "--status", "--mode", "direct", "--check-ready", "--color", "never",
     ], env)
-    require(status, "Workspace index is ready")
-    require(status, model)
+    if not re.search(r"^  Coverage +[█░#-]+ +100% +1 / 1 files$", status, re.MULTILINE):
+        raise AssertionError(f"Expected complete fixture coverage without a pending state:\n{status}")
+    require(status, f"  Embedding   {model}")
     query, query_err = run_zg(binary, workspace, logs, "query", [
         "--mode", "direct", "--vector", "Which component calibrates the telescope?",
         "--refresh", "off", "--limit", "1", "--preview", "full", *runtime_args,

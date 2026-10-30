@@ -653,8 +653,7 @@ fn server_on_exposes_only_agent_search_and_off_stops_it() -> Result<(), Box<dyn 
 
     // CLI administration uses the typed daemon protocol rather than the
     // public MCP toolset, so status remains available with the agent profile.
-    // Pin the display home so temporary paths are rendered consistently even
-    // when the runner's temporary directory is inside its real user home.
+    // Use an isolated home so the query cannot pick up real workspace state.
     let cli_status = Command::new(&guard.binary)
         .env("HOME", home.path())
         .env("USERPROFILE", home.path())
@@ -665,7 +664,7 @@ fn server_on_exposes_only_agent_search_and_off_stops_it() -> Result<(), Box<dyn 
     assert_command_success(&cli_status);
     let cli_stdout = String::from_utf8_lossy(&cli_status.stdout);
     assert!(
-        cli_stdout.starts_with("? Workspace index is not configured\n  ~\n"),
+        cli_stdout.starts_with("  Coverage    Unavailable (index not configured)\n"),
         "{cli_stdout}"
     );
 
@@ -1600,6 +1599,12 @@ fn server_index_failures_match_readiness_and_recover() -> Result<(), Box<dyn Err
     index_failures_match_readiness_and_recover("server")
 }
 
+fn assert_status_coverage(output: &str, expected: &str) {
+    let coverage = output.lines().next().expect("coverage field");
+    assert!(coverage.starts_with("  Coverage    "), "{output}");
+    assert!(coverage.ends_with(expected), "{output}");
+}
+
 fn index_failures_match_readiness_and_recover(mode: &str) -> Result<(), Box<dyn Error>> {
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
     let home = TempDir::new()?;
@@ -1670,11 +1675,7 @@ fn index_failures_match_readiness_and_recover(mode: &str) -> Result<(), Box<dyn 
         let status = status_after_index(&run, mode)?;
         assert_eq!(status.status.code(), Some(1));
         let stdout = String::from_utf8_lossy(&status.stdout);
-        assert!(
-            stdout.contains("1 / 2 files") && stdout.contains("1 pending · 1 failed"),
-            "{stdout}"
-        );
-        assert!(stdout.contains("Workspace index failed"), "{stdout}");
+        assert_status_coverage(&stdout, "50%  1 / 2 files (failed files)");
         std::fs::write(&broken, "Recovered readable nebula documentation.\n")?;
         embedding.fail.store(false, Ordering::Release);
         let recovered = run(&index_args)?;
@@ -1682,7 +1683,10 @@ fn index_failures_match_readiness_and_recover(mode: &str) -> Result<(), Box<dyn 
         let stdout = String::from_utf8_lossy(&recovered.stdout);
         assert!(stdout.starts_with("Workspace index\nfiles\t"), "{stdout}");
         assert!(stdout.contains("0 failed"), "{stdout}");
-        assert_command_success(&status_after_index(&run, mode)?);
+        let recovered_status = status_after_index(&run, mode)?;
+        assert_command_success(&recovered_status);
+        let stdout = String::from_utf8_lossy(&recovered_status.stdout);
+        assert_status_coverage(&stdout, "100%  2 / 2 files");
         if failed_path == "broken.txt" {
             std::fs::write(&good, "Modified orchard baseline.\n")?;
             embedding.fail.store(true, Ordering::Release);
@@ -1705,7 +1709,10 @@ fn status_after_index(
         let stdout = String::from_utf8_lossy(&status.stdout);
         // Watcher jobs can invalidate a server status scan after a manual job.
         // Retry only that transient state; callers still check exit codes and counts.
-        if mode != "server" || !stdout.starts_with("? Workspace index status is unknown\n") {
+        let unknown = stdout.lines().next().is_some_and(|coverage| {
+            coverage.starts_with("  Coverage    ") && coverage.ends_with("(status unknown)")
+        });
+        if mode != "server" || !unknown {
             return Ok(status);
         }
         assert!(

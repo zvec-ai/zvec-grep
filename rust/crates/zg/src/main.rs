@@ -1126,7 +1126,10 @@ async fn execute_status(
         zg_cli::stdout_supports_ansi(),
     )?;
     if output.debug {
-        eprintln!("Status diagnostics: indexed={}", result.indexed);
+        eprintln!(
+            "Status diagnostics: {}",
+            serde_json::json!({ "state": result.index_status(), "info": &result })
+        );
     }
     let ready = result.index_status() == zg_engine::api::info::result::IndexStatus::Ready;
     if check_ready && !ready {

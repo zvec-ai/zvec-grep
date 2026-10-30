@@ -593,8 +593,9 @@ See zg --help environment for precedence and Server-mode scope.";
 const STATUS_HELP: &str = r"Usage:
   zg --status [root] [--mode <direct|server|auto>] [--check-ready]
 
-Shows the nearest workspace root, index policy, index state, embedding model,
-stored paths, refresh status, and suggested next action.
+Shows Coverage, Embedding, FTS, and Storage for the nearest workspace.
+Coverage includes the file counts and any non-ready state; unavailable
+statistics are shown as Unavailable with the current state.
 
 --check-ready preserves the normal output and exits non-zero unless the
 Workspace index is ready.
