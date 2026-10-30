@@ -28,10 +28,16 @@ runs:
     - name: Resolve the immutable Rust source commit
       id: source
       shell: bash
+      env:
+        REQUESTED_REF: ${{ inputs.candidate_ref }}
       run: |
         commit="$(git -C candidate rev-parse HEAD)"
         if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
           echo "Selected Rust ref did not resolve to a full commit SHA" >&2
+          exit 1
+        fi
+        if [[ "$REQUESTED_REF" =~ ^[0-9a-f]{40}$ ]] && [ "$commit" != "$REQUESTED_REF" ]; then
+          echo "Rust checkout does not match the requested commit SHA" >&2
           exit 1
         fi
         echo "commit=$commit" >> "$GITHUB_OUTPUT"

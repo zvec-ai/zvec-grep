@@ -1,4 +1,5 @@
 import { ZG_MODES } from "./validation.mjs";
+import { markdownPerformance } from "./performance.mjs";
 
 const display = (value) => (Number.isFinite(value) ? value.toFixed(4) : "N/A");
 
@@ -32,6 +33,8 @@ export function markdownReport(report) {
     "Hybrid, fts and vector use the Rust public MCP default presentation on the same frozen repository index with the original query and Top-10 limit. The benchmark does not send a preview override because the current Rust MCP schema does not expose one. Presentation text and output length do not affect the five file-ranking metrics. Quality thresholds are report-only.",
   ];
   lines.push(
+    "",
+    markdownPerformance(report.performance),
     "",
     "<details>",
     "<summary>Per-question results and captured responses</summary>",

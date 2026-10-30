@@ -1,5 +1,7 @@
 {
-  "id": "sweqa20-zg-rust-three-modes-mcp-default-v7",
+  "id": "sweqa20-zg-rust-three-modes-mcp-default-v8",
+  "index_embedding_concurrency": 4,
+  "query_concurrency": 4,
   "model": "local/potion-code-16m-v2",
   "device": "cpu",
   "modes": ["hybrid", "fts", "vector"],
@@ -12,7 +14,7 @@
     "freshness": "eventual",
     "preferSymbol": false
   },
-  "endpoint": "rust-zg-install-opencode-stdio-public-mcp",
+  "endpoint": "zg-install-opencode-stdio-public-mcp",
   "score_contract": "sweqa-file-hit-rr-v1;five-call-query-mean;native-ranks-frozen-accepted-file-targets",
   "ndcg_contract": "upstream-0051e000-native-ranks-first-target-binary-gain-target-count-idcg",
   "index_policy": "fresh-per-repository-and-run-no-index-cache",
@@ -20,7 +22,8 @@
   "quality_gate": "report-only-until-a-reviewed-baseline-is-frozen",
   "integrity_gate": "fail-on-runtime-error-invalid-experiment-or-incomplete-call-matrix",
   "call_order": "mode-task-repetition",
-  "preview_contract": "public-rust-mcp-default-bounded-source-presentation;no-preview-request-argument",
+  "dispatch_policy": "four-in-flight-per-mode;dispatch-and-record-in-plan-order;completion-order-may-differ",
+  "preview_contract": "public-mcp-default-bounded-source-presentation;no-preview-request-argument",
   "primary_metric": "ndcg.repository_macro.ndcg_at_10",
   "index_selection": {
     "content": "code",

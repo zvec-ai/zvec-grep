@@ -28,6 +28,7 @@ import {
   summarizeRepeatedQuality,
 } from "../../metrics/repetitions.mjs";
 import { markdownReport } from "../../reports/zg.mjs";
+import { summarizePerformance } from "../../reports/performance.mjs";
 
 async function findRuns(directory) {
   const runs = [];
@@ -535,6 +536,9 @@ export async function aggregate(directory, { expectedTasks } = {}) {
       "each query/mode averages all five repetition scores; file Hit@1/5/10 and MRR@10 weight original questions equally; nDCG@10 weights repositories equally after averaging questions within each repository; all five metrics use frozen accepted-file targets and native ranks",
     modes: modeReports,
     repositories: manifests,
+    performance: summarizePerformance(
+      manifests.map((manifest) => manifest.performance ?? {}),
+    ),
     tasks: quality,
   };
   await writeFile(

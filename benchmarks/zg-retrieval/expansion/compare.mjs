@@ -7,9 +7,24 @@ import { buildCombined } from "./combined.mjs";
 import { PILOT_NAMES, PILOT_SUITES } from "./config.mjs";
 import { compareReports } from "../reports/compare.mjs";
 import { QUALITY_METRICS } from "../reports/ci.mjs";
+import {
+  markdownPerformance,
+  summarizePerformance,
+} from "../reports/performance.mjs";
 
 const MODES = ["hybrid", "fts", "vector"];
 const identity = (repository, commit) => ({ repository, commit });
+
+export function comparisonPackageHash(reports) {
+  const hashes = [
+    ...reports.zg.repositories.map((repo) => repo.package?.tarball_sha256),
+    ...PILOT_NAMES.map((name) => reports[name]?.package?.tarball_sha256),
+  ];
+  for (const hash of hashes)
+    assert.match(hash ?? "", /^[a-f0-9]{64}$/, "missing package hash");
+  assert.equal(new Set(hashes).size, 1, "different suite packages");
+  return hashes[0];
+}
 
 function checkIdentity(value) {
   assert.match(value.repository ?? "", /^[\w.-]+\/[\w.-]+$/);
@@ -75,6 +90,24 @@ export function compareCombinedResults(baseline, candidate, metadata) {
     ...metadata,
     harness_commit: baseline.harness_commit,
     rows,
+    performance: Object.fromEntries(
+      ["sweqa", ...PILOT_NAMES].map((name) => [
+        name,
+        Object.fromEntries(
+          [
+            ["baseline", baseline],
+            ["candidate", candidate],
+          ].map(([side, report]) => [
+            side,
+            name === "sweqa"
+              ? report.sweqa.performance
+              : summarizePerformance(
+                  report.pilots[name].report?.performance_groups ?? [],
+                ),
+          ]),
+        ),
+      ]),
+    ),
     errors: [],
   };
 }
@@ -110,7 +143,16 @@ export async function compareRuns(baseline, candidate, metadata) {
   // Validate equal source, protocol, file targets, task sets and scoring eligibility.
   // This also recomputes the SWE-QA scores from every saved repetition.
   compareReports(baseline.reports.zg, candidate.reports.zg);
-  return compareCombinedResults(before, after, metadata);
+  const result = compareCombinedResults(before, after, metadata);
+  result.package_sha256 = Object.fromEntries(
+    [
+      ["baseline", baseline],
+      ["candidate", candidate],
+    ].map(([side, bundle]) => {
+      return [side, comparisonPackageHash(bundle.reports)];
+    }),
+  );
+  return result;
 }
 
 export function markdownVersionComparison(result) {
@@ -128,6 +170,15 @@ export function markdownVersionComparison(result) {
     "",
     `Head: ${version("candidate")}`,
     "",
+    ...(result.harness_commit
+      ? [`Harness: \`${result.harness_commit}\``, ""]
+      : []),
+    ...(result.package_sha256
+      ? [
+          `Package SHA-256 — base: \`${result.package_sha256.baseline}\`; head: \`${result.package_sha256.candidate}\`.`,
+          "",
+        ]
+      : []),
     "Each cell is **base / head / Δ**. Δ = head − base; all five metrics use the 0–1 scale and higher is better. Both versions use the same frozen harness, queries, gold labels and local embedding models, with fresh indexes and five calls per query/mode. Quality is report-only; no regression threshold is applied.",
     "",
     "| Suite | Mode | File Hit@1 | File Hit@5 | File Hit@10 | MRR@10 | nDCG@10 |",
@@ -156,6 +207,18 @@ export function markdownVersionComparison(result) {
             .replace(/[\r\n]+/g, " ")}`,
       ),
     );
+  if (result.performance) {
+    lines.push(
+      "",
+      "<details>",
+      "<summary>Index & Query performance by suite and version</summary>",
+      "",
+    );
+    for (const [suite, versions] of Object.entries(result.performance))
+      for (const [side, measured] of Object.entries(versions))
+        lines.push(`## ${suite} / ${side}`, "", markdownPerformance(measured));
+    lines.push("", "</details>");
+  }
   lines.push(
     "",
     "SWE-QA nDCG uses repository macro averaging; the other suites use query means. Suites are reported separately. Full base/head reports and per-call evidence are available in the run artifacts.",
