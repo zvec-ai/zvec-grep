@@ -494,13 +494,11 @@ clients retain reverse form elicitation. Consent is rechecked before execution.
 ## MCP request lifecycle
 
 Search accepts `preview: "short"` (the default) or `preview: "full"` in both
-toolsets. Short preview shows up to ten source lines around the matched range
-and seven available outline lines. Full preview preserves all available source
-and outline content of each retrieved item; it neither reads whole files nor
-changes retrieval or ranking. Responses include query groups, selection reasons,
-matched ranges, source line numbers, and available code or Markdown metadata.
-The current engine supplies source snapshots without generated outlines; the
-optional outline is displayed only when provided with a result.
+toolsets. Both modes use the same text renderer as the CLI, without additional
+MCP fields. Short preview shows up to ten source lines around the matched range;
+full preview preserves all available source content of each retrieved item.
+Neither mode reads whole files, changes retrieval or ranking, or displays
+generated outlines. CLI `none` and `detail` previews remain CLI-only.
 
 The engine provides `content_range` for the exact source coordinates of returned
 content, independently of the entity `range` and matched `excerpt_range`. CLI and
@@ -520,11 +518,9 @@ coordinates. Terminal highlighting uses these actual matches, preserving regex,
 case, whole-word, and pattern-file semantics. Empty ranges are omitted; older
 replies without this field remain readable.
 
-Public search reports `freshness: fresh` or `freshness: possibly_stale`.
-`results: served_from_current_index` describes where results came from, with
-`background_refresh` reported separately. A provider that only reports current
-index provenance without verified freshness is conservatively shown as
-`possibly_stale`; a successful waited refresh reports `fresh`.
+Search still honors `autoUpdate` and `freshness: "wait_for_fresh"` for refresh
+timing. These controls do not add response fields; possibly stale items use the
+same status line as the CLI.
 
 Search and index accept `globs` and `insensitiveGlobs` as a string or list;
 case-insensitive string rules follow case-sensitive string rules. Index string

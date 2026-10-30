@@ -41,7 +41,6 @@ use zg_engine::{
                 ContextRoute, ContextRouteMode, FileCategory, FileFormat, QueryFilter,
                 RefreshPolicy, SymbolType,
             },
-            result::{ContentRange, MatchedBy},
         },
         index::{
             IndexOptions,
@@ -82,7 +81,7 @@ macro_rules! search_routing_rules {
         "- When user-provided or verified exact symbols are present but the answer spans multiple files, components, stages, implementations, or relationships, treat the task as mixed: call zvec_grep_search with the semantic intent and those anchors, then use ", $focused, " for focused verification.\n",
         "- For a semantic or mixed workspace task, start discovery with focused zvec_grep_search before broad file discovery.\n",
         "- Preserve the question's concepts, relationships, and constraints from the user request and established context in semantic queries. Treat inferred names as supplemental hypotheses, not replacements for or constraints on the stated intent.\n",
-        "- `query` creates one primary hybrid FTS-plus-vector group; `queries` creates one or more primary hybrid groups; `fts` and `vector` add supplemental lexical-only or semantic-only route groups. These are retrieval routes, not hard constraints. Without `fuse`, the response is one deduplicated and reranked list with query-group metadata; set `fuse: true` to collapse every group into one ranked search plan.\n",
+        "- `query` creates one primary hybrid FTS-plus-vector group; `queries` creates one or more primary hybrid groups; `fts` and `vector` add supplemental lexical-only or semantic-only route groups. These are retrieval routes, not hard constraints. Without `fuse`, each query group keeps its ranked results; set `fuse: true` to collapse every group into one ranked search plan.\n",
         "- For a fused mixed search, use arguments such as {\"root\":\"/absolute/workspace\",\"query\":\"how are results ranked and fused\",\"fts\":[\"RRF\",\"score\"],\"fuse\":true}.\n",
         "- Search results include bounded source snippets by default. Set preview: \"full\" for all available content of each retrieved item; this does not retrieve the entire file or change ranking. Treat sufficient returned content as already-read evidence, and open only the cited file or range when a required detail falls outside it.\n",
         "- If semantic retrieval remains irrelevant, fall back to ", $exact, ".\n",
@@ -97,8 +96,8 @@ pub const AGENT_INSTRUCTIONS: &str = concat!(
     search_routing_rules!("native Grep or rg", "Read, Grep, or rg"),
     "- Every workspace operation requires an absolute root path visible to the daemon.\n",
     "- Respect declined or cancelled index setup; do not repeat it without a renewed user request.\n",
-    "- Read freshness and background_refresh directly from zvec_grep_search responses without a status preflight.\n",
-    "- When results are served_from_current_index, use them immediately when they are sufficient; do not perform extra diagnostics merely because a background refresh is active.\n",
+    "- Use returned search evidence without a status preflight.\n",
+    "- Use sufficient returned evidence immediately; do not perform extra diagnostics merely because the index may refresh in the background.\n",
     "- When an index is missing, search can ask the user to choose an embedding model and approve a background build. Only explicit user confirmation creates an index. Read the returned indexing state and retry search after completion; use native Grep or rg only when literal lookup answers the task.",
 );
 
@@ -109,8 +108,8 @@ pub const FULL_INSTRUCTIONS: &str = concat!(
     "- Every workspace operation requires an absolute root path visible to the daemon.\n",
     "- Respect declined or cancelled index setup; do not repeat it without a renewed user request.\n",
     "- Use the zvec_grep_* tools directly for workspace search, status, indexing, deletion, and exhaustive lexical search.\n",
-    "- Use freshness and background_refresh from zvec_grep_search without a status preflight; call zvec_grep_index_status only for a missing index, failed or cancelled indexing, diagnostics, or explicit progress monitoring.\n",
-    "- When results are served_from_current_index, use them immediately when they are sufficient; do not call status merely because a background refresh is active.\n",
+    "- Use returned search evidence without a status preflight; call zvec_grep_index_status only for a missing index, failed or cancelled indexing, diagnostics, or explicit progress monitoring.\n",
+    "- Use sufficient returned evidence immediately; do not call status merely because the index may refresh in the background.\n",
     "- Call zvec_grep_index only when persistent indexing or index deletion is explicitly requested. Never silently create, rebuild, or drop an index.\n",
     "- For a new index, use a user-selected embedding or omit it only when a server default model is known; never guess a model.\n",
     "- zvec_grep_index wait defaults to false; poll zvec_grep_index_status for background progress and set wait to true only when completion is required before continuing.\n",
@@ -322,10 +321,6 @@ impl ZvecGrepMcpServer {
             search.attr.description = search.attr.description.as_ref().map(|description| {
                 description
                     .replace("Use native Grep or rg instead", "Use zvec_grep_rg instead")
-                    .replace(
-                        "from the response without a status preflight",
-                        "from the response",
-                    )
                     .into()
             });
         }
@@ -357,7 +352,7 @@ impl ZvecGrepMcpServer {
 impl ZvecGrepMcpServer {
     #[tool(
         name = "zvec_grep_search",
-        description = "Search a workspace index for semantic, relational, cross-file, or multi-hop evidence such as architecture, call chains, dependencies, lifecycle, data or control flow, design rationale, and comparisons. Use it when exact lookup alone cannot answer a workspace-grounded question. Results include bounded source snippets by default and query-group metadata; set preview: \"full\" to return all available content of each retrieved item without changing retrieval or ranking. Treat sufficient returned content as already-read evidence. Use native Grep or rg instead when exact lookup alone is sufficient. Read freshness and background_refresh from the response without a status preflight; when results are served_from_current_index, use them if sufficient. A missing index can request user model selection and authorization; accepted setup starts a background build and returns indexing status. Retry after completion.",
+        description = "Search a workspace index for semantic, relational, cross-file, or multi-hop evidence such as architecture, call chains, dependencies, lifecycle, data or control flow, design rationale, and comparisons. Use it when exact lookup alone cannot answer a workspace-grounded question. Results use the same text output as the CLI with bounded source snippets by default; set preview: \"full\" to return all available source content of each retrieved item without changing retrieval or ranking. Treat sufficient returned content as already-read evidence without a status preflight. Use native Grep or rg instead when exact lookup alone is sufficient. A missing index can request user model selection and authorization; accepted setup starts a background build and returns indexing status. Retry after completion.",
         annotations(
             title = "Search with zvec-grep",
             read_only_hint = false,
@@ -774,7 +769,7 @@ pub struct SearchInput {
     /// Maximum returned items per query group or fused plan.
     #[schemars(range(min = 1, max = 50), extend("type" = "integer"))]
     pub limit: Option<usize>,
-    /// Source display only: short bounds snippets; full preserves all available retrieved content and outline without changing retrieval or ranking.
+    /// Same text output as the CLI: short bounds source snippets; full preserves all available retrieved source content without changing retrieval or ranking.
     #[serde(default)]
     pub preview: SearchPreview,
     /// Ordered path glob rules; later matching rules take precedence.
@@ -2373,33 +2368,6 @@ fn context_result_to_tool_result(reply: &ContextResult) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(rg_format::format(reply))])
 }
 
-fn matched_by_label(value: MatchedBy) -> &'static str {
-    match value {
-        MatchedBy::Fts => "fts",
-        MatchedBy::Vector => "vector",
-        MatchedBy::FtsAndVector => "fts+vector",
-        MatchedBy::Lexical => "lexical",
-    }
-}
-
-fn range_label(range: &ContentRange) -> String {
-    match range {
-        ContentRange::File => "file".to_owned(),
-        ContentRange::Text { start_line, .. } => {
-            let last_line = range.last_line().expect("text range has line coordinates");
-            if *start_line == last_line {
-                start_line.to_string()
-            } else {
-                format!("{start_line}-{last_line}")
-            }
-        }
-        ContentRange::Byte {
-            start_offset,
-            end_offset,
-        } => format!("bytes:{start_offset}-{end_offset}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -2846,10 +2814,10 @@ mod tests {
     }
 
     #[test]
-    fn toolset_metadata_preserves_node_contract_with_interactive_setup_guidance() {
+    fn toolset_metadata_describes_cli_output_and_interactive_setup() {
         let expected: serde_json::Value =
             serde_json::from_str(include_str!("../../../compat/mcp/toolsets.json"))
-                .expect("Node.js toolset metadata");
+                .expect("MCP toolset metadata");
         for (profile, server) in [
             (
                 "agent",
@@ -2862,11 +2830,8 @@ mod tests {
         ] {
             let instructions = server.get_info().instructions.expect("instructions");
             assert!(instructions.contains("Respect declined or cancelled index setup"));
-            let legacy_instructions = instructions
-                .replace("- Respect declined or cancelled index setup; do not repeat it without a renewed user request.\n", "")
-                .replace("When an index is missing, search can ask the user to choose an embedding model and approve a background build. Only explicit user confirmation creates an index. Read the returned indexing state and retry search after completion; use native Grep or rg only when literal lookup answers the task.", "When an index is missing and literal or regex search can answer the task, use native Grep or rg. Creating or rebuilding a persistent index requires explicit user authorization.");
             assert_eq!(
-                Some(legacy_instructions.as_str()),
+                Some(instructions.as_str()),
                 expected[profile]["instructions"].as_str()
             );
             let search = server
@@ -2876,11 +2841,8 @@ mod tests {
                 .expect("search tool");
             let description = search.description.expect("search description");
             assert!(description.contains("accepted setup starts a background build"));
-            let legacy_description = description
-                .replace("Search a workspace index", "Search an existing workspace index")
-                .replace(" A missing index can request user model selection and authorization; accepted setup starts a background build and returns indexing status. Retry after completion.", "");
             assert_eq!(
-                Some(legacy_description.as_str()),
+                Some(description.as_ref()),
                 expected[profile]["search_description"].as_str()
             );
         }
@@ -3631,26 +3593,6 @@ mod tests {
         empty.query = Some("  ".to_owned());
         empty.fts = None;
         assert!(empty.into_request().is_err());
-    }
-
-    #[test]
-    fn range_labels_show_covered_lines_and_preserve_empty_positions() {
-        for (start_line, end_line, start_byte_offset, end_byte_offset, end_byte_column, label) in [
-            (1, 2, 0, 4, 0, "1"),
-            (1, 3, 0, 8, 0, "1-2"),
-            (1, 3, 0, 9, 1, "1-3"),
-            (3, 3, 8, 8, 0, "3"),
-        ] {
-            let range = super::ContentRange::Text {
-                start_line,
-                end_line,
-                start_byte_offset,
-                end_byte_offset,
-                start_byte_column: 0,
-                end_byte_column,
-            };
-            assert_eq!(super::range_label(&range), label);
-        }
     }
 
     fn index_input() -> IndexInput {

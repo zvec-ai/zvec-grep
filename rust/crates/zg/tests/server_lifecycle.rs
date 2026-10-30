@@ -877,7 +877,7 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
         "{response}"
     );
     assert!(response.contains("\"isError\":false"), "{response}");
-    assert!(response.contains("freshness: fresh"), "{response}");
+    assert!(!response.contains("freshness:"), "{response}");
     assert!(
         !response.contains("results: served_from_current_index"),
         "{response}"
@@ -910,7 +910,7 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
         );
         std::thread::sleep(Duration::from_millis(50));
     };
-    assert!(response.contains("freshness: fresh"), "{response}");
+    assert!(!response.contains("freshness:"), "{response}");
     assert!(!response.contains("background_refresh:"), "{response}");
     assert!(
         !response.contains("results: served_from_current_index"),
@@ -926,31 +926,14 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
     });
     let response = post_json(port, Some(&session), &background_search.to_string())?;
     assert!(response.contains("fresh.txt"), "{response}");
+    // A native watcher can deliver delayed or duplicate notifications after the
+    // preceding fresh query. Refresh activity must not add search output fields.
+    assert!(!response.contains("freshness:"), "{response}");
     assert!(
-        !response.contains("freshness: served_from_current_index"),
+        !response.contains("results: served_from_current_index"),
         "{response}"
     );
-    // A native watcher can deliver delayed or duplicate notifications after the
-    // preceding fresh query. Controlled runtime tests cover the quiet idle case.
-    let stale = response.contains("freshness: possibly_stale");
-    let scheduled = response.contains("background_refresh: scheduled");
-    assert!(stale || response.contains("freshness: fresh"), "{response}");
-    if stale || scheduled {
-        assert!(
-            response.contains("results: served_from_current_index"),
-            "{response}"
-        );
-        assert!(
-            response.contains("background_refresh: idle") || scheduled,
-            "{response}"
-        );
-    } else {
-        assert!(
-            !response.contains("results: served_from_current_index"),
-            "{response}"
-        );
-        assert!(!response.contains("background_refresh:"), "{response}");
-    }
+    assert!(!response.contains("background_refresh:"), "{response}");
     assert!(response.contains("\"isError\":false"), "{response}");
 
     let output = guard.stop()?;
@@ -1180,13 +1163,11 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
     std::fs::write(&source, "vineyard documentation")?;
     let response = search(workspace.path(), "orchard", "eventual", false)?;
     assert!(response.contains("source.txt"), "{response}");
-    assert!(response.contains("background_refresh: off"), "{response}");
+    assert!(response.contains("orchard documentation"), "{response}");
+    assert!(!response.contains("background_refresh:"), "{response}");
     let response = search(workspace.path(), "orchard", "eventual", true)?;
     assert!(response.contains("source.txt"), "{response}");
-    assert!(
-        response.contains("background_refresh: scheduled"),
-        "{response}"
-    );
+    assert!(!response.contains("background_refresh:"), "{response}");
     // Poll without requesting more refreshes: the first eventual search must do the work.
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
@@ -1206,7 +1187,8 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
     embedding.wait_for_request_after(before_edit, "harvest", home.path());
     let response = search(workspace.path(), "harvest", "wait_for_fresh", false)?;
     assert!(response.contains("source.txt"), "{response}");
-    assert!(response.contains("freshness: fresh"), "{response}");
+    assert!(response.contains("harvest documentation"), "{response}");
+    assert!(!response.contains("freshness:"), "{response}");
     assert!(response.contains("\"isError\":false"), "{response}");
     // Once activated, the watcher must refresh later edits even with autoUpdate off.
     std::fs::write(&source, "autumn documentation")?;
@@ -1478,11 +1460,7 @@ fn indexed_fragment_coordinates_survive_direct_server_and_mcp() -> Result<(), Bo
         let text = reply["result"]["content"][0]["text"]
             .as_str()
             .ok_or("missing source preview")?;
-        assert!(
-            text.contains("matched: 2\nsource:\n2\txxx"),
-            "{preview}: {text}"
-        );
-        assert!(text.ends_with("\n3\t"), "{preview}: {text}");
+        assert_eq!(text, outputs[0], "direct/server/MCP {preview}");
     }
     bridge.close()?;
     assert_command_success(&guard.stop()?);
