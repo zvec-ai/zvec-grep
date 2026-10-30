@@ -251,14 +251,20 @@ fn seed_persisted_call(root: &std::path::Path) -> Result<(), Box<dyn Error>> {
     }
     let (file_id, caller) = symbols.get("caller").ok_or("caller definition")?;
     let (_, target) = symbols.get("target").ok_or("target definition")?;
-    // IndexStore creates the graph database; extraction still supplies no edges.
-    // Seed a call into that production schema to exercise the query transports.
-    assert!(storage.join("graph/graph.sqlite").is_file());
+    // Default indexing leaves graph writes disabled. Supply a version-1 read
+    // fixture with the columns consumed by the reader to exercise the transports.
+    assert!(!storage.join("graph/graph.sqlite").exists());
+    std::fs::create_dir_all(storage.join("graph"))?;
     let graph = rusqlite::Connection::open(storage.join("graph/graph.sqlite"))?;
-    assert_eq!(
-        graph.query_row("SELECT count(*) FROM edges", [], |row| row.get::<_, u64>(0))?,
-        0
-    );
+    graph.execute_batch(
+        "PRAGMA user_version = 1;
+         PRAGMA application_id = 0x5a475250;
+         CREATE TABLE edges (
+             id INTEGER PRIMARY KEY, file_id INTEGER, source TEXT, target TEXT,
+             kind TEXT, status TEXT, line INTEGER, col INTEGER, provenance TEXT,
+             metadata TEXT NOT NULL DEFAULT '{}'
+         );",
+    )?;
     graph.execute(
         "INSERT INTO edges (file_id, source, target, kind, status, line, col, provenance) VALUES (?, ?, ?, 'calls', 'resolved', 5, 4, 'file_local')",
         rusqlite::params![file_id, caller, target],
