@@ -184,7 +184,10 @@ Indexed source size: 3060923 bytes
 
 test("structured status preserves exact audit fields independently of human output", () => {
   const expected = parseNativeStatus(groupedReadyStatus);
-  for (const stdout of [compactReadyStatus, "human presentation can change\n"]) {
+  for (const stdout of [
+    compactReadyStatus,
+    "human presentation can change\n",
+  ]) {
     assert.deepEqual(
       parseNativeStatus(stdout, {
         stderr: `other debug output\n${diagnosticsLine(readyDiagnostics())}`,
@@ -203,20 +206,42 @@ test("structured status preserves exact audit fields independently of human outp
 
 test("structured non-ready or incomplete indexes remain product failures", () => {
   for (const change of [
-    (value) => { value.state = "stale"; },
-    (value) => { value.state = "failed"; value.info.status = null; },
-    (value) => { value.info.status.files_pending = 1; },
-    (value) => { value.info.status.files_failed = 1; },
-    (value) => { value.info.status.files_added = 1; },
-    (value) => { value.info.status.files_modified = 1; },
-    (value) => { value.info.status.files_deleted = 1; },
-    (value) => { value.info.status.files_unchanged = 380; },
-    (value) => { value.info.status.entities_indexed = 0; },
+    (value) => {
+      value.state = "stale";
+    },
+    (value) => {
+      value.state = "failed";
+      value.info.status = null;
+    },
+    (value) => {
+      value.info.status.files_pending = 1;
+    },
+    (value) => {
+      value.info.status.files_failed = 1;
+    },
+    (value) => {
+      value.info.status.files_added = 1;
+    },
+    (value) => {
+      value.info.status.files_modified = 1;
+    },
+    (value) => {
+      value.info.status.files_deleted = 1;
+    },
+    (value) => {
+      value.info.status.files_unchanged = 380;
+    },
+    (value) => {
+      value.info.status.entities_indexed = 0;
+    },
   ]) {
     const value = readyDiagnostics();
     change(value);
     assert.throws(
-      () => parseNativeStatus(groupedReadyStatus, { stderr: diagnosticsLine(value) }),
+      () =>
+        parseNativeStatus(groupedReadyStatus, {
+          stderr: diagnosticsLine(value),
+        }),
       NativeIndexProductError,
     );
   }
@@ -224,32 +249,59 @@ test("structured non-ready or incomplete indexes remain product failures", () =>
 
 test("malformed structured diagnostics never fall back to a ready human heading", () => {
   for (const change of [
-    (value) => { delete value.state; },
-    (value) => { value.info.indexed = false; },
-    (value) => { value.info.index_policy = "disabled"; },
-    (value) => { value.info.compatibility.status = "rebuild_required"; },
-    (value) => { value.info.root = "relative/corpus"; },
-    (value) => { value.info.index_path = "relative/storage"; },
-    (value) => { delete value.info.workspace_index.embedding; },
-    (value) => { delete value.info.status.indexed_size_bytes; },
-    (value) => { value.info.status.indexed_size_bytes = Number.MAX_SAFE_INTEGER + 1; },
-    (value) => { value.info.status.files_pending = "0"; },
+    (value) => {
+      delete value.state;
+    },
+    (value) => {
+      value.info.indexed = false;
+    },
+    (value) => {
+      value.info.index_policy = "disabled";
+    },
+    (value) => {
+      value.info.compatibility.status = "rebuild_required";
+    },
+    (value) => {
+      value.info.root = "relative/corpus";
+    },
+    (value) => {
+      value.info.index_path = "relative/storage";
+    },
+    (value) => {
+      delete value.info.workspace_index.embedding;
+    },
+    (value) => {
+      delete value.info.status.indexed_size_bytes;
+    },
+    (value) => {
+      value.info.status.indexed_size_bytes = Number.MAX_SAFE_INTEGER + 1;
+    },
+    (value) => {
+      value.info.status.files_pending = "0";
+    },
   ]) {
     const value = readyDiagnostics();
     change(value);
     assert.throws(
-      () => parseNativeStatus(groupedReadyStatus, { stderr: diagnosticsLine(value) }),
+      () =>
+        parseNativeStatus(groupedReadyStatus, {
+          stderr: diagnosticsLine(value),
+        }),
       { name: "AssertionError" },
     );
   }
   assert.throws(
-    () => parseNativeStatus(groupedReadyStatus, { stderr: "Status diagnostics: {invalid\n" }),
+    () =>
+      parseNativeStatus(groupedReadyStatus, {
+        stderr: "Status diagnostics: {invalid\n",
+      }),
     { name: "SyntaxError" },
   );
   assert.throws(
-    () => parseNativeStatus(groupedReadyStatus, {
-      stderr: diagnosticsLine(readyDiagnostics()).repeat(2),
-    }),
+    () =>
+      parseNativeStatus(groupedReadyStatus, {
+        stderr: diagnosticsLine(readyDiagnostics()).repeat(2),
+      }),
     /ambiguous/,
   );
 });

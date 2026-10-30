@@ -126,7 +126,9 @@ export async function aggregate(directory, { expectedTasks } = {}) {
             "missing snapshot artifact identities",
           );
           for (const [path, hash] of Object.entries(snapshot.artifacts)) {
-            assert.ok(["status.txt", "status.stderr.txt", "status.json"].includes(path));
+            assert.ok(
+              ["status.txt", "status.stderr.txt", "status.json"].includes(path),
+            );
             assert.equal(
               await fileHash(join(runDirectory, `stages/${phase}`, path)),
               hash,

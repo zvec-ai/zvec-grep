@@ -159,16 +159,32 @@ function parseStatusDiagnostics(stderr) {
   const { state, info } = JSON.parse(diagnostics[0]);
   assert.ok(
     [
-      "ready", "stale", "failed", "unknown", "uninitialized", "disabled",
-      "missing", "rebuild_required",
+      "ready",
+      "stale",
+      "failed",
+      "unknown",
+      "uninitialized",
+      "disabled",
+      "missing",
+      "rebuild_required",
     ].includes(state),
     "native diagnostics omitted a valid state",
   );
   requireSearchable(state === "ready", "native index is not ready");
-  assert.equal(info?.indexed, true, "ready native diagnostics must have an index");
-  assert.equal(info.index_policy, "enabled", "ready native index must be enabled");
   assert.equal(
-    info.compatibility?.status, "compatible", "ready native index must be compatible",
+    info?.indexed,
+    true,
+    "ready native diagnostics must have an index",
+  );
+  assert.equal(
+    info.index_policy,
+    "enabled",
+    "ready native index must be enabled",
+  );
+  assert.equal(
+    info.compatibility?.status,
+    "compatible",
+    "ready native index must be compatible",
   );
   assert.ok(
     typeof info.root === "string" && isAbsolute(info.root),
@@ -180,22 +196,33 @@ function parseStatusDiagnostics(stderr) {
   );
   const embedding = info.workspace_index?.embedding;
   assert.ok(
-    typeof embedding?.provider === "string" && embedding.provider.length > 0 &&
-      typeof embedding?.model === "string" && embedding.model.length > 0,
+    typeof embedding?.provider === "string" &&
+      embedding.provider.length > 0 &&
+      typeof embedding?.model === "string" &&
+      embedding.model.length > 0,
     "native diagnostics omitted embedding",
   );
   const stats = info.status;
   for (const name of [
-    "files_scanned", "files_indexed", "files_pending", "files_failed",
-    "files_added", "files_modified", "files_deleted", "files_unchanged",
-    "entities_indexed", "indexed_size_bytes",
+    "files_scanned",
+    "files_indexed",
+    "files_pending",
+    "files_failed",
+    "files_added",
+    "files_modified",
+    "files_deleted",
+    "files_unchanged",
+    "entities_indexed",
+    "indexed_size_bytes",
   ]) {
     assert.ok(
-      Number.isSafeInteger(stats?.[name]) && stats[name] >= 0, `invalid ${name}`,
+      Number.isSafeInteger(stats?.[name]) && stats[name] >= 0,
+      `invalid ${name}`,
     );
   }
   requireSearchable(
-    stats.files_added === 0 && stats.files_modified === 0 &&
+    stats.files_added === 0 &&
+      stats.files_modified === 0 &&
       stats.files_deleted === 0,
     "native index still has changed files",
   );
@@ -217,13 +244,16 @@ function parseStatusDiagnostics(stderr) {
   };
 }
 
-export function parseNativeStatus(stdout, { home = homedir(), stderr = "" } = {}) {
+export function parseNativeStatus(
+  stdout,
+  { home = homedir(), stderr = "" } = {},
+) {
   const text = stripVTControlCharacters(stdout).replaceAll("\r\n", "\n");
-  const status = parseStatusDiagnostics(stderr) ?? (
-    /^Workspace index: /m.test(text)
+  const status =
+    parseStatusDiagnostics(stderr) ??
+    (/^Workspace index: /m.test(text)
       ? parseLegacyStatus(text)
-      : parseGroupedStatus(text, home)
-  );
+      : parseGroupedStatus(text, home));
   for (const [name, value] of Object.entries(status))
     if (typeof value === "number")
       assert.ok(Number.isSafeInteger(value) && value >= 0, `invalid ${name}`);
