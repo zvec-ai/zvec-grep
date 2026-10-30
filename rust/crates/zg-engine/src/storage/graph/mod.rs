@@ -29,10 +29,10 @@ pub(crate) enum Error {
     Io(#[from] std::io::Error),
     #[error("invalid graph input: {0}")]
     InvalidInput(&'static str),
-    #[error(
-        "unsupported graph database (version {version}, application {application_id}); rebuild the index"
-    )]
-    UnsupportedSchema { version: i64, application_id: i64 },
+    #[error("unexpected graph database owner (application {application_id}); rebuild the index")]
+    UnsupportedSchema { application_id: i64 },
+    #[error("graph database is missing the edges table; rebuild the index")]
+    IncompleteSchema,
     #[error("refusing to initialize an unrelated SQLite database")]
     ForeignDatabase,
 }
@@ -74,7 +74,7 @@ impl SqliteGraphStorage {
     /// Opens an existing reader, or initializes a writer and its parent directory.
     ///
     /// # Errors
-    /// Rejects missing read-only databases, foreign/newer schemas, and SQLite/I/O errors.
+    /// Rejects missing read-only databases, unrelated databases, and SQLite/I/O errors.
     pub(crate) fn open(path: &Path, mode: OpenMode) -> Result<Self> {
         if path.as_os_str().is_empty() {
             return Err(Error::InvalidInput("database path is empty"));

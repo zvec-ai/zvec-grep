@@ -117,6 +117,9 @@ fn entity_records_preserve_image_content_ranges_and_external_metadata() {
             documentation: Some("documentation".into()),
             language: None,
             visibility: None,
+            arity: None,
+            is_exported: false,
+            is_declaration: false,
         }));
         let entity = make_entity(
             FileId::new(1),

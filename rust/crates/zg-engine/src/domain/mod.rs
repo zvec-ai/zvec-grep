@@ -25,6 +25,7 @@ pub(crate) use entity::FragmentId;
 pub use glob::GlobRule;
 
 // Indexes.
+pub(crate) use index::CURRENT_INDEX_VERSION;
 pub(crate) use index::FTS_CONFIG;
 pub(crate) use index::FtsConfig;
 pub(crate) use index::IndexDescriptor;
@@ -43,12 +44,9 @@ pub use metadata::Visibility;
 
 // Shared graph contracts for extraction and persistence.
 pub(crate) use graph::EdgeProvenance;
-#[cfg(test)]
 pub(crate) use graph::FileEdge;
-#[cfg(test)]
 pub(crate) use graph::FileGraphNode;
 pub(crate) use graph::FileGraphResult;
-#[cfg(test)]
 pub(crate) use graph::GraphEdgeKind;
 pub(crate) use graph::PendingRef;
 pub(crate) use graph::PendingRefStatus;
@@ -70,6 +68,9 @@ pub(crate) use source::FileSnapshot;
 pub(crate) use source::Range;
 pub(crate) use source::SourcePath;
 pub(crate) use source::TextRange;
+// Consumed by the cross-file reference resolver; dormant until it lands.
+#[allow(unused_imports)]
+pub(crate) use source::formats_for_path;
 
 // Workspaces.
 pub use workspace::ScanRules;
