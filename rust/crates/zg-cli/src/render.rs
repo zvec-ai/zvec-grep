@@ -743,6 +743,10 @@ the effective agent directory; unrelated configuration and context are kept.";
 const HELP_HELP: &str = r"Usage:
   zg --help [topic]
   zg -h [topic]
+  zg <topic> --help
+
+A single known positional topic with -h or --help selects that topic.
+Other search input with -h or --help shows search help.
 
 Topics:
   search                             Indexed search and managed ripgrep

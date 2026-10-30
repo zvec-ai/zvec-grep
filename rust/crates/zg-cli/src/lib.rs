@@ -1076,10 +1076,12 @@ fn normalize_command(mut arguments: Vec<OsString>) -> Result<Vec<OsString>, clap
     }
     let mut action = None;
     let mut help_requested = false;
+    let mut positional_indices = Vec::new();
     let mut index_concurrency_requested = false;
     let mut index = 1;
     while let Some(argument) = arguments.get(index) {
         if argument == OsStr::new("--") {
+            positional_indices.extend(index + 1..arguments.len());
             break;
         }
         if let Some(command) = action_for_flag(argument)
@@ -1099,6 +1101,9 @@ fn normalize_command(mut arguments: Vec<OsString>) -> Result<Vec<OsString>, clap
             ));
         }
         index_concurrency_requested |= index_concurrency_flag(&text);
+        if !text.starts_with('-') || text == "-" {
+            positional_indices.push(index);
+        }
         index += if query_option_with_value(&text)
             || managed_rg::takes_separate_value(&text)
             || management_option_with_value(&text)
@@ -1109,27 +1114,38 @@ fn normalize_command(mut arguments: Vec<OsString>) -> Result<Vec<OsString>, clap
         };
     }
     validate_index_concurrency_scope(index_concurrency_requested, action)?;
-    let command = if let Some((index, command)) = action {
-        arguments.remove(index);
-        command
-    } else {
-        "query"
-    };
     if help_requested {
+        let topic = if let Some((_, command)) = action {
+            command
+        } else {
+            positional_help_topic(&arguments, &positional_indices).unwrap_or("search")
+        }
+        .to_owned();
         arguments.truncate(1);
         arguments.push("help".into());
-        arguments.push(
-            if command == "query" {
-                "search"
-            } else {
-                command
-            }
-            .into(),
-        );
+        arguments.push(topic.into());
     } else {
+        let command = if let Some((index, command)) = action {
+            arguments.remove(index);
+            command
+        } else {
+            "query"
+        };
         arguments.insert(1, command.into());
     }
     Ok(arguments)
+}
+
+fn positional_help_topic<'a>(
+    arguments: &'a [OsString],
+    positional_indices: &[usize],
+) -> Option<&'a str> {
+    let [index] = positional_indices else {
+        return None;
+    };
+    arguments[*index]
+        .to_str()
+        .filter(|topic| help_text(Some(topic)).is_ok())
 }
 
 fn normalize_query_argument_order(arguments: Vec<OsString>) -> (Vec<OsString>, usize) {
@@ -2281,6 +2297,64 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(arguments).is_err());
         }
+    }
+
+    #[test]
+    fn a_single_known_positional_selects_its_help_topic() {
+        for topic in [
+            "search",
+            "index",
+            "status",
+            "config",
+            "auth",
+            "server",
+            "install",
+            "uninstall",
+            "help",
+            "models",
+            "file-types",
+            "environment",
+            "env",
+            "version",
+        ] {
+            for flag in ["--help", "-h"] {
+                for arguments in [
+                    vec!["zg", topic, flag],
+                    vec!["zg", "--mode", "direct", topic, flag],
+                    vec!["zg", topic, "--mode", "server", flag],
+                    vec!["zg", "--limit", "3", topic, flag],
+                ] {
+                    assert!(
+                        matches!(plan(&arguments), CliPlan::Help(Some(actual)) if actual == topic),
+                        "{arguments:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn other_positional_help_requests_keep_the_search_context() {
+        for arguments in [
+            vec!["zg", "asdf", "afsd", "asd", "asdf", "--help"],
+            vec!["zg", "server", "timeout", "--help"],
+            vec!["zg", "server timeout", "--help"],
+            vec!["zg", "query", "--help"],
+            vec!["zg", "--mode", "server", "--help"],
+            vec!["zg", "--mode=server", "--help"],
+            vec!["zg", "--rg", "-e", "server", "--help"],
+            vec!["zg", "--glob", "server", "--help"],
+            vec!["zg", "server", "--help", "--", "timeout"],
+            vec!["zg", "server", "timeout", "-h"],
+        ] {
+            assert!(
+                matches!(plan(&arguments), CliPlan::Help(Some(topic)) if topic == "search"),
+                "{arguments:?}"
+            );
+        }
+        assert!(
+            matches!(plan(&["zg", "models", "--status", "--help"]), CliPlan::Help(Some(topic)) if topic == "status")
+        );
     }
 
     fn server_option_expected(case: &zg_testkit::ServerOptionCase) -> Option<PathBuf> {

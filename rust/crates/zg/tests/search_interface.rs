@@ -63,16 +63,31 @@ fn command_shaped_queries_warn_once_and_still_search() {
 }
 
 #[test]
-fn help_flags_do_not_warn_about_command_shaped_search_words() {
+fn help_flags_select_single_known_topics_without_search_warnings() {
     let root = tempfile::tempdir().expect("workspace");
-    for word in ["query", "config"] {
-        let output = run(root.path(), &[word, "--help"]);
+    for (arguments, topic) in [
+        (vec!["server", "--help"], "server"),
+        (vec!["config", "--help"], "config"),
+        (vec!["models", "-h"], "models"),
+        (vec!["query", "--help"], "search"),
+        (vec!["server", "timeout", "--help"], "search"),
+        (vec!["asdf", "afsd", "asd", "asdf", "--help"], "search"),
+        (vec!["--mode", "server", "--help"], "search"),
+        (vec!["server", "--mode", "direct", "--help"], "server"),
+        (vec!["server", "--mode", "server", "--help"], "server"),
+        (vec!["--server", "--help"], "server"),
+        (vec!["--help", "server"], "server"),
+    ] {
+        let output = run(root.path(), &arguments);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(output.status.success(), "{word}: {stderr}");
+        assert!(output.status.success(), "{arguments:?}: {stderr}");
         assert!(stderr.is_empty(), "{stderr}");
-        assert!(!output.stdout.is_empty());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let help = zg_cli::help_text(Some(topic)).expect("known help topic");
+        assert_eq!(stdout, format!("{help}\n"), "{arguments:?}");
     }
     assert!(!root.path().join(".zvec-grep").exists());
+    assert!(!root.path().join("state").exists());
 }
 
 #[test]
