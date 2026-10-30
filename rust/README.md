@@ -50,6 +50,22 @@ Rg requests return plain text matches and requested context without parsing code
 or Markdown structure. CLI and MCP rg searches share this behavior; current-file
 path lookup keeps its structural entity grouping.
 
+`zg --status` reports **Source size** as the original byte size of successfully
+indexed source snapshots, displayed in B, KiB, MiB, or larger binary units. It
+excludes unindexed or failed files and index storage, and is not the size of
+extracted chunks. Pending edits or deletions retain their last indexed snapshot
+size until `zg --index` updates the index. Coverage instead compares the current
+scan with unchanged indexed files. JSON retains the exact `indexed_size_bytes`
+integer.
+
+Interactive indexing retains a compact record of each major stage. File counts
+and model downloads update at most eight times per second; optimization, saving,
+and cleanup share a stable "Finalizing index" heading. Fast stages remain in
+scrollback without delaying indexing. Only the final CLI result reports readiness.
+Index progress and status use the Node CLI's green gradient and diamond markers.
+`NO_COLOR` and `--color never` disable color; redirected or dumb-terminal progress
+remains line-oriented.
+
 Index embedding concurrency is configured with
 `zg --index --embedding-concurrency <n>`.
 The option is rejected outside `--index`. For automatic indexing and

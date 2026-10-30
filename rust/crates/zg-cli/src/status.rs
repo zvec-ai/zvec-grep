@@ -144,7 +144,10 @@ pub fn write_info_result(writer: impl Write, result: &InfoResult) -> io::Result<
 
 fn heading(theme: StatusTheme, state: IndexStatus) -> String {
     match state {
-        IndexStatus::Ready => theme.success("✓ Workspace index is ready"),
+        IndexStatus::Ready => theme.index_accent(&format!(
+            "{} Workspace index is ready",
+            if unicode_supported() { "◆" } else { "*" }
+        )),
         IndexStatus::Stale => theme.warning("! Workspace index needs an update"),
         IndexStatus::Failed => theme.danger("✗ Workspace index failed"),
         IndexStatus::Disabled => theme.warning("○ Workspace indexing is disabled"),
@@ -159,7 +162,7 @@ fn terminal_heading(theme: StatusTheme, state: IndexStatus) -> String {
     let unicode = unicode_supported();
     let (marker, label) = match state {
         IndexStatus::Ready => (
-            theme.success(if unicode { "✓" } else { "+" }),
+            theme.index_accent(if unicode { "◆" } else { "*" }),
             "Index ready",
         ),
         IndexStatus::Stale => (theme.warning("!"), "Index needs an update"),
@@ -210,12 +213,7 @@ fn write_statistics(
     };
     let percent = ratio(100);
     let filled = usize::try_from(ratio(20)).unwrap_or(20);
-    let bar = if terminal {
-        crate::progress::block_bar(filled, 20, theme.color, crate::theme::unicode_supported())
-    } else {
-        let unicode = !cfg!(windows) && std::env::var("TERM").as_deref() != Ok("linux");
-        crate::progress::gradient_bar(filled, 20, theme.color, unicode)
-    };
+    let bar = crate::progress::gradient_bar(filled, 20, theme.color, unicode_supported());
     write_status_field(
         writer,
         theme,
@@ -232,14 +230,33 @@ fn write_statistics(
         "Entities",
         &[format_count(stats.entities_indexed)],
     )?;
-    // Rust indexes whole source snapshots and has no fragment truncation counter.
-    write_status_field(
-        writer,
-        theme,
-        "Source size",
-        &[format!("{} bytes", format_count(stats.indexed_size_bytes))],
-    )?;
+    let mut source_size = vec![
+        format_source_size(stats.indexed_size_bytes),
+        theme.muted("Saved source snapshots; not index storage"),
+    ];
+    if stats.files_modified > 0 || stats.files_deleted > 0 {
+        source_size.push(theme.muted("Pending changes are not reflected yet"));
+    }
+    write_status_field(writer, theme, "Source size", &source_size)?;
     write_queue_and_changes(writer, theme, stats, terminal)
+}
+
+fn format_source_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut divisor = 1024_u128;
+    let mut unit = "KiB";
+    for next in ["MiB", "GiB", "TiB", "PiB", "EiB"] {
+        if u128::from(bytes) < divisor * 1024 {
+            break;
+        }
+        divisor *= 1024;
+        unit = next;
+    }
+    // Integer rounding preserves the full u64 range without float precision loss.
+    let hundredths = (u128::from(bytes) * 100 + divisor / 2) / divisor;
+    format!("{}.{:02} {unit}", hundredths / 100, hundredths % 100)
 }
 
 fn write_queue_and_changes(
@@ -553,16 +570,12 @@ mod tests {
 
     #[test]
     fn ready_status_matches_node_layout_with_rust_metadata() {
-        let bar = crate::progress::gradient_bar(
-            20,
-            20,
-            false,
-            !cfg!(windows) && std::env::var("TERM").as_deref() != Ok("linux"),
-        );
+        let bar = crate::progress::gradient_bar(20, 20, false, unicode_supported());
+        let marker = if unicode_supported() { "◆" } else { "*" };
         assert_eq!(
             render(&ready(), ColorMode::Never),
             format!(
-                "✓ Workspace index is ready\n  /workspace\n\n  Coverage    {bar} 100%  1,132 / 1,132 files\n  Entities    22,037\n  Source size 4,177,103 bytes\n  Queue       0 pending · 0 failed\n\n  Embedding   qwen/text-embedding-v4\n              1,024 dimensions · cosine\n  FTS         tokenizer=jieba filters=lowercase\n\n  Storage     .zvec-grep/index\n  Version     2\n  Nested Git  included\n"
+                "{marker} Workspace index is ready\n  /workspace\n\n  Coverage    {bar} 100%  1,132 / 1,132 files\n  Entities    22,037\n  Source size 3.98 MiB\n              Saved source snapshots; not index storage\n  Queue       0 pending · 0 failed\n\n  Embedding   qwen/text-embedding-v4\n              1,024 dimensions · cosine\n  FTS         tokenizer=jieba filters=lowercase\n\n  Storage     .zvec-grep/index\n  Version     2\n  Nested Git  included\n"
             )
         );
     }
@@ -577,7 +590,7 @@ mod tests {
         };
         write_info_with_options(&mut bytes, &info, options, true).expect("ready output");
         let output = String::from_utf8(bytes).expect("UTF-8");
-        let ready_marker = if unicode_supported() { "✓" } else { "+" };
+        let ready_marker = if unicode_supported() { "◆" } else { "*" };
         assert!(output.starts_with(&format!("{ready_marker} Index ready\n  /workspace\n")));
         assert!(output.contains("100%  1,132 / 1,132 files"));
         assert!(!output.contains("Queue"));
@@ -645,19 +658,23 @@ mod tests {
             files_unchanged: 172,
             files_modified: 1,
             files_deleted: 20,
+            indexed_size_bytes: 1_747_503,
             ..IndexStats::default()
         });
         let output = render(&info, ColorMode::Never);
         assert!(output.starts_with("! Workspace index needs an update\n"));
         assert!(output.contains(" 99%  172 / 173 files"));
         assert!(output.contains("Changes     0 added · 1 modified · 20 deleted"));
+        assert!(output.contains("Source size 1.67 MiB"));
+        assert!(output.contains("Saved source snapshots; not index storage"));
+        assert!(output.contains("Pending changes are not reflected yet"));
         assert!(output.contains("Next        zg --index"));
         assert!(!output.contains("100%"));
     }
 
     #[test]
     fn incomplete_coverage_never_rounds_to_a_full_percentage_or_bar() {
-        let unicode = !cfg!(windows) && std::env::var("TERM").as_deref() != Ok("linux");
+        let unicode = unicode_supported();
         for (completed, total, percent, filled) in [
             (199, 200, 99, 19),
             (999, 1000, 99, 19),
@@ -688,6 +705,21 @@ mod tests {
                     assert!(output.contains("! Workspace index needs an update"));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn source_sizes_use_binary_units_without_overflow_or_byte_precision_loss() {
+        for (bytes, expected) in [
+            (0, "0 B"),
+            (1023, "1023 B"),
+            (1024, "1.00 KiB"),
+            (1536, "1.50 KiB"),
+            (1_747_503, "1.67 MiB"),
+            (1024_u64.pow(3), "1.00 GiB"),
+            (u64::MAX, "16.00 EiB"),
+        ] {
+            assert_eq!(format_source_size(bytes), expected);
         }
     }
 

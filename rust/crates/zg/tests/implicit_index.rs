@@ -30,6 +30,14 @@ struct Fixture {
     server_started: bool,
 }
 
+fn ready_heading() -> &'static str {
+    if cfg!(windows) || matches!(std::env::var("TERM").as_deref(), Ok("linux" | "dumb")) {
+        "* Workspace index is ready"
+    } else {
+        "◆ Workspace index is ready"
+    }
+}
+
 impl Fixture {
     fn new() -> Self {
         Self {
@@ -73,7 +81,7 @@ impl Fixture {
     fn assert_model(&self, mode: &str, reference: &str) {
         let output = self.success(&["--status", "--mode", mode, "--color", "never"]);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("✓ Workspace index is ready"), "{stdout}");
+        assert!(stdout.contains(ready_heading()), "{stdout}");
         assert!(
             stdout.contains(&format!("  Embedding   {reference}")),
             "{stdout}"
@@ -200,7 +208,7 @@ fn status_check_ready_keeps_direct_and_server_exit_semantics() {
         "--color",
         "never",
     ]);
-    check("✓ Workspace index is ready", true);
+    check(ready_heading(), true);
     fs::write(fixture.root.path().join("added.rs"), "fn added() {}\n").expect("new source file");
     check("! Workspace index needs an update", false);
 }
@@ -896,7 +904,7 @@ fn auto_and_server_build_at_the_query_root_not_the_daemon_working_directory() {
                 .expect("query workspace status"),
         );
         let stdout = String::from_utf8_lossy(&status.stdout);
-        assert!(stdout.contains("✓ Workspace index is ready"), "{stdout}");
+        assert!(stdout.contains(ready_heading()), "{stdout}");
         assert!(
             stdout.contains(&format!("  Embedding   {expected}")),
             "{stdout}"

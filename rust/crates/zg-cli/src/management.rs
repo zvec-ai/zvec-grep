@@ -136,7 +136,7 @@ fn write_compact_index(
         (theme.warning("!"), "No indexable files")
     } else {
         (
-            theme.success(if unicode { "✓" } else { "+" }),
+            theme.index_accent(if unicode { "◆" } else { "*" }),
             if unchanged {
                 "Index up to date"
             } else {
@@ -145,14 +145,18 @@ fn write_compact_index(
         )
     };
     let elapsed = format!("· {}", format_duration(result.duration_micros / 1_000));
-    let bar_width = columns
-        .saturating_sub(2 + 18 + 2 + 2 + elapsed.chars().count())
+    // Reserve CJK terminal widths for the diamond, middle dot, and bar blocks.
+    // ASCII fallback glyphs and bar cells still occupy one column each.
+    let glyph_width = if unicode { 2 } else { 1 };
+    let elapsed_width = elapsed.chars().count() + 1;
+    let bar_width = (columns.saturating_sub(glyph_width + 1 + 18 + 2 + 2 + elapsed_width)
+        / glyph_width)
         .min(20);
     if result.files_failed == 0 && result.files_scanned > 0 && bar_width >= 8 {
         writeln!(
             writer,
             "{glyph} {label:<18}  {}  {}",
-            crate::progress::block_bar(bar_width, bar_width, theme.color, unicode),
+            crate::progress::gradient_bar(bar_width, bar_width, theme.color, unicode),
             theme.muted(&elapsed)
         )?;
     } else {
@@ -452,6 +456,7 @@ pub fn write_config_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use unicode_width::UnicodeWidthChar;
     use zg_engine::authorization::AuthorizationGrantStatus;
 
     #[test]
@@ -672,9 +677,28 @@ mod tests {
             String::from_utf8(bytes).expect("text")
         };
         let text = render(&result, 80);
+        let marker = if unicode_supported() { "◆" } else { "*" };
+        assert!(text.starts_with(&format!("{marker} Index ready")));
         assert_eq!(text.matches("Index ready").count(), 1);
         assert_eq!(text.lines().count(), 3);
         assert!(text.contains("· 1m 27s\n  4,946 added · 155,654 entities\n  /repo\n"));
+        for columns in [30, 39, 40, 59, 79, 119] {
+            let output = render(&result, columns);
+            let heading = output.lines().next().expect("heading");
+            for cjk in [false, true] {
+                let width: usize = heading
+                    .chars()
+                    .map(|value| {
+                        if cjk {
+                            value.width_cjk().unwrap_or(0)
+                        } else {
+                            value.width().unwrap_or(0)
+                        }
+                    })
+                    .sum();
+                assert!(width <= columns, "{columns} columns, CJK={cjk}: {heading}");
+            }
+        }
         assert!(
             render(&result, 30)
                 .lines()
@@ -702,6 +726,6 @@ mod tests {
         result.files_failed = 0;
         result.files_added = 0;
         result.failed_files.clear();
-        assert!(render(&result, 80).contains("Index up to date"));
+        assert!(render(&result, 80).starts_with(&format!("{marker} Index up to date")));
     }
 }

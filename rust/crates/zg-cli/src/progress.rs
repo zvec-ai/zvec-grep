@@ -11,13 +11,14 @@ use zg_engine::api::index::progress::{
     IndexProgress, IndexProgressPhase, IndexProgressReporter,
 };
 
-/// Owns terminal progress state and finishes the live line on success or failure.
+/// Retains major index stages and finishes the active line on success or failure.
 pub struct IndexProgressDisplay {
     state: ProgressState,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(125);
+const MAX_PENDING_STAGES: usize = 16;
 
 #[derive(Clone)]
 enum ProgressState {
@@ -28,6 +29,7 @@ enum ProgressState {
 #[derive(Default)]
 struct PendingProgress {
     latest: Option<IndexProgress>,
+    transitions: Vec<IndexProgress>,
     files_total: Option<usize>,
     files_indexed: Option<usize>,
     files_failed: Option<usize>,
@@ -49,6 +51,22 @@ impl PendingProgress {
         self.files_total = progress.files_total;
         self.files_indexed = progress.files_indexed;
         self.files_failed = progress.files_failed;
+        // Coalesce counts within a phase, but keep the last snapshot of phases
+        // that finish between frames. Small workspaces must not lose their
+        // entire history just because they finish before the next 8 Hz tick.
+        if self
+            .latest
+            .as_ref()
+            .is_some_and(|previous| TerminalStage::of(previous) != TerminalStage::of(&progress))
+            && let Some(previous) = self.latest.take()
+        {
+            // Keep the UI queue bounded even if its writer is stalled while
+            // an external reporter repeatedly changes phases.
+            if self.transitions.len() == MAX_PENDING_STAGES {
+                self.transitions.remove(0);
+            }
+            self.transitions.push(previous);
+        }
         self.latest = Some(progress);
     }
 }
@@ -258,19 +276,36 @@ impl Stage {
             _ => Self::Indexing,
         }
     }
+}
+
+/// User-facing milestones. Model substeps and the optimize/save/cleanup tail
+/// stay on one stable heading instead of rapidly replacing each other's labels.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TerminalStage {
+    Scanning,
+    Model,
+    Indexing,
+    Finalizing,
+}
+
+impl TerminalStage {
+    fn of(progress: &IndexProgress) -> Self {
+        match Stage::of(progress) {
+            Stage::Scanning => Self::Scanning,
+            Stage::Preparing | Stage::Downloading | Stage::ModelReady | Stage::Warning => {
+                Self::Model
+            }
+            Stage::Indexing | Stage::FilesProcessed => Self::Indexing,
+            Stage::Optimizing | Stage::Saving | Stage::Finishing => Self::Finalizing,
+        }
+    }
 
     fn label(self) -> &'static str {
         match self {
             Self::Scanning => "Scanning workspace",
+            Self::Model => "Preparing model",
             Self::Indexing => "Indexing files",
-            Self::FilesProcessed => "Files processed",
-            Self::Optimizing => "Optimizing index",
-            Self::Saving => "Saving index",
-            Self::Finishing => "Finishing index",
-            Self::Preparing => "Preparing model",
-            Self::Downloading => "Downloading model",
-            Self::ModelReady => "Preparing index",
-            Self::Warning => "Model warning",
+            Self::Finalizing => "Finalizing index",
         }
     }
 }
@@ -280,7 +315,7 @@ struct TerminalOutput {
     color: bool,
     unicode: bool,
     latest: Option<IndexProgress>,
-    stage: Option<Stage>,
+    stage: Option<TerminalStage>,
     stage_started: Instant,
     frame: String,
     previous_line: String,
@@ -302,12 +337,17 @@ fn render_loop(state: &(Mutex<PendingProgress>, Condvar), output: &mut TerminalO
     }
     loop {
         let latest = pending.latest.take();
+        let transitions = std::mem::take(&mut pending.transitions);
         let warnings = std::mem::take(&mut pending.warnings);
         let finished = pending.finished;
         drop(pending);
         let started = Instant::now();
         // In particular, no producer lock is held across a blocked terminal write.
-        if output.render(latest, warnings, started, finished).is_err() || finished {
+        if output
+            .render(transitions, latest, warnings, started, finished)
+            .is_err()
+            || finished
+        {
             state
                 .0
                 .lock()
@@ -330,21 +370,39 @@ fn render_loop(state: &(Mutex<PendingProgress>, Condvar), output: &mut TerminalO
 impl TerminalOutput {
     fn render(
         &mut self,
+        transitions: Vec<IndexProgress>,
         latest: Option<IndexProgress>,
         warnings: Vec<IndexProgress>,
         now: Instant,
         finished: bool,
     ) -> io::Result<()> {
-        if let Some(progress) = latest {
-            let stage = Stage::of(&progress);
+        self.frame.clear();
+        for progress in transitions.into_iter().chain(latest) {
+            let stage = TerminalStage::of(&progress);
             if self.stage != Some(stage) {
+                if let Some(previous) = &self.latest
+                    // The pipeline announces indexing before preparing its
+                    // model. Do not retain that zero-work placeholder.
+                    && !(stage == TerminalStage::Model
+                        && self.stage == Some(TerminalStage::Indexing)
+                        && previous.files_indexed.unwrap_or(0) == 0)
+                {
+                    // Replace the active row with a durable, non-animated
+                    // record. No cursor-up movement or full-screen clearing:
+                    // history can wrap and resize like ordinary terminal text.
+                    self.frame.push('\r');
+                    self.frame
+                        .push_str(&stage_record(previous, self.color, self.unicode));
+                    self.frame.push_str("\x1b[K\r\n");
+                    self.visible = false;
+                    self.previous_line.clear();
+                }
                 self.stage_started = now;
                 self.tick = 0;
                 self.stage = Some(stage);
             }
             self.latest = Some(progress);
         }
-        self.frame.clear();
         if !warnings.is_empty() && self.visible {
             self.frame.push_str("\r\x1b[K");
         }
@@ -476,24 +534,33 @@ fn terminal_visible_width(value: &str) -> Option<usize> {
 }
 
 fn green(value: &str, color: bool) -> String {
-    if color {
-        format!("\x1b[38;2;111;207;145m{value}\x1b[0m")
-    } else {
-        value.into()
-    }
+    crate::theme::StatusTheme { color }.index_accent(value)
 }
 
-pub(crate) fn block_bar(filled: usize, width: usize, color: bool, unicode: bool) -> String {
-    let filled = filled.min(width);
-    let (solid, empty) = if unicode { ("█", "░") } else { ("#", "-") };
-    if color {
-        format!(
-            "\x1b[38;2;111;207;145m{}\x1b[0m\x1b[2m{}\x1b[0m",
-            solid.repeat(filled),
-            empty.repeat(width - filled)
-        )
-    } else {
-        solid.repeat(filled) + &empty.repeat(width - filled)
+fn stage_record(progress: &IndexProgress, color: bool, unicode: bool) -> String {
+    let stage = TerminalStage::of(progress);
+    let detail = match stage {
+        // This counter is pending candidates (the original batch on retry),
+        // not files scanned. Do not label it as a scan size.
+        TerminalStage::Scanning | TerminalStage::Finalizing => None,
+        TerminalStage::Model => progress
+            .embedding
+            .as_ref()
+            .and_then(|embedding| embedding.model.as_deref())
+            .map(|model| clean(model, false)),
+        TerminalStage::Indexing => progress.files_total.map(|total| {
+            let indexed = progress.files_indexed.unwrap_or(0).min(total);
+            let failures = progress
+                .files_failed
+                .filter(|count| *count > 0)
+                .map_or_else(String::new, |count| format!(" · {count} failed"));
+            format!("{indexed}/{total} files{failures}")
+        }),
+    };
+    let glyph = green(if unicode { "◆" } else { "*" }, color);
+    match detail {
+        Some(detail) => format!("{glyph} {:<18}  {detail}", stage.label()),
+        None => format!("{glyph} {}", stage.label()),
     }
 }
 
@@ -534,18 +601,14 @@ fn format_terminal_progress(
     elapsed: Duration,
     tick: usize,
 ) {
-    // Every live field is ASCII or a known single-cell glyph. Keep paths and
-    // arbitrary diagnostic text in durable output, where wrapping is harmless.
+    // Keep arbitrary diagnostics in durable output. Budget ambiguous Unicode
+    // diamonds/blocks as two cells so CJK width preferences cannot wrap a live
+    // row and leave stale fragments behind.
     let available = columns.saturating_sub(1);
     if available == 0 {
         return;
     }
     let stage = Stage::of(progress);
-    let spinner = if unicode {
-        ["·", "✢", "✳", "✶", "✻", "✽"]
-    } else {
-        [".", "*", "+", "x", "o", "O"]
-    };
     let mut percent = None;
     let mut suffix = match stage {
         Stage::Indexing if progress.files_total.is_some_and(|total| total > 0) => {
@@ -582,28 +645,21 @@ fn format_terminal_progress(
                 format!("{} received", bytes(downloaded))
             }
         }
-        Stage::Scanning if progress.files_total.is_some() => {
-            format!("{} files", progress.files_total.unwrap_or(0))
-        }
         _ => format!("{:.1}s elapsed", elapsed.as_secs_f64()),
     };
     if let Some(failed) = progress.files_failed.filter(|count| *count > 0) {
         let _ = write!(suffix, "  {failed} failed");
     }
-    let label = stage.label();
-    let glyph = if stage == Stage::Indexing && progress.files_total.is_some() {
-        spinner[0]
-    } else {
-        spinner[tick % spinner.len()]
-    };
-    let prefix_width = 22; // glyph, gap, 18-column label, two spaces
-    let bar_width = available
-        .saturating_sub(prefix_width + suffix.len() + 2)
-        .min(20);
+    let label = TerminalStage::of(progress).label();
+    let glyph = if unicode { "◆" } else { "*" };
+    let glyph_width = if unicode { 2 } else { 1 };
+    let prefix_width = glyph_width + 1 + 18 + 2;
+    let bar_width =
+        (available.saturating_sub(prefix_width + suffix.len() + 2) / glyph_width).min(20);
     if bar_width >= 4 {
         let _ = write!(line, "{} {label:<18}  ", green(glyph, color));
         if let Some(percent) = percent {
-            line.push_str(&block_bar(
+            line.push_str(&gradient_bar(
                 bar_width * percent / 100,
                 bar_width,
                 color,
@@ -621,7 +677,7 @@ fn format_terminal_progress(
         } else {
             format!("{label} {:.1}s", elapsed.as_secs_f64())
         };
-        if available >= compact.len() + 2 {
+        if available > compact.len() + glyph_width {
             let _ = write!(line, "{} {compact}", green(glyph, color));
         } else if available >= compact.len() {
             line.push_str(&compact);
@@ -646,7 +702,7 @@ fn activity_bar(width: usize, tick: usize, color: bool, unicode: bool) -> String
     };
     let empty = if unicode { "░" } else { "-" };
     let lead = empty.repeat(position);
-    let body = block_bar(block, width - position, color, unicode);
+    let body = gradient_bar(block, width - position, color, unicode);
     if color {
         format!("\x1b[2m{lead}\x1b[0m{body}")
     } else {
@@ -1000,9 +1056,12 @@ mod tests {
             tick: 0,
         };
         let mut render_pending = || {
-            let latest = state.0.lock().expect("pending progress").latest.take();
+            let mut pending = state.0.lock().expect("pending progress");
+            let latest = pending.latest.take();
+            let transitions = std::mem::take(&mut pending.transitions);
+            drop(pending);
             output
-                .render(latest, Vec::new(), now, false)
+                .render(transitions, latest, Vec::new(), now, false)
                 .expect("render queued progress");
             output.latest.clone().expect("rendered progress")
         };
@@ -1042,10 +1101,91 @@ mod tests {
             (None, None, None)
         );
         assert!(Stage::of(&reset) == Stage::Indexing);
-        let frames = capture.frames();
-        let last = String::from_utf8_lossy(frames.last().expect("reset frame"));
+        let last = &output.previous_line;
         assert!(!last.contains("50/100"));
         assert!(!last.contains("failed"));
+    }
+
+    #[test]
+    fn fast_stages_survive_coalescing_and_finish_without_a_transient_animation() {
+        let display = queued_display();
+        let reporter = display.reporter();
+        reporter.report(IndexProgress {
+            phase: IndexProgressPhase::Scanning,
+            ..indexing(0, 2)
+        });
+        reporter.report(indexing(0, 2));
+        for stage in [
+            IndexEmbeddingStage::Preparing,
+            IndexEmbeddingStage::Downloading,
+            IndexEmbeddingStage::Ready,
+        ] {
+            reporter.report(IndexProgress {
+                embedding: Some(IndexEmbeddingProgress {
+                    stage: Some(stage),
+                    model: Some("local/test-model".into()),
+                    ..IndexEmbeddingProgress::default()
+                }),
+                ..indexing(0, 2)
+            });
+        }
+        reporter.report(indexing(1, 2));
+        reporter.report(indexing(2, 2));
+        for detail in [DETAIL_FINALIZING_INDEX, DETAIL_SAVING_INDEX] {
+            reporter.report(IndexProgress {
+                phase: IndexProgressPhase::Finalizing,
+                detail: Some(detail.into()),
+                ..indexing(2, 2)
+            });
+        }
+        reporter.report(IndexProgress {
+            phase: IndexProgressPhase::Done,
+            ..indexing(2, 2)
+        });
+        let ProgressState::Terminal(state) = &display.state else {
+            panic!("expected terminal progress");
+        };
+        let mut pending = state.0.lock().expect("pending progress");
+        let capture = Capture::default();
+        let now = Instant::now();
+        let mut output = TerminalOutput {
+            writer: Box::new(capture.clone()),
+            color: false,
+            unicode: true,
+            latest: None,
+            stage: None,
+            stage_started: now,
+            frame: String::new(),
+            previous_line: String::new(),
+            visible: false,
+            columns: 80,
+            width_checked: Some(now),
+            tick: 0,
+        };
+        output
+            .render(
+                std::mem::take(&mut pending.transitions),
+                pending.latest.take(),
+                Vec::new(),
+                now,
+                true,
+            )
+            .expect("finish fast operation");
+        output.finish().expect("cleanup");
+        let text = capture.text().replace('\r', "").replace("\x1b[K", "");
+        assert_eq!(
+            text,
+            concat!(
+                "◆ Scanning workspace\n",
+                "◆ Preparing model     local/test-model\n",
+                "◆ Indexing files      2/2 files\n",
+            )
+        );
+        assert_eq!(capture.frames().len(), 1, "one atomic history update");
+        assert!(
+            !text.contains("Index ready"),
+            "only the CLI result can claim readiness"
+        );
     }
 
     #[test]
@@ -1061,13 +1201,7 @@ mod tests {
     }
 
     #[test]
-    fn solid_bar_and_activity_match_the_approved_style() {
-        assert_eq!(block_bar(3, 5, false, true), "███░░");
-        assert_eq!(block_bar(3, 5, false, false), "###--");
-        assert_eq!(
-            block_bar(3, 5, true, true),
-            "\x1b[38;2;111;207;145m███\x1b[0m\x1b[2m░░\x1b[0m"
-        );
+    fn activity_stays_visible_without_claiming_a_percentage() {
         assert_eq!(activity_bar(8, 0, false, true), "████░░░░");
         assert_eq!(activity_bar(8, 4, false, true), "░░░░████");
         assert_eq!(activity_bar(8, 5, false, true), "░░░████░");
@@ -1107,7 +1241,10 @@ mod tests {
                         5,
                     );
                     assert!(
-                        line.chars().count() <= columns.saturating_sub(1),
+                        line.chars()
+                            .map(|value| value.width_cjk().unwrap_or(0))
+                            .sum::<usize>()
+                            <= columns.saturating_sub(1),
                         "wrapped {columns}-column terminal: {line:?}"
                     );
                 }
@@ -1140,7 +1277,7 @@ mod tests {
             Duration::ZERO,
             0,
         );
-        assert!(line.contains("Files processed"));
+        assert!(line.contains("Indexing files"));
         assert!(line.contains("1000/1000"));
         assert!(!line.contains("100%"));
         line.clear();
@@ -1177,10 +1314,17 @@ mod tests {
                     tick: 0,
                 };
                 output
-                    .render(Some(indexing(892, 20_936)), Vec::new(), now, false)
+                    .render(
+                        Vec::new(),
+                        Some(indexing(892, 20_936)),
+                        Vec::new(),
+                        now,
+                        false,
+                    )
                     .expect("first progress frame");
                 output
                     .render(
+                        Vec::new(),
                         Some(indexing(893, 20_936)),
                         Vec::new(),
                         now + FRAME_INTERVAL,
@@ -1341,7 +1485,7 @@ mod tests {
         let frames = capture.frames();
         assert_ne!(frames[1], frames[2]);
         let text = capture.text();
-        assert!(text.contains("Optimizing index"));
+        assert!(text.contains("Finalizing index"));
         assert!(text.contains("elapsed"));
         assert!(!text.contains("100%"));
         assert!(!text.contains("\x1b[?25l"));
@@ -1376,7 +1520,7 @@ mod tests {
                 Duration::from_secs(3),
                 0,
             );
-            assert!(line.contains(expected.label()));
+            assert!(line.contains("Finalizing index"));
             assert!(line.contains("3.0s elapsed"));
             assert!(!line.contains("100%"));
         }
@@ -1393,7 +1537,7 @@ mod tests {
         capture.wait_for_frames(2);
         display.finish();
         let text = capture.text();
-        assert!(text.contains("Finishing index"));
+        assert!(text.contains("Finalizing index"));
         assert!(!text.contains("Index ready"));
         assert!(!text.contains("100%"));
     }

@@ -18,7 +18,10 @@ impl StatusTheme {
     pub fn new(mode: ColorMode, terminal: bool) -> Self {
         Self {
             color: mode == ColorMode::Always
-                || (mode == ColorMode::Auto && terminal && std::env::var_os("NO_COLOR").is_none()),
+                || (mode == ColorMode::Auto
+                    && terminal
+                    && std::env::var_os("NO_COLOR").is_none()
+                    && std::env::var("TERM").as_deref() != Ok("dumb")),
         }
     }
 
@@ -44,6 +47,10 @@ impl StatusTheme {
     }
     pub fn success(self, value: &str) -> String {
         self.paint(value, "32")
+    }
+    pub fn index_accent(self, value: &str) -> String {
+        // Match the Node CLI's indexing marker, independently of terminal palettes.
+        self.paint(value, "38;2;74;222;128")
     }
     pub fn warning(self, value: &str) -> String {
         self.paint(value, "33")
