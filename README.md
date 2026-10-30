@@ -8,13 +8,11 @@
     <img src="./.github/assets/zg-logo.svg" width="150" alt="zg logo" />
   </picture>
   <p><strong>Know the words—or don’t. Just zg.</strong></p>
-  <p>The local-first search layer for humans and agents.</p>
 
   <p>
     <a href="https://www.npmjs.com/package/@zvec/zvec-grep"><img src="https://img.shields.io/npm/v/@zvec/zvec-grep.svg" alt="npm version" /></a>
-    <a href="https://github.com/zvec-ai/zvec-grep/actions/workflows/ci.yml"><img src="https://github.com/zvec-ai/zvec-grep/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+    <a href="https://github.com/zvec-ai/zvec-grep/actions/workflows/rust-ci.yml"><img src="https://github.com/zvec-ai/zvec-grep/actions/workflows/rust-ci.yml/badge.svg" alt="Rust CI" /></a>
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 license" /></a>
-    <img src="https://img.shields.io/badge/node-%3E%3D22-blue.svg" alt="Node.js 22 or newer" />
   </p>
 
   <p>
@@ -23,7 +21,6 @@
   </p>
 
   <p>
-    <a href="#tour">🎬 <strong>Tour</strong></a> |
     <a href="#features">💫 <strong>Features</strong></a> |
     <a href="#try-it-yourself">🚀 <strong>Try it yourself</strong></a> |
     <a href="https://zvec.org/en/docs/zvec-grep/">📚 <strong>Docs</strong></a> |
@@ -34,15 +31,8 @@
 
 **zg** (**z**vec-**g**rep), powered by [zvec](https://github.com/alibaba/zvec),
 unifies ripgrep, BM25, and vector search behind
-[one local-first interface](https://zvec.org/en/docs/zvec-grep/). Use it directly from the
+one local-first interface. Use it directly from the
 terminal, or let your agent use it for you.
-
-This README describes the TypeScript / Node.js implementation. For the Rust
-implementation, see [`rust/`](./rust/README.md). User documentation is maintained
-on the [Zvec website](https://zvec.org/en/docs/zvec-grep/).
-
-**Install**: `npm install -g @zvec/zvec-grep`, or via Homebrew (macOS/Linux):
-`brew install zvec-grep`
 
 <a id="tour"></a>
 
@@ -77,7 +67,6 @@ on the [Zvec website](https://zvec.org/en/docs/zvec-grep/).
 ### 1. Set up a sample bookshelf
 
 ```bash
-# Requires Node.js 22 or newer.
 npm install -g @zvec/zvec-grep
 
 mkdir zg-mystery && cd zg-mystery
@@ -85,21 +74,11 @@ curl --retry 3 --retry-all-errors --progress-bar -fL \
   -o alice-in-wonderland.txt https://raw.githubusercontent.com/GITenberg/Alice-s-Adventures-in-Wonderland_11/master/11.txt \
   -o sherlock-holmes.txt https://raw.githubusercontent.com/GITenberg/The-Memoirs-of-Sherlock-Holmes_834/master/834.txt
 
-zg index --embedding local/potion-retrieval-32m
+zg --index --embedding local/potion-retrieval-32m
 ```
 
 > [!NOTE]
 > The index is stored in `.zvec-grep/` under the indexed project root.
-
-> [!TIP]
-> If `zg index` or `zg query` fails, rerun the same command with `--debug`
-> for diagnostics (supported in both direct and server modes).
-> `zg status --mode direct --debug` reports per-file failures stored in an
-> existing index; rerun a failed direct command to diagnose command-level
-> fatal errors. Use
-> `zg status --mode server --debug` to inspect recorded server indexing errors.
-> For server connection failures, check `zg server status` and the
-> [server logs](https://zvec.org/en/docs/zvec-grep/server/).
 
 ### 2. Choose how to search
 
@@ -108,7 +87,7 @@ zg index --embedding local/potion-retrieval-32m
 With [OpenCode](https://opencode.ai/) configured:
 
 ```bash
-zg install --target opencode --yes
+zg --install --target opencode --yes
 opencode models
 opencode run --model opencode/nemotron-3-ultra-free \
   "An unseen creature left a few marks. What did the detective infer? Cite local evidence."
@@ -156,66 +135,6 @@ zg --preview detail "An unseen creature left a few marks. What did the detective
 
 zg returns the relevant passages from `sherlock-holmes.txt`, ranked ahead of
 `alice-in-wonderland.txt`.
-
-### Index embedding concurrency and GPU errors
-
-`zg --index --embedding-concurrency <n>` and
-`ZVEC_GREP_EMBEDDING_CONCURRENCY` control embedding concurrency while
-building or updating an index, for both local and remote models. The environment
-variable also applies to automatic indexing and refresh. These controls do not
-change query-vector inference. The CLI option is accepted only with `--index`.
-
-For llama.cpp, the limit controls contexts per indexing model instance. For
-Transformers.js, it controls calls in flight on one cached pipeline and does not
-guarantee simultaneous native/GPU execution. Both cap positive integer values
-at **8**. For Potion/model2vec, it controls concurrent embedding batches without
-that cap; the default is **2** and the CPU worker pool has its own capacity limit.
-For remote models, both controls set the maximum concurrent batches without the
-cap of 8. Existing adaptive scheduling and its defaults remain unchanged; it may
-reduce concurrency after rate limits or retryable failures.
-
-The priority is the explicit CLI/API index option, then the index environment
-variable, then `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` (llama.cpp indexing only),
-then the automatic default.
-
-For llama.cpp and Transformers.js, CPU execution or a runtime without a VRAM
-query uses 1 unless overridden. Transformers.js currently has no VRAM query, so
-its automatic limit is 1. When a GPU runtime provides free VRAM, the limit is
-`floor(freeVRAM × 0.25 / 150 MiB)`, clamped to 1–8; a failed or invalid VRAM
-query uses 2. This retains the existing 150 MiB heuristic, which is not a
-guarantee that a model will fit in memory.
-
-For CUDA errors, memory exhaustion, or native crashes, try a limit of 1 and
-retry the index. These examples run directly so the new environment takes
-effect immediately:
-
-```bash
-export ZVEC_GREP_EMBEDDING_CONCURRENCY=1
-zg --index --mode direct
-```
-
-Windows PowerShell:
-
-```powershell
-$env:ZVEC_GREP_EMBEDDING_CONCURRENCY = "1"
-zg --index --mode direct
-```
-
-An explicit CLI option overrides the environment for that index operation,
-including when using the daemon; no daemon restart is needed for the CLI option:
-
-```bash
-export ZVEC_GREP_EMBEDDING_CONCURRENCY=8
-zg --index --embedding-concurrency 1
-```
-
-To change the daemon's environment-variable default, update its startup
-environment, then run `zg --server off` and `zg --server on` from that environment.
-If an agent launches zg, update its environment and restart the agent/MCP
-connection too. JavaScript exceptions can be caught, but native aborts can
-terminate the process before any CPU fallback runs. A limit of 1 reduces
-concurrency; it does not prevent every GPU failure. You can also retry with
-`--device cpu`.
 
 <a id="benchmarks"></a>
 
@@ -291,22 +210,6 @@ Embedding.
 > unknown, especially for call-chain, data-flow, and architectural questions.
 > Since agents decide when and how to use it, results vary by model and run;
 > repeated-run averages are more reliable.
-
-## 📚 Documentation
-
-User documentation is maintained on [zvec.org](https://zvec.org/en/docs/zvec-grep/).
-
-| Guide | What you can do |
-| :--- | :--- |
-| [Quickstart](https://zvec.org/en/docs/zvec-grep/quickstart/) | Install zg, build an index, and run your first search. |
-| [Agent integrations](https://zvec.org/en/docs/zvec-grep/agents/) | Connect an agent through MCP and understand retrieval routing. |
-| [CLI reference](https://zvec.org/en/docs/zvec-grep/cli/) | Find commands and options. |
-| [Search guide](https://zvec.org/en/docs/zvec-grep/search/) | Choose retrieval routes, filters, and output options. |
-| [Manage an index](https://zvec.org/en/docs/zvec-grep/indexing/) | Create, update, rebuild, or remove a workspace index. |
-| [Supported content](https://zvec.org/en/docs/zvec-grep/supported-content/) | Check text and code extraction boundaries. |
-| [Local server](https://zvec.org/en/docs/zvec-grep/server/) | Configure execution modes and the resident service. |
-| [Embedding models](https://zvec.org/en/docs/zvec-grep/embedding-models/) | Choose and configure local or remote models. |
-| [Troubleshooting](https://zvec.org/en/docs/zvec-grep/troubleshooting/) | Diagnose installation, indexing, and connection problems. |
 
 <a id="community"></a>
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Generate the deterministic terminal tour used by the project READMEs.
 
-The install scene mirrors the interactive UI and output implemented in
-src/cli/install.ts. Run with:
+The scenes use the Rust CLI syntax with deterministic sample terminal output.
+Run with:
 
   uv run --with pillow .github/scripts/readme-demo.py
   uv run --with pillow .github/scripts/readme-demo.py --theme dark
@@ -313,7 +313,7 @@ def install_scene(frames):
     lines = []
     type_command(frames, lines, "npm install -g @zvec/zvec-grep", stride=2)
     lines.append(plain())
-    type_command(frames, lines, "zg install")
+    type_command(frames, lines, "zg --install")
 
     reveal(
         frames,
@@ -371,7 +371,7 @@ def index_scene(frames, lines):
     type_command(
         frames,
         lines,
-        "zg index",
+        "zg --index",
         stride=2,
         title=repository_title,
     )
