@@ -40,12 +40,21 @@ fn command_shaped_queries_warn_once_and_still_search() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success(), "{word}: {stderr}");
         assert_eq!(stderr.matches("Warning:").count(), 1, "{stderr}");
-        let message = if matches!(word, "query" | "search") {
-            format!("\"{word}\" is search text.")
+        let message = if matches!(word, "query" | "search" | "index") {
+            format!("`{word}` is not a subcommand; the search text is \"{word}\".")
         } else {
             format!("now searches for \"{word}\".")
         };
         assert!(stderr.contains(&message), "{stderr}");
+        if matches!(word, "query" | "search") {
+            assert_eq!(stderr.trim_end().lines().count(), 1, "{stderr}");
+        } else if word == "index" {
+            assert_eq!(stderr.trim_end().lines().count(), 2, "{stderr}");
+            assert!(
+                stderr.contains("To build the index, use `zg --index`."),
+                "{stderr}"
+            );
+        }
         assert!(!stderr.contains('\u{1b}'), "{stderr}");
         assert!(stdout.contains("source.txt"), "{stdout}");
         assert!(stdout.contains(word), "{stdout}");

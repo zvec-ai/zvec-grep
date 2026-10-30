@@ -947,22 +947,44 @@ fn action_for_flag(value: &OsStr) -> Option<&'static str> {
 #[must_use]
 pub fn compatibility_warning_for_args(arguments: &[OsString]) -> Option<String> {
     let first = arguments.first()?.to_str()?;
-    if matches!(first, "query" | "search") {
-        return Some(format!(
-            "Warning: \"{first}\" is search text. Omit it to search the remaining words."
-        ));
+    if matches!(first, "query" | "search" | "index") {
+        let parts = Cli::try_parse_from(
+            std::iter::once(OsString::from("zg")).chain(arguments.iter().cloned()),
+        )
+        .ok()
+        .and_then(|cli| {
+            let Some(CommandLine::Query(args)) = cli.command else {
+                return None;
+            };
+            validate_query(&args, resolve_query_mode(&args).ok()?).ok()?;
+            // Managed-rg positional arguments include paths, not additional search words.
+            (!args.rg).then(|| {
+                args.positional_query_parts()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+        })
+        .unwrap_or_else(|| vec![first.to_owned()]);
+        let text = parts.join(" ");
+        let remaining = parts[1..].join(" ");
+        let full = if first != "index" && !remaining.is_empty() {
+            "full "
+        } else {
+            ""
+        };
+        let warning =
+            format!("Warning: `{first}` is not a subcommand; the {full}search text is {text:?}.");
+        return Some(if first == "index" {
+            format!("{warning}\n         To build the index, use `zg --index`.")
+        } else if !remaining.is_empty() {
+            format!("{warning}\n         To search for {remaining:?} only, use `zg {remaining}`.")
+        } else {
+            warning
+        });
     }
     if matches!(
         first,
-        "index"
-            | "status"
-            | "install"
-            | "uninstall"
-            | "config"
-            | "auth"
-            | "server"
-            | "help"
-            | "version"
+        "status" | "install" | "uninstall" | "config" | "auth" | "server" | "help" | "version"
     ) {
         let purpose = if first == "version" {
             "To display the CLI version"
@@ -1726,7 +1748,7 @@ mod tests {
     use super::{
         Cli, CliPlan, FileFormat, IndexOperation, QueryFilter, parse_byte_size, parse_modified_time,
     };
-    use std::path::PathBuf;
+    use std::{ffi::OsString, path::PathBuf};
 
     fn plan(arguments: &[&str]) -> CliPlan {
         Cli::try_parse_from(arguments.iter().copied())
@@ -2065,8 +2087,9 @@ mod tests {
             let arguments = [word.into(), "second".into()];
             let warning =
                 super::compatibility_warning_for_args(&arguments).expect("migration warning");
-            if matches!(word, "query" | "search") {
-                assert!(warning.contains(&format!("\"{word}\" is search text.")));
+            if matches!(word, "query" | "search" | "index") {
+                assert!(warning.contains(&format!("`{word}` is not a subcommand;")));
+                assert!(warning.contains(&format!("search text is \"{word} second\".")));
             } else {
                 assert!(warning.contains(&format!("now searches for \"{word}\".")));
                 assert!(warning.contains(&format!("`zg --{word}`")));
@@ -2075,6 +2098,65 @@ mod tests {
         for word in ["--", "needle", "--rg", "--index", "--help", "--version"] {
             assert!(
                 super::compatibility_warning_for_args(&[word.into(), "query".into()]).is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn query_and_search_warnings_show_the_full_search_text_and_optional_hint() {
+        for word in ["query", "search"] {
+            for suffix in [
+                vec![],
+                vec![""],
+                vec!["--limit", "3"],
+                vec!["--rg", "source.txt"],
+            ] {
+                let arguments = std::iter::once(word)
+                    .chain(suffix)
+                    .map(OsString::from)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    super::compatibility_warning_for_args(&arguments).expect("migration warning"),
+                    format!(
+                        "Warning: `{word}` is not a subcommand; the search text is \"{word}\"."
+                    )
+                );
+            }
+            for (suffix, remaining) in [
+                (vec!["server"], "server"),
+                (vec!["--limit", "3", "server"], "server"),
+                (vec!["server", "--color=never", "--limit", "3"], "server"),
+                (vec!["", " server ", ""], "server"),
+                (vec!["connection", "pool"], "connection pool"),
+                (
+                    vec!["connection pool", "timeout"],
+                    "connection pool timeout",
+                ),
+            ] {
+                let arguments = std::iter::once(word)
+                    .chain(suffix)
+                    .map(OsString::from)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    super::compatibility_warning_for_args(&arguments).expect("migration warning"),
+                    format!(
+                        "Warning: `{word}` is not a subcommand; the full search text is \"{word} {remaining}\".\n         To search for \"{remaining}\" only, use `zg {remaining}`."
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn index_warning_explains_how_to_build_the_index() {
+        for suffix in [vec![], vec!["--limit", "3"], vec!["--drop", "--yes"]] {
+            let arguments = std::iter::once("index")
+                .chain(suffix)
+                .map(OsString::from)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                super::compatibility_warning_for_args(&arguments).expect("migration warning"),
+                "Warning: `index` is not a subcommand; the search text is \"index\".\n         To build the index, use `zg --index`."
             );
         }
     }
