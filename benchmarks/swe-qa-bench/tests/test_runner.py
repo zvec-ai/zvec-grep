@@ -775,11 +775,16 @@ class RunValidationTests(unittest.TestCase):
                         self.assertNotIn("reasoningEffort", model_options)
                     self.assertNotIn("reasoning_effort", model_options)
                     self.assertNotIn("response_format", model_options)
-                    if model_id == "qwen3.8-max":
+                    if model_id in ("glm-5.2", "qwen3.8-max"):
                         self.assertEqual(
                             config["provider"][provider_id]["models"][model_id]["interleaved"],
                             {"field": "reasoning_content"},
                         )
+                    else:
+                        self.assertNotIn(
+                            "interleaved", config["provider"][provider_id]["models"][model_id]
+                        )
+                    if model_id == "qwen3.8-max":
                         self.assertEqual(
                             config["provider"][provider_id]["options"]["baseURL"],
                             settings.OPENCODE_CUSTOM_QWEN_BASE_URL,

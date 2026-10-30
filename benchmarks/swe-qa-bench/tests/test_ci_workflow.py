@@ -6,6 +6,8 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -195,3 +197,82 @@ class OfflineWorkflowTests(unittest.TestCase):
         )
         self.assertIn("python -m unittest discover", commands)
         self.assertIn("rust-package-cache.test.mjs", commands)
+
+    def test_opencode_contract_installs_pinned_client_and_enables_wire_tests(self) -> None:
+        steps = self.workflow["jobs"]["test"]["steps"]
+        contract = next(
+            step for step in steps
+            if step.get("name") == "Verify OpenCode request contract without model calls"
+        )
+        self.assertNotIn("if", contract)
+        self.assertNotIn("continue-on-error", contract)
+        self.assertGreater(
+            steps.index(contract),
+            next(i for i, step in enumerate(steps)
+                 if step.get("name") == "Run offline benchmark tests"),
+        )
+        # Execute the workflow shell with offline stand-ins. This catches a
+        # missing export, a wrong binary path, or running the wrong test suite
+        # without downloading a client or contacting any model endpoint.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            bin_dir = temp / "bin"
+            bin_dir.mkdir()
+            trace = temp / "commands.jsonl"
+            stand_in = f"#!{sys.executable}\n" + textwrap.dedent('''\
+                import json
+                import os
+                import subprocess
+                import sys
+                from pathlib import Path
+
+                command = Path(sys.argv[0]).name
+                args = sys.argv[1:]
+                entry = {"command": command, "args": args}
+                if command == "uv":
+                    assert args[:4] == ["run", "--project", "benchmarks/swe-qa-bench", "python"]
+                    if args[4] == "-c":
+                        subprocess.run([sys.executable, *args[4:]], check=True)
+                    else:
+                        assert args[4:] == ["-m", "unittest", "discover", "-s", "benchmarks/swe-qa-bench/tests", "-p", "test_opencode.py", "-v"]
+                        binary = os.environ["OPENCODE_BENCHMARK_TEST_BINARY"]
+                        assert os.access(binary, os.X_OK)
+                        entry["binary"] = binary
+                else:
+                    assert command == "npm"
+                    assert args[:2] == ["install", "--prefix"]
+                    assert args[3:5] == ["--no-audit", "--no-fund"]
+                    assert len(args) == 6
+                    binary = Path(args[2]) / "node_modules/.bin/opencode"
+                    binary.parent.mkdir(parents=True)
+                    binary.write_text("#!/bin/sh\\nexit 0\\n")
+                    binary.chmod(0o755)
+                with open(os.environ["CI_CONTRACT_TRACE"], "a") as output:
+                    output.write(json.dumps(entry) + "\\n")
+                ''')
+            for command in ("uv", "npm"):
+                script = bin_dir / command
+                script.write_text(stand_in)
+                script.chmod(0o755)
+            env = {
+                **os.environ,
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                "PYTHONPATH": str(BENCHMARK),
+                "RUNNER_TEMP": str(temp / "runner"),
+                "CI_CONTRACT_TRACE": str(trace),
+            }
+            env.pop("OPENCODE_BENCHMARK_TEST_BINARY", None)
+            subprocess.run(
+                ["bash", "-e", "-o", "pipefail", "-c", contract["run"]],
+                cwd=ROOT, env=env, check=True, capture_output=True, text=True,
+            )
+            calls = [json.loads(line) for line in trace.read_text().splitlines()]
+            self.assertEqual([call["command"] for call in calls], ["uv", "npm", "uv"])
+            self.assertIn("from zg_bench.settings import OPENCODE_VERSION", calls[0]["args"][-1])
+            from zg_bench.settings import OPENCODE_VERSION
+
+            self.assertEqual(calls[1]["args"][-1], f"opencode-ai@{OPENCODE_VERSION}")
+            self.assertEqual(
+                calls[2]["binary"],
+                str(temp / "runner/opencode-contract/node_modules/.bin/opencode"),
+            )
