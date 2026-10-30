@@ -79,6 +79,61 @@ struct ProgressFixtureModel {
     info: EmbeddingModelInfo,
 }
 
+struct RetainedWorkModel {
+    info: EmbeddingModelInfo,
+    work: StdMutex<Option<Arc<dyn Send + Sync>>>,
+}
+
+#[async_trait]
+impl EmbeddingModel for RetainedWorkModel {
+    fn info(&self) -> &EmbeddingModelInfo {
+        &self.info
+    }
+
+    async fn embed(
+        &self,
+        _inputs: &[Vec<Content>],
+        options: EmbeddingOptions,
+    ) -> Result<EmbeddingResult, ModelError> {
+        *self.work.lock().expect("work lock") = options.execution_lease;
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn native_work_retains_admission_and_runtime_after_caller_is_dropped() {
+    let fixture = Arc::new(RetainedWorkModel {
+        info: ConcurrentFixtureModel::new().info,
+        work: StdMutex::default(),
+    });
+    let manager = ModelRuntimeManager::with_factory({
+        let fixture = Arc::clone(&fixture);
+        move |_, _, _| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
+    });
+    let lease = manager
+        .acquire(ModelRuntimeRequest::new(
+            "local/all-minilm-l6-v2",
+            ModelConfig::default(),
+            Some(1),
+        ))
+        .expect("runtime");
+    let permits = Arc::clone(&lease.operation.permits);
+    let inputs = [vec![Content::Text("fixture".into())]];
+    let mut pending = Box::pin(lease.embed(&inputs, EmbeddingOptions::default(), None));
+    assert!(futures_util::poll!(&mut pending).is_pending());
+    drop(pending);
+    drop(lease);
+    manager.close();
+    assert_eq!(manager.snapshot().active_embeddings, 1);
+    assert_eq!(manager.snapshot().cached_runtimes, 1);
+    assert_eq!(permits.available_permits(), 0);
+    let work = fixture.work.lock().expect("work lock").take();
+    drop(work);
+    assert_eq!(manager.snapshot().active_embeddings, 0);
+    assert_eq!(manager.snapshot().cached_runtimes, 0);
+    assert_eq!(permits.available_permits(), 1);
+}
+
 struct GatedFixtureModel {
     info: EmbeddingModelInfo,
     active: AtomicUsize,
@@ -702,10 +757,7 @@ async fn forwards_preparation_progress_to_both_callbacks_with_effective_concurre
 
 #[tokio::test]
 async fn native_batches_share_admission_across_independent_leases() {
-    for (reference, requested, allowed) in [
-        ("local/all-minilm-l6-v2", 2, 2),
-        ("local/embeddinggemma-300m", 8, 1),
-    ] {
+    for (reference, requested, allowed) in [("local/embeddinggemma-300m", 8, 1)] {
         let fixture = Arc::new(GatedFixtureModel::new());
         let manager = ModelRuntimeManager::with_factory({
             let fixture = Arc::clone(&fixture);
@@ -763,43 +815,24 @@ async fn native_batches_share_admission_across_independent_leases() {
 }
 
 #[test]
-fn local_variants_reuse_equivalent_limits_and_release_idle_resources() {
+fn ort_leases_share_one_runtime_across_budgets() {
     let (manager, creations) = fixture_cache(CachePolicy::default());
     let request =
         |limit| ModelRuntimeRequest::new("local/all-minilm-l6-v2", ModelConfig::default(), limit);
-    let first = manager.acquire(request(Some(24))).expect("capped override");
-    let same = manager
-        .acquire(request(Some(99)))
-        .expect("equivalent override");
-    assert!(Arc::ptr_eq(&first.entry, &same.entry));
-    assert_eq!(first.operation.limit, 8);
-    let previous = Arc::downgrade(&first.entry.runtime.model);
-    let query = manager.acquire(request(None)).expect("query default");
-    assert!(!Arc::ptr_eq(&first.entry, &query.entry));
-    assert_eq!(query.operation.limit, 1);
-    assert!(
-        previous.upgrade().is_some(),
-        "active index resources are retained"
-    );
-    drop(first);
-    drop(same);
-    assert!(
-        previous.upgrade().is_none(),
-        "idle index variant is retired before replacement use"
-    );
-    let explicit_one = manager
-        .acquire(request(Some(1)))
-        .expect("equivalent query limit");
-    assert!(Arc::ptr_eq(&query.entry, &explicit_one.entry));
-    assert_eq!(creations.load(Ordering::Acquire), 2);
-    drop(explicit_one);
-    drop(query);
-    let replacement = manager
+    let index = manager.acquire(request(Some(24))).expect("index");
+    let query = manager.acquire(request(None)).expect("query");
+    let other = manager
         .acquire(request(Some(4)))
-        .expect("sequential index limit");
-    assert_eq!(manager.snapshot().cached_runtimes, 1);
-    assert_eq!(creations.load(Ordering::Acquire), 3);
-    drop(replacement);
+        .expect("different index budget");
+    assert!(Arc::ptr_eq(&index.entry, &query.entry));
+    assert!(Arc::ptr_eq(&index.entry, &other.entry));
+    assert_eq!(index.operation.limit, 8);
+    assert_eq!(query.operation.limit, 1);
+    assert_eq!(other.operation.limit, 4);
+    assert_eq!(creations.load(Ordering::Acquire), 1);
+    drop(index);
+    drop(query);
+    drop(other);
     manager.close();
     assert_eq!(manager.snapshot().cached_runtimes, 0);
 }
@@ -949,10 +982,19 @@ fn concurrency_policy_prefers_user_and_preserves_catalog_backend_defaults() {
         );
         assert_eq!(
             explicit.operation.limit,
-            if local_native { 8 } else { 24 },
+            if reference == "local/all-minilm-l6-v2" {
+                explicit.entry.runtime.model.execution_concurrency(8)
+            } else if local_native {
+                8
+            } else {
+                24
+            },
             "{reference}"
         );
-        assert_eq!(Arc::ptr_eq(&lease.entry, &explicit.entry), !local_native);
+        assert_eq!(
+            Arc::ptr_eq(&lease.entry, &explicit.entry),
+            reference != "local/embeddinggemma-300m"
+        );
     }
 }
 
