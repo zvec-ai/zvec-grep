@@ -204,6 +204,43 @@ fn short_and_full_keep_the_original_compact_layout_on_every_output() {
 }
 
 #[test]
+fn short_marks_truncated_source_lines_and_full_preserves_them() {
+    for (content, short_line) in [
+        ("a".repeat(160), "a".repeat(160)),
+        ("a".repeat(161), format!("{}...", "a".repeat(160))),
+        ("界😀".repeat(80), "界😀".repeat(80)),
+        ("界😀".repeat(81), format!("{}...", "界😀".repeat(80))),
+    ] {
+        let mut result = grouped_result();
+        result.group_results.clear();
+        result.items[0].content = content.clone();
+        for (preview, expected) in [
+            (PreviewMode::Short, short_line.as_str()),
+            (PreviewMode::Full, content.as_str()),
+        ] {
+            let mut bytes = Vec::new();
+            write_context_with_options(
+                &mut bytes,
+                &result,
+                OutputOptions {
+                    preview,
+                    color: ColorMode::Never,
+                    ..OutputOptions::default()
+                },
+                false,
+            )
+            .expect("single-line render");
+            let output = String::from_utf8(bytes).expect("UTF-8");
+            assert_eq!(
+                output.lines().find(|line| line.starts_with("  50: ")),
+                Some(format!("  50: {expected}").as_str()),
+                "{preview:?}: {output}"
+            );
+        }
+    }
+}
+
+#[test]
 fn minimal_and_detailed_modes_match_fixtures_on_terminals_and_redirected_output() {
     let fixtures: serde_json::Value =
         serde_json::from_str(include_str!("../../../compat/cli-search-presentation.json"))
