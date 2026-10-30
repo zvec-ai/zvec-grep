@@ -716,6 +716,7 @@ fn clean(value: &str, terminal: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use unicode_width::UnicodeWidthChar;
     use zg_engine::api::index::progress::IndexEmbeddingProgress;
     #[derive(Clone, Default)]
     struct Capture(Arc<(Mutex<Vec<Vec<u8>>>, Condvar)>);
@@ -766,6 +767,52 @@ mod tests {
             detail: None,
             embedding: None,
         }
+    }
+
+    // Replay the single-row CSI operations emitted by the progress renderer.
+    fn replay_line(frames: &[Vec<u8>], cjk: bool) -> String {
+        let mut cells = vec![' '; 100];
+        let mut column = 0;
+        for frame in frames {
+            let text = std::str::from_utf8(frame).expect("UTF-8 frame");
+            let mut characters = text.chars();
+            while let Some(character) = characters.next() {
+                match character {
+                    '\r' => column = 0,
+                    '\x1b' => {
+                        assert_eq!(characters.next(), Some('['));
+                        let mut parameters = String::new();
+                        let command = loop {
+                            let code = characters.next().expect("complete CSI sequence");
+                            if ('@'..='~').contains(&code) {
+                                break code;
+                            }
+                            parameters.push(code);
+                        };
+                        match command {
+                            'm' => {}
+                            'G' => column = parameters.parse::<usize>().expect("cursor column") - 1,
+                            'K' => cells[column..].fill(' '),
+                            _ => panic!("unexpected CSI command: {command}"),
+                        }
+                    }
+                    value => {
+                        let width = if cjk {
+                            value.width_cjk()
+                        } else {
+                            value.width()
+                        }
+                        .expect("printable progress character");
+                        if width > 0 {
+                            cells[column..column + width].fill(' ');
+                            cells[column] = value;
+                            column += width;
+                        }
+                    }
+                }
+            }
+        }
+        cells.into_iter().collect::<String>().trim_end().to_owned()
     }
 
     fn queued_display() -> IndexProgressDisplay {
@@ -1088,7 +1135,7 @@ mod tests {
     }
 
     #[test]
-    fn indexing_updates_only_repaint_the_changed_suffix() {
+    fn indexing_updates_preserve_counts_with_both_width_policies() {
         for color in [false, true] {
             for unicode in [false, true] {
                 let capture = Capture::default();
@@ -1120,12 +1167,26 @@ mod tests {
                     .expect("next progress frame");
                 let frames = capture.frames();
                 assert_eq!(frames.len(), 2);
+                let reference = format!("\r{}\x1b[K", output.previous_line).into_bytes();
+                for cjk in [false, true] {
+                    let actual = replay_line(&frames, cjk);
+                    assert!(
+                        actual.contains("893/20936"),
+                        "color={color}, unicode={unicode}, cjk={cjk}: {actual:?}"
+                    );
+                    assert_eq!(actual, replay_line(std::slice::from_ref(&reference), cjk));
+                }
                 let frame = String::from_utf8_lossy(&frames[1]);
-                assert!(frame.starts_with("\x1b["), "{frame:?}");
-                assert!(frame.ends_with("3/20936\x1b[K"), "{frame:?}");
-                assert!(!frame.contains("Indexing files"), "{frame:?}");
-                assert!(!frame.contains(['█', '░', '#', '-']), "{frame:?}");
-                assert!(!frame.contains('%'), "{frame:?}");
+                if unicode {
+                    assert!(frame.starts_with('\r'), "{frame:?}");
+                    assert!(frame.contains("Indexing files"), "{frame:?}");
+                } else {
+                    assert!(frame.starts_with("\x1b["), "{frame:?}");
+                    assert!(frame.ends_with("3/20936\x1b[K"), "{frame:?}");
+                    assert!(!frame.contains("Indexing files"), "{frame:?}");
+                    assert!(!frame.contains(['#', '-']), "{frame:?}");
+                    assert!(!frame.contains('%'), "{frame:?}");
+                }
             }
         }
     }

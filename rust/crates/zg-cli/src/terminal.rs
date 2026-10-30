@@ -1,27 +1,10 @@
 use std::io::{self, IsTerminal};
 
 pub(crate) fn terminal_character_width(character: char) -> Option<usize> {
+    // Column-based patches must not guess a configurable non-ASCII width.
     if character.is_control() {
         Some(0)
-    } else if character.is_ascii()
-        || matches!(
-            character,
-            '│' | '·'
-                | '›'
-                | '↑'
-                | '↓'
-                | '←'
-                | '→'
-                | '✢'
-                | '✳'
-                | '✶'
-                | '✻'
-                | '✽'
-                | '◆'
-                | '█'
-                | '░'
-        )
-    {
+    } else if character.is_ascii() {
         Some(1)
     } else {
         None

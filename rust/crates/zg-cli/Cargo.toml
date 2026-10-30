@@ -28,6 +28,7 @@ winapi-util = "0.1.11"
 
 [dev-dependencies]
 tempfile.workspace = true
+unicode-width = { workspace = true, features = ["cjk"] }
 zg-testkit = { path = "../zg-testkit" }
 
 [lints]

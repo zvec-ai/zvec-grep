@@ -21,7 +21,7 @@ use crossterm::{
     terminal::{self, Clear, ClearType},
 };
 use tokio_util::sync::CancellationToken;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::UnicodeWidthChar;
 use zg_engine::{
     api::index::setup::{EmbeddingChoice, IndexSetup},
     authorization::IndexAuthorization,
@@ -59,7 +59,24 @@ fn cancelled(key: KeyEvent) -> bool {
 
 struct RenderedLine {
     text: String,
-    columns: usize,
+    widths: Vec<usize>,
+}
+
+impl RenderedLine {
+    fn wrapped_rows(&self, columns: usize) -> usize {
+        let mut rows = 1;
+        let mut occupied = 0;
+        for &width in &self.widths {
+            let width = width.min(columns);
+            // A wide character wraps early when only the final column remains.
+            if occupied + width > columns {
+                rows += 1;
+                occupied = 0;
+            }
+            occupied += width;
+        }
+        rows
+    }
 }
 
 #[derive(Default)]
@@ -78,7 +95,7 @@ impl Screen {
         let previous_rows = if reflowed {
             self.lines
                 .iter()
-                .map(|line| line.columns.div_ceil(columns).max(1))
+                .map(|line| line.wrapped_rows(columns))
                 .sum()
         } else {
             self.lines.len()
@@ -182,7 +199,10 @@ fn render_screen(lines: &[String], columns: usize, theme: StatusTheme) -> Vec<u8
 
 fn render_line(value: &str, columns: usize, theme: StatusTheme) -> RenderedLine {
     let line = crate::theme::truncate(value, columns);
-    let width = UnicodeWidthStr::width(line.as_str());
+    let widths = line
+        .chars()
+        .map(|character| character.width().unwrap_or(0))
+        .collect();
     let styled = if let Some(selected) = line.strip_prefix("  ✓ ") {
         format!("  {} {selected}", theme.success("✓"))
     } else if let Some(error) = line.strip_prefix("  × ") {
@@ -203,7 +223,7 @@ fn render_line(value: &str, columns: usize, theme: StatusTheme) -> RenderedLine 
     };
     RenderedLine {
         text: styled,
-        columns: width,
+        widths,
     }
 }
 
@@ -786,6 +806,57 @@ mod tests {
             resized.starts_with(&expected_prefix),
             "width shrink left old wrapped picker rows behind: {resized:?}"
         );
+    }
+
+    #[test]
+    fn shrinking_width_rewinds_cjk_paths_at_odd_columns() {
+        let lines = [
+            "Set up workspace index".into(),
+            format!("  /中/{}", "文".repeat(36)),
+        ];
+        for color in [ColorMode::Never, ColorMode::Always] {
+            let mut screen = Screen::default();
+            screen
+                .draw_to(&mut Vec::new(), &lines, 79, 80, color)
+                .expect("draw Chinese workspace path");
+            let mut expected = Vec::new();
+            queue!(
+                expected,
+                MoveToColumn(0),
+                MoveUp(4),
+                Clear(ClearType::FromCursorDown)
+            )
+            .expect("clear all wrapped rows");
+            let mut cleared = Vec::new();
+            screen
+                .rewind(&mut cleared, 39, 80)
+                .expect("exit after width shrink");
+            assert_eq!(cleared, expected, "exit left the old title behind");
+            let mut resized = Vec::new();
+            screen
+                .draw_to(&mut resized, &lines, 38, 80, color)
+                .expect("redraw Chinese workspace path");
+            assert!(
+                resized.starts_with(&expected),
+                "redraw left the old title behind"
+            );
+            assert!(
+                String::from_utf8(resized)
+                    .expect("UTF-8 redraw")
+                    .contains("Set up workspace index")
+            );
+            let mut exit = Vec::new();
+            screen.rewind(&mut exit, 39, 80).expect("exit after redraw");
+            let mut expected_exit = Vec::new();
+            queue!(
+                expected_exit,
+                MoveToColumn(0),
+                MoveUp(2),
+                Clear(ClearType::FromCursorDown)
+            )
+            .expect("clear the redrawn prompt");
+            assert_eq!(exit, expected_exit);
+        }
     }
 
     #[test]
