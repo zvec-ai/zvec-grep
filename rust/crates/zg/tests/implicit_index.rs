@@ -642,10 +642,9 @@ fn implicit_query_index_progress_does_not_blank_the_live_line() {
         command.env_remove("RUST_LOG");
         let output = success(terminal::run(command, &[("Enter Build", b"\r")]));
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let progress = stderr
+        let (progress, _) = stderr
             .split_once("Building index")
             .and_then(|(_, remainder)| remainder.split_once("No indexable files"))
-            .map(|(progress, _)| progress)
             .unwrap_or_else(|| panic!("index progress between selection and query: {stderr}"));
         assert!(
             progress.contains("Scanning workspace") || progress.contains("Indexing files"),
