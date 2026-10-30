@@ -56,6 +56,9 @@ pub struct EmbeddingOptions {
     /// per-request local inference resources without exposing another public
     /// tuning knob.
     pub(crate) execution_concurrency: usize,
+    /// Keeps runtime admission and native resources alive until queued/native
+    /// work has settled, even if the caller drops its future.
+    pub(crate) execution_lease: Option<Arc<dyn Send + Sync>>,
     /// Standard W3C trace headers propagated by remote embedding backends.
     pub(crate) trace_headers: Option<EmbeddingTraceHeaders>,
 }
@@ -64,6 +67,9 @@ pub struct EmbeddingOptions {
 pub(crate) struct EmbeddingPrepareOptions {
     pub(crate) signal: Option<CancellationToken>,
     pub(crate) on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
+    /// Initial native execution budget; preparation must not create extra models.
+    pub(crate) execution_concurrency: usize,
+    pub(crate) execution_lease: Option<Arc<dyn Send + Sync>>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -81,6 +87,7 @@ impl fmt::Debug for EmbeddingOptions {
             .field("has_signal", &self.signal.is_some())
             .field("has_progress_callback", &self.on_progress.is_some())
             .field("execution_concurrency", &self.execution_concurrency)
+            .field("has_execution_lease", &self.execution_lease.is_some())
             .field("has_trace_headers", &self.trace_headers.is_some())
             .finish()
     }
@@ -108,6 +115,10 @@ pub trait EmbeddingModel: Send + Sync {
 
     fn concurrency_defaults(&self) -> EmbeddingConcurrencyDefaults {
         EmbeddingConcurrencyDefaults::default()
+    }
+
+    fn execution_concurrency(&self, requested: usize) -> usize {
+        requested.max(1)
     }
 
     /// Loads shared local resources before an operation dispatches embedding work.

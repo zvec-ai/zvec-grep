@@ -74,20 +74,40 @@ positive integers. Explicit CLI/API index settings take precedence over this
 environment variable, followed by the legacy
 `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` for llama.cpp indexing, then backend defaults.
 Invalid environment values warn and select the automatic default. These overrides
-do not configure query-vector inference and are not persisted in workspace settings.
+do not configure a separate query worker and are not persisted in workspace settings.
 Direct and Server indexing use the same engine boundary; restart the Server after
 changing its inherited environment, while explicit CLI overrides need no restart.
 
 For llama.cpp, the limit controls contexts within a serialized batch and is capped
-at eight, defaulting to one. Transformers/ORT limits in-flight batches to at most
-eight, defaulting to one. ORT may create sessions within this budget;
-CoreML retains one physical session. Potion/model2vec defaults to two batch tasks
-and retains an independent CPU worker capacity; remote models retain adaptive
-request scheduling. Model2vec and remote overrides are not capped at eight.
+at eight, defaulting to one. Transformers/ORT shares one native session between
+indexing and queries for the same model, cache and device, regardless of concurrency:
 
-Matching local concurrency configurations share runtime admission. Different
-configurations use separate cached native resources; active leases keep their
-models alive, while unused variants are released when switching configurations.
+- CPU uses the budget for intra-op threads, capped by available parallelism,
+  physical cores and eight. One batch runs at a time; tokenization is sequential.
+  A later index operation with a different budget replaces the session between
+  batches, destroying the previous session before loading its replacement.
+  Queries reuse the currently configured threads and do not trigger replacement.
+- CUDA keeps one batch in flight and uses the budget to combine ready document
+  batches. MiniLM can combine up to four base batches (16 inputs), bounded by
+  1,536 padded tokens. Other ONNX models retain their catalog batch ceiling.
+  Queries run first without waiting to fill a batch. Recent queries reduce the
+  aggregation limits; batches exceeding the internal 20 ms target reduce the
+  token budget after warm-up. These are scheduling heuristics, not latency or
+  total-VRAM guarantees. Already-running inference is not preempted.
+- Pending inputs have separate document/query limits: 16/4 requests and
+  32/8 MiB of copied text, with at most 8 MiB per request. Full queues apply
+  cancellable backpressure. A cancelled member of a merged batch does not cancel
+  other members. Native work retains runtime ownership until it settles.
+
+The effective backend budget is reported when it is lower than requested. The
+default remains one. Weight storage is not multiplied by concurrency, although
+activation buffers and allocator caches can increase memory use. The CLI option
+does not expose thread, session or batch-size settings.
+
+Potion/model2vec defaults to two batch tasks and retains an independent CPU worker
+capacity; remote models retain adaptive request scheduling. Their overrides are
+not capped at eight. llama.cpp continues to cache separate native resources for
+different fixed context budgets, retiring unused variants when switching.
 
 `zg --install --upgrade-installed` migrates existing user-level MCP launchers
 from 0.2.x without selecting agents or installing new integrations. It changes
