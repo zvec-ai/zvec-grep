@@ -65,7 +65,8 @@ impl SessionOwner {
         tracing::debug!(
             provider = provider.name(),
             threads,
-            "Transformers ONNX session initialized"
+            "Transformers ONNX {} embedding execution provider selected",
+            provider.name()
         );
         Ok(Self {
             model_path,
