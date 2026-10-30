@@ -44,6 +44,9 @@ use crate::models::{
     },
 };
 
+mod batching;
+use batching::LlamaBatchPlan;
+
 static LLAMA_BACKEND: super::backend_loading::BackendInitialization<InitializedBackend> =
     super::backend_loading::BackendInitialization::new();
 // ggml's global registry is not synchronized against native readers. Serialize
@@ -94,6 +97,7 @@ struct LoadedLlamaModel {
 
 struct LlamaContextPool {
     model: Arc<LlamaModel>,
+    gpu: bool,
     state: StdMutex<LlamaContextPoolState>,
     changed: Condvar,
 }
@@ -120,9 +124,8 @@ type LlamaWorkerResponse = Result<Vec<IndexedEmbedding>, String>;
 
 struct LlamaWorkerJob {
     inputs: Vec<PreparedLlamaInput>,
-    context_size: u32,
-    batch_capacity: u32,
-    threads: i32,
+    plan: LlamaBatchPlan,
+    profile: LlamaContextProfile,
     signal: Option<CancellationToken>,
     response: mpsc::SyncSender<LlamaWorkerResponse>,
 }
@@ -142,6 +145,7 @@ struct PreparedLlamaBatch {
 struct LlamaContextProfile {
     context_size: u32,
     batch_capacity: u32,
+    sequence_capacity: u32,
     threads: i32,
 }
 
@@ -449,7 +453,7 @@ fn cpu_model_params() -> Result<LlamaModelParams, ModelError> {
 fn loaded_llama_model(model: LlamaModel, path: &Path, gpu: bool) -> LoadedLlamaModel {
     let model = Arc::new(model);
     LoadedLlamaModel {
-        contexts: LlamaContextPool::new(Arc::clone(&model)),
+        contexts: LlamaContextPool::new(Arc::clone(&model), gpu),
         model,
         model_path: path.to_path_buf(),
         gpu,
@@ -571,10 +575,17 @@ fn physical_context_worker_limit(_gpu: bool, requested: usize) -> usize {
     requested.clamp(1, crate::models::runtime::LOCAL_CONCURRENCY_CAP)
 }
 
+fn use_multisequence_batching(architecture: &str, gpu: bool) -> bool {
+    // CPU measurements showed no consistent throughput benefit and larger
+    // numerical differences with Q8 batch kernels. Keep its single-sequence path.
+    gpu && architecture == "gemma-embedding"
+}
+
 impl LlamaContextPool {
-    fn new(model: Arc<LlamaModel>) -> Self {
+    fn new(model: Arc<LlamaModel>, gpu: bool) -> Self {
         Self {
             model,
+            gpu,
             state: StdMutex::new(LlamaContextPoolState::default()),
             changed: Condvar::new(),
         }
@@ -599,23 +610,39 @@ impl LlamaContextPool {
             chunks[offset % worker_count].push(input);
         }
 
+        let architecture = self
+            .model
+            .meta_val_str("general.architecture")
+            .map_err(|error| {
+                ModelError::internal("Unable to read llama.cpp model architecture")
+                    .with_cause(error)
+            })?;
+        // Plan every worker before dispatching any work, so a planning failure
+        // cannot release a lease while its native context is still executing.
+        let plans = chunks
+            .iter()
+            .map(|inputs| {
+                LlamaBatchPlan::new(
+                    inputs,
+                    context_size,
+                    use_multisequence_batching(&architecture, self.gpu),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
         let mut pending = Vec::with_capacity(worker_count);
         let mut first_error = None;
-        for (worker, chunk) in workers.into_iter().zip(chunks) {
-            let batch_capacity = llama_batch_capacity(
-                chunk
-                    .iter()
-                    .map(|input| input.tokens.len())
-                    .max()
-                    .unwrap_or(1),
-                context_size,
-            )?;
+        for ((worker, chunk), plan) in workers.into_iter().zip(chunks).zip(plans) {
             let (response, receiver) = mpsc::sync_channel(1);
             let job = LlamaWorkerJob {
                 inputs: chunk,
-                context_size,
-                batch_capacity,
-                threads,
+                profile: LlamaContextProfile {
+                    context_size,
+                    batch_capacity: plan.token_capacity,
+                    sequence_capacity: plan.sequence_capacity,
+                    threads,
+                },
+                plan,
                 signal: signal.cloned(),
                 response,
             };
@@ -779,15 +806,12 @@ fn llama_context_worker(model: &LlamaModel, receiver: &mpsc::Receiver<LlamaWorke
         let LlamaWorkerMessage::Embed(job) = message else {
             break;
         };
-        let desired = LlamaContextProfile {
-            context_size: job.context_size,
-            batch_capacity: job.batch_capacity,
-            threads: job.threads,
-        };
+        let desired = job.profile;
         let reusable = profile.is_some_and(|current: LlamaContextProfile| {
             current.context_size == desired.context_size
                 && current.threads == desired.threads
                 && current.batch_capacity >= desired.batch_capacity
+                && current.sequence_capacity >= desired.sequence_capacity
         });
         if !reusable {
             context = None;
@@ -826,6 +850,7 @@ fn create_llama_context(
     let params = LlamaContextParams::default()
         .with_n_ctx(NonZeroU32::new(profile.context_size))
         .with_n_batch(profile.batch_capacity)
+        .with_n_seq_max(profile.sequence_capacity)
         .with_n_ubatch(llama_micro_batch_capacity(
             &architecture,
             profile.batch_capacity,
@@ -833,6 +858,13 @@ fn create_llama_context(
         .with_n_threads(profile.threads)
         .with_n_threads_batch(profile.threads)
         .with_embeddings(true);
+    // Gemma has no KV cache. Keep the full per-input context length when
+    // increasing sequence capacity instead of dividing it among sequences.
+    let params = if architecture == "gemma-embedding" {
+        params.with_kv_unified(true)
+    } else {
+        params
+    };
     model
         .new_context(initialize_llama_backend(false, &registry)?, params)
         .map_err(|error| {
@@ -854,26 +886,39 @@ fn run_llama_worker_job(
     context: &mut LlamaContext<'_>,
     job: &LlamaWorkerJob,
 ) -> Result<Vec<(usize, Vec<f32>)>, ModelError> {
-    let mut vectors = Vec::with_capacity(job.inputs.len());
-    for input in &job.inputs {
-        check_cancelled(job.signal.as_ref())?;
-        context.clear_kv_cache();
-        let mut batch = LlamaBatch::new(input.tokens.len(), 1);
-        batch
-            .add_sequence(&input.tokens, 0, false)
-            .map_err(|error| {
-                ModelError::internal("Unable to prepare llama.cpp embedding batch")
-                    .with_cause(error)
+    job.plan
+        .execute(&job.inputs, job.signal.as_ref(), |inputs| {
+            context.clear_kv_cache();
+            // The second argument is sequence IDs per token, not sequences per batch.
+            let mut batch = LlamaBatch::new(inputs.iter().map(|input| input.tokens.len()).sum(), 1);
+            for (sequence, input) in inputs.iter().enumerate() {
+                let sequence = i32::try_from(sequence).map_err(|error| {
+                    ModelError::internal("Too many llama.cpp embedding sequences").with_cause(error)
+                })?;
+                batch
+                    .add_sequence(&input.tokens, sequence, inputs.len() > 1)
+                    .map_err(|error| {
+                        ModelError::internal("Unable to prepare llama.cpp embedding batch")
+                            .with_cause(error)
+                    })?;
+            }
+            context.decode(&mut batch).map_err(|error| {
+                ModelError::internal("llama.cpp embedding inference failed").with_cause(error)
             })?;
-        context.decode(&mut batch).map_err(|error| {
-            ModelError::internal("llama.cpp embedding inference failed").with_cause(error)
-        })?;
-        let vector = context.embeddings_seq_ith(0).map_err(|error| {
-            ModelError::internal("Unable to read llama.cpp embedding output").with_cause(error)
-        })?;
-        vectors.push((input.index, vector.to_vec()));
-    }
-    Ok(vectors)
+            // Reading the first sequence synchronizes native execution. Retain the
+            // worker lease until all outputs have been copied, including cancellation.
+            (0..inputs.len())
+                .map(|sequence| {
+                    context
+                        .embeddings_seq_ith(i32::try_from(sequence).expect("validated sequence ID"))
+                        .map(<[f32]>::to_vec)
+                        .map_err(|error| {
+                            ModelError::internal("Unable to read llama.cpp embedding output")
+                                .with_cause(error)
+                        })
+                })
+                .collect()
+        })
 }
 
 fn llama_batch_capacity(token_count: usize, context_size: u32) -> Result<u32, ModelError> {
