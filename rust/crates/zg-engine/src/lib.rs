@@ -136,7 +136,9 @@ impl ZvecGrep {
                 include_status: false,
             })
             .await?;
-        info.compatibility.ensure_compatible()?;
+        info.compatibility
+            .ensure_compatible()
+            .map_err(|error| error.with_workspace_root(&info.root))?;
         if !info.indexed {
             return Err(EngineError::invalid_argument(
                 "workspace must have an index before it can be watched",

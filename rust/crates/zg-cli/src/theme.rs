@@ -7,6 +7,7 @@ use std::{
 };
 
 use crate::{ColorMode, output_path};
+use unicode_width::UnicodeWidthChar;
 
 #[derive(Clone, Copy)]
 pub(crate) struct StatusTheme {
@@ -35,6 +36,12 @@ impl StatusTheme {
     pub fn path(self, value: &str) -> String {
         self.paint(value, "36")
     }
+    pub fn selected_tab(self, value: &str) -> String {
+        self.paint(value, "1;36")
+    }
+    pub fn metadata_label(self, value: &str) -> String {
+        self.paint(value, "35")
+    }
     pub fn success(self, value: &str) -> String {
         self.paint(value, "32")
     }
@@ -44,12 +51,46 @@ impl StatusTheme {
     pub fn danger(self, value: &str) -> String {
         self.paint(value, "31")
     }
-    pub fn accent(self, value: &str) -> String {
-        self.paint(value, "1")
+    pub fn accent(value: &str) -> String {
+        value.to_owned()
     }
     pub fn muted(self, value: &str) -> String {
         self.paint(value, "2")
     }
+}
+
+pub(crate) fn clean(value: &str) -> String {
+    value
+        .chars()
+        .map(|value| if value.is_control() { ' ' } else { value })
+        .collect()
+}
+
+/// Bounds a plain (not ANSI-styled) line before applying colors. Counting each
+/// character conservatively also avoids splitting a wide CJK character.
+pub(crate) fn truncate(value: &str, columns: usize) -> String {
+    let mut used = 0;
+    value
+        .chars()
+        .map(|value| if value.is_control() { ' ' } else { value })
+        .take_while(|value| {
+            used += value.width().unwrap_or(0);
+            used <= columns
+        })
+        .collect()
+}
+
+pub(crate) fn unicode_supported() -> bool {
+    !cfg!(windows) && !matches!(std::env::var("TERM").as_deref(), Ok("linux" | "dumb"))
+}
+
+pub(crate) fn columns() -> usize {
+    crossterm::terminal::size()
+        .ok()
+        .map(|(columns, _)| usize::from(columns))
+        .or_else(|| std::env::var("COLUMNS").ok()?.parse().ok())
+        .unwrap_or(80)
+        .saturating_sub(1)
 }
 
 pub(crate) fn write_status_field(
@@ -86,18 +127,11 @@ fn relative_to_home(path: &Path, home: &Path) -> Option<PathBuf> {
     if let Ok(relative) = output_path(path).strip_prefix(output_path(home)) {
         return Some(relative.to_path_buf());
     }
-    // Windows can report the same directory as C:\... and \\?\C:\...,
-    // or with short (8.3) names. Compare existing paths in the same form.
-    #[cfg(windows)]
-    {
-        let path = path.canonicalize().ok()?;
-        let home = home.canonicalize().ok()?;
-        path.strip_prefix(home).ok().map(Path::to_path_buf)
-    }
-    #[cfg(not(windows))]
-    {
-        None
-    }
+    // Existing paths can use filesystem aliases, such as /var and /private/var
+    // on macOS or ordinary, verbatim, and short (8.3) names on Windows.
+    let path = path.canonicalize().ok()?;
+    let home = home.canonicalize().ok()?;
+    path.strip_prefix(home).ok().map(Path::to_path_buf)
 }
 
 pub(crate) fn storage_path(path: &Path, root: &Path) -> String {
@@ -129,6 +163,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn terminal_text_cannot_move_the_cursor_or_split_wide_characters() {
+        assert_eq!(clean("path\n\x1b[2J"), "path  [2J");
+        assert_eq!(truncate("索引 ready", 3), "索");
+        assert_eq!(truncate("索引 ready", 4), "索引");
+    }
+
+    #[test]
     fn compact_paths_respect_directory_boundaries() {
         let home = Path::new("/users/alice");
         assert_eq!(display_path_with_home(home, Some(home)), "~");
@@ -142,8 +183,8 @@ mod tests {
         );
         let root = home.join("repo");
         assert_eq!(
-            storage_path(&root.join(".zvec-grep/storage"), &root),
-            Path::new(".zvec-grep/storage").display().to_string()
+            storage_path(&root.join(".zvec-grep/index"), &root),
+            Path::new(".zvec-grep/index").display().to_string()
         );
         assert_eq!(
             storage_path(Path::new("/elsewhere/storage"), &root),
@@ -177,6 +218,31 @@ mod tests {
         assert_eq!(format_count(999), "999");
         assert_eq!(format_count(1234), "1,234");
         assert_eq!(format_count(u64::MAX), "18,446,744,073,709,551,615");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn home_display_accepts_symlink_aliases_in_both_directions() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let home = temporary.path().join("home");
+        let alias = temporary.path().join("home-alias");
+        let unrelated = temporary.path().join("home-unrelated");
+        std::fs::create_dir_all(home.join("repo")).expect("home and nested directory");
+        std::fs::create_dir(&unrelated).expect("unrelated directory");
+        std::os::unix::fs::symlink(&home, &alias).expect("home alias");
+        let canonical = home.canonicalize().expect("canonical home");
+
+        for (path, home) in [(&canonical, &alias), (&alias, &canonical)] {
+            assert_eq!(display_path_with_home(path, Some(home)), "~");
+            assert_eq!(
+                display_path_with_home(&path.join("repo"), Some(home)),
+                "~/repo"
+            );
+            assert_eq!(
+                display_path_with_home(&unrelated, Some(home)),
+                unrelated.display().to_string()
+            );
+        }
     }
 
     #[cfg(windows)]

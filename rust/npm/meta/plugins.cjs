@@ -8,6 +8,12 @@ const { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync,
 const { homedir } = require("os");
 const { join, resolve } = require("path");
 
+// Shared by packaging, publication preflight and plugin validation. npm sends
+// tarballs as base64 in JSON: 180 MiB becomes 240 MiB before metadata/provenance.
+// This is a conservative project budget, not a documented registry maximum;
+// npm rejected our 202.4 MB Windows ORT archive with HTTP 413.
+const MAX_NPM_TARBALL_BYTES = 180 * 1024 * 1024;
+
 function hashFile(path, algorithm = "sha256", encoding = "hex") {
   const hash = createHash(algorithm);
   const fd = openSync(path, "r");
@@ -46,7 +52,7 @@ function validatePlugins(manifest, entry, version, coreId) {
         component.tarball !== packageFilename(expected.package, version) ||
         !/^sha512-[A-Za-z0-9+/]{86}==$/.test(component.integrity) ||
         !Number.isSafeInteger(component.archiveBytes) || component.archiveBytes <= 0 ||
-        component.archiveBytes > 350 * 1024 * 1024 || !validHash(component.checksum) ||
+        component.archiveBytes > MAX_NPM_TARBALL_BYTES || !validHash(component.checksum) ||
         !validHash(manifest.files[expected.file])) {
       throw new Error(`invalid pinned plugin: ${expected.package}`);
     }
@@ -173,5 +179,5 @@ function extractPayload(archive, component, manifest, destination) {
   }
 }
 
-module.exports = { coreIdentity, packageFilename, validHash, validatePlugins, settings,
+module.exports = { MAX_NPM_TARBALL_BYTES, coreIdentity, packageFilename, validHash, validatePlugins, settings,
   detectNvidia, componentArchive, extractPayload, hashFile, verifyArchive };

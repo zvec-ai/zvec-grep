@@ -372,14 +372,16 @@ pub(crate) fn runtime_device(
     explicit: Option<Device>,
     workspace: Option<Device>,
 ) -> Result<Option<Device>, EngineError> {
-    if let Some(device) = explicit.or(workspace).or_else(|| device(config, reference)) {
+    if let Some(device) = explicit {
         return Ok(Some(device));
     }
     let Some(value) = std::env::var("ZVEC_GREP_DEVICE")
         .ok()
         .filter(|value| !value.trim().is_empty())
     else {
-        return Ok(default_runtime_device());
+        return Ok(workspace
+            .or_else(|| device(config, reference))
+            .or_else(default_runtime_device));
     };
     serde_json::from_value(json!(value.trim().to_lowercase()))
         .map(Some)
@@ -404,8 +406,8 @@ pub(crate) fn model_cache(
     workspace: Option<PathBuf>,
 ) -> Option<PathBuf> {
     explicit
-        .or(workspace)
         .or_else(|| std::env::var_os("ZVEC_GREP_MODEL_CACHE").map(PathBuf::from))
+        .or_else(|| workspace.filter(|path| path.is_absolute() && path.is_dir()))
         .or_else(|| string(config, &["defaults", "modelCacheDir"]).map(PathBuf::from))
 }
 
@@ -498,9 +500,9 @@ fn update_at(path: &Path, changes: Value) -> Result<(), EngineError> {
             &error,
         ));
     }
-    let _lock = crate::workspace::lock::acquire_read_write_lock(
+    let _lock = crate::workspace::lock::try_acquire_file_lock(
         &parent.join("locks/config"),
-        crate::workspace::lock::LockMode::Write,
+        crate::workspace::lock::LockMode::Exclusive,
         "global-config.update",
     )?;
     let mut value = read_at(path)?;
@@ -532,6 +534,72 @@ fn merge(target: &mut Value, patch: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_cache_skips_unusable_workspace_preferences() {
+        const CHILD: &str = "ZG_TEST_MODEL_CACHE_RESOLUTION";
+        if std::env::var_os(CHILD).is_none() {
+            for environment in [None, Some("environment-models")] {
+                let mut command =
+                    std::process::Command::new(std::env::current_exe().expect("test executable"));
+                command
+                    .args([
+                        "--exact",
+                        "config::tests::model_cache_skips_unusable_workspace_preferences",
+                    ])
+                    .env(CHILD, "1")
+                    .env_remove("ZVEC_GREP_MODEL_CACHE");
+                if let Some(environment) = environment {
+                    command.env("ZVEC_GREP_MODEL_CACHE", environment);
+                }
+                let output = command.output().expect("isolated cache resolution test");
+                assert!(
+                    output.status.success(),
+                    "{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+                assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            }
+            return;
+        }
+
+        let directory = tempfile::tempdir().expect("cache preferences");
+        let existing = directory.path().join("existing");
+        fs::create_dir(&existing).expect("empty saved cache");
+        let file = directory.path().join("file");
+        fs::write(&file, b"not a directory").expect("invalid saved cache");
+        let missing = directory.path().join("missing");
+        let global = directory.path().join("global");
+        let explicit = directory.path().join("explicit");
+        let config = json!({"defaults": {"modelCacheDir": global}});
+        let environment = std::env::var_os("ZVEC_GREP_MODEL_CACHE").map(PathBuf::from);
+
+        assert_eq!(
+            model_cache(&config, Some(explicit.clone()), Some(existing.clone())),
+            Some(explicit.clone())
+        );
+        assert_eq!(
+            model_cache(&config, None, Some(existing.clone())),
+            environment.clone().or(Some(existing.clone()))
+        );
+        for saved in [
+            missing.clone(),
+            file.clone(),
+            PathBuf::from("relative-models"),
+        ] {
+            assert_eq!(
+                model_cache(&config, None, Some(saved.clone())),
+                environment.clone().or(Some(global.clone()))
+            );
+            assert_eq!(model_cache(&json!({}), None, Some(saved)), environment);
+        }
+        assert!(!explicit.exists());
+        assert!(!global.exists());
+        assert!(!missing.exists());
+        assert_eq!(fs::read(&file).expect("saved file"), b"not a directory");
+        assert_eq!(fs::read_dir(existing).expect("saved cache").count(), 0);
+    }
 
     #[test]
     fn cuda_release_defaults_to_automatic_device_selection() {

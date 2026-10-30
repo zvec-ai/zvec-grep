@@ -31,7 +31,7 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use zg_cli::{output_path, parse_managed_rg_args};
+use zg_cli::{ParsedRgArgs, files_options, output_path, parse_rg_args};
 use zg_engine::{
     EngineError, ErrorReport, ErrorSite, ZvecGrep,
     api::{
@@ -519,9 +519,25 @@ impl ZvecGrepMcpServer {
         Parameters(input): Parameters<RgInput>,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        let mut request = input
+        let parsed = input
             .into_request()
             .map_err(|message| ErrorData::invalid_params(message, None))?;
+        let mut request = parsed.request;
+        if parsed.files {
+            let limit = request.limit;
+            let mut options = files_options(request);
+            return Ok(
+                match request::run(&context, |_, signal| {
+                    options.signal = Some(signal);
+                    self.engine.files(options)
+                })
+                .await
+                {
+                    Ok(reply) => rg_format::files(&reply, limit, parsed.null),
+                    Err(error) => error_result(&error),
+                },
+            );
+        }
         Ok(
             match request::run(&context, |progress, signal| {
                 request.on_progress = progress;
@@ -814,10 +830,11 @@ pub struct IndexInput {
     /// Absolute workspace root visible to the daemon.
     #[schemars(length(min = 1, max = 1024))]
     pub root: String,
-    /// One-request embedding provider API key override.
+    /// Saves the embedding provider API key encrypted in this workspace for subsequent operations.
+    /// The decryption key is stored in the same workspace; copying it preserves access to the credential.
     #[schemars(length(min = 1, max = 8192))]
     pub api_key: Option<String>,
-    /// One-request local embedding device override.
+    /// Saves the local embedding device preference for this workspace.
     pub device: Option<DeviceInput>,
     /// Remote embedding endpoint override.
     #[schemars(length(max = 2048))]
@@ -853,7 +870,7 @@ pub struct IndexInput {
     pub ignore_files: Option<PathListInput>,
     #[serde(default, deserialize_with = "deserialize_optional_update")]
     pub max_depth: Option<Option<usize>>,
-    #[schemars(range(min = 1))]
+    /// Maximum file size in bytes; zero excludes all files, null clears the saved limit.
     #[serde(default, deserialize_with = "deserialize_optional_update")]
     pub max_file_size_bytes: Option<Option<u64>>,
     #[serde(rename = "follow", alias = "followSymlinks")]
@@ -1646,9 +1663,6 @@ impl IndexInput {
         if self.embedding_concurrency == Some(0) {
             return Err("embeddingConcurrency must be greater than zero".to_owned());
         }
-        if self.max_file_size_bytes == Some(Some(0)) {
-            return Err("maxFileSizeBytes must be greater than zero".to_owned());
-        }
         if let Some(endpoint) = &self.endpoint {
             validate_text("endpoint", endpoint, 1, 2_048)?;
             let valid = endpoint.parse::<http::Uri>().is_ok_and(|uri| {
@@ -1737,17 +1751,25 @@ impl IndexInput {
 }
 
 impl RgInput {
-    fn into_request(self) -> Result<ContextOptions, String> {
+    fn into_request(self) -> Result<ParsedRgArgs, String> {
         let root = absolute_root(&self.root)?;
         validate_text("command", &self.command, 1, MAX_QUERY_CHARS)?;
         let (args, limit) = parse_rg_command(&self.command)?;
-        let mut request = parse_managed_rg_args(&args).map_err(|error| error.to_string())?;
+        let mut parsed = parse_rg_args(&args, true).map_err(|error| error.to_string())?;
+        let request = &mut parsed.request;
+        if request.follow {
+            return Err(
+                "rg command option \"--follow\" (-L) is not supported by the MCP tool".to_owned(),
+            );
+        }
         request.limit = limit;
         validate_scoped_paths(&root, &request.rg_paths, "search path")?;
-        validate_scoped_paths(&root, &request.rg_options.pattern_files, "pattern file")?;
+        if !parsed.files {
+            validate_scoped_paths(&root, &request.rg_options.pattern_files, "pattern file")?;
+        }
         validate_scoped_paths(&root, &request.ignore_files, "ignore file")?;
         request.root = Some(root);
-        Ok(request)
+        Ok(parsed)
     }
 }
 
@@ -2232,6 +2254,7 @@ impl From<IndexRuntimeSnapshot> for IndexRuntimeStatusOutput {
                 phase: match progress.phase {
                     zg_engine::api::index::progress::IndexProgressPhase::Scanning => "scanning",
                     zg_engine::api::index::progress::IndexProgressPhase::Indexing => "indexing",
+                    zg_engine::api::index::progress::IndexProgressPhase::Finalizing => "finalizing",
                     zg_engine::api::index::progress::IndexProgressPhase::Done => "done",
                 }
                 .to_owned(),
@@ -2307,7 +2330,6 @@ impl RootSpecOutput {
             nested_git: scan.nested_git(),
             ignore_files: scan
                 .ignore_files()
-                .iter()
                 .map(|path| output_path(path).display().to_string())
                 .collect(),
             max_depth: scan.max_depth(),
@@ -2517,7 +2539,7 @@ mod tests {
             let root = test_root();
             let reply = super::InfoResult {
                 home: root.join(".zvec-grep"),
-                index_path: root.join(".zvec-grep/storage"),
+                index_path: root.join(".zvec-grep/index"),
                 root,
                 indexed: false,
                 compatibility: super::IndexCompatibility::RebuildRequired {
@@ -2560,7 +2582,7 @@ mod tests {
         let root = test_root();
         let reply = super::InfoResult {
             home: root.join(".zvec-grep"),
-            index_path: root.join(".zvec-grep/storage"),
+            index_path: root.join(".zvec-grep/index"),
             root: root.clone(),
             indexed: true,
             compatibility: super::IndexCompatibility::Compatible { version: 2 },
@@ -2936,6 +2958,13 @@ mod tests {
                     assert_eq!(schema["properties"]["limit"]["minimum"], 1);
                     assert_eq!(schema["properties"]["limit"]["maximum"], 50);
                 } else {
+                    let key_description = schema["properties"]["apiKey"]["description"]
+                        .as_str()
+                        .expect("API key persistence description");
+                    assert!(key_description.contains("for subsequent operations"));
+                    assert!(
+                        key_description.contains("decryption key is stored in the same workspace")
+                    );
                     // Explicit null clears these settings, unlike ordinary Option<T>.
                     for field in ["maxDepth", "maxFileSizeBytes"] {
                         let types = schema["properties"][field]["type"]
@@ -2945,7 +2974,7 @@ mod tests {
                         assert!(types.contains(&serde_json::json!("null")));
                         assert!(!required.contains(&serde_json::json!(field)));
                     }
-                    assert_eq!(schema["properties"]["maxFileSizeBytes"]["minimum"], 1);
+                    assert_eq!(schema["properties"]["maxFileSizeBytes"]["minimum"], 0);
                 }
             }
         }
@@ -3066,7 +3095,7 @@ mod tests {
     }
 
     #[test]
-    fn index_updates_preserve_omitted_empty_false_and_null_values() {
+    fn index_updates_preserve_explicit_values() {
         let parsed: IndexInput = serde_json::from_value(serde_json::json!({
             "root": test_root(), "globs": [], "includedFormats": [], "excludedFormats": [],
             "includeHidden": false, "followSymlinks": false, "nestedGit": false, "ignoreFiles": [],
@@ -3088,6 +3117,16 @@ mod tests {
         assert_eq!(options.scan.ignore_files, Some(Vec::new()));
         assert_eq!(options.scan.max_depth, Some(None));
         assert_eq!(options.scan.max_file_size_bytes, Some(None));
+
+        let parsed: IndexInput = serde_json::from_value(serde_json::json!({
+            "root": test_root(), "maxFileSizeBytes": 0
+        }))
+        .expect("zero file size");
+        let IndexToolRequest::Index { options, .. } = parsed.into_request().expect("index request")
+        else {
+            panic!("index");
+        };
+        assert_eq!(options.scan.max_file_size_bytes, Some(Some(0)));
     }
 
     #[test]
@@ -3472,6 +3511,8 @@ mod tests {
         }
         .into_request()
         .expect("managed rg should map");
+        assert!(!request.files);
+        let request = request.request;
         assert_eq!(request.root, Some(test_root()));
         assert_eq!(request.query.as_deref(), Some("resident manager"));
         assert_eq!(request.rg_paths, [PathBuf::from("src")]);
@@ -3494,6 +3535,90 @@ mod tests {
             .into_request()
             .is_err()
         );
+    }
+
+    #[test]
+    fn rg_file_listing_maps_paths_without_a_pattern_and_enforces_root_scope() {
+        for command in [
+            "rg --files",
+            "rg --files src -g '*.rs' --null | head -2",
+            "rg -0 --files src -e '[' -f ../unused-patterns",
+        ] {
+            let parsed = RgInput {
+                root: test_root().display().to_string(),
+                command: command.to_owned(),
+            }
+            .into_request()
+            .expect("file discovery request");
+            assert!(parsed.files);
+            assert_eq!(parsed.request.root, Some(test_root()));
+            assert!(parsed.request.query.is_none());
+            if command.contains("src") {
+                assert_eq!(parsed.request.rg_paths, [PathBuf::from("src")]);
+                assert!(parsed.null);
+            }
+            if command.contains("head") {
+                assert_eq!(parsed.request.limit, Some(2));
+                assert_eq!(parsed.request.rg_options.glob_rules[0].pattern, "*.rs");
+            }
+        }
+        let outside = std::env::temp_dir().join("outside-workspace");
+        for command in [
+            "rg --files ../secret".to_owned(),
+            "rg --files --ignore-file ../secret".to_owned(),
+            format!("rg --files '{}'", outside.display()),
+            "rg --files --json".to_owned(),
+            "rg --files=true".to_owned(),
+            "rg --null needle".to_owned(),
+            "rg --files | head -0".to_owned(),
+            "rg --files | sort".to_owned(),
+            "rg --files $(whoami)".to_owned(),
+        ] {
+            assert!(
+                RgInput {
+                    root: test_root().display().to_string(),
+                    command: command.clone(),
+                }
+                .into_request()
+                .is_err(),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn rg_rejects_symlink_following_for_content_search_and_file_listing() {
+        for command in [
+            "rg -L needle .",
+            "rg --follow needle .",
+            "rg -nL needle .",
+            "rg --files -L",
+            "rg --files --follow",
+        ] {
+            let error = RgInput {
+                root: test_root().display().to_string(),
+                command: command.to_owned(),
+            }
+            .into_request()
+            .err()
+            .expect("MCP rg rejects symlink following");
+            assert!(error.contains("--follow"), "{command}: {error}");
+        }
+        for command in [
+            "rg -e --follow .",
+            "rg -e -L .",
+            "rg --files -- --follow",
+            "rg --files -- -L",
+            "rg --no-follow needle .",
+        ] {
+            let parsed = RgInput {
+                root: test_root().display().to_string(),
+                command: command.to_owned(),
+            }
+            .into_request()
+            .expect("literal patterns and paths do not enable symlink following");
+            assert!(!parsed.request.follow, "{command}");
+        }
     }
 
     #[test]

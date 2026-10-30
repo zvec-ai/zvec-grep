@@ -1,4 +1,4 @@
-//! Remote embedding consent uses the same signed grants as the CLI.
+//! Remote embedding consent uses the same workspace grants as the CLI.
 
 mod continuation;
 use continuation::ContinuationApproval;

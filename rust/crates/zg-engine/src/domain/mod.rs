@@ -43,10 +43,12 @@ pub use metadata::Visibility;
 
 // Shared graph contracts for extraction and persistence.
 pub(crate) use graph::EdgeProvenance;
+#[cfg(test)]
 pub(crate) use graph::FileEdge;
-#[allow(unused_imports)]
+#[cfg(test)]
 pub(crate) use graph::FileGraphNode;
 pub(crate) use graph::FileGraphResult;
+#[cfg(test)]
 pub(crate) use graph::GraphEdgeKind;
 pub(crate) use graph::PendingRef;
 pub(crate) use graph::PendingRefStatus;
@@ -71,4 +73,6 @@ pub(crate) use source::TextRange;
 
 // Workspaces.
 pub use workspace::ScanRules;
+pub(crate) use workspace::SourceRoot;
 pub(crate) use workspace::Workspace;
+pub(crate) use workspace::WorkspaceLayout;

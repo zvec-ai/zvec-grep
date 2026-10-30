@@ -156,7 +156,8 @@ impl SetupState {
     ) -> Result<CallToolResponse, ErrorData> {
         let result = async {
             let info = provider.info(engine, InfoOptions { root: request.root.clone(), include_status: false }).await?;
-            info.compatibility.ensure_compatible()?;
+            info.compatibility.ensure_compatible()
+                .map_err(|error| error.with_workspace_root(&info.root))?;
             if info.indexed {
                 // A model/provider NOT_FOUND must not become an index creation prompt.
                 return Err(original_error);
@@ -279,8 +280,8 @@ impl SetupState {
                             endpoint: None,
                             device: zg_engine::api::index::options::Device::Auto,
                         }),
-                        model_cache: request.model_cache.clone(),
-                        device: if choice.local { request.device } else { None },
+                        runtime_model_cache: request.model_cache.clone(),
+                        runtime_device: if choice.local { request.device } else { None },
                         embedding_concurrency: request.embedding_concurrency,
                         ..Default::default()
                     };

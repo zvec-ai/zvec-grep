@@ -4,9 +4,11 @@ FROM ${CUDA_IMAGE}
 ARG DEBIAN_FRONTEND=noninteractive
 ARG RUST_VERSION=1.98.0
 
-# CUDA is already supplied by the pinned image. Build tools come from Ubuntu;
+# CUDA, when needed, is supplied by the pinned image. Build tools come from Ubuntu;
 # NVIDIA repository metadata is not needed and may be mid-mirror-sync.
-RUN set -- -o Dir::Etc::sourcelist=sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- \
+RUN sources=sources.list \
+    && if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then sources=sources.list.d/ubuntu.sources; fi \
+    && set -- -o Dir::Etc::sourcelist="$sources" -o Dir::Etc::sourceparts=- \
         -o APT::Update::Error-Mode=any -o Acquire::Retries=3 \
     && apt-get "$@" update \
     && apt-get "$@" install --yes --no-install-recommends \

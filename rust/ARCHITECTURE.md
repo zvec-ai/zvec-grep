@@ -2,90 +2,102 @@
 
 ## Public application boundary
 
-`zg-engine` has one behavioral entry point: `ZvecGrep`. Each public method
-accepts a concrete request and returns its concrete reply:
+[`ZvecGrep`](crates/zg-engine/src/lib.rs) is the reusable engine entry point.
+Its main asynchronous methods accept concrete options and return typed results:
 
 ```rust,ignore
-ZvecGrep::new() -> ZvecGrep
-ZvecGrep::query(QueryRequest) -> Result<QueryReply, EngineError>
-ZvecGrep::lexical_search(LexicalSearchRequest) -> Result<LexicalSearchReply, EngineError>
-ZvecGrep::index(IndexRequest) -> Result<IndexReply, EngineError>
-ZvecGrep::inspect(InspectRequest) -> Result<InspectReply, EngineError>
-ZvecGrep::change_index(ChangeIndexRequest) -> Result<ChangeIndexReply, EngineError>
-ZvecGrep::job(JobRequest) -> Result<JobReply, EngineError>
-ZvecGrep::close()
+ZvecGrep::context(ContextOptions) -> EngineResult<ContextResult>
+ZvecGrep::files(FilesOptions) -> EngineResult<FilesResult>
+ZvecGrep::paths(PathsOptions) -> EngineResult<PathsResult>
+ZvecGrep::lookup_path(PathsOptions) -> EngineResult<PathLookupResult>
+ZvecGrep::index(IndexOptions) -> EngineResult<IndexResult>
+ZvecGrep::info(InfoOptions) -> EngineResult<InfoResult>
+ZvecGrep::index_setup(IndexSetupOptions) -> EngineResult<IndexSetup>
+ZvecGrep::drop_index(InfoOptions) -> EngineResult<bool>
 ```
 
-Every request carries an optional workspace `root`; omitting it uses the process
-working directory. `ZvecGrep` owns shared engine resources rather than one
-workspace, so one long-lived instance can serve many roots. Multiple instances
-remain legal for configuration or test isolation; there is no global static
-singleton.
+`EngineResult<T>` is `Result<T, EngineError>`. Types live under the matching
+method groups in [`zg_engine::api`](crates/zg-engine/src/api/mod.rs).
+`ZvecGrep::new()` creates an instance; `close()` retires its resources.
+Resident callers can enable the read-session cache, inspect runtime counts,
+watch workspaces, and call `context_after_refresh` after coordinating a refresh.
 
-There is deliberately no `Core`, `Command`, `Operation`, `Reply`, `Outcome`,
-`CorePorts` or `OperationExecutor` in the engine. `RequestOutcome` is also
-absent: an in-process call returns the reply it requested.
+Workspace roots are request state, so one long-lived instance can serve many
+roots. Optional roots resolve from the current working directory according to
+the operation. Multiple instances remain useful for tests and isolated callers;
+there is no global engine singleton.
 
-The implemented lexical path is:
+Public methods call private services directly. Transport command envelopes and
+MCP tool routing live outside the engine; an in-process call returns the typed
+result it requested. Authorization preflight and configuration are explicit
+public modules, with their boundaries described in
+[the contributor guide](CONTRIBUTING.md#engine-changes).
+
+## Retrieval and indexing
+
+`context` selects indexed retrieval or direct lexical search from its options:
 
 ```text
-CLI -> ZvecGrep::lexical_search -> private embedded grep service
-MCP -> ZvecGrep::lexical_search -> private embedded grep service
+CLI / MCP -> ZvecGrep::context -> indexed retrieval (FTS / vector / hybrid)
+                             -> embedded grep when rg is enabled
 ```
 
-## Internal services
+The private lexical service owns admission, grep matcher/searcher construction,
+ignore-aware traversal, filtering, and deterministic ordering. Blocking search
+runs outside Tokio's async workers; no external ripgrep executable is required.
+`files` enumerates current files, while `paths` and `lookup_path` handle current
+file-name lookup and its literal-source fallback without creating an index.
 
-Implementation modules live in `zg-engine` and remain private. A service may
-own concurrency, cancellation or resource cleanup required by its native
-resource, but those policies do not justify a second generic dispatcher.
+Indexing coordinates the native scanner, source extraction, model runtimes,
+and zvec storage. Scan rules belong to the persisted workspace; query filters
+narrow retrieval without rewriting those rules. Text and code share one
+embedding model per workspace; images are currently skipped.
 
-The lexical service owns admission, `grep` matcher/searcher construction,
-`ignore` traversal, filtering and deterministic ordering. It runs blocking
-filesystem search work outside Tokio's async workers and does not spawn a
-ripgrep executable.
+The workspace layer owns manifests, portable paths, credentials, locks,
+and recoverable index publication under `.zvec-grep/`. See the
+[engine guide](crates/zg-engine/README.md) and
+[workspace internals](crates/zg-engine/src/workspace/README.md) for storage,
+relocation, and authorization behavior.
 
-`ZvecGrep` also owns one private model runtime manager. Its cache key includes
-the model reference and resource-affecting runtime options (credential
-fingerprint, endpoint, cache directory and device). Acquiring the same key
-returns counted leases over one shared model instance. Concurrent embedding
-calls share the instance's lazily loaded tokenizer and weights rather than
-loading independent copies. Closing `ZvecGrep` rejects new leases, immediately
-retires idle runtimes and lets active leases finish before their runtime is
-released.
+## Resource ownership
 
-Embedding model lifecycle events stay private until a runtime lease maps them
-into the public `IndexProgress::embedding` shape. In-process callers attach an
-`IndexProgressReporter` to `IndexRequest`; daemon protocol events carry the
-serializable `IndexProgress` value instead of the runtime-only callback.
+The engine owns a private model runtime manager. Matching model configuration
+and concurrency settings reuse cached runtimes and their loaded resources.
+Leases keep active runtimes alive; closing the engine rejects new operations
+and retires idle resources while active leases finish.
 
-## Process transport
+Embedding lifecycle events become `IndexProgress::embedding`. In-process
+callers attach an `IndexProgressReporter` to `IndexOptions`; daemon streams carry
+serializable progress events without the runtime-only callback.
 
-The daemon owns one process-level `Arc<ZvecGrep>`. `zg-transport-mcp` translates
-each tool input directly into the corresponding typed method call; it does not
-introduce a generic executor or engine command bus.
+The resident daemon owns workspace coordination, background jobs, watchers,
+and one process-level `Arc<ZvecGrep>`. It enables cached index read sessions and
+reuses engine resources across requests and roots. Direct CLI execution retains
+resources for the command's lifetime. Mode differences are recorded in
+[`compat/mode-differences.toml`](compat/mode-differences.toml).
 
-Other daemon serialization belongs to `zg-daemon-protocol`. Its wire DTOs are
-transport types only; the in-process engine never translates itself into a
-transport command.
+## Crate boundaries
 
-## Supporting crates
-
-The embedding catalog and Model2Vec runtime live in the private
-`zg-engine::models` module. They are not yet composed into the high-level
-index/query path, but integration requires no public model API or crate cycle.
-
-`zg-host-native` remains an independently testable scanner and watcher crate not
-yet composed into the high-level index/query path. When integrated, its concrete
-implementation should move behind a private engine service without introducing
-a dispatcher layer.
+- `zg-engine`: typed engine API and private retrieval, indexing, extraction,
+  model, storage, and workspace services.
+- `zg-cli` and `zg`: argument parsing, terminal rendering, and binary lifecycle.
+- `zg-host-native`: native scanner and watcher implementations used by the engine.
+- `zg-llama-native`: native llama/ggml backend loading boundary.
+- `zg-daemon`: resident process, HTTP endpoints, jobs, and stdio bootstrap.
+- `zg-daemon-protocol`: transport-only command, reply, and progress DTOs.
+- `zg-transport-mcp`: tool schemas, input validation, result presentation,
+  consent, and index setup.
+- `zg-testkit`: fixtures and shared test helpers.
 
 ## Dependency rules
 
-- Application code depends on `zg-engine`, never on private implementation
-  modules.
-- Transport DTOs do not enter the engine API.
-- Native implementation types stay in the crate that owns the dependency.
-- Add an abstraction only when at least two real implementations require it.
-- Concurrency limits live next to the resource they constrain.
-- Output ordering and error codes remain deterministic across Direct and Server
-  modes.
+- Application code uses the engine's public types and methods.
+- Transport DTOs stay outside the engine API.
+- Native dependency types stay in their owning crate; private engine services
+  coordinate them without an adapter registry or generic command bus.
+- Shared abstractions require multiple real implementations.
+- Concurrency limits stay next to the resources they constrain.
+- Cancellation, deterministic output, partial-artifact cleanup, and native
+  revision tracking are part of integration review.
+
+See [contributing](CONTRIBUTING.md) for checks and compatibility expectations.

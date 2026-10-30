@@ -1,0 +1,152 @@
+{
+  "version": "1.21.0",
+  "linuxGlibcMax": "2.31",
+  "artifacts": {
+    "linux-x64": {
+      "archive": "onnxruntime-linux-x64-1.21.0.tgz",
+      "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.21.0/onnxruntime-linux-x64-1.21.0.tgz",
+      "sha256": "7485c7e7aac6501b27e353dcbe068e45c61ab51fbaf598d13970dfae669d20bf",
+      "files": {
+        "onnxruntime-linux-x64-1.21.0/lib/libonnxruntime.so.1.21.0": "libonnxruntime.so.1",
+        "onnxruntime-linux-x64-1.21.0/LICENSE": "licenses/onnxruntime-LICENSE",
+        "onnxruntime-linux-x64-1.21.0/ThirdPartyNotices.txt": "licenses/onnxruntime-ThirdPartyNotices.txt"
+      }
+    },
+    "linux-aarch64": {
+      "archive": "onnxruntime-linux-aarch64-1.21.0.tgz",
+      "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.21.0/onnxruntime-linux-aarch64-1.21.0.tgz",
+      "sha256": "4508084bde1232ee1ab4b6fad2155be0ea2ccab1c1aae9910ddb3fb68a60805e",
+      "files": {
+        "onnxruntime-linux-aarch64-1.21.0/lib/libonnxruntime.so.1.21.0": "libonnxruntime.so.1",
+        "onnxruntime-linux-aarch64-1.21.0/LICENSE": "licenses/onnxruntime-LICENSE",
+        "onnxruntime-linux-aarch64-1.21.0/ThirdPartyNotices.txt": "licenses/onnxruntime-ThirdPartyNotices.txt"
+      }
+    },
+    "linux-x64-gpu": {
+      "archive": "onnxruntime-linux-x64-gpu-1.21.0.tgz",
+      "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.21.0/onnxruntime-linux-x64-gpu-1.21.0.tgz",
+      "sha256": "ef37a33ba75e457aebfd0d7b342ab20424aa6126bc5f565d247f1201b66996cf",
+      "files": {
+        "onnxruntime-linux-x64-gpu-1.21.0/lib/libonnxruntime.so.1.21.0": "libonnxruntime.so.1",
+        "onnxruntime-linux-x64-gpu-1.21.0/LICENSE": "licenses/onnxruntime-LICENSE",
+        "onnxruntime-linux-x64-gpu-1.21.0/ThirdPartyNotices.txt": "licenses/onnxruntime-ThirdPartyNotices.txt",
+        "onnxruntime-linux-x64-gpu-1.21.0/lib/libonnxruntime_providers_shared.so": "libonnxruntime_providers_shared.so",
+        "onnxruntime-linux-x64-gpu-1.21.0/lib/libonnxruntime_providers_cuda.so": "libonnxruntime_providers_cuda.so"
+      }
+    },
+    "osx-arm64": {
+      "archive": "onnxruntime-osx-arm64-1.21.0.tgz",
+      "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.21.0/onnxruntime-osx-arm64-1.21.0.tgz",
+      "sha256": "5c3f2064ee97eb7774e87f396735c8eada7287734f1bb7847467ad30d4036115",
+      "files": {
+        "onnxruntime-osx-arm64-1.21.0/lib/libonnxruntime.1.21.0.dylib": "libonnxruntime.1.dylib",
+        "onnxruntime-osx-arm64-1.21.0/LICENSE": "licenses/onnxruntime-LICENSE",
+        "onnxruntime-osx-arm64-1.21.0/ThirdPartyNotices.txt": "licenses/onnxruntime-ThirdPartyNotices.txt"
+      }
+    },
+    "osx-x86_64": {
+      "archive": "onnxruntime-osx-x86_64-1.21.0.tgz",
+      "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.21.0/onnxruntime-osx-x86_64-1.21.0.tgz",
+      "sha256": "8305afd2d75ee5702844a23b099d41885af30ad3d1b4cf3d8d795e3d8c1f9396",
+      "files": {
+        "onnxruntime-osx-x86_64-1.21.0/lib/libonnxruntime.1.21.0.dylib": "libonnxruntime.1.dylib",
+        "onnxruntime-osx-x86_64-1.21.0/LICENSE": "licenses/onnxruntime-LICENSE",
+        "onnxruntime-osx-x86_64-1.21.0/ThirdPartyNotices.txt": "licenses/onnxruntime-ThirdPartyNotices.txt"
+      }
+    },
+    "windows-x64-directml": {
+      "archive": "Microsoft.ML.OnnxRuntime.DirectML.1.21.0.nupkg",
+      "url": "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/1.21.0/microsoft.ml.onnxruntime.directml.1.21.0.nupkg",
+      "sha256": "12bed6e1e870f30e0150e039ebb6853da32eba381eda1c373faeeb17168785e6",
+      "files": {
+        "runtimes/win-x64/native/onnxruntime.dll": "onnxruntime.dll",
+        "LICENSE": "licenses/onnxruntime-LICENSE",
+        "ThirdPartyNotices.txt": "licenses/onnxruntime-ThirdPartyNotices.txt"
+      }
+    },
+    "directml-x64": {
+      "archive": "microsoft.ai.directml.1.15.4.nupkg",
+      "url": "https://api.nuget.org/v3-flatcontainer/microsoft.ai.directml/1.15.4/microsoft.ai.directml.1.15.4.nupkg",
+      "sha256": "4e7cb7ddce8cf837a7a75dc029209b520ca0101470fcdf275c1f49736a3615b9",
+      "files": {
+        "bin/x64-win/DirectML.dll": "DirectML.dll",
+        "LICENSE.txt": "licenses/directml-LICENSE",
+        "LICENSE-CODE.txt": "licenses/directml-LICENSE-CODE",
+        "ThirdPartyNotices.txt": "licenses/directml-ThirdPartyNotices.txt"
+      }
+    },
+    "windows-arm64-directml": {
+      "archive": "Microsoft.ML.OnnxRuntime.DirectML.1.21.0.nupkg",
+      "url": "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/1.21.0/microsoft.ml.onnxruntime.directml.1.21.0.nupkg",
+      "sha256": "12bed6e1e870f30e0150e039ebb6853da32eba381eda1c373faeeb17168785e6",
+      "files": {
+        "runtimes/win-arm64/native/onnxruntime.dll": "onnxruntime.dll",
+        "LICENSE": "licenses/onnxruntime-LICENSE",
+        "ThirdPartyNotices.txt": "licenses/onnxruntime-ThirdPartyNotices.txt"
+      }
+    },
+    "directml-arm64": {
+      "archive": "microsoft.ai.directml.1.15.4.nupkg",
+      "url": "https://api.nuget.org/v3-flatcontainer/microsoft.ai.directml/1.15.4/microsoft.ai.directml.1.15.4.nupkg",
+      "sha256": "4e7cb7ddce8cf837a7a75dc029209b520ca0101470fcdf275c1f49736a3615b9",
+      "files": {
+        "bin/arm64-win/DirectML.dll": "DirectML.dll",
+        "LICENSE.txt": "licenses/directml-LICENSE",
+        "LICENSE-CODE.txt": "licenses/directml-LICENSE-CODE",
+        "ThirdPartyNotices.txt": "licenses/directml-ThirdPartyNotices.txt"
+      }
+    },
+    "windows-x64-cuda": {
+      "archive": "microsoft.ml.onnxruntime.gpu.windows.1.21.0.nupkg",
+      "url": "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.gpu.windows/1.21.0/microsoft.ml.onnxruntime.gpu.windows.1.21.0.nupkg",
+      "sha256": "ba69f0aab905508eaca2beadd9fdd3939526651e78147005f527c7f45d7424c6",
+      "files": {
+        "runtimes/win-x64/native/onnxruntime.dll": "onnxruntime.dll",
+        "runtimes/win-x64/native/onnxruntime_providers_shared.dll": "onnxruntime_providers_shared.dll",
+        "runtimes/win-x64/native/onnxruntime_providers_cuda.dll": "onnxruntime_providers_cuda.dll",
+        "LICENSE": "licenses/onnxruntime-LICENSE",
+        "ThirdPartyNotices.txt": "licenses/onnxruntime-ThirdPartyNotices.txt"
+      }
+    }
+  },
+  "targets": {
+    "x86_64-unknown-linux-gnu": {
+      "cpu": [
+        "linux-x64"
+      ],
+      "cuda": [
+        "linux-x64-gpu"
+      ]
+    },
+    "aarch64-unknown-linux-gnu": {
+      "cpu": [
+        "linux-aarch64"
+      ]
+    },
+    "aarch64-apple-darwin": {
+      "cpu": [
+        "osx-arm64"
+      ]
+    },
+    "x86_64-apple-darwin": {
+      "cpu": [
+        "osx-x86_64"
+      ]
+    },
+    "x86_64-pc-windows-msvc": {
+      "cpu": [
+        "windows-x64-directml",
+        "directml-x64"
+      ],
+      "cuda": [
+        "windows-x64-cuda"
+      ]
+    },
+    "aarch64-pc-windows-msvc": {
+      "cpu": [
+        "windows-arm64-directml",
+        "directml-arm64"
+      ]
+    }
+  }
+}

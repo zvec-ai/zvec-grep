@@ -1,8 +1,11 @@
-# zvec-grep Rust rewrite
+# zvec-grep Rust workspace
 
-This directory contains the Rust implementation of zvec-grep. The TypeScript /
-Node.js implementation remains at the repository root; the [main README](../README.md)
-and [user documentation](../docs/README.md) describe that implementation.
+This directory contains the native zvec-grep CLI, engine, daemon, and MCP
+transport. Start with the [main README](../README.md) or the
+[user documentation](https://zvec.org/en/docs/zvec-grep/) for installation and
+everyday use. This page covers implementation behavior, native builds, and
+packaging. The repository root retains the legacy TypeScript implementation and
+its separate checks.
 
 Run the development commands below from `rust/` (`cd rust` from the repository
 root). See the [contributor guide](CONTRIBUTING.md) for checks and conventions.
@@ -43,10 +46,14 @@ let reply = zg.context(ContextOptions {
 zg.close();
 ```
 
+Rg requests return plain text matches and requested context without parsing code
+or Markdown structure. CLI and MCP rg searches share this behavior; current-file
+path lookup keeps its structural entity grouping.
+
 Index embedding concurrency is configured with
-`zg --index --index-embedding-concurrency <n>`; the old
-`--embedding-concurrency` spelling is rejected. For automatic indexing and
-refreshes as well, set `ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY=<n>`. Values must be
+`zg --index --embedding-concurrency <n>`.
+The option is rejected outside `--index`. For automatic indexing and
+refreshes as well, set `ZVEC_GREP_EMBEDDING_CONCURRENCY=<n>`. Values must be
 positive integers. Explicit CLI/API index settings take precedence over this
 environment variable, followed by the legacy
 `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` for llama.cpp indexing, then backend defaults.
@@ -65,6 +72,35 @@ request scheduling. Model2vec and remote overrides are not capped at eight.
 Matching local concurrency configurations share runtime admission. Different
 configurations use separate cached native resources; active leases keep their
 models alive, while unused variants are released when switching configurations.
+
+`zg --install --upgrade-installed` migrates existing user-level MCP launchers
+from 0.2.x without selecting agents or installing new integrations. It changes
+`zg server --stdio` to `zg --server --stdio` and replaces recognized Node/JS
+entrypoints with the running native executable. Legacy `zg` launchers that specify
+an executable path also switch to the running native executable, so an old npm
+prefix cannot keep invoking the Node.js version. Bare `zg` commands retain PATH
+lookup, and launchers already using native syntax retain their executable paths.
+Known config-directory overrides are respected; project files are not searched.
+HTTP connections, toolsets, timeouts, environment variables, disabled state,
+permissions and guidance remain unchanged. JSONC and TOML comments are preserved.
+Only existing entries are changed, including when related clients use separate
+config files.
+
+Use `zg --install --upgrade-installed --dry-run` to preview. Each changed file
+gets a unique adjacent `.zg-upgrade-*.bak` backup before atomic replacement.
+Repeated runs make no additional changes. Invalid files and unsupported launchers
+are reported while other independent files are processed; any unresolved entry
+produces a nonzero exit status. Migration does not start a daemon or load models.
+Reconnect agents afterwards. HTTP users can run `zg --server on` to replace an
+old daemon using the existing protocol-upgrade path.
+
+Published npm packages attempt this migration after a successful global
+installation or rebuild for the current user. Local dependencies, temporary
+execution, CI, elevated Unix installs and ambiguous user homes are skipped.
+Set `ZG_INSTALL_SKIP_AGENT_UPGRADE=1` to opt out. Automatic migration has a
+10-second timeout; failure preserves package installation and writes details to
+`agent-upgrade.log` in the installed package. The manual command remains available
+for skipped or failed migrations. Packaging and release verification opt out.
 
 `zg --install --target opencode` respects a nonempty `OPENCODE_CONFIG` override.
 Otherwise it selects an existing `opencode.jsonc` before `opencode.json` under
@@ -92,7 +128,8 @@ stable ownership marker, so changing the daemon URL does not leave stale
 managed entries. Use `/reload` or a new session. Native filesystem paths are
 required for the directory override; file URIs and Windows shell drive paths
 are rejected. Pi's built-in MCP currently needs user-managed `zg --auth grant`
-authorization for Remote Embedding; see the [integration guide](../docs/01-agents.md).
+authorization for Remote Embedding; see the
+[integration guide](https://zvec.org/en/docs/zvec-grep/agents/).
 
 `ZvecGrep` is normally shared for the lifetime of a process. Workspace root is
 request state, so the same instance can serve multiple workspaces. It exposes
@@ -145,7 +182,7 @@ incremental writer when the effective model configuration matches (including
 credentials, endpoint, device and model cache). Borrowed queries keep storage,
 models and the home lock alive; publication waits for them to finish. `Wait` and
 legacy synchronous auto-update queries never borrow partial writer state. A
-rebuild's unpublished generation remains private. The daemon preserves the refresh
+rebuild's unpublished replacement remains private. The daemon preserves the refresh
 policy when invoking the engine and also bounds cancellable waits for scheduled jobs.
 
 The daemon retires workspace runtimes and watchers after four hours without a
@@ -160,6 +197,35 @@ remain shared at engine scope and follow their own lease lifetime.
 The native engine supports indexing, indexed FTS and vector search, `zg --rg`,
 workspace discovery, `info`, and idempotent `drop_index`.
 
+Search and status discover the nearest enclosing `.zvec-grep` directory. Its
+parent is the source directory, and the active data lives at `.zvec-grep/index`.
+Moving or copying the source directory together with `.zvec-grep` preserves the
+index without registration or a workspace name. The manifest records the previous
+absolute source location for environment checks; it does not locate the source.
+
+First builds and rebuilds prepare data in `.zvec-grep/temp/new`, retaining the
+previous index until publication succeeds. An interrupted directory swap is
+recovered before readers enter; successful publication keeps the fixed `index/`
+path and clears temporary data.
+
+Stored file paths and internal ignore-file references move with the workspace.
+Missing ignore files and external paths that are not absolute on the current
+platform are skipped without removing their saved references. Other read errors,
+invalid rules, and invalid path components produce errors. Filename collisions
+introduced by moving to a different filesystem are not detected; rebuild the
+index to match the files present at the destination.
+Incomplete scans do not apply deletions, cancelled file preparation preserves
+existing content, and content-identical updates refresh timestamps without
+embedding again.
+
+Explicit index device and model-cache options are saved as workspace defaults;
+omitted options preserve them. Each operation resolves these settings from
+explicit options, environment, workspace defaults, global configuration, then
+backend defaults. After moving a workspace, override incompatible preferences
+with `zg --index --device cpu --model-cache <path>`; no rebuild is required.
+Query overrides remain temporary and are not written back by automatic refresh
+or retained by watchers.
+
 Search directly with `zg "where authentication is validated"`, `zg --fts
 "AuthService"`, or `zg --rg -F "AuthService" src`. Management uses flags:
 `zg --index`, `zg --status`, `zg --server`, `zg --config`, `zg --auth`,
@@ -173,10 +239,36 @@ It rotates at 10 MiB and keeps five numbered backups by default. The global
 (`info` or `debug`); restart the daemon after changing them. Bootstrap failures
 are written to `<home>/daemon/bootstrap.log`.
 
-Terminal searches default to human-readable output with full source previews;
-piped output is compact. `--compact` forces compact output, and
-`--preview=full` explicitly requests full previews even in compact output.
-The former `--human` option is no longer accepted.
+The instance record at `<home>/daemon/instance.lock` carries
+`daemonProtocolVersion: 1`. Status checks and daemon-backed CLI requests reject
+live legacy daemons without this field, including Node.js daemons; `auto` mode
+does not silently fall back to direct execution. Run `zg --server on` with the
+same home and any required token file to stop the legacy daemon and start Rust.
+The stdio bootstrap performs the same replacement automatically. Concurrent
+starts serialize shutdown and startup. Automatic migration only requests graceful
+shutdown: an unreachable endpoint, HTTP rejection, or exit timeout preserves the
+process instead of sending termination signals. OS process start times are checked
+against the instance record to reject reused PIDs. When changing listening addresses,
+the target is checked before stopping the old service. Legacy `localhost` endpoints
+are probed on both IPv4 and IPv6; ambiguous healthy endpoints block migration.
+Other protocol versions are rejected without replacement;
+use a compatible client or explicitly stop that daemon first. Index format
+compatibility remains separate and may require `zg --index --rebuild`.
+
+Searches default to `--preview short` in terminals, pipes, and redirected files.
+Use `none` for a one-line source summary, `short` for compact bounded source,
+`full` for compact full source, or `detail` for full previews with metadata,
+outlines, and file/hit grouping. Short and full preserve the original Rust compact
+per-hit layout, including indented `line: source` rows. Every preview preserves each
+query group's results, ranks and matched content; only `--fuse` combines groups.
+Query echoes, group headings, hit counts and `matchedBy` labels are omitted from
+the CLI result display. Full previews do not retrieve an entire function or file.
+Metadata labels use purple, file locations use cyan, and query matches use yellow.
+Automatic colors are disabled for redirected output, `TERM=dumb`, or `NO_COLOR`;
+`--color always` explicitly enables colors, including through pipes, and
+`--color never` disables them. `--color auto` is the default; the redundant
+`--no-color` option is no longer accepted.
+The former `--compact` and `--human` options are no longer accepted.
 
 When an interactive search finds no index, it asks you to choose an embedding
 model before building. The picker has **Local models** and **Remote models** tabs:
@@ -188,6 +280,13 @@ credentials are available. Selecting one with missing credentials opens a masked
 API Key prompt, with paste, Backspace, Ctrl+U to clear and Esc to exit. Enter saves
 a non-empty key to the provider's global configuration and continues to remote
 authorization. The new key is used for both the build and following CLI query.
+
+After files are processed, indexing shows **Optimizing index**, **Saving index**,
+and **Finishing index** while storage is finalized and the index is published.
+Interactive terminals show an animated indicator and elapsed time during these
+stages; completion is reported
+only after publication succeeds. Incompatible indexes show a rebuild command and
+their directory, with internal diagnostics available through `--debug`.
 
 Local selection starts the build. Remote selection first discloses the workspace,
 model, endpoint, data sent and possible API charges, then offers Allow once, Allow
@@ -226,13 +325,13 @@ either full content or UTF-8 byte offsets relative to the entity's content. Sour
 locations, including line and column numbers, are calculated when needed;
 fragments do not duplicate content or source coordinates.
 Model collections store the text and vectors needed for retrieval, with entity
-metadata included in search projections. Index format 5 uses this layout.
+metadata included in search projections. Index format 2 uses this layout.
 
 Lexical search runs in-process with ripgrep's `grep` and `ignore` crates; the
 binary and ordinary CI jobs do not require a system `rg` executable.
 
 A single file name or path, such as `zg auth.ts` or `zg src/auth.ts`, first
-looks up current file paths. Matches use `#1 matchedBy=path src/auth.ts`, with
+looks up current file paths. Matches use `#1 src/auth.ts`, with
 forward slashes on every platform and exact workspace-relative paths before suffix
 matches. Ties use deterministic native path ordering; `--limit` bounds the list
 (default: 10). Lookup uses the nearest workspace's saved scan rules and query
@@ -330,31 +429,39 @@ zg --auth revoke /path/to/workspace
 Granting consent does not send data, load a model, or build an index. Subsequent
 remote indexing and semantic search may send workspace content and query text
 to the selected endpoint and incur provider charges. API credentials remain
-separate: use `ZVEC_GREP_API_KEY` or `--api-key` for actual operations.
+separate: use `ZVEC_GREP_API_KEY`, global model settings, or `--api-key` for
+actual operations. An API key explicitly supplied when indexing is encrypted in
+the manifest; inherited environment/global credentials and query-only keys are
+not persisted.
+
+The decryption key is stored in `.zvec-grep/credentials.key` and must travel with
+the workspace. Copying the complete directory therefore copies access to its
+saved credentials; this key does not grant permission to send data remotely.
 
 Without `--embedding`, grant uses the existing index model, then
 `ZVEC_GREP_EMBEDDING`, then the configured default model. `--endpoint` overrides
 the stored index endpoint, per-model endpoint configuration, `ZVEC_GREP_ENDPOINT`,
-and provider default. The signed grant at
-`.zvec-grep/authorization.json` binds the canonical workspace root, model, and
-endpoint. Changing any of them requires a new grant. The signing key lives at
-`$ZVEC_GREP_HOME/authorization.key` (default `~/.zvec-grep/authorization.key`),
-or the path selected by `ZVEC_GREP_AUTHORIZATION_KEY_FILE`.
+and provider default. The grant at `.zvec-grep/authorization.json` binds the
+canonical source root, username, model, and endpoint. A change to any of these
+requires a matching grant. A copied grant remains valid on another machine when
+the source path and username match. No authorization state or signing key is
+stored in the user home directory, and no machine fingerprint is used.
 
-Prepare the outer directory before initializing a custom signing-key location.
-For example, with `ZVEC_GREP_HOME=/data/apps/zg`, `/data/apps` must already exist;
-the engine creates `zg`. For an explicit key-file path, the engine can create its
-direct parent directory, but that directory's parent must already exist.
+Authorization records describe the user's saved consent; they are not signed or
+protected against deliberate edits. Only explicit authorization updates the
+recorded path and username; index updates and manifest writes do not. When the
+username cannot be determined, use single-operation consent instead of a
+persistent grant.
 
-Direct CLI, server CLI, and MCP read the same authorization on each operation;
-configure them to use the same signing key. Revocation takes effect for new
+Direct CLI, server CLI, and MCP read the same workspace authorization on each
+operation. Revocation takes effect for new
 operations without restarting the server. `--allow-remote` on `zg --index` or
 `zg <query>` grants consent for that operation only, including its synchronous
 refresh, and never authorizes later watcher jobs. MCP reuses existing workspace
 grants and otherwise asks form-capable clients for explicit consent before index
 or search sends data remotely. The form discloses the root, source roots, model,
 endpoint and data categories. Choose `once` for this operation, `workspace` for a
-signed persistent grant, or `cancel` to deny transmission. Search also offers
+persistent grant, or `cancel` to deny transmission. Search also offers
 `fts_only`, which disables vector retrieval and refresh. Unsupported clients,
 invalid responses, declined forms, cancellation and timeouts never grant consent.
 Cancelling the originating request also sends a cancellation notification for its
@@ -371,7 +478,9 @@ establish a reconciliation proof. Public search freshness requires observed
 file-change evidence independently of reconciliation or background activity.
 Native `flush_pending` drains delivered events without forcing a
 scan, while explicit `flush` and periodic/recovery checks retain full rescans.
-Explicit `info` inspection still reads current disk status.
+Explicit `info` inspection still reads current disk status and compares changed
+files with saved content hashes. Automatic refresh checks use metadata first,
+and the indexing pass resolves unchanged content before embedding.
 
 For protocol `2026-07-28`, remote consent uses `input_required`. Echo the exact
 `requestState` and unchanged tool arguments with
@@ -399,10 +508,10 @@ MCP use these coordinates for source numbering; preview never infers a range fro
 the number of content lines. The engine also interprets half-open line bounds.
 The required field changes the internal daemon reply contract. Native ripgrep
 type filters apply to queries; persisted scan rules support path globs and file
-formats using the same filename rules as indexed queries. Version 14 separates
-case-sensitive and case-insensitive glob updates on the daemon wire.
-Version 15 distinguishes complete ordered glob replacement from category updates.
-Restart older resident daemons when updating the CLI; replies without
+formats using the same filename rules as indexed queries. The daemon wire
+distinguishes complete ordered glob replacement from case-category updates.
+The instance record uses `daemonProtocolVersion: 1`; see the daemon migration
+notes above when replacing older resident processes. Replies without
 `content_range` are rejected during deserialization. Direct and server rendering
 consume the same engine contract.
 
@@ -429,12 +538,13 @@ Search never changes persisted scan policy: `includeHidden`, `useDefaultIgnores`
 `maxDepth`, `maxFileSizeBytes` and `follow` belong on index requests. Node's
 indexed-search path ignores its scanning options; Rust rejects them explicitly.
 `useDefaultIgnores` controls built-in exclusions and discovered ignore files;
-explicit `ignoreFiles` always apply and must exist. Scan rules are validated
-before index mutations, and `maxFileSizeBytes` must be positive when set.
-Unknown search/index fields and public nulls are rejected, except index
-`maxDepth: null` / `maxFileSizeBytes: null`, which clear saved limits.
+explicit `ignoreFiles` remain enabled independently of that switch. Missing files
+are skipped and their paths remain saved; other read errors and invalid rules fail
+before index mutations. `maxFileSizeBytes: 0` excludes all files, including empty files.
+Unknown search/index fields are rejected. Index `maxDepth: null` and
+`maxFileSizeBytes: null` clear saved limits.
 Existing typed globs, `includedFormats`/`excludedFormats`, categories, `enum`,
-`name`, `nestedGit`, diagnostic extensions and their compatibility boundaries are recorded in
+`nestedGit`, diagnostic extensions and their compatibility boundaries are recorded in
 [`allowed-differences.toml`](compat/allowed-differences.toml).
 
 Managed rg uses a file/line/context presentation and preserves all requested
@@ -486,13 +596,14 @@ bash scripts/check.sh
 ## Native and CUDA builds
 
 The safe llama API and the C5 FFI boundary share the same pinned
-`zvec-ai/llama-cpp-rs` revision (`660cb4008b36aaefe9f98a590ba3b712b3a95087`),
-from branch `prebuilt/0.1.154-cpu-r2`.
+`zvec-ai/llama-cpp-rs` revision (`b55399ac6c2035f2301120547c4c967e741d25d3`),
+from branch `prebuilt/0.1.154-cpu-r2-glibc-2.31`.
 Its sys crate automatically selects a SHA256-pinned SDK when target, features
-and native options match: `zvec-0.1.154-cpu-r2` for CPU-only Linux x64 and
-Windows x64/ARM64, and `zvec-0.1.154-r1` for the existing five release configurations,
-including CUDA-enabled Linux/Windows x64. This pin adds Windows ARM64 CPU support
-without introducing the CUDA r2 architecture upgrade. Matching builds reuse native
+and native options match. Linux x64 CPU, Linux ARM64 CPU and Linux x64 CUDA use
+`zvec-0.1.154-glibc-2.31-r1`, built on Ubuntu 20.04 and verified against a glibc
+2.31 baseline. Windows x64/ARM64 CPU use `zvec-0.1.154-cpu-r2`; macOS and
+CUDA-enabled Windows x64 use `zvec-0.1.154-r1`. CUDA architecture coverage is
+unchanged. Matching builds reuse native
 libraries and bindings without executing bindgen, CMake, C++ or CUDA compilation;
 Rust application code still compiles normally. CPU-only x64 builds download only
 the static CPU SDK, not the CUDA SDK; CUDA builds retain the shared core, CPU
@@ -530,16 +641,18 @@ Optional backends still use the verified SDK cache or current source backend
 directory; this development output is not a portable distribution.
 Use the npm packaging commands below to assemble a distributable runtime.
 
-CUDA Cargo builds also deploy the pinned official ONNX Runtime CUDA 12 main
-library and its shared/CUDA providers beside the executable, using the same
-SHA-256-verified preparation script as npm packaging (requires Python 3 and
-curl; `PYTHON` can select the interpreter). The archive is reused from
-`target/ort-cuda12` (under the target triple for cross-target builds).
-`CARGO_NET_OFFLINE=true` requires that archive to be cached already. Both
-`--device cpu` and `--device cuda` can then load ORT without `ORT_DYLIB_PATH`
-or `LD_LIBRARY_PATH`; CUDA execution still requires a compatible NVIDIA driver,
-CUDA 12 runtime and cuDNN 9 installed on the host. Non-CUDA Cargo builds retain
-their existing ORT linking behavior and do not download this CUDA runtime.
+All Cargo builds deploy official ONNX Runtime 1.21.0 shared libraries beside
+executables, tests and examples. The engine build script uses the same
+SHA-256-pinned preparation script as npm packaging (Python 3 and curl are
+required; `PYTHON` selects the interpreter). Archives are cached under
+`target/ort-prebuilt` (under the target triple for cross-target builds), or
+`ZG_ORT_CACHE_DIR`. `CARGO_NET_OFFLINE=true` requires verified cached archives.
+CPU builds select CPU/CoreML/DirectML runtimes; x64 CUDA builds select matching
+CUDA 12 core/providers. Both `--device cpu` and `--device cuda` locate packaged
+ORT without loader environment overrides. CUDA execution still requires the
+host NVIDIA driver, CUDA 12 libraries and cuDNN 9. An explicit `ORT_DYLIB_PATH`
+skips automatic preparation and supplies a custom runtime when using ONNX WebGPU.
+Enabling GGUF Vulkan alone does not require a custom ORT library.
 
 ```sh
 npm run build
@@ -569,8 +682,8 @@ so neither a second CMake build nor the fallback toolchain is needed.
 Publish CI requires prebuilt llama SDKs on all six targets, including the
 Windows ARM64 static CPU SDK. CUDA Rust CI also requires
 prebuilt mode instead of recompiling only for its T4 GPU. Linux publish builds
-run on Ubuntu 24.04 without a CUDA compiler. Runtime libraries, driver checks,
-link audits and real CPU/GPU inference gates remain required. Runtime staging
+run in Ubuntu 20.04 containers without a CUDA compiler. Runtime libraries,
+driver checks, link audits and real CPU/GPU inference gates remain required. Runtime staging
 reads the current Cargo invocation's `GGML_BACKENDS_DIR`, not the newest directory
 under `target/build`; only runtime libraries, not SDK import archives or bindings,
 are packaged. CUDA 13.1 distribution builds use
@@ -586,7 +699,7 @@ silently with a prebuilt SDK.
 The package contains `bin/zg[.exe]`, with all shared libraries, plugins and
 dictionaries under `lib/`. GGUF loads the CUDA 13.1 plugin first, then the
 CUDA 12.4 fallback from `lib/cuda12/`; both use the same locked llama.cpp core.
-ONNX uses the hash-verified official ORT 1.28.0 CUDA 12 core/providers.
+ONNX uses the hash-verified official ORT 1.21.0 CUDA 12 core/providers.
 NVIDIA driver, CUDA runtime, cuBLAS and cuDNN 9 remain host dependencies.
 CUDA-enabled x64 builds default to automatic device selection and fall back
 to CPU when a GPU/backend is unavailable. `--device cpu` or
@@ -684,8 +797,9 @@ the original libraries or silently includes them in a CPU package.
 The registry distribution is prepared as one meta package plus exact-version
 native optional dependencies declared in `npm/platforms.json`. The meta package
 uses Node only during `postinstall` to verify and materialize the native
-executable; running `zg` enters that executable directly. Published installs
-support Node.js 14.14 and newer.
+executable and conditionally migrate existing agent configurations; running `zg`
+enters that executable directly. The native meta package requires Node.js 14.14
+or newer during installation.
 
 Validate the release manifest and build the current platform dry-run packages:
 
@@ -700,7 +814,7 @@ are pinned in `plugins.json`, not mandatory npm dependencies. Postinstall instal
 CPU first and, by default, fetches the complete CUDA component set when NVIDIA
 detection succeeds. `ZG_INSTALL_ACCELERATOR=cpu` skips detection/downloads;
 `cuda` forces installation, including on GPU-free builders. Installation requires
-no CUDA compiler. Linux ORT is transported as two
+no CUDA compiler. Linux and Windows ORT are each transported as two
 fragments and reconstructed with a full-library SHA256 check. The installed
 `bin/`, `lib/` and `lib/cuda12/` layout is unchanged. Local packaging follows the
 build policy above: no toolkit produces a CPU-only package. Use
@@ -820,8 +934,8 @@ also get the CPU model/fallback checks. A GPU failure does not block CPU checks
 or candidate retention, but all required CPU/GPU checks must pass before npm
 publication. A downloadable candidate is not proof of runtime validation.
 CPU runners compile Rust and assemble the default CUDA-capable bundles using
-the pinned native SDK. Linux x64 uses an Ubuntu 24.04 builder without nvcc;
-Linux ARM64 uses its native runner. Windows needs the Rust/MSVC linker but
+the pinned native SDK. Linux x64 and ARM64 use Ubuntu 20.04 containers on native
+runners, without nvcc. Windows needs the Rust/MSVC linker but
 does not install CUDA compilers for packaging. Ordinary PR CI
 does not compile CUDA packages. `rust-ci.yml` is the single entry point for
 workspace and real-model verification. Push/PR runs use ordinary runners on
@@ -832,7 +946,8 @@ build per model.
 For manual runs, `cuda_verify=true` enables `zg/cuda` from the first compilation,
 requiring the matching prebuilt SDK, but compilation, workspace tests, all three
 CPU model checks and build-cache uploads still run on ordinary CPU runners.
-Linux uses the Ubuntu 24.04 builder without GPU access or CUDA runtime libraries;
+These Linux workspace tests use an Ubuntu 24.04 builder without GPU access or
+CUDA runtime libraries; the npm release build uses Ubuntu 20.04 as described above.
 Windows uses `windows-2022`, matching the GPU image's OS generation.
 Before the test harness copies any libraries, CUDA jobs run `cargo build --features cuda`
 and exercise the original `target/debug/zg` with GGUF/ONNX CPU index and query.
@@ -858,16 +973,22 @@ unchanged. Quality, default tests and CUDA builds have separate build caches.
 select `linux` or `windows` to limit test platforms. Optional `ref` selects the
 reviewed source; otherwise the workflow's selected commit is used. All jobs
 check out the same resolved SHA. This workflow does no npm packaging or publishing.
-The current ONNX Runtime prebuilt libraries cannot link against
-Ubuntu 22.04's glibc and C++ runtime, so older Linux distributions are not
-covered by this release workflow.
+Linux x64/ARM64 npm releases compile the CLI in Ubuntu 20.04 containers,
+reuse the pinned native SDKs, and audit the executable and bundled libraries
+against glibc 2.31. Downloaded npm artifacts are installed and exercised on
+Ubuntu 20.04, including CPU GGUF/ONNX inference for the x64 bundle without
+CUDA installed. Host runners may use newer Ubuntu images; they do not set the
+release binary's glibc baseline. CUDA acceleration still requires compatible
+NVIDIA drivers and CUDA/cuDNN host libraries. The separate ORT CI gate also
+audits official ORT 1.21 x64/ARM64 runtimes and loads them on Ubuntu 20.04.
 Packaging selects Cargo/CMake parallelism from available CPUs and total memory
 with a conservative 3 GiB per-job budget, a minimum of 1 and a maximum of 8.
 The same limits are passed into the Linux builder. This is a resource
 heuristic, not a guarantee against OOM. The existing 180-minute limits remain
 upper bounds, not expected build durations. CUDA 13.1 and 12.4 native compilation
 now belongs to the fork's versioned SDK release, not every zg CI run.
-Intel macOS builds ONNX Runtime 1.28.0 with CoreML from a pinned source revision.
+Intel macOS downloads the official ORT 1.21.0 precompiled dylib, just like
+Apple Silicon; no ORT source checkout, CMake build or dedicated build cache is needed.
 Like the other targets, it lets `zvec-rust-sys` select the prebuilt zvec SDK from
 its locked crate version and Cargo `TARGET`, retaining the upstream source-build
 fallback if SDK acquisition fails. The SDK cache lives under Cargo `OUT_DIR`
@@ -878,8 +999,8 @@ The Intel release targets macOS 14 and later.
 Windows ARM64 builds and tests natively on `windows-11-arm` with ARM64 Node,
 Rust, and MSVC. zvec-rust 0.8.0 automatically downloads its Windows ARM64
 prebuilt SDK and stages `zvec_c_api.dll` for packaging; no local zvec source
-build is needed. ONNX Runtime uses the SHA-256-verified ARM64 DirectML archive
-from the locked dependency's distribution manifest. llama-cpp-rs selects the
+build is needed. ONNX Runtime uses the SHA-256-pinned official 1.21.0 DirectML NuGet runtime
+and the matching Microsoft.AI.DirectML 1.15.4 DLL, selected for ARM64. llama-cpp-rs selects the
 SHA-256-pinned Windows ARM64 static CPU SDK from `zvec-0.1.154-cpu-r2`, without
 running bindgen, CMake or a C++ compiler. No Clang/Ninja overrides are needed. npm selects
 `@zvec/zvec-grep-win32-arm64-msvc` for ARM64 Node on Windows.
@@ -914,25 +1035,34 @@ real GGUF/ONNX indexing and vector queries using both explicit CPU selection and
 default automatic CPU fallback. Logs are retained as `cpu-artifact-evidence-*`.
 Failure blocks npm publication; the candidate artifact is kept for diagnosis.
 
-To publish, update the Rust workspace version, tag the release commit on `main`
-as `rust-v<version>`, and manually run the workflow with `publish` enabled. The
-publishing repository must have an npm trusted publisher configured for all 14
+To publish, update the Rust workspace version and manually run the workflow with
+`publish` enabled. `rust-canary` allows `main` or a tag; `latest` requires a tag.
+Tag names are unrestricted; for example, use `v0.3.0` for the 0.3.0 release. The
+package version always comes from Cargo, not the tag name. From the CLI, publish
+a canary with `gh workflow run rust-publish.yml --ref main -f publish=true`, or
+request a stable release with
+`gh workflow run rust-publish.yml --ref v0.3.0 -f publish=true -f dist_tag=latest`.
+The selected ref must contain the updated workflow; rerunning a historical run
+does not apply workflow fixes from newer commits.
+The publishing repository must have an npm trusted publisher configured for all 15
 packages with both **Allow npm publish** and the independent **Allow npm
 dist-tag** permission enabled, or provide an eligible `NPM_TOKEN` secret.
 Publishing and promotion install npm 11.21.0 explicitly for OIDC dist-tag support.
 
-Registry publication is currently blocked until reviewed license texts and
-SPDX SBOMs are supplied for every target and CUDA component in [`npm/compliance/`](npm/compliance/README.md).
-Candidate downloads remain available while these inputs are prepared.
+Supplemental license collections and SPDX SBOMs in [`npm/compliance/`](npm/compliance/README.md)
+are optional. Every release package includes the project `LICENSE`, and bundled
+upstream notices are preserved.
 Every publication uses `rust-canary`, letting users opt into Rust with
-`npm install --global @zvec/zvec-grep@rust-canary`. Five native runners then
+`npm install --global @zvec/zvec-grep@rust-canary`. Six native runners then
 install only the meta package from the registry, test actual daemon IPC, and
 exercise update and rollback with a distinct previously published version.
 Selecting `latest` requests a separate promotion job that changes the default
 installation only after all registry checks pass.
 
-Each compressed tarball must be at most 350 MiB. Packing, collection and
+Each compressed tarball must be at most 180 MiB. Packing, collection and
 publication preflight all enforce this budget before any npm publication.
+Plugin validation shares the same limit. This project budget accounts for
+base64 expansion in npm's upload request; it is not a registry size guarantee.
 Use `--output-dir <path>` with release commands to keep inspection artifacts
 separate from `dist/npm/release/`.
 
@@ -955,6 +1085,16 @@ Registry install/update/rollback runs on ordinary CPU runners and explicitly
 checks exact component versions, payload hashes and the assembled runtime in
 addition to registry tarball integrity; a CPU-only CLI success cannot hide a
 missing CUDA component. Real GPU execution is validated before publication.
+Every registry platform also runs Potion, GGUF and ONNX CPU indexing, vector/FTS/
+hybrid queries, incremental updates and MCP stdio search after fresh installation
+and after upgrade. All commands use npm's Unix `zg` symlink or Windows `zg.ps1`
+entry, including baseline/rollback version checks. The executable path is never
+canonicalized by the test runner. The ONNX loader itself resolves executable
+symlinks before locating its sibling libraries. Default CPU installs are checked
+for unwanted CUDA components, plugin caches and npm download attempts before
+the deliberate CUDA rebuild check. Model caches are reused; command output,
+MCP responses and per-model results are uploaded even on failure. The `latest`
+promotion job requires the entire six-platform registry matrix to succeed.
 `release:publish` validates the collected files before publishing native packages
 and then the meta package under `rust-canary` with npm provenance. An already published version is
 reused only when its tarball integrity matches, allowing a partial publication

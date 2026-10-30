@@ -1,6 +1,8 @@
 "use strict";
 
 const { createHash, randomBytes } = require("crypto");
+const { spawnSync } = require("child_process");
+const { userInfo } = require("os");
 const {
   chmodSync,
   closeSync,
@@ -424,6 +426,54 @@ function selectPlatform(platforms, platform, arch, reportHeader = {}) {
   return matches[0];
 }
 
+function upgradeInstalledAgents(metaRoot, options = {}) {
+  const environment = options.environment || process.env;
+  const enabled = (value) => value && value !== "0" && value.toLowerCase() !== "false";
+  if (environment.npm_config_global !== "true" ||
+      environment.ZG_INSTALL_SKIP_AGENT_UPGRADE === "1" ||
+      ["ci", "exec"].includes(environment.npm_command) ||
+      ["CI", "CONTINUOUS_INTEGRATION", "BUILD_NUMBER", "GITHUB_ACTIONS", "TF_BUILD", "JENKINS_URL"].some((key) => enabled(environment[key])) ||
+      ["SUDO_UID", "SUDO_GID", "SUDO_USER"].some((key) => environment[key])) return;
+  const warn = options.warn || console.warn;
+  try {
+    const identity = (options.identity || (() => ({
+      ...userInfo(),
+      euid: process.geteuid ? process.geteuid() : undefined,
+    })))();
+    const home = process.platform === "win32"
+      ? environment.USERPROFILE || environment.HOME
+      : environment.HOME || environment.USERPROFILE;
+    if (identity.uid === 0 || (identity.euid !== undefined && identity.uid !== identity.euid) ||
+        !home || !isAbsolute(home) || resolve(home) !== resolve(identity.homedir)) return;
+    const result = (options.run || spawnSync)(join(resolve(metaRoot), "bin", "zg.exe"),
+      ["--install", "--upgrade-installed"], {
+        env: environment,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 10000,
+        killSignal: "SIGKILL",
+        maxBuffer: 1024 * 1024,
+        windowsHide: true,
+      });
+    const log = join(metaRoot, "agent-upgrade.log");
+    const details = `Exit status: ${result.status}; signal: ${result.signal || "none"}\n${result.stdout || ""}${result.stderr || ""}${result.error ? `${result.error.message}\n` : ""}`;
+    writeFileSync(log, details, { mode: 0o600 });
+    if (result.error || result.signal || result.status !== 0) {
+      warn(`zvec-grep: agent configuration upgrade needs attention; see ${log}. Run zg --install --upgrade-installed to retry.`);
+    } else if (result.stdout) {
+      (options.log || console.log)(result.stdout.trimEnd());
+    }
+  } catch (error) {
+    warn(`zvec-grep: agent configuration upgrade could not finish: ${error.message}. Run zg --install --upgrade-installed to retry.`);
+  }
+}
+
+function installPackage(options) {
+  const receipt = materialize(options);
+  upgradeInstalledAgents(options.metaRoot, options.agentUpgrade);
+  return receipt;
+}
+
 function main() {
   const metaRoot = __dirname;
   const packageJson = JSON.parse(readFileSync(join(metaRoot, "package.json"), "utf8"));
@@ -431,7 +481,7 @@ function main() {
   const report = process.report && process.report.getReport();
   const entry = selectPlatform(platforms, process.platform, process.arch, report?.header ?? {});
   const platformRoot = resolvePlatformRoot(metaRoot, entry);
-  materialize({
+  installPackage({
     metaRoot,
     platformRoot,
     entry,
@@ -440,6 +490,8 @@ function main() {
 }
 
 module.exports = {
+  installPackage,
+  upgradeInstalledAgents,
   materialize,
   resolvePlatformRoot,
   selectPlatform,

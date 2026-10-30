@@ -101,6 +101,9 @@ where
             _ = monitor.tick() => {
                 let current = match server_status(home).await {
                     Ok(current) => current,
+                    Err(error @ (DaemonError::LegacyDaemon { .. } | DaemonError::ProtocolMismatch { .. })) => {
+                        break Err(error);
+                    }
                     Err(error) => {
                         warn!(%error, "daemon status temporarily unavailable during MCP relay");
                         DaemonStatus::default()

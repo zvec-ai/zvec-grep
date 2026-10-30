@@ -14,8 +14,11 @@ crossterm = { workspace = true, features = ["bracketed-paste"] }
 grep.workspace = true
 # Configuration objects can contain first-match rules whose order must survive edits.
 serde_json = { workspace = true, features = ["preserve_order"] }
+serde = { workspace = true, features = ["derive"] }
+toml.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+unicode-width.workspace = true
 tokio-util.workspace = true
 zg-engine = { path = "../zg-engine" }
 
@@ -25,7 +28,7 @@ winapi-util = "0.1.11"
 
 [dev-dependencies]
 tempfile.workspace = true
-toml.workspace = true
+unicode-width = { workspace = true, features = ["cjk"] }
 zg-testkit = { path = "../zg-testkit" }
 
 [lints]

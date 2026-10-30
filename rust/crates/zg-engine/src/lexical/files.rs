@@ -128,7 +128,10 @@ fn list_sync(
             }
             let file = entry.file_type().is_some_and(|kind| kind.is_file())
                 || (entry.depth() == 0 && entry.path().is_file());
-            if !file || !matches_modified_time(entry.path(), &request) {
+            if !file
+                || request.options.max_file_size_bytes == Some(0)
+                || !matches_modified_time(entry.path(), &request)
+            {
                 continue;
             }
             let path = entry.into_path();
@@ -187,6 +190,39 @@ fn apply_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn zero_size_limit_excludes_empty_and_explicit_files() {
+        let root = tempfile::tempdir().expect("workspace");
+        std::fs::write(root.path().join("empty.txt"), "").expect("empty file");
+        std::fs::write(root.path().join("source.txt"), "needle\n").expect("source file");
+        let policy = Arc::new(
+            crate::file_selection::ScanPolicy::for_current_source(
+                root.path(),
+                &crate::domain::ScanRules::default(),
+            )
+            .expect("scan policy"),
+        );
+        for paths in [
+            Vec::new(),
+            vec![PathBuf::from("empty.txt"), PathBuf::from("source.txt")],
+        ] {
+            let options = FilesOptions {
+                root: Some(root.path().to_path_buf()),
+                paths,
+                max_file_size_bytes: Some(0),
+                ..FilesOptions::default()
+            };
+            let result = list(options.clone()).await.expect("file listing");
+            assert!(result.paths.is_empty());
+            assert!(result.errors.is_empty());
+            let result = list_with_policy(options, policy.clone())
+                .await
+                .expect("file listing with policy");
+            assert!(result.paths.is_empty());
+            assert!(result.errors.is_empty());
+        }
+    }
 
     #[tokio::test]
     async fn cancelled_discovery_returns_before_traversal() {

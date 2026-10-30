@@ -26,18 +26,22 @@
     <a href="#tour">🎬 <strong>功能演示</strong></a> |
     <a href="#features">💫 <strong>核心特性</strong></a> |
     <a href="#try-it-yourself">🚀 <strong>动手体验</strong></a> |
-    <a href="./docs/README.md">📚 <strong>文档</strong></a> |
+    <a href="https://zvec.org/zh/docs/zvec-grep/">📚 <strong>文档</strong></a> |
     <a href="#benchmarks">📊 <strong>性能测试</strong></a> |
     <a href="#community">🤝 <strong>社区</strong></a>
   </p>
 </div>
 
 **zg**（**z**vec-**g**rep），由 [zvec](https://github.com/alibaba/zvec) 驱动，
-将 ripgrep、BM25 与向量检索统一在一个[本地优先的检索入口](./docs/05-architecture.md)中。
+将 ripgrep、BM25 与向量检索统一在一个[本地优先的检索入口](https://zvec.org/zh/docs/zvec-grep/)中。
 既可以由人在终端中搜索，也可以让 Agent 根据问题选择合适的本地检索方式。
 
-本 README 和[使用文档](./docs/README.md)以 TypeScript / Node.js 实现为主。
-Rust 实现位于独立的 [`rust/`](./rust/README.md) 目录。
+本 README 以 TypeScript / Node.js 实现为主；Rust 实现见
+[`rust/`](./rust/README.md)。用户文档统一维护在
+[Zvec 官网](https://zvec.org/zh/docs/zvec-grep/)。
+
+**安装**：`npm install -g @zvec/zvec-grep`，或通过 Homebrew（macOS/Linux）：
+`brew install zvec-grep`
 
 <a id="tour"></a>
 
@@ -90,7 +94,7 @@ zg index --embedding local/potion-retrieval-32m
 > `zg index` 或 `zg query` 失败时，在原命令后加 `--debug` 重跑，查看诊断信息（direct 和 server 模式均支持）。
 > 在同一项目下，可用 `zg status --mode direct --debug` 或
 > `zg status --mode server --debug` 查看已记录的索引错误。
-> Server 连接失败时，检查 `zg server status` 和[服务日志](./docs/06-server.md#logs-and-state)。
+> Server 连接失败时，检查 `zg server status` 和[服务日志](https://zvec.org/zh/docs/zvec-grep/server/)。
 
 ### 2. 选择检索方式
 
@@ -142,7 +146,7 @@ left with the key (sherlock-holmes.txt:5464-5470, 5527-5528).
 不通过 Agent，直接搜索同一个书架：
 
 ```bash
-zg query --human "An unseen creature left a few marks. What did the detective infer?" --limit 3
+zg --preview detail "An unseen creature left a few marks. What did the detective infer?" --limit 3
 ```
 
 zg 会将 `sherlock-holmes.txt` 中的相关段落排在
@@ -150,8 +154,8 @@ zg 会将 `sherlock-holmes.txt` 中的相关段落排在
 
 ### 索引 Embedding 并发与 GPU 错误
 
-`zg --index --index-embedding-concurrency <n>` 和
-`ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY` 控制构建或更新索引时的 Embedding
+`zg --index --embedding-concurrency <n>` 和
+`ZVEC_GREP_EMBEDDING_CONCURRENCY` 控制构建或更新索引时的 Embedding
 并发，对本地和远程模型均生效。环境变量也适用于自动建索引和刷新；这些设置
 不影响查询文本的向量推理。
 CLI 参数仅与 `--index` 一起使用。
@@ -176,14 +180,14 @@ GPU 运行时提供空闲显存时，按
 以下示例使用直接执行模式，使新的环境变量立即生效：
 
 ```bash
-export ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY=1
+export ZVEC_GREP_EMBEDDING_CONCURRENCY=1
 zg --index --mode direct
 ```
 
 Windows PowerShell：
 
 ```powershell
-$env:ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY = "1"
+$env:ZVEC_GREP_EMBEDDING_CONCURRENCY = "1"
 zg --index --mode direct
 ```
 
@@ -191,8 +195,8 @@ zg --index --mode direct
 无需为 CLI 参数重启后台服务：
 
 ```bash
-export ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY=8
-zg --index --index-embedding-concurrency 1
+export ZVEC_GREP_EMBEDDING_CONCURRENCY=8
+zg --index --embedding-concurrency 1
 ```
 
 若要修改后台服务的环境变量默认值，需更新其启动环境，然后在该环境中运行
@@ -269,16 +273,19 @@ Profile 均使用 Qwen3.7 Text Embedding。
 
 ## 📚 文档
 
+用户文档统一维护在 [zvec.org](https://zvec.org/zh/docs/zvec-grep/)。
+
 | 指南 | 你可以完成什么 |
 | :--- | :--- |
-| [Agent 集成](./docs/01-agents.md) | 将 zg 接入 Codex、Claude Code、Qwen Code、Qoder、Cursor、GitHub Copilot、VS Code、Grok Build 或 OpenCode，并验证是否正常工作。 |
-| [CLI 指南](./docs/02-cli.md) | 在终端中搜索、索引和管理本地工作区。 |
-| [MCP 指南](./docs/03-mcp.md) | 了解 Agent 可以使用哪些 zg 工具，以及访问权限如何受到保护。 |
-| [检索 Pipeline](./docs/04-pipeline.md) | 选择索引范围、保持内容新鲜，并获得更好的检索结果。 |
-| [架构](./docs/05-architecture.md) | 了解 zg 如何处理查询，以及数据会保留在哪里。 |
-| [服务端与执行模式](./docs/06-server.md) | 在一次性命令和长期运行的本地服务之间选择。 |
-| [Embedding 模型](./docs/07-embedding.md) | 根据速度、检索质量、隐私和本机硬件选择合适的模型。 |
-| [Roadmap](./docs/08-roadmap.md) | 了解接下来的产品方向，并参与影响 zg 的优先级。 |
+| [快速开始](https://zvec.org/zh/docs/zvec-grep/quickstart/) | 安装 zg、构建索引并完成第一次搜索。 |
+| [Agent 集成](https://zvec.org/zh/docs/zvec-grep/agents/) | 通过 MCP 接入 Agent，了解检索路由。 |
+| [CLI 参考](https://zvec.org/zh/docs/zvec-grep/cli/) | 查找命令与参数。 |
+| [检索指南](https://zvec.org/zh/docs/zvec-grep/search/) | 选择检索方式、过滤条件与输出格式。 |
+| [管理索引](https://zvec.org/zh/docs/zvec-grep/indexing/) | 创建、更新、重建或删除工作区索引。 |
+| [支持的内容](https://zvec.org/zh/docs/zvec-grep/supported-content/) | 了解文本与代码的提取边界。 |
+| [本地 Server](https://zvec.org/zh/docs/zvec-grep/server/) | 配置执行模式与常驻服务。 |
+| [Embedding 模型](https://zvec.org/zh/docs/zvec-grep/embedding-models/) | 选择并配置本地或远程模型。 |
+| [故障排查](https://zvec.org/zh/docs/zvec-grep/troubleshooting/) | 诊断安装、索引与连接问题。 |
 
 <a id="community"></a>
 

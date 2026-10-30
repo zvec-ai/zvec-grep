@@ -24,7 +24,7 @@ on:
           - darwin-arm64
           - darwin-x64
       dist_tag:
-        description: Promote to latest only after registry install/update/rollback checks pass.
+        description: rust-canary allows main or a tag; latest requires a tag and all six npm entry/model/update/rollback checks.
         type: choice
         options: [rust-canary, latest]
         default: rust-canary
@@ -107,22 +107,21 @@ jobs:
         env:
           PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
           RELEASE_REF: ${{ github.ref }}
+          DIST_TAG: ${{ inputs.dist_tag }}
         run: |
           rustup show active-toolchain
           npm run release:verify
           version="$(cargo metadata --locked --no-deps --format-version 1 | node -e 'let s=""; process.stdin.on("data", d => s+=d).on("end", () => console.log(JSON.parse(s).packages.find(p => p.name === "zg").version))')"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           if [[ "$PUBLISH" == "true" ]]; then
-            if [[ "$RELEASE_REF" != "refs/heads/main" ]]; then
-              echo "::error::npm publishing must run from main"
+            if [[ "$RELEASE_REF" != "refs/heads/main" && "$RELEASE_REF" != refs/tags/* ]]; then
+              echo "::error::npm publishing must run from main or a tag"
               exit 1
             fi
-            tag_commit="$(git rev-parse --verify "refs/tags/rust-v$version^{commit}")"
-            if [[ "$tag_commit" != "$GITHUB_SHA" ]]; then
-              echo "::error::rust-v$version must point to the commit being published"
+            if [[ "$DIST_TAG" == "latest" && "$RELEASE_REF" != refs/tags/* ]]; then
+              echo "::error::latest publication must run from a tag"
               exit 1
             fi
-            node scripts/npm-release.mjs verify-publication
           fi
       - name: Test package selection and installation
         working-directory: rust
@@ -276,27 +275,31 @@ jobs:
         with:
           path: ${{ runner.temp }}/zvec-grep-model-cache
           key: cuda-cli-models-v1-${{ runner.os }}-${{ hashFiles('rust/crates/zg-engine/src/models/catalog/**', 'rust/scripts/cuda/e2e.py') }}
-      - name: Install and exercise the downloaded artifacts without Linux CUDA libraries
-        if: matrix.target == 'linux-x64-gnu'
+      - name: Install and exercise Linux artifacts on Ubuntu 20.04 without CUDA libraries
+        if: runner.os == 'Linux'
         shell: bash
         working-directory: ${{ github.workspace }}
         run: |
           mkdir -p cpu-logs "${RUNNER_TEMP}/zvec-grep-model-cache"
           node_root="$(node -p 'require("node:path").dirname(require("node:path").dirname(process.execPath))')"
           # Only Node and the downloaded artifacts are mounted; no CUDA image or GPU access.
-          docker run --rm --platform linux/amd64 \
+          docker run --rm --platform ${{ matrix.target == 'linux-arm64-gnu' && 'linux/arm64' || 'linux/amd64' }} \
             --volume "${GITHUB_WORKSPACE}:/work" \
             --volume "${node_root}:/opt/node:ro" \
             --volume "${RUNNER_TEMP}/zvec-grep-model-cache:/model-cache" \
             --workdir /work/rust --env DEBIAN_FRONTEND=noninteractive \
+            --env RELEASE_TARGET=${{ matrix.target }} \
             --env PATH=/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-            ubuntu:24.04 bash -euo pipefail -c '
+            ubuntu:20.04 bash -euo pipefail -c '
               apt-get update -qq
               apt-get install --yes --no-install-recommends python3 ca-certificates libstdc++6 >/dev/null
+              test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.31"
               npm run release:artifact-smoke -- --expect-cpu
-              python3 scripts/cuda/e2e.py --cpu-only \
-                --bundle dist/npm/release/artifact-smoke/prefix/lib/node_modules/@zvec/zvec-grep \
-                --model-cache /model-cache --logs /work/cpu-logs
+              if [[ "$RELEASE_TARGET" == linux-x64-gnu ]]; then
+                python3 scripts/cuda/e2e.py --cpu-only \
+                  --bundle dist/npm/release/artifact-smoke/prefix/lib/node_modules/@zvec/zvec-grep \
+                  --model-cache /model-cache --logs /work/cpu-logs
+              fi
             '
       - name: Install and exercise the downloaded artifacts without Windows CUDA libraries
         if: matrix.target == 'win32-x64-msvc'
@@ -311,14 +314,14 @@ jobs:
             --bundle dist/npm/release/artifact-smoke/prefix/node_modules/@zvec/zvec-grep `
             --model-cache "$env:RUNNER_TEMP/zvec-grep-model-cache" --logs ../cpu-logs
       - name: Restore Linux model cache and log ownership
-        if: ${{ always() && matrix.target == 'linux-x64-gnu' }}
+        if: ${{ always() && runner.os == 'Linux' }}
         shell: bash
         working-directory: ${{ github.workspace }}
         run: |
           mkdir -p cpu-logs "${RUNNER_TEMP}/zvec-grep-model-cache"
           sudo chown -R "$(id -u):$(id -g)" cpu-logs "${RUNNER_TEMP}/zvec-grep-model-cache"
       - name: Install and exercise the non-CUDA platform artifacts
-        if: ${{ !matrix.cuda_package }}
+        if: ${{ !matrix.cuda_package && runner.os != 'Linux' }}
         run: npm run release:artifact-smoke -- --expect-cpu
       - name: Retain CPU artifact execution evidence
         if: ${{ always() }}
@@ -372,11 +375,11 @@ jobs:
         run: npm run release:publish
 
   registry-smoke:
-    name: Verify registry install/update/rollback (${{ matrix.target }})
+    name: Verify npm entry, models and update/rollback (${{ matrix.target }})
     if: github.event_name == 'workflow_dispatch' && inputs.publish
     needs: [source, publish]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 45
     permissions:
       contents: read
     strategy:
@@ -410,15 +413,42 @@ jobs:
           # Registry smoke installs from npm; only release.json is read locally.
           name: rust-verification-${{ needs.source.outputs.version }}
           path: rust/dist/npm/release/tarballs
-      - name: Test registry packages without explicit native-package installation
+      - name: Restore verified model downloads
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/zvec-grep-model-cache
+          key: registry-models-${{ matrix.target }}-${{ hashFiles('rust/crates/zg-engine/src/models/catalog/entries.rs') }}
+      - name: Test installed npm commands and real models on this platform
         working-directory: rust
         env:
           NPM_ROLLBACK_VERSION: ${{ needs.publish.outputs.baseline }}
+          ZG_RELEASE_MODEL_CACHE: ${{ runner.temp }}/zvec-grep-model-cache
         run: npm run release:registry-smoke
+      - name: Retain registry install and runtime evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: registry-smoke-evidence-${{ matrix.target }}
+          path: |
+            rust/dist/npm/release/registry-smoke/results.json
+            rust/dist/npm/release/registry-smoke/installation.json
+            rust/dist/npm/release/registry-smoke/update-installation.json
+            rust/dist/npm/release/registry-smoke/cpu-downloads.json
+            rust/dist/npm/release/registry-smoke/cache/_logs/
+            rust/dist/npm/release/registry-smoke/cuda-cache/_logs/
+            rust/dist/npm/release/registry-smoke/*-workspace/logs/
+            rust/dist/npm/release/registry-smoke/*-models/results.json
+            rust/dist/npm/release/registry-smoke/*-models/*/logs/
+            rust/dist/npm/release/registry-smoke/*-models/*/home/daemon/logs/
+          if-no-files-found: warn
+          retention-days: 7
 
   promote:
     name: Promote the verified registry release to latest
-    if: github.event_name == 'workflow_dispatch' && inputs.publish && inputs.dist_tag == 'latest'
+    if: >-
+      ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.publish &&
+          inputs.dist_tag == 'latest' && needs.source.result == 'success' &&
+          needs.publish.result == 'success' && needs.registry-smoke.result == 'success' }}
     needs: [source, publish, registry-smoke]
     runs-on: ubuntu-22.04
     permissions:

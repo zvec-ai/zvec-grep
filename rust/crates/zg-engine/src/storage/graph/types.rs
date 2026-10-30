@@ -1,3 +1,4 @@
+#[cfg(test)]
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -10,6 +11,7 @@ pub(crate) type Metadata = BTreeMap<String, Value>;
 /// Direction of a one-hop query relative to its endpoint.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg(test)]
 pub(crate) enum Direction {
     In,
     Out,

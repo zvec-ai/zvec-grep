@@ -58,13 +58,13 @@ impl ByteRange {
 
 /// A half-open location in decoded UTF-8 source text, with one-based lines and
 /// zero-based byte offsets and columns.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize)]
 pub(crate) struct TextRange {
     start: TextPosition,
     end: TextPosition,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize)]
 struct TextPosition {
     byte_offset: usize,
     line: usize,

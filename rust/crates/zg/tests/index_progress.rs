@@ -68,9 +68,10 @@ fn direct_and_server_report_index_progress_on_stderr() {
             "local/potion-code-16m-v2",
             "--device",
             "cpu",
-            "--index-embedding-concurrency",
+            "--embedding-concurrency",
             "4",
-            "--no-color",
+            "--color",
+            "never",
         ]);
         assert!(
             output.status.success(),
@@ -78,7 +79,23 @@ fn direct_and_server_report_index_progress_on_stderr() {
             String::from_utf8_lossy(&output.stderr)
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("Index complete"), "{mode}: {stderr}");
+        let finishing = stderr.find("Finishing index").expect("final cleanup stage");
+        if mode == "direct" {
+            let optimizing = stderr.find("Optimizing index").expect("optimization stage");
+            let saving = stderr.find("Saving index").expect("saving stage");
+            assert!(
+                optimizing < saving && saving < finishing,
+                "{mode}: {stderr}"
+            );
+        } else {
+            // The daemon publishes snapshots, so short intermediate stages can
+            // finish between polls. Any observed tail stage must precede Done.
+            for label in ["Optimizing index", "Saving index"] {
+                if let Some(position) = stderr.find(label) {
+                    assert!(position < finishing, "{mode}: {stderr}");
+                }
+            }
+        }
         assert!(!stderr.contains('\r') && !stderr.contains("\x1b["));
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.starts_with("Workspace index\nfiles\t"));
@@ -120,7 +137,8 @@ fn index_summary_uses_saved_scope_in_direct_and_server_modes() {
             "--index",
             "--mode",
             mode,
-            "--no-color",
+            "--color",
+            "never",
             "--embedding",
             "local/potion-code-16m-v2",
             "--device",
@@ -141,22 +159,36 @@ fn index_summary_uses_saved_scope_in_direct_and_server_modes() {
         let initial_roots = roots_line(&initial);
         assert!(initial_roots.ends_with(" (glob=*.rs iglob=!vendor/** hidden no-ignore max-depth=2 max-filesize=4096 follow nested-git=false)"), "{mode}: {initial}");
 
-        let retained = fixture.success(&["--index", "--mode", mode, "--no-color"]);
+        let retained = fixture.success(&["--index", "--mode", mode, "--color", "never"]);
         assert_eq!(
             roots_line(&retained),
             initial_roots,
             "{mode}: omitted options preserve the saved scope and owning root"
         );
 
-        let updated =
-            fixture.success(&["--index", "--mode", mode, "--no-color", "--max-depth", "1"]);
+        let updated = fixture.success(&[
+            "--index",
+            "--mode",
+            mode,
+            "--color",
+            "never",
+            "--max-depth",
+            "1",
+        ]);
         assert_eq!(
             roots_line(&updated),
             initial_roots.replace("max-depth=2", "max-depth=1"),
             "{mode}: partial updates retain other rules"
         );
 
-        let reset = fixture.success(&["--index", "--mode", mode, "--no-color", "--reset-paths"]);
+        let reset = fixture.success(&[
+            "--index",
+            "--mode",
+            mode,
+            "--color",
+            "never",
+            "--reset-paths",
+        ]);
         let base_root = initial_roots.split_once(" (").expect("filtered roots").0;
         assert_eq!(
             roots_line(&reset),
@@ -194,7 +226,8 @@ fn explicit_nested_index_owns_its_scope_in_direct_and_server_modes() {
             "--index",
             "--mode",
             mode,
-            "--no-color",
+            "--color",
+            "never",
             "--embedding",
             "local/potion-code-16m-v2",
             "--device",
@@ -209,7 +242,8 @@ fn explicit_nested_index_owns_its_scope_in_direct_and_server_modes() {
             nested.to_str().expect("nested path"),
             "--mode",
             mode,
-            "--no-color",
+            "--color",
+            "never",
             "--embedding",
             "local/potion-retrieval-32m",
             "--device",

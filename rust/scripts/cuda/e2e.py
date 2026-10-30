@@ -38,7 +38,7 @@ def cargo_environment(binary, environment):
         if not entry:
             continue
         directory = Path(entry.strip('"')).resolve()
-        if directory.is_relative_to(profile) or any(
+        if (directory == profile or profile in directory.parents) or any(
                 path.is_file() for pattern in project_libraries for path in directory.glob(pattern)):
             continue
         paths.append(entry)
@@ -208,6 +208,15 @@ def require(text, expected):
         raise AssertionError(f"Expected output not found: {expected}")
 
 
+def require_index_progress(stderr):
+    # These are non-TTY progress events, not the final readiness verdict. The
+    # subsequent --check-ready and vector query verify the published index.
+    lines = iter(stderr.splitlines())
+    for stage in ("Optimizing index", "Saving index", "Finishing index"):
+        if not any(line == stage or line.startswith(f"{stage}: ") for line in lines):
+            raise AssertionError(f"Missing or out-of-order index progress stage: {stage}")
+
+
 def run_zg(binary, workspace, logs, stage, args, env):
     command = [str(binary), *args]
     print(f"Running {stage}: {command}", flush=True)
@@ -250,7 +259,7 @@ def run_case(binary, model_cache, work, logs, backend, model, expected_gguf_cuda
         "The heliotrope capacitor calibrates the observatory telescope.\n"
         f"{MARKER}\n", encoding="utf-8")
     env = case_environment(work, backend)
-    runtime_args = ["--model-cache", str(model_cache), "--debug", "--no-color"]
+    runtime_args = ["--model-cache", str(model_cache), "--debug", "--color", "never"]
     if device != "default":
         runtime_args += ["--device", device]
     def evidence(stderr):
@@ -259,12 +268,12 @@ def run_case(binary, model_cache, work, logs, backend, model, expected_gguf_cuda
         return cpu_evidence(stderr, backend, device)
     _, index_err = run_zg(binary, workspace, logs, "index", [
         "--index", "--mode", "direct",
-        "--embedding", model, "--index-embedding-concurrency", "2", *runtime_args,
+        "--embedding", model, "--embedding-concurrency", "2", *runtime_args,
     ], env)
-    require(index_err, "Index complete")
+    require_index_progress(index_err)
     index_evidence = evidence(index_err)
     status, _ = run_zg(binary, workspace, logs, "status", [
-        "--status", "--mode", "direct", "--check-ready", "--no-color",
+        "--status", "--mode", "direct", "--check-ready", "--color", "never",
     ], env)
     require(status, "Workspace index is ready")
     require(status, model)
@@ -322,7 +331,7 @@ def main():
         entry = metadata.get("bin", {})
         entry = entry if isinstance(entry, str) else entry.get("zg")
         binary = (bundle / (entry or f"bin/{'zg.exe' if os.name == 'nt' else 'zg'}")).resolve()
-        if not binary.is_relative_to(bundle):
+        if binary != bundle and bundle not in binary.parents:
             parser.error("packaged CLI must be inside the installed package")
         lib_dir = bundle / "lib"
         if not lib_dir.is_dir():

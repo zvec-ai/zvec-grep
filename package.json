@@ -31,7 +31,6 @@
     "README.md",
     "README_CN.md",
     "LICENSE",
-    "docs",
     "dist"
   ],
   "scripts": {

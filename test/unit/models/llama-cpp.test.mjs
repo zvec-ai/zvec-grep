@@ -569,7 +569,7 @@ test("local embedding reports context and embedding runtime failures", async (t)
 
 function setParallelism(t, shared, legacy) {
   for (const [name, value] of [
-    ["ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY", shared],
+    ["ZVEC_GREP_EMBEDDING_CONCURRENCY", shared],
     ["ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM", legacy],
   ]) {
     const previous = process.env[name];
@@ -628,7 +628,7 @@ for (const { name, shared, legacy, embeddingConcurrency, limit } of [
       setup.dependencies,
     );
     // The environment is not consulted at construction or during query calls.
-    process.env.ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY = "7";
+    process.env.ZVEC_GREP_EMBEDDING_CONCURRENCY = "7";
     const first = model.embed(
       [
         { kind: "text", text: "one" },
@@ -691,8 +691,8 @@ test("catchable CUDA failures preserve the cause and drain other contexts before
         error.code,
         "ZVEC_GREP.ENGINE.MODELS.LLAMA_CPP_EMBED_FAILED",
       );
-      assert.match(error.context, /ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY=1/);
-      assert.match(error.context, /--index-embedding-concurrency 1/);
+      assert.match(error.context, /ZVEC_GREP_EMBEDDING_CONCURRENCY=1/);
+      assert.match(error.context, /--embedding-concurrency 1/);
       return true;
     },
   );

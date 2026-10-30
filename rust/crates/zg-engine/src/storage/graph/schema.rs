@@ -58,7 +58,7 @@ CREATE TABLE edges (
     arity INTEGER CHECK (arity >= 0),
     line INTEGER CHECK (line >= 1),
     col INTEGER CHECK (col >= 0),
-    provenance TEXT CHECK (provenance IN ('file_local', 'import_scoped', 'preferred_file', 'workspace_unique')),
+    provenance TEXT CHECK (provenance IN ('file_local', 'import_scoped', 'qualified_name_match', 'workspace_unique')),
     metadata TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata) AND json_type(metadata) = 'object'),
     CHECK ((status = 'resolved' AND target IS NOT NULL AND provenance IS NOT NULL)
         OR (status IN ('pending', 'failed') AND target IS NULL AND provenance IS NULL)),

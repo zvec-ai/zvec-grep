@@ -4,7 +4,7 @@ use std::{
     path::Path,
     process::ExitCode,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -24,19 +24,70 @@ use zg_daemon_protocol::{DaemonCommand, DaemonReply};
 use zg_engine::{EngineError, ZvecGrep, api::context::ContextOptions};
 
 static DAEMON_LOGGING: AtomicBool = AtomicBool::new(false);
+static OUTPUT_OPTIONS: OnceLock<zg_cli::OutputOptions> = OnceLock::new();
+
+fn output_options() -> zg_cli::OutputOptions {
+    OUTPUT_OPTIONS.get().copied().unwrap_or_default()
+}
+
+fn report_error(error: &(dyn Error + 'static)) {
+    let options = output_options();
+    let terminal = zg_cli::stderr_supports_ansi();
+    let report = if let Some(error) = error.downcast_ref::<EngineError>() {
+        Some((error.report(), None))
+    } else {
+        match error.downcast_ref::<zg_daemon::DaemonError>() {
+            Some(zg_daemon::DaemonError::Remote { report, retryable }) => {
+                Some(((**report).clone(), Some(*retryable)))
+            }
+            Some(zg_daemon::DaemonError::Engine(error)) => Some((error.report(), None)),
+            _ => None,
+        }
+    };
+    if let Some((report, retryable)) = report {
+        let _ =
+            zg_cli::write_error_report(io::stderr().lock(), &report, retryable, options, terminal);
+    } else {
+        let _ =
+            zg_cli::write_error_message(io::stderr().lock(), &error.to_string(), options, terminal);
+    }
+}
+
+fn report_warning(message: &str) {
+    let _ = zg_cli::write_message(
+        io::stderr().lock(),
+        zg_cli::MessageKind::Warning,
+        message
+            .trim_start_matches("Warning: ")
+            .trim_start_matches("warning: "),
+        &[],
+        output_options().color,
+        zg_cli::stderr_supports_ansi(),
+    );
+}
+
+fn animated_progress(options: zg_cli::OutputOptions) -> bool {
+    zg_cli::stderr_supports_ansi() && !options.debug && std::env::var_os("RUST_LOG").is_none()
+}
 
 fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
         Err(error) if is_engine_error(error.as_ref(), EngineError::CANCELLED) => {
+            if zg_cli::stderr_supports_ansi() {
+                let _ = zg_cli::write_message(
+                    io::stderr().lock(),
+                    zg_cli::MessageKind::Info,
+                    "Cancelled",
+                    &[],
+                    output_options().color,
+                    true,
+                );
+            }
             ExitCode::from(130)
         }
         Err(error) => {
-            if let Some(error) = error.downcast_ref::<EngineError>() {
-                eprintln!("{}", error.report());
-            } else {
-                eprintln!("Error: {error}");
-            }
+            report_error(error.as_ref());
             if DAEMON_LOGGING.load(Ordering::Relaxed) {
                 tracing::error!(%error, "daemon failed");
             }
@@ -45,18 +96,37 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<ExitCode, Box<dyn Error>> {
+fn parse_cli() -> (Cli, Option<String>) {
     let arguments = std::env::args_os().collect::<Vec<_>>();
     let warning = zg_cli::compatibility_warning_for_args(&arguments[1..]);
+    let diagnostic_color = zg_cli::diagnostic_color_for_args(&arguments[1..]);
+    let cli = Cli::try_parse_from(arguments).unwrap_or_else(|error| {
+        if let Some(warning) = &warning {
+            let _ = zg_cli::write_warning(
+                io::stderr().lock(),
+                warning,
+                diagnostic_color,
+                zg_cli::stderr_supports_ansi(),
+            );
+        }
+        zg_cli::exit_parse_error(&error, diagnostic_color);
+    });
+    (cli, warning)
+}
+
+fn run() -> Result<ExitCode, Box<dyn Error>> {
+    let (cli, warning) = parse_cli();
+    let _ = OUTPUT_OPTIONS.set(cli.output_options());
     let warn = || {
         if let Some(warning) = &warning {
-            eprintln!("{warning}");
+            let _ = zg_cli::write_warning(
+                io::stderr().lock(),
+                warning,
+                output_options().color,
+                zg_cli::stderr_supports_ansi(),
+            );
         }
     };
-    let cli = Cli::try_parse_from(arguments).unwrap_or_else(|error| {
-        warn();
-        error.exit();
-    });
     let positional_warning = cli.positional_query_warning();
     let plan = cli
         .into_plan(std::env::current_dir()?)
@@ -72,27 +142,58 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
             writeln!(zg_cli::stdout(), "{}", env!("CARGO_PKG_VERSION"))?;
             return Ok(ExitCode::SUCCESS);
         }
+        CliPlan::Install(args) if args.upgrade_installed => {
+            zg_cli::execute_upgrade_installed(args)?;
+            return Ok(ExitCode::SUCCESS);
+        }
         _ => {}
     }
-    install_darwin_metal_residency_mitigation()?;
+    let lexical_only = matches!(&plan, CliPlan::Files { .. })
+        || matches!(&plan, CliPlan::Query { request, .. } if request.rg);
+    if !lexical_only {
+        install_darwin_metal_residency_mitigation()?;
+    }
     // Emit after a possible re-exec so macOS prints each warning only once.
     warn();
     if let Some(warning) = positional_warning {
-        eprintln!("{warning}");
+        report_warning(&warning);
     }
-    let debug = match &plan {
+    let error_presentation = match &plan {
         CliPlan::Query { output, .. }
-        | CliPlan::Index { output, .. }
-        | CliPlan::Status { output, .. } => output.debug,
-        _ => false,
+        | CliPlan::Status { output, .. }
+        | CliPlan::Index { output, .. } => Some(*output),
+        _ => None,
     };
     if !matches!(plan, CliPlan::Server(ServerPlan::Run(_))) {
-        init_tracing(debug);
+        init_tracing(
+            error_presentation
+                .as_ref()
+                .is_some_and(|output| output.debug),
+        );
     }
 
-    let runtime = Builder::new_multi_thread().enable_all().build()?;
+    // The grep walker owns its search threads; a Tokio worker pool would duplicate them.
+    let runtime = if lexical_only {
+        Builder::new_current_thread().enable_all().build()?
+    } else {
+        Builder::new_multi_thread().enable_all().build()?
+    };
 
-    runtime.block_on(Box::pin(execute_plan(plan)))
+    let result = runtime.block_on(Box::pin(execute_plan(plan)));
+    if let Err(error) = &result
+        && let Some(output) = error_presentation
+        && let Some(report) = engine_error_report(error.as_ref())
+        && report.code == EngineError::INDEX_INCOMPATIBLE
+    {
+        zg_cli::write_index_incompatible_error(
+            io::stderr().lock(),
+            &report,
+            output,
+            zg_cli::stderr_supports_ansi(),
+        )?;
+        return Ok(ExitCode::FAILURE);
+    }
+    result
 }
 
 #[cfg(target_os = "macos")]
@@ -145,7 +246,7 @@ async fn execute_plan(plan: CliPlan) -> Result<ExitCode, Box<dyn Error>> {
             home,
             operation,
             output,
-        } => execute_index(mode, home.as_deref(), operation, output).await,
+        } => return execute_index(mode, home.as_deref(), operation, output).await,
         CliPlan::Status {
             mode,
             home,
@@ -153,37 +254,7 @@ async fn execute_plan(plan: CliPlan) -> Result<ExitCode, Box<dyn Error>> {
             check_ready,
             output,
         } => execute_status(mode, home.as_deref(), request, check_ready, output).await,
-        CliPlan::Config(args) => {
-            use zg_cli::{ConfigAction, ModelAction, ProviderAction};
-            let (label, reference, path) = match args.action {
-                ConfigAction::Provider {
-                    action: ProviderAction::Set { reference, api_key },
-                } => {
-                    let path = zg_engine::config::set_provider(&reference, &api_key)?;
-                    ("Provider", reference, path)
-                }
-                ConfigAction::Model {
-                    action:
-                        ModelAction::Set {
-                            reference,
-                            endpoint,
-                            device,
-                            default_model,
-                        },
-                } => {
-                    let path = zg_engine::config::set_model(
-                        &reference,
-                        endpoint.as_deref(),
-                        device.map(Into::into),
-                        default_model,
-                    )?;
-                    ("Model", reference, path)
-                }
-            };
-            writeln!(zg_cli::stdout(), "{label} config: {reference}")?;
-            writeln!(zg_cli::stdout(), "Global config: {}", path.display())?;
-            Ok(())
-        }
+        CliPlan::Config(args) => execute_config(args),
         CliPlan::Auth(args) => {
             let root = args
                 .root
@@ -191,7 +262,12 @@ async fn execute_plan(plan: CliPlan) -> Result<ExitCode, Box<dyn Error>> {
                 .ok_or_else(|| io::Error::other("auth root is required"))?;
             if matches!(args.action, zg_cli::AuthAction::Revoke) {
                 let count = zg_engine::authorization::revoke_all(root)?;
-                zg_cli::write_authorization_revoke_result(zg_cli::stdout(), count)?;
+                zg_cli::write_authorization_revoke_with_options(
+                    zg_cli::stdout(),
+                    count,
+                    output_options().color,
+                    zg_cli::stdout_supports_ansi(),
+                )?;
                 return Ok(ExitCode::SUCCESS);
             }
             if matches!(args.action, zg_cli::AuthAction::Grant { .. }) {
@@ -205,11 +281,7 @@ async fn execute_plan(plan: CliPlan) -> Result<ExitCode, Box<dyn Error>> {
             zg_cli::write_authorization_status(
                 zg_cli::stdout(),
                 &status,
-                if args.no_color {
-                    zg_cli::ColorMode::Never
-                } else {
-                    args.color.unwrap_or_default()
-                },
+                args.color.unwrap_or_default(),
                 zg_cli::stdout_supports_ansi(),
             )?;
             Ok(())
@@ -222,6 +294,44 @@ async fn execute_plan(plan: CliPlan) -> Result<ExitCode, Box<dyn Error>> {
     Ok(ExitCode::SUCCESS)
 }
 
+fn execute_config(args: zg_cli::ConfigArgs) -> Result<(), Box<dyn Error>> {
+    use zg_cli::{ConfigAction, ModelAction, ProviderAction};
+    let (label, reference, path) = match args.action {
+        ConfigAction::Provider {
+            action: ProviderAction::Set { reference, api_key },
+        } => {
+            let path = zg_engine::config::set_provider(&reference, &api_key)?;
+            ("Provider", reference, path)
+        }
+        ConfigAction::Model {
+            action:
+                ModelAction::Set {
+                    reference,
+                    endpoint,
+                    device,
+                    default_model,
+                },
+        } => {
+            let path = zg_engine::config::set_model(
+                &reference,
+                endpoint.as_deref(),
+                device.map(Into::into),
+                default_model,
+            )?;
+            ("Model", reference, path)
+        }
+    };
+    zg_cli::write_config_result(
+        zg_cli::stdout(),
+        label,
+        &reference,
+        &path,
+        output_options().color,
+        zg_cli::stdout_supports_ansi(),
+    )?;
+    Ok(())
+}
+
 async fn execute_files(options: zg_engine::api::files::FilesOptions, null: bool) -> ExitCode {
     let engine = ZvecGrep::new();
     let result = engine.files(options).await;
@@ -229,17 +339,22 @@ async fn execute_files(options: zg_engine::api::files::FilesOptions, null: bool)
     let result = match result {
         Ok(result) => result,
         Err(error) => {
-            eprintln!("{}", error.report());
+            report_error(&error);
             return ExitCode::from(2);
         }
     };
     for error in &result.errors {
-        eprintln!("Error: {error}");
+        let _ = zg_cli::write_error_message(
+            io::stderr().lock(),
+            error,
+            output_options(),
+            zg_cli::stderr_supports_ansi(),
+        );
     }
     if let Err(error) = zg_cli::write_file_paths(io::stdout().lock(), &result.paths, null)
         && error.kind() != io::ErrorKind::BrokenPipe
     {
-        eprintln!("Error: {error}");
+        report_error(&error);
         return ExitCode::from(2);
     }
     if !result.errors.is_empty() {
@@ -262,6 +377,36 @@ async fn execute_install_plan(args: &zg_cli::InstallArgs) -> Result<(), Box<dyn 
     } else {
         Some(start_installed_server(&outcome).await?)
     };
+    if zg_cli::stdout_supports_ansi() {
+        if let Some(status) = &status {
+            write_server_status(status)?;
+        } else {
+            zg_cli::write_message(
+                zg_cli::stdout(),
+                zg_cli::MessageKind::Info,
+                "Server stopped",
+                &["Run: zg --server on"],
+                zg_cli::ColorMode::Auto,
+                true,
+            )?;
+        }
+        let agents = format!("Agents: {}", outcome.agent_labels.join(", "));
+        let mut details = vec![agents.as_str()];
+        if outcome.transport == McpInstallTransport::Stdio {
+            details.push("stdio · reconnecting starts the server automatically");
+        }
+        details.push("Remote data access requires authorization on first use");
+        details.push("Restart the selected agents or start a new session to load the integration");
+        zg_cli::write_message(
+            zg_cli::stdout(),
+            zg_cli::MessageKind::Success,
+            "Integration installed",
+            &details,
+            zg_cli::ColorMode::Auto,
+            true,
+        )?;
+        return Ok(());
+    }
     if let Some(status) = &status {
         if status.ready {
             writeln!(zg_cli::stdout(), "  ✓ Server")?;
@@ -336,8 +481,8 @@ async fn execute_request(
 ) -> Result<(), Box<dyn Error>> {
     if path_lookup {
         // Current-file lookup is local in every client mode, before index or model admission.
-        eprintln!(
-            "warning: automatically performing path lookup; use --hybrid to force hybrid search."
+        report_warning(
+            "Warning: automatically performing path lookup; use --hybrid to force hybrid search.",
         );
         let engine = ZvecGrep::new();
         let result = engine
@@ -350,12 +495,13 @@ async fn execute_request(
             })
             .await;
         engine.close();
-        zg_cli::write_path_lookup_result(
+        zg_cli::write_path_lookup_with_terminals(
             zg_cli::stdout(),
             io::stderr().lock(),
             &result?,
             output,
             zg_cli::stdout_supports_ansi(),
+            zg_cli::stderr_supports_ansi(),
         )?;
         return Ok(());
     }
@@ -392,6 +538,17 @@ fn is_engine_error(error: &(dyn Error + 'static), code: &str) -> bool {
     }
 }
 
+fn engine_error_report(error: &(dyn Error + 'static)) -> Option<zg_engine::ErrorReport> {
+    if let Some(error) = error.downcast_ref::<EngineError>() {
+        return Some(error.report());
+    }
+    match error.downcast_ref::<zg_daemon::DaemonError>() {
+        Some(zg_daemon::DaemonError::Remote { report, .. }) => Some((**report).clone()),
+        Some(zg_daemon::DaemonError::Engine(error)) => Some(error.report()),
+        _ => None,
+    }
+}
+
 async fn execute_context(
     request: ContextOptions,
     server: bool,
@@ -410,7 +567,12 @@ async fn execute_context(
             output,
             zg_cli::stdout_supports_ansi(),
         )?;
-        zg_cli::write_context_status(io::stderr().lock(), &result)?;
+        zg_cli::write_context_status_with_options(
+            io::stderr().lock(),
+            &result,
+            output,
+            zg_cli::stderr_supports_ansi(),
+        )?;
         if output.debug {
             eprintln!(
                 "Diagnostics: {}",
@@ -443,7 +605,9 @@ async fn ensure_query_index(
     if info.indexed || info.index_policy == WorkspaceIndexPolicy::Disabled {
         return Ok(false);
     }
-    info.compatibility.ensure_compatible()?;
+    info.compatibility
+        .ensure_compatible()
+        .map_err(|error| error.with_workspace_root(&info.root))?;
     if matches!(
         info.compatibility,
         zg_engine::api::info::result::IndexCompatibility::Compatible { .. }
@@ -453,7 +617,7 @@ async fn ensure_query_index(
         )
         .into());
     }
-    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+    if !io::stdin().is_terminal() || !zg_cli::stderr_supports_ansi() {
         return Err(EngineError::not_found(format!(
             "No index found in {}. Run `zg --index --embedding <model>` to build it, then retry the query. Run `zg --help models` to list supported models.",
             zg_cli::output_path(&info.root).display()
@@ -489,18 +653,26 @@ async fn ensure_query_index(
         output.color,
     )
     .await?;
-    eprintln!(
-        "\nBuilding index · {}\nEmbedding      · {}\nEsc Cancel · Ctrl+C Cancel",
-        zg_cli::output_path(&info.root).display(),
-        index_request
-            .embedding
-            .as_ref()
-            .map_or("", |model| model.reference.as_str())
-    );
+    zg_cli::write_message(
+        io::stderr().lock(),
+        zg_cli::MessageKind::Info,
+        "Building index",
+        &[
+            &zg_cli::output_path(&info.root).display().to_string(),
+            index_request
+                .embedding
+                .as_ref()
+                .map_or("", |model| model.reference.as_str()),
+            "Esc Cancel · Ctrl+C Cancel",
+        ],
+        output.color,
+        zg_cli::stderr_supports_ansi(),
+    )?;
     let cancellation = zg_cli::IndexCancellation::new()?;
     index_request.signal = Some(cancellation.signal());
     let ansi = zg_cli::stderr_supports_ansi();
-    let progress = zg_cli::IndexProgressDisplay::new(io::stderr(), ansi, output.color);
+    let progress =
+        zg_cli::IndexProgressDisplay::new(io::stderr(), animated_progress(output), output.color);
     let reporter = progress.reporter();
     let result: Result<_, Box<dyn Error>> = if let Some(home) = &server_home {
         zg_daemon::index_with_progress(home, index_request, &reporter)
@@ -510,22 +682,11 @@ async fn ensure_query_index(
         index_request.on_progress = Some(reporter.prioritize_model_progress());
         engine.index(index_request).await.map_err(Into::into)
     };
+    engine.close();
     progress.finish();
     drop(cancellation);
-    engine.close();
     let result = result?;
-    eprintln!(
-        "Index {} · {} files processed · {} failed · {} skipped · {:.1}s",
-        if result.files_failed == 0 {
-            "ready"
-        } else {
-            "completed with failures"
-        },
-        result.files_added + result.files_modified,
-        result.files_failed,
-        result.skipped_counts.values().sum::<usize>(),
-        std::time::Duration::from_micros(result.duration_micros).as_secs_f64()
-    );
+    zg_cli::write_index_with_options(io::stderr().lock(), &info.root, &result, None, output, ansi)?;
     Ok(true)
 }
 
@@ -568,15 +729,15 @@ async fn select_query_index(
                 endpoint: None,
                 device: zg_engine::api::index::options::Device::Auto,
             }),
-            // Remote credentials are only forwarded after an explicit model selection.
-            api_key: if model.local {
+            // Query credentials remain temporary during the implicit build.
+            runtime_api_key: if model.local {
                 None
             } else {
                 request.api_key.clone()
             },
             allow_remote: request.allow_remote,
-            device: if model.local { request.device } else { None },
-            model_cache: request.model_cache.clone(),
+            runtime_device: if model.local { request.device } else { None },
+            runtime_model_cache: request.model_cache.clone(),
             embedding_concurrency: request.embedding_concurrency,
             lock_timeout_ms: request.lock_timeout_ms,
             ..IndexOptions::default()
@@ -616,7 +777,7 @@ async fn select_query_index(
             )
             .into());
         }
-        request.device = index_request.device;
+        request.device = index_request.runtime_device;
         request
             .authorized_remote
             .extend(index_request.authorized_remote.clone());
@@ -768,13 +929,20 @@ async fn execute_direct_context(
             .and_then(zg_engine::api::context::result::ContextIndexingStatus::from_stats);
     }
     engine.close();
+    let mut stdout = io::BufWriter::new(zg_cli::stdout());
     zg_cli::write_context_with_options(
-        zg_cli::stdout(),
+        &mut stdout,
         &result,
         output,
         zg_cli::stdout_supports_ansi(),
     )?;
-    zg_cli::write_context_status(io::stderr().lock(), &result)?;
+    stdout.flush()?;
+    zg_cli::write_context_status_with_options(
+        io::stderr().lock(),
+        &result,
+        output,
+        zg_cli::stderr_supports_ansi(),
+    )?;
     if output.debug {
         eprintln!(
             "Diagnostics: {}",
@@ -789,7 +957,7 @@ async fn execute_index(
     home: Option<&Path>,
     operation: IndexOperation,
     output: zg_cli::OutputOptions,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<ExitCode, Box<dyn Error>> {
     let root = match &operation {
         IndexOperation::Build(request) => request.root.clone(),
         IndexOperation::Drop(request) => request.root.clone(),
@@ -801,7 +969,7 @@ async fn execute_index(
             authorize_index(&mut request, server, home).await?;
             let progress = zg_cli::IndexProgressDisplay::new(
                 io::stderr(),
-                zg_cli::stderr_supports_ansi(),
+                animated_progress(output),
                 output.color,
             );
             let reporter = progress.reporter();
@@ -815,7 +983,6 @@ async fn execute_index(
                 engine.close();
                 result
             };
-            progress.finish();
             // Inspect saved metadata so omitted flags and --reset-paths are
             // reflected in the summary without rescanning workspace files.
             let info = read_workspace_info(
@@ -827,6 +994,7 @@ async fn execute_index(
                 },
             )
             .await?;
+            progress.finish();
             zg_cli::write_index_with_options(
                 zg_cli::stdout(),
                 &info.root,
@@ -839,6 +1007,9 @@ async fn execute_index(
                 eprintln!("Index diagnostics: {}", serde_json::to_string(&result)?);
             }
             if result.files_failed > 0 {
+                if zg_cli::stdout_supports_ansi() && !output.debug {
+                    return Ok(ExitCode::FAILURE);
+                }
                 return Err(io::Error::other(format!(
                     "indexing completed with {} failed {}; workspace index is not ready",
                     result.files_failed,
@@ -866,10 +1037,16 @@ async fn execute_index(
                 engine.close();
                 removed
             };
-            zg_cli::write_index_drop_result(zg_cli::stdout(), &root, removed)?;
+            zg_cli::write_index_drop_with_options(
+                zg_cli::stdout(),
+                &root,
+                removed,
+                output.color,
+                zg_cli::stdout_supports_ansi(),
+            )?;
         }
     }
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 async fn authorize_index(
@@ -1065,6 +1242,36 @@ fn write_server_status(status: &DaemonStatus) -> io::Result<()> {
     } else {
         "stopped"
     };
+    if zg_cli::stdout_supports_ansi() {
+        let mut details = Vec::new();
+        if let Some(url) = &status.server_url {
+            details.push(url.clone());
+        }
+        let mut metadata = Vec::new();
+        if let Some(pid) = status.pid {
+            metadata.push(format!("PID {pid}"));
+        }
+        if let Some(toolset) = &status.mcp_toolset {
+            metadata.push(format!("MCP tools: {toolset}"));
+        }
+        if !metadata.is_empty() {
+            details.push(metadata.join(" · "));
+        }
+        return zg_cli::write_message(
+            output,
+            if status.ready {
+                zg_cli::MessageKind::Success
+            } else if status.running {
+                zg_cli::MessageKind::Warning
+            } else {
+                zg_cli::MessageKind::Info
+            },
+            &format!("Server {label}"),
+            &details.iter().map(String::as_str).collect::<Vec<_>>(),
+            output_options().color,
+            true,
+        );
+    }
     writeln!(output, "Server: {label}")?;
     if let Some(pid) = status.pid {
         writeln!(output, "PID: {pid}")?;
@@ -1079,6 +1286,11 @@ fn write_server_status(status: &DaemonStatus) -> io::Result<()> {
 }
 
 fn init_tracing(debug: bool) {
+    let options = output_options();
+    let color = options.color == zg_cli::ColorMode::Always
+        || (options.color == zg_cli::ColorMode::Auto
+            && zg_cli::stderr_supports_ansi()
+            && std::env::var_os("NO_COLOR").is_none());
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new(if debug {
             "zg=debug,zg_engine=debug,zg_daemon=debug"
@@ -1086,10 +1298,45 @@ fn init_tracing(debug: bool) {
             "warn"
         })
     });
-    let _ = tracing_subscriber::fmt()
-        .with_writer(io::stderr)
-        .with_env_filter(filter)
-        .try_init();
+    if animated_progress(options) {
+        let _ = tracing_subscriber::fmt()
+            .with_writer(|| TerminalLogWriter(b"\r\x1b[K".to_vec()))
+            .with_ansi(color)
+            .with_env_filter(filter)
+            .try_init();
+    } else {
+        let _ = tracing_subscriber::fmt()
+            .with_writer(io::stderr)
+            .with_ansi(color)
+            .with_env_filter(filter)
+            .try_init();
+    }
+}
+
+// tracing constructs one writer per event. Buffer the event until it is complete,
+// then replace the live line and print the log under one stderr lock. The next
+// progress tick starts on the following line, keeping warnings in scrollback.
+struct TerminalLogWriter(Vec<u8>);
+
+impl Write for TerminalLogWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for TerminalLogWriter {
+    fn drop(&mut self) {
+        if self.0.len() > 4 {
+            let mut output = io::stderr().lock();
+            let _ = output.write_all(&self.0);
+            let _ = output.flush();
+        }
+    }
 }
 
 fn init_daemon_tracing(log: zg_daemon::rolling_log::RollingLog, debug: bool) {
@@ -1163,14 +1410,13 @@ mod query_authorization_tests {
     async fn query_choices_apply_to_execution_and_workspace_consent_is_reused() {
         const FIXTURE_ENV: &str = "ZG_QUERY_AUTHORIZATION_TEST_ROOT";
         let Some(root) = std::env::var_os(FIXTURE_ENV) else {
-            // Isolate signing and global configuration without mutating process environment.
+            // Isolate global configuration without mutating process environment.
             let workspace = tempfile::tempdir().expect("workspace");
             let state = tempfile::tempdir().expect("state");
             let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
                 .args(["--exact", "query_authorization_tests::query_choices_apply_to_execution_and_workspace_consent_is_reused", "--nocapture"])
                 .env(FIXTURE_ENV, workspace.path())
                 .env("HOME", state.path()).env("USERPROFILE", state.path())
-                .env("ZVEC_GREP_AUTHORIZATION_KEY_FILE", state.path().join("key"))
                 .env_remove("ZVEC_GREP_API_KEY").env_remove("ZVEC_GREP_ENDPOINT")
                 .env_remove("ZVEC_GREP_EMBEDDING").env_remove("DASHSCOPE_API_KEY").env_remove("QWEN_API_KEY")
                 .output().expect("isolated test");

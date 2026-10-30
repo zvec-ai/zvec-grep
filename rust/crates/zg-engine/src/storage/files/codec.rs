@@ -2,17 +2,14 @@ use std::borrow::Cow;
 
 use serde::{Deserialize, Serialize};
 
-use super::super::{
-    path::PathRecord,
-    record::{decode, encode, invalid_record},
-};
+use super::super::record::{decode, encode, invalid_record};
 use crate::{
     EngineResult,
     domain::{FileId, FileIndexStatus, FileRecord, FileSnapshot, SourcePath},
 };
 
 pub(super) fn encode_file(file: &FileRecord) -> EngineResult<String> {
-    encode(FilePayload::from_file(file)?, "source file")
+    encode(FilePayload::from_file(file), "source file")
 }
 
 pub(super) fn decode_file(json: &str) -> EngineResult<FileRecord> {
@@ -25,7 +22,7 @@ pub(super) fn decode_file(json: &str) -> EngineResult<FileRecord> {
 #[derive(Serialize, Deserialize)]
 struct FilePayload<'a> {
     id: u32,
-    relative_path: PathRecord,
+    relative_path: Cow<'a, SourcePath>,
     snapshot: SnapshotRecord<'a>,
     index_status: IndexStatusRecord<'a>,
 }
@@ -90,23 +87,23 @@ impl From<IndexStatusRecord<'_>> for FileIndexStatus {
 }
 
 impl<'a> FilePayload<'a> {
-    fn from_file(file: &'a FileRecord) -> EngineResult<Self> {
-        Ok(Self {
+    fn from_file(file: &'a FileRecord) -> Self {
+        Self {
             index_status: file.index_status().into(),
             id: file.id().get(),
-            relative_path: PathRecord::from_path(file.relative_path())?,
+            relative_path: Cow::Borrowed(file.relative_path()),
             snapshot: SnapshotRecord {
                 size_bytes: file.snapshot().size_bytes,
                 modified_epoch_ms: file.snapshot().modified_epoch_ms,
                 content_hash: file.snapshot().content_hash.as_deref().map(Cow::Borrowed),
             },
-        })
+        }
     }
 
     fn into_file(self) -> EngineResult<FileRecord> {
         FileRecord::new(
             FileId::new(self.id),
-            SourcePath::new(self.relative_path.into_path()?)?,
+            self.relative_path.into_owned(),
             FileSnapshot {
                 size_bytes: self.snapshot.size_bytes,
                 modified_epoch_ms: self.snapshot.modified_epoch_ms,
@@ -145,7 +142,7 @@ mod tests {
             record,
             json!({
                 "id": 1, "index_status": {"kind": "not_indexed"},
-                "relative_path": {"encoding": "utf8", "value": "nested/tsconfig.json"},
+                "relative_path": {"components": ["nested", "tsconfig.json"]},
                 "snapshot": {"size_bytes": 123, "modified_epoch_ms": 456, "content_hash": "content-hash"},
             })
         );

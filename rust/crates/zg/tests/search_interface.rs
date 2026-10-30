@@ -39,11 +39,17 @@ fn command_shaped_queries_warn_once_and_still_search() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success(), "{word}: {stderr}");
-        assert_eq!(stderr.matches("warning:").count(), 1, "{stderr}");
-        assert!(stderr.contains("literal word"), "{stderr}");
+        assert_eq!(stderr.matches("Warning:").count(), 1, "{stderr}");
+        let message = if matches!(word, "query" | "search") {
+            format!("\"{word}\" is search text.")
+        } else {
+            format!("now searches for \"{word}\".")
+        };
+        assert!(stderr.contains(&message), "{stderr}");
+        assert!(!stderr.contains('\u{1b}'), "{stderr}");
         assert!(stdout.contains("source.txt"), "{stdout}");
         assert!(stdout.contains(word), "{stdout}");
-        assert!(!stdout.contains("warning:"), "{stdout}");
+        assert!(!stdout.contains("Warning:"), "{stdout}");
     }
     assert!(!root.path().join(".zvec-grep").exists());
 }
@@ -60,13 +66,13 @@ fn literal_flags_and_command_words_do_not_warn_or_run_actions() {
         for pattern_option in ["--", "-e", "-Fe", "--regexp"] {
             let mut arguments = vec!["--rg", pattern_option, word, "source.txt"];
             if pattern_option != "--" {
-                arguments.extend(["--limit", "3", "--compact"]);
+                arguments.extend(["--limit", "3"]);
             }
             let output = run(root.path(), &arguments);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(output.status.success(), "{word}: {stderr}");
-            assert!(!stderr.contains("warning:"), "{stderr}");
+            assert!(!stderr.contains("Warning:"), "{stderr}");
             assert!(stdout.contains("source.txt"), "{stdout}");
             assert!(stdout.contains(word), "{stdout}");
         }
@@ -87,7 +93,7 @@ fn removed_flags_and_ambiguous_actions_fail_without_side_effects() {
         assert!(output.stdout.is_empty());
         let stderr = String::from_utf8_lossy(&output.stderr);
         if arguments[0] == "index" {
-            assert!(stderr.contains("no longer runs an action"), "{stderr}");
+            assert!(stderr.contains("`zg --index`"), "{stderr}");
         }
         if arguments[0] == "--human" {
             assert!(stderr.contains("--human has been removed"), "{stderr}");
@@ -97,9 +103,10 @@ fn removed_flags_and_ambiguous_actions_fail_without_side_effects() {
 }
 
 const PATH_LOOKUP_NOTICE: &str =
-    "warning: automatically performing path lookup; use --hybrid to force hybrid search.\n";
+    "Warning: automatically performing path lookup; use --hybrid to force hybrid search.\n";
+const COLORED_PATH_LOOKUP_NOTICE: &str = "\x1b[33mWarning:\x1b[0m automatically performing path lookup; use --hybrid to force hybrid search.\n";
 const TEXT_FALLBACK_NOTICE: &str =
-    "warning: no matching file paths; searching current file contents literally (rg).\n";
+    "Warning: no matching file paths; searching current file contents literally (rg).\n";
 
 #[test]
 fn file_lookup_prints_ranked_path_matches_in_every_client_mode_without_a_daemon() {
@@ -127,7 +134,7 @@ fn file_lookup_prints_ranked_path_matches_in_every_client_mode_without_a_daemon(
             (".\\src\\auth.ts", None, vec!["src/auth.ts"]),
             ("auth.ts", Some("src/**"), vec!["src/auth.ts"]),
         ] {
-            let mut args = vec![query, "--mode", mode, "--no-color"];
+            let mut args = vec![query, "--mode", mode, "--color", "never"];
             if let Some(filter) = filter {
                 args.extend(["-g", filter, "--limit", "1"]);
             }
@@ -138,7 +145,7 @@ fn file_lookup_prints_ranked_path_matches_in_every_client_mode_without_a_daemon(
             let expected: Vec<_> = expected
                 .iter()
                 .enumerate()
-                .map(|(index, path)| format!("#{} matchedBy=path {path}", index + 1))
+                .map(|(index, path)| format!("#{} {path}", index + 1))
                 .collect();
             let stdout = String::from_utf8_lossy(&output.stdout);
             let actual: Vec<_> = stdout.lines().collect();
@@ -155,16 +162,17 @@ fn explicit_routes_continue_to_indexed_search() {
     std::fs::write(root.path().join("auth.ts"), "export const auth = true;").expect("source");
     let home = root.path().join(".zvec-grep");
     std::fs::create_dir(&home).expect("workspace home");
-    let canonical_root = std::fs::canonicalize(root.path()).expect("canonical root");
     std::fs::write(
         home.join("manifest.json"),
         serde_json::to_vec(&serde_json::json!({
-            "name": "path-fallback",
-            "root": canonical_root,
-            "path": home,
-            "indexPolicy": "disabled",
+            "sourceRoot": {
+                "recordedPath": std::fs::canonicalize(root.path()).expect("source root").to_string_lossy(),
+                "recordedUsername": std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).ok(),
+            },
+            "scan": {},
             "createdTime": 0,
             "updatedTime": 0,
+            "index": { "state": "disabled" },
         }))
         .expect("manifest json"),
     )
@@ -185,7 +193,14 @@ fn explicit_routes_continue_to_indexed_search() {
         assert!(!output.status.success(), "{args:?}: {stdout}");
         assert!(!stdout.contains("auth.ts"), "{stdout}");
         assert!(!stderr.contains("No index found"), "{stderr}");
-        assert!(stderr.contains("ZG.ENGINE.NOT_FOUND"), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("ZG.ENGINE.UNSUPPORTED"),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            stderr.contains("workspace indexing is disabled"),
+            "{args:?}: {stderr}"
+        );
         assert!(
             !stderr.contains("automatically performing path lookup"),
             "{stderr}"
@@ -359,7 +374,7 @@ fn path_lookup_smart_case_highlights_only_literal_matches_in_every_mode() {
         assert!(output.status.success(), "{mode}: {stderr}");
         assert_eq!(
             stderr,
-            format!("{PATH_LOOKUP_NOTICE}{TEXT_FALLBACK_NOTICE}")
+            format!("{COLORED_PATH_LOOKUP_NOTICE}{TEXT_FALLBACK_NOTICE}")
         );
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
@@ -396,7 +411,7 @@ fn path_lookup_deduplicates_symbols_before_the_limit_and_highlights_only_matchin
         assert!(output.status.success(), "{mode}: {stderr}");
         assert_eq!(
             stderr,
-            format!("{PATH_LOOKUP_NOTICE}{TEXT_FALLBACK_NOTICE}")
+            format!("{COLORED_PATH_LOOKUP_NOTICE}{TEXT_FALLBACK_NOTICE}")
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.starts_with("refs.ts\n"), "{stdout}");

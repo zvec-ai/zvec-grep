@@ -3,7 +3,7 @@ use super::{
     StoredPendingRef, decode_enum, decode_metadata, nonempty,
 };
 use crate::domain::{EdgeProvenance, PendingRef, PendingRefStatus};
-use rusqlite::{Row, TransactionBehavior, params};
+use rusqlite::{Row, TransactionBehavior, params, params_from_iter};
 
 /// Maximum references per page, excluding the one-row pagination lookahead.
 pub(super) const MAX_PENDING_PAGE_SIZE: usize = 1024;
@@ -11,6 +11,23 @@ pub(super) const MAX_PENDING_PAGE_SIZE: usize = 1024;
 const SELECT_REF: &str = "SELECT id, file_id, source, reference_name, receiver_name, kind, arity, line, col, metadata FROM edges";
 
 impl SqliteGraphStorage {
+    /// Fetch current pending rows for writeback validation, without scanning the queue.
+    pub(crate) fn get_pending_refs(&self, ids: &[i64]) -> Result<Vec<StoredPendingRef>> {
+        let mut refs = Vec::new();
+        for batch in ids.chunks(500) {
+            let placeholders = vec!["?"; batch.len()].join(",");
+            let mut statement = self.connection.prepare(&format!(
+                "{SELECT_REF} WHERE status = 'pending' AND id IN ({placeholders})"
+            ))?;
+            refs.extend(
+                statement
+                    .query_map(params_from_iter(batch), ref_from_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+            );
+        }
+        Ok(refs)
+    }
+
     /// Lists only pending refs using keyset pagination; no snapshot spans pages.
     /// Restart with cursor 0 after file mutations.
     /// Limit must be positive and at most [`MAX_PENDING_PAGE_SIZE`].

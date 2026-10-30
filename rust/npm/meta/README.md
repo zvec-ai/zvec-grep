@@ -28,6 +28,24 @@ ZG_INSTALL_ACCELERATOR=cuda npm rebuild -g @zvec/zvec-grep --foreground-scripts
 ```
 
 For project-local installations, omit `-g` and run in the project directory.
+After a successful global installation or rebuild, postinstall attempts to
+migrate existing user-level agent launch configurations from 0.2.x. It uses the
+new native executable with `--install --upgrade-installed`; no agent selection,
+new integration, daemon startup or model loading is involved. HTTP settings,
+custom fields, permissions, guidance and comments are preserved. Changed files
+receive adjacent `.zg-upgrade-*.bak` backups. Reconnect agents after migration;
+HTTP users can run `zg --server on` to replace an old daemon.
+
+Local dependencies, temporary execution, CI, elevated Unix installs and
+ambiguous user homes skip automatic migration. Set
+`ZG_INSTALL_SKIP_AGENT_UPGRADE=1` to opt out independently of native installation.
+Migration errors or the 10-second timeout do not fail package installation;
+details are saved in `agent-upgrade.log` inside this package when possible.
+Retry with `zg --install --upgrade-installed`, or preview changes with
+`zg --install --upgrade-installed --dry-run`. The command only scans known user
+configuration locations, respects directory overrides, and reports unsupported
+custom launchers for manual handling. Repeated runs make no additional changes.
+
 In PowerShell, set `$env:ZG_INSTALL_ACCELERATOR = 'cuda'` before `npm rebuild`,
 then remove that environment variable when finished. There is no `zg-setup`
 command. Restart any previously running daemon after successful installation.
@@ -53,7 +71,7 @@ content identity. Runtime libraries are copied beside the binary, not loaded
 from absolute cache paths. Online downloads use npm's registry/proxy/auth/CA
 configuration and do not run component lifecycle scripts.
 
-The installer verifies archives, streams Linux ORT fragments into a temporary
+The installer verifies archives, streams Linux/Windows ORT fragments into a temporary
 file, then checks the complete library hash before activation. It preserves
 `bin/zg.exe`, `lib/` and `lib/cuda12/`; no compilation, driver/Toolkit installation
 or model execution happens during installation. `native-install.json` records

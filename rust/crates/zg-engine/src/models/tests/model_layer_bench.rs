@@ -19,8 +19,8 @@ use crate::domain::{
 
 const DEFAULT_MODEL_REFERENCE: &str = "local/potion-code-16m-v2";
 
-/// Manual, release-mode comparison harness shared with
-/// `benchmarks/model-layer/main.mjs`.
+/// Manual, release-mode throughput and RSS harness used by
+/// `scripts/validate-onnxruntime-models.py`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "manual model-layer throughput and RSS benchmark"]
 async fn model_layer_throughput() {

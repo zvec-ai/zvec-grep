@@ -1,7 +1,10 @@
-# Rust rewrite contributor guide
+# Rust contributor guide
 
 The Rust workspace lives in `rust/`. Run the commands in this guide from that
-directory; the repository root contains the TypeScript / Node.js implementation.
+directory. The repository root retains the legacy TypeScript implementation and
+its separate checks. User documentation lives in
+[zvec-web](https://github.com/zvec-ai/zvec-web/tree/main/content/docs), published
+on [zvec.org](https://zvec.org/en/docs/zvec-grep/).
 
 ## Start
 
@@ -30,7 +33,7 @@ Do not add a generic `Core`, command bus, operation envelope, adapter registry o
 transport executor to connect an in-process method to its implementation.
 
 `zg_engine::authorization` is an explicit exception for remote-consent preflight
-and signed grant-file management. CLI, daemon and MCP callers must be able to
+and workspace grant-file management. CLI, daemon and MCP callers must be able to
 resolve destinations and inspect, grant or revoke consent before starting an
 engine operation. These functions use workspace metadata and authorization files;
 they do not require a `ZvecGrep` instance, acquire model runtimes, open index
@@ -46,15 +49,27 @@ Native dependency types remain in their owning crate. Daemon framing and wire
 commands remain in `zg-daemon-protocol`; MCP schemas remain in
 `zg-transport-mcp`. Transport handlers call public `ZvecGrep` methods directly.
 
+Create a separate native crate only when the component is independently useful
+or testable. Keep its library types and runtime policy in that crate. When
+integrating it, reuse typed engine options and results, put orchestration behind
+a private engine service, call it from `ZvecGrep`, and map failures to
+`EngineError`. Add shared abstractions only for multiple real implementations.
+
 If a private engine service needs code currently living in another crate,
 prefer moving that concrete implementation behind the engine boundary. Do not
 make an engine-internal module public solely to avoid a crate dependency cycle.
 
+Check cancellation during expensive work, bound processes and queues, preserve
+deterministic output order, clean up partial artifacts, and record native
+revisions and artifact fingerprints where applicable.
+
 ## Compatibility
 
-The TypeScript implementation in the repository root is the behavioral oracle
-during the rewrite. Store stable, machine-readable cases under `compat/` and normalize
-paths, random identifiers and timings in the runner.
+The TypeScript implementation and captured fixtures remain comparison baselines
+where parity is required. Current Rust APIs and regression tests define the Rust
+interface. Store stable, machine-readable cases under `compat/`, normalize paths,
+random identifiers and timings in the runner, and document intentional behavior
+differences. Keep fixtures consumed by tests when retiring migration notes.
 
 ## Verification
 
@@ -78,7 +93,8 @@ from the successful primary build to locate that build's verified source
 directory and revision. This supports the fork's source cache and
 `LLAMA_CPP_SOURCE_DIR` override without assuming a submodule directory or
 selecting a stale build tree. Prebuilt bundles copy the SDK's fallback instead.
-`prepare-onnxruntime.py` verifies and stages official ORT archives, and
+`scripts/prepare-onnxruntime.py` verifies and stages official ORT 1.21 archives for
+CPU builds on all six targets and CUDA builds on Linux/Windows x64, and
 `check.sh`/`check.ps1` audit the resulting runtime linkage. `prepare-windows.ps1`
 with `-DriverOnly` and the pinned runtime requirements prepare Windows GPU
 drivers/runtime libraries; compiler tools stay on CPU runners.
@@ -154,6 +170,9 @@ package-level validation. It runs only through manual dispatch. Runs with both
 without allocating GPUs or publishing
 to npm. Compilation always stays on CPU runners, including when `cuda=true` or
 `publish=true`; Linux/Windows x64 still build the default CUDA-capable bundles.
+Linux x64 and ARM64 release builds use Ubuntu 20.04 containers on native runners
+and audit the executable and bundled libraries against glibc 2.31. The host
+runner's Ubuntu version does not set the release package's compatibility baseline.
 Set `cuda=true,publish=false` to add GPU validation without publishing.
 Separate GPU jobs download the exact native npm artifacts from the same run and
 invoke `.github/actions/cuda-cli-e2e`, without recompiling native code or repacking. Publication
@@ -179,12 +198,13 @@ behavior on the real CPU host. An isolated loopback registry serves only this
 run's CUDA archives: any CUDA metadata/tarball request (even a failed optional
 attempt), installed plugin or populated plugin cache fails CPU validation.
 `cpu-downloads.json` retains the request evidence; no public registry is used.
-They verify CLI and daemon IPC. Linux/Windows x64 then
+They verify CLI and daemon IPC. Linux x64 and ARM64 install and exercise the
+artifacts in plain Ubuntu 20.04 containers. Linux/Windows x64 then
 run `scripts/cuda/e2e.py --cpu-only` against the installed meta
 package. This checks both explicit `--device cpu` and default automatic CPU
-fallback for real GGUF/ONNX indexing and vector queries. Linux uses a plain
-Ubuntu 24.04 container; Windows excludes toolkit paths. Both require CUDA host
-libraries to be unavailable and retain `cpu-artifact-evidence-*` logs on failure.
+fallback for real GGUF/ONNX indexing and vector queries. Windows excludes toolkit
+paths. Both x64 model checks require CUDA host libraries to be unavailable and
+retain `cpu-artifact-evidence-*` logs on failure.
 CPU artifact validation runs even when `publish=false`; failure blocks npm
 publication, while the downloaded candidate remains available for diagnosis.
 
@@ -201,6 +221,19 @@ covered. Before/after installation receipts and `rebuild-downloads.json` are
 retained with the GPU evidence, including on failure. This chain runs for
 `publish=false,cuda=true`, without compiling or publishing anything. Public
 registry smoke remains a separate post-publication check.
+
+Post-publication registry smoke runs on all six native CPU platforms. It invokes
+the installed npm command (Unix symlink or Windows PowerShell shim), not the
+package's internal executable. Fresh and upgraded candidates must index and
+search with Potion, GGUF and ONNX, exercise incremental add/delete, query through
+the daemon and complete MCP stdio search. It also checks default CPU installation
+for unintended CUDA downloads before the explicit plugin-fetch check. Per-command
+logs and model results are retained in `registry-smoke-evidence-<target>` even on
+failure. All six jobs must succeed before the workflow can promote `latest`.
+Run `node --test scripts/npm-*.test.mjs npm/meta/install.test.cjs` for deterministic
+packaging, npm entry and gate regression coverage. Real registry smoke requires
+published candidates and model-download access; it never builds or repairs the
+installed package.
 
 Both platforms run the same CLI index, readiness and vector-search test with
 GGUF `local/embeddinggemma-300m` and ONNX `local/all-minilm-l6-v2`, explicitly
@@ -259,3 +292,47 @@ uses a short `RUNNER_TEMP` workspace; it does not alter zg/zvec long-path handli
 Linux GPU runners must supply a compatible driver and NVIDIA container support.
 CPU fallback after a driver/runtime failure does not count as successful GPU
 validation.
+
+### ONNX Runtime distributions
+
+`zg-engine` pins the published `ort` 2.0.0-rc.15 crate with API 21 and dynamic
+loading, including the manual-environment fix and subsequent memory-safety fixes.
+The native runtime remains independently pinned to ORT 1.21.0; upgrading the Rust
+binding does not change its archive URLs or hashes. The engine keeps one
+environment across model reloads and registers its cleanup after library initialization so it runs
+before ORT's C++ destructors. A subprocess regression test verifies failed model
+loads, successful inference, reload and the final process exit status.
+
+The build script runs `scripts/prepare-onnxruntime.py`, whose target/variant selection, archive
+SHA-256 pins and exact payload paths live in `scripts/onnxruntime-distributions.json`.
+This also prepares independent engine tests; building the CLI first is unnecessary.
+Python 3 and curl are required (override Python with `PYTHON`).
+
+`ZG_ORT_CACHE_DIR` overrides the archive cache; otherwise it is `ort-prebuilt/`
+under the Cargo target directory (under the target triple for cross builds).
+`CARGO_NET_OFFLINE=true` requires valid cached archives and never downloads.
+`ORT_DYLIB_PATH` explicitly supplies an external runtime and skips automatic
+preparation; that runtime must support API 21. Using ONNX WebGPU requires a
+runtime containing WebGPU through this override. Enabling the Vulkan build
+feature alone does not require one: GGUF Vulkan and ONNX CPU remain available.
+On Windows, the engine preloads the selected runtime's sibling DirectML before
+ORT initialization. ORT loads CUDA providers from its own runtime directory;
+host CUDA/cuDNN libraries must still be available on PATH.
+Default release runtimes preserve CPU, macOS CoreML, Windows DirectML and x64
+CUDA 12 choices;
+macOS model routing continues to select CPU.
+
+Run `python3 scripts/test-prepare-onnxruntime.py` for offline deployment checks
+and `python3 scripts/test-check-glibc.py` for the compatibility checker tests.
+The ORT CI gate loads Linux x64/ARM64 CPU cores on glibc 2.31 and audits their
+ELF imports, including the x64 CUDA provider. `scripts/check-glibc.py <payload>`
+can also audit a complete ELF package. The release workflow builds Linux x64/ARM64
+packages on Ubuntu 20.04, applies this audit to the executable and bundled native
+libraries, and verifies the installed artifacts on that baseline.
+
+Dispatch Rust CI with `ort_validation=true` to validate all six catalog ONNX
+graphs on Linux x64/ARM64 and compare official ORT 1.21/1.28 q4 CPU throughput.
+The comparison uses one release binary, fixed CPU/batch/concurrency settings,
+warmup and alternating runtime order. It measures the native runtime change;
+it is not a comparison of different Rust bindings or the former Pyke static
+build. Raw rounds and machine details are retained in the job artifacts.

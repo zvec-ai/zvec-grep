@@ -13,7 +13,10 @@ use zg_engine::{
 use crate::{
     ColorMode, OutputOptions, output_path,
     status::scan_filters,
-    theme::{StatusTheme, display_path, storage_path, write_status_field},
+    theme::{
+        StatusTheme, clean, columns, display_path, format_count, storage_path, unicode_supported,
+        write_status_field,
+    },
 };
 
 /// Writes a completed index reply without terminal styling.
@@ -24,7 +27,7 @@ pub fn write_index_result(writer: impl Write, root: &Path, result: &IndexResult)
     write_index_with_options(writer, root, result, None, OutputOptions::default(), false)
 }
 
-/// Writes a completed index reply in the Node.js CLI's summary layout.
+/// Writes a compact terminal summary, retaining detailed fields in logs and debug output.
 /// Pass the saved scan rules to describe the effective indexing scope.
 ///
 /// # Errors
@@ -38,7 +41,10 @@ pub fn write_index_with_options(
     terminal: bool,
 ) -> io::Result<()> {
     let theme = StatusTheme::new(options.color, terminal);
-    writeln!(writer, "{}", theme.accent("Workspace index"))?;
+    if terminal && !options.debug {
+        return write_compact_index(&mut writer, root, result, scan, theme, columns());
+    }
+    writeln!(writer, "{}", StatusTheme::accent("Workspace index"))?;
     let failed = format!("{} failed", result.files_failed);
     index_field(
         &mut writer,
@@ -108,6 +114,93 @@ pub fn write_index_with_options(
     Ok(())
 }
 
+fn write_compact_index(
+    writer: &mut impl Write,
+    root: &Path,
+    result: &IndexResult,
+    scan: Option<&ScanRules>,
+    theme: StatusTheme,
+    columns: usize,
+) -> io::Result<()> {
+    let unchanged = result.files_added == 0
+        && result.files_modified == 0
+        && result.files_pending == 0
+        && result.files_deleted == 0;
+    let unicode = unicode_supported();
+    let (glyph, label) = if result.files_failed > 0 {
+        (
+            theme.danger(if unicode { "×" } else { "x" }),
+            "Index incomplete",
+        )
+    } else if result.files_scanned == 0 {
+        (theme.warning("!"), "No indexable files")
+    } else {
+        (
+            theme.success(if unicode { "✓" } else { "+" }),
+            if unchanged {
+                "Index up to date"
+            } else {
+                "Index ready"
+            },
+        )
+    };
+    let elapsed = format!("· {}", format_duration(result.duration_micros / 1_000));
+    let bar_width = columns
+        .saturating_sub(2 + 18 + 2 + 2 + elapsed.chars().count())
+        .min(20);
+    if result.files_failed == 0 && result.files_scanned > 0 && bar_width >= 8 {
+        writeln!(
+            writer,
+            "{glyph} {label:<18}  {}  {}",
+            crate::progress::block_bar(bar_width, bar_width, theme.color, unicode),
+            theme.muted(&elapsed)
+        )?;
+    } else {
+        writeln!(writer, "{glyph} {label} {}", theme.muted(&elapsed))?;
+    }
+    let mut counts = Vec::new();
+    for (count, label) in [
+        (result.files_added, "added"),
+        (result.files_modified, "modified"),
+        (result.files_pending, "retried"),
+        (result.files_deleted, "deleted"),
+        (result.files_failed, "failed"),
+        (result.entities_created, "entities"),
+    ] {
+        if count > 0 {
+            counts.push(format!("{} {label}", format_count(count)));
+        }
+    }
+    if counts.is_empty() {
+        counts.push(format!(
+            "{} files checked",
+            format_count(result.files_scanned)
+        ));
+    }
+    writeln!(writer, "  {}", counts.join(" · "))?;
+    writeln!(writer, "  {}", theme.muted(&clean(&display_path(root))))?;
+    let filters = scan.map(scan_filters).unwrap_or_default();
+    if !filters.is_empty() {
+        writeln!(
+            writer,
+            "  {}",
+            theme.muted(&format!("Scope: {}", clean(&filters)))
+        )?;
+    }
+    for file in &result.failed_files {
+        writeln!(
+            writer,
+            "  {}: {}",
+            clean(&storage_path(&file.path, root)),
+            clean(&file.reason)
+        )?;
+    }
+    if result.files_scanned == 0 {
+        writeln!(writer, "  Run: zg --help file-types")?;
+    }
+    Ok(())
+}
+
 fn index_field(
     writer: &mut impl Write,
     theme: StatusTheme,
@@ -150,7 +243,38 @@ pub fn write_index_drop_result(
     )
 }
 
-/// Writes verified workspace authorization in the Node.js CLI's grouped layout.
+/// Writes a removal result using the shared terminal style.
+/// # Errors
+/// Returns an output error.
+pub fn write_index_drop_with_options(
+    mut writer: impl Write,
+    root: &Path,
+    removed: bool,
+    color: ColorMode,
+    terminal: bool,
+) -> io::Result<()> {
+    if !terminal {
+        return write_index_drop_result(writer, root, removed);
+    }
+    crate::write_message(
+        &mut writer,
+        if removed {
+            crate::MessageKind::Success
+        } else {
+            crate::MessageKind::Info
+        },
+        if removed {
+            "Index removed"
+        } else {
+            "No index found"
+        },
+        &[&display_path(root)],
+        color,
+        terminal,
+    )
+}
+
+/// Writes verified workspace authorization, retaining the grouped layout in logs.
 ///
 /// # Errors
 /// Returns the underlying writer error.
@@ -161,6 +285,48 @@ pub fn write_authorization_status(
     terminal: bool,
 ) -> io::Result<()> {
     let theme = StatusTheme::new(color, terminal);
+    if terminal {
+        crate::write_message(
+            &mut writer,
+            if status.grants.is_empty() {
+                crate::MessageKind::Warning
+            } else {
+                crate::MessageKind::Success
+            },
+            if status.grants.is_empty() {
+                "Remote embedding is not authorized"
+            } else {
+                "Remote embedding authorized"
+            },
+            &[&display_path(&status.root)],
+            color,
+            terminal,
+        )?;
+        if status.grants.is_empty() {
+            writeln!(
+                writer,
+                "  Run: zg --auth grant --capability embedding --scope workspace"
+            )?;
+        } else {
+            for grant in &status.grants {
+                writeln!(
+                    writer,
+                    "  {} · {}",
+                    clean(&grant.model),
+                    clean(&grant.endpoint_host)
+                )?;
+            }
+            writeln!(
+                writer,
+                "  {}",
+                theme.muted(&format!(
+                    "Workspace scope · {}",
+                    clean(&storage_path(&status.path, &status.root))
+                ))
+            )?;
+        }
+        return Ok(());
+    }
     writeln!(
         writer,
         "{}",
@@ -173,14 +339,14 @@ pub fn write_authorization_status(
     writeln!(writer, "  {}", theme.path(&display_path(&status.root)))?;
     writeln!(writer)?;
     if status.grants.is_empty() {
-        writeln!(writer, "{}", theme.accent("Run"))?;
+        writeln!(writer, "{}", StatusTheme::accent("Run"))?;
         return writeln!(
             writer,
             "  {}",
             theme.path("zg --auth grant --capability embedding --scope workspace"),
         );
     }
-    writeln!(writer, "{}", theme.accent("Authorization"))?;
+    writeln!(writer, "{}", StatusTheme::accent("Authorization"))?;
     for (index, grant) in status.grants.iter().enumerate() {
         if index > 0 {
             writeln!(writer)?;
@@ -200,7 +366,7 @@ pub fn write_authorization_status(
         )?;
     }
     writeln!(writer)?;
-    writeln!(writer, "{}", theme.accent("Storage"))?;
+    writeln!(writer, "{}", StatusTheme::accent("Storage"))?;
     write_status_field(
         &mut writer,
         theme,
@@ -225,6 +391,62 @@ pub fn write_authorization_revoke_result(
         ),
         None => writeln!(writer, "Removed Remote Embedding Workspace authorization."),
     }
+}
+
+/// Writes a revocation result using the shared terminal style.
+/// # Errors
+/// Returns an output error.
+pub fn write_authorization_revoke_with_options(
+    writer: impl Write,
+    count: Option<usize>,
+    color: ColorMode,
+    terminal: bool,
+) -> io::Result<()> {
+    if !terminal {
+        return write_authorization_revoke_result(writer, count);
+    }
+    let label = match count {
+        Some(0) => "No remote embedding grants found".to_owned(),
+        Some(count) => format!("Remote embedding authorization revoked · {count} grants"),
+        None => "Remote embedding authorization removed".to_owned(),
+    };
+    crate::write_message(
+        writer,
+        if count == Some(0) {
+            crate::MessageKind::Info
+        } else {
+            crate::MessageKind::Success
+        },
+        &label,
+        &[],
+        color,
+        terminal,
+    )
+}
+
+/// Writes a configuration acknowledgement without exposing credentials.
+/// # Errors
+/// Returns an output error.
+pub fn write_config_result(
+    mut writer: impl Write,
+    kind: &str,
+    reference: &str,
+    path: &Path,
+    color: ColorMode,
+    terminal: bool,
+) -> io::Result<()> {
+    if !terminal {
+        writeln!(writer, "{kind} config: {reference}")?;
+        return writeln!(writer, "Global config: {}", path.display());
+    }
+    crate::write_message(
+        writer,
+        crate::MessageKind::Success,
+        &format!("{kind} configured"),
+        &[reference, &display_path(path)],
+        color,
+        terminal,
+    )
 }
 
 #[cfg(test)]
@@ -401,14 +623,12 @@ mod tests {
         write_authorization_status(&mut bytes, &status, ColorMode::Never, true)
             .expect("render output");
         let output = String::from_utf8(bytes).expect("render output");
-        assert!(
-            output.starts_with("✓ Remote Embedding is authorized\n  /workspace\n\nAuthorization\n")
-        );
+        assert!(output.contains("Remote embedding authorized\n  /workspace\n"));
         assert!(output.contains("Workspace"));
         assert!(output.contains("qwen/text-embedding-v4"));
         assert!(output.contains("provider.test:8443"));
         assert!(!output.contains("https://"));
-        assert!(output.contains("\nStorage\n"));
+        assert!(output.contains("Workspace scope · .zvec-grep/authorization.json"));
         assert!(output.contains(".zvec-grep/authorization.json"));
         assert!(!output.contains("\x1b["));
     }
@@ -427,5 +647,61 @@ mod tests {
             String::from_utf8(bytes).expect("render output"),
             "○ Remote Embedding is not authorized\n  /workspace\n\nRun\n  zg --auth grant --capability embedding --scope workspace\n",
         );
+    }
+
+    #[test]
+    fn compact_summary_has_one_heading_and_preserves_partial_failure_details() {
+        let mut result = IndexResult {
+            files_scanned: 4946,
+            files_added: 4946,
+            entities_created: 155_654,
+            duration_micros: 87_000_000,
+            ..IndexResult::default()
+        };
+        let render = |result: &IndexResult, width| {
+            let mut bytes = Vec::new();
+            write_compact_index(
+                &mut bytes,
+                Path::new("/repo"),
+                result,
+                None,
+                StatusTheme { color: false },
+                width,
+            )
+            .expect("summary");
+            String::from_utf8(bytes).expect("text")
+        };
+        let text = render(&result, 80);
+        assert_eq!(text.matches("Index ready").count(), 1);
+        assert_eq!(text.lines().count(), 3);
+        assert!(text.contains("· 1m 27s\n  4,946 added · 155,654 entities\n  /repo\n"));
+        assert!(
+            render(&result, 30)
+                .lines()
+                .next()
+                .expect("narrow heading")
+                .len()
+                < text.lines().next().expect("heading").len()
+        );
+        result.files_failed = 1;
+        result
+            .failed_files
+            .push(zg_engine::api::info::result::FailedFile {
+                path: "/repo/broken.txt".into(),
+                reason: "invalid text\x1b[2J".into(),
+            });
+        let text = render(&result, 80);
+        assert!(text.contains("Index incomplete"));
+        assert!(text.contains("1 failed"));
+        assert!(text.contains("broken.txt: invalid text [2J"));
+        assert!(!text.contains("Index ready"));
+        assert!(!text.contains('\x1b'));
+        let empty = render(&IndexResult::default(), 80);
+        assert!(empty.contains("No indexable files"));
+        assert!(empty.contains("Run: zg --help file-types"));
+        result.files_failed = 0;
+        result.files_added = 0;
+        result.failed_files.clear();
+        assert!(render(&result, 80).contains("Index up to date"));
     }
 }

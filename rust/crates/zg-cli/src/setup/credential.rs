@@ -83,18 +83,18 @@ impl CredentialInput {
             format!("  Model    {model}"),
             String::new(),
             format!(
-                "  › API Key  [ {:_<48} ]",
+                "  ✓ API Key  [ {:_<48} ]",
                 "*".repeat(self.value.chars().count().min(48))
             ),
-            "    Type or paste your API Key (input is hidden).".into(),
+            "  Type or paste your API Key (input is hidden).".into(),
             String::new(),
             format!("  Submitting saves the key for {provider} in the global configuration."),
             "  Remote authorization follows before any workspace data is sent.".into(),
             String::new(),
-            "  Enter Save and continue · Ctrl+U Clear · Esc Exit".into(),
+            "  Enter Save and continue · Ctrl+U Clear · Esc Cancel".into(),
         ];
         if let Some(error) = self.error {
-            lines.push(format!("  {error}"));
+            lines.push(format!("  × {error}"));
         }
         lines
     }
@@ -142,7 +142,7 @@ mod tests {
         let lines = input.lines("qwen/text-embedding-v4").join("\n");
         assert!(!lines.contains("setup-test-secret"));
         assert!(lines.contains("*****************"));
-        assert!(lines.contains("Esc Exit"));
+        assert!(lines.contains("Esc Cancel"));
         let Some(CredentialResult::Submit(value)) = input.key(key(KeyCode::Enter)) else {
             panic!("submit valid key");
         };

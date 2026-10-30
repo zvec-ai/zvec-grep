@@ -52,7 +52,6 @@ test("npm package contains and exposes the supported public surface", async (t) 
     "LICENSE",
     "README.md",
     "README_CN.md",
-    "docs/07-embedding.md",
     "dist/index.js",
     "dist/index.d.ts",
     "dist/cli/index.js",
@@ -61,7 +60,10 @@ test("npm package contains and exposes the supported public surface", async (t) 
   }
   assert.equal(
     [...paths].some(
-      ([path]) => path.startsWith("src/") || path.startsWith("test/"),
+      ([path]) =>
+        path.startsWith("src/") ||
+        path.startsWith("test/") ||
+        path.startsWith("docs/"),
     ),
     false,
   );

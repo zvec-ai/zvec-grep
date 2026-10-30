@@ -1,13 +1,16 @@
 //! Command-line parsing, validation, request construction, and terminal rendering.
 
 mod authorization;
+mod diagnostics;
 mod highlight;
 mod install;
 mod jsonc;
 mod managed_rg;
 mod management;
+mod messages;
 mod path_lookup;
 mod paths;
+pub mod preview;
 mod progress;
 mod render;
 mod setup;
@@ -15,10 +18,13 @@ mod status;
 mod stdio;
 mod terminal;
 mod theme;
+pub use diagnostics::{diagnostic_color_for_args, exit_parse_error, format_error_report};
 pub use management::{
-    write_authorization_revoke_result, write_authorization_status, write_index_drop_result,
-    write_index_result, write_index_with_options,
+    write_authorization_revoke_result, write_authorization_revoke_with_options,
+    write_authorization_status, write_config_result, write_index_drop_result,
+    write_index_drop_with_options, write_index_result, write_index_with_options,
 };
+pub use messages::{MessageKind, write_error_message, write_error_report, write_message};
 pub use paths::output_path;
 pub use progress::IndexProgressDisplay;
 pub use setup::{
@@ -31,7 +37,6 @@ pub use terminal::{stderr_supports_ansi, stdout_supports_ansi};
 
 use std::{
     ffi::{OsStr, OsString},
-    io::{self, IsTerminal},
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -61,14 +66,18 @@ pub use authorization::{
 };
 
 pub use install::{
-    InstallError, InstallOutcome, execute_install, execute_uninstall, resolve_server_listen,
-    resolve_server_url,
+    InstallError, InstallOutcome, IntegrationUpgradeEntryKind, IntegrationUpgradeSummary,
+    execute_install, execute_uninstall, execute_upgrade_installed, resolve_server_listen,
+    resolve_server_url, write_integration_upgrade_entry, write_integration_upgrade_summary,
 };
-pub use managed_rg::{ManagedRgArgumentError, parse_managed_rg_args};
-pub use path_lookup::write_path_lookup_result;
+pub use managed_rg::{
+    ManagedRgArgumentError, ParsedRgArgs, files_options, parse_managed_rg_args, parse_rg_args,
+};
+pub use path_lookup::{write_path_lookup_result, write_path_lookup_with_terminals};
 pub use render::{
     HelpTopicError, help_text, print_help, write_context_result, write_context_status,
-    write_context_with_options, write_file_paths,
+    write_context_status_with_options, write_context_with_options, write_file_paths,
+    write_index_incompatible_error, write_warning,
 };
 
 #[derive(Debug, Parser)]
@@ -120,8 +129,6 @@ pub struct AuthArgs {
     pub endpoint: Option<String>,
     #[arg(long, global = true, value_enum)]
     pub color: Option<ColorMode>,
-    #[arg(long = "no-color", global = true, conflicts_with = "color")]
-    pub no_color: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -184,7 +191,12 @@ pub enum McpInstallTransport {
 }
 
 #[derive(Clone, Debug, Args)]
+#[allow(clippy::struct_excessive_bools)] // CLI switches are constrained by clap conflicts and dependencies.
 pub struct InstallArgs {
+    #[arg(long, conflicts_with_all = ["targets", "positional_targets", "yes", "force", "transport", "mcp_toolset", "mcp_tool_timeout_seconds", "mcp_token_env"])]
+    pub upgrade_installed: bool,
+    #[arg(long, requires = "upgrade_installed")]
+    pub dry_run: bool,
     #[arg(long = "target", value_name = "AGENT", action = clap::ArgAction::Append)]
     pub targets: Vec<String>,
     #[arg(long = "mcp-transport", value_enum)]
@@ -247,10 +259,11 @@ pub enum ColorMode {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum PreviewMode {
-    #[default]
     None,
+    #[default]
     Short,
     Full,
+    Detail,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -484,14 +497,10 @@ pub struct QueryArgs {
     pub debug: bool,
     #[arg(long)]
     pub trace: bool,
-    #[arg(long)]
-    pub compact: bool,
     #[arg(long, value_enum)]
     pub preview: Option<PreviewMode>,
     #[arg(long, value_enum)]
     pub color: Option<ColorMode>,
-    #[arg(long = "no-color", conflicts_with = "color")]
-    pub no_color: bool,
     #[arg(long, value_parser = parse_positive_usize)]
     pub limit: Option<usize>,
     #[arg(long = "hybrid", value_name = "QUERY")]
@@ -538,22 +547,12 @@ impl QueryArgs {
             .filter(|value| !value.is_empty())
     }
 
-    fn output_options(&self, terminal: bool) -> OutputOptions {
-        let human = terminal && !self.compact;
+    fn output_options(&self) -> OutputOptions {
         OutputOptions {
             debug: self.debug,
             trace: self.trace,
-            human,
-            preview: self.preview.unwrap_or(if human {
-                PreviewMode::Full
-            } else {
-                PreviewMode::None
-            }),
-            color: if self.no_color {
-                ColorMode::Never
-            } else {
-                self.color.unwrap_or_default()
-            },
+            preview: self.preview.unwrap_or_default(),
+            color: self.color.unwrap_or_default(),
         }
     }
 }
@@ -576,8 +575,6 @@ pub struct IndexArgs {
     pub debug: bool,
     #[arg(long, value_enum)]
     pub color: Option<ColorMode>,
-    #[arg(long = "no-color", conflicts_with = "color")]
-    pub no_color: bool,
     #[arg(long, env = "ZVEC_GREP_HOME")]
     pub home: Option<PathBuf>,
     /// Single embedding model for this workspace; this version indexes text only.
@@ -591,7 +588,7 @@ pub struct IndexArgs {
     pub api_key: Option<String>,
     #[arg(long)]
     pub endpoint: Option<String>,
-    #[arg(long = "index-embedding-concurrency", value_parser = parse_positive_usize)]
+    #[arg(long = "embedding-concurrency", value_parser = parse_positive_usize)]
     pub embedding_concurrency: Option<usize>,
     #[arg(long = "allow-remote")]
     pub allow_remote: bool,
@@ -617,8 +614,6 @@ pub struct StatusArgs {
     pub debug: bool,
     #[arg(long, value_enum)]
     pub color: Option<ColorMode>,
-    #[arg(long = "no-color", conflicts_with = "color")]
-    pub no_color: bool,
     #[arg(long, env = "ZVEC_GREP_HOME")]
     pub home: Option<PathBuf>,
 }
@@ -715,7 +710,6 @@ pub enum CliPlan {
 pub struct OutputOptions {
     pub debug: bool,
     pub trace: bool,
-    pub human: bool,
     pub preview: PreviewMode,
     pub color: ColorMode,
 }
@@ -761,10 +755,12 @@ pub enum CliError {
     InvalidFileCategory(String),
     #[error("--force-direct requires --mode direct")]
     ForceDirectMode,
-    #[error("--json is not supported; redirect output or use --compact for compact markdown")]
+    #[error("--json is not supported; use --preview none, short, full, or detail for text output")]
     RemovedJson,
-    #[error("--human has been removed; terminal output is human-readable by default")]
+    #[error("--human has been removed; use --preview detail for detailed output")]
     RemovedHuman,
+    #[error("--compact has been removed; use --preview none, short, or full")]
+    RemovedCompact,
     #[error("unknown option: {0}")]
     UnknownQueryOption(String),
     #[error("--modified-after must not be later than --modified-before")]
@@ -790,13 +786,31 @@ pub enum CliError {
 }
 
 impl Cli {
+    /// Presentation options are available before plan validation, including on errors.
+    #[must_use]
+    pub fn output_options(&self) -> OutputOptions {
+        let (debug, color) = match self.command.as_ref() {
+            Some(CommandLine::Query(args)) => (args.debug, args.color),
+            Some(CommandLine::Index(args)) => (args.debug, args.color),
+            Some(CommandLine::Status(args)) => (args.debug, args.color),
+            Some(CommandLine::Auth(args)) => (false, args.color),
+            _ => (false, None),
+        };
+        OutputOptions {
+            debug,
+            color: color.unwrap_or_default(),
+            ..Default::default()
+        }
+    }
     /// Parses process arguments after normalizing the TS CLI's option-anywhere
     /// query syntax for clap.
     #[must_use]
     pub fn parse() -> Self {
-        match Self::try_parse_from(std::env::args_os()) {
+        let arguments = std::env::args_os().collect::<Vec<_>>();
+        let color = diagnostic_color_for_args(&arguments[1..]);
+        match Self::try_parse_from(arguments) {
             Ok(cli) => cli,
-            Err(error) => error.exit(),
+            Err(error) => exit_parse_error(&error, color),
         }
     }
 
@@ -866,7 +880,7 @@ impl Cli {
             return None;
         }
         Some(format!(
-            "warning: positional query arguments are merged into one query: {:?}. For separate queries, use repeated --hybrid flags, e.g. zg --hybrid \"connection pool\" --hybrid \"socket timeout\".",
+            "Warning: positional query arguments are merged into one query: {:?}. For separate queries, use repeated --hybrid flags, e.g. zg --hybrid \"connection pool\" --hybrid \"socket timeout\".",
             parts.join(" ")
         ))
     }
@@ -877,19 +891,11 @@ impl Cli {
     ///
     /// Returns [`CliError`] when options are incompatible.
     pub fn into_plan(self, current_dir: PathBuf) -> Result<CliPlan, CliError> {
-        self.into_plan_with_terminal(current_dir, io::stdout().is_terminal())
-    }
-
-    fn into_plan_with_terminal(
-        self,
-        current_dir: PathBuf,
-        terminal: bool,
-    ) -> Result<CliPlan, CliError> {
         let Some(command) = self.command else {
             return Ok(CliPlan::Help(None));
         };
         match command {
-            CommandLine::Query(args) => query_plan(args, current_dir, terminal),
+            CommandLine::Query(args) => query_plan(args, current_dir),
             CommandLine::Index(args) => index_plan(args, &current_dir),
             CommandLine::Status(args) => Ok(CliPlan::Status {
                 mode: resolve_client_mode(args.mode)?,
@@ -901,11 +907,7 @@ impl Cli {
                 check_ready: args.check_ready,
                 output: OutputOptions {
                     debug: args.debug,
-                    color: if args.no_color {
-                        ColorMode::Never
-                    } else {
-                        args.color.unwrap_or_default()
-                    },
+                    color: args.color.unwrap_or_default(),
                     ..OutputOptions::default()
                 },
             }),
@@ -947,7 +949,7 @@ pub fn compatibility_warning_for_args(arguments: &[OsString]) -> Option<String> 
     let first = arguments.first()?.to_str()?;
     if matches!(first, "query" | "search") {
         return Some(format!(
-            "warning: \"zg {first} ...\" is not a subcommand; search is already the default. Remove \"{first}\", or use 'zg -- \"{first}\" ...' to search for that literal word."
+            "Warning: \"{first}\" is search text. Omit it to search the remaining words."
         ));
     }
     if matches!(
@@ -962,22 +964,20 @@ pub fn compatibility_warning_for_args(arguments: &[OsString]) -> Option<String> 
             | "help"
             | "version"
     ) {
+        let purpose = if first == "version" {
+            "To display the CLI version"
+        } else {
+            "To run this command"
+        };
         return Some(format!(
-            "warning: \"zg {first} ...\" no longer runs an action and is parsed as search input. Use \"zg --{first} ...\", or 'zg -- \"{first}\" ...' to search for that literal word."
+            "Warning: `zg {first}` is legacy syntax and now searches for \"{first}\".\n         {purpose}, use `zg --{first}`."
         ));
     }
     None
 }
 
-fn index_concurrency_flag(text: &str) -> Result<bool, clap::Error> {
-    if text == "--embedding-concurrency" || text.starts_with("--embedding-concurrency=") {
-        return Err(clap::Error::raw(
-            clap::error::ErrorKind::UnknownArgument,
-            "--embedding-concurrency has been removed; use --index-embedding-concurrency with zg --index",
-        ));
-    }
-    Ok(text == "--index-embedding-concurrency"
-        || text.starts_with("--index-embedding-concurrency="))
+fn index_concurrency_flag(text: &str) -> bool {
+    text == "--embedding-concurrency" || text.starts_with("--embedding-concurrency=")
 }
 
 fn validate_index_concurrency_scope(
@@ -987,7 +987,7 @@ fn validate_index_concurrency_scope(
     if requested && !matches!(action, Some((_, "index"))) {
         return Err(clap::Error::raw(
             clap::error::ErrorKind::ArgumentConflict,
-            "--index-embedding-concurrency can only be used with zg --index",
+            "--embedding-concurrency can only be used with zg --index",
         ));
     }
     Ok(())
@@ -998,7 +998,7 @@ fn management_option_with_value(text: &str) -> bool {
         text,
         "--embedding"
             | "--endpoint"
-            | "--index-embedding-concurrency"
+            | "--embedding-concurrency"
             | "--listen"
             | "--token-file"
             | "--mcp-toolset"
@@ -1068,7 +1068,13 @@ fn normalize_command(mut arguments: Vec<OsString>) -> Result<Vec<OsString>, clap
         }
         help_requested |= matches!(argument.to_str(), Some("-h" | "--help"));
         let text = argument.to_string_lossy();
-        index_concurrency_requested |= index_concurrency_flag(&text)?;
+        if text == "--no-color" || text.starts_with("--no-color=") {
+            return Err(clap::Error::raw(
+                clap::error::ErrorKind::UnknownArgument,
+                "--no-color is no longer supported; use --color never instead",
+            ));
+        }
+        index_concurrency_requested |= index_concurrency_flag(&text);
         index += if query_option_with_value(&text)
             || managed_rg::takes_separate_value(&text)
             || management_option_with_value(&text)
@@ -1168,8 +1174,6 @@ fn query_option_without_value(value: &str) -> bool {
             | "--rg"
             | "--debug"
             | "--trace"
-            | "--compact"
-            | "--no-color"
             | "--fuse"
             | "--prefer-symbol"
             | "--allow-remote"
@@ -1292,7 +1296,7 @@ fn context_refresh_policy(
     use zg_engine::api::context::options::RefreshPolicy;
     if mode == ClientMode::Direct && matches!(refresh, Some(RefreshMode::Background)) {
         eprintln!(
-            "warning: --refresh background is unavailable in direct mode; falling back to off"
+            "Warning: --refresh background is unavailable in direct mode; falling back to off"
         );
     }
     match (mode, refresh) {
@@ -1329,6 +1333,9 @@ fn validate_query(args: &QueryArgs, mode: ClientMode) -> Result<(), CliError> {
         if value == "--human" {
             return Err(CliError::RemovedHuman);
         }
+        if value == "--compact" {
+            return Err(CliError::RemovedCompact);
+        }
         index += if args.rg && managed_rg::takes_separate_value(value) {
             2
         } else {
@@ -1349,16 +1356,12 @@ fn validate_query(args: &QueryArgs, mode: ClientMode) -> Result<(), CliError> {
     Ok(())
 }
 
-fn query_plan(
-    mut args: QueryArgs,
-    current_dir: PathBuf,
-    terminal: bool,
-) -> Result<CliPlan, CliError> {
+fn query_plan(mut args: QueryArgs, current_dir: PathBuf) -> Result<CliPlan, CliError> {
     let mode = resolve_query_mode(&args)?;
     validate_query(&args, mode)?;
     let path_lookup = uses_path_lookup(&args);
     let home = args.home.clone();
-    let output = args.output_options(terminal);
+    let output = args.output_options();
     let mut files = false;
     let mut null = false;
     let mut request = if args.rg {
@@ -1490,11 +1493,7 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
     let home = args.home.clone();
     let output = OutputOptions {
         debug: args.debug,
-        color: if args.no_color {
-            ColorMode::Never
-        } else {
-            args.color.unwrap_or_default()
-        },
+        color: args.color.unwrap_or_default(),
         ..OutputOptions::default()
     };
     if args.drop {
@@ -1729,60 +1728,55 @@ mod tests {
     };
     use std::path::PathBuf;
 
-    fn plan(arguments: &[&str], terminal: bool) -> CliPlan {
+    fn plan(arguments: &[&str]) -> CliPlan {
         Cli::try_parse_from(arguments.iter().copied())
             .expect("parse")
-            .into_plan_with_terminal(std::env::temp_dir(), terminal)
+            .into_plan(std::env::temp_dir())
             .expect("plan")
     }
 
     #[test]
     fn managed_files_plan_uses_all_positionals_as_inputs_and_preserves_filters() {
-        for terminal in [false, true] {
-            for arguments in [
-                vec!["zg", "--rg", "--files"],
-                vec!["zg", "--files", "--rg"],
-                vec!["zg", "--rg", "--files", "--null"],
-            ] {
-                let CliPlan::Files { request, null } = plan(&arguments, terminal) else {
-                    panic!("file discovery plan")
-                };
-                assert!(request.paths.is_empty());
-                assert_eq!(null, arguments.contains(&"--null"));
-            }
-            let CliPlan::Files { request, null } = plan(
-                &[
-                    "zg",
-                    "--iglob",
-                    "*.TS",
-                    "--rg",
-                    "--files",
-                    "src",
-                    "docs",
-                    "-g",
-                    "!*.test.ts",
-                    "-t",
-                    "ts",
-                    "--hidden",
-                    "-0",
-                    "--max-depth",
-                    "2",
-                ],
-                terminal,
-            ) else {
+        for arguments in [
+            vec!["zg", "--rg", "--files"],
+            vec!["zg", "--files", "--rg"],
+            vec!["zg", "--rg", "--files", "--null"],
+        ] {
+            let CliPlan::Files { request, null } = plan(&arguments) else {
                 panic!("file discovery plan")
             };
-            assert!(null);
-            assert_eq!(request.paths, [PathBuf::from("src"), PathBuf::from("docs")]);
-            assert_eq!(request.file_types, ["ts"]);
-            assert!(request.hidden);
-            assert_eq!(request.max_depth, Some(2));
-            assert_eq!(request.globs.len(), 2);
-            assert_eq!(request.globs[0].pattern, "*.TS");
-            assert!(request.globs[0].case_insensitive);
-            assert_eq!(request.globs[1].pattern, "!*.test.ts");
-            assert!(!request.globs[1].case_insensitive);
+            assert!(request.paths.is_empty());
+            assert_eq!(null, arguments.contains(&"--null"));
         }
+        let CliPlan::Files { request, null } = plan(&[
+            "zg",
+            "--iglob",
+            "*.TS",
+            "--rg",
+            "--files",
+            "src",
+            "docs",
+            "-g",
+            "!*.test.ts",
+            "-t",
+            "ts",
+            "--hidden",
+            "-0",
+            "--max-depth",
+            "2",
+        ]) else {
+            panic!("file discovery plan")
+        };
+        assert!(null);
+        assert_eq!(request.paths, [PathBuf::from("src"), PathBuf::from("docs")]);
+        assert_eq!(request.file_types, ["ts"]);
+        assert!(request.hidden);
+        assert_eq!(request.max_depth, Some(2));
+        assert_eq!(request.globs.len(), 2);
+        assert_eq!(request.globs[0].pattern, "*.TS");
+        assert!(request.globs[0].case_insensitive);
+        assert_eq!(request.globs[1].pattern, "!*.test.ts");
+        assert!(!request.globs[1].case_insensitive);
     }
 
     #[test]
@@ -1817,7 +1811,7 @@ mod tests {
             ".gitignore",
             "src/auth",
         ] {
-            let CliPlan::Query { path_lookup, .. } = plan(&["zg", query], false) else {
+            let CliPlan::Query { path_lookup, .. } = plan(&["zg", query]) else {
                 panic!("query plan");
             };
             assert!(path_lookup, "{query}");
@@ -1839,7 +1833,7 @@ mod tests {
             vec!["zg", "auth.ts", "--symbol-type", "function"],
             vec!["zg", "--rg", "auth.ts"],
         ] {
-            let CliPlan::Query { path_lookup, .. } = plan(&args, false) else {
+            let CliPlan::Query { path_lookup, .. } = plan(&args) else {
                 panic!("query plan");
             };
             assert!(!path_lookup, "{args:?}");
@@ -1862,8 +1856,7 @@ mod tests {
             "help",
             "version",
         ] {
-            let CliPlan::Query { request, .. } =
-                plan(&["zg", word, "second", "--limit", "3"], false)
+            let CliPlan::Query { request, .. } = plan(&["zg", word, "second", "--limit", "3"])
             else {
                 panic!("{word} must not run an action")
             };
@@ -1874,50 +1867,41 @@ mod tests {
 
     #[test]
     fn long_actions_are_exclusive_and_can_follow_options_or_roots() {
+        assert!(matches!(plan(&["zg", "--index"]), CliPlan::Index { .. }));
+        assert!(matches!(plan(&["zg", "--status"]), CliPlan::Status { .. }));
         assert!(matches!(
-            plan(&["zg", "--index"], false),
-            CliPlan::Index { .. }
-        ));
-        assert!(matches!(
-            plan(&["zg", "--status"], false),
-            CliPlan::Status { .. }
-        ));
-        assert!(matches!(
-            plan(&["zg", "--install", "--yes"], false),
+            plan(&["zg", "--install", "--yes"]),
             CliPlan::Install(_)
         ));
         assert!(matches!(
-            plan(&["zg", "--uninstall", "--yes"], false),
+            plan(&["zg", "--uninstall", "--yes"]),
             CliPlan::Uninstall(_)
         ));
         assert!(matches!(
-            plan(&["zg", "--auth", "status"], false),
+            plan(&["zg", "--auth", "status"]),
             CliPlan::Auth(_)
         ));
         assert!(matches!(
-            plan(
-                &[
-                    "zg",
-                    "--config",
-                    "model",
-                    "set",
-                    "local/potion-code-16m-v2",
-                    "--default"
-                ],
-                false
-            ),
+            plan(&[
+                "zg",
+                "--config",
+                "model",
+                "set",
+                "local/potion-code-16m-v2",
+                "--default"
+            ]),
             CliPlan::Config(_)
         ));
         assert!(matches!(
-            plan(&["zg", "--server", "status"], false),
+            plan(&["zg", "--server", "status"]),
             CliPlan::Server(_)
         ));
         assert!(matches!(
-            plan(&["zg", "--mode", "direct", "--index", "repo"], false),
+            plan(&["zg", "--mode", "direct", "--index", "repo"]),
             CliPlan::Index { .. }
         ));
         assert!(matches!(
-            plan(&["zg", "repo", "--status"], false),
+            plan(&["zg", "repo", "--status"]),
             CliPlan::Status { .. }
         ));
         for arguments in [["zg", "--index", "--status"], ["zg", "--index", "--index"]] {
@@ -1927,19 +1911,16 @@ mod tests {
 
     #[test]
     fn separator_preserves_literal_flags_and_command_words() {
-        let CliPlan::Query { request, .. } = plan(
-            &[
-                "zg", "--", "query", "--index", "--status", "--help", "--human", "--json", "-v",
-            ],
-            false,
-        ) else {
+        let CliPlan::Query { request, .. } = plan(&[
+            "zg", "--", "query", "--index", "--status", "--help", "--human", "--json", "-v",
+        ]) else {
             panic!("literal search")
         };
         assert_eq!(
             request.queries,
             ["query --index --status --help --human --json -v"]
         );
-        let CliPlan::Query { request, .. } = plan(&["zg", "--rg", "--", "--index"], false) else {
+        let CliPlan::Query { request, .. } = plan(&["zg", "--rg", "--", "--index"]) else {
             panic!("literal rg")
         };
         assert!(request.rg);
@@ -1959,6 +1940,61 @@ mod tests {
     }
 
     #[test]
+    fn removed_no_color_flag_is_rejected_but_literal_search_is_preserved() {
+        for arguments in [
+            vec!["zg", "--no-color", "needle"],
+            vec!["zg", "needle", "--no-color"],
+            vec!["zg", "needle", "--no-color=true"],
+            vec!["zg", "--rg", "needle", "--no-color"],
+            vec!["zg", "--index", "--no-color"],
+            vec!["zg", "--status", "--no-color"],
+            vec!["zg", "--auth", "status", "--no-color"],
+        ] {
+            let error = Cli::try_parse_from(arguments.clone()).expect_err("removed color alias");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{arguments:?}"
+            );
+            assert!(error.to_string().contains("--no-color"), "{error}");
+        }
+        for arguments in [
+            vec!["zg", "--", "--no-color"],
+            vec!["zg", "--rg", "--", "--no-color"],
+            vec!["zg", "--rg", "-e", "--no-color"],
+        ] {
+            let CliPlan::Query { request, .. } = plan(&arguments) else {
+                panic!("literal color alias query");
+            };
+            if let Some(query) = &request.query {
+                assert_eq!(query, "--no-color", "{arguments:?}");
+            } else {
+                assert_eq!(request.queries, ["--no-color"], "{arguments:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn color_modes_apply_to_search_and_management_commands() {
+        for (value, expected) in [
+            ("auto", super::ColorMode::Auto),
+            ("always", super::ColorMode::Always),
+            ("never", super::ColorMode::Never),
+        ] {
+            for mut arguments in [
+                vec!["zg", "needle"],
+                vec!["zg", "--index"],
+                vec!["zg", "--status"],
+                vec!["zg", "--auth", "status"],
+            ] {
+                arguments.extend(["--color", value]);
+                let cli = Cli::try_parse_from(arguments.clone()).expect("explicit color mode");
+                assert_eq!(cli.output_options().color, expected, "{arguments:?}");
+            }
+        }
+    }
+
+    #[test]
     fn rg_option_values_are_not_management_or_presentation_flags() {
         for option in ["-e", "-Fe", "--regexp"] {
             for pattern in [
@@ -1968,15 +2004,16 @@ mod tests {
                 "--help",
                 "--human",
                 "--compact",
+                "--no-color",
             ] {
                 let CliPlan::Query {
                     request, output, ..
-                } = plan(&["zg", "--rg", option, pattern], true)
+                } = plan(&["zg", "--rg", option, pattern])
                 else {
                     panic!("regexp values must remain search input")
                 };
                 assert_eq!(request.queries, [pattern]);
-                assert!(output.human);
+                assert_eq!(output.preview, super::PreviewMode::Short);
             }
         }
     }
@@ -1985,19 +2022,19 @@ mod tests {
     fn rg_separator_pattern_does_not_hide_following_options_or_literal_paths() {
         for option in ["-e", "-Fe", "--regexp"] {
             for literal_path in [false, true] {
-                let mut arguments = vec!["zg", "--rg", option, "--", "--limit", "3", "--compact"];
+                let mut arguments = vec!["zg", "--rg", option, "--", "--limit", "3"];
                 if literal_path {
                     arguments.extend(["--", "--human"]);
                 }
                 let CliPlan::Query {
                     request, output, ..
-                } = plan(&arguments, true)
+                } = plan(&arguments)
                 else {
                     panic!("separator pattern must remain search input")
                 };
                 assert_eq!(request.queries, ["--"]);
                 assert_eq!(request.limit, Some(3));
-                assert!(!output.human);
+                assert_eq!(output.preview, super::PreviewMode::Short);
                 assert_eq!(
                     request.rg_paths,
                     if literal_path {
@@ -2028,8 +2065,12 @@ mod tests {
             let arguments = [word.into(), "second".into()];
             let warning =
                 super::compatibility_warning_for_args(&arguments).expect("migration warning");
-            assert!(warning.contains(&format!("zg {word}")));
-            assert!(warning.contains("literal word"));
+            if matches!(word, "query" | "search") {
+                assert!(warning.contains(&format!("\"{word}\" is search text.")));
+            } else {
+                assert!(warning.contains(&format!("now searches for \"{word}\".")));
+                assert!(warning.contains(&format!("`zg --{word}`")));
+            }
         }
         for word in ["--", "needle", "--rg", "--index", "--help", "--version"] {
             assert!(
@@ -2039,28 +2080,29 @@ mod tests {
     }
 
     #[test]
-    fn terminal_search_defaults_to_human_unless_compact_is_explicit() {
-        for (terminal, compact, human, preview) in [
-            (true, false, true, super::PreviewMode::Full),
-            (true, true, false, super::PreviewMode::None),
-            (false, false, false, super::PreviewMode::None),
-            (false, true, false, super::PreviewMode::None),
+    fn preview_defaults_to_short_and_accepts_all_modes() {
+        let CliPlan::Query { output, .. } = plan(&["zg", "needle"]) else {
+            panic!("query")
+        };
+        assert_eq!(output.preview, super::PreviewMode::Short);
+        for (name, preview) in [
+            ("none", super::PreviewMode::None),
+            ("short", super::PreviewMode::Short),
+            ("full", super::PreviewMode::Full),
+            ("detail", super::PreviewMode::Detail),
         ] {
-            let mut arguments = vec!["zg", "needle"];
-            if compact {
-                arguments.push("--compact");
-            }
-            let CliPlan::Query { output, .. } = plan(&arguments, terminal) else {
+            let CliPlan::Query { output, .. } = plan(&["zg", "needle", "--preview", name]) else {
                 panic!("query")
             };
-            assert_eq!(output.human, human);
             assert_eq!(output.preview, preview);
-            arguments.push("--preview=short");
-            let CliPlan::Query { output, .. } = plan(&arguments, terminal) else {
-                panic!("query")
-            };
-            assert_eq!(output.human, human);
-            assert_eq!(output.preview, super::PreviewMode::Short);
+        }
+        for arguments in [["zg", "needle", "--compact"], ["zg", "--rg", "--compact"]] {
+            assert!(matches!(
+                Cli::try_parse_from(arguments)
+                    .expect("parse")
+                    .into_plan(std::env::temp_dir()),
+                Err(super::CliError::RemovedCompact)
+            ));
         }
         for arguments in [
             vec!["zg", "needle", "--human"],
@@ -2077,25 +2119,20 @@ mod tests {
 
     #[test]
     fn help_and_version_require_flags_and_respect_separator() {
-        assert!(matches!(plan(&["zg"], false), CliPlan::Help(None)));
-        assert!(matches!(
-            plan(&["zg", "--help"], false),
-            CliPlan::Help(None)
-        ));
+        assert!(matches!(plan(&["zg"]), CliPlan::Help(None)));
+        assert!(matches!(plan(&["zg", "--help"]), CliPlan::Help(None)));
         for arguments in [
             vec!["zg", "--help", "search"],
             vec!["zg", "--help=search"],
             vec!["zg", "needle", "--help"],
         ] {
-            assert!(
-                matches!(plan(&arguments, false), CliPlan::Help(Some(topic)) if topic == "search")
-            );
+            assert!(matches!(plan(&arguments), CliPlan::Help(Some(topic)) if topic == "search"));
         }
         assert!(
-            matches!(plan(&["zg", "--index", "--help"], false), CliPlan::Help(Some(topic)) if topic == "index")
+            matches!(plan(&["zg", "--index", "--help"]), CliPlan::Help(Some(topic)) if topic == "index")
         );
         for flag in ["--version", "-v"] {
-            assert!(matches!(plan(&["zg", flag], false), CliPlan::Version));
+            assert!(matches!(plan(&["zg", flag]), CliPlan::Version));
             assert!(Cli::try_parse_from(["zg", flag, "extra"]).is_err());
         }
         for arguments in [
@@ -2721,35 +2758,127 @@ mod tests {
     }
 
     #[test]
-    fn index_concurrency_is_index_only_and_rejects_the_removed_spelling() {
+    fn embedding_concurrency_is_forwarded_in_all_index_modes() {
         for mode in ["direct", "server", "auto"] {
-            let cli = Cli::try_parse_from([
-                "zg",
-                "--index",
-                "--mode",
-                mode,
-                "--index-embedding-concurrency",
-                "4",
-            ])
-            .expect("index override");
-            let current_dir = std::env::current_dir().expect("working directory");
-            let CliPlan::Index {
-                operation: IndexOperation::Build(request),
-                ..
-            } = cli.into_plan(current_dir).expect("index plan")
-            else {
-                panic!("index")
-            };
-            assert_eq!(request.embedding_concurrency, Some(4));
+            for options in [
+                vec!["--index", "--embedding-concurrency", "4"],
+                vec!["--embedding-concurrency", "4", "--index"],
+                vec!["--index", "--embedding-concurrency=4"],
+                vec!["--embedding-concurrency=4", "--index"],
+            ] {
+                let cli = Cli::try_parse_from(["zg", "--mode", mode].into_iter().chain(options))
+                    .expect("index override");
+                let current_dir = std::env::current_dir().expect("working directory");
+                let CliPlan::Index {
+                    operation: IndexOperation::Build(request),
+                    ..
+                } = cli.into_plan(current_dir).expect("index plan")
+                else {
+                    panic!("index")
+                };
+                assert_eq!(request.embedding_concurrency, Some(4));
+            }
         }
-        for args in [
-            vec!["zg", "--index", "--embedding-concurrency", "4"],
-            vec!["zg", "query", "--index-embedding-concurrency", "4"],
-            vec!["zg", "--status", "--index-embedding-concurrency", "4"],
-            vec!["zg", "--index", "--index-embedding-concurrency", "0"],
-            vec!["zg", "--index", "--index-embedding-concurrency", "-1"],
+    }
+
+    #[test]
+    fn embedding_concurrency_reports_index_scope_before_parsing_its_value() {
+        for command in [
+            vec![],
+            vec!["query"],
+            vec!["--query"],
+            vec!["--vector", "needle"],
+            vec!["--refresh", "wait", "needle"],
+            vec!["--rg", "needle"],
+            vec!["--status"],
+            vec!["--server", "on"],
+            vec!["--config", "model", "set"],
+            vec!["--auth", "status"],
+            vec!["--install"],
+            vec!["--uninstall"],
         ] {
-            assert!(Cli::try_parse_from(args.clone()).is_err(), "{args:?}");
+            for option in [
+                vec!["--embedding-concurrency", "4"],
+                vec!["--embedding-concurrency=4"],
+                vec!["--embedding-concurrency"],
+                vec!["--embedding-concurrency", "invalid"],
+            ] {
+                let args = [vec!["zg"], command.clone(), option].concat();
+                let error = Cli::try_parse_from(args.clone()).expect_err("index-only option");
+                assert_eq!(
+                    error.kind(),
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "{args:?}"
+                );
+                assert!(
+                    error
+                        .to_string()
+                        .contains("--embedding-concurrency can only be used with zg --index"),
+                    "{args:?}: {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn embedding_concurrency_rejects_invalid_index_values() {
+        for value in ["0", "-1", "1.5", "invalid", "999999999999999999999999999"] {
+            for option in [
+                vec!["--embedding-concurrency".to_owned(), value.to_owned()],
+                vec![format!("--embedding-concurrency={value}")],
+            ] {
+                assert!(
+                    Cli::try_parse_from(
+                        ["zg".to_owned(), "--index".to_owned()]
+                            .into_iter()
+                            .chain(option)
+                    )
+                    .is_err(),
+                    "{value}"
+                );
+            }
+        }
+        assert!(Cli::try_parse_from(["zg", "--index", "--embedding-concurrency"]).is_err());
+    }
+
+    #[test]
+    fn old_index_concurrency_spelling_is_an_unknown_option() {
+        for command in ["--index", "--status"] {
+            for option in [
+                "--index-embedding-concurrency",
+                "--index-embedding-concurrency=4",
+            ] {
+                let error =
+                    Cli::try_parse_from(["zg", command, option]).expect_err("unknown option");
+                assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+            }
+        }
+        for command in [vec!["query"], vec!["--rg", "query"]] {
+            for option in [
+                "--index-embedding-concurrency",
+                "--index-embedding-concurrency=4",
+            ] {
+                let args = [vec!["zg"], command.clone(), vec![option]].concat();
+                let error = Cli::try_parse_from(args)
+                    .expect("query arguments")
+                    .into_plan(PathBuf::from("/workspace"))
+                    .expect_err("unknown query option");
+                let message = error.to_string();
+                assert!(message.contains(option), "{message}");
+                assert!(
+                    message.starts_with("unknown option:")
+                        || message.starts_with("unsupported --rg option:"),
+                    "{message}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn embedding_concurrency_spelling_is_allowed_as_literal_search_text() {
+        for option in ["--embedding-concurrency", "--index-embedding-concurrency"] {
+            assert!(Cli::try_parse_from(["zg", "--", option]).is_ok());
+            assert!(Cli::try_parse_from(["zg", "--rg", "-e", option]).is_ok());
         }
     }
 
@@ -2767,7 +2896,7 @@ mod tests {
             "CPU",
             "--model-cache",
             "/models",
-            "--index-embedding-concurrency",
+            "--embedding-concurrency",
             "4",
             "-g",
             "src/**",
@@ -2814,7 +2943,6 @@ mod tests {
     fn parses_indexed_query_routes_and_filters() {
         let cli = Cli::try_parse_from([
             "zg",
-            "--compact",
             "--trace",
             "--limit",
             "7",
@@ -2840,7 +2968,7 @@ mod tests {
         assert_eq!(request.queries, ["query text", "zero"]);
         assert_eq!(request.routes.len(), 2);
         assert_eq!(request.limit, Some(7));
-        assert!(!output.human);
+        assert_eq!(output.preview, super::PreviewMode::Short);
         assert!(output.trace);
     }
 
@@ -2941,28 +3069,25 @@ mod tests {
 
     #[test]
     fn positional_merge_preserves_explicit_routes_options_and_literal_separator() {
-        let CliPlan::Query { request, .. } = plan(
-            &[
-                "zg",
-                "connection",
-                "--hybrid",
-                "first query",
-                "pool",
-                "--limit=3",
-                "--hybrid=second query",
-                "--fts",
-                "exact phrase",
-                "--fts=another phrase",
-                "--vector",
-                "semantic intent",
-                "--vector=another intent",
-                "--fuse",
-                "--",
-                "--timeout",
-                "literal words",
-            ],
-            false,
-        ) else {
+        let CliPlan::Query { request, .. } = plan(&[
+            "zg",
+            "connection",
+            "--hybrid",
+            "first query",
+            "pool",
+            "--limit=3",
+            "--hybrid=second query",
+            "--fts",
+            "exact phrase",
+            "--fts=another phrase",
+            "--vector",
+            "semantic intent",
+            "--vector=another intent",
+            "--fuse",
+            "--",
+            "--timeout",
+            "literal words",
+        ]) else {
             panic!("query")
         };
         assert_eq!(
@@ -3016,18 +3141,15 @@ mod tests {
             let cli = Cli::try_parse_from(arguments).expect("syntax");
             assert!(cli.positional_query_warning().is_none());
         }
-        let CliPlan::Query { request, .. } = plan(
-            &[
-                "zg",
-                "",
-                " ",
-                "--hybrid",
-                "connection pool",
-                "--hybrid",
-                "socket timeout",
-            ],
-            false,
-        ) else {
+        let CliPlan::Query { request, .. } = plan(&[
+            "zg",
+            "",
+            " ",
+            "--hybrid",
+            "connection pool",
+            "--hybrid",
+            "socket timeout",
+        ]) else {
             panic!("query")
         };
         assert_eq!(request.queries, ["connection pool", "socket timeout"]);
@@ -3090,6 +3212,7 @@ mod tests {
 
     #[test]
     fn typescript_size_and_time_forms() {
+        assert_eq!(parse_byte_size("0").expect("size"), 0);
         assert_eq!(parse_byte_size("2M").expect("size"), 2 * 1024 * 1024);
         assert_eq!(
             parse_modified_time("1700000000000").expect("epoch"),

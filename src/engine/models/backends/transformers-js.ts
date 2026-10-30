@@ -16,7 +16,7 @@ import {
   type ModelArtifactSource,
 } from "../artifact-downloader.js";
 import {
-  INDEX_EMBEDDING_CONCURRENCY_ENV,
+  EMBEDDING_CONCURRENCY_ENV,
   normalizeLocalEmbeddingConcurrency,
   resolveLocalEmbeddingParallelism,
 } from "../local-embedding-parallelism.js";
@@ -227,7 +227,7 @@ export class TransformersJsEmbeddingModel extends BaseEmbeddingModel {
     }
     throw new EngineError("Transformers.js embedding failed", {
       code: "ZVEC_GREP.ENGINE.MODELS.TRANSFORMERS_JS_EMBED_FAILED",
-      context: `model=${this.entry.reference} repo=${this.entry.repo}${this.executionProvider && this.executionProvider !== "cpu" ? `; for GPU errors, retry with --device cpu${options.purpose === "document" ? ` or index with --index-embedding-concurrency 1 (environment fallback: ${INDEX_EMBEDDING_CONCURRENCY_ENV}=1)` : ""}` : ""}`,
+      context: `model=${this.entry.reference} repo=${this.entry.repo}${this.executionProvider && this.executionProvider !== "cpu" ? `; for GPU errors, retry with --device cpu${options.purpose === "document" ? ` or index with --embedding-concurrency 1 (environment fallback: ${EMBEDDING_CONCURRENCY_ENV}=1)` : ""}` : ""}`,
       cause: failure,
     });
   }

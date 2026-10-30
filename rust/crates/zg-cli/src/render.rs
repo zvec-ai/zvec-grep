@@ -1,3 +1,15 @@
+mod compact;
+mod context;
+
+#[cfg(test)]
+use crate::highlight::QueryHighlighter;
+#[cfg(test)]
+use compact::write_item_preview;
+#[cfg(test)]
+use zg_engine::api::context::result::{
+    CodeMetadata, ContextItemStatus, EntityMetadata, MarkdownMetadata,
+};
+
 use std::{
     io::{self, Write},
     path::Path,
@@ -6,16 +18,93 @@ use std::{
 use thiserror::Error;
 use zg_engine::api::context::{
     ContextResult,
-    result::{
-        CodeMetadata, ContentRange, ContextItem, ContextItemStatus, EntityMetadata,
-        MarkdownMetadata,
-    },
+    result::{ContentRange, ContextItem},
 };
 
-use crate::{
-    highlight::{QueryHighlighter, highlight_ranges},
-    output_path,
-};
+use crate::{highlight::highlight_ranges, output_path, theme::StatusTheme};
+
+/// Writes a warning with a trailing blank line, highlighting its label and commands.
+/// # Errors
+/// Returns the underlying writer error.
+pub fn write_warning(
+    mut writer: impl Write,
+    warning: &str,
+    color: crate::ColorMode,
+    terminal: bool,
+) -> io::Result<()> {
+    let theme = crate::theme::StatusTheme::new(color, terminal);
+    let message = if let Some(message) = warning.strip_prefix("Warning:") {
+        write!(writer, "{}", theme.warning("Warning:"))?;
+        message
+    } else {
+        warning
+    };
+    for (index, part) in message.split('`').enumerate() {
+        if index % 2 == 1 {
+            write!(writer, "{}", theme.path(&format!("`{part}`")))?;
+        } else {
+            write!(writer, "{part}")?;
+        }
+    }
+    writeln!(writer, "\n")
+}
+
+/// Presents an incompatible index without exposing internal diagnostics by default.
+/// # Errors
+/// Returns the underlying writer error.
+pub fn write_index_incompatible_error(
+    mut writer: impl Write,
+    report: &zg_engine::ErrorReport,
+    options: crate::OutputOptions,
+    terminal: bool,
+) -> io::Result<()> {
+    let theme = crate::theme::StatusTheme::new(options.color, terminal);
+    writeln!(
+        writer,
+        "{}",
+        theme.danger(&format!("Error: {}", report.message))
+    )?;
+    let command = if let Some(root) = report.workspace_root.as_deref() {
+        let shell = if cfg!(windows) { " (PowerShell)" } else { "" };
+        writeln!(
+            writer,
+            "\nRebuild the index for {} to continue{shell}:",
+            theme.path(&crate::theme::display_path(root))
+        )?;
+        format!("zg --index --rebuild {}", quote_rebuild_root(root))
+    } else {
+        writeln!(
+            writer,
+            "\nRun the rebuild command with the index directory to continue:"
+        )?;
+        "zg --index --rebuild <index-directory>".to_owned()
+    };
+    writeln!(writer, "  {}", theme.path(&command))?;
+    if options.debug {
+        writeln!(
+            writer,
+            "\nDiagnostics:\n{}",
+            crate::format_error_report(report)
+        )?;
+    }
+    Ok(())
+}
+
+fn quote_rebuild_root(root: &Path) -> String {
+    // Keep the actual absolute path: quoting a display-only `~` would prevent expansion.
+    let path = output_path(root).display().to_string();
+    if cfg!(windows) {
+        format!("'{}'", path.replace('\'', "''"))
+    } else if !path.is_empty()
+        && path
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/_-.".contains(&byte))
+    {
+        path
+    } else {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    }
+}
 
 /// Writes only native file paths, separated by newlines or NUL bytes.
 ///
@@ -149,7 +238,56 @@ pub fn write_context_status(mut writer: impl Write, result: &ContextResult) -> i
     Ok(())
 }
 
-/// Writes context using the selected terminal presentation.
+/// Writes concise terminal freshness diagnostics, preserving redirected output.
+///
+/// # Errors
+/// Returns the underlying writer error.
+pub fn write_context_status_with_options(
+    mut writer: impl Write,
+    result: &ContextResult,
+    options: crate::OutputOptions,
+    terminal: bool,
+) -> io::Result<()> {
+    use zg_engine::api::context::result::ContextSource;
+    if !terminal {
+        return write_context_status(writer, result);
+    }
+    if result.source != ContextSource::Index {
+        return Ok(());
+    }
+    let has_drift =
+        result.freshness.as_deref() == Some("possibly_stale") || result.has_stale_items();
+    if !has_drift && result.indexing.is_none() {
+        return Ok(());
+    }
+    let theme = StatusTheme::new(options.color, terminal);
+    writeln!(
+        writer,
+        "{} Index may be out of date",
+        theme.warning("Warning:")
+    )?;
+    writeln!(writer, "  Results use the current index")?;
+    if let Some(state) = result
+        .indexing
+        .as_ref()
+        .map(|indexing| indexing.state.as_str())
+        .or(result.background_refresh.as_deref())
+    {
+        let state = if state == "off" { "idle" } else { state };
+        write!(writer, "  Refresh: {state}")?;
+        if let Some((completed, total)) = result
+            .indexing
+            .as_ref()
+            .and_then(|indexing| indexing.completed.zip(indexing.total))
+        {
+            write!(writer, " · {completed}/{total} files")?;
+        }
+        writeln!(writer)?;
+    }
+    Ok(())
+}
+
+/// Writes context using the selected preview presentation.
 /// # Errors
 /// Returns the underlying writer error.
 pub fn write_context_with_options(
@@ -158,171 +296,12 @@ pub fn write_context_with_options(
     options: crate::OutputOptions,
     terminal: bool,
 ) -> io::Result<()> {
-    use crate::ColorMode;
     use zg_engine::api::context::result::ContextSource;
-    let color = options.color == ColorMode::Always
-        || (options.color == ColorMode::Auto && terminal && std::env::var_os("NO_COLOR").is_none());
-    let highlighter = QueryHighlighter::new(&result.query, color);
-    let heading = |value: String| {
-        if color {
-            format!("\x1b[1;36m{value}\x1b[0m")
-        } else {
-            value
-        }
-    };
-    if options.human {
-        writeln!(writer, "{}: {:?}", heading("Context".into()), result.source)?;
-        writeln!(writer, "Query: {}", highlighter.highlight(&result.query))?;
-        writeln!(writer, "Hits: {}", result.items.len())?;
-    }
+    let theme = StatusTheme::new(options.color, terminal);
     if result.source == ContextSource::Rg {
-        return write_rg_context_result(writer, result, color, heading);
+        return write_rg_context_result(writer, result, theme.color, |value| value);
     }
-    if result.items.is_empty() {
-        return writeln!(writer, "No matches.");
-    }
-    for (index, item) in result.items.iter().enumerate() {
-        if index > 0 {
-            writeln!(writer)?;
-        }
-        let range = range_label(&item.range);
-        let matched_by = serde_json::to_value(item.matched_by).map_err(io::Error::other)?;
-        let label = if options.human {
-            format!(
-                "{}. {}:{}",
-                item.rank,
-                output_path(&item.relative_path).display(),
-                range
-            )
-        } else {
-            format!(
-                "#{} matchedBy={} {}:{}",
-                item.rank,
-                matched_by.as_str().unwrap_or_default(),
-                output_path(&item.relative_path).display(),
-                range
-            )
-        };
-        writeln!(writer, "{}", heading(label))?;
-        write_item_preview(&mut writer, item, options, &highlighter)?;
-        if options.trace {
-            if let Some(score) = item.score {
-                writeln!(writer, "score: {score:.4}")?;
-            }
-            if let Some(trace) = &item.trace {
-                writeln!(
-                    writer,
-                    "trace: {}",
-                    serde_json::to_string(trace).map_err(io::Error::other)?
-                )?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn write_item_preview(
-    mut writer: impl Write,
-    item: &ContextItem,
-    options: crate::OutputOptions,
-    highlighter: &QueryHighlighter,
-) -> io::Result<()> {
-    use crate::PreviewMode;
-    if item.status == ContextItemStatus::PossiblyStale {
-        writeln!(writer, "status: possibly_stale")?;
-    }
-    if let Some(metadata) = &item.metadata {
-        match metadata {
-            EntityMetadata::Code(CodeMetadata {
-                symbol_type,
-                symbol_name: Some(name),
-                scope,
-                ..
-            }) => {
-                write!(writer, "symbol: ")?;
-                if let Some(symbol_type) = symbol_type {
-                    let kind = serde_json::to_value(symbol_type).map_err(io::Error::other)?;
-                    write!(writer, "{} ", kind.as_str().unwrap_or_default())?;
-                }
-                write!(writer, "{name}")?;
-                if let Some(scope) = scope {
-                    write!(writer, " scope: {scope}")?;
-                }
-                writeln!(writer)?;
-            }
-            EntityMetadata::Markdown(MarkdownMetadata {
-                heading,
-                level,
-                scope,
-            }) => {
-                if let Some(heading) = heading {
-                    writeln!(writer, "heading: {heading}")?;
-                }
-                if let Some(level) = level {
-                    writeln!(writer, "heading_level: {level}")?;
-                }
-                if let Some(scope) = scope {
-                    writeln!(writer, "scope: {scope}")?;
-                }
-            }
-            EntityMetadata::Code(_) => {}
-        }
-    }
-    let max_lines = match options.preview {
-        PreviewMode::None => 1,
-        PreviewMode::Short => 10,
-        PreviewMode::Full => usize::MAX,
-    };
-    let first = item.content_range.start_line();
-    let lines: Vec<_> = item.content.lines().collect();
-    let anchor = item
-        .excerpt_range
-        .as_ref()
-        .unwrap_or(&item.range)
-        .start_line()
-        .zip(first)
-        .map_or(0, |(matched, first)| matched.saturating_sub(first))
-        .min(lines.len().saturating_sub(1));
-    let from = if options.preview == PreviewMode::None {
-        anchor
-    } else if options.preview == PreviewMode::Short {
-        anchor.saturating_sub(3)
-    } else {
-        0
-    };
-    for (offset, line) in lines.iter().enumerate().skip(from).take(max_lines) {
-        let line = if options.preview == PreviewMode::Full {
-            (*line).to_owned()
-        } else {
-            line.chars()
-                .take(if options.human { 120 } else { 160 })
-                .collect()
-        };
-        let line = highlighter.highlight(&line);
-        if let Some(first) = first {
-            writeln!(writer, "  {}: {line}", first + offset)?;
-        } else {
-            writeln!(writer, "  {line}")?;
-        }
-    }
-    if options.preview == PreviewMode::Short && lines.len() > from + max_lines {
-        writeln!(writer, "  …")?;
-    }
-    Ok(())
-}
-
-fn range_label(range: &ContentRange) -> String {
-    if let (Some(first), Some(last)) = (range.start_line(), range.last_line()) {
-        return format!("{first}-{last}");
-    }
-    if let ContentRange::Byte {
-        start_offset,
-        end_offset,
-    } = range
-    {
-        return format!("bytes:{start_offset}-{end_offset}");
-    }
-    "file".to_owned()
+    context::write(&mut writer, result, options, terminal)
 }
 
 #[derive(Debug, Error)]
@@ -394,8 +373,8 @@ Management:
 
 Bare words such as query, index, and help are literal search text.
 Positional words are joined into one query; repeat --hybrid for separate queries.
-Terminal searches use human-readable output and full previews; pipes use compact
-output. Use --compact to force compact output.
+Terminal, redirected, and piped output all default to --preview short.
+Use --preview detail for detailed metadata, file grouping, and full previews.
 
 Examples:
   zg "where authentication is validated"
@@ -455,22 +434,31 @@ is required. Use -g 'auth.ts' to select files by name.
 
 Result options:
   --limit <n>                       Maximum results per group (default: 7)
-  --compact                         Force compact output (default for pipes)
-  --preview <none|short|full>       Indexed preview size (default: full on TTY, none in compact mode)
+  --preview <none|short|full|detail> Indexed output detail (default: short)
+  --color <auto|always|never>       Color output (default: auto)
   --debug                           Print diagnostics to stderr
   --trace                           Include per-hit indexed search trace
   --refresh <background|wait|off>   Refresh policy (defaults: server=background, direct=off)
                                     In direct mode, background warns and falls back to off
   --mode <direct|server|auto>       Select indexed query transport (default: auto)
 
-Indexed results are shown by query group, preserving each group's own rank.
-A result that matches more than one group is shown in each matching group.
+Preview modes: none keeps one source line; short uses compact bounded source;
+full uses compact full source; detail adds metadata, outlines, and file grouping.
+Full previews do not retrieve an entire function or file. TTY affects only color.
+Auto colors terminal output and leaves pipes plain; NO_COLOR disables auto color.
+Use --color always to retain color in pipes, or --color never to disable it.
+
+All preview modes preserve result order, ranks, and matched content.
+A result appears in each matching group; only --fuse combines groups.
 
 Embedding runtime:
   --api-key <key>                   Embedding provider API key
   --model-cache <path>              Local model cache directory
   --device <device>                 auto, cpu, metal, vulkan, cuda
   --allow-remote                    Allow Remote Embedding for this command only
+
+Device and model-cache overrides apply to this query and its refresh only;
+they do not change saved workspace settings.
 
 File filters:
   -g, --glob <glob>                 Include paths; prefix with ! to exclude; repeatable
@@ -518,6 +506,7 @@ Index options:
   --yes                             Confirm --drop without prompting
   --debug                           Print skipped-file diagnostics to stderr
   --mode <direct|server|auto>       Select indexing transport
+  --color <auto|always|never>       Color output (default: auto)
 
 Embedding options:
   --embedding <model>               Single text embedding model for this workspace
@@ -525,8 +514,12 @@ Embedding options:
   --endpoint <url>                  Embedding provider endpoint
   --model-cache <path>              Local model cache directory
   --device <device>                 auto, cpu, metal, vulkan, cuda
-  --index-embedding-concurrency <n>  Positive index embedding concurrency
+  --embedding-concurrency <n>        Positive embedding concurrency (index only)
   --allow-remote                    Allow Remote Embedding for this command only
+
+Explicit --device and --model-cache values are saved after successful indexing;
+omitted options keep their saved values. Changes do not require --rebuild.
+Precedence: CLI > Environment > Workspace > Global config > Backend default.
 
 Index embedding concurrency:
   Applies only to index construction and updates, including automatic indexing
@@ -539,7 +532,7 @@ Index embedding concurrency:
     CPU worker-pool capacity. No cap of 8 is applied.
   Remote: concurrent requests; adaptive scheduling may reduce the limit after
     failures or rate limits. No cap of 8 is applied.
-  Precedence: CLI/API override, ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY, legacy
+  Precedence: CLI/API override, ZVEC_GREP_EMBEDDING_CONCURRENCY, legacy
     ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM for llama.cpp indexing, then defaults.
   Explicit CLI overrides work without restarting the Server. Environment
     changes require restarting the Server so it inherits the new value.
@@ -567,8 +560,8 @@ cancel. Non-interactive indexing requires --allow-remote or a workspace grant.
 Workspaces are identified by their root paths; different roots may share a directory name.
 
 This version indexes text only with one embedding model per workspace.
-Explicit zg --index requires --embedding, ZVEC_GREP_EMBEDDING, or a configured
-default when creating a new index.
+For a new index, zg --index uses --embedding, then ZVEC_GREP_EMBEDDING, then
+the configured default, falling back to local/potion-code-16m-v2.
 Interactive searches prompt to select an embedding model before creating a
 missing index. Local and remote models have separate tabs; downloaded local
 models and configured remote models appear first. Use arrows or Tab to switch,
@@ -589,7 +582,7 @@ Environment:
   ZVEC_GREP_DEVICE       Local embedding device: auto, cpu, metal, vulkan, or cuda
 
 Index-only embedding concurrency:
-  ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY  Positive index/update concurrency override
+  ZVEC_GREP_EMBEDDING_CONCURRENCY  Positive index/update concurrency override
   Applies to automatic indexing and refresh, never query-vector inference.
   Explicit CLI/API index settings take precedence. Invalid values warn and use
   automatic selection. Server mode reads the Server process environment;
@@ -604,7 +597,10 @@ Shows the nearest workspace root, index policy, index state, embedding model,
 stored paths, refresh status, and suggested next action.
 
 --check-ready preserves the normal output and exits non-zero unless the
-Workspace index is ready.";
+Workspace index is ready.
+
+Output:
+  --color <auto|always|never>       Color output (default: auto)";
 
 const CONFIG_HELP: &str = r"Usage:
   zg --config provider set <provider> --api-key <key>
@@ -630,7 +626,7 @@ const AUTH_HELP: &str = r"Usage:
   zg --auth status [root]
   zg --auth revoke [root]
 
-Manage the signed Remote Embedding grant stored in the Workspace under
+Manage the Remote Embedding grant stored in the Workspace under
 .zvec-grep/authorization.json. Workspace grants are shared by zg CLI and zg MCP.
 
 --embedding selects the Remote Embedding model to authorize; it does not run
@@ -639,11 +635,12 @@ ZVEC_GREP_EMBEDDING.
 
 --endpoint selects the exact provider URL to authorize; otherwise the stored
 index endpoint, ZVEC_GREP_ENDPOINT, or provider default is used. Grants bind the
-canonical workspace root, model, and endpoint. Granting sends no remote data.
+canonical source root, username, model, and endpoint. Moving the source or changing
+the username requires authorization again. A matching path and username can reuse
+the grant on another machine. Granting sends no remote data.
 
 Output:
   --color <auto|always|never>       Color output (default: auto)
-  --no-color                        Disable color output
 
 Scopes used during operations:
   once                              Current CLI command or Agent tool call only
@@ -656,8 +653,7 @@ configure a provider but do not grant permission.
 Environment used by auth grant:
   ZVEC_GREP_EMBEDDING               Default model for new indexes and auth grant
   ZVEC_GREP_API_KEY                 Embedding provider credential fallback
-  ZVEC_GREP_ENDPOINT                Remote Embedding endpoint fallback
-  ZVEC_GREP_AUTHORIZATION_KEY_FILE  Workspace grant signing-key file (advanced)";
+  ZVEC_GREP_ENDPOINT                Remote Embedding endpoint fallback";
 
 const SERVER_HELP: &str = r"Usage:
   zg --server --stdio [--token-file <path>] [--mcp-toolset <agent|full>]
@@ -689,6 +685,7 @@ See zg --help environment for daemon startup scope.";
 
 const INSTALL_HELP: &str = r"Usage:
   zg --install [--target codex|claude|qwen|qoder|opencode|cursor|copilot|vscode|grok|pi|all|auto] [--mcp-transport stdio|http] [--mcp-toolset agent|full] [--yes] [--force]
+  zg --install --upgrade-installed [--dry-run]
 
 Options:
   --target <agent>                  codex, claude, qwen, qoder, opencode, cursor, copilot, vscode, grok, pi, auto, or all; repeatable
@@ -698,6 +695,15 @@ Options:
   --mcp-token-env <name>            HTTP mode Bearer token environment variable
   --yes                             Install detected agents without prompting
   --force                           Replace conflicting unmanaged configuration
+  --upgrade-installed              Migrate existing integrations without installing new ones
+  --dry-run                        Preview migration without writing files
+
+Upgrade scans existing entries in known user configuration files.
+It preserves transport, custom settings, permissions, guidance and comments;
+HTTP entries are unchanged. Unsupported launchers require manual migration.
+Changed files receive a unique .zg-upgrade-*.bak backup beside the original.
+No daemon is started. Reconnect agents afterwards; HTTP users run zg --server on.
+Upgrade options cannot be combined with target or installation settings.
 
 The qoder target configures Qoder CLI and Qoder IDE together.
 The copilot target configures GitHub Copilot CLI and Agent Host. The vscode
@@ -879,7 +885,7 @@ Embedding:
   ZVEC_GREP_DEVICE       Local embedding device: auto, cpu, metal, vulkan, or cuda
 
 Index-only embedding concurrency:
-  ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY  Positive index/update concurrency override
+  ZVEC_GREP_EMBEDDING_CONCURRENCY  Positive index/update concurrency override
   Applies to automatic indexing and refresh, never query-vector inference.
   Precedence: explicit CLI/API index setting, this variable, legacy llama.cpp
   index setting, then backend defaults. Invalid values warn and use defaults.
@@ -890,14 +896,13 @@ Qwen credential aliases:
   DASHSCOPE_API_KEY  Qwen credential fallback after ZVEC_GREP_API_KEY
   QWEN_API_KEY       Qwen credential fallback after DASHSCOPE_API_KEY
 
-State and authorization:
+State:
   ZVEC_GREP_HOME                    Runtime and daemon state directory; Workspace indexes stay under <root>/.zvec-grep
-  ZVEC_GREP_AUTHORIZATION_KEY_FILE  Workspace grant signing-key file (advanced)
 
 Advanced:
   ZVEC_GREP_METAL_KEEP_RESIDENCY       Set to 1 to keep llama.cpp Metal residency enabled (advanced)
   ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM  Legacy index-only llama.cpp fallback after the index concurrency variable
-  NO_COLOR                             Disable terminal colors
+  NO_COLOR                             Disable automatic terminal colors; --color overrides it
 
 Agent integration paths:
   CODEX_HOME            Codex configuration directory used by zg --install
@@ -916,7 +921,8 @@ Agent integration paths:
   VSCODE_APPDATA        Base directory for VS Code release channels
 
 Precedence:
-  Embedding runtime                 CLI > Workspace snapshot > Global config > Environment
+  Remote credentials               CLI > Workspace snapshot > Global config > Environment
+  Device/model cache               CLI > Environment > Workspace > Global config > Backend default
   New-index model                  --embedding > ZVEC_GREP_EMBEDDING > Global config
   Client mode                      --mode > ZVEC_GREP_MODE > Global config
   Qwen environment credential      ZVEC_GREP_API_KEY > DASHSCOPE_API_KEY > QWEN_API_KEY
@@ -937,6 +943,21 @@ mod output_tests {
         ContextContentRole, ContextCoverage, ContextDiagnostics, ContextItemKind, ContextSource,
         MatchedBy,
     };
+
+    #[test]
+    fn incompatible_index_without_a_root_requires_an_explicit_directory() {
+        let report = zg_engine::EngineError::index_incompatible("missing root").report();
+        let mut output = Vec::new();
+        write_index_incompatible_error(&mut output, &report, OutputOptions::default(), false)
+            .expect("render recovery guidance");
+        let output = String::from_utf8(output).expect("UTF-8 output");
+        assert!(output.contains("zg --index --rebuild <index-directory>"));
+        assert!(
+            !output
+                .lines()
+                .any(|line| line.trim() == "zg --index --rebuild")
+        );
+    }
 
     #[cfg(unix)]
     #[test]
@@ -1013,6 +1034,15 @@ mod output_tests {
         result.query = "find ImportantSymbol".into();
         result.items[0].relative_path = "ImportantSymbol.rs".into();
         result.items[0].content = "İ 中文 ImportantSymbol here".into();
+        result.items[0].metadata = Some(EntityMetadata::Code(CodeMetadata {
+            symbol_type: Some(zg_engine::api::context::options::SymbolType::Function),
+            symbol_name: Some("MetadataSymbol".into()),
+            scope: Some("namespace".into()),
+            signature: None,
+            visibility: None,
+            language: None,
+            documentation: None,
+        }));
         for source in [ContextSource::Index, ContextSource::Rg] {
             result.source = source;
             result.items[0].match_ranges = if source == ContextSource::Rg {
@@ -1030,57 +1060,75 @@ mod output_tests {
                 Vec::new()
             };
             let original = result.clone();
-            for human in [false, true] {
-                for preview in [PreviewMode::None, PreviewMode::Short, PreviewMode::Full] {
-                    for (color, terminal, styled) in [
-                        (crate::ColorMode::Always, false, true),
-                        (crate::ColorMode::Never, true, false),
-                        (crate::ColorMode::Auto, false, false),
-                        (
-                            crate::ColorMode::Auto,
-                            true,
-                            std::env::var_os("NO_COLOR").is_none(),
-                        ),
-                    ] {
-                        let mut output = Vec::new();
-                        write_context_with_options(
-                            &mut output,
-                            &result,
-                            OutputOptions {
-                                human,
-                                preview,
-                                color,
-                                ..OutputOptions::default()
-                            },
-                            terminal,
-                        )
-                        .expect("context output");
-                        let output = String::from_utf8(output).expect("UTF-8");
-                        let expected = if styled {
-                            "  1: İ 中文 \x1b[1;33mImportantSymbol\x1b[0m here"
+            for preview in [
+                PreviewMode::None,
+                PreviewMode::Short,
+                PreviewMode::Full,
+                PreviewMode::Detail,
+            ] {
+                for (color, terminal, styled) in [
+                    (crate::ColorMode::Always, false, true),
+                    (crate::ColorMode::Never, true, false),
+                    (crate::ColorMode::Auto, false, false),
+                    (
+                        crate::ColorMode::Auto,
+                        true,
+                        std::env::var_os("NO_COLOR").is_none(),
+                    ),
+                ] {
+                    let mut output = Vec::new();
+                    write_context_with_options(
+                        &mut output,
+                        &result,
+                        OutputOptions {
+                            preview,
+                            color,
+                            ..OutputOptions::default()
+                        },
+                        terminal,
+                    )
+                    .expect("context output");
+                    let output = String::from_utf8(output).expect("UTF-8");
+                    let expected = if styled {
+                        "İ 中文 \x1b[1;33mImportantSymbol\x1b[0m here"
+                    } else {
+                        "İ 中文 ImportantSymbol here"
+                    };
+                    assert!(
+                        output.contains(expected),
+                        "{source:?} {color:?}: {output:?}"
+                    );
+                    assert_eq!(output.contains('\x1b'), styled);
+                    assert!(output.contains("ImportantSymbol.rs"));
+                    assert!(!output.contains("find ImportantSymbol"));
+                    if source == ContextSource::Index {
+                        let (label, value, scope) = if preview == PreviewMode::Detail {
+                            ("Symbol:", "MetadataSymbol", "Scope:")
                         } else {
-                            "  1: İ 中文 ImportantSymbol here"
+                            ("symbol:", "[function] MetadataSymbol", "scope:")
                         };
-                        assert!(
-                            output.contains(expected),
-                            "{source:?} {color:?}: {output:?}"
-                        );
-                        assert_eq!(output.contains('\x1b'), styled);
-                        assert!(output.contains("ImportantSymbol.rs"));
-                        if human && styled {
-                            assert!(
-                                output.contains("Query: \x1b[1;33mfind ImportantSymbol\x1b[0m")
-                            );
-                        }
-                        assert_eq!(result, original);
+                        let expected = if styled {
+                            format!("\x1b[35m{label}\x1b[0m {value}")
+                        } else {
+                            format!("{label} {value}")
+                        };
+                        assert!(output.contains(&expected), "{preview:?}: {output:?}");
+                        let expected_scope = if styled {
+                            format!("\x1b[35m{scope}\x1b[0m namespace")
+                        } else {
+                            format!("{scope} namespace")
+                        };
+                        assert!(output.contains(&expected_scope), "{output:?}");
+                        assert!(!output.contains("\x1b[1;35m"), "{output:?}");
                     }
+                    assert_eq!(result, original);
                 }
             }
         }
     }
 
     #[test]
-    fn context_highlighting_follows_visible_preview_without_coloring_metadata() {
+    fn context_highlighting_follows_visible_preview_without_coloring_metadata_values() {
         let mut result = indexed_result();
         result.query = "needle".into();
         result.items[0].content = format!("{}needle\nneedle", "x".repeat(160));
@@ -1111,7 +1159,7 @@ mod output_tests {
                 output.matches("\x1b[1;33mneedle\x1b[0m").count(),
                 expected_matches
             );
-            assert!(output.contains("heading: needle\n"));
+            assert!(output.contains("\x1b[35mheading:\x1b[0m needle\n"));
         }
     }
 
@@ -1198,6 +1246,7 @@ mod output_tests {
                             ..OutputOptions::default()
                         },
                         &QueryHighlighter::default(),
+                        crate::theme::StatusTheme::new(crate::ColorMode::Never, false),
                     )
                     .expect("source preview");
                     let expected = if whole_entity {
@@ -1257,6 +1306,35 @@ mod output_tests {
     }
 
     #[test]
+    fn terminal_freshness_keeps_refresh_counts_and_redirected_contract() {
+        use zg_engine::api::context::result::ContextIndexingStatus;
+        let mut result = indexed_result();
+        result.freshness = Some("possibly_stale".into());
+        result.indexing = Some(ContextIndexingStatus {
+            state: "running".into(),
+            completed: Some(2),
+            total: Some(3),
+        });
+        let options = OutputOptions {
+            color: crate::ColorMode::Never,
+            ..OutputOptions::default()
+        };
+        let mut terminal = Vec::new();
+        super::write_context_status_with_options(&mut terminal, &result, options, true)
+            .expect("terminal status");
+        assert_eq!(
+            String::from_utf8(terminal).expect("UTF-8"),
+            "Warning: Index may be out of date\n  Results use the current index\n  Refresh: running · 2/3 files\n"
+        );
+        let mut redirected = Vec::new();
+        let mut original = Vec::new();
+        super::write_context_status_with_options(&mut redirected, &result, options, false)
+            .expect("redirected status");
+        super::write_context_status(&mut original, &result).expect("original status");
+        assert_eq!(redirected, original);
+    }
+
+    #[test]
     fn preview_modes_and_trace_preserve_indexed_result_information() {
         let mut result = indexed_result();
         let render = |preview, trace| {
@@ -1275,9 +1353,9 @@ mod output_tests {
             String::from_utf8(buffer).expect("UTF-8")
         };
         let minimal = render(PreviewMode::None, false);
-        assert!(minimal.contains("#1 matchedBy=fts sample.rs:1-20"));
-        assert!(minimal.contains("1: line1"));
-        assert!(!minimal.contains("2: line2"));
+        assert!(minimal.contains("#1 sample.rs:1-20"));
+        assert!(minimal.contains("1\tline1"));
+        assert!(!minimal.contains("2\tline2"));
         let short = render(PreviewMode::Short, false);
         assert!(short.contains("10: line10"));
         assert!(!short.contains("11: line11"));
@@ -1310,7 +1388,7 @@ mod output_tests {
             (None, "symbol: User scope: app"),
             (
                 Some(zg_engine::api::context::options::SymbolType::Enum),
-                "symbol: enum User scope: app",
+                "symbol: [enum] User scope: app",
             ),
         ] {
             item.metadata = Some(EntityMetadata::Code(CodeMetadata {
@@ -1328,6 +1406,7 @@ mod output_tests {
                 &item,
                 OutputOptions::default(),
                 &QueryHighlighter::default(),
+                crate::theme::StatusTheme::new(crate::ColorMode::Never, false),
             )
             .expect("render symbol metadata");
             let rendered = String::from_utf8(buffer).expect("UTF-8");

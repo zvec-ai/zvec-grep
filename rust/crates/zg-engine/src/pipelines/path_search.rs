@@ -19,10 +19,8 @@ use crate::{
     },
     domain::ScanRules,
     file_selection::{GlobMatcher, ScanPolicy},
-    workspace::{
-        layout::{find_nearest_workspace, resolve_workspace_root},
-        manifest::read_workspace_manifest,
-    },
+    utils::resolve_directory,
+    workspace::{find_nearest_workspace, manifest::read_workspace_manifest},
 };
 
 use super::indexed_search::format_filter::{compile_format_filter, matches_file_name};
@@ -204,16 +202,12 @@ fn matching_paths(
 }
 
 fn workspace_scan(root: Option<&Path>) -> EngineResult<(PathBuf, ScanRules)> {
-    let requested = resolve_workspace_root(root)?;
-    let location = find_nearest_workspace(&requested)?;
-    let manifest = location
-        .as_ref()
-        .map(|location| read_workspace_manifest(&location.home))
-        .transpose()?
-        .flatten();
-    let root = std::fs::canonicalize(location.as_ref().map_or(requested.as_path(), |l| &l.root))
-        .map_err(|error| EngineError::from_io("resolve path search root", &error))?;
-    let scan = manifest.map_or_else(ScanRules::default, |manifest| manifest.workspace.scan);
+    let requested = resolve_directory(root)?;
+    let Some((root, layout)) = find_nearest_workspace(&requested)? else {
+        return Ok((requested, ScanRules::default()));
+    };
+    let manifest = read_workspace_manifest(&root, &layout)?;
+    let scan = manifest.map_or_else(ScanRules::default, |manifest| manifest.scan().clone());
     Ok((root, scan))
 }
 
@@ -277,15 +271,15 @@ fn check_cancelled(options: &PathsOptions) -> EngineResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fs, path::PathBuf};
+    use std::{fs, path::PathBuf};
 
     use super::*;
     use crate::{
         ZvecGrep,
         api::context::options::{FileCategory, FileFormat, GlobRule, QueryFilter},
         api::index::options::ScanRulesUpdate,
-        domain::{IndexState, ScanRules, Workspace},
-        workspace::manifest::{WorkspaceManifest, write_workspace_manifest},
+        domain::{IndexState, ScanRules, Workspace, WorkspaceLayout},
+        workspace::manifest::write_workspace_manifest,
     };
 
     fn fixture(files: &[&str]) -> tempfile::TempDir {
@@ -308,21 +302,20 @@ mod tests {
 
     fn save_scan(root: &Path, scan: ScanRules) {
         let root = fs::canonicalize(root).expect("canonical root");
-        let home = root.join(".zvec-grep");
-        let manifest = WorkspaceManifest::new(
-            Workspace {
-                root,
-                scan,
-                index: IndexState::Uninitialized,
-                created_epoch_ms: 0,
-                updated_epoch_ms: 0,
-            },
-            home.clone(),
+        let layout = WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout");
+        let manifest = Workspace::new(
+            &root,
+            layout,
+            scan,
             None,
-            BTreeMap::default(),
+            None,
+            0,
+            0,
+            IndexState::Uninitialized,
         )
         .expect("manifest");
-        write_workspace_manifest(&home, &manifest).expect("save scan rules");
+        write_workspace_manifest(manifest.layout().manifest_path(), &manifest)
+            .expect("save scan rules");
     }
 
     #[tokio::test]
@@ -706,12 +699,10 @@ mod tests {
                     ..ContextOptions::default()
                 })
                 .await
-                .expect("ordinary rg retains its enrichment budget");
-            let structure = direct.diagnostics.structure.expect("structure diagnostics");
-            assert_eq!(structure.file_limit, 100);
-            assert_eq!(structure.enriched_files, 100);
-            assert!(structure.truncated);
-            assert!(direct.items.last().expect("last match").container.is_none());
+                .expect("ordinary rg returns plain matches");
+            assert_eq!(direct.items.len(), 102);
+            assert!(direct.diagnostics.structure.is_none());
+            assert!(direct.items.iter().all(|item| item.container.is_none()));
 
             for limit in [101, 100, 102, 0, 1, usize::MAX] {
                 let mut request = options(root.path(), "auth.ts");
@@ -719,7 +710,7 @@ mod tests {
                 let PathLookupResult::Text(result) = engine
                     .lookup_path(request)
                     .await
-                    .expect("lookup beyond the ordinary rg enrichment budget")
+                    .expect("lookup with structural grouping beyond 100 files")
                 else {
                     panic!("no file has the queried name");
                 };
@@ -799,18 +790,10 @@ mod tests {
                 .expect("ordinary rg keeps individual matches");
             assert_eq!(direct.items.len(), 3, "{file}");
             assert_ne!(
-                direct.items[0]
-                    .container
-                    .as_ref()
-                    .expect("first fragment")
-                    .range,
-                direct.items[1]
-                    .container
-                    .as_ref()
-                    .expect("second fragment")
-                    .range,
-                "{file}: ordinary rg retains fragment containers"
+                direct.items[0].range, direct.items[1].range,
+                "{file}: ordinary rg keeps distinct source matches"
             );
+            assert!(direct.items.iter().all(|item| item.container.is_none()));
             let mut request = options(root.path(), "src/auth.ts");
             request.limit = Some(2);
             let PathLookupResult::Text(result) =

@@ -992,12 +992,10 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
             signal: request.signal.clone(),
             allow_remote: request.allow_remote,
             authorized_remote: request.authorized_remote.clone(),
-            api_key: request.api_key.clone(),
-            endpoint: request.endpoint.clone(),
             embedding_concurrency: request.embedding_concurrency,
             lock_timeout_ms: request.lock_timeout_ms,
             runtime_device: request.device,
-            model_cache: request.model_cache.clone(),
+            runtime_model_cache: request.model_cache.clone(),
             ..IndexOptions::default()
         };
         if matches!(policy, RefreshPolicy::Off | RefreshPolicy::Background) {
@@ -1045,7 +1043,9 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
                     .await
             })
             .await?;
-            info.compatibility.ensure_compatible()?;
+            info.compatibility
+                .ensure_compatible()
+                .map_err(|error| error.with_workspace_root(&info.root))?;
             if !info.indexed {
                 // Preserve the engine's missing-index error without silently creating one.
                 return Ok(None);
@@ -1340,7 +1340,13 @@ fn index_template(options: &IndexOptions) -> IndexOptions {
     template.on_progress = None;
     template.allow_remote = false;
     template.authorized_remote.clear();
+    template.runtime_api_key = None;
     template.runtime_device = None;
+    template.runtime_model_cache = None;
+    template.model_cache = None;
+    template.api_key = None;
+    template.endpoint = None;
+    template.device = None;
     template.embedding_concurrency = None;
     template.rebuild = false;
     template.reset_paths = false;
@@ -1439,6 +1445,37 @@ mod tests {
     use crate::job_scheduler::{IndexExecutor, SchedulerConfig};
 
     use super::WorkspaceRuntimeManager;
+
+    #[test]
+    fn watch_template_does_not_replay_model_configuration() {
+        use zg_engine::api::index::options::{Device, EmbeddingModelSpec};
+
+        let template = super::index_template(&IndexOptions {
+            api_key: Some("one-operation-key".into()),
+            endpoint: Some("https://example.test/embeddings".into()),
+            device: Some(Device::Cpu),
+            model_cache: Some("saved-cache".into()),
+            runtime_api_key: Some("temporary-key".into()),
+            runtime_device: Some(Device::Auto),
+            runtime_model_cache: Some("temporary-cache".into()),
+            embedding: Some(EmbeddingModelSpec {
+                reference: "local/potion-code-16m-v2".into(),
+                revision: None,
+                cache_dir: Some("local-model-cache".into()),
+                endpoint: None,
+                device: Device::Cpu,
+            }),
+            ..IndexOptions::default()
+        });
+        assert!(template.runtime_api_key.is_none());
+        assert!(template.runtime_device.is_none());
+        assert!(template.runtime_model_cache.is_none());
+        assert!(template.model_cache.is_none());
+        assert!(template.api_key.is_none());
+        assert!(template.endpoint.is_none());
+        assert!(template.embedding.is_none());
+        assert!(template.device.is_none());
+    }
 
     #[derive(Default)]
     struct RecordingExecutor {
@@ -1579,7 +1616,7 @@ mod tests {
             compatibility: IndexCompatibility::Compatible { version: 2 },
             index_policy: WorkspaceIndexPolicy::Enabled,
             home: "/workspace/.zvec-grep".into(),
-            index_path: "/workspace/.zvec-grep/storage".into(),
+            index_path: "/workspace/.zvec-grep/index".into(),
             source: InfoSource::Index,
             workspace_index: None,
             status: Some(IndexStats::default()),

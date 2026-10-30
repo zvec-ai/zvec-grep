@@ -325,18 +325,31 @@ fn config_merges_settings_and_index_consumes_model_defaults() {
             0o600
         );
     }
-    fixture.success(&["--index", "--mode", "direct", "--model-cache", "cache"]);
+    let cache = fixture.user.path().join("index-models");
+    fixture.success(&[
+        "--index",
+        "--mode",
+        "direct",
+        "--model-cache",
+        cache.to_str().expect("cache path"),
+    ]);
     let manifest: serde_json::Value = serde_json::from_slice(
         &fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("manifest"),
     )
     .expect("JSON");
     assert_eq!(
-        manifest["defaultEmbeddingModel"]["model"]["name"],
+        manifest["index"]["descriptor"]["defaultEmbeddingModel"]["model"]["name"],
         "potion-code-16m-v2"
     );
-    assert_eq!(
-        manifest["embeddingRuntimes"]["local/potion-code-16m-v2"]["device"],
-        "cpu"
+    let runtime = &manifest["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"];
+    assert!(runtime.get("device").is_none());
+    assert_eq!(runtime["cacheDir"], json!(cache));
+    assert!(
+        !fixture
+            .root
+            .path()
+            .join(".zvec-grep/credentials.key")
+            .exists()
     );
     let status = fixture.success(&["--status", "--mode", "direct"]);
     assert!(
@@ -381,17 +394,10 @@ fn invalid_config_commands_leave_no_config_file() {
 }
 
 #[test]
-fn binary_consumes_compact_color_and_debug_options() {
+fn binary_consumes_color_and_debug_options() {
     let fixture = Fixture::new();
     fs::write(fixture.root.path().join("sample.txt"), "needle\n").expect("source");
-    let output = fixture.success(&[
-        "--rg",
-        "--compact",
-        "--color",
-        "always",
-        "--debug",
-        "needle",
-    ]);
+    let output = fixture.success(&["--rg", "--color", "always", "--debug", "needle"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(!stdout.contains("Context"));
     assert!(stdout.contains("sample.txt"));
@@ -428,15 +434,29 @@ fn explicit_remote_credentials_and_consent_reach_index_execution() {
     )
     .expect("JSON");
     assert_eq!(
-        manifest["embeddingRuntimes"]["qwen/text-embedding-v4"]["endpoint"],
+        manifest["index"]["descriptor"]["embeddingConfigs"]["qwen/text-embedding-v4"]["endpoint"],
         "https://example.test/embeddings"
+    );
+    let credentials = manifest["index"]["descriptor"]["embeddingConfigs"]["qwen/text-embedding-v4"]
+        ["apiKey"]
+        .clone();
+    assert!(credentials["nonce"].is_string());
+    assert!(credentials["ciphertext"].is_string());
+    assert!(
+        !serde_json::to_string(&manifest)
+            .expect("manifest JSON")
+            .contains("test-key")
+    );
+    assert_eq!(
+        fs::read(fixture.root.path().join(".zvec-grep/credentials.key"))
+            .expect("workspace key")
+            .len(),
+        32
     );
     fixture.success(&[
         "--index",
         "--mode",
         "direct",
-        "--api-key",
-        "test-key",
         "--allow-remote",
         "--endpoint",
         "https://example.test/updated",
@@ -446,7 +466,213 @@ fn explicit_remote_credentials_and_consent_reach_index_execution() {
     )
     .expect("JSON");
     assert_eq!(
-        manifest["embeddingRuntimes"]["qwen/text-embedding-v4"]["endpoint"],
+        manifest["index"]["descriptor"]["embeddingConfigs"]["qwen/text-embedding-v4"]["endpoint"],
         "https://example.test/updated"
     );
+    assert_eq!(
+        manifest["index"]["descriptor"]["embeddingConfigs"]["qwen/text-embedding-v4"]["apiKey"],
+        credentials
+    );
+    let runtimes = manifest["index"]["descriptor"]["embeddingConfigs"].clone();
+    fs::write(fixture.root.path().join("empty.txt"), "")
+        .expect("trigger refresh without embedding");
+    let query = fixture.run(&[
+        "--mode",
+        "direct",
+        "--fts",
+        "needle",
+        "--refresh",
+        "wait",
+        "--allow-remote",
+        "--api-key",
+        "temporary-key",
+        "--endpoint",
+        "https://temporary.test/embeddings",
+    ]);
+    assert!(
+        matches!(query.status.code(), Some(0 | 1)),
+        "{}",
+        String::from_utf8_lossy(&query.stderr)
+    );
+    let after = fs::read(fixture.root.path().join(".zvec-grep/manifest.json"))
+        .expect("manifest after refresh");
+    let after: serde_json::Value = serde_json::from_slice(&after).expect("manifest JSON");
+    assert_eq!(after["index"]["descriptor"]["embeddingConfigs"], runtimes);
+    assert!(
+        !serde_json::to_string(&after)
+            .expect("manifest JSON")
+            .contains("temporary-key")
+    );
+}
+
+#[test]
+fn environment_and_global_api_keys_are_not_copied_into_the_workspace() {
+    for environment in [false, true] {
+        let fixture = Fixture::new();
+        if !environment {
+            fixture.write_config(&json!({
+                "version": 1,
+                "providers": {"qwen": {"apiKey": "global-secret"}}
+            }));
+        }
+        let mut command = fixture.command(&[
+            "--index",
+            "--mode",
+            "direct",
+            "--embedding",
+            "qwen/text-embedding-v4",
+            "--endpoint",
+            "https://example.test/embeddings",
+            "--allow-remote",
+        ]);
+        if environment {
+            command.env("ZVEC_GREP_API_KEY", "environment-secret");
+        }
+        let output = command.output().expect("index empty workspace");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bytes =
+            fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("manifest");
+        let manifest: serde_json::Value = serde_json::from_slice(&bytes).expect("manifest JSON");
+        assert!(
+            manifest["index"]["descriptor"]["embeddingConfigs"]["qwen/text-embedding-v4"]
+                .get("apiKey")
+                .is_none()
+        );
+        assert!(
+            !fixture
+                .root
+                .path()
+                .join(".zvec-grep/credentials.key")
+                .exists()
+        );
+    }
+}
+
+#[test]
+fn explicit_device_overrides_environment_and_saved_preferences_do_not() {
+    let fixture = Fixture::new();
+    fixture.write_config(&json!({
+        "version": 1,
+        "defaults": {"embedding": "local/potion-code-16m-v2"},
+        "models": {"local/potion-code-16m-v2": {"device": "cpu"}}
+    }));
+    let invalid = fixture
+        .command(&["--index", "--mode", "direct"])
+        .env("ZVEC_GREP_DEVICE", "invalid")
+        .output()
+        .expect("environment device");
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("Invalid ZVEC_GREP_DEVICE"));
+    assert!(
+        !fixture
+            .root
+            .path()
+            .join(".zvec-grep/manifest.json")
+            .exists()
+    );
+    let explicit = fixture
+        .command(&["--index", "--mode", "direct", "--device", "cpu"])
+        .env("ZVEC_GREP_DEVICE", "invalid")
+        .output()
+        .expect("explicit device");
+    assert!(
+        explicit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&explicit.stderr)
+    );
+    let invalid = fixture
+        .command(&["--index", "--mode", "direct"])
+        .env("ZVEC_GREP_DEVICE", "invalid")
+        .output()
+        .expect("environment takes precedence over saved device");
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("Invalid ZVEC_GREP_DEVICE"));
+}
+
+#[test]
+fn local_model_preferences_save_only_explicit_index_options() {
+    let fixture = Fixture::new();
+    fixture.write_config(&json!({
+        "version": 1,
+        "defaults": {
+            "embedding": "local/potion-code-16m-v2",
+            "modelCacheDir": fixture.user.path().join("global-models")
+        },
+        "models": {"local/potion-code-16m-v2": {"device": "cpu"}}
+    }));
+    let manifest = || -> serde_json::Value {
+        serde_json::from_slice(
+            &fs::read(fixture.root.path().join(".zvec-grep/manifest.json")).expect("manifest"),
+        )
+        .expect("manifest JSON")
+    };
+    fixture.success(&["--index", "--mode", "direct"]);
+    let original = manifest();
+    assert_eq!(
+        original["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"],
+        json!({})
+    );
+    let saved_cache = fixture.user.path().join("saved-models");
+    fixture.success(&[
+        "--index",
+        "--mode",
+        "direct",
+        "--device",
+        "cpu",
+        "--model-cache",
+        saved_cache.to_str().expect("cache path"),
+    ]);
+    let saved = manifest();
+    assert_eq!(
+        saved["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"],
+        json!({
+            "device": "cpu", "cacheDir": saved_cache
+        })
+    );
+    let inherited = fixture
+        .command(&["--index", "--mode", "direct"])
+        .env("ZVEC_GREP_DEVICE", "auto")
+        .env(
+            "ZVEC_GREP_MODEL_CACHE",
+            fixture.user.path().join("environment-models"),
+        )
+        .output()
+        .expect("temporary environment preferences");
+    assert!(
+        inherited.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inherited.stderr)
+    );
+    assert_eq!(
+        manifest()["index"]["descriptor"]["embeddingConfigs"],
+        saved["index"]["descriptor"]["embeddingConfigs"]
+    );
+
+    fixture.success(&["--index", "--mode", "direct", "--device", "auto"]);
+    assert_eq!(
+        manifest()["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"],
+        json!({
+            "device": "auto", "cacheDir": saved_cache
+        })
+    );
+    let replacement_cache = fixture.user.path().join("replacement-models");
+    fixture.success(&[
+        "--index",
+        "--mode",
+        "direct",
+        "--model-cache",
+        replacement_cache.to_str().expect("replacement cache path"),
+    ]);
+    let updated = manifest();
+    assert_eq!(
+        updated["index"]["descriptor"]["embeddingConfigs"]["local/potion-code-16m-v2"],
+        json!({
+            "device": "auto", "cacheDir": replacement_cache
+        })
+    );
+    assert_eq!(updated["storageGeneration"], original["storageGeneration"]);
 }

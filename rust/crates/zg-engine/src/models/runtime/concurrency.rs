@@ -4,7 +4,7 @@ use std::env;
 
 use crate::models::{EmbeddingCatalogEntry, ModelError, get_embedding_model_catalog_entry};
 
-pub(crate) const INDEX_CONCURRENCY_ENV: &str = "ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY";
+pub(crate) const EMBEDDING_CONCURRENCY_ENV: &str = "ZVEC_GREP_EMBEDDING_CONCURRENCY";
 const LEGACY_LLAMA_ENV: &str = "ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM";
 pub(crate) const LOCAL_CONCURRENCY_CAP: usize = 8;
 
@@ -51,7 +51,7 @@ fn resolve_override(
     if requested.is_some() {
         return Ok(requested);
     }
-    let mut name = INDEX_CONCURRENCY_ENV;
+    let mut name = EMBEDDING_CONCURRENCY_ENV;
     let mut value = environment(name).unwrap_or_default();
     if value.trim().is_empty() && is_llama(reference) {
         name = LEGACY_LLAMA_ENV;

@@ -75,9 +75,14 @@
           "payload": "lib/cuda12/ggml-cuda.dll"
         },
         {
-          "package": "@zvec/zvec-grep-win32-x64-msvc-ort-cuda",
+          "package": "@zvec/zvec-grep-win32-x64-msvc-ort-cuda-part1",
           "file": "lib/onnxruntime_providers_cuda.dll",
-          "payload": "lib/onnxruntime_providers_cuda.dll"
+          "payload": "parts/ort-cuda.part1"
+        },
+        {
+          "package": "@zvec/zvec-grep-win32-x64-msvc-ort-cuda-part2",
+          "file": "lib/onnxruntime_providers_cuda.dll",
+          "payload": "parts/ort-cuda.part2"
         }
       ]
     },

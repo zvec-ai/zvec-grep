@@ -8,6 +8,8 @@ mod service;
 mod spi;
 mod text;
 
+pub(crate) use code::code_outline;
+
 // Extraction sources.
 pub(crate) use spi::{ImageSource, Source, SourceKind, TextSource};
 

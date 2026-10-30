@@ -46,11 +46,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Workspaces
 
-A workspace is a directory of files that zg indexes and searches as a unit. Each workspace is identified by its canonical root path and has its own scanning rules, model settings, and index.
+A workspace is a directory of files that zg indexes and searches as a unit, with its own scanning rules, model settings, and index. Search and status from a subdirectory discover the nearest enclosing workspace; a Git repository is not required.
 
 ### Index storage
 
-Workspace indexes and saved settings use a configurable storage location, defaulting to a `.zvec-grep` directory within the workspace. Downloaded models are cached separately and shared across workspaces. Moving or copying the source root together with `.zvec-grep` preserves the index.
+Saved settings live in the source directory's fixed `.zvec-grep` child, with active index data in `.zvec-grep/index`. Moving or copying the source directory together with `.zvec-grep` preserves the index; downloaded models are cached separately and shared across workspaces. Sharing `.zvec-grep` also shares access to any credentials saved in it.
 
 ### File selection
 
@@ -63,6 +63,10 @@ An index is created on the first indexing run and updated as files are added, ch
 ### Search
 
 Indexed search combines full-text and vector retrieval to return relevant source snippets, refreshing the index as needed by default. Query filters narrow results without changing the workspace's scanning rules. Direct text search reads source files without requiring an index.
+
+### Vector storage
+
+Embedding vectors are stored as IEEE binary16. The engine keeps embeddings and query vectors as `f32` until they are narrowed for the FP16 field. `indexVersion` remains 2. Existing FP32 indexes require an explicit rebuild with `zg --index --rebuild` before use.
 
 ### Embedding models
 
@@ -78,6 +82,6 @@ Each workspace uses an embedding model for semantic search. Local models run on 
 | [Extraction](src/extraction/mod.rs) and [lexical search](src/lexical/mod.rs) | Source-preserving extraction and direct ripgrep search. |
 | [Pipelines](src/pipelines/README.md) | Indexing, indexed retrieval, and direct search; [ranking](src/pipelines/indexed_search/ranking/README.md) combines retrieval evidence. |
 | [Models](src/models/mod.rs) | Model catalogs, embedding backends, downloads, and reusable runtimes. |
-| [Storage](src/storage/mod.rs) and [workspace](src/workspace/README.md) | Collection schemas and operations; manifests, root paths, locks, and publication. |
+| [Storage](src/storage/mod.rs) and [workspace](src/workspace/README.md) | Collection schemas and operations; workspace discovery, manifests, locks, and publication. |
 | [Authorization](src/authorization.rs) and [config](src/config.rs) | Remote-service consent and configuration resolution. |
 | [Errors](src/error.rs) and [utilities](src/utils/mod.rs) | Diagnostics and shared text, encoding, hashing, and filesystem helpers. |
