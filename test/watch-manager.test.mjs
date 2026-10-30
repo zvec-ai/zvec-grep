@@ -230,6 +230,49 @@ test("recursive watcher keeps events while root paths are unavailable", async ()
   }
 });
 
+test("recursive watcher does not create directory fallbacks on rename", async () => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-watch-recursive-rename-"),
+  );
+  const root = join(temporaryDirectory, "repo");
+  const created = join(root, "created");
+  await mkdir(root);
+  let listener;
+  const watchers = [];
+  const batches = [];
+  const manager = new WatchManager({
+    root,
+    platform: "darwin",
+    debounceMs: 5,
+    maxWaitMs: 20,
+    reconcileIntervalMs: 0,
+    resumeCheckIntervalMs: 0,
+    watchFactory: (directory, options, callback) => {
+      const watcher = new EventEmitter();
+      watcher.close = () => {};
+      watchers.push({ directory, recursive: options.recursive });
+      if (options.recursive) listener = callback;
+      return watcher;
+    },
+    onChanges: (changes) => batches.push(changes),
+  });
+  try {
+    manager.start();
+    assert.equal(watchers.length, 1);
+
+    await mkdir(created);
+    listener("rename", "created");
+    await waitFor(() => batches.length === 1);
+    await manager.refreshPaths();
+
+    assert.deepEqual(watchers, [{ directory: root, recursive: true }]);
+    assert.deepEqual(batches[0].rescanDirectories, [created]);
+  } finally {
+    await manager.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
 test("recursive watcher fallback starts after root paths become available", async () => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-watch-recursive-fallback-"),
