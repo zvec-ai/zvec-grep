@@ -78,7 +78,23 @@ fn direct_and_server_report_index_progress_on_stderr() {
             String::from_utf8_lossy(&output.stderr)
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("Index complete"), "{mode}: {stderr}");
+        let finishing = stderr.find("Finishing index").expect("final cleanup stage");
+        if mode == "direct" {
+            let optimizing = stderr.find("Optimizing index").expect("optimization stage");
+            let saving = stderr.find("Saving index").expect("saving stage");
+            assert!(
+                optimizing < saving && saving < finishing,
+                "{mode}: {stderr}"
+            );
+        } else {
+            // The daemon publishes snapshots, so short intermediate stages can
+            // finish between polls. Any observed tail stage must precede Done.
+            for label in ["Optimizing index", "Saving index"] {
+                if let Some(position) = stderr.find(label) {
+                    assert!(position < finishing, "{mode}: {stderr}");
+                }
+            }
+        }
         assert!(!stderr.contains('\r') && !stderr.contains("\x1b["));
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.starts_with("Workspace index\nfiles\t"));

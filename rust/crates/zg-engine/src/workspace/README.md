@@ -31,5 +31,5 @@ cached separately.
   First builds and rebuilds prepare an index in `temp/` and publish it after
   storage closes. Interrupted publication can be recovered; a failed rebuild
   before the manifest commits preserves the previous index.
-- **Compatibility.** Rebuild the index when its version does not match the
-  version supported by the engine.
+- **Compatibility.** `indexVersion` determines index compatibility.
+  Incompatible indexes must be rebuilt.

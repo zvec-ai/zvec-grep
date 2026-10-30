@@ -21,7 +21,7 @@ use zg_engine::api::context::{
     result::{ContentRange, ContextItem},
 };
 
-use crate::{highlight::highlight_ranges, output_path};
+use crate::{highlight::highlight_ranges, output_path, theme::StatusTheme};
 
 /// Writes only native file paths, separated by newlines or NUL bytes.
 ///
@@ -155,6 +155,51 @@ pub fn write_context_status(mut writer: impl Write, result: &ContextResult) -> i
     Ok(())
 }
 
+/// Writes concise terminal freshness diagnostics, preserving redirected output.
+///
+/// # Errors
+/// Returns the underlying writer error.
+pub fn write_context_status_with_options(
+    mut writer: impl Write,
+    result: &ContextResult,
+    options: crate::OutputOptions,
+    terminal: bool,
+) -> io::Result<()> {
+    use zg_engine::api::context::result::ContextSource;
+    if !terminal {
+        return write_context_status(writer, result);
+    }
+    if result.source != ContextSource::Index {
+        return Ok(());
+    }
+    let has_drift =
+        result.freshness.as_deref() == Some("possibly_stale") || result.has_stale_items();
+    if !has_drift && result.indexing.is_none() {
+        return Ok(());
+    }
+    let theme = StatusTheme::new(options.color, terminal);
+    writeln!(writer, "{} Index may be out of date", theme.warning("!"))?;
+    writeln!(writer, "  Results use the current index")?;
+    if let Some(state) = result
+        .indexing
+        .as_ref()
+        .map(|indexing| indexing.state.as_str())
+        .or(result.background_refresh.as_deref())
+    {
+        let state = if state == "off" { "idle" } else { state };
+        write!(writer, "  Refresh: {state}")?;
+        if let Some((completed, total)) = result
+            .indexing
+            .as_ref()
+            .and_then(|indexing| indexing.completed.zip(indexing.total))
+        {
+            write!(writer, " · {completed}/{total} files")?;
+        }
+        writeln!(writer)?;
+    }
+    Ok(())
+}
+
 /// Writes context using the selected preview presentation.
 /// # Errors
 /// Returns the underlying writer error.
@@ -164,19 +209,10 @@ pub fn write_context_with_options(
     options: crate::OutputOptions,
     terminal: bool,
 ) -> io::Result<()> {
-    use crate::ColorMode;
     use zg_engine::api::context::result::ContextSource;
-    let color = options.color == ColorMode::Always
-        || (options.color == ColorMode::Auto && terminal && std::env::var_os("NO_COLOR").is_none());
-    let heading = |value: String| {
-        if color {
-            format!("\x1b[1;36m{value}\x1b[0m")
-        } else {
-            value
-        }
-    };
+    let theme = StatusTheme::new(options.color, terminal);
     if result.source == ContextSource::Rg {
-        return write_rg_context_result(writer, result, color, heading);
+        return write_rg_context_result(writer, result, theme.color, |value| value);
     }
     context::write(&mut writer, result, options, terminal)
 }
@@ -1133,6 +1169,35 @@ mod output_tests {
         assert_eq!(render(&result), "status: possibly_stale\n");
         result.source = ContextSource::Rg;
         assert_eq!(render(&result), "");
+    }
+
+    #[test]
+    fn terminal_freshness_keeps_refresh_counts_and_redirected_contract() {
+        use zg_engine::api::context::result::ContextIndexingStatus;
+        let mut result = indexed_result();
+        result.freshness = Some("possibly_stale".into());
+        result.indexing = Some(ContextIndexingStatus {
+            state: "running".into(),
+            completed: Some(2),
+            total: Some(3),
+        });
+        let options = OutputOptions {
+            color: crate::ColorMode::Never,
+            ..OutputOptions::default()
+        };
+        let mut terminal = Vec::new();
+        super::write_context_status_with_options(&mut terminal, &result, options, true)
+            .expect("terminal status");
+        assert_eq!(
+            String::from_utf8(terminal).expect("UTF-8"),
+            "! Index may be out of date\n  Results use the current index\n  Refresh: running · 2/3 files\n"
+        );
+        let mut redirected = Vec::new();
+        let mut original = Vec::new();
+        super::write_context_status_with_options(&mut redirected, &result, options, false)
+            .expect("redirected status");
+        super::write_context_status(&mut original, &result).expect("original status");
+        assert_eq!(redirected, original);
     }
 
     #[test]

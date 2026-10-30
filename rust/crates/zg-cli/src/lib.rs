@@ -6,6 +6,7 @@ mod install;
 mod jsonc;
 mod managed_rg;
 mod management;
+mod messages;
 mod path_lookup;
 mod paths;
 pub mod preview;
@@ -17,9 +18,11 @@ mod stdio;
 mod terminal;
 mod theme;
 pub use management::{
-    write_authorization_revoke_result, write_authorization_status, write_index_drop_result,
-    write_index_result, write_index_with_options,
+    write_authorization_revoke_result, write_authorization_revoke_with_options,
+    write_authorization_status, write_config_result, write_index_drop_result,
+    write_index_drop_with_options, write_index_result, write_index_with_options,
 };
+pub use messages::{MessageKind, write_error_message, write_error_report, write_message};
 pub use paths::output_path;
 pub use progress::IndexProgressDisplay;
 pub use setup::{
@@ -61,14 +64,17 @@ pub use authorization::{
 };
 
 pub use install::{
-    InstallError, InstallOutcome, execute_install, execute_uninstall, execute_upgrade_installed,
-    resolve_server_listen, resolve_server_url,
+    InstallError, InstallOutcome, IntegrationUpgradeEntryKind, IntegrationUpgradeSummary,
+    execute_install, execute_uninstall, execute_upgrade_installed, resolve_server_listen,
+    resolve_server_url, write_integration_upgrade_entry, write_integration_upgrade_summary,
 };
-pub use managed_rg::{ManagedRgArgumentError, parse_managed_rg_args};
-pub use path_lookup::write_path_lookup_result;
+pub use managed_rg::{
+    ManagedRgArgumentError, ParsedRgArgs, files_options, parse_managed_rg_args, parse_rg_args,
+};
+pub use path_lookup::{write_path_lookup_result, write_path_lookup_with_terminals};
 pub use render::{
     HelpTopicError, help_text, print_help, write_context_result, write_context_status,
-    write_context_with_options, write_file_paths,
+    write_context_status_with_options, write_context_with_options, write_file_paths,
 };
 
 #[derive(Debug, Parser)]
@@ -789,6 +795,26 @@ pub enum CliError {
 }
 
 impl Cli {
+    /// Presentation options are available before plan validation, including on errors.
+    #[must_use]
+    pub fn output_options(&self) -> OutputOptions {
+        let (debug, color, no_color) = match self.command.as_ref() {
+            Some(CommandLine::Query(args)) => (args.debug, args.color, args.no_color),
+            Some(CommandLine::Index(args)) => (args.debug, args.color, args.no_color),
+            Some(CommandLine::Status(args)) => (args.debug, args.color, args.no_color),
+            Some(CommandLine::Auth(args)) => (false, args.color, args.no_color),
+            _ => (false, None, false),
+        };
+        OutputOptions {
+            debug,
+            color: if no_color {
+                ColorMode::Never
+            } else {
+                color.unwrap_or_default()
+            },
+            ..Default::default()
+        }
+    }
     /// Parses process arguments after normalizing the TS CLI's option-anywhere
     /// query syntax for clap.
     #[must_use]

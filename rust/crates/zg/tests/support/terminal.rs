@@ -18,7 +18,72 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub fn run(mut command: Command, actions: &[(&str, &[u8])]) -> Output {
+pub fn run(command: Command, actions: &[(&str, &[u8])]) -> Output {
+    run_actions(
+        command,
+        actions
+            .iter()
+            .map(|(marker, keys)| (*marker, Action::Keys(keys))),
+    )
+}
+
+/// Interrupt after a complete frame and confirmation that the operation is gated.
+pub fn run_with_sigint(command: Command, ready: mpsc::Receiver<()>) -> Output {
+    run_actions(command, [("\x1b[K", Action::Interrupt(ready))])
+}
+
+enum Action<'a> {
+    Keys(&'a [u8]),
+    Interrupt(mpsc::Receiver<()>),
+}
+
+impl Action<'_> {
+    fn apply(self, writer: &mut File, child_id: u32, observed: &str) {
+        match self {
+            Self::Keys(keys) => {
+                writer.write_all(keys).expect("terminal input");
+                writer.flush().expect("flush terminal input");
+            }
+            Self::Interrupt(ready) => {
+                // Explicit indexing has no raw input reader. Sending a literal
+                // Ctrl-C byte through this PTY would not reliably target the
+                // child, which does not own it as a controlling terminal.
+                assert!(
+                    [
+                        "Scanning workspace",
+                        "Indexing files",
+                        "Optimizing index",
+                        "Saving index",
+                        "Finishing index",
+                    ]
+                    .iter()
+                    .any(|label| observed.contains(label)),
+                    "expected a complete progress frame before SIGINT: {observed}"
+                );
+                // The test's loopback embedding server holds the operation
+                // open. Do not race normal completion between the first frame
+                // and spawning kill, even on a fast or heavily loaded runner.
+                ready
+                    .recv_timeout(Duration::from_secs(60))
+                    .expect("index operation reached its fixture gate");
+                let signalled = Command::new("/bin/kill")
+                    .args(["-s", "INT", &child_id.to_string()])
+                    .output()
+                    .expect("send SIGINT to CLI");
+                assert!(
+                    signalled.status.success(),
+                    "could not interrupt CLI: {}\n{observed}",
+                    String::from_utf8_lossy(&signalled.stderr)
+                );
+            }
+        }
+    }
+}
+
+fn run_actions<'a>(
+    mut command: Command,
+    actions: impl IntoIterator<Item = (&'a str, Action<'a>)>,
+) -> Output {
     let master = pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).expect("open terminal");
     rustix::io::fcntl_setfd(&master, rustix::io::FdFlags::CLOEXEC).expect("terminal close-on-exec");
     let flags = rustix::fs::fcntl_getfl(&master).expect("terminal flags");
@@ -58,7 +123,7 @@ pub fn run(mut command: Command, actions: &[(&str, &[u8])]) -> Output {
     let capture = capture_terminal(reader, sender, stopped.clone());
     let mut observed = String::new();
     let mut cursor = 0;
-    for (marker, keys) in actions {
+    for (marker, action) in actions {
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             if let Some(offset) = observed[cursor..].find(marker) {
@@ -75,8 +140,7 @@ pub fn run(mut command: Command, actions: &[(&str, &[u8])]) -> Output {
                 panic!("CLI exited before prompt {marker:?}: {status}\n{observed}");
             }
         }
-        writer.write_all(keys).expect("terminal input");
-        writer.flush().expect("flush terminal input");
+        action.apply(&mut writer, child.id(), &observed[..cursor]);
     }
     let deadline = Instant::now() + Duration::from_secs(60);
     while child.try_wait().expect("CLI state").is_none() {

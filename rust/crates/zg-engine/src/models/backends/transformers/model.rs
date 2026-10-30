@@ -54,8 +54,13 @@ pub(crate) struct TransformersEmbeddingModel {
 }
 
 struct LoadedTransformersModel {
-    tokenizer: Tokenizer,
+    tokenizers: PreparedTokenizers,
     sessions: SessionPool,
+}
+
+struct PreparedTokenizers {
+    probe: Tokenizer,
+    inputs: Tokenizer,
 }
 
 struct SessionPool {
@@ -236,6 +241,7 @@ impl TransformersEmbeddingModel {
             )
             .with_cause(error)
         })?;
+        let tokenizers = prepare_tokenizers(tokenizer, self.entry)?;
         let device = self.device;
         let reporter_for_session = reporter.clone();
         let sessions = self
@@ -244,16 +250,9 @@ impl TransformersEmbeddingModel {
             .await??;
         reporter.finish();
         Ok(LoadedTransformersModel {
-            tokenizer,
+            tokenizers,
             sessions,
         })
-    }
-
-    #[cfg(test)]
-    fn model_directory(&self) -> PathBuf {
-        self.model_cache_dir
-            .join(self.entry.download.hugging_face.repo)
-            .join(self.entry.download.hugging_face.revision)
     }
 }
 
@@ -313,7 +312,6 @@ impl EmbeddingModel for TransformersEmbeddingModel {
                 })
             })
             .collect::<Result<Vec<_>, ModelError>>()?;
-        let tokenizer = loaded.tokenizer.clone();
         let entry = self.entry;
         let signal = options.signal;
         let on_progress = options.on_progress;
@@ -323,7 +321,6 @@ impl EmbeddingModel for TransformersEmbeddingModel {
             .run(move || {
                 embed_batch(
                     &loaded,
-                    tokenizer,
                     &texts,
                     entry,
                     execution_concurrency,
@@ -792,7 +789,6 @@ fn configure_directml(
 
 fn embed_batch(
     loaded: &LoadedTransformersModel,
-    tokenizer: Tokenizer,
     texts: &[String],
     entry: TransformersConfig,
     execution_concurrency: usize,
@@ -800,7 +796,7 @@ fn embed_batch(
     on_progress: Option<&Arc<dyn Fn(ModelProgress) + Send + Sync>>,
 ) -> Result<EmbeddingResult, ModelError> {
     check_cancelled(signal)?;
-    let prepared = prepare_batch(tokenizer, texts, entry)?;
+    let prepared = prepare_batch(&loaded.tokenizers, texts, entry)?;
     check_cancelled(signal)?;
     let provider = loaded.sessions.provider();
     let first = if provider == TransformersExecutionProvider::CoreMl {
@@ -1048,11 +1044,12 @@ fn run_session(
     })
 }
 
-fn prepare_batch(
+fn prepare_tokenizers(
     mut tokenizer: Tokenizer,
-    texts: &[String],
     entry: TransformersConfig,
-) -> Result<PreparedBatch, ModelError> {
+) -> Result<PreparedTokenizers, ModelError> {
+    // WordPiece cloning copies its vocabulary. Configure both immutable variants
+    // once per loaded model so requests can share them without cloning or locks.
     tokenizer.with_padding(None);
     tokenizer
         .with_truncation(Some(TruncationParams {
@@ -1061,7 +1058,32 @@ fn prepare_batch(
             ..TruncationParams::default()
         }))
         .map_err(|error| tokenization_error(entry, error))?;
-    let probe = tokenizer
+    let probe = tokenizer.clone();
+    tokenizer
+        .with_truncation(Some(TruncationParams {
+            max_length: entry.max_input_tokens,
+            direction: TruncationDirection::Right,
+            ..TruncationParams::default()
+        }))
+        .map_err(|error| tokenization_error(entry, error))?;
+    tokenizer.with_padding(Some(PaddingParams {
+        strategy: PaddingStrategy::BatchLongest,
+        direction: PaddingDirection::Right,
+        ..PaddingParams::default()
+    }));
+    Ok(PreparedTokenizers {
+        probe,
+        inputs: tokenizer,
+    })
+}
+
+fn prepare_batch(
+    tokenizers: &PreparedTokenizers,
+    texts: &[String],
+    entry: TransformersConfig,
+) -> Result<PreparedBatch, ModelError> {
+    let probe = tokenizers
+        .probe
         .encode_batch(texts.to_vec(), true)
         .map_err(|error| tokenization_error(entry, error))?;
     let truncated = probe
@@ -1078,21 +1100,9 @@ fn prepare_batch(
         })
         .collect::<Vec<_>>();
 
-    tokenizer
-        .with_truncation(Some(TruncationParams {
-            max_length: entry.max_input_tokens,
-            direction: TruncationDirection::Right,
-            ..TruncationParams::default()
-        }))
-        .map_err(|error| tokenization_error(entry, error))?;
-    let padding = PaddingParams {
-        strategy: PaddingStrategy::BatchLongest,
-        direction: PaddingDirection::Right,
-        ..PaddingParams::default()
-    };
-    let padding_input_id = i64::from(padding.pad_id);
-    tokenizer.with_padding(Some(padding));
-    let encodings = tokenizer
+    let padding_input_id = i64::from(PaddingParams::default().pad_id);
+    let encodings = tokenizers
+        .inputs
         .encode_batch(texts.to_vec(), true)
         .map_err(|error| tokenization_error(entry, error))?;
     let sequence_length = encodings

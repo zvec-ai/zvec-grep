@@ -6,7 +6,7 @@ use std::{
 };
 
 use crossterm::{
-    cursor::{MoveToColumn, MoveUp},
+    cursor::{Hide, MoveToColumn, MoveUp, Show},
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     queue,
     terminal::{self, Clear, ClearType},
@@ -15,10 +15,17 @@ use serde_json::{Map, Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{InstallArgs, McpInstallTransport, McpToolset, UninstallArgs};
+use crate::{
+    ColorMode, InstallArgs, McpInstallTransport, McpToolset, MessageKind, UninstallArgs,
+    theme::{StatusTheme, clean, display_path},
+    write_message,
+};
 
 mod upgrade;
-pub use upgrade::execute_upgrade_installed;
+pub use upgrade::{
+    IntegrationUpgradeEntryKind, IntegrationUpgradeSummary, execute_upgrade_installed,
+    write_integration_upgrade_entry, write_integration_upgrade_summary,
+};
 
 const CONFIG_START: &str = "# ZVEC_GREP_START";
 const CONFIG_END: &str = "# ZVEC_GREP_END";
@@ -138,7 +145,6 @@ struct AgentOptions {
 /// Returns an error when target selection, configuration validation, or an
 /// atomic file update fails.
 pub fn execute_install(args: &InstallArgs) -> Result<InstallOutcome, InstallError> {
-    print_header()?;
     let detected = detect_agents();
     let agents = resolve_agents(
         args.targets.iter().chain(&args.positional_targets),
@@ -147,7 +153,7 @@ pub fn execute_install(args: &InstallArgs) -> Result<InstallOutcome, InstallErro
         "install",
     )?;
     if agents.is_empty() {
-        writeln!(crate::stdout(), "\nNo agent integrations selected.")?;
+        writeln!(crate::stdout(), "No agent integrations selected.")?;
         return Ok(InstallOutcome {
             agent_labels: Vec::new(),
             transport: args.transport.unwrap_or_default(),
@@ -163,18 +169,17 @@ pub fn execute_install(args: &InstallArgs) -> Result<InstallOutcome, InstallErro
         token_env: args.mcp_token_env.clone(),
     };
 
-    writeln!(crate::stdout(), "\nInstalling integrations\n")?;
+    writeln!(crate::stdout(), "Installing integrations\n")?;
     for agent in &agents {
         let result = install_agent(*agent, &options)?;
-        writeln!(crate::stdout(), "  ✓ {}", agent.label())?;
-        writeln!(crate::stdout(), "    MCP       configured")?;
-        if let Some(path) = result.config_path {
-            writeln!(crate::stdout(), "    Config    {}", path.display())?;
-        }
-        if let Some(note) = result.config_note {
-            writeln!(crate::stdout(), "    Note      {note}")?;
-        }
-        writeln!(crate::stdout())?;
+        write_installed(
+            &mut crate::stdout(),
+            agent.label(),
+            result.config_path.as_deref(),
+            result.config_note.as_deref(),
+            crate::stdout_supports_ansi(),
+            ColorMode::Auto,
+        )?;
     }
 
     Ok(InstallOutcome {
@@ -191,7 +196,6 @@ pub fn execute_install(args: &InstallArgs) -> Result<InstallOutcome, InstallErro
 /// Returns an error when an existing configuration is invalid or a file update
 /// fails.
 pub fn execute_uninstall(args: &UninstallArgs) -> Result<(), InstallError> {
-    print_header()?;
     let detected = detect_agents();
     let agents = resolve_agents(
         args.targets.iter().chain(&args.positional_targets),
@@ -200,27 +204,76 @@ pub fn execute_uninstall(args: &UninstallArgs) -> Result<(), InstallError> {
         "uninstall",
     )?;
     if agents.is_empty() {
-        writeln!(crate::stdout(), "\nNo agent integrations selected.")?;
+        writeln!(crate::stdout(), "No agent integrations selected.")?;
         return Ok(());
     }
 
-    writeln!(crate::stdout(), "\nRemoving integrations\n")?;
+    writeln!(crate::stdout(), "Removing integrations\n")?;
+    let theme = install_theme();
     for agent in agents {
         uninstall_agent(agent)?;
-        writeln!(crate::stdout(), "  ✓ {}", agent.label())?;
-        writeln!(crate::stdout(), "    integration removed")?;
+        writeln!(
+            crate::stdout(),
+            "{} {} removed",
+            theme.success("✓"),
+            agent.label()
+        )?;
     }
     writeln!(
         crate::stdout(),
-        "\nRestart the selected agents or start a new session to apply the change."
+        "\n  {}",
+        theme.muted("Restart the selected agents or start a new session to apply the change.")
     )?;
     Ok(())
 }
 
-fn print_header() -> io::Result<()> {
-    let mut output = crate::stdout();
-    writeln!(output, "zvec-grep setup")?;
-    writeln!(output, "{}", "─".repeat(40))
+fn install_theme() -> StatusTheme {
+    StatusTheme::new(ColorMode::Auto, crate::stdout_supports_ansi())
+}
+
+fn write_installed(
+    output: &mut impl Write,
+    agent: &str,
+    path: Option<&Path>,
+    note: Option<&str>,
+    terminal: bool,
+    color: ColorMode,
+) -> io::Result<()> {
+    if terminal {
+        let path = path.map(display_path);
+        let details = path.as_deref().into_iter().chain(note).collect::<Vec<_>>();
+        write_message(
+            &mut *output,
+            MessageKind::Success,
+            &format!("{agent} configured"),
+            &details,
+            color,
+            terminal,
+        )?;
+    } else {
+        writeln!(output, "  ✓ {}", clean(agent))?;
+        writeln!(output, "    MCP       configured")?;
+        if let Some(path) = path {
+            writeln!(
+                output,
+                "    Config    {}",
+                clean(&path.display().to_string())
+            )?;
+        }
+        if let Some(note) = note {
+            writeln!(output, "    Note      {}", clean(note))?;
+        }
+    }
+    writeln!(output)
+}
+
+fn install_warning(message: &str) {
+    if crate::stderr_supports_ansi() {
+        let theme = StatusTheme::new(ColorMode::Auto, true);
+        eprintln!("{} {}", theme.warning("!"), clean(message));
+    } else {
+        eprintln!("warning: {}", clean(message));
+    }
 }
 
 fn resolve_transport(
@@ -289,12 +342,15 @@ impl SelectionRawMode {
     fn enable() -> io::Result<Self> {
         let was_raw = terminal::is_raw_mode_enabled()?;
         terminal::enable_raw_mode()?;
-        Ok(Self { was_raw })
+        let session = Self { was_raw };
+        crossterm::execute!(crate::stdout(), Hide)?;
+        Ok(session)
     }
 }
 
 impl Drop for SelectionRawMode {
     fn drop(&mut self) {
+        let _ = crossterm::execute!(crate::stdout(), Show);
         if !self.was_raw {
             let _ = terminal::disable_raw_mode();
         }
@@ -313,17 +369,26 @@ fn prompt_agent_selection(detected: &BTreeSet<Agent>) -> Result<Vec<Agent>, Inst
         .position(|agent| detected.contains(agent))
         .unwrap_or(0);
     let mut output = crate::stdout();
-    render_agent_selection(&mut output, active_index, detected, false)?;
+    let theme = install_theme();
+    render_agent_selection(&mut output, active_index, detected, false, theme)?;
     loop {
-        let Event::Key(key) = event::read()? else {
+        let input = event::read()?;
+        if matches!(input, Event::Resize(_, _)) {
+            render_agent_selection(&mut output, active_index, detected, true, theme)?;
+            continue;
+        }
+        let Event::Key(key) = input else {
             continue;
         };
+        let previous = active_index;
         if let Some(selected) = select_agent_key(&mut active_index, key) {
             write!(output, "\r\n")?;
             output.flush()?;
             return Ok(selected);
         }
-        render_agent_selection(&mut output, active_index, detected, true)?;
+        if previous != active_index {
+            render_agent_selection(&mut output, active_index, detected, true, theme)?;
+        }
     }
 }
 
@@ -352,10 +417,13 @@ fn render_agent_selection(
     active_index: usize,
     detected: &BTreeSet<Agent>,
     redraw: bool,
+    theme: StatusTheme,
 ) -> io::Result<()> {
+    let mut frame = Vec::with_capacity(1024);
+    let columns = crate::theme::columns();
     if redraw {
         queue!(
-            output,
+            frame,
             MoveUp(u16::try_from(Agent::ALL.len() + 2).expect("small agent list"))
         )?;
     }
@@ -365,23 +433,41 @@ fn render_agent_selection(
         .max()
         .unwrap_or(0);
     for (index, agent) in Agent::ALL.iter().enumerate() {
-        queue!(output, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
-        let marker = if index == active_index { "●" } else { "○" };
+        queue!(frame, MoveToColumn(0))?;
+        let marker = if index == active_index { "✓" } else { " " };
         let status = if detected.contains(agent) {
             "detected"
         } else {
             "not found"
         };
-        write!(
-            output,
-            "  {marker} {:label_width$}  {status}\r\n",
-            agent.label()
-        )?;
+        let plain = crate::theme::truncate(
+            &format!("  {marker} {:label_width$}  {status}", agent.label()),
+            columns,
+        );
+        let mut row = if let Some(remainder) = plain.strip_prefix("  ✓") {
+            format!("  {}{remainder}", theme.success("✓"))
+        } else {
+            plain
+        };
+        if let Some(prefix) = row.strip_suffix(status) {
+            row = format!("{prefix}{}", theme.muted(status));
+        }
+        write!(frame, "{row}")?;
+        queue!(frame, Clear(ClearType::UntilNewLine))?;
+        write!(frame, "\r\n")?;
     }
-    queue!(output, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
-    write!(output, "\r\n")?;
-    queue!(output, Clear(ClearType::CurrentLine))?;
-    write!(output, "  Use ↑↓ to move · Enter to select\r\n")?;
+    queue!(frame, MoveToColumn(0), Clear(ClearType::UntilNewLine))?;
+    write!(
+        frame,
+        "\r\n{}",
+        theme.muted(&crate::theme::truncate(
+            "  ↑/↓ Select · Enter Confirm · Esc Cancel",
+            columns
+        ))
+    )?;
+    queue!(frame, Clear(ClearType::UntilNewLine))?;
+    write!(frame, "\r\n")?;
+    output.write_all(&frame)?;
     output.flush()
 }
 
@@ -408,6 +494,10 @@ fn prompt_agent_line_selection(detected: &BTreeSet<Agent>) -> Result<Vec<Agent>,
             .collect::<Vec<_>>()
             .join(",")
     };
+    writeln!(
+        crate::stdout(),
+        "  Enter agent names or numbers; type none to cancel."
+    )?;
     write!(crate::stdout(), "Agents [{defaults}]: ")?;
     crate::stdout().flush()?;
     let mut answer = String::new();
@@ -855,10 +945,10 @@ fn uninstall_pi() -> Result<(), InstallError> {
     for name in PI_CONTEXT_FILES {
         let path = home.join(name);
         if let Err(error) = remove_pi_context_file(&path) {
-            eprintln!(
-                "    warning   Could not clean guidance {}: {error}",
+            install_warning(&format!(
+                "Could not clean guidance {}: {error}",
                 path.display()
-            );
+            ));
         }
     }
     Ok(())
@@ -1203,7 +1293,7 @@ fn install_qwen(options: &AgentOptions) -> Result<(), InstallError> {
     let server = qwen_server(options)?;
     update_jsonc_server(&path, &server, options.force, "Qwen Code", is_managed_qwen)?;
     if let Some(warning) = context_warning(&path, "QWEN.md")? {
-        eprintln!("    warning   {warning}");
+        install_warning(&warning);
     }
     write_marked_file(
         &home.join("QWEN.md"),
@@ -1244,7 +1334,7 @@ fn install_qoder(options: &AgentOptions) -> Result<(), InstallError> {
         is_managed_qoder_ide,
     )?;
     if let Some(warning) = context_warning(&settings, "AGENTS.md")? {
-        eprintln!("    warning   {warning}");
+        install_warning(&warning);
     }
     write_marked_file(
         &home.join("AGENTS.md"),
@@ -3294,15 +3384,96 @@ mod tests {
     fn keyboard_menu_shows_selection_and_detection_status() {
         let detected = BTreeSet::from([Agent::Qwen]);
         let mut output = Vec::new();
-        render_agent_selection(&mut output, 4, &detected, false).expect("render menu");
+        render_agent_selection(
+            &mut output,
+            4,
+            &detected,
+            false,
+            StatusTheme::new(ColorMode::Never, true),
+        )
+        .expect("render menu");
         let output = String::from_utf8(output).expect("utf8 menu");
-        assert_eq!(output.matches('●').count(), 1);
-        assert_eq!(output.matches('○').count(), Agent::ALL.len() - 1);
-        assert!(output.lines().any(|line| {
-            line.contains("● Qwen Code") && line.trim_end().ends_with("detected")
-        }));
+        assert_eq!(output.matches('✓').count(), 1);
+        assert!(
+            output
+                .lines()
+                .any(|line| { line.contains("✓ Qwen Code") && line.contains("detected") })
+        );
         assert_eq!(output.matches("not found").count(), Agent::ALL.len() - 1);
-        assert!(output.contains("Use ↑↓ to move · Enter to select"));
+        assert!(output.contains("↑/↓ Select · Enter Confirm · Esc Cancel"));
+    }
+
+    #[test]
+    fn keyboard_menu_redraw_is_one_write() {
+        #[derive(Default)]
+        struct Capture {
+            writes: usize,
+            flushes: usize,
+            bytes: Vec<u8>,
+        }
+        impl Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.writes += 1;
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.flushes += 1;
+                Ok(())
+            }
+        }
+        let mut output = Capture::default();
+        render_agent_selection(
+            &mut output,
+            0,
+            &BTreeSet::new(),
+            true,
+            StatusTheme::new(ColorMode::Never, true),
+        )
+        .expect("render menu");
+        assert_eq!(output.writes, 1);
+        assert_eq!(output.flushes, 1);
+        assert!(!output.bytes.windows(4).any(|bytes| bytes == b"\x1b[2K"));
+    }
+
+    #[test]
+    fn install_result_is_compact_on_terminal_and_preserves_plain_fields() {
+        let path = Path::new("/config/agent.json");
+        let mut terminal = Vec::new();
+        write_installed(
+            &mut terminal,
+            "Agent",
+            Some(path),
+            Some("note\x1b[2J\nfake"),
+            true,
+            ColorMode::Never,
+        )
+        .expect("terminal result");
+        let terminal = String::from_utf8(terminal).expect("UTF-8 result");
+        let marker = if crate::theme::unicode_supported() {
+            "✓"
+        } else {
+            "+"
+        };
+        assert!(terminal.starts_with(&format!("{marker} Agent configured\n  ")));
+        assert!(!terminal.contains('\x1b'));
+        assert!(!terminal.contains("\nfake"));
+        assert!(!terminal.contains("MCP"));
+        let mut plain = Vec::new();
+        write_installed(
+            &mut plain,
+            "Agent",
+            Some(path),
+            None,
+            false,
+            ColorMode::Always,
+        )
+        .expect("plain result");
+        let plain = String::from_utf8(plain).expect("UTF-8 result");
+        assert!(plain.starts_with("  ✓ Agent\n"));
+        assert!(!plain.contains('\x1b'));
+        assert!(plain.contains("MCP       configured"));
+        assert!(plain.contains(&format!("Config    {}", path.display())));
     }
 
     #[test]

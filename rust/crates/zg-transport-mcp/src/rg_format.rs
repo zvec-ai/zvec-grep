@@ -1,10 +1,38 @@
-//! Managed-rg presentation preserves all matches and requested context.
+//! Managed-rg presentation preserves file paths, all matches and requested context.
 
+use rmcp::model::{CallToolResult, ContentBlock};
 use std::collections::BTreeMap;
-use zg_engine::api::context::{
-    ContextResult,
-    result::{ContextCoverage, ContextItem, EmptyReason},
+use zg_engine::api::{
+    context::{
+        ContextResult,
+        result::{ContextCoverage, ContextItem, EmptyReason},
+    },
+    files::FilesResult,
 };
+
+pub(crate) fn files(reply: &FilesResult, limit: Option<usize>, null: bool) -> CallToolResult {
+    let count = limit.unwrap_or(reply.paths.len()).min(reply.paths.len());
+    let mut paths = String::new();
+    for path in &reply.paths[..count] {
+        paths.push_str(&path.to_string_lossy());
+        paths.push(if null { '\0' } else { '\n' });
+    }
+    let mut content = vec![ContentBlock::text(paths)];
+    if count < reply.paths.len() {
+        content.push(ContentBlock::text("More files were omitted by the explicit output bound. Remove or increase the trailing `head` bound to see them."));
+    }
+    content.extend(
+        reply
+            .errors
+            .iter()
+            .map(|error| ContentBlock::text(format!("Error: {error}"))),
+    );
+    if reply.errors.is_empty() {
+        CallToolResult::success(content)
+    } else {
+        CallToolResult::error(content)
+    }
+}
 
 pub(crate) fn format(reply: &ContextResult) -> String {
     let mut lines = Vec::new();
@@ -102,6 +130,38 @@ mod tests {
                 server.serve(server_io).await.expect("server").waiting().await
             });
             let client = ().serve(client_io).await.expect("client");
+            for command in [
+                "rg -L needle .",
+                "rg --follow needle .",
+                "rg --files -L",
+                "rg --files --follow",
+            ] {
+                let mut request = CallToolRequestParams::new("zvec_grep_rg");
+                request.arguments = serde_json::json!({
+                    "root": directory.path(),
+                    "command": command
+                })
+                .as_object()
+                .cloned();
+                let error = client
+                    .call_tool(request)
+                    .await
+                    .expect_err("MCP rg rejects symlink following");
+                assert!(error.to_string().contains("--follow"), "{error}");
+            }
+            let mut files_request = CallToolRequestParams::new("zvec_grep_rg");
+            files_request.arguments = serde_json::json!({
+                "root": directory.path(),
+                "command": "rg --files"
+            })
+            .as_object()
+            .cloned();
+            let files = client.call_tool(files_request).await.expect("file listing");
+            assert!(!files.is_error.unwrap_or(false));
+            let rmcp::model::ContentBlock::Text(content) = &files.content[0] else {
+                panic!("file listing returns text")
+            };
+            assert_eq!(content.text, "notes.md\nsource.rs\n");
             let mut request = CallToolRequestParams::new("zvec_grep_rg");
             request.arguments = serde_json::json!({
                 "root": directory.path(),

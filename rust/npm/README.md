@@ -31,20 +31,19 @@ Every release package carries the project's `LICENSE`. Native packages also
 carry `checksums.json` and any supplied `LICENSES/` or `SBOM.spdx.json`; these
 are package metadata rather than runtime files copied by the installer.
 
-The Linux x64 base package's `plugins.json` references `-ggml-cuda13`, `-ggml-cuda12`,
-`-ort-cuda-part1` and `-ort-cuda-part2` packages. Windows x64 references
-`-ggml-cuda13`, `-ggml-cuda12` and `-ort-cuda`. These suffixes extend the base
-platform package name. macOS, Linux ARM64 and deliberate CPU-only builds remain
-single native packages. A default all-platform release contains 14 tarballs:
-six base packages, seven runtime components and the meta package.
+The Linux and Windows x64 base packages' `plugins.json` references `-ggml-cuda13`,
+`-ggml-cuda12`, `-ort-cuda-part1` and `-ort-cuda-part2` packages. These suffixes
+extend the base platform package name. macOS, Linux ARM64 and deliberate CPU-only
+builds remain single native packages. A default all-platform release contains 15 tarballs:
+six base packages, eight runtime components and the meta package.
 
 The base package retains the executable and CPU/core libraries, including
 zvec's embedded Jieba dictionary; no external dictionary files are required.
-CUDA components contain whole GGML plugins or the ORT provider. The Linux ORT
-provider is split into two ordered byte ranges under `parts/`; postinstall
-streams them back into the original `.so` and verifies the original complete
-file's SHA256. No compiler, model execution or CUDA Toolkit installation is
-performed during npm installation. Meta still selects its base by OS/CPU/libc,
+CUDA components contain whole GGML plugins or fragments of the ORT provider.
+Both Linux and Windows ORT providers are split into two ordered byte ranges under
+`parts/`; postinstall streams them back into the original `.so` or `.dll` and
+verifies the original complete file's SHA256. No compiler, model execution or
+CUDA Toolkit installation is performed during npm installation. Meta still selects its base by OS/CPU/libc,
 but CUDA components are no longer npm dependencies. Postinstall first verifies
 and installs CPU, then uses bounded NVIDIA detection to decide whether to fetch
 the complete pinned CUDA set. CPU-only hosts make no CUDA component requests.
@@ -72,11 +71,13 @@ and custom CA settings for online transport, with component scripts disabled.
 Archives, payloads and reconstructed libraries are verified before activation;
 the cache is not a permanent runtime library path. See [installation and recovery](meta/README.md).
 
-Every compressed `.tgz` has a **350 MiB maximum**, enforced after `npm pack`,
-during collection, and again before publication/promotion. This leaves room
-below the approximately 384 MiB tarball ceiling caused by npm's base64/JSON
-publication path and 64-bit Node's string limit. `npm pack` succeeding alone is
-not publication validation. A component that outgrows the budget fails closed;
+Every compressed `.tgz` has a **180 MiB maximum**, enforced after `npm pack`,
+during collection, and again before publication/promotion. Plugin validation
+uses the same limit. This is a conservative project budget, not an npm guarantee:
+the registry rejected a 202.4 MB Windows ORT archive with HTTP 413 even though it
+fit Node's string limit. npm's base64 encoding expands 180 MiB to 240 MiB before
+JSON metadata and provenance. `npm pack` succeeding alone is not publication
+validation. A component that outgrows the budget fails closed;
 it must be split further, not silently published as a reduced CPU package.
 
 Supplemental `LICENSES/` and `SBOM.spdx.json` inputs are optional for packaging,
@@ -231,12 +232,21 @@ Release order:
    registry alone, so npm must select its native optional dependency. These jobs
    download only the small `rust-verification-<version>` artifact for the release
    inventory, not another copy of all platforms' native/CUDA tarballs.
-5. Verify CLI startup, managed-rg, daemon startup and IPC, then update from a
-   distinct published baseline version and roll back to that version. On the
-   CUDA targets also force a registry plugin installation and verify its hashes
-   and core identity; CPU fallback must not hide a plugin-fetch failure.
+5. Execute npm's `bin/zg` symlink on Unix and `zg.ps1` entry on Windows, without
+   resolving them to the package binary. Verify startup, managed-rg and daemon
+   IPC, plus real CPU indexing and vector/FTS/hybrid search with Potion, GGUF and
+   ONNX on all six platforms. Check incremental updates and MCP stdio search.
+   Repeat the candidate probes after updating from a distinct published baseline,
+   then roll back. Both fresh and upgraded CPU installations must leave no CUDA
+   plugins/cache or npm CUDA download attempts. After rollback, use separate caches
+   to force a registry plugin installation
+   on CUDA-capable targets and verify hashes and core identity; CPU fallback
+   must not hide a plugin-fetch failure. Retain per-command and model evidence
+   on failures as well as successes. Command timeouts terminate the npm entry's
+   process tree (including PowerShell children on Windows); MCP EOF shutdown must
+   complete successfully within a bounded wait before continuing.
 6. Promote native `latest` tags and then the meta `latest` tag in a separate job,
-   only after all six registry install/update/rollback jobs pass.
+   only after all six registry entry/model/install/update/rollback jobs pass.
 
 `.github/workflows/rust-publish.yml` builds and packs the selected targets once on
 their native runners in parallel, collects the candidates into a downloadable
@@ -370,7 +380,7 @@ includes the project `LICENSE`, and bundled upstream notices are preserved.
 Removing this metadata gate does not change third-party redistribution terms.
 
 Publication and promotion explicitly install npm 11.21.0, which supports OIDC
-authentication for `npm dist-tag`. Configure trusted publishing for all 14
+authentication for `npm dist-tag`. Configure trusted publishing for all 15
 packages with repository `zvec-ai/zvec-grep`, workflow filename
 `rust-publish.yml`, and both **Allow npm publish** and **Allow npm dist-tag**.
 The dist-tag permission is independent and disabled by default; `id-token:

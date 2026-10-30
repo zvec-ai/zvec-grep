@@ -1,8 +1,11 @@
-# zvec-grep Rust rewrite
+# zvec-grep Rust workspace
 
-This directory contains the Rust implementation of zvec-grep. The TypeScript /
-Node.js implementation remains at the repository root; the [main README](../README.md)
-and [user documentation](../docs/README.md) describe that implementation.
+This directory contains the native zvec-grep CLI, engine, daemon, and MCP
+transport. Start with the [main README](../README.md) or the
+[user documentation](https://zvec.org/en/docs/zvec-grep/) for installation and
+everyday use. This page covers implementation behavior, native builds, and
+packaging. The repository root retains the legacy TypeScript implementation and
+its separate checks.
 
 Run the development commands below from `rust/` (`cd rust` from the repository
 root). See the [contributor guide](CONTRIBUTING.md) for checks and conventions.
@@ -125,7 +128,8 @@ stable ownership marker, so changing the daemon URL does not leave stale
 managed entries. Use `/reload` or a new session. Native filesystem paths are
 required for the directory override; file URIs and Windows shell drive paths
 are rejected. Pi's built-in MCP currently needs user-managed `zg --auth grant`
-authorization for Remote Embedding; see the [integration guide](../docs/01-agents.md).
+authorization for Remote Embedding; see the
+[integration guide](https://zvec.org/en/docs/zvec-grep/agents/).
 
 `ZvecGrep` is normally shared for the lifetime of a process. Workspace root is
 request state, so the same instance can serve multiple workspaces. It exposes
@@ -492,10 +496,10 @@ MCP use these coordinates for source numbering; preview never infers a range fro
 the number of content lines. The engine also interprets half-open line bounds.
 The required field changes the internal daemon reply contract. Native ripgrep
 type filters apply to queries; persisted scan rules support path globs and file
-formats using the same filename rules as indexed queries. Version 14 separates
-case-sensitive and case-insensitive glob updates on the daemon wire.
-Version 15 distinguishes complete ordered glob replacement from category updates.
-Restart older resident daemons when updating the CLI; replies without
+formats using the same filename rules as indexed queries. The daemon wire
+distinguishes complete ordered glob replacement from case-category updates.
+The instance record uses `daemonProtocolVersion: 1`; see the daemon migration
+notes above when replacing older resident processes. Replies without
 `content_range` are rejected during deserialization. Direct and server rendering
 consume the same engine contract.
 
@@ -525,10 +529,10 @@ indexed-search path ignores its scanning options; Rust rejects them explicitly.
 explicit `ignoreFiles` remain enabled independently of that switch. Missing files
 are skipped and their paths remain saved; other read errors and invalid rules fail
 before index mutations. `maxFileSizeBytes: 0` excludes all files, including empty files.
-Unknown search/index fields and public nulls are rejected, except index
-`maxDepth: null` / `maxFileSizeBytes: null`, which clear saved limits.
+Unknown search/index fields are rejected. Index `maxDepth: null` and
+`maxFileSizeBytes: null` clear saved limits.
 Existing typed globs, `includedFormats`/`excludedFormats`, categories, `enum`,
-`name`, `nestedGit`, diagnostic extensions and their compatibility boundaries are recorded in
+`nestedGit`, diagnostic extensions and their compatibility boundaries are recorded in
 [`allowed-differences.toml`](compat/allowed-differences.toml).
 
 Managed rg uses a file/line/context presentation and preserves all requested
@@ -782,8 +786,8 @@ The registry distribution is prepared as one meta package plus exact-version
 native optional dependencies declared in `npm/platforms.json`. The meta package
 uses Node only during `postinstall` to verify and materialize the native
 executable and conditionally migrate existing agent configurations; running `zg`
-enters that executable directly. Published installs
-support Node.js 14.14 and newer.
+enters that executable directly. The native meta package requires Node.js 14.14
+or newer during installation.
 
 Validate the release manifest and build the current platform dry-run packages:
 
@@ -798,7 +802,7 @@ are pinned in `plugins.json`, not mandatory npm dependencies. Postinstall instal
 CPU first and, by default, fetches the complete CUDA component set when NVIDIA
 detection succeeds. `ZG_INSTALL_ACCELERATOR=cpu` skips detection/downloads;
 `cuda` forces installation, including on GPU-free builders. Installation requires
-no CUDA compiler. Linux ORT is transported as two
+no CUDA compiler. Linux and Windows ORT are each transported as two
 fragments and reconstructed with a full-library SHA256 check. The installed
 `bin/`, `lib/` and `lib/cuda12/` layout is unchanged. Local packaging follows the
 build policy above: no toolkit produces a CPU-only package. Use
@@ -1019,25 +1023,34 @@ real GGUF/ONNX indexing and vector queries using both explicit CPU selection and
 default automatic CPU fallback. Logs are retained as `cpu-artifact-evidence-*`.
 Failure blocks npm publication; the candidate artifact is kept for diagnosis.
 
-To publish, update the Rust workspace version, tag the release commit on `main`
-as `rust-v<version>`, and manually run the workflow with `publish` enabled. The
-publishing repository must have an npm trusted publisher configured for all 14
+To publish, update the Rust workspace version and manually run the workflow with
+`publish` enabled. `rust-canary` allows `main` or a tag; `latest` requires a tag.
+Tag names are unrestricted; for example, use `v0.3.0` for the 0.3.0 release. The
+package version always comes from Cargo, not the tag name. From the CLI, publish
+a canary with `gh workflow run rust-publish.yml --ref main -f publish=true`, or
+request a stable release with
+`gh workflow run rust-publish.yml --ref v0.3.0 -f publish=true -f dist_tag=latest`.
+The selected ref must contain the updated workflow; rerunning a historical run
+does not apply workflow fixes from newer commits.
+The publishing repository must have an npm trusted publisher configured for all 15
 packages with both **Allow npm publish** and the independent **Allow npm
 dist-tag** permission enabled, or provide an eligible `NPM_TOKEN` secret.
 Publishing and promotion install npm 11.21.0 explicitly for OIDC dist-tag support.
 
-Registry publication is currently blocked until reviewed license texts and
-SPDX SBOMs are supplied for every target and CUDA component in [`npm/compliance/`](npm/compliance/README.md).
-Candidate downloads remain available while these inputs are prepared.
+Supplemental license collections and SPDX SBOMs in [`npm/compliance/`](npm/compliance/README.md)
+are optional. Every release package includes the project `LICENSE`, and bundled
+upstream notices are preserved.
 Every publication uses `rust-canary`, letting users opt into Rust with
-`npm install --global @zvec/zvec-grep@rust-canary`. Five native runners then
+`npm install --global @zvec/zvec-grep@rust-canary`. Six native runners then
 install only the meta package from the registry, test actual daemon IPC, and
 exercise update and rollback with a distinct previously published version.
 Selecting `latest` requests a separate promotion job that changes the default
 installation only after all registry checks pass.
 
-Each compressed tarball must be at most 350 MiB. Packing, collection and
+Each compressed tarball must be at most 180 MiB. Packing, collection and
 publication preflight all enforce this budget before any npm publication.
+Plugin validation shares the same limit. This project budget accounts for
+base64 expansion in npm's upload request; it is not a registry size guarantee.
 Use `--output-dir <path>` with release commands to keep inspection artifacts
 separate from `dist/npm/release/`.
 
@@ -1060,6 +1073,16 @@ Registry install/update/rollback runs on ordinary CPU runners and explicitly
 checks exact component versions, payload hashes and the assembled runtime in
 addition to registry tarball integrity; a CPU-only CLI success cannot hide a
 missing CUDA component. Real GPU execution is validated before publication.
+Every registry platform also runs Potion, GGUF and ONNX CPU indexing, vector/FTS/
+hybrid queries, incremental updates and MCP stdio search after fresh installation
+and after upgrade. All commands use npm's Unix `zg` symlink or Windows `zg.ps1`
+entry, including baseline/rollback version checks. The executable path is never
+canonicalized by the test runner. The ONNX loader itself resolves executable
+symlinks before locating its sibling libraries. Default CPU installs are checked
+for unwanted CUDA components, plugin caches and npm download attempts before
+the deliberate CUDA rebuild check. Model caches are reused; command output,
+MCP responses and per-model results are uploaded even on failure. The `latest`
+promotion job requires the entire six-platform registry matrix to succeed.
 `release:publish` validates the collected files before publishing native packages
 and then the meta package under `rust-canary` with npm provenance. An already published version is
 reused only when its tarball integrity matches, allowing a partial publication

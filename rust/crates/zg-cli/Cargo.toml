@@ -18,6 +18,7 @@ serde = { workspace = true, features = ["derive"] }
 toml.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+unicode-width.workspace = true
 tokio-util.workspace = true
 zg-engine = { path = "../zg-engine" }
 

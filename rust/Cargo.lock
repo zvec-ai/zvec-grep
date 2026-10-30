@@ -3503,6 +3503,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
+name = "unicode-width"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
+
+[[package]]
 name = "unicode_categories"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4258,7 +4264,7 @@ dependencies = [
 
 [[package]]
 name = "zg"
-version = "0.0.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "cc",
  "clap",
@@ -4283,7 +4289,7 @@ dependencies = [
 
 [[package]]
 name = "zg-cli"
-version = "0.0.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "chrono",
  "clap",
@@ -4296,6 +4302,7 @@ dependencies = [
  "thiserror",
  "tokio-util",
  "toml",
+ "unicode-width",
  "uuid",
  "winapi-util",
  "zg-engine",
@@ -4304,7 +4311,7 @@ dependencies = [
 
 [[package]]
 name = "zg-daemon"
-version = "0.0.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -4334,7 +4341,7 @@ dependencies = [
 
 [[package]]
 name = "zg-daemon-protocol"
-version = "0.0.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4343,7 +4350,7 @@ dependencies = [
 
 [[package]]
 name = "zg-engine"
-version = "0.0.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4389,12 +4396,13 @@ dependencies = [
  "zg-engine-macros",
  "zg-host-native",
  "zg-llama-native",
+ "zg-zvec-fp16",
  "zvec-rust",
 ]
 
 [[package]]
 name = "zg-engine-macros"
-version = "0.0.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4403,7 +4411,7 @@ dependencies = [
 
 [[package]]
 name = "zg-host-native"
-version = "0.0.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "async-trait",
  "notify",
@@ -4417,7 +4425,7 @@ dependencies = [
 
 [[package]]
 name = "zg-llama-native"
-version = "0.0.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "libloading 0.8.9",
  "llama-cpp-sys-2",
@@ -4426,7 +4434,7 @@ dependencies = [
 
 [[package]]
 name = "zg-testkit"
-version = "0.0.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4438,7 +4446,7 @@ dependencies = [
 
 [[package]]
 name = "zg-transport-mcp"
-version = "0.0.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4456,6 +4464,15 @@ dependencies = [
  "zg-cli",
  "zg-engine",
  "zg-testkit",
+]
+
+[[package]]
+name = "zg-zvec-fp16"
+version = "0.3.0-rc.1"
+dependencies = [
+ "half",
+ "tempfile",
+ "zvec-rust",
 ]
 
 [[package]]

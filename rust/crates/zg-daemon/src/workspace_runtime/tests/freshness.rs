@@ -88,6 +88,75 @@ fn lexical_search(root: &Path, policy: RefreshPolicy) -> ContextOptions {
 }
 
 #[tokio::test]
+async fn watcher_does_not_recreate_a_deleted_workspace_index() {
+    let workspace = tempdir().expect("workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let engine = Arc::new(ZvecGrep::new());
+    let options = IndexOptions {
+        root: Some(root.clone()),
+        ..IndexOptions::default()
+    };
+    engine.index(options.clone()).await.expect("empty index");
+    let (manager, sender) = fixture(Arc::new(super::super::ZvecGrepIndexExecutor {
+        engine: Arc::clone(&engine),
+    }));
+    manager
+        .refresh_index(options, true)
+        .await
+        .expect("activate watcher");
+    let home = root.join(".zvec-grep");
+    std::fs::remove_dir_all(&home).expect("delete workspace index");
+
+    deliver(&manager, &sender, &root, WorkspaceChange::Rescan).await;
+
+    assert!(
+        !home.exists(),
+        "watcher refresh must not recreate an index without model selection"
+    );
+    let job = manager.job_for_root(&root).expect("watch refresh job");
+    assert_eq!(job.state, crate::job_scheduler::JobState::Failed);
+    assert_eq!(
+        job.error.expect("missing index error").report.code,
+        EngineError::NOT_FOUND
+    );
+    manager
+        .submit_index(
+            IndexOptions {
+                root: Some(root.clone()),
+                embedding: Some(EmbeddingModelSpec {
+                    reference: "local/potion-retrieval-32m".into(),
+                    revision: None,
+                    cache_dir: None,
+                    endpoint: None,
+                    device: Device::Cpu,
+                }),
+                ..IndexOptions::default()
+            },
+            true,
+        )
+        .await
+        .expect("explicit model selection can create an index again");
+    let info = engine
+        .info(InfoOptions {
+            root: Some(root.clone()),
+            ..InfoOptions::default()
+        })
+        .await
+        .expect("new index");
+    assert!(info.indexed);
+    assert_eq!(
+        info.workspace_index
+            .expect("workspace index")
+            .embedding
+            .expect("selected embedding")
+            .model,
+        "potion-retrieval-32m"
+    );
+    manager.shutdown_all().await.expect("shutdown");
+    engine.close();
+}
+
+#[tokio::test]
 async fn clean_searches_remain_fresh_during_initial_reconciliation_and_idle() {
     let workspace = tempdir().expect("workspace");
     let root = workspace.path().canonicalize().expect("root");

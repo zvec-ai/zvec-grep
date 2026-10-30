@@ -16,13 +16,8 @@ pub(super) const WRITE_BATCH: usize = 1024;
 static INITIALIZED: OnceLock<Result<(), String>> = OnceLock::new();
 
 pub(super) fn initialize() -> EngineResult<()> {
-    match INITIALIZED.get_or_init(|| {
-        let config = zvec_rust::ConfigBuilder::new()
-            .num_threads(2)
-            .memory_limit(512 * 1024 * 1024)
-            .build();
-        zvec_rust::initialize(Some(&config)).map_err(|error| error.to_string())
-    }) {
+    match INITIALIZED.get_or_init(|| zvec_rust::initialize(None).map_err(|error| error.to_string()))
+    {
         Ok(()) => Ok(()),
         Err(message) => Err(EngineError::storage_failure(format!(
             "cannot initialize zvec: {message}"

@@ -34,7 +34,7 @@ use winapi_util::{HandleRef, console};
 /// Checks stdout for ANSI support, enabling Windows virtual terminal processing.
 #[must_use]
 pub fn stdout_supports_ansi() -> bool {
-    let terminal = io::stdout().is_terminal();
+    let terminal = io::stdout().is_terminal() && std::env::var("TERM").as_deref() != Ok("dumb");
     #[cfg(windows)]
     {
         terminal && enable_windows_ansi(&HandleRef::stdout())
@@ -48,7 +48,7 @@ pub fn stdout_supports_ansi() -> bool {
 /// Checks stderr for ANSI support, enabling Windows virtual terminal processing.
 #[must_use]
 pub fn stderr_supports_ansi() -> bool {
-    let terminal = io::stderr().is_terminal();
+    let terminal = io::stderr().is_terminal() && std::env::var("TERM").as_deref() != Ok("dumb");
     #[cfg(windows)]
     {
         terminal && enable_windows_ansi(&HandleRef::stderr())

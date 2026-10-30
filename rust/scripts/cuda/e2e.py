@@ -208,6 +208,15 @@ def require(text, expected):
         raise AssertionError(f"Expected output not found: {expected}")
 
 
+def require_index_progress(stderr):
+    # These are non-TTY progress events, not the final readiness verdict. The
+    # subsequent --check-ready and vector query verify the published index.
+    lines = iter(stderr.splitlines())
+    for stage in ("Optimizing index", "Saving index", "Finishing index"):
+        if not any(line == stage or line.startswith(f"{stage}: ") for line in lines):
+            raise AssertionError(f"Missing or out-of-order index progress stage: {stage}")
+
+
 def run_zg(binary, workspace, logs, stage, args, env):
     command = [str(binary), *args]
     print(f"Running {stage}: {command}", flush=True)
@@ -261,7 +270,7 @@ def run_case(binary, model_cache, work, logs, backend, model, expected_gguf_cuda
         "--index", "--mode", "direct",
         "--embedding", model, "--embedding-concurrency", "2", *runtime_args,
     ], env)
-    require(index_err, "Index complete")
+    require_index_progress(index_err)
     index_evidence = evidence(index_err)
     status, _ = run_zg(binary, workspace, logs, "status", [
         "--status", "--mode", "direct", "--check-ready", "--no-color",

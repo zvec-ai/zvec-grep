@@ -11,6 +11,11 @@ use crate::storage::graph::{
     Direction, Metadata, Resolution, SqliteGraphStorage, StoredPendingRef,
 };
 use rusqlite::Connection;
+use std::{
+    process::{Child, Command, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
 
 struct Snapshot {
     file: FileRecord,
@@ -707,11 +712,45 @@ fn retry_replaces_a_committed_graph_when_canonical_entities_are_still_old() {
     assert_eq!(pending(&reopened)[0].id, ref_id);
 }
 
+struct CrashWriter(Child);
+
+impl CrashWriter {
+    fn wait_until_ready(&mut self, ready: &Path, log_path: &Path) {
+        let started = Instant::now();
+        loop {
+            if let Some(status) = self.0.try_wait().expect("poll interrupted writer") {
+                panic!(
+                    "interrupted writer exited before termination: {status}\n{}",
+                    fs::read_to_string(log_path).unwrap_or_default()
+                );
+            }
+            if ready.is_file() {
+                return;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "timed out waiting for durable crash state\n{}",
+                fs::read_to_string(log_path).unwrap_or_default()
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+impl Drop for CrashWriter {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 #[test]
 fn process_exit_during_canonical_replacement_recovers_from_durable_status() {
     const CHILD_ROOT: &str = "ZG_TEST_GRAPH_CRASH_ROOT";
+    const CHILD_READY: &str = "writer-ready";
     if let Some(root) = std::env::var_os(CHILD_ROOT) {
-        let store = open(Path::new(&root), false);
+        let root = Path::new(&root);
+        let store = open(root, false);
         let original = snapshot(&store, "target.rs", &["old first", "old second"]);
         let mut source = snapshot(&store, "source.rs", &["caller"]);
         source
@@ -753,20 +792,36 @@ fn process_exit_during_canonical_replacement_recovers_from_durable_status() {
             .expect("persist graph and only part of the canonical replacement");
         // Skip IndexStore::close and all Rust destructors, leaving SQLite's WAL
         // and zvec's partially replaced content for a fresh process to reopen.
-        std::process::exit(77);
+        // Let the parent kill this process: process::exit can deadlock during
+        // Windows DLL cleanup while native storage threads still hold locks.
+        fs::write(root.join(CHILD_READY), b"ready").expect("signal durable crash state");
+        loop {
+            thread::park();
+        }
     }
     let temporary = tempfile::tempdir().expect("workspace");
-    let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
-        .args(["--exact", "storage::store::graph_tests::process_exit_during_canonical_replacement_recovers_from_durable_status", "--nocapture"])
-        .env(CHILD_ROOT, temporary.path())
-        .output().expect("run interrupted writer");
-    assert_eq!(
-        status.status.code(),
-        Some(77),
-        "{}",
-        String::from_utf8_lossy(&status.stderr)
+    let root = temporary.path().join("w");
+    let log_path = temporary.path().join("child.log");
+    let output = File::create(&log_path).expect("create child log");
+    let errors = output.try_clone().expect("clone child log");
+    let mut child = CrashWriter(
+        Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", "storage::store::graph_tests::process_exit_during_canonical_replacement_recovers_from_durable_status", "--nocapture", "--test-threads=1"])
+            .env(CHILD_ROOT, &root)
+            .stdin(Stdio::null())
+            .stdout(output)
+            .stderr(errors)
+            .spawn().expect("run interrupted writer"),
     );
-    let store = open(temporary.path(), false);
+    child.wait_until_ready(&root.join(CHILD_READY), &log_path);
+    child.0.kill().expect("terminate interrupted writer");
+    assert!(
+        !child.0.wait().expect("reap interrupted writer").success(),
+        "interrupted writer must be terminated\n{}",
+        fs::read_to_string(&log_path).unwrap_or_default()
+    );
+    drop(child);
+    let store = open(&root, false);
     let target = store
         .list_files()
         .expect("durable status")

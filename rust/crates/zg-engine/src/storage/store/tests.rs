@@ -1310,6 +1310,104 @@ fn vector_index_completeness(storage: &IndexStore, model: &str) -> f32 {
 }
 
 #[test]
+fn parallel_optimization_joins_every_collection_after_success_or_failure() {
+    use std::sync::{
+        Barrier,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    for fail in [false, true] {
+        let started = Barrier::new(4);
+        let completed = AtomicUsize::new(0);
+        let optimize = |index| {
+            started.wait();
+            completed.fetch_add(1, Ordering::SeqCst);
+            if fail && index == 0 {
+                Err(EngineError::storage_failure("injected optimize failure"))
+            } else {
+                Ok(())
+            }
+        };
+        let result =
+            optimize_collections([&|| optimize(0), &|| optimize(1), &|| optimize(2), &|| {
+                optimize(3)
+            }]);
+        assert_eq!(completed.load(Ordering::SeqCst), 4);
+        if fail {
+            assert!(
+                result
+                    .expect_err("optimize failure")
+                    .message()
+                    .contains("injected")
+            );
+        } else {
+            result.expect("all collections optimized");
+        }
+    }
+}
+
+#[test]
+fn partial_optimization_is_retried_on_the_same_store_and_after_reopening() {
+    for reopen in [false, true] {
+        let home = tempfile::tempdir().expect("workspace");
+        let writer = open(home.path(), false);
+        let (file, entry) = fixture(Some(&writer), "source", "orchard", vec![1.0, 0.0, 0.0]);
+        writer.replace_fixture_file(&file, &[entry]).expect("file");
+        writer.close().expect("flush without optimizing");
+
+        let writer = open(home.path(), false);
+        assert!(vector_index_completeness(&writer, "fixture/fixture-model") < 1.0);
+        let error = writer
+            .finalize_writes_with(|state| {
+                optimize_collections([
+                    &|| state.directories.optimize(),
+                    &|| state.entities.optimize(),
+                    &|| {
+                        Err(EngineError::storage_failure(
+                            "injected files optimize failure",
+                        ))
+                    },
+                    &|| state.fragments.optimize(),
+                ])
+            })
+            .expect_err("one collection failed");
+        assert!(error.message().contains("injected"));
+        assert!(vector_index_completeness(&writer, "fixture/fixture-model") >= 1.0);
+
+        let writer = if reopen {
+            writer.close().expect("close after partial failure");
+            open(home.path(), false)
+        } else {
+            writer
+        };
+        let mut retried = false;
+        writer
+            .finalize_writes_with(|state| {
+                retried = true;
+                optimize_collections([
+                    &|| state.directories.optimize(),
+                    &|| state.entities.optimize(),
+                    &|| state.files.optimize(),
+                    &|| state.fragments.optimize(),
+                ])
+            })
+            .expect("retry partial optimization");
+        assert!(retried, "retry skipped (reopen={reopen})");
+        writer.close().expect("close after success");
+
+        let writer = open(home.path(), false);
+        writer
+            .finalize_writes_with(|_| panic!("successful optimization must not repeat"))
+            .expect("completed optimization survives reopening");
+        assert_eq!(
+            writer.search_fts("orchard", 10, None).expect("FTS").len(),
+            1
+        );
+        writer.close().expect("close verified store");
+    }
+}
+
+#[test]
 fn finalization_builds_every_model_index_in_reopened_flush_only_storage() {
     let home = tempfile::tempdir().expect("workspace");
     let writer = open_multi_model(home.path());
@@ -1699,12 +1797,19 @@ fn critical_storage_symlinks_are_rejected_before_opening_the_target() {
     let root = tempfile::tempdir().expect("workspace");
     let outside = root.path().join("outside");
     fs::create_dir(&outside).expect("outside");
-    for name in ["storage.lock", "schema.json", "file-ids.json"] {
+    for name in [
+        "storage.lock",
+        "schema.json",
+        "file-ids.json",
+        "optimize.pending",
+    ] {
         let index = root.path().join(name.replace('.', "-"));
         fs::create_dir(&index).expect("index directory");
-        if name == "file-ids.json" {
+        if matches!(name, "file-ids.json" | "optimize.pending") {
             open(&index, false).close().expect("create index");
-            fs::remove_file(index.join(name)).expect("remove allocation");
+            if name == "file-ids.json" {
+                fs::remove_file(index.join(name)).expect("remove allocation");
+            }
         }
         let target = outside.join(name);
         fs::write(&target, "preserve").expect("outside record");

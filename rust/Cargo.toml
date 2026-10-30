@@ -4,7 +4,7 @@ members = ["crates/*", "crates/zg-engine/macros"]
 default-members = ["crates/zg"]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.3.0-rc.1"
 edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"
@@ -58,6 +58,7 @@ tree-sitter-python = "0.25.0"
 tree-sitter-rust = "0.24.2"
 tree-sitter-typescript = "0.23.2"
 uuid = { version = "1.18.1", features = ["serde", "v4"] }
+unicode-width = { version = "0.2.3", default-features = false }
 windows-spawn = "0.1.0"
 zvec-rust = "=0.8.0"
 zvec-rust-build = "=0.8.0"

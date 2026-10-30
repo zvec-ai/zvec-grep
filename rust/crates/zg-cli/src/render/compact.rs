@@ -33,11 +33,7 @@ pub(super) fn write_items(
             output_path(&item.relative_path).display(),
             range_label(&item.range)
         );
-        if theme.color {
-            writeln!(writer, "\x1b[1;36m{header}\x1b[0m")?;
-        } else {
-            writeln!(writer, "{header}")?;
-        }
+        writeln!(writer, "{header}")?;
         write_item_preview(writer, item, options, &highlighter)?;
         if options.trace {
             if let Some(score) = item.score {

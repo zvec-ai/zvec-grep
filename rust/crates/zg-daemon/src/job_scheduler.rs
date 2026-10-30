@@ -505,6 +505,8 @@ fn spawn_job(inner: Arc<SchedulerInner>, job: Arc<ScheduledJob>) {
                 .take()
                 .expect("a queued daemon job must retain its index options")
         };
+        // Decide after coalescing so explicit manual jobs retain creation permission.
+        options.require_existing_index = lock(&job.snapshot).reason == JobReason::Watch;
         options.signal = Some(job.cancellation.clone());
         let weak_job = Arc::downgrade(&job);
         options.on_progress = Some(
@@ -1693,6 +1695,8 @@ mod tests {
         assert_eq!(completed.job.state, JobState::Succeeded);
         let calls = executor.calls.lock().expect("calls should be readable");
         assert_eq!(calls.len(), 2);
+        assert!(!calls[0].require_existing_index);
+        assert!(calls[1].require_existing_index);
         assert_eq!(
             calls[1].changes,
             [zg_engine::api::index::options::WorkspaceChange::Delete(

@@ -16,8 +16,8 @@ removal_condition = "TypeScript accepts the same server argument forms and prece
 [[difference]]
 id = "cli-managed-rg-files"
 owner = "CLI/engine"
-reason = "Rust supports explicit metadata-only file discovery with zg --rg --files, native input-path semantics, glob/type/ignore filters, plain paths, NUL delimiters and file-discovery exit codes. TypeScript and the MCP rg tool retain their content-search contracts. Direct, Server and Auto modes all run discovery locally; recursive walks skip internal directories like managed content search. Validation: rg_files integration tests and CLI parsing tests."
-removal_condition = "TypeScript gains equivalent CLI file discovery or its compatibility surface is retired."
+reason = "Rust supports explicit metadata-only file discovery with zg --rg --files and the MCP rg tool, native input-path semantics, glob/type/ignore filters, plain paths and NUL delimiters. TypeScript retains its content-search contract. Direct, Server and Auto CLI modes all run discovery locally; MCP uses the same file-discovery engine and supports explicit trailing head bounds. MCP rejects -L/--follow for content searches and file listings, while CLI retains symlink following. CLI reports discovery exit codes; MCP retains partial paths with isError on traversal failures and returns successful empty text for no files. Recursive walks skip internal directories like managed content search. Validation: rg_files integration tests, CLI parsing tests, public_rg_tool_returns_plain_code_and_markdown_matches and modern_http_rg_files_matches_direct_listing_without_an_index."
+removal_condition = "TypeScript gains equivalent CLI and MCP file discovery or its compatibility surface is retired."
 
 [[difference]]
 id = "cli-positional-words-form-one-query"

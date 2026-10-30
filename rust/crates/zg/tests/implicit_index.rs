@@ -145,7 +145,7 @@ fn status_uses_grouped_layout_compact_paths_and_explicit_color_policy() {
         colored.contains("\u{1b}[33m? Workspace index is not configured\u{1b}[0m"),
         "{colored:?}"
     );
-    assert!(colored.contains("\u{1b}[36m~\u{1b}[0m"), "{colored:?}");
+    assert!(colored.contains("\u{1b}[2m~\u{1b}[0m"), "{colored:?}");
     assert!(
         colored.contains("\u{1b}[2mStorage     \u{1b}[0m"),
         "{colored:?}"
@@ -638,16 +638,15 @@ fn implicit_query_index_progress_does_not_blank_the_live_line() {
         if server {
             fixture.start_server();
         }
-        let output = success(terminal::run(
-            fixture.command(&["--mode", mode, "--fts", "needle", "--no-color"]),
-            &[("Enter Build", b"\r")],
-        ));
+        let mut command = fixture.command(&["--mode", mode, "--fts", "needle", "--no-color"]);
+        command.env_remove("RUST_LOG");
+        let output = success(terminal::run(command, &[("Enter Build", b"\r")]));
         let stderr = String::from_utf8_lossy(&output.stderr);
         let progress = stderr
             .split_once("Building index")
-            .and_then(|(_, remainder)| remainder.split_once("Index ready"))
+            .and_then(|(_, remainder)| remainder.split_once("No indexable files"))
             .map(|(progress, _)| progress)
-            .expect("index progress between selection and query");
+            .unwrap_or_else(|| panic!("index progress between selection and query: {stderr}"));
         assert!(
             progress.contains("Scanning workspace") || progress.contains("Indexing files"),
             "{mode}: {stderr}"
@@ -703,10 +702,7 @@ fn configured_local_models_follow_environment_then_global_default_precedence() {
         }
         let output = success(terminal::run(command, &[("Enter Build", b"\r")]));
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("Select an embedding model to build zg index:"),
-            "{stderr}"
-        );
+        assert!(stderr.contains("Select an embedding model"), "{stderr}");
         fixture.assert_model("direct", expected);
     }
 }
@@ -732,11 +728,8 @@ fn auto_and_server_build_at_the_query_root_not_the_daemon_working_directory() {
         }
         let output = success(terminal::run(command, &[("Enter Build", b"\r")]));
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("Select an embedding model to build zg index:"),
-            "{stderr}"
-        );
-        assert!(stderr.contains("Index ready"), "{stderr}");
+        assert!(stderr.contains("Select an embedding model"), "{stderr}");
+        assert!(stderr.contains("No indexable files"), "{stderr}");
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
             "query groups (1):\nQ1 [supplemental]: needle\nhits: 0\n\nNo matches.\n"
@@ -984,6 +977,90 @@ fn query_refresh_keeps_saved_model_preferences() {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_sigint_during_explicit_index_progress_leaves_the_cursor_visible() {
+    assert_sigint_preserves_progress_cursor("direct").await;
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_sigint_during_explicit_index_progress_leaves_the_cursor_visible() {
+    assert_sigint_preserves_progress_cursor("server").await;
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+async fn assert_sigint_preserves_progress_cursor(mode: &str) {
+    use std::os::unix::process::ExitStatusExt;
+
+    let embedding = GatedEmbedding::start_with_credential(Some("local-test-key".into())).await;
+    let mut fixture = Fixture::new();
+    // Release any server-side index before Fixture stops the daemon on drop,
+    // including when an assertion fails.
+    let _release = ReleaseIndexGate(Arc::clone(&embedding.release));
+    fs::write(fixture.root.path().join("held.txt"), "hold-index").expect("gated source");
+    if mode == "server" {
+        fixture.start_server();
+    }
+    // The loopback fixture holds the actual embedding response so indexing
+    // cannot finish between observing a frame and delivering SIGINT. It uses
+    // no external service or downloaded model; consent is command-local only.
+    let mut command = fixture.command(&[
+        "--index",
+        "--mode",
+        mode,
+        "--embedding",
+        "qwen/text-embedding-v4",
+        "--endpoint",
+        &embedding.endpoint,
+        "--allow-remote",
+        "--api-key",
+        "local-test-key",
+        "--no-color",
+    ]);
+    // Debug logging intentionally disables live animation; this test exercises
+    // normal terminal presentation regardless of the test runner's environment.
+    command.env_remove("RUST_LOG");
+    let (signal, ready) = std::sync::mpsc::channel();
+    let terminal = tokio::task::spawn_blocking(move || terminal::run_with_sigint(command, ready));
+    tokio::time::timeout(Duration::from_secs(60), embedding.entered.acquire())
+        .await
+        .expect("index embedding reached the gate")
+        .expect("open embedding gate")
+        .forget();
+    signal.send(()).expect("allow PTY helper to send SIGINT");
+    let output = tokio::time::timeout(Duration::from_secs(60), terminal)
+        .await
+        .expect("interrupted CLI exits")
+        .expect("PTY task");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.code() == Some(130) || output.status.signal() == Some(2),
+        "{mode}: expected SIGINT exit, got {}\n{stderr}",
+        output.status
+    );
+    assert!(
+        !stderr.contains("Downloading model"),
+        "{mode}: loopback embedding must not download a model: {stderr}"
+    );
+    assert!(embedding.authorized_requests.load(Ordering::SeqCst) > 0);
+    assert!(!fixture.user.path().join("models").exists());
+    assert!(!fixture.user.path().join(".zvec-grep/config.json").exists());
+    assert!(
+        !fixture
+            .root
+            .path()
+            .join(".zvec-grep/authorization.json")
+            .exists()
+    );
+    let last_hide = stderr.rfind("\x1b[?25l");
+    let last_show = stderr.rfind("\x1b[?25h");
+    assert!(
+        last_hide.is_none() || last_show > last_hide,
+        "{mode}: SIGINT left the cursor hidden: {stderr:?}"
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn cancelling_model_selection_exits_without_error_or_index() {
     for (mode, server) in [
@@ -999,7 +1076,7 @@ fn cancelling_model_selection_exits_without_error_or_index() {
             }
             let output = terminal::run(
                 fixture.command(&["--mode", mode, "--fts", "needle", "--no-color"]),
-                &[("Esc Exit", cancellation)],
+                &[("Esc Cancel", cancellation)],
             );
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert_eq!(output.status.code(), Some(130), "{mode}: {stderr}");
@@ -1014,7 +1091,7 @@ fn cancelling_model_selection_exits_without_error_or_index() {
                 "{mode}: {stderr}"
             );
             assert!(
-                stderr.contains("Select an embedding model to build zg index:"),
+                stderr.contains("Select an embedding model"),
                 "{mode}: {stderr}"
             );
             assert!(!fixture.root.path().join(".zvec-grep").exists());

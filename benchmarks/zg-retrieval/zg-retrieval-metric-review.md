@@ -4,7 +4,7 @@ The benchmark measures whether ZG retrieves and ranks annotated relevant files f
 
 ## What the quality metrics measure
 
-A result is relevant when its public file path matches a labeled file in [`gold/files-v1.json`](../benchmarks/zg-retrieval/gold/files-v1.json). Matching normalizes path separators and accepts exact paths or directory-boundary suffixes, without case folding. It does not inspect declarations, outlines, source text or snippet boundaries.
+A result is relevant when its public file path matches a labeled file in [`gold/files-v1.json`](./gold/files-v1.json). Matching normalizes path separators and accepts exact paths or directory-boundary suffixes, without case folding. It does not inspect declarations, outlines, source text or snippet boundaries.
 
 The labels contain one target per unique accepted file path for each question. Bridge-only files do not earn credit. A fragment from any location in a labeled file can count as a hit; the score does not establish that the returned content answers the question.
 
@@ -43,7 +43,7 @@ Installation, indexing and product-call failures fail operational integrity. Mis
 
 ## Scoring and compatibility
 
-The file-ranking contract is `sweqa-file-hit-rr-v1`. The nDCG implementation is checked against the byte-identical pinned Python scoring reference in [`test/fixtures/ndcg-reference/`](../benchmarks/zg-retrieval/test/fixtures/ndcg-reference/), with its MIT attribution preserved. This reference is used only in unit tests.
+The file-ranking contract is `sweqa-file-hit-rr-v1`. The nDCG implementation is checked against the byte-identical pinned Python scoring reference in [`test/fixtures/ndcg-reference/`](./test/fixtures/ndcg-reference/), with its MIT attribution preserved. This reference is used only in unit tests.
 
 Protocol `sweqa20-zg-rust-three-modes-mcp-default-v7` fixes the original questions, repository commits, file labels, Rust MCP default presentation and three retrieval modes. ZG evidence uses schema 7: `quality_mean` contains five-call Hit/MRR/nDCG means and ranking stability; the representative fifth-call `file_retrieval` and `ndcg` retain target evidence. The CI overview uses schema 5 with fixed `zg-hybrid`, `zg-fts` and `zg-vector` rows.
 

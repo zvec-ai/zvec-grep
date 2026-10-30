@@ -40,11 +40,11 @@ pub fn prompt_index_authorization(
     };
     writeln!(
         output,
-        "Remote Embedding authorization\n\nSend selected workspace files?\n\n  From  {roots}{extra}\n  To    {}\n        {}\n\nAPI charges may apply.\n\n1. Allow once\n2. Allow for this workspace\n3. Cancel",
+        "Remote embedding authorization\n  Send selected workspace files?\n\n  Workspace  {roots}{extra}\n  Model      {}\n  Endpoint   {}\n  ! API charges may apply.\n\n  1. Allow once\n  2. Allow for this workspace\n  3. Cancel",
         label(&target.model, 72),
         label(&target.endpoint_host, 72)
     )?;
-    write!(output, "Choose [1-3]: ")?;
+    write!(output, "Choose [1-3] (blank cancels): ")?;
     output.flush()?;
     let mut answer = String::new();
     input.read_line(&mut answer)?;
@@ -88,11 +88,11 @@ pub fn prompt_query_authorization(
     );
     writeln!(
         output,
-        "Remote Embedding authorization\n\nSend {data}?\n\n  From  {root}\n  To    {}\n        {}\n\nAPI charges may apply.\n\n1. Allow once\n2. Allow for this workspace\n3. Use FTS only\n4. Cancel",
+        "Remote embedding authorization\n  Send {data}?\n\n  Workspace  {root}\n  Model      {}\n  Endpoint   {}\n  ! API charges may apply.\n\n  1. Allow once\n  2. Allow for this workspace\n  3. Use FTS only\n  4. Cancel",
         label(&target.model, 72),
         label(&target.endpoint_host, 72)
     )?;
-    write!(output, "Choose [1-4]: ")?;
+    write!(output, "Choose [1-4] (blank cancels): ")?;
     output.flush()?;
     let mut answer = String::new();
     input.read_line(&mut answer)?;
@@ -217,11 +217,11 @@ mod tests {
         assert_eq!(decision, QueryAuthorizationDecision::FtsOnly);
         let text = String::from_utf8(output).expect("UTF-8");
         assert!(text.contains("Send query text?"));
-        assert!(text.contains("3. Use FTS only\n4. Cancel\nChoose [1-4]: "));
+        assert!(text.contains("  3. Use FTS only\n  4. Cancel\nChoose [1-4] (blank cancels): "));
     }
 
     #[test]
-    fn matches_legacy_prompt_and_requires_explicit_consent() {
+    fn index_prompt_discloses_target_and_requires_explicit_consent() {
         let target = IndexAuthorization {
             root: "/workspace/docs".into(),
             workspace_roots: vec!["/workspace/docs".into()],
@@ -244,10 +244,29 @@ mod tests {
                 expected
             );
             let text = String::from_utf8(output).expect("UTF-8 prompt");
-            assert!(text.contains("Send selected workspace files?\n\n  From  docs\n  To    qwen/text-embedding-v4\n        dashscope.aliyuncs.com"));
+            assert!(text.contains("Send selected workspace files?\n\n  Workspace  docs\n  Model      qwen/text-embedding-v4\n  Endpoint   dashscope.aliyuncs.com"));
             assert!(text.ends_with(
-                "1. Allow once\n2. Allow for this workspace\n3. Cancel\nChoose [1-3]: "
+                "  1. Allow once\n  2. Allow for this workspace\n  3. Cancel\nChoose [1-3] (blank cancels): "
             ));
         }
+    }
+
+    #[test]
+    fn authorization_disclosure_does_not_execute_terminal_controls() {
+        let target = IndexAuthorization {
+            root: "/workspace/docs".into(),
+            workspace_roots: vec!["/workspace/docs".into()],
+            model: "remote/\x1b[2Jmodel".into(),
+            endpoint: "https://example.test/embeddings".into(),
+            endpoint_host: "example.test\r\nfake prompt".into(),
+        };
+        let mut output = Vec::new();
+        assert_eq!(
+            prompt_index_authorization(&target, "\x1b\n".as_bytes(), &mut output).expect("prompt"),
+            AuthorizationDecision::Cancel
+        );
+        let text = String::from_utf8(output).expect("UTF-8 prompt");
+        assert!(!text.contains('\x1b'));
+        assert!(!text.contains("\nfake prompt"));
     }
 }

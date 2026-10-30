@@ -1,6 +1,9 @@
-//! Workspace status in the same grouped layout as the Node.js CLI.
+//! Workspace status with compact terminal headings and stable redirected output.
 
-use std::io::{self, Write};
+use std::{
+    borrow::Cow,
+    io::{self, Write},
+};
 
 use zg_engine::{
     api::index::options::{FileFormat, ScanRules},
@@ -14,7 +17,10 @@ use zg_engine::{
 
 use crate::{
     ColorMode, OutputOptions, output_path,
-    theme::{StatusTheme, display_path, format_count, storage_path, write_status_field},
+    theme::{
+        StatusTheme, clean, display_path, format_count, storage_path, unicode_supported,
+        write_status_field,
+    },
 };
 
 /// Writes workspace status with the requested color policy.
@@ -27,16 +33,28 @@ pub fn write_info_with_options(
     terminal: bool,
 ) -> io::Result<()> {
     let theme = StatusTheme::new(options.color, terminal);
-    writeln!(writer, "{}", heading(theme, result.index_status()))?;
-    writeln!(writer, "  {}", theme.path(&display_path(&result.root)))?;
+    writeln!(
+        writer,
+        "{}",
+        if terminal {
+            terminal_heading(theme, result.index_status())
+        } else {
+            heading(theme, result.index_status())
+        }
+    )?;
+    writeln!(
+        writer,
+        "  {}",
+        theme.path(&human_text(&display_path(&result.root), terminal))
+    )?;
 
     if let Some(stats) = &result.status {
         writeln!(writer)?;
-        write_statistics(&mut writer, theme, stats)?;
+        write_statistics(&mut writer, theme, stats, terminal)?;
     }
     if let Some(index) = &result.workspace_index {
         writeln!(writer)?;
-        write_embedding(&mut writer, theme, index)?;
+        write_embedding(&mut writer, theme, index, terminal)?;
     }
 
     writeln!(writer)?;
@@ -44,7 +62,10 @@ pub fn write_info_with_options(
         &mut writer,
         theme,
         "Storage",
-        &[theme.path(&storage_path(&result.index_path, &result.root))],
+        &[theme.path(&human_text(
+            &storage_path(&result.index_path, &result.root),
+            terminal,
+        ))],
     )?;
     match &result.compatibility {
         IndexCompatibility::Unbuilt => {}
@@ -62,7 +83,7 @@ pub fn write_info_with_options(
                 &mut writer,
                 theme,
                 "Version",
-                &[theme.warning(&format!("{actual} (expected {expected_version})"))],
+                &[format!("{actual} (expected {expected_version})")],
             )?;
         }
     }
@@ -86,19 +107,24 @@ pub fn write_info_with_options(
             } else {
                 format!("{root} ({filters})")
             };
-            write_status_field(&mut writer, theme, "Roots", &[theme.path(&root)])?;
+            write_status_field(
+                &mut writer,
+                theme,
+                "Roots",
+                &[theme.path(&human_text(&root, terminal))],
+            )?;
         }
     }
     match result.index_policy {
         WorkspaceIndexPolicy::Enabled => {}
         WorkspaceIndexPolicy::Disabled => {
-            write_status_field(&mut writer, theme, "Policy", &[theme.warning("disabled")])?;
+            write_status_field(&mut writer, theme, "Policy", &["disabled".into()])?;
         }
         WorkspaceIndexPolicy::Uninitialized => {
             write_status_field(&mut writer, theme, "Policy", &[theme.muted("undecided")])?;
         }
     }
-    write_diagnostics(&mut writer, theme, result)
+    write_diagnostics(&mut writer, theme, result, terminal)
 }
 
 /// Writes workspace index status without ANSI colors.
@@ -129,10 +155,40 @@ fn heading(theme: StatusTheme, state: IndexStatus) -> String {
     }
 }
 
+fn terminal_heading(theme: StatusTheme, state: IndexStatus) -> String {
+    let unicode = unicode_supported();
+    let (marker, label) = match state {
+        IndexStatus::Ready => (
+            theme.success(if unicode { "✓" } else { "+" }),
+            "Index ready",
+        ),
+        IndexStatus::Stale => (theme.warning("!"), "Index needs an update"),
+        IndexStatus::Failed => (
+            theme.danger(if unicode { "×" } else { "x" }),
+            "Index has failed files",
+        ),
+        IndexStatus::Disabled => (theme.warning("!"), "Indexing disabled"),
+        IndexStatus::Missing => (theme.warning("!"), "Index not created"),
+        IndexStatus::Uninitialized => (theme.warning("!"), "Index not configured"),
+        IndexStatus::Unknown => (theme.warning("!"), "Index status unknown"),
+        IndexStatus::RebuildRequired => (theme.warning("!"), "Index requires a rebuild"),
+    };
+    format!("{marker} {label}")
+}
+
+fn human_text(value: &str, terminal: bool) -> Cow<'_, str> {
+    if terminal {
+        Cow::Owned(clean(value))
+    } else {
+        Cow::Borrowed(value)
+    }
+}
+
 fn write_statistics(
     writer: &mut impl Write,
     theme: StatusTheme,
     stats: &IndexStats,
+    terminal: bool,
 ) -> io::Result<()> {
     // Stored/indexed counts include changed and deleted snapshots. Coverage is
     // the current scan's unchanged files, matching Node's indexCompletionFromStatus.
@@ -154,8 +210,12 @@ fn write_statistics(
     };
     let percent = ratio(100);
     let filled = usize::try_from(ratio(20)).unwrap_or(20);
-    let unicode = !cfg!(windows) && std::env::var("TERM").as_deref() != Ok("linux");
-    let bar = crate::progress::gradient_bar(filled, 20, theme.color, unicode);
+    let bar = if terminal {
+        crate::progress::block_bar(filled, 20, theme.color, crate::theme::unicode_supported())
+    } else {
+        let unicode = !cfg!(windows) && std::env::var("TERM").as_deref() != Ok("linux");
+        crate::progress::gradient_bar(filled, 20, theme.color, unicode)
+    };
     write_status_field(
         writer,
         theme,
@@ -179,28 +239,63 @@ fn write_statistics(
         "Source size",
         &[format!("{} bytes", format_count(stats.indexed_size_bytes))],
     )?;
-    let pending = format!("{} pending", format_count(stats.files_pending));
-    let failed = format!("{} failed", format_count(stats.files_failed));
-    write_status_field(
-        writer,
-        theme,
-        "Queue",
-        &[format!(
-            "{} {} {}",
-            if stats.files_pending > 0 {
-                theme.warning(&pending)
-            } else {
-                theme.muted(&pending)
-            },
-            theme.muted("·"),
-            if stats.files_failed > 0 {
-                theme.danger(&failed)
-            } else {
-                theme.muted(&failed)
-            }
-        )],
-    )?;
+    write_queue_and_changes(writer, theme, stats, terminal)
+}
+
+fn write_queue_and_changes(
+    writer: &mut impl Write,
+    theme: StatusTheme,
+    stats: &IndexStats,
+    terminal: bool,
+) -> io::Result<()> {
+    if terminal {
+        let queue = [
+            (stats.files_pending, "pending"),
+            (stats.files_failed, "failed"),
+        ]
+        .into_iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, label)| format!("{} {label}", format_count(count)))
+        .collect::<Vec<_>>();
+        if !queue.is_empty() {
+            write_status_field(writer, theme, "Queue", &[queue.join(" · ")])?;
+        }
+    } else {
+        let pending = format!("{} pending", format_count(stats.files_pending));
+        let failed = format!("{} failed", format_count(stats.files_failed));
+        write_status_field(
+            writer,
+            theme,
+            "Queue",
+            &[format!(
+                "{} {} {}",
+                if stats.files_pending > 0 {
+                    theme.warning(&pending)
+                } else {
+                    theme.muted(&pending)
+                },
+                theme.muted("·"),
+                if stats.files_failed > 0 {
+                    theme.danger(&failed)
+                } else {
+                    theme.muted(&failed)
+                }
+            )],
+        )?;
+    }
     if stats.files_added > 0 || stats.files_modified > 0 || stats.files_deleted > 0 {
+        if terminal {
+            let changes = [
+                (stats.files_added, "added"),
+                (stats.files_modified, "modified"),
+                (stats.files_deleted, "deleted"),
+            ]
+            .into_iter()
+            .filter(|(count, _)| *count > 0)
+            .map(|(count, label)| format!("{} {label}", format_count(count)))
+            .collect::<Vec<_>>();
+            return write_status_field(writer, theme, "Changes", &[changes.join(" · ")]);
+        }
         write_status_field(
             writer,
             theme,
@@ -222,17 +317,22 @@ fn write_embedding(
     writer: &mut impl Write,
     theme: StatusTheme,
     index: &WorkspaceIndexInfo,
+    terminal: bool,
 ) -> io::Result<()> {
     let values = index.embedding.as_ref().map_or_else(
-        || vec![theme.warning("Not configured")],
+        || vec!["Not configured".into()],
         |embedding| {
             vec![
-                format!("{}/{}", embedding.provider, embedding.model),
+                format!(
+                    "{}/{}",
+                    human_text(&embedding.provider, terminal),
+                    human_text(&embedding.model, terminal)
+                ),
                 format!(
                     "{} dimensions {} {}",
                     format_count(embedding.dimension),
                     theme.muted("·"),
-                    embedding.metric
+                    human_text(&embedding.metric, terminal)
                 ),
             ]
         },
@@ -245,8 +345,8 @@ fn write_embedding(
             "FTS",
             &[format!(
                 "tokenizer={} filters={}",
-                fts.tokenizer,
-                fts.filters.join(", ")
+                human_text(&fts.tokenizer, terminal),
+                human_text(&fts.filters.join(", "), terminal)
             )],
         )?;
     }
@@ -257,6 +357,7 @@ fn write_diagnostics(
     writer: &mut impl Write,
     theme: StatusTheme,
     result: &InfoResult,
+    terminal: bool,
 ) -> io::Result<()> {
     let reason = match &result.compatibility {
         IndexCompatibility::RebuildRequired { reason, .. } => Some(reason.as_str()),
@@ -276,7 +377,16 @@ fn write_diagnostics(
         writeln!(writer)?;
     }
     if let Some(reason) = reason {
-        write_status_field(writer, theme, "Problem", &[theme.danger(reason)])?;
+        write_status_field(
+            writer,
+            theme,
+            "Problem",
+            &[if terminal {
+                clean(reason)
+            } else {
+                theme.danger(reason)
+            }],
+        )?;
     }
     if let Some(files) = failed {
         let mut messages: Vec<_> = files
@@ -290,21 +400,30 @@ fn write_diagnostics(
                 } else {
                     compact
                 };
-                format!("{}: {compact}", output_path(path).display())
+                human_text(
+                    &format!("{}: {compact}", output_path(path).display()),
+                    terminal,
+                )
+                .into_owned()
             })
             .collect();
         if files.len() > 3 {
             messages.push(format!("and {} more", files.len() - 3));
         }
+        let messages = if terminal {
+            messages
+        } else {
+            vec![theme.danger(&messages.join("; "))]
+        };
+        write_status_field(writer, theme, "Problem", &messages)?;
+    }
+    if let Some(suggestion) = suggestion {
         write_status_field(
             writer,
             theme,
-            "Problem",
-            &[theme.danger(&messages.join("; "))],
+            "Next",
+            &[StatusTheme::accent(&human_text(suggestion, terminal))],
         )?;
-    }
-    if let Some(suggestion) = suggestion {
-        write_status_field(writer, theme, "Next", &[theme.accent(suggestion)])?;
     }
     Ok(())
 }
@@ -446,6 +565,74 @@ mod tests {
                 "✓ Workspace index is ready\n  /workspace\n\n  Coverage    {bar} 100%  1,132 / 1,132 files\n  Entities    22,037\n  Source size 4,177,103 bytes\n  Queue       0 pending · 0 failed\n\n  Embedding   qwen/text-embedding-v4\n              1,024 dimensions · cosine\n  FTS         tokenizer=jieba filters=lowercase\n\n  Storage     .zvec-grep/index\n  Version     2\n  Nested Git  included\n"
             )
         );
+    }
+
+    #[test]
+    fn terminal_status_has_compact_heading_and_retains_nonzero_attention_counts() {
+        let mut info = ready();
+        let mut bytes = Vec::new();
+        let options = OutputOptions {
+            color: ColorMode::Never,
+            ..OutputOptions::default()
+        };
+        write_info_with_options(&mut bytes, &info, options, true).expect("ready output");
+        let output = String::from_utf8(bytes).expect("UTF-8");
+        let ready_marker = if unicode_supported() { "✓" } else { "+" };
+        assert!(output.starts_with(&format!("{ready_marker} Index ready\n  /workspace\n")));
+        assert!(output.contains("100%  1,132 / 1,132 files"));
+        assert!(!output.contains("Queue"));
+
+        let stats = info.status.as_mut().expect("stats");
+        stats.files_unchanged -= 1;
+        stats.files_modified = 1;
+        stats.files_failed = 1;
+        stats.failed_files = vec![FailedFile {
+            path: "/workspace/failure.rs".into(),
+            reason: "cannot read file".into(),
+        }];
+        let mut bytes = Vec::new();
+        write_info_with_options(&mut bytes, &info, options, true).expect("failed output");
+        let output = String::from_utf8(bytes).expect("UTF-8");
+        let failed_marker = if unicode_supported() { "×" } else { "x" };
+        assert!(output.starts_with(&format!("{failed_marker} Index has failed files\n")));
+        assert!(output.contains("Queue       1 failed"));
+        assert!(output.contains("Changes     1 modified"));
+        assert!(output.contains("failure.rs: cannot read file"));
+        assert!(output.contains("Next        zg --index"));
+        assert!(!output.contains("0 added"));
+        assert!(!output.contains("0 pending"));
+    }
+
+    #[test]
+    fn terminal_status_sanitizes_dynamic_fields_without_rewriting_redirected_output() {
+        let mut info = ready();
+        info.root = "/workspace/\x1b[2J\nroot".into();
+        info.index_path = "/storage/\x1b[2J\nindex".into();
+        let index = info.workspace_index.as_mut().expect("index");
+        let embedding = index.embedding.as_mut().expect("embedding");
+        embedding.model = "model\x1b[2J\nname".into();
+        let stats = info.status.as_mut().expect("stats");
+        stats.files_failed = 1;
+        stats.failed_files = vec![FailedFile {
+            path: "/workspace/file\x1b[2J\nname.rs".into(),
+            reason: "failed\x1b[2J\nreason".into(),
+        }];
+        let mut bytes = Vec::new();
+        write_info_with_options(
+            &mut bytes,
+            &info,
+            OutputOptions {
+                color: ColorMode::Never,
+                ..OutputOptions::default()
+            },
+            true,
+        )
+        .expect("terminal status");
+        let terminal = String::from_utf8(bytes).expect("UTF-8");
+        assert!(!terminal.contains('\x1b'));
+        assert!(terminal.contains("model [2J name"));
+        assert!(terminal.contains("file [2J name.rs: failed [2J reason"));
+        assert!(render(&info, ColorMode::Never).contains("\x1b[2J\nroot"));
     }
 
     #[test]

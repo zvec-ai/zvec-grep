@@ -28,11 +28,26 @@ use crate::{OutputOptions, theme::StatusTheme};
 /// # Errors
 /// Returns the underlying output or diagnostic writer error.
 pub fn write_path_lookup_result(
+    writer: impl Write,
+    diagnostics: impl Write,
+    result: &PathLookupResult,
+    options: OutputOptions,
+    terminal: bool,
+) -> io::Result<()> {
+    write_path_lookup_with_terminals(writer, diagnostics, result, options, terminal, terminal)
+}
+
+/// Writes lookup output with independent stdout and diagnostic terminal policies.
+///
+/// # Errors
+/// Returns the underlying output or diagnostic writer error.
+pub fn write_path_lookup_with_terminals(
     mut writer: impl Write,
     mut diagnostics: impl Write,
     result: &PathLookupResult,
     options: OutputOptions,
-    terminal: bool,
+    stdout_terminal: bool,
+    diagnostics_terminal: bool,
 ) -> io::Result<()> {
     match result {
         PathLookupResult::Files(result) => {
@@ -40,27 +55,54 @@ pub fn write_path_lookup_result(
                 writeln!(writer, "#{} matchedBy=path {}", index + 1, path_label(path))?;
             }
             if result.truncated {
-                writeln!(
-                    diagnostics,
-                    "warning: more matching files exist; use --limit to show more"
+                write_warning(
+                    &mut diagnostics,
+                    "More matching files exist",
+                    "Use --limit to show more",
+                    "more matching files exist; use --limit to show more",
+                    options,
+                    diagnostics_terminal,
                 )?;
             }
         }
         PathLookupResult::Text(result) => {
-            writeln!(
-                diagnostics,
-                "warning: no matching file paths; searching current file contents literally (rg)."
+            write_warning(
+                &mut diagnostics,
+                "No matching file paths",
+                "Searching current file contents literally (rg)",
+                "no matching file paths; searching current file contents literally (rg).",
+                options,
+                diagnostics_terminal,
             )?;
-            write_current_text(&mut writer, result, options, terminal)?;
+            write_current_text(&mut writer, result, options, stdout_terminal)?;
             if result.coverage == ContextCoverage::RgTruncated {
-                writeln!(
-                    diagnostics,
-                    "warning: text search reached the result or scan limit; search coverage is incomplete; narrow the query or use --limit to show more"
+                write_warning(
+                    &mut diagnostics,
+                    "Search coverage is incomplete",
+                    "Result or scan limit reached; narrow the query or use --limit to show more",
+                    "text search reached the result or scan limit; search coverage is incomplete; narrow the query or use --limit to show more",
+                    options,
+                    diagnostics_terminal,
                 )?;
             }
         }
     }
     Ok(())
+}
+
+fn write_warning(
+    writer: &mut impl Write,
+    title: &str,
+    detail: &str,
+    plain: &str,
+    options: OutputOptions,
+    terminal: bool,
+) -> io::Result<()> {
+    if !terminal {
+        return writeln!(writer, "warning: {plain}");
+    }
+    let theme = StatusTheme::new(options.color, terminal);
+    writeln!(writer, "{} {title}\n  {detail}", theme.warning("!"))
 }
 
 fn write_current_text(
@@ -88,11 +130,11 @@ fn write_current_text(
             &highlight(&result.query, &result.query, theme.color),
         )?;
         let coverage = match result.coverage {
-            ContextCoverage::RgExhaustive => theme.success("rg_exhaustive"),
-            ContextCoverage::RgTruncated => theme.warning("rg_truncated"),
-            ContextCoverage::RankedSample => "ranked_sample".to_owned(),
+            ContextCoverage::RgExhaustive => "rg_exhaustive",
+            ContextCoverage::RgTruncated => "rg_truncated",
+            ContextCoverage::RankedSample => "ranked_sample",
         };
-        field(writer, theme, "Coverage", &coverage)?;
+        field(writer, theme, "Coverage", coverage)?;
         field(writer, theme, "Files", &groups.len().to_string())?;
         field(writer, theme, "Hits", &result.items.len().to_string())?;
     }
@@ -167,12 +209,12 @@ fn write_detail_item(
     writeln!(
         writer,
         "  {} {summary} matchedBy={}",
-        theme.accent(&format!("#{}", item.rank)),
-        theme.accent("lexical")
+        StatusTheme::accent(&format!("#{}", item.rank)),
+        StatusTheme::accent("lexical")
     )?;
     let status = match item.status {
-        ContextItemStatus::Fresh => theme.success("fresh"),
-        ContextItemStatus::PossiblyStale => theme.warning("possibly_stale"),
+        ContextItemStatus::Fresh => "fresh",
+        ContextItemStatus::PossiblyStale => "possibly_stale",
     };
     writeln!(
         writer,
@@ -449,6 +491,76 @@ mod tests {
             String::from_utf8(output).expect("UTF-8 output"),
             String::from_utf8(diagnostics).expect("UTF-8 diagnostics"),
         )
+    }
+
+    #[test]
+    fn terminal_warning_changes_only_diagnostics_not_search_data() {
+        let result = PathLookupResult::Text(Box::new(text_result()));
+        let expected = render(&result, false).0;
+        let mut output = Vec::new();
+        let mut diagnostics = Vec::new();
+        write_path_lookup_result(
+            &mut output,
+            &mut diagnostics,
+            &result,
+            OutputOptions {
+                color: ColorMode::Never,
+                ..OutputOptions::default()
+            },
+            true,
+        )
+        .expect("terminal lookup");
+        assert_eq!(String::from_utf8(output).expect("UTF-8"), expected);
+        assert_eq!(
+            String::from_utf8(diagnostics).expect("UTF-8"),
+            "! No matching file paths\n  Searching current file contents literally (rg)\n"
+        );
+    }
+
+    #[test]
+    fn lookup_diagnostics_follow_their_own_terminal_not_stdout() {
+        let result = PathLookupResult::Files(PathsResult {
+            root: std::env::temp_dir(),
+            paths: vec![Path::new("src").join("auth.ts")],
+            truncated: true,
+        });
+        for stdout_terminal in [false, true] {
+            for diagnostics_terminal in [false, true] {
+                let (mut output, mut diagnostics) = (Vec::new(), Vec::new());
+                write_path_lookup_with_terminals(
+                    &mut output,
+                    &mut diagnostics,
+                    &result,
+                    OutputOptions {
+                        color: ColorMode::Auto,
+                        ..OutputOptions::default()
+                    },
+                    stdout_terminal,
+                    diagnostics_terminal,
+                )
+                .expect("lookup with independent streams");
+                assert_eq!(
+                    String::from_utf8(output).expect("UTF-8"),
+                    "#1 matchedBy=path src/auth.ts\n"
+                );
+                let diagnostics = String::from_utf8(diagnostics).expect("UTF-8");
+                assert_eq!(
+                    diagnostics.contains('\x1b'),
+                    diagnostics_terminal && std::env::var_os("NO_COLOR").is_none()
+                );
+                if diagnostics_terminal {
+                    assert!(
+                        diagnostics
+                            .contains("More matching files exist\n  Use --limit to show more\n")
+                    );
+                } else {
+                    assert_eq!(
+                        diagnostics,
+                        "warning: more matching files exist; use --limit to show more\n"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

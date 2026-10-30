@@ -18,12 +18,43 @@ import {
   publishRelease,
 } from "./npm-release-registry.mjs";
 
+// Test fixtures must never append release notes to the real Actions summary.
+delete process.env.GITHUB_STEP_SUMMARY;
+
 const entry = {
   name: "@zvec/zvec-grep",
   version: "0.0.1",
   integrity: "sha512-verified-tarball",
 };
 const projectLicense = await readFile(new URL("../../LICENSE", import.meta.url), "utf8");
+
+test("release fixtures do not write to an inherited Actions summary", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "zg-release-summary-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const summaryPath = join(root, "summary.md");
+  const originalSummary = "Existing workflow summary\n";
+  await writeFile(summaryPath, originalSummary);
+  const env = { ...process.env, GITHUB_STEP_SUMMARY: summaryPath };
+  // Start an independent test runner instead of inheriting the parent IPC mode.
+  delete env.NODE_TEST_CONTEXT;
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--test",
+      "--test-name-pattern=^default collection still requires every platform",
+      fileURLToPath(import.meta.url),
+    ],
+    {
+      env,
+      encoding: "utf8",
+      timeout: 60_000,
+    },
+  );
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /collected \d+ verified packages/);
+  assert.equal(await readFile(summaryPath, "utf8"), originalSummary);
+});
 
 test("allows an unpublished version and an identical partial-release retry", async () => {
   assert.equal(
@@ -275,6 +306,7 @@ test("verification metadata preserves collected bytes and supports registry smok
     },
     verifyInstalled: async () => { await mkdir(prefixRoot, { recursive: true }); return { components: [] }; },
     probe: async () => { probes++; },
+    modelProbe: async () => {},
     probePrevious: async () => {},
   });
   assert.equal(verifiedPackages, release.packages.length);
@@ -509,26 +541,28 @@ test("oversized candidates fail collection and publication before any npm mutati
   const fixture = await releaseFixture(t);
   // Inflate the final tarball as a sparse file: no hundreds-of-MiB fixture data.
   await truncate(join(fixture.tarballRoot, fixture.packages.at(-1).file), MAX_NPM_TARBALL_BYTES + 1);
-  await assert.rejects(collectRelease({ ...fixture, version: entry.version }), /exceeds 350 MiB/);
+  await assert.rejects(collectRelease({ ...fixture, version: entry.version }), /exceeds 180 MiB/);
   for (const action of [publishRelease, promoteRelease]) {
     await assert.rejects(action({ ...fixture,
       registryFetch: publishedRegistry(fixture.packages),
       runNpm: () => assert.fail("must not mutate npm"),
-    }), /exceeds 350 MiB/);
+    }), /exceeds 180 MiB/);
   }
 });
 
-test("collection requires every referenced component and rejects mandatory CUDA dependencies", async (t) => {
-  const targets = ["linux-x64-gnu"];
-  const missing = await releaseFixture(t, { targets });
-  const component = missing.packages.find((pkg) => pkg.component?.endsWith("ort-cuda-part2"));
-  await rm(join(missing.tarballRoot, component.file));
-  await assert.rejects(collectRelease({ ...missing, version: entry.version, targets }), /do not cover exactly/);
-  const wrongVersion = await releaseFixture(t, { targets, mutateMetadata: (_, metadata) => {
-    if (metadata.name === "@zvec/zvec-grep-linux-x64-gnu") metadata.dependencies = { "@zvec/zvec-grep-linux-x64-gnu-ggml-cuda13": "0.0.2" };
-  } });
-  await assert.rejects(collectRelease({ ...wrongVersion, version: entry.version, targets }), /does not lock every runtime component/);
-});
+for (const target of ["linux-x64-gnu", "win32-x64-msvc"]) {
+  test(`${target} collection requires every referenced component and rejects mandatory CUDA dependencies`, async (t) => {
+    const targets = [target];
+    const missing = await releaseFixture(t, { targets });
+    const component = missing.packages.find((pkg) => pkg.component?.endsWith("ort-cuda-part2"));
+    await rm(join(missing.tarballRoot, component.file));
+    await assert.rejects(collectRelease({ ...missing, version: entry.version, targets }), /do not cover exactly/);
+    const wrongVersion = await releaseFixture(t, { targets, mutateMetadata: (_, metadata) => {
+      if (metadata.name === `@zvec/zvec-grep-${target}`) metadata.dependencies = { [`${metadata.name}-ggml-cuda13`]: "0.0.2" };
+    } });
+    await assert.rejects(collectRelease({ ...wrongVersion, version: entry.version, targets }), /does not lock every runtime component/);
+  });
+}
 
 test("components publish before the base package that depends on them", async (t) => {
   const fixture = await releaseFixture(t);

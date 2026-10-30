@@ -26,7 +26,8 @@ use crate::{
         index::{
             options::WorkspaceChange,
             progress::{
-                IndexEmbeddingProgress, IndexProgress, IndexProgressPhase, IndexProgressReporter,
+                DETAIL_FINALIZING_INDEX, DETAIL_INDEXING_COMPLETE, IndexEmbeddingProgress,
+                IndexProgress, IndexProgressPhase, IndexProgressReporter,
             },
             result::{IndexResult, SkippedFile, SkippedFileReason, TimingEntry},
         },
@@ -177,7 +178,7 @@ pub(crate) async fn index_workspace(
             files_total: Some(final_pass.diff.pending_count()),
             files_indexed: Some(final_pass.stats.files_indexed + final_pass.stats.files_failed),
             files_failed: Some(final_pass.stats.files_failed),
-            detail: Some("finalizing index".to_owned()),
+            detail: Some(DETAIL_FINALIZING_INDEX.to_owned()),
             embedding: None,
         },
     );
@@ -210,7 +211,7 @@ pub(crate) async fn index_workspace(
             files_total: Some(final_pass.diff.pending_count()),
             files_indexed: Some(final_pass.stats.files_indexed),
             files_failed: Some(0),
-            detail: Some("indexing complete".to_owned()),
+            detail: Some(DETAIL_INDEXING_COMPLETE.to_owned()),
             embedding: None,
         },
     );

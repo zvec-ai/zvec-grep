@@ -53,6 +53,7 @@ struct StoreState {
     entities: Entities,
     fragments: Fragments,
     graph: Option<SqliteGraphStorage>,
+    optimize_marker: PathBuf,
     needs_optimize: bool,
     closed: bool,
 }
@@ -152,6 +153,8 @@ impl IndexStore {
             ));
         }
         let (lock, schema) = prepare_storage(&path, options)?;
+        let optimize_marker = path.join("optimize.pending");
+        let needs_optimize = file_exists(&optimize_marker)?;
         let files = Files::open(&path, read_only)?;
         let directories = Directories::open(&path, read_only)?;
         let entities = Entities::open(&path, read_only)?;
@@ -185,7 +188,8 @@ impl IndexStore {
                 entities,
                 fragments,
                 graph,
-                needs_optimize: false,
+                optimize_marker,
+                needs_optimize,
                 closed: false,
             }),
             schema,
@@ -407,16 +411,35 @@ impl IndexStore {
 
     /// Build indexes and compact accepted writes when needed.
     pub(crate) fn finalize_writes(&self) -> EngineResult<()> {
+        self.finalize_writes_with(|state| {
+            optimize_collections([
+                &|| state.directories.optimize(),
+                &|| state.entities.optimize(),
+                &|| state.files.optimize(),
+                &|| state.fragments.optimize(),
+            ])
+        })
+    }
+
+    fn finalize_writes_with(
+        &self,
+        optimize: impl FnOnce(&mut StoreState) -> EngineResult<()>,
+    ) -> EngineResult<()> {
         if self.read_only {
             return Ok(());
         }
         self.write(|state| {
             // Also finish indexes created by versions that only flushed writes.
             if state.needs_optimize || state.fragments.needs_optimize()? {
-                state.directories.optimize()?;
-                state.entities.optimize()?;
-                state.files.optimize()?;
-                state.fragments.optimize()?;
+                state.needs_optimize = true;
+                // Fragments can finish before another collection fails. Persist retry
+                // intent before starting any worker so reopening retains that work.
+                write_record(&state.optimize_marker, b"")?;
+                optimize(state)?;
+                fs::remove_file(&state.optimize_marker).map_err(|error| {
+                    io_error("clear pending optimization", &state.optimize_marker, &error)
+                })?;
+                // A crash before this removal persists can only cause a safe extra retry.
                 state.needs_optimize = false;
             }
             Ok(())
@@ -447,6 +470,23 @@ impl IndexStore {
             .map_or(Ok(()), |graph| graph.close().map_err(graph_error));
         flush_result.and(graph_close)
     }
+}
+
+fn optimize_collections(
+    operations: [&(dyn Fn() -> EngineResult<()> + Sync); 4],
+) -> EngineResult<()> {
+    std::thread::scope(|scope| {
+        let workers = operations.map(|optimize| scope.spawn(optimize));
+        let mut result = Ok(());
+        // Keep the store locked until every collection settles, even after an error.
+        for worker in workers {
+            let next = worker.join().unwrap_or_else(|_| {
+                Err(EngineError::internal("collection optimize worker panicked"))
+            });
+            result = result.and(next);
+        }
+        result
+    })
 }
 
 // Cross-table writes stay under the store's single writer lock.

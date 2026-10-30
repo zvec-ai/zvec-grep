@@ -157,7 +157,7 @@ fn direct_and_server_modes_share_query_highlighting_and_color_policy() -> Result
             assert_eq!(
                 output,
                 if color == "always" {
-                    "\x1b[1;36mneedle.txt\x1b[0m\n  1: İ 中文 🦀 \x1b[1;33mNeedle\x1b[0m \x1b[1;33mneedle\x1b[0m\n"
+                    "needle.txt\n  1: İ 中文 🦀 \x1b[1;33mNeedle\x1b[0m \x1b[1;33mneedle\x1b[0m\n"
                 } else {
                     "needle.txt\n  1: İ 中文 🦀 Needle needle\n"
                 }
@@ -207,7 +207,7 @@ fn managed_rg_highlighting_uses_actual_patterns_and_matching_options() -> Result
                 .args(*args)
                 .arg("sample.txt")
                 .output()?;
-            let expected = format!("\x1b[1;36msample.txt\x1b[0m\n  1: {highlighted}\n");
+            let expected = format!("sample.txt\n  1: {highlighted}\n");
             let stdout = String::from_utf8(output.stdout)?;
             if !output.status.success() || stdout != expected {
                 failures.push(format!(
@@ -362,7 +362,7 @@ async fn managed_rg_match_ranges_handle_multiline_and_inverted_matches()
         )?;
         assert_eq!(
             String::from_utf8(output)?,
-            format!("\x1b[1;36msample.txt\x1b[0m\n{expected}"),
+            format!("sample.txt\n{expected}"),
             "{args:?}"
         );
     }

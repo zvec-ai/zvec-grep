@@ -7,6 +7,7 @@ use std::{
 };
 
 use crate::{ColorMode, output_path};
+use unicode_width::UnicodeWidthChar;
 
 #[derive(Clone, Copy)]
 pub(crate) struct StatusTheme {
@@ -33,10 +34,10 @@ impl StatusTheme {
         self.paint(value, "2")
     }
     pub fn path(self, value: &str) -> String {
-        self.paint(value, "36")
+        self.muted(value)
     }
     pub fn success(self, value: &str) -> String {
-        self.paint(value, "32")
+        self.paint(value, "38;2;111;207;145")
     }
     pub fn warning(self, value: &str) -> String {
         self.paint(value, "33")
@@ -44,12 +45,46 @@ impl StatusTheme {
     pub fn danger(self, value: &str) -> String {
         self.paint(value, "31")
     }
-    pub fn accent(self, value: &str) -> String {
-        self.paint(value, "1")
+    pub fn accent(value: &str) -> String {
+        value.to_owned()
     }
     pub fn muted(self, value: &str) -> String {
         self.paint(value, "2")
     }
+}
+
+pub(crate) fn clean(value: &str) -> String {
+    value
+        .chars()
+        .map(|value| if value.is_control() { ' ' } else { value })
+        .collect()
+}
+
+/// Bounds a plain (not ANSI-styled) line before applying colors. Counting each
+/// character conservatively also avoids splitting a wide CJK character.
+pub(crate) fn truncate(value: &str, columns: usize) -> String {
+    let mut used = 0;
+    value
+        .chars()
+        .map(|value| if value.is_control() { ' ' } else { value })
+        .take_while(|value| {
+            used += value.width().unwrap_or(0);
+            used <= columns
+        })
+        .collect()
+}
+
+pub(crate) fn unicode_supported() -> bool {
+    !cfg!(windows) && !matches!(std::env::var("TERM").as_deref(), Ok("linux" | "dumb"))
+}
+
+pub(crate) fn columns() -> usize {
+    crossterm::terminal::size()
+        .ok()
+        .map(|(columns, _)| usize::from(columns))
+        .or_else(|| std::env::var("COLUMNS").ok()?.parse().ok())
+        .unwrap_or(80)
+        .saturating_sub(1)
 }
 
 pub(crate) fn write_status_field(
@@ -120,6 +155,13 @@ pub(crate) fn format_count(value: impl Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_text_cannot_move_the_cursor_or_split_wide_characters() {
+        assert_eq!(clean("path\n\x1b[2J"), "path  [2J");
+        assert_eq!(truncate("索引 ready", 3), "索");
+        assert_eq!(truncate("索引 ready", 4), "索引");
+    }
 
     #[test]
     fn compact_paths_respect_directory_boundaries() {

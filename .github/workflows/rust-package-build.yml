@@ -188,7 +188,7 @@ jobs:
               apt-get install --yes --no-install-recommends libstdc++6 >/dev/null
               ldd /opt/zg/lib/libggml-cuda.so | grep -Eq "lib(cuda|cudart|cublas).*not found"
               /opt/zg/bin/zg --help >/dev/null
-              /opt/zg/bin/zg --rg -F "zvec-grep Rust rewrite" /workspace/rust/README.md >/dev/null
+              /opt/zg/bin/zg --rg -F "zvec-grep Rust workspace" /workspace/rust/README.md >/dev/null
             '
       - name: Build the Windows CPU/CUDA bundle
         if: inputs.target == 'win32-x64-msvc'

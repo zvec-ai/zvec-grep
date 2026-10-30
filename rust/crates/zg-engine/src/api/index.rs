@@ -25,6 +25,10 @@ pub mod options {
         pub root: Option<PathBuf>,
         /// Build from empty storage and replace the active index only after success.
         pub rebuild: bool,
+        /// Automatic refreshes require an existing enabled index instead of creating one.
+        /// This admission policy is runtime-only and never accepted from transport requests.
+        #[serde(skip)]
+        pub require_existing_index: bool,
         /// Resets saved scan rules before applying this request's updates.
         pub reset_paths: bool,
         /// Normalized watcher changes for a narrow incremental index operation.
@@ -515,6 +519,15 @@ pub mod progress {
     };
 
     use serde::{Deserialize, Serialize};
+
+    // These detail values identify lifecycle steps across producers and renderers.
+    // Keep their wire values stable; renderers choose the user-facing labels.
+    /// Detail identifying index storage optimization.
+    pub const DETAIL_FINALIZING_INDEX: &str = "finalizing index";
+    /// Detail identifying storage cleanup and manifest publication.
+    pub const DETAIL_SAVING_INDEX: &str = "saving index";
+    /// Detail identifying successful index completion.
+    pub const DETAIL_INDEXING_COMPLETE: &str = "indexing complete";
 
     /// Thread-safe callback used by the in-process indexing API.
     #[derive(Clone)]

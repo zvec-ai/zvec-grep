@@ -208,14 +208,14 @@ fn write_detail(
             .map(|route| format!("{}:{}", enum_label(route.mode), route.query))
             .collect::<Vec<_>>()
             .join(", ");
-        field(writer, theme, "Routes", &theme.accent(&routes))?;
+        field(writer, theme, "Routes", &StatusTheme::accent(&routes))?;
     }
     let coverage = match result.coverage {
-        ContextCoverage::RankedSample => theme.warning("ranked_sample"),
-        ContextCoverage::RgExhaustive => theme.success("rg_exhaustive"),
-        ContextCoverage::RgTruncated => theme.warning("rg_truncated"),
+        ContextCoverage::RankedSample => "ranked_sample",
+        ContextCoverage::RgExhaustive => "rg_exhaustive",
+        ContextCoverage::RgTruncated => "rg_truncated",
     };
-    field(writer, theme, "Coverage", &coverage)?;
+    field(writer, theme, "Coverage", coverage)?;
     if grouped {
         field(
             writer,
@@ -311,13 +311,13 @@ fn write_detail_items(
             writeln!(
                 writer,
                 "\n  {} {} matchedBy={}{score}",
-                theme.accent(&format!("#{}", item.rank)),
+                StatusTheme::accent(&format!("#{}", item.rank)),
                 summary(item),
-                theme.accent(matched_by(item.matched_by))
+                StatusTheme::accent(matched_by(item.matched_by))
             )?;
             let status = match item.status {
-                ContextItemStatus::Fresh => theme.success("fresh"),
-                ContextItemStatus::PossiblyStale => theme.warning("possibly_stale"),
+                ContextItemStatus::Fresh => "fresh",
+                ContextItemStatus::PossiblyStale => "possibly_stale",
             };
             writeln!(
                 writer,
@@ -331,7 +331,7 @@ fn write_detail_items(
                     writer,
                     "  {}: {}",
                     theme.label("Matched"),
-                    theme.accent(&range_label(range))
+                    StatusTheme::accent(&range_label(range))
                 )?;
             }
             for line in metadata_lines(item) {
