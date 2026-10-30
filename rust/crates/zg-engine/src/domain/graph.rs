@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::metadata::SymbolType;
+use super::source::TextRange;
 
 /// Kinds produced by the extraction layer.
 ///
@@ -84,10 +85,9 @@ pub(crate) struct FileGraphNode {
     /// `scope::name` breadcrumb joined with `::`, or the bare name.
     pub qualified_name: String,
     pub language: String,
-    pub start_line: usize,
-    pub end_line: usize,
-    pub start_column: usize,
-    pub end_column: usize,
+    /// Extent of the entity in its source, absent when the entity carries no
+    /// text range (a whole-file or byte-only range has no coordinates).
+    pub range: Option<TextRange>,
     pub signature: Option<String>,
     pub doc: Option<String>,
     pub arity: Option<usize>,

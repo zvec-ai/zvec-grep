@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use crate::domain::{
     EdgeProvenance, Entity, EntityMetadata, FileEdge, FileFormat, FileGraphNode, FileGraphResult,
-    GraphEdgeKind, PendingRef, PendingRefStatus, Range, SymbolType, TextRange,
+    GraphEdgeKind, PendingRef, PendingRefStatus, Range, SymbolType,
 };
 use crate::extraction::{FILE_SCOPE_INDEX, PartitionedGraph};
 
@@ -184,10 +184,7 @@ fn entity_node(entity: &Entity, language: FileFormat) -> FileGraphNode {
         name,
         qualified_name,
         language: language.as_str().to_owned(),
-        start_line: range.as_ref().map_or(0, TextRange::start_line),
-        end_line: range.as_ref().map_or(0, TextRange::end_line),
-        start_column: range.as_ref().map_or(0, TextRange::start_byte_column),
-        end_column: range.as_ref().map_or(0, TextRange::end_byte_column),
+        range,
         signature,
         doc,
         arity,
