@@ -15,7 +15,7 @@ pub(crate) fn is_llama(reference: &str) -> bool {
     )
 }
 
-fn is_transformers(reference: &str) -> bool {
+pub(super) fn is_transformers(reference: &str) -> bool {
     matches!(
         get_embedding_model_catalog_entry(reference),
         Some(EmbeddingCatalogEntry::Transformers(_))

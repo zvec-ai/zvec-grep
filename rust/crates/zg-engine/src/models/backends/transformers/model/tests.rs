@@ -52,23 +52,7 @@ fn maps_devices_to_native_rust_execution_providers() {
 }
 
 #[test]
-fn coreml_uses_one_physical_session_for_all_user_concurrency() {
-    assert_eq!(
-        physical_session_limit(TransformersExecutionProvider::CoreMl, 1),
-        1
-    );
-    assert_eq!(
-        physical_session_limit(TransformersExecutionProvider::CoreMl, 4),
-        1
-    );
-    assert_eq!(
-        physical_session_limit(TransformersExecutionProvider::Cpu, 4),
-        4
-    );
-}
-
-#[test]
-fn coreml_batch_merge_repads_rows_and_preserves_indexes() {
+fn batch_merge_repads_rows_and_preserves_indexes() {
     let first = PreparedBatch {
         input_ids: vec![101, 102],
         attention_mask: vec![1, 1],
@@ -241,14 +225,7 @@ fn concurrent_requests_share_tokenizers_without_changing_configuration() {
             .max_length,
         4
     );
-    assert!(matches!(
-        tokenizers
-            .inputs
-            .get_padding()
-            .expect("input padding")
-            .strategy,
-        PaddingStrategy::BatchLongest
-    ));
+    assert!(tokenizers.inputs.get_padding().is_none());
 }
 
 #[test]
@@ -364,7 +341,7 @@ async fn cached_minilm_runs_real_onnx_inference() {
         crate::models::runtime::ModelComputeRuntime::shared(),
     );
     let loaded = model
-        .ensure_loaded(None, None)
+        .ensure_loaded(None, None, 1, None)
         .await
         .expect("download and load cached ONNX model");
     let prepared = prepare_batch(
@@ -470,30 +447,43 @@ async fn cached_minilm_runs_real_onnx_inference() {
         assert!((actual - expected).abs() < 1e-5);
     }
 
-    let barrier = Arc::new(std::sync::Barrier::new(2));
-    let first_loaded = Arc::clone(&loaded);
-    let first_barrier = Arc::clone(&barrier);
-    let first = model.compute_runtime.run(move || {
-        first_loaded.sessions.run(2, |_session| {
-            first_barrier.wait();
-            Ok(())
-        })
-    });
-    let second_loaded = Arc::clone(&loaded);
-    let second = model.compute_runtime.run(move || {
-        second_loaded.sessions.run(2, |_session| {
-            barrier.wait();
-            Ok(())
-        })
-    });
-    let (first, second) = tokio::join!(first, second);
-    first
-        .expect("first compute task")
-        .expect("first pooled session");
-    second
-        .expect("second compute task")
-        .expect("second pooled session");
-    assert_eq!(lock_std_mutex(&loaded.sessions.state).sessions.len(), 2);
+    assert_eq!(loaded.sessions.configuration(), (1, 1));
+    assert!(loaded.sessions.largest_batch() <= entry.max_batch_size);
+    let inputs = [vec![Content::Text(
+        "concurrent requests share one session".into(),
+    )]];
+    let results = futures_util::future::join_all(
+        (0..4).map(|_| model.embed(&inputs, EmbeddingOptions::default())),
+    )
+    .await;
+    assert!(results.into_iter().all(|result| result.is_ok()));
+    assert_eq!(loaded.sessions.configuration(), (1, 1));
+    for budget in [4, 1] {
+        model
+            .embed(
+                &inputs,
+                EmbeddingOptions {
+                    purpose: EmbeddingPurpose::Document,
+                    execution_concurrency: budget,
+                    ..EmbeddingOptions::default()
+                },
+            )
+            .await
+            .expect("new CPU budget");
+        let configuration = loaded.sessions.configuration();
+        assert_eq!(configuration.0, policy::cpu_threads(budget));
+        model
+            .embed(
+                &inputs,
+                EmbeddingOptions {
+                    purpose: EmbeddingPurpose::Query,
+                    ..EmbeddingOptions::default()
+                },
+            )
+            .await
+            .expect("query reuses configured session");
+        assert_eq!(loaded.sessions.configuration(), configuration);
+    }
 }
 
 #[cfg(all(target_os = "linux", feature = "cuda"))]
@@ -524,16 +514,54 @@ async fn cached_minilm_uses_cuda() {
 
     assert_eq!(result.vectors[0].len(), entry.dimension);
     assert!(result.vectors[0].iter().all(|value| value.is_finite()));
-    let loaded = model.state.lock().await;
-    let provider = loaded
-        .as_ref()
-        .map(|loaded| loaded.sessions.provider())
-        .expect("loaded model");
+    let loaded = Arc::clone(lock_std_mutex(&model.state).as_ref().expect("loaded model"));
+    let provider = loaded.sessions.provider();
     assert_eq!(
         provider,
         TransformersExecutionProvider::Cuda,
         "CUDA request unexpectedly fell back to CPU"
     );
+    let inputs = (0..4)
+        .map(|i| {
+            vec![Content::Text(format!(
+                "find relevant code for token cache {i}"
+            ))]
+        })
+        .collect::<Vec<_>>();
+    let reference = model
+        .embed(&inputs, EmbeddingOptions::default())
+        .await
+        .expect("reference batch");
+    for _ in 0..4 {
+        let results = futures_util::future::join_all((0..4).map(|_| {
+            model.embed(
+                &inputs,
+                EmbeddingOptions {
+                    execution_concurrency: 4,
+                    ..EmbeddingOptions::default()
+                },
+            )
+        }))
+        .await;
+        for result in results {
+            let result = result.expect("merged CUDA batch");
+            for (actual, expected) in result.vectors.iter().zip(&reference.vectors) {
+                assert!(
+                    actual
+                        .iter()
+                        .zip(expected)
+                        .all(|(a, b)| (a - b).abs() < 1e-5)
+                );
+            }
+        }
+    }
+    assert_eq!(
+        loaded.sessions.provider(),
+        TransformersExecutionProvider::Cuda
+    );
+    assert_eq!(loaded.sessions.configuration(), (1, 1));
+    assert!(loaded.sessions.largest_batch() > entry.max_batch_size);
+    assert!(loaded.sessions.largest_batch() <= 16);
 }
 
 #[cfg(target_os = "macos")]
@@ -572,7 +600,7 @@ async fn cached_minilm_routes_metal_to_cpu_with_warning() {
         .await
         .expect("ORT CPU inference");
     assert_eq!(result.vectors[0].len(), entry.dimension);
-    let loaded = model.state.lock().await;
+    let loaded = lock_std_mutex(&model.state);
     let provider = loaded
         .as_ref()
         .map(|loaded| loaded.sessions.provider())
