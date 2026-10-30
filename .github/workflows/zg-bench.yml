@@ -1,26 +1,64 @@
 name: ZG Bench
-run-name: "ZG Bench · PR #${{ github.event.issue.number || inputs.pr_number }}"
+run-name: "${{ inputs.benchmark == 'browse-comp-plus' && format('BrowseComp-Plus / Rust {0} / OpenCode + Qwen3.8 Max / local Potion / {1}', inputs.candidate_ref, inputs.suite) || format('ZG Bench · PR #{0}', github.event.issue.number || inputs.pr_number) }}"
 
 on:
   issue_comment:
     types: [created]
   workflow_dispatch:
     inputs:
+      benchmark:
+        description: Benchmark to run manually
+        default: retrieval
+        type: choice
+        options: [retrieval, browse-comp-plus]
       pr_number:
-        description: Open PR number in this repository
-        required: true
+        description: Open PR number (required for retrieval; unused by BrowseComp-Plus)
+        required: false
         type: string
       run_e2e:
         description: Also run e2e (disabled by default)
         default: false
         type: boolean
+      candidate_ref:
+        description: BrowseComp-Plus trusted Rust candidate branch, tag, or commit
+        default: main
+        type: string
+      suite:
+        description: BrowseComp-Plus paired suite
+        default: iteration
+        type: choice
+        options: [iteration, ci, smoke]
+      parallel_cases:
+        description: BrowseComp-Plus maximum concurrent cases
+        default: "2"
+        type: choice
+        options: ["1", "2", "5"]
+      prepared_run_id:
+        description: BrowseComp-Plus optional prior run with the exact same preparation
+        type: string
 
 permissions: {}
 
 jobs:
+  browse-comp-plus:
+    if: github.event_name == 'workflow_dispatch' && inputs.benchmark == 'browse-comp-plus'
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/browse-comp-plus.yml
+    with:
+      candidate_ref: ${{ inputs.candidate_ref }}
+      suite: ${{ inputs.suite }}
+      parallel_cases: ${{ inputs.parallel_cases }}
+      prepared_run_id: ${{ inputs.prepared_run_id }}
+    secrets:
+      QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
+      GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
   request:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && inputs.benchmark != 'browse-comp-plus') ||
       (github.event.issue.pull_request &&
        github.event.comment.user.type != 'Bot' &&
        contains(github.event.comment.body, '@zg-bench'))

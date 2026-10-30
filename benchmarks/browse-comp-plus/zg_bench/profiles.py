@@ -1,161 +1,220 @@
 from __future__ import annotations
 
-import json
 import os
 import time
 from pathlib import Path
 from typing import Any
 
 from .artifacts import (
-    atomic_write_text,
     fingerprint,
     read_json,
     sha256_file,
     utc_now,
     write_json,
 )
-from .config import BENCHMARK_ROOT, BenchmarkConfig
+from .config import BenchmarkConfig
 from .corpus import workspace_root
 from .process import inherited_environment, resolve_executable, run_command
 
-
-CONFIG_START = "# ZVEC_GREP_START"
-CONFIG_END = "# ZVEC_GREP_END"
 AGENTS_START = "<!-- ZVEC_GREP_START -->"
-AGENTS_END = "<!-- ZVEC_GREP_END -->"
 
 
 def server_url(config: BenchmarkConfig) -> str:
     return f"http://127.0.0.1:{config.zvec_grep.server_port}/mcp"
 
 
-def server_environment(
-    config: BenchmarkConfig, artifacts: Path
-) -> dict[str, str]:
+def server_environment(config: BenchmarkConfig, artifacts: Path) -> dict[str, str]:
     environment = inherited_environment()
     environment.update(
         {
-            "ZVEC_GREP_HOME": str(
-                (artifacts / "runtime" / "zvec-home").resolve()
-            ),
+            "ZVEC_GREP_HOME": str((artifacts / "runtime" / "zvec-home").resolve()),
+            "ZVEC_GREP_MODEL_CACHE": str((artifacts / "models").resolve()),
             "ZVEC_GREP_SERVER_URL": server_url(config),
         }
     )
     return environment
 
 
-def _link_if_present(source: Path, target: Path) -> None:
-    if not source.exists():
-        return
-    if target.is_symlink() and target.resolve() == source.resolve():
-        return
-    if target.exists() or target.is_symlink():
-        raise RuntimeError(f"refusing to replace profile path: {target}")
-    target.symlink_to(source, target_is_directory=source.is_dir())
+def model_base_url() -> str:
+    from urllib.parse import urlparse
+
+    value = os.environ.get("BROWSE_COMP_MODEL_BASE_URL", "").strip().rstrip("/")
+    parsed = urlparse(value)
+    if not parsed.hostname or parsed.scheme not in {"https", "http"}:
+        raise ValueError(
+            "BROWSE_COMP_MODEL_BASE_URL must be an OpenAI-compatible base URL"
+        )
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError(
+            "model base URL must not contain credentials, query, or fragment"
+        )
+    if parsed.scheme != "https" and parsed.hostname not in {
+        "127.0.0.1",
+        "localhost",
+        "::1",
+    }:
+        raise ValueError("model base URL requires HTTPS (except local test fixtures)")
+    return value
 
 
-def _write_clean_config(path: Path, *, trusted_project: Path) -> None:
-    atomic_write_text(
-        path,
-        "\n".join(
-            (
-                'web_search = "disabled"',
-                'sandbox_mode = "workspace-write"',
-                "allow_login_shell = false",
-                "analytics.enabled = false",
-                "feedback.enabled = false",
-                'history.persistence = "none"',
-                "",
-                "[sandbox_workspace_write]",
-                "network_access = true",
-                "",
-                "[features.network_proxy]",
-                "enabled = true",
-                "allow_local_binding = true",
-                'domains = { "127.0.0.1" = "allow" }',
-                "",
-                f"[projects.{json.dumps(str(trusted_project))}]",
-                'trust_level = "trusted"',
-                "",
-            )
-        ),
-    )
-
-
-def _authentication_status(codex: Path, home: Path) -> str:
-    environment = inherited_environment()
+def opencode_environment(home: Path) -> dict[str, str]:
+    # Do not inherit user providers, agents, plugins, skills, or config overrides.
+    allowed = {
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "NO_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "no_proxy",
+        "OPENAI_API_KEY",
+    }
+    environment = {key: value for key, value in os.environ.items() if key in allowed}
     environment.update(
         {
-            "CODEX_HOME": str(home),
             "HOME": str(home),
+            "OPENCODE_CONFIG": str(home / "opencode.json"),
+            "OPENCODE_CONFIG_DIR": str(home),
+            "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
+            "OPENCODE_DISABLE_EXTERNAL_SKILLS": "true",
+            "OPENCODE_DISABLE_CLAUDE_CODE": "true",
+            "OPENCODE_DISABLE_DEFAULT_PLUGINS": "true",
+            "OPENCODE_DISABLE_MODELS_FETCH": "true",
+            "OPENCODE_DISABLE_AUTOUPDATE": "true",
+            "XDG_CONFIG_HOME": str(home / "config"),
+            "XDG_DATA_HOME": str(home / "data"),
+            "XDG_STATE_HOME": str(home / "state"),
+            "XDG_CACHE_HOME": str(home / "cache"),
             "NO_COLOR": "1",
         }
     )
-    result = run_command(
-        [codex, "login", "status"],
-        env=environment,
-        timeout=30,
+    return environment
+
+
+def opencode_configuration(
+    config: BenchmarkConfig, *, judge: bool = False
+) -> dict[str, Any]:
+    provider, separator, model = config.run.model.partition("/")
+    if provider != "custom-openai" or not separator or not model:
+        raise ValueError("OpenCode model must use custom-openai/<model-id>")
+    # Both profiles expose the same local tools; only Treatment adds zvec-grep.
+    # No delegated sessions: all model usage belongs to this single session.
+    permission = (
+        {"*": "deny"}
+        if judge
+        else {
+            "*": "allow",
+            "websearch": "deny",
+            "webfetch": "deny",
+            "task": "deny",
+            "external_directory": "deny",
+            "question": "deny",
+            "skill": "deny",
+        }
     )
-    if not result.ok:
-        detail = result.stderr.strip() or result.stdout.strip()
-        raise RuntimeError(
-            f"Codex authentication is unavailable in profile {home}: "
-            f"{detail or 'login status failed'}"
-        )
-    return next(
-        (
-            line.strip()
-            for line in (*result.stdout.splitlines(), *result.stderr.splitlines())
-            if line.lower().startswith("logged in")
-        ),
-        "authenticated",
-    )
+    agent = {
+        "temperature": config.run.temperature,
+        "options": {"seed": config.run.seed},
+        "permission": permission.copy(),
+    }
+    return {
+        "$schema": "https://opencode.ai/config.json",
+        "model": config.run.model,
+        "small_model": config.run.model,
+        "enabled_providers": [provider],
+        "provider": {
+            provider: {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "BrowseComp-Plus Qwen",
+                "options": {
+                    "apiKey": "{env:OPENAI_API_KEY}",
+                    "baseURL": model_base_url(),
+                },
+                "models": {
+                    model: {
+                        "name": "Qwen3.8 Max",
+                        "temperature": True,
+                        "reasoning": True,
+                        "interleaved": {"field": "reasoning_content"},
+                        "limit": {
+                            "context": config.run.context_limit,
+                            "output": config.run.max_output_tokens,
+                        },
+                        "options": {
+                            "enable_thinking": True,
+                            "reasoningEffort": config.run.reasoning_effort,
+                        },
+                    }
+                },
+            }
+        },
+        "agent": {
+            name: agent.copy()
+            for name in (
+                "build",
+                "plan",
+                "general",
+                "explore",
+                "compaction",
+                "title",
+                "summary",
+            )
+        },
+        "permission": permission,
+        "instructions": [],
+        "autoupdate": False,
+        "share": "disabled",
+        "snapshot": False,
+        "lsp": False,
+        "formatter": False,
+        # No background compaction calls missing from the trial trace.
+        "compaction": {"auto": False, "prune": False},
+    }
+
+
+def prepare_judge_home(config: BenchmarkConfig, artifacts: Path, home: Path) -> Path:
+    del artifacts
+    home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    home.chmod(0o700)
+    write_json(home / "opencode.json", opencode_configuration(config, judge=True))
+    return home
 
 
 def prepare_profiles(
     config: BenchmarkConfig,
     artifacts: Path,
     *,
-    codex_bin: str = "codex",
-    source_codex_home: Path | None = None,
+    opencode_bin: str = "opencode",
     profiles_root: Path,
     manifest_path: Path,
 ) -> Path:
     started = time.monotonic()
-    codex = resolve_executable(codex_bin)
+    opencode = resolve_executable(opencode_bin)
     zg = resolve_executable("zg")
-    if codex is None:
-        raise RuntimeError(f"Codex executable not found: {codex_bin}")
-    if zg is None:
-        raise RuntimeError("zvec-grep executable not found: zg")
-
-    source_home = (
-        (
-            source_codex_home
-            or Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
-        )
-        .expanduser()
-        .resolve()
-    )
-    root = profiles_root
-    baseline = root / "baseline" / "codex-home"
-    treatment = root / "zvec-grep" / "codex-home"
-    trusted_project = BENCHMARK_ROOT.parents[1].resolve()
+    if opencode is None or zg is None:
+        raise RuntimeError("OpenCode and zvec-grep must be available")
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise RuntimeError("OPENAI_API_KEY is required for the Qwen provider")
+    baseline = profiles_root / "baseline" / "opencode-home"
+    treatment = profiles_root / "zvec-grep" / "opencode-home"
     for home in (baseline, treatment):
-        home.mkdir(parents=True, exist_ok=True)
-        _write_clean_config(
-            home / "config.toml",
-            trusted_project=trusted_project,
-        )
+        home.mkdir(parents=True, exist_ok=True, mode=0o700)
+        home.chmod(0o700)
+        write_json(home / "opencode.json", opencode_configuration(config))
         (home / "AGENTS.md").unlink(missing_ok=True)
-        _link_if_present(source_home / "auth.json", home / "auth.json")
-    environment = server_environment(config, artifacts)
+    environment = opencode_environment(treatment)
+    runtime = server_environment(config, artifacts)
     environment.update(
-        {
-            "CODEX_HOME": str(treatment),
-            "HOME": str(treatment),
-            "NO_COLOR": "1",
-        }
+        {name: runtime[name] for name in ("ZVEC_GREP_HOME", "ZVEC_GREP_SERVER_URL")}
     )
     install_started = time.monotonic()
     install = run_command(
@@ -163,7 +222,7 @@ def prepare_profiles(
             zg,
             "--install",
             "--target",
-            "codex",
+            "opencode",
             "--mcp-transport",
             "http",
             "--mcp-tool-timeout",
@@ -177,64 +236,54 @@ def prepare_profiles(
     install_wall_seconds = time.monotonic() - install_started
     if not install.ok:
         raise RuntimeError(install.stderr.strip() or install.stdout.strip())
-
-    baseline_config = (baseline / "config.toml").read_text(encoding="utf-8")
-    baseline_agents = (
-        (baseline / "AGENTS.md").read_text(encoding="utf-8")
-        if (baseline / "AGENTS.md").is_file()
-        else ""
-    )
-    treatment_config = (treatment / "config.toml").read_text(encoding="utf-8")
-    treatment_agents = (
-        (treatment / "AGENTS.md").read_text(encoding="utf-8")
-        if (treatment / "AGENTS.md").is_file()
-        else ""
-    )
-    if CONFIG_START in baseline_config or AGENTS_START in baseline_agents:
+    baseline_config = read_json(baseline / "opencode.json")
+    treatment_config = read_json(treatment / "opencode.json")
+    guidance = treatment / "AGENTS.md"
+    if baseline_config.get("mcp") or (baseline / "AGENTS.md").exists():
         raise RuntimeError("baseline profile contains zvec-grep integration")
-    if CONFIG_START not in treatment_config or AGENTS_START not in treatment_agents:
-        raise RuntimeError("treatment profile is missing zvec-grep integration")
-
-    authentication = {
-        "baseline": _authentication_status(codex, baseline),
-        "zvec-grep": _authentication_status(codex, treatment),
+    if not guidance.is_file() or AGENTS_START not in guidance.read_text():
+        raise RuntimeError("treatment profile is missing zvec-grep guidance")
+    expected_mcp = {
+        "type": "remote",
+        "url": server_url(config),
+        "enabled": True,
+        "timeout": config.zvec_grep.mcp_tool_timeout_seconds * 1000,
+        "oauth": False,
     }
-    baseline_config_path = baseline / "config.toml"
-    treatment_config_path = treatment / "config.toml"
-    treatment_agents_path = treatment / "AGENTS.md"
+    if treatment_config.get("mcp", {}).get("zvec_grep") != expected_mcp:
+        raise RuntimeError("treatment MCP configuration does not match the benchmark")
+    # Explicitly include only installed guidance, even with project rules disabled.
+    treatment_config["instructions"] = [str(guidance.resolve())]
+    write_json(treatment / "opencode.json", treatment_config)
     build = zvec_grep_build_identity(zg)
-    files: dict[str, str | None] = {
-        "baseline_config_sha256": sha256_file(baseline_config_path),
+    files = {
+        "baseline_config_sha256": sha256_file(baseline / "opencode.json"),
         "baseline_agents_sha256": None,
-        "treatment_config_sha256": sha256_file(treatment_config_path),
-        "treatment_agents_sha256": sha256_file(treatment_agents_path),
+        "treatment_config_sha256": sha256_file(treatment / "opencode.json"),
+        "treatment_agents_sha256": sha256_file(guidance),
     }
-    profile_fingerprint = fingerprint(
-        [
-            build["fingerprint"],
-            *(files[key] or "<absent>" for key in sorted(files)),
-        ]
-    )
     manifest = {
         "stage": "profiles",
         "generated_at": utc_now(),
-        "codex_bin": str(codex),
-        "source_codex_home": str(source_home),
+        "opencode_bin": str(opencode),
         "baseline_home": str(baseline.resolve()),
         "treatment_home": str(treatment.resolve()),
         "zvec_grep_home": environment["ZVEC_GREP_HOME"],
         "zvec_grep_server_url": environment["ZVEC_GREP_SERVER_URL"],
         "zvec_grep_build": build,
-        "authentication": authentication,
+        "authentication": {
+            "baseline": "provider API key",
+            "zvec-grep": "provider API key",
+        },
         "files": files,
-        "fingerprint": profile_fingerprint,
+        "fingerprint": fingerprint(
+            [build["fingerprint"], *(files[key] or "<absent>" for key in sorted(files))]
+        ),
         "baseline": {"zvec_mcp": False, "zvec_guidance": False},
         "zvec-grep": {
             "zvec_mcp": True,
             "zvec_guidance": True,
-            "install_command": (
-                "zg --install --target codex --mcp-transport http --yes"
-            ),
+            "install_command": "zg --install --target opencode --mcp-transport http --yes",
         },
         "install_stdout": install.stdout,
         "install_stderr": install.stderr,
@@ -283,11 +332,11 @@ def validate_profiles(manifest_path: Path) -> dict[str, Any]:
     treatment = Path(manifest["treatment_home"])
     baseline_agents = baseline / "AGENTS.md"
     actual_files: dict[str, str | None] = {
-        "baseline_config_sha256": sha256_file(baseline / "config.toml"),
+        "baseline_config_sha256": sha256_file(baseline / "opencode.json"),
         "baseline_agents_sha256": (
             sha256_file(baseline_agents) if baseline_agents.is_file() else None
         ),
-        "treatment_config_sha256": sha256_file(treatment / "config.toml"),
+        "treatment_config_sha256": sha256_file(treatment / "opencode.json"),
         "treatment_agents_sha256": sha256_file(treatment / "AGENTS.md"),
     }
     if manifest.get("files") != actual_files:

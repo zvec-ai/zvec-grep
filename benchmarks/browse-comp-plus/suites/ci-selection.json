@@ -1,0 +1,107 @@
+{
+  "version": 2,
+  "dataset_repo": "Tevatron/browsecomp-plus",
+  "dataset_revision": "144cff8e35b5eaef7e526346aa60774a9deb941f",
+  "corpus_revision": "b27b02bc3e45511b8b82a13e6f90ce761df726f6",
+  "decrypted_queries_sha256": "bb413e2403aa436c72efc7299b8e7d969891f7c9c3feeef9bb751974fd6f6236",
+  "dataset_query_count": 830,
+  "seed": "browsecomp-plus-ci-v1",
+  "ranking": "ascending SHA256(UTF8(revision + NUL + seed + NUL + query_id))",
+  "selection_rule": "first 5 ranks, restoring the original five-case daily suite without substitutions",
+  "selection_inputs": [
+    "pinned query IDs for ranking",
+    "query wording and annotated document IDs for descriptive coverage review"
+  ],
+  "not_selection_inputs": [
+    "agent answers",
+    "judgements",
+    "zg adoption",
+    "tokens",
+    "latency"
+  ],
+  "cases": [
+    {
+      "query_id": "628",
+      "rank": 1,
+      "rank_sha256": "009c7a4f860aa1d6f36251bc1b90253e79f9c057056f11b6ddd50c74d7fd79b0",
+      "gold_docids": ["4257", "48195", "4965", "58431", "93131"],
+      "evidence_docids": ["4257", "48195", "4965", "58431", "93131", "93185"],
+      "gold_document_count": 5,
+      "evidence_document_count": 6,
+      "coverage_tags": [
+        "filmography",
+        "person-work-links",
+        "role-disambiguation"
+      ]
+    },
+    {
+      "query_id": "700",
+      "rank": 2,
+      "rank_sha256": "01ae20bd4050168278460b980d64cbc662c7b62195079d0930bd3216a95c6974",
+      "gold_docids": ["35635", "51630", "58893", "73054"],
+      "evidence_docids": [
+        "35635",
+        "51630",
+        "58893",
+        "64785",
+        "73054",
+        "75767",
+        "78615"
+      ],
+      "gold_document_count": 4,
+      "evidence_document_count": 7,
+      "coverage_tags": [
+        "corporate-history",
+        "game-credits",
+        "character-description"
+      ]
+    },
+    {
+      "query_id": "966",
+      "rank": 3,
+      "rank_sha256": "0244b97cecc4a0f368dc111f7809ac01d5d4420a21213e97b8260a2c60fd4386",
+      "gold_docids": ["17196", "22518", "52450", "70683", "80078", "99085"],
+      "evidence_docids": [
+        "17196",
+        "22518",
+        "52450",
+        "57493",
+        "70683",
+        "80078",
+        "99085"
+      ],
+      "gold_document_count": 6,
+      "evidence_document_count": 7,
+      "coverage_tags": [
+        "historical-chronology",
+        "site-identity",
+        "cross-source-verification"
+      ]
+    },
+    {
+      "query_id": "827",
+      "rank": 4,
+      "rank_sha256": "024880c5e7d0807e4734e4877a5bfe5a443de35b226287fa5872ba304d004de3",
+      "gold_docids": ["52689"],
+      "evidence_docids": ["10142", "32072", "52689", "70725", "72940", "8330"],
+      "gold_document_count": 1,
+      "evidence_document_count": 6,
+      "coverage_tags": [
+        "genealogy",
+        "book-author-links",
+        "namesake-disambiguation"
+      ]
+    },
+    {
+      "query_id": "241",
+      "rank": 5,
+      "rank_sha256": "028e843578620e8f3bb7bee69d20c77af39d21e914b6045fe3514ccd2c51d43a",
+      "gold_docids": ["12810", "51950", "5670", "6621", "68526", "73451"],
+      "evidence_docids": ["12810", "51950", "5670", "6621", "68526", "73451"],
+      "gold_document_count": 6,
+      "evidence_document_count": 6,
+      "coverage_tags": ["biography", "family-history", "letter-evidence"]
+    }
+  ],
+  "suite_size_decision": "User requested restoring the original five cases after the ten-case experiment was too slow; the original ranking and case identities are unchanged."
+}

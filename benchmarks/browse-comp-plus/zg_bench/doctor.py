@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import platform
 import sys
 from dataclasses import asdict, dataclass
@@ -34,23 +35,22 @@ def _command(name: str, executable: str, args: list[str]) -> Check:
     return Check(name, result.ok, f"{detail} ({resolved})")
 
 
-def _authentication(codex_bin: str) -> Check:
-    executable = resolve_executable(codex_bin)
-    if executable is None:
-        return Check("Codex authentication", False, "Codex was not found")
-    result = run_command([executable, "login", "status"], timeout=30)
-    status = next(
-        (
-            line.strip()
-            for line in (*result.stdout.splitlines(), *result.stderr.splitlines())
-            if line.lower().startswith("logged in")
-        ),
-        "authenticated",
-    )
+def _authentication(opencode_bin: str) -> Check:
+    from .profiles import model_base_url
+
+    if resolve_executable(opencode_bin) is None:
+        return Check("OpenCode provider", False, "OpenCode was not found")
+    try:
+        model_base_url()
+    except ValueError as error:
+        return Check("OpenCode provider", False, str(error))
+    ready = bool(os.environ.get("OPENAI_API_KEY"))
     return Check(
-        "Codex authentication",
-        result.ok,
-        status if result.ok else "run 'codex login' before the benchmark",
+        "OpenCode provider",
+        ready,
+        "API key and base URL configured; model access is checked by preflight"
+        if ready
+        else "set OPENAI_API_KEY for the Qwen endpoint",
     )
 
 
@@ -70,7 +70,7 @@ def _zvec_version() -> Check:
 def run_doctor(
     config: BenchmarkConfig,
     *,
-    codex_bin: str = "codex",
+    opencode_bin: str = "opencode",
 ) -> dict[str, Any]:
     version = sys.version_info
     system = platform.system()
@@ -86,8 +86,8 @@ def run_doctor(
             f"{system} {platform.machine()}; native macOS and Linux are supported",
         ),
         _zvec_version(),
-        _command("Codex", codex_bin, ["--version"]),
-        _authentication(codex_bin),
+        _command("OpenCode", opencode_bin, ["--version"]),
+        _authentication(opencode_bin),
     ]
     report = {
         "stage": "doctor",

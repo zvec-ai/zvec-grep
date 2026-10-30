@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import subprocess
+import math
 import tempfile
 import time
 from pathlib import Path
@@ -18,14 +18,16 @@ from .artifacts import (
     utc_now,
     write_json,
 )
+from .config import BenchmarkConfig, load_config
 from .console import Console
 from .corpus import workspace_root
 from .dataset import load_queries
 from .models import PROFILES, TraceSummary
-from .process import inherited_environment, resolve_executable, run_command
+from .opencode import run_prompt
+from .process import resolve_executable, run_command
+from .profiles import model_base_url, prepare_judge_home
 from .report import generate_report
 from .trace import parse_trace
-
 
 JUDGE_PROMPT = """
 Judge whether the candidate response to the question is correct based only on
@@ -99,13 +101,12 @@ USAGE_AUDIT_SCHEMA: dict[str, Any] = {
     },
 }
 
-USAGE_AUDIT_PROMPT_SHA256 = hashlib.sha256(
-    USAGE_AUDIT_PROMPT.encode()
-).hexdigest()
+USAGE_AUDIT_PROMPT_SHA256 = hashlib.sha256(USAGE_AUDIT_PROMPT.encode()).hexdigest()
 USAGE_AUDIT_SCHEMA_SHA256 = hashlib.sha256(
     json.dumps(USAGE_AUDIT_SCHEMA, sort_keys=True, separators=(",", ":")).encode()
 ).hexdigest()
 EVALUATION_SOURCE_SHA256 = sha256_file(Path(__file__))
+EVALUATOR_TIMEOUT_SECONDS = 900
 
 
 def _eligible_trial_pairs(run_root: Path) -> list[tuple[str, int]]:
@@ -122,9 +123,7 @@ def _eligible_trial_pairs(run_root: Path) -> list[tuple[str, int]]:
             )
         for trial in pair["trials"]:
             if trial.get("eligible") is True:
-                trial_pairs.append(
-                    (query_id, int(trial["trial_index"]))
-                )
+                trial_pairs.append((query_id, int(trial["trial_index"])))
     return trial_pairs
 
 
@@ -151,10 +150,7 @@ def export_official(run_root: Path) -> Path:
                 name = str(call.get("name", "unknown"))
                 counts[name] = counts.get(name, 0) + 1
             write_json(
-                output_root
-                / profile
-                / query_id
-                / f"trial-{trial_index:03d}.json",
+                output_root / profile / query_id / f"trial-{trial_index:03d}.json",
                 {
                     "query_id": query_id,
                     "trial_index": trial_index,
@@ -185,9 +181,7 @@ def _judge_result_path(
     )
 
 
-def _usage_audit_result_path(
-    run_root: Path, query_id: str, trial_index: int
-) -> Path:
+def _usage_audit_result_path(run_root: Path, query_id: str, trial_index: int) -> Path:
     return (
         run_root
         / "evaluation"
@@ -214,6 +208,20 @@ def _candidate_sha256(
     return hashlib.sha256(candidate.encode()).hexdigest()
 
 
+def _case_result_sha256(
+    run_root: Path, profile: str, query_id: str, trial_index: int
+) -> str:
+    return sha256_file(
+        run_root
+        / "cases"
+        / query_id
+        / profile
+        / "trials"
+        / f"trial-{trial_index:03d}"
+        / "result.json"
+    )
+
+
 def _completed_judgement(
     path: Path,
     *,
@@ -232,10 +240,11 @@ def _completed_judgement(
         and result.get("trial_index") == trial_index
         and result.get("judge_prompt_sha256") == JUDGE_PROMPT_SHA256
         and result.get("judge_schema_sha256") == JUDGE_SCHEMA_SHA256
-        and result.get("evaluation_source_sha256")
-        == EVALUATION_SOURCE_SHA256
+        and result.get("evaluation_source_sha256") == EVALUATION_SOURCE_SHA256
         and result.get("candidate_sha256")
         == _candidate_sha256(run_root, profile, query_id, trial_index)
+        and result.get("case_result_sha256")
+        == _case_result_sha256(run_root, profile, query_id, trial_index)
     )
 
 
@@ -256,12 +265,9 @@ def _usage_audit_current(
     result = read_json(path)
     return (
         result.get("status") == "completed"
-        and result.get("usage_audit_prompt_sha256")
-        == USAGE_AUDIT_PROMPT_SHA256
-        and result.get("usage_audit_schema_sha256")
-        == USAGE_AUDIT_SCHEMA_SHA256
-        and result.get("evaluation_source_sha256")
-        == EVALUATION_SOURCE_SHA256
+        and result.get("usage_audit_prompt_sha256") == USAGE_AUDIT_PROMPT_SHA256
+        and result.get("usage_audit_schema_sha256") == USAGE_AUDIT_SCHEMA_SHA256
+        and result.get("evaluation_source_sha256") == EVALUATION_SOURCE_SHA256
         and str(result.get("query_id")) == query_id
         and result.get("trial_index") == trial_index
         and result.get("case_result_sha256") == sha256_file(case_result)
@@ -301,12 +307,9 @@ def evaluation_complete(run_root: Path) -> bool:
         and summary.get("evaluated_answers") == expected_answers
         and summary.get("judge_prompt_sha256") == JUDGE_PROMPT_SHA256
         and summary.get("judge_schema_sha256") == JUDGE_SCHEMA_SHA256
-        and summary.get("usage_audit_prompt_sha256")
-        == USAGE_AUDIT_PROMPT_SHA256
-        and summary.get("usage_audit_schema_sha256")
-        == USAGE_AUDIT_SCHEMA_SHA256
-        and summary.get("evaluation_source_sha256")
-        == EVALUATION_SOURCE_SHA256
+        and summary.get("usage_audit_prompt_sha256") == USAGE_AUDIT_PROMPT_SHA256
+        and summary.get("usage_audit_schema_sha256") == USAGE_AUDIT_SCHEMA_SHA256
+        and summary.get("evaluation_source_sha256") == EVALUATION_SOURCE_SHA256
         and usage_audit.get("expected_trials") == expected_usage_audits
         and usage_audit.get("evaluated_trials") == expected_usage_audits
         and all(
@@ -335,9 +338,7 @@ def evaluation_complete(run_root: Path) -> bool:
     )
 
 
-def _judge_items(
-    run_root: Path, input_root: Path
-) -> list[tuple[str, int, str, Path]]:
+def _judge_items(run_root: Path, input_root: Path) -> list[tuple[str, int, str, Path]]:
     items = [
         (
             query_id,
@@ -364,98 +365,136 @@ def _judge_items(
     )
 
 
+def _parse_judgement(raw_response: str, schema: dict[str, Any]) -> dict[str, Any]:
+    """Validate the small, closed judge schemas without accepting coerced JSON."""
+
+    def invalid_constant(value: str) -> None:
+        raise ValueError(f"non-finite JSON number: {value}")
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate JSON field: {key!r}")
+            value[key] = item
+        return value
+
+    judgement = json.loads(
+        raw_response,
+        parse_constant=invalid_constant,
+        object_pairs_hook=unique_object,
+    )
+    if not isinstance(judgement, dict):
+        raise TypeError("evaluator response must be a JSON object")
+    if set(judgement) != set(schema["required"]):
+        raise ValueError("evaluator response fields do not match the output schema")
+    for name, definition in schema["properties"].items():
+        value = judgement[name]
+        kind = definition["type"]
+        valid = (
+            isinstance(value, bool)
+            if kind == "boolean"
+            else isinstance(value, str)
+            if kind == "string"
+            else (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and definition.get("minimum", -math.inf) <= value
+                and value <= definition.get("maximum", math.inf)
+                and math.isfinite(value)
+            )
+            if kind == "number"
+            else False
+        )
+        if not valid:
+            raise ValueError(f"evaluator response has invalid {kind} field {name!r}")
+    return judgement
+
+
 def _execute_evaluator(
     *,
-    codex: Path,
-    codex_home: Path,
+    opencode: Path,
+    opencode_home: Path,
     workspace: Path,
     schema_path: Path,
     output_dir: Path,
     prompt: str,
     model: str,
     reasoning_effort: str,
-) -> tuple[subprocess.CompletedProcess[str], TraceSummary, float, dict[str, str]]:
+) -> tuple[dict[str, Any], TraceSummary, float, dict[str, str]]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    events_path = output_dir / "events.jsonl"
-    stderr_path = output_dir / "stderr.log"
-    response_path = output_dir / "response.json"
     prompt_path = output_dir / "prompt.md"
+    # OpenCode has no --output-schema flag. Supply the same versioned schema
+    # explicitly and validate its exact types and fields before accepting a score.
+    prompt = (
+        prompt
+        + "\n\nOUTPUT_SCHEMA:\n"
+        + json.dumps(read_json(schema_path), ensure_ascii=False, indent=2)
+    )
     atomic_write_text(prompt_path, prompt)
-    command = [
-        str(codex),
-        "exec",
-        "--json",
-        "--ephemeral",
-        "--ignore-user-config",
-        "--ignore-rules",
-        "--skip-git-repo-check",
-        "--model",
-        model,
-        "-c",
-        f'model_reasoning_effort="{reasoning_effort}"',
-        "-c",
-        'web_search="disabled"',
-        "-c",
-        "allow_login_shell=false",
-        "--sandbox",
-        "read-only",
-        "--output-schema",
-        str(schema_path),
-        "-C",
-        str(workspace),
-        "-o",
-        str(response_path),
-        "-",
-    ]
-    environment = inherited_environment()
-    environment.pop("ZVEC_GREP_HOME", None)
-    environment.pop("ZVEC_GREP_SERVER_URL", None)
-    environment.update(
-        {
-            "CODEX_HOME": str(codex_home),
-            "HOME": str(codex_home),
-            "NO_COLOR": "1",
-            "CODEX_CI": "1",
-        }
-    )
-    write_json(
-        output_dir / "command.json",
-        {
-            "args": command,
-            "cwd": str(workspace),
-            "model": model,
-            "reasoning_effort": reasoning_effort,
-            "environment": {"CODEX_HOME": str(codex_home)},
-        },
-    )
     started = time.monotonic()
-    completed = subprocess.run(
-        command,
-        cwd=workspace,
-        env=environment,
-        input=prompt,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    wall_seconds = time.monotonic() - started
-    atomic_write_text(events_path, completed.stdout)
-    atomic_write_text(stderr_path, completed.stderr)
-    trace = parse_trace(events_path, response_path)
+    try:
+        outcome = run_prompt(
+            opencode,
+            home=opencode_home,
+            workspace=workspace,
+            model=model,
+            prompt=prompt,
+            output_dir=output_dir,
+            timeout_seconds=EVALUATOR_TIMEOUT_SECONDS,
+        )
+    except (OSError, RuntimeError) as exception:
+        # A launch failure is a failed, resumable judgement, not an absent one.
+        atomic_write_text(output_dir / "stderr.log", str(exception))
+        outcome = {
+            "exit_code": -1,
+            "idle_killed": False,
+            "wall_seconds": time.monotonic() - started,
+            "trace": TraceSummary(
+                thread_id=None,
+                final_response="",
+                last_agent_message="",
+                turn_completed=False,
+                usage=None,
+                tool_calls=(),
+                observed_docids=(),
+                errors=(str(exception),),
+            ),
+        }
     paths = {
         "prompt": str(prompt_path.resolve()),
-        "response": str(response_path.resolve()),
-        "events": str(events_path.resolve()),
-        "stderr": str(stderr_path.resolve()),
+        "response": str((output_dir / "response.md").resolve()),
+        "events": str((output_dir / "events.jsonl").resolve()),
+        "stderr": str((output_dir / "stderr.log").resolve()),
     }
-    return completed, trace, wall_seconds, paths
+    return outcome, outcome["trace"], float(outcome["wall_seconds"]), paths
+
+
+def _evaluator_error(
+    outcome: dict[str, Any], trace: TraceSummary, paths: dict[str, str]
+) -> str | None:
+    if outcome.get("idle_killed"):
+        return "OpenCode evaluator exceeded its time limit"
+    if outcome["exit_code"] != 0 or not trace.turn_completed or trace.errors:
+        stderr_path = Path(paths["stderr"])
+        stderr = (
+            stderr_path.read_text(encoding="utf-8").strip()
+            if stderr_path.is_file()
+            else ""
+        )
+        return (
+            stderr or "; ".join(trace.errors) or "OpenCode evaluator did not complete"
+        )
+    if trace.tool_calls:
+        return "OpenCode evaluator used tools despite the no-tools evaluation policy"
+    return None
 
 
 def _run_judge(
     *,
     run_root: Path,
-    codex: Path,
-    codex_home: Path,
+    opencode: Path,
+    opencode_home: Path,
     workspace: Path,
     schema_path: Path,
     run_id: str,
@@ -500,8 +539,8 @@ def _run_judge(
         f"profile {profile} · trial {trial_index}",
     )
     completed, trace, wall_seconds, paths = _execute_evaluator(
-        codex=codex,
-        codex_home=codex_home,
+        opencode=opencode,
+        opencode_home=opencode_home,
         workspace=workspace,
         schema_path=schema_path,
         output_dir=output_dir,
@@ -514,30 +553,14 @@ def _run_judge(
     error: str | None = None
     judgement: dict[str, Any] = {}
     try:
-        judgement = json.loads(raw_response)
-        if not isinstance(judgement.get("correct"), bool):
-            raise ValueError("judge response is missing boolean field 'correct'")
-        if not isinstance(judgement.get("extracted_final_answer"), str):
-            raise ValueError(
-                "judge response is missing string field 'extracted_final_answer'"
-            )
-        if not isinstance(judgement.get("reasoning"), str):
-            raise ValueError("judge response is missing string field 'reasoning'")
-        confidence = judgement.get("confidence")
-        if (
-            not isinstance(confidence, (int, float))
-            or isinstance(confidence, bool)
-            or not 0 <= confidence <= 100
-        ):
-            raise ValueError(
-                "judge response has invalid numeric field 'confidence'"
-            )
-    except (json.JSONDecodeError, ValueError) as exception:
+        judgement = _parse_judgement(raw_response, JUDGE_SCHEMA)
+    except (TypeError, ValueError) as exception:
         status = "failed"
         error = str(exception)
-    if completed.returncode != 0 or not trace.turn_completed:
+    execution_error = _evaluator_error(completed, trace, paths)
+    if execution_error:
         status = "failed"
-        error = completed.stderr.strip() or "Codex judge did not complete"
+        error = execution_error
     result = {
         "status": status,
         "attempt": attempt,
@@ -552,6 +575,9 @@ def _run_judge(
         "reasoning": judgement.get("reasoning"),
         "confidence": judgement.get("confidence"),
         "candidate_sha256": hashlib.sha256(candidate.encode()).hexdigest(),
+        "case_result_sha256": _case_result_sha256(
+            run_root, profile, query_id, trial_index
+        ),
         "judge_prompt_sha256": JUDGE_PROMPT_SHA256,
         "judge_schema_sha256": JUDGE_SCHEMA_SHA256,
         "evaluation_source_sha256": EVALUATION_SOURCE_SHA256,
@@ -564,9 +590,7 @@ def _run_judge(
         },
     }
     write_json(output_dir / "result.json", result)
-    write_json(
-        _judge_result_path(run_root, profile, query_id, trial_index), result
-    )
+    write_json(_judge_result_path(run_root, profile, query_id, trial_index), result)
     outcome = (
         "failed"
         if status != "completed"
@@ -587,8 +611,8 @@ def _run_judge(
 def _run_usage_audit(
     *,
     run_root: Path,
-    codex: Path,
-    codex_home: Path,
+    opencode: Path,
+    opencode_home: Path,
     workspace: Path,
     schema_path: Path,
     query_id: str,
@@ -642,8 +666,8 @@ def _run_usage_audit(
         f"profile zvec-grep · trial {trial_index}",
     )
     completed, audit_trace, wall_seconds, paths = _execute_evaluator(
-        codex=codex,
-        codex_home=codex_home,
+        opencode=opencode,
+        opencode_home=opencode_home,
         workspace=workspace,
         schema_path=schema_path,
         output_dir=output_dir,
@@ -656,22 +680,14 @@ def _run_usage_audit(
     error: str | None = None
     judgement: dict[str, Any] = {}
     try:
-        judgement = json.loads(raw_response)
-        for field in ("used_zvec_grep", "correct_usage"):
-            if not isinstance(judgement.get(field), bool):
-                raise ValueError(
-                    f"usage audit response is missing boolean field {field!r}"
-                )
-        if not isinstance(judgement.get("reasoning"), str):
-            raise ValueError(
-                "usage audit response is missing string field 'reasoning'"
-            )
-    except (json.JSONDecodeError, ValueError) as exception:
+        judgement = _parse_judgement(raw_response, USAGE_AUDIT_SCHEMA)
+    except (TypeError, ValueError) as exception:
         status = "failed"
         error = str(exception)
-    if completed.returncode != 0 or not audit_trace.turn_completed:
+    execution_error = _evaluator_error(completed, audit_trace, paths)
+    if execution_error:
         status = "failed"
-        error = completed.stderr.strip() or "Codex usage audit did not complete"
+        error = execution_error
     zvec_grep_calls = sum(
         str(call.get("name", "")).startswith(("zvec_grep", "zvec-grep"))
         for call in tool_calls
@@ -701,9 +717,7 @@ def _run_usage_audit(
         },
     }
     write_json(output_dir / "result.json", result)
-    write_json(
-        _usage_audit_result_path(run_root, query_id, trial_index), result
-    )
+    write_json(_usage_audit_result_path(run_root, query_id, trial_index), result)
     outcome = (
         "failed"
         if status != "completed"
@@ -725,7 +739,8 @@ def evaluate_run(
     artifacts: Path,
     run_root: Path,
     *,
-    codex_bin: str = "codex",
+    opencode_bin: str = "opencode",
+    config: BenchmarkConfig | None = None,
     console: Console,
 ) -> Path:
     if not (run_root / "run.json").is_file():
@@ -734,32 +749,25 @@ def evaluate_run(
     trial_pairs = _eligible_trial_pairs(run_root)
     if not trial_pairs:
         raise RuntimeError(f"run has no completed trial pairs: {metadata['run_id']}")
-    codex = resolve_executable(codex_bin)
-    if codex is None:
-        raise RuntimeError(f"Codex executable not found: {codex_bin}")
-    version = run_command([codex, "--version"], timeout=30)
+    opencode = resolve_executable(opencode_bin)
+    if opencode is None:
+        raise RuntimeError(f"OpenCode executable not found: {opencode_bin}")
+    version = run_command([opencode, "--version"], timeout=30)
     actual_version = version.stdout.strip() or version.stderr.strip()
     if not version.ok or not actual_version:
-        raise RuntimeError("could not determine the Codex evaluator version")
+        raise RuntimeError("could not determine the OpenCode evaluator version")
     protocol = metadata["protocol"]
-    if sha256_file(codex) != protocol["codex_sha256"]:
+    if sha256_file(opencode) != protocol["opencode_sha256"]:
         raise RuntimeError(
-            "Codex changed after this run was created; evaluate with the "
+            "OpenCode changed after this run was created; evaluate with the "
             "recorded executable or start a new run"
         )
-    if actual_version != protocol["codex_version"]:
+    if actual_version != protocol["opencode_version"]:
         raise RuntimeError(
-            "Codex version changed after this run was created; evaluate with "
+            "OpenCode version changed after this run was created; evaluate with "
             "the recorded version or start a new run"
         )
-    profiles = read_json(run_root / "profiles" / "manifest.json")
-    codex_home = Path(profiles["baseline_home"])
-    if not codex_home.is_dir():
-        raise RuntimeError(f"Codex evaluation profile is missing: {codex_home}")
-
-    query_rows = load_queries(
-        artifacts / "source" / "browsecomp_plus_decrypted.jsonl"
-    )
+    query_rows = load_queries(artifacts / "source" / "browsecomp_plus_decrypted.jsonl")
     queries = {str(query["query_id"]): query for query in query_rows}
     missing_queries = [
         str(query_id)
@@ -772,19 +780,36 @@ def evaluate_run(
             + ", ".join(missing_queries)
         )
     selected_queries_sha256 = fingerprint(
-        json.dumps(
-            queries[str(query_id)], sort_keys=True, ensure_ascii=False
-        )
+        json.dumps(queries[str(query_id)], sort_keys=True, ensure_ascii=False)
         for query_id in metadata["query_ids"]
     )
     if selected_queries_sha256 != protocol["selected_queries_sha256"]:
         raise RuntimeError(
-            "prepared questions or reference answers changed after this run "
-            "was created"
+            "prepared questions or reference answers changed after this run was created"
         )
     if evaluation_complete(run_root):
         return generate_report(run_root)
 
+    evaluator_config = config or (
+        load_config(Path(metadata["configuration"]))
+        if metadata.get("configuration")
+        else load_config()
+    )
+    if sha256_file(evaluator_config.path) != protocol.get("configuration_sha256"):
+        raise RuntimeError(
+            "benchmark configuration changed after this run was created; "
+            "restore the recorded configuration before evaluation"
+        )
+    if "model_base_url" in protocol and protocol["model_base_url"] != model_base_url():
+        raise RuntimeError(
+            "model endpoint changed after this run was created; "
+            "restore the recorded endpoint before evaluation"
+        )
+    opencode_home = prepare_judge_home(
+        evaluator_config,
+        artifacts,
+        run_root / "profiles" / "judge" / "opencode-home",
+    )
     input_root = export_official(run_root)
     evaluation_root = run_root / "evaluation"
     schema_path = evaluation_root / "judge-schema.json"
@@ -820,8 +845,8 @@ def evaluate_run(
             query = queries[query_id]
             _run_judge(
                 run_root=run_root,
-                codex=codex,
-                codex_home=codex_home,
+                opencode=opencode,
+                opencode_home=opencode_home,
                 workspace=workspace,
                 schema_path=schema_path,
                 run_id=str(metadata["run_id"]),
@@ -840,8 +865,8 @@ def evaluate_run(
         for offset, (query_id, trial_index) in enumerate(usage_audit_items, 1):
             _run_usage_audit(
                 run_root=run_root,
-                codex=codex,
-                codex_home=codex_home,
+                opencode=opencode,
+                opencode_home=opencode_home,
                 workspace=workspace,
                 schema_path=usage_audit_schema_path,
                 query_id=query_id,
@@ -854,14 +879,23 @@ def evaluate_run(
                 console=console,
             )
 
+    return summarize_evaluation(run_root, opencode_version=actual_version)
+
+
+def summarize_evaluation(run_root: Path, *, opencode_version: str) -> Path:
+    """Recompute scores and costs from existing judgements without model calls."""
+    metadata = read_json(run_root / "run.json")
+    trial_pairs = _eligible_trial_pairs(run_root)
+    evaluation_root = run_root / "evaluation"
+    actual_version = opencode_version
+    model = str(metadata["model"])
+    reasoning_effort = str(metadata["reasoning_effort"])
     completed_results = [
         read_json(path)
         for query_id, trial_index in trial_pairs
         for profile in PROFILES
         if _completed_judgement(
-            path := _judge_result_path(
-                run_root, profile, query_id, trial_index
-            ),
+            path := _judge_result_path(run_root, profile, query_id, trial_index),
             run_root=run_root,
             profile=profile,
             query_id=query_id,
@@ -873,9 +907,7 @@ def evaluate_run(
         read_json(path)
         for query_id, trial_index in trial_pairs
         if _usage_audit_current(
-            path := _usage_audit_result_path(
-                run_root, query_id, trial_index
-            ),
+            path := _usage_audit_result_path(run_root, query_id, trial_index),
             run_root=run_root,
             query_id=query_id,
             trial_index=trial_index,
@@ -899,13 +931,12 @@ def evaluate_run(
                 "expected_trials": expected_usage_audits,
                 "evaluated_trials": len(completed_usage_audits),
                 "correct_trials": sum(
-                    result["correct_usage"] is True
-                    for result in completed_usage_audits
+                    result["correct_usage"] is True for result in completed_usage_audits
                 ),
             },
             "model": model,
             "reasoning_effort": reasoning_effort,
-            "codex_version": actual_version,
+            "opencode_version": actual_version,
             "judge_prompt_sha256": JUDGE_PROMPT_SHA256,
             "judge_schema_sha256": JUDGE_SCHEMA_SHA256,
             "usage_audit_prompt_sha256": USAGE_AUDIT_PROMPT_SHA256,
@@ -913,9 +944,7 @@ def evaluate_run(
             "evaluation_source_sha256": EVALUATION_SOURCE_SHA256,
             "cost": {
                 "answer_judgements": _evaluation_cost(completed_results),
-                "zvec_grep_usage_audits": _evaluation_cost(
-                    completed_usage_audits
-                ),
+                "zvec_grep_usage_audits": _evaluation_cost(completed_usage_audits),
                 "total": _evaluation_cost(completed_evaluations),
             },
         },
@@ -927,12 +956,14 @@ def evaluate(
     artifacts: Path,
     run_id: str,
     *,
-    codex_bin: str = "codex",
+    opencode_bin: str = "opencode",
+    config: BenchmarkConfig | None = None,
     console: Console,
 ) -> Path:
     return evaluate_run(
         artifacts,
         find_run(artifacts, run_id),
-        codex_bin=codex_bin,
+        opencode_bin=opencode_bin,
+        config=config,
         console=console,
     )
