@@ -927,13 +927,21 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
     let response = post_json(port, Some(&session), &background_search.to_string())?;
     assert!(response.contains("fresh.txt"), "{response}");
     // A native watcher can deliver delayed or duplicate notifications after the
-    // preceding fresh query. Refresh activity must not add search output fields.
+    // preceding fresh query. Global drift uses the same diagnostics as the CLI.
     assert!(!response.contains("freshness:"), "{response}");
-    assert!(
-        !response.contains("results: served_from_current_index"),
-        "{response}"
-    );
-    assert!(!response.contains("background_refresh:"), "{response}");
+    if response.contains("status: possibly_stale") {
+        assert!(
+            response.contains("results: served_from_current_index"),
+            "{response}"
+        );
+        assert!(response.contains("background_refresh:"), "{response}");
+    } else {
+        assert!(
+            !response.contains("results: served_from_current_index"),
+            "{response}"
+        );
+        assert!(!response.contains("background_refresh:"), "{response}");
+    }
     assert!(response.contains("\"isError\":false"), "{response}");
 
     let output = guard.stop()?;
@@ -1164,10 +1172,12 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
     let response = search(workspace.path(), "orchard", "eventual", false)?;
     assert!(response.contains("source.txt"), "{response}");
     assert!(response.contains("orchard documentation"), "{response}");
-    assert!(!response.contains("background_refresh:"), "{response}");
+    assert!(response.contains("status: possibly_stale"), "{response}");
+    assert!(response.contains("background_refresh: idle"), "{response}");
     let response = search(workspace.path(), "orchard", "eventual", true)?;
     assert!(response.contains("source.txt"), "{response}");
-    assert!(!response.contains("background_refresh:"), "{response}");
+    assert!(response.contains("status: possibly_stale"), "{response}");
+    assert!(response.contains("background_refresh:"), "{response}");
     // Poll without requesting more refreshes: the first eventual search must do the work.
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
@@ -1447,7 +1457,7 @@ fn indexed_fragment_coordinates_survive_direct_server_and_mcp() -> Result<(), Bo
             let text = String::from_utf8(reply.stdout)?;
             assert!(text.contains("\n  2: xxx"), "{mode} {preview}: {text}");
             assert!(!text.contains("\n  1: xxx"), "{mode} {preview}: {text}");
-            outputs.push(text);
+            outputs.push(format!("{text}{}", String::from_utf8(reply.stderr)?));
         }
         assert_eq!(outputs[0], outputs[1], "direct/server {preview}");
         let reply = bridge.request(&json!({

@@ -8,7 +8,9 @@ use rmcp::{
     ServiceExt,
     model::{CallToolRequestParams, ContentBlock},
 };
-use zg_cli::{ColorMode, OutputOptions, PreviewMode, write_context_with_options};
+use zg_cli::{
+    ColorMode, OutputOptions, PreviewMode, write_context_status, write_context_with_options,
+};
 use zg_engine::{
     EngineError, ZvecGrep,
     api::{
@@ -42,6 +44,7 @@ fn cli_output(result: &ContextResult, preview: PreviewMode) -> String {
         false,
     )
     .expect("CLI search output");
+    write_context_status(&mut bytes, result).expect("CLI search diagnostics");
     String::from_utf8(bytes).expect("UTF-8")
 }
 
@@ -146,6 +149,53 @@ fn grouped_cases() -> Vec<McpSearchPresentationCase> {
     vec![case]
 }
 
+fn global_staleness_cases() -> Vec<McpSearchPresentationCase> {
+    [true, false]
+        .into_iter()
+        .flat_map(|empty| {
+            [false, true].into_iter().map(move |indexing| {
+                let mut case = fixtures().remove(0);
+                case.id = format!("global-staleness-empty-{empty}-indexing-{indexing}");
+                case.result["freshness"] = if indexing { "fresh" } else { "possibly_stale" }.into();
+                case.result["background_refresh"] = serde_json::Value::Null;
+                case.result["indexing"] = if indexing {
+                    serde_json::json!({"state": "running", "completed": 2, "total": 3})
+                } else {
+                    serde_json::Value::Null
+                };
+                if empty {
+                    case.result["items"].as_array_mut().expect("items").clear();
+                }
+                case
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn global_staleness_is_visible_without_stale_hits() {
+    for case in global_staleness_cases() {
+        let result: ContextResult = serde_json::from_value(case.result).expect("context");
+        assert!(!result.has_stale_items());
+        let diagnostics = if result.indexing.is_some() {
+            "status: possibly_stale\nresults: served_from_current_index\nbackground_refresh: running (2/3)\n"
+        } else {
+            "status: possibly_stale\n"
+        };
+        for preview in [SearchPreview::Short, SearchPreview::Full] {
+            let text = format_search_result(&result, preview);
+            assert!(
+                text.ends_with(diagnostics),
+                "{} {preview:?}: {text}",
+                case.id
+            );
+            if result.items.is_empty() {
+                assert_eq!(text, format!("No matches.\n{diagnostics}"));
+            }
+        }
+    }
+}
+
 #[test]
 fn source_previews_hide_generated_call_outlines_and_preserve_symbols() {
     for case in generated_outline_cases() {
@@ -190,7 +240,11 @@ fn content_coordinates_are_required_at_the_engine_boundary() {
 
 #[test]
 fn supported_previews_match_cli_without_extra_fields() {
-    for fixture in fixtures().into_iter().chain(grouped_cases()) {
+    for fixture in fixtures()
+        .into_iter()
+        .chain(grouped_cases())
+        .chain(global_staleness_cases())
+    {
         let result: ContextResult =
             serde_json::from_value(fixture.result).expect("context fixture");
         let original = result.clone();
@@ -231,7 +285,9 @@ fn search_metadata_does_not_add_output_fields() {
     result.freshness = Some("possibly_stale".to_owned());
     assert_eq!(
         format_search_result(&result, SearchPreview::Short),
-        expected
+        format!(
+            "{expected}status: possibly_stale\nresults: served_from_current_index\nbackground_refresh: idle\n"
+        )
     );
     result.freshness = None;
     result.background_refresh = None;
@@ -276,7 +332,7 @@ impl IndexOperationProvider for FixedSearch {
 #[tokio::test]
 async fn public_tool_preview_matches_cli_without_changing_retrieval() {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        let cases = fixtures().into_iter().chain(source_range_cases()).chain(generated_outline_cases()).chain(grouped_cases()).collect::<Vec<_>>();
+        let cases = fixtures().into_iter().chain(source_range_cases()).chain(generated_outline_cases()).chain(grouped_cases()).chain(global_staleness_cases()).collect::<Vec<_>>();
         for toolset in [McpToolset::Agent, McpToolset::Full] {
             let backend = Arc::new(FixedSearch {
                 result: Mutex::new(serde_json::from_value(cases[0].result.clone()).expect("fixture")),

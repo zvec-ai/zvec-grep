@@ -519,8 +519,9 @@ case, whole-word, and pattern-file semantics. Empty ranges are omitted; older
 replies without this field remain readable.
 
 Search still honors `autoUpdate` and `freshness: "wait_for_fresh"` for refresh
-timing. These controls do not add response fields; possibly stale items use the
-same status line as the CLI.
+timing. CLI global freshness and indexing diagnostics follow the result body in
+MCP's single text response, including empty results and fresh hits served from an
+incomplete index. Per-item status lines also match the CLI.
 
 Search and index accept `globs` and `insensitiveGlobs` as a string or list;
 case-insensitive string rules follow case-sensitive string rules. Index string
