@@ -83,13 +83,14 @@ fn persisted_calls_match_across_direct_daemon_and_mcp() -> Result<(), Box<dyn Er
     ] {
         let mut replies = Vec::new();
         for mode in ["direct", "server"] {
-            let output = Command::new(&binary)
+            let mut command = Command::new(&binary);
+            command
                 .arg(format!("--{tool}"))
                 .arg(format!(" {symbol} "))
                 .arg(workspace.path())
                 .args(["--mode", mode, "--home"])
-                .arg(home.path())
-                .output()?;
+                .arg(home.path());
+            let output = command.output()?;
             assert_command_success(&output);
             let reply: serde_json::Value = serde_json::from_slice(&output.stdout)?;
             assert_eq!(reply["matches"].as_array().ok_or("matches array")?.len(), 1);
@@ -100,6 +101,11 @@ fn persisted_calls_match_across_direct_daemon_and_mcp() -> Result<(), Box<dyn Er
             assert_eq!(reply["matches"][0]["edges"][0]["line"], 5);
             assert_eq!(reply["matches"][0]["edges"][0]["filePath"], "calls.py");
             replies.push(reply);
+            let (reader, writer) = std::io::pipe()?;
+            drop(reader);
+            let output = command.stdout(Stdio::from(writer)).output()?;
+            assert_command_success(&output);
+            assert!(output.stderr.is_empty(), "{tool} {mode}: {output:?}");
         }
         assert_eq!(replies[0], replies[1]);
         let mcp = bridge.request(&json!({
