@@ -44,8 +44,15 @@ fn cli_output(result: &ContextResult, preview: PreviewMode) -> String {
         false,
     )
     .expect("CLI search output");
-    write_context_status(&mut bytes, result).expect("CLI search diagnostics");
-    String::from_utf8(bytes).expect("UTF-8")
+    let mut diagnostics = Vec::new();
+    write_context_status(&mut diagnostics, result).expect("CLI search diagnostics");
+    let body = String::from_utf8(bytes).expect("UTF-8");
+    if diagnostics.is_empty() {
+        format!("freshness: fresh\n{body}")
+    } else {
+        let diagnostics = String::from_utf8(diagnostics).expect("UTF-8");
+        format!("freshness: possibly_stale\n{diagnostics}\n{body}")
+    }
 }
 
 fn source_range_cases() -> Vec<McpSearchPresentationCase> {
@@ -86,7 +93,7 @@ fn source_range_cases() -> Vec<McpSearchPresentationCase> {
             } else {
                 "  2: needle"
             };
-            let expected = format!("#1 sample.md:1-2\n{lines}\n");
+            let expected = format!("freshness: fresh\n#1 sample.md:1-2\n{lines}\n");
             cases.push(McpSearchPresentationCase {
                 id: format!(
                     "explicit-content-range-whole-{whole_entity}-newline-{trailing_newline}"
@@ -121,7 +128,7 @@ fn generated_outline_cases() -> Vec<McpSearchPresentationCase> {
             };
             item["content"] = source.into();
             let expected = format!(
-                "#1 src/sample.ts:10-33\nsymbol: [function] resolveContext scope: Workspace\n  10: {source}\n"
+                "freshness: fresh\n#1 src/sample.ts:10-33\nsymbol: [function] resolveContext scope: Workspace\n  10: {source}\n"
             );
             McpSearchPresentationCase {
                 id: format!("generated-outline-source-signature-{has_signature}"),
@@ -185,12 +192,15 @@ fn global_staleness_is_visible_without_stale_hits() {
         for preview in [SearchPreview::Short, SearchPreview::Full] {
             let text = format_search_result(&result, preview);
             assert!(
-                text.ends_with(diagnostics),
+                text.starts_with(&format!("freshness: possibly_stale\n{diagnostics}\n")),
                 "{} {preview:?}: {text}",
                 case.id
             );
             if result.items.is_empty() {
-                assert_eq!(text, format!("No matches.\n{diagnostics}"));
+                assert_eq!(
+                    text,
+                    format!("freshness: possibly_stale\n{diagnostics}\nNo matches.\n")
+                );
             }
         }
     }
@@ -286,7 +296,10 @@ fn search_metadata_does_not_add_output_fields() {
     assert_eq!(
         format_search_result(&result, SearchPreview::Short),
         format!(
-            "{expected}status: possibly_stale\nresults: served_from_current_index\nbackground_refresh: idle\n"
+            "freshness: possibly_stale\nstatus: possibly_stale\nresults: served_from_current_index\nbackground_refresh: idle\n\n{}",
+            expected
+                .strip_prefix("freshness: fresh\n")
+                .expect("fresh header")
         )
     );
     result.freshness = None;

@@ -494,8 +494,8 @@ clients retain reverse form elicitation. Consent is rechecked before execution.
 ## MCP request lifecycle
 
 Search accepts `preview: "short"` (the default) or `preview: "full"` in both
-toolsets. Both modes use the same text renderer as the CLI, without additional
-MCP fields. Short preview shows up to ten source lines around the matched range;
+toolsets. Both modes include a required MCP `freshness:` header and reuse CLI
+result content and diagnostic conditions. Short preview shows up to ten source lines around the matched range;
 full preview preserves all available source content of each retrieved item.
 Neither mode reads whole files, changes retrieval or ranking, or displays
 generated outlines. CLI `none` and `detail` previews remain CLI-only.
@@ -519,9 +519,12 @@ case, whole-word, and pattern-file semantics. Empty ranges are omitted; older
 replies without this field remain readable.
 
 Search still honors `autoUpdate` and `freshness: "wait_for_fresh"` for refresh
-timing. CLI global freshness and indexing diagnostics follow the result body in
-MCP's single text response, including empty results and fresh hits served from an
-incomplete index. Per-item status lines also match the CLI.
+timing. Global freshness and indexing diagnostics precede the result body in
+MCP's single text response, separated by a blank line, including empty results
+and fresh hits served from an incomplete index. Healthy results only add the
+`freshness: fresh` header. Per-item status stays within each hit. CLI diagnostics
+use stderr, so consistency means matching content and conditions rather than
+concatenating stdout and stderr in the same order.
 
 Search and index accept `globs` and `insensitiveGlobs` as a string or list;
 case-insensitive string rules follow case-sensitive string rules. Index string

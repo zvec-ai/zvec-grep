@@ -22,7 +22,9 @@ The **Retrieval results** job publishes one page with a suite overview and a sep
 | zg-fts | `fts: [originalQuestion]` | Rust MCP default |
 | zg-vector | `vector: [originalQuestion]` | Rust MCP default |
 
-Every request also uses `limit: 10`, `autoUpdate: false`, `freshness: eventual` and `preferSymbol: false`. FTS and vector requests omit `query` and the other route. The benchmark does not send a `preview` field because the Rust MCP schema does not expose it. The product retains its native chunking, aggregation, ranking and bounded response presentation.
+Every request also uses `limit: 10`, `autoUpdate: false`, `freshness: eventual` and `preferSymbol: false`. FTS and vector requests omit `query` and the other route. The benchmark leaves `preview` unset to measure the default presentation. The product retains its native chunking, aggregation, ranking and bounded response presentation.
+
+The public response parser requires the MCP `freshness:` header and accepts both the legacy MCP body and the CLI compact body. Compact output does not expose per-hit route labels, so unavailable routes remain `null`; the parser never invents route evidence from the requested mode. Route validation still rejects any reported label that conflicts with the requested mode. Global CLI freshness and indexing diagnostics remain visible evidence before the compact body; legacy trailing diagnostics are also supported.
 
 | Column | Meaning / aggregation |
 | --- | --- |

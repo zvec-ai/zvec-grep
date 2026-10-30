@@ -352,7 +352,7 @@ impl ZvecGrepMcpServer {
 impl ZvecGrepMcpServer {
     #[tool(
         name = "zvec_grep_search",
-        description = "Search a workspace index for semantic, relational, cross-file, or multi-hop evidence such as architecture, call chains, dependencies, lifecycle, data or control flow, design rationale, and comparisons. Use it when exact lookup alone cannot answer a workspace-grounded question. Results use the same text output as the CLI with bounded source snippets by default; set preview: \"full\" to return all available source content of each retrieved item without changing retrieval or ranking. Treat sufficient returned content as already-read evidence without a status preflight. Use native Grep or rg instead when exact lookup alone is sufficient. A missing index can request user model selection and authorization; accepted setup starts a background build and returns indexing status. Retry after completion.",
+        description = "Search a workspace index for semantic, relational, cross-file, or multi-hop evidence such as architecture, call chains, dependencies, lifecycle, data or control flow, design rationale, and comparisons. Use it when exact lookup alone cannot answer a workspace-grounded question. Results start with freshness and any global index diagnostics, followed by CLI-formatted bounded source snippets; set preview: \"full\" to return all available source content of each retrieved item without changing retrieval or ranking. Treat sufficient returned content as already-read evidence without a status preflight. Use native Grep or rg instead when exact lookup alone is sufficient. A missing index can request user model selection and authorization; accepted setup starts a background build and returns indexing status. Retry after completion.",
         annotations(
             title = "Search with zvec-grep",
             read_only_hint = false,
@@ -769,7 +769,7 @@ pub struct SearchInput {
     /// Maximum returned items per query group or fused plan.
     #[schemars(range(min = 1, max = 50), extend("type" = "integer"))]
     pub limit: Option<usize>,
-    /// Same text output as the CLI: short bounds source snippets; full preserves all available retrieved source content without changing retrieval or ranking.
+    /// CLI source display: short bounds snippets; full preserves all available retrieved source content without changing retrieval or ranking. Freshness precedes results.
     #[serde(default)]
     pub preview: SearchPreview,
     /// Ordered path glob rules; later matching rules take precedence.

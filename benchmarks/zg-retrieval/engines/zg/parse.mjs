@@ -6,7 +6,7 @@ import {
 } from "../../core/response.mjs";
 export { VisibleFormatError };
 
-/** Enforce this benchmark's indexed search route without narrowing the public parser. */
+/** Validate reported indexed routes; compact output explicitly leaves them unknown. */
 export function validateSearchRoute(items, mode) {
   const allowed =
     mode === "hybrid"
@@ -18,7 +18,7 @@ export function validateSearchRoute(items, mode) {
   assert.ok(Array.isArray(items), `${mode}: missing public parsed items`);
   for (const item of items)
     assert.ok(
-      allowed.includes(item?.matched_by),
+      item?.matched_by === null || allowed.includes(item?.matched_by),
       `${mode}: unexpected matchedBy=${String(item?.matched_by)} at rank ${item?.rank ?? "?"}; expected ${allowed.join(" or ")}`,
     );
 }
@@ -58,6 +58,114 @@ function parseRange(text) {
   fail(`Unknown range: ${text}`);
 }
 
+function parseCompactResponse(text, lines, freshness) {
+  while (lines.at(-1) === "") lines.pop();
+  if (lines[0] === "status: possibly_stale") {
+    if (freshness === "fresh")
+      fail("Global diagnostics conflict with freshness.");
+    lines.shift();
+    if (lines[0] === "results: served_from_current_index") {
+      lines.shift();
+      if (!/^background_refresh: \S.*$/.test(lines.shift() ?? ""))
+        fail("Missing background refresh status.");
+    }
+    while (lines[0] === "") lines.shift();
+  } else {
+    const status = lines.lastIndexOf("status: possibly_stale");
+    if (status >= 0) {
+      const diagnostics = lines.slice(status);
+      if (
+        diagnostics.length === 1 ||
+        (diagnostics.length === 3 &&
+          diagnostics[1] === "results: served_from_current_index" &&
+          /^background_refresh: \S.*$/.test(diagnostics[2]))
+      ) {
+        if (freshness === "fresh")
+          fail("Global diagnostics conflict with freshness.");
+        lines.splice(status);
+      }
+    }
+  }
+  // An empty string is not a successful empty search. The product has explicit empty labels.
+  if (lines[0] === "No matches." || lines[0] === "No searchable files.") {
+    const emptyReason =
+      lines.shift() === "No matches." ? "no_matches" : "no_searchable_files";
+    if (lines[0]?.startsWith("missing: ")) lines.shift();
+    if (lines.some((line) => line !== ""))
+      fail("Unexpected text after empty result.");
+    return { text, items: [], freshness, empty_reason: emptyReason };
+  }
+  const header =
+    /^#([1-9]\d*) (?!matchedBy=)(.+?):((?:[1-9]\d*(?:-[1-9]\d*)?)|file|page:[1-9]\d*|bytes:\d+-\d+)$/;
+  const items = [];
+  let item;
+  let sourceStarted = false;
+  for (const line of lines) {
+    const match = header.exec(line);
+    if (match) {
+      const rank = Number(match[1]);
+      if (!Number.isSafeInteger(rank) || rank !== items.length + 1 || rank > 10)
+        fail("Expected consecutive native top-10 ranks.");
+      if (!relativePath(match[2]))
+        fail("Expected an unambiguous repository-relative path.");
+      item = {
+        rank,
+        path: match[2],
+        range: parseRange(match[3]),
+        matched_by: null,
+        header: line,
+        metadata: [],
+        outline: [],
+        source_lines: [],
+        unnumbered_source: [],
+        raw_lines: [line],
+        matched_range: null,
+      };
+      items.push(item);
+      sourceStarted = false;
+      continue;
+    }
+    if (!item) {
+      if (line === "") continue;
+      fail("Unknown public search output before the first ranked item.");
+    }
+    item.raw_lines.push(line);
+    if (line === "" || line === "  …") continue;
+    if (
+      !sourceStarted &&
+      /^(?:status: possibly_stale$|symbol: |heading: |heading_level: \d+$|scope: )/.test(
+        line,
+      )
+    ) {
+      item.metadata.push(line);
+      continue;
+    }
+    const source = /^ {2}([1-9]\d*): (.*)$/.exec(line);
+    if (source && item.range.kind === "text") {
+      const number = Number(source[1]);
+      if (
+        !Number.isSafeInteger(number) ||
+        number <= (item.source_lines.at(-1)?.line ?? 0)
+      )
+        fail("Repeated or unordered visible source lines.");
+      if (number < item.range.start_line || number > item.range.end_line)
+        fail("Visible source falls outside the item's public range.");
+      item.source_lines.push({ line: number, text: source[2] });
+      sourceStarted = true;
+      continue;
+    }
+    if (line.startsWith("  ") && item.range.kind === "other") {
+      item.unnumbered_source.push(line.slice(2));
+      sourceStarted = true;
+      continue;
+    }
+    fail(`Unknown line in result #${item.rank}: ${line.slice(0, 80)}`);
+  }
+  if (items.length === 0)
+    fail("Missing explicit empty result or ranked items.");
+  return { text, items, freshness, empty_reason: null };
+}
+
 /** Parse only the public, single-query MCP search text. Never consult hidden structuredContent. */
 export function parseVisibleResponse(response) {
   const text = visibleText(response);
@@ -78,20 +186,13 @@ export function parseVisibleResponse(response) {
       fail("Unexpected background refresh status.");
     lines.shift();
   }
-  // An empty string is not a successful empty search. The product has explicit empty labels.
-  if (lines[0] === "No matches." || lines[0] === "No searchable files.") {
-    const emptyReason =
-      lines.shift() === "No matches." ? "no_matches" : "no_searchable_files";
-    if (lines[0]?.startsWith("missing: ")) lines.shift();
-    if (lines.some((line) => line !== ""))
-      fail("Unexpected text after empty result.");
-    return { text, items: [], freshness: first[1], empty_reason: emptyReason };
-  }
   const items = [];
   let item;
   let section = "metadata";
   const header =
     /^#([1-9]\d*)(?: \[(?:group_coverage: [^\]\n]+|global_fill)\])? matchedBy=(fts\+vector|fts|vector|lexical)(?: score=(-?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?))? (.+?):((?:[1-9]\d*(?:-[1-9]\d*)?)|file|page:[1-9]\d*|bytes:\d+-\d+)$/;
+  if (!lines.some((line) => header.test(line)))
+    return parseCompactResponse(text, lines, first[1]);
   for (const line of lines) {
     const match = header.exec(line);
     if (match) {

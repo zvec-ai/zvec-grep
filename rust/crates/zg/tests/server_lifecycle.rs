@@ -877,7 +877,7 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
         "{response}"
     );
     assert!(response.contains("\"isError\":false"), "{response}");
-    assert!(!response.contains("freshness:"), "{response}");
+    assert!(response.contains("freshness: fresh"), "{response}");
     assert!(
         !response.contains("results: served_from_current_index"),
         "{response}"
@@ -910,7 +910,7 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
         );
         std::thread::sleep(Duration::from_millis(50));
     };
-    assert!(!response.contains("freshness:"), "{response}");
+    assert!(response.contains("freshness: fresh"), "{response}");
     assert!(!response.contains("background_refresh:"), "{response}");
     assert!(
         !response.contains("results: served_from_current_index"),
@@ -928,7 +928,10 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
     assert!(response.contains("fresh.txt"), "{response}");
     // A native watcher can deliver delayed or duplicate notifications after the
     // preceding fresh query. Global drift uses the same diagnostics as the CLI.
-    assert!(!response.contains("freshness:"), "{response}");
+    assert!(
+        response.contains("freshness: fresh") || response.contains("freshness: possibly_stale"),
+        "{response}"
+    );
     if response.contains("status: possibly_stale") {
         assert!(
             response.contains("results: served_from_current_index"),
@@ -1198,7 +1201,7 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
     let response = search(workspace.path(), "harvest", "wait_for_fresh", false)?;
     assert!(response.contains("source.txt"), "{response}");
     assert!(response.contains("harvest documentation"), "{response}");
-    assert!(!response.contains("freshness:"), "{response}");
+    assert!(response.contains("freshness: fresh"), "{response}");
     assert!(response.contains("\"isError\":false"), "{response}");
     // Once activated, the watcher must refresh later edits even with autoUpdate off.
     std::fs::write(&source, "autumn documentation")?;
@@ -1457,7 +1460,7 @@ fn indexed_fragment_coordinates_survive_direct_server_and_mcp() -> Result<(), Bo
             let text = String::from_utf8(reply.stdout)?;
             assert!(text.contains("\n  2: xxx"), "{mode} {preview}: {text}");
             assert!(!text.contains("\n  1: xxx"), "{mode} {preview}: {text}");
-            outputs.push(format!("{text}{}", String::from_utf8(reply.stderr)?));
+            outputs.push((text, String::from_utf8(reply.stderr)?));
         }
         assert_eq!(outputs[0], outputs[1], "direct/server {preview}");
         let reply = bridge.request(&json!({
@@ -1470,7 +1473,13 @@ fn indexed_fragment_coordinates_survive_direct_server_and_mcp() -> Result<(), Bo
         let text = reply["result"]["content"][0]["text"]
             .as_str()
             .ok_or("missing source preview")?;
-        assert_eq!(text, outputs[0], "direct/server/MCP {preview}");
+        let (body, diagnostics) = &outputs[0];
+        let expected = if diagnostics.is_empty() {
+            format!("freshness: fresh\n{body}")
+        } else {
+            format!("freshness: possibly_stale\n{diagnostics}\n{body}")
+        };
+        assert_eq!(text, expected, "direct/server/MCP {preview}");
     }
     bridge.close()?;
     assert_command_success(&guard.stop()?);
