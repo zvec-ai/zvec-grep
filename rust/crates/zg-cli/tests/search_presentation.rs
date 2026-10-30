@@ -22,7 +22,7 @@ fn grouped_result() -> ContextResult {
 }
 
 #[test]
-fn every_preview_preserves_hits_and_local_ranks_without_search_metadata() {
+fn every_preview_separates_queries_and_preserves_hits_and_local_ranks() {
     let result = grouped_result();
     let original = result.clone();
     for preview in [
@@ -45,6 +45,16 @@ fn every_preview_preserves_hits_and_local_ranks_without_search_metadata() {
             )
             .expect("grouped render");
             let output = String::from_utf8(bytes).expect("UTF-8");
+            let first = output
+                .find("-- query 1/3: checkpoint --\n\n")
+                .expect("first query");
+            let second = output
+                .find("-- query 2/3: workspace --\n\n")
+                .expect("second query");
+            assert!(first < output.find("primary-source").expect("first hit"));
+            assert!(output.find("primary-source").expect("first hit") < second);
+            assert!(second < output.find("supplemental-source").expect("second hit"));
+            assert!(!output.contains("query 3/3:"), "empty groups stay hidden");
             for required in ["primary-source", "supplemental-source", "#1", "#2"] {
                 assert!(
                     output.contains(required),
@@ -105,6 +115,7 @@ fn every_preview_preserves_hits_and_local_ranks_without_search_metadata() {
             let output = String::from_utf8(bytes).expect("UTF-8");
             assert_eq!(output.matches("No matches").count(), 1, "{output}");
             assert!(!output.contains("sample.ts"), "{output}");
+            assert!(!output.contains("query 1/3:"), "{output}");
         }
     }
 }
@@ -126,6 +137,9 @@ fn compact_previews_highlight_the_query_of_each_group() {
         )
         .expect("colored grouped render");
         let output = String::from_utf8(bytes).expect("UTF-8");
+        assert!(output.contains("\x1b[35mquery 1/3:\x1b[0m \x1b[1mcheckpoint\x1b[0m"));
+        assert!(output.contains("\x1b[35mquery 2/3:\x1b[0m \x1b[1mworkspace\x1b[0m"));
+        assert!(output.contains("\x1b[2m"), "separator rules are dim");
         assert!(
             output.contains("  50: \x1b[1;33mcheckpoint\x1b[0m workspace primary-source"),
             "{preview:?}: {output}"
@@ -134,6 +148,82 @@ fn compact_previews_highlight_the_query_of_each_group() {
             output.contains("  50: checkpoint \x1b[1;33mworkspace\x1b[0m supplemental-source"),
             "{preview:?}: {output}"
         );
+    }
+}
+
+#[test]
+fn query_headings_keep_original_positions_and_sanitize_without_truncating() {
+    let mut result = grouped_result();
+    result.group_results[0].items.clear();
+    let long_text = "中文e\u{301}👩‍💻".repeat(30);
+    result.group_results[1].query =
+        format!("pool  timeout\n\r\t\x1b[2J\u{2028}\u{2029}{long_text}");
+    let expected = format!("pool  timeout    [2J  {long_text}");
+    for color in [ColorMode::Auto, ColorMode::Never, ColorMode::Always] {
+        for preview in [
+            PreviewMode::None,
+            PreviewMode::Short,
+            PreviewMode::Full,
+            PreviewMode::Detail,
+        ] {
+            let mut bytes = Vec::new();
+            write_context_with_options(
+                &mut bytes,
+                &result,
+                OutputOptions {
+                    preview,
+                    color,
+                    ..OutputOptions::default()
+                },
+                false,
+            )
+            .expect("long query render");
+            let output = String::from_utf8(bytes).expect("UTF-8");
+            let heading = output
+                .lines()
+                .find(|line| line.contains("query 2/3:"))
+                .expect("original query position");
+            assert!(heading.contains(&expected), "{heading}");
+            assert!(!output.contains("query 1/3:"));
+            assert!(
+                !output.contains("\x1b[2J"),
+                "query must not clear the terminal"
+            );
+            if color != ColorMode::Always {
+                assert!(
+                    !output.contains('\x1b'),
+                    "plain output must not contain ANSI escapes"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn single_query_does_not_add_a_divider() {
+    let mut result = grouped_result();
+    result.group_results.truncate(1);
+    for preview in [
+        PreviewMode::None,
+        PreviewMode::Short,
+        PreviewMode::Full,
+        PreviewMode::Detail,
+    ] {
+        let mut bytes = Vec::new();
+        write_context_with_options(
+            &mut bytes,
+            &result,
+            OutputOptions {
+                preview,
+                color: ColorMode::Never,
+                ..OutputOptions::default()
+            },
+            false,
+        )
+        .expect("single query render");
+        let output = String::from_utf8(bytes).expect("UTF-8");
+        assert!(output.contains("primary-source"));
+        assert!(!output.contains("query 1/1:"), "{output}");
     }
 }
 
