@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,8 +34,9 @@ test("executes npm's real global entry, preserving spaced arguments and retainin
 console.log(JSON.stringify({args: process.argv.slice(2), home: process.env.ZVEC_GREP_HOME}));
 if (process.argv.includes("--fail")) { console.error("fixture native failure"); process.exit(7); }
 `);
-  const result = await runInstalledCli(prefix, ["two words", "中文路径"], { env });
-  assert.deepEqual(JSON.parse(result.stdout), { args: ["two words", "中文路径"], home: join(root, "runtime") });
+  const args = ["two words", "中文路径", "", 'a"b', "it's literal", '$env:PATH; $(throw "unexpected")'];
+  const result = await runInstalledCli(prefix, args, { env });
+  assert.deepEqual(JSON.parse(result.stdout), { args, home: join(root, "runtime") });
   const logRoot = join(root, "logs");
   await assert.rejects(runInstalledCli(prefix, ["--fail"], { env, logRoot, label: "failure" }), /failed \(7\).*fixture native failure/s);
   assert.match(await readFile(join(logRoot, "failure.stderr"), "utf8"), /fixture native failure/);
@@ -122,6 +124,62 @@ lines.on("close", () => { console.error("EOF shutdown"); process.exit(Number(pro
     assert.match(await readFile(join(logRoot, "mcp.stderr"), "utf8"), /EOF shutdown/);
     assert.equal(JSON.parse(await readFile(join(logRoot, "mcp.json"), "utf8")).length, 3);
   }
+});
+
+test("MCP preserves Chinese workspace paths and UTF-8 responses through npm's installed entry", async (t) => {
+  const { root, prefix, env } = await installedFixture(t, `
+const { readFileSync } = require("node:fs");
+const { join } = require("node:path");
+const lines = require("node:readline").createInterface({ input: process.stdin });
+lines.on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  let result = {};
+  if (request.method === "tools/list") result = { tools: [{ name: "zvec_grep_search" }] };
+  if (request.method === "tools/call") {
+    const root = request.params.arguments.root;
+    if (root !== process.env.FIXTURE_ROOT) throw new Error("MCP root was corrupted: " + root);
+    result = { content: [{ type: "text", text: readFileSync(join(root, "中文笔记.md"), "utf8") }],
+      structuredContent: { root } };
+  }
+  console.log(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }));
+});
+`);
+  const cwd = join(root, "workspace 中文 space");
+  const contents = "releaseobservatorymarker 中文搜索结果：望远镜 🔭\n";
+  await mkdir(cwd);
+  await writeFile(join(cwd, "中文笔记.md"), contents);
+  const environment = { ...env, FIXTURE_ROOT: cwd };
+  const expected = { content: [{ type: "text", text: contents }], structuredContent: { root: cwd } };
+  const logRoot = join(root, "mcp-unicode");
+  await smokeInstalledMcp({ prefix, cwd, env: environment, logRoot });
+  const transcript = JSON.parse(await readFile(join(logRoot, "mcp.json"), "utf8"));
+  assert.deepEqual(transcript.find(({ id }) => id === 3).result, expected);
+
+  await t.test("overrides CP437 before forwarding MCP stdin to the npm shim", { skip: process.platform !== "win32" }, async () => {
+    // Force the failing runner's legacy encoding in the same PowerShell process
+    // before invoking the production launcher; don't depend on the CI locale.
+    const legacyLauncher = join(root, "legacy-console.ps1");
+    await writeFile(legacyLauncher, `
+[Console]::InputEncoding = [System.Text.Encoding]::GetEncoding(437)
+[Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding(437)
+$OutputEncoding = [System.Text.Encoding]::GetEncoding(437)
+$launcher = $args[0]
+$launcherArguments = @($args | Select-Object -Skip 1)
+& $launcher @launcherArguments
+exit $LASTEXITCODE
+`);
+    const invocation = installedCliInvocation(prefix, ["--server", "--stdio"]);
+    const result = spawnSync(invocation.command,
+      [...invocation.args.slice(0, 4), legacyLauncher, ...invocation.args.slice(4)], {
+        cwd, env: environment, encoding: "utf8", timeout: 30_000, windowsHide: true,
+        input: `${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call",
+          params: { arguments: { root: cwd } } })}\n`,
+      });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout).result, expected);
+  });
 });
 
 test("Windows executes the npm PowerShell shim, not the package executable", () => {

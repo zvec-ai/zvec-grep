@@ -1,9 +1,11 @@
 import { accessSync, mkdirSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { delimiter, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const processes = new WeakMap();
 const cleanupTimeout = 5_000;
+const windowsLauncher = fileURLToPath(new URL("./npm-installed-cli.ps1", import.meta.url));
 
 async function within(promise, timeout) {
   let timer;
@@ -20,7 +22,7 @@ export function installedCliInvocation(prefix, args, platform = process.platform
     ? join(resolve(prefix), "zg.ps1")
     : join(resolve(prefix), "bin", "zg");
   return platform === "win32"
-    ? { entry, command: "pwsh", args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", entry, ...args] }
+    ? { entry, command: "pwsh", args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", windowsLauncher, entry, ...args] }
     : { entry, command: entry, args };
 }
 
