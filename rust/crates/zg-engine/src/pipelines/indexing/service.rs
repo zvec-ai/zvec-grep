@@ -258,7 +258,7 @@ impl WorkspaceIndexService {
             // manifest still take time. Keep that work visible without reporting
             // Done before the active generation is durable.
             reporter.report(IndexProgress {
-                phase: crate::api::index::progress::IndexProgressPhase::Indexing,
+                phase: crate::api::index::progress::IndexProgressPhase::Finalizing,
                 detail: Some(DETAIL_SAVING_INDEX.to_owned()),
                 ..progress.clone()
             });
@@ -336,6 +336,7 @@ impl WorkspaceIndexService {
             ManifestState::RebuildRequired {
                 actual_version,
                 reason,
+                ..
             } => {
                 let mut info = unindexed_info(&source_root, &layout, WorkspaceIndexPolicy::Enabled);
                 info.compatibility = IndexCompatibility::RebuildRequired {
@@ -1050,7 +1051,13 @@ mod tests {
         for version in [None, Some(0), Some(1), Some(3), Some(5), Some(u32::MAX)] {
             let error = crate::workspace::manifest::require_current_index_version(version)
                 .expect_err("incompatible index format");
-            assert!(error.message().contains("rebuild the index"));
+            assert_eq!(error.code(), crate::EngineError::INDEX_INCOMPATIBLE);
+            assert!(
+                error
+                    .help()
+                    .expect("rebuild guidance")
+                    .contains("zg --index --rebuild")
+            );
         }
     }
 
@@ -1131,6 +1138,8 @@ mod tests {
             let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
             let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let captured = observed.clone();
+            let finalizing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let captured_finalizing = finalizing.clone();
             let result = service
                 .index(
                     &models,
@@ -1145,10 +1154,17 @@ mod tests {
                         }),
                         on_progress: Some(IndexProgressReporter::new(move |progress| {
                             if progress.detail.as_deref() == Some(DETAIL_SAVING_INDEX) {
-                                assert_eq!(progress.phase, IndexProgressPhase::Indexing);
+                                assert_eq!(progress.phase, IndexProgressPhase::Finalizing);
                                 assert!(!layout.manifest_path().exists());
                             }
+                            if progress.phase == IndexProgressPhase::Finalizing {
+                                captured_finalizing
+                                    .store(true, std::sync::atomic::Ordering::Release);
+                            }
                             if progress.phase == IndexProgressPhase::Done {
+                                assert!(
+                                    captured_finalizing.load(std::sync::atomic::Ordering::Acquire)
+                                );
                                 assert!(
                                     super::read_workspace_manifest(
                                         layout.storage_dir().parent().expect("source root"),
@@ -1175,6 +1191,7 @@ mod tests {
                 )
                 .await;
             assert_eq!(result.is_err(), fail);
+            assert!(finalizing.load(std::sync::atomic::Ordering::Acquire));
             assert_eq!(
                 *observed.lock().expect("observed progress"),
                 if fail {
@@ -2473,7 +2490,13 @@ mod tests {
             )
             .await
             .expect_err("previous index needs rebuild");
-        assert!(error.message().contains("rebuild the index"));
+        assert_eq!(error.code(), crate::EngineError::INDEX_INCOMPATIBLE);
+        assert!(
+            error
+                .help()
+                .expect("rebuild guidance")
+                .contains("zg --index --rebuild")
+        );
 
         service
             .index(

@@ -23,6 +23,89 @@ use zg_engine::api::context::{
 
 use crate::{highlight::highlight_ranges, output_path, theme::StatusTheme};
 
+/// Writes a warning with a trailing blank line, highlighting its label and commands.
+/// # Errors
+/// Returns the underlying writer error.
+pub fn write_warning(
+    mut writer: impl Write,
+    warning: &str,
+    color: crate::ColorMode,
+    terminal: bool,
+) -> io::Result<()> {
+    let theme = crate::theme::StatusTheme::new(color, terminal);
+    let message = if let Some(message) = warning.strip_prefix("Warning:") {
+        write!(writer, "{}", theme.warning("Warning:"))?;
+        message
+    } else {
+        warning
+    };
+    for (index, part) in message.split('`').enumerate() {
+        if index % 2 == 1 {
+            write!(writer, "{}", theme.path(&format!("`{part}`")))?;
+        } else {
+            write!(writer, "{part}")?;
+        }
+    }
+    writeln!(writer, "\n")
+}
+
+/// Presents an incompatible index without exposing internal diagnostics by default.
+/// # Errors
+/// Returns the underlying writer error.
+pub fn write_index_incompatible_error(
+    mut writer: impl Write,
+    report: &zg_engine::ErrorReport,
+    options: crate::OutputOptions,
+    terminal: bool,
+) -> io::Result<()> {
+    let theme = crate::theme::StatusTheme::new(options.color, terminal);
+    writeln!(
+        writer,
+        "{}",
+        theme.danger(&format!("Error: {}", report.message))
+    )?;
+    let command = if let Some(root) = report.workspace_root.as_deref() {
+        let shell = if cfg!(windows) { " (PowerShell)" } else { "" };
+        writeln!(
+            writer,
+            "\nRebuild the index for {} to continue{shell}:",
+            theme.path(&crate::theme::display_path(root))
+        )?;
+        format!("zg --index --rebuild {}", quote_rebuild_root(root))
+    } else {
+        writeln!(
+            writer,
+            "\nRun the rebuild command with the index directory to continue:"
+        )?;
+        "zg --index --rebuild <index-directory>".to_owned()
+    };
+    writeln!(writer, "  {}", theme.path(&command))?;
+    if options.debug {
+        writeln!(
+            writer,
+            "\nDiagnostics:\n{}",
+            crate::format_error_report(report)
+        )?;
+    }
+    Ok(())
+}
+
+fn quote_rebuild_root(root: &Path) -> String {
+    // Keep the actual absolute path: quoting a display-only `~` would prevent expansion.
+    let path = output_path(root).display().to_string();
+    if cfg!(windows) {
+        format!("'{}'", path.replace('\'', "''"))
+    } else if !path.is_empty()
+        && path
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/_-.".contains(&byte))
+    {
+        path
+    } else {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    }
+}
+
 /// Writes only native file paths, separated by newlines or NUL bytes.
 ///
 /// # Errors
@@ -178,7 +261,11 @@ pub fn write_context_status_with_options(
         return Ok(());
     }
     let theme = StatusTheme::new(options.color, terminal);
-    writeln!(writer, "{} Index may be out of date", theme.warning("!"))?;
+    writeln!(
+        writer,
+        "{} Index may be out of date",
+        theme.warning("Warning:")
+    )?;
     writeln!(writer, "  Results use the current index")?;
     if let Some(state) = result
         .indexing
@@ -348,6 +435,7 @@ is required. Use -g 'auth.ts' to select files by name.
 Result options:
   --limit <n>                       Maximum results per group (default: 7)
   --preview <none|short|full|detail> Indexed output detail (default: short)
+  --color <auto|always|never>       Color output (default: auto)
   --debug                           Print diagnostics to stderr
   --trace                           Include per-hit indexed search trace
   --refresh <background|wait|off>   Refresh policy (defaults: server=background, direct=off)
@@ -357,8 +445,10 @@ Result options:
 Preview modes: none keeps one source line; short uses compact bounded source;
 full uses compact full source; detail adds metadata, outlines, and file grouping.
 Full previews do not retrieve an entire function or file. TTY affects only color.
+Auto colors terminal output and leaves pipes plain; NO_COLOR disables auto color.
+Use --color always to retain color in pipes, or --color never to disable it.
 
-All preview modes preserve query groups, their ranks, and matched content.
+All preview modes preserve result order, ranks, and matched content.
 A result appears in each matching group; only --fuse combines groups.
 
 Embedding runtime:
@@ -416,6 +506,7 @@ Index options:
   --yes                             Confirm --drop without prompting
   --debug                           Print skipped-file diagnostics to stderr
   --mode <direct|server|auto>       Select indexing transport
+  --color <auto|always|never>       Color output (default: auto)
 
 Embedding options:
   --embedding <model>               Single text embedding model for this workspace
@@ -506,7 +597,10 @@ Shows the nearest workspace root, index policy, index state, embedding model,
 stored paths, refresh status, and suggested next action.
 
 --check-ready preserves the normal output and exits non-zero unless the
-Workspace index is ready.";
+Workspace index is ready.
+
+Output:
+  --color <auto|always|never>       Color output (default: auto)";
 
 const CONFIG_HELP: &str = r"Usage:
   zg --config provider set <provider> --api-key <key>
@@ -547,7 +641,6 @@ the grant on another machine. Granting sends no remote data.
 
 Output:
   --color <auto|always|never>       Color output (default: auto)
-  --no-color                        Disable color output
 
 Scopes used during operations:
   once                              Current CLI command or Agent tool call only
@@ -809,7 +902,7 @@ State:
 Advanced:
   ZVEC_GREP_METAL_KEEP_RESIDENCY       Set to 1 to keep llama.cpp Metal residency enabled (advanced)
   ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM  Legacy index-only llama.cpp fallback after the index concurrency variable
-  NO_COLOR                             Disable terminal colors
+  NO_COLOR                             Disable automatic terminal colors; --color overrides it
 
 Agent integration paths:
   CODEX_HOME            Codex configuration directory used by zg --install
@@ -850,6 +943,21 @@ mod output_tests {
         ContextContentRole, ContextCoverage, ContextDiagnostics, ContextItemKind, ContextSource,
         MatchedBy,
     };
+
+    #[test]
+    fn incompatible_index_without_a_root_requires_an_explicit_directory() {
+        let report = zg_engine::EngineError::index_incompatible("missing root").report();
+        let mut output = Vec::new();
+        write_index_incompatible_error(&mut output, &report, OutputOptions::default(), false)
+            .expect("render recovery guidance");
+        let output = String::from_utf8(output).expect("UTF-8 output");
+        assert!(output.contains("zg --index --rebuild <index-directory>"));
+        assert!(
+            !output
+                .lines()
+                .any(|line| line.trim() == "zg --index --rebuild")
+        );
+    }
 
     #[cfg(unix)]
     #[test]
@@ -926,6 +1034,15 @@ mod output_tests {
         result.query = "find ImportantSymbol".into();
         result.items[0].relative_path = "ImportantSymbol.rs".into();
         result.items[0].content = "İ 中文 ImportantSymbol here".into();
+        result.items[0].metadata = Some(EntityMetadata::Code(CodeMetadata {
+            symbol_type: Some(zg_engine::api::context::options::SymbolType::Function),
+            symbol_name: Some("MetadataSymbol".into()),
+            scope: Some("namespace".into()),
+            signature: None,
+            visibility: None,
+            language: None,
+            documentation: None,
+        }));
         for source in [ContextSource::Index, ContextSource::Rg] {
             result.source = source;
             result.items[0].match_ranges = if source == ContextSource::Rg {
@@ -983,10 +1100,26 @@ mod output_tests {
                     );
                     assert_eq!(output.contains('\x1b'), styled);
                     assert!(output.contains("ImportantSymbol.rs"));
-                    if preview == PreviewMode::Detail && source == ContextSource::Index && styled {
-                        assert!(output.contains(
-                            "\x1b[2mQuery\x1b[0m: \x1b[1;33mfind ImportantSymbol\x1b[0m"
-                        ));
+                    assert!(!output.contains("find ImportantSymbol"));
+                    if source == ContextSource::Index {
+                        let (label, value, scope) = if preview == PreviewMode::Detail {
+                            ("Symbol:", "MetadataSymbol", "Scope:")
+                        } else {
+                            ("symbol:", "[function] MetadataSymbol", "scope:")
+                        };
+                        let expected = if styled {
+                            format!("\x1b[35m{label}\x1b[0m {value}")
+                        } else {
+                            format!("{label} {value}")
+                        };
+                        assert!(output.contains(&expected), "{preview:?}: {output:?}");
+                        let expected_scope = if styled {
+                            format!("\x1b[35m{scope}\x1b[0m namespace")
+                        } else {
+                            format!("{scope} namespace")
+                        };
+                        assert!(output.contains(&expected_scope), "{output:?}");
+                        assert!(!output.contains("\x1b[1;35m"), "{output:?}");
                     }
                     assert_eq!(result, original);
                 }
@@ -995,7 +1128,7 @@ mod output_tests {
     }
 
     #[test]
-    fn context_highlighting_follows_visible_preview_without_coloring_metadata() {
+    fn context_highlighting_follows_visible_preview_without_coloring_metadata_values() {
         let mut result = indexed_result();
         result.query = "needle".into();
         result.items[0].content = format!("{}needle\nneedle", "x".repeat(160));
@@ -1026,7 +1159,7 @@ mod output_tests {
                 output.matches("\x1b[1;33mneedle\x1b[0m").count(),
                 expected_matches
             );
-            assert!(output.contains("heading: needle\n"));
+            assert!(output.contains("\x1b[35mheading:\x1b[0m needle\n"));
         }
     }
 
@@ -1113,6 +1246,7 @@ mod output_tests {
                             ..OutputOptions::default()
                         },
                         &QueryHighlighter::default(),
+                        crate::theme::StatusTheme::new(crate::ColorMode::Never, false),
                     )
                     .expect("source preview");
                     let expected = if whole_entity {
@@ -1190,7 +1324,7 @@ mod output_tests {
             .expect("terminal status");
         assert_eq!(
             String::from_utf8(terminal).expect("UTF-8"),
-            "! Index may be out of date\n  Results use the current index\n  Refresh: running · 2/3 files\n"
+            "Warning: Index may be out of date\n  Results use the current index\n  Refresh: running · 2/3 files\n"
         );
         let mut redirected = Vec::new();
         let mut original = Vec::new();
@@ -1219,7 +1353,7 @@ mod output_tests {
             String::from_utf8(buffer).expect("UTF-8")
         };
         let minimal = render(PreviewMode::None, false);
-        assert!(minimal.contains("#1 matchedBy=fts sample.rs:1-20"));
+        assert!(minimal.contains("#1 sample.rs:1-20"));
         assert!(minimal.contains("1\tline1"));
         assert!(!minimal.contains("2\tline2"));
         let short = render(PreviewMode::Short, false);
@@ -1254,7 +1388,7 @@ mod output_tests {
             (None, "symbol: User scope: app"),
             (
                 Some(zg_engine::api::context::options::SymbolType::Enum),
-                "symbol: enum User scope: app",
+                "symbol: [enum] User scope: app",
             ),
         ] {
             item.metadata = Some(EntityMetadata::Code(CodeMetadata {
@@ -1272,6 +1406,7 @@ mod output_tests {
                 &item,
                 OutputOptions::default(),
                 &QueryHighlighter::default(),
+                crate::theme::StatusTheme::new(crate::ColorMode::Never, false),
             )
             .expect("render symbol metadata");
             let rendered = String::from_utf8(buffer).expect("UTF-8");

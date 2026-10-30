@@ -157,10 +157,17 @@ fn concurrent_starts_replace_one_legacy_daemon_and_reuse_the_new_protocol()
     assert_command_success(&cli(&guard, &["--server", "on"]).output()?);
     assert_eq!(instance_record(home.path())?, current);
 
-    let direct = cli(&guard, &["--status", "--mode", "direct", "--no-color"]).output()?;
-    let server = cli(&guard, &["--status", "--mode", "server", "--no-color"])
-        .env("ZVEC_GREP_SERVER_TOKEN_FILE", &token_file)
-        .output()?;
+    let direct = cli(
+        &guard,
+        &["--status", "--mode", "direct", "--color", "never"],
+    )
+    .output()?;
+    let server = cli(
+        &guard,
+        &["--status", "--mode", "server", "--color", "never"],
+    )
+    .env("ZVEC_GREP_SERVER_TOKEN_FILE", &token_file)
+    .output()?;
     assert_command_success(&direct);
     assert_command_success(&server);
     assert_eq!(direct.stdout, server.stdout);

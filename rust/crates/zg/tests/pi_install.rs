@@ -203,7 +203,7 @@ fn inactive_invalid_guidance_does_not_block_installation_or_uninstall() {
         let output = command("--uninstall", root).output().expect("run zg");
         let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
         assert!(output.status.success(), "{stderr}");
-        assert!(stderr.contains("warning"), "{stderr}");
+        assert!(stderr.contains("Warning:"), "{stderr}");
         assert!(
             stderr.contains(&invalid_path.display().to_string()),
             "{stderr}"
@@ -251,7 +251,7 @@ fn unreadable_guidance_is_skipped_when_a_readable_candidate_exists() {
     assert!(active_guidance.contains("ZVEC_GREP_START"));
     let stderr = String::from_utf8(uninstall.stderr).expect("UTF-8 stderr");
     assert!(uninstall.status.success(), "{stderr}");
-    assert!(stderr.contains("warning"), "{stderr}");
+    assert!(stderr.contains("Warning:"), "{stderr}");
     assert!(
         stderr.contains(&unreadable.display().to_string()),
         "{stderr}"

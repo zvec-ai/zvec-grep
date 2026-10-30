@@ -102,7 +102,7 @@ export async function smokeInstalledPackage({
   ) {
     throw new Error("packaged zg managed-rg search failed");
   }
-  const direct = await execute(["--status", "--no-color"]);
+  const direct = await execute(["--status", "--color", "never"]);
   try {
     await execute([
       "--server",
@@ -120,7 +120,7 @@ export async function smokeInstalledPackage({
     }
     // Unlike managed --rg, workspace status in server mode crosses the IPC
     // boundary and exercises the packaged daemon's command endpoint.
-    const server = await execute(["--status", "--no-color"], "server");
+    const server = await execute(["--status", "--color", "never"], "server");
     if (direct !== server)
       throw new Error("packaged direct/server workspace status differs");
   } finally {
@@ -131,7 +131,7 @@ export async function smokeInstalledPackage({
   }
   let unavailable = false;
   try {
-    await execute(["--status", "--no-color"], "server");
+    await execute(["--status", "--color", "never"], "server");
   } catch {
     unavailable = true;
   }

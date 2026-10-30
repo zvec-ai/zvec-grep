@@ -91,12 +91,10 @@ pub mod result {
         /// Rejects persisted data that requires an explicit rebuild.
         ///
         /// # Errors
-        /// Returns a storage error with rebuild guidance for incompatible data.
+        /// Returns an index incompatibility error with rebuild guidance.
         pub fn ensure_compatible(&self) -> Result<(), crate::EngineError> {
             if let Self::RebuildRequired { reason, .. } = self {
-                return Err(crate::EngineError::storage_failure(format!(
-                    "{reason}; rebuild the index with `zg --index --rebuild`"
-                )));
+                return Err(crate::EngineError::index_incompatible(reason.clone()));
             }
             Ok(())
         }
@@ -352,8 +350,17 @@ mod tests {
             .compatibility
             .ensure_compatible()
             .expect_err("rebuild required");
-        assert_eq!(error.code(), crate::EngineError::STORAGE_FAILURE);
-        assert!(error.message().contains("zg --index --rebuild"));
+        assert_eq!(error.code(), crate::EngineError::INDEX_INCOMPATIBLE);
+        assert_eq!(
+            error.message(),
+            "This index is incompatible with the current version of zg."
+        );
+        assert!(
+            error
+                .help()
+                .expect("rebuild guidance")
+                .contains("zg --index --rebuild")
+        );
         assert!(IndexCompatibility::Unbuilt.ensure_compatible().is_ok());
         assert!(
             IndexCompatibility::Compatible { version: 2 }

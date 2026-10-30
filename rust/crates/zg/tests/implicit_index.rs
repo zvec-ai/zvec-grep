@@ -71,7 +71,7 @@ impl Fixture {
     }
 
     fn assert_model(&self, mode: &str, reference: &str) {
-        let output = self.success(&["--status", "--mode", mode, "--no-color"]);
+        let output = self.success(&["--status", "--mode", mode, "--color", "never"]);
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("✓ Workspace index is ready"), "{stdout}");
         assert!(
@@ -145,7 +145,7 @@ fn status_uses_grouped_layout_compact_paths_and_explicit_color_policy() {
         colored.contains("\u{1b}[33m? Workspace index is not configured\u{1b}[0m"),
         "{colored:?}"
     );
-    assert!(colored.contains("\u{1b}[2m~\u{1b}[0m"), "{colored:?}");
+    assert!(colored.contains("\u{1b}[36m~\u{1b}[0m"), "{colored:?}");
     assert!(
         colored.contains("\u{1b}[2mStorage     \u{1b}[0m"),
         "{colored:?}"
@@ -163,7 +163,14 @@ fn status_check_ready_keeps_direct_and_server_exit_semantics() {
     let check = |heading: &str, ready: bool| {
         for mode in ["direct", "server"] {
             let output = fixture
-                .command(&["--status", "--mode", mode, "--check-ready", "--no-color"])
+                .command(&[
+                    "--status",
+                    "--mode",
+                    mode,
+                    "--check-ready",
+                    "--color",
+                    "never",
+                ])
                 .output()
                 .expect("readiness status");
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -190,7 +197,8 @@ fn status_check_ready_keeps_direct_and_server_exit_semantics() {
         "direct",
         "--embedding",
         "local/potion-code-16m-v2",
-        "--no-color",
+        "--color",
+        "never",
     ]);
     check("✓ Workspace index is ready", true);
     fs::write(fixture.root.path().join("added.rs"), "fn added() {}\n").expect("new source file");
@@ -505,7 +513,8 @@ async fn indexed_cli_queries_do_not_wait_for_incremental_writer() {
             "--allow-remote",
             "--api-key",
             "local-test-key",
-            "--no-color",
+            "--color",
+            "never",
         ]
     };
     // Build before starting the daemon so no watcher can race the explicit update.
@@ -534,7 +543,7 @@ async fn indexed_cli_queries_do_not_wait_for_incremental_writer() {
             for refresh in ["off", "background"] {
                 let mut query = spawn_cli(fixture.command(&[
                     "--mode", mode, "--fts", "orchard", "--refresh", refresh,
-                    "--allow-remote", "--api-key", "local-test-key", "--no-color",
+                    "--allow-remote", "--api-key", "local-test-key", "--color", "never",
                 ]))?;
                 // The unreleased gate proves nonblocking behavior without timing process startup.
                 let output = wait_cli(&mut query, Duration::from_secs(30)).await;
@@ -581,9 +590,10 @@ fn direct_search_warns_about_unmatched_index_drift_on_stderr() {
         "direct",
         "--embedding",
         "local/potion-code-16m-v2",
-        "--no-color",
+        "--color",
+        "never",
     ]);
-    let clean = fixture.success(&["--mode", "direct", "--fts", "needle", "--no-color"]);
+    let clean = fixture.success(&["--mode", "direct", "--fts", "needle", "--color", "never"]);
     assert!(!String::from_utf8_lossy(&clean.stderr).contains("status:"));
     fs::write(
         fixture.root.path().join("unmatched.txt"),
@@ -597,12 +607,10 @@ fn direct_search_warns_about_unmatched_index_drift_on_stderr() {
         "needle",
         "--refresh",
         "off",
-        "--no-color",
+        "--color",
+        "never",
     ]);
-    assert_eq!(
-        String::from_utf8_lossy(&stale.stdout),
-        "query groups (1):\nQ1 [supplemental]: needle\nhits: 0\n\nNo matches.\n"
-    );
+    assert_eq!(String::from_utf8_lossy(&stale.stdout), "No matches.\n");
     assert!(String::from_utf8_lossy(&stale.stderr).contains("status: possibly_stale\nresults: served_from_current_index\nbackground_refresh: idle (0/1)\n"), "{}", String::from_utf8_lossy(&stale.stderr));
 }
 
@@ -611,7 +619,7 @@ fn noninteractive_missing_index_requires_explicit_creation() {
     let fixture = Fixture::new();
     // Missing workspaces never download or execute a model without confirmation.
     let output = fixture
-        .command(&["--mode", "direct", "--fts", "needle", "--no-color"])
+        .command(&["--mode", "direct", "--fts", "needle", "--color", "never"])
         .output()
         .expect("noninteractive query");
     assert!(!output.status.success());
@@ -623,6 +631,149 @@ fn noninteractive_missing_index_requires_explicit_creation() {
     );
     assert!(output.stdout.is_empty());
     assert!(!fixture.root.path().join(".zvec-grep").exists());
+}
+
+#[test]
+fn incompatible_index_errors_are_actionable_without_rebuilding_existing_data() {
+    for mode in ["direct", "server"] {
+        let mut fixture = Fixture::new();
+        let index_home = fixture.root.path().join(".zvec-grep");
+        let legacy_storage = index_home.join("index.zvec");
+        fs::create_dir_all(&legacy_storage).expect("legacy storage");
+        let manifest_path = index_home.join("manifest.json");
+        let manifest = serde_json::to_vec(&json!({
+            "manifestVersion": 1,
+            "indexVersion": 1,
+        }))
+        .expect("legacy manifest JSON");
+        fs::write(&manifest_path, &manifest).expect("legacy manifest");
+        let sentinel_path = legacy_storage.join("original-index-data");
+        let sentinel = b"retain the existing index until an explicit rebuild";
+        fs::write(&sentinel_path, sentinel).expect("legacy index data");
+        if mode == "server" {
+            fixture.start_server();
+        }
+
+        for (presentation, options) in [
+            ("plain", Vec::<&str>::new()),
+            ("colored", vec!["--color", "always"]),
+            ("debug", vec!["--debug", "--color", "never"]),
+        ] {
+            let mut arguments = vec!["--mode", mode, "--fts", "needle"];
+            arguments.extend(options);
+            let output = fixture
+                .command(&arguments)
+                .env("NO_COLOR", "1")
+                .output()
+                .expect("query incompatible index");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "{mode}/{presentation}: {stderr}"
+            );
+            assert!(output.stdout.is_empty(), "{mode}/{presentation}");
+            assert!(
+                stderr.contains("This index is incompatible with the current version of zg."),
+                "{mode}/{presentation}: {stderr}"
+            );
+            assert!(stderr.contains("zg --index --rebuild"), "{stderr}");
+            if presentation == "debug" {
+                assert!(stderr.contains("unsupported index version 1"), "{stderr}");
+                assert!(stderr.contains("expected 2"), "{stderr}");
+                assert!(stderr.contains("Error location:"), "{stderr}");
+            } else {
+                for internal_detail in [
+                    "unsupported index version",
+                    "expected 2",
+                    "manifest.json",
+                    "Error location:",
+                    "ZG.ENGINE.",
+                ] {
+                    assert!(!stderr.contains(internal_detail), "{stderr}");
+                }
+            }
+            if presentation == "colored" {
+                assert!(stderr.contains("\u{1b}[31m"), "{stderr:?}");
+                assert!(stderr.contains("\u{1b}[36m"), "{stderr:?}");
+            } else {
+                assert!(!stderr.contains("\u{1b}["), "{stderr:?}");
+            }
+            assert_eq!(
+                fs::read(&manifest_path).expect("preserved manifest"),
+                manifest
+            );
+            assert_eq!(
+                fs::read(&sentinel_path).expect("preserved index"),
+                sentinel.as_slice()
+            );
+            assert!(!index_home.join("index").exists());
+        }
+    }
+}
+
+#[test]
+fn incompatible_parent_index_recovery_targets_the_discovered_workspace() {
+    for mode in ["direct", "server"] {
+        let mut fixture = Fixture::new();
+        let workspace = fixture.root.path().join("project's workspace $root");
+        let child = workspace.join("src");
+        let index_home = workspace.join(".zvec-grep");
+        fs::create_dir_all(&child).expect("query directory");
+        fs::create_dir_all(&index_home).expect("parent index directory");
+        let manifest_path = index_home.join("manifest.json");
+        let manifest = br#"{"indexVersion":1}"#;
+        fs::write(&manifest_path, manifest).expect("incompatible parent manifest");
+        let sentinel_path = index_home.join("original-index-data");
+        fs::write(&sentinel_path, b"original").expect("existing index data");
+        let resolved = fs::canonicalize(&workspace).expect("canonical index root");
+        let displayed = zg_cli::output_path(&resolved).display().to_string();
+        if mode == "server" {
+            fixture.start_server();
+        }
+
+        for action in [vec!["--fts", "needle"], vec!["needle"]] {
+            let mut arguments = vec!["--mode", mode, "--color", "never"];
+            arguments.extend(action);
+            let output = fixture
+                .command(&arguments)
+                .current_dir(&child)
+                .output()
+                .expect("access parent index from child");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(output.status.code(), Some(1), "{mode}: {stderr}");
+            assert!(
+                stderr.contains(&format!("Rebuild the index for {displayed} to continue")),
+                "{mode}: {stderr}"
+            );
+            let command = stderr
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("zg --index --rebuild "))
+                .expect("rebuild command has an explicit index directory");
+            #[cfg(unix)]
+            {
+                // Interpret the displayed shell syntax without running a real rebuild.
+                let script = format!("set -- {command}; test \"$#\" -eq 1 && printf '%s' \"$1\"");
+                let parsed = Command::new("/bin/sh")
+                    .args(["-c", &script])
+                    .output()
+                    .expect("parse recovery argument");
+                assert!(parsed.status.success(), "{command}");
+                assert_eq!(String::from_utf8_lossy(&parsed.stdout), displayed);
+            }
+            #[cfg(windows)]
+            assert_eq!(command, format!("'{}'", displayed.replace('\'', "''")));
+            assert_eq!(
+                fs::read(&manifest_path).expect("manifest retained"),
+                manifest
+            );
+            assert_eq!(
+                fs::read(&sentinel_path).expect("data retained"),
+                b"original"
+            );
+            assert!(!child.join(".zvec-grep").exists());
+        }
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -638,7 +789,7 @@ fn implicit_query_index_progress_does_not_blank_the_live_line() {
         if server {
             fixture.start_server();
         }
-        let mut command = fixture.command(&["--mode", mode, "--fts", "needle", "--no-color"]);
+        let mut command = fixture.command(&["--mode", mode, "--fts", "needle", "--color", "never"]);
         command.env_remove("RUST_LOG");
         let output = success(terminal::run(command, &[("Enter Build", b"\r")]));
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -656,7 +807,7 @@ fn implicit_query_index_progress_does_not_blank_the_live_line() {
         );
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "query groups (1):\nQ1 [supplemental]: needle\nhits: 0\n\nNo matches.\n",
+            "No matches.\n",
             "{mode}"
         );
     }
@@ -695,13 +846,17 @@ fn configured_local_models_follow_environment_then_global_default_precedence() {
     ] {
         let fixture = Fixture::new();
         fixture.success(&["--config", "model", "set", configured, "--default"]);
-        let mut command = fixture.command(&["--mode", "direct", "--fts", "needle", "--no-color"]);
+        let mut command =
+            fixture.command(&["--mode", "direct", "--fts", "needle", "--color", "never"]);
         if let Some(reference) = environment {
             command.env("ZVEC_GREP_EMBEDDING", reference);
         }
         let output = success(terminal::run(command, &[("Enter Build", b"\r")]));
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("Select an embedding model"), "{stderr}");
+        assert!(
+            stderr.contains("Choose a model to build the index and continue this search."),
+            "{stderr}"
+        );
         fixture.assert_model("direct", expected);
     }
 }
@@ -719,7 +874,7 @@ fn auto_and_server_build_at_the_query_root_not_the_daemon_working_directory() {
             fixture.start_server();
         }
         let workspace = TempDir::new().expect("query workspace distinct from daemon cwd");
-        let mut command = fixture.command(&["--mode", mode, "--fts", "needle", "--no-color"]);
+        let mut command = fixture.command(&["--mode", mode, "--fts", "needle", "--color", "never"]);
         command.current_dir(workspace.path());
         if mode == "server" {
             // Query-process defaults must take precedence over the daemon's environment.
@@ -727,15 +882,15 @@ fn auto_and_server_build_at_the_query_root_not_the_daemon_working_directory() {
         }
         let output = success(terminal::run(command, &[("Enter Build", b"\r")]));
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("Select an embedding model"), "{stderr}");
-        assert!(stderr.contains("No indexable files"), "{stderr}");
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout),
-            "query groups (1):\nQ1 [supplemental]: needle\nhits: 0\n\nNo matches.\n"
+        assert!(
+            stderr.contains("Choose a model to build the index and continue this search."),
+            "{stderr}"
         );
+        assert!(stderr.contains("No indexable files"), "{stderr}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "No matches.\n");
         let status = success(
             fixture
-                .command(&["--status", "--mode", mode, "--no-color"])
+                .command(&["--status", "--mode", mode, "--color", "never"])
                 .current_dir(workspace.path())
                 .output()
                 .expect("query workspace status"),
@@ -777,7 +932,7 @@ fn disabled_workspace_is_not_rebuilt_from_a_nested_query_directory() {
     fixture.start_server();
     for mode in ["direct", "server", "auto"] {
         let output = fixture
-            .command(&["--mode", mode, "--fts", "needle", "--no-color"])
+            .command(&["--mode", mode, "--fts", "needle", "--color", "never"])
             .current_dir(&nested)
             .env("ZVEC_GREP_EMBEDDING", "unsupported/model")
             .output()
@@ -786,7 +941,7 @@ fn disabled_workspace_is_not_rebuilt_from_a_nested_query_directory() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(!stderr.contains("No index found"), "{stderr}");
         assert!(!stderr.contains("Index ready"), "{stderr}");
-        let status = fixture.success(&["--status", "--mode", mode, "--no-color"]);
+        let status = fixture.success(&["--status", "--mode", mode, "--color", "never"]);
         let stdout = String::from_utf8_lossy(&status.stdout);
         assert!(
             stdout.contains("○ Workspace indexing is disabled"),
@@ -803,7 +958,7 @@ fn rg_never_inspects_or_builds_an_index_even_in_server_mode() {
         // Invalid model defaults and an absent daemon must not affect managed rg.
         let output = success(
             fixture
-                .command(&["--mode", mode, "--no-color", "--rg", "needle", "."])
+                .command(&["--mode", mode, "--color", "never", "--rg", "needle", "."])
                 .env("ZVEC_GREP_EMBEDDING", "unsupported/model")
                 .output()
                 .expect("rg query"),
@@ -827,7 +982,8 @@ fn existing_local_and_remote_indexes_are_reused_from_nested_directories() {
             "--allow-remote",
             "--api-key",
             "test-key",
-            "--no-color",
+            "--color",
+            "never",
         ]);
         let nested = fixture.root.path().join("nested");
         fs::create_dir(&nested).expect("nested directory");
@@ -842,7 +998,8 @@ fn existing_local_and_remote_indexes_are_reused_from_nested_directories() {
                         "needle",
                         "--refresh",
                         "off",
-                        "--no-color",
+                        "--color",
+                        "never",
                     ])
                     .current_dir(&nested)
                     .env("ZVEC_GREP_EMBEDDING", "unsupported/model")
@@ -852,10 +1009,7 @@ fn existing_local_and_remote_indexes_are_reused_from_nested_directories() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(!stderr.contains("No index found"), "{stderr}");
             assert!(!stderr.contains("Index ready"), "{stderr}");
-            assert_eq!(
-                String::from_utf8_lossy(&output.stdout),
-                "query groups (1):\nQ1 [supplemental]: needle\nhits: 0\n\nNo matches.\n"
-            );
+            assert_eq!(String::from_utf8_lossy(&output.stdout), "No matches.\n");
             fixture.assert_model(mode, reference);
             assert!(!nested.join(".zvec-grep").exists());
         }
@@ -890,7 +1044,8 @@ fn implicit_build_does_not_persist_local_overrides_or_query_credentials() {
             "--api-key",
             "implicit-query-secret",
             "--allow-remote",
-            "--no-color",
+            "--color",
+            "never",
             "--model-cache",
         ]);
         command
@@ -1014,7 +1169,8 @@ async fn assert_sigint_preserves_progress_cursor(mode: &str) {
         "--allow-remote",
         "--api-key",
         "local-test-key",
-        "--no-color",
+        "--color",
+        "never",
     ]);
     // Debug logging intentionally disables live animation; this test exercises
     // normal terminal presentation regardless of the test runner's environment.
@@ -1074,7 +1230,7 @@ fn cancelling_model_selection_exits_without_error_or_index() {
                 fixture.start_server();
             }
             let output = terminal::run(
-                fixture.command(&["--mode", mode, "--fts", "needle", "--no-color"]),
+                fixture.command(&["--mode", mode, "--fts", "needle", "--color", "never"]),
                 &[("Esc Cancel", cancellation)],
             );
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1084,13 +1240,16 @@ fn cancelling_model_selection_exits_without_error_or_index() {
                 !stderr.contains("Index creation cancelled"),
                 "{mode}: {stderr}"
             );
-            assert!(!stderr.contains("error["), "{mode}: {stderr}");
+            assert!(
+                !stderr.to_ascii_lowercase().contains("error["),
+                "{mode}: {stderr}"
+            );
             assert!(
                 !stderr.to_ascii_lowercase().contains("error:"),
                 "{mode}: {stderr}"
             );
             assert!(
-                stderr.contains("Select an embedding model"),
+                stderr.contains("Choose a model to build the index and continue this search."),
                 "{mode}: {stderr}"
             );
             assert!(!fixture.root.path().join(".zvec-grep").exists());
@@ -1122,7 +1281,8 @@ fn remote_authorization_can_return_to_model_selection_without_sending_data() {
             "cpu",
             "--api-key",
             "setup-test-secret",
-            "--no-color",
+            "--color",
+            "never",
         ]),
         &[
             ("Enter Continue", b"\r"),
@@ -1142,10 +1302,7 @@ fn remote_authorization_can_return_to_model_selection_without_sending_data() {
             .is_none()
     );
     assert!(!String::from_utf8_lossy(&output.stderr).contains("setup-test-secret"));
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "query groups (1):\nQ1 [supplemental]: needle\nhits: 0\n\nNo matches.\n"
-    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "No matches.\n");
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1179,7 +1336,8 @@ async fn remote_allow_once_keeps_query_credentials_temporary_through_build_and_q
             "setup-test-secret",
             "--refresh",
             "off",
-            "--no-color",
+            "--color",
+            "never",
         ]);
         let before = embedding.authorized_requests.load(Ordering::SeqCst);
         let output = success(
@@ -1222,7 +1380,7 @@ async fn remote_allow_once_keeps_query_credentials_temporary_through_build_and_q
         );
         assert!(!manifest.to_string().contains("setup-test-secret"));
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.starts_with("query groups (1):\n"), "{stdout}");
+        assert!(stdout.starts_with("#1 "), "{stdout}");
         assert!(stdout.contains("needle.txt"));
         assert!(!stdout.contains("setup-test-secret"));
         assert!(!String::from_utf8_lossy(&output.stderr).contains("setup-test-secret"));
@@ -1260,7 +1418,8 @@ async fn missing_remote_credential_can_be_saved_before_build_and_query() {
             "cpu",
             "--refresh",
             "off",
-            "--no-color",
+            "--color",
+            "never",
         ]);
         let before = embedding.authorized_requests.load(Ordering::SeqCst);
         let output = success(
@@ -1326,7 +1485,7 @@ fn cancelling_missing_credential_input_does_not_save_or_build() {
                 fixture.start_server();
             }
             let output = terminal::run(
-                fixture.command(&["--mode", mode, "--fts", "needle", "--no-color"]),
+                fixture.command(&["--mode", mode, "--fts", "needle", "--color", "never"]),
                 &[
                     ("Enter Build", b"\x1b[C"),
                     ("Enter Continue", b"\r"),
@@ -1365,7 +1524,8 @@ fn escaping_remote_authorization_leaves_no_index_or_grant() {
             "needle",
             "--api-key",
             "setup-test-secret",
-            "--no-color",
+            "--color",
+            "never",
         ]),
         &[("Enter Continue", b"\r"), ("Enter Confirm", b"\x1b")],
     );
@@ -1407,16 +1567,14 @@ fn matching_workspace_consent_skips_the_remote_authorization_screen() {
             "needle",
             "--api-key",
             "setup-test-secret",
-            "--no-color",
+            "--color",
+            "never",
         ]),
         &[("Enter Continue", b"\r")],
     ));
     fixture.assert_model("direct", "qwen/text-embedding-v4");
     assert!(!String::from_utf8_lossy(&output.stderr).contains("Remote embedding authorization"));
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "query groups (1):\nQ1 [supplemental]: needle\nhits: 0\n\nNo matches.\n"
-    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "No matches.\n");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1481,8 +1639,8 @@ async fn warm_index_path_lookups_return_current_text_or_no_matches_without_vecto
             assert_eq!(
                 stderr,
                 concat!(
-                    "warning: automatically performing path lookup; use --hybrid to force hybrid search.\n",
-                    "warning: no matching file paths; searching current file contents literally (rg).\n"
+                    "Warning: automatically performing path lookup; use --hybrid to force hybrid search.\n",
+                    "Warning: no matching file paths; searching current file contents literally (rg).\n"
                 )
             );
             if query == "missing.ts" {

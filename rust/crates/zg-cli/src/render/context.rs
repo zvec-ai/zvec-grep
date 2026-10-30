@@ -9,7 +9,7 @@ use zg_engine::api::context::{
     ContextResult,
     result::{
         ContentRange, ContextCoverage, ContextItem, ContextItemKind, ContextItemStatus,
-        ContextQueryGroupRole, EmptyReason, EntityMetadata, MatchedBy,
+        EmptyReason, EntityMetadata,
     },
 };
 
@@ -39,19 +39,18 @@ pub(super) fn write(
         }
         return write_items(writer, &result.items, &result.query, options, theme);
     }
-    writeln!(writer, "query groups ({}):", result.group_results.len())?;
-    for (index, group) in result.group_results.iter().enumerate() {
+    let groups = result
+        .group_results
+        .iter()
+        .filter(|group| !group.items.is_empty())
+        .collect::<Vec<_>>();
+    if groups.is_empty() {
+        return writeln!(writer, "No matches.");
+    }
+    for (index, group) in groups.into_iter().enumerate() {
         if index > 0 {
             writeln!(writer)?;
         }
-        writeln!(
-            writer,
-            "{} [{}]: {}",
-            group.id,
-            role(group.role),
-            one_line(&group.query)
-        )?;
-        writeln!(writer, "hits: {}\n", group.items.len())?;
         write_items(writer, &group.items, &group.query, options, theme)?;
     }
     Ok(())
@@ -76,8 +75,9 @@ fn write_items(
             writeln!(writer)?;
         }
         let score = if options.trace {
-            item.score
-                .map_or(String::new(), |value| format!(" score={}", score(value)))
+            item.score.map_or(String::new(), |value| {
+                format!(" {}{}", theme.metadata_label("score="), score(value))
+            })
         } else {
             String::new()
         };
@@ -87,17 +87,16 @@ fn write_items(
             .map_or(&item.range, |container| &container.range);
         writeln!(
             writer,
-            "#{} matchedBy={}{score} {}:{}",
+            "#{}{score} {}:{}",
             item.rank,
-            matched_by(item.matched_by),
             output_path(&item.relative_path).display(),
             range_label(range)
         )?;
-        write_item_preview(writer, item, options, &highlighter)?;
+        write_item_preview(writer, item, options, &highlighter, theme)?;
         if options.trace
             && let Some(trace) = trace(item)
         {
-            writeln!(writer, "trace: {trace}")?;
+            writeln!(writer, "{} {trace}", theme.metadata_label("trace:"))?;
         }
     }
     Ok(())
@@ -108,9 +107,10 @@ pub(super) fn write_item_preview(
     item: &ContextItem,
     options: OutputOptions,
     highlighter: &QueryHighlighter,
+    theme: StatusTheme,
 ) -> io::Result<()> {
     if item.status == ContextItemStatus::PossiblyStale {
-        writeln!(writer, "status: possibly_stale")?;
+        writeln!(writer, "{} possibly_stale", theme.metadata_label("status:"))?;
     }
     let outline = outline_lines(item, options.preview);
     let source = source_lines(item, options.preview, highlighter);
@@ -124,29 +124,32 @@ pub(super) fn write_item_preview(
             {
                 let kind = code
                     .symbol_type
-                    .map_or(String::new(), |kind| format!("{} ", enum_label(kind)));
-                let scope = code
-                    .scope
-                    .as_ref()
-                    .map_or(String::new(), |scope| format!(" scope: {scope}"));
-                writeln!(writer, "symbol: {kind}{name}{scope}")?;
+                    .map_or(String::new(), |kind| format!("[{}] ", enum_label(kind)));
+                let scope = code.scope.as_ref().map_or(String::new(), |scope| {
+                    format!(" {} {scope}", theme.metadata_label("scope:"))
+                });
+                writeln!(
+                    writer,
+                    "{} {kind}{name}{scope}",
+                    theme.metadata_label("symbol:")
+                )?;
             }
         }
         Some(EntityMetadata::Markdown(markdown)) => {
             if let Some(heading) = &markdown.heading {
-                writeln!(writer, "heading: {heading}")?;
+                writeln!(writer, "{} {heading}", theme.metadata_label("heading:"))?;
             }
             if let Some(level) = markdown.level {
-                writeln!(writer, "heading_level: {level}")?;
+                writeln!(writer, "{} {level}", theme.metadata_label("heading_level:"))?;
             }
             if let Some(scope) = &markdown.scope {
-                writeln!(writer, "scope: {scope}")?;
+                writeln!(writer, "{} {scope}", theme.metadata_label("scope:"))?;
             }
         }
         None => {}
     }
     if !outline.is_empty() {
-        writeln!(writer, "outline:")?;
+        writeln!(writer, "{}", theme.metadata_label("outline:"))?;
         for line in outline {
             writeln!(writer, "{line}")?;
         }
@@ -154,10 +157,15 @@ pub(super) fn write_item_preview(
     if options.preview != PreviewMode::None
         && let Some(range) = matched_range(item)
     {
-        writeln!(writer, "matched: {}", range_label(range))?;
+        writeln!(
+            writer,
+            "{} {}",
+            theme.metadata_label("matched:"),
+            range_label(range)
+        )?;
     }
     if !source.is_empty() && options.preview != PreviewMode::None {
-        writeln!(writer, "source:")?;
+        writeln!(writer, "{}", theme.metadata_label("source:"))?;
     }
     for line in source {
         writeln!(writer, "{line}")?;
@@ -193,37 +201,12 @@ fn write_detail(
         "Context",
         &format!("{} {context}", output_path(&result.root).display()),
     )?;
-    let query = if grouped {
-        result.query.as_str().into()
-    } else {
-        highlighter.highlight(&result.query)
-    };
-    field(writer, theme, "Query", &query)?;
-    if let Some(index) = &result.diagnostics.index
-        && !index.routes.is_empty()
-    {
-        let routes = index
-            .routes
-            .iter()
-            .map(|route| format!("{}:{}", enum_label(route.mode), route.query))
-            .collect::<Vec<_>>()
-            .join(", ");
-        field(writer, theme, "Routes", &StatusTheme::accent(&routes))?;
-    }
     let coverage = match result.coverage {
         ContextCoverage::RankedSample => "ranked_sample",
         ContextCoverage::RgExhaustive => "rg_exhaustive",
         ContextCoverage::RgTruncated => "rg_truncated",
     };
     field(writer, theme, "Coverage", coverage)?;
-    if grouped {
-        field(
-            writer,
-            theme,
-            "Groups",
-            &result.group_results.len().to_string(),
-        )?;
-    }
     field(
         writer,
         theme,
@@ -235,36 +218,18 @@ fn write_detail(
             .len()
             .to_string(),
     )?;
-    field(writer, theme, "Hits", &items.len().to_string())?;
-    if grouped {
-        for group in &result.group_results {
-            writeln!(writer)?;
-            field(
-                writer,
-                theme,
-                "Group",
-                &format!("{} [{}]", group.id, role(group.role)),
-            )?;
-            let highlighter = QueryHighlighter::new(&group.query, theme.color);
-            field(
-                writer,
-                theme,
-                "Query",
-                &highlighter.highlight(&one_line(&group.query)),
-            )?;
-            field(writer, theme, "Hits", &group.items.len().to_string())?;
-            if group.items.is_empty() {
-                field(writer, theme, "Reason", "No matches")?;
-            }
-            write_detail_items(writer, &group.items, options, theme, &highlighter)?;
-        }
-    } else if items.is_empty() {
+    if items.is_empty() {
         let reason = if result.diagnostics.empty_reason == Some(EmptyReason::NoSearchableFiles) {
             "No searchable files"
         } else {
             "No matches"
         };
         field(writer, theme, "Reason", reason)?;
+    } else if grouped {
+        for group in &result.group_results {
+            let highlighter = QueryHighlighter::new(&group.query, theme.color);
+            write_detail_items(writer, &group.items, options, theme, &highlighter)?;
+        }
     } else {
         write_detail_items(writer, &result.items, options, theme, &highlighter)?;
     }
@@ -303,17 +268,15 @@ fn write_detail_items(
             "File",
             &theme.path(&output_path(&group[0].relative_path).display().to_string()),
         )?;
-        field(writer, theme, "Hits", &group.len().to_string())?;
         for item in sorted(group) {
-            let score = item
-                .score
-                .map_or(String::new(), |value| format!(" score={}", score(value)));
+            let score = item.score.map_or(String::new(), |value| {
+                format!(" {}{}", theme.metadata_label("score="), score(value))
+            });
             writeln!(
                 writer,
-                "\n  {} {} matchedBy={}{score}",
+                "\n  {} {}{score}",
                 StatusTheme::accent(&format!("#{}", item.rank)),
-                summary(item),
-                StatusTheme::accent(matched_by(item.matched_by))
+                summary(item)
             )?;
             let status = match item.status {
                 ContextItemStatus::Fresh => "fresh",
@@ -321,20 +284,20 @@ fn write_detail_items(
             };
             writeln!(
                 writer,
-                "  {}: {}  {}: {status}",
-                theme.label("Range"),
+                "  {} {}  {} {status}",
+                theme.metadata_label("Range:"),
                 range_label(&item.range),
-                theme.label("Status")
+                theme.metadata_label("Status:")
             )?;
             if let Some(range) = matched_range(item) {
                 writeln!(
                     writer,
-                    "  {}: {}",
-                    theme.label("Matched"),
+                    "  {} {}",
+                    theme.metadata_label("Matched:"),
                     StatusTheme::accent(&range_label(range))
                 )?;
             }
-            for line in metadata_lines(item) {
+            for line in metadata_lines(item, theme) {
                 writeln!(writer, "  {line}")?;
             }
             for (label, lines) in [
@@ -345,7 +308,7 @@ fn write_detail_items(
                 ),
             ] {
                 if !lines.is_empty() {
-                    writeln!(writer, "  {}:", theme.label(label))?;
+                    writeln!(writer, "  {}", theme.metadata_label(&format!("{label}:")))?;
                     for line in lines {
                         writeln!(writer, "    {line}")?;
                     }
@@ -354,44 +317,49 @@ fn write_detail_items(
             if options.trace
                 && let Some(trace) = trace(item)
             {
-                writeln!(writer, "  {}: {trace}", theme.label("Trace"))?;
+                writeln!(writer, "  {} {trace}", theme.metadata_label("Trace:"))?;
             }
         }
     }
     Ok(())
 }
 
-fn metadata_lines(item: &ContextItem) -> Vec<String> {
+fn metadata_lines(item: &ContextItem, theme: StatusTheme) -> Vec<String> {
     let mut lines = Vec::new();
     match &item.metadata {
         Some(EntityMetadata::Code(code)) => {
-            lines.push(code.symbol_type.map_or_else(
-                || "Kind: code".into(),
-                |kind| format!("Kind: code/{}", enum_label(kind)),
-            ));
+            let kind = code.symbol_type.map_or_else(
+                || "code".into(),
+                |kind| format!("code/{}", enum_label(kind)),
+            );
+            lines.push(format!("{} {kind}", theme.metadata_label("Kind:")));
             if let Some(name) = &code.symbol_name {
-                lines.push(format!("Symbol: {name}"));
+                lines.push(format!("{} {name}", theme.metadata_label("Symbol:")));
             }
             if let Some(scope) = &code.scope {
-                lines.push(format!("Scope: {scope}"));
+                lines.push(format!("{} {scope}", theme.metadata_label("Scope:")));
             }
             if let Some(signature) = &code.signature {
                 lines.push(format!(
-                    "Signature: {}",
+                    "{} {}",
+                    theme.metadata_label("Signature:"),
                     truncate(&one_line(signature), 120)
                 ));
             }
         }
         Some(EntityMetadata::Markdown(markdown)) => {
-            lines.push("Kind: markdown".into());
+            lines.push(format!("{} markdown", theme.metadata_label("Kind:")));
             if let Some(heading) = &markdown.heading {
-                lines.push(format!("Heading: {heading}"));
+                lines.push(format!("{} {heading}", theme.metadata_label("Heading:")));
             }
             if let Some(level) = markdown.level {
-                lines.push(format!("Heading level: {level}"));
+                lines.push(format!(
+                    "{} {level}",
+                    theme.metadata_label("Heading level:")
+                ));
             }
             if let Some(scope) = &markdown.scope {
-                lines.push(format!("Scope: {scope}"));
+                lines.push(format!("{} {scope}", theme.metadata_label("Scope:")));
             }
         }
         None => {}
@@ -464,7 +432,11 @@ fn sorted<'a>(items: impl IntoIterator<Item = &'a ContextItem>) -> Vec<&'a Conte
 }
 
 fn field(writer: &mut impl Write, theme: StatusTheme, label: &str, value: &str) -> io::Result<()> {
-    writeln!(writer, "{}: {value}", theme.label(label))
+    writeln!(
+        writer,
+        "{} {value}",
+        theme.metadata_label(&format!("{label}:"))
+    )
 }
 fn one_line(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -482,21 +454,6 @@ fn enum_label(value: impl serde::Serialize) -> String {
         .and_then(|value| value.as_str().map(str::to_owned))
         .unwrap_or_default()
 }
-fn role(value: ContextQueryGroupRole) -> &'static str {
-    match value {
-        ContextQueryGroupRole::Primary => "primary",
-        ContextQueryGroupRole::Supplemental => "supplemental",
-    }
-}
-fn matched_by(value: MatchedBy) -> &'static str {
-    match value {
-        MatchedBy::Fts => "fts",
-        MatchedBy::Vector => "vector",
-        MatchedBy::FtsAndVector => "fts+vector",
-        MatchedBy::Lexical => "lexical",
-    }
-}
-
 fn range_label(range: &ContentRange) -> String {
     match (range.start_line(), range.last_line()) {
         (Some(first), Some(last)) if first == last => first.to_string(),

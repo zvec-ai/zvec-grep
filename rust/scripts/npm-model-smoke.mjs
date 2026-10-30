@@ -118,12 +118,12 @@ export async function smokeInstalledModels({ prefix, fixtureRoot, modelCache,
     const run = (label, args, mode = "direct") => execute(prefix, args, {
       cwd, env: { ...env, ZVEC_GREP_MODE: mode }, logRoot, label, timeout: 900_000,
     });
-    const runtime = ["--device", "cpu", "--model-cache", modelCache, "--debug", "--no-color"];
+    const runtime = ["--device", "cpu", "--model-cache", modelCache, "--debug", "--color", "never"];
     let started = false;
     try {
       const index = await run("index", ["--index", "--embedding", model, ...runtime]);
       requireIndexProgress(index.stderr);
-      requireOutput((await run("status", ["--status", "--check-ready", "--no-color"])).stdout, model);
+      requireOutput((await run("status", ["--status", "--check-ready", "--color", "never"])).stdout, model);
       const vector = ["--vector", "Which component calibrates the telescope?", "--refresh", "off",
         "--limit", "1", "--preview", "full", ...runtime];
       requireOutput((await run("vector", vector)).stdout, marker);

@@ -2254,6 +2254,7 @@ impl From<IndexRuntimeSnapshot> for IndexRuntimeStatusOutput {
                 phase: match progress.phase {
                     zg_engine::api::index::progress::IndexProgressPhase::Scanning => "scanning",
                     zg_engine::api::index::progress::IndexProgressPhase::Indexing => "indexing",
+                    zg_engine::api::index::progress::IndexProgressPhase::Finalizing => "finalizing",
                     zg_engine::api::index::progress::IndexProgressPhase::Done => "done",
                 }
                 .to_owned(),

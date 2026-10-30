@@ -34,10 +34,16 @@ impl StatusTheme {
         self.paint(value, "2")
     }
     pub fn path(self, value: &str) -> String {
-        self.muted(value)
+        self.paint(value, "36")
+    }
+    pub fn selected_tab(self, value: &str) -> String {
+        self.paint(value, "1;36")
+    }
+    pub fn metadata_label(self, value: &str) -> String {
+        self.paint(value, "35")
     }
     pub fn success(self, value: &str) -> String {
-        self.paint(value, "38;2;111;207;145")
+        self.paint(value, "32")
     }
     pub fn warning(self, value: &str) -> String {
         self.paint(value, "33")

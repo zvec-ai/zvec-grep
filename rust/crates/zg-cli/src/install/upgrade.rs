@@ -780,7 +780,7 @@ mod presentation_tests {
             assert!(output.contains(&format!("\n{marker} Integrations up to date\n")));
             assert!(output.contains(&format!(
                 "\n{} Integration upgrade failed\n",
-                theme.danger(if unicode { "×" } else { "x" })
+                theme.danger("Error:")
             )));
         }
     }
@@ -827,7 +827,7 @@ mod presentation_tests {
         assert!(partial.contains("2 upgraded · 1 manual · 1 failed"));
         assert!(partial.starts_with(&format!(
             "{} Integration upgrade needs attention\n",
-            theme.warning("!")
+            theme.warning("Warning:")
         )));
     }
 

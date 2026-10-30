@@ -1043,7 +1043,9 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
                     .await
             })
             .await?;
-            info.compatibility.ensure_compatible()?;
+            info.compatibility
+                .ensure_compatible()
+                .map_err(|error| error.with_workspace_root(&info.root))?;
             if !info.indexed {
                 // Preserve the engine's missing-index error without silently creating one.
                 return Ok(None);

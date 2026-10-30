@@ -106,7 +106,8 @@ fn stored_outline_context_is_consistent_in_direct_and_server_modes() -> Result<(
                 "detail",
                 "--refresh",
                 "off",
-                "--no-color",
+                "--color",
+                "never",
             ])?;
             assert_command_success(&output);
             let text = String::from_utf8(output.stdout)?;

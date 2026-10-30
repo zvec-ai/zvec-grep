@@ -52,7 +52,7 @@ pub fn write_path_lookup_with_terminals(
     match result {
         PathLookupResult::Files(result) => {
             for (index, path) in result.paths.iter().enumerate() {
-                writeln!(writer, "#{} matchedBy=path {}", index + 1, path_label(path))?;
+                writeln!(writer, "#{} {}", index + 1, path_label(path))?;
             }
             if result.truncated {
                 write_warning(
@@ -99,10 +99,10 @@ fn write_warning(
     terminal: bool,
 ) -> io::Result<()> {
     if !terminal {
-        return writeln!(writer, "warning: {plain}");
+        return writeln!(writer, "Warning: {plain}");
     }
     let theme = StatusTheme::new(options.color, terminal);
-    writeln!(writer, "{} {title}\n  {detail}", theme.warning("!"))
+    writeln!(writer, "{} {title}\n  {detail}", theme.warning("Warning:"))
 }
 
 fn write_current_text(
@@ -123,12 +123,6 @@ fn write_current_text(
             "Context",
             &format!("{} rg", path_label(&result.root)),
         )?;
-        field(
-            writer,
-            theme,
-            "Query",
-            &highlight(&result.query, &result.query, theme.color),
-        )?;
         let coverage = match result.coverage {
             ContextCoverage::RgExhaustive => "rg_exhaustive",
             ContextCoverage::RgTruncated => "rg_truncated",
@@ -136,7 +130,6 @@ fn write_current_text(
         };
         field(writer, theme, "Coverage", coverage)?;
         field(writer, theme, "Files", &groups.len().to_string())?;
-        field(writer, theme, "Hits", &result.items.len().to_string())?;
     }
     if groups.is_empty() {
         let reason = match result.diagnostics.empty_reason {
@@ -159,14 +152,13 @@ fn write_current_text(
                 "File",
                 &theme.path(&path_label(&group[0].relative_path)),
             )?;
-            field(writer, theme, "Hits", &group.len().to_string())?;
         } else {
             writeln!(writer, "{}", path_label(&group[0].relative_path))?;
         }
         for item in group {
             if options.preview == crate::PreviewMode::Detail {
                 write_detail_item(writer, item, theme)?;
-                writeln!(writer, "  {}:", theme.label("Source"))?;
+                writeln!(writer, "  {}", theme.metadata_label("Source:"))?;
             } else if let Some(label) = structural_label(item) {
                 let range = &item.container.as_ref().expect("structural container").range;
                 writeln!(writer, "  {} [{label}]", range_label(range))?;
@@ -208,9 +200,8 @@ fn write_detail_item(
     writeln!(writer)?;
     writeln!(
         writer,
-        "  {} {summary} matchedBy={}",
-        StatusTheme::accent(&format!("#{}", item.rank)),
-        StatusTheme::accent("lexical")
+        "  {} {summary}",
+        StatusTheme::accent(&format!("#{}", item.rank))
     )?;
     let status = match item.status {
         ContextItemStatus::Fresh => "fresh",
@@ -218,42 +209,48 @@ fn write_detail_item(
     };
     writeln!(
         writer,
-        "  {}: {}  {}: {status}",
-        theme.label("Range"),
+        "  {} {}  {} {status}",
+        theme.metadata_label("Range:"),
         range_label(&item.range),
-        theme.label("Status")
+        theme.metadata_label("Status:")
     )?;
     match &item.metadata {
         Some(EntityMetadata::Code(code)) => {
             writeln!(
                 writer,
-                "  Kind: code/{}",
+                "  {} code/{}",
+                theme.metadata_label("Kind:"),
                 symbol_type_label(code.symbol_type)
             )?;
             if let Some(name) = &code.symbol_name {
-                writeln!(writer, "  Symbol: {name}")?;
+                writeln!(writer, "  {} {name}", theme.metadata_label("Symbol:"))?;
             }
             if let Some(scope) = &code.scope {
-                writeln!(writer, "  Scope: {scope}")?;
+                writeln!(writer, "  {} {scope}", theme.metadata_label("Scope:"))?;
             }
             if let Some(signature) = &code.signature {
                 writeln!(
                     writer,
-                    "  Signature: {}",
+                    "  {} {}",
+                    theme.metadata_label("Signature:"),
                     signature.split_whitespace().collect::<Vec<_>>().join(" ")
                 )?;
             }
         }
         Some(EntityMetadata::Markdown(markdown)) => {
-            writeln!(writer, "  Kind: markdown")?;
+            writeln!(writer, "  {} markdown", theme.metadata_label("Kind:"))?;
             if let Some(heading) = &markdown.heading {
-                writeln!(writer, "  Heading: {heading}")?;
+                writeln!(writer, "  {} {heading}", theme.metadata_label("Heading:"))?;
             }
             if let Some(level) = markdown.level {
-                writeln!(writer, "  Heading level: {level}")?;
+                writeln!(
+                    writer,
+                    "  {} {level}",
+                    theme.metadata_label("Heading level:")
+                )?;
             }
             if let Some(scope) = &markdown.scope {
-                writeln!(writer, "  Scope: {scope}")?;
+                writeln!(writer, "  {} {scope}", theme.metadata_label("Scope:"))?;
             }
         }
         None => {}
@@ -372,7 +369,11 @@ fn path_label(path: &Path) -> String {
 }
 
 fn field(writer: &mut impl Write, theme: StatusTheme, label: &str, value: &str) -> io::Result<()> {
-    writeln!(writer, "{}: {value}", theme.label(label))
+    writeln!(
+        writer,
+        "{} {value}",
+        theme.metadata_label(&format!("{label}:"))
+    )
 }
 
 fn highlight(value: &str, query: &str, color: bool) -> String {
@@ -513,7 +514,7 @@ mod tests {
         assert_eq!(String::from_utf8(output).expect("UTF-8"), expected);
         assert_eq!(
             String::from_utf8(diagnostics).expect("UTF-8"),
-            "! No matching file paths\n  Searching current file contents literally (rg)\n"
+            "Warning: No matching file paths\n  Searching current file contents literally (rg)\n"
         );
     }
 
@@ -541,7 +542,7 @@ mod tests {
                 .expect("lookup with independent streams");
                 assert_eq!(
                     String::from_utf8(output).expect("UTF-8"),
-                    "#1 matchedBy=path src/auth.ts\n"
+                    "#1 src/auth.ts\n"
                 );
                 let diagnostics = String::from_utf8(diagnostics).expect("UTF-8");
                 assert_eq!(
@@ -556,7 +557,7 @@ mod tests {
                 } else {
                     assert_eq!(
                         diagnostics,
-                        "warning: more matching files exist; use --limit to show more\n"
+                        "Warning: more matching files exist; use --limit to show more\n"
                     );
                 }
             }
@@ -574,8 +575,8 @@ mod tests {
             assert_eq!(
                 render(&result, detail),
                 (
-                    "#1 matchedBy=path src/auth.ts\n".into(),
-                    "warning: more matching files exist; use --limit to show more\n".into(),
+                    "#1 src/auth.ts\n".into(),
+                    "Warning: more matching files exist; use --limit to show more\n".into(),
                 )
             );
         }
@@ -611,7 +612,7 @@ mod tests {
         );
         assert_eq!(
             diagnostics,
-            "warning: no matching file paths; searching current file contents literally (rg).\n"
+            "Warning: no matching file paths; searching current file contents literally (rg).\n"
         );
     }
 
@@ -620,27 +621,50 @@ mod tests {
         let mut result = text_result();
         let (output, diagnostics) = render(&PathLookupResult::Text(Box::new(result.clone())), true);
         assert!(
-            output
-                .contains(" rg\nQuery: src/auth.ts\nCoverage: rg_exhaustive\nFiles: 1\nHits: 1\n"),
+            output.contains(" rg\nCoverage: rg_exhaustive\nFiles: 1\n"),
             "{output}"
         );
-        assert!(output.contains("File: refs.txt\nHits: 1\n\n  #1 lexical_match matchedBy=lexical\n  Range: 1-3  Status: fresh\n  Source:\n    1-\tbefore\n    2:\tImport src/auth.ts\n    3-\tafter\n"), "{output}");
+        assert!(output.contains("File: refs.txt\n\n  #1 lexical_match\n  Range: 1-3  Status: fresh\n  Source:\n    1-\tbefore\n    2:\tImport src/auth.ts\n    3-\tafter\n"), "{output}");
         assert_eq!(
             diagnostics,
-            "warning: no matching file paths; searching current file contents literally (rg).\n"
+            "Warning: no matching file paths; searching current file contents literally (rg).\n"
         );
+        let mut colored = Vec::new();
+        write_current_text(
+            &mut colored,
+            &result,
+            OutputOptions {
+                preview: crate::PreviewMode::Detail,
+                color: ColorMode::Always,
+                ..OutputOptions::default()
+            },
+            false,
+        )
+        .expect("colored detail");
+        let colored = String::from_utf8(colored).expect("UTF-8");
+        for label in [
+            "Context", "Coverage", "Files", "File", "Range", "Status", "Source",
+        ] {
+            assert!(
+                colored.contains(&format!("\x1b[35m{label}:\x1b[0m")),
+                "{colored:?}"
+            );
+        }
+        assert!(colored.contains("\x1b[35mRange:\x1b[0m 1-3"), "{colored:?}");
+        assert!(colored.contains("Import \x1b[1;33msrc/auth.ts\x1b[0m"));
+        assert!(!colored.contains("\x1b[1;35m"));
         result.items.clear();
         let result = PathLookupResult::Text(Box::new(result));
         assert!(
             render(&result, true)
                 .0
-                .ends_with("Files: 0\nHits: 0\nReason: No matches\n")
+                .ends_with("Files: 0\nReason: No matches\n")
         );
         assert_eq!(
             render(&result, false),
             (
                 "No matches.\n".into(),
-                "warning: no matching file paths; searching current file contents literally (rg).\n"
+                "Warning: no matching file paths; searching current file contents literally (rg).\n"
                     .into()
             )
         );

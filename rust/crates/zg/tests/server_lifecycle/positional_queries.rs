@@ -89,7 +89,8 @@ fn verify_script_outlines(
                 "detail",
                 "--refresh",
                 "off",
-                "--no-color",
+                "--color",
+                "never",
             ])?;
             assert_command_success(&output);
             let text = String::from_utf8(output.stdout)?;
@@ -117,7 +118,8 @@ fn verify_positional_queries(
                 "--allow-remote",
                 "--refresh",
                 "off",
-                "--no-color",
+                "--color",
+                "never",
             ];
             args.extend(words);
             let output = run(&args)?;
@@ -145,7 +147,7 @@ fn verify_positional_queries(
             let output = search(&words)?;
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert_eq!(
-                stderr.matches("warning:").count(),
+                stderr.matches("Warning:").count(),
                 usize::from(warns),
                 "{mode}: {words:?}: {stderr}"
             );
@@ -161,9 +163,12 @@ fn verify_positional_queries(
             }
             if words[0] == "--hybrid" {
                 let text = String::from_utf8(output.stdout)?;
-                assert!(text.contains("query groups (2):"), "{text}");
-                assert!(text.contains("[primary]: connection pool"), "{text}");
-                assert!(text.contains("[primary]: socket timeout"), "{text}");
+                assert_eq!(
+                    text.lines().filter(|line| line.starts_with("#1 ")).count(),
+                    2,
+                    "{text}"
+                );
+                assert_eq!(text.matches("source.txt").count(), 2, "{text}");
             } else {
                 let limited_output = if words.contains(&"--limit=3") {
                     Some(search(&["connection pool timeout", "--limit=3"])?)
@@ -171,20 +176,9 @@ fn verify_positional_queries(
                     None
                 };
                 let expected = limited_output.as_ref().unwrap_or(&expected);
-                let query = words
-                    .iter()
-                    .filter(|word| !word.starts_with("--"))
-                    .copied()
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let expected_text = String::from_utf8_lossy(&expected.stdout).replacen(
-                    "Q1 [primary]: connection pool timeout",
-                    &format!("Q1 [primary]: {query}"),
-                    1,
-                );
                 assert_eq!(
                     String::from_utf8_lossy(&output.stdout),
-                    expected_text,
+                    String::from_utf8_lossy(&expected.stdout),
                     "{mode}: {words:?}"
                 );
             }
@@ -216,7 +210,8 @@ fn verify_previews(
                 "outlineProbe",
                 "--refresh",
                 "off",
-                "--no-color",
+                "--color",
+                "never",
             ];
             if let Some(preview) = preview {
                 args.extend(["--preview", preview]);
@@ -243,7 +238,18 @@ fn verify_previews(
                 assert!(text.contains("\n  1: function outlineProbe() {"), "{text}");
                 assert!(!text.contains("outline:"), "{text}");
                 assert!(!text.contains("source:"), "{text}");
-                assert!(text.contains("query groups (1):"), "{text}");
+            }
+            for metadata in [
+                "matchedBy=",
+                "hits:",
+                "Hits:",
+                "query groups",
+                "Groups:",
+                "Group:",
+                "Query:",
+                "Q1 [",
+            ] {
+                assert!(!text.contains(metadata), "{preview:?}: {text}");
             }
             outputs.push(text);
         }
@@ -280,7 +286,8 @@ fn verify_query_groups(
                     "--allow-remote",
                     "--refresh",
                     "off",
-                    "--no-color",
+                    "--color",
+                    "never",
                 ];
                 if fuse {
                     args.push("--fuse");
@@ -289,17 +296,26 @@ fn verify_query_groups(
                 assert_command_success(&output);
                 let text = String::from_utf8(output.stdout)?;
                 let count = if fuse { 1 } else { 2 };
-                let heading = if preview == "detail" {
-                    format!("Groups: {count}")
-                } else {
-                    format!("query groups ({count}):")
-                };
-                assert!(
-                    text.contains(&heading),
+                assert_eq!(
+                    text.lines()
+                        .filter(|line| line.trim_start().starts_with("#1 "))
+                        .count(),
+                    count,
                     "{mode} {preview} fuse={fuse}: {text}"
                 );
-                assert!(text.contains("Q1 [primary]"), "{text}");
-                assert_eq!(text.contains("Q2 [supplemental]"), !fuse, "{text}");
+                for metadata in [
+                    "matchedBy=",
+                    "hits:",
+                    "Hits:",
+                    "query groups",
+                    "Groups:",
+                    "Group:",
+                    "Query:",
+                    "Q1 [",
+                    "Q2 [",
+                ] {
+                    assert!(!text.contains(metadata), "{text}");
+                }
                 assert_eq!(
                     text.matches("checkpoint.ts").count(),
                     count,

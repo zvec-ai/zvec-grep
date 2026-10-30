@@ -25,24 +25,27 @@ pub(super) fn write_items(
         if index > 0 {
             writeln!(writer)?;
         }
-        let matched_by = serde_json::to_value(item.matched_by).map_err(io::Error::other)?;
         let header = format!(
-            "#{} matchedBy={} {}:{}",
+            "#{} {}:{}",
             item.rank,
-            matched_by.as_str().unwrap_or_default(),
             output_path(&item.relative_path).display(),
             range_label(&item.range)
         );
-        writeln!(writer, "{header}")?;
-        write_item_preview(writer, item, options, &highlighter)?;
+        if theme.color {
+            writeln!(writer, "\x1b[1;36m{header}\x1b[0m")?;
+        } else {
+            writeln!(writer, "{header}")?;
+        }
+        write_item_preview(writer, item, options, &highlighter, theme)?;
         if options.trace {
             if let Some(score) = item.score {
-                writeln!(writer, "score: {score:.4}")?;
+                writeln!(writer, "{} {score:.4}", theme.metadata_label("score:"))?;
             }
             if let Some(trace) = &item.trace {
                 writeln!(
                     writer,
-                    "trace: {}",
+                    "{} {}",
+                    theme.metadata_label("trace:"),
                     serde_json::to_string(trace).map_err(io::Error::other)?
                 )?;
             }
@@ -56,34 +59,35 @@ pub(super) fn write_item_preview(
     item: &ContextItem,
     options: OutputOptions,
     highlighter: &QueryHighlighter,
+    theme: StatusTheme,
 ) -> io::Result<()> {
     if item.status == ContextItemStatus::PossiblyStale {
-        writeln!(writer, "status: possibly_stale")?;
+        writeln!(writer, "{} possibly_stale", theme.metadata_label("status:"))?;
     }
     match &item.metadata {
         Some(EntityMetadata::Code(code)) => {
             if let Some(name) = &code.symbol_name {
-                write!(writer, "symbol: ")?;
+                write!(writer, "{} ", theme.metadata_label("symbol:"))?;
                 if let Some(kind) = code.symbol_type {
                     let kind = serde_json::to_value(kind).map_err(io::Error::other)?;
-                    write!(writer, "{} ", kind.as_str().unwrap_or_default())?;
+                    write!(writer, "[{}] ", kind.as_str().unwrap_or_default())?;
                 }
                 write!(writer, "{name}")?;
                 if let Some(scope) = &code.scope {
-                    write!(writer, " scope: {scope}")?;
+                    write!(writer, " {} {scope}", theme.metadata_label("scope:"))?;
                 }
                 writeln!(writer)?;
             }
         }
         Some(EntityMetadata::Markdown(markdown)) => {
             if let Some(heading) = &markdown.heading {
-                writeln!(writer, "heading: {heading}")?;
+                writeln!(writer, "{} {heading}", theme.metadata_label("heading:"))?;
             }
             if let Some(level) = markdown.level {
-                writeln!(writer, "heading_level: {level}")?;
+                writeln!(writer, "{} {level}", theme.metadata_label("heading_level:"))?;
             }
             if let Some(scope) = &markdown.scope {
-                writeln!(writer, "scope: {scope}")?;
+                writeln!(writer, "{} {scope}", theme.metadata_label("scope:"))?;
             }
         }
         None => {}

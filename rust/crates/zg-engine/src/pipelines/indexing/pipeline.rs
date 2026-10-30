@@ -174,7 +174,7 @@ pub(crate) async fn index_workspace(
     report(
         context,
         IndexProgress {
-            phase: IndexProgressPhase::Indexing,
+            phase: IndexProgressPhase::Finalizing,
             files_total: Some(final_pass.diff.pending_count()),
             files_indexed: Some(final_pass.stats.files_indexed + final_pass.stats.files_failed),
             files_failed: Some(final_pass.stats.files_failed),
@@ -3903,19 +3903,20 @@ mod tests {
         }
         let workspace = workspace(directory.path());
         let scanner = NativeScanner::default();
-        let storage = MemoryStorage::default();
+        let storage = Arc::new(MemoryStorage::default());
         let model = ConcurrentModel::new();
         let progress = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&progress);
+        let captured_storage = Arc::clone(&storage);
         let reporter = IndexProgressReporter::new(move |value| {
             captured
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .push(value);
+                .push((value, captured_storage.finalized.load(Ordering::Acquire)));
         });
         let context = IndexingContext {
             workspace: &workspace,
-            storage: &storage,
+            storage: storage.as_ref(),
             scanner: &scanner,
             embedding_models: &[&model],
             embedding_concurrency: Some(2),
@@ -3929,12 +3930,21 @@ mod tests {
         assert_eq!(first.entities_created, 4);
         assert_eq!(storage.list_files().expect("stored files").len(), 4);
         assert_eq!(model.maximum_active.load(Ordering::Acquire), 2);
-        assert!(
+        assert_eq!(
             progress
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .iter()
-                .any(|item| item.phase == IndexProgressPhase::Done)
+                .filter(|(item, _)| matches!(
+                    item.phase,
+                    IndexProgressPhase::Finalizing | IndexProgressPhase::Done
+                ))
+                .map(|(item, finalized)| (item.phase, *finalized))
+                .collect::<Vec<_>>(),
+            [
+                (IndexProgressPhase::Finalizing, 0),
+                (IndexProgressPhase::Done, 1)
+            ]
         );
 
         let calls = model.calls.load(Ordering::Acquire);

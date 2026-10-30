@@ -259,11 +259,16 @@ Searches default to `--preview short` in terminals, pipes, and redirected files.
 Use `none` for a one-line source summary, `short` for compact bounded source,
 `full` for compact full source, or `detail` for full previews with metadata,
 outlines, and file/hit grouping. Short and full preserve the original Rust compact
-per-hit layout, including indented `line: source` rows. Every preview preserves query
-groups, their ranks and matched content; only `--fuse` combines groups. Full previews
-do not retrieve an entire function or file.
-Terminal detection affects automatic colors only. The former `--compact` and
-`--human` options are no longer accepted.
+per-hit layout, including indented `line: source` rows. Every preview preserves each
+query group's results, ranks and matched content; only `--fuse` combines groups.
+Query echoes, group headings, hit counts and `matchedBy` labels are omitted from
+the CLI result display. Full previews do not retrieve an entire function or file.
+Metadata labels use purple, file locations use cyan, and query matches use yellow.
+Automatic colors are disabled for redirected output, `TERM=dumb`, or `NO_COLOR`;
+`--color always` explicitly enables colors, including through pipes, and
+`--color never` disables them. `--color auto` is the default; the redundant
+`--no-color` option is no longer accepted.
+The former `--compact` and `--human` options are no longer accepted.
 
 When an interactive search finds no index, it asks you to choose an embedding
 model before building. The picker has **Local models** and **Remote models** tabs:
@@ -275,6 +280,13 @@ credentials are available. Selecting one with missing credentials opens a masked
 API Key prompt, with paste, Backspace, Ctrl+U to clear and Esc to exit. Enter saves
 a non-empty key to the provider's global configuration and continues to remote
 authorization. The new key is used for both the build and following CLI query.
+
+After files are processed, indexing shows **Optimizing index**, **Saving index**,
+and **Finishing index** while storage is finalized and the index is published.
+Interactive terminals show an animated indicator and elapsed time during these
+stages; completion is reported
+only after publication succeeds. Incompatible indexes show a rebuild command and
+their directory, with internal diagnostics available through `--debug`.
 
 Local selection starts the build. Remote selection first discloses the workspace,
 model, endpoint, data sent and possible API charges, then offers Allow once, Allow
@@ -319,7 +331,7 @@ Lexical search runs in-process with ripgrep's `grep` and `ignore` crates; the
 binary and ordinary CI jobs do not require a system `rg` executable.
 
 A single file name or path, such as `zg auth.ts` or `zg src/auth.ts`, first
-looks up current file paths. Matches use `#1 matchedBy=path src/auth.ts`, with
+looks up current file paths. Matches use `#1 src/auth.ts`, with
 forward slashes on every platform and exact workspace-relative paths before suffix
 matches. Ties use deterministic native path ordering; `--limit` bounds the list
 (default: 10). Lookup uses the nearest workspace's saved scan rules and query

@@ -22,7 +22,7 @@ fn grouped_result() -> ContextResult {
 }
 
 #[test]
-fn every_preview_preserves_groups_duplicate_hits_local_ranks_and_empty_groups() {
+fn every_preview_preserves_hits_and_local_ranks_without_search_metadata() {
     let result = grouped_result();
     let original = result.clone();
     for preview in [
@@ -45,19 +45,26 @@ fn every_preview_preserves_groups_duplicate_hits_local_ranks_and_empty_groups() 
             )
             .expect("grouped render");
             let output = String::from_utf8(bytes).expect("UTF-8");
-            for required in [
-                "Q1 [primary]",
-                "Q2 [supplemental]",
-                "Q3 [supplemental]",
-                "primary-source",
-                "supplemental-source",
-                "No matches",
-                "#2",
-            ] {
+            for required in ["primary-source", "supplemental-source", "#1", "#2"] {
                 assert!(
                     output.contains(required),
                     "{preview:?} missing {required}: {output}"
                 );
+            }
+            for hidden in [
+                "matchedBy=",
+                "hits:",
+                "Hits:",
+                "query groups",
+                "Groups:",
+                "Group:",
+                "Query:",
+                "Routes:",
+                "[primary]",
+                "[supplemental]",
+                "No matches",
+            ] {
+                assert!(!output.contains(hidden), "{preview:?}: {output}");
             }
             assert_eq!(
                 output.matches("src/sample.ts").count(),
@@ -79,6 +86,25 @@ fn every_preview_preserves_groups_duplicate_hits_local_ranks_and_empty_groups() 
                 result, original,
                 "rendering must preserve retrieval results"
             );
+            let mut empty = result.clone();
+            for group in &mut empty.group_results {
+                group.items.clear();
+            }
+            let mut bytes = Vec::new();
+            write_context_with_options(
+                &mut bytes,
+                &empty,
+                OutputOptions {
+                    preview,
+                    color: ColorMode::Never,
+                    ..OutputOptions::default()
+                },
+                terminal,
+            )
+            .expect("empty groups");
+            let output = String::from_utf8(bytes).expect("UTF-8");
+            assert_eq!(output.matches("No matches").count(), 1, "{output}");
+            assert!(!output.contains("sample.ts"), "{output}");
         }
     }
 }
@@ -121,8 +147,8 @@ fn short_and_full_keep_the_original_compact_layout_on_every_output() {
             "groups-outline-and-matched-window",
             PreviewMode::Short,
             concat!(
-                "#1 matchedBy=fts+vector src/sample.ts:10-33\n",
-                "symbol: function resolveContext scope: Workspace\n",
+                "#1 src/sample.ts:10-33\n",
+                "symbol: [function] resolveContext scope: Workspace\n",
                 "  17: retrieved-source-line-8\n",
                 "  18: retrieved-source-line-9\n",
                 "  19: retrieved-source-line-10\n",
@@ -134,7 +160,7 @@ fn short_and_full_keep_the_original_compact_layout_on_every_output() {
                 "  25: retrieved-source-line-16\n",
                 "  26: retrieved-source-line-17\n",
                 "  …\n\n",
-                "#2 matchedBy=fts+vector notes/design.md:file\n",
+                "#2 notes/design.md:file\n",
                 "heading: Design\nheading_level: 1\nscope: Search / Design\n",
                 "  # Design\n  \n  Retain local evidence.\n  \n",
             ),
@@ -143,8 +169,8 @@ fn short_and_full_keep_the_original_compact_layout_on_every_output() {
             "excerpt-only-source-and-redundant-symbol",
             PreviewMode::Full,
             concat!(
-                "#1 matchedBy=fts+vector src/sample.ts:1-100\n",
-                "symbol: function resolveContext\n",
+                "#1 src/sample.ts:1-100\n",
+                "symbol: [function] resolveContext\n",
                 "  50: function resolveContext() {\n",
                 "  51:   return true;\n",
                 "  52: }\n",
@@ -178,10 +204,10 @@ fn short_and_full_keep_the_original_compact_layout_on_every_output() {
 }
 
 #[test]
-fn minimal_and_detailed_modes_match_node_on_terminals_and_redirected_output() {
+fn minimal_and_detailed_modes_match_fixtures_on_terminals_and_redirected_output() {
     let fixtures: serde_json::Value =
         serde_json::from_str(include_str!("../../../compat/cli-search-presentation.json"))
-            .expect("shared Node.js fixtures");
+            .expect("search presentation fixtures");
     for fixture in fixtures["cases"].as_array().expect("cases") {
         let result: ContextResult =
             serde_json::from_value(fixture["result"].clone()).expect("context result");
@@ -204,7 +230,7 @@ fn minimal_and_detailed_modes_match_node_on_terminals_and_redirected_output() {
                 let actual = String::from_utf8(bytes).expect("UTF-8");
                 let expected = format!(
                     "{}\n",
-                    fixture[format!("expected_{mode}")]
+                    fixture[format!("expected_rust_{mode}")]
                         .as_str()
                         .expect("expected output")
                 );

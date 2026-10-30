@@ -44,7 +44,7 @@ def check(bundle, model_cache, logs):
             workspace.mkdir(parents=True)
             (workspace / "fixture.md").write_text("The heliotrope capacitor calibrates the observatory telescope.\n")
             environment = {**base, **override, "ZVEC_GREP_HOME": str(root / "home" / label)}
-            common = ["--mode", "direct", "--device", "cpu", "--model-cache", str(model_cache), "--debug", "--no-color"]
+            common = ["--mode", "direct", "--device", "cpu", "--model-cache", str(model_cache), "--debug", "--color", "never"]
             commands = {
                 "index": ["--index", "--embedding", "local/all-minilm-l6-v2", *common],
                 "query": ["--vector", "Which component calibrates the telescope?", "--refresh", "off", "--limit", "1", *common],

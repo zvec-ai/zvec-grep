@@ -560,7 +560,11 @@ pub mod progress {
                         self.report(state.1.take().unwrap_or(progress));
                         return;
                     }
-                    _ if progress.phase == IndexProgressPhase::Done => {
+                    _ if matches!(
+                        progress.phase,
+                        IndexProgressPhase::Finalizing | IndexProgressPhase::Done
+                    ) =>
+                    {
                         state.0 = false;
                         state.1 = None;
                     }
@@ -631,7 +635,33 @@ pub mod progress {
             reporter.report(next.clone());
             assert_eq!(
                 *events.lock().expect("progress events lock"),
-                [indexing, preparing, downloading, latest, next]
+                [
+                    indexing.clone(),
+                    preparing.clone(),
+                    downloading,
+                    latest.clone(),
+                    next
+                ]
+            );
+            // Finalization must escape model-priority mode even if no Ready event arrived.
+            reporter.report(preparing);
+            reporter.report(latest);
+            let finalizing = IndexProgress {
+                phase: IndexProgressPhase::Finalizing,
+                files_indexed: Some(10),
+                ..indexing
+            };
+            let done = IndexProgress {
+                phase: IndexProgressPhase::Done,
+                ..finalizing.clone()
+            };
+            reporter.report(finalizing.clone());
+            reporter.report(done.clone());
+            let events = events.lock().expect("progress events lock");
+            assert_eq!(events[events.len() - 2..], [finalizing, done]);
+            assert_eq!(
+                serde_json::to_value(IndexProgressPhase::Finalizing).expect("phase serializes"),
+                "finalizing"
             );
         }
     }
@@ -655,6 +685,7 @@ pub mod progress {
     pub enum IndexProgressPhase {
         Scanning,
         Indexing,
+        Finalizing,
         Done,
     }
 

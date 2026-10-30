@@ -28,16 +28,19 @@ pub fn write_message(
     terminal: bool,
 ) -> io::Result<()> {
     let theme = StatusTheme::new(color, terminal);
-    let glyph = match kind {
-        MessageKind::Success => theme.success(if unicode_supported() { "✓" } else { "+" }),
-        MessageKind::Warning => theme.warning("!"),
-        MessageKind::Error => theme.danger(if unicode_supported() { "×" } else { "x" }),
-        MessageKind::Info => theme.muted(if unicode_supported() { "·" } else { "-" }),
-    };
-    if terminal {
-        writeln!(writer, "{glyph} {}", clean(title))?;
-    } else {
-        writeln!(writer, "{}", clean(title))?;
+    let title = clean(title);
+    match kind {
+        MessageKind::Warning => writeln!(writer, "{} {title}", theme.warning("Warning:"))?,
+        MessageKind::Error => writeln!(writer, "{} {title}", theme.danger("Error:"))?,
+        MessageKind::Success | MessageKind::Info if terminal => {
+            let glyph = if matches!(kind, MessageKind::Success) {
+                theme.success(if unicode_supported() { "✓" } else { "+" })
+            } else {
+                theme.muted(if unicode_supported() { "·" } else { "-" })
+            };
+            writeln!(writer, "{glyph} {title}")?;
+        }
+        MessageKind::Success | MessageKind::Info => writeln!(writer, "{title}")?,
     }
     for detail in details {
         writeln!(writer, "  {}", theme.muted(&clean(detail)))?;
@@ -57,12 +60,13 @@ pub fn write_error_report(
     terminal: bool,
 ) -> io::Result<()> {
     if !terminal || options.debug {
+        let diagnostic = crate::format_error_report(report);
         if terminal {
-            for line in report.to_string().lines() {
+            for line in diagnostic.lines() {
                 writeln!(writer, "{}", clean(line))?;
             }
         } else {
-            writeln!(writer, "{report}")?;
+            writeln!(writer, "{diagnostic}")?;
         }
         if let Some(retryable) = retryable {
             writeln!(writer, "retryable: {retryable}")?;
@@ -142,14 +146,16 @@ mod tests {
                 .expect("render");
                 let text = String::from_utf8(bytes).expect("text");
                 let expected = if terminal && !debug {
-                    let glyph = if unicode_supported() { "×" } else { "x" };
                     let help = report
                         .help
                         .as_ref()
                         .map_or_else(String::new, |help| format!("  {help}\n"));
-                    format!("{glyph} {}\n{help}", report.message)
+                    format!("Error: {}\n{help}", report.message)
                 } else {
-                    format!("{report}\nretryable: false\n")
+                    format!(
+                        "{}\nretryable: false\n",
+                        crate::format_error_report(&report)
+                    )
                 };
                 assert_eq!(text, expected);
             }

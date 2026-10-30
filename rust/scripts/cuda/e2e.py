@@ -259,7 +259,7 @@ def run_case(binary, model_cache, work, logs, backend, model, expected_gguf_cuda
         "The heliotrope capacitor calibrates the observatory telescope.\n"
         f"{MARKER}\n", encoding="utf-8")
     env = case_environment(work, backend)
-    runtime_args = ["--model-cache", str(model_cache), "--debug", "--no-color"]
+    runtime_args = ["--model-cache", str(model_cache), "--debug", "--color", "never"]
     if device != "default":
         runtime_args += ["--device", device]
     def evidence(stderr):
@@ -273,7 +273,7 @@ def run_case(binary, model_cache, work, logs, backend, model, expected_gguf_cuda
     require_index_progress(index_err)
     index_evidence = evidence(index_err)
     status, _ = run_zg(binary, workspace, logs, "status", [
-        "--status", "--mode", "direct", "--check-ready", "--no-color",
+        "--status", "--mode", "direct", "--check-ready", "--color", "never",
     ], env)
     require(status, "Workspace index is ready")
     require(status, model)

@@ -71,7 +71,7 @@ impl Drop for Stop<'_> {
 #[test]
 fn grants_are_workspace_local_scoped_and_revocable_without_remote_requests() {
     let fixture = Fixture::new();
-    let missing = fixture.success(&["--auth", "status", "--no-color"]);
+    let missing = fixture.success(&["--auth", "status", "--color", "never"]);
     assert!(missing.starts_with("○ Remote Embedding is not authorized\n  "));
     assert!(
         missing.contains("\n\nRun\n  zg --auth grant --capability embedding --scope workspace\n")
@@ -79,7 +79,7 @@ fn grants_are_workspace_local_scoped_and_revocable_without_remote_requests() {
     assert!(!missing.contains("\x1b["));
     assert!(!fixture.root.path().join(".zvec-grep").exists());
     fixture.grant();
-    let status = fixture.success(&["--auth", "status", ".", "--no-color"]);
+    let status = fixture.success(&["--auth", "status", ".", "--color", "never"]);
     assert!(status.starts_with("✓ Remote Embedding is authorized\n  "));
     assert!(status.contains("\n\nAuthorization\n  Scope       Workspace\n"));
     assert!(status.contains("  Target      qwen/text-embedding-v4\n"));
@@ -95,10 +95,10 @@ fn grants_are_workspace_local_scoped_and_revocable_without_remote_requests() {
     let path = fixture.root.path().join(".zvec-grep/authorization.json");
     let original = fs::read(&path).expect("authorization test fixture operation");
     let styled = fixture.success(&["--auth", "--color", "always", "status"]);
-    assert!(styled.contains("\x1b[38;2;111;207;145m✓ Remote Embedding is authorized\x1b[0m"));
+    assert!(styled.contains("\x1b[32m✓ Remote Embedding is authorized\x1b[0m"));
     assert!(styled.contains("\n\nAuthorization\n"));
     assert!(!styled.contains("\x1b[1mAuthorization"));
-    let plain = fixture.success(&["--auth", "status", "--no-color"]);
+    let plain = fixture.success(&["--auth", "status", "--color", "never"]);
     assert!(!plain.contains("\x1b["));
     assert_eq!(fs::read(&path).expect("unchanged grants"), original);
     let other = Fixture::new();

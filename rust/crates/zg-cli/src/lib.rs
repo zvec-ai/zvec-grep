@@ -1,6 +1,7 @@
 //! Command-line parsing, validation, request construction, and terminal rendering.
 
 mod authorization;
+mod diagnostics;
 mod highlight;
 mod install;
 mod jsonc;
@@ -17,6 +18,7 @@ mod status;
 mod stdio;
 mod terminal;
 mod theme;
+pub use diagnostics::{diagnostic_color_for_args, exit_parse_error, format_error_report};
 pub use management::{
     write_authorization_revoke_result, write_authorization_revoke_with_options,
     write_authorization_status, write_config_result, write_index_drop_result,
@@ -75,6 +77,7 @@ pub use path_lookup::{write_path_lookup_result, write_path_lookup_with_terminals
 pub use render::{
     HelpTopicError, help_text, print_help, write_context_result, write_context_status,
     write_context_status_with_options, write_context_with_options, write_file_paths,
+    write_index_incompatible_error, write_warning,
 };
 
 #[derive(Debug, Parser)]
@@ -126,8 +129,6 @@ pub struct AuthArgs {
     pub endpoint: Option<String>,
     #[arg(long, global = true, value_enum)]
     pub color: Option<ColorMode>,
-    #[arg(long = "no-color", global = true, conflicts_with = "color")]
-    pub no_color: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -500,8 +501,6 @@ pub struct QueryArgs {
     pub preview: Option<PreviewMode>,
     #[arg(long, value_enum)]
     pub color: Option<ColorMode>,
-    #[arg(long = "no-color", conflicts_with = "color")]
-    pub no_color: bool,
     #[arg(long, value_parser = parse_positive_usize)]
     pub limit: Option<usize>,
     #[arg(long = "hybrid", value_name = "QUERY")]
@@ -553,11 +552,7 @@ impl QueryArgs {
             debug: self.debug,
             trace: self.trace,
             preview: self.preview.unwrap_or_default(),
-            color: if self.no_color {
-                ColorMode::Never
-            } else {
-                self.color.unwrap_or_default()
-            },
+            color: self.color.unwrap_or_default(),
         }
     }
 }
@@ -580,8 +575,6 @@ pub struct IndexArgs {
     pub debug: bool,
     #[arg(long, value_enum)]
     pub color: Option<ColorMode>,
-    #[arg(long = "no-color", conflicts_with = "color")]
-    pub no_color: bool,
     #[arg(long, env = "ZVEC_GREP_HOME")]
     pub home: Option<PathBuf>,
     /// Single embedding model for this workspace; this version indexes text only.
@@ -621,8 +614,6 @@ pub struct StatusArgs {
     pub debug: bool,
     #[arg(long, value_enum)]
     pub color: Option<ColorMode>,
-    #[arg(long = "no-color", conflicts_with = "color")]
-    pub no_color: bool,
     #[arg(long, env = "ZVEC_GREP_HOME")]
     pub home: Option<PathBuf>,
 }
@@ -798,20 +789,16 @@ impl Cli {
     /// Presentation options are available before plan validation, including on errors.
     #[must_use]
     pub fn output_options(&self) -> OutputOptions {
-        let (debug, color, no_color) = match self.command.as_ref() {
-            Some(CommandLine::Query(args)) => (args.debug, args.color, args.no_color),
-            Some(CommandLine::Index(args)) => (args.debug, args.color, args.no_color),
-            Some(CommandLine::Status(args)) => (args.debug, args.color, args.no_color),
-            Some(CommandLine::Auth(args)) => (false, args.color, args.no_color),
-            _ => (false, None, false),
+        let (debug, color) = match self.command.as_ref() {
+            Some(CommandLine::Query(args)) => (args.debug, args.color),
+            Some(CommandLine::Index(args)) => (args.debug, args.color),
+            Some(CommandLine::Status(args)) => (args.debug, args.color),
+            Some(CommandLine::Auth(args)) => (false, args.color),
+            _ => (false, None),
         };
         OutputOptions {
             debug,
-            color: if no_color {
-                ColorMode::Never
-            } else {
-                color.unwrap_or_default()
-            },
+            color: color.unwrap_or_default(),
             ..Default::default()
         }
     }
@@ -819,9 +806,11 @@ impl Cli {
     /// query syntax for clap.
     #[must_use]
     pub fn parse() -> Self {
-        match Self::try_parse_from(std::env::args_os()) {
+        let arguments = std::env::args_os().collect::<Vec<_>>();
+        let color = diagnostic_color_for_args(&arguments[1..]);
+        match Self::try_parse_from(arguments) {
             Ok(cli) => cli,
-            Err(error) => error.exit(),
+            Err(error) => exit_parse_error(&error, color),
         }
     }
 
@@ -891,7 +880,7 @@ impl Cli {
             return None;
         }
         Some(format!(
-            "warning: positional query arguments are merged into one query: {:?}. For separate queries, use repeated --hybrid flags, e.g. zg --hybrid \"connection pool\" --hybrid \"socket timeout\".",
+            "Warning: positional query arguments are merged into one query: {:?}. For separate queries, use repeated --hybrid flags, e.g. zg --hybrid \"connection pool\" --hybrid \"socket timeout\".",
             parts.join(" ")
         ))
     }
@@ -918,11 +907,7 @@ impl Cli {
                 check_ready: args.check_ready,
                 output: OutputOptions {
                     debug: args.debug,
-                    color: if args.no_color {
-                        ColorMode::Never
-                    } else {
-                        args.color.unwrap_or_default()
-                    },
+                    color: args.color.unwrap_or_default(),
                     ..OutputOptions::default()
                 },
             }),
@@ -964,7 +949,7 @@ pub fn compatibility_warning_for_args(arguments: &[OsString]) -> Option<String> 
     let first = arguments.first()?.to_str()?;
     if matches!(first, "query" | "search") {
         return Some(format!(
-            "warning: \"zg {first} ...\" is not a subcommand; search is already the default. Remove \"{first}\", or use 'zg -- \"{first}\" ...' to search for that literal word."
+            "Warning: \"{first}\" is search text. Omit it to search the remaining words."
         ));
     }
     if matches!(
@@ -979,8 +964,13 @@ pub fn compatibility_warning_for_args(arguments: &[OsString]) -> Option<String> 
             | "help"
             | "version"
     ) {
+        let purpose = if first == "version" {
+            "To display the CLI version"
+        } else {
+            "To run this command"
+        };
         return Some(format!(
-            "warning: \"zg {first} ...\" no longer runs an action and is parsed as search input. Use \"zg --{first} ...\", or 'zg -- \"{first}\" ...' to search for that literal word."
+            "Warning: `zg {first}` is legacy syntax and now searches for \"{first}\".\n         {purpose}, use `zg --{first}`."
         ));
     }
     None
@@ -1078,6 +1068,12 @@ fn normalize_command(mut arguments: Vec<OsString>) -> Result<Vec<OsString>, clap
         }
         help_requested |= matches!(argument.to_str(), Some("-h" | "--help"));
         let text = argument.to_string_lossy();
+        if text == "--no-color" || text.starts_with("--no-color=") {
+            return Err(clap::Error::raw(
+                clap::error::ErrorKind::UnknownArgument,
+                "--no-color is no longer supported; use --color never instead",
+            ));
+        }
         index_concurrency_requested |= index_concurrency_flag(&text);
         index += if query_option_with_value(&text)
             || managed_rg::takes_separate_value(&text)
@@ -1178,7 +1174,6 @@ fn query_option_without_value(value: &str) -> bool {
             | "--rg"
             | "--debug"
             | "--trace"
-            | "--no-color"
             | "--fuse"
             | "--prefer-symbol"
             | "--allow-remote"
@@ -1301,7 +1296,7 @@ fn context_refresh_policy(
     use zg_engine::api::context::options::RefreshPolicy;
     if mode == ClientMode::Direct && matches!(refresh, Some(RefreshMode::Background)) {
         eprintln!(
-            "warning: --refresh background is unavailable in direct mode; falling back to off"
+            "Warning: --refresh background is unavailable in direct mode; falling back to off"
         );
     }
     match (mode, refresh) {
@@ -1498,11 +1493,7 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
     let home = args.home.clone();
     let output = OutputOptions {
         debug: args.debug,
-        color: if args.no_color {
-            ColorMode::Never
-        } else {
-            args.color.unwrap_or_default()
-        },
+        color: args.color.unwrap_or_default(),
         ..OutputOptions::default()
     };
     if args.drop {
@@ -1949,6 +1940,61 @@ mod tests {
     }
 
     #[test]
+    fn removed_no_color_flag_is_rejected_but_literal_search_is_preserved() {
+        for arguments in [
+            vec!["zg", "--no-color", "needle"],
+            vec!["zg", "needle", "--no-color"],
+            vec!["zg", "needle", "--no-color=true"],
+            vec!["zg", "--rg", "needle", "--no-color"],
+            vec!["zg", "--index", "--no-color"],
+            vec!["zg", "--status", "--no-color"],
+            vec!["zg", "--auth", "status", "--no-color"],
+        ] {
+            let error = Cli::try_parse_from(arguments.clone()).expect_err("removed color alias");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{arguments:?}"
+            );
+            assert!(error.to_string().contains("--no-color"), "{error}");
+        }
+        for arguments in [
+            vec!["zg", "--", "--no-color"],
+            vec!["zg", "--rg", "--", "--no-color"],
+            vec!["zg", "--rg", "-e", "--no-color"],
+        ] {
+            let CliPlan::Query { request, .. } = plan(&arguments) else {
+                panic!("literal color alias query");
+            };
+            if let Some(query) = &request.query {
+                assert_eq!(query, "--no-color", "{arguments:?}");
+            } else {
+                assert_eq!(request.queries, ["--no-color"], "{arguments:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn color_modes_apply_to_search_and_management_commands() {
+        for (value, expected) in [
+            ("auto", super::ColorMode::Auto),
+            ("always", super::ColorMode::Always),
+            ("never", super::ColorMode::Never),
+        ] {
+            for mut arguments in [
+                vec!["zg", "needle"],
+                vec!["zg", "--index"],
+                vec!["zg", "--status"],
+                vec!["zg", "--auth", "status"],
+            ] {
+                arguments.extend(["--color", value]);
+                let cli = Cli::try_parse_from(arguments.clone()).expect("explicit color mode");
+                assert_eq!(cli.output_options().color, expected, "{arguments:?}");
+            }
+        }
+    }
+
+    #[test]
     fn rg_option_values_are_not_management_or_presentation_flags() {
         for option in ["-e", "-Fe", "--regexp"] {
             for pattern in [
@@ -1958,6 +2004,7 @@ mod tests {
                 "--help",
                 "--human",
                 "--compact",
+                "--no-color",
             ] {
                 let CliPlan::Query {
                     request, output, ..
@@ -2018,8 +2065,12 @@ mod tests {
             let arguments = [word.into(), "second".into()];
             let warning =
                 super::compatibility_warning_for_args(&arguments).expect("migration warning");
-            assert!(warning.contains(&format!("zg {word}")));
-            assert!(warning.contains("literal word"));
+            if matches!(word, "query" | "search") {
+                assert!(warning.contains(&format!("\"{word}\" is search text.")));
+            } else {
+                assert!(warning.contains(&format!("now searches for \"{word}\".")));
+                assert!(warning.contains(&format!("`zg --{word}`")));
+            }
         }
         for word in ["--", "needle", "--rg", "--index", "--help", "--version"] {
             assert!(

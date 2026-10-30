@@ -614,7 +614,13 @@ mod tests {
             "test.recovery",
         )
         .expect_err("unsupported manifest must not recover");
-        assert!(error.message().contains("unsupported index version"));
+        assert_eq!(error.code(), EngineError::INDEX_INCOMPATIBLE);
+        assert!(
+            error
+                .help()
+                .expect("index diagnostics")
+                .contains("unsupported index version")
+        );
         assert!(layout.index_dir().join("new").exists());
         assert!(layout.backup_index_dir().join("old").exists());
         fs::write(layout.manifest_path(), original).expect("restore manifest");

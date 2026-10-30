@@ -1625,7 +1625,7 @@ fn index_failures_match_readiness_and_recover(mode: &str) -> Result<(), Box<dyn 
         configure(&mut command);
         command
             .args(args)
-            .args(["--mode", mode, "--no-color"])
+            .args(["--mode", mode, "--color", "never"])
             .output()
     };
     let mut guard = if mode == "server" {

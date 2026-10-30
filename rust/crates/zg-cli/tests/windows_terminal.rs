@@ -45,10 +45,16 @@ fn test_command() -> io::Result<Command> {
 
 fn run_console_workers() -> io::Result<()> {
     let console = OpenOptions::new().read(true).write(true).open("CONOUT$")?;
-    for role in ["stdout", "stderr"] {
+    for (role, term) in [
+        ("stdout", "xterm"),
+        ("stderr", "xterm"),
+        ("stdout", "dumb"),
+        ("stderr", "dumb"),
+    ] {
         let mut command = test_command()?;
         command
             .env(TEST_ROLE, role)
+            .env("TERM", term)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         // Explicit console handles are needed: CREATE_NEW_CONSOLE can retain pipes.
@@ -61,7 +67,7 @@ fn run_console_workers() -> io::Result<()> {
         let output = command.output()?;
         assert!(
             output.status.success(),
-            "{role} worker failed: {}\n{}{}",
+            "{role}/{term} worker failed: {}\n{}{}",
             output.status,
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
@@ -93,10 +99,11 @@ fn check_console_stream(stdout: bool) -> io::Result<()> {
     };
     assert!(!pipe_supports_ansi, "a pipe must not enable automatic ANSI");
     assert_eq!(console::mode(&handle)?, disabled);
-    assert!(console_supports_ansi(), "console VT initialization failed");
+    let automatic_color = env::var("TERM").as_deref() != Ok("dumb");
+    assert_eq!(console_supports_ansi(), automatic_color);
     let enabled = disabled | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
     assert_eq!(console::mode(&handle)?, enabled, "other flags changed");
-    assert!(console_supports_ansi());
+    assert_eq!(console_supports_ansi(), automatic_color);
     assert_eq!(console::mode(&handle)?, enabled);
     console::set_mode(&handle, original)
 }

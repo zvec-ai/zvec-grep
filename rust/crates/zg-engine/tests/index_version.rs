@@ -45,9 +45,17 @@ fn explicit_options(root: &Path, address: SocketAddr) -> IndexOptions {
 }
 
 fn assert_rebuild_error(error: &EngineError) {
-    assert_eq!(error.code(), EngineError::STORAGE_FAILURE, "{error}");
-    assert!(error.message().contains("rebuild"), "{error}");
-    assert!(error.message().contains("zg --index --rebuild"), "{error}");
+    assert_eq!(error.code(), EngineError::INDEX_INCOMPATIBLE, "{error}");
+    assert_eq!(
+        error.message(),
+        "This index is incompatible with the current version of zg."
+    );
+    assert!(
+        error
+            .help()
+            .expect("rebuild guidance")
+            .contains("zg --index --rebuild")
+    );
 }
 
 fn assert_manifest_unchanged(root: &Path, expected: &[u8]) -> TestResult {

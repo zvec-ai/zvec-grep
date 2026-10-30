@@ -268,12 +268,14 @@ fn write_installed(
 }
 
 fn install_warning(message: &str) {
-    if crate::stderr_supports_ansi() {
-        let theme = StatusTheme::new(ColorMode::Auto, true);
-        eprintln!("{} {}", theme.warning("!"), clean(message));
-    } else {
-        eprintln!("warning: {}", clean(message));
-    }
+    let _ = write_message(
+        io::stderr().lock(),
+        MessageKind::Warning,
+        message,
+        &[],
+        ColorMode::Auto,
+        crate::stderr_supports_ansi(),
+    );
 }
 
 fn resolve_transport(
