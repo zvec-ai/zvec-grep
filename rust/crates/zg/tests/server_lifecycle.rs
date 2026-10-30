@@ -1398,12 +1398,39 @@ fn direct_writes_retire_daemon_read_sessions() -> Result<(), Box<dyn Error>> {
         response.contains("source.txt") && response.contains("\"isError\":false"),
         "{response}"
     );
-    assert_command_success(&direct(&["--drop", "--yes"])?);
+    assert_command_success(&direct(&["--drop"])?);
     let response = search("vineyard")?;
     assert!(
         response.contains("\"isError\":true"),
         "dropped index remained cached: {response}"
     );
+    assert_command_success(&guard.stop()?);
+    Ok(())
+}
+
+#[test]
+fn index_drop_runs_without_confirmation_through_the_daemon() -> Result<(), Box<dyn Error>> {
+    let _permit = server_test_permit();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
+    let home = TempDir::new()?;
+    let (mut guard, _) = start_server(&binary, &home, "full", None, |_| {})?;
+    for mode in ["server", "auto"] {
+        let workspace = TempDir::new()?;
+        let index = workspace.path().join(".zvec-grep/index");
+        std::fs::create_dir_all(&index)?;
+        let source = workspace.path().join("source.txt");
+        std::fs::write(&source, "keep source")?;
+
+        let output = Command::new(&binary)
+            .args(["--index", "--drop", "--mode", mode, "--home"])
+            .arg(home.path())
+            .arg(workspace.path())
+            .output()?;
+        assert_command_success(&output);
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Dropped index"));
+        assert!(!index.exists());
+        assert_eq!(std::fs::read_to_string(source)?, "keep source");
+    }
     assert_command_success(&guard.stop()?);
     Ok(())
 }

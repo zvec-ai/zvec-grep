@@ -2,6 +2,12 @@
 # reason and removal condition.
 
 [[difference]]
+id = "cli-index-drop-without-confirmation"
+owner = "CLI"
+reason = "Rust treats --index --drop as the explicit instruction to delete the workspace index, without a confirmation prompt or TTY check. The --yes option is no longer accepted for indexing; install and uninstall retain it. TypeScript keeps its existing deletion confirmation behavior. Validation: index_drop_runs_without_confirmation_and_rejects_the_removed_yes_flag and index_drop_runs_without_confirmation_through_the_daemon."
+removal_condition = "TypeScript adopts the same deletion contract or its compatibility surface is retired."
+
+[[difference]]
 id = "managed-rg-plain-text"
 owner = "CLI/engine/MCP"
 reason = "Rust CLI, API and MCP rg searches return plain source matches without code or Markdown extraction, structural containers or symbol headings. This removes parsing work from exhaustive text search. File grouping, source coordinates, matching/context markers, output bounds and Direct/Server semantics remain shared. Current-file path lookup retains structural entity grouping. Validation: direct_search, lexical_modes and rg_format regression tests."

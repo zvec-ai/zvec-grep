@@ -498,15 +498,16 @@ See zg --help environment for precedence and Server-mode scope."#;
 const INDEX_HELP: &str = r"Usage:
   zg --index [root] [options]
   zg --index [root] --rebuild [options]
-  zg --index [root] --drop [--yes]
+  zg --index [root] --drop
 
 Index options:
   --rebuild                         Rebuild the existing index
   --drop                            Permanently remove the workspace index
-  --yes                             Confirm --drop without prompting
   --debug                           Print skipped-file diagnostics to stderr
   --mode <direct|server|auto>       Select indexing transport
   --color <auto|always|never>       Color output (default: auto)
+
+Dropping an index runs immediately without a confirmation prompt.
 
 Embedding options:
   --embedding <model>               Single text embedding model for this workspace

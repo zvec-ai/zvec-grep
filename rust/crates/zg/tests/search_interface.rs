@@ -138,6 +138,41 @@ fn removed_flags_and_ambiguous_actions_fail_without_side_effects() {
     assert!(!root.path().join(".zvec-grep").exists());
 }
 
+#[test]
+fn index_drop_runs_without_confirmation_and_rejects_the_removed_yes_flag() {
+    for mode in ["direct", "auto"] {
+        let root = tempfile::tempdir().expect("workspace");
+        let index = root.path().join(".zvec-grep/index");
+        std::fs::create_dir_all(&index).expect("orphaned index fixture");
+        std::fs::write(root.path().join("source.txt"), "keep source").expect("source fixture");
+
+        let rejected = run(root.path(), &["--index", "--drop", "--yes", "--mode", mode]);
+        assert!(!rejected.status.success());
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains("--yes"),
+            "{rejected:?}"
+        );
+        assert!(
+            index.is_dir(),
+            "invalid arguments must not delete the index"
+        );
+
+        // output() supplies no interactive terminal or confirmation input.
+        let dropped = run(root.path(), &["--index", "--drop", "--mode", mode]);
+        assert!(dropped.status.success(), "{dropped:?}");
+        assert!(String::from_utf8_lossy(&dropped.stdout).contains("Dropped index"));
+        assert!(!index.exists());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("source.txt")).expect("source remains"),
+            "keep source"
+        );
+
+        let absent = run(root.path(), &["--index", "--drop", "--mode", mode]);
+        assert!(absent.status.success(), "{absent:?}");
+        assert!(String::from_utf8_lossy(&absent.stdout).contains("No index found"));
+    }
+}
+
 const PATH_LOOKUP_NOTICE: &str =
     "Warning: automatically performing path lookup; use --hybrid to force hybrid search.\n";
 const COLORED_PATH_LOOKUP_NOTICE: &str = "\x1b[33mWarning:\x1b[0m automatically performing path lookup; use --hybrid to force hybrid search.\n";

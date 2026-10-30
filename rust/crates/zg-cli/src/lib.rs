@@ -567,8 +567,6 @@ pub struct IndexArgs {
     pub rebuild: bool,
     #[arg(long)]
     pub drop: bool,
-    #[arg(long)]
-    pub yes: bool,
     #[arg(long = "reset-paths")]
     pub reset_paths: bool,
     #[arg(long)]
@@ -767,8 +765,6 @@ pub enum CliError {
     InvalidModifiedRange,
     #[error("zg --index --drop cannot be combined with indexing options")]
     DropWithIndexOptions,
-    #[error("zg --index --drop requires --yes in non-interactive Rust mode")]
-    DropNeedsConfirmation,
     #[error("use `zg --server --stdio` or choose one of: on, off, status, run")]
     MissingServerAction,
     #[error("--stdio cannot be combined with a server action")]
@@ -1552,9 +1548,6 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
             || !args.excluded_file_types.is_empty()
         {
             return Err(CliError::DropWithIndexOptions);
-        }
-        if !args.yes {
-            return Err(CliError::DropNeedsConfirmation);
         }
         return Ok(CliPlan::Index {
             mode,
@@ -2775,7 +2768,7 @@ mod tests {
                 Err(super::CliError::InvalidFileFormat(_))
             ));
             assert!(matches!(
-                Cli::try_parse_from(["zg", "--index", "--drop", "--yes", option, "rust"])
+                Cli::try_parse_from(["zg", "--index", "--drop", option, "rust"])
                     .expect("index drop syntax")
                     .into_plan(std::env::temp_dir()),
                 Err(super::CliError::DropWithIndexOptions)
