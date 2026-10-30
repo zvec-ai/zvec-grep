@@ -109,6 +109,247 @@ fn embeddinggemma_micro_batch_covers_long_inputs_without_changing_qwen() {
     }
 }
 
+#[test]
+fn multisequence_batching_is_limited_to_gpu_gemma() {
+    assert!(use_multisequence_batching("gemma-embedding", true));
+    assert!(!use_multisequence_batching("gemma-embedding", false));
+    assert!(!use_multisequence_batching("qwen3", true));
+    assert!(!use_multisequence_batching("qwen3", false));
+}
+
+#[tokio::test]
+#[ignore = "requires ZVEC_GREP_TEST_MODEL_CACHE with embeddinggemma; compares batched and individual vectors"]
+async fn cached_embeddinggemma_cpu_batches_preserve_vectors_and_context_limits() {
+    embeddinggemma_batches_preserve_vectors_and_context_limits(Device::Cpu).await;
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "requires cached embeddinggemma and Metal; no CPU fallback"]
+async fn cached_embeddinggemma_metal_batches_preserve_vectors_and_context_limits() {
+    embeddinggemma_batches_preserve_vectors_and_context_limits(Device::Metal).await;
+}
+
+#[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "cuda"))]
+#[tokio::test]
+#[ignore = "requires cached embeddinggemma and CUDA plugins; run in a fresh process; no CPU fallback"]
+async fn cached_embeddinggemma_cuda_batches_preserve_vectors_and_context_limits() {
+    embeddinggemma_batches_preserve_vectors_and_context_limits(Device::Cuda).await;
+}
+
+async fn embeddinggemma_batches_preserve_vectors_and_context_limits(device: Device) {
+    let cache = env::var_os("ZVEC_GREP_TEST_MODEL_CACHE")
+        .map(PathBuf::from)
+        .expect("ZVEC_GREP_TEST_MODEL_CACHE must point at the model cache");
+    let model = LlamaCppEmbeddingModel::new(
+        entry("local/embeddinggemma-300m"),
+        ModelConfig {
+            cache_dir: Some(cache),
+            device: Some(device),
+            ..ModelConfig::default()
+        },
+        ModelComputeRuntime::shared(),
+    );
+    let loaded = model.ensure_loaded(None, None).await.expect("cached model");
+    assert_eq!(loaded.gpu, device != Device::Cpu);
+    let inputs = gemma_batch_fixture(&loaded.model);
+    assert_eq!(inputs[4].tokens.len(), 2_048);
+    let prepared = || PreparedLlamaBatch {
+        inputs: inputs.clone(),
+        truncated: vec![4],
+    };
+    let mut expected = Vec::new();
+    for input in &inputs {
+        let result = loaded
+            .contexts
+            .run(
+                PreparedLlamaBatch {
+                    inputs: vec![PreparedLlamaInput {
+                        index: 0,
+                        tokens: input.tokens.clone(),
+                    }],
+                    truncated: Vec::new(),
+                },
+                2_048,
+                1,
+                threads_per_context(loaded.gpu, 1),
+                None,
+            )
+            .expect("individual inference");
+        expected.push(result.vectors[0].clone());
+    }
+    if loaded.gpu {
+        assert_gemma_sequence_isolation(&loaded, &inputs);
+    }
+    for concurrency in [1, 2, 4, 8] {
+        let threads = threads_per_context(loaded.gpu, concurrency);
+        let result = loaded
+            .contexts
+            .run(prepared(), 2_048, concurrency, threads, None)
+            .expect("batched inference");
+        assert_eq!(result.truncated, [4]);
+        for (actual, expected) in result.vectors.iter().zip(&expected) {
+            assert_embedding_close(actual, expected);
+        }
+        assert_eq!(result.vectors.len(), inputs.len());
+        let state = lock_llama_mutex(&loaded.contexts.state);
+        assert_eq!(state.workers.len(), concurrency);
+        assert!(
+            state
+                .workers
+                .iter()
+                .all(|worker| !worker.busy.load(Ordering::Acquire))
+        );
+        drop(state);
+
+        // A larger sequence/token profile must remain safe for a later single query.
+        let result = loaded
+            .contexts
+            .run(
+                PreparedLlamaBatch {
+                    inputs: vec![inputs[0].clone()],
+                    truncated: Vec::new(),
+                },
+                2_048,
+                concurrency,
+                threads,
+                None,
+            )
+            .expect("reuse after batch");
+        assert_embedding_close(&result.vectors[0], &expected[0]);
+    }
+    assert_gemma_batch_failure_recovery(&loaded, &inputs, &expected);
+}
+
+fn gemma_batch_fixture(model: &LlamaModel) -> Vec<PreparedLlamaInput> {
+    let texts = [
+        "find authentication middleware".to_owned(),
+        "parse configuration and handle errors".to_owned(),
+        "sort vector search results".repeat(10),
+        "long sequence of parser tokens ".repeat(100),
+        "validate access permissions ".repeat(2_048),
+        "find authentication middleware".to_owned(),
+        "implement a cache eviction policy".repeat(20),
+        "a separate document about image processing".to_owned(),
+    ];
+    texts
+        .iter()
+        .enumerate()
+        .map(|(index, text)| {
+            let mut tokens = model.str_to_token(text, AddBos::Always).expect("tokens");
+            tokens.truncate(2_048);
+            PreparedLlamaInput { index, tokens }
+        })
+        .collect()
+}
+
+fn assert_embedding_close(actual: &[f32], expected: &[f32]) {
+    assert_eq!(actual.len(), 768);
+    assert_eq!(actual.len(), expected.len());
+    assert!(actual.iter().all(|value| value.is_finite()));
+    let norm = expected.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>();
+    let error = actual
+        .iter()
+        .zip(expected)
+        .map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2))
+        .sum::<f64>();
+    let relative_l2 = (error / norm).sqrt();
+    let actual_norm = actual.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>();
+    let dot = actual
+        .iter()
+        .zip(expected)
+        .map(|(&a, &b)| f64::from(a) * f64::from(b))
+        .sum::<f64>();
+    let cosine = dot / (actual_norm * norm).sqrt();
+    eprintln!("batch equivalence relative_l2={relative_l2:.8} cosine={cosine:.9}");
+    // Allow small GPU rounding differences; verify sequence isolation separately.
+    assert!(
+        cosine > 0.99999 && relative_l2 < 0.005,
+        "batched output changed: relative_l2={relative_l2} cosine={cosine}"
+    );
+}
+
+fn assert_gemma_sequence_isolation(loaded: &LoadedLlamaModel, inputs: &[PreparedLlamaInput]) {
+    for target in [0, 6] {
+        let mut pair = vec![inputs[target].clone(), inputs[1].clone()];
+        pair[0].index = 0;
+        pair[1].index = 1;
+        let infer = |inputs| {
+            loaded
+                .contexts
+                .run(
+                    PreparedLlamaBatch {
+                        inputs,
+                        truncated: Vec::new(),
+                    },
+                    2_048,
+                    1,
+                    threads_per_context(loaded.gpu, 1),
+                    None,
+                )
+                .expect("sequence isolation inference")
+                .vectors
+        };
+        let before = infer(pair.clone());
+        pair[1].tokens.reverse();
+        let after = infer(pair);
+        // Changing an unrelated sequence must not affect the target embedding.
+        let difference = before[0]
+            .iter()
+            .zip(&after[0])
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        eprintln!("sequence isolation max_absolute_difference={difference}");
+        assert!(difference < 1e-5, "cross-sequence interference");
+        assert_ne!(before[1], after[1]);
+    }
+}
+
+fn assert_gemma_batch_failure_recovery(
+    loaded: &LoadedLlamaModel,
+    inputs: &[PreparedLlamaInput],
+    expected: &[Vec<f32>],
+) {
+    let prepared = || PreparedLlamaBatch {
+        inputs: inputs.to_vec(),
+        truncated: vec![4],
+    };
+    let signal = CancellationToken::new();
+    signal.cancel();
+    assert!(
+        loaded
+            .contexts
+            .run(prepared(), 2_048, 4, 3, Some(&signal))
+            .is_err()
+    );
+    // Invalid native tokens return an error without poisoning the leased context.
+    assert!(
+        loaded
+            .contexts
+            .run(
+                PreparedLlamaBatch {
+                    inputs: vec![PreparedLlamaInput {
+                        index: 0,
+                        tokens: vec![LlamaToken::new(-1)]
+                    }],
+                    truncated: Vec::new(),
+                },
+                2_048,
+                4,
+                3,
+                None
+            )
+            .is_err()
+    );
+    let result = loaded
+        .contexts
+        .run(prepared(), 2_048, 4, 3, None)
+        .expect("recover after failure");
+    for (actual, expected) in result.vectors.iter().zip(expected) {
+        assert_embedding_close(actual, expected);
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires ZVEC_GREP_TEST_MODEL_CACHE with the embeddinggemma GGUF; exercises up to 2048 tokens"]
 async fn cached_embeddinggemma_cpu_handles_long_inputs_and_reuse() {
