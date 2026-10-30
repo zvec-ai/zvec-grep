@@ -43,12 +43,10 @@ pub use metadata::Visibility;
 
 // Shared graph contracts for extraction and persistence.
 pub(crate) use graph::EdgeProvenance;
-#[cfg(test)]
 pub(crate) use graph::FileEdge;
 #[cfg(test)]
 pub(crate) use graph::FileGraphNode;
 pub(crate) use graph::FileGraphResult;
-#[cfg(test)]
 pub(crate) use graph::GraphEdgeKind;
 pub(crate) use graph::PendingRef;
 pub(crate) use graph::PendingRefStatus;

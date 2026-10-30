@@ -37,6 +37,7 @@ zvec-rust-build.workspace = true
 [dev-dependencies]
 toml.workspace = true
 serde = { workspace = true, features = ["derive"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true

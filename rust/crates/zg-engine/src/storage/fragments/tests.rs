@@ -731,3 +731,81 @@ fn query_limits_and_nul_text_preserve_native_boundaries() {
     assert_eq!(index_text("before\0after"), "before after");
     assert!(matches!(index_text("plain"), Cow::Borrowed(_)));
 }
+
+#[test]
+fn exact_symbol_lookup_collects_all_models_and_deduplicates_large_fragment_sets() {
+    super::super::zvec::initialize().expect("initialize zvec");
+    let root = tempfile::tempdir().expect("storage");
+    let first = model();
+    let second = EmbeddingModelInfo::new(
+        crate::domain::model::ModelInfo::new(
+            first.model().provider(),
+            "second",
+            first.model().content_kinds().iter().copied(),
+            first.model().max_batch_size(),
+        )
+        .expect("second model metadata"),
+        first.dimension(),
+        first.metric(),
+        first.max_input_tokens(),
+        first.max_image_bytes(),
+    )
+    .expect("second model");
+    let store = Fragments::open(root.path(), &[first.clone(), second.clone()], false)
+        .expect("model tables");
+    let mut entities = Vec::new();
+    let mut entries = Vec::new();
+    for i in 0..125 {
+        let (_, mut owners, mut projections) = metadata_fragments(1, &format!("body-{i}"));
+        let mut owner = owners.remove(0);
+        if i == 0 {
+            // One entity alone fills a query batch; splitting must skip its
+            // remaining fragments without hiding other matching entities.
+            let fragments = (0..1100)
+                .map(|ordinal| EntityFragment {
+                    id: FragmentId::new(owner.id(), ordinal),
+                    range: Range::Full,
+                })
+                .collect();
+            owner = Entity::new(
+                owner.id().clone(),
+                owner.file_id(),
+                owner.source_range(),
+                owner.content().clone(),
+                owner.metadata().cloned(),
+                fragments,
+            )
+            .expect("fragmented entity");
+            projections = owner
+                .fragments()
+                .iter()
+                .map(|fragment| IndexedFragment {
+                    entity_id: owner.id().clone(),
+                    fragment_id: fragment.id.clone(),
+                    model: first.model().reference(),
+                    vector: vec![1.0, 0.0, 0.0],
+                    fts_text: "harvest".into(),
+                })
+                .collect();
+        }
+        if i == 124 {
+            for projection in &mut projections {
+                projection.model = second.model().reference();
+            }
+        }
+        entities.push(owner);
+        entries.extend(projections);
+    }
+    write_fixture(&store, &file(1, "harvest.rs"), &entities, &entries);
+    let expected: BTreeSet<_> = entities.iter().map(|entity| entity.id().clone()).collect();
+    let found = store
+        .find_symbol_entity_ids("harvest 春'\\crop", None)
+        .expect("all exact definitions");
+    assert_eq!(found, expected.into_iter().collect::<Vec<_>>());
+    assert!(
+        store
+            .find_symbol_entity_ids("Harvest 春'\\crop", None)
+            .expect("case-sensitive lookup")
+            .is_empty()
+    );
+}

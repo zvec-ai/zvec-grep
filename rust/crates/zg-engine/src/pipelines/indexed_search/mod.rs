@@ -2,7 +2,7 @@
 
 pub(crate) mod context;
 pub(super) mod format_filter;
-mod path_filter;
+pub(super) mod path_filter;
 mod pipeline;
 mod ranking;
 pub(crate) mod service;

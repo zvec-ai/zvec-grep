@@ -311,6 +311,25 @@ handling are controlled by the MCP host. For protocol `2026-07-28`, echo the exa
 `requestState` and unchanged tool arguments with `inputResponses.index_setup`;
 each model selection or remote authorization round issues a new, single-use state.
 
+`zg --callers <symbol> [root]` and `zg --callees <symbol> [root]` query an existing
+workspace graph. CLI `-g`/`--glob` and `--iglob` use the same ordered,
+workspace-relative glob rules as ordinary search (for example, `-g 'src/**'`).
+They filter definitions and suggestions, while call-site files remain unrestricted.
+Use `--limit N` to cap call sites per matching definition and
+`--mode direct|server|auto` to select execution. Scope-qualified names such as
+`Class::method` are supported. Same-name definitions remain separate, and repeated
+call sites retain their locations; `truncated` indicates additional visible call
+sites beyond the per-symbol limit. Endpoint visibility is checked before the limit;
+queries do not compute an exact total. Each definition and its call sites share a
+read snapshot; indexing may advance between definitions. Definitions changed since
+initial selection are skipped until the next query.
+Each edge has a caller `filePath` independently of its optional `symbol` metadata.
+Both MCP toolsets expose `zvec_grep_callers` and `zvec_grep_callees` with an absolute `root`, `symbol`,
+and optional `globs`, `insensitiveGlobs`, and `limit`, using the same glob inputs as
+search. These queries do not load models or refresh the index.
+Graph extraction and resolution must have populated the index for call edges to
+be available; unresolved references are excluded from results.
+
 This version indexes text and code with one embedding model per workspace. Choose
 it with `zg --index --embedding <model>` or set a default with
 `zg --config model set <model> --default`. Code, documents and structured text use

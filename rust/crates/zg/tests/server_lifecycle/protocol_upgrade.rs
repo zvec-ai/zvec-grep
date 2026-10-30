@@ -190,12 +190,16 @@ fn stdio_bootstrap_replaces_a_legacy_daemon_before_mcp_connects() -> Result<(), 
     }))?;
     bridge.notify(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))?;
     let tools = bridge.request(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}))?;
+    let mut names = tools["result"]["tools"]
+        .as_array()
+        .ok_or("tool list")?
+        .iter()
+        .map(|tool| tool["name"].as_str().ok_or("tool name"))
+        .collect::<Result<Vec<_>, _>>()?;
+    names.sort_unstable();
     assert_eq!(
-        tools["result"]["tools"]
-            .as_array()
-            .ok_or("tool list")?
-            .len(),
-        1
+        names,
+        ["zvec_grep_callees", "zvec_grep_callers", "zvec_grep_search"]
     );
     let current = instance_record(home.path())?;
     assert_eq!(current["daemonProtocolVersion"], 1);

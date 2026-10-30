@@ -317,6 +317,7 @@ pub fn help_text(topic: Option<&str>) -> Result<String, HelpTopicError> {
     let text = match topic {
         None => return Ok(main_help()),
         Some("search") => SEARCH_HELP,
+        Some("callers" | "callees") => RELATIONSHIP_HELP,
         Some("index") => INDEX_HELP,
         Some("status") => STATUS_HELP,
         Some("config") => CONFIG_HELP,
@@ -360,6 +361,10 @@ Search:
   <query>        Search indexed context (no command prefix)
   --rg           Run managed ripgrep
 
+Relationships:
+  --callers      Show incoming call sites for a symbol
+  --callees      Show outgoing call sites for a symbol
+
 Management:
   --index        Build, rebuild, or drop the workspace index
   --status       Show workspace and index status
@@ -399,6 +404,25 @@ Run zg --help models or zg --help file-types for supported indexing capabilities
 Run zg --help environment for all variables, scopes, aliases, and precedence.
 Run zg --help search or zg --help <topic> for specific help.
 Use zg -h/--help for this page and zg -v/--version for the version."#;
+
+const RELATIONSHIP_HELP: &str = r"Usage:
+  zg --callers <symbol> [root] [options]
+  zg --callees <symbol> [root] [options]
+
+Options:
+  -g, --glob <GLOB>                Workspace-relative glob; prefix ! to exclude; repeatable
+  --iglob <GLOB>                   Case-insensitive glob; repeatable
+  --limit <N>                      Maximum edges per matching symbol (default: 20)
+  --mode <direct|server|auto>       Select the execution mode (default: auto)
+
+Globs follow the same ordered rules as ordinary search and filter definitions
+and suggestions, not call-site files.
+Names may be scope-qualified, such as Class::method. Same-name definitions are
+returned as separate JSON matches. truncated indicates additional visible call sites beyond the limit.
+Each edge's filePath, line, and column identify the call site in the caller file,
+including calls without symbol metadata. Unresolved references
+are excluded, so empty results do not prove that a relationship is absent.
+Requires an existing graph index; does not refresh or build it.";
 
 const SEARCH_HELP: &str = r#"Usage:
   zg <query> [options]
@@ -668,7 +692,7 @@ when the client disconnects.
 
 The server listens on loopback. Authentication is disabled by default; pass a
 token file or set ZVEC_GREP_SERVER_TOKEN to require Bearer authentication.
-The public MCP endpoint defaults to the agent toolset (indexed search only).
+The public MCP endpoint defaults to the agent toolset (indexed search and callers/callees).
 Use --mcp-toolset full, or ZVEC_GREP_MCP_TOOLSET=full, to expose managed rg and
 the four index and status tools. CLI managed rg, index, and status commands
 continue to use the daemon's internal administration endpoint.

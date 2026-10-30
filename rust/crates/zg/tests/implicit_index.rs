@@ -255,6 +255,16 @@ fn closed_stdout_preserves_success_and_readiness_errors() {
             assert_eq!(output.status.code(), Some(0), "{args:?}: {output:?}");
             assert!(output.stderr.is_empty(), "{args:?}: {output:?}");
         }
+        // Ordinary indexing no longer creates a graph. A closed pipe must not
+        // hide this query error; successful relationship output is tested with a graph fixture.
+        for tool in ["--callers", "--callees"] {
+            let output = with_closed_stdout(fixture.command(&[tool, "foo", "--mode", mode]));
+            assert_eq!(output.status.code(), Some(1), "{tool} {mode}: {output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("workspace graph is missing"),
+                "{tool} {mode}: {output:?}"
+            );
+        }
     }
     fixture.success(&["--server", "off"]);
     fixture.server_started = false;

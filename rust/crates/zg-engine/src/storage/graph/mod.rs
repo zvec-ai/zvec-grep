@@ -5,10 +5,9 @@
 //! the indexing coordinator owns consistency with zvec.
 //! Callers must serialize reference reads, resolution and writeback with file updates.
 //! This module does not resolve names, run FTS, or manage workspace locks.
-//! `IndexStore` owns the writable connection and coordinates file replacement.
+//! `IndexStore` owns the connection and coordinates file replacement.
 
 mod pending;
-#[cfg(test)]
 mod reader;
 mod schema;
 mod types;
@@ -43,7 +42,6 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 /// Read-only opening never creates a database or modifies its schema.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OpenMode {
-    #[cfg(test)]
     ReadOnly,
     ReadWrite,
 }
@@ -80,7 +78,6 @@ impl SqliteGraphStorage {
             return Err(Error::InvalidInput("database path is empty"));
         }
         let flags = match mode {
-            #[cfg(test)]
             OpenMode::ReadOnly => OpenFlags::SQLITE_OPEN_READ_ONLY,
             OpenMode::ReadWrite => {
                 if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -105,7 +102,6 @@ impl SqliteGraphStorage {
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.pragma_update(None, "foreign_keys", true)?;
         match mode {
-            #[cfg(test)]
             OpenMode::ReadOnly => schema::validate(&connection)?,
             OpenMode::ReadWrite => {
                 schema::initialize(&mut connection)?;

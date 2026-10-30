@@ -1,5 +1,7 @@
 #[path = "server_lifecycle/mcp_parity.rs"]
 mod mcp_parity;
+#[path = "server_lifecycle/relationships.rs"]
+mod relationships;
 #[path = "server_lifecycle/workspaces.rs"]
 mod workspaces;
 
@@ -581,7 +583,12 @@ fn duplicate_server_run_preserves_active_daemon_logs() -> Result<(), Box<dyn Err
 }
 
 #[test]
-fn server_on_exposes_only_agent_search_and_off_stops_it() -> Result<(), Box<dyn Error>> {
+#[expect(
+    clippy::too_many_lines,
+    reason = "Verify MCP and CLI read routes within one server lifecycle"
+)]
+fn server_on_exposes_agent_search_and_relationships_and_off_stops_it() -> Result<(), Box<dyn Error>>
+{
     let _permit = server_test_permit();
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
     let home = TempDir::new()?;
@@ -626,6 +633,8 @@ fn server_on_exposes_only_agent_search_and_off_stops_it() -> Result<(), Box<dyn 
     });
     let response = post_json(port, Some(&session), &list.to_string())?;
     assert!(response.contains("zvec_grep_search"));
+    assert!(response.contains("\"name\":\"zvec_grep_callers\""));
+    assert!(response.contains("\"name\":\"zvec_grep_callees\""));
     assert!(!response.contains("zvec_grep_index"));
     assert!(!response.contains("zvec_grep_rg"));
     assert!(response.contains("\"maximum\":50"));
@@ -650,6 +659,34 @@ fn server_on_exposes_only_agent_search_and_off_stops_it() -> Result<(), Box<dyn 
             || response.contains("zg --index --embedding <model>")
     );
     assert!(response.contains("\"isError\":true"));
+
+    for (id, name) in [(10, "callers"), (11, "callees")] {
+        let call = json!({
+            "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": format!("zvec_grep_{name}"), "arguments": {"root": home.path(), "symbol": "run"}}
+        });
+        let response = post_json(port, Some(&session), &call.to_string())?;
+        assert!(
+            response.contains("error[ZG.ENGINE.NOT_FOUND]"),
+            "{name}: {response}"
+        );
+        assert!(response.contains("\"isError\":true"), "{name}: {response}");
+        for mode in ["direct", "server"] {
+            let output = Command::new(&guard.binary)
+                .arg(format!("--{name}"))
+                .arg("run")
+                .arg(home.path())
+                .args(["--mode", mode, "--home"])
+                .arg(&guard.home)
+                .output()?;
+            assert!(
+                !output.status.success(),
+                "{name} {mode} must require an index"
+            );
+            assert!(String::from_utf8_lossy(&output.stderr).contains("ZG.ENGINE.NOT_FOUND"));
+        }
+        assert!(!home.path().join(".zvec-grep").exists());
+    }
 
     // CLI administration uses the typed daemon protocol rather than the
     // public MCP toolset, so status remains available with the agent profile.
@@ -744,6 +781,8 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
     });
     let response = post_json(port, Some(&session), &list.to_string())?;
     for name in [
+        "zvec_grep_callers",
+        "zvec_grep_callees",
         "zvec_grep_search",
         "zvec_grep_index",
         "zvec_grep_index_drop",
@@ -1058,7 +1097,7 @@ fn default_connections_reuse_either_toolset_and_explicit_conflicts_fail()
                 .as_array()
                 .ok_or("tool list")?
                 .len(),
-            if profile == "agent" { 1 } else { 6 }
+            if profile == "agent" { 3 } else { 8 }
         );
         bridge.close()?;
         let current: serde_json::Value =
@@ -1281,7 +1320,7 @@ fn concurrent_stdio_bootstraps_share_one_resident_daemon() -> Result<(), Box<dyn
     let tools = list["result"]["tools"]
         .as_array()
         .ok_or("tools/list did not return an array")?;
-    assert_eq!(tools.len(), 6);
+    assert_eq!(tools.len(), 8);
 
     for bridge in bridges {
         bridge.close()?;

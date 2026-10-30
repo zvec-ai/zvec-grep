@@ -34,7 +34,9 @@ use super::{
 use crate::domain::FileGraphResult;
 use crate::domain::model::EmbeddingModelInfo;
 
+mod read;
 mod resolution;
+pub(crate) use read::ReadView;
 
 type StoreRegistry = Mutex<HashMap<PathBuf, Weak<SharedStore>>>;
 static STORES: OnceLock<StoreRegistry> = OnceLock::new();
@@ -54,6 +56,8 @@ struct StoreState {
     fragments: Fragments,
     graph: Option<SqliteGraphStorage>,
     optimize_marker: PathBuf,
+    // A failed graph reader must not prevent canonical text/vector reads.
+    graph_open_error: Option<crate::ErrorReport>,
     needs_optimize: bool,
     closed: bool,
 }
@@ -130,7 +134,7 @@ impl IndexStore {
         Self::open_with_graph(options, false)
     }
 
-    fn open_with_graph(
+    pub(crate) fn open_with_graph(
         options: WorkspaceIndexStorageOptions,
         graph_enabled: bool,
     ) -> EngineResult<Self> {
@@ -175,17 +179,29 @@ impl IndexStore {
         let directories = Directories::open(&path, read_only)?;
         let entities = Entities::open(&path, read_only)?;
         let fragments = Fragments::open(&path, &schema, read_only)?;
-        // Ordinary readers do not depend on the graph's availability.
-        let graph = if read_only || !graph_enabled {
-            None
+        let graph_path = path.join("graph").join("graph.sqlite");
+        let graph = if read_only {
+            match fs::metadata(&graph_path) {
+                Ok(_) => SqliteGraphStorage::open(&graph_path, OpenMode::ReadOnly)
+                    .map(Some)
+                    .map_err(graph_error),
+                // Pre-graph indexes remain readable without creating SQLite in a reader.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(io_error("inspect workspace graph", &graph_path, &error)),
+            }
+        } else if !graph_enabled {
+            Ok(None)
         } else {
-            let graph_path = path.join("graph").join("graph.sqlite");
             // Current extractors produce no graph, so pre-graph indexes can
             // initialize an empty database without rebuilding canonical data.
             let graph =
                 SqliteGraphStorage::open(&graph_path, OpenMode::ReadWrite).map_err(graph_error)?;
             sync_directory(&path.join("graph"))?;
-            Some(graph)
+            Ok(Some(graph))
+        };
+        let (graph, graph_open_error) = match graph {
+            Ok(graph) => (graph, None),
+            Err(error) => (None, Some(error.into_report())),
         };
         if !read_only {
             directories.load()?;
@@ -206,6 +222,7 @@ impl IndexStore {
                 graph,
                 optimize_marker,
                 needs_optimize,
+                graph_open_error,
                 closed: false,
             }),
             schema,
@@ -311,13 +328,7 @@ impl IndexStore {
         limit: usize,
         filter: Option<&StorageSearchFilter>,
     ) -> EngineResult<Vec<StorageSearchHit>> {
-        self.read(|state| {
-            if limit == 0 || fragments::empty_filter(filter) {
-                return Ok(Vec::new());
-            }
-            let filter = fragments::build_filter(filter, &|path| state.directories.get(path))?;
-            state.fragments.search_fts(query, limit, filter.as_deref())
-        })
+        self.read_snapshot(|view| view.search_fts(query, limit, filter))
     }
 
     pub(crate) fn search_vector(
@@ -851,3 +862,19 @@ mod tables_tests;
 
 #[cfg(test)]
 mod graph_tests;
+
+#[cfg(test)]
+impl IndexStore {
+    pub(crate) fn set_test_file_status(
+        &self,
+        id: FileId,
+        status: FileIndexStatus,
+    ) -> EngineResult<()> {
+        self.write(|state| {
+            let mut file = state.files.fetch(&[id])?.remove(&id).expect("fixture file");
+            file.set_index_status(status)?;
+            let directories = state.directories.ensure(file.relative_path())?;
+            state.files.put(&file, &directories)
+        })
+    }
+}
