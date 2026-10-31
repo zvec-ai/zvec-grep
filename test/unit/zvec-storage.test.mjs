@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -381,4 +382,120 @@ test("finalize waits for metadata optimization and does not repeat it after succ
     await pending;
     storage.close();
   }
+});
+
+test("incremental indexing reclaims interrupted-merge leftovers and stays openable", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "zvec-grep-merge-leftovers-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const options = storageOptions(parent);
+  const writeFile = (storage, id) => {
+    const file = fileInfo(id, parent, `${id}.ts`);
+    storage.replaceFile(file, [
+      {
+        fragment: {
+          id,
+          fileId: file.id,
+          range: {
+            kind: "text",
+            startLine: 1,
+            endLine: 1,
+            startOffset: 0,
+            endOffset: 6,
+          },
+          content: { kind: "text", text: "shared" },
+        },
+        vector: [1, 0],
+      },
+    ]);
+  };
+  const original = createWorkspaceIndexStorage(options);
+  try {
+    writeFile(original, "a");
+    await original.finalizeWrites();
+  } finally {
+    original.close();
+  }
+
+  const entityLeftover = join(parent, "storage", "index.zvec", "0.tmp");
+  const filesLeftover = join(parent, "storage", "files.zvec", "1.tmp");
+  mkdirSync(entityLeftover, { recursive: true });
+  writeFileSync(join(entityLeftover, "postings.tmp"), "interrupted merge");
+  mkdirSync(filesLeftover, { recursive: true });
+  writeFileSync(join(filesLeftover, "postings.tmp"), "interrupted merge");
+
+  const reopened = createWorkspaceIndexStorage(options);
+  try {
+    assert.equal(reopened.searchFts("shared", 10).length, 1);
+    writeFile(reopened, "b");
+    await reopened.finalizeWrites();
+    assert.equal(existsSync(entityLeftover), false);
+    assert.equal(existsSync(filesLeftover), false);
+    assert.equal(reopened.searchFts("shared", 10).length, 2);
+  } finally {
+    reopened.close();
+  }
+  const next = createWorkspaceIndexStorage(options);
+  try {
+    assert.equal(next.searchFts("shared", 10).length, 2);
+    assert.equal(next.listFiles().length, 2);
+  } finally {
+    next.close();
+  }
+});
+
+test("collection open retries once after reclaiming interrupted-merge leftovers", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "zvec-grep-open-recovery-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const zvecPath = join(parent, "index.zvec");
+  const leftover = join(zvecPath, "3.tmp");
+  mkdirSync(leftover, { recursive: true });
+  const { openZvecCollection } =
+    await import("../../dist/engine/storage/zvec.js");
+  const attempts = [];
+  openZvecCollection(zvecPath, false, "open", () => {
+    attempts.push(1);
+    if (attempts.length === 1) {
+      throw new Error(
+        "Corruption: FTS merge state was left unfinished by an interrupted optimization",
+      );
+    }
+    return { recovered: true };
+  });
+  assert.equal(attempts.length, 2);
+  assert.equal(existsSync(leftover), false);
+});
+
+test("unrecoverable open keeps ZVEC_OPEN_FAILED and read-only opens never reclaim", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "zvec-grep-open-failure-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const zvecPath = join(parent, "index.zvec");
+  const leftover = join(zvecPath, "4.tmp");
+  mkdirSync(leftover, { recursive: true });
+  const [{ openZvecCollection }, { EngineError }] = await Promise.all([
+    import("../../dist/engine/storage/zvec.js"),
+    import("../../dist/engine/errors.js"),
+  ]);
+  const failure = new Error(
+    "Corruption: FTS merge state was left unfinished by an interrupted optimization",
+  );
+  assert.throws(
+    () =>
+      openZvecCollection(zvecPath, true, "open", () => {
+        throw failure;
+      }),
+    (error) =>
+      error instanceof EngineError &&
+      error.code === "ZVEC_GREP.ENGINE.STORAGE.ZVEC_OPEN_FAILED",
+  );
+  assert.equal(existsSync(leftover), true);
+  assert.throws(
+    () =>
+      openZvecCollection(zvecPath, false, "open", () => {
+        throw failure;
+      }),
+    (error) =>
+      error instanceof EngineError &&
+      error.code === "ZVEC_GREP.ENGINE.STORAGE.ZVEC_OPEN_FAILED",
+  );
+  assert.equal(existsSync(leftover), false);
 });
