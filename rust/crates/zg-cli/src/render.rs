@@ -445,6 +445,8 @@ Result options:
 Preview modes: none keeps one source line; short uses compact bounded source;
 full uses compact full source; detail adds metadata, outlines, and file grouping.
 Full previews do not retrieve an entire function or file. TTY affects only color.
+Multi-query results start each nonempty group with its original query and position.
+Plain output uses -- query i/n: text --; colored output adds a dim separator rule.
 Auto colors terminal output and leaves pipes plain; NO_COLOR disables auto color.
 Use --color always to retain color in pipes, or --color never to disable it.
 

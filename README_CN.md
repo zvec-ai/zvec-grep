@@ -152,6 +152,10 @@ zg --preview detail "An unseen creature left a few marks. What did the detective
 zg 会将 `sherlock-holmes.txt` 中的相关段落排在
 `alice-in-wonderland.txt` 前面。
 
+重复使用 `--hybrid`、`--fts` 或 `--vector` 可分别执行多个 Query。
+每组非空结果前显示原始 Query 和顺序，例如 `-- query 2/2: timeout --`；
+彩色输出使用暗色分隔线和紫色标签。
+
 ### 索引 Embedding 并发与 GPU 错误
 
 `zg --index --embedding-concurrency <n>` 和

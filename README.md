@@ -157,6 +157,10 @@ zg --preview detail "An unseen creature left a few marks. What did the detective
 zg returns the relevant passages from `sherlock-holmes.txt`, ranked ahead of
 `alice-in-wonderland.txt`.
 
+Use repeated `--hybrid`, `--fts`, or `--vector` flags for separate queries.
+Each nonempty result group starts with its original query and position, such as
+`-- query 2/2: timeout --`; colored output uses a dim rule and a magenta label.
+
 ### Index embedding concurrency and GPU errors
 
 `zg --index --embedding-concurrency <n>` and
