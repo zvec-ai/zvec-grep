@@ -1,14 +1,14 @@
-//! Search projections: one zvec collection per embedding model, with FTS and FP16 vectors.
+//! Per-model full-text projections in zvec and persistent vectors in `DiskANN`.
 
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    fmt::Write as _,
     path::Path,
 };
 
 use zvec_rust::{
-    Collection, CollectionSchema, DataType, Doc, FieldSchema, Fts, IndexParams, MetricType,
-    SearchQuery,
+    Collection, CollectionSchema, DataType, Doc, FieldSchema, Fts, IndexParams, SearchQuery,
 };
 
 use super::{
@@ -36,6 +36,12 @@ const MAX_TOP_K: usize = 100_000;
 
 pub(super) struct Fragments {
     indexes: BTreeMap<String, Collection>,
+    vectors: BTreeMap<String, zg_diskann::VectorIndex>,
+}
+
+pub(super) struct PreparedModel {
+    docs: Vec<Doc>,
+    vectors: Vec<(String, u32, Vec<f32>)>,
 }
 
 impl Fragments {
@@ -45,26 +51,25 @@ impl Fragments {
         read_only: bool,
     ) -> EngineResult<Self> {
         let mut indexes = BTreeMap::new();
+        let mut vectors = BTreeMap::new();
         for embedding in embeddings {
-            let dimension = u32::try_from(embedding.dimension())
-                .ok()
-                .filter(|value| (1..=20_000).contains(value))
-                .ok_or_else(|| {
-                    EngineError::invalid_argument(
-                        "storage embedding dimension must be between 1 and 20,000",
-                    )
-                })?;
             let metric = match embedding.metric() {
-                EmbeddingMetric::Cosine => MetricType::Cosine,
-                EmbeddingMetric::DotProduct => MetricType::Ip,
-                EmbeddingMetric::Euclidean => MetricType::L2,
+                EmbeddingMetric::Cosine => zg_diskann::Distance::Cosine,
+                EmbeddingMetric::DotProduct => zg_diskann::Distance::DotProduct,
+                EmbeddingMetric::Euclidean => zg_diskann::Distance::Euclidean,
             };
             let name = fragment_collection_name(embedding);
-            let collection = open_collection(
-                &root.join(&name),
-                &fragments_schema(dimension, metric)?,
-                read_only,
-            )?;
+            let collection = open_collection(&root.join(&name), &fragments_schema()?, read_only)?;
+            vectors.insert(
+                embedding.model().reference(),
+                zg_diskann::VectorIndex::open(
+                    &root.join(format!("{name}.diskann.sqlite")),
+                    embedding.dimension(),
+                    metric,
+                    read_only,
+                )
+                .map_err(diskann_error)?,
+            );
             if indexes
                 .insert(embedding.model().reference(), collection)
                 .is_some()
@@ -72,7 +77,7 @@ impl Fragments {
                 return Err(EngineError::invalid_argument("duplicate embedding model"));
             }
         }
-        Ok(Self { indexes })
+        Ok(Self { indexes, vectors })
     }
 
     /// Encode the entire replacement before any stored rows are changed.
@@ -81,7 +86,7 @@ impl Fragments {
         entities: &[Entity],
         entries: &[IndexedFragment],
         directories: &[DirectoryId],
-    ) -> EngineResult<BTreeMap<String, Vec<Doc>>> {
+    ) -> EngineResult<BTreeMap<String, PreparedModel>> {
         let owners = entities
             .iter()
             .map(|entity| {
@@ -102,7 +107,7 @@ impl Fragments {
             .flat_map(Entity::fragments)
             .map(|fragment| (&fragment.id, fragment))
             .collect::<HashMap<_, _>>();
-        let mut projections: BTreeMap<String, Vec<Doc>> = BTreeMap::new();
+        let mut projections: BTreeMap<String, PreparedModel> = BTreeMap::new();
         for entry in entries {
             let (owner, fields) = owners.get(&entry.entity_id).ok_or_else(|| {
                 EngineError::invalid_argument("search projection references a missing entity")
@@ -115,21 +120,42 @@ impl Fragments {
                 doc.add_string("text", &index_text(&entry.fts_text)),
                 "encode searchable text",
             )?;
-            native(
-                zg_zvec_fp16::add_embedding(&mut doc, "embedding", &entry.vector),
-                "encode embedding vector",
-            )?;
-            projections
-                .entry(entry.model.clone())
-                .or_default()
-                .push(doc);
+            let projection =
+                projections
+                    .entry(entry.model.clone())
+                    .or_insert_with(|| PreparedModel {
+                        docs: Vec::new(),
+                        vectors: Vec::new(),
+                    });
+            projection.docs.push(doc);
+            projection.vectors.push((
+                entry.fragment_id.as_str().to_owned(),
+                file.id().get(),
+                entry.vector.clone(),
+            ));
         }
         Ok(projections)
     }
 
-    pub(super) fn write(&self, projections: &BTreeMap<String, Vec<Doc>>) -> EngineResult<()> {
-        for (model, docs) in projections {
-            write_docs(self.index(model)?, docs, "write model fragments")?;
+    pub(super) fn write(&self, projections: &BTreeMap<String, PreparedModel>) -> EngineResult<()> {
+        for (model, projection) in projections {
+            let vectors = projection
+                .vectors
+                .iter()
+                .map(|(document_id, file_id, vector)| zg_diskann::Record {
+                    document_id,
+                    file_id: *file_id,
+                    vector,
+                })
+                .collect::<Vec<_>>();
+            self.vector_index(model)?
+                .upsert(&vectors)
+                .map_err(diskann_error)?;
+            write_docs(
+                self.index(model)?,
+                &projection.docs,
+                "write model fragments",
+            )?;
         }
         Ok(())
     }
@@ -150,6 +176,9 @@ impl Fragments {
     }
 
     pub(super) fn delete_file(&self, file_id: FileId) -> EngineResult<()> {
+        for index in self.vectors.values() {
+            index.delete_file(file_id.get()).map_err(diskann_error)?;
+        }
         let filter = format!("file_id = {}", file_id.get());
         for index in self.indexes.values() {
             native(index.delete_by_filter(&filter), "delete source fragments")?;
@@ -260,19 +289,36 @@ impl Fragments {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let mut request = native(
-            zg_zvec_fp16::embedding_query("embedding", vector, top_k(limit)?),
-            "create vector query",
-        )?;
-        configure_query(
-            &mut request,
-            filter,
-            &["document_id", "entity_id", "file_id"],
-        )?;
-        native(index.query(&request), "search vector index")?
-            .into_iter()
-            .map(|doc| decode_search_hit(&doc, StorageSearchPath::Vector))
+        top_k(limit)?;
+        let allowed = filter
+            .map(|filter| matching_documents(index, filter))
+            .transpose()?;
+        let hits = self
+            .vector_index(model)?
+            .search(vector, limit, allowed.as_ref())
+            .map_err(diskann_error)?;
+        let keys = hits
+            .iter()
+            .map(|hit| hit.document_id.clone())
+            .collect::<Vec<_>>();
+        let docs = fetch_map(index, &keys)?;
+        hits.into_iter()
+            .filter_map(|hit| {
+                // A failed cross-store write may leave an unpublished vector. The
+                // canonical projection must exist before it can become a result.
+                docs.get(&hit.document_id).map(|doc| {
+                    let mut decoded = decode_search_hit(doc, StorageSearchPath::Vector)?;
+                    decoded.score = hit.score;
+                    Ok(decoded)
+                })
+            })
             .collect()
+    }
+
+    fn vector_index(&self, model: &str) -> EngineResult<&zg_diskann::VectorIndex> {
+        self.vectors.get(model).ok_or_else(|| {
+            EngineError::invalid_argument(format!("unknown embedding model {model:?}"))
+        })
     }
 
     fn index(&self, model: &str) -> EngineResult<&Collection> {
@@ -311,7 +357,7 @@ fn identity_schema(name: &str) -> EngineResult<CollectionSchema> {
     let mut schema = native(CollectionSchema::new(name), "create collection schema")?;
     scalar(&mut schema, "file_id", DataType::Uint32, false, true)?;
     scalar(&mut schema, "entity_id", DataType::String, false, true)?;
-    scalar(&mut schema, "document_id", DataType::String, false, false)?;
+    scalar(&mut schema, "document_id", DataType::String, false, true)?;
     Ok(schema)
 }
 
@@ -328,7 +374,7 @@ fn retrieval_schema(name: &str) -> EngineResult<CollectionSchema> {
     Ok(schema)
 }
 
-fn fragments_schema(dimension: u32, metric: MetricType) -> EngineResult<CollectionSchema> {
+fn fragments_schema() -> EngineResult<CollectionSchema> {
     let mut schema = retrieval_schema("fragments")?;
     let mut text = native(
         FieldSchema::new("text", DataType::String, false, 0),
@@ -343,19 +389,59 @@ fn fragments_schema(dimension: u32, metric: MetricType) -> EngineResult<Collecti
     )?;
     native(schema.add_field(&text), "add full-text field")?;
 
-    let mut vector = native(
-        FieldSchema::new("embedding", DataType::VectorFp16, false, dimension),
-        "define vector field",
-    )?;
-    native(
-        vector.set_index_params(&native(
-            IndexParams::hnsw(metric, 50, 500),
-            "define vector index",
-        )?),
-        "attach vector index",
-    )?;
-    native(schema.add_field(&vector), "add vector field")?;
     Ok(schema)
+}
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "map_err consumes the storage error"
+)]
+fn diskann_error(error: zg_diskann::Error) -> EngineError {
+    EngineError::storage_failure(format!("DiskANN storage: {error}"))
+}
+
+/// Partition full scalar batches around a collected ID, avoiding any result cap
+/// or dependence on zvec's unspecified scalar-result order.
+fn matching_documents(index: &Collection, filter: &str) -> EngineResult<HashSet<String>> {
+    let mut ids = HashSet::new();
+    let mut ranges: Vec<(Option<String>, Option<String>)> = vec![(None, None)];
+    while let Some((lower, upper)) = ranges.pop() {
+        let mut clause = if lower.is_none() && upper.is_none() {
+            filter.to_owned()
+        } else {
+            format!("({filter})")
+        };
+        if let Some(lower) = &lower {
+            let _ = write!(clause, " AND document_id > {}", quote(lower));
+        }
+        if let Some(upper) = &upper {
+            let _ = write!(clause, " AND document_id < {}", quote(upper));
+        }
+        let mut query = native(SearchQuery::scalar(1024), "create vector membership query")?;
+        configure_query(&mut query, Some(&clause), &["document_id"])?;
+        let docs = native(index.query(&query), "resolve vector membership")?;
+        let full = docs.len() == 1024;
+        let mut batch = docs
+            .iter()
+            .map(|doc| string_field(doc, "document_id"))
+            .collect::<EngineResult<Vec<_>>>()?;
+        batch.sort();
+        batch.dedup();
+        if batch.iter().any(|id| {
+            lower.as_ref().is_some_and(|lo| id <= lo) || upper.as_ref().is_some_and(|hi| id >= hi)
+        }) {
+            return Err(corrupt(
+                "vector membership returned an ID outside its range",
+            ));
+        }
+        if full {
+            let pivot = batch[batch.len() / 2].clone();
+            ranges.push((Some(pivot.clone()), upper));
+            ranges.push((lower, Some(pivot)));
+        }
+        ids.extend(batch);
+    }
+    Ok(ids)
 }
 
 fn identity_doc(entity: &Entity, fragment: &EntityFragment) -> EngineResult<Doc> {

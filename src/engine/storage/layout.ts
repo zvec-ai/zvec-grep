@@ -8,6 +8,7 @@ type WorkspaceIndexStoragePaths = {
   storagePath: string;
   filesPath: string;
   indexPath: string;
+  vectorPath: string;
 };
 
 export function resolveWorkspaceIndexStoragePaths(
@@ -18,17 +19,27 @@ export function resolveWorkspaceIndexStoragePaths(
     storagePath: resolvedStoragePath,
     filesPath: join(resolvedStoragePath, FILES_ZVEC),
     indexPath: join(resolvedStoragePath, ENTITIES_ZVEC),
+    vectorPath: join(resolvedStoragePath, "vectors.diskann.sqlite"),
   };
 }
 
 export function hasWorkspaceIndexStorage(storagePath: string): boolean {
   const paths = resolveWorkspaceIndexStoragePaths(storagePath);
-  return existsSync(paths.filesPath) && existsSync(paths.indexPath);
+  return (
+    existsSync(paths.filesPath) &&
+    existsSync(paths.indexPath) &&
+    existsSync(paths.vectorPath)
+  );
 }
 
 export function deleteWorkspaceIndexStorage(storagePath: string): void {
   const paths = resolveWorkspaceIndexStoragePaths(storagePath);
-  for (const target of [paths.filesPath, paths.indexPath]) {
+  for (const target of [
+    paths.filesPath,
+    paths.indexPath,
+    paths.vectorPath,
+    `${paths.vectorPath}-journal`,
+  ]) {
     if (dirname(target) !== paths.storagePath) {
       throw new Error("Workspace index data must be inside its storage path");
     }

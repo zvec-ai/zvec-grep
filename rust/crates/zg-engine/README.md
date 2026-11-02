@@ -66,7 +66,14 @@ Indexed search combines full-text and vector retrieval to return relevant source
 
 ### Vector storage
 
-Embedding vectors are stored as IEEE binary16. The engine keeps embeddings and query vectors as `f32` until they are narrowed for the FP16 field. `indexVersion` remains 2. Existing FP32 indexes require an explicit rebuild with `zg --index --rebuild` before use.
+Vector search uses Microsoft's DiskANN 0.61.0 through `zg-diskann`. Each embedding
+model has a SQLite database containing FP32 vectors and DiskANN graph edges,
+read on demand with a bounded page cache. zvec stores full-text and metadata
+projections. Metadata filters are resolved to document membership and applied
+inside DiskANN's filtered traversal. Inserts commit vectors and edges together;
+deleted nodes remain available for traversal but are excluded from results.
+`indexVersion` is 3. Existing zvec vector indexes require an explicit rebuild with
+`zg --index --rebuild`; opening them never performs an implicit migration.
 
 ### Embedding models
 

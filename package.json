@@ -31,10 +31,20 @@
     "README.md",
     "README_CN.md",
     "LICENSE",
-    "dist"
+    "dist",
+    "native/*.node",
+    "native/Cargo.toml",
+    "native/Cargo.lock",
+    "native/build.rs",
+    "native/THIRD_PARTY_NOTICES.md",
+    "native/src",
+    "scripts/build-diskann.mjs"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prebuild": "npm run build:native",
+    "build:native": "node scripts/build-diskann.mjs",
+    "postinstall": "node scripts/build-diskann.mjs --install",
     "check": "npm run lint && npm run format:check && npm run typecheck && npm run test:coverage && npm run test:package",
     "format:check": "prettier --check .",
     "lint": "eslint .",

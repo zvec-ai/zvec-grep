@@ -41,6 +41,18 @@ This README describes the TypeScript / Node.js implementation. For the Rust
 implementation, see [`rust/`](./rust/README.md). User documentation is maintained
 on the [Zvec website](https://zvec.org/en/docs/zvec-grep/).
 
+Both engines use [Microsoft DiskANN](https://github.com/microsoft/DiskANN) for
+vector search, with FP32 vectors and graph edges persisted in SQLite. zvec
+continues to provide full-text search and metadata filtering. Existing indexes
+must be rebuilt explicitly with `zg --index --rebuild` after upgrading.
+
+Building the TypeScript package from source requires Rust 1.98+ and a C compiler:
+`npm run build` builds its shared DiskANN Node-API binding before TypeScript.
+Package archives include the build host's binding and standalone Rust sources;
+installation on another platform compiles the binding using that toolchain.
+Deleted vectors are excluded immediately; an explicit rebuild reclaims their
+retained graph nodes.
+
 **Install**: `npm install -g @zvec/zvec-grep`, or via Homebrew (macOS/Linux):
 `brew install zvec-grep`
 

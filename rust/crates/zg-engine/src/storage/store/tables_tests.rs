@@ -442,7 +442,7 @@ fn entity_content_is_canonical_and_fragments_have_one_model() {
             for model in ["fixture/fixture", "fixture/other"] {
                 let schema = state.fragments.collection(model)?.schema().expect("schema");
                 assert!(schema.has_index("text"));
-                assert!(schema.has_index("embedding"));
+                assert!(!schema.has_field("embedding"));
                 assert!(!schema.has_field("payload"));
             }
             Ok(())

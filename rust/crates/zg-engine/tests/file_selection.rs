@@ -731,16 +731,11 @@ async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResul
     }
 
     let info = engine.info(info_options(root)).await?;
-    let dimension = info
-        .workspace_index
-        .expect("workspace")
-        .embedding
-        .expect("model")
-        .dimension;
     let collections = fs::read_dir(&info.index_path)?
         .map(|entry| entry.map(|entry| entry.path()))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
+        .filter(|path| path.is_dir())
         .filter(|path| {
             path.file_name()
                 .expect("collection name")
@@ -768,8 +763,8 @@ async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResul
         ),
         (
             ContextRouteMode::Vector,
-            "search vector index",
-            zg_zvec_fp16::embedding_query("embedding", &vec![1.0; dimension], 64)?,
+            "resolve vector membership",
+            zvec_rust::SearchQuery::scalar(1024)?,
         ),
     ] {
         // Excluding Rust negates both its suffix and the dot-only filename exception.

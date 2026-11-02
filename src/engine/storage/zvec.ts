@@ -5,7 +5,6 @@ import {
   ZVecIndexType,
   ZVecInitialize,
   ZVecLogLevel,
-  ZVecMetricType,
   ZVecOpen,
   type ZVecCollection,
   type ZVecDoc,
@@ -18,7 +17,6 @@ import { EngineError } from "../errors.js";
 import type {
   CodeEntityModifier,
   CodeSymbolType,
-  WorkspaceIndexEmbeddingSchema,
   Content,
   Entity,
   EntityFragment,
@@ -33,6 +31,7 @@ import type {
   WorkspaceIndexStorageOptions,
 } from "./index.js";
 import { resolveWorkspaceIndexStoragePaths } from "./layout.js";
+import { openDiskann, type DiskannIndex } from "./diskann.js";
 
 type FileRecord = FileInfo & {
   entityIds: string[];
@@ -66,7 +65,6 @@ type StorageSearchHit = {
   score: number;
 };
 
-const ENTITY_VECTOR_FIELD = "embedding";
 const ENTITY_TEXT_FIELD = "text";
 const ZVEC_LOCK_FILE = "LOCK";
 const NO_MATCH_FILTER = "file_id = '__zvec_grep_no_match__'";
@@ -93,6 +91,7 @@ type StoredEntityFragment = {
 class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
   readonly readOnly: boolean;
   private readonly collection: ZVecCollection;
+  private readonly vectors: DiskannIndex;
   private readonly files: ZvecFileMetaStore;
   private readonly filesById = new Map<string, FileRecord>();
   private readonly filesByAbsolutePath = new Map<string, FileRecord>();
@@ -102,12 +101,21 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     const paths = resolveWorkspaceIndexStoragePaths(options.storagePath);
     const { readOnly } = options;
     this.readOnly = readOnly;
+    if (existsSync(paths.indexPath) && !existsSync(paths.vectorPath)) {
+      throw new EngineError(
+        "Vector storage is incompatible or missing; rebuild with zg --index --rebuild",
+        {
+          code: "ZVEC_GREP.ENGINE.STORAGE.INCOMPATIBLE_VECTOR_INDEX",
+        },
+      );
+    }
     initializeZvec();
     if (!readOnly) {
       mkdirSync(paths.storagePath, { recursive: true });
     }
 
     this.files = new ZvecFileMetaStore(paths.filesPath, readOnly);
+    let openedCollection: ZVecCollection | undefined;
     try {
       for (const file of this.files.list()) {
         this.rememberFile(file);
@@ -125,11 +133,22 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
         });
       } else {
         this.collection = openZvecCollection(zvecPath, readOnly, "create", () =>
-          ZVecCreateAndOpen(zvecPath, createSchema(options.embedding)),
+          ZVecCreateAndOpen(zvecPath, createSchema()),
         );
       }
+      openedCollection = this.collection;
+      this.vectors = openDiskann(
+        paths.vectorPath,
+        options.readOnly ? undefined : options.embedding,
+        readOnly,
+      );
     } catch (error) {
       // Opening the entity collection can fail after metadata acquired its lock.
+      try {
+        openedCollection?.closeSync();
+      } catch {
+        // Preserve the initialization error.
+      }
       try {
         this.files.close();
       } catch {
@@ -238,11 +257,14 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     };
 
     if (entries.length > 0) {
-      const docs = entries.map(({ fragment, vector }, index): ZVecDocInput => ({
+      this.vectors.upsert(
+        entries.map(({ fragment, vector }) => ({
+          documentId: fragment.id,
+          vector: [...vector],
+        })),
+      );
+      const docs = entries.map(({ fragment }, index): ZVecDocInput => ({
         id: fragment.id,
-        vectors: {
-          [ENTITY_VECTOR_FIELD]: [...vector],
-        },
         fields: fragmentToFields(indexedFile, fragment, index),
       }));
 
@@ -322,16 +344,27 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     limit: number,
     filter?: StorageSearchFilter,
   ): StorageSearchHit[] {
+    if (!Number.isInteger(limit) || limit < 0 || limit > ZVEC_MAX_QUERY_TOPK) {
+      throw new RangeError(
+        `Vector search limit must be in 0..${ZVEC_MAX_QUERY_TOPK}`,
+      );
+    }
     const zvecFilter = buildFilter(filter);
-    const docs = this.collection.querySync({
-      fieldName: ENTITY_VECTOR_FIELD,
-      vector: [...vector],
-      ...(zvecFilter ? { filter: zvecFilter } : {}),
-      topk: limit,
+    const allowed = zvecFilter
+      ? matchingDocumentIds(this.collection, zvecFilter)
+      : undefined;
+    const hits = this.vectors.search([...vector], limit, allowed);
+    if (hits.length === 0) return [];
+    const docs = this.collection.fetchSync({
+      ids: hits.map((hit) => hit.documentId),
       includeVector: false,
     });
-
-    return docsToHits(docs, "vector", this);
+    return hits.flatMap((hit) => {
+      const doc = docs[hit.documentId];
+      return doc
+        ? docsToHits([{ ...doc, score: hit.score }], "vector", this)
+        : [];
+    });
   }
 
   async finalizeWrites(): Promise<void> {
@@ -348,7 +381,11 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     try {
       this.files.close();
     } finally {
-      this.collection.closeSync();
+      try {
+        this.collection.closeSync();
+      } finally {
+        this.vectors.close();
+      }
     }
   }
 
@@ -438,6 +475,12 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
   }
 
   private deleteFileDocuments(fileId: string): void {
+    this.vectors.deleteDocuments(
+      matchingDocumentIds(
+        this.collection,
+        `file_id = ${quoteFilterString(fileId)}`,
+      ),
+    );
     this.collection.deleteByFilterSync(
       `file_id = ${quoteFilterString(fileId)}`,
     );
@@ -901,12 +944,52 @@ function sleepSync(ms: number): void {
   Atomics.wait(values, 0, 0, ms);
 }
 
-function createSchema(
-  embedding: WorkspaceIndexEmbeddingSchema,
-): ZVecCollectionSchema {
+function matchingDocumentIds(
+  collection: ZVecCollection,
+  filter: string,
+): string[] {
+  const ids = new Set<string>();
+  const ranges: [string | undefined, string | undefined][] = [
+    [undefined, undefined],
+  ];
+  while (ranges.length > 0) {
+    const [lower, upper] = ranges.pop()!;
+    const clauses = [`(${filter})`];
+    if (lower !== undefined)
+      clauses.push(`document_id > ${quoteFilterString(lower)}`);
+    if (upper !== undefined)
+      clauses.push(`document_id < ${quoteFilterString(upper)}`);
+    const docs = collection.querySync({
+      filter: clauses.join(" AND "),
+      topk: 1024,
+      includeVector: false,
+    });
+    const batch = [...new Set(docs.map((doc) => doc.id))].sort();
+    if (
+      batch.some(
+        (id) =>
+          (lower !== undefined && id <= lower) ||
+          (upper !== undefined && id >= upper),
+      )
+    ) {
+      throw new Error(
+        "Vector membership query returned an ID outside its requested range",
+      );
+    }
+    for (const id of batch) ids.add(id);
+    if (docs.length === 1024) {
+      const pivot = batch[Math.floor(batch.length / 2)];
+      ranges.push([lower, pivot], [pivot, upper]);
+    }
+  }
+  return [...ids];
+}
+
+function createSchema(): ZVecCollectionSchema {
   return new ZVecCollectionSchema({
     name: "zvec_grep_entities",
     fields: [
+      indexedStringField("document_id"),
       indexedStringField("group", true),
       indexedStringField("file_id"),
       stringField("content_kind"),
@@ -944,15 +1027,6 @@ function createSchema(
       { name: "content_base64", dataType: ZVecDataType.STRING, nullable: true },
       { name: "image_format", dataType: ZVecDataType.STRING, nullable: true },
     ],
-    vectors: {
-      name: ENTITY_VECTOR_FIELD,
-      dataType: ZVecDataType.VECTOR_FP32,
-      dimension: embedding.dimension,
-      indexParams: {
-        indexType: ZVecIndexType.HNSW,
-        metricType: metricToZvec(embedding.metric),
-      },
-    },
   });
 }
 
@@ -973,25 +1047,6 @@ function stringField(name: string, nullable = false) {
   };
 }
 
-function metricToZvec(metric: string): ZVecMetricType {
-  if (metric === "cosine") {
-    return ZVecMetricType.COSINE;
-  }
-
-  if (metric === "dot") {
-    return ZVecMetricType.IP;
-  }
-
-  if (metric === "euclidean") {
-    return ZVecMetricType.L2;
-  }
-
-  throw new EngineError("Unsupported vector metric for zvec storage", {
-    code: "ZVEC_GREP.ENGINE.STORAGE.UNSUPPORTED_VECTOR_METRIC",
-    context: `metric=${metric}`,
-  });
-}
-
 function fragmentToFields(
   file: FileRecord,
   fragment: EntityFragment,
@@ -1005,6 +1060,7 @@ function fragmentToFields(
       content_hash: file.contentHash,
     }),
     file_id: file.id,
+    document_id: fragment.id,
     content_kind: fragment.content.kind,
     ...metadataToFields(fragment.metadata),
     fragment_index: fragmentIndex,

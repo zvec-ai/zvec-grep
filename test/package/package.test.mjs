@@ -55,6 +55,10 @@ test("npm package contains and exposes the supported public surface", async (t) 
     "dist/index.js",
     "dist/index.d.ts",
     "dist/cli/index.js",
+    `native/zg-diskann.${process.platform}-${process.arch}.node`,
+    "native/Cargo.toml",
+    "native/src/lib.rs",
+    "scripts/build-diskann.mjs",
   ]) {
     assert.ok(paths.has(required), `package is missing ${required}`);
   }

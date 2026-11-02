@@ -131,6 +131,7 @@ async fn text_and_code_share_one_model_and_support_incremental_search() -> TestR
     assert_eq!(
         fs::read_dir(&info.index_path)?
             .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_dir())
             .filter(|entry| entry
                 .file_name()
                 .to_string_lossy()
@@ -226,7 +227,7 @@ async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -
             .as_ref()
             .expect("workspace")
             .index_version,
-        Some(2)
+        Some(3)
     );
     let collections = model_collections(&info.index_path)?;
     assert_eq!(collections.len(), 1);
@@ -239,7 +240,7 @@ async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -
     let manifest: Value =
         serde_json::from_slice(&fs::read(root.join(".zvec-grep/manifest.json"))?)?;
     assert!(manifest.get("manifestVersion").is_none());
-    assert_eq!(manifest["indexVersion"], 2);
+    assert_eq!(manifest["indexVersion"], 3);
     assert_eq!(
         manifest["index"]["descriptor"]["defaultEmbeddingModel"]["model"]["name"],
         "text-embedding-v4"
@@ -1125,6 +1126,7 @@ async fn public_engine_recovers_pending_files_without_skipping_unchanged_sources
     let collections = fs::read_dir(&index_path)?
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
+        .filter(|entry| entry.path().is_dir())
         .filter(|entry| {
             entry
                 .file_name()
@@ -1584,6 +1586,7 @@ fn model_collections(index_path: &Path) -> Result<Vec<PathBuf>, Box<dyn std::err
     Ok(fs::read_dir(index_path)?
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
+        .filter(|entry| entry.path().is_dir())
         .filter(|entry| {
             entry
                 .file_name()
@@ -1606,10 +1609,23 @@ fn assert_vector_indexes_complete(index_path: &Path) -> TestResult {
         )?;
         let stats = collection.stats()?;
         assert!(stats.doc_count > 0);
-        assert_eq!(stats.indexes.len(), 1);
-        assert!(
-            stats.indexes[0].completeness >= 1.0,
-            "default indexing must finish the vector index: {stats:?}"
+        assert!(!collection.schema()?.has_field("embedding"));
+        let vectors = index_path.join(format!(
+            "{}.diskann.sqlite",
+            path.file_name().expect("model name").to_string_lossy()
+        ));
+        let database = rusqlite::Connection::open_with_flags(
+            vectors,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let count: u64 = database.query_row(
+            "SELECT COUNT(*) FROM nodes WHERE live = 1 AND length(neighbors) > 0",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            count, stats.doc_count,
+            "each fragment has a durable DiskANN graph node"
         );
         collection.close()?;
     }

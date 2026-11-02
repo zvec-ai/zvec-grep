@@ -67,7 +67,14 @@ pub(crate) struct IndexStore {
 #[serde(deny_unknown_fields)]
 struct SchemaRecord {
     path_encoding: PathEncoding,
+    vector_engine: VectorEngine,
     embeddings: Vec<EmbeddingModelInfo>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum VectorEngine {
+    DiskannSqliteV1,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -80,6 +87,7 @@ impl SchemaRecord {
     fn new(embeddings: &[EmbeddingModelInfo]) -> Self {
         Self {
             path_encoding: PathEncoding::Components,
+            vector_engine: VectorEngine::DiskannSqliteV1,
             embeddings: embeddings.to_vec(),
         }
     }
@@ -410,6 +418,9 @@ impl IndexStore {
 
     pub(crate) fn delete_file(&self, file_id: FileId) -> EngineResult<()> {
         self.write(|state| {
+            if !state.needs_optimize {
+                write_record(&state.optimize_marker, b"")?;
+            }
             state.needs_optimize = true;
             let old_ids = invalidation_entity_ids(state, file_id)?;
             state.files.mark_deleting(file_id)?;
@@ -520,6 +531,9 @@ fn replace_file(
     state.files.validate(file)?;
     state.entities.validate_ownership(entities, file.id())?;
     state.fragments.validate_ownership(entries, file.id())?;
+    if !state.needs_optimize {
+        write_record(&state.optimize_marker, b"")?;
+    }
     state.needs_optimize = true;
     let directories = state.directories.ensure(file.relative_path())?;
     // Encode every projection before removing any of the previous file's data.
@@ -728,6 +742,17 @@ fn load_schema(
             if !directory_exists(&collection_path)? {
                 return Err(EngineError::storage_failure(format!(
                     "index collection {collection} is missing; rebuild the index"
+                )));
+            }
+        }
+        for embedding in &schema {
+            let name = format!(
+                "{}.diskann.sqlite",
+                fragments::fragment_collection_name(embedding)
+            );
+            if !file_exists(&path.join(&name))? {
+                return Err(EngineError::storage_failure(format!(
+                    "DiskANN index {name} is missing; rebuild the index"
                 )));
             }
         }

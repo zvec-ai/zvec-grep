@@ -11,6 +11,62 @@ import {
 import { createWorkspaceIndexStorage } from "../../dist/engine/storage/index.js";
 import { queryFileMetadataDocs } from "../../dist/engine/storage/zvec.js";
 
+test("DiskANN vectors persist, respect metadata filters, and follow replacement and deletion", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "zvec-grep-diskann-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const options = storageOptions(parent);
+  const write = (storage, id, vector) => {
+    const file = fileInfo(id, parent, `${id}.ts`);
+    storage.replaceFile(file, [
+      {
+        fragment: {
+          id,
+          fileId: file.id,
+          range: {
+            kind: "text",
+            startLine: 1,
+            endLine: 1,
+            startOffset: 0,
+            endOffset: 6,
+          },
+          content: { kind: "text", text: "orchard" },
+        },
+        vector,
+      },
+    ]);
+  };
+  const original = createWorkspaceIndexStorage(options);
+  try {
+    write(original, "a", [1, 0]);
+    write(original, "b", [0, 1]);
+    assert.equal(original.searchVector([1, 0], 1)[0].fragment.id, "a");
+    assert.equal(
+      original.searchVector([1, 0], 1, { fileIds: ["b".repeat(64)] })[0]
+        .fragment.id,
+      "b",
+    );
+    assert.equal(original.searchVector([1, 0], 1, { fileIds: [] }).length, 0);
+    assert.equal(original.searchFts("orchard", 10).length, 2);
+    write(original, "a", [-1, 0]);
+    assert.equal(original.searchVector([1, 0], 1)[0].fragment.id, "b");
+    original.deleteFile("b".repeat(64));
+  } finally {
+    original.close();
+  }
+  const reader = createWorkspaceIndexStorage({ ...options, readOnly: true });
+  try {
+    assert.deepEqual(
+      reader.searchVector([-1, 0], 10).map((hit) => hit.fragment.id),
+      ["a"],
+    );
+    assert.equal(reader.searchFts("orchard", 10).length, 1);
+  } finally {
+    reader.close();
+  }
+  await rm(join(options.storagePath, "vectors.diskann.sqlite"));
+  assert.throws(() => createWorkspaceIndexStorage(options), /rebuild/);
+});
+
 function doc(id) {
   return {
     id,
