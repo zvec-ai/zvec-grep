@@ -24,6 +24,7 @@ zg-cli = { path = "../zg-cli" }
 zg-engine = { path = "../zg-engine" }
 
 [dev-dependencies]
+jsonschema.workspace = true
 tempfile.workspace = true
 zg-testkit = { path = "../zg-testkit" }
 rmcp = { workspace = true, features = ["client", "transport-io"] }

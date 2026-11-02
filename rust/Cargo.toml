@@ -29,6 +29,7 @@ http-body-util = "0.1.5"
 hyper = { version = "1.11.0", features = ["client", "http1"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 ignore = "0.4.33"
+jsonschema = { version = "0.60", default-features = false }
 notify = "8.2.0"
 # Keep the published binding's safety fixes while loading the separately pinned
 # ORT 1.21.0 runtime through API 21; do not enable automatic runtime downloads.

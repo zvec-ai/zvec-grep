@@ -422,7 +422,7 @@ impl ZvecGrepMcpServer {
     #[tool(
         name = "zvec_grep_index",
         description = "Activate an absolute workspace root to create, incrementally update, rebuild, or explicitly drop its index. Do not call this tool to create, rebuild, or drop an index unless the user requested persistent indexing or index deletion.",
-        output_schema = rmcp::handler::server::tool::schema_for_type::<IndexOutput>(),
+        output_schema = output_schema::<IndexOutput>(),
         annotations(
             title = "Ensure or drop zvec-grep index",
             read_only_hint = false,
@@ -472,7 +472,7 @@ impl ZvecGrepMcpServer {
     #[tool(
         name = "zvec_grep_index_drop",
         description = "Delete the persisted index for an absolute workspace root and release its daemon runtime.",
-        output_schema = rmcp::handler::server::tool::schema_for_type::<IndexDropOutput>(),
+        output_schema = output_schema::<IndexDropOutput>(),
         annotations(
             title = "Drop zvec-grep workspace index",
             read_only_hint = false,
@@ -550,7 +550,7 @@ impl ZvecGrepMcpServer {
     #[tool(
         name = "zvec_grep_index_status",
         description = "Read persisted index status for an absolute root. Use only after a missing-index response, indexing failure or cancellation, explicit progress monitoring, or daemon diagnostics.",
-        output_schema = rmcp::handler::server::tool::schema_for_type::<IndexStatusOutput>(),
+        output_schema = output_schema::<IndexStatusOutput>(),
         annotations(
             title = "Inspect zvec-grep index status",
             read_only_hint = true,
@@ -584,7 +584,7 @@ impl ZvecGrepMcpServer {
     #[tool(
         name = "zvec_grep_server_status",
         description = "Read daemon version, queue, runtime and model-pool summary without exposing repository paths.",
-        output_schema = rmcp::handler::server::tool::schema_for_type::<ServerStatusOutput>(),
+        output_schema = output_schema::<ServerStatusOutput>(),
         annotations(
             title = "Inspect zvec-grep server status",
             read_only_hint = true,
@@ -2044,6 +2044,20 @@ fn error_result(error: &EngineError) -> CallToolResult {
     ))])
 }
 
+fn output_schema<T: JsonSchema>() -> Arc<rmcp::model::JsonObject> {
+    // Output schemas must reflect serde's serialization and field omission rules.
+    let schema = schemars::generate::SchemaSettings::draft2020_12()
+        .for_serialize()
+        .into_generator()
+        .into_root_schema_for::<T>();
+    Arc::new(
+        schema
+            .as_object()
+            .expect("MCP output schema must be an object")
+            .clone(),
+    )
+}
+
 fn structured_result(value: impl Serialize) -> CallToolResult {
     match serde_json::to_value(value) {
         Ok(value) => {
@@ -2400,6 +2414,28 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("workspace")
     }
 
+    fn output_validator(name: &str) -> jsonschema::Validator {
+        let server =
+            ZvecGrepMcpServer::full_direct(Arc::new(ZvecGrep::new()), Arc::new(FixedStatus));
+        let schema = server
+            .listed_tools()
+            .into_iter()
+            .find(|tool| tool.name == name)
+            .expect("listed tool")
+            .output_schema
+            .expect("structured output schema");
+        jsonschema::validator_for(&serde_json::Value::Object((*schema).clone()))
+            .expect("valid output schema")
+    }
+
+    fn assert_schema_validates(validator: &jsonschema::Validator, instance: &serde_json::Value) {
+        let errors = validator
+            .iter_errors(instance)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        assert!(errors.is_empty(), "schema mismatch: {errors:?}");
+    }
+
     fn input() -> SearchInput {
         SearchInput {
             root: test_root().display().to_string(),
@@ -2503,6 +2539,7 @@ mod tests {
 
     #[test]
     fn index_status_exposes_rebuild_compatibility_without_workspace_metadata() {
+        let validator = output_validator("zvec_grep_index_status");
         for actual_version in [None, Some(1)] {
             let root = test_root();
             let reply = super::InfoResult {
@@ -2524,6 +2561,7 @@ mod tests {
             let output = super::info_result_to_tool_result(reply, None)
                 .structured_content
                 .expect("status output");
+            assert_schema_validates(&validator, &output);
             assert_eq!(output["status"], "rebuild_required");
             assert_eq!(
                 output["compatibility"],
@@ -2536,6 +2574,12 @@ mod tests {
             );
             assert!(output["persistent"].get("files").is_none());
             assert!(output["persistent"].get("workspace_index").is_none());
+            let mut invalid = output;
+            invalid["compatibility"]
+                .as_object_mut()
+                .expect("compatibility object")
+                .remove("actual_version");
+            assert!(!validator.is_valid(&invalid));
         }
         let schema = serde_json::to_value(schemars::schema_for!(super::IndexStatusOutput))
             .expect("status schema");
@@ -2580,6 +2624,7 @@ mod tests {
         let output = super::info_result_to_tool_result(reply, None)
             .structured_content
             .expect("status output");
+        assert_schema_validates(&output_validator("zvec_grep_index_status"), &output);
         let files = &output["persistent"]["files"];
         assert_eq!(
             output["compatibility"],
@@ -2719,6 +2764,195 @@ mod tests {
         reply.result = None;
         reply.state = super::IndexOperationState::Queued;
         assert!(output(&reply, true).get("debug").is_none());
+    }
+
+    #[test]
+    fn index_results_match_the_listed_output_schema() {
+        use super::{IndexOperationError, IndexOperationResult, IndexOperationState};
+        use zg_engine::api::{index::IndexResult, info::result::FailedFile};
+
+        let validator = output_validator("zvec_grep_index");
+        for state in [
+            IndexOperationState::Queued,
+            IndexOperationState::Running,
+            IndexOperationState::Succeeded,
+            IndexOperationState::Failed,
+            IndexOperationState::Cancelled,
+        ] {
+            let mut reply = IndexOperationResult {
+                root: test_root(),
+                job_id: "test".into(),
+                state,
+                reused: false,
+                error: None,
+                result: None,
+            };
+            if matches!(
+                state,
+                IndexOperationState::Failed | IndexOperationState::Cancelled
+            ) {
+                reply.error = Some(IndexOperationError {
+                    report: EngineError::cancelled("test cancellation").into_report(),
+                    retryable: false,
+                });
+            }
+            reply.result = match state {
+                IndexOperationState::Succeeded => Some(IndexResult::default()),
+                IndexOperationState::Failed => Some(IndexResult {
+                    files_failed: 1,
+                    failed_files: vec![FailedFile {
+                        path: test_root().join("sample.rs"),
+                        reason: "test failure".into(),
+                    }],
+                    ..Default::default()
+                }),
+                _ => None,
+            };
+            for debug in [false, true] {
+                let output = super::index_operation_to_result(&reply, debug)
+                    .structured_content
+                    .expect("index output");
+                assert_schema_validates(&validator, &output);
+            }
+        }
+        let mut invalid = super::drop_result_to_index_result(&test_root(), true)
+            .structured_content
+            .expect("drop output");
+        invalid["failed_files"] = serde_json::json!(false);
+        assert!(!validator.is_valid(&invalid));
+        invalid["failed_files"] = serde_json::json!([]);
+        invalid.as_object_mut().expect("object").remove("root");
+        assert!(!validator.is_valid(&invalid));
+    }
+
+    #[test]
+    fn drop_and_server_status_results_match_the_listed_output_schemas() {
+        let index_validator = output_validator("zvec_grep_index");
+        let drop_validator = output_validator("zvec_grep_index_drop");
+        for removed in [false, true] {
+            for (validator, result) in [
+                (
+                    &index_validator,
+                    super::drop_result_to_index_result(&test_root(), removed),
+                ),
+                (
+                    &drop_validator,
+                    super::drop_result_to_result(&test_root(), removed),
+                ),
+            ] {
+                assert_schema_validates(
+                    validator,
+                    &result.structured_content.expect("drop output"),
+                );
+            }
+        }
+        let result =
+            super::structured_result(super::ServerStatusOutput::from(FixedStatus.snapshot()));
+        assert_schema_validates(
+            &output_validator("zvec_grep_server_status"),
+            &result.structured_content.expect("server status output"),
+        );
+    }
+
+    #[test]
+    fn index_status_schema_accepts_populated_scan_and_runtime_fields() {
+        use zg_engine::api::{
+            index::progress::{IndexProgress, IndexProgressPhase},
+            info::result::{IndexStats, WorkspaceIndexInfo},
+        };
+
+        let root = test_root();
+        let scan = super::ScanRulesUpdate {
+            included_formats: Some(vec![super::FileFormat::Rust]),
+            excluded_formats: Some(vec![super::FileFormat::Markdown]),
+            globs: Some(vec![super::GlobRule::from("*.rs")]),
+            include_hidden: Some(true),
+            ignore_files: Some(vec![root.join(".ignore")]),
+            follow_symlinks: Some(true),
+            max_depth: Some(Some(3)),
+            max_file_size_bytes: Some(Some(1024)),
+            ..Default::default()
+        }
+        .apply(&super::ScanRules::default())
+        .expect("scan rules");
+        let reply = super::InfoResult {
+            home: root.join(".zvec-grep"),
+            index_path: root.join(".zvec-grep/index"),
+            root: root.clone(),
+            indexed: true,
+            compatibility: super::IndexCompatibility::Compatible { version: 2 },
+            index_policy: super::WorkspaceIndexPolicy::Enabled,
+            source: super::InfoSource::Index,
+            workspace_index: Some(WorkspaceIndexInfo {
+                path: root.join(".zvec-grep"),
+                root,
+                scan,
+                policy: super::WorkspaceIndexPolicy::Enabled,
+                embedding: None,
+                fts: None,
+                index_version: Some(2),
+                created_epoch_ms: 1,
+                updated_epoch_ms: 2,
+            }),
+            status: Some(IndexStats::default()),
+            suggestion: None,
+        };
+        let runtime = super::IndexRuntimeSnapshot {
+            index_status: None,
+            completion_baseline: None,
+            watcher_active: true,
+            dirty_revision: 1,
+            indexed_revision: 0,
+            active_job_id: Some("test".into()),
+            job_state: Some(super::IndexOperationState::Running),
+            progress: Some(IndexProgress {
+                phase: IndexProgressPhase::Indexing,
+                files_total: Some(1),
+                files_indexed: Some(0),
+                files_failed: Some(0),
+                detail: Some("indexing".into()),
+                embedding: None,
+            }),
+            error: None,
+        };
+        let output = super::info_result_to_tool_result(reply, Some(runtime))
+            .structured_content
+            .expect("status output");
+        let validator = output_validator("zvec_grep_index_status");
+        assert_schema_validates(&validator, &output);
+        let mut invalid = output;
+        invalid["persistent"]["workspace_index"]["root_paths"][0]["include_hidden"] =
+            serde_json::json!("true");
+        assert!(!validator.is_valid(&invalid));
+    }
+
+    #[test]
+    fn text_tools_do_not_declare_structured_output_schemas() {
+        let server =
+            ZvecGrepMcpServer::full_direct(Arc::new(ZvecGrep::new()), Arc::new(FixedStatus));
+        for tool in server.listed_tools() {
+            if matches!(tool.name.as_ref(), "zvec_grep_search" | "zvec_grep_rg") {
+                assert!(tool.output_schema.is_none(), "{} returns text", tool.name);
+            }
+        }
+    }
+
+    #[test]
+    fn listed_input_schemas_accept_minimal_arguments_for_all_tools() {
+        let server =
+            ZvecGrepMcpServer::full_direct(Arc::new(ZvecGrep::new()), Arc::new(FixedStatus));
+        for tool in server.listed_tools() {
+            let arguments = match tool.name.as_ref() {
+                "zvec_grep_search" => serde_json::json!({"root": test_root(), "query": "needle"}),
+                "zvec_grep_rg" => serde_json::json!({"root": test_root(), "command": "rg needle"}),
+                "zvec_grep_server_status" => serde_json::json!({}),
+                _ => serde_json::json!({"root": test_root()}),
+            };
+            let validator =
+                jsonschema::validator_for(&serde_json::Value::Object((*tool.input_schema).clone()))
+                    .expect("valid input schema");
+            assert_schema_validates(&validator, &arguments);
+        }
     }
 
     #[test]
