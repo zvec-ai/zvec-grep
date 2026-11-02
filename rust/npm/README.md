@@ -39,13 +39,6 @@ six base packages, eight runtime components and the meta package.
 
 The base package retains the executable and CPU/core libraries, including
 zvec's embedded Jieba dictionary; no external dictionary files are required.
-Postinstall keeps the established meta-package `bin/lib` layout and reuses verified
-base files through hard links when their permissions and ownership match. Both
-paths remain available for npm verification and rebuilds without retaining a
-second allocation for the payload. Unsupported links, separate filesystems and locked
-files retain verified copies. Rebuilds also deduplicate existing installations
-without removing installed CUDA plugins; staging and rollback verification remain
-unchanged. Payload files must be treated as immutable; sharing does not bypass checksums.
 CUDA components contain whole GGML plugins or fragments of the ORT provider.
 Both Linux and Windows ORT providers are split into two ordered byte ranges under
 `parts/`; postinstall streams them back into the original `.so` or `.dll` and
