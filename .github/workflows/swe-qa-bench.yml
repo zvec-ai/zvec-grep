@@ -132,7 +132,15 @@ jobs:
           fi
           for actor in "$BENCH_ACTOR" "$BENCH_TRIGGERING_ACTOR"; do
             # The legacy permission field maps maintain to write; use role_name.
-            role="$(gh api "repos/$BENCH_REPOSITORY/collaborators/$actor/permission" --jq '.role_name')"
+            if command -v gh >/dev/null 2>&1; then
+              role="$(gh api "repos/$BENCH_REPOSITORY/collaborators/$actor/permission" --jq '.role_name')"
+            else
+              role="$(curl --fail --silent --show-error \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H 'Accept: application/vnd.github+json' \
+                "${GITHUB_API_URL:-https://api.github.com}/repos/$BENCH_REPOSITORY/collaborators/$actor/permission" \
+                | python3 -c 'import json, sys; print(json.load(sys.stdin)["role_name"])')"
+            fi
             case "$role" in
               admin|maintain)
                 echo "Authorized $actor with repository role $role."
