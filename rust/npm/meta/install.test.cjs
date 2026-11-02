@@ -4,10 +4,12 @@ const assert = require("node:assert/strict");
 const { createHash } = require("node:crypto");
 const {
   chmodSync,
+  copyFileSync,
   cpSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -82,6 +84,97 @@ test("materializes a verified native package and replaces the placeholder last",
       "native-library-fixture\n",
     );
     assert.notEqual(statSync(join(paths.metaRoot, "bin", "zg.exe")).mode & 0o111, 0);
+  } finally {
+    rmSync(paths.root, { recursive: true, force: true });
+  }
+});
+
+test("reuses native payload files across materialization and rebuild", () => {
+  const paths = fixture();
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      materialize({ ...paths, entry, expectedVersion: "0.0.1" });
+      for (const [source, installed] of [
+        ["bin/zg", "bin/zg.exe"],
+        ["lib/libbackend.dylib", "lib/libbackend.dylib"],
+        ["lib/libfixture.dylib", "lib/libfixture.dylib"],
+      ]) {
+        const original = statSync(join(paths.platformRoot, source), { bigint: true });
+        const active = statSync(join(paths.metaRoot, installed), { bigint: true });
+        assert.deepEqual([active.dev, active.ino], [original.dev, original.ino],
+          `${installed} must reuse the verified platform payload instead of duplicating it`);
+        assert.equal(active.nlink, 2n);
+      }
+      verifyInstallation({ ...paths, entry, expectedVersion: "0.0.1" });
+    }
+  } finally {
+    rmSync(paths.root, { recursive: true, force: true });
+  }
+});
+
+test("keeps platform permissions when the installed executable needs chmod", (t) => {
+  const paths = fixture();
+  try {
+    if (process.platform === "win32") {
+      t.skip("POSIX executable permission changes do not apply to Windows");
+      return;
+    }
+    const source = join(paths.platformRoot, "bin/zg");
+    chmodSync(source, 0o644);
+    materialize({ ...paths, entry, expectedVersion: "0.0.1" });
+    assert.equal(statSync(source).mode & 0o777, 0o644);
+    assert.equal(statSync(join(paths.metaRoot, "bin/zg.exe")).mode & 0o777, 0o755);
+    assert.notEqual(statSync(source, { bigint: true }).ino,
+      statSync(join(paths.metaRoot, "bin/zg.exe"), { bigint: true }).ino);
+    verifyInstallation({ ...paths, entry, expectedVersion: "0.0.1" });
+  } finally {
+    rmSync(paths.root, { recursive: true, force: true });
+  }
+});
+
+for (const code of ["EXDEV", "EPERM", "EACCES", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EMLINK", "EBUSY", "EIO"]) {
+  test(`native file reuse ${code} ${code === "EIO" ? "fails without damaging the installed files" : "retains verified copies"}`, () => {
+    const paths = fixture();
+    try {
+      const result = spawnSync(process.execPath, ["-e", `
+        const fs = require('fs');
+        fs.linkSync = () => { throw Object.assign(new Error('injected link failure'), { code: process.argv[1] }); };
+        require(process.argv[2]).materialize(JSON.parse(process.argv[3]));
+      `, code, join(__dirname, "install.cjs"), JSON.stringify({ ...paths, entry, expectedVersion: "0.0.1" })],
+      { encoding: "utf8" });
+      assert.equal(result.status === 0, code !== "EIO", result.stderr);
+      verifyInstallation({ ...paths, entry, expectedVersion: "0.0.1" });
+      assert.equal(statSync(join(paths.metaRoot, "bin/zg.exe")).nlink, 1);
+      assert.equal(statSync(join(paths.platformRoot, "bin/zg")).nlink, 1);
+    } finally {
+      rmSync(paths.root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("locked installed binary keeps its verified copy and removes link staging", () => {
+  const paths = fixture();
+  try {
+    const result = spawnSync(process.execPath, ["-e", `
+      const fs = require('fs');
+      const path = require('path');
+      const options = JSON.parse(process.argv[2]);
+      const rename = fs.renameSync;
+      fs.renameSync = (source, destination) => {
+        if (source.includes('.native-links-') && destination === path.join(options.metaRoot, 'bin/zg.exe')) {
+          throw Object.assign(new Error('installed executable is locked'), { code: 'EPERM' });
+        }
+        rename(source, destination);
+      };
+      require(process.argv[1]).materialize(options);
+    `, join(__dirname, "install.cjs"), JSON.stringify({ ...paths, entry, expectedVersion: "0.0.1" })],
+    { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    verifyInstallation({ ...paths, entry, expectedVersion: "0.0.1" });
+    assert.equal(statSync(join(paths.metaRoot, "bin/zg.exe")).nlink, 1);
+    assert.equal(statSync(join(paths.platformRoot, "bin/zg")).nlink, 1);
+    assert.equal(statSync(join(paths.metaRoot, "lib/libbackend.dylib")).nlink, 2);
+    assert.equal(readdirSync(paths.metaRoot).some((name) => name.startsWith(".native-links-")), false);
   } finally {
     rmSync(paths.root, { recursive: true, force: true });
   }
@@ -294,6 +387,27 @@ test("automatic CPU-host install makes zero component requests", (t) => {
 });
 
 for (const target of ["linux-x64-gnu", "win32-x64-msvc"]) {
+  test(`rebuild deduplicates an existing ${target} installation without removing CUDA`, (t) => {
+    const paths = optionalFixture(t, target);
+    materialize({ ...paths, config: { ...paths.config, mode: "cuda" } });
+    const checksums = JSON.parse(readFileSync(join(paths.platformRoot, "checksums.json")));
+    for (const file of Object.keys(checksums.files)) {
+      const destination = join(paths.metaRoot, file === `bin/${paths.entry.binary}` ? "bin/zg.exe" : file);
+      const copy = `${destination}.copy`;
+      copyFileSync(destination, copy);
+      renameSync(copy, destination);
+      assert.equal(statSync(destination).nlink, 1);
+    }
+    materialize({ ...paths, fetchArchive: () => assert.fail("must not fetch installed CUDA") });
+    for (const file of Object.keys(checksums.files)) {
+      const original = statSync(join(paths.platformRoot, file), { bigint: true });
+      const active = statSync(join(paths.metaRoot, file === `bin/${paths.entry.binary}` ? "bin/zg.exe" : file), { bigint: true });
+      assert.deepEqual([active.dev, active.ino], [original.dev, original.ino]);
+    }
+    assert.equal(verifyInstallation({ ...paths, requireCuda: true }).components.length, 4);
+    for (const [file, contents] of paths.originals) assert.deepEqual(readFileSync(join(paths.metaRoot, file)), contents);
+  });
+
   test(`CPU then offline CUDA installation preserves the same binary and layout: ${target}`, (t) => {
     const fixture = optionalFixture(t, target);
     materialize(fixture);

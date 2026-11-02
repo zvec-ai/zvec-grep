@@ -8,6 +8,7 @@ const {
   closeSync,
   copyFileSync,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -246,6 +247,37 @@ function installedFiles(entry, files) {
     [file === `bin/${entry.binary}` ? "bin/zg.exe" : file, value]));
 }
 
+function reuseBaseFiles({ metaRoot, platformRoot, entry }, files) {
+  let temporaryRoot;
+  try {
+    for (const file of Object.keys(files)) {
+      const source = checkedPayloadPath(platformRoot, file);
+      const destination = checkedPayloadPath(metaRoot, file === `bin/${entry.binary}` ? "bin/zg.exe" : file);
+      const original = lstatSync(source, { bigint: true });
+      const installed = lstatSync(destination, { bigint: true });
+      if (original.dev === installed.dev && original.ino === installed.ino) continue;
+      // Sharing an inode must not change the installed permissions or ownership.
+      if ((original.mode & 0o7777n) !== (installed.mode & 0o7777n) ||
+          original.uid !== installed.uid || original.gid !== installed.gid) continue;
+      // Keep staging outside bin/lib so interruption cannot invalidate the payload.
+      if (!temporaryRoot) temporaryRoot = mkdtempSync(join(metaRoot, ".native-links-"));
+      const temporary = join(temporaryRoot, "file");
+      try {
+        linkSync(source, temporary);
+        renameSync(temporary, destination);
+      } catch (error) {
+        // Unsupported links, separate mounts or locked Windows files retain the
+        // verified copy. Both paths remain valid for future npm rebuilds.
+        if (!["EXDEV", "EPERM", "EACCES", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EMLINK", "EBUSY"].includes(error.code)) throw error;
+      } finally {
+        rmSync(temporary, { force: true });
+      }
+    }
+  } finally {
+    if (temporaryRoot) rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+}
+
 function writeReceipt(metaRoot, receipt) {
   const temporary = join(metaRoot, `.native-install-${process.pid}.json`);
   writeFileSync(temporary, `${JSON.stringify({ schemaVersion: 1, target: receipt.target,
@@ -351,6 +383,7 @@ function materialize(options) {
   return installLock(metaRoot, () => {
     if (checksums.schemaVersion !== 3) {
       materializeBase(options);
+      reuseBaseFiles(options, checksums.files);
       if (config.mode === "cuda") throw new Error("this native package has no CUDA plugin support");
       return verifyInstallation(options);
     }
@@ -363,6 +396,7 @@ function materialize(options) {
         coreId: manifest.coreId, components: [] };
       writeReceipt(metaRoot, installed);
     }
+    reuseBaseFiles(options, checksums.files);
     if (config.mode === "cpu") return installed;
     if (installed.components.length) return installed;
     const wantsCuda = config.mode === "cuda" || (options.detectNvidia || plugins.detectNvidia)();
