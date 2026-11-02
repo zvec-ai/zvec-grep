@@ -1,5 +1,5 @@
 use zg_cli::{ColorMode, OutputOptions, PreviewMode, write_context_with_options};
-use zg_engine::api::context::ContextResult;
+use zg_engine::api::context::{ContextResult, result::ContentRange};
 
 fn grouped_result() -> ContextResult {
     let fixtures: serde_json::Value =
@@ -326,6 +326,73 @@ fn short_marks_truncated_source_lines_and_full_preserves_them() {
                 Some(format!("  50: {expected}").as_str()),
                 "{preview:?}: {output}"
             );
+        }
+    }
+}
+
+#[test]
+fn short_keeps_fragment_text_after_restoring_a_long_line_prefix() {
+    let fragment = format!("node.name,{}needle", "x".repeat(144));
+    for prefix in [" ".repeat(200), "中😀".repeat(100)] {
+        let line = format!("{prefix}{fragment}tail");
+        for before in ["", "before\r\n"] {
+            let matched_line = 50 + usize::from(!before.is_empty());
+            let column_origin = if before.is_empty() { 4 } else { 0 };
+            let mut result = grouped_result();
+            result.group_results.clear();
+            let item = &mut result.items[0];
+            item.content = format!("{before}{line}");
+            item.content_range = ContentRange::Text {
+                start_line: 50,
+                end_line: matched_line,
+                start_byte_offset: 100,
+                end_byte_offset: 100 + item.content.len(),
+                start_byte_column: 4,
+                end_byte_column: column_origin + line.len(),
+            };
+            item.range = item.content_range.clone();
+            item.excerpt_range = Some(ContentRange::Text {
+                start_line: matched_line,
+                end_line: matched_line,
+                start_byte_offset: 100 + before.len() + prefix.len(),
+                end_byte_offset: 100 + before.len() + prefix.len() + fragment.len(),
+                start_byte_column: column_origin + prefix.len(),
+                end_byte_column: column_origin + prefix.len() + fragment.len(),
+            });
+            let original = result.clone();
+            for preview in [PreviewMode::Short, PreviewMode::Full] {
+                for terminal in [false, true] {
+                    let mut bytes = Vec::new();
+                    write_context_with_options(
+                        &mut bytes,
+                        &result,
+                        OutputOptions {
+                            preview,
+                            color: ColorMode::Never,
+                            ..OutputOptions::default()
+                        },
+                        terminal,
+                    )
+                    .expect("fragment preview");
+                    let output = String::from_utf8(bytes).expect("UTF-8");
+                    let label = format!("  {matched_line}: ");
+                    let displayed = output
+                        .lines()
+                        .find_map(|line| line.strip_prefix(&label))
+                        .expect("matched source line");
+                    assert!(displayed.contains(&fragment), "{preview:?}: {output}");
+                    if preview == PreviewMode::Full {
+                        assert_eq!(displayed, line);
+                    } else {
+                        assert!(displayed.starts_with("...") && displayed.ends_with("..."));
+                        assert!(displayed.chars().count() <= 198, "bounded source context");
+                    }
+                    assert_eq!(
+                        result, original,
+                        "rendering preserves retrieval and source coordinates"
+                    );
+                }
+            }
         }
     }
 }
