@@ -11,6 +11,15 @@ from zg_bench.engines.registry import resolve_agent_model, resolve_opencode_mode
 
 
 class ModelRequestTests(unittest.TestCase):
+    def test_qwen_versions_have_identical_execution_parameters(self) -> None:
+        from dataclasses import replace
+
+        old = resolve_agent_model("opencode", "custom-openai/qwen3.7-max").opencode
+        new = resolve_agent_model("opencode", "custom-openai/qwen3.8-max").opencode
+        self.assertEqual(
+            replace(old, model_id=new.model_id, display_name=new.display_name), new
+        )
+
     def test_custom_execution_and_judging_share_parameters(self) -> None:
         for model in JUDGE_MODELS:
             with self.subTest(model=model):
@@ -50,7 +59,11 @@ class ModelRequestTests(unittest.TestCase):
                     execution = resolve_opencode_model(
                         f"custom-openai/{model}", require_credentials=True
                     )
-                    judge = resolve_opencode_model(model, require_credentials=True)
+                    # The judge explicitly selects the comparison endpoint;
+                    # bare qwen3.7-max remains a legacy DashScope alias.
+                    judge = resolve_opencode_model(
+                        f"custom-openai/{model}", require_credentials=True
+                    )
                     self.assertEqual(execution, judge)
                     self.assertEqual(judge.credential_name, "GLM_API_KEY")
                     self.assertEqual(judge.api_key, "preferred-key")

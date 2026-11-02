@@ -215,3 +215,25 @@ class TaskReportAttemptTests(unittest.TestCase):
         wrong_trials["configuration"]["trials_per_profile"] = 3
         with self.assertRaisesRegex(SweQaError, "different trial count"):
             stamp_report(directory, wrong_trials)
+
+    def test_common_judge_and_single_trial_are_bound_to_execution_identity(self):
+        identity = run_identity({
+            **self.env,
+            "SWE_QA_MODEL": "qwen3.7-max",
+            "SWE_QA_JUDGE_MODEL": "glm-5.2",
+            "SWE_QA_TRIALS": "1",
+        })
+        directory = self.root / "common-judge"
+        source = _judged_task_report(EXPECTED_TASK_IDS[0])
+        _set_report_trial_judgements(source, baseline=[75], zvec=[80])
+        _write_json(directory / "report.json", source)
+        stamp_report(directory, identity)
+        manifest = json.loads((directory / MANIFEST).read_text())
+        self.assertEqual(manifest["configuration"]["model"], "qwen3.7-max")
+        self.assertEqual(manifest["configuration"]["judge_model"], "glm-5.2")
+        self.assertEqual(manifest["configuration"]["trials_per_profile"], 1)
+
+    def test_invalid_trial_override_is_rejected(self):
+        for value in ("0", "21", "invalid"):
+            with self.subTest(value=value), self.assertRaises(SweQaError):
+                run_identity({**self.env, "SWE_QA_TRIALS": value})

@@ -19,6 +19,15 @@ on:
       embedding:
         default: local
         type: string
+      runner:
+        default: ubuntu-24.04
+        type: string
+      n_attempts:
+        default: 5
+        type: number
+      judge_model:
+        default: ''
+        type: string
     secrets:
       GLM_API_KEY:
         required: true
@@ -47,6 +56,7 @@ on:
         type: choice
         options:
           - glm-5.2
+          - qwen3.7-max
           - qwen3.8-max
       embedding:
         description: Embedding runtime (local uses Potion; remote uses Qwen3.7 Text Embedding)
@@ -56,12 +66,29 @@ on:
         options:
           - local
           - remote
+      runner:
+        description: Runner for the paired E2E trials
+        default: zvec-retrieval-benchmark
+        type: choice
+        options:
+          - zvec-retrieval-benchmark
+          - ubuntu-24.04
+      n_attempts:
+        description: Independent trials per task and profile (1-20)
+        default: 5
+        type: number
+      judge_model:
+        description: Common judge model; empty uses the execution model
+        default: ''
+        type: string
 
 permissions: {}
 
 env:
   SWE_QA_MODEL: ${{ inputs.model || 'glm-5.2' }}
-  SWE_QA_MODEL_BASE_URL: ${{ vars.SWE_QA_MODEL_BASE_URL }}
+  SWE_QA_MODEL_BASE_URL: ${{ vars.SWE_QA_MODEL_BASE_URL || vars.BROWSE_COMP_MODEL_BASE_URL }}
+  SWE_QA_TRIALS: ${{ inputs.n_attempts || 5 }}
+  SWE_QA_JUDGE_MODEL: ${{ inputs.judge_model || inputs.model || 'glm-5.2' }}
 
 concurrency:
   group: swe-qa-bench-${{ github.run_id }}-${{ github.run_attempt }}
@@ -194,15 +221,80 @@ jobs:
             --agent opencode \
             --model "custom-openai/$SWE_QA_MODEL" \
             --profile all \
-            --n-attempts "$(jq -r '.trials_per_profile' "$config")" \
+            --n-attempts "$SWE_QA_TRIALS" \
             --max-retries "$(jq -r '.max_retries' "$config")" \
             "${embedding_args[@]}" \
             --zvec-grep-package "$RUNNER_TEMP/package/candidate.tgz" \
             --job-name preflight \
             --dry-run
 
+  runner-preflight:
+    name: Check E2E runner and model access
+    runs-on: ${{ inputs.runner || 'ubuntu-24.04' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - *authorize-benchmark
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Check Docker and the selected model endpoint
+        env:
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+        run: |
+          set -euo pipefail
+          docker version --format '{{.Server.Version}}'
+          docker compose version
+          df -h "$RUNNER_TEMP"
+          probe_dir="$(mktemp -d "$RUNNER_TEMP/sweqa-mount-probe.XXXXXX")"
+          printf 'sweqa-docker-mount-ok\n' > "$probe_dir/marker"
+          docker run --rm --mount "type=bind,src=$probe_dir,dst=/probe,readonly" \
+            alpine:3.21 cat /probe/marker
+          rm "$probe_dir/marker"
+          rmdir "$probe_dir"
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          trials = int(os.environ['SWE_QA_TRIALS'])
+          if not 1 <= trials <= 20:
+              raise SystemExit('n_attempts must be between 1 and 20')
+          endpoint = os.environ['SWE_QA_MODEL_BASE_URL'].rstrip('/')
+          if not endpoint or not os.environ.get('GLM_API_KEY'):
+              raise SystemExit('Model endpoint or GLM_API_KEY is missing')
+          for model in dict.fromkeys((os.environ['SWE_QA_MODEL'], os.environ['SWE_QA_JUDGE_MODEL'])):
+              payload = {
+                  'model': model,
+                  'messages': [{'role': 'user', 'content': 'Reply OK.'}],
+                  'enable_thinking': True,
+                  'reasoning_effort': 'high',
+                  'temperature': 0,
+                  'max_tokens': 64,
+                  'seed': 42,
+              }
+              request = urllib.request.Request(
+                  endpoint + '/chat/completions',
+                  data=json.dumps(payload).encode(),
+                  headers={'Authorization': 'Bearer ' + os.environ['GLM_API_KEY'],
+                           'Content-Type': 'application/json'},
+              )
+              try:
+                  with urllib.request.urlopen(request, timeout=120) as response:
+                      result = json.load(response)
+              except urllib.error.HTTPError as error:
+                  # Do not echo provider errors, which can contain credentials.
+                  raise SystemExit(f'{model}: model probe returned HTTP {error.code}') from None
+              if not result.get('choices'):
+                  raise SystemExit(f'{model}: model probe returned no choices')
+              print(f'{model}: model access OK')
+          PY
+
   package-candidate:
     name: Build selected Rust candidate
+    needs: runner-preflight
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     outputs:
@@ -235,13 +327,13 @@ jobs:
   run-pair:
     name: Pair + judge / ${{ matrix.task }}
     needs: [validate, package-candidate]
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.runner || 'ubuntu-24.04' }}
     timeout-minutes: 360
     permissions:
       contents: read
     strategy:
       fail-fast: false
-      max-parallel: 5
+      max-parallel: 1
       matrix:
         task: ${{ fromJSON(needs.validate.outputs.task-matrix) }}
     steps:
@@ -297,7 +389,7 @@ jobs:
           fi
           runs_dir="$RUNNER_TEMP/swe-qa-runs/$TASK_NAME"
           config=benchmarks/swe-qa-bench/ci-config.json
-          trials="$(jq -r '.trials_per_profile' "$config")"
+          trials="$SWE_QA_TRIALS"
           embedding_args=(--embedding-model "$EMBEDDING_MODEL")
           if [[ "$EMBEDDING_RUNTIME" == remote ]]; then
             embedding_args+=(--embedding-endpoint "$ZVEC_GREP_ENDPOINT")
@@ -329,7 +421,7 @@ jobs:
           uv run --project benchmarks/swe-qa-bench python -m zg_bench.swe_qa judge \
             --pairs-root "$RUNNER_TEMP/pair-${TASK_NAME}.json" \
             --references benchmarks/swe-qa-bench/zg_bench/swe_qa/data/references.json \
-            --model "$SWE_QA_MODEL" \
+            --model "$SWE_QA_JUDGE_MODEL" \
             --output-dir "$RUNNER_TEMP/swe-qa-task-report/${TASK_NAME}" \
             --expected "$TASK_NAME"
       - name: Bind the task report to this candidate and evaluation configuration

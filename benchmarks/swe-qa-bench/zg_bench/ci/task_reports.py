@@ -70,6 +70,16 @@ def run_identity(env: Mapping[str, str]) -> dict[str, Any]:
             ).encode()
         ),
     }
+    if env.get("SWE_QA_TRIALS"):
+        try:
+            trials = int(env["SWE_QA_TRIALS"])
+        except ValueError as error:
+            raise SweQaError("invalid SWE_QA_TRIALS") from error
+        if not 1 <= trials <= 20:
+            raise SweQaError("SWE_QA_TRIALS must be between 1 and 20")
+        configuration["trials_per_profile"] = trials
+    if env.get("SWE_QA_JUDGE_MODEL"):
+        configuration["judge_model"] = env["SWE_QA_JUDGE_MODEL"]
     return {
         "schema_version": 1,
         "run_id": env["GITHUB_RUN_ID"],
@@ -86,7 +96,7 @@ def _validated_task(report_path: Path, identity: dict[str, Any]) -> str:
     report = load_object(report_path, label="per-task report")
     case = validate_task_report(report, report_path)
     config = identity["configuration"]
-    if report["judge"]["model"] != config["model"]:
+    if report["judge"]["model"] != config.get("judge_model", config["model"]):
         raise SweQaError("task report uses a different judge model")
     if case.get("trial_count") != config["trials_per_profile"]:
         raise SweQaError("task report uses a different trial count")

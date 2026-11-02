@@ -34,6 +34,12 @@ MODEL_REQUEST_SPECS = {
         reasoning_effort=OPENCODE_GLM_REASONING_EFFORT,
         max_tokens=BENCHMARK_MAX_OUTPUT_TOKENS,
     ),
+    "qwen3.7-max": ModelRequestSpec(
+        temperature=OPENCODE_QWEN_TEMPERATURE,
+        enable_thinking=OPENCODE_QWEN_ENABLE_THINKING,
+        reasoning_effort=OPENCODE_QWEN_REASONING_EFFORT,
+        max_tokens=BENCHMARK_MAX_OUTPUT_TOKENS,
+    ),
     "qwen3.8-max": ModelRequestSpec(
         temperature=OPENCODE_QWEN_TEMPERATURE,
         enable_thinking=OPENCODE_QWEN_ENABLE_THINKING,

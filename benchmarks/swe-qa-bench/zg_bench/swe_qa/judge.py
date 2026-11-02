@@ -68,7 +68,7 @@ def judge_pairs(
         )
 
     try:
-        runtime = resolve_opencode_model(model, require_credentials=True)
+        runtime = resolve_opencode_model(f"custom-openai/{model}", require_credentials=True)
     except ValueError as error:
         raise SweQaError(str(error)) from error
     assert runtime.api_key is not None  # Guaranteed by require_credentials.

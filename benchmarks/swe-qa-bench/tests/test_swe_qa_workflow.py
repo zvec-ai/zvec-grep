@@ -96,7 +96,7 @@ class ManualBenchmarkAuthorizationTests(unittest.TestCase):
         )
         model = self.workflow["on"]["workflow_dispatch"]["inputs"]["model"]
         self.assertEqual(model["default"], "glm-5.2")
-        self.assertEqual(set(model["options"]), {"glm-5.2", "qwen3.8-max"})
+        self.assertEqual(set(model["options"]), {"glm-5.2", "qwen3.7-max", "qwen3.8-max"})
         embedding = self.workflow["on"]["workflow_dispatch"]["inputs"]["embedding"]
         self.assertEqual(embedding["default"], "local")
         self.assertEqual(set(embedding["options"]), {"local", "remote"})

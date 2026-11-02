@@ -139,6 +139,23 @@ AGENT_MODEL_SUPPORT: tuple[AgentModelSupport, ...] = (
     ),
     AgentModelSupport(
         "opencode",
+        "custom-openai/qwen3.7-max",
+        opencode=OpenCodeModel(
+            provider="custom-openai",
+            model_id="qwen3.7-max",
+            base_url=OPENCODE_CUSTOM_QWEN_BASE_URL,
+            credential_env_vars=("GLM_API_KEY", "OPENAI_API_KEY"),
+            base_url_env_vars=("GLM_BASE_URL", "OPENAI_BASE_URL"),
+            temperature=_QWEN_REQUEST.temperature,
+            enable_thinking=_QWEN_REQUEST.enable_thinking,
+            reasoning_effort=_QWEN_REQUEST.reasoning_effort,
+            output_limit=_QWEN_REQUEST.max_tokens,
+            display_name="Qwen 3.7 Max",
+            interleaved=True,
+        ),
+    ),
+    AgentModelSupport(
+        "opencode",
         OPENCODE_CUSTOM_QWEN_MODEL,
         opencode=OpenCodeModel(
             provider="custom-openai",
