@@ -111,6 +111,7 @@ async function suite(arm, name, candidate, python) {
   await sampleHost();
   assert.ok(hostSamples.at(-1).runner_workers <= 1, 'another runner job is active on this host');
   const directory = join(output, arm, name);
+  await mkdir(dirname(directory), { recursive: true });
   const args = name === 'zg'
     ? ['benchmarks/zg-retrieval/run.mjs', '--corpus', join(output, 'corpus', arm)]
     : ['benchmarks/zg-retrieval/expansion/run.mjs', '--suite', name];
