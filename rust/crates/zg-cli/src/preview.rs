@@ -66,10 +66,26 @@ pub fn split_lines(content: &str) -> impl Iterator<Item = &str> {
 /// Keep the fragment's 160-character budget independently of restored line
 /// prefixes. Add at most 32 prefix characters and mark any omitted context.
 pub(crate) fn short_source_line(item: &ContextItem, offset: usize, line: &str) -> String {
+    bounded_source_line(item, offset, line, truncate_chars)
+}
+
+/// The single-line summary keeps its existing UTF-16 budget while using the
+/// same evidence window as the compact preview.
+pub(crate) fn minimal_source_line(item: &ContextItem, offset: usize, line: &str) -> String {
+    bounded_source_line(item, offset, line, truncate_utf16)
+}
+
+fn bounded_source_line(
+    item: &ContextItem,
+    offset: usize,
+    line: &str,
+    truncate: fn(&str, usize) -> String,
+) -> String {
     const SOURCE_CHARS: usize = 160;
     const PREFIX_CHARS: usize = 32;
-    if line.chars().take(SOURCE_CHARS + 1).count() <= SOURCE_CHARS {
-        return line.to_owned();
+    let ordinary = truncate(line, SOURCE_CHARS);
+    if ordinary == line {
+        return ordinary;
     }
     let prefix_bytes = match (&item.excerpt_range, &item.content_range) {
         (
@@ -90,6 +106,9 @@ pub(crate) fn short_source_line(item: &ContextItem, offset: usize, line: &str) -
     };
     // Invalid or mismatched coordinates retain the normal line-prefix preview.
     let prefix = line.get(..prefix_bytes).unwrap_or_default();
+    if prefix.is_empty() {
+        return ordinary;
+    }
     let start = prefix
         .char_indices()
         .rev()
@@ -100,12 +119,14 @@ pub(crate) fn short_source_line(item: &ContextItem, offset: usize, line: &str) -
     } else {
         "...".to_owned()
     };
-    let mut chars = line[start..].chars();
-    text.extend(
-        chars
-            .by_ref()
-            .take(SOURCE_CHARS + prefix[start..].chars().count()),
-    );
+    text.push_str(&prefix[start..]);
+    text.push_str(&truncate(&line[prefix.len()..], SOURCE_CHARS));
+    text
+}
+
+fn truncate_chars(line: &str, max: usize) -> String {
+    let mut chars = line.chars();
+    let mut text: String = chars.by_ref().take(max).collect();
     if chars.next().is_some() {
         text.push_str("...");
     }

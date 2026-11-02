@@ -331,8 +331,8 @@ fn short_marks_truncated_source_lines_and_full_preserves_them() {
 }
 
 #[test]
-fn short_keeps_fragment_text_after_restoring_a_long_line_prefix() {
-    let fragment = format!("node.name,{}needle", "x".repeat(144));
+fn bounded_previews_keep_fragment_text_after_restoring_a_long_line_prefix() {
+    let fragment = format!("node.name,{}needle", "x".repeat(143));
     for prefix in [" ".repeat(200), "中😀".repeat(100)] {
         let line = format!("{prefix}{fragment}tail");
         for before in ["", "before\r\n"] {
@@ -360,7 +360,7 @@ fn short_keeps_fragment_text_after_restoring_a_long_line_prefix() {
                 end_byte_column: column_origin + prefix.len() + fragment.len(),
             });
             let original = result.clone();
-            for preview in [PreviewMode::Short, PreviewMode::Full] {
+            for preview in [PreviewMode::None, PreviewMode::Short, PreviewMode::Full] {
                 for terminal in [false, true] {
                     let mut bytes = Vec::new();
                     write_context_with_options(
@@ -375,7 +375,11 @@ fn short_keeps_fragment_text_after_restoring_a_long_line_prefix() {
                     )
                     .expect("fragment preview");
                     let output = String::from_utf8(bytes).expect("UTF-8");
-                    let label = format!("  {matched_line}: ");
+                    let label = if preview == PreviewMode::None {
+                        format!("{matched_line}\t")
+                    } else {
+                        format!("  {matched_line}: ")
+                    };
                     let displayed = output
                         .lines()
                         .find_map(|line| line.strip_prefix(&label))
@@ -394,6 +398,44 @@ fn short_keeps_fragment_text_after_restoring_a_long_line_prefix() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn minimal_preview_preserves_its_utf16_limit_without_a_restored_prefix() {
+    for (content, expected) in [
+        ("a".repeat(160), "a".repeat(160)),
+        ("a".repeat(161), format!("{}...", "a".repeat(159))),
+        (
+            format!("{}😀", "a".repeat(158)),
+            format!("{}😀", "a".repeat(158)),
+        ),
+        (
+            format!("{}😀b", "a".repeat(158)),
+            format!("{}...", "a".repeat(158)),
+        ),
+    ] {
+        let mut result = grouped_result();
+        result.group_results.clear();
+        result.items[0].content = content;
+        result.items[0].excerpt_range = None;
+        let mut bytes = Vec::new();
+        write_context_with_options(
+            &mut bytes,
+            &result,
+            OutputOptions {
+                preview: PreviewMode::None,
+                color: ColorMode::Never,
+                ..OutputOptions::default()
+            },
+            false,
+        )
+        .expect("minimal render");
+        let output = String::from_utf8(bytes).expect("UTF-8");
+        assert_eq!(
+            output.lines().find_map(|line| line.strip_prefix("50\t")),
+            Some(expected.as_str())
+        );
     }
 }
 
