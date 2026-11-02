@@ -262,13 +262,19 @@ function reuseBaseFiles({ metaRoot, platformRoot, entry }, files) {
       // Keep staging outside bin/lib so interruption cannot invalidate the payload.
       if (!temporaryRoot) temporaryRoot = mkdtempSync(join(metaRoot, ".native-links-"));
       const temporary = join(temporaryRoot, "file");
+      let linked = false;
       try {
         linkSync(source, temporary);
+        linked = true;
         renameSync(temporary, destination);
       } catch (error) {
+        // Windows exFAT maps unsupported hard links to EISDIR. Do not suppress
+        // directory errors from rename or from other platforms.
+        const unsupportedWindowsLink = process.platform === "win32" && !linked && error.code === "EISDIR";
         // Unsupported links, separate mounts or locked Windows files retain the
         // verified copy. Both paths remain valid for future npm rebuilds.
-        if (!["EXDEV", "EPERM", "EACCES", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EMLINK", "EBUSY"].includes(error.code)) throw error;
+        if (!unsupportedWindowsLink &&
+            !["EXDEV", "EPERM", "EACCES", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EMLINK", "EBUSY"].includes(error.code)) throw error;
       } finally {
         rmSync(temporary, { force: true });
       }

@@ -152,6 +152,46 @@ for (const code of ["EXDEV", "EPERM", "EACCES", "ENOTSUP", "EOPNOTSUPP", "ENOSYS
   });
 }
 
+for (const [platform, operation, fallback] of [
+  ["win32", "linkSync", true],
+  ["linux", "linkSync", false],
+  ["darwin", "linkSync", false],
+  ["win32", "renameSync", false],
+]) {
+  test(`${platform} ${operation} EISDIR ${fallback ? "retains verified copies on exFAT" : "still fails"}`, () => {
+    const paths = fixture();
+    try {
+      const result = spawnSync(process.execPath, ["-e", `
+        const fs = require('fs');
+        const operation = process.argv[2];
+        const original = fs[operation];
+        fs[operation] = (source, destination) => {
+          if (operation === 'linkSync' || source.includes('.native-links-')) {
+            throw Object.assign(new Error('injected EISDIR'), { code: 'EISDIR' });
+          }
+          return original(source, destination);
+        };
+        const installer = require(process.argv[3]);
+        Object.defineProperty(process, 'platform', { value: process.argv[1] });
+        const options = JSON.parse(process.argv[4]);
+        for (let attempt = 0; attempt < 2; attempt++) {
+          installer.materialize(options);
+          installer.verifyInstallation(options);
+        }
+      `, platform, operation, join(__dirname, "install.cjs"), JSON.stringify({ ...paths, entry, expectedVersion: "0.0.1" })],
+      { encoding: "utf8" });
+      assert.equal(result.status === 0, fallback, result.stderr);
+      if (!fallback) assert.match(result.stderr, /EISDIR/);
+      verifyInstallation({ ...paths, entry, expectedVersion: "0.0.1" });
+      assert.equal(statSync(join(paths.metaRoot, "bin/zg.exe")).nlink, 1);
+      assert.equal(statSync(join(paths.platformRoot, "bin/zg")).nlink, 1);
+      assert.equal(readdirSync(paths.metaRoot).some((name) => name.startsWith(".native-links-")), false);
+    } finally {
+      rmSync(paths.root, { recursive: true, force: true });
+    }
+  });
+}
+
 test("locked installed binary keeps its verified copy and removes link staging", () => {
   const paths = fixture();
   try {
