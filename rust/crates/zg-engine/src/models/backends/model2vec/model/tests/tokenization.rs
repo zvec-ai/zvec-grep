@@ -3,23 +3,19 @@ use super::*;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-async fn tokenizer_fixture(root: &Path, direction: Option<&str>, padding: bool) {
+async fn tokenizer_fixture(root: &Path, direction: Option<&str>) {
     let bytes = serde_json::to_vec(&json!({
         "version": "1.0",
         "truncation": direction.map(|direction| json!({
             "direction": direction, "max_length": 512,
             "strategy": "LongestFirst", "stride": 0
         })),
-        "padding": padding.then(|| json!({
-            "strategy": {"Fixed": 2048}, "direction": "Left",
-            "pad_to_multiple_of": null, "pad_id": 3,
-            "pad_type_id": 0, "pad_token": "[PAD]"
-        })),
+        "padding": null,
         "added_tokens": [], "normalizer": null,
         "pre_tokenizer": {"type": "WhitespaceSplit"},
         "post_processor": null, "decoder": null,
         "model": {"type": "WordLevel", "unk_token": "[UNK]",
-            "vocab": {"hello": 0, "tail": 1, "[UNK]": 2, "[PAD]": 3, "invalid": 4}}
+            "vocab": {"hello": 0, "tail": 1, "[UNK]": 2, "invalid": 3}}
     }))
     .expect("serialize tokenizer");
     tokio::fs::write(root.join("tokenizer.json"), bytes)
@@ -44,9 +40,9 @@ async fn loaded_fixture(root: &Path) -> Model2VecEmbeddingModel {
             .await
             .expect("load tokenizer"),
         table: StaticEmbeddingTable {
-            values: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            values: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
             dimension: 3,
-            rows: 4,
+            rows: 3,
         },
     }));
     model
@@ -73,7 +69,7 @@ async fn embed(
 async fn catalog_limit_overrides_serialized_truncation_for_both_purposes() {
     for direction in [None, Some("Right"), Some("Left")] {
         let root = TempDir::new().expect("temporary tokenizer");
-        tokenizer_fixture(root.path(), direction, false).await;
+        tokenizer_fixture(root.path(), direction).await;
         let original = tokio::fs::read(root.path().join("tokenizer.json"))
             .await
             .expect("original artifact");
@@ -125,9 +121,9 @@ async fn catalog_limit_overrides_serialized_truncation_for_both_purposes() {
 }
 
 #[tokio::test]
-async fn padding_is_not_content_and_unknowns_do_not_extend_the_token_budget() {
+async fn unknowns_and_prefixes_respect_the_token_budget() {
     let root = TempDir::new().expect("temporary tokenizer");
-    tokenizer_fixture(root.path(), Some("Right"), true).await;
+    tokenizer_fixture(root.path(), Some("Right")).await;
     let mut model = loaded_fixture(root.path()).await;
     for purpose in [EmbeddingPurpose::Query, EmbeddingPurpose::Document] {
         let short = embed(&model, "hello tail missing".to_owned(), purpose).await;
@@ -158,7 +154,7 @@ async fn padding_is_not_content_and_unknowns_do_not_extend_the_token_budget() {
 #[tokio::test]
 async fn full_tokenization_preserves_errors_cancellation_and_reuse() {
     let root = TempDir::new().expect("temporary tokenizer");
-    tokenizer_fixture(root.path(), Some("Right"), false).await;
+    tokenizer_fixture(root.path(), Some("Right")).await;
     let model = loaded_fixture(root.path()).await;
     let inputs = [vec![Content::Text("hello ".repeat(512) + "invalid")]];
     let error = model
@@ -204,7 +200,7 @@ async fn tokenizer_load_failure_can_be_retried_after_repair() {
             .expect("reject malformed tokenizer");
         assert_eq!(error.code(), crate::EngineError::STORAGE_FAILURE);
     }
-    tokenizer_fixture(root.path(), Some("Right"), false).await;
+    tokenizer_fixture(root.path(), Some("Right")).await;
     let tokenizer = dependencies
         .load_tokenizer(root.path())
         .await

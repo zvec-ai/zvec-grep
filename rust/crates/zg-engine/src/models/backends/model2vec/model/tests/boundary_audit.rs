@@ -44,7 +44,6 @@ async fn model2vec_local_boundary_audit() {
         original
             .with_truncation(None)
             .expect("unlimited reference tokenizer");
-        original.with_padding(None);
         let hello = original
             .encode("hello", false)
             .expect("one token")

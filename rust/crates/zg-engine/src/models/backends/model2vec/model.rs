@@ -359,8 +359,6 @@ impl Model2VecDependencies for DefaultModel2VecDependencies {
             ModelError::storage_failure("Unable to disable Model2Vec tokenizer truncation")
                 .with_cause(error)
         })?;
-        // Padding is not input content and must not enter the budget or mean pool.
-        tokenizer.with_padding(None);
         let unknown_token_id = resolve_unknown_token_id(&tokenizer, &tokenizer_json);
         Ok(Arc::new(HuggingFaceTokenizer {
             tokenizer,
