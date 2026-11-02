@@ -324,7 +324,10 @@ test("every independently rerunnable job checks benchmark access before doing wo
   assert.ok(jobs.results && jobs.sweqa && jobs.authorize);
   for (const [name, job] of Object.entries(jobs)) {
     if (name === "npm-comparison") {
-      assert.match(job, /uses: \.\/\.github\/workflows\/retrieval-npm-self-hosted.yml/);
+      assert.match(
+        job,
+        /uses: \.\/\.github\/workflows\/retrieval-npm-self-hosted.yml/,
+      );
       continue; // The called workflow checks both actors before setup or npm.
     }
     const entries = steps(job);

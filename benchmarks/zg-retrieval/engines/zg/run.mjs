@@ -216,12 +216,21 @@ export async function packageCandidate(packagePath, output) {
   // The isolated consumer supplies the MCP client and verifies the same package.
   if (process.env.RETRIEVAL_INSTALLED_PACKAGE) {
     const installedRoot = resolve(process.env.RETRIEVAL_INSTALLED_PACKAGE);
-    const installedMetadata = await readJson(join(installedRoot, "package.json"));
+    const installedMetadata = await readJson(
+      join(installedRoot, "package.json"),
+    );
     assert.equal(installedMetadata.name, metadata.name);
     assert.equal(installedMetadata.version, metadata.version);
-    const installed = productCandidate(installedRoot, consumer, installedMetadata);
-    assert.equal(await fileHash(installed.cli), await fileHash(candidate.cli),
-      "global CLI differs from the frozen npm package");
+    const installed = productCandidate(
+      installedRoot,
+      consumer,
+      installedMetadata,
+    );
+    assert.equal(
+      await fileHash(installed.cli),
+      await fileHash(candidate.cli),
+      "global CLI differs from the frozen npm package",
+    );
     candidate = installed;
   }
   assert.ok((await lstat(candidate.cli)).isFile(), "installed CLI is missing");

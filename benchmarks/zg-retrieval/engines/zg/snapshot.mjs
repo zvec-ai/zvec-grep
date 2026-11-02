@@ -135,14 +135,17 @@ function parseGroupedStatus(stdout, home, runtime) {
       required(/^ {2}Entities +([\d,]+)$/m, stdout, "entity count")[1],
       "entity count",
     ),
-    indexed_source_bytes: runtime === "node-0.2.2" ? null : groupedCount(
-      required(
-        /^ {2}Source size +([\d,]+) bytes$/m,
-        stdout,
-        "indexed source size",
-      )[1],
-      "indexed source size",
-    ),
+    indexed_source_bytes:
+      runtime === "node-0.2.2"
+        ? null
+        : groupedCount(
+            required(
+              /^ {2}Source size +([\d,]+) bytes$/m,
+              stdout,
+              "indexed source size",
+            )[1],
+            "indexed source size",
+          ),
   };
 }
 
@@ -320,7 +323,8 @@ export async function snapshotIndex({
   await writeJson(join(output, "status.json"), status);
   const summary = {
     schema_version: 2,
-    kind: runtime === "node-0.2.2" ? "node-public-status" : "rust-public-status",
+    kind:
+      runtime === "node-0.2.2" ? "node-public-status" : "rust-public-status",
     runtime,
     logical_content_sha256: objectHash(identity),
     files: status.files_indexed,

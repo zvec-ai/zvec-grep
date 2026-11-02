@@ -27,7 +27,10 @@ const { values } = parseArgs({
 });
 for (const name of ["node-package", "rust-package", "rust-commit", "output"])
   assert.ok(values[name], `requires --${name}`);
-assert.match(values["rust-commit"], /^(?:[a-f0-9]{40}|npm:@zvec\/zvec-grep@\d+\.\d+\.\d+(?:-[\w.-]+)?)$/);
+assert.match(
+  values["rust-commit"],
+  /^(?:[a-f0-9]{40}|npm:@zvec\/zvec-grep@\d+\.\d+\.\d+(?:-[\w.-]+)?)$/,
+);
 const output = resolve(values.output);
 await mkdir(output, { recursive: false });
 const modelCache = resolve(

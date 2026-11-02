@@ -28,7 +28,9 @@ export function comparisonPackageHash(reports) {
 
 function checkIdentity(value) {
   assert.match(value.repository ?? "", /^[\w.-]+\/[\w.-]+$/);
-  if (/^npm:@zvec\/zvec-grep@\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(value.commit ?? ""))
+  if (
+    /^npm:@zvec\/zvec-grep@\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(value.commit ?? "")
+  )
     assert.equal(value.repository, "zvec-ai/zvec-grep");
   else assert.match(value.commit ?? "", /^[a-f0-9]{40}$/);
 }

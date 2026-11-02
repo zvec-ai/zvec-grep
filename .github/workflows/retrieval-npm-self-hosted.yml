@@ -28,10 +28,10 @@ jobs:
         run: echo "RETRIEVAL_WORK=$RUNNER_TEMP/retrieval-npm-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v6
         with:
-          node-version: '24.21.0'
+          node-version: "24.21.0"
       - uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: "3.12"
       - name: Run both published products through all four suites sequentially
         run: |
           flock -n "$HOME/.zvec-retrieval-benchmark.lock" \
