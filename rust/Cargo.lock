@@ -4800,6 +4800,7 @@ dependencies = [
 name = "zg-diskann"
 version = "0.3.0"
 dependencies = [
+ "bytemuck",
  "diskann",
  "diskann-vector",
  "futures",

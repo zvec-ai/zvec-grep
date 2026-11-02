@@ -13,6 +13,7 @@ crate-type = ["rlib", "cdylib"]
 node = ["dep:napi", "dep:napi-derive", "dep:napi-build"]
 
 [dependencies]
+bytemuck = "1.25"
 diskann = "=0.61.0"
 diskann-vector = "=0.61.0"
 futures.workspace = true

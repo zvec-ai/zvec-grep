@@ -72,6 +72,10 @@ read on demand with a bounded page cache. zvec stores full-text and metadata
 projections. Metadata filters are resolved to document membership and applied
 inside DiskANN's filtered traversal. Inserts commit vectors and edges together;
 deleted nodes remain available for traversal but are excluded from results.
+Per-model SQLite page-cache targets are 256 KiB for readers and 2 MiB for writers,
+with at most 16 MiB of memory-mapped file data where supported. These are cache
+settings, not whole-process memory limits: query candidates and metadata filters
+also consume memory. Searches use a candidate list of at least 512 entries.
 `indexVersion` is 3. Existing zvec vector indexes require an explicit rebuild with
 `zg --index --rebuild`; opening them never performs an implicit migration.
 

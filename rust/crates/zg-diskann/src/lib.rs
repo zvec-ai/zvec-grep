@@ -146,8 +146,14 @@ impl VectorIndex {
         };
         let connection = Connection::open_with_flags(path, flags)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
-        // Keep SQLite's page cache bounded independently of corpus size.
-        connection.execute_batch("PRAGMA cache_size = -8192;")?;
+        // Keep private caches small. The bounded mapping shares clean pages with
+        // the OS instead of retaining another copy of every hot database page.
+        // SQLite falls back to ordinary reads when mapping is unavailable.
+        connection.execute_batch(if read_only {
+            "PRAGMA cache_size = -256; PRAGMA mmap_size = 16777216;"
+        } else {
+            "PRAGMA cache_size = -2048; PRAGMA mmap_size = 16777216;"
+        })?;
         if !read_only {
             connection.execute_batch("PRAGMA journal_mode = DELETE; PRAGMA synchronous = FULL;")?;
         }
@@ -279,14 +285,35 @@ impl VectorIndex {
         limit: usize,
         allowed: Option<&HashSet<String>>,
     ) -> Result<Vec<Hit>> {
+        self.search_with_list_size(vector, limit, allowed, 512)
+    }
+
+    /// Search with an explicit candidate-list size for recall/latency tuning.
+    /// The traversal uses at least twice `limit`, and filtered searches may expand it.
+    ///
+    /// # Errors
+    /// Rejects zero list sizes, invalid vectors, and unreadable storage.
+    pub fn search_with_list_size(
+        &self,
+        vector: &[f32],
+        limit: usize,
+        allowed: Option<&HashSet<String>>,
+        list_size: usize,
+    ) -> Result<Vec<Hit>> {
+        if list_size == 0 {
+            return Err(Error::Invalid("search list size must be positive".into()));
+        }
         self.validate(vector)?;
         if limit == 0 || allowed.is_some_and(HashSet::is_empty) {
             return Ok(Vec::new());
         }
         let index = self.index.lock().map_err(poisoned)?;
+        index.data_provider.clear_query_cache()?;
         let live: usize = index.data_provider.connection()?.query_row(
-            "SELECT COUNT(*) FROM nodes WHERE live = 1",
-            [],
+            // Only determine whether there are enough live nodes to fill top-k.
+            // Counting the entire corpus on every query needlessly scans its index.
+            "SELECT COUNT(*) FROM (SELECT 1 FROM nodes WHERE live = 1 LIMIT ?1)",
+            [i64::try_from(limit).unwrap_or(i64::MAX)],
             |row| row.get(0),
         )?;
         if live == 0 {
@@ -302,7 +329,9 @@ impl VectorIndex {
             .min(live)
             .min(allowed.map_or(usize::MAX, HashSet::len));
         let search = InlineFilterSearch::new(
-            Knn::new_default(count.saturating_mul(2).max(100)).map_err(graph_error)?,
+            // Keep query effort independent of graph-build effort. A 100-entry
+            // beam under-searched the high-dimensional regression corpus.
+            Knn::new_default(count.saturating_mul(2).max(list_size)).map_err(graph_error)?,
             Some(graph::search::AdaptiveL::new(32, 8.0).map_err(graph_error)?),
         );
         let mut neighbors = Vec::<Neighbor<u32>>::new();
@@ -319,7 +348,15 @@ impl VectorIndex {
             return Err(error);
         }
         let mut hits = Vec::new();
-        for neighbor in neighbors {
+        // DiskANN returns candidates sorted by distance. Resolve only the best
+        // results, retaining boundary ties for deterministic document-ID ordering.
+        let cutoff = neighbors
+            .get(count - 1)
+            .map(|neighbor| *neighbor.distance());
+        for neighbor in neighbors
+            .into_iter()
+            .take_while(|neighbor| cutoff.is_none_or(|cutoff| *neighbor.distance() <= cutoff))
+        {
             if let Some(document_id) = index.data_provider.document(*neighbor.id())? {
                 hits.push(Hit {
                     document_id,
@@ -369,11 +406,8 @@ impl std::fmt::Debug for LiveFilter<'_> {
 
 impl labeled::QueryLabelProvider<u32> for LiveFilter<'_> {
     fn is_match(&self, id: u32) -> bool {
-        match self.provider.document(id) {
-            Ok(Some(document)) => self
-                .allowed
-                .is_none_or(|allowed| allowed.contains(&document)),
-            Ok(None) => false,
+        match self.provider.matches(id, self.allowed) {
+            Ok(matches) => matches,
             Err(error) => {
                 // The predicate cannot return errors. Preserve one and fail the
                 // whole query immediately after traversal instead of hiding it.

@@ -148,6 +148,11 @@ fn rejects_invalid_vectors_and_incompatible_storage() {
     let path = home.path().join("vectors.sqlite");
     assert!(VectorIndex::open(&path, 2, Distance::Cosine, true).is_err());
     let index = VectorIndex::open(&path, 2, Distance::Cosine, false).expect("index");
+    assert!(
+        index
+            .search_with_list_size(&[0.0, 0.0], 1, None, 0)
+            .is_err()
+    );
     for vector in [&[1.0][..], &[f32::NAN, 1.0], &[f32::INFINITY, 0.0]] {
         assert!(
             index
@@ -175,4 +180,56 @@ fn rejects_invalid_vectors_and_incompatible_storage() {
     drop(index);
     assert!(VectorIndex::open(&path, 3, Distance::Cosine, true).is_err());
     assert!(VectorIndex::open(&path, 2, Distance::Euclidean, true).is_err());
+}
+
+#[test]
+fn reused_reader_refreshes_liveness_and_filters_after_committed_writes() {
+    let home = tempfile::tempdir().expect("temporary storage");
+    let path = home.path().join("vectors.sqlite");
+    let writer = VectorIndex::open(&path, 2, Distance::Cosine, false).expect("writer");
+    writer
+        .upsert(&[
+            Record {
+                document_id: "a",
+                file_id: 1,
+                vector: &[1.0, 0.0],
+            },
+            Record {
+                document_id: "b",
+                file_id: 2,
+                vector: &[0.0, 1.0],
+            },
+        ])
+        .expect("insert");
+    let reader = VectorIndex::open_read_only(&path).expect("reader");
+    assert_eq!(
+        reader.search(&[1.0, 0.0], 1, None).expect("warm query")[0].document_id,
+        "a"
+    );
+    writer.delete_file(1).expect("delete");
+    let allowed = HashSet::from(["a".to_owned()]);
+    assert!(
+        reader
+            .search(&[1.0, 0.0], 1, Some(&allowed))
+            .expect("deleted filter")
+            .is_empty()
+    );
+    assert_eq!(
+        reader.search(&[1.0, 0.0], 1, None).expect("refresh query")[0].document_id,
+        "b"
+    );
+    writer
+        .upsert(&[Record {
+            document_id: "a",
+            file_id: 1,
+            vector: &[1.0, 0.0],
+        }])
+        .expect("replace");
+    assert_eq!(
+        reader
+            .search(&[1.0, 0.0], 1, Some(&allowed))
+            .expect("replaced filter")[0]
+            .document_id,
+        "a"
+    );
 }

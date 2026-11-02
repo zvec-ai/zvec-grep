@@ -5,7 +5,10 @@
     reason = "DiskANN's async provider contract wraps synchronous SQLite operations"
 )]
 
-use std::sync::{Mutex, MutexGuard};
+use std::{
+    collections::HashSet,
+    sync::{Mutex, MutexGuard},
+};
 
 use diskann::{
     ANNResult,
@@ -21,6 +24,7 @@ pub(super) struct Provider {
     connection: Mutex<Connection>,
     dimension: usize,
     distance: Distance,
+    last_live: Mutex<Option<(u32, bool)>>,
 }
 
 impl Provider {
@@ -29,6 +33,7 @@ impl Provider {
             connection: Mutex::new(connection),
             dimension,
             distance,
+            last_live: Mutex::new(None),
         }
     }
 
@@ -45,44 +50,139 @@ impl Provider {
     }
 
     pub(super) fn vector(&self, id: u32) -> Result<Box<[f32]>> {
-        let bytes: Vec<u8> = self
-            .connection()?
-            .prepare_cached("SELECT vector FROM nodes WHERE id = ?1")?
-            .query_row([id], |row| row.get(0))?;
-        if bytes.len() != self.dimension * 4 {
-            return Err(Error::Invalid(format!(
-                "invalid vector length for node {id}"
-            )));
+        self.with_vector(id, |vector| vector.into())
+    }
+
+    pub(super) fn matches(&self, id: u32, allowed: Option<&HashSet<String>>) -> Result<bool> {
+        // The labeled traversal asks about a node immediately after measuring
+        // its distance. Reuse liveness fetched with the vector, without issuing
+        // another SQL lookup. Other nodes and metadata filters use the database.
+        if allowed.is_none() {
+            let last_live = self.last_live.lock().map_err(poisoned)?;
+            if let Some((cached, live)) = *last_live
+                && cached == id
+            {
+                return Ok(live);
+            }
         }
-        let vector: Box<[f32]> = bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .collect();
-        if vector.iter().any(|value| !value.is_finite()) {
-            return Err(Error::Invalid(format!("non-finite vector for node {id}")));
+        self.connection()?
+            .prepare_cached("SELECT live, document_id FROM nodes WHERE id = ?1")?
+            .query_row([id], |row| {
+                if !row.get::<_, bool>(0)? {
+                    return Ok(false);
+                }
+                match allowed {
+                    None => Ok(true),
+                    Some(allowed) => Ok(allowed.contains(row.get_ref(1)?.as_str()?)),
+                }
+            })
+            .optional()
+            .map(|value| value.unwrap_or(false))
+            .map_err(Into::into)
+    }
+
+    pub(super) fn clear_query_cache(&self) -> Result<()> {
+        *self.last_live.lock().map_err(poisoned)? = None;
+        Ok(())
+    }
+
+    fn with_vector<T>(&self, id: u32, visit: impl FnOnce(&[f32]) -> T) -> Result<T> {
+        self.connection()?
+            .prepare_cached("SELECT vector, live FROM nodes WHERE id = ?1")?
+            .query_row([id], |row| {
+                let bytes = row.get_ref(0)?.as_blob()?;
+                let live = row.get(1)?;
+                let mut last_live = match self.last_live.lock() {
+                    Ok(last_live) => last_live,
+                    Err(error) => return Ok(Err(poisoned(error))),
+                };
+                *last_live = Some((id, live));
+                drop(last_live);
+                Ok(with_vector_bytes(bytes, self.dimension, id, visit))
+            })?
+    }
+
+    fn query_distance(&self, id: u32, query: &[f32], query_norm: f64) -> Result<f32> {
+        self.with_vector(id, |vector| {
+            if self.distance == Distance::Cosine {
+                cosine_distance(
+                    sum_pairs(query, vector, |x, y| x * y),
+                    query_norm,
+                    self.norm(vector),
+                )
+            } else {
+                self.distance.evaluate_similarity(query, vector)
+            }
+        })
+    }
+
+    fn norm(&self, vector: &[f32]) -> f64 {
+        if self.distance == Distance::Cosine {
+            sum_pairs(vector, vector, |x, y| x * y)
+        } else {
+            0.0
         }
-        Ok(vector)
     }
 
     fn neighbors(&self, id: u32) -> Result<Vec<u32>> {
-        let bytes: Vec<u8> = self
-            .connection()?
+        self.connection()?
             .prepare_cached("SELECT neighbors FROM nodes WHERE id = ?1")?
-            .query_row([id], |row| row.get(0))?;
-        if !bytes.len().is_multiple_of(4) {
-            return Err(Error::Invalid(format!(
-                "invalid adjacency list for node {id}"
-            )));
+            .query_row([id], |row| {
+                let bytes = row.get_ref(0)?.as_blob()?;
+                if !bytes.len().is_multiple_of(4) {
+                    return Ok(Err(Error::Invalid(format!(
+                        "invalid adjacency list for node {id}"
+                    ))));
+                }
+                Ok(Ok(bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| u32::from_le_bytes(*b))
+                    .collect()))
+            })?
+    }
+}
+
+// The SQLite row owns the bytes for the duration of the callback. Borrow aligned
+// little-endian blobs directly; copy only when alignment or byte order requires it.
+fn with_vector_bytes<T>(
+    bytes: &[u8],
+    dimension: usize,
+    id: u32,
+    visit: impl FnOnce(&[f32]) -> T,
+) -> Result<T> {
+    if bytes.len() != dimension * 4 {
+        return Err(Error::Invalid(format!(
+            "invalid vector length for node {id}"
+        )));
+    }
+    let decoded;
+    let vector = if cfg!(target_endian = "little") {
+        if let Ok(vector) = bytemuck::try_cast_slice::<u8, f32>(bytes) {
+            vector
+        } else {
+            decoded = bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
+                .collect::<Vec<_>>();
+            &decoded
         }
-        Ok(bytes
+    } else {
+        decoded = bytes
             .as_chunks::<4>()
             .0
             .iter()
-            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .collect())
+            .map(|b| f32::from_le_bytes(*b))
+            .collect::<Vec<_>>();
+        &decoded
+    };
+    if vector.iter().any(|value| !value.is_finite()) {
+        return Err(Error::Invalid(format!("non-finite vector for node {id}")));
     }
+    Ok(visit(vector))
 }
 
 impl provider::DataProvider for Provider {
@@ -173,36 +273,57 @@ impl DistanceFunction<&[f32], &[f32]> for Distance {
         reason = "DiskANN distances are f32; clamp finite f64 accumulation"
     )]
     fn evaluate_similarity(&self, left: &[f32], right: &[f32]) -> f32 {
-        let mut dot = 0.0_f64;
-        let mut left_norm = 0.0_f64;
-        let mut right_norm = 0.0_f64;
-        let mut squared = 0.0_f64;
-        for (&x, &y) in left.iter().zip(right) {
-            let (x, y) = (f64::from(x), f64::from(y));
-            dot += x * y;
-            left_norm += x * x;
-            right_norm += y * y;
-            squared += (x - y) * (x - y);
-        }
         let value = match self {
             Self::Cosine => {
-                let norm = (left_norm * right_norm).sqrt();
-                if norm == 0.0 {
-                    1.0
-                } else {
-                    1.0 - (dot / norm).clamp(-1.0, 1.0)
-                }
+                let dot = sum_pairs(left, right, |x, y| x * y);
+                return cosine_distance(
+                    dot,
+                    sum_pairs(left, left, |x, y| x * y),
+                    sum_pairs(right, right, |x, y| x * y),
+                );
             }
-            Self::DotProduct => -dot,
-            Self::Euclidean => squared,
+            Self::DotProduct => -sum_pairs(left, right, |x, y| x * y),
+            Self::Euclidean => sum_pairs(left, right, |x, y| (x - y) * (x - y)),
         };
         value.clamp(-f64::from(f32::MAX), f64::from(f32::MAX)) as f32
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "normalized cosine distance is finite and within 0..=2"
+)]
+fn cosine_distance(dot: f64, left_norm: f64, right_norm: f64) -> f32 {
+    let norm = (left_norm * right_norm).sqrt();
+    if norm == 0.0 {
+        1.0
+    } else {
+        (1.0 - (dot / norm).clamp(-1.0, 1.0)) as f32
+    }
+}
+
+// Independent f64 accumulators let the compiler vectorize the reduction while
+// retaining finite-input overflow protection, including on non-SIMD platforms.
+fn sum_pairs(left: &[f32], right: &[f32], operation: impl Fn(f64, f64) -> f64) -> f64 {
+    let (left, left_tail) = left.as_chunks::<4>();
+    let (right, right_tail) = right.as_chunks::<4>();
+    let mut sums = [0.0; 4];
+    for (left, right) in left.iter().zip(right) {
+        for lane in 0..4 {
+            sums[lane] += operation(f64::from(left[lane]), f64::from(right[lane]));
+        }
+    }
+    let mut sum = sums.into_iter().sum::<f64>();
+    for (&left, &right) in left_tail.iter().zip(right_tail) {
+        sum += operation(f64::from(left), f64::from(right));
+    }
+    sum
+}
+
 pub(super) struct Accessor<'a> {
     provider: &'a Provider,
     query: &'a [f32],
+    query_norm: f64,
 }
 
 impl provider::HasId for Accessor<'_> {
@@ -221,8 +342,7 @@ impl glue::SearchAccessor for Accessor<'_> {
         visit(
             0,
             self.provider
-                .distance
-                .evaluate_similarity(self.query, &self.provider.vector(0)?),
+                .query_distance(0, self.query, self.query_norm)?,
         );
         Ok(())
     }
@@ -244,8 +364,7 @@ impl glue::SearchAccessor for Accessor<'_> {
                     visit(
                         neighbor,
                         self.provider
-                            .distance
-                            .evaluate_similarity(self.query, &self.provider.vector(neighbor)?),
+                            .query_distance(neighbor, self.query, self.query_norm)?,
                     );
                 }
             }
@@ -254,7 +373,26 @@ impl glue::SearchAccessor for Accessor<'_> {
     }
 }
 
-type WorkingSet = workingset::Map<u32, Box<[f32]>, workingset::map::Ref<[f32]>>;
+pub(super) struct PreparedVector {
+    values: Box<[f32]>,
+    norm: f64,
+}
+
+impl DistanceFunction<&PreparedVector, &PreparedVector> for Distance {
+    fn evaluate_similarity(&self, left: &PreparedVector, right: &PreparedVector) -> f32 {
+        if *self == Self::Cosine {
+            cosine_distance(
+                sum_pairs(&left.values, &right.values, |x, y| x * y),
+                left.norm,
+                right.norm,
+            )
+        } else {
+            self.evaluate_similarity(&*left.values, &*right.values)
+        }
+    }
+}
+
+type WorkingSet = workingset::Map<u32, Box<PreparedVector>, workingset::map::Ref<PreparedVector>>;
 
 pub(super) struct Prune<'a> {
     provider: &'a Provider,
@@ -266,9 +404,9 @@ impl provider::HasId for Prune<'_> {
 }
 
 impl glue::PruneAccessor for Prune<'_> {
-    type ElementRef<'a> = &'a [f32];
+    type ElementRef<'a> = &'a PreparedVector;
     type View<'a>
-        = workingset::map::View<'a, u32, Box<[f32]>, workingset::map::Ref<[f32]>>
+        = workingset::map::View<'a, u32, Box<PreparedVector>, workingset::map::Ref<PreparedVector>>
     where
         Self: 'a;
     type Distance<'a>
@@ -284,9 +422,16 @@ impl glue::PruneAccessor for Prune<'_> {
     where
         I: ExactSizeIterator<Item = u32> + Clone + Send + Sync,
     {
-        let view = self
-            .set
-            .fill(ids, |id| self.provider.vector(id).map(Some))?;
+        let view = self.set.fill(ids, |id| {
+            self.provider.vector(id).map(|values| {
+                // Pruning compares each candidate repeatedly. Keep only this
+                // bounded working set's norms, never a corpus-wide vector cache.
+                Some(Box::new(PreparedVector {
+                    norm: self.provider.norm(&values),
+                    values,
+                }))
+            })
+        })?;
         Ok((view, self.provider.distance))
     }
 
@@ -308,7 +453,11 @@ impl<'a> glue::SearchStrategy<'a, Provider, &'a [f32]> for Strategy {
         _: &'a DefaultContext,
         query: &'a [f32],
     ) -> Result<Accessor<'a>> {
-        Ok(Accessor { provider, query })
+        Ok(Accessor {
+            provider,
+            query,
+            query_norm: provider.norm(query),
+        })
     }
 }
 
@@ -340,10 +489,81 @@ impl<'a> glue::InsertStrategy<'a, Provider, &'a [f32]> for Strategy {
         _: &'a DefaultContext,
         query: &'a [f32],
     ) -> Result<Accessor<'a>> {
-        Ok(Accessor { provider, query })
+        Ok(Accessor {
+            provider,
+            query,
+            query_norm: provider.norm(query),
+        })
     }
 
     fn prune_strategy(&self) -> Self {
         *self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stored_vectors_decode_independently_of_alignment_and_reject_corruption() {
+        let expected = [0.25_f32, -3.5, f32::MAX];
+        let encoded = encode_vector(&expected);
+        let mut unaligned = vec![0_u8; encoded.len() + 1];
+        unaligned[1..].copy_from_slice(&encoded);
+        for bytes in [&encoded[..], &unaligned[1..]] {
+            let decoded = with_vector_bytes(bytes, 3, 1, <[f32]>::to_vec).expect("valid vector");
+            assert_eq!(decoded, expected);
+        }
+        assert!(with_vector_bytes(&encoded[..11], 3, 1, |_| ()).is_err());
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(with_vector_bytes(&value.to_le_bytes(), 1, 1, |_| ()).is_err());
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "these reductions have exact representable results or clamp to exact endpoints"
+    )]
+    fn distance_reductions_handle_tail_elements_zero_and_extreme_vectors() {
+        for length in [1, 3, 4, 7, 768] {
+            let a = vec![f32::MAX; length];
+            let b = vec![-f32::MAX; length];
+            assert_eq!(
+                Distance::Cosine.evaluate_similarity(a.as_slice(), a.as_slice()),
+                0.0
+            );
+            assert_eq!(
+                Distance::Cosine.evaluate_similarity(a.as_slice(), b.as_slice()),
+                2.0
+            );
+            assert_eq!(
+                Distance::DotProduct.evaluate_similarity(a.as_slice(), b.as_slice()),
+                f32::MAX
+            );
+            assert_eq!(
+                Distance::Euclidean.evaluate_similarity(a.as_slice(), b.as_slice()),
+                f32::MAX
+            );
+            assert_eq!(
+                Distance::Cosine.evaluate_similarity(vec![0.0; length].as_slice(), a.as_slice()),
+                1.0
+            );
+        }
+        let left = [1.0, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0];
+        let right = [7.0, -6.0, 5.0, -4.0, 3.0, -2.0, 1.0];
+        assert_eq!(
+            Distance::DotProduct.evaluate_similarity(left.as_slice(), right.as_slice()),
+            -84.0
+        );
+        assert_eq!(
+            Distance::Euclidean.evaluate_similarity(left.as_slice(), right.as_slice()),
+            112.0
+        );
+        assert!(
+            (Distance::Cosine.evaluate_similarity(left.as_slice(), right.as_slice()) - 0.4).abs()
+                < 1e-6
+        );
     }
 }
