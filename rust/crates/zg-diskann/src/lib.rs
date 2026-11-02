@@ -152,7 +152,9 @@ impl VectorIndex {
         connection.execute_batch(if read_only {
             "PRAGMA cache_size = -256; PRAGMA mmap_size = 16777216;"
         } else {
-            "PRAGMA cache_size = -2048; PRAGMA mmap_size = 16777216;"
+            // Writers already retain dirty pages. Avoid additionally keeping
+            // mapped read pages resident throughout graph construction.
+            "PRAGMA cache_size = -2048; PRAGMA mmap_size = 0;"
         })?;
         if !read_only {
             connection.execute_batch("PRAGMA journal_mode = DELETE; PRAGMA synchronous = FULL;")?;
@@ -230,8 +232,10 @@ impl VectorIndex {
                 ))
                 .map_err(graph_error)?;
                 let connection = provider.connection()?;
+                // Match the partial live_document index instead of scanning
+                // every stored vector, including historical replacements.
                 connection.execute(
-                    "UPDATE nodes SET live = 0 WHERE document_id = ?1",
+                    "UPDATE nodes SET live = 0 WHERE document_id = ?1 AND live = 1",
                     [record.document_id],
                 )?;
                 connection.execute(
