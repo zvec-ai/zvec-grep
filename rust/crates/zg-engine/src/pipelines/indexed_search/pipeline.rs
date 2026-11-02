@@ -21,14 +21,13 @@ use crate::{
         Content, Entity, EntityFragment, EntityId, FileId, FileRecord,
         model::{EmbeddingModelInfo, EmbeddingPurpose},
     },
-    file_selection::GlobMatcher,
     models::{EmbeddingOptions, ModelError, ModelRuntimeLease},
     storage::types::{StoragePathFilter, StorageSearchFilter, StorageSearchHit, StoredSearchData},
 };
 
 use super::{
     format_filter::{compile_format_filter, matches_file_name},
-    path_filter::{all, compile_path_filter},
+    path_filter::{all, resolve_glob_filter},
 };
 
 const DEFAULT_LIMIT: usize = 7;
@@ -708,53 +707,51 @@ fn search_plan_to_storage_filter(
     plan: &SearchPlan,
     storage: &dyn SearchStorage,
 ) -> Result<Option<StorageSearchFilter>, EngineError> {
-    // Compile even when pushdown is available so invalid rules have one error path.
-    let matcher = GlobMatcher::new(workspace_root, &plan.filter.globs)?;
     let types = crate::file_selection::file_types(
         &plan.filter.file_types,
         &plan.filter.excluded_file_types,
     )?;
     let has_types =
         !plan.filter.file_types.is_empty() || !plan.filter.excluded_file_types.is_empty();
-    let has_globs = !plan.filter.globs.is_empty();
-    let glob_path = if has_globs {
-        compile_path_filter(&plan.filter.globs, storage)?
-    } else {
-        None
-    };
     let format_path = compile_format_filter(&plan.filter);
     let push_formats = format_path.is_some() && !storage.has_non_unicode_file_names()?;
     let residual_format = (!push_formats).then_some(format_path.as_ref()).flatten();
     let needs_attributes = plan.filter.modified_after_epoch_ms.is_some()
         || plan.filter.modified_before_epoch_ms.is_some();
-    let file_ids = if needs_attributes {
-        let attributes = storage.list_file_attributes()?;
-        Some(resolve_filtered_paths(
-            plan,
-            &matcher,
-            &types,
-            residual_format,
-            attributes.iter().map(|file| {
-                (
-                    file.id,
-                    file.relative_path.as_path(),
-                    file.modified_epoch_ms,
-                )
-            }),
-        ))
-    } else if has_types || residual_format.is_some() || (has_globs && glob_path.is_none()) {
-        let paths = storage.list_file_paths()?;
-        Some(resolve_filtered_paths(
-            plan,
-            &matcher,
-            &types,
-            residual_format,
-            paths.iter().map(|(id, path)| (*id, path.as_path(), None)),
-        ))
-    } else {
-        None
-    };
-    let path = match (glob_path, format_path.filter(|_| push_formats)) {
+    let glob_filter = resolve_glob_filter(
+        workspace_root,
+        &plan.filter.globs,
+        || storage.has_non_unicode_file_names(),
+        needs_attributes || has_types || residual_format.is_some(),
+        || {
+            if needs_attributes {
+                Ok(storage
+                    .list_file_attributes()?
+                    .into_iter()
+                    .filter(|file| {
+                        matches_file_filters(
+                            &plan.filter,
+                            &types,
+                            residual_format,
+                            &file.relative_path,
+                            file.modified_epoch_ms,
+                        )
+                    })
+                    .map(|file| (file.id, file.relative_path))
+                    .collect())
+            } else {
+                Ok(storage
+                    .list_file_paths()?
+                    .into_iter()
+                    .filter(|(_, path)| {
+                        matches_file_filters(&plan.filter, &types, residual_format, path, None)
+                    })
+                    .collect())
+            }
+        },
+    )?;
+    let file_ids = glob_filter.file_ids;
+    let path = match (glob_filter.path, format_path.filter(|_| push_formats)) {
         (Some(glob), Some(formats)) => Some(all(vec![glob, formats])),
         (glob, formats) => glob.or(formats),
     };
@@ -772,34 +769,25 @@ fn search_plan_to_storage_filter(
     }
 }
 
-fn resolve_filtered_paths<'a>(
-    plan: &SearchPlan,
-    matcher: &GlobMatcher,
+fn matches_file_filters(
+    filter: &QueryFilter,
     types: &ignore::types::Types,
     format: Option<&StoragePathFilter>,
-    files: impl IntoIterator<Item = (FileId, &'a Path, Option<u64>)>,
-) -> Vec<FileId> {
-    files
-        .into_iter()
-        .filter(|(_, relative, modified)| {
-            matcher.matches_path(relative)
-                && !types.matched(relative, false).is_ignore()
-                && plan
-                    .filter
-                    .modified_after_epoch_ms
-                    .is_none_or(|after| modified.is_some_and(|modified| modified >= after))
-                && plan
-                    .filter
-                    .modified_before_epoch_ms
-                    .is_none_or(|before| modified.is_some_and(|modified| modified <= before))
-                && format.is_none_or(|predicate| {
-                    relative
-                        .file_name()
-                        .is_some_and(|name| matches_file_name(predicate, name))
-                })
+    relative: &Path,
+    modified: Option<u64>,
+) -> bool {
+    !types.matched(relative, false).is_ignore()
+        && filter
+            .modified_after_epoch_ms
+            .is_none_or(|after| modified.is_some_and(|modified| modified >= after))
+        && filter
+            .modified_before_epoch_ms
+            .is_none_or(|before| modified.is_some_and(|modified| modified <= before))
+        && format.is_none_or(|predicate| {
+            relative
+                .file_name()
+                .is_some_and(|name| matches_file_name(predicate, name))
         })
-        .map(|(id, _, _)| id)
-        .collect()
 }
 
 #[cfg(test)]
@@ -808,24 +796,26 @@ fn resolve_filtered_file_ids(
     plan: &SearchPlan,
     files: &[FileRecord],
 ) -> Result<Vec<FileId>, EngineError> {
-    let matcher = GlobMatcher::new(workspace_root, &plan.filter.globs)?;
+    let matcher = crate::file_selection::GlobMatcher::new(workspace_root, &plan.filter.globs)?;
     let format = compile_format_filter(&plan.filter);
-    Ok(resolve_filtered_paths(
-        plan,
-        &matcher,
-        &crate::file_selection::file_types(
-            &plan.filter.file_types,
-            &plan.filter.excluded_file_types,
-        )?,
-        format.as_ref(),
-        files.iter().map(|file| {
-            (
-                file.id(),
-                file.relative_path().as_path(),
-                file.snapshot().modified_epoch_ms,
-            )
-        }),
-    ))
+    let types = crate::file_selection::file_types(
+        &plan.filter.file_types,
+        &plan.filter.excluded_file_types,
+    )?;
+    Ok(files
+        .iter()
+        .filter(|file| {
+            matcher.matches_path(file.relative_path().as_path())
+                && matches_file_filters(
+                    &plan.filter,
+                    &types,
+                    format.as_ref(),
+                    file.relative_path().as_path(),
+                    file.snapshot().modified_epoch_ms,
+                )
+        })
+        .map(FileRecord::id)
+        .collect())
 }
 
 fn filter_matches_no_files(filter: Option<&StorageSearchFilter>) -> bool {
@@ -864,7 +854,9 @@ mod tests {
             FileIndexStatus, FileRecord, FileSnapshot, FragmentId, GlobRule, Range, TextRange,
             model::{EmbeddingMetric, EmbeddingModelInfo},
         },
+        file_selection::GlobMatcher,
         models::ModelError,
+        pipelines::indexed_search::path_filter::compile_path_filter,
         storage::types::{
             StoragePathFilter, StorageSearchFilter, StorageSearchHit, StorageSearchPath,
             StoredEntity, StoredFileAttributes, StoredSearchData,
@@ -872,8 +864,8 @@ mod tests {
     };
 
     use super::{
-        GlobMatcher, MatchedBy, QueryFilter, SearchEmbeddingRuntime, SearchPlan, SearchRoute,
-        SearchRouteMode, SearchStorage, compile_path_filter, search_workspace_index,
+        MatchedBy, QueryFilter, SearchEmbeddingRuntime, SearchPlan, SearchRoute, SearchRouteMode,
+        SearchStorage, search_workspace_index,
     };
 
     struct FixtureModel {
@@ -1991,9 +1983,10 @@ mod tests {
             };
             let matcher =
                 GlobMatcher::new(Path::new("/workspace"), &filter.globs).expect("valid fixture");
-            let predicate = compile_path_filter(&filter.globs, &storage)
-                .expect("valid fixture")
-                .expect("pushdown");
+            let predicate =
+                compile_path_filter(&filter.globs, || storage.has_non_unicode_file_names())
+                    .expect("valid fixture")
+                    .expect("pushdown");
             for path in paths {
                 assert_eq!(
                     predicate_matches(&predicate, Path::new(path)),
@@ -2052,9 +2045,10 @@ mod tests {
                         ..QueryFilter::default()
                     };
                     let matcher = GlobMatcher::new(root.path(), &filter.globs).expect("globs");
-                    let predicate = compile_path_filter(&filter.globs, &storage)
-                        .expect("planner")
-                        .expect("pushdown");
+                    let predicate =
+                        compile_path_filter(&filter.globs, || storage.has_non_unicode_file_names())
+                            .expect("planner")
+                            .expect("pushdown");
                     let mut overrides = ignore::overrides::OverrideBuilder::new(root.path());
                     for pattern in &patterns {
                         overrides.add(pattern).expect("override");
@@ -2144,9 +2138,10 @@ mod tests {
             let mut plan = plan(Vec::new());
             plan.filter.globs = glob_rules(&patterns);
             assert!(
-                compile_path_filter(&plan.filter.globs, &pushdown_storage())
-                    .expect("valid fixture")
-                    .is_none(),
+                compile_path_filter(&plan.filter.globs, || pushdown_storage()
+                    .has_non_unicode_file_names())
+                .expect("valid fixture")
+                .is_none(),
                 "{patterns:?}"
             );
             let actual = super::resolve_filtered_file_ids(Path::new("/workspace"), &plan, &files)
@@ -2179,9 +2174,10 @@ mod tests {
             GlobMatcher::new(Path::new("/workspace"), &filter.globs).expect("valid fixture");
         assert!(insensitive.matches_path(Path::new("src/main.rs")));
         assert!(
-            compile_path_filter(&filter.globs, &pushdown_storage())
-                .expect("planner")
-                .is_none()
+            compile_path_filter(&filter.globs, || pushdown_storage()
+                .has_non_unicode_file_names())
+            .expect("planner")
+            .is_none()
         );
 
         filter.globs.extend(glob_rules(&["!main.rs"]));
@@ -2215,13 +2211,14 @@ mod tests {
         storage.files = vec![source.clone()];
         let name_patterns = glob_rules(&["*.rs"]);
         assert!(
-            compile_path_filter(&name_patterns, &storage)
+            compile_path_filter(&name_patterns, || storage.has_non_unicode_file_names())
                 .expect("planner")
                 .is_none()
         );
         let directory_patterns = glob_rules(&["src/**"]);
         assert_eq!(
-            compile_path_filter(&directory_patterns, &storage).expect("planner"),
+            compile_path_filter(&directory_patterns, || storage.has_non_unicode_file_names())
+                .expect("planner"),
             Some(StoragePathFilter::Directory(
                 crate::domain::SourcePath::new("src").expect("directory")
             ))
