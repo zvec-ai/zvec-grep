@@ -2,6 +2,16 @@
 
 本轮比较四组：baseline × qwen3.7-max / qwen3.8-max，以及 zg × 两个模型。
 
+| 执行模型（均包含 baseline / zg） | 正式运行 |
+| --- | --- |
+| qwen3.7-max | [41458924991](https://github.com/zvec-ai/zvec-grep/actions/runs/41458924991) |
+| qwen3.8-max | [41458927671](https://github.com/zvec-ai/zvec-grep/actions/runs/41458927671) |
+
+两个运行均固定 harness `e0c10be65c77c8fef46984f775da3cd369175208`。
+Docker、容器挂载和实际模型请求已通过 self-hosted runner 预检；
+本地 195 项测试通过（2 项依赖真实 OpenCode 的测试由 CI 执行），
+20 题锁定输入与参考答案隔离验证通过。此处仅记录启动信息，成绩以运行产物为准。
+
 | 配置 | 本轮值 |
 | --- | --- |
 | Runner | `zvec-retrieval-benchmark`，同一台机器串行执行 |
