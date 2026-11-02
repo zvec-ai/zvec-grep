@@ -2710,8 +2710,16 @@ mod tests {
                 "1",
                 "symbol must contain",
             ),
-            ("::".to_owned(), "1", "symbol name must not be empty"),
-            ("Foo.".to_owned(), "1", "symbol name must not be empty"),
+            (
+                "::".to_owned(),
+                "1",
+                "expected a symbol name after '::' or '.', e.g. 'Foo::bar'",
+            ),
+            (
+                "Foo.".to_owned(),
+                "1",
+                "expected a symbol name after '::' or '.', e.g. 'Foo::bar'",
+            ),
             (
                 "target".to_owned(),
                 "0",
