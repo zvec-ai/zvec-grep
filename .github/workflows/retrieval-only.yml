@@ -22,6 +22,14 @@ on:
         required: false
   workflow_dispatch:
     inputs:
+      benchmark_target:
+        description: Published Node 0.2.2 vs Rust canary on the fixed runner, or a Rust source candidate
+        required: true
+        default: node022-rust-canary
+        type: choice
+        options:
+          - node022-rust-canary
+          - rust-source
       candidate_ref:
         description: Candidate ref (main resolves from zvec-ai/zvec-grep; other refs resolve from this fork)
         required: true
@@ -90,6 +98,7 @@ jobs:
         run: node --test benchmarks/zg-retrieval/test/*.test.mjs
 
   package-candidate:
+    if: inputs.benchmark_target != 'node022-rust-canary'
     name: build Rust retrieval candidate
     needs: [authorize, quality-contract]
     runs-on: ubuntu-24.04
@@ -117,6 +126,12 @@ jobs:
           if-no-files-found: error
           overwrite: true
           retention-days: 7
+
+  npm-comparison:
+    name: Node 0.2.2 vs Rust canary on fixed hardware
+    if: github.event_name == 'workflow_dispatch' && inputs.benchmark_target == 'node022-rust-canary'
+    needs: [authorize, quality-contract]
+    uses: ./.github/workflows/retrieval-npm-self-hosted.yml
 
   sweqa:
     name: SWE-QA20 (20 questions)
@@ -422,7 +437,7 @@ jobs:
     name: Retrieval results
     env:
       RETRIEVAL_EMBEDDING: ${{ inputs.embedding }}
-    if: ${{ always() && needs.authorize.result == 'success' }}
+    if: ${{ always() && needs.authorize.result == 'success' && inputs.benchmark_target != 'node022-rust-canary' }}
     needs:
       [
         authorize,

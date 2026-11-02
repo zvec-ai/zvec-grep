@@ -69,12 +69,13 @@ test("Retrieval-only retains its reusable and manual candidate/embedding inputs"
   assert.match(dispatch, /^ {8}type: choice$/m);
   assert.match(dispatch, /^ {10}- local$/m);
   assert.match(dispatch, /^ {10}- remote$/m);
-  assert.equal((dispatch.match(/^ {6}[a-z_]+:$/gm) ?? []).length, 2);
+  assert.equal((dispatch.match(/^ {6}[a-z_]+:$/gm) ?? []).length, 3);
   const files = await readdir(new URL(".github/workflows/", repository));
   assert.deepEqual(
     files.filter((file) => /^retrieval.*\.ya?ml$/.test(file)).sort(),
     [
       "retrieval-comparison.yml",
+      "retrieval-npm-self-hosted.yml",
       "retrieval-only.yml",
       "retrieval-pr-comment.yml",
       "retrieval-pr.yml",
@@ -84,6 +85,7 @@ test("Retrieval-only retains its reusable and manual candidate/embedding inputs"
     "authorize",
     "quality-contract",
     "package-candidate",
+    "npm-comparison",
     "sweqa",
     "beir",
     "duretrieval",
@@ -220,7 +222,7 @@ test("the four suites run in independent jobs using one candidate package", asyn
     new Set(lock.repositories.map((repo) => repo.repository)).size,
     11,
   );
-  assert.equal(Object.keys(jobs).length, 8);
+  assert.equal(Object.keys(jobs).length, 9);
   assert.doesNotMatch(workflow, /strategy:|fromJSON\(/);
   const runner = steps(jobs.sweqa).find((entry) =>
     entry.includes("node benchmarks/zg-retrieval/run.mjs"),
@@ -318,9 +320,13 @@ test("the selected source is built from rust/ and exact-commit package caching b
 });
 
 test("every independently rerunnable job checks benchmark access before doing work", () => {
-  assert.equal(Object.keys(jobs).length, 8);
+  assert.equal(Object.keys(jobs).length, 9);
   assert.ok(jobs.results && jobs.sweqa && jobs.authorize);
   for (const [name, job] of Object.entries(jobs)) {
+    if (name === "npm-comparison") {
+      assert.match(job, /uses: \.\/\.github\/workflows\/retrieval-npm-self-hosted.yml/);
+      continue; // The called workflow checks both actors before setup or npm.
+    }
     const entries = steps(job);
     assert.match(entries[0], /uses: actions\/checkout@/, `${name}: checkout`);
     assert.match(

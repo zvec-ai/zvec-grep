@@ -135,6 +135,8 @@ test("comparison recomputes only the five quality metrics and both operational m
     latency_ms_mean: 50,
     latency_ms_p50: 50,
     latency_sample_count: 10,
+    latency_ms_p95: 50,
+    latency_ms_p99: 50,
     output_bytes_mean: 1024,
     output_sample_count: 2,
   });

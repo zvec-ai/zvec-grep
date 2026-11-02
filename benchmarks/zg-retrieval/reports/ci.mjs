@@ -6,6 +6,7 @@ import { loadSuite, readJson, writeJson } from "../core/lib.mjs";
 import { summarizeMeasurements } from "../metrics/measurements.mjs";
 import { summarizeNdcg } from "../metrics/summary.mjs";
 import { validateZgReport, ZG_MODES } from "./validation.mjs";
+import { markdownPerformance, summarizePerformance } from "./performance.mjs";
 
 export const QUALITY_METRICS = Object.freeze([
   "file_hit_at_1",
@@ -210,6 +211,7 @@ export async function buildCiSummary({
         errors.push(`${job}: ${jobResults[job]?.result ?? "missing job"}`);
   return {
     schema_version: 5,
+    runtime: zg?.runtime ?? "rust-native",
     status: errors.length ? "failed" : "success",
     model: suite.protocol.model,
     preview: "mcp-default",
@@ -221,6 +223,11 @@ export async function buildCiSummary({
       commit: candidateCommit,
     },
     rows,
+    performance: Array.isArray(zg?.repositories)
+      ? summarizePerformance(
+          zg.repositories.map((manifest) => manifest?.performance ?? {}),
+        )
+      : null,
     tasks,
     failed_tasks: failures,
     errors,
@@ -271,6 +278,7 @@ export function markdownCiSummary(result) {
           `- ${cell(row.label)}: ${row.measurements.output_sample_count} output samples; ${row.measurements.latency_sample_count} latency samples.`,
       ),
   );
+  lines.push("", markdownPerformance(result.performance));
   if (result.tasks?.length) {
     lines.push(
       "",
@@ -328,7 +336,19 @@ export function markdownCiSummary(result) {
   );
   if (result.run_url)
     lines.push("", `[Open this run and its artifacts](${result.run_url})`);
-  return `${lines.join("\n")}\n`;
+  const text = `${lines.join("\n")}\n`;
+  return result.runtime === "node-0.2.2"
+    ? text
+        .replaceAll(
+          "Rust MCP default presentation",
+          "Node.js 0.2.2 MCP default presentation",
+        )
+        .replaceAll(
+          "Rust public MCP default presentation",
+          "Node.js 0.2.2 public MCP default presentation",
+        )
+        .replace("Rust candidate:", "Node.js 0.2.2 candidate:")
+    : text;
 }
 
 export async function main() {
