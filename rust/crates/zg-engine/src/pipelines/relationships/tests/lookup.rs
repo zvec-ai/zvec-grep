@@ -73,7 +73,7 @@ async fn common_names_are_bounded_after_scope_filtering_without_fts_fallback() {
         .map(|line| {
             (
                 "new",
-                Some(if line <= 5 { "Other" } else { "Rest" }),
+                Some(if line <= 10 { "Other" } else { "Rest" }),
                 line,
                 "fn new() {}",
             )
@@ -104,7 +104,7 @@ async fn common_names_are_bounded_after_scope_filtering_without_fts_fallback() {
         "Foo::helper"
     );
     let others = fixture.callers("Other::new").await.matches;
-    assert_eq!(others.len(), 5);
+    assert_eq!(others.len(), 10);
     assert!(others.iter().all(|group| group.symbol.name == "Other::new"));
     let error = engine
         .callees(RelationshipOptions {
@@ -114,7 +114,7 @@ async fn common_names_are_bounded_after_scope_filtering_without_fts_fallback() {
         .await
         .expect_err("too many definitions even with a small edge limit");
     assert_eq!(error.code(), EngineError::INVALID_ARGUMENT);
-    assert!(error.message().contains("more than 5 indexed definitions"));
+    assert!(error.message().contains("more than 10 indexed definitions"));
     let suggestions = fixture.callers("MissingScope::new").await;
     assert!(suggestions.matches.is_empty());
     assert_eq!(suggestions.suggestions.len(), 5);

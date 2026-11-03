@@ -16,8 +16,7 @@ use crate::{
         SymbolRelationships,
     },
     domain::{
-        Entity, EntityId, EntityMetadata, FileEdge, FileId, FileIndexStatus, FileRecord,
-        GraphEdgeKind, Range,
+        Entity, EntityId, EntityMetadata, FileEdge, FileId, FileRecord, GraphEdgeKind, Range,
     },
     pipelines::indexed_search::path_filter::resolve_glob_filter,
     storage::{
@@ -145,7 +144,9 @@ fn collect_match(
     direction: Direction,
 ) -> EngineResult<Option<SymbolRelationships>> {
     let id = stored.entity.id();
-    let current = get_entities(storage, std::slice::from_ref(id))?.remove(id);
+    let current = get_entities(storage, std::slice::from_ref(id))?
+        .remove(id)
+        .filter(|current| current.file.index_status().is_indexed());
     // Entity IDs do not encode metadata or the containing file's revision.
     // Skip roots changed since selection rather than mix their old description
     // with newer edges. A later query can select the updated definition.
@@ -444,9 +445,6 @@ fn get_entities(
         .into_iter()
         .filter_map(|(id, entity)| {
             let file = files.get(&entity.file_id())?;
-            if !matches!(file.index_status(), FileIndexStatus::Indexed { .. }) {
-                return None;
-            }
             Some((
                 id,
                 StoredEntity {
