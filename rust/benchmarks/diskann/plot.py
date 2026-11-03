@@ -20,7 +20,7 @@ plt.rcParams.update({"font.size": 11, "axes.unicode_minus": False,
 rows = json.loads(args.summary.read_text())
 assert {r["engine"] for r in rows} == {"hnsw", "diskann"}
 args.output.mkdir(parents=True, exist_ok=True)
-engines = [("hnsw", "HNSW FP16", "#57677e"), ("diskann", "DiskANN 优化版 FP32", "#008c7c")]
+engines = [("hnsw", "HNSW FP16", "#163B65"), ("diskann", "DiskANN 优化版 FP32", "#E87722")]
 
 def panel(ax, metric, title, unit, log=False):
     for engine, label, color in engines:
