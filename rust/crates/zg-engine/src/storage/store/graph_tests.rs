@@ -505,18 +505,8 @@ fn graph_and_entities_reopen_together_and_read_only_handles_reject_writes() {
     store.close().expect("close writer");
 
     let reader = open(temporary.path(), true);
-    let graph_reader = SqliteGraphStorage::open(
-        &temporary.path().join("graph/graph.sqlite"),
-        OpenMode::ReadOnly,
-    )
-    .expect("open graph reader");
     assert_eq!(stored_entities(&reader, &source.entities).len(), 2);
-    assert_eq!(
-        graph_reader
-            .neighborhood(source.entities[1].id().as_str(), Direction::In, None)
-            .expect("persisted edges"),
-        source.graph.edges
-    );
+    assert_eq!(callers(&reader, &source.entities[1]), source.graph.edges);
     assert!(
         reader
             .replace_file_with_graph(
@@ -528,14 +518,8 @@ fn graph_and_entities_reopen_together_and_read_only_handles_reject_writes() {
             .is_err()
     );
     assert!(reader.delete_file(source.file.id()).is_err());
-    assert_eq!(
-        graph_reader
-            .neighborhood(source.entities[1].id().as_str(), Direction::In, None)
-            .expect("persisted edges"),
-        source.graph.edges
-    );
+    assert_eq!(callers(&reader, &source.entities[1]), source.graph.edges);
     reader.close().expect("close reader");
-    graph_reader.close().expect("close graph reader");
     IndexStore::delete(temporary.path()).expect("delete combined storage");
     assert!(!temporary.path().join("graph/graph.sqlite").exists());
 }
@@ -553,8 +537,10 @@ fn missing_graph_is_created_without_rebuilding_indexed_files() {
     let reader = open(temporary.path(), true);
     assert!(
         reader
-            .read(|state| Ok(state.graph.is_none()))
-            .expect("optional graph")
+            .read(|state| {
+                Ok(matches!(&state.graph, Err(error) if error.code == EngineError::NOT_FOUND))
+            })
+            .expect("missing graph")
     );
     assert_eq!(stored_entities(&reader, &source.entities).len(), 1);
     assert!(
