@@ -34,9 +34,9 @@ use super::{
 use crate::domain::FileGraphResult;
 use crate::domain::model::EmbeddingModelInfo;
 
-mod read;
+mod read_view;
 mod resolution;
-pub(crate) use read::ReadView;
+pub(crate) use read_view::ReadView;
 
 type StoreRegistry = Mutex<HashMap<PathBuf, Weak<SharedStore>>>;
 static STORES: OnceLock<StoreRegistry> = OnceLock::new();
