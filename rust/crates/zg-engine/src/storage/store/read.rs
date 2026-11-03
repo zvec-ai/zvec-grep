@@ -23,16 +23,42 @@ impl IndexStore {
         &self,
         operation: impl FnOnce(&ReadView<'_>) -> EngineResult<T>,
     ) -> EngineResult<T> {
-        self.read(|state| operation(&ReadView { state }))
+        self.read(|state| {
+            operation(&ReadView {
+                state,
+                #[cfg(test)]
+                after_neighborhood: None,
+                #[cfg(test)]
+                entity_file_reads: None,
+            })
+        })
     }
 }
 
 /// Raw reads borrowing a locked store; selection and visibility belong to the caller.
 pub(crate) struct ReadView<'a> {
     state: &'a StoreState,
+    #[cfg(test)]
+    after_neighborhood: Option<&'a dyn Fn(&str)>,
+    #[cfg(test)]
+    entity_file_reads: Option<&'a std::cell::Cell<usize>>,
 }
 
 impl ReadView<'_> {
+    /// Observe reads inside the held snapshot for deterministic concurrency tests.
+    #[cfg(test)]
+    pub(crate) fn observe_reads<'a>(
+        &'a self,
+        after_neighborhood: &'a dyn Fn(&str),
+        entity_file_reads: &'a std::cell::Cell<usize>,
+    ) -> ReadView<'a> {
+        ReadView {
+            state: self.state,
+            after_neighborhood: Some(after_neighborhood),
+            entity_file_reads: Some(entity_file_reads),
+        }
+    }
+
     pub(crate) fn find_symbol_entity_ids(
         &self,
         name: &str,
@@ -65,6 +91,10 @@ impl ReadView<'_> {
         &self,
         ids: &[EntityId],
     ) -> EngineResult<HashMap<EntityId, FileId>> {
+        #[cfg(test)]
+        if let Some(reads) = self.entity_file_reads {
+            reads.set(reads.get() + 1);
+        }
         self.state.entities.fetch_file_ids(ids)
     }
 
@@ -86,12 +116,18 @@ impl ReadView<'_> {
         direction: Direction,
         kinds: Option<&[GraphEdgeKind]>,
     ) -> EngineResult<Vec<FileEdge>> {
-        self.state
+        let edges = self
+            .state
             .graph
             .as_ref()
             .map_err(|error| EngineError::from_report(error.clone()))?
             .neighborhood(id, direction, kinds)
-            .map_err(graph_error)
+            .map_err(graph_error)?;
+        #[cfg(test)]
+        if let Some(after_neighborhood) = self.after_neighborhood {
+            after_neighborhood(id);
+        }
+        Ok(edges)
     }
 
     pub(crate) fn search_fts(

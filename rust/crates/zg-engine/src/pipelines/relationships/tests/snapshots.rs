@@ -2,19 +2,12 @@
 use super::*;
 use crate::{
     EngineResult,
-    domain::{FileEdge, FileId, GraphEdgeKind},
-    pipelines::relationships::{
-        pipeline::query_symbols,
-        storage::{RelationshipRead, RelationshipStorage},
-    },
-    storage::{
-        graph::Direction,
-        types::{StorageSearchFilter, StorageSearchHit},
-    },
+    domain::FileId,
+    pipelines::relationships::{pipeline::query_symbols, storage::RelationshipStorage},
+    storage::{ReadView, graph::Direction},
 };
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
     sync::mpsc,
 };
 
@@ -51,72 +44,15 @@ impl RelationshipStorage for ObservedStore<'_> {
     }
     fn read_snapshot<T>(
         &self,
-        operation: impl FnOnce(&dyn RelationshipRead) -> EngineResult<T>,
+        operation: impl FnOnce(&ReadView<'_>) -> EngineResult<T>,
     ) -> EngineResult<T> {
         let result = self.store.read_snapshot(|view| {
-            operation(&ObservedRead {
-                view,
-                observer: self,
-            })
+            operation(&view.observe_reads(self.after_edges, &self.endpoint_batches))
         });
         let count = self.snapshots.get() + 1;
         self.snapshots.set(count);
         (self.after_snapshot)(count);
         result
-    }
-}
-
-struct ObservedRead<'a> {
-    view: &'a dyn RelationshipRead,
-    observer: &'a ObservedStore<'a>,
-}
-
-impl RelationshipRead for ObservedRead<'_> {
-    fn ensure_graph(&self) -> EngineResult<()> {
-        self.view.ensure_graph()
-    }
-    fn find_symbol_entity_ids(
-        &self,
-        name: &str,
-        filter: Option<&StorageSearchFilter>,
-    ) -> EngineResult<Vec<EntityId>> {
-        self.view.find_symbol_entity_ids(name, filter)
-    }
-    fn fetch_code_metadata(
-        &self,
-        ids: &[EntityId],
-    ) -> EngineResult<HashMap<EntityId, (FileId, CodeMetadata)>> {
-        self.view.fetch_code_metadata(ids)
-    }
-    fn fetch_entities(&self, ids: &[EntityId]) -> EngineResult<HashMap<EntityId, Entity>> {
-        self.view.fetch_entities(ids)
-    }
-    fn fetch_entity_file_ids(&self, ids: &[EntityId]) -> EngineResult<HashMap<EntityId, FileId>> {
-        self.observer
-            .endpoint_batches
-            .set(self.observer.endpoint_batches.get() + 1);
-        self.view.fetch_entity_file_ids(ids)
-    }
-    fn fetch_files(&self, ids: &[FileId]) -> EngineResult<HashMap<FileId, FileRecord>> {
-        self.view.fetch_files(ids)
-    }
-    fn graph_neighborhood(
-        &self,
-        id: &str,
-        direction: Direction,
-        kinds: Option<&[GraphEdgeKind]>,
-    ) -> EngineResult<Vec<FileEdge>> {
-        let edges = self.view.graph_neighborhood(id, direction, kinds)?;
-        (self.observer.after_edges)(id);
-        Ok(edges)
-    }
-    fn search_fts(
-        &self,
-        query: &str,
-        limit: usize,
-        filter: Option<&StorageSearchFilter>,
-    ) -> EngineResult<Vec<StorageSearchHit>> {
-        self.view.search_fts(query, limit, filter)
     }
 }
 

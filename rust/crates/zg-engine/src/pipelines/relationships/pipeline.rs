@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
 };
 
-use super::storage::{RelationshipRead, RelationshipStorage};
+use super::storage::RelationshipStorage;
 
 use tokio_util::sync::CancellationToken;
 
@@ -20,6 +20,7 @@ use crate::{
     },
     pipelines::indexed_search::path_filter::resolve_glob_filter,
     storage::{
+        ReadView,
         graph::Direction,
         types::{StorageSearchFilter, StoredEntity},
     },
@@ -138,7 +139,7 @@ fn check_cancelled(signal: Option<&CancellationToken>) -> EngineResult<()> {
 }
 
 fn collect_match(
-    storage: &dyn RelationshipRead,
+    storage: &ReadView<'_>,
     stored: &StoredEntity,
     limit: usize,
     direction: Direction,
@@ -229,7 +230,7 @@ fn describe(stored: &StoredEntity) -> Option<SymbolDefinition> {
 /// Bounded best-effort suggestions, never relationship query roots.
 /// Do not require the requested scope: a misspelled scope is a useful retry case.
 fn suggest_symbols(
-    storage: &dyn RelationshipRead,
+    storage: &ReadView<'_>,
     name: &str,
     filter: Option<&StorageSearchFilter>,
 ) -> EngineResult<Vec<StoredEntity>> {
@@ -273,7 +274,7 @@ fn suggest_symbols(
 
 /// Resolve bounded roots and reuse their checked file records while hydrating.
 pub(super) fn find_symbols(
-    storage: &dyn RelationshipRead,
+    storage: &ReadView<'_>,
     name: &str,
     scope: Option<&str>,
     filter: Option<&StorageSearchFilter>,
@@ -289,7 +290,7 @@ pub(super) fn find_symbols(
 
 /// Exact bare-name candidates for a wrong scope, bounded without an overflow error.
 fn suggest_exact_symbols(
-    storage: &dyn RelationshipRead,
+    storage: &ReadView<'_>,
     name: &str,
     filter: Option<&StorageSearchFilter>,
 ) -> EngineResult<Vec<StoredEntity>> {
@@ -298,7 +299,7 @@ fn suggest_exact_symbols(
 }
 
 fn select_symbols(
-    storage: &dyn RelationshipRead,
+    storage: &ReadView<'_>,
     name: &str,
     scope: Option<&str>,
     filter: Option<&StorageSearchFilter>,
@@ -345,7 +346,7 @@ fn select_symbols(
 }
 
 fn load_symbols(
-    storage: &dyn RelationshipRead,
+    storage: &ReadView<'_>,
     selected: Vec<(EntityId, FileRecord)>,
 ) -> EngineResult<Vec<StoredEntity>> {
     let ids: Vec<_> = selected.iter().map(|(id, _)| id.clone()).collect();
@@ -362,7 +363,7 @@ fn load_symbols(
 
 /// Filter resolved edges by endpoint visibility before applying the limit.
 fn neighborhood(
-    storage: &dyn RelationshipRead,
+    storage: &ReadView<'_>,
     id: &str,
     direction: Direction,
     kinds: Option<&[GraphEdgeKind]>,
@@ -430,7 +431,7 @@ fn suggestion_rank(query: &str, candidate: &str) -> Option<u8> {
 }
 
 fn get_entities(
-    storage: &dyn RelationshipRead,
+    storage: &ReadView<'_>,
     ids: &[EntityId],
 ) -> EngineResult<HashMap<EntityId, StoredEntity>> {
     let entities = storage.fetch_entities(ids)?;
@@ -457,7 +458,7 @@ fn get_entities(
 }
 
 fn endpoint_paths(
-    storage: &dyn RelationshipRead,
+    storage: &ReadView<'_>,
     ids: &[EntityId],
 ) -> EngineResult<HashMap<EntityId, PathBuf>> {
     let mut owners = storage.fetch_entity_file_ids(ids)?;
