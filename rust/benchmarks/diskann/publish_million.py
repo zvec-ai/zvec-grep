@@ -6,6 +6,7 @@ import json
 import math
 import pathlib
 import re
+import shutil
 import statistics
 
 parser = argparse.ArgumentParser()
@@ -40,6 +41,8 @@ if not args.completed_only:
     assert read(args.experiment / "status.json")["stage"] == "complete"
 configuration = read(args.experiment / "configuration.json")
 assert configuration["data_manifest_sha256"] == sha(args.data / "manifest.json")
+for name, digest in configuration["measurement_scripts_sha256"].items():
+    assert sha(pathlib.Path(__file__).with_name(name)) == digest, name
 runs = read(args.experiment / "results.json")
 summary = read(args.experiment / "summary.json")
 counts = sorted({row["count"] for row in runs})
@@ -47,7 +50,7 @@ assert counts and counts == requested_counts[:len(counts)]
 if not args.completed_only:
     assert counts == requested_counts
 assert len(runs) == len(counts) * 12 and len(summary) == len(counts) * 2
-selections, environments, evidence = [], [], []
+selections, environments, evidence, diagnostics = [], [], [], []
 
 def raw_recall(path, truth, count):
     stages = [json.loads(line) for line in path.read_text().splitlines()]
@@ -92,8 +95,14 @@ for count in counts:
             assert run["list_size"] == chosen[0]["effort"]
             assert math.isclose(run["qps"], 200000 / run["batch_ms"], rel_tol=1e-12)
             err = run_root / f"{stem}.stderr"
-            rss = int(re.search(r"(\d+)\s+maximum resident set size", err.read_text())[1]) / 2**20
+            stderr = err.read_text()
+            rss = int(re.search(r"(\d+)\s+maximum resident set size", stderr)[1]) / 2**20
             assert rss == run["rss_mib"]
+            elapsed = re.search(r"([\d.]+)\s+real\s+([\d.]+)\s+user\s+([\d.]+)\s+sys", stderr)
+            diagnostics.append(dict(count=count, engine=engine, repeat=repeat,
+                process_real_s=float(elapsed[1]), process_user_s=float(elapsed[2]), process_sys_s=float(elapsed[3]),
+                page_faults=int(re.search(r"(\d+)\s+page faults", stderr)[1]),
+                page_reclaims=int(re.search(r"(\d+)\s+page reclaims", stderr)[1])))
             evidence.append(dict(path=str(err.relative_to(args.experiment)), sha256=sha(err)))
         aggregate = [row for row in summary if row["count"] == count and row["engine"] == engine]
         assert len(aggregate) == 1
@@ -127,16 +136,22 @@ audit = dict(verified_test_runs=len(runs), verified_validation_trials=len(select
              ground_truth="recomputed exhaustive FP64 cosine on original FP32 prefixes",
              all_test_groups_reach_90_percent=all(row["recall_at_10_min"] >= .90 for row in summary))
 args.output.mkdir(parents=True, exist_ok=True)
-write("dataset.json", dataset)
-write("validation-dataset.json", validation)
+# Keep the exact bytes: the validation manifest refers to the dataset manifest's SHA256.
+shutil.copyfile(args.data / "manifest.json", args.output / "dataset.json")
+shutil.copyfile(args.data / "validation/manifest.json", args.output / "validation-dataset.json")
 write("runs.json", runs)
 write("summary.json", summary)
 write("selection.json", selection)
 write("build-audit.json", build_audit)
 write("audit.json", audit)
 write("raw-evidence.json", evidence)
+write("process-diagnostics.json", dict(
+    scope="entire process, including index open and warmup; not restricted to measured queries",
+    source="/usr/bin/time -l stderr; original file hashes are in raw-evidence.json",
+    records=diagnostics))
 write("environment.json", dict(
     implementation_commit="74c7d39", binary_sha256=configuration["binary_sha256"],
+    data_manifest_sha256=configuration["data_manifest_sha256"],
     builder_sha256=configuration["builder_sha256"], counts=counts,
     measurement_scripts_sha256=configuration["measurement_scripts_sha256"],
     query_precision={"hnsw":"FP16", "diskann":"FP16 rounded, widened to FP32"},
