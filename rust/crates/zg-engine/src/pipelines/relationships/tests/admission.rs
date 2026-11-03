@@ -157,32 +157,17 @@ async fn lock_timeouts_cancellation_and_closed_engines_reject_reads() {
 }
 
 #[tokio::test]
-async fn invalid_queries_fail_before_opening_a_workspace() {
+async fn invalid_query_fails_before_opening_a_workspace() {
     let directory = tempfile::tempdir().expect("unindexed workspace");
     let engine = ZvecGrep::new();
-    for (symbol, limit) in [
-        (String::new(), None),
-        ("   ".into(), None),
-        ("scope::".into(), None),
-        ("::".into(), None),
-        ("x".repeat(1025), None),
-        ("run".into(), Some(0)),
-    ] {
-        let options = RelationshipOptions {
+    let invalid = engine
+        .callers(RelationshipOptions {
             root: Some(directory.path().to_path_buf()),
-            symbol,
-            limit,
             ..RelationshipOptions::default()
-        };
-        assert_eq!(
-            engine
-                .callers(options.clone())
-                .await
-                .expect_err("invalid callers query")
-                .code(),
-            EngineError::INVALID_ARGUMENT,
-        );
-    }
+        })
+        .await
+        .expect_err("validate before looking for an index");
+    assert_eq!(invalid.code(), EngineError::INVALID_ARGUMENT);
     let missing = engine
         .callers(RelationshipOptions {
             root: Some(directory.path().to_path_buf()),

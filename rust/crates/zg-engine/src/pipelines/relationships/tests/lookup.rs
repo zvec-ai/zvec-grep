@@ -1,5 +1,25 @@
 use super::*;
 
+#[test]
+fn invalid_queries_fail_validation() {
+    for (symbol, limit) in [
+        (String::new(), None),
+        ("   ".into(), None),
+        ("scope::".into(), None),
+        ("::".into(), None),
+        ("x".repeat(1025), None),
+        ("run".into(), Some(0)),
+    ] {
+        let options = RelationshipOptions {
+            symbol,
+            limit,
+            ..RelationshipOptions::default()
+        };
+        let error = options.validate().expect_err("invalid query parameters");
+        assert_eq!(error.code(), EngineError::INVALID_ARGUMENT, "{options:?}");
+    }
+}
+
 #[tokio::test]
 async fn exact_definitions_keep_scopes_order_and_per_symbol_limits() {
     let fixture = Fixture::new();
