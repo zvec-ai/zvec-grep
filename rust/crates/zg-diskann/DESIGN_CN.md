@@ -4,7 +4,7 @@
 
 Rust 和 TypeScript 共用 `zg-diskann` 原生向量后端，使用 DiskANN 图搜索和 SQLite 持久化向量、图边。设计优先控制查询私有内存，保留增删改、过滤和显式重建语义。当前实现仍存在显著的查询吞吐量差距；内存收益与 QPS 必须结合召回率评估。
 
-本文描述已实现的设计，并单独列出后续性能工作。[测试报告](../../benchmarks/diskann/REPORT_CN.md)只比较 HNSW 与优化版 DiskANN。
+本文描述已实现的设计，并单独列出后续性能工作。[测试报告](../../benchmarks/diskann/REPORT_CN.md)只比较 HNSW 与 DiskANN。
 
 ## 目标与边界
 
