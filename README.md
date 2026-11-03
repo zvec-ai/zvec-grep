@@ -67,7 +67,7 @@ terminal, or let your agent use it for you.
 ### 1. Set up a sample bookshelf
 
 ```bash
-npm install -g @zvec/zvec-grep
+npm install -g @zvec/zvec-grep --allow-scripts=@zvec/zvec-grep
 
 mkdir zg-mystery && cd zg-mystery
 curl --retry 3 --retry-all-errors --progress-bar -fL \
