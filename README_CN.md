@@ -66,7 +66,7 @@
 ### 1. 准备示例书架
 
 ```bash
-npm install -g @zvec/zvec-grep
+npm install -g @zvec/zvec-grep --allow-scripts=@zvec/zvec-grep
 
 mkdir zg-mystery && cd zg-mystery
 curl --retry 3 --retry-all-errors --progress-bar -fL \

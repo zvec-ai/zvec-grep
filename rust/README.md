@@ -845,7 +845,8 @@ build policy above: no toolkit produces a CPU-only package. Use
 `npm run release:cpu` to explicitly produce a CPU-only package; CI supplies and
 audits a complete CUDA bundle before packaging the default x64 releases.
 
-Later add CUDA with `ZG_INSTALL_ACCELERATOR=cuda npm rebuild -g @zvec/zvec-grep`
+Later add CUDA with
+`ZG_INSTALL_ACCELERATOR=cuda npm rebuild -g @zvec/zvec-grep --allow-scripts=@zvec/zvec-grep`
 (omit `-g` for project-local installs). `ZG_PLUGIN_DIR` selects an absolute local
 artifact directory; `ZG_INSTALL_OFFLINE=1` prevents network access. Stop zg before
 adding plugins and restart any daemon afterwards. There is no `zg-setup` command
@@ -1077,8 +1078,8 @@ Supplemental license collections and SPDX SBOMs in [`npm/compliance/`](npm/compl
 are optional. Every release package includes the project `LICENSE`, and bundled
 upstream notices are preserved.
 Every publication uses `rust-canary`, letting users opt into Rust with
-`npm install --global @zvec/zvec-grep@rust-canary`. Six native runners then
-install only the meta package from the registry, test actual daemon IPC, and
+`npm install --global @zvec/zvec-grep@rust-canary --allow-scripts=@zvec/zvec-grep`.
+Six native runners then install only the meta package from the registry, test actual daemon IPC, and
 exercise update and rollback with a distinct previously published version.
 Selecting `latest` requests a separate promotion job that changes the default
 installation only after all registry checks pass.
