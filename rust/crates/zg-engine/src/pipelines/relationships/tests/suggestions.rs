@@ -170,7 +170,17 @@ async fn suggestions_use_definition_names_rank_similarity_and_count_distinct_def
                 .all(|s| s.get("edges").is_none() && s.get("truncated").is_none())
         );
         if let Some(candidate) = result.suggestions.first() {
-            let retried = fixture.callers(&candidate.name).await;
+            let retried = fixture
+                .engine
+                .callers(fixture.options(&candidate.name))
+                .await;
+            if candidate.name == "Foo::newBuilder" {
+                // Suggestions remain bounded even when retrying the name exceeds the definition cap.
+                let error = retried.expect_err("eight same-scope definitions exceed the cap");
+                assert_eq!(error.code(), EngineError::INVALID_ARGUMENT);
+                continue;
+            }
+            let retried = retried.expect("retry suggested definition");
             assert!(!retried.matches.is_empty());
             assert!(retried.suggestions.is_empty());
         }
