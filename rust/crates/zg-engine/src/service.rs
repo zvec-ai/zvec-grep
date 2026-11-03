@@ -69,11 +69,7 @@ impl EngineService {
         if options.rg {
             self.direct_search.context(options).await
         } else {
-            let cache = self
-                .read_sessions
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
+            let cache = self.read_session_cache();
             indexed_search::service::context(
                 &self.indexing,
                 &self.models,
@@ -83,6 +79,13 @@ impl EngineService {
             )
             .await
         }
+    }
+
+    fn read_session_cache(&self) -> Option<ReadSessionCache> {
+        self.read_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Creates or refreshes the workspace index.
