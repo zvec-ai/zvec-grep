@@ -985,6 +985,85 @@ mod tests {
     }
 
     #[test]
+    fn nested_calls_inside_receivers_reach_the_graph() {
+        // `factory().run()` spells its member on a call result: the callee text
+        // is not identifier-like, so no edge names `run`, but the receiver's
+        // own call is only reachable through the call node's subtree.
+        use super::{Parser, WalkContext, grammar, resolve_adapter};
+        use crate::domain::GraphEdgeKind;
+
+        let source = test_source(
+            FileFormat::Rust,
+            "chained_calls.rs",
+            concat!(
+                "struct Api;\n",
+                "fn factory() -> Api { Api }\n",
+                "impl Api { fn run(&self) {} }\n",
+                "fn caller() { factory().run(); }\n",
+            ),
+        );
+        let adapter = resolve_adapter(FileFormat::Rust).expect("rust adapter");
+        let language = grammar(FileFormat::Rust, false).expect("rust grammar");
+        let mut parser = Parser::new();
+        parser.set_language(&language).expect("grammar loads");
+        let tree = parser.parse(&source.text, None).expect("source parses");
+
+        let mut entities = Vec::new();
+        let mut graph_context = WalkContext::new();
+        super::walk_code_node(
+            tree.root_node(),
+            adapter,
+            source.text.as_bytes(),
+            &[],
+            &mut entities,
+            &mut graph_context,
+            FileFormat::Rust,
+        );
+
+        let calls: Vec<&str> = graph_context
+            .name_edges()
+            .iter()
+            .filter(|edge| edge.ref_kind == GraphEdgeKind::Calls)
+            .map(|edge| edge.ref_name.as_str())
+            .collect();
+        assert_eq!(
+            calls,
+            vec!["factory"],
+            "only the receiver's own call is a bindable name"
+        );
+    }
+
+    #[test]
+    fn nested_calls_stay_inside_their_owning_entity() {
+        // The container's scan skips member subtrees, so `outer(inner())`
+        // inside a method is claimed once — by the method — instead of being
+        // duplicated by the class that also encloses the site.
+        let source = test_source(
+            FileFormat::Java,
+            "Boundary.java",
+            "class A { void run() { outer(inner()); } }\n",
+        );
+        let graph = extract_for_indexing(&source, ChunkOptions::default())
+            .expect("extraction")
+            .graph
+            .expect("code sources carry a graph");
+        let mut calls: Vec<&str> = graph
+            .pending
+            .iter()
+            .filter(|edge| edge.ref_kind == crate::domain::GraphEdgeKind::Calls)
+            .map(|edge| edge.ref_name.as_str())
+            .collect();
+        calls.sort_unstable();
+        assert_eq!(
+            calls,
+            vec!["inner", "outer"],
+            "one owner per site: {:?}",
+            graph.pending
+        );
+        assert!(graph.resolved.is_empty(), "resolved: {:?}", graph.resolved);
+    }
+
+    #[test]
     fn type_scoped_member_names_do_not_bind_from_file_scope() {
         // `import { run }` plus `class A { run() {} }`: the member is not a
         // file-level name, so `caller`'s bare `run()` must stay pending rather
