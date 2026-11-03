@@ -7,7 +7,7 @@ pub use crate::domain::GlobRule;
 use serde::{Deserialize, Serialize};
 
 /// Maximum number of exact definitions in a relationship query.
-pub const MAX_SYMBOL_MATCHES: usize = 100;
+pub const MAX_SYMBOL_MATCHES: usize = 10;
 /// Maximum length of a relationship symbol query in characters.
 pub const MAX_RELATIONSHIP_SYMBOL_CHARS: usize = 1024;
 
