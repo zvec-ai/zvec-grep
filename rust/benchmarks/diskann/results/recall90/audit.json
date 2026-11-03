@@ -1,0 +1,10 @@
+{
+  "verified_test_runs": 60,
+  "verified_validation_trials": 20,
+  "every_run_uses_frozen_parameters": true,
+  "recall_recomputed_from_raw_ids": true,
+  "qps_formula_verified": true,
+  "all_summary_median_min_max_verified": true,
+  "original_test_query_sha256": "8941a335c7124ba2887290831a269dde78d3c555deaf1560b0d4ac7bf6ba864e",
+  "all_test_groups_reach_90_percent": true
+}

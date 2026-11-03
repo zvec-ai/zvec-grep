@@ -16,6 +16,8 @@ parser.add_argument("--output", type=pathlib.Path, required=True)
 parser.add_argument("--counts", type=int, nargs="+", default=[2000, 10000, 20000, 50000, 100000])
 parser.add_argument("--query-file", type=pathlib.Path)
 parser.add_argument("--diskann-list-size", type=int)
+parser.add_argument("--hnsw-ef", type=int, default=0)
+parser.add_argument("--repeat-offset", type=int, default=0)
 parser.add_argument("--require-recall-match", action="store_true")
 args = parser.parse_args()
 args.output.mkdir(parents=True, exist_ok=True)
@@ -24,13 +26,13 @@ records = []
 for count in args.counts:
     truth = [set(row) for row in json.loads((args.truth_root / f"truth-{count}.json").read_text())]
     assert len(truth) == 200 and all(len(row) == 10 for row in truth)
-    for repeat in range(3):
+    for repeat in range(args.repeat_offset, args.repeat_offset + 3):
         # Alternate order to reduce systematic cache/thermal bias.
         for engine in (["hnsw", "diskann"] if repeat % 2 == 0 else ["diskann", "hnsw"]):
             mode = "hnsw_fp16" if engine == "hnsw" else "diskann"
             index = next(root / f"{mode}-{count}-768/index" for root in args.index_roots
                          if (root / f"{mode}-{count}-768/index").exists())
-            effort = (512 if count <= 10000 else 768) if engine == "diskann" else 0
+            effort = (512 if count <= 10000 else 768) if engine == "diskann" else args.hnsw_ef
             if engine == "diskann" and args.diskann_list_size is not None:
                 effort = args.diskann_list_size
             name = f"{engine}-{count}-{repeat}"
@@ -50,7 +52,6 @@ for count in args.counts:
             row["recall_at_10"] = sum(len(set(a) & b) for a, b in zip(found, truth)) / 2000
             stderr = (args.output / f"{name}.stderr").read_text()
             row["rss_mib"] = int(re.search(r"(\d+)\s+maximum resident set size", stderr).group(1)) / 2**20
-            row["footprint_mib"] = int(re.search(r"(\d+)\s+peak memory footprint", stderr).group(1)) / 2**20
             row["repeat"] = repeat
             records.append(row)
             (args.output / "results.json").write_text(json.dumps(records, indent=2))
@@ -61,7 +62,7 @@ for count in args.counts:
     for engine in ["hnsw", "diskann"]:
         group = [r for r in records if r["count"] == count and r["engine"] == engine]
         row = dict(count=count, engine=engine, list_size=group[0]["list_size"], repeats=len(group))
-        for metric in ["qps", "mean_ms", "p50_ms", "p95_ms", "rss_mib", "footprint_mib", "recall_at_10"]:
+        for metric in ["qps", "mean_ms", "p50_ms", "p95_ms", "rss_mib", "recall_at_10"]:
             row[metric] = statistics.median(r[metric] for r in group)
             row[metric + "_min"] = min(r[metric] for r in group)
             row[metric + "_max"] = max(r[metric] for r in group)
@@ -85,5 +86,6 @@ with (args.output / "summary.csv").open("w", newline="") as f:
     "truth_root": str(args.truth_root),
     "query_file_sha256": hashlib.sha256(args.query_file.read_bytes()).hexdigest() if args.query_file else None,
     "diskann_list_size_override": args.diskann_list_size,
+    "hnsw_ef": args.hnsw_ef,
 }, indent=2))
 print("FINISHED", args.output, flush=True)

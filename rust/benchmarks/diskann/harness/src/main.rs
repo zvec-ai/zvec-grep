@@ -6,7 +6,7 @@ use std::{
     time::Instant,
 };
 use zg_diskann::{Distance, VectorIndex};
-use zvec_rust::{Collection, CollectionOptions};
+use zvec_rust::{Collection, CollectionOptions, HnswQueryParams};
 
 // Same deterministic query sequence as the memory benchmark's FP32 truth set.
 fn vector(id: usize) -> Vec<f32> {
@@ -33,7 +33,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     assert!(
         matches!(args.len(), 5 | 6),
-        "engine index_path count search_list_size [queries.f32]"
+        "engine index_path count search_effort [queries.f32] (DiskANN L; HNSW ef, 0=default)"
     );
     let engine = args[1].as_str();
     assert!(matches!(engine, "diskann" | "hnsw"));
@@ -86,6 +86,16 @@ fn main() {
         } else {
             let mut query = zg_zvec_fp16::embedding_query("embedding", &query, 10).unwrap();
             query.set_include_vector(false).unwrap();
+            if list_size > 0 {
+                query
+                    .set_hnsw_params(HnswQueryParams::new(
+                        i32::try_from(list_size).unwrap(),
+                        0.0,
+                        false,
+                        false,
+                    ))
+                    .unwrap();
+            }
             collection
                 .as_ref()
                 .unwrap()

@@ -19,9 +19,6 @@
     "rss_mib": 39.203125,
     "rss_mib_min": 39.1875,
     "rss_mib_max": 39.40625,
-    "footprint_mib": 19.26605987548828,
-    "footprint_mib_min": 19.26605987548828,
-    "footprint_mib_max": 19.48480987548828,
     "recall_at_10": 0.996,
     "recall_at_10_min": 0.996,
     "recall_at_10_max": 0.996
@@ -46,9 +43,6 @@
     "rss_mib": 35.171875,
     "rss_mib_min": 35.078125,
     "rss_mib_max": 35.609375,
-    "footprint_mib": 15.750411987304688,
-    "footprint_mib_min": 15.641036987304688,
-    "footprint_mib_max": 16.125411987304688,
     "recall_at_10": 1.0,
     "recall_at_10_min": 1.0,
     "recall_at_10_max": 1.0
@@ -73,9 +67,6 @@
     "rss_mib": 54.34375,
     "rss_mib_min": 54.3125,
     "rss_mib_max": 54.359375,
-    "footprint_mib": 19.375411987304688,
-    "footprint_mib_min": 19.359786987304688,
-    "footprint_mib_max": 19.40668487548828,
     "recall_at_10": 0.997,
     "recall_at_10_min": 0.997,
     "recall_at_10_max": 0.997
@@ -100,9 +91,6 @@
     "rss_mib": 43.734375,
     "rss_mib_min": 43.640625,
     "rss_mib_max": 43.90625,
-    "footprint_mib": 16.172286987304688,
-    "footprint_mib_min": 16.078536987304688,
-    "footprint_mib_max": 16.344161987304688,
     "recall_at_10": 1.0,
     "recall_at_10_min": 1.0,
     "recall_at_10_max": 1.0
@@ -127,9 +115,6 @@
     "rss_mib": 73.328125,
     "rss_mib_min": 73.28125,
     "rss_mib_max": 73.34375,
-    "footprint_mib": 19.516036987304688,
-    "footprint_mib_min": 19.500411987304688,
-    "footprint_mib_max": 19.54730987548828,
     "recall_at_10": 0.9955,
     "recall_at_10_min": 0.9955,
     "recall_at_10_max": 0.9955
@@ -154,9 +139,6 @@
     "rss_mib": 44.0,
     "rss_mib_min": 43.984375,
     "rss_mib_max": 44.09375,
-    "footprint_mib": 16.156661987304688,
-    "footprint_mib_min": 16.156661987304688,
-    "footprint_mib_max": 16.29730987548828,
     "recall_at_10": 1.0,
     "recall_at_10_min": 1.0,
     "recall_at_10_max": 1.0
@@ -181,9 +163,6 @@
     "rss_mib": 130.28125,
     "rss_mib_min": 130.234375,
     "rss_mib_max": 130.390625,
-    "footprint_mib": 19.906661987304688,
-    "footprint_mib_min": 19.813003540039062,
-    "footprint_mib_max": 20.00043487548828,
     "recall_at_10": 0.999,
     "recall_at_10_min": 0.999,
     "recall_at_10_max": 0.999
@@ -208,9 +187,6 @@
     "rss_mib": 44.046875,
     "rss_mib_min": 43.96875,
     "rss_mib_max": 44.1875,
-    "footprint_mib": 16.203536987304688,
-    "footprint_mib_min": 16.109786987304688,
-    "footprint_mib_max": 16.297286987304688,
     "recall_at_10": 1.0,
     "recall_at_10_min": 1.0,
     "recall_at_10_max": 1.0
@@ -235,9 +211,6 @@
     "rss_mib": 225.1875,
     "rss_mib_min": 225.125,
     "rss_mib_max": 225.25,
-    "footprint_mib": 20.531822204589844,
-    "footprint_mib_min": 20.48492431640625,
-    "footprint_mib_max": 20.594322204589844,
     "recall_at_10": 0.9975,
     "recall_at_10_min": 0.9975,
     "recall_at_10_max": 0.9975
@@ -262,9 +235,6 @@
     "rss_mib": 44.046875,
     "rss_mib_min": 43.609375,
     "rss_mib_max": 44.078125,
-    "footprint_mib": 16.172286987304688,
-    "footprint_mib_min": 16.172286987304688,
-    "footprint_mib_max": 16.281661987304688,
     "recall_at_10": 0.9995,
     "recall_at_10_min": 0.9995,
     "recall_at_10_max": 0.9995

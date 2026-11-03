@@ -1,0 +1,45 @@
+{
+  "binary_sha256": "c640de28d10e7e821c27e3f5ccf643a033ec67ecacb84d7c862c9355097f8bd1",
+  "cpu": "Apple M3 Pro",
+  "memory_bytes": 38654705664,
+  "os": "ProductName:\t\tmacOS\nProductVersion:\t\t26.6.2\nBuildVersion:\t\t25G83",
+  "counts": [
+    2000,
+    10000,
+    20000,
+    50000,
+    100000
+  ],
+  "dimension": 768,
+  "top_k": 10,
+  "warmup_queries": 20,
+  "measured_queries": 200,
+  "repeats": 6,
+  "query_concurrency": 1,
+  "diskann_default_list_size": 512,
+  "qps": "200 / measured_batch_seconds",
+  "file_cache": "not purged",
+  "index_roots": [
+    "cohere-benchmark-indexes"
+  ],
+  "truth_root": "cohere-benchmark-data",
+  "query_file_sha256": "8941a335c7124ba2887290831a269dde78d3c555deaf1560b0d4ac7bf6ba864e",
+  "dataset": "Wikipedia-Cohere / Big ANN Benchmarks",
+  "measurement_date_local": "2026-11-03T11:38:04.434277+08:00",
+  "selection_file": "selection.json",
+  "held_out_test_queries": true,
+  "production_defaults_changed": false,
+  "reused_indexes": true,
+  "repeat_protocol": "two blocks of 3 fresh processes per engine/scale; alternate engine order across all six repeats",
+  "implementation_commit": "4d6c155440ea72705d0d15f9347dfc8035e84bf6",
+  "effort_field": "list_size means HNSW ef or DiskANN L",
+  "precision": {
+    "hnsw": "FP16",
+    "diskann": "FP32"
+  },
+  "hnsw_query_options": {
+    "radius": 0,
+    "is_linear": false,
+    "is_using_refiner": false
+  }
+}

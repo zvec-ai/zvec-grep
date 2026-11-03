@@ -12,6 +12,7 @@ parser.add_argument("summary", type=pathlib.Path)
 parser.add_argument("output", type=pathlib.Path)
 parser.add_argument("--font", type=pathlib.Path)
 parser.add_argument("--dataset", default="合成随机向量")
+parser.add_argument("--recall-target", type=float)
 args = parser.parse_args()
 if args.font:
     font_manager.fontManager.addfont(str(args.font))
@@ -23,6 +24,11 @@ assert {r["engine"] for r in rows} == {"hnsw", "diskann"}
 args.output.mkdir(parents=True, exist_ok=True)
 engines = [("hnsw", "HNSW FP16", "#163B65"), ("diskann", "DiskANN", "#E87722")]
 efforts = "/".join(map(str, sorted({r["list_size"] for r in rows if r["engine"] == "diskann"})))
+parameters = (f"参数由独立验证集选择；测试集目标 Recall@10 ≥ {args.recall_target * 100:g}%"
+              if args.recall_target is not None else f"DiskANN L={efforts}")
+repeats = {r["repeats"] for r in rows}
+assert len(repeats) == 1
+repeats = repeats.pop()
 
 def panel(ax, metric, title, unit, log=False):
     for engine, label, color in engines:
@@ -46,20 +52,21 @@ panel(axes[0], "qps", "查询吞吐量（越高越好）", "QPS，次/秒（对�
 panel(axes[1], "p95_ms", "P95 延迟（越低越好）", "毫秒（对数刻度）", True)
 panel(axes[2], "recall_at_10", "近邻召回率", "Recall@10（%）")
 axes[2].set_ylim(max(0, min(90, min(r["recall_at_10"] for r in rows) * 100 - 2)), 100.5)
+if args.recall_target is not None:
+    axes[2].axhline(args.recall_target * 100, color="#777777", linestyle="--", linewidth=1)
+    axes[2].set_ylim(min(88, min(r["recall_at_10"] for r in rows) * 100 - 2), 100.5)
 fig.suptitle(f"HNSW 与 DiskANN 查询性能 · {args.dataset} · 并发度 1\n"
-             f"三次独立进程中位数，误差线为最小至最大值；DiskANN L={efforts}", fontsize=13)
+             f"{repeats} 次独立进程中位数，误差线为最小至最大值；{parameters}", fontsize=13)
 fig.legend(*axes[0].get_legend_handles_labels(), loc="outside lower center", ncol=2, frameon=False)
 fig.savefig(args.output / "performance.png", dpi=180)
 fig.savefig(args.output / "performance.svg")
 plt.close(fig)
-fig, axes = plt.subplots(1, 2, figsize=(11, 5.2), layout="constrained")
-panel(axes[0], "rss_mib", "查询峰值 RSS", "MiB")
-panel(axes[1], "footprint_mib", "查询峰值 footprint", "MiB")
-axes[0].set_ylim(bottom=0)
-axes[1].set_ylim(bottom=0)
+fig, ax = plt.subplots(figsize=(9, 5.2), layout="constrained")
+panel(ax, "rss_mib", "查询峰值 RSS", "MiB")
+ax.set_ylim(bottom=0)
 fig.suptitle(f"HNSW 与 DiskANN 查询内存 · {args.dataset} · macOS\n"
-             f"三次独立进程峰值的中位数，误差线为最小至最大值；DiskANN L={efforts}", fontsize=13)
-fig.legend(*axes[0].get_legend_handles_labels(), loc="outside lower center", ncol=2, frameon=False)
+             f"{repeats} 次独立进程峰值的中位数，误差线为最小至最大值\n{parameters}", fontsize=13)
+fig.legend(*ax.get_legend_handles_labels(), loc="outside lower center", ncol=2, frameon=False)
 fig.savefig(args.output / "memory.png", dpi=180)
 fig.savefig(args.output / "memory.svg")
 for name in ["performance.svg", "memory.svg"]:
