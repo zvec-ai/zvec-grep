@@ -1,0 +1,15 @@
+{
+  "purpose": "post-measurement file-integrity probe; excluded from QPS summaries",
+  "file": "0/embedding.index.3.proxima",
+  "before": {
+    "sha256": "fe4c666171e6c7bdd1e92204e648ffe1d2ae145cddbcdb864e57539592c4834b",
+    "bytes": 1568292864,
+    "mtime_ns": 1793704658269245431
+  },
+  "after": {
+    "sha256": "5ee37c5bee45d9d42f4ff378a3c5bbf500e5238bb271e01bc6dcd2cc7b35e3c8",
+    "bytes": 1568292864,
+    "mtime_ns": 1793704802911360267
+  },
+  "identical_file_bytes": false
+}

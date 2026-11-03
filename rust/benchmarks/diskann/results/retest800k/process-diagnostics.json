@@ -1,0 +1,305 @@
+{
+  "scope": "entire process, including index open and warmup",
+  "records": [
+    {
+      "protocol": "original",
+      "engine": "hnsw",
+      "repeat": 0,
+      "process_real_s": 0.31,
+      "process_user_s": 0.2,
+      "process_sys_s": 0.08,
+      "page_faults": 0,
+      "page_reclaims": 97479
+    },
+    {
+      "protocol": "original",
+      "engine": "hnsw",
+      "repeat": 1,
+      "process_real_s": 11.11,
+      "process_user_s": 0.27,
+      "process_sys_s": 0.91,
+      "page_faults": 94995,
+      "page_reclaims": 3166
+    },
+    {
+      "protocol": "original",
+      "engine": "hnsw",
+      "repeat": 2,
+      "process_real_s": 0.32,
+      "process_user_s": 0.21,
+      "process_sys_s": 0.08,
+      "page_faults": 73,
+      "page_reclaims": 97403
+    },
+    {
+      "protocol": "original",
+      "engine": "hnsw",
+      "repeat": 3,
+      "process_real_s": 3.35,
+      "process_user_s": 0.2,
+      "process_sys_s": 0.31,
+      "page_faults": 34424,
+      "page_reclaims": 63055
+    },
+    {
+      "protocol": "original",
+      "engine": "hnsw",
+      "repeat": 4,
+      "process_real_s": 0.31,
+      "process_user_s": 0.19,
+      "process_sys_s": 0.08,
+      "page_faults": 10,
+      "page_reclaims": 97467
+    },
+    {
+      "protocol": "original",
+      "engine": "hnsw",
+      "repeat": 5,
+      "process_real_s": 0.31,
+      "process_user_s": 0.19,
+      "process_sys_s": 0.08,
+      "page_faults": 40,
+      "page_reclaims": 97439
+    },
+    {
+      "protocol": "original",
+      "engine": "diskann",
+      "repeat": 0,
+      "process_real_s": 10.32,
+      "process_user_s": 1.47,
+      "process_sys_s": 2.89,
+      "page_faults": 59,
+      "page_reclaims": 3183
+    },
+    {
+      "protocol": "original",
+      "engine": "diskann",
+      "repeat": 1,
+      "process_real_s": 12.4,
+      "process_user_s": 1.59,
+      "process_sys_s": 3.55,
+      "page_faults": 46,
+      "page_reclaims": 3136
+    },
+    {
+      "protocol": "original",
+      "engine": "diskann",
+      "repeat": 2,
+      "process_real_s": 10.37,
+      "process_user_s": 1.15,
+      "process_sys_s": 2.37,
+      "page_faults": 934,
+      "page_reclaims": 2061
+    },
+    {
+      "protocol": "original",
+      "engine": "diskann",
+      "repeat": 3,
+      "process_real_s": 2.85,
+      "process_user_s": 1.07,
+      "process_sys_s": 1.73,
+      "page_faults": 1,
+      "page_reclaims": 2990
+    },
+    {
+      "protocol": "original",
+      "engine": "diskann",
+      "repeat": 4,
+      "process_real_s": 4.95,
+      "process_user_s": 1.06,
+      "process_sys_s": 1.86,
+      "page_faults": 2,
+      "page_reclaims": 2988
+    },
+    {
+      "protocol": "original",
+      "engine": "diskann",
+      "repeat": 5,
+      "process_real_s": 3.33,
+      "process_user_s": 1.06,
+      "process_sys_s": 1.75,
+      "page_faults": 0,
+      "page_reclaims": 2988
+    },
+    {
+      "protocol": "alternating",
+      "engine": "hnsw",
+      "repeat": 0,
+      "process_real_s": 0.62,
+      "process_user_s": 0.2,
+      "process_sys_s": 0.11,
+      "page_faults": 2099,
+      "page_reclaims": 95382
+    },
+    {
+      "protocol": "alternating",
+      "engine": "hnsw",
+      "repeat": 1,
+      "process_real_s": 0.34,
+      "process_user_s": 0.21,
+      "process_sys_s": 0.09,
+      "page_faults": 10,
+      "page_reclaims": 97487
+    },
+    {
+      "protocol": "alternating",
+      "engine": "hnsw",
+      "repeat": 2,
+      "process_real_s": 0.35,
+      "process_user_s": 0.22,
+      "process_sys_s": 0.09,
+      "page_faults": 0,
+      "page_reclaims": 97483
+    },
+    {
+      "protocol": "alternating",
+      "engine": "hnsw",
+      "repeat": 3,
+      "process_real_s": 0.34,
+      "process_user_s": 0.22,
+      "process_sys_s": 0.09,
+      "page_faults": 8,
+      "page_reclaims": 97475
+    },
+    {
+      "protocol": "alternating",
+      "engine": "hnsw",
+      "repeat": 4,
+      "process_real_s": 0.35,
+      "process_user_s": 0.22,
+      "process_sys_s": 0.09,
+      "page_faults": 0,
+      "page_reclaims": 97478
+    },
+    {
+      "protocol": "alternating",
+      "engine": "hnsw",
+      "repeat": 5,
+      "process_real_s": 0.33,
+      "process_user_s": 0.21,
+      "process_sys_s": 0.09,
+      "page_faults": 0,
+      "page_reclaims": 97476
+    },
+    {
+      "protocol": "alternating",
+      "engine": "diskann",
+      "repeat": 0,
+      "process_real_s": 3.67,
+      "process_user_s": 1.06,
+      "process_sys_s": 1.81,
+      "page_faults": 59,
+      "page_reclaims": 2940
+    },
+    {
+      "protocol": "alternating",
+      "engine": "diskann",
+      "repeat": 1,
+      "process_real_s": 2.91,
+      "process_user_s": 1.07,
+      "process_sys_s": 1.78,
+      "page_faults": 11,
+      "page_reclaims": 2984
+    },
+    {
+      "protocol": "alternating",
+      "engine": "diskann",
+      "repeat": 2,
+      "process_real_s": 2.92,
+      "process_user_s": 1.07,
+      "process_sys_s": 1.79,
+      "page_faults": 0,
+      "page_reclaims": 2996
+    },
+    {
+      "protocol": "alternating",
+      "engine": "diskann",
+      "repeat": 3,
+      "process_real_s": 2.98,
+      "process_user_s": 1.08,
+      "process_sys_s": 1.83,
+      "page_faults": 1,
+      "page_reclaims": 2990
+    },
+    {
+      "protocol": "alternating",
+      "engine": "diskann",
+      "repeat": 4,
+      "process_real_s": 3.31,
+      "process_user_s": 1.1,
+      "process_sys_s": 1.87,
+      "page_faults": 0,
+      "page_reclaims": 2992
+    },
+    {
+      "protocol": "alternating",
+      "engine": "diskann",
+      "repeat": 5,
+      "process_real_s": 3.03,
+      "process_user_s": 1.09,
+      "process_sys_s": 1.86,
+      "page_faults": 9,
+      "page_reclaims": 2988
+    },
+    {
+      "protocol": "diskann_only",
+      "engine": "diskann",
+      "repeat": 0,
+      "process_real_s": 2.93,
+      "process_user_s": 1.08,
+      "process_sys_s": 1.79,
+      "page_faults": 0,
+      "page_reclaims": 2990
+    },
+    {
+      "protocol": "diskann_only",
+      "engine": "diskann",
+      "repeat": 1,
+      "process_real_s": 2.91,
+      "process_user_s": 1.08,
+      "process_sys_s": 1.76,
+      "page_faults": 2,
+      "page_reclaims": 2991
+    },
+    {
+      "protocol": "diskann_only",
+      "engine": "diskann",
+      "repeat": 2,
+      "process_real_s": 2.64,
+      "process_user_s": 1.02,
+      "process_sys_s": 1.59,
+      "page_faults": 14,
+      "page_reclaims": 2974
+    },
+    {
+      "protocol": "diskann_only",
+      "engine": "diskann",
+      "repeat": 3,
+      "process_real_s": 2.65,
+      "process_user_s": 1.01,
+      "process_sys_s": 1.59,
+      "page_faults": 0,
+      "page_reclaims": 2986
+    },
+    {
+      "protocol": "diskann_only",
+      "engine": "diskann",
+      "repeat": 4,
+      "process_real_s": 2.66,
+      "process_user_s": 1.01,
+      "process_sys_s": 1.6,
+      "page_faults": 0,
+      "page_reclaims": 2993
+    },
+    {
+      "protocol": "diskann_only",
+      "engine": "diskann",
+      "repeat": 5,
+      "process_real_s": 2.67,
+      "process_user_s": 1.02,
+      "process_sys_s": 1.61,
+      "page_faults": 0,
+      "page_reclaims": 2988
+    }
+  ]
+}

@@ -1,0 +1,81 @@
+{
+  "count": 800000,
+  "repeats_per_engine_and_protocol": 6,
+  "hnsw_ef": 48,
+  "diskann_list_size": 48,
+  "precision": "FP16",
+  "warmup_queries": 20,
+  "measured_queries": 200,
+  "query_concurrency": 1,
+  "binary_sha256": "9937f35549668e76b2b08d9c6fb922f2dd8a26d914b22b7013da8da290986c5d",
+  "data_manifest_sha256": "4c56167ebc49c2b574b6740376e2ca9bb8764665faeccef385ac817935d5b919",
+  "original_selection_sha256": "2bc22923b6157fa3f0c510d2b08d48c83ba500b349a9f55833635f20a79b7dd9",
+  "original_measurement_scripts_sha256": {
+    "run_recall90.py": "83733b568d3144f417f19cf3b1151160d9fdd2177e169016b82431e01fde16c8",
+    "run.py": "61195f79883be802c30a1d713214d1852a21058354693086a8d79920f0f59a38"
+  },
+  "schedule": [
+    "original validation sequence + six alternating runs per engine",
+    "six consecutive fresh DiskANN processes"
+  ],
+  "file_cache": "not purged; state carries over from alternating to DiskANN-only phase",
+  "rebuilding": false,
+  "index_files_before": {
+    "indexes/diskann_fp16-800000-768/index": {
+      "bytes": 1667203072,
+      "mtime_ns": 1793699194431128986
+    },
+    "indexes/hnsw_fp16-800000-768/index/0/embedding.index.3.proxima": {
+      "bytes": 1568292864,
+      "mtime_ns": 1793699947835387868
+    },
+    "indexes/hnsw_fp16-800000-768/index/0/scalar.0.ipc": {
+      "bytes": 16849058,
+      "mtime_ns": 1793699207902006810
+    },
+    "indexes/hnsw_fp16-800000-768/index/LOCK": {
+      "bytes": 0,
+      "mtime_ns": 1793699197142581081
+    },
+    "indexes/hnsw_fp16-800000-768/index/del.0": {
+      "bytes": 72,
+      "mtime_ns": 1793699197205881654
+    },
+    "indexes/hnsw_fp16-800000-768/index/idmap.0/000004.log": {
+      "bytes": 0,
+      "mtime_ns": 1793699197181685016
+    },
+    "indexes/hnsw_fp16-800000-768/index/idmap.0/000008.sst": {
+      "bytes": 17843421,
+      "mtime_ns": 1793699207881029093
+    },
+    "indexes/hnsw_fp16-800000-768/index/idmap.0/CURRENT": {
+      "bytes": 16,
+      "mtime_ns": 1793699197186950841
+    },
+    "indexes/hnsw_fp16-800000-768/index/idmap.0/IDENTITY": {
+      "bytes": 36,
+      "mtime_ns": 1793699197146102382
+    },
+    "indexes/hnsw_fp16-800000-768/index/idmap.0/LOCK": {
+      "bytes": 0,
+      "mtime_ns": 1793699197145845503
+    },
+    "indexes/hnsw_fp16-800000-768/index/idmap.0/LOG": {
+      "bytes": 0,
+      "mtime_ns": 1793699197143647847
+    },
+    "indexes/hnsw_fp16-800000-768/index/idmap.0/MANIFEST-000005": {
+      "bytes": 194,
+      "mtime_ns": 1793699860314269064
+    },
+    "indexes/hnsw_fp16-800000-768/index/idmap.0/OPTIONS-000007": {
+      "bytes": 7045,
+      "mtime_ns": 1793699197195352878
+    },
+    "indexes/hnsw_fp16-800000-768/index/manifest.3": {
+      "bytes": 182,
+      "mtime_ns": 1793699859896437288
+    }
+  }
+}

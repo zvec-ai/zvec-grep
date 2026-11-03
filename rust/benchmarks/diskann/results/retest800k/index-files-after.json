@@ -1,0 +1,58 @@
+{
+  "indexes/diskann_fp16-800000-768/index": {
+    "bytes": 1667203072,
+    "mtime_ns": 1793699194431128986
+  },
+  "indexes/hnsw_fp16-800000-768/index/0/embedding.index.3.proxima": {
+    "bytes": 1568292864,
+    "mtime_ns": 1793704658269245431
+  },
+  "indexes/hnsw_fp16-800000-768/index/0/scalar.0.ipc": {
+    "bytes": 16849058,
+    "mtime_ns": 1793699207902006810
+  },
+  "indexes/hnsw_fp16-800000-768/index/LOCK": {
+    "bytes": 0,
+    "mtime_ns": 1793699197142581081
+  },
+  "indexes/hnsw_fp16-800000-768/index/del.0": {
+    "bytes": 72,
+    "mtime_ns": 1793699197205881654
+  },
+  "indexes/hnsw_fp16-800000-768/index/idmap.0/000004.log": {
+    "bytes": 0,
+    "mtime_ns": 1793699197181685016
+  },
+  "indexes/hnsw_fp16-800000-768/index/idmap.0/000008.sst": {
+    "bytes": 17843421,
+    "mtime_ns": 1793699207881029093
+  },
+  "indexes/hnsw_fp16-800000-768/index/idmap.0/CURRENT": {
+    "bytes": 16,
+    "mtime_ns": 1793699197186950841
+  },
+  "indexes/hnsw_fp16-800000-768/index/idmap.0/IDENTITY": {
+    "bytes": 36,
+    "mtime_ns": 1793699197146102382
+  },
+  "indexes/hnsw_fp16-800000-768/index/idmap.0/LOCK": {
+    "bytes": 0,
+    "mtime_ns": 1793699197145845503
+  },
+  "indexes/hnsw_fp16-800000-768/index/idmap.0/LOG": {
+    "bytes": 0,
+    "mtime_ns": 1793699197143647847
+  },
+  "indexes/hnsw_fp16-800000-768/index/idmap.0/MANIFEST-000005": {
+    "bytes": 194,
+    "mtime_ns": 1793699860314269064
+  },
+  "indexes/hnsw_fp16-800000-768/index/idmap.0/OPTIONS-000007": {
+    "bytes": 7045,
+    "mtime_ns": 1793699197195352878
+  },
+  "indexes/hnsw_fp16-800000-768/index/manifest.3": {
+    "bytes": 182,
+    "mtime_ns": 1793699859896437288
+  }
+}

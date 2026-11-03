@@ -1,0 +1,23 @@
+{
+  "verified_original_test_runs": 12,
+  "verified_new_test_runs": 18,
+  "verified_repeated_validation_trials": 9,
+  "same_frozen_parameters": true,
+  "same_recall": true,
+  "all_new_result_ids_match_original": true,
+  "data_file_hashes_verified": true,
+  "index_file_set_and_sizes_unchanged": true,
+  "diskann_index_metadata_unchanged": true,
+  "hnsw_metadata_changed_files": [
+    "indexes/hnsw_fp16-800000-768/index/0/embedding.index.3.proxima"
+  ],
+  "hnsw_whole_retest_content_invariance_established": false,
+  "diagnostic_probe_excluded_from_timing": true,
+  "diskann_live_vectors_sha256": "eb4b42fba058219b81ded296cf1d176076f56d0c2970f99adc8bddedee7d744e",
+  "diskann_stored_vectors_match_original": true,
+  "recall_recomputed_from_raw_ids": true,
+  "qps_formula_verified": true,
+  "rss_from_time_verified": true,
+  "all_summary_median_min_max_recomputed": true,
+  "original_results_preserved": true
+}

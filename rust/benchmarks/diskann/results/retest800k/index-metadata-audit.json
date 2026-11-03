@@ -1,0 +1,19 @@
+{
+  "file_set_and_sizes_unchanged": true,
+  "diskann_metadata_unchanged": true,
+  "hnsw_metadata_changes": {
+    "indexes/hnsw_fp16-800000-768/index/0/embedding.index.3.proxima": {
+      "before": {
+        "bytes": 1568292864,
+        "mtime_ns": 1793699947835387868
+      },
+      "after": {
+        "bytes": 1568292864,
+        "mtime_ns": 1793704658269245431
+      }
+    }
+  },
+  "initial_content_hash_not_recorded": true,
+  "scope": "Metadata only; HNSW content invariance is not established",
+  "finalized_without_retiming": true
+}

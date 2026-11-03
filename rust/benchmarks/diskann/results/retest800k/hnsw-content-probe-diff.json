@@ -1,0 +1,49 @@
+{
+  "total_bytes": 1568292864,
+  "changed_bytes": 8,
+  "changed_chunk_offsets": [
+    1048576
+  ],
+  "first_changes": [
+    {
+      "offset": 1064832,
+      "before": 91,
+      "after": 166
+    },
+    {
+      "offset": 1064833,
+      "before": 106,
+      "after": 217
+    },
+    {
+      "offset": 1064834,
+      "before": 147,
+      "after": 31
+    },
+    {
+      "offset": 1064835,
+      "before": 212,
+      "after": 74
+    },
+    {
+      "offset": 1064880,
+      "before": 210,
+      "after": 98
+    },
+    {
+      "offset": 1064881,
+      "before": 194,
+      "after": 195
+    },
+    {
+      "offset": 1081440,
+      "before": 210,
+      "after": 98
+    },
+    {
+      "offset": 1081441,
+      "before": 194,
+      "after": 195
+    }
+  ]
+}
