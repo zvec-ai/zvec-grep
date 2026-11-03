@@ -212,7 +212,10 @@ async fn verifies_gguf_in_modelscope_cache() {
     std::fs::write(&fallback, b"abc").expect("write GGUF fixture");
 
     let record = verify_artifacts(EmbeddingCatalogEntry::LlamaCpp(model), cache.path()).await;
-    assert_eq!(record["verified_artifacts"][0]["path"], json!(fallback));
+    let recorded_path = record["verified_artifacts"][0]["path"]
+        .as_str()
+        .expect("verified artifact path");
+    assert_eq!(Path::new(recorded_path), fallback.as_path());
     assert_eq!(
         record["verified_artifacts"][0]["sha256"],
         DOWNLOAD.artifacts[0].sha256
