@@ -348,8 +348,16 @@ impl Model2VecDependencies for DefaultModel2VecDependencies {
         let tokenizer_json = fs::read(&tokenizer_path).await.map_err(|error| {
             ModelError::storage_failure(format!("Unable to read Model2Vec tokenizer: {error}"))
         })?;
-        let tokenizer = Tokenizer::from_bytes(&tokenizer_json).map_err(|error| {
+        let mut tokenizer = Tokenizer::from_bytes(&tokenizer_json).map_err(|error| {
             ModelError::storage_failure("Unable to load Model2Vec tokenizer").with_cause(error)
+        })?;
+        // Static embeddings have no positional context limit. The catalog budget
+        // is enforced in embed_model2vec_texts, which needs the complete token
+        // sequence to report truncation. Serialized tokenizer defaults (e.g.
+        // Potion Code's 512-token limit) must not silently shorten that sequence.
+        tokenizer.with_truncation(None).map_err(|error| {
+            ModelError::storage_failure("Unable to disable Model2Vec tokenizer truncation")
+                .with_cause(error)
         })?;
         let unknown_token_id = resolve_unknown_token_id(&tokenizer, &tokenizer_json);
         Ok(Arc::new(HuggingFaceTokenizer {
