@@ -40,8 +40,8 @@ use crate::{
         model::{EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult},
     },
     extraction::{
-        ExtractedEntity, SourceKind, TextSource, extract_for_indexing, source_kind,
-        vector_content_for_fragment,
+        ExtractedEntity, SourceKind, TextSource, extract_for_indexing, extract_without_graph,
+        source_kind, vector_content_for_fragment,
     },
     file_selection::ScanPolicy,
     models::{
@@ -939,7 +939,7 @@ fn commit_file(
             return Ok(format!("failed {}", file.file.relative_path().display()));
         }
         return Err(EngineError::storage_failure(format!(
-            "replace file {}: {error}",
+            "cannot store index data for {}: {error}",
             file.file.relative_path().display()
         )));
     }
@@ -986,7 +986,7 @@ async fn prepare_candidate(
         .ok_or_else(|| EngineError::internal("index candidate must have a detected format"))?;
     if !matches!(source_kind(formats), Some(SourceKind::Text)) {
         return Err(EngineError::unsupported(format!(
-            "this version only indexes text content: {}",
+            "cannot index {}: only text and code files are supported",
             file.relative_path().display()
         )));
     }
@@ -1003,7 +1003,11 @@ async fn prepare_candidate(
         formats: formats.clone(),
         text: source_text.into_owned(),
     };
-    let extracted = extract_for_indexing(&text, chunk_options)?;
+    let extracted = if context.workspace.graph_indexing() {
+        extract_for_indexing(&text, chunk_options)?
+    } else {
+        extract_without_graph(&text, chunk_options)?
+    };
     let entities = bind_entities(file.id(), extracted.fragments)?;
     let owners = entities
         .iter()
@@ -1021,18 +1025,24 @@ async fn prepare_candidate(
     for fragment in &mut fragments {
         fragment.model = owners[&fragment.entity_id].clone();
     }
-    let graph = extracted
-        .graph
-        .as_ref()
-        .map(|graph| {
-            graph_assembly::assemble_file_graph(
-                &file.id().get().to_string(),
-                graph_language(formats),
-                graph,
-                &entities,
-            )
-        })
-        .unwrap_or_default();
+    // A store without graph storage rejects any non-empty graph write, so the
+    // walk-time graph is only assembled when the store would accept it.
+    let graph = if context.storage.graph_enabled() {
+        extracted
+            .graph
+            .as_ref()
+            .map(|graph| {
+                graph_assembly::assemble_file_graph(
+                    &file.id().get().to_string(),
+                    graph_language(formats),
+                    graph,
+                    &entities,
+                )
+            })
+            .unwrap_or_default()
+    } else {
+        FileGraphResult::default()
+    };
     Ok(PreparedCandidate::File(Box::new(PreparedFile {
         file,
         entities,
@@ -1067,9 +1077,10 @@ fn model_for_content<'a>(
     kind: ContentKind,
 ) -> Result<&'a dyn IndexEmbeddingRuntime, EngineError> {
     if !matches!(kind, ContentKind::Text | ContentKind::Code) {
-        return Err(EngineError::unsupported(
-            "this version only supports text embedding",
-        ));
+        return Err(EngineError::unsupported(format!(
+            "cannot embed {kind} content: this index stores text and code vectors only",
+            kind = kind.as_str(),
+        )));
     }
     let index =
         context.workspace.index().descriptor().ok_or_else(|| {
@@ -2509,6 +2520,127 @@ mod tests {
         fail_replacements_once: Mutex<HashSet<FileId>>,
         fail_snapshot_updates: AtomicBool,
         snapshot_update_failed: Notify,
+        graph_enabled: bool,
+    }
+
+    impl MemoryStorage {
+        /// A store that accepts walk-time graphs, mirroring a production store
+        /// opened with graph storage enabled.
+        fn with_graph() -> Self {
+            Self {
+                graph_enabled: true,
+                ..Self::default()
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn graph_assembly_follows_the_workspace_graph_setting() {
+        let directory = tempdir().expect("workspace");
+        std::fs::write(
+            directory.path().join("lib.rs"),
+            "fn caller() { callee(); }\nfn callee() {}\n",
+        )
+        .expect("source");
+        let plain_workspace = workspace(directory.path());
+        assert!(
+            !plain_workspace.graph_indexing(),
+            "graph indexing stays off until a workspace opts in"
+        );
+        let model = ConcurrentModel::new();
+
+        // A store without graph storage accepts the file and records nothing.
+        let disabled = MemoryStorage::default();
+        index_once(&plain_workspace, &disabled, &model).await;
+        assert_empty_graph(&disabled, "a store without graph storage");
+
+        // The workspace setting, not the store's capability, decides: a
+        // graph-capable store still receives nothing while the switch is off.
+        let capable_but_off = MemoryStorage::with_graph();
+        index_once(&plain_workspace, &capable_but_off, &model).await;
+        assert_empty_graph(
+            &capable_but_off,
+            "a graph-capable store while the setting is off",
+        );
+
+        // Only an opted-in workspace walks for a graph and stores it.
+        let enabled = MemoryStorage::with_graph();
+        let mut graph_workspace = workspace(directory.path());
+        graph_workspace.set_graph_indexing(true);
+        index_once(&graph_workspace, &enabled, &model).await;
+        let stored = enabled.graphs.lock().expect("stored graphs");
+        let graph = stored.values().next().expect("committed file graph");
+        assert_ne!(
+            graph,
+            &FileGraphResult::default(),
+            "walk-time graph must reach a store that accepts graphs"
+        );
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|node| node.name.as_deref() == Some("callee")),
+            "the walk must report the called symbol as a node: {graph:?}"
+        );
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|edge| edge.kind == crate::domain::GraphEdgeKind::Calls)
+                || graph
+                    .pending_refs
+                    .iter()
+                    .any(|reference| reference.ref_name == "callee"),
+            "the walk must report the call to callee as an edge or a pending ref: {graph:?}"
+        );
+    }
+
+    async fn index_once(
+        workspace: &Workspace,
+        storage: &MemoryStorage,
+        model: &dyn IndexEmbeddingRuntime,
+    ) {
+        index_workspace(&IndexingContext {
+            workspace,
+            storage,
+            scanner: &RecordingScanner::new(),
+            embedding_models: &[model],
+            embedding_concurrency: None,
+            on_progress: None,
+            signal: None,
+            changes: &[],
+        })
+        .await
+        .expect("index workspace");
+    }
+
+    /// Asserts the file was indexed but no graph reached the store.
+    fn assert_empty_graph(storage: &MemoryStorage, store: &str) {
+        assert_eq!(
+            storage.files.lock().expect("stored files").len(),
+            1,
+            "{store}: a graph-free workspace still indexes every file"
+        );
+        assert!(
+            !storage
+                .entries
+                .lock()
+                .expect("stored entries")
+                .values()
+                .all(Vec::is_empty),
+            "{store}: graph-free indexing must still store code fragments"
+        );
+        assert_eq!(
+            storage
+                .graphs
+                .lock()
+                .expect("stored graphs")
+                .values()
+                .next()
+                .expect("committed file graph"),
+            &FileGraphResult::default(),
+            "{store}: no graph may be stored"
+        );
     }
 
     #[test]
@@ -2611,6 +2743,10 @@ mod tests {
     }
 
     impl IndexStorage for MemoryStorage {
+        fn graph_enabled(&self) -> bool {
+            self.graph_enabled
+        }
+
         fn is_read_only(&self) -> bool {
             false
         }

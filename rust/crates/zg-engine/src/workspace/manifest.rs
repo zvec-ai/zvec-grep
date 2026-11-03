@@ -19,6 +19,10 @@ struct ManifestFields {
     storage_generation: Option<String>,
     created_time: u64,
     updated_time: u64,
+    /// Missing from manifests written before the graph switch existed; those
+    /// workspaces index without a graph, the same as an explicit `false`.
+    #[serde(default)]
+    graph_indexing: bool,
     index: IndexState,
 }
 
@@ -37,6 +41,7 @@ impl ManifestFields {
             self.storage_generation,
             self.created_time,
             self.updated_time,
+            self.graph_indexing,
             self.index,
         )
     }
@@ -566,6 +571,43 @@ mod tests {
             );
         }
         write_workspace_manifest(layout.manifest_path(), &manifest).expect("write valid manifest");
+        assert_eq!(
+            read_workspace_manifest(directory.path(), &layout).expect("read manifest"),
+            Some(manifest)
+        );
+    }
+
+    #[test]
+    fn graph_indexing_persists_and_reads_as_off_when_absent() {
+        let directory = tempdir().expect("workspace");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        fs::create_dir(layout.storage_dir()).expect("storage directory");
+        let mut manifest = fixture_manifest(&layout);
+        assert!(!manifest.graph_indexing(), "the switch defaults to off");
+        manifest.set_graph_indexing(true);
+
+        let value = serde_json::to_value(&manifest).expect("manifest JSON");
+        assert_eq!(value["graphIndexing"], serde_json::json!(true));
+        assert!(
+            decode_manifest(&value, &layout)
+                .expect("round trip")
+                .graph_indexing()
+        );
+
+        // Manifests written before the switch existed carry no field at all.
+        let mut legacy = value;
+        legacy
+            .as_object_mut()
+            .expect("manifest object")
+            .remove("graphIndexing");
+        assert!(
+            !decode_manifest(&legacy, &layout)
+                .expect("legacy manifest")
+                .graph_indexing(),
+            "a manifest without the switch keeps indexing without a graph"
+        );
+
+        write_workspace_manifest(layout.manifest_path(), &manifest).expect("write manifest");
         assert_eq!(
             read_workspace_manifest(directory.path(), &layout).expect("read manifest"),
             Some(manifest)

@@ -108,6 +108,10 @@ fn rebinding_receivers(name_edges: &[NameEdge]) -> HashSet<(usize, String)> {
         .collect()
 }
 
+/// One name-reference site: two references collapse only when they share the
+/// owner, kind, receiver, name, and call arity.
+type RefSite = (GraphEdgeKind, usize, Option<String>, String, Option<usize>);
+
 /// Partitions the walk buffers against the completed symbol table.
 ///
 /// Resolution policy, mirroring the TypeScript original: a bare `ref_name` hit
@@ -125,6 +129,7 @@ pub(crate) fn partition_walk(
         resolved_edges,
         name_edges,
         symbols,
+        file_symbols,
         scoped_symbols,
         ..
     } = context;
@@ -136,7 +141,7 @@ pub(crate) fn partition_walk(
     };
     let aliases = alias_table(&name_edges);
     let rebinding_receivers = rebinding_receivers(&name_edges);
-    let mut collapsed: HashSet<(GraphEdgeKind, usize, Option<String>, String)> = HashSet::new();
+    let mut collapsed: HashSet<RefSite> = HashSet::new();
     for edge in name_edges {
         let rebinding_call = edge.ref_kind == GraphEdgeKind::Calls
             && edge.receiver_name.as_deref().is_some_and(|receiver| {
@@ -145,12 +150,15 @@ pub(crate) fn partition_walk(
         if !rebinding_call && edge.ref_kind != GraphEdgeKind::Declares {
             // Binding rows never collapse: the resolver's binding table
             // orders them by line, so a rebinding row is load-bearing even
-            // when an earlier row binds the same name.
+            // when an earlier row binds the same name. Arity is part of the
+            // site: `x.run()` and `x.run(1)` may name different overloads, so
+            // collapsing them would discard one of the two shapes.
             let site = (
                 edge.ref_kind,
                 edge.owner_index,
                 edge.receiver_name.clone(),
                 edge.ref_name.clone(),
+                edge.arity,
             );
             if !collapsed.insert(site) {
                 continue;
@@ -168,6 +176,11 @@ pub(crate) fn partition_walk(
             // initializers, its owner's local name table (the nested
             // spelling an entity declares in its body shadows any
             // file-level name inside it), then the file-level table.
+            // Members and nested definitions stay out of that last table: a
+            // top-level `caller()` naming `run` does not see `A::run` just
+            // because the file declares it once. Without better evidence the
+            // reference stays pending for the cross-file resolver, which also
+            // weighs imports.
             GraphEdgeKind::Calls => aliases
                 .get(&(edge.owner_index, edge.ref_name.clone()))
                 .and_then(|bound| {
@@ -182,7 +195,7 @@ pub(crate) fn partition_walk(
                         .copied()
                 })
                 .or_else(|| {
-                    symbols
+                    file_symbols
                         .get(&edge.ref_name)
                         .and_then(|indices| (indices.len() == 1).then(|| indices[0]))
                 }),
@@ -322,5 +335,48 @@ mod tests {
             }]
         );
         assert_eq!(graph.head_fragment_indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn file_scope_calls_do_not_bind_to_container_members() {
+        // `class A { run() {} } function caller() { run(); }`: `A::run` is a
+        // member, not a file-level name. Binding it from a top-level caller
+        // would claim an edge the resolver can no longer revisit, and the
+        // import of the real `run` would lose its chance to bind.
+        let mut context = WalkContext::new();
+        let caller = context.next_entity_index();
+        context.register_symbol(Some("caller"), caller);
+        let container = context.next_entity_index();
+        context.register_symbol(Some("A"), container);
+        context.push_scope(container);
+        let member = context.next_entity_index();
+        context.register_symbol(Some("run"), member);
+        context.register_scoped_symbol(Some("run"), member);
+        context.pop_scope();
+        context.add_call_edge(caller, "run", None, None, Some(0), 4, 2);
+
+        let graph = partition_walk(context, vec![0, 1, 2]);
+        assert!(
+            graph.resolved.is_empty(),
+            "a container member must not bind from file scope"
+        );
+        assert_eq!(graph.pending.len(), 1);
+        assert_eq!(graph.pending[0].ref_name, "run");
+    }
+
+    #[test]
+    fn different_arities_at_one_receiver_are_not_collapsed() {
+        // `x.run()` and `x.run(1)` may name different overloads, so the call
+        // shape carries the arity rather than collapsing to the first site.
+        let mut context = context_with_entities(2);
+        context.register_symbol(Some("run"), 1);
+        context.add_call_edge(0, "run", Some("x"), None, Some(0), 5, 2);
+        context.add_call_edge(0, "run", Some("x"), None, Some(1), 5, 8);
+
+        let graph = partition_walk(context, vec![0, 1]);
+        assert!(graph.resolved.is_empty());
+        assert_eq!(graph.pending.len(), 2);
+        assert_eq!(graph.pending[0].arity, Some(0));
+        assert_eq!(graph.pending[1].arity, Some(1));
     }
 }

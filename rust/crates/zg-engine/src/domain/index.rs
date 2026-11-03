@@ -9,8 +9,6 @@ use super::{
     model::{EmbeddingModelInfo, EncryptedApiKey, ModelConfig},
 };
 
-pub(crate) const CURRENT_INDEX_VERSION: u32 = 2;
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(
     tag = "state",

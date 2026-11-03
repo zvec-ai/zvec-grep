@@ -25,6 +25,15 @@ pub mod options {
         pub root: Option<PathBuf>,
         /// Build from empty storage and replace the active index only after success.
         pub rebuild: bool,
+        /// Turns walk-time code graph indexing on or off for this workspace.
+        ///
+        /// Omitted keeps the saved setting, and a workspace saved before this
+        /// option existed indexes without a graph. Changing the setting rebuilds
+        /// the index: the graph and the rest of the index must describe the same
+        /// build, and a graph-backed workspace needs its whole content indexed
+        /// before the graph can answer anything.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub graph_indexing: Option<bool>,
         /// Automatic refreshes require an existing enabled index instead of creating one.
         /// This admission policy is runtime-only and never accepted from transport requests.
         #[serde(skip)]

@@ -24,6 +24,10 @@ pub(crate) struct Workspace {
     created_epoch_ms: u64,
     #[serde(rename = "updatedTime")]
     updated_epoch_ms: u64,
+    /// Whether this workspace extracts and persists the code graph. Absent in
+    /// manifests written before the switch existed, which read as `false`.
+    #[serde(default)]
+    graph_indexing: bool,
     index: IndexState,
 }
 
@@ -48,6 +52,7 @@ impl Workspace {
             storage_generation,
             created_epoch_ms,
             updated_epoch_ms,
+            graph_indexing: false,
             index,
         };
         workspace.validate()?;
@@ -63,6 +68,7 @@ impl Workspace {
         storage_generation: Option<String>,
         created_epoch_ms: u64,
         updated_epoch_ms: u64,
+        graph_indexing: bool,
         index: IndexState,
     ) -> EngineResult<Self> {
         let changed = source_root.environment_changed();
@@ -74,6 +80,7 @@ impl Workspace {
             storage_generation,
             created_epoch_ms,
             updated_epoch_ms,
+            graph_indexing,
             index,
         };
         workspace.validate()?;
@@ -156,6 +163,17 @@ impl Workspace {
 
     pub(crate) fn index_enabled(&self) -> bool {
         matches!(self.index, IndexState::Enabled(_))
+    }
+
+    /// Whether indexing this workspace extracts, assembles, and persists the
+    /// code graph. Off by default; a workspace switched on must be rebuilt so
+    /// the graph and the rest of the index describe the same content.
+    pub(crate) fn graph_indexing(&self) -> bool {
+        self.graph_indexing
+    }
+
+    pub(crate) fn set_graph_indexing(&mut self, enabled: bool) {
+        self.graph_indexing = enabled;
     }
 
     pub(crate) fn record_update(&mut self, updated_epoch_ms: u64) {
@@ -574,6 +592,7 @@ mod tests {
             serde_json::from_value(saved["storageGeneration"].clone()).expect("storage generation"),
             serde_json::from_value(saved["createdTime"].clone()).expect("created time"),
             serde_json::from_value(saved["updatedTime"].clone()).expect("updated time"),
+            saved["graphIndexing"].as_bool().unwrap_or_default(),
             serde_json::from_value(saved["index"].clone()).expect("index fields"),
         )
         .expect("workspace from manifest")

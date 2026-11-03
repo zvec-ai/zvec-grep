@@ -110,8 +110,11 @@ impl WorkspaceIndexService {
         } else {
             recover_build(&layout)?;
         }
-        let rebuilding =
-            options.rebuild || !existing.as_ref().is_some_and(Workspace::index_enabled);
+        // One workspace setting drives extraction, assembly, and storage.
+        let graph_indexing = resolve_graph_indexing(existing.as_ref(), &options);
+        let rebuilding = options.rebuild
+            || graph_setting_changed(existing.as_ref(), graph_indexing)
+            || !existing.as_ref().is_some_and(Workspace::index_enabled);
         if options.reset_paths
             || options.scan != crate::api::index::options::ScanRulesUpdate::default()
         {
@@ -149,6 +152,7 @@ impl WorkspaceIndexService {
             scan,
             rebuilding,
         )?;
+        workspace.set_graph_indexing(graph_indexing);
         if rebuilding {
             options.changes.clear();
             prepare_build(&workspace)?;
@@ -192,10 +196,13 @@ impl WorkspaceIndexService {
         } else {
             workspace.layout().index_dir()
         };
-        let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
-            storage_path: storage_path.to_path_buf(),
-            embeddings: models.iter().map(|model| model.info().clone()).collect(),
-        })?;
+        let storage = IndexStore::open_with_graph(
+            WorkspaceIndexStorageOptions::ReadWrite {
+                storage_path: storage_path.to_path_buf(),
+                embeddings: models.iter().map(|model| model.info().clone()).collect(),
+            },
+            workspace.graph_indexing(),
+        )?;
         let writer = self.writers.register(
             crate::pipelines::indexed_search::writer::WriterSession::new(
                 storage,
@@ -427,6 +434,23 @@ fn missing_refresh_index(root: &Path) -> EngineError {
         "No index found in {}. Run `zg --index --embedding <model>` to build it before refreshing.",
         root.display()
     ))
+}
+
+/// Resolves the workspace's graph setting: an explicit request wins, and a
+/// workspace saved before the switch existed keeps indexing without a graph.
+fn resolve_graph_indexing(existing: Option<&Workspace>, options: &IndexOptions) -> bool {
+    options
+        .graph_indexing
+        .unwrap_or_else(|| existing.is_some_and(Workspace::graph_indexing))
+}
+
+/// A changed setting forces a rebuild: a graph only describes the files
+/// indexed alongside it, so an index built under the other setting cannot be
+/// extended with one.
+fn graph_setting_changed(existing: Option<&Workspace>, graph_indexing: bool) -> bool {
+    existing.is_some_and(|workspace| {
+        workspace.index_enabled() && workspace.graph_indexing() != graph_indexing
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2201,6 +2225,86 @@ mod tests {
             .expect("reuse saved zero limit");
         assert_eq!(result.files_added, 0);
         assert_eq!(result.files_failed, 0);
+        models.close();
+    }
+
+    #[tokio::test]
+    async fn graph_indexing_switch_persists_and_rebuilds_the_workspace() {
+        let directory = tempdir().expect("workspace");
+        let service = WorkspaceIndexService::new();
+        let models = ModelRuntimeManager::new();
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        let published = |layout: &WorkspaceLayout| {
+            super::read_workspace_manifest(
+                layout.storage_dir().parent().expect("source root"),
+                layout,
+            )
+            .expect("manifest read")
+            .expect("published workspace")
+        };
+
+        service
+            .index(&models, empty_index_options(directory.path()))
+            .await
+            .expect("initial index");
+        let initial = published(&layout);
+        assert!(
+            !initial.graph_indexing(),
+            "graph indexing stays off unless the request asks for it"
+        );
+        assert!(
+            !layout.index_dir().join("graph").exists(),
+            "a graph-free workspace must not create graph storage"
+        );
+
+        // An ordinary refresh keeps the saved setting, so it does not rebuild.
+        service
+            .index(&models, empty_index_options(directory.path()))
+            .await
+            .expect("refresh");
+        let refreshed = published(&layout);
+        assert_eq!(refreshed.storage_generation(), initial.storage_generation());
+        assert!(!refreshed.graph_indexing());
+
+        // Switching the setting on rebuilds: a graph only describes the files
+        // indexed alongside it.
+        service
+            .index(
+                &models,
+                IndexOptions {
+                    graph_indexing: Some(true),
+                    ..empty_index_options(directory.path())
+                },
+            )
+            .await
+            .expect("enable graph indexing");
+        let enabled = published(&layout);
+        assert!(enabled.graph_indexing());
+        assert_ne!(enabled.storage_generation(), initial.storage_generation());
+        assert!(
+            layout.index_dir().join("graph").exists(),
+            "an enabled workspace keeps graph storage"
+        );
+
+        // Switching it off rebuilds again and drops the stale graph with the
+        // previous generation.
+        service
+            .index(
+                &models,
+                IndexOptions {
+                    graph_indexing: Some(false),
+                    ..empty_index_options(directory.path())
+                },
+            )
+            .await
+            .expect("disable graph indexing");
+        let disabled = published(&layout);
+        assert!(!disabled.graph_indexing());
+        assert_ne!(disabled.storage_generation(), enabled.storage_generation());
+        assert!(
+            !layout.index_dir().join("graph").exists(),
+            "disabling graph indexing must not leave the old graph behind"
+        );
         models.close();
     }
 

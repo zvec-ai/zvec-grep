@@ -141,13 +141,12 @@ fn is_identifier_like(value: &str) -> bool {
 }
 
 /// Scans an entity body for call sites and buffers one `calls` reference per
-/// distinct callee. Nested call expressions inside an argument list are
-/// skipped: the inner call is collected on its own visit when the walk
-/// reaches it as a sibling — keeping attribution shallow matches how the
-/// outline collector treats nested calls and avoids double-counting chains.
-/// `boundary` marks subtrees owned by another entity (nested members of a
-/// container entity); their call sites are claimed when the walk reaches the
-/// owning entity, so they are not collected here.
+/// distinct callee. Nested call expressions inside an argument list or a
+/// receiver are collected too: the walk descends declarations only, so it
+/// never revisits a call's interior on its own. `boundary` marks subtrees
+/// owned by another entity (nested members of a container entity); their call
+/// sites are claimed when the walk reaches the owning entity, so they are not
+/// collected here.
 pub(crate) fn scan_call_edges(
     entity_node: Node<'_>,
     owner_index: usize,
@@ -155,6 +154,9 @@ pub(crate) fn scan_call_edges(
     context: &mut WalkContext,
     boundary: Option<&dyn Fn(Node<'_>) -> bool>,
 ) {
+    if !context.is_collecting() {
+        return;
+    }
     visit_for_calls(entity_node, owner_index, source, context, boundary);
 }
 
@@ -165,30 +167,30 @@ fn visit_for_calls(
     context: &mut WalkContext,
     boundary: Option<&dyn Fn(Node<'_>) -> bool>,
 ) {
-    if is_call_node(node) {
-        if let Some(callee) = callee_text_of(node, source) {
-            // C/C++ arrow member access joins the identifier gate and the
-            // split under the dot spelling: `ptr->bar()` names the same
-            // member shape as `ref.bar()`. The buffered raw text keeps the
-            // original spelling.
-            let normalized = callee.replace("->", ".");
-            let normalized = normalize_super_call(&normalized);
-            if normalized.len() <= MAX_CALLEE_TEXT_CHARS && is_identifier_like(&normalized) {
-                let (ref_name, receiver_name) = split_callee_name(&normalized);
-                context.add_call_edge(
-                    owner_index,
-                    &ref_name,
-                    receiver_name.as_deref(),
-                    Some(callee.as_str()),
-                    call_arity_of(node),
-                    node.start_position().row + 1,
-                    node.start_position().column,
-                );
-            }
+    // A call node still descends below: `outer(inner())` and `factory().run()`
+    // reach their inner calls only through its subtree, and the declaration
+    // walk never comes back for them.
+    if is_call_node(node)
+        && let Some(callee) = callee_text_of(node, source)
+    {
+        // C/C++ arrow member access joins the identifier gate and the
+        // split under the dot spelling: `ptr->bar()` names the same
+        // member shape as `ref.bar()`. The buffered raw text keeps the
+        // original spelling.
+        let normalized = callee.replace("->", ".");
+        let normalized = normalize_super_call(&normalized);
+        if normalized.len() <= MAX_CALLEE_TEXT_CHARS && is_identifier_like(&normalized) {
+            let (ref_name, receiver_name) = split_callee_name(&normalized);
+            context.add_call_edge(
+                owner_index,
+                &ref_name,
+                receiver_name.as_deref(),
+                Some(callee.as_str()),
+                call_arity_of(node),
+                node.start_position().row + 1,
+                node.start_position().column,
+            );
         }
-        // Do not descend into the call's own arguments; other collectors and
-        // the walk revisit that region.
-        return;
     }
     for child in named_children(node) {
         if boundary.is_some_and(|owns| owns(child)) {
@@ -213,6 +215,9 @@ pub(crate) fn scan_binding_declarations(
     context: &mut WalkContext,
     boundary: Option<&dyn Fn(Node<'_>) -> bool>,
 ) {
+    if !context.is_collecting() {
+        return;
+    }
     visit_for_bindings(entity_node, owner_index, source, format, context, boundary);
 }
 
@@ -275,6 +280,9 @@ pub(crate) fn scan_return_types(
     format: FileFormat,
     context: &mut WalkContext,
 ) {
+    if !context.is_collecting() {
+        return;
+    }
     visit_for_return_types(root, source, format, context);
 }
 
@@ -1049,6 +1057,9 @@ pub(crate) fn collect_import_edge(
     format: FileFormat,
     context: &mut WalkContext,
 ) {
+    if !context.is_collecting() {
+        return;
+    }
     let Some(path) = module_path_of(node, source, format) else {
         return;
     };
@@ -1069,6 +1080,9 @@ pub(crate) fn collect_inheritance_edges(
     owner_index: usize,
     context: &mut WalkContext,
 ) {
+    if !context.is_collecting() {
+        return;
+    }
     let Some(vocabulary) = heritage_vocabulary_for(format) else {
         return;
     };

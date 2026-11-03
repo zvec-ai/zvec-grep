@@ -85,12 +85,17 @@ pub(crate) struct NameEdge {
 }
 
 /// Mutable state carried through a single AST walk.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct WalkContext {
     resolved_edges: Vec<WalkEdge>,
     name_edges: Vec<NameEdge>,
     scope_stack: Vec<usize>,
     symbols: HashMap<String, Vec<usize>>,
+    /// Symbols declared at file top level. A bare call may only bind to these
+    /// from the file scope: `symbols` also holds members and nested
+    /// definitions, and a member is not visible to a top-level caller that
+    /// never received a receiver of its container's type.
+    file_symbols: HashMap<String, Vec<usize>>,
     /// Symbols each containing entity declares directly in its body, the
     /// innermost-scope shadow table: a call inside `outer` that names
     /// `work` binds the nested `outer::work` before any file-level name.
@@ -101,11 +106,46 @@ pub(crate) struct WalkContext {
     /// different types whose factory answer is ambiguous.
     return_types: HashMap<String, Option<String>>,
     entity_counter: usize,
+    /// False when the workspace does not keep a graph: every collector
+    /// returns immediately and no buffer is ever filled.
+    collecting: bool,
+}
+
+impl Default for WalkContext {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WalkContext {
     pub(crate) fn new() -> Self {
-        Self::default()
+        Self::with_collection(true)
+    }
+
+    /// A context that records nothing. Extraction builds it for workspaces
+    /// without graph storage so the graph scans do only a flag check.
+    pub(crate) fn disabled() -> Self {
+        Self::with_collection(false)
+    }
+
+    fn with_collection(collecting: bool) -> Self {
+        Self {
+            resolved_edges: Vec::new(),
+            name_edges: Vec::new(),
+            scope_stack: Vec::new(),
+            symbols: HashMap::new(),
+            file_symbols: HashMap::new(),
+            scoped_symbols: HashMap::new(),
+            seen_name_edges: HashSet::new(),
+            return_types: HashMap::new(),
+            entity_counter: 0,
+            collecting,
+        }
+    }
+
+    /// False when this walk records no graph state.
+    pub(crate) fn is_collecting(&self) -> bool {
+        self.collecting
     }
 
     /// Allocates the next per-file entity ordinal. Ordinals follow walk order,
@@ -133,17 +173,32 @@ impl WalkContext {
 
     /// Registers a symbol so partition can resolve in-file references to it.
     /// Absent and empty names are skipped, mirroring the TypeScript guard.
+    /// The registration also records whether the symbol is file-level: the
+    /// walk calls this before pushing the entity's own scope, so an empty
+    /// scope stack means a top-level declaration.
     pub(crate) fn register_symbol(&mut self, name: Option<&str>, index: usize) {
+        if !self.collecting {
+            return;
+        }
         let Some(name) = name.filter(|name| !name.is_empty()) else {
             return;
         };
         self.symbols.entry(name.to_owned()).or_default().push(index);
+        if self.current_scope_index().is_none() {
+            self.file_symbols
+                .entry(name.to_owned())
+                .or_default()
+                .push(index);
+        }
     }
 
     /// Registers a nested entity under its containing entity's local name
     /// table: inside that entity's body the nested spelling shadows any
     /// file-level name. The registration is a no-op at file top level.
     pub(crate) fn register_scoped_symbol(&mut self, name: Option<&str>, index: usize) {
+        if !self.collecting {
+            return;
+        }
         let Some(name) = name.filter(|name| !name.is_empty()) else {
             return;
         };
@@ -181,6 +236,9 @@ impl WalkContext {
     /// produce no walk-time edge; the graph assembly links them to the file
     /// node once it is materialized.
     pub(crate) fn add_contains_edge(&mut self, target_index: usize, line: usize, column: usize) {
+        if !self.collecting {
+            return;
+        }
         let Some(source_index) = self.current_scope_index() else {
             return;
         };
@@ -198,6 +256,9 @@ impl WalkContext {
     /// metadata. Distinct receivers stay separate: `left_api.work()` and
     /// `right_api.work()` can bind different declarations.
     pub(crate) fn add_name_edge(&mut self, edge: NameEdge) {
+        if !self.collecting {
+            return;
+        }
         // Containment uses its own buffer ([`Self::add_contains_edge`]); every
         // name reference is a call, import, inheritance clause, or binding.
         debug_assert_ne!(
@@ -263,6 +324,9 @@ impl WalkContext {
         line: usize,
         column: usize,
     ) {
+        if !self.collecting {
+            return;
+        }
         // Bindings bypass the name-edge dedup: rebinding one name to a
         // different type is exactly the evidence the resolver orders by
         // line, and identical redeclarations collapse harmlessly at
@@ -285,6 +349,9 @@ impl WalkContext {
     /// registered with two different types (same-named methods, overloads)
     /// becomes ambiguous and stops answering factory lookups.
     pub(crate) fn register_return_type(&mut self, name: &str, return_type: &str) {
+        if !self.collecting {
+            return;
+        }
         let entry = self.return_types.entry(name.to_owned()).or_insert(None);
         match entry {
             None => *entry = Some(return_type.to_owned()),

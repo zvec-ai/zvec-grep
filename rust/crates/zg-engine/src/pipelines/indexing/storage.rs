@@ -9,6 +9,8 @@ use crate::{
 };
 
 pub(crate) trait IndexStorage: Send + Sync {
+    /// Whether writes may carry a walk-time graph.
+    fn graph_enabled(&self) -> bool;
     fn is_read_only(&self) -> bool;
     fn list_files(&self) -> EngineResult<Vec<FileRecord>>;
     fn resolve_file_ids(&self, paths: &[PathBuf]) -> EngineResult<Vec<FileId>>;
@@ -26,6 +28,10 @@ pub(crate) trait IndexStorage: Send + Sync {
 }
 
 impl IndexStorage for IndexStore {
+    fn graph_enabled(&self) -> bool {
+        self.graph_enabled()
+    }
+
     fn is_read_only(&self) -> bool {
         self.is_read_only()
     }

@@ -29,12 +29,13 @@ const COMPONENT_CODE_FORMATS: [FileFormat; 2] = [FileFormat::Vue, FileFormat::Sv
 pub(super) fn extract_for_indexing(
     source: &TextSource,
     options: ChunkOptions,
+    collect_graph: bool,
 ) -> Result<ExtractionOutput, EngineError> {
     let jsx = source
         .relative_path
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("tsx"));
-    extract_code(source, options, jsx).map(|mut output| {
+    extract_code(source, options, jsx, collect_graph).map(|mut output| {
         for entity in &mut output.fragments {
             if let Content::Text(text) = &mut entity.content {
                 entity.content = Content::Code(std::mem::take(text));
@@ -48,6 +49,7 @@ fn extract_code(
     source: &TextSource,
     options: ChunkOptions,
     jsx: bool,
+    collect_graph: bool,
 ) -> Result<ExtractionOutput, EngineError> {
     if !super::service::is_code_source(&source.formats) {
         return Ok(ExtractionOutput {
@@ -112,7 +114,12 @@ fn extract_code(
     let mut entities = Vec::new();
     // The walk buffers containment edges and name references; the post-walk
     // partition splits them into in-file resolved edges and pending refs.
-    let mut graph_context = WalkContext::new();
+    // A workspace without graph storage gets a context that records nothing.
+    let mut graph_context = if collect_graph {
+        WalkContext::new()
+    } else {
+        WalkContext::disabled()
+    };
     // Factory return types register before the entity walk so a bare-call
     // initializer binds its factory even when the factory is spelled after
     // the caller in this file.
@@ -142,11 +149,14 @@ fn extract_code(
         })
     } else {
         // The symbol table is complete now, so partitioning resolves forward
-        // references as readily as backward ones.
-        let graph = partition_walk(graph_context, entity_heads);
+        // references as readily as backward ones. A walk that recorded nothing
+        // produces no graph at all, so assembly skips it.
+        let partitioned = graph_context
+            .is_collecting()
+            .then(|| partition_walk(graph_context, entity_heads));
         Ok(ExtractionOutput {
             fragments: output,
-            graph: Some(graph),
+            graph: partitioned,
         })
     }
 }
@@ -430,6 +440,9 @@ fn extract_script_blocks(
                 chunk_overlap_chars: Some(overlap_chars),
             },
             block.jsx,
+            // Component scripts are remapped into the wrapper's coordinates
+            // and never contribute a graph, so the walk records nothing.
+            false,
         )?
         .fragments;
         let remapped = remap_script_block_entities(
@@ -916,6 +929,113 @@ mod tests {
             Some(EntityMetadata::Code(CodeMetadata { documentation: Some(doc), .. }))
                 if doc == "Load a value.\nKeep the result."
         ));
+    }
+
+    #[test]
+    fn skipping_graph_collection_keeps_every_entity() {
+        let source = test_source(
+            FileFormat::Rust,
+            "skip.rs",
+            "fn caller() { callee(); }\nfn callee() {}\nstruct Api;\nimpl Api { fn run(&self) {} }\n",
+        );
+        let with_graph =
+            extract_for_indexing(&source, ChunkOptions::default()).expect("graph extraction");
+        let without = crate::extraction::extract_without_graph(&source, ChunkOptions::default())
+            .expect("graph-free extraction");
+        assert!(
+            with_graph.graph.is_some(),
+            "indexing a graph workspace collects a graph"
+        );
+        assert!(
+            without.graph.is_none(),
+            "a graph-free workspace must not collect one"
+        );
+        assert_eq!(
+            without.fragments, with_graph.fragments,
+            "the indexed content must not depend on the graph setting"
+        );
+    }
+
+    #[test]
+    fn nested_calls_inside_arguments_reach_the_graph() {
+        // `outer(inner())` must report both calls: the walk descends
+        // declarations only, so the inner call is reachable solely through
+        // the outer call's argument subtree.
+        let source = test_source(
+            FileFormat::Rust,
+            "nested_calls.rs",
+            "fn inner() {}\nfn outer(_: ()) {}\nfn caller() { outer(inner()); }\n",
+        );
+        let graph = extract_for_indexing(&source, ChunkOptions::default())
+            .expect("extraction")
+            .graph
+            .expect("code sources carry a graph");
+        let mut targets: Vec<usize> = graph
+            .resolved
+            .iter()
+            .map(|edge| edge.target_index)
+            .collect();
+        targets.sort_unstable();
+        assert_eq!(
+            targets,
+            vec![0, 1],
+            "caller must reach both inner and outer"
+        );
+        assert!(graph.pending.is_empty());
+    }
+
+    #[test]
+    fn type_scoped_member_names_do_not_bind_from_file_scope() {
+        // `import { run }` plus `class A { run() {} }`: the member is not a
+        // file-level name, so `caller`'s bare `run()` must stay pending rather
+        // than claim `A::run` before the resolver weighs the import.
+        let source = test_source(
+            FileFormat::TypeScript,
+            "shadow.ts",
+            "import { run } from './other';\nclass A { run() {} }\nfunction caller() { run(); }\n",
+        );
+        let graph = extract_for_indexing(&source, ChunkOptions::default())
+            .expect("extraction")
+            .graph
+            .expect("code sources carry a graph");
+        assert!(graph.resolved.is_empty(), "resolved: {:?}", graph.resolved);
+        assert!(
+            graph.pending.iter().any(|edge| {
+                edge.ref_kind == crate::domain::GraphEdgeKind::Calls && edge.ref_name == "run"
+            }),
+            "pending: {:?}",
+            graph.pending
+        );
+    }
+
+    #[test]
+    fn overload_calls_keep_their_arity() {
+        // `x.run()` and `x.run(1)` may name different overloads; partition must
+        // keep both call shapes instead of collapsing to the first one.
+        let source = test_source(
+            FileFormat::Java,
+            "Overload.java",
+            "class A { void caller(Api x) { x.run(); x.run(1); } }\n",
+        );
+        let graph = extract_for_indexing(&source, ChunkOptions::default())
+            .expect("extraction")
+            .graph
+            .expect("code sources carry a graph");
+        let mut arities: Vec<Option<usize>> = graph
+            .pending
+            .iter()
+            .filter(|edge| {
+                edge.ref_kind == crate::domain::GraphEdgeKind::Calls && edge.ref_name == "run"
+            })
+            .map(|edge| edge.arity)
+            .collect();
+        arities.sort_unstable();
+        assert_eq!(
+            arities,
+            vec![Some(0), Some(1)],
+            "pending: {:?}",
+            graph.pending
+        );
     }
 
     #[test]

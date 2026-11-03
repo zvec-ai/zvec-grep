@@ -18,12 +18,15 @@ pub(super) fn extract<'source>(
     source: impl Into<Source<'source>>,
     options: ChunkOptions,
 ) -> Result<Vec<ExtractedEntity>, EngineError> {
-    Ok(extract_for_indexing(source, options)?.fragments)
+    // Search reads the same content but never stores a graph, so the walk-time
+    // collection would only burn cycles.
+    Ok(extract_for_indexing(source, options, false)?.fragments)
 }
 
 pub(super) fn extract_for_indexing<'source>(
     source: impl Into<Source<'source>>,
     options: ChunkOptions,
+    collect_graph: bool,
 ) -> Result<ExtractionOutput, EngineError> {
     let source = source.into();
     let source_text = match &source {
@@ -32,7 +35,7 @@ pub(super) fn extract_for_indexing<'source>(
     };
     let output = match source {
         Source::Text(source) if is_code_source(&source.formats) => {
-            code::extract_for_indexing(source, options)
+            code::extract_for_indexing(source, options, collect_graph)
         }
         Source::Image(source) => Ok(ExtractionOutput {
             fragments: image::extract(source),
