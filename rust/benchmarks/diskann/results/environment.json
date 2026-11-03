@@ -1,0 +1,35 @@
+{
+  "binary_sha256": "e52b3f64e522b67bd102a03bd29a30bfa117e36b1170c7ad25574d030e43606f",
+  "cpu": "Apple M3 Pro",
+  "memory_bytes": 38654705664,
+  "os": "ProductName:\t\tmacOS\nProductVersion:\t\t26.6.2\nBuildVersion:\t\t25G83",
+  "counts": [
+    2000,
+    10000,
+    20000,
+    50000,
+    100000
+  ],
+  "dimension": 768,
+  "top_k": 10,
+  "warmup_queries": 20,
+  "measured_queries": 200,
+  "repeats": 3,
+  "query_concurrency": 1,
+  "diskann_default_list_size": 512,
+  "qps": "200 / measured_batch_seconds",
+  "file_cache": "not purged",
+  "index_roots": [
+    "zvec-memory-bench",
+    "zvec-scale-bench"
+  ],
+  "truth_root": "zvec-scale-bench",
+  "implementation_commit": "4d6c155440ea72705d0d15f9347dfc8035e84bf6",
+  "measurement_date_local": "2026-11-03",
+  "timezone": "Asia/Shanghai",
+  "rustc": "1.98.0",
+  "precision": {
+    "hnsw": "FP16",
+    "diskann": "FP32"
+  }
+}

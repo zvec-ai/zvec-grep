@@ -1,0 +1,16 @@
+[package]
+name = "zvec-qps-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+zg-diskann = { path = "../../../crates/zg-diskann" }
+zg-zvec-fp16 = { path = "../../../crates/zg-zvec-fp16" }
+zvec-rust = "=0.8.0"
+serde_json = "1"
+
+[build-dependencies]
+zvec-rust-build = "=0.8.0"
+
+[workspace]
