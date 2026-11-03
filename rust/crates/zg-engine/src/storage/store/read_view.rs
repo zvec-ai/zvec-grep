@@ -110,7 +110,7 @@ impl ReadView<'_> {
             .map_err(|error| EngineError::from_report(error.clone()))
     }
 
-    pub(crate) fn graph_neighborhood(
+    pub(crate) fn neighborhood(
         &self,
         id: &str,
         direction: Direction,

@@ -369,9 +369,7 @@ fn neighborhood(
     kinds: Option<&[GraphEdgeKind]>,
     limit: usize,
 ) -> EngineResult<Vec<(FileEdge, PathBuf)>> {
-    let mut rows = storage
-        .graph_neighborhood(id, direction, kinds)?
-        .into_iter();
+    let mut rows = storage.neighborhood(id, direction, kinds)?.into_iter();
     let mut edges = Vec::new();
     let mut hydration_size = limit.clamp(1, ENDPOINT_BATCH_SIZE);
     let mut checked = HashSet::new();
