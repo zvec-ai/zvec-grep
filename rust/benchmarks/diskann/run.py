@@ -16,6 +16,7 @@ parser.add_argument("--output", type=pathlib.Path, required=True)
 parser.add_argument("--counts", type=int, nargs="+", default=[2000, 10000, 20000, 50000, 100000])
 parser.add_argument("--query-file", type=pathlib.Path)
 parser.add_argument("--diskann-list-size", type=int)
+parser.add_argument("--diskann-precision", choices=["fp32", "fp16"], default="fp32")
 parser.add_argument("--hnsw-ef", type=int, default=0)
 parser.add_argument("--repeat-offset", type=int, default=0)
 parser.add_argument("--require-recall-match", action="store_true")
@@ -30,6 +31,8 @@ for count in args.counts:
         # Alternate order to reduce systematic cache/thermal bias.
         for engine in (["hnsw", "diskann"] if repeat % 2 == 0 else ["diskann", "hnsw"]):
             mode = "hnsw_fp16" if engine == "hnsw" else "diskann"
+            if engine == "diskann" and args.diskann_precision == "fp16":
+                mode = "diskann_fp16"
             index = next(root / f"{mode}-{count}-768/index" for root in args.index_roots
                          if (root / f"{mode}-{count}-768/index").exists())
             effort = (512 if count <= 10000 else 768) if engine == "diskann" else args.hnsw_ef
@@ -41,6 +44,9 @@ for count in args.counts:
                 command = ["/usr/bin/time", "-l", str(args.binary), engine, str(index), str(count), str(effort)]
                 if args.query_file:
                     command.append(str(args.query_file))
+                if engine == "diskann" and args.diskann_precision == "fp16":
+                    assert args.query_file, "FP16 benchmark requires an explicit query file"
+                    command.append("fp16")
                 subprocess.run(command,
                                stdout=out, stderr=err, check=True)
             stages = [json.loads(line) for line in (args.output / f"{name}.jsonl").read_text().splitlines()]
@@ -87,5 +93,6 @@ with (args.output / "summary.csv").open("w", newline="") as f:
     "query_file_sha256": hashlib.sha256(args.query_file.read_bytes()).hexdigest() if args.query_file else None,
     "diskann_list_size_override": args.diskann_list_size,
     "hnsw_ef": args.hnsw_ef,
+    "diskann_precision": args.diskann_precision,
 }, indent=2))
 print("FINISHED", args.output, flush=True)

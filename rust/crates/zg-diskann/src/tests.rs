@@ -2,10 +2,16 @@ use super::*;
 
 #[test]
 fn persists_metrics_replacements_deletions_and_read_only_queries() {
-    for metric in [Distance::Cosine, Distance::DotProduct, Distance::Euclidean] {
+    for (metric, precision) in [Distance::Cosine, Distance::DotProduct, Distance::Euclidean]
+        .into_iter()
+        .flat_map(|metric| {
+            [VectorPrecision::Fp32, VectorPrecision::Fp16].map(|precision| (metric, precision))
+        })
+    {
         let home = tempfile::tempdir().expect("temporary storage");
         let path = home.path().join("vectors.sqlite");
-        let index = VectorIndex::open(&path, 3, metric, false).expect("create");
+        let index =
+            VectorIndex::open_with_precision(&path, 3, metric, false, precision).expect("create");
         assert!(
             index
                 .search(&[1.0, 0.0, 0.0], 10, None)
@@ -48,7 +54,7 @@ fn persists_metrics_replacements_deletions_and_read_only_queries() {
         index.delete_file(2).expect("delete twice");
         drop(index);
         let bytes = std::fs::read(&path).expect("database bytes");
-        let index = VectorIndex::open(&path, 3, metric, true).expect("reopen");
+        let index = VectorIndex::open_read_only(&path).expect("reopen persisted precision");
         let hits = index
             .search(&[-1.0, 0.0, 0.0], 10, None)
             .expect("persisted search");
@@ -65,6 +71,93 @@ fn persists_metrics_replacements_deletions_and_read_only_queries() {
         drop(index);
         assert_eq!(std::fs::read(path).expect("unchanged bytes"), bytes);
     }
+}
+
+#[test]
+fn fp16_persists_binary16_and_rejects_overflow_without_partial_writes() {
+    let home = tempfile::tempdir().expect("temporary storage");
+    let path = home.path().join("fp16.sqlite");
+    let index =
+        VectorIndex::open_with_precision(&path, 4, Distance::Cosine, false, VectorPrecision::Fp16)
+            .expect("FP16 index");
+    index
+        .upsert(&[Record {
+            document_id: "original",
+            file_id: 1,
+            vector: &[0.1, 1.0001, 65504.0, 2.0_f32.powi(-24)],
+        }])
+        .expect("insert FP16");
+    let db = Connection::open(&path).expect("database");
+    let version: u32 = db
+        .query_row("SELECT version FROM settings", [], |row| row.get(0))
+        .expect("version");
+    assert_eq!(version, 2);
+    let bytes: Vec<u8> = db
+        .query_row(
+            "SELECT vector FROM nodes WHERE document_id='original'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("stored bytes");
+    let expected: Vec<u8> = [0x2e66_u16, 0x3c00, 0x7bff, 0x0001]
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    assert_eq!(bytes, expected);
+    assert!(
+        index
+            .upsert(&[
+                Record {
+                    document_id: "valid",
+                    file_id: 1,
+                    vector: &[1.0; 4]
+                },
+                Record {
+                    document_id: "overflow",
+                    file_id: 1,
+                    vector: &[f32::MAX; 4]
+                },
+            ])
+            .is_err()
+    );
+    let count: usize = db
+        .query_row("SELECT COUNT(*) FROM nodes WHERE live=1", [], |row| {
+            row.get(0)
+        })
+        .expect("count");
+    assert_eq!(count, 1);
+    let allowed = HashSet::from(["original".to_owned()]);
+    assert_eq!(
+        index
+            .search(&[0.0, 0.0, 1.0, 0.0], 1, Some(&allowed))
+            .expect("filtered FP16")[0]
+            .document_id,
+        "original"
+    );
+    drop(index);
+    let before = std::fs::read(&path).expect("snapshot");
+    assert!(VectorIndex::open(&path, 4, Distance::Cosine, true).is_err());
+    assert_eq!(before, std::fs::read(&path).expect("unchanged format"));
+    let reader = VectorIndex::open_read_only(&path).expect("detect FP16");
+    assert_eq!(
+        reader
+            .search(&[0.0, 0.0, 1.0, 0.0], 1, None)
+            .expect("reopened")[0]
+            .document_id,
+        "original"
+    );
+    let fp32_path = home.path().join("fp32.sqlite");
+    drop(VectorIndex::open(&fp32_path, 4, Distance::Cosine, false).expect("default FP32"));
+    assert!(
+        VectorIndex::open_with_precision(
+            &fp32_path,
+            4,
+            Distance::Cosine,
+            true,
+            VectorPrecision::Fp16
+        )
+        .is_err()
+    );
 }
 
 #[test]

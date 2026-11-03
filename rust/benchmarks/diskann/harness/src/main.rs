@@ -5,7 +5,7 @@ use std::{
     path::Path,
     time::Instant,
 };
-use zg_diskann::{Distance, VectorIndex};
+use zg_diskann::{Distance, VectorIndex, VectorPrecision};
 use zvec_rust::{Collection, CollectionOptions, HnswQueryParams};
 
 // Same deterministic query sequence as the memory benchmark's FP32 truth set.
@@ -32,9 +32,14 @@ fn vector(id: usize) -> Vec<f32> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     assert!(
-        matches!(args.len(), 5 | 6),
-        "engine index_path count search_effort [queries.f32] (DiskANN L; HNSW ef, 0=default)"
+        matches!(args.len(), 5..=7),
+        "engine index_path count search_effort [queries.f32] [diskann precision: fp32|fp16]"
     );
+    let precision = match args.get(6).map(String::as_str).unwrap_or("fp32") {
+        "fp32" => VectorPrecision::Fp32,
+        "fp16" => VectorPrecision::Fp16,
+        _ => panic!("unsupported precision"),
+    };
     let engine = args[1].as_str();
     assert!(matches!(engine, "diskann" | "hnsw"));
     let count: usize = args[3].parse().unwrap();
@@ -48,8 +53,16 @@ fn main() {
     let mut collection = None;
     let mut diskann = None;
     if engine == "diskann" {
-        diskann =
-            Some(VectorIndex::open(Path::new(&args[2]), 768, Distance::Cosine, true).unwrap());
+        diskann = Some(
+            VectorIndex::open_with_precision(
+                Path::new(&args[2]),
+                768,
+                Distance::Cosine,
+                true,
+                precision,
+            )
+            .unwrap(),
+        );
     } else {
         let mut options = CollectionOptions::new().unwrap();
         options.set_read_only(true).unwrap();
@@ -63,7 +76,7 @@ fn main() {
         if i == 20 {
             batch_started = Some(Instant::now());
         }
-        let query = if let Some(reader) = &mut query_file {
+        let mut query = if let Some(reader) = &mut query_file {
             let mut bytes = [0_u8; 768 * 4];
             reader.read_exact(&mut bytes).unwrap();
             bytes
@@ -76,6 +89,12 @@ fn main() {
             vector(1_000_000 + i)
         };
         let call_started = Instant::now();
+        if engine == "diskann" && precision == VectorPrecision::Fp16 {
+            // Match HNSW's binary16 query payload; retain the original FP32 GT.
+            for value in &mut query {
+                *value = half::f16::from_f32(*value).to_f32();
+            }
+        }
         let found: Vec<String> = if let Some(index) = &diskann {
             index
                 .search_with_list_size(&query, 10, None, list_size)
@@ -117,6 +136,7 @@ fn main() {
     println!(
         "{}",
         json!({"stage":"queried","engine":engine,"count":count,"list_size":list_size,
+            "storage_precision":if engine == "hnsw" || precision == VectorPrecision::Fp16 { "fp16" } else { "fp32" },
             "queries":200,"batch_ms":batch_ms,"qps":200_000.0/batch_ms,
             "mean_ms":latencies.iter().sum::<f64>()/200.0,
             "p50_ms":latencies[100],"p95_ms":latencies[190]})

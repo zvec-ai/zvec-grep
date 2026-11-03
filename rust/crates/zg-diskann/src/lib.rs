@@ -26,6 +26,41 @@ use rusqlite::{Connection, OpenFlags, params};
 
 use provider::{Provider, Strategy};
 
+/// Persisted vector precision. Existing indexes and `open` remain FP32.
+/// FP16 stores IEEE binary16 values and widens them for distance evaluation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VectorPrecision {
+    Fp32,
+    Fp16,
+}
+
+impl VectorPrecision {
+    fn version(self) -> u32 {
+        match self {
+            Self::Fp32 => 1,
+            Self::Fp16 => 2,
+        }
+    }
+
+    fn from_version(version: u32) -> Result<Self> {
+        match version {
+            1 => Ok(Self::Fp32),
+            2 => Ok(Self::Fp16),
+            _ => Err(Error::Invalid("unknown DiskANN storage version".into())),
+        }
+    }
+
+    fn encode(self, vector: &[f32]) -> Vec<u8> {
+        match self {
+            Self::Fp32 => encode_vector(vector),
+            Self::Fp16 => vector
+                .iter()
+                .flat_map(|&value| half::f16::from_f32(value).to_le_bytes())
+                .collect(),
+        }
+    }
+}
+
 /// Supported embedding distance functions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Distance {
@@ -94,6 +129,7 @@ pub struct VectorIndex {
     dimension: usize,
     distance: Distance,
     read_only: bool,
+    precision: VectorPrecision,
 }
 
 impl VectorIndex {
@@ -103,10 +139,11 @@ impl VectorIndex {
     /// Rejects missing databases and unknown stored metrics.
     pub fn open_read_only(path: &Path) -> Result<Self> {
         let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let (dimension, metric): (usize, String) =
-            connection.query_row("SELECT dimension, metric FROM settings", [], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?;
+        let (version, dimension, metric): (u32, usize, String) = connection.query_row(
+            "SELECT version, dimension, metric FROM settings",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
         let distance = match metric.as_str() {
             "cosine" => Distance::Cosine,
             "dot_product" => Distance::DotProduct,
@@ -118,7 +155,13 @@ impl VectorIndex {
             }
         };
         drop(connection);
-        Self::open(path, dimension, distance, true)
+        Self::open_with_precision(
+            path,
+            dimension,
+            distance,
+            true,
+            VectorPrecision::from_version(version)?,
+        )
     }
 
     /// Open a persistent index, creating it only when writable and absent.
@@ -130,6 +173,21 @@ impl VectorIndex {
         dimension: usize,
         distance: Distance,
         read_only: bool,
+    ) -> Result<Self> {
+        Self::open_with_precision(path, dimension, distance, read_only, VectorPrecision::Fp32)
+    }
+
+    /// Open or create an index with explicitly selected storage precision.
+    /// Never converts an existing index; precision must match its stored format.
+    ///
+    /// # Errors
+    /// Rejects missing read-only indexes, incompatible schemas, and invalid dimensions.
+    pub fn open_with_precision(
+        path: &Path,
+        dimension: usize,
+        distance: Distance,
+        read_only: bool,
+        precision: VectorPrecision,
     ) -> Result<Self> {
         if !(1..=20_000).contains(&dimension) {
             return Err(Error::Invalid(
@@ -167,14 +225,14 @@ impl VectorIndex {
                 CREATE UNIQUE INDEX live_document ON nodes(document_id) WHERE live = 1;
                 CREATE INDEX file_nodes ON nodes(file_id) WHERE live = 1;")?;
             connection.execute(
-                "INSERT INTO settings VALUES (1, ?1, ?2)",
-                params![dimension, distance.name()],
+                "INSERT INTO settings VALUES (?1, ?2, ?3)",
+                params![precision.version(), dimension, distance.name()],
             )?;
             let mut start = vec![0.0_f32; dimension];
             start[0] = 1.0;
             connection.execute(
                 "INSERT INTO nodes VALUES (0, NULL, NULL, ?1, x'', 0)",
-                [encode_vector(&start)],
+                [precision.encode(&start)],
             )?;
             connection.execute_batch("COMMIT")?;
         }
@@ -183,12 +241,12 @@ impl VectorIndex {
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
-        if schema != (1, dimension, distance.name().to_owned()) {
+        if schema != (precision.version(), dimension, distance.name().to_owned()) {
             return Err(Error::Invalid(
                 "incompatible DiskANN storage; rebuild the index".into(),
             ));
         }
-        let provider = Provider::new(connection, dimension, distance);
+        let provider = Provider::new(connection, dimension, distance, precision);
         provider.vector(0)?;
         let config = graph::config::Builder::new(
             48,
@@ -203,6 +261,7 @@ impl VectorIndex {
             dimension,
             distance,
             read_only,
+            precision,
         })
     }
 
@@ -214,23 +273,38 @@ impl VectorIndex {
         self.writable()?;
         for record in records {
             self.validate(record.vector)?;
+            if self.precision == VectorPrecision::Fp16
+                && record
+                    .vector
+                    .iter()
+                    .any(|&v| !half::f16::from_f32(v).is_finite())
+            {
+                return Err(Error::Invalid("vector overflows FP16 storage".into()));
+            }
         }
         let index = self.index.lock().map_err(poisoned)?;
         let provider = &index.data_provider;
         transaction(provider, || {
             for record in records {
+                // Graph construction must see the same rounded vector that is stored.
+                let rounded;
+                let vector = if self.precision == VectorPrecision::Fp16 {
+                    rounded = record
+                        .vector
+                        .iter()
+                        .map(|&v| half::f16::from_f32(v).to_f32())
+                        .collect::<Vec<_>>();
+                    rounded.as_slice()
+                } else {
+                    record.vector
+                };
                 let id: u32 = provider.connection()?.query_row(
                     "SELECT COALESCE(MAX(id), 0) + 1 FROM nodes",
                     [],
                     |row| row.get(0),
                 )?;
-                block_on(index.insert(
-                    &Strategy,
-                    &diskann::provider::DefaultContext,
-                    &id,
-                    record.vector,
-                ))
-                .map_err(graph_error)?;
+                block_on(index.insert(&Strategy, &diskann::provider::DefaultContext, &id, vector))
+                    .map_err(graph_error)?;
                 let connection = provider.connection()?;
                 // Match the partial live_document index instead of scanning
                 // every stored vector, including historical replacements.

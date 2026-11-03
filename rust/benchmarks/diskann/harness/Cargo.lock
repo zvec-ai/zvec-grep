@@ -638,6 +638,7 @@ dependencies = [
  "diskann",
  "diskann-vector",
  "futures",
+ "half",
  "rusqlite",
  "thiserror",
 ]
@@ -660,6 +661,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 name = "zvec-qps-bench"
 version = "0.1.0"
 dependencies = [
+ "half",
  "serde_json",
  "zg-diskann",
  "zg-zvec-fp16",

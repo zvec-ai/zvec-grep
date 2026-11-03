@@ -15,6 +15,7 @@ parser.add_argument("--indexes", type=pathlib.Path, required=True)
 parser.add_argument("--data", type=pathlib.Path, required=True)
 parser.add_argument("--validation", type=pathlib.Path, required=True)
 parser.add_argument("--output", type=pathlib.Path, required=True)
+parser.add_argument("--diskann-precision", choices=["fp32", "fp16"], default="fp32")
 args = parser.parse_args()
 args.output.mkdir(parents=True, exist_ok=False)
 dataset = json.loads((args.data / "manifest.json").read_text())
@@ -40,13 +41,18 @@ for count in dataset["counts"]:
     assert len(truth) == 200 and all(len(x) == 10 for x in truth)
     for engine in ["hnsw", "diskann"]:
         mode = "hnsw_fp16" if engine == "hnsw" else engine
+        if engine == "diskann" and args.diskann_precision == "fp16":
+            mode = "diskann_fp16"
         index = args.indexes / f"{mode}-{count}-768/index"
         for effort in grid[engine]:
             name = f"{engine}-{count}-{effort}"
             print("TUNE", name, flush=True)
             with (trials / f"{name}.jsonl").open("w") as out, (trials / f"{name}.stderr").open("w") as err:
-                subprocess.run([str(args.binary), engine, str(index), str(count), str(effort),
-                                str(args.validation / "queries.f32")], stdout=out, stderr=err, check=True)
+                command = [str(args.binary), engine, str(index), str(count), str(effort),
+                           str(args.validation / "queries.f32")]
+                if engine == "diskann" and args.diskann_precision == "fp16":
+                    command.append("fp16")
+                subprocess.run(command, stdout=out, stderr=err, check=True)
             stages = [json.loads(line) for line in (trials / f"{name}.jsonl").read_text().splitlines()]
             found = next(row["ids"] for row in stages if row["stage"] == "results")
             assert len(found) == 200 and all(len(row) == len(set(row)) == 10 for row in found)
@@ -71,6 +77,7 @@ for block, count in [(block, count) for block in range(2) for count in dataset["
                     "--truth-root", str(args.data), "--output", str(output), "--counts", str(count),
                     "--query-file", str(args.data / "queries.f32"),
                     "--diskann-list-size", str(efforts["diskann"]), "--hnsw-ef", str(efforts["hnsw"]),
+                    "--diskann-precision", args.diskann_precision,
                     "--repeat-offset", str(block * 3)], check=True)
     all_runs.extend(json.loads((output / "results.json").read_text()))
     all_summary = []
@@ -97,6 +104,7 @@ environment.update(counts=dataset["counts"], dataset=dataset["dataset"],
     measurement_date_local=datetime.now().astimezone().isoformat(),
     selection_file="selection.json", held_out_test_queries=True,
     production_defaults_changed=False, reused_indexes=True, repeats=6,
+    precision={"hnsw": "FP16", "diskann": args.diskann_precision.upper()},
     effort_field="list_size means HNSW ef or DiskANN L",
     repeat_protocol="two blocks of 3 fresh processes per engine/scale; alternate engine order across all six repeats")
 (args.output / "environment.json").write_text(json.dumps(environment, indent=2))

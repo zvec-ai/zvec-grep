@@ -17,6 +17,7 @@ bytemuck = "1.25"
 diskann = "=0.61.0"
 diskann-vector = "=0.61.0"
 futures.workspace = true
+half = "2.7.1"
 rusqlite = { version = "0.37", features = ["bundled"] }
 thiserror.workspace = true
 napi = { version = "3", default-features = false, features = ["napi8", "dyn-symbols"], optional = true }

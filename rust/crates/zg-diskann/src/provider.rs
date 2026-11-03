@@ -18,21 +18,28 @@ use diskann::{
 use diskann_vector::DistanceFunction;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::{Distance, Error, Result, encode_vector, poisoned};
+use super::{Distance, Error, Result, VectorPrecision, poisoned};
 
 pub(super) struct Provider {
     connection: Mutex<Connection>,
     dimension: usize,
     distance: Distance,
+    precision: VectorPrecision,
     last_live: Mutex<Option<(u32, bool)>>,
 }
 
 impl Provider {
-    pub(super) fn new(connection: Connection, dimension: usize, distance: Distance) -> Self {
+    pub(super) fn new(
+        connection: Connection,
+        dimension: usize,
+        distance: Distance,
+        precision: VectorPrecision,
+    ) -> Self {
         Self {
             connection: Mutex::new(connection),
             dimension,
             distance,
+            precision,
             last_live: Mutex::new(None),
         }
     }
@@ -98,7 +105,12 @@ impl Provider {
                 };
                 *last_live = Some((id, live));
                 drop(last_live);
-                Ok(with_vector_bytes(bytes, self.dimension, id, visit))
+                Ok(match self.precision {
+                    VectorPrecision::Fp32 => with_vector_bytes(bytes, self.dimension, id, visit),
+                    VectorPrecision::Fp16 => {
+                        with_fp16_vector_bytes(bytes, self.dimension, id, visit)
+                    }
+                })
             })?
     }
 
@@ -185,6 +197,33 @@ fn with_vector_bytes<T>(
     Ok(visit(vector))
 }
 
+// FP16 occupies two bytes per element on disk. Decode only the currently visited
+// vector, not the corpus; search/pruning arithmetic retains its existing precision.
+fn with_fp16_vector_bytes<T>(
+    bytes: &[u8],
+    dimension: usize,
+    id: u32,
+    visit: impl FnOnce(&[f32]) -> T,
+) -> Result<T> {
+    if bytes.len() != dimension * 2 {
+        return Err(Error::Invalid(format!(
+            "invalid FP16 vector length for node {id}"
+        )));
+    }
+    let vector: Vec<f32> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&b| half::f16::from_le_bytes(b).to_f32())
+        .collect();
+    if vector.iter().any(|v| !v.is_finite()) {
+        return Err(Error::Invalid(format!(
+            "non-finite FP16 vector for node {id}"
+        )));
+    }
+    Ok(visit(&vector))
+}
+
 impl provider::DataProvider for Provider {
     type Context = DefaultContext;
     type InternalId = u32;
@@ -214,7 +253,7 @@ impl provider::SetElement<&[f32]> for Provider {
     ) -> Result<Self::Guard> {
         self.connection()?.execute(
             "INSERT INTO nodes VALUES (?1, NULL, NULL, ?2, x'', 0)",
-            params![id, encode_vector(element)],
+            params![id, self.precision.encode(element)],
         )?;
         Ok(provider::NoopGuard::new(*id))
     }
@@ -506,9 +545,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fp16_decoder_handles_unaligned_bytes_and_rejects_corruption() {
+        let bytes = [0, 0x66, 0x2e, 0, 0xbc];
+        let decoded =
+            with_fp16_vector_bytes(&bytes[1..], 2, 1, <[f32]>::to_vec).expect("unaligned binary16");
+        assert_eq!(decoded[0].to_bits(), 0.099_975_586_f32.to_bits());
+        assert_eq!(decoded[1].to_bits(), (-1.0_f32).to_bits());
+        assert!(with_fp16_vector_bytes(&bytes[1..4], 2, 1, |_| ()).is_err());
+        for bits in [0x7c00_u16, 0xfc00, 0x7e00] {
+            assert!(with_fp16_vector_bytes(&bits.to_le_bytes(), 1, 1, |_| ()).is_err());
+        }
+    }
+
+    #[test]
     fn stored_vectors_decode_independently_of_alignment_and_reject_corruption() {
         let expected = [0.25_f32, -3.5, f32::MAX];
-        let encoded = encode_vector(&expected);
+        let encoded = super::super::encode_vector(&expected);
         let mut unaligned = vec![0_u8; encoded.len() + 1];
         unaligned[1..].copy_from_slice(&encoded);
         for bytes in [&encoded[..], &unaligned[1..]] {

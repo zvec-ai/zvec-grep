@@ -4,14 +4,22 @@ use std::{
     path::Path,
     time::Instant,
 };
-use zg_diskann::{Distance, Record, VectorIndex};
+use zg_diskann::{Distance, Record, VectorIndex, VectorPrecision};
 use zvec_rust::{
     Collection, CollectionOptions, CollectionSchema, DataType, Doc, IndexParams, MetricType,
 };
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    assert_eq!(args.len(), 6, "engine index_path base.f32 count start");
+    assert!(
+        matches!(args.len(), 6 | 7),
+        "engine index_path base.f32 count start [fp32|fp16]"
+    );
+    let precision = match args.get(6).map(String::as_str).unwrap_or("fp32") {
+        "fp32" => VectorPrecision::Fp32,
+        "fp16" => VectorPrecision::Fp16,
+        _ => panic!("unsupported precision"),
+    };
     let engine = args[1].as_str();
     assert!(matches!(engine, "hnsw" | "diskann"));
     let path = Path::new(&args[2]);
@@ -33,7 +41,10 @@ fn main() {
     let mut diskann = None;
     let mut hnsw = None;
     if engine == "diskann" {
-        diskann = Some(VectorIndex::open(path, 768, Distance::Cosine, false).unwrap());
+        diskann = Some(
+            VectorIndex::open_with_precision(path, 768, Distance::Cosine, false, precision)
+                .unwrap(),
+        );
     } else {
         let schema = CollectionSchema::builder("cohere_bench")
             .add_vector_field(
