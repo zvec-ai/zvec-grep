@@ -3148,6 +3148,9 @@ mod tests {
             let arguments = match tool.name.as_ref() {
                 "zvec_grep_search" => serde_json::json!({"root": test_root(), "query": "needle"}),
                 "zvec_grep_rg" => serde_json::json!({"root": test_root(), "command": "rg needle"}),
+                "zvec_grep_callers" | "zvec_grep_callees" => {
+                    serde_json::json!({"root": test_root(), "symbol": "run"})
+                }
                 "zvec_grep_server_status" => serde_json::json!({}),
                 _ => serde_json::json!({"root": test_root()}),
             };
