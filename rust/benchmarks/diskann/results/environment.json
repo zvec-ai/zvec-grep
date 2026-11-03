@@ -1,5 +1,5 @@
 {
-  "binary_sha256": "e52b3f64e522b67bd102a03bd29a30bfa117e36b1170c7ad25574d030e43606f",
+  "binary_sha256": "7a2bedd5363d2d1b062999aacb120b649387abd3803ce976c978bb363fce62f0",
   "cpu": "Apple M3 Pro",
   "memory_bytes": 38654705664,
   "os": "ProductName:\t\tmacOS\nProductVersion:\t\t26.6.2\nBuildVersion:\t\t25G83",
@@ -20,13 +20,18 @@
   "qps": "200 / measured_batch_seconds",
   "file_cache": "not purged",
   "index_roots": [
-    "zvec-memory-bench",
-    "zvec-scale-bench"
+    "cohere-benchmark-indexes"
   ],
-  "truth_root": "zvec-scale-bench",
-  "implementation_commit": "4d6c155440ea72705d0d15f9347dfc8035e84bf6",
+  "truth_root": "cohere-benchmark-data",
+  "query_file_sha256": "8941a335c7124ba2887290831a269dde78d3c555deaf1560b0d4ac7bf6ba864e",
+  "diskann_list_size_override": 512,
+  "dataset": "Wikipedia-Cohere / Big ANN Benchmarks",
+  "seed": 20261103,
+  "dataset_manifest_sha256": "e3c810d896b457fdb1e150906c55711876d9b99b3c4f7029a9f4946042068972",
+  "fixture_build": "production backend; nested DiskANN snapshots continue the identical insertion order; fresh HNSW builds",
   "measurement_date_local": "2026-11-03",
   "timezone": "Asia/Shanghai",
+  "implementation_commit": "4d6c155440ea72705d0d15f9347dfc8035e84bf6",
   "rustc": "1.98.0",
   "precision": {
     "hnsw": "FP16",

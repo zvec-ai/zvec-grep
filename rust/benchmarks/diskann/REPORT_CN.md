@@ -1,134 +1,129 @@
-# HNSW 与 DiskANN 测试报告
+# HNSW 与 DiskANN Cohere Wikipedia 测试报告
 
-测试日期：2026-11-03（Asia/Shanghai）。实现基线：`4d6c155`。本文只比较 **HNSW** 与 **DiskANN**，存储精度分别为 FP16 和 FP32，所有性能数据来自本轮重新运行的查询基准。
+测试日期：2026-11-03（Asia/Shanghai）。生产实现基线：`4d6c155`。本轮使用 Cohere 的真实文本向量，固定抽样并为每个规模重新生成精确 GT，只比较 **HNSW** 与 **DiskANN**。
 
 ## 结论
 
-DiskANN 在五个已测规模的查询 RSS 和 footprint 都低于 HNSW，但单并发 QPS 明显更低。10 万条时，RSS 从 HNSW 的 225.12 MiB 降到 44.56 MiB，降幅约 **80.2%**；footprint 从 20.45 MiB 降到 17.25 MiB，降幅约 **15.7%**。对应吞吐量为 **142.80 对 4.99 QPS**，HNSW 约高 **28.6 倍**。
+DiskANN Recall@10 为 **99.95%–100.00%**，使用的都是产品默认查询 `L=512`。10 万条时，HNSW 与 DiskANN 的 Recall@10 分别为 **99.75% / 99.95%**。这些是同一组 200 个测量查询的结果，不意味着整个源数据集或任意查询都能达到相同召回率。
 
-这一结果支持把当前实现作为优先控制向量查询内存的方案。对低延迟或高吞吐量要求较强的场景，当前性能差距仍然重要。两者在 10 万条高维随机向量上的 Recall@10 只有约 63%；本轮结果不代表两者达到高召回业务目标后的容量。
+10 万条时，HNSW 与 DiskANN 的 QPS 为 **411.51 / 15.78**，HNSW 约高 **26.1 倍**。DiskANN 的 RSS 为 44.05 MiB，较 HNSW 的 225.19 MiB 低约 **80.4%**；footprint 为 16.17 MiB，较 HNSW 的 20.53 MiB 低约 **21.2%**。
 
-## 测试设计
+真实文本向量上的召回率明显好于此前的随机向量实验。当前实现的内存收益和吞吐量差距仍同时存在，不能把高召回率解释成 QPS 已经追平。
+
+## 数据从哪里来
+
+采用 [Big ANN Benchmarks 的 Wikipedia-Cohere 分发版本](https://github.com/harsha-simhadri/big-ann-benchmarks/blob/main/benchmark/datasets.py#L460-L501)。其库包含 3,500 万条英文 Wikipedia 标题与正文的 Cohere 向量；独立查询文件包含 5,000 条 Simple Wikipedia 的 Cohere 向量，维度均为 768。
+
+- 库文件：[wikipedia_base.bin](https://comp21storage.z5.web.core.windows.net/wiki-cohere-35M/wikipedia_base.bin)。
+- 查询文件：[wikipedia_query.bin](https://comp21storage.z5.web.core.windows.net/wiki-cohere-35M/wikipedia_query.bin)。
+- 实际抽样块编号、源文件 ETag、查询源行号、随机种子和输出 SHA256 记录在 [dataset.json](results/dataset.json)。
+
+分发基准的距离类型为 inner product；本项目使用 cosine，因此本轮显式归一化向量，并按归一化后的实际 FP32 数据重算 cosine GT。这是本地抽样实验，不是官方完整数据集配置的复刻。
+
+## 抽样与 GT 设计
+
+1. 固定种子 `20261103`，使用 NumPy PCG64。从全库的 35,000 个连续数据块中随机选 120 个块，每块 1,000 条，用 HTTP Range 下载约 12 万条候选。它是分块概率抽样，块内样本有关联，不能视为全库逐行独立抽样。
+2. 用 FP64 计算范数并归一化，再保存为 FP32。打乱候选顺序，去掉归一化后字节完全相同的向量，选出 100,000 条。在选满这 10 万条前跳过了 14 个重复候选；源行号映射另存本地。
+3. 从独立查询文件打乱选出 220 条唯一向量，排除与选中库向量完全相同的记录；本次未遇到需要排除的查询。前 20 条用于预热，后 200 条用于正式测量，五个规模共用这组查询。
+4. 以打乱后的库向量前缀构成 2k、10k、20k、50k、100k 五个嵌套子集。对每个子集独立进行全量 FP64 cosine 计算和排序，生成该子集的精确 top-10 文档 ID。
+5. 对每个规模的第 1、200 个测量查询，另用逐元素乘加求和重新计算全库分数，结果与矩阵乘法 GT 一致。记录第 10 与第 11 名的最小分数间隔，检查边界同分情况。
+
+**没有复用全库的 GT，也没有先取全库 top-10 再过滤抽样 ID。** 抽样会改变最近邻集合，因此每个规模都有单独的 `truth-N.json`。数据准备和 GT 计算完全在查询计时之外。
+
+Recall@10 表示 ANN 返回结果对精确向量近邻的召回率，不是人工相关性或问答正确率；100% 不等于语义搜索准确率 100%。重新计算 GT 消除了抽样后真值不匹配的问题，但不能保证任意抽样分布下的 ANN 召回率。
+
+测量完成后，校验了数据清单内全部文件的 SHA256，并逐条检查五个 DiskANN 索引的存储向量与对应 GT 输入一致；同时从 30 份原始结果重新核算召回率与 QPS。[校验记录](results/audit.json)。
+
+两组使用同一份归一化输入，HNSW 存为 FP16，DiskANN 存为 FP32，统一对照 FP32 精确真值。精度差异可能影响 HNSW 的少量召回损失；本轮没有做量化消融，不能把这部分差异全部归因于图算法。
+
+## 测试协议
 
 | 项目 | 设置 |
 |---|---|
-| 硬件与系统 | Apple M3 Pro，36 GiB RAM，macOS 26.6.2 |
-| 编译 | Rust 1.98.0，release；两个引擎使用同一个基准二进制 |
-| 输入 | 确定性随机向量，768 维，归一化，cosine，top-10 |
-| 数据规模 | 2,000 / 10,000 / 20,000 / 50,000 / 100,000 |
-| 并发度 | 1；每次仅一个查询在执行 |
-| 重复次数 | 每个规模、每个引擎启动 3 个独立进程，共 30 个进程 |
-| 查询数量 | 每进程先预热 20 次，再测量相同的 200 次查询；合计 6,000 次计时查询 |
-| 执行顺序 | 逐进程执行，各轮交替引擎顺序；没有同时运行建库任务 |
-| 缓存 | 未清空系统文件缓存，未人为制造内存压力 |
-| 查询过滤 | 无元数据过滤；返回文档 ID，不返回向量 |
-| HNSW | FP16，M=50，efConstruction=500，mmap=true，使用原有 API 默认查询参数 |
-| DiskANN | FP32，degree=48，build L=100；查询 L 在 2k/10k 为 512，在 20k/50k/100k 为 768 |
-| 读取配置 | DiskANN 只读 SQLite cache 目标 256 KiB，mmap 上限 16 MiB |
+| 设备 | Apple M3 Pro，36 GiB RAM，macOS 26.6.2 |
+| 构建 | Rust 1.98.0，release；两组使用同一查询二进制 |
+| 查询 | 768 维，cosine，top-10，无元数据过滤，不返回向量 |
+| HNSW | FP16，M=50，efConstruction=500，mmap=true，原有 API 默认查询参数 |
+| DiskANN | FP32，degree=48，build L=100，所有规模查询 L=512 |
+| 只读缓存 | DiskANN SQLite cache 目标 256 KiB，mmap 上限 16 MiB |
+| 重复 | 每个引擎、每个规模 3 个独立进程，共 30 个进程 |
+| 并发 | 单个在途查询；按进程顺序运行，交替引擎顺序，查询期间不运行建库 |
+| 每进程查询 | 20 次预热 + 200 次计时；合计 6,000 次计时查询 |
+| 系统缓存 | 未清空文件缓存，未人为制造内存压力 |
 
-DiskANN 的产品默认查询 L 仍为 512。本次在较大规模使用 768，使同一组查询上的召回率不低于 HNSW。这里是调参后的质量对照，不代表两者都已经达到各自最优的 recall-latency 工作点，也不是所有规模都使用产品默认参数。
+所有索引均通过生产后端构建。HNSW 各规模分别建库；DiskANN 从上一个已关闭数据库复制快照，再按同一输入顺序追加到下个规模。没有使用额外全量向量缓存或延后刷边的特殊 builder。这里测量查询，不比较增量建库耗时与全量建库耗时。
 
-HNSW 对照采用迁移前 Rust 引擎的 FP16 配置；两组存储精度不同。虽然 Rust 和 TypeScript 共享 DiskANN 后端，本测试不包含 Node 运行时，也不是旧 TypeScript FP32 引擎的端到端对照。
+**QPS = 200 / 计时批次秒数**，包含读取查询向量、查询调用和结果 ID 收集；不包含打开索引、预热和 JSON 输出。查询文件通过有界缓冲读取，不把全部库向量加载进查询进程。P50/P95 计量单次查询调用及 ID 转换，不包含读取查询向量。
 
-### 指标口径
+每进程将 200 个延迟排序，取零基下标 100 和 190 作为 P50/P95。表中为三次进程指标的中位数，而非合并 600 个延迟后重算分位数。RSS 和 footprint 为 `/usr/bin/time -l` 的进程峰值，包含打开与预热；MiB = 2²⁰ 字节。图中误差线为三次最小值至最大值，不是置信区间。
 
-**QPS = 200 / 计时批次耗时（秒）**。计时从第 21 个查询开始，在第 220 个查询完成后结束；包含本地查询向量生成、查询调用及结果收集，不包含进程启动、打开索引、预热、JSON 输出和关闭。没有使用 `1000 / P50` 估算 QPS。
+## QPS 延迟与召回率
 
-P50/P95 单独计时每次查询调用，包含查询对象准备和结果 ID 转换，不包含本地向量生成。每次进程内将 200 个延迟排序，使用零基下标 100、190 对应的值。表中延迟是三次进程指标的中位数，并非把 600 个延迟合并后重新计算分位数。
+| 向量数 | 引擎 | QPS ↑ | P50 ms ↓ | P95 ms ↓ | Recall@10 ↑ |
+|---:|---|---:|---:|---:|---:|
+| 2,000 | HNSW | 2735.50 | 0.36 | 0.40 | 99.60% |
+| 2,000 | DiskANN | 85.36 | 11.90 | 12.80 | 100.00% |
+| 10,000 | HNSW | 1108.63 | 0.89 | 1.11 | 99.70% |
+| 10,000 | DiskANN | 35.53 | 27.97 | 31.02 | 100.00% |
+| 20,000 | HNSW | 714.39 | 1.40 | 1.72 | 99.55% |
+| 20,000 | DiskANN | 25.18 | 39.47 | 46.82 | 100.00% |
+| 50,000 | HNSW | 424.45 | 2.36 | 2.93 | 99.90% |
+| 50,000 | DiskANN | 17.91 | 55.22 | 67.72 | 100.00% |
+| 100,000 | HNSW | 411.51 | 2.42 | 3.19 | 99.75% |
+| 100,000 | DiskANN | 15.78 | 63.35 | 81.19 | 99.95% |
 
-RSS 和 footprint 来自 macOS `/usr/bin/time -l` 的进程峰值，**包含打开和预热阶段**。单位 MiB 为 2²⁰ 字节。图中点为三次测量的中位数，误差线为最小值至最大值，不是置信区间。
+![Cohere 查询吞吐量、P95 延迟与召回率](results/performance.png)
 
-Recall@10 使用实际 FP32 向量计算的全量精确 cosine top-10 作为真值，累计 200 次查询的 2,000 个目标。参数选择和测量使用同一固定查询集，因此没有独立测试集上的泛化保证。
-
-### 固定索引来源
-
-本轮只重跑查询，复用前一轮的固定索引与精确真值，不把建库耗时或内存算入结果。50k/100k 的 DiskANN 查询夹具使用离线加速 builder：额外缓存向量与图边，最后统一刷边；100k builder 还使用带 `live=1` 的替换语句。图参数和输入顺序保持一致。
-
-离线 builder 在 2k 上与生产构建逐节点比较一致；优化后的生产 writer 在 10k 上的向量、图边、ID、归属与存活状态也逐行一致。未另建一份完整的大库做逐节点等价对照，所以本报告不能用来证明生产大库的建库性能。
-
-## QPS 与延迟结果
-
-| 向量数 | 引擎 | 查询 L | QPS ↑ | P50 ms ↓ | P95 ms ↓ | Recall@10 ↑ |
-|---:|---|---:|---:|---:|---:|---:|
-| 2,000 | HNSW | API 默认 | 2765.27 | 0.36 | 0.40 | 99.90% |
-| 2,000 | DiskANN | 512 | 98.61 | 10.07 | 10.89 | 100.00% |
-| 10,000 | HNSW | API 默认 | 514.49 | 1.91 | 2.42 | 99.50% |
-| 10,000 | DiskANN | 512 | 21.88 | 44.86 | 48.87 | 99.55% |
-| 20,000 | HNSW | API 默认 | 253.92 | 3.87 | 4.72 | 96.35% |
-| 20,000 | DiskANN | 768 | 11.17 | 87.85 | 97.43 | 98.10% |
-| 50,000 | HNSW | API 默认 | 160.12 | 6.14 | 7.04 | 81.30% |
-| 50,000 | DiskANN | 768 | 6.69 | 147.65 | 161.34 | 84.65% |
-| 100,000 | HNSW | API 默认 | 142.80 | 6.98 | 7.45 | 62.60% |
-| 100,000 | DiskANN | 768 | 4.99 | 189.26 | 266.33 | 63.15% |
-
-![查询吞吐量、P95 延迟与召回率](results/performance.png)
-
-吞吐量和延迟图使用对数纵轴，方便同时展示两条差距较大的曲线。QPS 随规模增加而降低；本次数据没有显示 DiskANN 在查询吞吐量上反超的趋势。较大规模还改变了 DiskANN 的 L，因此曲线同时体现数据量和搜索工作量的变化，不能把斜率全部归因于向量数量。
-
-## 查询内存结果
+## 查询内存
 
 | 向量数 | HNSW RSS MiB | DiskANN RSS MiB | HNSW footprint MiB | DiskANN footprint MiB |
 |---:|---:|---:|---:|---:|
-| 2,000 | 39.22 | 35.34 | 19.25 | 15.81 |
-| 10,000 | 54.27 | 44.08 | 19.28 | 16.47 |
-| 20,000 | 73.31 | 44.86 | 19.47 | 17.23 |
-| 50,000 | 130.30 | 44.44 | 19.86 | 16.78 |
-| 100,000 | 225.12 | 44.56 | 20.45 | 17.25 |
+| 2,000 | 39.20 | 35.17 | 19.27 | 15.75 |
+| 10,000 | 54.34 | 43.73 | 19.38 | 16.17 |
+| 20,000 | 73.33 | 44.00 | 19.52 | 16.16 |
+| 50,000 | 130.28 | 44.05 | 19.91 | 16.20 |
+| 100,000 | 225.19 | 44.05 | 20.53 | 16.17 |
 
-![查询峰值 RSS 与 footprint](results/memory.png)
+![Cohere 查询峰值 RSS 与 footprint](results/memory.png)
 
-HNSW 的 RSS 随规模显著上升，footprint 增幅较小；DiskANN 的这两个指标在 10k–100k 间变化较小。HNSW 开启 mmap，因此较多驻留文件页并不要求 footprint 同比例增加。
+RSS 与 footprint 的统计口径不同：可回收的干净文件映射页可以增加 RSS，而通常不计入 footprint。RSS 的降幅不能直接解释为系统需要为进程保留的内存成本有相同降幅，应同时比较两项指标。[Apple 对 footprint 的说明](https://developer.apple.com/videos/play/wwdc2021/10180/)
 
-DiskANN 的缓存目标、有限映射、按需读取和局部工作集设计与这条较平缓的内存曲线相符，但本次没有逐项消融实验，不能把节省量精确分摊给某一个优化。20k 与 50k 等点存在小幅非单调波动，应结合三次范围理解，不应解释成精确的规模阈值。
+## 结果说明
 
-## 如何解释与使用结果
+**召回率需要用真实向量分布判断。** 抽样只选择现成的文本向量，不会把向量改造成随机方向。本轮的几何结构不同于高维随机向量，不能继续把历史实验的低召回结论用于当前数据。
 
-**内存收益和吞吐量损失同时成立。** 10 万条时，DiskANN 将 RSS 降低约 80%，但完成同样数量串行查询需要更长时间。若请求率接近本测试的约 5 QPS，已经很难留出排队和负载波动余量；不能直接把这个数字当成可承诺的线上吞吐量。
+**当前 DiskANN 的查询内存增长更平缓，吞吐量仍显著较低。** SQLite 按需读取与有界缓存设计符合较平缓的内存曲线，但本轮没有逐项消融，不能量化每项优化的贡献。细粒度 SQL 读取和距离计算是后续应剖析的开销来源，尚未测定各自占比。
 
-**当前图算法与存储实现共同决定性能。** 遍历仍需要多次 SQLite 读取和 FP32 距离计算，且一个索引实例的完整查询受互斥锁保护。这些是后续分析方向；本次没有查询热点剖析，尚不能定量判断 SQLite、距离核或 I/O 各占多少，也不能据此推广为 DiskANN 算法本身固有的 QPS 差距。
+**单并发不是服务容量承诺。** 同一索引实例的完整搜索目前受互斥锁保护。提高线程数后的 QPS、尾延迟和每连接内存需要另测；本次也不包含 Node 运行时、嵌入模型、全文检索和服务排队。
 
-**相对召回对齐不等于满足高召回要求。** 10 万条的两组 Recall@10 都只有约 63%。如果业务需要 95% 或更高召回率，应为双方分别调参达到目标后，再比较吞吐量、尾延迟和内存。
+**真实 Wikipedia 向量仍不等于代码搜索负载。** 本轮查询是 Simple Wikipedia 段落 embedding，不是人类搜索问题；仅用了 200 个固定测试查询和一个抽样种子。更高置信度、不同语言、真实代码嵌入、过滤查询和冷缓存需要补充实验。
 
-**单并发结果不等于最大并发容量。** 本次每进程只有一个在途查询，未测试 2/4/8 并发，也未测试服务排队或 Node 阻塞。连接池及线程数增加后，还需要重新评估每连接缓存、锁竞争和读写一致性。
+默认 L=512 已能在这组查询上取得较高召回率。后续可用独立验证集比较 L=64/128/256/512 的 recall-latency 曲线；本轮没有根据这 200 个测量查询做候选数调参。
 
-本轮测试支持继续围绕内存预算优化当前后端，并优先分析查询热点、批量读取和距离核。具体方案、已实现内容与未实现工作见[中文设计说明](../../crates/zg-diskann/DESIGN_CN.md)。真实代码嵌入、元数据过滤、冷缓存、多模型以及长期增删后的表现需要独立实验。
+[历史合成随机向量报告](REPORT_SYNTHETIC_CN.md)单独归档。新旧实验的数据分布、查询输入方式和较大规模的 L 均有差异，不能将跨实验的全部性能变化归因于某一个因素。生产设计与后续优化方向见[中文设计说明](../../crates/zg-diskann/DESIGN_CN.md)。
 
-## 数据与重跑
+## 数据与复现
 
-- [汇总 CSV](results/summary.csv)：图表与表格输入，含三次范围。
-- [汇总 JSON](results/summary.json)、[30 次逐进程指标](results/runs.json)、[环境与二进制 SHA256](results/environment.json)。
-- [Rust 查询程序](harness/src/main.rs)、[配对运行器](run.py)、[绘图程序](plot.py)。
-- [性能图 SVG](results/performance.svg)、[内存图 SVG](results/memory.svg)：可用于文档排版。
+- [汇总 CSV](results/summary.csv)、[汇总 JSON](results/summary.json)、[30 次进程指标](results/runs.json)。
+- [数据来源与抽样清单](results/dataset.json)、[测试环境与二进制哈希](results/environment.json)。
+- [性能图 SVG](results/performance.svg)、[内存图 SVG](results/memory.svg)。
+- [抽样与 GT 生成器](prepare_cohere.py)、[生产建库程序](harness/src/bin/build-index.rs)、[查询程序](harness/src/main.rs)、[顺序运行器](run_cohere.py)、[绘图程序](plot.py)。
 
-本仓库保留查询程序、逐进程指标和图表；大型索引、精确真值以及逐查询 ID 日志保留在本地原始资料归档。以下运行器只重放已有索引，不会创建或重建工作区索引。重跑需要提供同一数据生成规则和配置的固定夹具：
-
-```text
-INDEX_ROOT/
-  hnsw_fp16-2000-768/index
-  diskann-2000-768/index
-  ... 对应五种规模
-TRUTH_ROOT/
-  truth-2000.json
-  ... 每份为 200 个精确 top-10 文档 ID 集合
-```
-
-按仓库 Rust 开发环境完成依赖配置后，在仓库根目录执行：
+查询向量、库向量、源行号映射、GT、逐查询结果与大索引保留在本地原始资料目录，不提交大体积向量文件到 Git。抽样清单保存源文件 ETag，下载范围必须匹配；输出数据保存 SHA256 供校验。以下命令会下载公开数据、创建专用基准索引，不操作工作区检索索引。需要 Python、NumPy、curl、Matplotlib 和仓库 Rust 构建环境：
 
 ```bash
+python3 rust/benchmarks/diskann/prepare_cohere.py /absolute/path/to/cohere-data
 cargo build --release --manifest-path rust/benchmarks/diskann/harness/Cargo.toml --target-dir native/target
-python3 rust/benchmarks/diskann/run.py \
+python3 rust/benchmarks/diskann/run_cohere.py \
   --binary "$PWD/native/target/release/zvec-qps-bench" \
-  --index-roots /absolute/path/to/indexes \
-  --truth-root /absolute/path/to/truth \
-  --output /absolute/path/to/new-run
-```
-
-绘图需要 Python 与 Matplotlib，以及支持中文的字体。仅重画已提交的数据无需索引：
-
-```bash
+  --builder "$PWD/native/target/release/build-index" \
+  --data /absolute/path/to/cohere-data \
+  --indexes /absolute/path/to/new-indexes \
+  --output /absolute/path/to/new-results
 python3 rust/benchmarks/diskann/plot.py \
-  rust/benchmarks/diskann/results/summary.json /absolute/path/to/figures \
+  /absolute/path/to/new-results/summary.json /absolute/path/to/figures \
+  --dataset 'Cohere Wikipedia 抽样' \
   --font '/System/Library/Fonts/Supplemental/Arial Unicode.ttf'
 ```
 
-验收检查：30 次查询进程全部成功；每次测量均返回 200 组 top-10；DiskANN 在各规模的固定查询集上召回率不低于 HNSW；汇总公式、中文图表、文档链接与格式已检查。本次没有修改生产引擎代码。
+每个输出目录应是新的目录。查询 GT 必须由同一次抽样得到的库向量生成，不应混用不同 seed、规模或距离定义的数据。本轮没有修改生产引擎代码。

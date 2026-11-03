@@ -1,0 +1,27 @@
+[
+  {
+    "count": 2000,
+    "all_stored_fp32_vectors_match_ground_truth_input": true,
+    "query_runs_verified": 6
+  },
+  {
+    "count": 10000,
+    "all_stored_fp32_vectors_match_ground_truth_input": true,
+    "query_runs_verified": 6
+  },
+  {
+    "count": 20000,
+    "all_stored_fp32_vectors_match_ground_truth_input": true,
+    "query_runs_verified": 6
+  },
+  {
+    "count": 50000,
+    "all_stored_fp32_vectors_match_ground_truth_input": true,
+    "query_runs_verified": 6
+  },
+  {
+    "count": 100000,
+    "all_stored_fp32_vectors_match_ground_truth_input": true,
+    "query_runs_verified": 6
+  }
+]

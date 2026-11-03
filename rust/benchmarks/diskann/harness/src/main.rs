@@ -1,5 +1,10 @@
 use serde_json::json;
-use std::{path::Path, time::Instant};
+use std::{
+    fs::File,
+    io::{BufReader, Read},
+    path::Path,
+    time::Instant,
+};
 use zg_diskann::{Distance, VectorIndex};
 use zvec_rust::{Collection, CollectionOptions};
 
@@ -26,11 +31,19 @@ fn vector(id: usize) -> Vec<f32> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    assert_eq!(args.len(), 5, "engine index_path count search_list_size");
+    assert!(
+        matches!(args.len(), 5 | 6),
+        "engine index_path count search_list_size [queries.f32]"
+    );
     let engine = args[1].as_str();
     assert!(matches!(engine, "diskann" | "hnsw"));
     let count: usize = args[3].parse().unwrap();
     let list_size: usize = args[4].parse().unwrap();
+    let mut query_file = args.get(5).map(|path| {
+        let file = File::open(path).unwrap();
+        assert_eq!(file.metadata().unwrap().len(), 220 * 768 * 4);
+        BufReader::new(file)
+    });
     zvec_rust::initialize(None).unwrap();
     let mut collection = None;
     let mut diskann = None;
@@ -50,7 +63,18 @@ fn main() {
         if i == 20 {
             batch_started = Some(Instant::now());
         }
-        let query = vector(1_000_000 + i);
+        let query = if let Some(reader) = &mut query_file {
+            let mut bytes = [0_u8; 768 * 4];
+            reader.read_exact(&mut bytes).unwrap();
+            bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
+                .collect()
+        } else {
+            vector(1_000_000 + i)
+        };
         let call_started = Instant::now();
         let found: Vec<String> = if let Some(index) = &diskann {
             index
