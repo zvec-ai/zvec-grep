@@ -13,6 +13,7 @@ parser.add_argument("output", type=pathlib.Path)
 parser.add_argument("--font", type=pathlib.Path)
 parser.add_argument("--dataset", default="合成随机向量")
 parser.add_argument("--recall-target", type=float)
+parser.add_argument("--xscale", choices=["log", "linear"], default="log")
 args = parser.parse_args()
 if args.font:
     font_manager.fontManager.addfont(str(args.font))
@@ -39,8 +40,10 @@ def panel(ax, metric, title, unit, log=False):
                   [(r[metric + "_max"] - r[metric]) * scale for r in group]]
         ax.errorbar([r["count"] for r in group], values, yerr=errors, fmt="o-", color=color,
                     label=label, linewidth=2, capsize=3, markersize=5)
-    ax.set_xscale("log")
-    ax.set_xticks([2000, 10000, 20000, 50000, 100000], ["2千", "1万", "2万", "5万", "10万"])
+    ax.set_xscale(args.xscale)
+    counts = sorted({r["count"] for r in rows})
+    labels = [f"{n/10000:g}万" if n >= 10000 else f"{n/1000:g}千" for n in counts]
+    ax.set_xticks(counts, labels)
     if log:
         ax.set_yscale("log")
     ax.minorticks_off()

@@ -16,10 +16,13 @@ parser.add_argument("--data", type=pathlib.Path, required=True)
 parser.add_argument("--validation", type=pathlib.Path, required=True)
 parser.add_argument("--output", type=pathlib.Path, required=True)
 parser.add_argument("--diskann-precision", choices=["fp32", "fp16"], default="fp32")
+parser.add_argument("--counts", type=int, nargs="+")
 args = parser.parse_args()
 args.output.mkdir(parents=True, exist_ok=False)
 dataset = json.loads((args.data / "manifest.json").read_text())
 validation = json.loads((args.validation / "manifest.json").read_text())
+counts = args.counts or dataset["counts"]
+assert counts == sorted(set(counts)) and set(counts).issubset(dataset["counts"])
 assert not set(dataset["query_source_row_ids"]).intersection(validation["query_source_row_ids"])
 for root, manifest in [(args.data, dataset), (args.validation, validation)]:
     for name, info in manifest["files"].items():
@@ -36,7 +39,7 @@ selection = dict(test_recall_target=target, validation_margin=margin,
 trials = args.output / "validation"
 trials.mkdir()
 # Freeze ALL selected parameters before inspecting any held-out test results.
-for count in dataset["counts"]:
+for count in counts:
     truth = [set(x) for x in json.loads((args.validation / f"truth-{count}.json").read_text())]
     assert len(truth) == 200 and all(len(x) == 10 for x in truth)
     for engine in ["hnsw", "diskann"]:
@@ -69,7 +72,7 @@ for count in dataset["counts"]:
         (args.output / "selection.json").write_text(json.dumps(selection, indent=2))
 print("PARAMETERS FROZEN", flush=True)
 all_runs, all_summary = [], []
-for block, count in [(block, count) for block in range(2) for count in dataset["counts"]]:
+for block, count in [(block, count) for block in range(2) for count in counts]:
     efforts = {row["engine"]: row["effort"] for row in selection["selected"] if row["count"] == count}
     output = args.output / (str(count) if block == 0 else f"{count}-extra")
     subprocess.run(["python3", str(pathlib.Path(__file__).with_name("run.py")),
@@ -100,7 +103,7 @@ for block, count in [(block, count) for block in range(2) for count in dataset["
 environment = json.loads((output / "environment.json").read_text())
 for key in ["diskann_list_size_override", "hnsw_ef"]:
     environment.pop(key)
-environment.update(counts=dataset["counts"], dataset=dataset["dataset"],
+environment.update(counts=counts, dataset=dataset["dataset"],
     measurement_date_local=datetime.now().astimezone().isoformat(),
     selection_file="selection.json", held_out_test_queries=True,
     production_defaults_changed=False, reused_indexes=True, repeats=6,
