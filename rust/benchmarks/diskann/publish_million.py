@@ -12,6 +12,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--data", type=pathlib.Path, required=True)
 parser.add_argument("--experiment", type=pathlib.Path, required=True)
 parser.add_argument("--output", type=pathlib.Path, required=True)
+parser.add_argument("--completed-only", action="store_true",
+                    help="Audit completed scales while later scales are still running")
 args = parser.parse_args()
 
 def read(path):
@@ -26,20 +28,25 @@ def write(name, value):
 
 dataset = read(args.data / "manifest.json")
 validation = read(args.data / "validation/manifest.json")
-counts = [200000, 400000, 600000, 800000, 1000000]
-assert dataset["counts"] == counts
+requested_counts = [200000, 400000, 600000, 800000, 1000000]
+assert dataset["counts"] == requested_counts
 assert validation["source_dataset_manifest_sha256"] == sha(args.data / "manifest.json")
 assert not set(dataset["query_source_row_ids"]).intersection(validation["query_source_row_ids"])
 for folder, manifest in [(args.data, dataset), (args.data / "validation", validation)]:
     for name, info in manifest["files"].items():
         assert (folder / name).stat().st_size == info["bytes"]
         assert sha(folder / name) == info["sha256"], name
-assert read(args.experiment / "status.json")["stage"] == "complete"
+if not args.completed_only:
+    assert read(args.experiment / "status.json")["stage"] == "complete"
 configuration = read(args.experiment / "configuration.json")
 assert configuration["data_manifest_sha256"] == sha(args.data / "manifest.json")
 runs = read(args.experiment / "results.json")
 summary = read(args.experiment / "summary.json")
-assert len(runs) == 60 and len(summary) == 10
+counts = sorted({row["count"] for row in runs})
+assert counts and counts == requested_counts[:len(counts)]
+if not args.completed_only:
+    assert counts == requested_counts
+assert len(runs) == len(counts) * 12 and len(summary) == len(counts) * 2
 selections, environments, evidence = [], [], []
 
 def raw_recall(path, truth, count):
@@ -113,6 +120,7 @@ build_audit = read(args.experiment / "build-audit.json")
 assert [row["count"] for row in build_audit] == counts
 assert all(row["all_stored_vectors_match_numpy_fp16"] and row["precision"] == "FP16" for row in build_audit)
 audit = dict(verified_test_runs=len(runs), verified_validation_trials=len(selection["trials"]),
+             all_requested_scales_complete=counts == requested_counts,
              both_engines_storage_precision="FP16", all_runs_use_frozen_parameters=True,
              recall_recomputed_from_raw_ids=True, qps_formula_verified=True, rss_from_time_verified=True,
              all_summary_median_min_max_verified=True, all_dataset_file_hashes_verified=True,
