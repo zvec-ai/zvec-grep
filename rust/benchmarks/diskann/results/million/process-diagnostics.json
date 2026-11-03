@@ -1,0 +1,606 @@
+{
+  "scope": "entire process, including index open and warmup; not restricted to measured queries",
+  "source": "/usr/bin/time -l stderr; original file hashes are in raw-evidence.json",
+  "records": [
+    {
+      "count": 200000,
+      "engine": "hnsw",
+      "repeat": 0,
+      "process_real_s": 0.14,
+      "process_user_s": 0.11,
+      "process_sys_s": 0.02,
+      "page_faults": 0,
+      "page_reclaims": 26883
+    },
+    {
+      "count": 200000,
+      "engine": "hnsw",
+      "repeat": 1,
+      "process_real_s": 0.14,
+      "process_user_s": 0.11,
+      "process_sys_s": 0.02,
+      "page_faults": 5,
+      "page_reclaims": 26875
+    },
+    {
+      "count": 200000,
+      "engine": "hnsw",
+      "repeat": 2,
+      "process_real_s": 0.13,
+      "process_user_s": 0.11,
+      "process_sys_s": 0.02,
+      "page_faults": 0,
+      "page_reclaims": 26875
+    },
+    {
+      "count": 200000,
+      "engine": "hnsw",
+      "repeat": 3,
+      "process_real_s": 0.14,
+      "process_user_s": 0.11,
+      "process_sys_s": 0.02,
+      "page_faults": 7,
+      "page_reclaims": 26873
+    },
+    {
+      "count": 200000,
+      "engine": "hnsw",
+      "repeat": 4,
+      "process_real_s": 0.13,
+      "process_user_s": 0.11,
+      "process_sys_s": 0.02,
+      "page_faults": 0,
+      "page_reclaims": 26882
+    },
+    {
+      "count": 200000,
+      "engine": "hnsw",
+      "repeat": 5,
+      "process_real_s": 0.13,
+      "process_user_s": 0.11,
+      "process_sys_s": 0.02,
+      "page_faults": 0,
+      "page_reclaims": 26871
+    },
+    {
+      "count": 200000,
+      "engine": "diskann",
+      "repeat": 0,
+      "process_real_s": 1.83,
+      "process_user_s": 0.72,
+      "process_sys_s": 1.09,
+      "page_faults": 6,
+      "page_reclaims": 3038
+    },
+    {
+      "count": 200000,
+      "engine": "diskann",
+      "repeat": 1,
+      "process_real_s": 1.85,
+      "process_user_s": 0.73,
+      "process_sys_s": 1.1,
+      "page_faults": 15,
+      "page_reclaims": 3044
+    },
+    {
+      "count": 200000,
+      "engine": "diskann",
+      "repeat": 2,
+      "process_real_s": 1.8,
+      "process_user_s": 0.72,
+      "process_sys_s": 1.08,
+      "page_faults": 0,
+      "page_reclaims": 3043
+    },
+    {
+      "count": 200000,
+      "engine": "diskann",
+      "repeat": 3,
+      "process_real_s": 1.83,
+      "process_user_s": 0.72,
+      "process_sys_s": 1.09,
+      "page_faults": 0,
+      "page_reclaims": 3046
+    },
+    {
+      "count": 200000,
+      "engine": "diskann",
+      "repeat": 4,
+      "process_real_s": 1.84,
+      "process_user_s": 0.73,
+      "process_sys_s": 1.09,
+      "page_faults": 2,
+      "page_reclaims": 3047
+    },
+    {
+      "count": 200000,
+      "engine": "diskann",
+      "repeat": 5,
+      "process_real_s": 1.8,
+      "process_user_s": 0.72,
+      "process_sys_s": 1.08,
+      "page_faults": 15,
+      "page_reclaims": 3029
+    },
+    {
+      "count": 400000,
+      "engine": "hnsw",
+      "repeat": 0,
+      "process_real_s": 0.36,
+      "process_user_s": 0.16,
+      "process_sys_s": 0.06,
+      "page_faults": 1608,
+      "page_reclaims": 49444
+    },
+    {
+      "count": 400000,
+      "engine": "hnsw",
+      "repeat": 1,
+      "process_real_s": 0.23,
+      "process_user_s": 0.16,
+      "process_sys_s": 0.05,
+      "page_faults": 0,
+      "page_reclaims": 51052
+    },
+    {
+      "count": 400000,
+      "engine": "hnsw",
+      "repeat": 2,
+      "process_real_s": 0.25,
+      "process_user_s": 0.17,
+      "process_sys_s": 0.05,
+      "page_faults": 0,
+      "page_reclaims": 51049
+    },
+    {
+      "count": 400000,
+      "engine": "hnsw",
+      "repeat": 3,
+      "process_real_s": 0.28,
+      "process_user_s": 0.2,
+      "process_sys_s": 0.06,
+      "page_faults": 0,
+      "page_reclaims": 51054
+    },
+    {
+      "count": 400000,
+      "engine": "hnsw",
+      "repeat": 4,
+      "process_real_s": 0.3,
+      "process_user_s": 0.2,
+      "process_sys_s": 0.06,
+      "page_faults": 0,
+      "page_reclaims": 51050
+    },
+    {
+      "count": 400000,
+      "engine": "hnsw",
+      "repeat": 5,
+      "process_real_s": 0.25,
+      "process_user_s": 0.16,
+      "process_sys_s": 0.05,
+      "page_faults": 9,
+      "page_reclaims": 51038
+    },
+    {
+      "count": 400000,
+      "engine": "diskann",
+      "repeat": 0,
+      "process_real_s": 2.8,
+      "process_user_s": 1.03,
+      "process_sys_s": 1.63,
+      "page_faults": 14,
+      "page_reclaims": 3026
+    },
+    {
+      "count": 400000,
+      "engine": "diskann",
+      "repeat": 1,
+      "process_real_s": 2.52,
+      "process_user_s": 0.98,
+      "process_sys_s": 1.5,
+      "page_faults": 0,
+      "page_reclaims": 3037
+    },
+    {
+      "count": 400000,
+      "engine": "diskann",
+      "repeat": 2,
+      "process_real_s": 2.67,
+      "process_user_s": 1.02,
+      "process_sys_s": 1.6,
+      "page_faults": 0,
+      "page_reclaims": 3038
+    },
+    {
+      "count": 400000,
+      "engine": "diskann",
+      "repeat": 3,
+      "process_real_s": 2.58,
+      "process_user_s": 1.01,
+      "process_sys_s": 1.55,
+      "page_faults": 0,
+      "page_reclaims": 3035
+    },
+    {
+      "count": 400000,
+      "engine": "diskann",
+      "repeat": 4,
+      "process_real_s": 2.56,
+      "process_user_s": 0.99,
+      "process_sys_s": 1.52,
+      "page_faults": 15,
+      "page_reclaims": 3019
+    },
+    {
+      "count": 400000,
+      "engine": "diskann",
+      "repeat": 5,
+      "process_real_s": 2.66,
+      "process_user_s": 1.02,
+      "process_sys_s": 1.58,
+      "page_faults": 2,
+      "page_reclaims": 3036
+    },
+    {
+      "count": 600000,
+      "engine": "hnsw",
+      "repeat": 0,
+      "process_real_s": 6.26,
+      "process_user_s": 0.18,
+      "process_sys_s": 0.46,
+      "page_faults": 69780,
+      "page_reclaims": 3843
+    },
+    {
+      "count": 600000,
+      "engine": "hnsw",
+      "repeat": 1,
+      "process_real_s": 0.23,
+      "process_user_s": 0.14,
+      "process_sys_s": 0.06,
+      "page_faults": 1,
+      "page_reclaims": 73549
+    },
+    {
+      "count": 600000,
+      "engine": "hnsw",
+      "repeat": 2,
+      "process_real_s": 0.21,
+      "process_user_s": 0.13,
+      "process_sys_s": 0.06,
+      "page_faults": 0,
+      "page_reclaims": 73549
+    },
+    {
+      "count": 600000,
+      "engine": "hnsw",
+      "repeat": 3,
+      "process_real_s": 0.21,
+      "process_user_s": 0.13,
+      "process_sys_s": 0.06,
+      "page_faults": 0,
+      "page_reclaims": 73540
+    },
+    {
+      "count": 600000,
+      "engine": "hnsw",
+      "repeat": 4,
+      "process_real_s": 0.26,
+      "process_user_s": 0.16,
+      "process_sys_s": 0.07,
+      "page_faults": 0,
+      "page_reclaims": 73543
+    },
+    {
+      "count": 600000,
+      "engine": "hnsw",
+      "repeat": 5,
+      "process_real_s": 0.23,
+      "process_user_s": 0.14,
+      "process_sys_s": 0.06,
+      "page_faults": 22,
+      "page_reclaims": 73523
+    },
+    {
+      "count": 600000,
+      "engine": "diskann",
+      "repeat": 0,
+      "process_real_s": 3.33,
+      "process_user_s": 1.07,
+      "process_sys_s": 1.76,
+      "page_faults": 35,
+      "page_reclaims": 2974
+    },
+    {
+      "count": 600000,
+      "engine": "diskann",
+      "repeat": 1,
+      "process_real_s": 2.74,
+      "process_user_s": 1.05,
+      "process_sys_s": 1.66,
+      "page_faults": 0,
+      "page_reclaims": 3008
+    },
+    {
+      "count": 600000,
+      "engine": "diskann",
+      "repeat": 2,
+      "process_real_s": 2.78,
+      "process_user_s": 1.06,
+      "process_sys_s": 1.69,
+      "page_faults": 0,
+      "page_reclaims": 3007
+    },
+    {
+      "count": 600000,
+      "engine": "diskann",
+      "repeat": 3,
+      "process_real_s": 2.76,
+      "process_user_s": 1.05,
+      "process_sys_s": 1.65,
+      "page_faults": 1,
+      "page_reclaims": 3013
+    },
+    {
+      "count": 600000,
+      "engine": "diskann",
+      "repeat": 4,
+      "process_real_s": 2.81,
+      "process_user_s": 1.07,
+      "process_sys_s": 1.7,
+      "page_faults": 0,
+      "page_reclaims": 3012
+    },
+    {
+      "count": 600000,
+      "engine": "diskann",
+      "repeat": 5,
+      "process_real_s": 2.81,
+      "process_user_s": 1.06,
+      "process_sys_s": 1.71,
+      "page_faults": 2,
+      "page_reclaims": 3005
+    },
+    {
+      "count": 800000,
+      "engine": "hnsw",
+      "repeat": 0,
+      "process_real_s": 0.31,
+      "process_user_s": 0.2,
+      "process_sys_s": 0.08,
+      "page_faults": 0,
+      "page_reclaims": 97479
+    },
+    {
+      "count": 800000,
+      "engine": "hnsw",
+      "repeat": 1,
+      "process_real_s": 11.11,
+      "process_user_s": 0.27,
+      "process_sys_s": 0.91,
+      "page_faults": 94995,
+      "page_reclaims": 3166
+    },
+    {
+      "count": 800000,
+      "engine": "hnsw",
+      "repeat": 2,
+      "process_real_s": 0.32,
+      "process_user_s": 0.21,
+      "process_sys_s": 0.08,
+      "page_faults": 73,
+      "page_reclaims": 97403
+    },
+    {
+      "count": 800000,
+      "engine": "hnsw",
+      "repeat": 3,
+      "process_real_s": 3.35,
+      "process_user_s": 0.2,
+      "process_sys_s": 0.31,
+      "page_faults": 34424,
+      "page_reclaims": 63055
+    },
+    {
+      "count": 800000,
+      "engine": "hnsw",
+      "repeat": 4,
+      "process_real_s": 0.31,
+      "process_user_s": 0.19,
+      "process_sys_s": 0.08,
+      "page_faults": 10,
+      "page_reclaims": 97467
+    },
+    {
+      "count": 800000,
+      "engine": "hnsw",
+      "repeat": 5,
+      "process_real_s": 0.31,
+      "process_user_s": 0.19,
+      "process_sys_s": 0.08,
+      "page_faults": 40,
+      "page_reclaims": 97439
+    },
+    {
+      "count": 800000,
+      "engine": "diskann",
+      "repeat": 0,
+      "process_real_s": 10.32,
+      "process_user_s": 1.47,
+      "process_sys_s": 2.89,
+      "page_faults": 59,
+      "page_reclaims": 3183
+    },
+    {
+      "count": 800000,
+      "engine": "diskann",
+      "repeat": 1,
+      "process_real_s": 12.4,
+      "process_user_s": 1.59,
+      "process_sys_s": 3.55,
+      "page_faults": 46,
+      "page_reclaims": 3136
+    },
+    {
+      "count": 800000,
+      "engine": "diskann",
+      "repeat": 2,
+      "process_real_s": 10.37,
+      "process_user_s": 1.15,
+      "process_sys_s": 2.37,
+      "page_faults": 934,
+      "page_reclaims": 2061
+    },
+    {
+      "count": 800000,
+      "engine": "diskann",
+      "repeat": 3,
+      "process_real_s": 2.85,
+      "process_user_s": 1.07,
+      "process_sys_s": 1.73,
+      "page_faults": 1,
+      "page_reclaims": 2990
+    },
+    {
+      "count": 800000,
+      "engine": "diskann",
+      "repeat": 4,
+      "process_real_s": 4.95,
+      "process_user_s": 1.06,
+      "process_sys_s": 1.86,
+      "page_faults": 2,
+      "page_reclaims": 2988
+    },
+    {
+      "count": 800000,
+      "engine": "diskann",
+      "repeat": 5,
+      "process_real_s": 3.33,
+      "process_user_s": 1.06,
+      "process_sys_s": 1.75,
+      "page_faults": 0,
+      "page_reclaims": 2988
+    },
+    {
+      "count": 1000000,
+      "engine": "hnsw",
+      "repeat": 0,
+      "process_real_s": 7.65,
+      "process_user_s": 0.24,
+      "process_sys_s": 0.65,
+      "page_faults": 95945,
+      "page_reclaims": 23198
+    },
+    {
+      "count": 1000000,
+      "engine": "hnsw",
+      "repeat": 1,
+      "process_real_s": 0.35,
+      "process_user_s": 0.2,
+      "process_sys_s": 0.1,
+      "page_faults": 13,
+      "page_reclaims": 119019
+    },
+    {
+      "count": 1000000,
+      "engine": "hnsw",
+      "repeat": 2,
+      "process_real_s": 0.32,
+      "process_user_s": 0.19,
+      "process_sys_s": 0.09,
+      "page_faults": 0,
+      "page_reclaims": 119033
+    },
+    {
+      "count": 1000000,
+      "engine": "hnsw",
+      "repeat": 3,
+      "process_real_s": 0.33,
+      "process_user_s": 0.2,
+      "process_sys_s": 0.1,
+      "page_faults": 0,
+      "page_reclaims": 119021
+    },
+    {
+      "count": 1000000,
+      "engine": "hnsw",
+      "repeat": 4,
+      "process_real_s": 0.33,
+      "process_user_s": 0.19,
+      "process_sys_s": 0.1,
+      "page_faults": 0,
+      "page_reclaims": 119034
+    },
+    {
+      "count": 1000000,
+      "engine": "hnsw",
+      "repeat": 5,
+      "process_real_s": 0.36,
+      "process_user_s": 0.2,
+      "process_sys_s": 0.1,
+      "page_faults": 0,
+      "page_reclaims": 119029
+    },
+    {
+      "count": 1000000,
+      "engine": "diskann",
+      "repeat": 0,
+      "process_real_s": 4.12,
+      "process_user_s": 1.04,
+      "process_sys_s": 1.77,
+      "page_faults": 86,
+      "page_reclaims": 2862
+    },
+    {
+      "count": 1000000,
+      "engine": "diskann",
+      "repeat": 1,
+      "process_real_s": 2.88,
+      "process_user_s": 1.04,
+      "process_sys_s": 1.7,
+      "page_faults": 8,
+      "page_reclaims": 2950
+    },
+    {
+      "count": 1000000,
+      "engine": "diskann",
+      "repeat": 2,
+      "process_real_s": 2.79,
+      "process_user_s": 1.04,
+      "process_sys_s": 1.7,
+      "page_faults": 0,
+      "page_reclaims": 2956
+    },
+    {
+      "count": 1000000,
+      "engine": "diskann",
+      "repeat": 3,
+      "process_real_s": 2.83,
+      "process_user_s": 1.06,
+      "process_sys_s": 1.74,
+      "page_faults": 0,
+      "page_reclaims": 2954
+    },
+    {
+      "count": 1000000,
+      "engine": "diskann",
+      "repeat": 4,
+      "process_real_s": 2.88,
+      "process_user_s": 1.04,
+      "process_sys_s": 1.72,
+      "page_faults": 2,
+      "page_reclaims": 2951
+    },
+    {
+      "count": 1000000,
+      "engine": "diskann",
+      "repeat": 5,
+      "process_real_s": 2.81,
+      "process_user_s": 1.04,
+      "process_sys_s": 1.7,
+      "page_faults": 10,
+      "page_reclaims": 2936
+    }
+  ]
+}

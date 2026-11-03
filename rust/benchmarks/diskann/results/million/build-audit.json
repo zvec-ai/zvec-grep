@@ -1,0 +1,42 @@
+[
+  {
+    "count": 200000,
+    "precision": "FP16",
+    "all_stored_vectors_match_numpy_fp16": true,
+    "live_vector_bytes": 307200000,
+    "live_vectors_sha256": "5032fabd7ff350ac3fa242cd9c7a9a81e6c0f3899b2db3ddd1ef72830baa0900",
+    "database_bytes": 416751616
+  },
+  {
+    "count": 400000,
+    "precision": "FP16",
+    "all_stored_vectors_match_numpy_fp16": true,
+    "live_vector_bytes": 614400000,
+    "live_vectors_sha256": "33f30bdeb83eb306626beee737d614d2a3279cce0d7c075c3a159177c4d626ac",
+    "database_bytes": 833568768
+  },
+  {
+    "count": 600000,
+    "precision": "FP16",
+    "all_stored_vectors_match_numpy_fp16": true,
+    "live_vector_bytes": 921600000,
+    "live_vectors_sha256": "d4232b1b5f30cc2de8db9747e051435bd4dd8ecf3fd47921179c5601f2492d80",
+    "database_bytes": 1250385920
+  },
+  {
+    "count": 800000,
+    "precision": "FP16",
+    "all_stored_vectors_match_numpy_fp16": true,
+    "live_vector_bytes": 1228800000,
+    "live_vectors_sha256": "eb4b42fba058219b81ded296cf1d176076f56d0c2970f99adc8bddedee7d744e",
+    "database_bytes": 1667203072
+  },
+  {
+    "count": 1000000,
+    "precision": "FP16",
+    "all_stored_vectors_match_numpy_fp16": true,
+    "live_vector_bytes": 1536000000,
+    "live_vectors_sha256": "a08fcc097bfc195a5ae7b96e5b16e2a40862e75eb5b393b42e380010e364b937",
+    "database_bytes": 2084012032
+  }
+]

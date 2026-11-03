@@ -1,0 +1,14 @@
+{
+  "verified_test_runs": 60,
+  "verified_validation_trials": 42,
+  "all_requested_scales_complete": true,
+  "both_engines_storage_precision": "FP16",
+  "all_runs_use_frozen_parameters": true,
+  "recall_recomputed_from_raw_ids": true,
+  "qps_formula_verified": true,
+  "rss_from_time_verified": true,
+  "all_summary_median_min_max_verified": true,
+  "all_dataset_file_hashes_verified": true,
+  "ground_truth": "recomputed exhaustive FP64 cosine on original FP32 prefixes",
+  "all_test_groups_reach_90_percent": true
+}
