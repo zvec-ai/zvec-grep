@@ -7,7 +7,7 @@ import statistics
 import sys
 
 from measurement import case_identity, case_path
-from run import digest, save
+from evidence import digest, save
 
 REPORT_HASH = digest(Path(__file__))
 HEADERS = ["模型 / L / B / C / 设备",

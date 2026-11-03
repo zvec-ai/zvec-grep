@@ -122,8 +122,7 @@ storage-cold timing.
   second have no peak. Keep raw evidence rather than clipping impossible values.
 - **GPU utilization:** device-wide mean/peak, sampled every 500 ms through
   IORegistry on macOS (including CPU cases) or `nvidia-smi` on CUDA. It includes other applications and
-  is not process-attributed utilization. CUDA collection remains unvalidated
-  until run on CUDA hardware.
+  is not process-attributed utilization.
 
 Resource workers use the same OS monotonic clock. On macOS, bracket
 `proc_pid_rusage` with that clock, use the midpoint and convert CPU ticks with
@@ -152,7 +151,9 @@ The manifest fingerprints the complete matrix, policy, profile, duration/sample
 limits, rounds/order/seed/cooldown/timeout, cache and provenance. Each round has a
 case fingerprint including L and B. Changed configurations cannot resume an
 existing experiment. Keep interrupted partial directories with an incomplete
-suffix; retain completed failures instead of silently rerunning them.
+suffix; retain completed failures instead of silently rerunning them. Publish
+`result.json` after saving raw evidence. Resume and verification flag rounds
+whose completion marker exists but required evidence files are missing.
 
 Python checks measurement records: case identity, request IDs, input scheduling,
 timestamps, counts, throughput arithmetic, percentile calculations and planned
@@ -204,6 +205,7 @@ cd rust
 python3 -m venv .venv
 . .venv/bin/activate
 python3 -m pip install psutil==7.2.2
+python3 -m unittest discover -s micro-bench/model -p 'test_benchmark.py'
 cargo +1.98.0 test -p zg-engine --release --lib --no-run --message-format=json > build-v5.jsonl
 python3 micro-bench/model/suite.py --build-json build-v5.jsonl --cache /absolute/cache --output /absolute/setup-v5 --prepare-only
 python3 micro-bench/model/suite.py --build-json build-v5.jsonl --cache /absolute/cache --output /absolute/results-v5 --lengths 32 256 1024 --batch-sizes 1 4 16 --embedding-concurrency default 1 2 4 8 --devices cpu metal

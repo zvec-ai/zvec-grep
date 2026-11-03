@@ -8,7 +8,9 @@ import time
 from pathlib import Path
 import subprocess
 
-from run import ROOT, environment, inventory, run, save
+from evidence import missing_round_evidence, save
+from report import generate
+from run import ROOT, environment, inventory, run
 from measurement import case_identity, case_path, experiment_config, fingerprint
 
 
@@ -127,7 +129,6 @@ def main():
     metadata = {model["model"]:model for model in models}
     supported = [case for case in configuration["cases"]
                  if not unsupported_case(args.output,case,metadata[case["model"]],identity)]
-    from report import generate
     generate(args.output)
     for round_index in range(1, args.rounds+1):
         plan = list(supported)
@@ -145,6 +146,9 @@ def main():
                 saved = json.loads((destination/"result.json").read_text())
                 if saved.get("case_fingerprint") != case.case_fingerprint or saved.get("experiment_fingerprint") != identity:
                     raise RuntimeError(f"Cannot resume a different case configuration: {destination}")
+                missing = missing_round_evidence(destination, saved["protocol_pass"])
+                if missing:
+                    raise RuntimeError(f"Incomplete round {destination}: missing evidence {', '.join(missing)}")
                 outcomes.append(saved["protocol_pass"])
                 continue
             time.sleep(args.cooldown)
@@ -152,9 +156,7 @@ def main():
                                   device=case.device,concurrency=budget,input_tokens=case.input_tokens,
                                   batch_size=case.batch_size)), flush=True)
             outcomes.append(run(case, budget, env, info))
-            from report import generate
             generate(args.output)
-    from report import generate
     generate(args.output)
     raise SystemExit(0 if all(outcomes) else 1)
 

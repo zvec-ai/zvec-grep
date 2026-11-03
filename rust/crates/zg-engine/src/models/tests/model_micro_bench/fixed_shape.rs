@@ -221,7 +221,7 @@ async fn local_model_shape() {
     let config = Config::environment();
     let target = number("ZG_MODEL_BENCH_TOKENS", 32);
     let requested_batch = number("ZG_MODEL_BENCH_BATCH_SIZE", 1);
-    let mut provenance = support::verify_artifacts(&config);
+    let mut provenance = support::verify_artifacts(config.entry, &config.cache).await;
     let manager = ModelRuntimeManager::new();
     let origin = Instant::now();
     phase("before_load", origin);

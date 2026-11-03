@@ -2,7 +2,7 @@ use crate::{
     domain::model::{Device, ModelConfig},
     models::{
         ModelRuntimeLease, ModelRuntimeManager, ModelRuntimeRequest,
-        artifacts::ArtifactDownloadConfig,
+        artifacts::{ArtifactDownloadConfig, cached_source},
         catalog::{
             EmbeddingCatalogEntry, get_embedding_model_catalog_entry, list_embedding_models,
         },
@@ -94,49 +94,6 @@ fn download(entry: EmbeddingCatalogEntry) -> &'static ArtifactDownloadConfig {
     }
 }
 
-fn roots(entry: EmbeddingCatalogEntry, cache: &Path) -> [PathBuf; 2] {
-    let d = download(entry);
-    match entry {
-        EmbeddingCatalogEntry::LlamaCpp(_) => [cache.to_owned(), cache.to_owned()],
-        EmbeddingCatalogEntry::Model2Vec(_) => [
-            cache
-                .join("model2vec")
-                .join(d.hugging_face.repo.replace('/', "--"))
-                .join(d.hugging_face.revision),
-            cache
-                .join("modelscope/model2vec")
-                .join(d.model_scope.repo.replace('/', "--"))
-                .join(d.model_scope.revision),
-        ],
-        EmbeddingCatalogEntry::Transformers(_) => [
-            cache
-                .join(d.hugging_face.repo)
-                .join(d.hugging_face.revision),
-            cache
-                .join("modelscope/transformers-js")
-                .join(d.model_scope.repo.replace('/', "--"))
-                .join(d.model_scope.revision),
-        ],
-        EmbeddingCatalogEntry::Qwen(_) => panic!("local only"),
-    }
-}
-
-fn local_path(entry: EmbeddingCatalogEntry, artifact: &str) -> String {
-    match entry {
-        EmbeddingCatalogEntry::LlamaCpp(e) => e.cache_file.to_owned(),
-        EmbeddingCatalogEntry::Model2Vec(e) if artifact == e.tokenizer_file => {
-            "tokenizer/tokenizer.json".into()
-        }
-        EmbeddingCatalogEntry::Model2Vec(e) if artifact == e.model_file => Path::new(artifact)
-            .file_name()
-            .expect("model filename")
-            .to_str()
-            .expect("UTF8")
-            .into(),
-        _ => artifact.into(),
-    }
-}
-
 fn metadata(entry: EmbeddingCatalogEntry) -> Value {
     let (batch, limit, semantics) = match entry {
         EmbeddingCatalogEntry::LlamaCpp(e) => (
@@ -162,21 +119,14 @@ fn metadata(entry: EmbeddingCatalogEntry) -> Value {
         "fallback_revision":d.model_scope.revision,"artifacts":d.artifacts.iter().map(|a|json!({"path":a.path,"size":a.size,"sha256":a.sha256})).collect::<Vec<_>>()})
 }
 
-pub(super) fn verify_artifacts(config: &Config) -> Value {
-    let mut meta = metadata(config.entry);
-    let candidates = roots(config.entry, &config.cache);
-    let root = candidates
-        .iter()
-        .find(|r| {
-            download(config.entry)
-                .artifacts
-                .iter()
-                .all(|a| r.join(local_path(config.entry, a.path)).is_file())
-        })
+pub(super) async fn verify_artifacts(entry: EmbeddingCatalogEntry, cache: &Path) -> Value {
+    let mut meta = metadata(entry);
+    let source = cached_source(entry, Some(cache))
+        .await
         .expect("download artifacts before measuring");
     let mut verified = Vec::new();
-    for artifact in download(config.entry).artifacts {
-        let path = root.join(local_path(config.entry, artifact.path));
+    for artifact in download(entry).artifacts {
+        let path = source.local_path(artifact).expect("catalog artifact path");
         let mut file = File::open(&path).expect("local artifact");
         assert_eq!(
             file.metadata().expect("artifact metadata").len(),
@@ -224,9 +174,49 @@ async fn prepare_artifacts() {
         .prepare(EmbeddingPrepareOptions::default(), None)
         .await
         .expect("prepare artifacts");
-    println!("ZG_BENCH_SETUP={}", verify_artifacts(&config));
+    println!(
+        "ZG_BENCH_SETUP={}",
+        verify_artifacts(config.entry, &config.cache).await
+    );
     drop(model);
     manager.close();
+}
+
+#[tokio::test]
+async fn verifies_gguf_in_modelscope_cache() {
+    use crate::models::artifacts::{ArtifactConfig, ArtifactSourceConfig};
+
+    const SOURCE: ArtifactSourceConfig = ArtifactSourceConfig {
+        repo: "fixture/gguf",
+        revision: "v1",
+    };
+    const DOWNLOAD: ArtifactDownloadConfig = ArtifactDownloadConfig {
+        hugging_face: SOURCE,
+        model_scope: SOURCE,
+        artifacts: &[ArtifactConfig {
+            path: "model.gguf",
+            size: 3,
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        }],
+    };
+    let EmbeddingCatalogEntry::LlamaCpp(mut model) =
+        get_embedding_model_catalog_entry("local/embeddinggemma-300m").expect("catalog model")
+    else {
+        panic!("expected GGUF model")
+    };
+    model.download = &DOWNLOAD;
+    let cache = tempfile::tempdir().expect("isolated cache");
+    let snapshot = cache.path().join("modelscope/llama-cpp/fixture--gguf/v1");
+    std::fs::create_dir_all(&snapshot).expect("create snapshot");
+    let fallback = snapshot.join("model.gguf");
+    std::fs::write(&fallback, b"abc").expect("write GGUF fixture");
+
+    let record = verify_artifacts(EmbeddingCatalogEntry::LlamaCpp(model), cache.path()).await;
+    assert_eq!(record["verified_artifacts"][0]["path"], json!(fallback));
+    assert_eq!(
+        record["verified_artifacts"][0]["sha256"],
+        DOWNLOAD.artifacts[0].sha256
+    );
 }
 
 #[test]

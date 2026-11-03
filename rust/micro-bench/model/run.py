@@ -3,7 +3,6 @@
 import ctypes
 import hashlib
 import json
-import math
 import multiprocessing
 import os
 from pathlib import Path
@@ -14,7 +13,8 @@ import threading
 import time
 
 import psutil
-from measurement import PHASES, background_summary, case_path, profile, resource_summary as summarize_resources, fingerprint
+from evidence import digest, publish_round, save
+from measurement import POLICY, PHASES, checked_accounting, background_summary, case_path, profile, resource_summary as summarize_resources, fingerprint
 
 ROOT = Path(__file__).resolve().parents[2]
 TEST = "models::tests::model_micro_bench::fixed_shape::local_model_shape"
@@ -28,22 +28,8 @@ def clock():
     return time.monotonic()
 
 
-def digest(path):
-    with path.open("rb") as stream:
-        checksum = hashlib.sha256()
-        for chunk in iter(lambda: stream.read(1024*1024), b""):
-            checksum.update(chunk)
-        return checksum.hexdigest()
-
-
 def command(*args):
     return subprocess.check_output(args, cwd=ROOT, text=True).strip()
-
-
-def save(path, data):
-    temporary = path.with_suffix(path.suffix+".tmp")
-    temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
-    temporary.replace(path)
 
 
 class Usage(ctypes.Structure):
@@ -148,78 +134,6 @@ def gpu_worker(stop, child_pid, device, path):
 
 def resource_summary(samples):
     return summarize_resources(samples, psutil.cpu_count() or 1)
-
-
-def validate_accounting(result, requests, input_tokens, batch_size):
-    """Recompute measurement statistics; do not inspect model output correctness."""
-    if result is None:
-        return ["missing benchmark result"]
-    errors = []
-    if (result.get("schema_version") != 5 or result.get("input_tokens") != input_tokens
-            or result.get("batch_size") != batch_size):
-        errors.append("recorded case configuration does not match requested case")
-    summary = result.get("embedding", {})
-    if not isinstance(summary,dict):
-        return errors+["invalid embedding summary"]
-    rows = requests.get("embedding", [])
-    if set(requests) != {"embedding"} or not rows:
-        return errors+["missing embedding rows or unexpected phases"]
-    statuses = [r.get("status") for r in rows]
-    if any(s not in ("completed", "timeout", "error") for s in statuses):
-        errors.append("embedding: unknown status")
-    if sorted(r.get("id",-1) for r in rows) != list(range(len(rows))):
-        errors.append("embedding: omitted or duplicated requests")
-    expected = dict(scheduled=len(rows),issued=len(rows),completed=statuses.count("completed"),
-                    timeout=statuses.count("timeout"),errors=statuses.count("error"))
-    if any(summary.get(k) != v for k,v in expected.items()):
-        errors.append("embedding: summary/raw accounting mismatch")
-    if result.get("protocol_pass") and expected["completed"] != len(rows):
-        errors.append("embedding: failed calls marked as a successful round")
-    inputs = result.get("provenance",{}).get("inputs",[])
-    if not inputs:
-        errors.append("embedding: missing input manifest")
-    if any(len(r.get("input_indices",[])) != batch_size or
-           any(type(i) is not int or not 0 <= i < len(inputs) for i in r.get("input_indices",[])) for r in rows):
-        errors.append("embedding: recorded batch inputs do not match configuration")
-    if inputs and any(r.get("input_indices") != [(r["id"]*batch_size+i)%len(inputs) for i in range(batch_size)] for r in rows):
-        errors.append("embedding: input sequence differs from deterministic corpus schedule")
-    # Counts describe what the API returned; zero or B-mismatched counts are not
-    # treated as model failures. Only their numeric accounting is checked here.
-    if any(type(r.get("vectors")) is not int or r["vectors"] < 0 for r in rows):
-        errors.append("embedding: invalid recorded vector count")
-    start, finish = summary.get("started_ns"), summary.get("finished_ns")
-    if not isinstance(start,int) or not isinstance(finish,int) or finish <= start:
-        return errors+["embedding: invalid measurement window"]
-    if any(not (start <= r["scheduled_ns"] <= r["issued_ns"] <= r["finished_ns"] <= finish) for r in rows):
-        errors.append("embedding: invalid timestamp order")
-    if max(r["finished_ns"] for r in rows) != finish:
-        errors.append("embedding: measurement does not include final completion")
-    elapsed = (finish-start)/1e9
-    success = [r for r in rows if r["status"] == "completed"]
-    rates = dict(elapsed_seconds=elapsed,
-                 vectors_per_second=sum(r["vectors"] for r in success)/elapsed,
-                 nominal_tokens_per_second=len(success)*batch_size*input_tokens/elapsed)
-    if any(not isinstance(summary.get(k),(float,int)) or
-           not math.isclose(summary[k],v,rel_tol=1e-9,abs_tol=1e-9) for k,v in rates.items()):
-        errors.append("embedding: incorrect elapsed time or throughput denominator")
-    latencies = sorted((r["finished_ns"]-r["issued_ns"])/1e6 for r in success)
-    observed = summary.get("call_latency",{})
-    if observed.get("n") != len(latencies):
-        errors.append("embedding: wrong latency sample count")
-    for p,minimum in ((50,1),(95,100),(99,1000)):
-        value = latencies[math.ceil(len(latencies)*p/100)-1] if len(latencies)>=minimum else None
-        actual = observed.get(f"p{p}_ms")
-        if (value is None and actual is not None) or (value is not None and
-                (not isinstance(actual,(float,int)) or not math.isclose(actual,value,rel_tol=1e-9,abs_tol=1e-9))):
-            errors.append(f"embedding: incorrect p{p} latency or sample threshold")
-    return errors
-
-
-def checked_accounting(result,requests,input_tokens,batch_size):
-    try:
-        return validate_accounting(result,requests,input_tokens,batch_size)
-    except (KeyError,TypeError,ValueError,AttributeError) as error:
-        return [f"malformed benchmark evidence: {type(error).__name__}: {error}"]
 
 
 def machine_info():
@@ -449,8 +363,9 @@ def run(args, budget, env, info):
     inference_phases = set(PHASES)
     inference_gaps = [b["at_seconds"]-a["at_seconds"] for a,b in zip(samples,samples[1:])
                       if a["phase"] in inference_phases or b["phase"] in inference_phases]
-    if max(inference_gaps, default=0) > 0.25:
-        exclusion.append("inference resource sampling gap exceeded 250 ms")
+    max_gap = POLICY["maximum_sample_gap_seconds"]
+    if max(inference_gaps, default=0) > max_gap:
+        exclusion.append(f"inference resource sampling gap exceeded {max_gap * 1000:g} ms")
     if not inference_phases.issubset({s["phase"] for s in samples}):
         exclusion.append("missing inference resource phase samples")
     gpu_samples = [json.loads(line) for line in gpu_path.read_text().splitlines()] if gpu_path.exists() else []
@@ -466,7 +381,7 @@ def run(args, budget, env, info):
         phase_samples = [s for s in samples if s["phase"] == name]
         phase_gaps = [b["at_seconds"]-a["at_seconds"] for a,b in zip(phase_samples, phase_samples[1:])]
         phase_quality[name] = dict(background=background_by_phase.get(name),
-            sampling_valid=len(phase_samples) >= 2 and max(phase_gaps, default=0) <= 0.25,
+            sampling_valid=len(phase_samples) >= 2 and max(phase_gaps, default=0) <= max_gap,
             cpu_peak_valid=resources.get(name, {}).get("peak_cpu_percent_one_core") is not None)
     output = dict(schema_version=5, provenance=info,
                   experiment_fingerprint=getattr(args, "experiment_fingerprint", None),
@@ -495,21 +410,11 @@ def run(args, budget, env, info):
                            peak_percent=max(gpu_values,default=None),
                            process_memory_peak_bytes=max((s["process_memory_bytes"] for s in gpu_samples
                                if s["phase"] in inference_phases and s["process_memory_bytes"] is not None),default=None)))
-    save(destination/"result.json", output)
-    save(destination/"events.json", events)
-    save(destination/"resources.json", samples)
-    save(destination/"background.json", dict(snapshots=backgrounds, intervals=background_intervals, phases=background_by_phase))
+    publish_round(destination, output, events, samples, dict(
+        snapshots=backgrounds, intervals=background_intervals, phases=background_by_phase))
     print(json.dumps(dict(model=args.model, device=args.device, budget=budget, protocol_pass=passed, eligible=output["eligible_for_comparison"],
                          exclusions=exclusion, result=str(destination/"result.json"))), flush=True)
     return passed
-
-
-def main():
-    # Keep the single-case entry point on the same manifest/resume contract.
-    import sys
-    import suite
-    sys.argv = [{"--model":"--models", "--device":"--devices"}.get(arg,arg) for arg in sys.argv]
-    suite.main()
 
 
 def inventory(env, info):
@@ -519,4 +424,4 @@ def inventory(env, info):
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit("Use suite.py to run the benchmark; use --models and --devices for a single case.")

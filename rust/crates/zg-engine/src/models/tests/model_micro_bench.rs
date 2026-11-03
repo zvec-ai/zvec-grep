@@ -1,4 +1,4 @@
-//! Model inference micro-benchmark; see rust/micro-bench/model/PROTOCOL.md.
+//! Model inference micro-benchmark; see rust/micro-bench/model/README.md.
 use std::{
     env,
     sync::Arc,

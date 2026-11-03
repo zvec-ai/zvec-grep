@@ -6,8 +6,8 @@ import math
 from pathlib import Path
 import statistics
 
-from measurement import case_identity, case_path, fingerprint, matrix_cases
-from run import save, checked_accounting
+from measurement import checked_accounting, case_identity, case_path, fingerprint, matrix_cases
+from evidence import missing_round_evidence, save
 from report import HEADERS, display
 
 
@@ -103,6 +103,9 @@ def verify(root, require_complete=True):
                 if require_complete: errors.append(f"missing round: {key}")
                 continue
             record = json.loads(path.read_text())
+            missing = missing_round_evidence(path.parent, record.get("protocol_pass"))
+            if missing:
+                errors.append(f"{key}: missing evidence {', '.join(missing)}")
             observed.append(record)
             records_by_case[fingerprint(case)].append(record)
             expected = case_identity(manifest["fingerprint"],case,round_index)

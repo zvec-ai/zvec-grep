@@ -1,5 +1,6 @@
 """Core measurement math, failure accounting and resume checks; no model inference."""
 import copy
+import errno
 from pathlib import Path
 import subprocess
 import sys
@@ -9,9 +10,10 @@ from unittest.mock import patch
 
 import report
 import suite
-from measurement import case_identity, case_path, fingerprint, resource_summary
-from run import checked_accounting, clock, save, validate_accounting
-from verify import check_table
+from evidence import publish_round, save
+from measurement import case_identity, case_path, checked_accounting, fingerprint, resource_summary, validate_accounting
+from run import clock
+from verify import check_table, verify
 
 
 class SamplingTests(unittest.TestCase):
@@ -125,6 +127,20 @@ class WorkflowTests(unittest.TestCase):
                 wrong_table[0][report.HEADERS[2]] = "999.00"
                 self.assertTrue(check(wrong_table,[wrong_metrics]))
 
+    def test_failed_evidence_write_does_not_publish_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+
+            def fail_on_resources(path, value):
+                if path.name == "resources.json":
+                    raise OSError(errno.ENOSPC, "disk full")
+                save(path, value)
+
+            with patch("evidence.save", side_effect=fail_on_resources), self.assertRaises(OSError):
+                publish_round(folder, {"protocol_pass": True}, [], [], {})
+            self.assertTrue((folder / "events.json").exists())
+            self.assertFalse((folder / "result.json").exists())
+
     def test_resume_preserves_failed_rounds_and_rejects_configuration_changes(self):
         info = dict(binary_sha256="binary",source_sha256={"source":"hash"},cargo_lock_sha256="lock",
                     features=[],build_profile={},rustc="rustc",build_environment={},ort={},machine={})
@@ -140,15 +156,30 @@ class WorkflowTests(unittest.TestCase):
                             input_tokens=args.input_tokens,batch_size=args.batch_size)
                 dest = case_path(args.output,case,args.round_index)
                 dest.mkdir(parents=True)
-                save(dest/"result.json",dict(schema_version=5,protocol_pass=False,
-                    experiment_fingerprint=args.experiment_fingerprint,case_fingerprint=args.case_fingerprint))
+                for name in ("stdout.log", "stderr.log", "requests.jsonl", "background-scans.jsonl", "gpu.jsonl"):
+                    (dest / name).touch()
+                save(dest / "gpu-phases.json", [])
+                record = dict(schema_version=5, protocol_pass=False, exit_code=1, provenance=info,
+                              configuration=dict(**case, embedding_concurrency=budget, profile="smoke"),
+                              experiment_fingerprint=args.experiment_fingerprint, case_fingerprint=args.case_fingerprint)
+                publish_round(dest, record, [], [], {})
                 return False
-            with patch.object(suite,"environment",return_value=({},info)),patch.object(suite,"inventory",return_value=models),patch.object(suite,"run",side_effect=fake_run) as run,patch.object(report,"generate"),patch("builtins.print"):
+            with patch.object(suite,"environment",return_value=({},info)),patch.object(suite,"inventory",return_value=models),patch.object(suite,"run",side_effect=fake_run) as run,patch("builtins.print"):
                 for _ in range(2):
                     with patch.object(sys,"argv",base+["--smoke"]),self.assertRaises(SystemExit) as caught:
                         suite.main()
                     self.assertEqual(caught.exception.code,1)
                 self.assertEqual(run.call_count,1)
+                output = root / "results"
+                self.assertTrue(verify(output)["passed"])
+                next(output.glob("**/r01/background.json")).unlink()
+                verification = verify(output)
+                self.assertFalse(verification["passed"])
+                self.assertTrue(any("missing evidence background.json" in error for error in verification["errors"]))
+                with patch.object(sys, "argv", base + ["--smoke"]), self.assertRaisesRegex(RuntimeError, "missing evidence background.json"):
+                    suite.main()
+                self.assertEqual(run.call_count, 1)
+
                 changed_length = list(base)
                 changed_length[changed_length.index("--lengths")+1] = "16"
                 for command in (base,changed_length+["--smoke"]):

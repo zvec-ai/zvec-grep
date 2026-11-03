@@ -1,6 +1,7 @@
 """Pure measurement policy; raw evidence is retained separately from validity."""
 import hashlib
 import json
+import math
 import os
 
 PHASES = ("embedding",)
@@ -130,3 +131,75 @@ def background_summary(intervals, events, started):
             warning=fraction is not None and fraction >= POLICY["background_warning_fraction"],
             interpretation="observed external CPU load; impact on measured performance is unproven")
     return result
+
+
+def validate_accounting(result, requests, input_tokens, batch_size):
+    """Recompute measurement statistics; do not inspect model output correctness."""
+    if result is None:
+        return ["missing benchmark result"]
+    errors = []
+    if (result.get("schema_version") != 5 or result.get("input_tokens") != input_tokens
+            or result.get("batch_size") != batch_size):
+        errors.append("recorded case configuration does not match requested case")
+    summary = result.get("embedding", {})
+    if not isinstance(summary,dict):
+        return errors+["invalid embedding summary"]
+    rows = requests.get("embedding", [])
+    if set(requests) != {"embedding"} or not rows:
+        return errors+["missing embedding rows or unexpected phases"]
+    statuses = [r.get("status") for r in rows]
+    if any(s not in ("completed", "timeout", "error") for s in statuses):
+        errors.append("embedding: unknown status")
+    if sorted(r.get("id",-1) for r in rows) != list(range(len(rows))):
+        errors.append("embedding: omitted or duplicated requests")
+    expected = dict(scheduled=len(rows),issued=len(rows),completed=statuses.count("completed"),
+                    timeout=statuses.count("timeout"),errors=statuses.count("error"))
+    if any(summary.get(k) != v for k,v in expected.items()):
+        errors.append("embedding: summary/raw accounting mismatch")
+    if result.get("protocol_pass") and expected["completed"] != len(rows):
+        errors.append("embedding: failed calls marked as a successful round")
+    inputs = result.get("provenance",{}).get("inputs",[])
+    if not inputs:
+        errors.append("embedding: missing input manifest")
+    if any(len(r.get("input_indices",[])) != batch_size or
+           any(type(i) is not int or not 0 <= i < len(inputs) for i in r.get("input_indices",[])) for r in rows):
+        errors.append("embedding: recorded batch inputs do not match configuration")
+    if inputs and any(r.get("input_indices") != [(r["id"]*batch_size+i)%len(inputs) for i in range(batch_size)] for r in rows):
+        errors.append("embedding: input sequence differs from deterministic corpus schedule")
+    # Counts describe what the API returned; zero or B-mismatched counts are not
+    # treated as model failures. Only their numeric accounting is checked here.
+    if any(type(r.get("vectors")) is not int or r["vectors"] < 0 for r in rows):
+        errors.append("embedding: invalid recorded vector count")
+    start, finish = summary.get("started_ns"), summary.get("finished_ns")
+    if not isinstance(start,int) or not isinstance(finish,int) or finish <= start:
+        return errors+["embedding: invalid measurement window"]
+    if any(not (start <= r["scheduled_ns"] <= r["issued_ns"] <= r["finished_ns"] <= finish) for r in rows):
+        errors.append("embedding: invalid timestamp order")
+    if max(r["finished_ns"] for r in rows) != finish:
+        errors.append("embedding: measurement does not include final completion")
+    elapsed = (finish-start)/1e9
+    success = [r for r in rows if r["status"] == "completed"]
+    rates = dict(elapsed_seconds=elapsed,
+                 vectors_per_second=sum(r["vectors"] for r in success)/elapsed,
+                 nominal_tokens_per_second=len(success)*batch_size*input_tokens/elapsed)
+    if any(not isinstance(summary.get(k),(float,int)) or
+           not math.isclose(summary[k],v,rel_tol=1e-9,abs_tol=1e-9) for k,v in rates.items()):
+        errors.append("embedding: incorrect elapsed time or throughput denominator")
+    latencies = sorted((r["finished_ns"]-r["issued_ns"])/1e6 for r in success)
+    observed = summary.get("call_latency",{})
+    if observed.get("n") != len(latencies):
+        errors.append("embedding: wrong latency sample count")
+    for p,minimum in ((50,1),(95,100),(99,1000)):
+        value = latencies[math.ceil(len(latencies)*p/100)-1] if len(latencies)>=minimum else None
+        actual = observed.get(f"p{p}_ms")
+        if (value is None and actual is not None) or (value is not None and
+                (not isinstance(actual,(float,int)) or not math.isclose(actual,value,rel_tol=1e-9,abs_tol=1e-9))):
+            errors.append(f"embedding: incorrect p{p} latency or sample threshold")
+    return errors
+
+
+def checked_accounting(result,requests,input_tokens,batch_size):
+    try:
+        return validate_accounting(result,requests,input_tokens,batch_size)
+    except (KeyError,TypeError,ValueError,AttributeError) as error:
+        return [f"malformed benchmark evidence: {type(error).__name__}: {error}"]
