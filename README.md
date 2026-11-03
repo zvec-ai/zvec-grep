@@ -87,7 +87,7 @@ zg --index --embedding local/potion-retrieval-32m
 With [OpenCode](https://opencode.ai/) configured:
 
 ```bash
-zg --install --target opencode --yes
+zg install --target opencode --yes
 opencode models
 opencode run --model opencode/nemotron-3-ultra-free \
   "An unseen creature left a few marks. What did the detective infer? Cite local evidence."
