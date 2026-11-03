@@ -1,0 +1,54 @@
+{
+  "binary_sha256": "9937f35549668e76b2b08d9c6fb922f2dd8a26d914b22b7013da8da290986c5d",
+  "cpu": "Apple M3 Pro",
+  "memory_bytes": 38654705664,
+  "os": "ProductName:\t\tmacOS\nProductVersion:\t\t26.6.2\nBuildVersion:\t\t25G83",
+  "counts": [
+    2000,
+    10000,
+    20000,
+    50000,
+    100000
+  ],
+  "dimension": 768,
+  "top_k": 10,
+  "warmup_queries": 20,
+  "measured_queries": 200,
+  "repeats": 6,
+  "query_concurrency": 1,
+  "diskann_default_list_size": 512,
+  "qps": "200 / measured_batch_seconds",
+  "file_cache": "not purged",
+  "index_roots": [
+    "cohere-fp16-benchmark-indexes"
+  ],
+  "truth_root": "cohere-benchmark-data",
+  "query_file_sha256": "8941a335c7124ba2887290831a269dde78d3c555deaf1560b0d4ac7bf6ba864e",
+  "diskann_precision": "fp16",
+  "dataset": "Wikipedia-Cohere / Big ANN Benchmarks",
+  "measurement_date_local": "2026-11-03T14:19:03.277044+08:00",
+  "selection_file": "selection.json",
+  "held_out_test_queries": true,
+  "production_defaults_changed": false,
+  "reused_indexes": true,
+  "precision": {
+    "hnsw": "FP16",
+    "diskann": "FP16"
+  },
+  "effort_field": "list_size means HNSW ef or DiskANN L",
+  "repeat_protocol": "two blocks of 3 fresh processes per engine/scale; alternate engine order across all six repeats",
+  "implementation_commit": "74c7d39",
+  "builder_sha256": "4eca42257362a9b1f3b9983be66b8e6b2d18d9de2253e395698d495e7be68671",
+  "query_precision": {
+    "hnsw": "FP16",
+    "diskann": "FP16 rounded, widened to FP32"
+  },
+  "diskann_distance_arithmetic": "FP32 decoded values with existing FP64 accumulators",
+  "hnsw_query_options": {
+    "radius": 0,
+    "is_linear": false,
+    "is_using_refiner": false
+  },
+  "ground_truth_precision": "original FP32 inputs, exhaustive FP64 cosine",
+  "fixture_build": "new FP16 DiskANN graphs using quantized insertion vectors; existing HNSW FP16 indexes reused"
+}

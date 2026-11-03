@@ -1,12 +1,14 @@
 # HNSW 与 DiskANN Cohere Wikipedia 测试报告
 
-测试日期：2026-11-03（Asia/Shanghai）。生产实现基线：`4d6c155`。本轮使用 Cohere 的真实文本向量，固定抽样并为每个规模重新生成精确 GT，只比较 **HNSW** 与 **DiskANN**。内存统一使用峰值 **RSS**，新增 **Recall@10 ≥ 90%** 目标实验，并保留默认参数结果供参考。
+测试日期：2026-11-03（Asia/Shanghai）。FP32 基线：`4d6c155`；FP16 实现：`74c7d39`。本轮使用 Cohere 的真实文本向量，固定抽样并为每个规模重新生成精确 GT，只比较 **HNSW** 与 **DiskANN**。内存统一使用峰值 **RSS**。在原有 2千、1万、2万、5万、10万规模上补充两组均采用 FP16 的 **Recall@10 ≥ 90%** 目标实验；此前 FP32 和默认参数结果分别保留为参考。
 
 ## 结论
 
-90% 目标实验的五个规模、两个引擎都在测试集达到门槛。10 万条时，HNSW `ef=32` / DiskANN `L=20` 的实际 Recall@10 为 **94.85% / 93.15%**，QPS 为 **1584.76 / 164.34**；HNSW 吞吐量约高 **9.6 倍**。峰值 RSS 为 **225.05 / 42.60 MiB**，DiskANN 低约 **81.1%**。这些结果只针对同一组 200 条固定测试查询。
+新增双 FP16 实验中，五个规模、两个引擎均达到 90% 目标。10 万条时，HNSW `ef=32` / DiskANN `L=20` 的实际 Recall@10 为 **94.85% / 93.05%**，QPS 中位数为 **2100.10 / 162.41**，峰值 RSS 为 **225.14 / 43.17 MiB**。这是同一组 200 个固定查询的观测结果，不代表全数据集或其他查询分布。
 
-默认参数实验使用 DiskANN `L=512`，Recall@10 为 **99.95%–100.00%**；10 万条时 QPS 为 **15.78**，RSS 为 **44.05 MiB**。降低召回目标主要改善查询速度，RSS 变化较小。两轮运行时间和重复次数不同，跨轮比值只是观察值，不是严格隔离系统负载的消融结果。生产默认值仍为 `L=512`。
+FP16 在这轮明确减少了 DiskANN 的磁盘体积：10 万条数据库从 **394.49 MiB 降到 198.69 MiB**。与前轮 FP32、同为 L=20 的结果相比，RSS 为 **42.60 → 43.17 MiB**，QPS 为 **164.34 → 162.41**，没有观察到进一步降低 RSS 或提高吞吐量。不能把向量存储减半解释为进程常驻内存也减半。
+
+此前默认参数实验使用 DiskANN FP32、`L=512`，Recall@10 为 **99.95%–100.00%**；10 万条时 QPS 为 **15.78**，RSS 为 **44.05 MiB**。该轮降低召回目标主要改善查询速度，RSS 变化较小。不同实验的运行时间和部分重复次数不同，跨轮比值只是观察值，不是严格隔离系统负载的消融结果。生产默认值仍为 `L=512`。
 
 ## 数据从哪里来
 
@@ -32,7 +34,7 @@ Recall@10 表示 ANN 返回结果对精确向量近邻的召回率，不是人�
 
 默认参数实验完成后，校验了数据清单内全部文件的 SHA256，并逐条检查五个 DiskANN 索引的存储向量与对应 GT 输入一致；同时从 30 份原始结果重新核算召回率与 QPS。[默认参数校验记录](results/audit.json)。新增实验另从原始返回 ID 复核了 20 次验证运行、60 次测试运行，确认使用冻结参数、QPS 公式及汇总中位数/范围一致。[90% 目标校验记录](results/recall90/audit.json)。
 
-两组使用同一份归一化输入，HNSW 存为 FP16，DiskANN 存为 FP32，统一对照 FP32 精确真值。精度差异可能影响 HNSW 的少量召回损失；本轮没有做量化消融，不能把这部分差异全部归因于图算法。
+两组使用同一份归一化输入，HNSW 始终存为 FP16；DiskANN 的 FP32 与 FP16 实验分别统计，统一对照原始 FP32 精确真值。双 FP16 实验的两组查询输入也都经过 FP16 舍入，但距离内核和累加方式不完全相同。FP32 真值保留了量化引起的召回损失，不能把召回差异全部归因于图算法。
 
 ## 测试协议
 
@@ -42,11 +44,11 @@ Recall@10 表示 ANN 返回结果对精确向量近邻的召回率，不是人�
 | 构建 | Rust 1.98.0，release；两组使用同一查询二进制 |
 | 查询 | 768 维，cosine，top-10，无元数据过滤，不返回向量 |
 | HNSW | FP16，M=50，efConstruction=500，mmap=true；默认实验用原有 API 默认值，90% 目标实验显式设置 ef |
-| DiskANN | FP32，degree=48，build L=100；默认实验查询 L=512，90% 目标实验由验证集选择 L |
+| DiskANN | FP32 / FP16 分开实验，degree=48，build L=100；默认实验查询 L=512，90% 目标实验由验证集选择 L |
 | 只读缓存 | DiskANN SQLite cache 目标 256 KiB，mmap 上限 16 MiB |
 | 重复 | 默认实验每组 3 个独立进程；90% 目标实验每组 6 个独立进程 |
 | 并发 | 单个在途查询；按进程顺序运行，交替引擎顺序，查询期间不运行建库 |
-| 每进程查询 | 20 次预热 + 200 次计时；默认实验 6,000 次、90% 目标实验 12,000 次计时查询 |
+| 每进程查询 | 20 次预热 + 200 次计时；默认实验 6,000 次，每种精度的 90% 目标实验各 12,000 次计时查询 |
 | 系统缓存 | 未清空文件缓存，未人为制造内存压力 |
 
 所有索引均通过生产后端构建。HNSW 各规模分别建库；DiskANN 从上一个已关闭数据库复制快照，再按同一输入顺序追加到下个规模。没有使用额外全量向量缓存或延后刷边的特殊 builder。这里测量查询，不比较增量建库耗时与全量建库耗时。
@@ -55,7 +57,52 @@ Recall@10 表示 ANN 返回结果对精确向量近邻的召回率，不是人�
 
 每进程将 200 个延迟排序，取零基下标 100 和 190 作为 P50/P95。表中为独立进程指标的中位数，而非合并全部延迟后重算分位数；默认实验为 3 次，90% 目标实验为 6 次。内存指标统一为 `/usr/bin/time -l` 的峰值 RSS，包含打开与预热；MiB = 2²⁰ 字节。图中误差线为各次最小值至最大值，不是置信区间。
 
-## 90% 召回目标实验
+## 新增：双 FP16、90% 召回目标
+
+HNSW 沿用相同的 FP16 图索引。DiskANN 用新的可选 FP16 后端，在同一份原始输入上重新构图：每个分量实际保存为 2 字节 IEEE binary16，768 维每条 **1,536 字节**。五个规模逐条校验存储字节与 NumPy 独立量化结果完全一致，校验记录同时保存了数据库文件大小。
+
+DiskANN 的 FP16 BLOB 按访问需要解码为 FP32，距离仍使用原有 FP64 累加器；它是 FP16 存储，不是纯 FP16 算术内核。构图时使用量化后的值；测试查询先舍入到 FP16，与 HNSW 输入精度一致，转换计入查询延迟。没有把向量舍入后继续存为 4 字节，也没有将整库解码进查询进程。
+
+仍使用同一份独立验证集、同一份测试集及原有 FP32 GT；库子集没有变化，因此不改成针对量化向量重新计算的 GT。沿用下文 90% 目标的候选网格和验证集 92% 门槛，为 FP16 重新选参数；全部参数冻结后，两组均重新测量 **6 个独立进程**，没有复用前轮 HNSW 的计时结果。每组按两轮各 3 次运行并交替引擎顺序，所有索引构建及回归测试完成后才开始查询测量。
+
+| 向量数 | 引擎 | 参数 | 验证 Recall@10 | 测试 Recall@10 | QPS ↑ | P50 ms ↓ | P95 ms ↓ | RSS MiB ↓ |
+|---:|---|---|---:|---:|---:|---:|---:|---:|
+| 2,000 | HNSW | ef=16 | 94.85% | 95.25% | 8193.76 | 0.12 | 0.15 | 39.16 |
+| 2,000 | DiskANN | L=20 | 99.40% | 99.35% | 347.43 | 2.71 | 4.43 | 30.86 |
+| 10,000 | HNSW | ef=24 | 95.05% | 96.15% | 4489.22 | 0.21 | 0.31 | 54.35 |
+| 10,000 | DiskANN | L=20 | 96.65% | 97.70% | 232.91 | 3.93 | 7.17 | 43.20 |
+| 20,000 | HNSW | ef=24 | 94.05% | 94.90% | 3240.63 | 0.29 | 0.49 | 73.28 |
+| 20,000 | DiskANN | L=20 | 95.05% | 96.50% | 214.78 | 4.38 | 7.87 | 43.10 |
+| 50,000 | HNSW | ef=24 | 92.95% | 94.05% | 2755.03 | 0.33 | 0.61 | 130.30 |
+| 50,000 | DiskANN | L=20 | 93.60% | 94.65% | 175.00 | 5.28 | 9.75 | 43.19 |
+| 100,000 | HNSW | ef=32 | 93.40% | 94.85% | 2100.10 | 0.46 | 0.69 | 225.14 |
+| 100,000 | DiskANN | L=20 | 92.00% | 93.05% | 162.41 | 5.66 | 9.60 | 43.17 |
+
+![双 FP16：查询性能与实际召回率](results/recall90-fp16/performance.png)
+
+![双 FP16：查询峰值 RSS](results/recall90-fp16/memory.png)
+
+**DiskANN FP32 与 FP16 的补充对照：** 以下 FP32 是前轮观测，FP16 是新一轮；两轮构图精度、图拓扑、查询舍入和运行时系统状态可能不同，不能把 QPS 差异全部归因于存储位宽。数据库文件大小是磁盘体积，不是 RSS。
+
+| 向量数 | FP32 QPS | FP16 QPS | FP32 RSS MiB | FP16 RSS MiB | FP32 索引文件 MiB | FP16 索引文件 MiB |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2,000 | 335.49 | 347.43 | 34.79 | 30.86 | 7.91 | 3.99 |
+| 10,000 | 227.90 | 232.91 | 43.11 | 43.20 | 39.44 | 19.87 |
+| 20,000 | 186.90 | 214.78 | 43.17 | 43.10 | 78.88 | 39.72 |
+| 50,000 | 172.49 | 175.00 | 43.02 | 43.19 | 197.21 | 99.32 |
+| 100,000 | 164.34 | 162.41 | 42.60 | 43.17 | 394.49 | 198.69 |
+
+FP16 将 10 万条的纯向量载荷从 **292.97 MiB 降到 146.48 MiB**。图边、数据库结构、SQLite 缓存上限和运行时没有同比缩减，而且读取时需要临时解码，所以不能由磁盘体积减半推导出 RSS 也减半。
+
+从 1 万到 10 万条，两轮 DiskANN 的 RSS 都在约 43 MiB 附近；本轮主要确认了存储体积收益，没有证实这个范围内的额外常驻内存收益。尚未做距离解码与 I/O 的分项剖析，不能把速度变化具体归因于某项开销。
+
+**波动范围：** 10 万条时，HNSW 六次 QPS 为 **1522.52–2329.29**，DiskANN 为 **156.57–169.02**。全部运行纳入统计；误差线为最小至最大值，不是置信区间。仍未隔离其他系统活动，也未测试内存压力下其他桌面应用的响应。
+
+FP16 索引为独立数据库，不覆盖已有 FP32 索引。现有应用默认创建格式仍为 FP32，默认查询 L=512；本轮通过可选 Rust API 和基准参数启用 FP16。
+
+## 前轮参考：HNSW FP16 / DiskANN FP32，90% 目标
+
+该轮五个规模、两个引擎都在测试集达到门槛。10 万条时，HNSW `ef=32` / DiskANN `L=20` 的实际 Recall@10 为 **94.85% / 93.15%**，QPS 为 **1584.76 / 164.34**；HNSW 吞吐量约高 **9.6 倍**。峰值 RSS 为 **225.05 / 42.60 MiB**，DiskANN 低约 **81.1%**。以下结果属于前轮，未与新增双 FP16 运行合并。
 
 目标是测试集 Recall@10 **至少 90%**，不是要求两个引擎恰好达到 90%。调参规则在测量前固定：验证集门槛设为 **92%**，为抽样波动预留 2 个百分点；这不是统计置信保证。两组都按候选参数从小到大选择第一个达到门槛的值，没有按测试集结果重新选择参数，也没有修改或丢弃返回结果来凑召回率。
 
@@ -135,6 +182,7 @@ RSS 包含当前驻留的文件映射页，但不涵盖全部系统文件缓存�
 ## 数据与复现
 
 - 90% 目标：[汇总 CSV](results/recall90/summary.csv)、[汇总 JSON](results/recall90/summary.json)、[60 次进程指标](results/recall90/runs.json)、[参数选择](results/recall90/selection.json)、[环境](results/recall90/environment.json)、[验证数据清单](results/recall90/validation-dataset.json)、[结果复核](results/recall90/audit.json)。
+- 双 FP16：[汇总 CSV](results/recall90-fp16/summary.csv)、[汇总 JSON](results/recall90-fp16/summary.json)、[60 次进程指标](results/recall90-fp16/runs.json)、[参数选择](results/recall90-fp16/selection.json)、[环境](results/recall90-fp16/environment.json)、[FP16 存储校验](results/recall90-fp16/build-audit.json)、[结果复核](results/recall90-fp16/audit.json)。
 - 默认参数：[汇总 CSV](results/summary.csv)、[汇总 JSON](results/summary.json)、[30 次进程指标](results/runs.json)。
 - [数据来源与抽样清单](results/dataset.json)、[测试环境与二进制哈希](results/environment.json)。
 - [性能图 SVG](results/performance.svg)、[内存图 SVG](results/memory.svg)。
@@ -158,7 +206,7 @@ python3 rust/benchmarks/diskann/plot.py \
   --font '/System/Library/Fonts/Supplemental/Arial Unicode.ttf'
 ```
 
-每个输出目录应是新的目录。查询 GT 必须由同一次抽样得到的库向量生成，不应混用不同 seed、规模或距离定义的数据。本轮没有修改生产引擎代码。
+每个输出目录应是新的目录。查询 GT 必须由同一次抽样得到的原始库向量生成，不应混用不同 seed、规模或距离定义的数据。新增可选 FP16 存储格式，但没有修改默认精度和默认查询参数。
 
 完成上述数据准备和建库后，可复用同一份索引运行 90% 召回目标实验：
 
@@ -175,5 +223,25 @@ python3 rust/benchmarks/diskann/run_recall90.py \
 python3 rust/benchmarks/diskann/plot.py \
   /absolute/path/to/new-recall90-results/summary.json /absolute/path/to/new-recall90-figures \
   --dataset 'Cohere Wikipedia 抽样' --recall-target 0.9 \
+  --font '/System/Library/Fonts/Supplemental/Arial Unicode.ttf'
+```
+
+双 FP16 补测复用已有 HNSW 索引，并新建 DiskANN FP16 索引；建库脚本需要 NumPy，对所有存储向量逐条校验。以下新目录中的 HNSW 条目为指向原索引的符号链接，查询始终只读打开：
+
+```bash
+python3 rust/benchmarks/diskann/build_cohere_fp16.py \
+  --builder "$PWD/native/target/release/build-index" \
+  --data /absolute/path/to/cohere-data \
+  --previous-indexes /absolute/path/to/new-indexes \
+  --output /absolute/path/to/new-fp16-indexes
+python3 rust/benchmarks/diskann/run_recall90.py \
+  --binary "$PWD/native/target/release/zvec-qps-bench" \
+  --indexes /absolute/path/to/new-fp16-indexes \
+  --data /absolute/path/to/cohere-data \
+  --validation /absolute/path/to/new-validation \
+  --output /absolute/path/to/new-fp16-results --diskann-precision fp16
+python3 rust/benchmarks/diskann/plot.py \
+  /absolute/path/to/new-fp16-results/summary.json /absolute/path/to/new-fp16-figures \
+  --dataset 'Cohere Wikipedia（均 FP16）' --recall-target 0.9 \
   --font '/System/Library/Fonts/Supplemental/Arial Unicode.ttf'
 ```

@@ -1,0 +1,11 @@
+{
+  "verified_test_runs": 60,
+  "verified_validation_trials": 20,
+  "both_engines_storage_precision": "FP16",
+  "all_runs_use_frozen_parameters": true,
+  "recall_recomputed_from_raw_ids": true,
+  "qps_formula_verified": true,
+  "all_summary_median_min_max_verified": true,
+  "unchanged_fp32_ground_truth": true,
+  "all_test_groups_reach_90_percent": true
+}

@@ -1,0 +1,217 @@
+{
+  "test_recall_target": 0.9,
+  "validation_margin": 0.02,
+  "validation_threshold": 0.92,
+  "candidate_grid": {
+    "hnsw": [
+      10,
+      16,
+      24,
+      32,
+      48,
+      64,
+      96,
+      128,
+      192,
+      256,
+      512
+    ],
+    "diskann": [
+      20,
+      24,
+      32,
+      48,
+      64,
+      96,
+      128,
+      192,
+      256,
+      512
+    ]
+  },
+  "rule": "first ascending effort with validation Recall@10 >= 92%; no test-set retuning",
+  "trials": [
+    {
+      "count": 2000,
+      "engine": "hnsw",
+      "effort": 10,
+      "validation_recall_at_10": 0.907
+    },
+    {
+      "count": 2000,
+      "engine": "hnsw",
+      "effort": 16,
+      "validation_recall_at_10": 0.9485
+    },
+    {
+      "count": 2000,
+      "engine": "diskann",
+      "effort": 20,
+      "validation_recall_at_10": 0.994
+    },
+    {
+      "count": 10000,
+      "engine": "hnsw",
+      "effort": 10,
+      "validation_recall_at_10": 0.849
+    },
+    {
+      "count": 10000,
+      "engine": "hnsw",
+      "effort": 16,
+      "validation_recall_at_10": 0.9125
+    },
+    {
+      "count": 10000,
+      "engine": "hnsw",
+      "effort": 24,
+      "validation_recall_at_10": 0.9505
+    },
+    {
+      "count": 10000,
+      "engine": "diskann",
+      "effort": 20,
+      "validation_recall_at_10": 0.9665
+    },
+    {
+      "count": 20000,
+      "engine": "hnsw",
+      "effort": 10,
+      "validation_recall_at_10": 0.8365
+    },
+    {
+      "count": 20000,
+      "engine": "hnsw",
+      "effort": 16,
+      "validation_recall_at_10": 0.901
+    },
+    {
+      "count": 20000,
+      "engine": "hnsw",
+      "effort": 24,
+      "validation_recall_at_10": 0.9405
+    },
+    {
+      "count": 20000,
+      "engine": "diskann",
+      "effort": 20,
+      "validation_recall_at_10": 0.9505
+    },
+    {
+      "count": 50000,
+      "engine": "hnsw",
+      "effort": 10,
+      "validation_recall_at_10": 0.792
+    },
+    {
+      "count": 50000,
+      "engine": "hnsw",
+      "effort": 16,
+      "validation_recall_at_10": 0.876
+    },
+    {
+      "count": 50000,
+      "engine": "hnsw",
+      "effort": 24,
+      "validation_recall_at_10": 0.9295
+    },
+    {
+      "count": 50000,
+      "engine": "diskann",
+      "effort": 20,
+      "validation_recall_at_10": 0.936
+    },
+    {
+      "count": 100000,
+      "engine": "hnsw",
+      "effort": 10,
+      "validation_recall_at_10": 0.7765
+    },
+    {
+      "count": 100000,
+      "engine": "hnsw",
+      "effort": 16,
+      "validation_recall_at_10": 0.854
+    },
+    {
+      "count": 100000,
+      "engine": "hnsw",
+      "effort": 24,
+      "validation_recall_at_10": 0.91
+    },
+    {
+      "count": 100000,
+      "engine": "hnsw",
+      "effort": 32,
+      "validation_recall_at_10": 0.934
+    },
+    {
+      "count": 100000,
+      "engine": "diskann",
+      "effort": 20,
+      "validation_recall_at_10": 0.92
+    }
+  ],
+  "selected": [
+    {
+      "count": 2000,
+      "engine": "hnsw",
+      "effort": 16,
+      "validation_recall_at_10": 0.9485
+    },
+    {
+      "count": 2000,
+      "engine": "diskann",
+      "effort": 20,
+      "validation_recall_at_10": 0.994
+    },
+    {
+      "count": 10000,
+      "engine": "hnsw",
+      "effort": 24,
+      "validation_recall_at_10": 0.9505
+    },
+    {
+      "count": 10000,
+      "engine": "diskann",
+      "effort": 20,
+      "validation_recall_at_10": 0.9665
+    },
+    {
+      "count": 20000,
+      "engine": "hnsw",
+      "effort": 24,
+      "validation_recall_at_10": 0.9405
+    },
+    {
+      "count": 20000,
+      "engine": "diskann",
+      "effort": 20,
+      "validation_recall_at_10": 0.9505
+    },
+    {
+      "count": 50000,
+      "engine": "hnsw",
+      "effort": 24,
+      "validation_recall_at_10": 0.9295
+    },
+    {
+      "count": 50000,
+      "engine": "diskann",
+      "effort": 20,
+      "validation_recall_at_10": 0.936
+    },
+    {
+      "count": 100000,
+      "engine": "hnsw",
+      "effort": 32,
+      "validation_recall_at_10": 0.934
+    },
+    {
+      "count": 100000,
+      "engine": "diskann",
+      "effort": 20,
+      "validation_recall_at_10": 0.92
+    }
+  ]
+}
