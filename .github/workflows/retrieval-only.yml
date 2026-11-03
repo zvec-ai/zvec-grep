@@ -53,6 +53,8 @@ jobs:
     timeout-minutes: 5
     outputs:
       harness-commit: ${{ steps.harness.outputs.commit }}
+      # Both sides of a fork PR use hosted runners, including its upstream base.
+      benchmark-runner: ${{ github.repository == 'zvec-ai/zvec-grep' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'zvec-retrieval-benchmark' || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -123,7 +125,7 @@ jobs:
     env:
       RETRIEVAL_EMBEDDING: ${{ inputs.embedding }}
     needs: [authorize, package-candidate]
-    runs-on: ubuntu-24.04
+    runs-on: ${{ needs.authorize.outputs.benchmark-runner }}
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v6
@@ -132,6 +134,9 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/retrieval-authorize
         id: access
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24.21.0"
       - uses: actions/download-artifact@v8
         with:
           name: package-${{ inputs.artifact_prefix || 'retrieval' }}-candidate
@@ -152,7 +157,8 @@ jobs:
           ZVEC_GREP_API_KEY: ${{ secrets.QWEN_EMBEDDING_API_KEY }}
           ZVEC_GREP_ENDPOINT: ${{ vars.QWEN_EMBEDDING_ENDPOINT }}
         run: |
-          node benchmarks/zg-retrieval/run.mjs \
+          flock -n "$HOME/.zvec-retrieval-benchmark.lock" \
+            node benchmarks/zg-retrieval/run.mjs \
             --package "$RUNNER_TEMP/package/candidate.tgz" \
             --output "$RUNNER_TEMP/sweqa" \
             --corpus "$RUNNER_TEMP/corpus" \
@@ -202,7 +208,7 @@ jobs:
     env:
       RETRIEVAL_EMBEDDING: ${{ inputs.embedding }}
     needs: [authorize, package-candidate]
-    runs-on: ubuntu-24.04
+    runs-on: ${{ needs.authorize.outputs.benchmark-runner }}
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v6
@@ -211,6 +217,9 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/retrieval-authorize
         id: access
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24.21.0"
       - uses: actions/download-artifact@v8
         with:
           name: package-${{ inputs.artifact_prefix || 'retrieval' }}-candidate
@@ -226,7 +235,10 @@ jobs:
           cache: pip
           cache-dependency-path: benchmarks/zg-retrieval/expansion/requirements-beir.txt
       - name: Install the pinned BEIR Parquet reader
-        run: python -m pip install --requirement benchmarks/zg-retrieval/expansion/requirements-beir.txt
+        run: |
+          python -m venv "$RUNNER_TEMP/retrieval-beir-venv"
+          echo "$RUNNER_TEMP/retrieval-beir-venv/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/retrieval-beir-venv/bin/python" -m pip install --requirement benchmarks/zg-retrieval/expansion/requirements-beir.txt
       - name: Cache the multilingual model
         if: inputs.embedding == 'local'
         uses: actions/cache@v5
@@ -238,7 +250,8 @@ jobs:
           ZVEC_GREP_API_KEY: ${{ secrets.QWEN_EMBEDDING_API_KEY }}
           ZVEC_GREP_ENDPOINT: ${{ vars.QWEN_EMBEDDING_ENDPOINT }}
         run: |
-          node benchmarks/zg-retrieval/expansion/run.mjs \
+          flock -n "$HOME/.zvec-retrieval-benchmark.lock" \
+            node benchmarks/zg-retrieval/expansion/run.mjs \
             --suite beir \
             --package "$RUNNER_TEMP/package/candidate.tgz" \
             --output "$RUNNER_TEMP/beir" \
@@ -278,7 +291,7 @@ jobs:
     env:
       RETRIEVAL_EMBEDDING: ${{ inputs.embedding }}
     needs: [authorize, package-candidate]
-    runs-on: ubuntu-24.04
+    runs-on: ${{ needs.authorize.outputs.benchmark-runner }}
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v6
@@ -287,6 +300,9 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/retrieval-authorize
         id: access
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24.21.0"
       - uses: actions/download-artifact@v8
         with:
           name: package-${{ inputs.artifact_prefix || 'retrieval' }}-candidate
@@ -302,7 +318,10 @@ jobs:
           cache: pip
           cache-dependency-path: benchmarks/zg-retrieval/expansion/requirements-duretrieval.txt
       - name: Install the pinned Parquet reader
-        run: python -m pip install --requirement benchmarks/zg-retrieval/expansion/requirements-duretrieval.txt
+        run: |
+          python -m venv "$RUNNER_TEMP/retrieval-duretrieval-venv"
+          echo "$RUNNER_TEMP/retrieval-duretrieval-venv/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/retrieval-duretrieval-venv/bin/python" -m pip install --requirement benchmarks/zg-retrieval/expansion/requirements-duretrieval.txt
       - name: Cache the multilingual model
         if: inputs.embedding == 'local'
         uses: actions/cache@v5
@@ -314,7 +333,8 @@ jobs:
           ZVEC_GREP_API_KEY: ${{ secrets.QWEN_EMBEDDING_API_KEY }}
           ZVEC_GREP_ENDPOINT: ${{ vars.QWEN_EMBEDDING_ENDPOINT }}
         run: |
-          node benchmarks/zg-retrieval/expansion/run.mjs \
+          flock -n "$HOME/.zvec-retrieval-benchmark.lock" \
+            node benchmarks/zg-retrieval/expansion/run.mjs \
             --suite duretrieval \
             --package "$RUNNER_TEMP/package/candidate.tgz" \
             --output "$RUNNER_TEMP/duretrieval" \
@@ -354,7 +374,7 @@ jobs:
     env:
       RETRIEVAL_EMBEDDING: ${{ inputs.embedding }}
     needs: [authorize, package-candidate]
-    runs-on: ubuntu-24.04
+    runs-on: ${{ needs.authorize.outputs.benchmark-runner }}
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v6
@@ -363,6 +383,9 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/retrieval-authorize
         id: access
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24.21.0"
       - uses: actions/download-artifact@v8
         with:
           name: package-${{ inputs.artifact_prefix || 'retrieval' }}-candidate
@@ -383,7 +406,8 @@ jobs:
           ZVEC_GREP_API_KEY: ${{ secrets.QWEN_EMBEDDING_API_KEY }}
           ZVEC_GREP_ENDPOINT: ${{ vars.QWEN_EMBEDDING_ENDPOINT }}
         run: |
-          node benchmarks/zg-retrieval/expansion/run.mjs \
+          flock -n "$HOME/.zvec-retrieval-benchmark.lock" \
+            node benchmarks/zg-retrieval/expansion/run.mjs \
             --suite quarry \
             --package "$RUNNER_TEMP/package/candidate.tgz" \
             --output "$RUNNER_TEMP/quarry" \
