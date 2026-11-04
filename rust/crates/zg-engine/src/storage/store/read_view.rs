@@ -1,6 +1,6 @@
 //! Storage read primitives, optionally grouped under one store lock.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::{IndexStore, StoreState, graph_error};
 use crate::{
@@ -37,7 +37,7 @@ impl IndexStore {
     }
 }
 
-/// Raw reads borrowing a locked store; selection and visibility belong to the caller.
+/// Reads borrowing a locked store; query selection and ranking belong to the caller.
 pub(crate) struct ReadView<'a> {
     state: &'a StoreState,
     #[cfg(test)]
@@ -93,15 +93,15 @@ impl ReadView<'_> {
         self.state.entities.fetch(ids)
     }
 
-    pub(crate) fn fetch_entity_file_ids(
+    pub(crate) fn visible_endpoint_files(
         &self,
         ids: &[EntityId],
-    ) -> EngineResult<HashMap<EntityId, FileId>> {
+    ) -> EngineResult<HashMap<EntityId, FileRecord>> {
         #[cfg(test)]
         if let Some(reads) = self.entity_file_reads {
             reads.set(reads.get() + 1);
         }
-        let files = self.state.entities.fetch_file_ids(ids)?;
+        let files = visible_endpoint_files(self.state, ids)?;
         #[cfg(test)]
         if let Some(after_read) = self.after_entity_file_read {
             after_read();
@@ -155,4 +155,39 @@ impl ReadView<'_> {
             .fragments
             .search_fts(query, limit, filter.as_deref())
     }
+}
+
+/// Resolve endpoint ownership and Indexed visibility under the caller's store lock.
+/// File endpoints use only the canonical `f{file_id}` spelling, including files without entities.
+pub(super) fn visible_endpoint_files(
+    state: &StoreState,
+    ids: &[EntityId],
+) -> EngineResult<HashMap<EntityId, FileRecord>> {
+    let mut owners = state.entities.fetch_file_ids(ids)?;
+    for id in ids {
+        if let Some(file_id) = id
+            .as_str()
+            .strip_prefix('f')
+            .and_then(|id| id.parse::<u32>().ok())
+            && id.as_str() == format!("f{file_id}")
+        {
+            owners.insert(id.clone(), FileId::new(file_id));
+        }
+    }
+    let file_ids = owners
+        .values()
+        .copied()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let files = state.files.fetch(&file_ids)?;
+    Ok(owners
+        .into_iter()
+        .filter_map(|(id, file_id)| {
+            files
+                .get(&file_id)
+                .filter(|file| file.index_status().is_indexed())
+                .map(|file| (id, file.clone()))
+        })
+        .collect())
 }

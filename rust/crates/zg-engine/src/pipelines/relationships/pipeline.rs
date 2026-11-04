@@ -15,9 +15,7 @@ use crate::{
         CallSite, MAX_SYMBOL_MATCHES, RelationshipOptions, RelationshipResult, SymbolDefinition,
         SymbolRelationships,
     },
-    domain::{
-        Entity, EntityId, EntityMetadata, FileEdge, FileId, FileRecord, GraphEdgeKind, Range,
-    },
+    domain::{Entity, EntityId, EntityMetadata, FileEdge, FileRecord, GraphEdgeKind, Range},
     pipelines::indexed_search::path_filter::resolve_glob_filter,
     storage::{
         ReadView,
@@ -484,33 +482,9 @@ fn endpoint_paths(
     storage: &ReadView<'_>,
     ids: &[EntityId],
 ) -> EngineResult<HashMap<EntityId, PathBuf>> {
-    let mut owners = storage.fetch_entity_file_ids(ids)?;
-    for id in ids {
-        if let Some(file_id) = id
-            .as_str()
-            .strip_prefix('f')
-            .and_then(|id| id.parse::<u32>().ok())
-        {
-            // Only canonical f{file_id} spellings represent implicit file endpoints.
-            if id.as_str() == format!("f{file_id}") {
-                owners.insert(id.clone(), FileId::new(file_id));
-            }
-        }
-    }
-    let file_ids: Vec<_> = owners
-        .values()
-        .copied()
-        .collect::<HashSet<_>>()
+    Ok(storage
+        .visible_endpoint_files(ids)?
         .into_iter()
-        .collect();
-    let files = storage.fetch_files(&file_ids)?;
-    Ok(owners
-        .into_iter()
-        .filter_map(|(id, file_id)| {
-            files
-                .get(&file_id)
-                .filter(|file| file.index_status().is_indexed())
-                .map(|file| (id, file.relative_path().to_path_buf()))
-        })
+        .map(|(id, file)| (id, file.relative_path().to_path_buf()))
         .collect())
 }
