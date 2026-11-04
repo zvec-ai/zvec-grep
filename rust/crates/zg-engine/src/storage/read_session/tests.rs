@@ -112,6 +112,7 @@ fn write_text(layout: &WorkspaceLayout, storage_home: &Path, text: &str) {
     let _lock = acquire_workspace_lock(layout, LockMode::Exclusive, "test.write")
         .expect("writer drains cache");
     let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        graph_enabled: false,
         storage_path: storage_home.to_path_buf(),
         embeddings: vec![schema()],
     })
@@ -653,6 +654,7 @@ fn cold_open_does_not_block_another_workspaces_cache_hit() {
                     started.send(()).expect("opening");
                     released.recv().expect("allow native open");
                     IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
+                        graph_enabled: false,
                         storage_path: cold.storage_home.clone(),
                     })
                 })

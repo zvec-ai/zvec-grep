@@ -206,14 +206,16 @@ async fn malformed_fts_and_unreadable_suggestions_do_not_fail_exact_misses() {
     let home = fixture.storage_home();
     let candidate = fixture.add_symbols("frob.rs", &[("frob", None, 1, "fn frob() {}")]);
     corrupt_entity_bodies(home, &[candidate[0].id().clone()]);
-    let engine = &fixture.engine;
     for symbol in ["wrong::frob", "FROB", "operator()", "\"", "frob AND ("] {
         let result = fixture.callers(symbol).await;
         assert!(result.matches.is_empty());
         assert!(result.suggestions.is_empty());
     }
     assert!(
-        engine.callers(fixture.options("frob")).await.is_err(),
+        fixture
+            .query(RelationshipDirection::Callers, fixture.options("frob"))
+            .await
+            .is_err(),
         "exact-match corruption remains an error"
     );
 }

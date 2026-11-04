@@ -110,6 +110,7 @@ impl ReadSessionCache {
     ) -> EngineResult<ReadSessionLease> {
         self.acquire_with(layout, storage_home, generation, || {
             IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
+                graph_enabled: false,
                 storage_path: storage_home.to_path_buf(),
             })
         })
@@ -273,6 +274,7 @@ impl ReadSessionLease {
         Ok(Self {
             session: Arc::new(ReadSession {
                 storage: IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
+                    graph_enabled: false,
                     storage_path: storage_home.to_path_buf(),
                 })?,
                 storage_home: storage_home.to_path_buf(),

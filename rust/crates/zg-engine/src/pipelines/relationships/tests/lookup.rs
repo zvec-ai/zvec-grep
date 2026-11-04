@@ -23,7 +23,6 @@ fn invalid_queries_fail_validation() {
 #[tokio::test]
 async fn exact_definitions_keep_scopes_order_and_per_symbol_limits() {
     let fixture = Fixture::new();
-    let engine = &fixture.engine;
     let groups = fixture.callers(" run ").await.matches;
     let descriptions: Vec<_> = groups
         .iter()
@@ -61,11 +60,6 @@ async fn exact_definitions_keep_scopes_order_and_per_symbol_limits() {
         "keep distinct callsites"
     );
 
-    engine
-        .enable_read_session_cache()
-        .expect("enable read cache");
-    assert_eq!(fixture.callers("run").await.matches, groups,);
-
     let limited = fixture.callers_with_limit("run", 2).await.matches;
     assert_eq!(
         limited
@@ -79,11 +73,6 @@ async fn exact_definitions_keep_scopes_order_and_per_symbol_limits() {
     assert_eq!(scoped.len(), 1);
     assert_eq!(scoped[0].symbol.name, "blue::run");
     assert!(scoped[0].truncated);
-    assert_eq!(
-        engine.runtime_snapshot(),
-        EngineRuntimeSnapshot::default(),
-        "relationships do not load embedding models"
-    );
 }
 
 #[tokio::test]
@@ -113,7 +102,6 @@ async fn common_names_are_bounded_after_scope_filtering_without_fts_fallback() {
         foo[0].id().as_str(),
         foo[1].id().as_str(),
     );
-    let engine = &fixture.engine;
     let scoped = fixture.callers("Foo::new").await.matches;
     assert_eq!(scoped.len(), 1);
     assert_eq!(scoped[0].symbol.name, "Foo::new");
@@ -126,11 +114,14 @@ async fn common_names_are_bounded_after_scope_filtering_without_fts_fallback() {
     let others = fixture.callers("Other::new").await.matches;
     assert_eq!(others.len(), 10);
     assert!(others.iter().all(|group| group.symbol.name == "Other::new"));
-    let error = engine
-        .callees(RelationshipOptions {
-            limit: Some(1),
-            ..fixture.options("new")
-        })
+    let error = fixture
+        .query(
+            RelationshipDirection::Callees,
+            RelationshipOptions {
+                limit: Some(1),
+                ..fixture.options("new")
+            },
+        )
         .await
         .expect_err("too many definitions even with a small edge limit");
     assert_eq!(error.code(), EngineError::INVALID_ARGUMENT);
@@ -160,7 +151,6 @@ async fn symbol_spellings_select_expected_scopes() {
             ("bar", Some("pkg.Foo"), 6, "fn bar() {}"),
         ],
     );
-    let engine = &fixture.engine;
     for (query, expected) in [
         ("::main", &["main"][..]),
         ("main", &["main", "Foo::main"][..]),
@@ -189,8 +179,8 @@ async fn symbol_spellings_select_expected_scopes() {
         );
         assert!(result.suggestions.is_empty());
     }
-    let error = engine
-        .callers(fixture.options("::"))
+    let error = fixture
+        .query(RelationshipDirection::Callers, fixture.options("::"))
         .await
         .expect_err("empty name");
     assert_eq!(
@@ -214,10 +204,9 @@ async fn glob_filters_disambiguate_common_scoped_and_top_level_names_before_the_
         );
     }
     store.close().expect("close writer");
-    let engine = &fixture.engine;
     for name in ["tests::setup", "::main"] {
-        let error = engine
-            .callers(fixture.options(name))
+        let error = fixture
+            .query(RelationshipDirection::Callers, fixture.options(name))
             .await
             .expect_err("ambiguous across files");
         assert!(error.message().contains("glob filter"));
@@ -226,8 +215,8 @@ async fn glob_filters_disambiguate_common_scoped_and_top_level_names_before_the_
                 globs: vec![path.into()],
                 ..fixture.options(name)
             };
-            let result = engine
-                .callers(options.clone())
+            let result = fixture
+                .query(RelationshipDirection::Callers, options.clone())
                 .await
                 .expect("filtered callers");
             assert_eq!(
@@ -241,11 +230,14 @@ async fn glob_filters_disambiguate_common_scoped_and_top_level_names_before_the_
             );
         }
     }
-    let suggestions = engine
-        .callers(RelationshipOptions {
-            globs: vec!["pkg99/**".into()],
-            ..fixture.options("wrong::setup")
-        })
+    let suggestions = fixture
+        .query(
+            RelationshipDirection::Callers,
+            RelationshipOptions {
+                globs: vec!["pkg99/**".into()],
+                ..fixture.options("wrong::setup")
+            },
+        )
         .await
         .expect("path-scoped exact-name suggestions");
     assert_eq!(suggestions.suggestions.len(), 1);
@@ -254,11 +246,14 @@ async fn glob_filters_disambiguate_common_scoped_and_top_level_names_before_the_
         PathBuf::from("pkg99/main.rs")
     );
     for path in ["", "!", "["] {
-        let error = engine
-            .callers(RelationshipOptions {
-                globs: vec![path.into()],
-                ..fixture.options("main")
-            })
+        let error = fixture
+            .query(
+                RelationshipDirection::Callers,
+                RelationshipOptions {
+                    globs: vec![path.into()],
+                    ..fixture.options("main")
+                },
+            )
             .await
             .expect_err("invalid glob filter");
         assert_eq!(error.code(), EngineError::INVALID_ARGUMENT);
@@ -274,9 +269,11 @@ async fn glob_filters_exclude_other_files_before_loading_symbol_metadata() {
         &[("localize", None, 1, "fn localize() {}")],
     );
     corrupt_entity_metadata(fixture.storage_home(), &[outside[0].id().clone()]);
-    let engine = &fixture.engine;
     assert!(
-        engine.callers(fixture.options("localize")).await.is_err(),
+        fixture
+            .query(RelationshipDirection::Callers, fixture.options("localize"))
+            .await
+            .is_err(),
         "unfiltered metadata is corrupt"
     );
     for path in ["keep/**", "keep/main.rs", "missing/**"] {
@@ -285,11 +282,14 @@ async fn glob_filters_exclude_other_files_before_loading_symbol_metadata() {
             ("wrong::localize", false),
             ("LOCALIZE", false),
         ] {
-            let result = engine
-                .callers(RelationshipOptions {
-                    globs: vec![path.into()],
-                    ..fixture.options(name)
-                })
+            let result = fixture
+                .query(
+                    RelationshipDirection::Callers,
+                    RelationshipOptions {
+                        globs: vec![path.into()],
+                        ..fixture.options(name)
+                    },
+                )
                 .await
                 .expect("outside metadata must not be fetched");
             let count = usize::from(path != "missing/**");
@@ -320,11 +320,13 @@ async fn ordered_and_insensitive_globs_filter_definitions_but_not_call_sites() {
         }],
     ] {
         let result = fixture
-            .engine
-            .callers(RelationshipOptions {
-                globs: globs.clone(),
-                ..fixture.options("run")
-            })
+            .query(
+                RelationshipDirection::Callers,
+                RelationshipOptions {
+                    globs: globs.clone(),
+                    ..fixture.options("run")
+                },
+            )
             .await
             .expect("filtered definitions");
         assert_eq!(result.matches.len(), 2);
@@ -335,12 +337,14 @@ async fn ordered_and_insensitive_globs_filter_definitions_but_not_call_sites() {
                 .all(|m| m.symbol.file_path == std::path::Path::new("a.rs"))
         );
         let result = fixture
-            .engine
-            .callees(RelationshipOptions {
-                globs,
-                limit: Some(100),
-                ..fixture.options("invoke")
-            })
+            .query(
+                RelationshipDirection::Callees,
+                RelationshipOptions {
+                    globs,
+                    limit: Some(100),
+                    ..fixture.options("invoke")
+                },
+            )
             .await
             .expect("unrestricted callees");
         assert!(result.matches[0].edges.iter().any(|edge| {

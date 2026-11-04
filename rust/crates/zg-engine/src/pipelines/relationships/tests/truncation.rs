@@ -85,8 +85,7 @@ async fn unfinished_cross_file_endpoints_are_filtered_before_limit() {
                 .all(|edge| edge.line != Some(101) && edge.line != Some(99))
         );
         let groups = fixture
-            .engine
-            .callers(fixture.options("run"))
+            .query(RelationshipDirection::Callers, fixture.options("run"))
             .await
             .expect("query visible definitions")
             .matches;
@@ -153,7 +152,6 @@ async fn truncation_skips_invisible_edges_in_both_directions() {
         );
     }
     drop(graph);
-    let engine = &fixture.engine;
     for (limit, count, truncated) in [(1, 1, true), (3, 3, false), (4, 3, false)] {
         for incoming in [false, true] {
             let options = RelationshipOptions {
@@ -165,9 +163,9 @@ async fn truncation_skips_invisible_edges_in_both_directions() {
                 })
             };
             let reply = if incoming {
-                engine.callers(options).await
+                fixture.query(RelationshipDirection::Callers, options).await
             } else {
-                engine.callees(options).await
+                fixture.query(RelationshipDirection::Callees, options).await
             }
             .expect("advance across invisible edges");
             assert_eq!(
@@ -213,8 +211,7 @@ async fn limited_queries_skip_unneeded_endpoint_metadata_and_bodies() {
         };
         for limit in [1, 1000] {
             let result = fixture
-                .engine
-                .relationships(
+                .query(
                     direction,
                     RelationshipOptions {
                         limit: Some(limit),

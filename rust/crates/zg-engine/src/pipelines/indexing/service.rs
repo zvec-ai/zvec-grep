@@ -59,7 +59,6 @@ const DEFAULT_LOCAL_EMBEDDING: &str = "local/potion-code-16m-v2";
 pub(crate) struct WorkspaceIndexService {
     pub(crate) writers: crate::pipelines::indexed_search::writer::WriterContexts,
     scanner: NativeScanner,
-    graph_enabled: bool,
     #[cfg(test)]
     fail_index_completion: bool,
 }
@@ -69,28 +68,13 @@ impl WorkspaceIndexService {
         Self {
             writers: crate::pipelines::indexed_search::writer::WriterContexts::default(),
             scanner: NativeScanner::default(),
-            graph_enabled: crate::storage::GRAPH_ENABLED,
             #[cfg(test)]
             fail_index_completion: false,
         }
     }
 
-    /// The same capability controls graph writes and relationship-query admission.
-    pub(crate) fn graph_enabled(&self) -> bool {
-        self.graph_enabled
-    }
 
-    #[cfg(test)]
-    pub(crate) fn with_graph() -> Self {
-        Self {
-            graph_enabled: true,
-            ..Self::new()
-        }
-    }
-
-    /// Runs the indexing pipeline in one linear sequence: recovery, model
-    /// resolution, build, and publication are order-dependent, so the steps
-    /// stay visible here instead of behind helpers.
+    // Keep recovery, model resolution, build, and publication in sequence.
     #[allow(clippy::too_many_lines)]
     pub(crate) async fn index(
         &self,
@@ -216,16 +200,11 @@ impl WorkspaceIndexService {
         } else {
             workspace.layout().index_dir()
         };
-        let storage = IndexStore::open_with_graph(
-            WorkspaceIndexStorageOptions::ReadWrite {
-                storage_path: storage_path.to_path_buf(),
-                embeddings: models.iter().map(|model| model.info().clone()).collect(),
-            },
-            workspace
-                .index()
-                .descriptor()
-                .is_some_and(IndexDescriptor::graph_indexing),
-        )?;
+        let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+            graph_enabled: workspace.index().descriptor().is_some_and(IndexDescriptor::graph_indexing),
+            storage_path: storage_path.to_path_buf(),
+            embeddings: models.iter().map(|model| model.info().clone()).collect(),
+        })?;
         let writer = self.writers.register(
             crate::pipelines::indexed_search::writer::WriterSession::new(
                 storage,
@@ -328,6 +307,7 @@ impl WorkspaceIndexService {
             return Ok(false);
         }
         let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
+            graph_enabled: false,
             storage_path: workspace.layout().index_dir().to_path_buf(),
         })?;
         let status =
@@ -383,6 +363,7 @@ impl WorkspaceIndexService {
         let indexed = metadata_indexed && storage_exists;
         let status = if options.include_status && indexed {
             let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
+                graph_enabled: false,
                 storage_path: workspace.layout().index_dir().to_path_buf(),
             })?;
             let status =

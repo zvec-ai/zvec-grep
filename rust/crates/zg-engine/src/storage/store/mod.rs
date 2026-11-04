@@ -45,6 +45,7 @@ struct SharedStore {
     state: Mutex<StoreState>,
     schema: Vec<EmbeddingModelInfo>,
     read_only: bool,
+    graph_enabled: bool,
     // The native handles must close before the operating-system lock is released.
     _lock: File,
 }
@@ -127,28 +128,13 @@ fn validate_models(embeddings: &[EmbeddingModelInfo]) -> EngineResult<()> {
 }
 
 impl IndexStore {
-    /// Opens storage without graph access, which is all a reader needs: query
-    /// paths answer from files, entities, and fragments. Indexing opens through
-    /// [`Self::open_with_graph`] instead, because only the workspace setting
-    /// decides whether this workspace keeps a graph.
-    pub(crate) fn open(options: WorkspaceIndexStorageOptions) -> EngineResult<Self> {
-        // Graph extraction and resolution are not enabled in this release.
-        // Re-enabling graph indexing requires rebuilding any unmaintained graph.
-        Self::open_with_graph(options, crate::storage::GRAPH_ENABLED)
-    }
-
-    /// Whether this store can persist walk-time graphs. Indexing skips graph
-    /// assembly when the answer is no, because a store without a graph
-    /// rejects any non-empty graph write.
+    /// Whether indexing can persist extracted graphs in this store.
     pub(crate) fn graph_enabled(&self) -> bool {
-        self.read(|state| Ok(state.graph.is_ok()))
-            .unwrap_or(false)
+        self.read(|state| Ok(state.graph.is_ok())).unwrap_or(false)
     }
 
-    pub(crate) fn open_with_graph(
-        options: WorkspaceIndexStorageOptions,
-        graph_enabled: bool,
-    ) -> EngineResult<Self> {
+    pub(crate) fn open(options: WorkspaceIndexStorageOptions) -> EngineResult<Self> {
+        let graph_enabled = options.graph_enabled();
         if let WorkspaceIndexStorageOptions::ReadWrite { embeddings, .. } = &options {
             validate_models(embeddings)?;
         }
@@ -173,7 +159,7 @@ impl IndexStore {
             .map_err(|error| io_error("locate index directory", home, &error))?;
         let mut registry = registry()?;
         if let Some(shared) = registry.get(&path).and_then(Weak::upgrade) {
-            if read_only && shared.read_only {
+            if read_only && shared.read_only && graph_enabled == shared.graph_enabled {
                 return Ok(Self {
                     shared: Mutex::new(Some(shared)),
                     read_only,
@@ -191,7 +177,9 @@ impl IndexStore {
         let entities = Entities::open(&path, read_only)?;
         let fragments = Fragments::open(&path, &schema, read_only)?;
         let graph_path = path.join("graph").join("graph.sqlite");
-        let graph = if read_only {
+        let graph = if !graph_enabled {
+            Err(graph_disabled())
+        } else if read_only {
             match fs::metadata(&graph_path) {
                 Ok(_) => {
                     SqliteGraphStorage::open(&graph_path, OpenMode::ReadOnly).map_err(graph_error)
@@ -200,10 +188,7 @@ impl IndexStore {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(graph_missing()),
                 Err(error) => Err(io_error("inspect workspace graph", &graph_path, &error)),
             }
-        } else if !graph_enabled {
-            Err(graph_missing())
         } else {
-            let graph_path = path.join("graph").join("graph.sqlite");
             // An index built before its workspace asked for a graph still owns
             // a valid canonical index; creating the empty database on first use
             // keeps that build usable instead of forcing a rebuild.
@@ -236,6 +221,7 @@ impl IndexStore {
             }),
             schema,
             read_only,
+            graph_enabled,
             _lock: lock,
         });
         registry.insert(path, Arc::downgrade(&shared));
@@ -577,10 +563,7 @@ fn invalidation_entity_ids(state: &StoreState, file_id: FileId) -> EngineResult<
 }
 
 fn graph_disabled() -> EngineError {
-    EngineError::unsupported(
-        "this workspace indexes without a code graph, so graph data cannot be stored; \
-         enable graph indexing and rebuild the index",
-    )
+    EngineError::unsupported("graph support is disabled")
 }
 
 fn graph_missing() -> EngineError {

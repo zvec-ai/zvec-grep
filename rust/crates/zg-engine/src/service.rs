@@ -40,14 +40,6 @@ impl EngineService {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_graph() -> Self {
-        Self {
-            indexing: WorkspaceIndexService::with_graph(),
-            ..Self::new()
-        }
-    }
-
     /// Retrieves context from an index or, when `rg` is enabled, embedded ripgrep.
     ///
     /// # Errors

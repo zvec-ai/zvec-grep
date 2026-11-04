@@ -4,14 +4,13 @@ use super::*;
 async fn missing_graph_errors_without_creating_a_database() {
     let fixture = Fixture::new();
     fs::remove_file(&fixture.graph_path).expect("remove graph fixture");
-    let engine = &fixture.engine;
     for error in [
-        engine
-            .callers(fixture.options("run"))
+        fixture
+            .query(RelationshipDirection::Callers, fixture.options("run"))
             .await
             .expect_err("missing graph"),
-        engine
-            .callees(fixture.options("run"))
+        fixture
+            .query(RelationshipDirection::Callees, fixture.options("run"))
             .await
             .expect_err("missing graph"),
     ] {
@@ -48,10 +47,6 @@ async fn unreadable_graphs_do_not_break_search_but_relationships_report_the_erro
             _ => unreachable!(),
         }
         let before = fs::read(&fixture.graph_path).ok();
-        fixture
-            .engine
-            .enable_read_session_cache()
-            .expect("cache read errors with the handle");
         let search = ContextOptions {
             root: Some(fixture.root.clone()),
             routes: vec![ContextRoute {
@@ -74,8 +69,7 @@ async fn unreadable_graphs_do_not_break_search_but_relationships_report_the_erro
                 RelationshipDirection::Callees,
             ] {
                 let error = fixture
-                    .engine
-                    .relationships(direction, fixture.options(name))
+                    .query(direction, fixture.options(name))
                     .await
                     .expect_err("graph error is retained");
                 assert_eq!(
@@ -184,7 +178,7 @@ async fn invalid_query_fails_before_opening_a_workspace() {
 #[tokio::test]
 async fn relationship_queries_borrow_incremental_writers_even_when_registered_late() {
     let fixture = Fixture::new();
-    let indexing = WorkspaceIndexService::with_graph();
+    let indexing = WorkspaceIndexService::new();
     let session = fixture.writer_session();
     let options = RelationshipOptions {
         lock_timeout_ms: Some(2_000),
@@ -232,7 +226,7 @@ async fn relationship_queries_borrow_incremental_writers_even_when_registered_la
 #[tokio::test]
 async fn relationship_queries_never_borrow_unpublished_generations() {
     let fixture = Fixture::new();
-    let indexing = WorkspaceIndexService::with_graph();
+    let indexing = WorkspaceIndexService::new();
     let manifest = fixture.manifest();
     let lock = Arc::new(
         acquire_workspace_lock(&fixture.layout(), LockMode::Exclusive, "rebuild")
@@ -253,6 +247,7 @@ async fn relationship_queries_never_borrow_unpublished_generations() {
         let storage_home = fixture.layout().staged_index_dir().to_path_buf();
         fs::create_dir_all(&storage_home).expect("rebuild directory");
         let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+            graph_enabled: false,
             storage_path: storage_home,
             embeddings: vec![schema()],
         })
@@ -277,7 +272,7 @@ async fn relationship_queries_never_borrow_unpublished_generations() {
 #[tokio::test]
 async fn waiting_relationship_reads_leave_the_async_worker_free_and_retain_the_writer_lease() {
     let fixture = Fixture::new();
-    let indexing = Arc::new(WorkspaceIndexService::with_graph());
+    let indexing = Arc::new(WorkspaceIndexService::new());
     let session = fixture.writer_session();
     let writer = indexing.writers.register(session, true);
     let session = Arc::clone(&writer.session);
@@ -322,7 +317,7 @@ async fn waiting_relationship_reads_leave_the_async_worker_free_and_retain_the_w
 }
 
 #[tokio::test]
-async fn disabled_graph_queries_reject_old_graphs_before_read_admission() {
+async fn disabled_storage_rejects_old_graphs_after_read_admission() {
     let fixture = Fixture::new();
     let engine = ZvecGrep::new();
     for state in ["idle", "writer", "missing"] {
@@ -347,8 +342,12 @@ async fn disabled_graph_queries_reject_old_graphs_before_read_admission() {
                 )
                 .await
                 .expect_err("disabled even with an old readable graph");
-            assert_eq!(error.code(), EngineError::UNSUPPORTED, "{state}");
-            assert_eq!(error.message(), "graph queries are disabled", "{state}");
+            if state == "writer" {
+                assert_eq!(error.code(), EngineError::RESOURCE_BUSY);
+            } else {
+                assert_eq!(error.code(), EngineError::UNSUPPORTED, "{state}");
+                assert!(error.message().contains("disabled"), "{state}: {error}");
+            }
         }
         drop(writer);
     }

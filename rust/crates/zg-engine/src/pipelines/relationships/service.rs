@@ -29,11 +29,6 @@ pub(crate) async fn query(
     wait.check_cancelled()?;
     let requested = resolve_directory(options.root.as_deref())?;
     let (source_root, layout) = find_nearest_workspace(&requested)?.ok_or_else(missing_index)?;
-    // An old database is not evidence of a maintained graph. Reject before
-    // read admission so idle readers and active writers have identical behavior.
-    if !indexing.graph_enabled() {
-        return Err(EngineError::unsupported("graph queries are disabled"));
-    }
     let direction = match direction {
         RelationshipDirection::Callers => Direction::In,
         RelationshipDirection::Callees => Direction::Out,
