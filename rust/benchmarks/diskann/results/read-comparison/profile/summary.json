@@ -1,0 +1,38 @@
+{
+  "serial-1m": {
+    "batches": 16533,
+    "requests": 311339,
+    "requested_bytes": 1275244544,
+    "miss_reads": 212829,
+    "read_bytes": 871747584,
+    "pread_syscalls": 212829,
+    "read_ns": 17062619556,
+    "batch_ns": 17274537491,
+    "qps": 78.81387561066603,
+    "batch_s": 12.688121124
+  },
+  "parallel4-1m": {
+    "batches": 16533,
+    "requests": 311339,
+    "requested_bytes": 1275244544,
+    "miss_reads": 212796,
+    "read_bytes": 871612416,
+    "pread_syscalls": 212796,
+    "read_ns": 18511619492,
+    "batch_ns": 5277632534,
+    "qps": 236.97759488314642,
+    "batch_s": 4.219808208
+  },
+  "parallel-selected-1m": {
+    "batches": 16533,
+    "requests": 311339,
+    "requested_bytes": 1275244544,
+    "miss_reads": 212768,
+    "read_bytes": 871497728,
+    "pread_syscalls": 212768,
+    "read_ns": 20176133838,
+    "batch_ns": 3408452071,
+    "qps": 345.51631543537894,
+    "batch_s": 2.8942193329999997
+  }
+}

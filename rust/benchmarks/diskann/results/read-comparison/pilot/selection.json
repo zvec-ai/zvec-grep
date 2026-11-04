@@ -1,0 +1,11 @@
+{
+  "workers": 8,
+  "validation_geometric_mean_qps": {
+    "1": 123.56018878568537,
+    "2": 212.85242634478155,
+    "4": 330.10472640794984,
+    "8": 420.364346465355
+  },
+  "rule": "smallest worker count reaching 90% of best geometric-mean validation QPS across five scales; 2 processes per worker count/scale",
+  "frozen_at": "2026-11-04T19:37:17.068805+08:00"
+}

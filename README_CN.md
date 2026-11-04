@@ -57,6 +57,10 @@ TypeScript 包直接使用 zvec Node.js SDK，无需再编译独立的 Rust 向�
 zvec 源码修改前后，在相同索引和搜索参数下列出吞吐量收益与 RSS 代价。
 已发布的 SDK 二进制尚未包含此本地源码改动。
 
+后续[并行读取测试报告](rust/benchmarks/diskann/REPORT_READ_CN.md) 定位 macOS 剩余的读取等待，
+固定 64 MiB 缓存和搜索结果，通过有限的 I/O 工作线程并行读取节点页，
+重新对比 20 万至 100 万 Cohere 向量下的 QPS、RSS 和召回率，并列明与微软方案的差异。
+
 **安装**：`npm install -g @zvec/zvec-grep`，或通过 Homebrew（macOS/Linux）：
 `brew install zvec-grep`
 

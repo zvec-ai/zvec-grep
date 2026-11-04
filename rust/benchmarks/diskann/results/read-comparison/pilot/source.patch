@@ -1,0 +1,381 @@
+diff --git a/src/core/algorithm/diskann/diskann_file_reader.cc b/src/core/algorithm/diskann/diskann_file_reader.cc
+index cc7e39fc..1fb6dd58 100644
+--- a/src/core/algorithm/diskann/diskann_file_reader.cc
++++ b/src/core/algorithm/diskann/diskann_file_reader.cc
+@@ -16,6 +16,7 @@
+ #include <algorithm>
+ #include <atomic>
+ #include <cerrno>
++#include <chrono>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+@@ -298,12 +299,14 @@ int destroy_io_ctx(IOContext &ctx) {
+ }
+ 
+ #if !defined(_WIN32) && !defined(_WIN64)
+-static int execute_one_pread(int fd, const AlignedRead &req) {
++static int execute_one_pread(int fd, const AlignedRead &req,
++                             std::atomic<uint64_t> *syscall_count = nullptr) {
+   auto *buf = static_cast<uint8_t *>(req.buf);
+   uint64_t offset = req.offset;
+   uint64_t remaining = req.len;
+ 
+   while (remaining > 0) {
++    if (syscall_count) syscall_count->fetch_add(1, std::memory_order_relaxed);
+     ssize_t bytes_read =
+         ::pread(fd, buf, static_cast<size_t>(remaining), offset);
+     if (bytes_read > 0) {
+@@ -534,10 +537,7 @@ LinuxAlignedFileReader::LinuxAlignedFileReader() {
+ }
+ 
+ LinuxAlignedFileReader::~LinuxAlignedFileReader() {
+-  if (file_desc >= 0) {
+-    ::close(file_desc);
+-    file_desc = -1;
+-  }
++  close();
+ }
+ 
+ static int duplicate_file_descriptor(int source_fd) {
+@@ -744,6 +744,27 @@ int LinuxAlignedFileReader::open_from_handle(const std::string &fname,
+ 
+ void LinuxAlignedFileReader::close() {
+ #if defined(__APPLE__)
++  // Join workers before releasing the cache and stable file descriptor.
++  read_executor_.reset();
++  if (profile_reads_ && profile_batches_) {
++    std::fprintf(stderr,
++                 "DISKANN_READ_PROFILE {\"batches\":%llu,\"requests\":%llu,"
++                 "\"requested_bytes\":%llu,\"miss_reads\":%llu,"
++                 "\"read_bytes\":%llu,\"pread_syscalls\":%llu,"
++                 "\"read_ns\":%llu,\"batch_ns\":%llu}\n",
++                 (unsigned long long)profile_batches_.load(),
++                 (unsigned long long)profile_requests_.load(),
++                 (unsigned long long)profile_requested_bytes_.load(),
++                 (unsigned long long)profile_misses_.load(),
++                 (unsigned long long)profile_read_bytes_.load(),
++                 (unsigned long long)profile_syscalls_.load(),
++                 (unsigned long long)profile_read_ns_.load(),
++                 (unsigned long long)profile_batch_ns_.load());
++  }
++  profile_reads_ = false;
++  profile_batches_ = profile_requests_ = profile_requested_bytes_ = 0;
++  profile_misses_ = profile_read_bytes_ = profile_syscalls_ = 0;
++  profile_read_ns_ = profile_batch_ns_ = 0;
+   read_cache_.reset();
+ #endif
+   if (file_desc >= 0) {
+@@ -758,11 +779,49 @@ int LinuxAlignedFileReader::configure_read_cache(size_t budget_bytes) {
+     std::unique_ptr<DiskAnnReadCache> next;
+     if (budget_bytes) next.reset(new DiskAnnReadCache(budget_bytes));
+     read_cache_ = std::move(next);
++    const char *profile = std::getenv("ZVEC_DISKANN_PROFILE_READS");
++    profile_reads_ = profile && std::strcmp(profile, "1") == 0;
+     return 0;
+   } catch (const std::bad_alloc &) {
+     return IndexError_NoMemory;
+   }
+ }
++
++int LinuxAlignedFileReader::read_cached(const AlignedRead &req) {
++  const auto read_one = [this](uint64_t offset, size_t len, void *buf) {
++    if (!profile_reads_)
++      return execute_one_pread(file_desc, AlignedRead(offset, len, buf));
++    const auto begin = std::chrono::steady_clock::now();
++    int ret = execute_one_pread(file_desc, AlignedRead(offset, len, buf),
++                                &profile_syscalls_);
++    profile_read_ns_.fetch_add(
++        std::chrono::duration_cast<std::chrono::nanoseconds>(
++            std::chrono::steady_clock::now() - begin)
++            .count(),
++        std::memory_order_relaxed);
++    profile_misses_.fetch_add(1, std::memory_order_relaxed);
++    if (!ret) profile_read_bytes_.fetch_add(len, std::memory_order_relaxed);
++    return ret;
++  };
++  if (read_cache_)
++    return read_cache_->read(req.offset, req.len, req.buf, read_one);
++  return read_one(req.offset, req.len, req.buf);
++}
++
++int LinuxAlignedFileReader::configure_read_workers(size_t workers) {
++  if (workers < 1 || workers > 8) return IndexError_InvalidArgument;
++  try {
++    std::unique_ptr<DiskAnnReadExecutor> next;
++    if (workers > 1) next.reset(new DiskAnnReadExecutor(workers));
++    read_executor_ = std::move(next);
++    return 0;
++  } catch (const std::bad_alloc &) {
++    return IndexError_NoMemory;
++  } catch (const std::system_error &e) {
++    LOG_ERROR("DiskAnn read worker creation failed: %s", e.what());
++    return IndexError_Runtime;
++  }
++}
+ #endif
+ 
+ int LinuxAlignedFileReader::read(std::vector<AlignedRead> &read_reqs,
+@@ -777,14 +836,49 @@ int LinuxAlignedFileReader::read(std::vector<AlignedRead> &read_reqs,
+   }
+ 
+ #if defined(__APPLE__)
+-  if (read_cache_) {
++  if (read_cache_ || read_executor_ || profile_reads_) {
++    const auto begin = profile_reads_ ? std::chrono::steady_clock::now()
++                                      : std::chrono::steady_clock::time_point{};
++    bool parallel = read_executor_ && read_reqs.size() > 1;
++    // Preserve the serial API's behavior for overlapping destination buffers.
++    // A conservative bounding interval avoids quadratic overlap checks.
++    uintptr_t begin_buffer = UINTPTR_MAX, end_buffer = 0;
+     for (const auto &req : read_reqs) {
+-      int ret = read_cache_->read(
+-          req.offset, req.len, req.buf,
+-          [this](uint64_t offset, size_t len, void *buf) {
+-            return execute_one_pread(file_desc, AlignedRead(offset, len, buf));
+-          });
+-      if (ret != 0) return ret;
++      const uintptr_t begin = reinterpret_cast<uintptr_t>(req.buf);
++      if (req.len > UINTPTR_MAX - begin) {
++        parallel = false;
++        break;
++      }
++      const uintptr_t end = begin + req.len;
++      if (begin < end_buffer && end > begin_buffer) parallel = false;
++      begin_buffer = std::min(begin_buffer, begin);
++      end_buffer = std::max(end_buffer, end);
++    }
++    if (parallel) {
++      std::vector<int> errors(read_reqs.size(), 0);
++      read_executor_->run(read_reqs.size(), [&](size_t i) {
++        errors[i] = read_cached(read_reqs[i]);
++      });
++      // All requests have completed, including after an error. Return the
++      // first error in submission order, without leaving pending writes.
++      for (int ret : errors)
++        if (ret != 0) return ret;
++    } else {
++      for (const auto &req : read_reqs) {
++        int ret = read_cached(req);
++        if (ret != 0) return ret;
++      }
++    }
++    if (profile_reads_) {
++      profile_batches_.fetch_add(1, std::memory_order_relaxed);
++      profile_requests_.fetch_add(read_reqs.size(), std::memory_order_relaxed);
++      for (const auto &req : read_reqs)
++        profile_requested_bytes_.fetch_add(req.len, std::memory_order_relaxed);
++      profile_batch_ns_.fetch_add(
++          std::chrono::duration_cast<std::chrono::nanoseconds>(
++              std::chrono::steady_clock::now() - begin)
++              .count(),
++          std::memory_order_relaxed);
+     }
+     return 0;
+   }
+diff --git a/src/core/algorithm/diskann/diskann_file_reader.h b/src/core/algorithm/diskann/diskann_file_reader.h
+index b3b5b5c1..b80ae460 100644
+--- a/src/core/algorithm/diskann/diskann_file_reader.h
++++ b/src/core/algorithm/diskann/diskann_file_reader.h
+@@ -17,6 +17,7 @@
+ 
+ #include <fcntl.h>
+ #include <array>
++#include <atomic>
+ 
+ #if defined(__linux__) && !defined(__ANDROID__)
+ #include <ailego/io/iouring_loader.h>  // raw-syscall io_uring wrapper (IoUringRing)
+@@ -51,6 +52,7 @@
+ #include "diskann_util.h"
+ #if defined(__APPLE__)
+ #include "diskann_read_cache.h"
++#include "diskann_read_executor.h"
+ #endif
+ 
+ namespace zvec {
+@@ -169,6 +171,12 @@ class LinuxAlignedFileReader : public AlignedFileReader {
+   int file_desc;
+ #if defined(__APPLE__)
+   std::unique_ptr<DiskAnnReadCache> read_cache_;
++  std::unique_ptr<DiskAnnReadExecutor> read_executor_;
++  bool profile_reads_{false};
++  std::atomic<uint64_t> profile_batches_{0}, profile_requests_{0},
++      profile_requested_bytes_{0}, profile_misses_{0}, profile_read_bytes_{0},
++      profile_syscalls_{0}, profile_read_ns_{0}, profile_batch_ns_{0};
++  int read_cached(const AlignedRead &req);
+ #endif
+ 
+  public:
+@@ -188,6 +196,10 @@ class LinuxAlignedFileReader : public AlignedFileReader {
+   // Configure only while no operations are active; open/close discard cached
+   // data so sectors can never leak across different file identities.
+   int configure_read_cache(size_t budget_bytes);
++  int configure_read_workers(size_t workers);
++  size_t read_workers() const {
++    return read_executor_ ? read_executor_->workers() : 1;
++  }
+   size_t read_cache_bytes() const {
+     return read_cache_ ? read_cache_->allocated_bytes() : 0;
+   }
+diff --git a/src/core/algorithm/diskann/diskann_indexer.cc b/src/core/algorithm/diskann/diskann_indexer.cc
+index d3c70b9f..a49a4876 100644
+--- a/src/core/algorithm/diskann/diskann_indexer.cc
++++ b/src/core/algorithm/diskann/diskann_indexer.cc
+@@ -270,9 +270,18 @@ int DiskAnnIndexer::init(DiskAnnSearcherEntity &entity,
+     auto *file_reader = static_cast<LinuxAlignedFileReader *>(reader_.get());
+     ret = file_reader->configure_read_cache(cache_bytes);
+     if (ret != 0) return ret;
++    size_t workers = 0;
++    if (!DiskAnnReadExecutor::parse_workers(
++            std::getenv("ZVEC_DISKANN_READ_WORKERS"), &workers)) {
++      LOG_ERROR("ZVEC_DISKANN_READ_WORKERS must be an integer in [1, 8]");
++      return IndexError_InvalidArgument;
++    }
++    ret = file_reader->configure_read_workers(workers);
++    if (ret != 0) return ret;
+     LOG_INFO(
+-        "DiskAnn node-sector read cache: budget_bytes=%zu allocated_bytes=%zu",
+-        cache_bytes, file_reader->read_cache_bytes());
++        "DiskAnn node-sector read cache: budget_bytes=%zu allocated_bytes=%zu "
++        "read_workers=%zu",
++        cache_bytes, file_reader->read_cache_bytes(), workers);
+ #endif
+   }
+ 
+diff --git a/src/core/algorithm/diskann/diskann_read_executor.h b/src/core/algorithm/diskann/diskann_read_executor.h
+new file mode 100644
+index 00000000..75bb4391
+--- /dev/null
++++ b/src/core/algorithm/diskann/diskann_read_executor.h
+@@ -0,0 +1,131 @@
++// Copyright 2025-present the zvec project
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy at http://www.apache.org/licenses/LICENSE-2.0
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++#pragma once
++
++#include <condition_variable>
++#include <cstddef>
++#include <exception>
++#include <functional>
++#include <mutex>
++#include <thread>
++#include <vector>
++
++namespace zvec {
++namespace core {
++
++// A fixed per-reader pool for portable pread batches. No per-request tasks or
++// threads are allocated. Concurrent callers share the same workers; queued
++// batches rotate fairly. run() drains every request before returning/throwing,
++// so workers never retain caller buffers. Configure/close requires no callers.
++class DiskAnnReadExecutor {
++ public:
++  explicit DiskAnnReadExecutor(size_t workers) : worker_count_(workers) {
++    if (workers <= 1) return;
++    try {
++      for (size_t i = 0; i < workers; ++i)
++        threads_.emplace_back([this] { work(); });
++    } catch (...) {
++      stop();
++      throw;
++    }
++  }
++  ~DiskAnnReadExecutor() {
++    stop();
++  }
++  DiskAnnReadExecutor(const DiskAnnReadExecutor &) = delete;
++  DiskAnnReadExecutor &operator=(const DiskAnnReadExecutor &) = delete;
++
++  size_t workers() const {
++    return worker_count_;
++  }
++
++  void run(size_t count, const std::function<void(size_t)> &callback) {
++    if (!count) return;
++    if (threads_.empty()) {
++      for (size_t i = 0; i < count; ++i) callback(i);
++      return;
++    }
++    Batch batch(count, callback);
++    std::unique_lock<std::mutex> lock(mutex_);
++    append(&batch);
++    ready_.notify_all();
++    finished_.wait(lock, [&] { return batch.completed == count; });
++    if (batch.error) std::rethrow_exception(batch.error);
++  }
++
++  static bool parse_workers(const char *value, size_t *workers) {
++    if (!value) {
++      *workers = 4;
++      return true;
++    }
++    if (value[0] < '1' || value[0] > '8' || value[1] != '\0') return false;
++    *workers = static_cast<size_t>(value[0] - '0');
++    return true;
++  }
++
++ private:
++  struct Batch {
++    Batch(size_t n, const std::function<void(size_t)> &fn)
++        : count(n), callback(fn) {}
++    const size_t count;
++    const std::function<void(size_t)> &callback;
++    size_t next{0}, completed{0};
++    Batch *link{nullptr};
++    std::exception_ptr error;
++  };
++  void append(Batch *batch) {
++    batch->link = nullptr;
++    if (tail_)
++      tail_->link = batch;
++    else
++      head_ = batch;
++    tail_ = batch;
++  }
++  void work() {
++    while (true) {
++      std::unique_lock<std::mutex> lock(mutex_);
++      ready_.wait(lock, [&] { return stopping_ || head_; });
++      if (!head_) return;
++      Batch *batch = head_;
++      head_ = batch->link;
++      if (!head_) tail_ = nullptr;
++      const size_t index = batch->next++;
++      if (batch->next < batch->count) append(batch);
++      lock.unlock();
++      std::exception_ptr error;
++      try {
++        batch->callback(index);
++      } catch (...) {
++        error = std::current_exception();
++      }
++      lock.lock();
++      if (error && !batch->error) batch->error = error;
++      const bool completed = ++batch->completed == batch->count;
++      // No access to batch after releasing the lock: its caller may return.
++      lock.unlock();
++      if (completed) finished_.notify_all();
++    }
++  }
++  void stop() {
++    {
++      std::lock_guard<std::mutex> lock(mutex_);
++      stopping_ = true;
++    }
++    ready_.notify_all();
++    for (auto &thread : threads_) thread.join();
++  }
++  const size_t worker_count_;
++  std::mutex mutex_;
++  std::condition_variable ready_, finished_;
++  Batch *head_{nullptr}, *tail_{nullptr};
++  bool stopping_{false};
++  std::vector<std::thread> threads_;
++};
++
++}  // namespace core
++}  // namespace zvec

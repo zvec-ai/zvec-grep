@@ -1,0 +1,22 @@
+{
+  "source_commit": "37ff6bd5618d63b85b2e6b14f7dff9076287a40d",
+  "compiler": "Apple clang version 15.0.0 (clang-1500.3.9.4)\nTarget: arm64-apple-darwin25.6.0\nThread model: posix\nInstalledDir: /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin\n",
+  "cmake_options": [
+    "BUILD_C_BINDINGS:BOOL=ON",
+    "BUILD_PYTHON_BINDINGS:BOOL=OFF",
+    "BUILD_TESTING:BOOL=OFF",
+    "BUILD_ZVEC_SHARED:BOOL=OFF",
+    "CMAKE_BUILD_TYPE:STRING=Release",
+    "CMAKE_CXX_COMPILER:FILEPATH=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/c++",
+    "CMAKE_CXX_FLAGS_RELEASE:STRING=-O3 -DNDEBUG"
+  ],
+  "cmake_build_command": "cmake --build /tmp/zvec-local-cohere-20261104/build --target zvec_c_api diskann_cache_test diskann_file_reader_test diskann_read_executor_test diskann_mobile_compat_test --parallel 4",
+  "direct_link_command": ": && ccache /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/c++ -march=armv8 -O3 -DNDEBUG -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX14.5.sdk -dynamiclib -Wl,-headerpad_max_install_names -Wl,-force_load,/tmp/zvec-local-cohere-20261104/build/lib/libzvec.a -Wl,-force_load,/tmp/zvec-local-cohere-20261104/build/lib/libzvec_core.a -Wl,-force_load,/tmp/zvec-local-cohere-20261104/build/lib/libzvec_ailego.a -Wl,-force_load,/tmp/zvec-local-cohere-20261104/build/lib/libzvec_turbo.a -Wl,-dead_strip -Wl,-exported_symbols_list,/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/zvec/src/binding/c/exported_symbols.txt -o /tmp/zvec-read-cohere-20261104/optimized/libzvec_c_api.dylib -install_name @rpath/libzvec_c_api.dylib src/binding/c/CMakeFiles/zvec_c_api.dir/c_api.cc.o  lib/libzvec.a  lib/libzvec_core.a  lib/libzvec_ailego.a  lib/libzvec_turbo.a  lib/librabitq_fastscan.a  lib/librabitq_core.a  lib/libzvec_ailego.a  external/usr/local/lib/libglog.a  external/usr/local/lib/libgflags_nothreads.a  external/usr/local/lib/libroaring.a  external/usr/local/lib/librocksdb.a  external/usr/local/lib//liblz4.a  external/usr/local/lib/libantlr4-runtime.a  -framework CoreFoundation  lib/libFastPFOR.a  external/usr/local/lib//liblz4.a  lib/libsnowball.a  external/usr/local/lib/libparquet.a  external/usr/local/lib/libarrow_acero.a  external/usr/local/lib/libarrow_compute.a  external/usr/local/lib/libarrow.a  external/usr/local/lib/libarrow_bundled_dependencies.a  lib/libutf8proc.a && cd /tmp/zvec-local-cohere-20261104/build/src/binding/c && /usr/bin/strip -x /tmp/zvec-read-cohere-20261104/optimized/libzvec_c_api.dylib",
+  "rust_build_command": "ZVEC_LIB_DIR=/tmp/zvec-read-cohere-20261104/optimized ZVEC_INCLUDE_DIR=/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/zvec/src/include ZVEC_AUTO_BUILD=0 CARGO_TARGET_DIR=/tmp/zvec-local-cohere-20261104/rust-target RUSTFLAGS=\"-C link-arg=-Wl,-headerpad_max_install_names\" cargo build --release --locked --manifest-path rust/benchmarks/diskann/harness/Cargo.toml --bin native-retest",
+  "loader_observation": [
+    "dyld[35118]: <69504394-FD85-3929-B447-42937ED836F2> /private/tmp/zvec-local-cohere-20261104/rust-target/release/libzvec_c_api.dylib"
+  ],
+  "optimized_library_sha256": "6908a2e48470c76bcc3fd65122aaa560cac5c592f0c09d7ee2a20afd8b1e2998",
+  "startup_failure": "Initial copied, load-path-rewritten native-retest rejected by AMFI/Xprotect before main. Rebuilt normally; no security settings changed.",
+  "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+}

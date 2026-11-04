@@ -1,0 +1,26 @@
+{
+  "source_base_commit": "e31ce799b1a05b2a2f32237261029a6166b3d4e1",
+  "parallel_source_commit": "37ff6bd5618d63b85b2e6b14f7dff9076287a40d",
+  "query_set": "independent validation",
+  "count": 1000000,
+  "effort": 128,
+  "cache_mib": 64,
+  "query_concurrency": 1,
+  "queries_including_warmup": 1420,
+  "profiling_enabled": true,
+  "serial_source_patch_sha256": "67a00ec339b724d024e1725e4765ee6b835405ed83f423a1d725726bc8779cc1",
+  "serial_library_sha256": "ade92aeadf493bbce48d1a7fd7f122ae5f6b56fed160109c619209dbccb7ac88",
+  "parallel_library_sha256": "6908a2e48470c76bcc3fd65122aaa560cac5c592f0c09d7ee2a20afd8b1e2998",
+  "selected_workers": 8,
+  "selection": {
+    "workers": 8,
+    "validation_geometric_mean_qps": {
+      "1": 123.56018878568537,
+      "2": 212.85242634478155,
+      "4": 330.10472640794984,
+      "8": 420.364346465355
+    },
+    "rule": "smallest worker count reaching 90% of best geometric-mean validation QPS across five scales; 2 processes per worker count/scale",
+    "frozen_at": "2026-11-04T19:37:17.068805+08:00"
+  }
+}

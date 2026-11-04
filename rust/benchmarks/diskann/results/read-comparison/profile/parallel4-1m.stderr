@@ -1,0 +1,19 @@
+DISKANN_READ_PROFILE {"batches":16533,"requests":311339,"requested_bytes":1275244544,"miss_reads":212796,"read_bytes":871612416,"pread_syscalls":212796,"read_ns":18511619492,"batch_ns":5277632534}
+        7.36 real         1.06 user         2.41 sys
+           225705984  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               12738  page reclaims
+                1323  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+              212808  voluntary context switches
+              117647  involuntary context switches
+         20969402890  instructions retired
+         12316424518  cycles elapsed
+           187433584  peak memory footprint
