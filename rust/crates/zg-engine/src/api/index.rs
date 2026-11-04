@@ -28,10 +28,10 @@ pub mod options {
         /// Turns walk-time code graph indexing on or off for this workspace.
         ///
         /// Omitted keeps the saved setting, and a workspace saved before this
-        /// option existed indexes without a graph. Changing the setting rebuilds
-        /// the index: the graph and the rest of the index must describe the same
-        /// build, and a graph-backed workspace needs its whole content indexed
-        /// before the graph can answer anything.
+        /// option existed indexes without a graph. Changing the setting requires
+        /// `rebuild`: the graph and the rest of the index must describe the same
+        /// build, so a refresh that flips the switch is rejected and the published
+        /// index stays untouched.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub graph_indexing: Option<bool>,
         /// Automatic refreshes require an existing enabled index instead of creating one.

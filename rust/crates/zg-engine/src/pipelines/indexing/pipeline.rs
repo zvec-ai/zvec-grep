@@ -36,7 +36,7 @@ use crate::{
     domain::{
         Content, ContentKind, Entity, EntityFragment, EntityId, EntityMetadata, FileCategory,
         FileFormat, FileGraphResult, FileId, FileIndexStatus, FileRecord, FileSnapshot, FragmentId,
-        Range, SourcePath, Workspace,
+        IndexDescriptor, Range, SourcePath, Workspace,
         model::{EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult},
     },
     extraction::{
@@ -1003,7 +1003,12 @@ async fn prepare_candidate(
         formats: formats.clone(),
         text: source_text.into_owned(),
     };
-    let extracted = if context.workspace.graph_indexing() {
+    let extracted = if context
+        .workspace
+        .index()
+        .descriptor()
+        .is_some_and(IndexDescriptor::graph_indexing)
+    {
         extract_for_indexing(&text, chunk_options)?
     } else {
         extract_without_graph(&text, chunk_options)?
@@ -2544,7 +2549,10 @@ mod tests {
         .expect("source");
         let plain_workspace = workspace(directory.path());
         assert!(
-            !plain_workspace.graph_indexing(),
+            !plain_workspace
+                .index()
+                .descriptor()
+                .is_some_and(IndexDescriptor::graph_indexing),
             "graph indexing stays off until a workspace opts in"
         );
         let model = ConcurrentModel::new();
@@ -2565,8 +2573,7 @@ mod tests {
 
         // Only an opted-in workspace walks for a graph and stores it.
         let enabled = MemoryStorage::with_graph();
-        let mut graph_workspace = workspace(directory.path());
-        graph_workspace.set_graph_indexing(true);
+        let graph_workspace = with_graph_indexing(&workspace(directory.path()), true);
         index_once(&graph_workspace, &enabled, &model).await;
         let stored = enabled.graphs.lock().expect("stored graphs");
         let graph = stored.values().next().expect("committed file graph");
@@ -3265,6 +3272,27 @@ mod tests {
                 )
                 .expect("index descriptor"),
             )),
+        )
+        .expect("workspace")
+    }
+
+    /// Rebuilds a workspace whose published descriptor records the graph switch.
+    fn with_graph_indexing(workspace: &Workspace, enabled: bool) -> Workspace {
+        let mut descriptor = workspace
+            .index()
+            .descriptor()
+            .expect("workspace index descriptor")
+            .clone();
+        descriptor.set_graph_indexing(enabled);
+        Workspace::new(
+            workspace.source_root(),
+            workspace.layout().clone(),
+            workspace.scan().clone(),
+            workspace.index_version(),
+            workspace.storage_generation().map(str::to_owned),
+            workspace.created_epoch_ms(),
+            workspace.updated_epoch_ms(),
+            crate::domain::IndexState::Enabled(Box::new(descriptor)),
         )
         .expect("workspace")
     }

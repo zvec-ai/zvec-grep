@@ -185,6 +185,9 @@ impl IndexDescriptor {
     }
 
     /// Records whether the published index carries the walk-time code graph.
+    /// Production sets the switch through [`Self::new`]; tests use this to
+    /// derive a variant of a fixture descriptor.
+    #[cfg(test)]
     pub(crate) fn set_graph_indexing(&mut self, enabled: bool) {
         self.graph_indexing = enabled;
     }

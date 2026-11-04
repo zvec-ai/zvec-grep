@@ -372,6 +372,27 @@ mod tests {
         .expect("fixture manifest")
     }
 
+    /// Rebuilds a manifest whose published descriptor records the graph switch.
+    fn with_graph_indexing(manifest: &Workspace, enabled: bool) -> Workspace {
+        let mut descriptor = manifest
+            .index()
+            .descriptor()
+            .expect("index descriptor")
+            .clone();
+        descriptor.set_graph_indexing(enabled);
+        Workspace::new(
+            manifest.source_root(),
+            manifest.layout().clone(),
+            manifest.scan().clone(),
+            manifest.index_version(),
+            manifest.storage_generation().map(str::to_owned),
+            manifest.created_epoch_ms(),
+            manifest.updated_epoch_ms(),
+            IndexState::Enabled(Box::new(descriptor)),
+        )
+        .expect("manifest")
+    }
+
     #[test]
     fn saved_model_configs_belong_to_the_index_without_changing_compatibility() {
         let directory = tempdir().expect("workspace");
@@ -578,10 +599,21 @@ mod tests {
         let directory = tempdir().expect("workspace");
         let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
         fs::create_dir(layout.storage_dir()).expect("storage directory");
-        let mut manifest = fixture_manifest(&layout);
-        assert!(!manifest.graph_indexing(), "the switch defaults to off");
-        manifest.set_graph_indexing(true);
-        assert!(manifest.graph_indexing());
+        let manifest = fixture_manifest(&layout);
+        assert!(
+            !manifest
+                .index()
+                .descriptor()
+                .is_some_and(IndexDescriptor::graph_indexing),
+            "the switch defaults to off"
+        );
+        let manifest = with_graph_indexing(&manifest, true);
+        assert!(
+            manifest
+                .index()
+                .descriptor()
+                .is_some_and(IndexDescriptor::graph_indexing)
+        );
 
         let mut value = serde_json::to_value(&manifest).expect("manifest JSON");
         assert_eq!(
@@ -595,7 +627,9 @@ mod tests {
         assert!(
             decode_manifest(&value, &layout)
                 .expect("round trip")
-                .graph_indexing()
+                .index()
+                .descriptor()
+                .is_some_and(IndexDescriptor::graph_indexing)
         );
 
         // The setting is required: there is no older layout to fall back to.

@@ -198,10 +198,18 @@ impl IndexJobScheduler {
             // Once another caller relies on a job, request cancellation must not stop it.
             active.shared.store(true, Ordering::Release);
             let active_snapshot = lock(&active.snapshot).clone();
+            // A graph switch is a saved configuration change: a job that already
+            // started under the other value cannot apply it, so the request needs
+            // its own job instead of being absorbed by the active one.
+            let graph_setting_request = {
+                let current = lock(&active.options);
+                changes_graph_setting(current.as_ref(), &options)
+            };
             let needs_followup = reason == JobReason::Watch
                 || active_snapshot.reason == JobReason::Watch
                 || options.rebuild
-                || has_selection_update(&options);
+                || has_selection_update(&options)
+                || graph_setting_request;
             if needs_followup && active_snapshot.state == JobState::Queued {
                 let queued_full_manual = active_snapshot.reason == JobReason::Manual
                     && reason == JobReason::Watch
@@ -590,6 +598,9 @@ fn merge_options(current: &mut Option<IndexOptions>, mut incoming: IndexOptions)
     }
     current.reset_paths |= incoming.reset_paths;
     current.rebuild |= incoming.rebuild;
+    // A saved configuration switch follows the same rule as scan updates: an
+    // explicit value wins, including false, and omission keeps the earlier one.
+    merge_update(&mut current.graph_indexing, incoming.graph_indexing.take());
     merge_update(
         &mut current.scan.included_formats,
         incoming.scan.included_formats.take(),
@@ -741,6 +752,14 @@ fn merge_runtime_options(current: &mut IndexOptions, incoming: &mut IndexOptions
             current.authorized_remote.push(target);
         }
     }
+}
+
+/// A request changes the saved graph switch when it names a value that differs
+/// from the one the queued job would apply; an omitted value never changes it.
+fn changes_graph_setting(current: Option<&IndexOptions>, incoming: &IndexOptions) -> bool {
+    incoming.graph_indexing.is_some_and(|requested| {
+        current.and_then(|current| current.graph_indexing) != Some(requested)
+    })
 }
 
 fn merge_update<T>(current: &mut Option<T>, incoming: Option<T>) {
@@ -1806,6 +1825,186 @@ mod tests {
             }
             scheduler.shutdown().await;
         }
+    }
+
+    #[tokio::test]
+    async fn graph_setting_requests_are_merged_and_never_absorbed() {
+        for queued in [false, true] {
+            let executor = Arc::new(RecordingExecutor {
+                calls: Mutex::new(Vec::new()),
+                started: Notify::new(),
+                releases: tokio::sync::Semaphore::new(0),
+            });
+            let scheduler = IndexJobScheduler::new(
+                executor.clone(),
+                SchedulerConfig {
+                    concurrency: 1,
+                    queue_capacity: 8,
+                },
+            );
+            if queued {
+                scheduler
+                    .submit(
+                        PathBuf::from("/blocker"),
+                        IndexOptions::default(),
+                        JobReason::Manual,
+                    )
+                    .expect("occupy worker");
+                executor.started.notified().await;
+            }
+            let root = PathBuf::from("/workspace");
+            let first = scheduler
+                .submit(root.clone(), IndexOptions::default(), JobReason::Manual)
+                .expect("initial index");
+            if !queued {
+                executor.started.notified().await;
+            }
+            // A running job cannot apply a switch it did not start with, so the
+            // request needs its own job instead of being absorbed by that one.
+            let enable = scheduler
+                .submit(
+                    root.clone(),
+                    IndexOptions {
+                        graph_indexing: Some(true),
+                        ..IndexOptions::default()
+                    },
+                    JobReason::Manual,
+                )
+                .expect("enable graph");
+            assert_eq!(
+                enable.job.id == first.job.id,
+                queued,
+                "a running job must not swallow the graph switch"
+            );
+            // A later explicit false replaces the queued true.
+            let disable = scheduler
+                .submit(
+                    root.clone(),
+                    IndexOptions {
+                        graph_indexing: Some(false),
+                        rebuild: true,
+                        ..IndexOptions::default()
+                    },
+                    JobReason::Manual,
+                )
+                .expect("disable graph");
+            assert_eq!(disable.job.id, enable.job.id);
+            // An omission keeps the value the earlier request asked for.
+            scheduler
+                .submit(
+                    root,
+                    IndexOptions {
+                        changes: vec![WorkspaceChange::Rescan],
+                        ..IndexOptions::default()
+                    },
+                    JobReason::Watch,
+                )
+                .expect("watch refresh");
+            executor.releases.add_permits(1);
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                executor.started.notified(),
+            )
+            .await
+            .expect("graph switch reaches executor");
+            executor.releases.add_permits(1);
+            scheduler
+                .wait(enable.job.id)
+                .await
+                .expect("graph switch completes");
+            {
+                let calls = executor.calls.lock().expect("recorded calls");
+                let applied = calls.last().expect("graph switch execution");
+                assert_eq!(
+                    applied.graph_indexing,
+                    Some(false),
+                    "an explicit false survives merging and omission keeps it"
+                );
+                assert!(applied.rebuild, "the switch is applied by a rebuild");
+            }
+            scheduler.shutdown().await;
+        }
+    }
+
+    #[test]
+    fn graph_setting_merge_keeps_explicit_values_and_omissions() {
+        let mut pending = Some(IndexOptions::default());
+        super::merge_options(
+            &mut pending,
+            IndexOptions {
+                graph_indexing: Some(true),
+                ..IndexOptions::default()
+            },
+        );
+        assert_eq!(
+            pending.as_ref().expect("pending").graph_indexing,
+            Some(true)
+        );
+        // An omitted value never clears an earlier explicit one.
+        super::merge_options(&mut pending, IndexOptions::default());
+        assert_eq!(
+            pending.as_ref().expect("pending").graph_indexing,
+            Some(true)
+        );
+        // A later explicit false wins over the earlier true.
+        super::merge_options(
+            &mut pending,
+            IndexOptions {
+                graph_indexing: Some(false),
+                ..IndexOptions::default()
+            },
+        );
+        assert_eq!(
+            pending.as_ref().expect("pending").graph_indexing,
+            Some(false)
+        );
+        // An explicit value replaces an omitted one.
+        let mut pending = Some(IndexOptions::default());
+        super::merge_options(
+            &mut pending,
+            IndexOptions {
+                graph_indexing: Some(true),
+                ..IndexOptions::default()
+            },
+        );
+        assert_eq!(
+            pending.as_ref().expect("pending").graph_indexing,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn omitted_graph_setting_is_not_a_configuration_change() {
+        let current = IndexOptions {
+            graph_indexing: Some(true),
+            ..IndexOptions::default()
+        };
+        assert!(!super::changes_graph_setting(
+            Some(&current),
+            &IndexOptions::default()
+        ));
+        assert!(!super::changes_graph_setting(
+            Some(&current),
+            &IndexOptions {
+                graph_indexing: Some(true),
+                ..IndexOptions::default()
+            }
+        ));
+        assert!(super::changes_graph_setting(
+            Some(&current),
+            &IndexOptions {
+                graph_indexing: Some(false),
+                ..IndexOptions::default()
+            }
+        ));
+        // A claimed job keeps no options to compare against; treat it as a change.
+        assert!(super::changes_graph_setting(
+            None,
+            &IndexOptions {
+                graph_indexing: Some(true),
+                ..IndexOptions::default()
+            }
+        ));
     }
 
     fn assert_merged_selection(applied: &IndexOptions) {

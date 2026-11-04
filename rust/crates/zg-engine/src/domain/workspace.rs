@@ -7,7 +7,7 @@ use crate::{
     utils::{current_username, directory_exists, file_exists, resolve_directory},
 };
 
-use super::{FileFormat, GlobRule, IndexDescriptor, IndexState, SourcePath};
+use super::{FileFormat, GlobRule, IndexState, SourcePath};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -156,25 +156,6 @@ impl Workspace {
 
     pub(crate) fn index_enabled(&self) -> bool {
         matches!(self.index, IndexState::Enabled(_))
-    }
-
-    /// Whether indexing this workspace extracts, assembles, and persists the
-    /// code graph. The published index descriptor carries the answer: an index
-    /// is built with or without a graph, and both must describe the same
-    /// content, so a disabled index reports `false`.
-    pub(crate) fn graph_indexing(&self) -> bool {
-        self.index
-            .descriptor()
-            .is_some_and(IndexDescriptor::graph_indexing)
-    }
-
-    /// Records the graph setting on the published index descriptor, the only
-    /// place it lives. A workspace without an enabled index has nothing to
-    /// describe, so the call is a no-op there.
-    pub(crate) fn set_graph_indexing(&mut self, enabled: bool) {
-        if let IndexState::Enabled(index) = &mut self.index {
-            index.set_graph_indexing(enabled);
-        }
     }
 
     pub(crate) fn record_update(&mut self, updated_epoch_ms: u64) {
