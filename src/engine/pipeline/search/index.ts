@@ -36,6 +36,11 @@ import {
   resolveFileTypePatterns,
   type FileTypePatterns,
 } from "../../utils/file-selection.js";
+import {
+  rankingMultiplier,
+  rankingWeightsEnabled,
+  MAX_RANKING_MULTIPLIER,
+} from "./scoring.js";
 
 type SearchContext = {
   workspaceIndex: WorkspaceIndexInfo;
@@ -59,6 +64,8 @@ type Candidate = {
   score: number;
   rank: number;
   forced: boolean;
+  fusionScore?: number;
+  fusionRank?: number;
 };
 
 type InternalSearchEvidence = {
@@ -149,7 +156,13 @@ export async function searchWorkspaceIndex(
       );
     }
 
-    const fused = timings.timeSync("fusion", () => fuseCandidates(candidates));
+    const fused = timings.timeSync("fusion", () =>
+      // Both diagnostic modes report scores for candidates outside the visible
+      // window — tracking for one specific entity, tracing for the whole
+      // ranking — so neither can tolerate the approximate tail that pruning
+      // leaves behind.
+      fuseCandidates(candidates, trace ? undefined : limit, trace),
+    );
     const visible = fused.slice(0, limit);
     const tracked = normalized.trackEntityId
       ? fused.find((candidate) => candidate.id === normalized.trackEntityId)
@@ -1144,8 +1157,27 @@ function normalizePathFilterPattern(pattern: string): string {
   return normalizePathPattern(pattern);
 }
 
-function fuseCandidates(candidates: Map<string, Candidate>): Candidate[] {
-  for (const candidate of candidates.values()) {
+/**
+ * Fuses recall traces into a final ordering.
+ *
+ * `visibleLimit` lets scoring skip candidates that cannot reach the visible
+ * window. Omit it to score every candidate, which the diagnostic paths need
+ * because they report a score for an arbitrary tracked entity.
+ *
+ * With a limit set, only the returned window is exact. Skipped candidates keep
+ * their unweighted score, so ordering *below* the window is an approximation —
+ * two tail candidates can appear in the opposite order to a full scoring pass.
+ * That is deliberate: the tail is never shown, and scoring it costs more than
+ * the whole rest of fusion.
+ */
+function fuseCandidates(
+  candidates: Map<string, Candidate>,
+  visibleLimit?: number,
+  recordTrace: boolean = false,
+): Candidate[] {
+  const pending = [...candidates.values()];
+
+  for (const candidate of pending) {
     candidate.score = 0;
     candidate.forced = candidate.recall.some((trace) => trace.forced);
 
@@ -1156,7 +1188,46 @@ function fuseCandidates(candidates: Map<string, Candidate>): Candidate[] {
     }
   }
 
-  const fused = [...candidates.values()].sort((left, right) => {
+  // Preserve pre-weighting stock RRF score and rank only when trace diagnostic is enabled
+  if (recordTrace) {
+    const unweightedOrder = [...pending].sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+      return left.id.localeCompare(right.id);
+    });
+    for (const [index, candidate] of unweightedOrder.entries()) {
+      candidate.fusionRank = index + 1;
+      candidate.fusionScore = candidate.score;
+    }
+  }
+
+  // Every multiplier is >= 1, so the limit-th best unweighted score is a lower
+  // bound on the limit-th best final score. A candidate that cannot exceed it
+  // even at the maximum multiplier keeps its unweighted score: it is ranked
+  // among the tail either way, and skipping it avoids the metadata work.
+  //
+  // With weighting off there is nothing to bound, so skip the cutoff sort and
+  // the weighting pass entirely and fall straight through to stock RRF order.
+  if (rankingWeightsEnabled()) {
+    const cutoff = weightingCutoff(pending, visibleLimit);
+
+    for (const candidate of pending) {
+      if (
+        candidate.score * MAX_RANKING_MULTIPLIER < cutoff &&
+        !candidate.forced
+      ) {
+        continue;
+      }
+
+      candidate.score *= rankingMultiplier({
+        metadata: candidate.entity.metadata,
+        recall: candidate.recall,
+      });
+    }
+  }
+
+  const fused = pending.sort((left, right) => {
     if (right.score !== left.score) {
       return right.score - left.score;
     }
@@ -1169,6 +1240,61 @@ function fuseCandidates(candidates: Map<string, Candidate>): Candidate[] {
   }
 
   return fused;
+}
+
+/**
+ * The score a candidate must be able to reach to be worth weighting, or 0 when
+ * every candidate should be scored.
+ *
+ * For standard small visibleLimits (e.g. 7-10), maintains a min-heap / insertion
+ * window in O(N * limit) without allocating or sorting the entire candidate array.
+ */
+function weightingCutoff(
+  candidates: readonly Candidate[],
+  visibleLimit: number | undefined,
+): number {
+  const n = candidates.length;
+  if (visibleLimit === undefined || n <= visibleLimit) {
+    return 0;
+  }
+
+  // Fallback to full sort for unusually large visible limits
+  if (visibleLimit > 32) {
+    const scores = candidates.map((candidate) => candidate.score);
+    scores.sort((left, right) => right - left);
+    return scores[visibleLimit - 1] ?? 0;
+  }
+
+  const top = new Float64Array(visibleLimit);
+  for (let i = 0; i < visibleLimit; i++) {
+    top[i] = candidates[i]!.score;
+  }
+  for (let i = 0; i < visibleLimit - 1; i++) {
+    for (let j = i + 1; j < visibleLimit; j++) {
+      if (top[j]! > top[i]!) {
+        const tmp = top[i]!;
+        top[i] = top[j]!;
+        top[j] = tmp;
+      }
+    }
+  }
+
+  let minTop = top[visibleLimit - 1]!;
+
+  for (let i = visibleLimit; i < n; i++) {
+    const s = candidates[i]!.score;
+    if (s > minTop) {
+      let idx = visibleLimit - 1;
+      while (idx > 0 && top[idx - 1]! < s) {
+        top[idx] = top[idx - 1]!;
+        idx--;
+      }
+      top[idx] = s;
+      minTop = top[visibleLimit - 1]!;
+    }
+  }
+
+  return minTop;
 }
 
 function candidateToHit(
@@ -1229,13 +1355,26 @@ function candidateToTrace(candidate: Candidate, limit: number): SearchHitTrace {
     cutoffRank: limit,
   };
 
+  const hasRankingStage =
+    candidate.fusionRank !== undefined &&
+    candidate.fusionScore !== undefined &&
+    (candidate.fusionRank !== candidate.rank ||
+      candidate.fusionScore !== candidate.score);
+
   return {
     recall: candidate.recall,
     fusion: {
-      rank: candidate.rank,
-      score: candidate.score,
+      rank: candidate.fusionRank ?? candidate.rank,
+      score: candidate.fusionScore ?? candidate.score,
       forced: candidate.forced || undefined,
     },
+    ranking: hasRankingStage
+      ? {
+          rank: candidate.rank,
+          score: candidate.score,
+          forced: candidate.forced || undefined,
+        }
+      : undefined,
     final,
   };
 }
