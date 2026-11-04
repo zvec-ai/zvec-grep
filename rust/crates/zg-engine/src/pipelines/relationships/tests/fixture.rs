@@ -68,8 +68,10 @@ impl Fixture {
         let graph_path = storage_home.join("graph/graph.sqlite");
         write_graph(&graph_path, &local, &remote[0]);
         write_workspace_manifest(layout.manifest_path(), &manifest).expect("publish manifest");
+        let mut engine = ZvecGrep::new();
+        engine.service.graph_queries_enabled = true;
         Self {
-            engine: ZvecGrep::new(),
+            engine,
             _directory: directory,
             root,
             home,

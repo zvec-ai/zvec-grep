@@ -350,3 +350,29 @@ async fn ordered_and_insensitive_globs_filter_definitions_but_not_call_sites() {
         }));
     }
 }
+
+#[tokio::test]
+async fn literal_dotted_names_round_trip_before_qualified_fallback() {
+    let fixture = Fixture::new();
+    fixture.add_symbols(
+        "api.ts",
+        &[
+            ("user.get", Some("api"), 1, "'user.get': () => 1"),
+            ("get", Some("api::user"), 2, "get() {}"),
+            ("user.get", None, 3, "function dotted() {}"),
+            ("run", Some("pkg.Type"), 4, "run() {}"),
+        ],
+    );
+    for (query, expected) in [
+        ("api::user.get", "api::user.get"),
+        ("::user.get", "user.get"),
+        ("pkg.Type.run", "pkg.Type::run"),
+    ] {
+        let matches = fixture.callers(query).await.matches;
+        assert_eq!(matches.len(), 1, "{query}");
+        assert_eq!(matches[0].symbol.name, expected);
+        let retry = fixture.callers(&matches[0].symbol.name).await;
+        // An unqualified literal name may match the same name in several scopes.
+        assert!(retry.matches.iter().any(|m| m.symbol == matches[0].symbol));
+    }
+}

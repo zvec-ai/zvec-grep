@@ -19,6 +19,7 @@ pub enum RelationshipDirection {
 }
 
 /// Reads an existing workspace index without loading models or refreshing it.
+/// Graph queries are disabled until graph extraction and resolution are enabled.
 /// Each matched definition and its call sites are read from one consistent store snapshot.
 /// Different matches may reflect different indexing moments; roots changed since selection are skipped.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -28,6 +29,7 @@ pub struct RelationshipOptions {
     pub root: Option<PathBuf>,
     /// Symbol name, optionally qualified as `scope::name` or `scope.name` (as shown by rg).
     /// `::name` selects only top-level definitions; plain `name` matches any scope.
+    /// Literal symbol names take precedence over dotted qualification.
     /// Absolute qualified paths such as `::ns::name` are equivalent to `ns::name`.
     /// Missing or unrepresentable exact definitions may return similarly named suggestions without edges.
     /// Queries exceeding [`MAX_SYMBOL_MATCHES`] indexed definitions fail; narrow the scope or use `globs`.

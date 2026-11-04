@@ -132,7 +132,9 @@ impl IndexStore {
     /// [`Self::open_with_graph`] instead, because only the workspace setting
     /// decides whether this workspace keeps a graph.
     pub(crate) fn open(options: WorkspaceIndexStorageOptions) -> EngineResult<Self> {
-        Self::open_with_graph(options, false)
+        // Graph extraction and resolution are not enabled in this release.
+        // Re-enabling graph indexing requires rebuilding any unmaintained graph.
+        Self::open_with_graph(options, crate::storage::GRAPH_ENABLED)
     }
 
     /// Whether this store can persist walk-time graphs. Indexing skips graph

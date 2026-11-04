@@ -17,6 +17,7 @@ struct ObservedStore<'a> {
     after_edges: &'a dyn Fn(&str),
     snapshots: Cell<usize>,
     endpoint_batches: Cell<usize>,
+    after_endpoint_read: Option<&'a dyn Fn()>,
 }
 
 impl<'a> ObservedStore<'a> {
@@ -31,6 +32,7 @@ impl<'a> ObservedStore<'a> {
             after_edges,
             snapshots: Cell::new(0),
             endpoint_batches: Cell::new(0),
+            after_endpoint_read: None,
         }
     }
 }
@@ -47,7 +49,11 @@ impl RelationshipStorage for ObservedStore<'_> {
         operation: impl FnOnce(&ReadView<'_>) -> EngineResult<T>,
     ) -> EngineResult<T> {
         let result = self.store.read_snapshot(|view| {
-            operation(&view.observe_reads(self.after_edges, &self.endpoint_batches))
+            operation(&view.observe_reads(
+                self.after_edges,
+                &self.endpoint_batches,
+                self.after_endpoint_read,
+            ))
         });
         let count = self.snapshots.get() + 1;
         self.snapshots.set(count);
@@ -275,4 +281,48 @@ fn writer_waits_for_all_endpoint_batches_and_next_snapshot_drops_removed_calls()
         "completed replacement must remove the old call site"
     );
     store.close().expect("close store");
+}
+
+#[test]
+fn cancellation_stops_endpoint_hydration_and_releases_the_snapshot() {
+    for after_edges in [true, false] {
+        let fixture = Fixture::new();
+        let target = fixture.find_symbol("run", Some(""));
+        let graph = rusqlite::Connection::open(&fixture.graph_path).expect("graph");
+        graph
+            .execute("DELETE FROM edges WHERE target = ?", [target.id().as_str()])
+            .expect("clear calls");
+        graph
+            .execute(
+                "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 64)
+             INSERT INTO edges (file_id, source, target, kind, status, provenance, line)
+             SELECT ?1, 'missing-' || x, ?2, 'calls', 'resolved', 'file_local', x FROM n",
+                rusqlite::params![target.file_id().get(), target.id().as_str()],
+            )
+            .expect("invisible calls");
+        drop(graph);
+        let store = fixture.open_store();
+        let signal = CancellationToken::new();
+        let on_edges = |_: &str| {
+            if after_edges {
+                signal.cancel();
+            }
+        };
+        let on_endpoint = || signal.cancel();
+        let mut observed = ObservedStore::new(&store, &|_| {}, &on_edges);
+        observed.after_endpoint_read = Some(&on_endpoint);
+        let options = RelationshipOptions {
+            limit: Some(1),
+            signal: Some(signal.clone()),
+            ..fixture.options("::run")
+        };
+        let error = query_symbols(&observed, "run", Some(""), &options, Direction::In)
+            .expect_err("cancel within a definition");
+        assert_eq!(error.code(), EngineError::CANCELLED);
+        assert_eq!(observed.endpoint_batches.get(), usize::from(!after_edges));
+        store
+            .delete_file(target.file_id())
+            .expect("snapshot lock released");
+        store.close().expect("close store");
+    }
 }

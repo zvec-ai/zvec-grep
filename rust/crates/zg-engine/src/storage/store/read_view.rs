@@ -30,6 +30,8 @@ impl IndexStore {
                 after_neighborhood: None,
                 #[cfg(test)]
                 entity_file_reads: None,
+                #[cfg(test)]
+                after_entity_file_read: None,
             })
         })
     }
@@ -42,6 +44,8 @@ pub(crate) struct ReadView<'a> {
     after_neighborhood: Option<&'a dyn Fn(&str)>,
     #[cfg(test)]
     entity_file_reads: Option<&'a std::cell::Cell<usize>>,
+    #[cfg(test)]
+    after_entity_file_read: Option<&'a dyn Fn()>,
 }
 
 impl ReadView<'_> {
@@ -51,11 +55,13 @@ impl ReadView<'_> {
         &'a self,
         after_neighborhood: &'a dyn Fn(&str),
         entity_file_reads: &'a std::cell::Cell<usize>,
+        after_entity_file_read: Option<&'a dyn Fn()>,
     ) -> ReadView<'a> {
         ReadView {
             state: self.state,
             after_neighborhood: Some(after_neighborhood),
             entity_file_reads: Some(entity_file_reads),
+            after_entity_file_read,
         }
     }
 
@@ -95,7 +101,12 @@ impl ReadView<'_> {
         if let Some(reads) = self.entity_file_reads {
             reads.set(reads.get() + 1);
         }
-        self.state.entities.fetch_file_ids(ids)
+        let files = self.state.entities.fetch_file_ids(ids)?;
+        #[cfg(test)]
+        if let Some(after_read) = self.after_entity_file_read {
+            after_read();
+        }
+        Ok(files)
     }
 
     pub(crate) fn fetch_files(&self, ids: &[FileId]) -> EngineResult<HashMap<FileId, FileRecord>> {

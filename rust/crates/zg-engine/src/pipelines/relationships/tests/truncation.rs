@@ -84,7 +84,8 @@ async fn unfinished_cross_file_endpoints_are_filtered_before_limit() {
                 .iter()
                 .all(|edge| edge.line != Some(101) && edge.line != Some(99))
         );
-        let groups = ZvecGrep::new()
+        let groups = fixture
+            .engine
             .callers(fixture.options("run"))
             .await
             .expect("query visible definitions")

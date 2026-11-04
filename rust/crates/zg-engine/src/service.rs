@@ -26,6 +26,8 @@ pub(crate) struct EngineService {
     models: ModelRuntimeManager,
     read_sessions: Arc<Mutex<Option<ReadSessionCache>>>,
     closed: Arc<AtomicBool>,
+    #[cfg(test)]
+    pub(crate) graph_queries_enabled: bool,
 }
 
 impl EngineService {
@@ -37,6 +39,8 @@ impl EngineService {
             models: ModelRuntimeManager::new(),
             read_sessions: Arc::new(Mutex::new(None)),
             closed: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            graph_queries_enabled: false,
         }
     }
 
@@ -88,11 +92,15 @@ impl EngineService {
         options: RelationshipOptions,
     ) -> Result<RelationshipResult, EngineError> {
         self.ensure_open()?;
+        let graph_enabled = crate::storage::GRAPH_ENABLED;
+        #[cfg(test)]
+        let graph_enabled = graph_enabled || self.graph_queries_enabled;
         relationships::service::query(
             &self.indexing,
             &options,
             self.read_session_cache().as_ref(),
             direction,
+            graph_enabled,
         )
         .await
     }

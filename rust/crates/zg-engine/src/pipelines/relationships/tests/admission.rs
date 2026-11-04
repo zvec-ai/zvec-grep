@@ -191,7 +191,13 @@ async fn relationship_queries_borrow_incremental_writers_even_when_registered_la
         ..fixture.options("red::run")
     };
     let (groups, writer) = tokio::join!(
-        service::query(&indexing, &options, None, RelationshipDirection::Callers),
+        service::query(
+            &indexing,
+            &options,
+            None,
+            RelationshipDirection::Callers,
+            true
+        ),
         async {
             tokio::time::sleep(Duration::from_millis(20)).await;
             indexing.writers.register(session, true)
@@ -206,10 +212,16 @@ async fn relationship_queries_borrow_incremental_writers_even_when_registered_la
         lock_timeout_ms: Some(0),
         ..fixture.options("invoke")
     };
-    let groups = service::query(&indexing, &outgoing, None, RelationshipDirection::Callees)
-        .await
-        .expect("borrow active writer without waiting for workspace lock")
-        .matches;
+    let groups = service::query(
+        &indexing,
+        &outgoing,
+        None,
+        RelationshipDirection::Callees,
+        true,
+    )
+    .await
+    .expect("borrow active writer without waiting for workspace lock")
+    .matches;
     assert!(groups[0].truncated);
     let signal = CancellationToken::new();
     signal.cancel();
@@ -217,14 +229,26 @@ async fn relationship_queries_borrow_incremental_writers_even_when_registered_la
         signal: Some(signal),
         ..outgoing.clone()
     };
-    let error = service::query(&indexing, &cancelled, None, RelationshipDirection::Callees)
-        .await
-        .expect_err("cancel before borrowing");
+    let error = service::query(
+        &indexing,
+        &cancelled,
+        None,
+        RelationshipDirection::Callees,
+        true,
+    )
+    .await
+    .expect_err("cancel before borrowing");
     assert_eq!(error.code(), EngineError::CANCELLED);
     writer.retire().await;
-    let error = service::query(&indexing, &outgoing, None, RelationshipDirection::Callees)
-        .await
-        .expect_err("retired writer cannot be borrowed");
+    let error = service::query(
+        &indexing,
+        &outgoing,
+        None,
+        RelationshipDirection::Callees,
+        true,
+    )
+    .await
+    .expect_err("retired writer cannot be borrowed");
     assert_eq!(error.code(), EngineError::RESOURCE_BUSY);
     writer.session.storage.close().expect("close writer");
 }
@@ -265,9 +289,15 @@ async fn relationship_queries_never_borrow_unpublished_generations() {
             lock_timeout_ms: Some(0),
             ..fixture.options("run")
         };
-        let error = service::query(&indexing, &options, None, RelationshipDirection::Callers)
-            .await
-            .expect_err("do not query an unpublished index even if registered");
+        let error = service::query(
+            &indexing,
+            &options,
+            None,
+            RelationshipDirection::Callers,
+            true,
+        )
+        .await
+        .expect_err("do not query an unpublished index even if registered");
         assert_eq!(error.code(), EngineError::RESOURCE_BUSY);
         writer.retire().await;
         writer.session.storage.close().expect("close rebuild");
@@ -296,7 +326,14 @@ async fn waiting_relationship_reads_leave_the_async_worker_free_and_retain_the_w
     ready_rx.recv().expect("writer acquired store");
     let options = fixture.options("red::run");
     let query = tokio::spawn(async move {
-        service::query(&indexing, &options, None, RelationshipDirection::Callers).await
+        service::query(
+            &indexing,
+            &options,
+            None,
+            RelationshipDirection::Callers,
+            true,
+        )
+        .await
     });
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert!(
@@ -319,4 +356,42 @@ async fn waiting_relationship_reads_leave_the_async_worker_free_and_retain_the_w
         .await
         .expect("native query releases lease");
     writer.session.storage.close().expect("close writer");
+}
+
+#[tokio::test]
+async fn disabled_graph_queries_reject_old_graphs_before_read_admission() {
+    let fixture = Fixture::new();
+    let engine = ZvecGrep::new();
+    for state in ["idle", "writer", "missing"] {
+        let writer = (state == "writer").then(|| {
+            acquire_workspace_lock(&fixture.layout(), LockMode::Exclusive, "index")
+                .expect("hold writer lock")
+        });
+        if state == "missing" {
+            fs::remove_file(&fixture.graph_path).expect("remove old graph");
+        }
+        for direction in [
+            RelationshipDirection::Callers,
+            RelationshipDirection::Callees,
+        ] {
+            let error = engine
+                .relationships(
+                    direction,
+                    RelationshipOptions {
+                        lock_timeout_ms: Some(0),
+                        ..fixture.options("run")
+                    },
+                )
+                .await
+                .expect_err("disabled even with an old readable graph");
+            assert_eq!(error.code(), EngineError::UNSUPPORTED, "{state}");
+            assert_eq!(error.message(), "graph queries are disabled", "{state}");
+        }
+        drop(writer);
+    }
+    assert!(
+        !fixture.graph_path.exists(),
+        "queries must not create a graph"
+    );
+    engine.close();
 }

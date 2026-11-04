@@ -31,19 +31,20 @@ const ENDPOINT_BATCH_SIZE: usize = 256;
 
 pub(super) fn normalize(options: &RelationshipOptions) -> EngineResult<(String, Option<String>)> {
     options.validate()?;
-    let symbol = options.symbol.trim();
-    // Normalize dotted and mixed qualified names to the internal :: separator.
-    let symbol = symbol.replace('.', "::");
+    Ok(split_symbol(options.symbol.trim()))
+}
+
+fn split_symbol(symbol: &str) -> (String, Option<String>) {
     let (absolute, path) = symbol
         .strip_prefix("::")
-        .map_or((false, symbol.as_str()), |rest| (true, rest));
+        .map_or((false, symbol), |rest| (true, rest));
     let (scope, name) = match path.rsplit_once("::") {
         Some((scope, name)) => (Some(scope), name),
         // `::main` names a top-level definition; plain `main` matches any scope.
         None if absolute => (Some(""), path),
         None => (None, path),
     };
-    Ok((name.to_owned(), scope.map(str::to_owned)))
+    (name.to_owned(), scope.map(|scope| scope.replace('.', "::")))
 }
 
 pub(super) fn query_symbols(
@@ -84,10 +85,20 @@ fn collect_relationships(
     check_cancelled(options.signal.as_ref())?;
     // Selection reads metadata, file records and bodies together: file_id alone
     // cannot detect a same-ID rewrite between these steps.
+    // Preserve literal dots (e.g. api::user.get) before trying dotted qualification.
+    let dotted = split_symbol(&options.symbol.trim().replace('.', "::"));
+    let (mut name, mut scope) = (name, scope);
     let definitions = storage.read_snapshot(|view| {
         check_cancelled(options.signal.as_ref())?;
         view.ensure_graph()?;
-        find_symbols(view, name, scope, filter)
+        let definitions = find_symbols(view, name, scope, filter)?;
+        if definitions.is_empty() && name.contains('.') {
+            name = &dotted.0;
+            scope = dotted.1.as_deref();
+            find_symbols(view, name, scope, filter)
+        } else {
+            Ok(definitions)
+        }
     })?;
     let mut matches = Vec::new();
     for stored in &definitions {
@@ -97,7 +108,13 @@ fn collect_relationships(
         // between reading an edge and checking its endpoints.
         if let Some(group) = storage.read_snapshot(|view| {
             check_cancelled(options.signal.as_ref())?;
-            collect_match(view, stored, options.limit.unwrap_or(20), direction)
+            collect_match(
+                view,
+                stored,
+                options.limit.unwrap_or(20),
+                direction,
+                options.signal.as_ref(),
+            )
         })? {
             matches.push(group);
         }
@@ -143,6 +160,7 @@ fn collect_match(
     stored: &StoredEntity,
     limit: usize,
     direction: Direction,
+    signal: Option<&CancellationToken>,
 ) -> EngineResult<Option<SymbolRelationships>> {
     let id = stored.entity.id();
     let current = get_entities(storage, std::slice::from_ref(id))?
@@ -165,6 +183,7 @@ fn collect_match(
         direction,
         Some(&[GraphEdgeKind::Calls]),
         limit.saturating_add(1),
+        signal,
     )?;
     let truncated = edges.len() > limit;
     edges.truncate(limit);
@@ -185,7 +204,9 @@ fn collect_match(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
+    check_cancelled(signal)?;
     let endpoints = get_entities(storage, &missing)?;
+    check_cancelled(signal)?;
     for id in missing {
         symbols.insert(id.clone(), endpoints.get(&id).and_then(describe));
     }
@@ -368,13 +389,16 @@ fn neighborhood(
     direction: Direction,
     kinds: Option<&[GraphEdgeKind]>,
     limit: usize,
+    signal: Option<&CancellationToken>,
 ) -> EngineResult<Vec<(FileEdge, PathBuf)>> {
+    check_cancelled(signal)?;
     let mut rows = storage.neighborhood(id, direction, kinds)?.into_iter();
     let mut edges = Vec::new();
     let mut hydration_size = limit.clamp(1, ENDPOINT_BATCH_SIZE);
     let mut checked = HashSet::new();
     let mut visible = HashMap::new();
     while edges.len() < limit {
+        check_cancelled(signal)?;
         let batch: Vec<_> = rows.by_ref().take(hydration_size).collect();
         if batch.is_empty() {
             break;
@@ -388,6 +412,7 @@ fn neighborhood(
             .filter(|id| checked.insert(id.clone()))
             .collect();
         visible.extend(endpoint_paths(storage, &ids)?);
+        check_cancelled(signal)?;
         let before = edges.len();
         let remaining = limit - before;
         edges.extend(
