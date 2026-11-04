@@ -121,7 +121,7 @@ enum LlamaWorkerMessage {
 }
 
 type IndexedEmbedding = (usize, Vec<f32>);
-type LlamaWorkerResponse = Result<Vec<IndexedEmbedding>, String>;
+type LlamaWorkerResponse = Result<Vec<IndexedEmbedding>, ModelError>;
 
 struct LlamaWorkerJob {
     inputs: Vec<PreparedLlamaInput>,
@@ -372,7 +372,10 @@ impl EmbeddingModel for LlamaCppEmbeddingModel {
             .await?;
         let result = match first {
             Ok(result) => result,
-            Err(error) if model.gpu => {
+            Err(error) if should_fallback_to_cpu(model.gpu, &error) => {
+                // Cancellation can arrive while native inference is finishing.
+                // It must not replace the shared GPU runtime with a CPU model.
+                check_cancelled(signal.as_ref()).map_err(|error| embed_error(entry, error))?;
                 let cpu = self
                     .fallback_to_cpu(model, on_progress, &error)
                     .await
@@ -389,6 +392,10 @@ impl EmbeddingModel for LlamaCppEmbeddingModel {
         validate_result(&self.info, inputs.len(), &result)?;
         Ok(result)
     }
+}
+
+fn should_fallback_to_cpu(gpu: bool, error: &ModelError) -> bool {
+    gpu && error.code() == crate::EngineError::INTERNAL
 }
 
 fn load_model_with_fallback(
@@ -669,7 +676,7 @@ impl LlamaContextPool {
         // Native work and output copies have finished before releasing ownership.
         drop(worker);
         let mut vectors = (0..input_count).map(|_| None).collect::<Vec<_>>();
-        for (index, vector) in result.map_err(ModelError::internal)? {
+        for (index, vector) in result? {
             if let Some(target) = vectors.get_mut(index) {
                 *target = Some(vector);
             }
@@ -788,7 +795,7 @@ fn llama_context_worker(model: &LlamaModel, receiver: &mpsc::Receiver<LlamaWorke
                     profile = Some(desired);
                 }
                 Err(error) => {
-                    let _ = job.response.send(Err(error.to_string()));
+                    let _ = job.response.send(Err(error));
                     continue;
                 }
             }
@@ -813,10 +820,8 @@ fn llama_context_worker(model: &LlamaModel, receiver: &mpsc::Receiver<LlamaWorke
         }
         let result = context
             .as_mut()
-            .ok_or_else(|| "llama.cpp context worker has no context".to_owned())
-            .and_then(|context| {
-                run_llama_worker_job(context, &job).map_err(|error| error.to_string())
-            });
+            .ok_or_else(|| ModelError::internal("llama.cpp context worker has no context"))
+            .and_then(|context| run_llama_worker_job(context, &job));
         let _ = job.response.send(result);
     }
 }

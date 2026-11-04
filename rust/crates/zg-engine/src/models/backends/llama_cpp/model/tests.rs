@@ -29,6 +29,70 @@ fn cancelled_model_preparation_is_rejected() {
 }
 
 #[test]
+fn only_gpu_backend_failures_trigger_cpu_fallback() {
+    let backend_failure = ModelError::internal("native backend failed");
+    assert!(should_fallback_to_cpu(true, &backend_failure));
+    assert!(!should_fallback_to_cpu(false, &backend_failure));
+    for error in [
+        ModelError::cancelled("operation cancelled"),
+        ModelError::invalid_argument("invalid input"),
+        ModelError::unsupported("unsupported input"),
+        ModelError::storage_failure("model storage unavailable"),
+    ] {
+        assert!(!should_fallback_to_cpu(true, &error), "{error:?}");
+    }
+}
+
+#[test]
+fn worker_responses_preserve_failure_codes_and_metadata() {
+    for error in [
+        ModelError::cancelled("cancelled after native inference"),
+        ModelError::invalid_argument("invalid sequence length"),
+    ] {
+        let error = error
+            .with_cause("fixture failure")
+            .wrap("embedding failed", Some("model=fixture".to_owned()));
+        let expected_code = error.code();
+        let expected_context = error.context().map(str::to_owned);
+        let expected_cause = error.cause().map(str::to_owned);
+        let expected_fail_fast = error.should_fail_fast();
+        let (sender, receiver) = mpsc::sync_channel::<LlamaWorkerResponse>(1);
+        sender.send(Err(error)).expect("worker response");
+        let delivered = receiver
+            .recv()
+            .expect("received worker response")
+            .expect_err("structured worker failure");
+        assert_eq!(delivered.code(), expected_code);
+        assert_eq!(delivered.context(), expected_context.as_deref());
+        assert_eq!(delivered.cause(), expected_cause.as_deref());
+        assert_eq!(delivered.should_fail_fast(), expected_fail_fast);
+        assert!(!should_fallback_to_cpu(true, &delivered));
+    }
+}
+
+#[test]
+fn cancellation_after_native_completion_does_not_request_cpu_fallback() {
+    let inputs = vec![PreparedLlamaInput {
+        index: 0,
+        tokens: vec![LlamaToken::new(7); 32],
+    }];
+    let plan = LlamaBatchPlan::new(&inputs, 2_048, Some(128)).expect("plan");
+    let signal = CancellationToken::new();
+    let mut calls = 0;
+    let error = plan
+        .execute(&inputs, Some(&signal), |batch| {
+            calls += 1;
+            signal.cancel();
+            Ok(vec![vec![1.0]; batch.len()])
+        })
+        .expect_err("cancellation after inference must propagate");
+    assert_eq!(calls, 1);
+    assert_eq!(error.code(), crate::EngineError::CANCELLED);
+    assert!(error.should_fail_fast());
+    assert!(!should_fallback_to_cpu(true, &error));
+}
+
+#[test]
 fn cuda_release_defaults_to_automatic_device_selection() {
     let expected = if cfg!(all(
         feature = "cuda",
