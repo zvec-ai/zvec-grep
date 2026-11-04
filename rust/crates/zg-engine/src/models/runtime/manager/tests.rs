@@ -85,6 +85,7 @@ struct GatedFixtureModel {
     maximum_active: AtomicUsize,
     started: AtomicUsize,
     release: TokioSemaphore,
+    budgets: StdMutex<Vec<usize>>,
 }
 
 impl GatedFixtureModel {
@@ -96,6 +97,7 @@ impl GatedFixtureModel {
             maximum_active: AtomicUsize::new(0),
             started: AtomicUsize::new(0),
             release: TokioSemaphore::new(0),
+            budgets: StdMutex::new(Vec::new()),
         }
     }
 }
@@ -109,8 +111,12 @@ impl EmbeddingModel for GatedFixtureModel {
     async fn embed(
         &self,
         inputs: &[Vec<Content>],
-        _options: EmbeddingOptions,
+        options: EmbeddingOptions,
     ) -> Result<EmbeddingResult, ModelError> {
+        self.budgets
+            .lock()
+            .expect("record budget")
+            .push(options.execution_concurrency);
         let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
         self.maximum_active.fetch_max(active, Ordering::AcqRel);
         self.started.fetch_add(1, Ordering::AcqRel);
@@ -702,9 +708,9 @@ async fn forwards_preparation_progress_to_both_callbacks_with_effective_concurre
 
 #[tokio::test]
 async fn native_batches_share_admission_across_independent_leases() {
-    for (reference, requested, allowed) in [
-        ("local/all-minilm-l6-v2", 2, 2),
-        ("local/embeddinggemma-300m", 8, 1),
+    for (reference, requested, second_budget, allowed) in [
+        ("local/all-minilm-l6-v2", 2, 2, 2),
+        ("local/embeddinggemma-300m", 8, 1, 1),
     ] {
         let fixture = Arc::new(GatedFixtureModel::new());
         let manager = ModelRuntimeManager::with_factory({
@@ -712,9 +718,13 @@ async fn native_batches_share_admission_across_independent_leases() {
             move |_, _, _| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
         });
         let request =
-            || ModelRuntimeRequest::new(reference, ModelConfig::default(), Some(requested));
-        let first = manager.acquire(request()).expect("first operation");
-        let second = manager.acquire(request()).expect("second operation");
+            |budget| ModelRuntimeRequest::new(reference, ModelConfig::default(), Some(budget));
+        let first = manager
+            .acquire(request(requested))
+            .expect("first operation");
+        let second = manager
+            .acquire(request(second_budget))
+            .expect("second operation");
         assert!(Arc::ptr_eq(&first.entry, &second.entry));
         let inputs = [vec![Content::Text("fixture".into())]];
         let embeddings = async {
@@ -759,6 +769,12 @@ async fn native_batches_share_admission_across_independent_leases() {
             result.expect("embedding batch");
         }
         assert_eq!(fixture.maximum_active.load(Ordering::Acquire), allowed);
+        let mut observed = fixture.budgets.lock().expect("recorded budgets").clone();
+        observed.sort_unstable();
+        let mut expected = vec![requested, requested, second_budget, second_budget];
+        expected.sort_unstable();
+        assert_eq!(observed, expected);
+        assert_eq!(manager.snapshot().cached_runtimes, 1);
     }
 }
 
@@ -943,10 +959,7 @@ fn concurrency_policy_prefers_user_and_preserves_catalog_backend_defaults() {
         let explicit = manager
             .acquire(ModelRuntimeRequest::new(reference, config, Some(24)))
             .expect("explicit concurrency");
-        let local_native = matches!(
-            reference,
-            "local/embeddinggemma-300m" | "local/all-minilm-l6-v2"
-        );
+        let local_native = reference == "local/all-minilm-l6-v2";
         assert_eq!(
             explicit.operation.limit,
             if local_native { 8 } else { 24 },

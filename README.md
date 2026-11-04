@@ -165,11 +165,21 @@ building or updating an index, for both local and remote models. The environment
 variable also applies to automatic indexing and refresh. These controls do not
 change query-vector inference. The CLI option is accepted only with `--index`.
 
-For llama.cpp, the limit controls contexts per indexing model instance. For
-Transformers.js, it controls calls in flight on one cached pipeline and does not
-guarantee simultaneous native/GPU execution. Both cap positive integer values
-at **8**. For Potion/model2vec, it controls concurrent embedding batches without
-that cap; the default is **2** and the CPU worker pool has its own capacity limit.
+For the Rust llama.cpp backend, the value sets CPU compute threads
+(`n_threads` and `n_threads_batch`) on one shared context; the default is **1**.
+Different thread budgets share the loaded model and serialize embedding calls.
+Changing the budget replaces the context because the pinned Rust binding does
+not expose an in-place thread setter. The old context is released first.
+On Metal/CUDA/Vulkan, this controls CPU-side work, not GPU thread count; GPU
+batching is independent. Increasing it is not expected to scale GPU throughput
+or allocate more contexts. GPU Gemma packs short inputs within a 128-token
+budget and executes longer inputs individually.
+
+For Transformers.js, the value controls calls in flight on one cached pipeline
+and does not guarantee simultaneous native/GPU execution. Positive integer
+values are capped at **8**. For Potion/model2vec, it controls concurrent embedding
+batches without that cap; the default is **2** and the CPU worker pool has its own
+capacity limit.
 For remote models, both controls set the maximum concurrent batches without the
 cap of 8. Existing adaptive scheduling and its defaults remain unchanged; it may
 reduce concurrency after rate limits or retryable failures.
@@ -178,8 +188,9 @@ The priority is the explicit CLI/API index option, then the index environment
 variable, then `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` (llama.cpp indexing only),
 then the automatic default.
 
-For llama.cpp and Transformers.js, CPU execution or a runtime without a VRAM
-query uses 1 unless overridden. Transformers.js currently has no VRAM query, so
+For the JavaScript llama.cpp backend and Transformers.js, CPU execution or a
+runtime without a VRAM query uses 1 unless overridden. Transformers.js currently
+has no VRAM query, so
 its automatic limit is 1. When a GPU runtime provides free VRAM, the limit is
 `floor(freeVRAM × 0.25 / 150 MiB)`, clamped to 1–8; a failed or invalid VRAM
 query uses 2. This retains the existing 150 MiB heuristic, which is not a
@@ -214,7 +225,8 @@ environment, then run `zg --server off` and `zg --server on` from that environme
 If an agent launches zg, update its environment and restart the agent/MCP
 connection too. JavaScript exceptions can be caught, but native aborts can
 terminate the process before any CPU fallback runs. A limit of 1 reduces
-concurrency; it does not prevent every GPU failure. You can also retry with
+the relevant execution budget; on Rust llama.cpp it reduces CPU threads, not
+GPU batch memory. It does not prevent every GPU failure. You can also retry with
 `--device cpu`.
 
 <a id="benchmarks"></a>

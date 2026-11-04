@@ -1,7 +1,7 @@
 use crate::domain::Content;
 use std::{
     env,
-    num::{NonZeroU32, NonZeroUsize},
+    num::NonZeroU32,
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex as StdMutex, MutexGuard as StdMutexGuard, PoisonError,
@@ -104,8 +104,7 @@ struct LlamaContextPool {
 
 #[derive(Default)]
 struct LlamaContextPoolState {
-    workers: Vec<Arc<LlamaContextWorker>>,
-    next_worker_id: usize,
+    worker: Option<Arc<LlamaContextWorker>>,
 }
 
 struct LlamaContextWorker {
@@ -512,13 +511,13 @@ fn report_warning(
     }
 }
 
-fn threads_per_context(gpu: bool, execution_concurrency: usize) -> i32 {
-    if gpu || execution_concurrency <= 1 {
-        return 0;
-    }
-    let cores = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
-    let threads = (cores / execution_concurrency).max(1);
-    i32::try_from(threads).unwrap_or(i32::MAX)
+fn inference_threads(execution_concurrency: usize) -> Result<i32, ModelError> {
+    // On GPU this controls CPU-side work only; it never changes GPU batch size
+    // or allocates more contexts. Keep explicit overrides meaningful on fallback.
+    i32::try_from(execution_concurrency.max(1)).map_err(|error| {
+        ModelError::invalid_argument("llama.cpp thread count exceeds the native limit")
+            .with_cause(error)
+    })
 }
 
 fn embed_texts(
@@ -560,19 +559,13 @@ fn embed_texts(
         }
         inputs.push(PreparedLlamaInput { index, tokens });
     }
-    let context_workers = physical_context_worker_limit(loaded.gpu, execution_concurrency);
-    let threads = threads_per_context(loaded.gpu, context_workers);
+    let threads = inference_threads(execution_concurrency)?;
     loaded.contexts.run(
         PreparedLlamaBatch { inputs, truncated },
         context_size_u32,
-        context_workers,
         threads,
         signal,
     )
-}
-
-fn physical_context_worker_limit(_gpu: bool, requested: usize) -> usize {
-    requested.clamp(1, crate::models::runtime::LOCAL_CONCURRENCY_CAP)
 }
 
 fn use_multisequence_batching(architecture: &str, gpu: bool) -> bool {
@@ -595,21 +588,12 @@ impl LlamaContextPool {
         &self,
         prepared: PreparedLlamaBatch,
         context_size: u32,
-        max_workers: usize,
         threads: i32,
         signal: Option<&CancellationToken>,
     ) -> Result<EmbeddingResult, ModelError> {
         check_cancelled(signal)?;
         let PreparedLlamaBatch { inputs, truncated } = prepared;
         let input_count = inputs.len();
-        let desired_workers = max_workers.max(1).min(input_count.max(1));
-        let workers = self.lease_workers(max_workers.max(1), desired_workers, signal)?;
-        let worker_count = workers.len();
-        let mut chunks = (0..worker_count).map(|_| Vec::new()).collect::<Vec<_>>();
-        for (offset, input) in inputs.into_iter().enumerate() {
-            chunks[offset % worker_count].push(input);
-        }
-
         let architecture = self
             .model
             .meta_val_str("general.architecture")
@@ -617,73 +601,43 @@ impl LlamaContextPool {
                 ModelError::internal("Unable to read llama.cpp model architecture")
                     .with_cause(error)
             })?;
-        // Plan every worker before dispatching any work, so a planning failure
-        // cannot release a lease while its native context is still executing.
-        let plans = chunks
-            .iter()
-            .map(|inputs| {
-                LlamaBatchPlan::new(
-                    inputs,
-                    context_size,
-                    use_multisequence_batching(&architecture, self.gpu),
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let mut pending = Vec::with_capacity(worker_count);
-        let mut first_error = None;
-        for ((worker, chunk), plan) in workers.into_iter().zip(chunks).zip(plans) {
-            let (response, receiver) = mpsc::sync_channel(1);
-            let job = LlamaWorkerJob {
-                inputs: chunk,
-                profile: LlamaContextProfile {
-                    context_size,
-                    batch_capacity: plan.token_capacity,
-                    sequence_capacity: plan.sequence_capacity,
-                    threads,
-                },
-                plan,
-                signal: signal.cloned(),
-                response,
-            };
-            if worker
-                .worker
-                .sender
-                .send(LlamaWorkerMessage::Embed(job))
-                .is_err()
-            {
-                first_error.get_or_insert_with(|| {
-                    ModelError::internal("llama.cpp context worker stopped unexpectedly")
-                });
-                continue;
-            }
-            pending.push((receiver, worker));
-        }
-
+        let plan = LlamaBatchPlan::new(
+            &inputs,
+            context_size,
+            use_multisequence_batching(&architecture, self.gpu),
+        )?;
+        let worker = self.lease_worker(signal)?;
+        let (response, receiver) = mpsc::sync_channel(1);
+        let job = LlamaWorkerJob {
+            inputs,
+            profile: LlamaContextProfile {
+                context_size,
+                batch_capacity: plan.token_capacity,
+                sequence_capacity: plan.sequence_capacity,
+                threads,
+            },
+            plan,
+            signal: signal.cloned(),
+            response,
+        };
+        worker
+            .worker
+            .sender
+            .send(LlamaWorkerMessage::Embed(job))
+            .map_err(|error| {
+                ModelError::internal("llama.cpp context worker stopped unexpectedly")
+                    .with_cause(error)
+            })?;
+        let result = receiver.recv().map_err(|error| {
+            ModelError::internal("llama.cpp context worker failed").with_cause(error)
+        })?;
+        // Native work and output copies have finished before releasing ownership.
+        drop(worker);
         let mut vectors = (0..input_count).map(|_| None).collect::<Vec<_>>();
-        for (receiver, worker) in pending {
-            let result = receiver.recv().map_err(|error| {
-                ModelError::internal("llama.cpp context worker failed").with_cause(error)
-            });
-            drop(worker);
-            match result {
-                Ok(Ok(worker_vectors)) => {
-                    for (index, vector) in worker_vectors {
-                        if let Some(target) = vectors.get_mut(index) {
-                            *target = Some(vector);
-                        }
-                    }
-                }
-                Ok(Err(error)) => {
-                    first_error.get_or_insert_with(|| ModelError::internal(error));
-                }
-                Err(error) => {
-                    first_error.get_or_insert(error);
-                }
+        for (index, vector) in result.map_err(ModelError::internal)? {
+            if let Some(target) = vectors.get_mut(index) {
+                *target = Some(vector);
             }
-        }
-        if let Some(error) = first_error {
-            return Err(error);
         }
         let vectors = vectors
             .into_iter()
@@ -699,51 +653,26 @@ impl LlamaContextPool {
         Ok(EmbeddingResult { vectors, truncated })
     }
 
-    fn lease_workers(
+    fn lease_worker(
         &self,
-        max_workers: usize,
-        desired_workers: usize,
         signal: Option<&CancellationToken>,
-    ) -> Result<Vec<LlamaWorkerLease<'_>>, ModelError> {
+    ) -> Result<LlamaWorkerLease<'_>, ModelError> {
         loop {
             check_cancelled(signal)?;
             let mut state = lock_llama_mutex(&self.state);
-            let mut selected = state
-                .workers
-                .iter()
-                .filter(|worker| {
-                    worker
-                        .busy
-                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                        .is_ok()
-                })
-                .map(Arc::clone)
-                .take(desired_workers)
-                .collect::<Vec<_>>();
-
-            let mut create_error = None;
-            while selected.len() < desired_workers && state.workers.len() < max_workers {
-                match self.create_worker(&mut state) {
-                    Ok(worker) => {
-                        worker.busy.store(true, Ordering::Release);
-                        state.workers.push(Arc::clone(&worker));
-                        selected.push(worker);
-                    }
-                    Err(error) => {
-                        create_error = Some(error);
-                        break;
-                    }
-                }
+            if state.worker.is_none() {
+                state.worker = Some(self.create_worker()?);
             }
-            if !selected.is_empty() {
-                drop(state);
-                return Ok(selected
-                    .into_iter()
-                    .map(|worker| LlamaWorkerLease { pool: self, worker })
-                    .collect());
-            }
-            if let Some(error) = create_error {
-                return Err(error);
+            let worker = state.worker.as_ref().expect("worker initialized");
+            if worker
+                .busy
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Ok(LlamaWorkerLease {
+                    pool: self,
+                    worker: Arc::clone(worker),
+                });
             }
             let (guard, _) = self
                 .changed
@@ -753,16 +682,11 @@ impl LlamaContextPool {
         }
     }
 
-    fn create_worker(
-        &self,
-        state: &mut LlamaContextPoolState,
-    ) -> Result<Arc<LlamaContextWorker>, ModelError> {
-        let worker_id = state.next_worker_id;
-        state.next_worker_id = state.next_worker_id.saturating_add(1);
+    fn create_worker(&self) -> Result<Arc<LlamaContextWorker>, ModelError> {
         let model = Arc::clone(&self.model);
         let (sender, receiver) = mpsc::channel();
         let join = thread::Builder::new()
-            .name(format!("zg-llama-context-{worker_id}"))
+            .name("zg-llama-context".to_owned())
             .spawn(move || llama_context_worker(&model, &receiver))
             .map_err(|error| {
                 ModelError::internal("Unable to create llama.cpp context worker").with_cause(error)
@@ -777,14 +701,12 @@ impl LlamaContextPool {
 
 impl Drop for LlamaContextPool {
     fn drop(&mut self) {
-        let workers = {
+        let worker = {
             let state = self.state.get_mut().unwrap_or_else(PoisonError::into_inner);
-            std::mem::take(&mut state.workers)
+            state.worker.take()
         };
-        for worker in &workers {
+        if let Some(worker) = worker {
             let _ = worker.sender.send(LlamaWorkerMessage::Shutdown);
-        }
-        for worker in workers {
             if let Some(join) = lock_llama_mutex(&worker.join).take() {
                 let _ = join.join();
             }
@@ -814,6 +736,9 @@ fn llama_context_worker(model: &LlamaModel, receiver: &mpsc::Receiver<LlamaWorke
                 && current.sequence_capacity >= desired.sequence_capacity
         });
         if !reusable {
+            // The pinned safe binding has no thread setter. Release the old
+            // context before changing its thread budget or growing capacity;
+            // the loaded model and dedicated worker remain shared.
             context = None;
             profile = None;
             match create_llama_context(model, desired) {
@@ -847,12 +772,23 @@ fn create_llama_context(
         .map_err(|error| {
             ModelError::internal("Unable to read llama.cpp model architecture").with_cause(error)
         })?;
+    model
+        .new_context(
+            initialize_llama_backend(false, &registry)?,
+            llama_context_params(&architecture, profile),
+        )
+        .map_err(|error| {
+            ModelError::internal("Unable to create llama.cpp embedding context").with_cause(error)
+        })
+}
+
+fn llama_context_params(architecture: &str, profile: LlamaContextProfile) -> LlamaContextParams {
     let params = LlamaContextParams::default()
         .with_n_ctx(NonZeroU32::new(profile.context_size))
         .with_n_batch(profile.batch_capacity)
         .with_n_seq_max(profile.sequence_capacity)
         .with_n_ubatch(llama_micro_batch_capacity(
-            &architecture,
+            architecture,
             profile.batch_capacity,
         ))
         .with_n_threads(profile.threads)
@@ -860,16 +796,11 @@ fn create_llama_context(
         .with_embeddings(true);
     // Gemma has no KV cache. Keep the full per-input context length when
     // increasing sequence capacity instead of dividing it among sequences.
-    let params = if architecture == "gemma-embedding" {
+    if architecture == "gemma-embedding" {
         params.with_kv_unified(true)
     } else {
         params
-    };
-    model
-        .new_context(initialize_llama_backend(false, &registry)?, params)
-        .map_err(|error| {
-            ModelError::internal("Unable to create llama.cpp embedding context").with_cause(error)
-        })
+    }
 }
 
 fn llama_micro_batch_capacity(architecture: &str, batch_capacity: u32) -> u32 {

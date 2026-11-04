@@ -72,23 +72,25 @@ fn pins_main_compatible_sources_and_cache_name() {
 
 #[test]
 fn user_concurrency_controls_cpu_threads_per_context() {
-    assert_eq!(threads_per_context(true, 4), 0);
-    assert_eq!(threads_per_context(false, 1), 0);
-    let cores = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
-    assert_eq!(
-        threads_per_context(false, 4),
-        i32::try_from((cores / 4).max(1)).unwrap_or(i32::MAX)
-    );
-}
-
-#[test]
-fn context_pool_honors_user_limit_and_caps_at_eight() {
-    assert_eq!(physical_context_worker_limit(true, 1), 1);
-    assert_eq!(physical_context_worker_limit(true, 2), 2);
-    assert_eq!(physical_context_worker_limit(true, 4), 4);
-    assert_eq!(physical_context_worker_limit(false, 4), 4);
-    assert_eq!(physical_context_worker_limit(true, 24), 8);
-    assert_eq!(physical_context_worker_limit(false, 24), 8);
+    for count in [1, 2, 4, 8, 24] {
+        let threads = inference_threads(count).expect("thread count");
+        assert_eq!(usize::try_from(threads).expect("positive threads"), count);
+        let params = llama_context_params(
+            "gemma-embedding",
+            LlamaContextProfile {
+                context_size: 2_048,
+                batch_capacity: 128,
+                sequence_capacity: 4,
+                threads,
+            },
+        );
+        assert_eq!(params.n_threads(), threads);
+        assert_eq!(params.n_threads_batch(), threads);
+        assert_eq!(params.n_batch(), 128);
+        assert_eq!(params.n_seq_max(), 4);
+    }
+    assert_eq!(inference_threads(0).expect("backend default"), 1);
+    assert!(inference_threads(usize::MAX).is_err());
 }
 
 #[test]
@@ -152,6 +154,7 @@ async fn embeddinggemma_batches_preserve_vectors_and_context_limits(device: Devi
     );
     let loaded = model.ensure_loaded(None, None).await.expect("cached model");
     assert_eq!(loaded.gpu, device != Device::Cpu);
+    assert_single_worker_ownership(&loaded);
     let inputs = gemma_batch_fixture(&loaded.model);
     assert_eq!(inputs[4].tokens.len(), 2_048);
     let prepared = || PreparedLlamaBatch {
@@ -172,7 +175,6 @@ async fn embeddinggemma_batches_preserve_vectors_and_context_limits(device: Devi
                 },
                 2_048,
                 1,
-                threads_per_context(loaded.gpu, 1),
                 None,
             )
             .expect("individual inference");
@@ -182,10 +184,10 @@ async fn embeddinggemma_batches_preserve_vectors_and_context_limits(device: Devi
         assert_gemma_sequence_isolation(&loaded, &inputs);
     }
     for concurrency in [1, 2, 4, 8] {
-        let threads = threads_per_context(loaded.gpu, concurrency);
+        let threads = inference_threads(concurrency).expect("thread count");
         let result = loaded
             .contexts
-            .run(prepared(), 2_048, concurrency, threads, None)
+            .run(prepared(), 2_048, threads, None)
             .expect("batched inference");
         assert_eq!(result.truncated, [4]);
         for (actual, expected) in result.vectors.iter().zip(&expected) {
@@ -193,13 +195,8 @@ async fn embeddinggemma_batches_preserve_vectors_and_context_limits(device: Devi
         }
         assert_eq!(result.vectors.len(), inputs.len());
         let state = lock_llama_mutex(&loaded.contexts.state);
-        assert_eq!(state.workers.len(), concurrency);
-        assert!(
-            state
-                .workers
-                .iter()
-                .all(|worker| !worker.busy.load(Ordering::Acquire))
-        );
+        let worker = state.worker.as_ref().expect("one worker");
+        assert!(!worker.busy.load(Ordering::Acquire));
         drop(state);
 
         // A larger sequence/token profile must remain safe for a later single query.
@@ -211,7 +208,6 @@ async fn embeddinggemma_batches_preserve_vectors_and_context_limits(device: Devi
                     truncated: Vec::new(),
                 },
                 2_048,
-                concurrency,
                 threads,
                 None,
             )
@@ -219,6 +215,19 @@ async fn embeddinggemma_batches_preserve_vectors_and_context_limits(device: Devi
         assert_embedding_close(&result.vectors[0], &expected[0]);
     }
     assert_gemma_batch_failure_recovery(&loaded, &inputs, &expected);
+}
+
+fn assert_single_worker_ownership(loaded: &LoadedLlamaModel) {
+    let first = loaded.contexts.lease_worker(None).expect("first lease");
+    assert!(first.worker.busy.load(Ordering::Acquire));
+    let signal = CancellationToken::new();
+    signal.cancel();
+    assert!(loaded.contexts.lease_worker(Some(&signal)).is_err());
+    assert!(first.worker.busy.load(Ordering::Acquire));
+    let original = Arc::clone(&first.worker);
+    drop(first);
+    let next = loaded.contexts.lease_worker(None).expect("released worker");
+    assert!(Arc::ptr_eq(&original, &next.worker));
 }
 
 fn gemma_batch_fixture(model: &LlamaModel) -> Vec<PreparedLlamaInput> {
@@ -284,7 +293,6 @@ fn assert_gemma_sequence_isolation(loaded: &LoadedLlamaModel, inputs: &[Prepared
                     },
                     2_048,
                     1,
-                    threads_per_context(loaded.gpu, 1),
                     None,
                 )
                 .expect("sequence isolation inference")
@@ -319,7 +327,7 @@ fn assert_gemma_batch_failure_recovery(
     assert!(
         loaded
             .contexts
-            .run(prepared(), 2_048, 4, 3, Some(&signal))
+            .run(prepared(), 2_048, 3, Some(&signal))
             .is_err()
     );
     // Invalid native tokens return an error without poisoning the leased context.
@@ -335,7 +343,6 @@ fn assert_gemma_batch_failure_recovery(
                     truncated: Vec::new(),
                 },
                 2_048,
-                4,
                 3,
                 None
             )
@@ -343,7 +350,7 @@ fn assert_gemma_batch_failure_recovery(
     );
     let result = loaded
         .contexts
-        .run(prepared(), 2_048, 4, 3, None)
+        .run(prepared(), 2_048, 3, None)
         .expect("recover after failure");
     for (actual, expected) in result.vectors.iter().zip(expected) {
         assert_embedding_close(actual, expected);
@@ -401,7 +408,7 @@ async fn embeddinggemma_handles_long_inputs_and_reuse(device: Device) {
     assert!(
         loaded
             .contexts
-            .run(prepared(257), 2_048, 1, 4, Some(&cancelled))
+            .run(prepared(257), 2_048, 4, Some(&cancelled))
             .is_err()
     );
     let mut first: Option<Vec<f32>> = None;
@@ -410,7 +417,7 @@ async fn embeddinggemma_handles_long_inputs_and_reuse(device: Device) {
     for length in [32, 256, 257, 1_024, 2_048, 32] {
         let result = loaded
             .contexts
-            .run(prepared(length), 2_048, 1, 4, None)
+            .run(prepared(length), 2_048, 4, None)
             .expect("full-sequence encoder inference");
         assert!(result.truncated.is_empty());
         assert_eq!(result.vectors.len(), 1);

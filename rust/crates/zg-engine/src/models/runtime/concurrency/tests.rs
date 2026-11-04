@@ -82,11 +82,11 @@ fn invalid_environment_warns_and_uses_auto_without_legacy_retry() {
 }
 
 #[test]
-fn native_limits_cap_at_eight_and_llama_batches_are_serial() {
+fn llama_thread_budgets_share_one_runtime_and_serialize_batches() {
     let llama = "local/embeddinggemma-300m";
     let transformers = "local/all-minilm-l6-v2";
-    assert_eq!(local_runtime_limit(llama, Some(24)), Some(8));
-    assert_eq!(local_runtime_limit(llama, None), Some(1));
+    assert_eq!(local_runtime_limit(llama, Some(24)), None);
+    assert_eq!(local_runtime_limit(llama, None), None);
     assert_eq!(local_runtime_limit(transformers, Some(24)), Some(8));
     assert_eq!(local_runtime_limit(transformers, None), Some(1));
     assert_eq!(batch_concurrency(llama, Some(24)), Some(1));

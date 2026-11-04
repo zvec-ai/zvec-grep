@@ -16,7 +16,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use super::compute::ModelComputeRuntime;
-use super::concurrency::{batch_concurrency, local_runtime_limit};
+use super::concurrency::{batch_concurrency, is_llama, local_runtime_limit};
 use crate::domain::{
     Content,
     model::{Device, EmbeddingModelInfo, EmbeddingResult, ModelConfig},
@@ -82,7 +82,7 @@ struct ModelRuntimeEntry {
 struct ModelRuntime {
     model: Arc<dyn EmbeddingModel>,
     active_embeddings: AtomicUsize,
-    // Native callers with the same budget share admission across all leases.
+    // Native callers share admission across all leases of this runtime.
     batch_permits: Option<Arc<Semaphore>>,
 }
 
@@ -205,7 +205,7 @@ impl ModelRuntimeManager {
                 runtime: Arc::new(ModelRuntime {
                     model,
                     active_embeddings: AtomicUsize::new(0),
-                    batch_permits: key.local_limit.is_some().then(|| {
+                    batch_permits: (key.local_limit.is_some() || is_llama(&reference)).then(|| {
                         Arc::new(Semaphore::new(
                             batch_concurrency(&reference, key.local_limit).unwrap_or(1),
                         ))
