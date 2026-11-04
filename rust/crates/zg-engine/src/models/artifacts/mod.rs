@@ -14,6 +14,8 @@ mod spec;
 
 pub(super) use cache_paths::{LocalModelBackend, default_model_cache};
 pub(super) use downloader::{ResolveArtifacts, resolve_model_artifacts};
+#[cfg(test)]
+pub(super) use inspection::cached_source;
 pub(crate) use inspection::model_is_cached;
 #[cfg(test)]
 pub(super) use progress::ArtifactDownloadProgress;

@@ -74,7 +74,7 @@ impl ArtifactSource {
         self
     }
 
-    pub(super) fn local_path(
+    pub(in crate::models) fn local_path(
         &self,
         artifact: &ArtifactConfig,
     ) -> Result<PathBuf, ArtifactDownloadError> {
