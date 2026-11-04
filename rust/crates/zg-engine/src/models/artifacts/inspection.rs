@@ -10,16 +10,23 @@ use super::{
 };
 
 pub(crate) async fn model_is_cached(entry: EmbeddingCatalogEntry, cache: Option<&Path>) -> bool {
+    cached_source(entry, cache).await.is_some()
+}
+
+pub(in crate::models) async fn cached_source(
+    entry: EmbeddingCatalogEntry,
+    cache: Option<&Path>,
+) -> Option<ArtifactSource> {
     let backend = match entry {
         EmbeddingCatalogEntry::LlamaCpp(_) => LocalModelBackend::LlamaCpp,
         EmbeddingCatalogEntry::Model2Vec(_) => LocalModelBackend::Model2Vec,
         EmbeddingCatalogEntry::Transformers(_) => LocalModelBackend::Transformers,
-        EmbeddingCatalogEntry::Qwen(_) => return false,
+        EmbeddingCatalogEntry::Qwen(_) => return None,
     };
     let cache = cache.map_or_else(|| default_model_cache(backend), Path::to_path_buf);
     let cache = cache.as_path();
     let (download, sources) = match entry {
-        EmbeddingCatalogEntry::Qwen(_) => return false,
+        EmbeddingCatalogEntry::Qwen(_) => return None,
         EmbeddingCatalogEntry::LlamaCpp(model) => (
             model.download,
             [
@@ -55,9 +62,7 @@ pub(crate) async fn model_is_cached(entry: EmbeddingCatalogEntry, cache: Option<
             ],
         ),
         EmbeddingCatalogEntry::Model2Vec(model) => {
-            let Some(model_file) = Path::new(model.model_file).file_name() else {
-                return false;
-            };
+            let model_file = Path::new(model.model_file).file_name()?;
             (
                 model.download,
                 [
@@ -84,18 +89,18 @@ pub(crate) async fn model_is_cached(entry: EmbeddingCatalogEntry, cache: Option<
             )
         }
     };
-    for source in &sources {
-        let Ok(manifest) = Manifest::new(entry.reference(), source, download.artifacts) else {
+    for source in sources {
+        let Ok(manifest) = Manifest::new(entry.reference(), &source, download.artifacts) else {
             continue;
         };
-        if validate_snapshot(source, download.artifacts, &manifest, None)
+        if validate_snapshot(&source, download.artifacts, &manifest, None)
             .await
             .unwrap_or(false)
         {
-            return true;
+            return Some(source);
         }
     }
-    false
+    None
 }
 
 #[cfg(test)]

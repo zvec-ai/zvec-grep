@@ -653,8 +653,7 @@ fn server_on_exposes_only_agent_search_and_off_stops_it() -> Result<(), Box<dyn 
 
     // CLI administration uses the typed daemon protocol rather than the
     // public MCP toolset, so status remains available with the agent profile.
-    // Pin the display home so temporary paths are rendered consistently even
-    // when the runner's temporary directory is inside its real user home.
+    // Use an isolated home so the query cannot pick up real workspace state.
     let cli_status = Command::new(&guard.binary)
         .env("HOME", home.path())
         .env("USERPROFILE", home.path())
@@ -665,7 +664,7 @@ fn server_on_exposes_only_agent_search_and_off_stops_it() -> Result<(), Box<dyn 
     assert_command_success(&cli_status);
     let cli_stdout = String::from_utf8_lossy(&cli_status.stdout);
     assert!(
-        cli_stdout.starts_with("? Workspace index is not configured\n  ~\n"),
+        cli_stdout.starts_with("  Coverage    Unavailable (index not configured)\n"),
         "{cli_stdout}"
     );
 
@@ -926,24 +925,18 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
     });
     let response = post_json(port, Some(&session), &background_search.to_string())?;
     assert!(response.contains("fresh.txt"), "{response}");
+    // A native watcher can deliver delayed or duplicate notifications after the
+    // preceding fresh query. Global drift uses the same diagnostics as the CLI.
     assert!(
-        !response.contains("freshness: served_from_current_index"),
+        response.contains("freshness: fresh") || response.contains("freshness: possibly_stale"),
         "{response}"
     );
-    // A native watcher can deliver delayed or duplicate notifications after the
-    // preceding fresh query. Controlled runtime tests cover the quiet idle case.
-    let stale = response.contains("freshness: possibly_stale");
-    let scheduled = response.contains("background_refresh: scheduled");
-    assert!(stale || response.contains("freshness: fresh"), "{response}");
-    if stale || scheduled {
+    if response.contains("status: possibly_stale") {
         assert!(
             response.contains("results: served_from_current_index"),
             "{response}"
         );
-        assert!(
-            response.contains("background_refresh: idle") || scheduled,
-            "{response}"
-        );
+        assert!(response.contains("background_refresh:"), "{response}");
     } else {
         assert!(
             !response.contains("results: served_from_current_index"),
@@ -1180,13 +1173,13 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
     std::fs::write(&source, "vineyard documentation")?;
     let response = search(workspace.path(), "orchard", "eventual", false)?;
     assert!(response.contains("source.txt"), "{response}");
-    assert!(response.contains("background_refresh: off"), "{response}");
+    assert!(response.contains("orchard documentation"), "{response}");
+    assert!(response.contains("status: possibly_stale"), "{response}");
+    assert!(response.contains("background_refresh: idle"), "{response}");
     let response = search(workspace.path(), "orchard", "eventual", true)?;
     assert!(response.contains("source.txt"), "{response}");
-    assert!(
-        response.contains("background_refresh: scheduled"),
-        "{response}"
-    );
+    assert!(response.contains("status: possibly_stale"), "{response}");
+    assert!(response.contains("background_refresh:"), "{response}");
     // Poll without requesting more refreshes: the first eventual search must do the work.
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
@@ -1206,6 +1199,7 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
     embedding.wait_for_request_after(before_edit, "harvest", home.path());
     let response = search(workspace.path(), "harvest", "wait_for_fresh", false)?;
     assert!(response.contains("source.txt"), "{response}");
+    assert!(response.contains("harvest documentation"), "{response}");
     assert!(response.contains("freshness: fresh"), "{response}");
     assert!(response.contains("\"isError\":false"), "{response}");
     // Once activated, the watcher must refresh later edits even with autoUpdate off.
@@ -1398,12 +1392,39 @@ fn direct_writes_retire_daemon_read_sessions() -> Result<(), Box<dyn Error>> {
         response.contains("source.txt") && response.contains("\"isError\":false"),
         "{response}"
     );
-    assert_command_success(&direct(&["--drop", "--yes"])?);
+    assert_command_success(&direct(&["--drop"])?);
     let response = search("vineyard")?;
     assert!(
         response.contains("\"isError\":true"),
         "dropped index remained cached: {response}"
     );
+    assert_command_success(&guard.stop()?);
+    Ok(())
+}
+
+#[test]
+fn index_drop_runs_without_confirmation_through_the_daemon() -> Result<(), Box<dyn Error>> {
+    let _permit = server_test_permit();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
+    let home = TempDir::new()?;
+    let (mut guard, _) = start_server(&binary, &home, "full", None, |_| {})?;
+    for mode in ["server", "auto"] {
+        let workspace = TempDir::new()?;
+        let index = workspace.path().join(".zvec-grep/index");
+        std::fs::create_dir_all(&index)?;
+        let source = workspace.path().join("source.txt");
+        std::fs::write(&source, "keep source")?;
+
+        let output = Command::new(&binary)
+            .args(["--index", "--drop", "--mode", mode, "--home"])
+            .arg(home.path())
+            .arg(workspace.path())
+            .output()?;
+        assert_command_success(&output);
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Dropped index"));
+        assert!(!index.exists());
+        assert_eq!(std::fs::read_to_string(source)?, "keep source");
+    }
     assert_command_success(&guard.stop()?);
     Ok(())
 }
@@ -1465,7 +1486,7 @@ fn indexed_fragment_coordinates_survive_direct_server_and_mcp() -> Result<(), Bo
             let text = String::from_utf8(reply.stdout)?;
             assert!(text.contains("\n  2: xxx"), "{mode} {preview}: {text}");
             assert!(!text.contains("\n  1: xxx"), "{mode} {preview}: {text}");
-            outputs.push(text);
+            outputs.push((text, String::from_utf8(reply.stderr)?));
         }
         assert_eq!(outputs[0], outputs[1], "direct/server {preview}");
         let reply = bridge.request(&json!({
@@ -1478,11 +1499,13 @@ fn indexed_fragment_coordinates_survive_direct_server_and_mcp() -> Result<(), Bo
         let text = reply["result"]["content"][0]["text"]
             .as_str()
             .ok_or("missing source preview")?;
-        assert!(
-            text.contains("matched: 2\nsource:\n2\txxx"),
-            "{preview}: {text}"
-        );
-        assert!(text.ends_with("\n3\t"), "{preview}: {text}");
+        let (body, diagnostics) = &outputs[0];
+        let expected = if diagnostics.is_empty() {
+            format!("freshness: fresh\n{body}")
+        } else {
+            format!("freshness: possibly_stale\n{diagnostics}\n{body}")
+        };
+        assert_eq!(text, expected, "direct/server/MCP {preview}");
     }
     bridge.close()?;
     assert_command_success(&guard.stop()?);
@@ -1600,6 +1623,12 @@ fn server_index_failures_match_readiness_and_recover() -> Result<(), Box<dyn Err
     index_failures_match_readiness_and_recover("server")
 }
 
+fn assert_status_coverage(output: &str, expected: &str) {
+    let coverage = output.lines().next().expect("coverage field");
+    assert!(coverage.starts_with("  Coverage    "), "{output}");
+    assert!(coverage.ends_with(expected), "{output}");
+}
+
 fn index_failures_match_readiness_and_recover(mode: &str) -> Result<(), Box<dyn Error>> {
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
     let home = TempDir::new()?;
@@ -1670,11 +1699,7 @@ fn index_failures_match_readiness_and_recover(mode: &str) -> Result<(), Box<dyn 
         let status = status_after_index(&run, mode)?;
         assert_eq!(status.status.code(), Some(1));
         let stdout = String::from_utf8_lossy(&status.stdout);
-        assert!(
-            stdout.contains("1 / 2 files") && stdout.contains("1 pending · 1 failed"),
-            "{stdout}"
-        );
-        assert!(stdout.contains("Workspace index failed"), "{stdout}");
+        assert_status_coverage(&stdout, "50%  1 / 2 files (failed files)");
         std::fs::write(&broken, "Recovered readable nebula documentation.\n")?;
         embedding.fail.store(false, Ordering::Release);
         let recovered = run(&index_args)?;
@@ -1682,7 +1707,10 @@ fn index_failures_match_readiness_and_recover(mode: &str) -> Result<(), Box<dyn 
         let stdout = String::from_utf8_lossy(&recovered.stdout);
         assert!(stdout.starts_with("Workspace index\nfiles\t"), "{stdout}");
         assert!(stdout.contains("0 failed"), "{stdout}");
-        assert_command_success(&status_after_index(&run, mode)?);
+        let recovered_status = status_after_index(&run, mode)?;
+        assert_command_success(&recovered_status);
+        let stdout = String::from_utf8_lossy(&recovered_status.stdout);
+        assert_status_coverage(&stdout, "100%  2 / 2 files");
         if failed_path == "broken.txt" {
             std::fs::write(&good, "Modified orchard baseline.\n")?;
             embedding.fail.store(true, Ordering::Release);
@@ -1705,7 +1733,10 @@ fn status_after_index(
         let stdout = String::from_utf8_lossy(&status.stdout);
         // Watcher jobs can invalidate a server status scan after a manual job.
         // Retry only that transient state; callers still check exit codes and counts.
-        if mode != "server" || !stdout.starts_with("? Workspace index status is unknown\n") {
+        let unknown = stdout.lines().next().is_some_and(|coverage| {
+            coverage.starts_with("  Coverage    ") && coverage.ends_with("(status unknown)")
+        });
+        if mode != "server" || !unknown {
             return Ok(status);
         }
         assert!(

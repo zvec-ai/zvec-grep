@@ -544,6 +544,16 @@ test("successful raw calls with missing or invalid latency invalidate the standa
     const directory = join(fixture.shard, "stages", phase);
     await mkdir(directory, { recursive: true });
     await writeFile(join(directory, "status.txt"), "Workspace index: ready\n");
+    // Current snapshots hash stderr diagnostics; historical snapshots only
+    // hashed stdout and normalized status. Both remain valid report inputs.
+    const artifactNames = ["status.txt", "status.json"];
+    if (phase === "before") {
+      await writeFile(
+        join(directory, "status.stderr.txt"),
+        "Status diagnostics: indexed=true\n",
+      );
+      artifactNames.push("status.stderr.txt");
+    }
     await writeJson(join(directory, "status.json"), {
       state: "ready",
       root: "/app",
@@ -558,7 +568,7 @@ test("successful raw calls with missing or invalid latency invalidate the standa
     });
     const artifacts = Object.fromEntries(
       await Promise.all(
-        ["status.txt", "status.json"].map(async (name) => [
+        artifactNames.map(async (name) => [
           name,
           await fileHash(join(directory, name)),
         ]),
@@ -580,6 +590,17 @@ test("successful raw calls with missing or invalid latency invalidate the standa
   }
   await fixture.save();
   assert.equal((await fixture.score()).integrity_passed, true);
+  const diagnosticPath = join(fixture.shard, "stages/before/status.stderr.txt");
+  const diagnostics = await readFile(diagnosticPath, "utf8");
+  await writeFile(diagnosticPath, "tampered diagnostics\n");
+  const tampered = await fixture.score();
+  assertNoHeadline(tampered);
+  assert.ok(
+    tampered.integrity_errors.some((error) =>
+      error.includes("snapshot artifact drift: status.stderr.txt"),
+    ),
+  );
+  await writeFile(diagnosticPath, diagnostics);
   for (const invalid of [undefined, null, -1, "slow"]) {
     fixture.calls[1].latency_ms = invalid;
     await fixture.save();

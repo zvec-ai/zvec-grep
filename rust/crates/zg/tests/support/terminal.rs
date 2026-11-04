@@ -52,9 +52,8 @@ impl Action<'_> {
                     [
                         "Scanning workspace",
                         "Indexing files",
-                        "Optimizing index",
-                        "Saving index",
-                        "Finishing index",
+                        "Preparing model",
+                        "Finalizing index",
                     ]
                     .iter()
                     .any(|label| observed.contains(label)),

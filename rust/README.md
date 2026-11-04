@@ -26,6 +26,14 @@ positional query groups should switch to repeated `--hybrid` flags. Explicit
 `--hybrid`, `--fts`, and `--vector` queries stay separate. Direct and Server modes
 use the same parsing; managed `--rg` retains its pattern/path syntax.
 
+Multi-query indexed output labels each nonempty group with its original query
+and position, for example `-- query 2/3: socket timeout --`. Colored output uses
+a dim rule, a magenta label, and a bold query in the terminal's default foreground
+color, preserving contrast on light and dark backgrounds. Control characters become
+spaces so each heading occupies one logical line; long queries remain complete
+and may wrap in narrow terminals. Empty groups stay hidden, and single-query,
+fused, managed-rg, and MCP output keep their existing layouts.
+
 This workspace preserves its own crates, scripts, compatibility fixtures, and
 benchmarks. The application API is centered on one reusable `ZvecGrep` engine
 value:
@@ -49,6 +57,22 @@ zg.close();
 Rg requests return plain text matches and requested context without parsing code
 or Markdown structure. CLI and MCP rg searches share this behavior; current-file
 path lookup keeps its structural entity grouping.
+
+`zg --status` shows only **Coverage**, **Embedding**, **FTS**, and **Storage**.
+Coverage compares the current scan with unchanged indexed files and includes
+any non-ready state. Missing statistics show `Unavailable`; missing embedding
+or FTS configuration shows `Not configured`. `--check-ready` keeps its existing
+exit-code behavior. The daemon and MCP status APIs retain their full metadata.
+`--debug` also writes the complete structured status snapshot to stderr.
+
+Interactive indexing retains a compact record of each major stage. File counts
+and model downloads update at most eight times per second; optimization, saving,
+and cleanup share a stable "Finalizing index" heading. Fast stages remain in
+scrollback without delaying indexing. Only the final CLI result reports readiness.
+Index progress uses the Node CLI's green gradient and diamond markers; status
+coverage uses the same gradient.
+`NO_COLOR` and `--color never` disable color; redirected or dumb-terminal progress
+remains line-oriented.
 
 Index embedding concurrency is configured with
 `zg --index --embedding-concurrency <n>`.
@@ -494,13 +518,11 @@ clients retain reverse form elicitation. Consent is rechecked before execution.
 ## MCP request lifecycle
 
 Search accepts `preview: "short"` (the default) or `preview: "full"` in both
-toolsets. Short preview shows up to ten source lines around the matched range
-and seven available outline lines. Full preview preserves all available source
-and outline content of each retrieved item; it neither reads whole files nor
-changes retrieval or ranking. Responses include query groups, selection reasons,
-matched ranges, source line numbers, and available code or Markdown metadata.
-The current engine supplies source snapshots without generated outlines; the
-optional outline is displayed only when provided with a result.
+toolsets. Both modes include a required MCP `freshness:` header and reuse CLI
+result content and diagnostic conditions. Short preview shows up to ten source lines around the matched range;
+full preview preserves all available source content of each retrieved item.
+Neither mode reads whole files, changes retrieval or ranking, or displays
+generated outlines. CLI `none` and `detail` previews remain CLI-only.
 
 The engine provides `content_range` for the exact source coordinates of returned
 content, independently of the entity `range` and matched `excerpt_range`. CLI and
@@ -520,11 +542,13 @@ coordinates. Terminal highlighting uses these actual matches, preserving regex,
 case, whole-word, and pattern-file semantics. Empty ranges are omitted; older
 replies without this field remain readable.
 
-Public search reports `freshness: fresh` or `freshness: possibly_stale`.
-`results: served_from_current_index` describes where results came from, with
-`background_refresh` reported separately. A provider that only reports current
-index provenance without verified freshness is conservatively shown as
-`possibly_stale`; a successful waited refresh reports `fresh`.
+Search still honors `autoUpdate` and `freshness: "wait_for_fresh"` for refresh
+timing. Global freshness and indexing diagnostics precede the result body in
+MCP's single text response, separated by a blank line, including empty results
+and fresh hits served from an incomplete index. Healthy results only add the
+`freshness: fresh` header. Per-item status stays within each hit. CLI diagnostics
+use stderr, so consistency means matching content and conditions rather than
+concatenating stdout and stderr in the same order.
 
 Search and index accept `globs` and `insensitiveGlobs` as a string or list;
 case-insensitive string rules follow case-sensitive string rules. Index string
@@ -821,7 +845,8 @@ build policy above: no toolkit produces a CPU-only package. Use
 `npm run release:cpu` to explicitly produce a CPU-only package; CI supplies and
 audits a complete CUDA bundle before packaging the default x64 releases.
 
-Later add CUDA with `ZG_INSTALL_ACCELERATOR=cuda npm rebuild -g @zvec/zvec-grep`
+Later add CUDA with
+`ZG_INSTALL_ACCELERATOR=cuda npm rebuild -g @zvec/zvec-grep --allow-scripts=@zvec/zvec-grep`
 (omit `-g` for project-local installs). `ZG_PLUGIN_DIR` selects an absolute local
 artifact directory; `ZG_INSTALL_OFFLINE=1` prevents network access. Stop zg before
 adding plugins and restart any daemon afterwards. There is no `zg-setup` command
@@ -1053,8 +1078,8 @@ Supplemental license collections and SPDX SBOMs in [`npm/compliance/`](npm/compl
 are optional. Every release package includes the project `LICENSE`, and bundled
 upstream notices are preserved.
 Every publication uses `rust-canary`, letting users opt into Rust with
-`npm install --global @zvec/zvec-grep@rust-canary`. Six native runners then
-install only the meta package from the registry, test actual daemon IPC, and
+`npm install --global @zvec/zvec-grep@rust-canary --allow-scripts=@zvec/zvec-grep`.
+Six native runners then install only the meta package from the registry, test actual daemon IPC, and
 exercise update and rollback with a distinct previously published version.
 Selecting `latest` requests a separate promotion job that changes the default
 installation only after all registry checks pass.

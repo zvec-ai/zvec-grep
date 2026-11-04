@@ -59,8 +59,9 @@ Use `ZG_INSTALL_ACCELERATOR=cpu|auto|cuda` (default `auto`) with npm install or
 rebuild. `cpu` skips detection/downloads; `cuda` explicitly requests plugins even
 on a GPU-free builder and fails on any plugin error. Auto failures retain CPU
 with diagnostics. A forced plugin failure also leaves the CPU core intact.
-Later use `ZG_INSTALL_ACCELERATOR=cuda npm rebuild -g @zvec/zvec-grep` (omit `-g`
-for project-local installs). Stop zg first and restart the daemon afterwards.
+Later use
+`ZG_INSTALL_ACCELERATOR=cuda npm rebuild -g @zvec/zvec-grep --allow-scripts=@zvec/zvec-grep`
+(omit `-g` for project-local installs). Stop zg first and restart the daemon afterwards.
 There is no extra setup command or runtime downloading.
 
 `ZG_PLUGIN_DIR` is an authoritative absolute directory of exact-version `.tgz`

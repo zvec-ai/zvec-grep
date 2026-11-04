@@ -43,6 +43,45 @@ const groupedReadyStatus = `✓ Workspace index is ready
   Nested Git  included
 `;
 
+const compactReadyStatus = `  Coverage    ████████████████████ 100%  381 / 381 files
+  Embedding   local/potion-code-16m-v2
+              256 dimensions · cosine
+  FTS         tokenizer=jieba filters=lowercase
+  Storage     .zvec-grep/generations/current/storage
+`;
+
+function readyDiagnostics() {
+  return {
+    state: "ready",
+    info: {
+      root: "/tmp/corpus",
+      indexed: true,
+      compatibility: { status: "compatible", version: 2 },
+      index_policy: "enabled",
+      index_path: "/tmp/corpus/.zvec-grep/generations/current/storage",
+      workspace_index: {
+        embedding: { provider: "local", model: "potion-code-16m-v2" },
+      },
+      status: {
+        files_scanned: 381,
+        files_indexed: 381,
+        files_unchanged: 381,
+        files_pending: 0,
+        files_failed: 0,
+        files_added: 0,
+        files_modified: 0,
+        files_deleted: 0,
+        entities_indexed: 4269,
+        indexed_size_bytes: 3060923,
+      },
+    },
+  };
+}
+
+function diagnosticsLine(value) {
+  return `Status diagnostics: ${JSON.stringify(value)}\n`;
+}
+
 test("the packed Rust npm metadata resolves to a native zg binary", () => {
   const root = "/tmp/candidate/node_modules/@zvec/zvec-grep";
   assert.deepEqual(
@@ -141,6 +180,130 @@ Indexed source size: 3060923 bytes
 `;
     assert.deepEqual(parseNativeStatus(stdout), parseNativeStatus(legacy));
   }
+});
+
+test("structured status preserves exact audit fields independently of human output", () => {
+  const expected = parseNativeStatus(groupedReadyStatus);
+  for (const stdout of [
+    compactReadyStatus,
+    "human presentation can change\n",
+  ]) {
+    assert.deepEqual(
+      parseNativeStatus(stdout, {
+        stderr: `other debug output\n${diagnosticsLine(readyDiagnostics())}`,
+      }),
+      expected,
+    );
+  }
+  assert.deepEqual(
+    parseNativeStatus(groupedReadyStatus, {
+      stderr: "Status diagnostics: indexed=true\n",
+    }),
+    expected,
+  );
+  assert.throws(() => parseNativeStatus(compactReadyStatus), /omitted state/);
+});
+
+test("structured non-ready or incomplete indexes remain product failures", () => {
+  for (const change of [
+    (value) => {
+      value.state = "stale";
+    },
+    (value) => {
+      value.state = "failed";
+      value.info.status = null;
+    },
+    (value) => {
+      value.info.status.files_pending = 1;
+    },
+    (value) => {
+      value.info.status.files_failed = 1;
+    },
+    (value) => {
+      value.info.status.files_added = 1;
+    },
+    (value) => {
+      value.info.status.files_modified = 1;
+    },
+    (value) => {
+      value.info.status.files_deleted = 1;
+    },
+    (value) => {
+      value.info.status.files_unchanged = 380;
+    },
+    (value) => {
+      value.info.status.entities_indexed = 0;
+    },
+  ]) {
+    const value = readyDiagnostics();
+    change(value);
+    assert.throws(
+      () =>
+        parseNativeStatus(groupedReadyStatus, {
+          stderr: diagnosticsLine(value),
+        }),
+      NativeIndexProductError,
+    );
+  }
+});
+
+test("malformed structured diagnostics never fall back to a ready human heading", () => {
+  for (const change of [
+    (value) => {
+      delete value.state;
+    },
+    (value) => {
+      value.info.indexed = false;
+    },
+    (value) => {
+      value.info.index_policy = "disabled";
+    },
+    (value) => {
+      value.info.compatibility.status = "rebuild_required";
+    },
+    (value) => {
+      value.info.root = "relative/corpus";
+    },
+    (value) => {
+      value.info.index_path = "relative/storage";
+    },
+    (value) => {
+      delete value.info.workspace_index.embedding;
+    },
+    (value) => {
+      delete value.info.status.indexed_size_bytes;
+    },
+    (value) => {
+      value.info.status.indexed_size_bytes = Number.MAX_SAFE_INTEGER + 1;
+    },
+    (value) => {
+      value.info.status.files_pending = "0";
+    },
+  ]) {
+    const value = readyDiagnostics();
+    change(value);
+    assert.throws(
+      () =>
+        parseNativeStatus(groupedReadyStatus, {
+          stderr: diagnosticsLine(value),
+        }),
+      { name: "AssertionError" },
+    );
+  }
+  assert.throws(
+    () =>
+      parseNativeStatus(groupedReadyStatus, {
+        stderr: "Status diagnostics: {invalid\n",
+      }),
+    { name: "SyntaxError" },
+  );
+  assert.throws(
+    () =>
+      parseNativeStatus(groupedReadyStatus, {
+        stderr: diagnosticsLine(readyDiagnostics()).repeat(2),
+      }),
+    /ambiguous/,
+  );
 });
 
 test("grouped status accepts ANSI, CRLF, ASCII coverage and candidate HOME paths", () => {
@@ -350,12 +513,13 @@ test("successful status retains its existing snapshot identity", async (t) => {
   assert.equal(summary.fragments, 42);
   assert.deepEqual(Object.keys(summary.artifacts).sort(), [
     "status.json",
+    "status.stderr.txt",
     "status.txt",
   ]);
   assert.equal(await readFile(join(output, "status.txt"), "utf8"), stdout);
 });
 
-test("legacy and grouped snapshots share logical identity and retain raw evidence", async (t) => {
+test("legacy, grouped and structured snapshots share identity and retain raw evidence", async (t) => {
   const output = await mkdtemp(join(tmpdir(), "zg-retrieval-grouped-"));
   t.after(() => rm(output, { recursive: true, force: true }));
   const outputs = [
@@ -368,6 +532,7 @@ Entities: 4269
 Indexed source size: 3060923 bytes
 `,
     groupedReadyStatus.replace("  /tmp/corpus", "  ~/corpus"),
+    compactReadyStatus,
   ];
   const snapshots = [];
   for (const [index, stdout] of outputs.entries()) {
@@ -390,7 +555,7 @@ Indexed source size: 3060923 bytes
           assert.equal(options.env.HOME, "/tmp");
           return {
             stdout,
-            stderr: "",
+            stderr: index === 2 ? diagnosticsLine(readyDiagnostics()) : "",
             code: 0,
             signal: null,
             timed_out: false,
@@ -404,8 +569,16 @@ Indexed source size: 3060923 bytes
     snapshots[0].logical_content_sha256,
     snapshots[1].logical_content_sha256,
   );
+  assert.equal(
+    snapshots[0].logical_content_sha256,
+    snapshots[2].logical_content_sha256,
+  );
   assert.equal(snapshots[1].files, 381);
   assert.equal(snapshots[1].fragments, 4269);
+  assert.equal(
+    await readFile(join(output, "2", "status.stderr.txt"), "utf8"),
+    diagnosticsLine(readyDiagnostics()),
+  );
 });
 
 test("Rust-generated optional and referenced JSON Schema variants are resolved", () => {

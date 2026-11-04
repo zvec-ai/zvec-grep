@@ -30,6 +30,23 @@ struct Fixture {
     server_started: bool,
 }
 
+fn assert_ready_coverage(output: &str) {
+    let coverage = output.lines().next().expect("coverage field");
+    assert!(coverage.starts_with("  Coverage    "), "{output}");
+    let (progress, counts) = coverage.rsplit_once('%').expect("coverage percentage");
+    let (completed, total) = counts
+        .trim()
+        .strip_suffix(" files")
+        .expect("ready coverage has no failure or pending state")
+        .split_once(" / ")
+        .expect("coverage file counts");
+    assert_eq!(completed, total, "{output}");
+    assert!(
+        progress.ends_with(if total == "0" { "  0" } else { "100" }),
+        "{output}"
+    );
+}
+
 impl Fixture {
     fn new() -> Self {
         Self {
@@ -71,9 +88,16 @@ impl Fixture {
     }
 
     fn assert_model(&self, mode: &str, reference: &str) {
-        let output = self.success(&["--status", "--mode", mode, "--color", "never"]);
+        let output = self.success(&[
+            "--status",
+            "--mode",
+            mode,
+            "--check-ready",
+            "--color",
+            "never",
+        ]);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("✓ Workspace index is ready"), "{stdout}");
+        assert_ready_coverage(&stdout);
         assert!(
             stdout.contains(&format!("  Embedding   {reference}")),
             "{stdout}"
@@ -100,7 +124,7 @@ fn success(output: Output) -> Output {
 }
 
 #[test]
-fn status_uses_grouped_layout_compact_paths_and_explicit_color_policy() {
+fn status_shows_only_four_fields_and_respects_explicit_color_policy() {
     let fixture = Fixture::new();
     let root = fs::canonicalize(fixture.root.path()).expect("canonical workspace");
     let run = |color: &str, no_color: bool| {
@@ -117,12 +141,21 @@ fn status_uses_grouped_layout_compact_paths_and_explicit_color_policy() {
 
     let plain = run("never", false);
     assert!(
-        plain.starts_with("? Workspace index is not configured\n  ~\n"),
+        plain.starts_with("  Coverage    Unavailable (index not configured)\n"),
         "{plain}"
     );
+    let fields = plain
+        .lines()
+        .filter_map(|line| line.strip_prefix("  "))
+        .filter(|line| !line.starts_with(' '))
+        .filter_map(|line| line.split_whitespace().next())
+        .collect::<Vec<_>>();
+    assert_eq!(fields, ["Coverage", "Embedding", "FTS", "Storage"]);
+    assert!(plain.contains("  Embedding   Not configured\n"), "{plain}");
+    assert!(plain.contains("  FTS         Not configured\n"), "{plain}");
     let storage = std::path::Path::new(".zvec-grep").join("index");
     assert!(
-        plain.contains(&format!("\n\n  Storage     {}", storage.display())),
+        plain.contains(&format!("\n  Storage     {}", storage.display())),
         "{plain}"
     );
     assert!(!plain.contains("\u{1b}["), "{plain}");
@@ -141,11 +174,11 @@ fn status_uses_grouped_layout_compact_paths_and_explicit_color_policy() {
     assert_eq!(run("never", true), plain);
 
     let colored = run("always", true);
+    assert!(colored.contains("index not configured"), "{colored:?}");
     assert!(
-        colored.contains("\u{1b}[33m? Workspace index is not configured\u{1b}[0m"),
+        colored.contains(&format!("\u{1b}[36m{}\u{1b}[0m", storage.display())),
         "{colored:?}"
     );
-    assert!(colored.contains("\u{1b}[36m~\u{1b}[0m"), "{colored:?}");
     assert!(
         colored.contains("\u{1b}[2mStorage     \u{1b}[0m"),
         "{colored:?}"
@@ -156,11 +189,65 @@ fn status_uses_grouped_layout_compact_paths_and_explicit_color_policy() {
     );
 }
 
+// macOS filesystems reject non-UTF-8 names before the CLI can observe them.
+#[cfg(target_os = "linux")]
+#[test]
+fn status_debug_preserves_exit_behavior_in_non_utf8_workspace() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+    let fixture = Fixture::new();
+    let root = fixture
+        .root
+        .path()
+        .join(OsString::from_vec(b"workspace-\xff".to_vec()));
+    fs::create_dir(&root).expect("non-UTF-8 workspace");
+    let root = fs::canonicalize(root).expect("canonical workspace");
+    for check_ready in [false, true] {
+        let mut args = vec!["--status", "--mode", "direct", "--color", "never"];
+        if check_ready {
+            args.push("--check-ready");
+        }
+        let plain = fixture
+            .command(&args)
+            .current_dir(&root)
+            .output()
+            .expect("normal status");
+        args.push("--debug");
+        let debug = fixture
+            .command(&args)
+            .current_dir(&root)
+            .output()
+            .expect("debug status");
+        let stderr = String::from_utf8(debug.stderr).expect("UTF-8 diagnostics");
+        assert_eq!(plain.status.code(), Some(i32::from(check_ready)));
+        assert_eq!(debug.status.code(), plain.status.code(), "{stderr}");
+        assert_eq!(debug.stdout, plain.stdout);
+        let diagnostics = stderr
+            .lines()
+            .find_map(|line| line.strip_prefix("Status diagnostics: "))
+            .expect("status diagnostics");
+        let diagnostics: serde_json::Value =
+            serde_json::from_str(diagnostics).expect("JSON diagnostics");
+        assert_eq!(diagnostics["state"], "uninitialized");
+        assert_eq!(diagnostics["info"]["root"], root.to_string_lossy().as_ref());
+        assert_eq!(
+            diagnostics["info"]["index_path"],
+            root.join(".zvec-grep/index").to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            stderr.contains("Error: workspace index is not ready"),
+            check_ready,
+            "{stderr}"
+        );
+    }
+    assert!(!root.join(".zvec-grep").exists());
+}
+
 #[test]
 fn status_check_ready_keeps_direct_and_server_exit_semantics() {
     let mut fixture = Fixture::new();
     fixture.start_server();
-    let check = |heading: &str, ready: bool| {
+    let check = |expected_state: Option<&str>, ready: bool| {
         for mode in ["direct", "server"] {
             let output = fixture
                 .command(&[
@@ -176,20 +263,31 @@ fn status_check_ready_keeps_direct_and_server_exit_semantics() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert_eq!(output.status.success(), ready, "{mode}: {stdout}\n{stderr}");
-            assert!(stdout.starts_with(heading), "{mode}: {stdout}");
+            let coverage = stdout.lines().next().expect("coverage field");
+            assert!(coverage.starts_with("  Coverage    "), "{mode}: {stdout}");
+            if let Some(state) = expected_state {
+                assert!(
+                    coverage.ends_with(&format!("({state})")),
+                    "{mode}: {stdout}"
+                );
+            }
             assert_eq!(
                 stderr.contains("workspace index is not ready"),
                 !ready,
                 "{mode}: {stderr}"
             );
             if ready {
-                assert!(stdout.contains("  Coverage    "), "{mode}: {stdout}");
+                assert_ready_coverage(&stdout);
                 assert!(stdout.contains("0 / 0 files"), "{mode}: {stdout}");
+            } else if expected_state == Some("needs update") {
+                assert!(coverage.contains("0 / 1 files"), "{mode}: {stdout}");
+            } else {
+                assert!(coverage.contains("Unavailable"), "{mode}: {stdout}");
             }
         }
     };
 
-    check("? Workspace index is not configured", false);
+    check(Some("index not configured"), false);
     // An empty local index never loads or downloads the embedding model.
     fixture.success(&[
         "--index",
@@ -200,9 +298,9 @@ fn status_check_ready_keeps_direct_and_server_exit_semantics() {
         "--color",
         "never",
     ]);
-    check("✓ Workspace index is ready", true);
+    check(None, true);
     fs::write(fixture.root.path().join("added.rs"), "fn added() {}\n").expect("new source file");
-    check("! Workspace index needs an update", false);
+    check(Some("needs update"), false);
 }
 
 fn with_closed_stdout(mut command: Command) -> Output {
@@ -896,7 +994,7 @@ fn auto_and_server_build_at_the_query_root_not_the_daemon_working_directory() {
                 .expect("query workspace status"),
         );
         let stdout = String::from_utf8_lossy(&status.stdout);
-        assert!(stdout.contains("✓ Workspace index is ready"), "{stdout}");
+        assert_ready_coverage(&stdout);
         assert!(
             stdout.contains(&format!("  Embedding   {expected}")),
             "{stdout}"
@@ -944,7 +1042,7 @@ fn disabled_workspace_is_not_rebuilt_from_a_nested_query_directory() {
         let status = fixture.success(&["--status", "--mode", mode, "--color", "never"]);
         let stdout = String::from_utf8_lossy(&status.stdout);
         assert!(
-            stdout.contains("○ Workspace indexing is disabled"),
+            stdout.starts_with("  Coverage    Unavailable (indexing disabled)\n"),
             "{stdout}"
         );
         assert!(!nested.join(".zvec-grep").exists());

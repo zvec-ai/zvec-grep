@@ -23,8 +23,8 @@ runtime libraries and cuDNN remain separate requirements.
 Stop running zg/daemon processes before adding plugins. On Linux, for example:
 
 ```sh
-ZG_INSTALL_ACCELERATOR=cpu npm install -g @zvec/zvec-grep
-ZG_INSTALL_ACCELERATOR=cuda npm rebuild -g @zvec/zvec-grep --foreground-scripts
+ZG_INSTALL_ACCELERATOR=cpu npm install -g @zvec/zvec-grep --allow-scripts=@zvec/zvec-grep
+ZG_INSTALL_ACCELERATOR=cuda npm rebuild -g @zvec/zvec-grep --allow-scripts=@zvec/zvec-grep --foreground-scripts
 ```
 
 For project-local installations, omit `-g` and run in the project directory.
@@ -46,7 +46,8 @@ Retry with `zg --install --upgrade-installed`, or preview changes with
 configuration locations, respects directory overrides, and reports unsupported
 custom launchers for manual handling. Repeated runs make no additional changes.
 
-In PowerShell, set `$env:ZG_INSTALL_ACCELERATOR = 'cuda'` before `npm rebuild`,
+In PowerShell, set `$env:ZG_INSTALL_ACCELERATOR = 'cuda'` before
+`npm rebuild -g @zvec/zvec-grep --allow-scripts=@zvec/zvec-grep`,
 then remove that environment variable when finished. There is no `zg-setup`
 command. Restart any previously running daemon after successful installation.
 CPU mode disables downloads; it does not uninstall already verified plugins.
@@ -85,5 +86,6 @@ Windows/macOS/Linux environments). CLI execution does not require Node or npm.
 
 `--ignore-scripts` skips CPU bootstrap too and leaves a placeholder command.
 Explicitly allow this package's lifecycle scripts in your npm policy, then use
-`npm rebuild -g @zvec/zvec-grep --ignore-scripts=false` to initialize it. If the
-platform dependency was omitted, reinstall without `--omit=optional` first.
+`npm rebuild -g @zvec/zvec-grep --allow-scripts=@zvec/zvec-grep --ignore-scripts=false`
+to initialize it. If the platform dependency was omitted, reinstall without
+`--omit=optional` first.

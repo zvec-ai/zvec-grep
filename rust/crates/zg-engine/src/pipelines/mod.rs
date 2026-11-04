@@ -4,3 +4,5 @@ pub(crate) mod direct_search;
 pub(crate) mod indexed_search;
 pub(crate) mod indexing;
 pub(crate) mod path_search;
+
+mod read_access;

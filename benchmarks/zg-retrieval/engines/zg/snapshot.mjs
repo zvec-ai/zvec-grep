@@ -146,11 +146,114 @@ function parseGroupedStatus(stdout, home) {
   };
 }
 
-export function parseNativeStatus(stdout, { home = homedir() } = {}) {
+function parseStatusDiagnostics(stderr) {
+  const diagnostics = stripVTControlCharacters(stderr)
+    .replaceAll("\r\n", "\n")
+    .split("\n")
+    .filter((line) => line.startsWith("Status diagnostics: "))
+    .map((line) => line.slice("Status diagnostics: ".length))
+    // Historical candidates only reported indexed=true/false here.
+    .filter((line) => !/^indexed=(true|false)$/.test(line));
+  if (diagnostics.length === 0) return null;
+  assert.equal(diagnostics.length, 1, "ambiguous native status diagnostics");
+  const { state, info } = JSON.parse(diagnostics[0]);
+  assert.ok(
+    [
+      "ready",
+      "stale",
+      "failed",
+      "unknown",
+      "uninitialized",
+      "disabled",
+      "missing",
+      "rebuild_required",
+    ].includes(state),
+    "native diagnostics omitted a valid state",
+  );
+  requireSearchable(state === "ready", "native index is not ready");
+  assert.equal(
+    info?.indexed,
+    true,
+    "ready native diagnostics must have an index",
+  );
+  assert.equal(
+    info.index_policy,
+    "enabled",
+    "ready native index must be enabled",
+  );
+  assert.equal(
+    info.compatibility?.status,
+    "compatible",
+    "ready native index must be compatible",
+  );
+  assert.ok(
+    typeof info.root === "string" && isAbsolute(info.root),
+    "native status root is not absolute",
+  );
+  assert.ok(
+    typeof info.index_path === "string" && isAbsolute(info.index_path),
+    "native status index path is not absolute",
+  );
+  const embedding = info.workspace_index?.embedding;
+  assert.ok(
+    typeof embedding?.provider === "string" &&
+      embedding.provider.length > 0 &&
+      typeof embedding?.model === "string" &&
+      embedding.model.length > 0,
+    "native diagnostics omitted embedding",
+  );
+  const stats = info.status;
+  for (const name of [
+    "files_scanned",
+    "files_indexed",
+    "files_pending",
+    "files_failed",
+    "files_added",
+    "files_modified",
+    "files_deleted",
+    "files_unchanged",
+    "entities_indexed",
+    "indexed_size_bytes",
+  ]) {
+    assert.ok(
+      Number.isSafeInteger(stats?.[name]) && stats[name] >= 0,
+      `invalid ${name}`,
+    );
+  }
+  requireSearchable(
+    stats.files_added === 0 &&
+      stats.files_modified === 0 &&
+      stats.files_deleted === 0,
+    "native index still has changed files",
+  );
+  requireSearchable(
+    stats.files_unchanged === stats.files_scanned,
+    "native index coverage is incomplete",
+  );
+  return {
+    state,
+    root: info.root,
+    index_path: info.index_path,
+    embedding: `${embedding.provider}/${embedding.model}`,
+    files_scanned: stats.files_scanned,
+    files_indexed: stats.files_indexed,
+    files_pending: stats.files_pending,
+    files_failed: stats.files_failed,
+    entities_indexed: stats.entities_indexed,
+    indexed_source_bytes: stats.indexed_size_bytes,
+  };
+}
+
+export function parseNativeStatus(
+  stdout,
+  { home = homedir(), stderr = "" } = {},
+) {
   const text = stripVTControlCharacters(stdout).replaceAll("\r\n", "\n");
-  const status = /^Workspace index: /m.test(text)
-    ? parseLegacyStatus(text)
-    : parseGroupedStatus(text, home);
+  const status =
+    parseStatusDiagnostics(stderr) ??
+    (/^Workspace index: /m.test(text)
+      ? parseLegacyStatus(text)
+      : parseGroupedStatus(text, home));
   for (const [name, value] of Object.entries(status))
     if (typeof value === "number")
       assert.ok(Number.isSafeInteger(value) && value >= 0, `invalid ${name}`);
@@ -194,7 +297,10 @@ export async function snapshotIndex({
     throw error;
   }
   await writeStatusEvidence(output, result);
-  const status = parseNativeStatus(result.stdout, { home: env?.HOME });
+  const status = parseNativeStatus(result.stdout, {
+    home: env?.HOME,
+    stderr: result.stderr,
+  });
   assert.equal(
     status.root,
     root,
@@ -234,7 +340,7 @@ export async function snapshotIndex({
   };
   summary.artifacts = Object.fromEntries(
     await Promise.all(
-      ["status.txt", "status.json"].map(async (path) => [
+      ["status.txt", "status.stderr.txt", "status.json"].map(async (path) => [
         path,
         await fileHash(join(output, path)),
       ]),

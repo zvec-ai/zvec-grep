@@ -8,10 +8,13 @@ use crate::{
         context::{ContextOptions, ContextResult},
         index::IndexOptions,
     },
-    domain::{IndexState, Workspace, WorkspaceLayout, model::ModelConfig},
+    domain::{IndexState, Workspace, model::ModelConfig},
     models::{ModelError, ModelRuntimeLease, ModelRuntimeManager, ModelRuntimeRequest},
-    pipelines::indexing::service::{
-        WorkspaceIndexService, assert_embedding_compatible, environment_api_key,
+    pipelines::{
+        indexing::service::{
+            WorkspaceIndexService, assert_embedding_compatible, environment_api_key,
+        },
+        read_access::{ReadSource, acquire_read_source},
     },
     storage::{
         IndexStore,
@@ -19,9 +22,7 @@ use crate::{
     },
     utils::{directory_exists, resolve_directory},
     workspace::{
-        credentials::decrypt_api_key,
-        find_nearest_workspace,
-        lock::{LockWait, try_acquire_workspace_read},
+        credentials::decrypt_api_key, find_nearest_workspace, lock::LockWait,
         manifest::read_workspace_manifest,
     },
 };
@@ -72,19 +73,27 @@ pub(crate) async fn context(
     let allows_writer = options.refresh.map_or(!options.auto_update, |policy| {
         policy != crate::api::context::options::RefreshPolicy::Wait
     });
-    let _lock = loop {
-        wait.check_cancelled()?;
-        if allows_writer
-            && let Some(result) =
-                try_writer_context(indexing, models, &source_root, &layout, options, &request)
-                    .await?
-        {
-            return Ok(result);
+    let _lock = match acquire_read_source(
+        &source_root,
+        &layout,
+        &wait,
+        "context",
+        allows_writer.then_some(&indexing.writers),
+        |writer| prepare_writer_context(models, options, &request, writer),
+    )
+    .await?
+    {
+        ReadSource::Writer { lease, context } => {
+            return query_storage(
+                &context,
+                &lease.session.workspace,
+                &lease.session.storage,
+                options,
+                &request,
+            )
+            .await;
         }
-        if let Some(lock) = try_acquire_workspace_read(&source_root, &layout, "context")? {
-            break lock;
-        }
-        wait.wait_for_retry(layout.storage_dir(), "context").await?;
+        ReadSource::Read(lock) => lock,
     };
     let workspace = read_workspace_manifest(&source_root, &layout)?.ok_or_else(|| {
         workspace_index_unavailable(&source_root, "workspace manifest disappeared")
@@ -125,35 +134,26 @@ pub(crate) async fn context(
     Ok(result)
 }
 
-async fn try_writer_context(
-    indexing: &WorkspaceIndexService,
+fn prepare_writer_context(
     models: &ModelRuntimeManager,
-    source_root: &Path,
-    layout: &WorkspaceLayout,
     options: &ContextOptions,
     request: &super::context::NormalizedContextRequest,
-) -> Result<Option<ContextResult>, EngineError> {
-    let Some(writer) = indexing.writers.borrow(layout.storage_dir()) else {
-        return Ok(None);
-    };
-    let Some(active) = read_workspace_manifest(source_root, layout)? else {
-        return Ok(None);
-    };
-    let workspace = &writer.session.workspace;
-    if !active.index_enabled() || active.storage_generation() != workspace.storage_generation() {
-        return Ok(None);
-    }
+    writer: &super::writer::WriterSession,
+) -> Result<Option<Vec<ModelRuntimeLease>>, EngineError> {
+    let workspace = &writer.workspace;
     let acquired = if uses_vectors(request) {
         let schema = workspace
             .index()
             .descriptor()
             .map(crate::domain::IndexDescriptor::default_embedding_model)
             .ok_or_else(|| {
-                workspace_index_unavailable(source_root, "writer model information is missing")
+                workspace_index_unavailable(
+                    workspace.source_root(),
+                    "writer model information is missing",
+                )
             })?;
         let model_request = search_model_request(workspace, schema, options)?;
         if !writer
-            .session
             .models
             .first()
             .is_some_and(|model| model.matches_query_request(&model_request))
@@ -169,15 +169,7 @@ async fn try_writer_context(
     } else {
         Vec::new()
     };
-    query_storage(
-        &acquired,
-        workspace,
-        &writer.session.storage,
-        options,
-        request,
-    )
-    .await
-    .map(Some)
+    Ok(Some(acquired))
 }
 
 fn uses_vectors(request: &super::context::NormalizedContextRequest) -> bool {

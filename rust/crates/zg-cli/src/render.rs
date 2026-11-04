@@ -445,6 +445,8 @@ Result options:
 Preview modes: none keeps one source line; short uses compact bounded source;
 full uses compact full source; detail adds metadata, outlines, and file grouping.
 Full previews do not retrieve an entire function or file. TTY affects only color.
+Multi-query results start each nonempty group with its original query and position.
+Plain output uses -- query i/n: text --; colored output adds a dim separator rule.
 Auto colors terminal output and leaves pipes plain; NO_COLOR disables auto color.
 Use --color always to retain color in pipes, or --color never to disable it.
 
@@ -498,15 +500,16 @@ See zg --help environment for precedence and Server-mode scope."#;
 const INDEX_HELP: &str = r"Usage:
   zg --index [root] [options]
   zg --index [root] --rebuild [options]
-  zg --index [root] --drop [--yes]
+  zg --index [root] --drop
 
 Index options:
   --rebuild                         Rebuild the existing index
   --drop                            Permanently remove the workspace index
-  --yes                             Confirm --drop without prompting
   --debug                           Print skipped-file diagnostics to stderr
   --mode <direct|server|auto>       Select indexing transport
   --color <auto|always|never>       Color output (default: auto)
+
+Dropping an index runs immediately without a confirmation prompt.
 
 Embedding options:
   --embedding <model>               Single text embedding model for this workspace
@@ -594,8 +597,9 @@ See zg --help environment for precedence and Server-mode scope.";
 const STATUS_HELP: &str = r"Usage:
   zg --status [root] [--mode <direct|server|auto>] [--check-ready]
 
-Shows the nearest workspace root, index policy, index state, embedding model,
-stored paths, refresh status, and suggested next action.
+Shows Coverage, Embedding, FTS, and Storage for the nearest workspace.
+Coverage includes the file counts and any non-ready state; unavailable
+statistics are shown as Unavailable with the current state.
 
 --check-ready preserves the normal output and exits non-zero unless the
 Workspace index is ready.

@@ -22,7 +22,9 @@ The **Retrieval results** job publishes one page with a suite overview and a sep
 | zg-fts | `fts: [originalQuestion]` | Rust MCP default |
 | zg-vector | `vector: [originalQuestion]` | Rust MCP default |
 
-Every request also uses `limit: 10`, `autoUpdate: false`, `freshness: eventual` and `preferSymbol: false`. FTS and vector requests omit `query` and the other route. The benchmark does not send a `preview` field because the Rust MCP schema does not expose it. The product retains its native chunking, aggregation, ranking and bounded response presentation.
+Every request also uses `limit: 10`, `autoUpdate: false`, `freshness: eventual` and `preferSymbol: false`. FTS and vector requests omit `query` and the other route. The benchmark leaves `preview` unset to measure the default presentation. The product retains its native chunking, aggregation, ranking and bounded response presentation.
+
+The public response parser requires the MCP `freshness:` header and accepts both the legacy MCP body and the CLI compact body. Compact output does not expose per-hit route labels, so unavailable routes remain `null`; the parser never invents route evidence from the requested mode. Route validation still rejects any reported label that conflicts with the requested mode. Global CLI freshness and indexing diagnostics remain visible evidence before the compact body; legacy trailing diagnostics are also supported.
 
 | Column | Meaning / aggregation |
 | --- | --- |
@@ -48,6 +50,12 @@ All five quality metrics use the same file labels and normalized-path matching. 
 `metrics/ndcg.mjs` uses first-target rank, binary gain and target-count IDCG. It is checked against a byte-identical pinned Python scoring reference, with its MIT attribution preserved in [`test/fixtures/ndcg-reference/`](test/fixtures/ndcg-reference/). The reference is used only by unit tests. The benchmark runs only ZG.
 
 Questions, labels and reports remain outside indexed source checkouts. Indexing applies the frozen code-extension and size policy while retaining ZG's native ignore rules. Repository indexes are never cached; model downloads and compiled candidate packages may be cached. Corpus and model inventories plus the Rust CLI's public aggregate index status are checked before and after retrieval. Model identity includes artifact contents but excludes only the runtime-generated `.zvec-grep-artifacts-<24hex>.complete` cache marker, whose machine-specific timestamps do not identify model weights.
+
+Index audits prefer the structured `Status diagnostics` snapshot on stderr from
+`zg --status --check-ready --debug`. It preserves exact source bytes, entity
+counts and readiness independently of the compact human layout. Historical
+candidates without that snapshot retain the legacy status parser; missing audit
+fields are never inferred from a coverage bar. Raw stdout and stderr are retained.
 
 Rust candidates are built through the [shared package Action](../../.github/actions/rust-candidate-package/action.yml); its [manifest utility](../shared/rust-package-cache.mjs) binds each tarball to the exact source commit and package bytes. SWE-QA uses the same packaging path while retaining its own evaluation protocol.
 

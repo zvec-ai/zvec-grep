@@ -100,6 +100,9 @@ fn models_help_uses_the_rust_transformers_backend_name() {
 #[test]
 fn index_help_uses_root_paths_without_workspace_names() {
     let help = stdout(&["--index", "--help"]);
+    assert!(help.contains("zg --index [root] --drop\n"));
+    assert!(!help.contains("--yes"));
+    assert!(help.contains("Dropping an index runs immediately without a confirmation prompt."));
     assert!(!help.contains("--name"));
     assert!(help.contains("identified by their root paths"));
     assert!(help.contains("Scan rules:"));

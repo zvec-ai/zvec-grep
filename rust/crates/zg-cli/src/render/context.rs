@@ -5,6 +5,8 @@ use std::{
     io::{self, Write},
 };
 
+use unicode_width::UnicodeWidthStr;
+
 use zg_engine::api::context::{
     ContextResult,
     result::{
@@ -42,18 +44,65 @@ pub(super) fn write(
     let groups = result
         .group_results
         .iter()
-        .filter(|group| !group.items.is_empty())
+        .enumerate()
+        .filter(|(_, group)| !group.items.is_empty())
         .collect::<Vec<_>>();
     if groups.is_empty() {
         return writeln!(writer, "No matches.");
     }
-    for (index, group) in groups.into_iter().enumerate() {
-        if index > 0 {
+    for (position, (index, group)) in groups.into_iter().enumerate() {
+        if position > 0 {
             writeln!(writer)?;
+        }
+        if result.group_results.len() > 1 {
+            writeln!(
+                writer,
+                "{}\n",
+                query_divider(
+                    &group.query,
+                    index,
+                    result.group_results.len(),
+                    theme,
+                    crate::theme::columns(),
+                )
+            )?;
         }
         write_items(writer, &group.items, &group.query, options, theme)?;
     }
     Ok(())
+}
+
+fn query_divider(
+    query: &str,
+    index: usize,
+    total: usize,
+    theme: StatusTheme,
+    columns: usize,
+) -> String {
+    // Keep the original query (including spaces), but never let it add output
+    // lines or terminal control sequences. Long queries may wrap visually.
+    let query = crate::theme::clean(query).replace(['\u{2028}', '\u{2029}'], " ");
+    let label = format!("query {}/{total}:", index + 1);
+    if !theme.color {
+        return format!("-- {label} {query} --");
+    }
+    let rule = if crate::theme::unicode_supported() {
+        "─"
+    } else {
+        "-"
+    };
+    let used = 3 + label.width() + 1 + query.width();
+    let remaining = columns.saturating_sub(used);
+    let tail = if remaining > 1 {
+        format!(" {}", theme.muted(&rule.repeat(remaining - 1)))
+    } else {
+        String::new()
+    };
+    format!(
+        "{} {} \x1b[1m{query}\x1b[0m{tail}",
+        theme.muted(&rule.repeat(2)),
+        theme.metadata_label(&label),
+    )
 }
 
 fn write_items(
@@ -226,7 +275,23 @@ fn write_detail(
         };
         field(writer, theme, "Reason", reason)?;
     } else if grouped {
-        for group in &result.group_results {
+        for (index, group) in result.group_results.iter().enumerate() {
+            if group.items.is_empty() {
+                continue;
+            }
+            if result.group_results.len() > 1 {
+                writeln!(
+                    writer,
+                    "\n{}",
+                    query_divider(
+                        &group.query,
+                        index,
+                        result.group_results.len(),
+                        theme,
+                        crate::theme::columns(),
+                    )
+                )?;
+            }
             let highlighter = QueryHighlighter::new(&group.query, theme.color);
             write_detail_items(writer, &group.items, options, theme, &highlighter)?;
         }
@@ -519,4 +584,58 @@ fn trace(item: &ContextItem) -> Option<String> {
         parts.push(format!("reranked #{}", ranking.rank));
     }
     Some(parts.join("; "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::query_divider;
+    use crate::theme::StatusTheme;
+    use unicode_width::UnicodeWidthStr;
+
+    fn without_sgr(value: &str) -> String {
+        value
+            .split("\x1b[")
+            .enumerate()
+            .map(|(index, part)| {
+                if index == 0 {
+                    part
+                } else {
+                    part.split_once('m').expect("SGR terminator").1
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn query_dividers_respect_display_width_at_terminal_boundaries() {
+        let theme = StatusTheme { color: true };
+        for terminal_columns in [20, 40, 80, 120] {
+            // Production reserves the last column to avoid an automatic wrap.
+            let available = terminal_columns - 1;
+            let query_budget = available - "-- query 1/2: ".width();
+            for seed in ["a", "中", "e\u{301}", "👩‍💻"] {
+                for (query_width, expected_width) in [
+                    (query_budget - 3, available),
+                    (query_budget - 1, available - 1),
+                    (query_budget, available),
+                    (query_budget + 1, available + 1),
+                ] {
+                    let query = format!("{seed}{}", "x".repeat(query_width - seed.width()));
+                    let heading = query_divider(&query, 0, 2, theme, available);
+                    let plain = without_sgr(&heading);
+                    assert_eq!(
+                        plain.width(),
+                        expected_width,
+                        "{terminal_columns} columns, query {query:?}: {plain:?}"
+                    );
+                    assert!(plain.contains(&query), "query must remain complete");
+                    assert!(!plain.contains(['\n', '\r']), "one logical line");
+                    assert!(
+                        heading.contains(&format!("\x1b[1m{query}\x1b[0m")),
+                        "bold query must retain the terminal foreground: {heading:?}"
+                    );
+                }
+            }
+        }
+    }
 }

@@ -107,7 +107,12 @@ pub(super) fn write_item_preview(
     let from = if short { anchor.saturating_sub(3) } else { 0 };
     for (offset, line) in lines.iter().enumerate().skip(from).take(max_lines) {
         let line = if short {
-            line.chars().take(160).collect()
+            let mut chars = line.chars();
+            let mut text: String = chars.by_ref().take(160).collect();
+            if chars.next().is_some() {
+                text.push_str("...");
+            }
+            text
         } else {
             (*line).to_owned()
         };

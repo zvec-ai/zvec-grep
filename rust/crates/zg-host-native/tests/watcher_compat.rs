@@ -540,15 +540,21 @@ async fn wait_for_change_matching(
     control: &TaskControl,
     matches: impl Fn(&WorkspaceChange) -> bool,
 ) -> TestResult {
+    let mut observed = Vec::new();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let batch = session.next_changes(control).await?;
-            if batch.changes.iter().any(&matches) {
+            let found = batch.changes.iter().any(&matches);
+            observed.extend(batch.changes);
+            if found {
                 return Ok::<_, HostError>(());
             }
         }
     })
-    .await??;
+    .await
+    .map_err(|error| {
+        format!("waiting for matching change: {error}; observed changes: {observed:?}")
+    })??;
     Ok(())
 }
 
@@ -608,7 +614,12 @@ async fn watcher_observes_markers_in_rejected_subtrees_and_updates_the_watch_sco
     let marker = directory.join(".git");
     fs::create_dir_all(&marker)?;
     fs::create_dir_all(directory.join("src/deep"))?;
-    fs::write(directory.join("src/deep/source.rs"), "before")?;
+    for directory_marker in [true, false] {
+        fs::write(
+            directory.join(format!("src/deep/source-{directory_marker}.rs")),
+            "before",
+        )?;
+    }
     let policy = Arc::new(MarkerPolicy {
         directory: directory.clone(),
         marker: marker.clone(),
@@ -643,13 +654,31 @@ async fn watcher_observes_markers_in_rejected_subtrees_and_updates_the_watch_sco
             WorkspaceChange::RescanDirectory("nested".into()),
         )
         .await?;
-        tokio::time::sleep(Duration::from_millis(60)).await;
-        fs::write(
-            directory.join("src/deep/source.rs"),
-            format!("reopened after directory marker: {directory_marker}"),
-        )?;
-        wait_for_change_matching(&session, &control, |change|
-            matches!(change, WorkspaceChange::Upsert(path) if path == Path::new("nested/src/deep/source.rs"))).await?;
+        let relative = PathBuf::from(format!("nested/src/deep/source-{directory_marker}.rs"));
+        let expected = WorkspaceChange::Upsert(relative);
+        let observed = wait_for_change_matching(&session, &control, |change| change == &expected);
+        tokio::pin!(observed);
+        let mut writes = tokio::time::interval(Duration::from_millis(100));
+        writes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut revision = 0;
+        // Marker removal can overlap a poll or backend recovery. A broad rescan
+        // can cover a single edit, so keep probing until the new file watch
+        // emits an exact upsert. Each phase has its own file to reject stale events.
+        loop {
+            tokio::select! {
+                result = &mut observed => {
+                    result?;
+                    break;
+                }
+                _ = writes.tick() => {
+                    revision += 1;
+                    fs::write(
+                        directory.join(format!("src/deep/source-{directory_marker}.rs")),
+                        format!("reopened revision {revision}"),
+                    )?;
+                }
+            }
+        }
         fs::write(&marker, "marker file")?;
         wait_for_change(
             &session,

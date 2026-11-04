@@ -1126,13 +1126,44 @@ async fn execute_status(
         zg_cli::stdout_supports_ansi(),
     )?;
     if output.debug {
-        eprintln!("Status diagnostics: indexed={}", result.indexed);
+        match status_diagnostics(&result) {
+            Ok(diagnostics) => {
+                let _ = writeln!(io::stderr().lock(), "Status diagnostics: {diagnostics}");
+            }
+            Err(error) => {
+                report_warning(&format!("Could not serialize status diagnostics: {error}"));
+            }
+        }
     }
     let ready = result.index_status() == zg_engine::api::info::result::IndexStatus::Ready;
     if check_ready && !ready {
         return Err(io::Error::other("workspace index is not ready").into());
     }
     Ok(())
+}
+
+fn status_diagnostics(result: &zg_engine::api::info::InfoResult) -> serde_json::Result<String> {
+    // JSON requires Unicode paths. Use display text only in this diagnostic copy;
+    // keep native paths intact in the engine result and transport protocol.
+    let mut info = result.clone();
+    for path in [&mut info.root, &mut info.home, &mut info.index_path] {
+        *path = path.to_string_lossy().into_owned().into();
+    }
+    if let Some(workspace) = &mut info.workspace_index {
+        for path in [&mut workspace.path, &mut workspace.root] {
+            *path = path.to_string_lossy().into_owned().into();
+        }
+    }
+    if let Some(status) = &mut info.status {
+        for failed in &mut status.failed_files {
+            failed.path = failed.path.to_string_lossy().into_owned().into();
+        }
+    }
+    let diagnostics = serde_json::Map::from_iter([
+        ("state".into(), result.index_status().as_str().into()),
+        ("info".into(), serde_json::to_value(info)?),
+    ]);
+    serde_json::to_string(&diagnostics)
 }
 
 async fn read_workspace_info(
@@ -1351,6 +1382,97 @@ fn init_daemon_tracing(log: zg_daemon::rolling_log::RollingLog, debug: bool) {
         .with_writer(move || log.writer())
         .with_env_filter(filter)
         .try_init();
+}
+
+#[cfg(test)]
+mod status_diagnostics_tests {
+    use super::status_diagnostics;
+    use zg_engine::api::info::result::{
+        IndexCompatibility, IndexStats, InfoResult, InfoSource, WorkspaceIndexEmbedding,
+        WorkspaceIndexInfo, WorkspaceIndexPolicy,
+    };
+
+    fn info() -> InfoResult {
+        InfoResult {
+            root: "/workspace".into(),
+            indexed: true,
+            compatibility: IndexCompatibility::Compatible { version: 1 },
+            index_policy: WorkspaceIndexPolicy::Enabled,
+            home: "/home".into(),
+            index_path: "/workspace/.zvec-grep/index".into(),
+            source: InfoSource::Index,
+            workspace_index: Some(WorkspaceIndexInfo {
+                path: "/workspace/.zvec-grep".into(),
+                root: "/workspace".into(),
+                scan: zg_engine::api::index::options::ScanRules::default(),
+                policy: WorkspaceIndexPolicy::Enabled,
+                embedding: Some(WorkspaceIndexEmbedding {
+                    provider: "local".into(),
+                    model: "potion-code-16m-v2".into(),
+                    dimension: 128,
+                    metric: "cosine".into(),
+                }),
+                fts: None,
+                index_version: Some(1),
+                created_epoch_ms: 1,
+                updated_epoch_ms: 2,
+            }),
+            status: Some(IndexStats::default()),
+            suggestion: None,
+        }
+    }
+
+    #[test]
+    fn unicode_paths_preserve_the_diagnostic_schema() {
+        let info = info();
+        let actual: serde_json::Value =
+            serde_json::from_str(&status_diagnostics(&info).expect("diagnostics")).expect("JSON");
+        assert_eq!(
+            actual,
+            serde_json::json!({ "state": "ready", "info": &info })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_paths_are_lossy_only_in_diagnostics() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
+        use zg_engine::api::info::result::FailedFile;
+
+        let native = PathBuf::from(OsString::from_vec(b"/workspace-\xff".to_vec()));
+        let mut info = info();
+        info.root = native.clone();
+        info.home = native.join("home");
+        info.index_path = native.join("index");
+        let workspace = info.workspace_index.as_mut().expect("workspace");
+        workspace.path = native.join(".zvec-grep");
+        workspace.root = native.clone();
+        let status = info.status.as_mut().expect("status");
+        status.files_failed = 1;
+        status.failed_files.push(FailedFile {
+            path: native.join("failed.rs"),
+            reason: "test failure".into(),
+        });
+        let original = info.clone();
+        let actual: serde_json::Value =
+            serde_json::from_str(&status_diagnostics(&info).expect("diagnostics")).expect("JSON");
+        assert_eq!(info, original, "diagnostics must not mutate native paths");
+        assert_eq!(actual["state"], "failed");
+        for (pointer, suffix) in [
+            ("/info/root", ""),
+            ("/info/home", "/home"),
+            ("/info/index_path", "/index"),
+            ("/info/workspace_index/path", "/.zvec-grep"),
+            ("/info/workspace_index/root", ""),
+            ("/info/status/failed_files/0/path", "/failed.rs"),
+        ] {
+            assert_eq!(
+                actual.pointer(pointer).and_then(serde_json::Value::as_str),
+                Some(format!("/workspace-\u{fffd}{suffix}").as_str()),
+                "{pointer}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
