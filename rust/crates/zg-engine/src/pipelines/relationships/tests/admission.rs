@@ -184,20 +184,14 @@ async fn invalid_query_fails_before_opening_a_workspace() {
 #[tokio::test]
 async fn relationship_queries_borrow_incremental_writers_even_when_registered_late() {
     let fixture = Fixture::new();
-    let indexing = WorkspaceIndexService::new();
+    let indexing = WorkspaceIndexService::with_graph();
     let session = fixture.writer_session();
     let options = RelationshipOptions {
         lock_timeout_ms: Some(2_000),
         ..fixture.options("red::run")
     };
     let (groups, writer) = tokio::join!(
-        service::query(
-            &indexing,
-            &options,
-            None,
-            RelationshipDirection::Callers,
-            true
-        ),
+        service::query(&indexing, &options, None, RelationshipDirection::Callers),
         async {
             tokio::time::sleep(Duration::from_millis(20)).await;
             indexing.writers.register(session, true)
@@ -212,16 +206,10 @@ async fn relationship_queries_borrow_incremental_writers_even_when_registered_la
         lock_timeout_ms: Some(0),
         ..fixture.options("invoke")
     };
-    let groups = service::query(
-        &indexing,
-        &outgoing,
-        None,
-        RelationshipDirection::Callees,
-        true,
-    )
-    .await
-    .expect("borrow active writer without waiting for workspace lock")
-    .matches;
+    let groups = service::query(&indexing, &outgoing, None, RelationshipDirection::Callees)
+        .await
+        .expect("borrow active writer without waiting for workspace lock")
+        .matches;
     assert!(groups[0].truncated);
     let signal = CancellationToken::new();
     signal.cancel();
@@ -229,26 +217,14 @@ async fn relationship_queries_borrow_incremental_writers_even_when_registered_la
         signal: Some(signal),
         ..outgoing.clone()
     };
-    let error = service::query(
-        &indexing,
-        &cancelled,
-        None,
-        RelationshipDirection::Callees,
-        true,
-    )
-    .await
-    .expect_err("cancel before borrowing");
+    let error = service::query(&indexing, &cancelled, None, RelationshipDirection::Callees)
+        .await
+        .expect_err("cancel before borrowing");
     assert_eq!(error.code(), EngineError::CANCELLED);
     writer.retire().await;
-    let error = service::query(
-        &indexing,
-        &outgoing,
-        None,
-        RelationshipDirection::Callees,
-        true,
-    )
-    .await
-    .expect_err("retired writer cannot be borrowed");
+    let error = service::query(&indexing, &outgoing, None, RelationshipDirection::Callees)
+        .await
+        .expect_err("retired writer cannot be borrowed");
     assert_eq!(error.code(), EngineError::RESOURCE_BUSY);
     writer.session.storage.close().expect("close writer");
 }
@@ -256,7 +232,7 @@ async fn relationship_queries_borrow_incremental_writers_even_when_registered_la
 #[tokio::test]
 async fn relationship_queries_never_borrow_unpublished_generations() {
     let fixture = Fixture::new();
-    let indexing = WorkspaceIndexService::new();
+    let indexing = WorkspaceIndexService::with_graph();
     let manifest = fixture.manifest();
     let lock = Arc::new(
         acquire_workspace_lock(&fixture.layout(), LockMode::Exclusive, "rebuild")
@@ -289,15 +265,9 @@ async fn relationship_queries_never_borrow_unpublished_generations() {
             lock_timeout_ms: Some(0),
             ..fixture.options("run")
         };
-        let error = service::query(
-            &indexing,
-            &options,
-            None,
-            RelationshipDirection::Callers,
-            true,
-        )
-        .await
-        .expect_err("do not query an unpublished index even if registered");
+        let error = service::query(&indexing, &options, None, RelationshipDirection::Callers)
+            .await
+            .expect_err("do not query an unpublished index even if registered");
         assert_eq!(error.code(), EngineError::RESOURCE_BUSY);
         writer.retire().await;
         writer.session.storage.close().expect("close rebuild");
@@ -307,7 +277,7 @@ async fn relationship_queries_never_borrow_unpublished_generations() {
 #[tokio::test]
 async fn waiting_relationship_reads_leave_the_async_worker_free_and_retain_the_writer_lease() {
     let fixture = Fixture::new();
-    let indexing = Arc::new(WorkspaceIndexService::new());
+    let indexing = Arc::new(WorkspaceIndexService::with_graph());
     let session = fixture.writer_session();
     let writer = indexing.writers.register(session, true);
     let session = Arc::clone(&writer.session);
@@ -326,14 +296,7 @@ async fn waiting_relationship_reads_leave_the_async_worker_free_and_retain_the_w
     ready_rx.recv().expect("writer acquired store");
     let options = fixture.options("red::run");
     let query = tokio::spawn(async move {
-        service::query(
-            &indexing,
-            &options,
-            None,
-            RelationshipDirection::Callers,
-            true,
-        )
-        .await
+        service::query(&indexing, &options, None, RelationshipDirection::Callers).await
     });
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert!(

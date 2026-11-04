@@ -59,6 +59,7 @@ const DEFAULT_LOCAL_EMBEDDING: &str = "local/potion-code-16m-v2";
 pub(crate) struct WorkspaceIndexService {
     pub(crate) writers: crate::pipelines::indexed_search::writer::WriterContexts,
     scanner: NativeScanner,
+    graph_enabled: bool,
     #[cfg(test)]
     fail_index_completion: bool,
 }
@@ -68,8 +69,22 @@ impl WorkspaceIndexService {
         Self {
             writers: crate::pipelines::indexed_search::writer::WriterContexts::default(),
             scanner: NativeScanner::default(),
+            graph_enabled: crate::storage::GRAPH_ENABLED,
             #[cfg(test)]
             fail_index_completion: false,
+        }
+    }
+
+    /// The same capability controls graph writes and relationship-query admission.
+    pub(crate) fn graph_enabled(&self) -> bool {
+        self.graph_enabled
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_graph() -> Self {
+        Self {
+            graph_enabled: true,
+            ..Self::new()
         }
     }
 

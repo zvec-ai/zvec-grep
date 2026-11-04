@@ -23,7 +23,6 @@ pub(crate) async fn query(
     options: &RelationshipOptions,
     read_sessions: Option<&ReadSessionCache>,
     direction: RelationshipDirection,
-    graph_enabled: bool,
 ) -> EngineResult<RelationshipResult> {
     let (name, scope) = normalize(options)?;
     let wait = LockWait::new(options.signal.as_ref(), options.lock_timeout_ms)?;
@@ -32,7 +31,7 @@ pub(crate) async fn query(
     let (source_root, layout) = find_nearest_workspace(&requested)?.ok_or_else(missing_index)?;
     // An old database is not evidence of a maintained graph. Reject before
     // read admission so idle readers and active writers have identical behavior.
-    if !graph_enabled {
+    if !indexing.graph_enabled() {
         return Err(EngineError::unsupported("graph queries are disabled"));
     }
     let direction = match direction {
