@@ -4878,10 +4878,10 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-typescript",
  "uuid",
- "zg-diskann",
  "zg-engine-macros",
  "zg-host-native",
  "zg-llama-native",
+ "zg-zvec-fp16",
  "zvec-rust",
 ]
 

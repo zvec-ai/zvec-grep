@@ -209,7 +209,7 @@ function multiBatchModel2Vec(modelCacheDir, failure) {
       modelFile: "model.safetensors",
       embeddingTensor: "embeddings",
       tokenizerFile: "tokenizer.json",
-      dimension: 3,
+      dimension: 10,
       metric: "cosine",
       normalize: true,
       maxInputTokens: 512,
@@ -241,13 +241,15 @@ function multiBatchModel2Vec(modelCacheDir, failure) {
         }
         return {
           data: Float32Array.from(
-            Array.from({ length: 770 }, (_, id) => [
-              Math.cos(id / 250),
-              Math.sin(id / 250),
-              1,
-            ]).flat(),
+            // Well-separated directions keep this ordering test independent of
+            // FP16 distance rounding between nearly identical vectors.
+            Array.from({ length: 770 }, (_, id) =>
+              Array.from({ length: 10 }, (_, bit) =>
+                id & (1 << bit) ? 1 : -1,
+              ),
+            ).flat(),
           ),
-          dimension: 3,
+          dimension: 10,
           dtype: "F32",
           rows: 770,
         };
@@ -879,10 +881,29 @@ test("service optionally fuses independent query groups into one result list", a
     await writeFile(join(root, `${name}.ts`), `export const ${value} = 1;\n`);
   }
 
-  const service = await createZvecGrep({
-    root,
-    embeddingModel: new FakeEmbeddingModel(),
+  // Distinct directions make query-group coverage deterministic with FP16 ANN.
+  const model = new FakeEmbeddingModel();
+  const keywords = [
+    "Alpha",
+    "Beta",
+    "Gamma",
+    "Delta",
+    "Epsilon",
+    "Zeta",
+    "Eta",
+  ];
+  model.doEmbed = async (contents) => ({
+    vectors: contents.map(({ text }) => {
+      const match = keywords.findIndex((word) =>
+        text.includes(`${word}Needle`),
+      );
+      return Array.from({ length: model.info.dimension }, (_, i) =>
+        i === match ? 1 : 0,
+      );
+    }),
+    truncated: [],
   });
+  const service = await createZvecGrep({ root, embeddingModel: model });
   t.after(() => service.close());
   await service.index();
 

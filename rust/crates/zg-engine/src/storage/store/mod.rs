@@ -74,7 +74,7 @@ struct SchemaRecord {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum VectorEngine {
-    DiskannSqliteV1,
+    ZvecDiskannFp16V1,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -87,7 +87,7 @@ impl SchemaRecord {
     fn new(embeddings: &[EmbeddingModelInfo]) -> Self {
         Self {
             path_encoding: PathEncoding::Components,
-            vector_engine: VectorEngine::DiskannSqliteV1,
+            vector_engine: VectorEngine::ZvecDiskannFp16V1,
             embeddings: embeddings.to_vec(),
         }
     }
@@ -742,17 +742,6 @@ fn load_schema(
             if !directory_exists(&collection_path)? {
                 return Err(EngineError::storage_failure(format!(
                     "index collection {collection} is missing; rebuild the index"
-                )));
-            }
-        }
-        for embedding in &schema {
-            let name = format!(
-                "{}.diskann.sqlite",
-                fragments::fragment_collection_name(embedding)
-            );
-            if !file_exists(&path.join(&name))? {
-                return Err(EngineError::storage_failure(format!(
-                    "DiskANN index {name} is missing; rebuild the index"
                 )));
             }
         }

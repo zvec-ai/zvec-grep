@@ -10,7 +10,7 @@ pub(crate) mod lock;
 pub(crate) mod manifest;
 
 /// Compatibility version of the workspace index contents.
-pub(crate) const CURRENT_INDEX_VERSION: u32 = 3;
+pub(crate) const CURRENT_INDEX_VERSION: u32 = 4;
 
 /// Finds the nearest workspace at or above the given directory.
 pub(crate) fn find_nearest_workspace(

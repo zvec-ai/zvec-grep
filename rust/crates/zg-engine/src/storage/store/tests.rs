@@ -426,7 +426,7 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
     let record: serde_json::Value = serde_json::from_slice(&persisted).expect("descriptor JSON");
     assert_eq!(
         record,
-        serde_json::json!({"path_encoding": "components", "vector_engine": "diskann_sqlite_v1", "embeddings": [original]})
+        serde_json::json!({"path_encoding": "components", "vector_engine": "zvec_diskann_fp16_v1", "embeddings": [original]})
     );
     assert_eq!(
         read_json::<SchemaRecord>(&descriptor)
@@ -1816,7 +1816,7 @@ fn native_path_schema_requires_rebuild_without_mutating_collections() {
 }
 
 #[test]
-fn old_vector_backends_and_missing_diskann_files_require_rebuild() {
+fn old_vector_backends_and_missing_collections_require_rebuild() {
     for legacy in [true, false] {
         let root = tempfile::tempdir().expect("workspace");
         open(root.path(), false).close().expect("create index");
@@ -1824,17 +1824,14 @@ fn old_vector_backends_and_missing_diskann_files_require_rebuild() {
         if legacy {
             let mut value: serde_json::Value =
                 serde_json::from_slice(&fs::read(&descriptor).expect("schema")).expect("JSON");
-            value
-                .as_object_mut()
-                .expect("object")
-                .remove("vector_engine");
+            value["vector_engine"] = serde_json::json!("diskann_sqlite_v1");
             fs::write(&descriptor, serde_json::to_vec(&value).expect("old schema"))
                 .expect("write old schema");
         } else {
-            fs::remove_file(root.path().join(format!(
-                "{}.diskann.sqlite",
-                fragments::fragment_collection_name(&schema())
-            )))
+            fs::remove_dir_all(
+                root.path()
+                    .join(fragments::fragment_collection_name(&schema())),
+            )
             .expect("remove vectors");
         }
         let before = fs::read(&descriptor).expect("descriptor");

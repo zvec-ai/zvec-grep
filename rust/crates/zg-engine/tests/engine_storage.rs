@@ -227,7 +227,7 @@ async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -
             .as_ref()
             .expect("workspace")
             .index_version,
-        Some(3)
+        Some(4)
     );
     let collections = model_collections(&info.index_path)?;
     assert_eq!(collections.len(), 1);
@@ -240,7 +240,7 @@ async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -
     let manifest: Value =
         serde_json::from_slice(&fs::read(root.join(".zvec-grep/manifest.json"))?)?;
     assert!(manifest.get("manifestVersion").is_none());
-    assert_eq!(manifest["indexVersion"], 3);
+    assert_eq!(manifest["indexVersion"], 4);
     assert_eq!(
         manifest["index"]["descriptor"]["defaultEmbeddingModel"]["model"]["name"],
         "text-embedding-v4"
@@ -1609,23 +1609,13 @@ fn assert_vector_indexes_complete(index_path: &Path) -> TestResult {
         )?;
         let stats = collection.stats()?;
         assert!(stats.doc_count > 0);
-        assert!(!collection.schema()?.has_field("embedding"));
-        let vectors = index_path.join(format!(
-            "{}.diskann.sqlite",
-            path.file_name().expect("model name").to_string_lossy()
-        ));
-        let database = rusqlite::Connection::open_with_flags(
-            vectors,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
-        let count: u64 = database.query_row(
-            "SELECT COUNT(*) FROM nodes WHERE live = 1 AND length(neighbors) > 0",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(
-            count, stats.doc_count,
-            "each fragment has a durable DiskANN graph node"
+        let field =
+            zg_zvec_fp16::vector_field_info(&collection, "embedding")?.expect("embedding field");
+        assert_eq!(field.index_type, zvec_rust::IndexType::Diskann);
+        assert_eq!(field.data_type, zvec_rust::DataType::VectorFp16);
+        assert!(
+            stats.indexes.iter().any(|index| index.name == "embedding"
+                && (index.completeness - 1.0).abs() < f32::EPSILON)
         );
         collection.close()?;
     }

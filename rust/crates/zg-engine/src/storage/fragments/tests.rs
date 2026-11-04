@@ -427,7 +427,7 @@ fn filename_like_negation_propagates_native_query_errors() {
                 store.search_fts("orchard", 10, filter.as_deref()),
             ),
             (
-                "resolve vector membership",
+                "search zvec DiskANN index",
                 store.search_vector("fixture/fixture", &[1.0, 0.0, 0.0], 10, filter.as_deref()),
             ),
         ] {
@@ -661,7 +661,7 @@ fn fragment_ownership_is_checked_across_model_collections() {
 }
 
 #[test]
-fn embeddings_use_diskann_and_remain_searchable_after_reopen() {
+fn embeddings_use_zvec_diskann_fp16_and_remain_searchable_after_reopen() {
     let home = tempfile::tempdir().expect("storage");
     let store = metadata_store(home.path());
     let (source, entities, entries) = metadata_fragments(1, "diskann");
@@ -677,8 +677,19 @@ fn embeddings_use_diskann_and_remain_searchable_after_reopen() {
         .fetch(&[entries[1].fragment_id.as_str()])
         .expect("fetch fragment");
     assert_eq!(stored.len(), 1);
-    assert!(!stored[0].has_field("embedding"));
-    assert!(!collection.schema().expect("schema").has_field("embedding"));
+    assert!(stored[0].has_field("embedding"));
+    let vector = zg_zvec_fp16::decode_embedding(&stored[0], "embedding")
+        .expect("decode FP16")
+        .expect("stored embedding");
+    assert_eq!(vector.len(), 3);
+    assert!((vector[0] - 0.1).abs() < 0.0001);
+    let field = zg_zvec_fp16::vector_field_info(collection, "embedding")
+        .expect("inspect schema")
+        .expect("embedding field");
+    assert_eq!(field.index_type, IndexType::Diskann);
+    assert_eq!(field.data_type, DataType::VectorFp16);
+    assert_eq!(field.dimension, 3);
+    store.optimize().expect("build DiskANN");
     drop(store);
     let store = Fragments::open(home.path(), &[model()], true).expect("reopen read-only");
 

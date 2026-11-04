@@ -40,13 +40,13 @@
 [`rust/`](./rust/README.md)。用户文档统一维护在
 [Zvec 官网](https://zvec.org/zh/docs/zvec-grep/)。
 
-Rust 和 TypeScript 引擎均使用 Microsoft DiskANN 进行向量检索，并通过 SQLite
-持久化 FP32 向量和图边。zvec 继续负责全文检索和元数据过滤。升级后，请使用
-`zg --index --rebuild` 显式重建旧索引。
+Rust 和 TypeScript 引擎均通过 zvec 的 SDK 使用其内置 DiskANN，保存 FP16 向量，
+启用内置 PQ（最多 64 段）。向量索引、全文检索、元数据过滤和增删更新统一交给 zvec。
+旧 HNSW 及 Microsoft DiskANN/SQLite 索引需要用 `zg --index --rebuild` 显式重建。
+TypeScript 包直接使用 zvec Node.js SDK，无需再编译独立的 Rust 向量绑定。
 
-从源码构建 TypeScript 包需要 Rust 1.98+ 和 C 编译器。`npm run build` 会先构建
-共享的 DiskANN Node-API 绑定。安装包包含构建平台的绑定及独立 Rust 源码；
-其他平台安装时需要上述工具链。删除立即生效，显式重建可回收保留的图节点。
+`rust/benchmarks/diskann/REPORT*_CN.md` 中的测量数据对应此前的 Microsoft
+DiskANN/SQLite 实现，不能代表此次替换后的性能。
 
 **安装**：`npm install -g @zvec/zvec-grep`，或通过 Homebrew（macOS/Linux）：
 `brew install zvec-grep`

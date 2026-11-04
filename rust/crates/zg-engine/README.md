@@ -66,19 +66,20 @@ Indexed search combines full-text and vector retrieval to return relevant source
 
 ### Vector storage
 
-Vector search uses Microsoft's DiskANN 0.61.0 through `zg-diskann`. Each embedding
-model has a SQLite database containing FP32 vectors and DiskANN graph edges,
-read on demand with a bounded page cache. zvec stores full-text and metadata
-projections. Metadata filters are resolved to document membership and applied
-inside DiskANN's filtered traversal. Inserts commit vectors and edges together;
-deleted nodes remain available for traversal but are excluded from results.
-Per-model SQLite page-cache targets are 256 KiB for readers and 2 MiB for writers,
-with at most 16 MiB of memory-mapped file data for readers where supported;
-writers disable mapping to avoid extra resident pages during construction. These are cache
-settings, not whole-process memory limits: query candidates and metadata filters
-also consume memory. Searches use a candidate list of at least 512 entries.
-`indexVersion` is 3. Existing zvec vector indexes require an explicit rebuild with
-`zg --index --rebuild`; opening them never performs an implicit migration.
+Vector search uses zvec's native DiskANN through `zvec-rust` 0.8.0. Each model's
+zvec collection stores an FP16 embedding alongside its full-text and metadata
+fields. The graph and PQ codes are built by zvec during optimization. The build
+parameters are maximum degree 32, list size 100, and the largest divisor of the
+embedding dimension no greater than 64 PQ chunks (64 for 768 dimensions).
+Queries use a candidate list of at least 300 and pass metadata filters directly
+to zvec. Cosine/L2 distances are converted to larger-is-better scores; inner
+product scores are already similarities. The `zg-zvec-fp16` adapter encodes FP16
+payloads and reads native schema properties missing from the Rust SDK's safe API.
+
+`indexVersion` is 4 and storage declares `zvec_diskann_fp16_v1`. Previous HNSW and
+Microsoft DiskANN/SQLite indexes require `zg --index --rebuild`; opening never
+migrates data implicitly. The old `zg-diskann` crate remains solely for historical
+benchmark reproduction and is not a dependency of the runtime engine.
 
 ### Embedding models
 

@@ -8,7 +8,6 @@ type WorkspaceIndexStoragePaths = {
   storagePath: string;
   filesPath: string;
   indexPath: string;
-  vectorPath: string;
 };
 
 export function resolveWorkspaceIndexStoragePaths(
@@ -19,17 +18,12 @@ export function resolveWorkspaceIndexStoragePaths(
     storagePath: resolvedStoragePath,
     filesPath: join(resolvedStoragePath, FILES_ZVEC),
     indexPath: join(resolvedStoragePath, ENTITIES_ZVEC),
-    vectorPath: join(resolvedStoragePath, "vectors.diskann.sqlite"),
   };
 }
 
 export function hasWorkspaceIndexStorage(storagePath: string): boolean {
   const paths = resolveWorkspaceIndexStoragePaths(storagePath);
-  return (
-    existsSync(paths.filesPath) &&
-    existsSync(paths.indexPath) &&
-    existsSync(paths.vectorPath)
-  );
+  return existsSync(paths.filesPath) && existsSync(paths.indexPath);
 }
 
 export function deleteWorkspaceIndexStorage(storagePath: string): void {
@@ -37,8 +31,9 @@ export function deleteWorkspaceIndexStorage(storagePath: string): void {
   for (const target of [
     paths.filesPath,
     paths.indexPath,
-    paths.vectorPath,
-    `${paths.vectorPath}-journal`,
+    // Explicit rebuild also removes the previous backend's vector sidecar.
+    join(paths.storagePath, "vectors.diskann.sqlite"),
+    join(paths.storagePath, "vectors.diskann.sqlite-journal"),
   ]) {
     if (dirname(target) !== paths.storagePath) {
       throw new Error("Workspace index data must be inside its storage path");

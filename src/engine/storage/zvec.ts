@@ -5,6 +5,7 @@ import {
   ZVecIndexType,
   ZVecInitialize,
   ZVecLogLevel,
+  ZVecMetricType,
   ZVecOpen,
   type ZVecCollection,
   type ZVecDoc,
@@ -24,6 +25,7 @@ import type {
   FileInfo,
   ImageFormat,
   Range,
+  WorkspaceIndexEmbeddingSchema,
 } from "../types.js";
 import { normalizePath } from "../utils/path.js";
 import type {
@@ -31,7 +33,6 @@ import type {
   WorkspaceIndexStorageOptions,
 } from "./index.js";
 import { resolveWorkspaceIndexStoragePaths } from "./layout.js";
-import { openDiskann, type DiskannIndex } from "./diskann.js";
 
 type FileRecord = FileInfo & {
   entityIds: string[];
@@ -91,7 +92,7 @@ type StoredEntityFragment = {
 class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
   readonly readOnly: boolean;
   private readonly collection: ZVecCollection;
-  private readonly vectors: DiskannIndex;
+  private readonly vectorMetric: ZVecMetricType;
   private readonly files: ZvecFileMetaStore;
   private readonly filesById = new Map<string, FileRecord>();
   private readonly filesByAbsolutePath = new Map<string, FileRecord>();
@@ -101,14 +102,6 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     const paths = resolveWorkspaceIndexStoragePaths(options.storagePath);
     const { readOnly } = options;
     this.readOnly = readOnly;
-    if (existsSync(paths.indexPath) && !existsSync(paths.vectorPath)) {
-      throw new EngineError(
-        "Vector storage is incompatible or missing; rebuild with zg --index --rebuild",
-        {
-          code: "ZVEC_GREP.ENGINE.STORAGE.INCOMPATIBLE_VECTOR_INDEX",
-        },
-      );
-    }
     initializeZvec();
     if (!readOnly) {
       mkdirSync(paths.storagePath, { recursive: true });
@@ -133,15 +126,29 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
         });
       } else {
         this.collection = openZvecCollection(zvecPath, readOnly, "create", () =>
-          ZVecCreateAndOpen(zvecPath, createSchema()),
+          ZVecCreateAndOpen(zvecPath, createSchema(options.embedding)),
         );
       }
       openedCollection = this.collection;
-      this.vectors = openDiskann(
-        paths.vectorPath,
-        options.readOnly ? undefined : options.embedding,
-        readOnly,
-      );
+      const vector = this.collection.schema
+        .vectors()
+        .find((field) => field.name === "embedding");
+      if (
+        vector?.indexParams?.indexType !== ZVecIndexType.DISKANN ||
+        vector.dataType !== ZVecDataType.VECTOR_FP16 ||
+        (!readOnly &&
+          (vector.dimension !== options.embedding.dimension ||
+            vector.indexParams.metricType !==
+              metricType(options.embedding.metric)))
+      ) {
+        throw new EngineError(
+          "Vector storage is incompatible; rebuild with zg --index --rebuild",
+          {
+            code: "ZVEC_GREP.ENGINE.STORAGE.INCOMPATIBLE_VECTOR_INDEX",
+          },
+        );
+      }
+      this.vectorMetric = vector.indexParams.metricType ?? ZVecMetricType.IP;
     } catch (error) {
       // Opening the entity collection can fail after metadata acquired its lock.
       try {
@@ -257,15 +264,10 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     };
 
     if (entries.length > 0) {
-      this.vectors.upsert(
-        entries.map(({ fragment, vector }) => ({
-          documentId: fragment.id,
-          vector: [...vector],
-        })),
-      );
-      const docs = entries.map(({ fragment }, index): ZVecDocInput => ({
+      const docs = entries.map(({ fragment, vector }, index): ZVecDocInput => ({
         id: fragment.id,
         fields: fragmentToFields(indexedFile, fragment, index),
+        vectors: { embedding: [...vector] },
       }));
 
       this.upsertDocs(file.id, docs);
@@ -349,22 +351,32 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
         `Vector search limit must be in 0..${ZVEC_MAX_QUERY_TOPK}`,
       );
     }
+    if (limit === 0) return [];
     const zvecFilter = buildFilter(filter);
-    const allowed = zvecFilter
-      ? matchingDocumentIds(this.collection, zvecFilter)
-      : undefined;
-    const hits = this.vectors.search([...vector], limit, allowed);
-    if (hits.length === 0) return [];
-    const docs = this.collection.fetchSync({
-      ids: hits.map((hit) => hit.documentId),
+    const docs = this.collection.querySync({
+      fieldName: "embedding",
+      vector: [...vector],
+      topk: limit,
       includeVector: false,
+      ...(zvecFilter ? { filter: zvecFilter } : {}),
+      params: {
+        indexType: ZVecIndexType.DISKANN,
+        listSize: Math.max(300, limit),
+      },
     });
-    return hits.flatMap((hit) => {
-      const doc = docs[hit.documentId];
-      return doc
-        ? docsToHits([{ ...doc, score: hit.score }], "vector", this)
-        : [];
-    });
+    return docsToHits(
+      docs.map((doc) => ({
+        ...doc,
+        score:
+          this.vectorMetric === ZVecMetricType.COSINE
+            ? 1 - doc.score
+            : this.vectorMetric === ZVecMetricType.L2
+              ? -doc.score
+              : doc.score,
+      })),
+      "vector",
+      this,
+    );
   }
 
   async finalizeWrites(): Promise<void> {
@@ -381,11 +393,7 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     try {
       this.files.close();
     } finally {
-      try {
-        this.collection.closeSync();
-      } finally {
-        this.vectors.close();
-      }
+      this.collection.closeSync();
     }
   }
 
@@ -475,12 +483,6 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
   }
 
   private deleteFileDocuments(fileId: string): void {
-    this.vectors.deleteDocuments(
-      matchingDocumentIds(
-        this.collection,
-        `file_id = ${quoteFilterString(fileId)}`,
-      ),
-    );
     this.collection.deleteByFilterSync(
       `file_id = ${quoteFilterString(fileId)}`,
     );
@@ -944,50 +946,42 @@ function sleepSync(ms: number): void {
   Atomics.wait(values, 0, 0, ms);
 }
 
-function matchingDocumentIds(
-  collection: ZVecCollection,
-  filter: string,
-): string[] {
-  const ids = new Set<string>();
-  const ranges: [string | undefined, string | undefined][] = [
-    [undefined, undefined],
-  ];
-  while (ranges.length > 0) {
-    const [lower, upper] = ranges.pop()!;
-    const clauses = [`(${filter})`];
-    if (lower !== undefined)
-      clauses.push(`document_id > ${quoteFilterString(lower)}`);
-    if (upper !== undefined)
-      clauses.push(`document_id < ${quoteFilterString(upper)}`);
-    const docs = collection.querySync({
-      filter: clauses.join(" AND "),
-      topk: 1024,
-      includeVector: false,
-    });
-    const batch = [...new Set(docs.map((doc) => doc.id))].sort();
-    if (
-      batch.some(
-        (id) =>
-          (lower !== undefined && id <= lower) ||
-          (upper !== undefined && id >= upper),
-      )
-    ) {
-      throw new Error(
-        "Vector membership query returned an ID outside its requested range",
-      );
-    }
-    for (const id of batch) ids.add(id);
-    if (docs.length === 1024) {
-      const pivot = batch[Math.floor(batch.length / 2)];
-      ranges.push([lower, pivot], [pivot, upper]);
-    }
+function metricType(
+  metric: WorkspaceIndexEmbeddingSchema["metric"],
+): ZVecMetricType {
+  switch (metric) {
+    case "cosine":
+      return ZVecMetricType.COSINE;
+    case "dot_product":
+      return ZVecMetricType.IP;
+    case "euclidean":
+      return ZVecMetricType.L2;
+    default:
+      throw new Error(`Unsupported embedding metric: ${metric}`);
   }
-  return [...ids];
 }
 
-function createSchema(): ZVecCollectionSchema {
+function createSchema(
+  embedding: WorkspaceIndexEmbeddingSchema,
+): ZVecCollectionSchema {
+  let chunks = Math.min(64, embedding.dimension);
+  while (chunks > 1 && embedding.dimension % chunks !== 0) chunks--;
   return new ZVecCollectionSchema({
     name: "zvec_grep_entities",
+    vectors: [
+      {
+        name: "embedding",
+        dataType: ZVecDataType.VECTOR_FP16,
+        dimension: embedding.dimension,
+        indexParams: {
+          indexType: ZVecIndexType.DISKANN,
+          metricType: metricType(embedding.metric),
+          maxDegree: 32,
+          listSize: 100,
+          pqChunkNum: chunks,
+        },
+      },
+    ],
     fields: [
       indexedStringField("document_id"),
       indexedStringField("group", true),
