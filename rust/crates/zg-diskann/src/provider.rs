@@ -114,7 +114,7 @@ impl Provider {
             })?
     }
 
-    fn query_distance(&self, id: u32, query: &[f32], query_norm: f64) -> Result<f32> {
+    pub(super) fn query_distance(&self, id: u32, query: &[f32], query_norm: f64) -> Result<f32> {
         self.with_vector(id, |vector| {
             if self.distance == Distance::Cosine {
                 cosine_distance(
@@ -136,7 +136,7 @@ impl Provider {
         }
     }
 
-    fn neighbors(&self, id: u32) -> Result<Vec<u32>> {
+    pub(super) fn neighbors(&self, id: u32) -> Result<Vec<u32>> {
         self.connection()?
             .prepare_cached("SELECT neighbors FROM nodes WHERE id = ?1")?
             .query_row([id], |row| {

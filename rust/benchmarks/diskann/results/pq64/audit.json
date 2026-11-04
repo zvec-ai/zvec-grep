@@ -1,0 +1,16 @@
+{
+  "raw_test_processes_verified": 60,
+  "raw_validation_processes_verified": 10,
+  "measured_queries": 12000,
+  "data_and_pq_artifact_hashes_verified": true,
+  "index_metadata_unchanged": true,
+  "recall_recomputed_from_raw_ids": true,
+  "qps_and_rss_recomputed": true,
+  "summary_recomputed": true,
+  "result_ids_identical_across_repeats": true,
+  "baseline_output_parity_checked_by_runner": true,
+  "all_test_recalls_at_least_90": true,
+  "all_pq_codes_loaded_into_owned_memory": true,
+  "production_default_changed": false,
+  "scope": "PQ64 traversal on existing SQLite graph; full FP16 reranking; static unfiltered benchmark only"
+}

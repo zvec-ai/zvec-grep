@@ -837,6 +837,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "diskann-quantization"
+version = "0.61.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46d1af02ee6dfe4e10b230b90f0a295e08085efe8c94e776a33abeaed5edc7d0"
+dependencies = [
+ "bytemuck",
+ "cfg-if",
+ "diskann-utils",
+ "diskann-vector",
+ "diskann-wide",
+ "half",
+ "rand 0.9.5",
+ "rayon",
+ "thiserror",
+]
+
+[[package]]
 name = "diskann-utils"
 version = "0.61.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -849,6 +866,7 @@ dependencies = [
  "half",
  "rand 0.9.5",
  "rand_distr",
+ "rayon",
  "thiserror",
 ]
 
@@ -4802,6 +4820,8 @@ version = "0.3.0"
 dependencies = [
  "bytemuck",
  "diskann",
+ "diskann-quantization",
+ "diskann-utils",
  "diskann-vector",
  "futures",
  "half",

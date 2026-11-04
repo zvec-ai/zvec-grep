@@ -1,0 +1,25 @@
+{
+  "reason": "Preparation executable rebuilt after formatting; retrained and re-encoded after query measurements to verify reproducibility",
+  "original_binary_sha256": "12f5c6207f7097ce095929078f512cc5626931d6265bd4775c93908befdea959",
+  "final_binary_sha256": "4ec737ca0052bf14361833a66509594415880252d3b3e43144b9b13582d4d4f6",
+  "all_training_inputs_and_artifacts_byte_identical": true,
+  "files": {
+    "pivots.f32": {
+      "bytes": 786432,
+      "sha256": "ecc9fe8cb081ccfb41205729ee0fe975f52088c161ea203af64eaaa13da2e48d"
+    },
+    "codes.bin": {
+      "bytes": 64786456,
+      "sha256": "f09864b337238aa83c18abbcccdd023328b34a24eb34d9ad62bd115baab5aecc"
+    },
+    "training.f32": {
+      "bytes": 100663296,
+      "sha256": "83a2b46709312a23d9db0441efdfcec40fa9f973b64854c0d5391d4b143ab7a7"
+    },
+    "training-ids.json": {
+      "bytes": 309594,
+      "sha256": "0db7f428fddda99defe2562fd2c710975d33fd02da8ed8d85b5f738b2809fbf4"
+    }
+  },
+  "excluded_from_query_measurements": true
+}

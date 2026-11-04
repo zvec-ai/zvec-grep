@@ -10,6 +10,22 @@ zg-zvec-fp16 = { path = "../../../crates/zg-zvec-fp16" }
 zvec-rust = "=0.8.0"
 serde_json = "1"
 half = "2.7.1"
+diskann-quantization = { version = "=0.61.0", optional = true }
+diskann-utils = { version = "=0.61.0", optional = true }
+rayon = { version = "1.12", optional = true }
+
+[features]
+experimental-pq = ["zg-diskann/experimental-pq", "dep:diskann-quantization", "dep:diskann-utils", "dep:rayon"]
+
+[[bin]]
+name = "pq-prepare"
+path = "src/bin/pq-prepare.rs"
+required-features = ["experimental-pq"]
+
+[[bin]]
+name = "pq-bench"
+path = "src/bin/pq-bench.rs"
+required-features = ["experimental-pq"]
 
 [build-dependencies]
 zvec-rust-build = "=0.8.0"

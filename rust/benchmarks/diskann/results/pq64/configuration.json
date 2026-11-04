@@ -1,0 +1,58 @@
+{
+  "started": "2026-11-04T11:22:59.939652+08:00",
+  "counts": [
+    200000,
+    400000,
+    600000,
+    800000,
+    1000000
+  ],
+  "binary_sha256": "6486b6ee9d8428ccc547fa316a31bab0e2b6a62a67a5d6b05dc03983b3832dfb",
+  "preparation_manifest_sha256": "b433e21492582610403a5f6a84c583abe0b7cd053dd737bb6f6a4cd64af96a34",
+  "data_manifest_sha256": "4c56167ebc49c2b574b6740376e2ca9bb8764665faeccef385ac817935d5b919",
+  "pq_code_bytes": 64,
+  "pq_candidate_grid": [
+    128,
+    192,
+    256,
+    384,
+    512,
+    768,
+    1024
+  ],
+  "rerank": 128,
+  "validation_threshold": 0.92,
+  "test_target": 0.9,
+  "repeats": 6,
+  "warmup_queries": 20,
+  "measured_queries": 200,
+  "query_concurrency": 1,
+  "baseline": "reuse original independently validated L; recheck validation and test IDs",
+  "selection": "first ascending PQ L achieving validation Recall@10 >= 92%; all scales frozen before test",
+  "graph": "reuse identical FP16 graphs; PQ only changes traversal scoring plus full-vector reranking",
+  "filter": "unfiltered, immutable contiguous live IDs verified at PQ open; entry node 0 excluded",
+  "schedule": "six fresh processes per mode/scale, alternate full/PQ order at each repetition",
+  "system_cache": "not purged; shared OS file cache and other system activity not controlled",
+  "index_files_before": {
+    "200000": {
+      "bytes": 416751616,
+      "mtime_ns": 1793689990318504695
+    },
+    "400000": {
+      "bytes": 833568768,
+      "mtime_ns": 1793692704434516849
+    },
+    "600000": {
+      "bytes": 1250385920,
+      "mtime_ns": 1793695743351004240
+    },
+    "800000": {
+      "bytes": 1667203072,
+      "mtime_ns": 1793699194431128986
+    },
+    "1000000": {
+      "bytes": 2084012032,
+      "mtime_ns": 1793702465304801955
+    }
+  }
+}

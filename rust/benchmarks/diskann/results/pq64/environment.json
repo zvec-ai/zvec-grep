@@ -1,0 +1,7 @@
+{
+  "cpu": "Apple M3 Pro",
+  "memory_bytes": 38654705664,
+  "os": "ProductName:\t\tmacOS\nProductVersion:\t\t26.6.2\nBuildVersion:\t\t25G83",
+  "vm_stat_before": "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                     6573.\nPages active:                                 431617.\nPages inactive:                               428956.\nPages speculative:                              1448.\nPages throttled:                                   0.\nPages wired down:                             280662.\nPages purgeable:                                  33.\n\"Translation faults\":                     8293434248.\nPages copy-on-write:                       360474882.\nPages zero filled:                        7245181261.\nPages reactivated:                         680177785.\nPages purged:                              156996658.\nFile-backed pages:                            394597.\nAnonymous pages:                              467424.\nPages stored in compressor:                  2590804.\nPages occupied by compressor:                1156498.\nDecompressions:                            459247539.\nCompressions:                              543791570.\nPageins:                                   239843006.\nPageouts:                                   12125898.\nSwapins:                                      778443.\nSwapouts:                                    1548373.\n",
+  "swap_before": "vm.swapusage: total = 4096.00M  used = 3003.38M  free = 1092.62M  (encrypted)\n"
+}

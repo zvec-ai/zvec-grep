@@ -15,6 +15,8 @@ Rust 和 TypeScript 共用 `zg-diskann` 原生向量后端，使用 DiskANN 图�
 
 当前采用 DiskANN 的 Rust 图算法和自定义 SQLite provider。官方 DiskANN 常见的 PQ 压缩、专用 SSD 文件布局及异步 I/O 流水线并未因此自动具备。全文检索、元数据、嵌入模型和服务协议也不包含在纯向量微基准内。
 
+2026-11-04 补充：新增默认关闭的 `experimental-pq` 实验特性，以 PQ64 常驻编码进行图遍历，再用完整 FP16 向量重排。它复用 SQLite 图，仅支持只读、无过滤、连续且全存活节点的静态基准；动态更新、过滤和码本维护尚未接入。20 万至 100 万条的实测结果及复现方法见 [PQ64 测试报告](../../benchmarks/diskann/REPORT_PQ_CN.md)。
+
 ## 模块结构
 
 ```mermaid

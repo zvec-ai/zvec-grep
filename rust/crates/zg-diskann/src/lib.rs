@@ -3,6 +3,8 @@
 //! Vectors and adjacency lists are read on demand. Mutations are serialized and
 //! committed together; deleted nodes remain traversable but cannot be returned.
 
+#[cfg(feature = "experimental-pq")]
+pub mod experimental_pq;
 #[cfg(feature = "node")]
 mod node;
 mod provider;

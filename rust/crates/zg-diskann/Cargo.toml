@@ -11,11 +11,14 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 node = ["dep:napi", "dep:napi-derive", "dep:napi-build"]
+experimental-pq = ["dep:diskann-quantization", "dep:diskann-utils"]
 
 [dependencies]
 bytemuck = "1.25"
 diskann = "=0.61.0"
 diskann-vector = "=0.61.0"
+diskann-quantization = { version = "=0.61.0", optional = true }
+diskann-utils = { version = "=0.61.0", optional = true }
 futures.workspace = true
 half = "2.7.1"
 rusqlite = { version = "0.37", features = ["bundled"] }
