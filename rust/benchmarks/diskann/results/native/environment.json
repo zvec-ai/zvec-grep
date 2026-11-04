@@ -1,0 +1,13 @@
+{
+  "cpu": "Apple M3 Pro",
+  "memory_bytes": 38654705664,
+  "os": "ProductName:\t\tmacOS\nProductVersion:\t\t26.6.2\nBuildVersion:\t\t25G83",
+  "finished": "2026-11-04T15:17:16.998717+08:00",
+  "file_cache": "not purged",
+  "query_concurrency": 1,
+  "query_threads": 1,
+  "measurement": "fresh process /usr/bin/time -l peak RSS, includes open/warmup/query",
+  "qps": "1000 sequential API calls / measured seconds; input query file read before timing",
+  "order": "six rounds; reverse scale and engine order on odd rounds",
+  "build_and_query_overlap": false
+}

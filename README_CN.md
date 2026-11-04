@@ -45,8 +45,10 @@ Rust 和 TypeScript 引擎均通过 zvec 的 SDK 使用其内置 DiskANN，保�
 旧 HNSW 及 Microsoft DiskANN/SQLite 索引需要用 `zg --index --rebuild` 显式重建。
 TypeScript 包直接使用 zvec Node.js SDK，无需再编译独立的 Rust 向量绑定。
 
-`rust/benchmarks/diskann/REPORT*_CN.md` 中的测量数据对应此前的 Microsoft
-DiskANN/SQLite 实现，不能代表此次替换后的性能。
+[Cohere 测试报告](rust/benchmarks/diskann/REPORT_BRIEF_CN.md) 对比本地 zvec
+源码 `960ecbc2` 编译的 DiskANN 与 HNSW，覆盖 20 万至 100 万向量。
+测量范围为向量查询，不代表完整应用或已发布 SDK 二进制的性能；
+标注为历史测试的旧报告对应此前的 Microsoft DiskANN/SQLite 实现。
 
 **安装**：`npm install -g @zvec/zvec-grep`，或通过 Homebrew（macOS/Linux）：
 `brew install zvec-grep`

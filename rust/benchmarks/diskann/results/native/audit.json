@@ -1,0 +1,7 @@
+{
+  "all_60_measured_runs_verified": true,
+  "all_validation_trials_verified": true,
+  "all_queries_unique_and_validation_test_vectors_disjoint": true,
+  "actual_test_recall_at_10_min": 0.931,
+  "raw_evidence_uncompressed_sha256": "fb60c732a0f82f81b87b178a07b23bb18172119f6754c414c8fbb4886b0f2d12"
+}

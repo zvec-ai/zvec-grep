@@ -1,0 +1,9 @@
+{
+  "process_id": 66431,
+  "command": "/private/tmp/zvec-local-cohere-20261104/rust-target/release/native-bench build hnsw /private/tmp/zvec-local-cohere-20261104/experiment/indexes/hnsw-600000 /private/tmp/zvec-cohere-million/data/base.f32 600000 0 1",
+  "loaded_library": [
+    "native-be 66431 xingrui  txt    REG   1,15   30270880           232861755 /private/tmp/zvec-local-cohere-20261104/build/lib/libzvec_c_api.dylib"
+  ],
+  "native_library_sha256": "d9ad81542a3b186a7caf68f9ae9bd3eba67ea4f9e414920fd7cbc944087e3496",
+  "local_library_verified_in_actual_benchmark_process": true
+}

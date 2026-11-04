@@ -1,0 +1,29 @@
+{
+  "manifest_sha256": "4c56167ebc49c2b574b6740376e2ca9bb8764665faeccef385ac817935d5b919",
+  "all_input_hashes_verified": true,
+  "independent_validation_queries": true,
+  "method": "recomputed exhaustive FP64 cosine, 2000-row blocks, deterministic ID tie breaks",
+  "counts": [
+    {
+      "count": 200000,
+      "test_and_validation_gt_match": true
+    },
+    {
+      "count": 400000,
+      "test_and_validation_gt_match": true
+    },
+    {
+      "count": 600000,
+      "test_and_validation_gt_match": true
+    },
+    {
+      "count": 800000,
+      "test_and_validation_gt_match": true
+    },
+    {
+      "count": 1000000,
+      "test_and_validation_gt_match": true
+    }
+  ],
+  "finished": "2026-11-04T14:14:12.411136+08:00"
+}

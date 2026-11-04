@@ -48,8 +48,11 @@ Existing HNSW and Microsoft DiskANN/SQLite indexes require an explicit rebuild
 with `zg --index --rebuild` after upgrading. The TypeScript package uses the
 zvec Node.js SDK and no longer builds a separate Rust vector binding.
 
-The measurements in `rust/benchmarks/diskann/REPORT*_CN.md` describe the previous
-Microsoft DiskANN/SQLite implementation; they are not measurements of this backend.
+The [Cohere benchmark report](rust/benchmarks/diskann/REPORT_BRIEF_CN.md) compares
+native zvec DiskANN and HNSW on 200k–1M vectors using a local source build at
+`960ecbc2`. It measures vector queries, not the complete application or the
+published SDK binaries. Older reports explicitly marked as historical describe
+the previous Microsoft DiskANN/SQLite implementation.
 
 **Install**: `npm install -g @zvec/zvec-grep`, or via Homebrew (macOS/Linux):
 `brew install zvec-grep`
