@@ -1,0 +1,9 @@
+{
+  "all_90_processes_verified": true,
+  "primary_processes": 60,
+  "fixed_ef_processes": 30,
+  "raw_evidence_uncompressed_sha256": "a49096ec85a7b48e31da0ecccaf00d6fca43f470267e616ae2aa0c3ae9ad4f67",
+  "actual_recall_min": 0.931,
+  "measured_major_faults_max": 0,
+  "first_pass_major_faults_max": 71707
+}

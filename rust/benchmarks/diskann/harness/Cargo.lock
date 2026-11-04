@@ -735,6 +735,7 @@ dependencies = [
  "diskann-quantization",
  "diskann-utils",
  "half",
+ "libc",
  "rayon",
  "serde_json",
  "zg-diskann",

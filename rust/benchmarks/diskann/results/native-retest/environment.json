@@ -1,0 +1,11 @@
+{
+  "finished": "2026-11-04T16:02:51.397022+08:00",
+  "cpu": "Apple M3 Pro",
+  "memory_bytes": 38654705664,
+  "os": "ProductName:\t\tmacOS\nProductVersion:\t\t26.6.2\nBuildVersion:\t\t25G83",
+  "unchanged_index_inventory": true,
+  "query_concurrency": 1,
+  "query_threads": 1,
+  "system_load": "not isolated",
+  "cache": "not purged"
+}

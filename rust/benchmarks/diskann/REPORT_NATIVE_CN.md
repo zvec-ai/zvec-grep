@@ -1,6 +1,8 @@
-# zvec 原生 DiskANN / HNSW 测试详细记录
+# zvec 原生 DiskANN / HNSW 初次测试详细记录
 
-结果与曲线见 [简要报告](REPORT_BRIEF_CN.md)。本轮完成于 2026-11-04T15:17:16.998717+08:00。
+本轮完成于 2026-11-04T15:17:16.998717+08:00。本文保留首次测试，用于排查 HNSW QPS 回升；完整查询集尚未预热就开始计时，QPS 混合了缺页开销不同的运行状态。最新结果见 [复测记录](REPORT_RETEST_NATIVE_CN.md)和[简要报告](REPORT_BRIEF_CN.md)。
+
+![初次测试曲线，仅用于诊断](results/native/qps-memory-initial.png)
 
 ## 数据和 GT
 
@@ -86,7 +88,7 @@ VECLIB_MAXIMUM_THREADS=4 OPENBLAS_NUM_THREADS=4 python3 rust/benchmarks/diskann/
   --binary "$OUT/rust-target/release/native-bench" --data "$DATA" --output "$OUT/experiment" \
   --source-root "$ZVEC_SOURCE" --native-library "$CBUILD/lib/libzvec_c_api.dylib"
 python3 rust/benchmarks/diskann/publish_native.py "$OUT/experiment" "$DATA"
-python3 rust/benchmarks/diskann/plot_brief.py rust/benchmarks/diskann/results \
+python3 rust/benchmarks/diskann/plot_brief.py rust/benchmarks/diskann/results --dataset native \
   --font '/System/Library/Fonts/STHeiti Light.ttc'
 ```
 

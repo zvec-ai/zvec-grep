@@ -10,6 +10,7 @@ from matplotlib import font_manager, ticker
 
 parser = argparse.ArgumentParser()
 parser.add_argument("results", type=pathlib.Path, help="Directory containing native/summary.json")
+parser.add_argument("--dataset", default="native-retest", choices=["native", "native-retest"])
 parser.add_argument("--font", type=pathlib.Path)
 args = parser.parse_args()
 if args.font:
@@ -18,8 +19,8 @@ if args.font:
 plt.rcParams.update({"font.size": 11, "axes.unicode_minus": False,
                      "axes.spines.top": False, "axes.spines.right": False,
                      "svg.hashsalt": "diskann-brief"})
-rows = json.loads((args.results / "native/summary.json").read_text())
-config = json.loads((args.results / "native/configuration.json").read_text())
+rows = json.loads((args.results / args.dataset / "summary.json").read_text())
+config = json.loads((args.results / args.dataset / "configuration.json").read_text())
 assert config["local_source_build"]
 rows.sort(key=lambda r: (r["count"], r["engine"]))
 counts = [200000, 400000, 600000, 800000, 1000000]
@@ -58,11 +59,16 @@ fig.suptitle("zvec HNSW 与 DiskANN：QPS 和内存随数据规模的变化\n"
              "Cohere Wikipedia · 双 FP16 · 单并发 · Recall@10 ≥ 90%", fontsize=15, y=.98)
 fig.legend(*axes[0].get_legend_handles_labels(), loc="lower center",
            bbox_to_anchor=(.5, .105), ncol=2, frameon=False)
-fig.text(.5, .078, "曲线及数字为 6 次独立进程的中位数；QPS 有明显波动，范围见报告。",
+note = ("完整查询集预热 2 遍，再计时 5 遍；曲线及数字为 6 次独立进程的中位数。"
+        if args.dataset == "native-retest" else
+        "曲线及数字为 6 次独立进程的中位数；QPS 有明显波动，范围见报告。")
+fig.text(.5, .078, note,
          ha="center", fontsize=10)
-fig.text(.5, .045, "全部规模重新建库、交替测量；DiskANN 启用 PQ64。各规模参数由独立验证集选择。",
+efforts = {engine: " / ".join(str(r["effort"]) for r in rows if r["engine"] == engine)
+           for engine in ["hnsw", "diskann"]}
+fig.text(.5, .045, f"各规模 HNSW ef：{efforts['hnsw']}；DiskANN L：{efforts['diskann']}，PQ64。",
          ha="center", fontsize=10)
-fig.text(.5, .012, f"本地 zvec {config['zvec_source_commit'][:8]} · Apple M3 Pro / 36 GiB / macOS；未隔离系统负载或文件缓存。",
+fig.text(.5, .012, f"本地 zvec {config['zvec_source_commit'][:8]} · Apple M3 Pro / 36 GiB / macOS；其他应用正常运行，未清空系统文件缓存。",
          ha="center", fontsize=10, color="#555555")
 fig.subplots_adjust(left=.075, right=.985, top=.80, bottom=.28, wspace=.25)
 fig.savefig(output / "qps-memory.png", dpi=200)

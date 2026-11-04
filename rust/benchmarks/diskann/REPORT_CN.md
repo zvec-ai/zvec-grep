@@ -2,7 +2,7 @@
 
 > 历史测试：本文的 DiskANN 使用微软 Rust 库和 SQLite 存储，测试代码截至 `a885372`。2026-11-04 后主引擎已切换为 zvec 内置 DiskANN；本文数值不代表新后端性能。
 
-**当前 zvec 原生实现的结果见 [20 万至 100 万 Cohere 测试报告](REPORT_BRIEF_CN.md)及[详细记录](REPORT_NATIVE_CN.md)，使用本地源码 `960ecbc2` 编译，两种索引均重新建库。**
+**当前 zvec 原生实现的结果见 [20 万至 100 万 Cohere 测试报告](REPORT_BRIEF_CN.md)及[复测详细记录](REPORT_RETEST_NATIVE_CN.md)，使用本地源码 `960ecbc2` 编译，并将完整查询集预热与正式计时分开。**
 
 **2026-11-04 新增：[DiskANN PQ64 查询对照测试](REPORT_PQ_CN.md)。** 100 万条的本轮对测中，完整向量模式 / PQ64 模式 QPS 为 86.45 / 506.28，RSS 为 41.77 / 105.99 MiB，Recall@10 为 95.95% / 96.10%。以下 HNSW 对照数据对应未启用 PQ 的原实现。
 

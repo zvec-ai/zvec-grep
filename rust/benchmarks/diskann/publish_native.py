@@ -218,7 +218,7 @@ VECLIB_MAXIMUM_THREADS=4 OPENBLAS_NUM_THREADS=4 python3 rust/benchmarks/diskann/
   --binary "$OUT/rust-target/release/native-bench" --data "$DATA" --output "$OUT/experiment" \\
   --source-root "$ZVEC_SOURCE" --native-library "$CBUILD/lib/libzvec_c_api.dylib"
 python3 rust/benchmarks/diskann/publish_native.py "$OUT/experiment" "$DATA"
-python3 rust/benchmarks/diskann/plot_brief.py rust/benchmarks/diskann/results \\
+python3 rust/benchmarks/diskann/plot_brief.py rust/benchmarks/diskann/results --dataset native \\
   --font '/System/Library/Fonts/STHeiti Light.ttc'
 ```
 
