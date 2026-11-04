@@ -38,7 +38,7 @@ pub(crate) struct ResolutionSweep {
     /// Receiver-qualified calls bound to a same-file declaration this sweep.
     pub file_scoped: usize,
     /// Qualified references bound through `qualified_name` this sweep.
-    pub preferred_file: usize,
+    pub qualified_name_match: usize,
     /// Ambiguous references narrowed to the one exported candidate.
     pub export_bound: usize,
     /// Ambiguous references narrowed to the one arity-matching candidate.
@@ -186,7 +186,7 @@ pub(crate) fn resolve_pending(store: &IndexStore) -> crate::EngineResult<Resolut
             }
             if let Some(resolution) = resolve_qualified_name(stored, &hits) {
                 resolutions.push(resolution);
-                sweep.preferred_file += 1;
+                sweep.qualified_name_match += 1;
                 continue;
             }
             if let [hit] = hits.as_slice() {

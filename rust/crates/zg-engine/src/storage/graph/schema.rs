@@ -69,7 +69,7 @@ CREATE TABLE edges (
     candidates TEXT CHECK (candidates IS NULL OR (json_valid(candidates) AND json_type(candidates) = 'array')),
     language TEXT NOT NULL DEFAULT 'unknown',
     name_tail TEXT NOT NULL DEFAULT '',
-    provenance TEXT CHECK (provenance IN ('arity_bound', 'export_bound', 'file_local', 'file_scoped', 'import_bound', 'import_scoped', 'preferred_file', 'qualified_name_match', 'workspace_unique')),
+    provenance TEXT CHECK (provenance IN ('arity_bound', 'export_bound', 'file_local', 'file_scoped', 'import_bound', 'import_scoped', 'qualified_name_match', 'workspace_unique')),
     metadata TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata) AND json_type(metadata) = 'object'),
     CHECK ((status = 'resolved' AND target IS NOT NULL AND provenance IS NOT NULL)
         OR (status IN ('pending', 'failed') AND target IS NULL AND provenance IS NULL)),
