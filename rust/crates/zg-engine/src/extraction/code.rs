@@ -168,6 +168,7 @@ fn grammar(format: FileFormat, jsx: bool) -> Option<Language> {
         FileFormat::Go => tree_sitter_go::LANGUAGE.into(),
         FileFormat::Java => tree_sitter_java::LANGUAGE.into(),
         FileFormat::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+        FileFormat::Php => tree_sitter_php::LANGUAGE_PHP.into(),
         FileFormat::Python => tree_sitter_python::LANGUAGE.into(),
         FileFormat::Rust => tree_sitter_rust::LANGUAGE.into(),
         FileFormat::TypeScript if !jsx => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
@@ -735,6 +736,235 @@ mod tests {
                 .enumerate()
                 .all(|(index, fragment)| fragment.index() == index)
         );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn preserves_php_symbols_scopes_properties_and_constants() {
+        let source = test_source(
+            FileFormat::Php,
+            "fixture.php",
+            &[
+                "<?php",
+                "namespace App {",
+                "/** Charges a guest. */",
+                "interface ChargerInterface { public function charge(int $cents): bool; }",
+                "trait Loggable { public function log(string $msg): void {} }",
+                "enum ChargeStatus: string { case Paid = 'paid'; const int MIN = 1; }",
+                "abstract class BaseCharger implements ChargerInterface {",
+                "  /** The wallet. */",
+                "  #[Inject]",
+                "  private readonly Wallet $wallet;",
+                "  public const int MAX = 100, MIN = 0;",
+                "  public string $full {",
+                "    get => $this->a;",
+                "    set(string $v) { $this->a = $v; }",
+                "  }",
+                "  private(set) int $counter = 0;",
+                "  public static function make(int $limit): static { return new static($limit); }",
+                "  public function __construct(",
+                "    private Logger $logger,",
+                "    protected(set) string $tag,",
+                "    int $plain,",
+                "  ) {}",
+                "}",
+                "function helper(int $x): int { return $x * 2; }",
+                "}",
+            ]
+            .join("\n"),
+        );
+        let fragments = extract(&source, ChunkOptions::default()).expect("php extraction");
+        let expected: [(&str, SymbolType, &str, &str, Option<&str>); 14] = [
+            (
+                "ChargerInterface",
+                SymbolType::Interface,
+                "App",
+                "interface ChargerInterface",
+                Some("Charges a guest."),
+            ),
+            (
+                "charge",
+                SymbolType::Function,
+                "App::ChargerInterface",
+                "public function charge(int $cents): bool",
+                None,
+            ),
+            (
+                "Loggable",
+                SymbolType::Interface,
+                "App",
+                "trait Loggable",
+                None,
+            ),
+            (
+                "log",
+                SymbolType::Function,
+                "App::Loggable",
+                "public function log(string $msg): void",
+                None,
+            ),
+            (
+                "ChargeStatus",
+                SymbolType::Enum,
+                "App",
+                "enum ChargeStatus: string",
+                None,
+            ),
+            (
+                "Paid",
+                SymbolType::Value,
+                "App::ChargeStatus",
+                "case Paid = 'paid'",
+                None,
+            ),
+            (
+                "make",
+                SymbolType::Function,
+                "App::BaseCharger",
+                "public static function make(int $limit): static",
+                None,
+            ),
+            (
+                "wallet",
+                SymbolType::Value,
+                "App::BaseCharger",
+                "private readonly Wallet $wallet",
+                Some("The wallet."),
+            ),
+            (
+                "MAX",
+                SymbolType::Value,
+                "App::BaseCharger",
+                "public const int MAX = 100, MIN = 0",
+                None,
+            ),
+            (
+                "full",
+                SymbolType::Value,
+                "App::BaseCharger",
+                "public string $full",
+                None,
+            ),
+            (
+                "counter",
+                SymbolType::Value,
+                "App::BaseCharger",
+                "private(set) int $counter = 0",
+                None,
+            ),
+            (
+                "logger",
+                SymbolType::Value,
+                "App::BaseCharger",
+                "private Logger $logger",
+                None,
+            ),
+            (
+                "tag",
+                SymbolType::Value,
+                "App::BaseCharger",
+                "protected(set) string $tag",
+                None,
+            ),
+            (
+                "helper",
+                SymbolType::Function,
+                "App",
+                "function helper(int $x): int",
+                None,
+            ),
+        ];
+        for (name, kind, scope, signature, documentation) in expected {
+            assert_eq!(
+                test_metadata(named(&fragments, name)).cloned(),
+                Some(EntityMetadata::Code(CodeMetadata {
+                    symbol_type: Some(kind),
+                    symbol_name: Some(name.to_owned()),
+                    scope: Some(scope.to_owned()),
+                    signature: Some(signature.to_owned()),
+                    visibility: None,
+                    language: Some(CodeLanguage::Php),
+                    documentation: documentation.map(str::to_owned),
+                })),
+                "{name}"
+            );
+        }
+        assert!(matches!(
+            test_metadata(named(&fragments, "App")),
+            Some(EntityMetadata::Code(CodeMetadata {
+                symbol_type: Some(SymbolType::Module),
+                scope: None,
+                ..
+            }))
+        ));
+        // A lone property spans its whole statement; split constants span one element.
+        assert_eq!(
+            test_content(named(&fragments, "wallet")),
+            Content::Code("#[Inject]\n  private readonly Wallet $wallet;".to_owned())
+        );
+        assert_eq!(
+            test_content(named(&fragments, "MAX")),
+            Content::Code("MAX = 100".to_owned())
+        );
+        // Multi-line signatures keep their source layout, like other languages.
+        assert!(matches!(
+            test_metadata(named(&fragments, "__construct")),
+            Some(EntityMetadata::Code(CodeMetadata { signature: Some(signature), .. }))
+                if signature.starts_with("public function __construct(\n")
+                    && signature.ends_with("int $plain,\n  )")
+        ));
+        // Both MIN constants are indexed, each under its own scope.
+        let min_scopes = fragments
+            .iter()
+            .filter_map(|fragment| match test_metadata(fragment) {
+                Some(EntityMetadata::Code(CodeMetadata {
+                    symbol_name: Some(name),
+                    scope,
+                    ..
+                })) if name == "MIN" => scope.clone(),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            min_scopes,
+            HashSet::from([
+                "App::ChargeStatus".to_owned(),
+                "App::BaseCharger".to_owned()
+            ])
+        );
+        // A plain constructor parameter declares no property.
+        assert!(fragments.iter().all(|fragment| !matches!(
+            test_metadata(fragment),
+            Some(EntityMetadata::Code(CodeMetadata { symbol_name: Some(name), .. })) if name == "plain"
+        )));
+    }
+
+    #[test]
+    fn extracts_php_symbols_from_templates_mixing_html() {
+        let source = test_source(
+            FileFormat::Php,
+            "view.phtml",
+            &[
+                "<html><body>",
+                "<?php",
+                "function title(string $name): string { return ucfirst($name); }",
+                "?>",
+                "<h1><?= title('home') ?></h1>",
+                "<?php class Widget { public function render(): void {} } ?>",
+                "</body></html>",
+            ]
+            .join("\n"),
+        );
+        let fragments = extract(&source, ChunkOptions::default()).expect("phtml extraction");
+        assert!(matches!(
+            test_metadata(named(&fragments, "title")),
+            Some(EntityMetadata::Code(CodeMetadata { signature: Some(signature), .. }))
+                if signature == "function title(string $name): string"
+        ));
+        assert!(matches!(
+            test_metadata(named(&fragments, "render")),
+            Some(EntityMetadata::Code(CodeMetadata { scope: Some(scope), .. })) if scope == "Widget"
+        ));
     }
 
     #[test]

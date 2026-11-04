@@ -43,7 +43,7 @@ pub(crate) fn code_outline(
     let wrapped_source;
     if matches!(
         format,
-        FileFormat::Java | FileFormat::JavaScript | FileFormat::TypeScript
+        FileFormat::Java | FileFormat::JavaScript | FileFormat::Php | FileFormat::TypeScript
     ) && metadata.symbol_type == Some(SymbolType::Function)
         && !has_complete_entity(
             tree.root_node(),
@@ -102,7 +102,14 @@ pub(crate) fn code_outline(
 }
 
 fn parse_source(parser: &mut Parser, source: &str, format: FileFormat, jsx: bool) -> Option<Tree> {
-    parser.set_language(&grammar(format, jsx)?).ok()?;
+    let language = if format == FileFormat::Php {
+        // Stored entities have no `<?php` tag, so the full grammar would read
+        // them as inline HTML. Parse them as bare PHP instead.
+        tree_sitter_php::LANGUAGE_PHP_ONLY.into()
+    } else {
+        grammar(format, jsx)?
+    };
+    parser.set_language(&language).ok()?;
     let tree = parser.parse(source, None)?;
     if format == FileFormat::TypeScript && !jsx && tree.root_node().has_error() {
         // Stored component snippets do not retain script lang="tsx". Recover
@@ -157,6 +164,7 @@ fn outline_format(path: &Path, language: Option<Language>) -> Option<FileFormat>
             Language::Go => FileFormat::Go,
             Language::Java => FileFormat::Java,
             Language::JavaScript => FileFormat::JavaScript,
+            Language::Php => FileFormat::Php,
             Language::Python => FileFormat::Python,
             Language::Rust => FileFormat::Rust,
             Language::TypeScript => FileFormat::TypeScript,
@@ -244,9 +252,12 @@ fn collect_calls(root: Node<'_>, source: &[u8], calls: &mut Vec<String>) {
             "call"
                 | "call_expression"
                 | "function_call_expression"
+                | "member_call_expression"
                 | "method_invocation"
+                | "nullsafe_member_call_expression"
                 | "object_creation_expression"
                 | "new_expression"
+                | "scoped_call_expression"
         ) {
             let target = ["function", "name", "constructor", "type"]
                 .into_iter()
@@ -634,5 +645,37 @@ mod tests {
         assert_eq!(calls.split(", ").count(), MAX_CALLS);
         assert!(calls.ends_with("call_23"));
         assert_eq!(clip("中文测试", 3), "...");
+    }
+
+    #[test]
+    fn stored_php_entities_outline_without_an_open_tag() {
+        let method = code_outline(
+            Path::new("Charger.php"),
+            &Content::Code(
+                "public function charge(int $cents): bool {\n  $this->wallet->debit($cents);\n  return Audit::record(helper($cents)) ?? $this->log?->flush();\n}"
+                    .into(),
+            ),
+            Some(&metadata(SymbolType::Function, "charge")),
+        )
+        .expect("php method outline");
+        assert!(
+            method.ends_with("calls: debit, record, helper, flush"),
+            "{method}"
+        );
+
+        let class = code_outline(
+            Path::new("Charger.php"),
+            &Content::Code(
+                "class Charger {\n  public const int MAX = 1;\n  public function __construct(private Wallet $wallet) {}\n}"
+                    .into(),
+            ),
+            Some(&metadata(SymbolType::Class, "Charger")),
+        )
+        .expect("php class outline");
+        assert!(
+            class.contains("- value public const int MAX = 1"),
+            "{class}"
+        );
+        assert!(class.contains("- value private Wallet $wallet"), "{class}");
     }
 }
