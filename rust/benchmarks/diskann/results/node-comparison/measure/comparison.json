@@ -1,0 +1,35 @@
+{
+  "all_scales_faster": true,
+  "scales": [
+    {
+      "count": 200000,
+      "qps_ratio": 4.654555613140732,
+      "faster": true,
+      "recall_at_10": 0.944
+    },
+    {
+      "count": 400000,
+      "qps_ratio": 3.145061956193782,
+      "faster": true,
+      "recall_at_10": 0.9395
+    },
+    {
+      "count": 600000,
+      "qps_ratio": 2.8716158259654083,
+      "faster": true,
+      "recall_at_10": 0.941
+    },
+    {
+      "count": 800000,
+      "qps_ratio": 2.735854454128497,
+      "faster": true,
+      "recall_at_10": 0.9335
+    },
+    {
+      "count": 1000000,
+      "qps_ratio": 1.3657222592877838,
+      "faster": true,
+      "recall_at_10": 0.931
+    }
+  ]
+}

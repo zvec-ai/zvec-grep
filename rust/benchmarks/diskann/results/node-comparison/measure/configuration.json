@@ -1,0 +1,156 @@
+{
+  "start": "2026-11-04T20:21:59.345302+08:00",
+  "stage": "measure",
+  "counts": [
+    200000,
+    400000,
+    600000,
+    800000,
+    1000000
+  ],
+  "settings": {
+    "200000": {
+      "backend": "zvec",
+      "count": 200000,
+      "effort": 96,
+      "expected_validation_recall": 0.9275
+    },
+    "400000": {
+      "backend": "zvec",
+      "count": 400000,
+      "effort": 96,
+      "expected_validation_recall": 0.924
+    },
+    "600000": {
+      "backend": "zvec",
+      "count": 600000,
+      "effort": 96,
+      "expected_validation_recall": 0.9285
+    },
+    "800000": {
+      "backend": "zvec",
+      "count": 800000,
+      "effort": 96,
+      "expected_validation_recall": 0.9225
+    },
+    "1000000": {
+      "backend": "zvec",
+      "count": 1000000,
+      "effort": 128,
+      "expected_validation_recall": 0.931
+    }
+  },
+  "backends": [
+    "baseline",
+    "optimized",
+    "microsoft"
+  ],
+  "microsoft_settings": {
+    "200000": {
+      "backend": "microsoft",
+      "count": 200000,
+      "effort": 128,
+      "expected_validation_recall": 0.971
+    },
+    "400000": {
+      "backend": "microsoft",
+      "count": 400000,
+      "effort": 128,
+      "expected_validation_recall": 0.9575
+    },
+    "600000": {
+      "backend": "microsoft",
+      "count": 600000,
+      "effort": 128,
+      "expected_validation_recall": 0.948
+    },
+    "800000": {
+      "backend": "microsoft",
+      "count": 800000,
+      "effort": 128,
+      "expected_validation_recall": 0.9485
+    },
+    "1000000": {
+      "backend": "microsoft",
+      "count": 1000000,
+      "effort": 128,
+      "expected_validation_recall": 0.946
+    }
+  },
+  "microsoft_indexes": "/private/tmp/zvec-cohere-million/experiment/indexes",
+  "pq_preparation": "/private/tmp/zvec-cohere-pq64-20261104/preparation",
+  "pq_codes_sha256": "f09864b337238aa83c18abbcccdd023328b34a24eb34d9ad62bd115baab5aecc",
+  "microsoft_source_sha256": {
+    "rust/crates/zg-diskann/src/lib.rs": "34427006a2eb3b477943e728ed86c5952087afc39b1c6f7b414abec921768d1d",
+    "rust/crates/zg-diskann/src/provider.rs": "56669c6de111605df307b18d9fc2cbac82db34dd6ba32510233cb775fc8fef7a",
+    "rust/crates/zg-diskann/src/experimental_pq.rs": "81cd246edfda8dc8d27791fe7f8fb00d1eb48999d0524ecc8700c8ab6c5eae37",
+    "rust/crates/zg-diskann/src/node.rs": "2a20dadb8939eef2fb9720d91bbf70351023ec35623d88e1531dcaf26bd253ba",
+    "rust/crates/zg-diskann/src/tests.rs": "74cc32e2bfecc5fb1458af104526f38db397f0903302702e0c40195a39ce8688",
+    "rust/crates/zg-diskann/src/experimental_pq/tests.rs": "4a657896a80944e47c11077ab736b299af9a1a15f83cf2a15c471b6d10d495fb"
+  },
+  "microsoft_harness_sha256": "f60f2c38f5581075e21feba5157b5628b9d56ddb73bd072b15dee2c474615e9e",
+  "schedule": "six rounds; alternate scale order and rotate/reverse backend order",
+  "data": "/tmp/zvec-cohere-million/data",
+  "data_manifest_sha256": "4c56167ebc49c2b574b6740376e2ca9bb8764665faeccef385ac817935d5b919",
+  "indexes": "/tmp/zvec-local-cohere-20261104/experiment/indexes",
+  "source": "/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/zvec",
+  "source_base_commit": "37ff6bd5618d63b85b2e6b14f7dff9076287a40d",
+  "source_commit": "7d3a413e1f1e5367dc45402b2e28a9ed254343f3",
+  "source_sha256": {
+    "src/core/algorithm/diskann/diskann_read_cache.h": "be5beb2c40f166b28b021f5841338a67575a482c4e8625f7ba755a26cf993aec",
+    "src/core/algorithm/diskann/diskann_read_executor.h": "92248e4cc41db6431e147c53543ecf89324efe0c25f656e1659bdef0a4937358",
+    "src/core/algorithm/diskann/diskann_file_reader.h": "0435ce0496b2042ea7b6c808b0800ea3dbc711ebb158ddb5cea23675a9b6d052",
+    "src/core/algorithm/diskann/diskann_file_reader.cc": "2d28bad5fe6462ff36b7b22070311babcab2b611373640995b8cb42687a82137",
+    "src/core/algorithm/diskann/diskann_indexer.cc": "0414e078a0c0be3fe323cda43236fa4f9eb2f8b68c55dcbda40eb88b37ec7c40",
+    "src/core/algorithm/diskann/diskann_indexer.h": "15f0fb7b35d26a9fabd16e74e0aef88d42666731d6672fe8c840f7af1b30ac47"
+  },
+  "harness_sha256": "aea202a14242573e800951f9d6c1eb8420a79b39feab7fc21972c53b011efbf9",
+  "runner_sha256": "5179bdf2d3b30fecf0eb8707aa88d26bed725eab0195a3a1ddde655a42752758",
+  "binaries": {
+    "baseline": {
+      "path": "/tmp/zvec-local-cohere-20261104/rust-target/release/native-retest",
+      "sha256": "4395e64bf1c6577c58b564ae4d629924447cdd38fa473d01e2547ddc3d310f06"
+    },
+    "optimized": {
+      "path": "/tmp/zvec-node-cohere-20261104/rust-target/release/native-retest",
+      "sha256": "4395e64bf1c6577c58b564ae4d629924447cdd38fa473d01e2547ddc3d310f06"
+    },
+    "microsoft": {
+      "path": "/private/tmp/zvec-local-cohere-20261104/rust-target/release/microsoft-retest",
+      "sha256": "9f14d99bffa93d11698a5bf8b0ba7c6868229410960f2210ad49042d81c2052a"
+    }
+  },
+  "libraries": {
+    "baseline": {
+      "path": "/tmp/zvec-local-cohere-20261104/rust-target/release/libzvec_c_api.dylib",
+      "sha256": "6908a2e48470c76bcc3fd65122aaa560cac5c592f0c09d7ee2a20afd8b1e2998"
+    },
+    "optimized": {
+      "path": "/tmp/zvec-node-cohere-20261104/rust-target/release/libzvec_c_api.dylib",
+      "sha256": "3e7534960cb0c74bac91079bea64202f5fd7689a8bd971b6eaad98cc79c83244"
+    },
+    "microsoft": {
+      "path": "/private/tmp/zvec-local-cohere-20261104/build/lib/libzvec_c_api.dylib",
+      "sha256": "d9ad81542a3b186a7caf68f9ae9bd3eba67ea4f9e414920fd7cbc944087e3496"
+    }
+  },
+  "query_concurrency": 1,
+  "num_threads": 1,
+  "warmup_independent": 20,
+  "warmup_full_passes": 2,
+  "measured_passes": 5,
+  "distinct_queries": 200,
+  "top_k": 10,
+  "metric": "cosine",
+  "precision": "FP16",
+  "pq_chunks": 64,
+  "search_parameters_unchanged": true,
+  "graph_and_pq_unchanged": true,
+  "selection_rule": "reuse the prior independent validation choice of eight workers; keep workers and cache budget identical between zvec variants",
+  "cache_scope": "fixed per reader; packed node payloads with sector-sized disk transfers; F_NOCACHE retained",
+  "cache_budget_mib": 64,
+  "read_workers": 8,
+  "cache_max_ways": 16,
+  "profiling": false,
+  "file_cache": "not purged"
+}

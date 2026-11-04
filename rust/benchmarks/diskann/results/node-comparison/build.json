@@ -1,0 +1,17 @@
+{
+  "source_commit": "7d3a413e1f1e5367dc45402b2e28a9ed254343f3",
+  "compiler": "Apple clang version 15.0.0 (clang-1500.3.9.4)\nTarget: arm64-apple-darwin25.6.0\nThread model: posix\nInstalledDir: /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin\n",
+  "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+  "direct_link_command": ": && ccache /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/c++ -march=armv8 -O3 -DNDEBUG -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX14.5.sdk -dynamiclib -Wl,-headerpad_max_install_names -Wl,-force_load,/tmp/zvec-local-cohere-20261104/build/lib/libzvec.a -Wl,-force_load,/tmp/zvec-local-cohere-20261104/build/lib/libzvec_core.a -Wl,-force_load,/tmp/zvec-local-cohere-20261104/build/lib/libzvec_ailego.a -Wl,-force_load,/tmp/zvec-local-cohere-20261104/build/lib/libzvec_turbo.a -Wl,-dead_strip -Wl,-exported_symbols_list,/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/zvec/src/binding/c/exported_symbols.txt -o /tmp/zvec-node-cohere-20261104/optimized/libzvec_c_api.dylib -install_name @rpath/libzvec_c_api.dylib src/binding/c/CMakeFiles/zvec_c_api.dir/c_api.cc.o  lib/libzvec.a  lib/libzvec_core.a  lib/libzvec_ailego.a  lib/libzvec_turbo.a  lib/librabitq_fastscan.a  lib/librabitq_core.a  lib/libzvec_ailego.a  external/usr/local/lib/libglog.a  external/usr/local/lib/libgflags_nothreads.a  external/usr/local/lib/libroaring.a  external/usr/local/lib/librocksdb.a  external/usr/local/lib//liblz4.a  external/usr/local/lib/libantlr4-runtime.a  -framework CoreFoundation  lib/libFastPFOR.a  external/usr/local/lib//liblz4.a  lib/libsnowball.a  external/usr/local/lib/libparquet.a  external/usr/local/lib/libarrow_acero.a  external/usr/local/lib/libarrow_compute.a  external/usr/local/lib/libarrow.a  external/usr/local/lib/libarrow_bundled_dependencies.a  lib/libutf8proc.a && cd /tmp/zvec-local-cohere-20261104/build/src/binding/c && /usr/bin/strip -x /tmp/zvec-node-cohere-20261104/optimized/libzvec_c_api.dylib",
+  "library_sha256": "3e7534960cb0c74bac91079bea64202f5fd7689a8bd971b6eaad98cc79c83244",
+  "harness_sha256": "aea202a14242573e800951f9d6c1eb8420a79b39feab7fc21972c53b011efbf9",
+  "cache_mib": 64,
+  "read_workers": 8,
+  "cache_max_ways": 16,
+  "node_record_bytes_from_index": true,
+  "sector_transfers_unchanged": true,
+  "changes_persisted_in_source": true,
+  "loader_observation": [
+    "dyld[51394]: <D39A701D-E6C4-3D14-9C74-3752670B8997> /private/tmp/zvec-node-cohere-20261104/rust-target/release/libzvec_c_api.dylib"
+  ]
+}

@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/zvec-grep/rust/benchmarks/diskann/run_node_comparison.py", line 224, in <module>
+    if __name__=='__main__': main()
+                             ^^^^^^
+  File "/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/zvec-grep/rust/benchmarks/diskann/run_node_comparison.py", line 70, in main
+    assert any(Path(v).is_absolute() and Path(v).resolve()==libraries[name].resolve() for v in paths)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError

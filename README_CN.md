@@ -61,6 +61,11 @@ zvec 源码修改前后，在相同索引和搜索参数下列出吞吐量收益
 固定 64 MiB 缓存和搜索结果，通过有限的 I/O 工作线程并行读取节点页，
 重新对比 20 万至 100 万 Cohere 向量下的 QPS、RSS 和召回率，并列明与微软方案的差异。
 
+最新[节点缓存报告](rust/benchmarks/diskann/REPORT_NODE_CN.md) 在同样的 64 MiB 预算和
+8 个 I/O 工作线程下，紧凑保存单个节点、保留整页读盘并减少冲突淘汰。
+六轮复测中，五个规模的 QPS 均超过微软适配层，有序结果不变、召回率均高于 90%；
+报告同时列出 RSS、CPU 代价和读取诊断证据。
+
 **安装**：`npm install -g @zvec/zvec-grep`，或通过 Homebrew（macOS/Linux）：
 `brew install zvec-grep`
 

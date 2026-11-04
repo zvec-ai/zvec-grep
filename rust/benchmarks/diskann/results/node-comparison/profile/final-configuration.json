@@ -1,0 +1,13 @@
+{
+  "source_commit": "7d3a413e1f1e5367dc45402b2e28a9ed254343f3",
+  "library_sha256": "3e7534960cb0c74bac91079bea64202f5fd7689a8bd971b6eaad98cc79c83244",
+  "cache_budget_mib": 64,
+  "read_workers": 8,
+  "max_cache_ways": 16,
+  "query_set": "independent validation",
+  "count": 1000000,
+  "effort": 128,
+  "record_bytes": 1708,
+  "transfer_bytes": 4096,
+  "profiling_enabled": true
+}

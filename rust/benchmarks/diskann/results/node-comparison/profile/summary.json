@@ -1,0 +1,54 @@
+{
+  "page8": {
+    "batches": 16533,
+    "requests": 311339,
+    "requested_bytes": 1275244544,
+    "miss_reads": 212768,
+    "read_bytes": 871497728,
+    "pread_syscalls": 212768,
+    "read_ns": 20176133838,
+    "batch_ns": 3408452071,
+    "qps": 345.51631543537894,
+    "record_bytes": 4096,
+    "transfer_bytes": 4096
+  },
+  "node4_small": {
+    "batches": 16533,
+    "requests": 311339,
+    "requested_bytes": 531767012,
+    "miss_reads": 109476,
+    "read_bytes": 186985008,
+    "pread_syscalls": 109476,
+    "read_ns": 14935552118,
+    "batch_ns": 3083167628,
+    "qps": 408.8177075337817,
+    "record_bytes": 1708,
+    "transfer_bytes": 1708
+  },
+  "node4_sector": {
+    "batches": 16533,
+    "requests": 311339,
+    "requested_bytes": 531767012,
+    "miss_reads": 109476,
+    "read_bytes": 448413696,
+    "pread_syscalls": 109476,
+    "read_ns": 11112643550,
+    "batch_ns": 2300438506,
+    "qps": 512.7993218487419,
+    "record_bytes": 1708,
+    "transfer_bytes": 4096
+  },
+  "node16_sector": {
+    "batches": 16533,
+    "requests": 311339,
+    "requested_bytes": 531767012,
+    "miss_reads": 72128,
+    "read_bytes": 295436288,
+    "pread_syscalls": 72128,
+    "read_ns": 7490896344,
+    "batch_ns": 1851356898,
+    "qps": 645.0803077731044,
+    "record_bytes": 1708,
+    "transfer_bytes": 4096
+  }
+}

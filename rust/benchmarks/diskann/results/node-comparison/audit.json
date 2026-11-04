@@ -1,0 +1,53 @@
+{
+  "primary_processes_verified": 105,
+  "final_validation_processes": 15,
+  "measured_processes": 90,
+  "exploratory_precheck_processes": 6,
+  "diagnostic_records": 4,
+  "one_diagnostic_reused_from_prior_experiment": true,
+  "all_scales_median_qps_above_microsoft": true,
+  "paired_round_wins": {
+    "200000": 6,
+    "400000": 6,
+    "600000": 6,
+    "800000": 6,
+    "1000000": 6
+  },
+  "ordered_ids_identical_between_zvec_variants": true,
+  "minimum_test_recall": 0.931,
+  "measured_major_faults_max": 5,
+  "raw_evidence_uncompressed_sha256": "10dcc63f880ec50273bc89ee76f4151f64d77e8fc16a590838827b9d95c02b8f",
+  "cache_budget_mib": 64,
+  "read_workers": 8,
+  "cache_max_ways": 16,
+  "nonzero_major_fault_runs": [
+    {
+      "backend": "microsoft",
+      "count": 1000000,
+      "repeat": 3,
+      "major_faults": 5
+    }
+  ],
+  "zero_fault_paired_sensitivity": {
+    "200000": {
+      "pairs": 6,
+      "minimum_qps_ratio": 3.974339212285418
+    },
+    "400000": {
+      "pairs": 6,
+      "minimum_qps_ratio": 3.1167316237778757
+    },
+    "600000": {
+      "pairs": 6,
+      "minimum_qps_ratio": 2.6882003592795587
+    },
+    "800000": {
+      "pairs": 6,
+      "minimum_qps_ratio": 2.5908936979215045
+    },
+    "1000000": {
+      "pairs": 5,
+      "minimum_qps_ratio": 1.2878423049756478
+    }
+  }
+}

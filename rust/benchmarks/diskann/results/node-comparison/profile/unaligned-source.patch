@@ -1,0 +1,390 @@
+diff --git a/src/core/algorithm/diskann/diskann_file_reader.cc b/src/core/algorithm/diskann/diskann_file_reader.cc
+index 1fb6dd58..7db2a94c 100644
+--- a/src/core/algorithm/diskann/diskann_file_reader.cc
++++ b/src/core/algorithm/diskann/diskann_file_reader.cc
+@@ -774,10 +774,13 @@ void LinuxAlignedFileReader::close() {
+ }
+ 
+ #if defined(__APPLE__)
+-int LinuxAlignedFileReader::configure_read_cache(size_t budget_bytes) {
++int LinuxAlignedFileReader::configure_read_cache(size_t budget_bytes,
++                                                 size_t record_bytes) {
++  if (!record_bytes) return IndexError_InvalidArgument;
+   try {
+     std::unique_ptr<DiskAnnReadCache> next;
+-    if (budget_bytes) next.reset(new DiskAnnReadCache(budget_bytes));
++    if (budget_bytes)
++      next.reset(new DiskAnnReadCache(budget_bytes, record_bytes));
+     read_cache_ = std::move(next);
+     const char *profile = std::getenv("ZVEC_DISKANN_PROFILE_READS");
+     profile_reads_ = profile && std::strcmp(profile, "1") == 0;
+@@ -855,10 +858,24 @@ int LinuxAlignedFileReader::read(std::vector<AlignedRead> &read_reqs,
+       end_buffer = std::max(end_buffer, end);
+     }
+     if (parallel) {
++      std::vector<size_t> misses;
++      misses.reserve(read_reqs.size());
++      for (size_t i = 0; i < read_reqs.size(); ++i) {
++        const auto &req = read_reqs[i];
++        if (!read_cache_ ||
++            !read_cache_->try_read(req.offset, req.len, req.buf))
++          misses.push_back(i);
++      }
+       std::vector<int> errors(read_reqs.size(), 0);
+-      read_executor_->run(read_reqs.size(), [&](size_t i) {
++      if (misses.size() == 1) {
++        const size_t i = misses.front();
+         errors[i] = read_cached(read_reqs[i]);
+-      });
++      } else if (!misses.empty()) {
++        read_executor_->run(misses.size(), [&](size_t position) {
++          const size_t i = misses[position];
++          errors[i] = read_cached(read_reqs[i]);
++        });
++      }
+       // All requests have completed, including after an error. Return the
+       // first error in submission order, without leaving pending writes.
+       for (int ret : errors)
+diff --git a/src/core/algorithm/diskann/diskann_file_reader.h b/src/core/algorithm/diskann/diskann_file_reader.h
+index b80ae460..e1dd0951 100644
+--- a/src/core/algorithm/diskann/diskann_file_reader.h
++++ b/src/core/algorithm/diskann/diskann_file_reader.h
+@@ -195,7 +195,9 @@ class LinuxAlignedFileReader : public AlignedFileReader {
+ #if defined(__APPLE__)
+   // Configure only while no operations are active; open/close discard cached
+   // data so sectors can never leak across different file identities.
+-  int configure_read_cache(size_t budget_bytes);
++  int configure_read_cache(
++      size_t budget_bytes,
++      size_t record_bytes = DiskAnnReadCache::kSectorBytes);
+   int configure_read_workers(size_t workers);
+   size_t read_workers() const {
+     return read_executor_ ? read_executor_->workers() : 1;
+diff --git a/src/core/algorithm/diskann/diskann_indexer.cc b/src/core/algorithm/diskann/diskann_indexer.cc
+index a49a4876..a2133c61 100644
+--- a/src/core/algorithm/diskann/diskann_indexer.cc
++++ b/src/core/algorithm/diskann/diskann_indexer.cc
+@@ -77,6 +77,7 @@ DiskAnnIndexer::~DiskAnnIndexer() {
+ 
+ int DiskAnnIndexer::init(DiskAnnSearcherEntity &entity,
+                          turbo::Quantizer::Pointer quantizer) {
++  node_record_reads_ = false;
+   auto storage = entity.get_storage();
+   auto vector_segment = entity.get_vector_segment();
+   if (!storage || !vector_segment) {
+@@ -268,8 +269,9 @@ int DiskAnnIndexer::init(DiskAnnSearcherEntity &entity,
+     // Small indexes must not each reserve the full default budget.
+     cache_bytes = std::min(cache_bytes, vector_segment_bytes);
+     auto *file_reader = static_cast<LinuxAlignedFileReader *>(reader_.get());
+-    ret = file_reader->configure_read_cache(cache_bytes);
++    ret = file_reader->configure_read_cache(cache_bytes, max_node_size_);
+     if (ret != 0) return ret;
++    node_record_reads_ = true;
+     size_t workers = 0;
+     if (!DiskAnnReadExecutor::parse_workers(
+             std::getenv("ZVEC_DISKANN_READ_WORKERS"), &workers)) {
+@@ -279,9 +281,9 @@ int DiskAnnIndexer::init(DiskAnnSearcherEntity &entity,
+     ret = file_reader->configure_read_workers(workers);
+     if (ret != 0) return ret;
+     LOG_INFO(
+-        "DiskAnn node-sector read cache: budget_bytes=%zu allocated_bytes=%zu "
+-        "read_workers=%zu",
+-        cache_bytes, file_reader->read_cache_bytes(), workers);
++        "DiskAnn node-record read cache: budget_bytes=%zu allocated_bytes=%zu "
++        "record_bytes=%u read_workers=%zu",
++        cache_bytes, file_reader->read_cache_bytes(), max_node_size_, workers);
+ #endif
+   }
+ 
+@@ -326,6 +328,29 @@ int DiskAnnIndexer::init(DiskAnnSearcherEntity &entity,
+   return 0;
+ }
+ 
++AlignedRead DiskAnnIndexer::node_read(diskann_id_t id,
++                                      uint8_t *sector_buffer) const {
++  const uint64_t sector_offset =
++      index_segment_offset_ +
++      DiskAnnUtil::get_node_sector(node_per_sector_, max_node_size_,
++                                   DiskAnnUtil::kSectorSize, id) *
++          DiskAnnUtil::kSectorSize;
++  if (node_record_reads_) {
++    // macOS pread accepts unaligned byte ranges. Copy only this node into its
++    // existing scratch-buffer position; graph decoding and file layout stay
++    // unchanged. Linux/Windows direct-I/O paths keep aligned sector requests.
++    const size_t within =
++        node_per_sector_
++            ? static_cast<size_t>(id % node_per_sector_) * max_node_size_
++            : 0;
++    return AlignedRead(sector_offset + within, max_node_size_,
++                       sector_buffer + within);
++  }
++  return AlignedRead(sector_offset,
++                     sector_num_per_node_ * DiskAnnUtil::kSectorSize,
++                     sector_buffer);
++}
++
+ int DiskAnnIndexer::use_medroids_data_as_centroids() {
+   LOG_INFO("Loading centroid data from medoid vector data");
+ 
+@@ -393,15 +418,8 @@ std::vector<bool> DiskAnnIndexer::read_nodes(
+   for (size_t i = 0; i < node_ids.size(); ++i) {
+     auto node_id = node_ids[i];
+ 
+-    AlignedRead read;
+-    read.len = sector_num * DiskAnnUtil::kSectorSize;
+-    read.buf = buf + i * sector_num * DiskAnnUtil::kSectorSize;
+-    read.offset =
+-        index_segment_offset_ +
+-        DiskAnnUtil::get_node_sector(node_per_sector_, max_node_size_,
+-                                     DiskAnnUtil::kSectorSize, node_id) *
+-            DiskAnnUtil::kSectorSize;
+-    read_reqs.push_back(read);
++    read_reqs.push_back(
++        node_read(node_id, buf + i * sector_num * DiskAnnUtil::kSectorSize));
+   }
+ 
+   int read_ret = reader_->read(read_reqs, init_ctx_);
+@@ -884,13 +902,8 @@ int DiskAnnIndexer::linear_search(DiskAnnContext *ctx) {
+ 
+         sector_buffer_idx++;
+ 
+-        frontier_read_reqs.emplace_back(
+-            index_segment_offset_ +
+-                DiskAnnUtil::get_node_sector(node_per_sector_, max_node_size_,
+-                                             DiskAnnUtil::kSectorSize, cur_id) *
+-                    DiskAnnUtil::kSectorSize,
+-            sector_num_per_node * DiskAnnUtil::kSectorSize,
+-            frontier_neighbor.second);
++        frontier_read_reqs.push_back(
++            node_read(cur_id, frontier_neighbor.second));
+ 
+         stats.disk_page_reads++;
+         stats.io_num++;
+@@ -1043,13 +1056,8 @@ int DiskAnnIndexer::keys_search(const std::vector<uint64_t> &keys,
+ 
+         sector_buffer_idx++;
+ 
+-        frontier_read_reqs.emplace_back(
+-            index_segment_offset_ +
+-                DiskAnnUtil::get_node_sector(node_per_sector_, max_node_size_,
+-                                             DiskAnnUtil::kSectorSize, cur_id) *
+-                    DiskAnnUtil::kSectorSize,
+-            sector_num_per_node * DiskAnnUtil::kSectorSize,
+-            frontier_neighbor.second);
++        frontier_read_reqs.push_back(
++            node_read(cur_id, frontier_neighbor.second));
+ 
+         stats.disk_page_reads++;
+         stats.io_num++;
+@@ -1179,12 +1187,7 @@ int DiskAnnIndexer::get_vector(diskann_id_t id, IndexContext::Pointer &context,
+     frontier_neighbor.second = sector_buffer;
+     frontier_neighbors.push_back(frontier_neighbor);
+ 
+-    frontier_read_reqs.emplace_back(
+-        index_segment_offset_ +
+-            DiskAnnUtil::get_node_sector(node_per_sector_, max_node_size_,
+-                                         DiskAnnUtil::kSectorSize, id) *
+-                DiskAnnUtil::kSectorSize,
+-        sector_read_size, frontier_neighbor.second);
++    frontier_read_reqs.push_back(node_read(id, frontier_neighbor.second));
+ 
+     stats.disk_page_reads++;
+     stats.io_num++;
+@@ -1371,13 +1374,8 @@ int DiskAnnIndexer::cached_beam_search_impl(DiskAnnContext *ctx) {
+ 
+         sector_buffer_idx++;
+ 
+-        frontier_read_reqs.emplace_back(
+-            index_segment_offset_ +
+-                DiskAnnUtil::get_node_sector(node_per_sector_, max_node_size_,
+-                                             DiskAnnUtil::kSectorSize, cur_id) *
+-                    DiskAnnUtil::kSectorSize,
+-            sector_num_per_node * DiskAnnUtil::kSectorSize,
+-            frontier_neighbor.second);
++        frontier_read_reqs.push_back(
++            node_read(cur_id, frontier_neighbor.second));
+ 
+         stats.disk_page_reads++;
+         stats.io_num++;
+@@ -1616,13 +1614,8 @@ int DiskAnnIndexer::cached_beam_search_by_group(DiskAnnContext *ctx) {
+ 
+           sector_buffer_idx++;
+ 
+-          frontier_read_reqs.emplace_back(
+-              index_segment_offset_ + DiskAnnUtil::get_node_sector(
+-                                          node_per_sector_, max_node_size_,
+-                                          DiskAnnUtil::kSectorSize, cur_id) *
+-                                          DiskAnnUtil::kSectorSize,
+-              sector_num_per_node * DiskAnnUtil::kSectorSize,
+-              frontier_neighbor.second);
++          frontier_read_reqs.push_back(
++              node_read(cur_id, frontier_neighbor.second));
+ 
+           stats.disk_page_reads++;
+           stats.io_num++;
+diff --git a/src/core/algorithm/diskann/diskann_indexer.h b/src/core/algorithm/diskann/diskann_indexer.h
+index e0a8d75c..5112124c 100644
+--- a/src/core/algorithm/diskann/diskann_indexer.h
++++ b/src/core/algorithm/diskann/diskann_indexer.h
+@@ -97,6 +97,7 @@ class DiskAnnIndexer {
+   int cache_bfs_levels(uint64_t num_nodes_to_cache, CacheLoadState &state);
+   void reset_cache_storage();
+   int cached_beam_search_impl(DiskAnnContext *ctx);
++  AlignedRead node_read(diskann_id_t id, uint8_t *sector_buffer) const;
+ 
+   DiskAnnEntity::Pointer entity_{};
+   IndexStorage::Pointer storage_{};
+@@ -106,6 +107,7 @@ class DiskAnnIndexer {
+   uint32_t max_degree_{0};
+   uint32_t node_per_sector_{0};
+   uint32_t max_node_size_{0};
++  bool node_record_reads_{false};
+   uint64_t quant_code_size_{0};
+   uint64_t disk_bytes_per_point_{0};
+   uint64_t index_segment_offset_{0};
+diff --git a/src/core/algorithm/diskann/diskann_read_cache.h b/src/core/algorithm/diskann/diskann_read_cache.h
+index d86f0480..c362fcb7 100644
+--- a/src/core/algorithm/diskann/diskann_read_cache.h
++++ b/src/core/algorithm/diskann/diskann_read_cache.h
+@@ -11,13 +11,14 @@
+ #include <cstddef>
+ #include <cstdint>
+ #include <cstring>
++#include <limits>
+ #include <memory>
+ #include <mutex>
+ 
+ namespace zvec {
+ namespace core {
+ 
+-// A per-file cache for immutable DiskANN node sectors. Fixed four-way clock
++// A per-file cache for immutable, fixed-size DiskANN records. Four-way clock
+ // sets bound both payload and bookkeeping; no per-hit heap allocation or
+ // whole-index table. I/O happens outside the set lock. Concurrent misses may
+ // duplicate a read, but never publish partial data or retain caller buffers.
+@@ -25,44 +26,71 @@ class DiskAnnReadCache {
+  public:
+   static constexpr size_t kSectorBytes = 4096;
+ 
+-  explicit DiskAnnReadCache(size_t budget) {
+-    if (budget > sizeof(*this)) {
+-      set_count_ = (budget - sizeof(*this)) / sizeof(Set);
+-      if (set_count_) sets_.reset(new Set[set_count_]);
++  explicit DiskAnnReadCache(size_t budget, size_t record_bytes = kSectorBytes)
++      : record_bytes_(record_bytes) {
++    if (record_bytes &&
++        record_bytes <=
++            (std::numeric_limits<size_t>::max() - sizeof(Set)) / 4 &&
++        budget > sizeof(*this)) {
++      set_count_ = (budget - sizeof(*this)) / (sizeof(Set) + 4 * record_bytes);
++      if (set_count_) {
++        sets_.reset(new Set[set_count_]);
++        data_.reset(new uint8_t[set_count_ * 4 * record_bytes]);
++      }
+     }
+   }
+ 
+   size_t allocated_bytes() const {
+-    return sizeof(*this) + set_count_ * sizeof(Set);
++    return set_count_
++               ? sizeof(*this) + set_count_ * (sizeof(Set) + 4 * record_bytes_)
++               : sizeof(*this);
++  }
++
++  size_t capacity() const {
++    return set_count_ * 4;
++  }
++
++  // Copy hits before scheduling I/O. A miss may have copied a prefix, which
++  // read() safely overwrites from the same immutable file.
++  bool try_read(uint64_t offset, size_t length, void *destination) {
++    if (!set_count_ || length % record_bytes_ != 0) return false;
++    auto *out = static_cast<uint8_t *>(destination);
++    for (size_t consumed = 0; consumed < length; consumed += record_bytes_) {
++      const uint64_t key = offset + consumed;
++      const size_t slot = hash(key) % set_count_;
++      Set &set = sets_[slot];
++      std::lock_guard<std::mutex> lock(set.mutex);
++      bool found = false;
++      for (size_t i = 0; i < set.entries.size(); ++i) {
++        auto &entry = set.entries[i];
++        if (entry.valid && entry.offset == key) {
++          std::memcpy(out + consumed, payload(slot, i), record_bytes_);
++          entry.referenced = true;
++          found = true;
++          break;
++        }
++      }
++      if (!found) return false;
++    }
++    return true;
+   }
+ 
+-  // Non-sector requests bypass the cache without reading beyond their range.
++  // Non-record requests bypass the cache without reading beyond their range.
+   // read_one(offset, length, destination) must fully fill the destination on
+   // success and return zero; errors are returned without caching that sector.
+   template <typename ReadOne>
+   int read(uint64_t offset, size_t length, void *destination,
+            const ReadOne &read_one) {
+-    if (!set_count_ || length % kSectorBytes != 0) {
++    if (!set_count_ || length % record_bytes_ != 0) {
+       return read_one(offset, length, destination);
+     }
+     auto *out = static_cast<uint8_t *>(destination);
+-    for (size_t consumed = 0; consumed < length; consumed += kSectorBytes) {
++    for (size_t consumed = 0; consumed < length; consumed += record_bytes_) {
+       const uint64_t key = offset + consumed;
+-      Set &set = sets_[hash(key) % set_count_];
+-      bool hit = false;
+-      {
+-        std::lock_guard<std::mutex> lock(set.mutex);
+-        for (auto &entry : set.entries) {
+-          if (entry.valid && entry.offset == key) {
+-            std::memcpy(out + consumed, entry.data.data(), kSectorBytes);
+-            entry.referenced = true;
+-            hit = true;
+-            break;
+-          }
+-        }
+-      }
+-      if (hit) continue;
+-      int ret = read_one(key, kSectorBytes, out + consumed);
++      if (try_read(key, record_bytes_, out + consumed)) continue;
++      const size_t slot = hash(key) % set_count_;
++      Set &set = sets_[slot];
++      int ret = read_one(key, record_bytes_, out + consumed);
+       if (ret != 0) return ret;
+       {
+         std::lock_guard<std::mutex> lock(set.mutex);
+@@ -82,7 +110,7 @@ class DiskAnnReadCache {
+           set.hand = (set.hand + 1) % set.entries.size();
+         }
+         auto &entry = set.entries[set.hand];
+-        std::memcpy(entry.data.data(), out + consumed, kSectorBytes);
++        std::memcpy(payload(slot, set.hand), out + consumed, record_bytes_);
+         entry.offset = key;
+         entry.valid = entry.referenced = true;
+         set.hand = (set.hand + 1) % set.entries.size();
+@@ -113,7 +141,6 @@ class DiskAnnReadCache {
+     uint64_t offset{0};
+     bool valid{false};
+     bool referenced{false};
+-    std::array<uint8_t, kSectorBytes> data{};
+   };
+   struct Set {
+     std::mutex mutex;
+@@ -128,8 +155,13 @@ class DiskAnnReadCache {
+     key *= UINT64_C(0x94d049bb133111eb);
+     return key ^ (key >> 31);
+   }
++  uint8_t *payload(size_t set, size_t entry) {
++    return data_.get() + (set * 4 + entry) * record_bytes_;
++  }
+   size_t set_count_{0};
++  size_t record_bytes_{kSectorBytes};
+   std::unique_ptr<Set[]> sets_;
++  std::unique_ptr<uint8_t[]> data_;
+ };
+ 
+ }  // namespace core

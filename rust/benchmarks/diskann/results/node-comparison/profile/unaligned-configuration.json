@@ -1,0 +1,11 @@
+{
+  "source_base_commit": "37ff6bd5618d63b85b2e6b14f7dff9076287a40d",
+  "library_sha256": "0dc968eb324e206d5bffa0b89a045aacfa53f869c323793a019a9383aed8484e",
+  "source_patch_sha256": "fecfa9ff97077fd914cc873aefec77361fc78669ae1cb22352d1cecb6ed1c3f8",
+  "cache_mib": 64,
+  "workers": 8,
+  "query_set": "validation",
+  "count": 1000000,
+  "effort": 128,
+  "profiling": true
+}

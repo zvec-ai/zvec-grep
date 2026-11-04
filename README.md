@@ -68,6 +68,12 @@ profiles the remaining macOS read wait, keeps the same 64 MiB cache and search
 results, and retests zvec against the Microsoft Rust/SQLite adapter on 200k–1M
 Cohere vectors. It reports I/O worker counts alongside QPS, RSS, and recall.
 
+The latest [packed node-cache report](rust/benchmarks/diskann/REPORT_NODE_CN.md)
+keeps the 64 MiB budget and eight I/O workers, caches individual node records,
+and retains sector-sized disk reads. Across six fresh rounds, zvec exceeds the
+Microsoft adapter's QPS at all five scales while preserving the previous ordered
+results and recall above 90%. The report includes RSS and diagnostic evidence.
+
 **Install**: `npm install -g @zvec/zvec-grep`, or via Homebrew (macOS/Linux):
 `brew install zvec-grep`
 

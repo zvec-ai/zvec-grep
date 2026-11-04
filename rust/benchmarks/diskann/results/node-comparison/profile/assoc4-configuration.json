@@ -1,0 +1,10 @@
+{
+  "source_base_commit": "37ff6bd5618d63b85b2e6b14f7dff9076287a40d",
+  "library_sha256": "c82ac1a0d292206e9a999659f9ae3f9c1f526084c9ce0e3ad2b0c1547b504882",
+  "source_patch_sha256": "b5ef8297a6de39c6464ff5c4658ed497e83b02b5d7b0608ea63d6c0bcdf72e78",
+  "cache_mib": 64,
+  "workers": 8,
+  "count": 1000000,
+  "effort": 128,
+  "query_set": "validation"
+}
