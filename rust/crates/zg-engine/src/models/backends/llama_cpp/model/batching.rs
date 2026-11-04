@@ -1,14 +1,10 @@
-//! Bounded sequence packing for the non-causal Gemma encoder.
+//! Token-bounded sequence packing for llama.cpp embedding models.
 use std::ops::Range;
 
 use super::{
     IndexedEmbedding, ModelError, PreparedLlamaInput, check_cancelled, llama_batch_capacity,
 };
 use tokio_util::sync::CancellationToken;
-
-// Non-causal attention builds a mask over the whole batch. Bound total tokens,
-// not just sequence count; a longer valid input is executed on its own.
-const GEMMA_BATCH_TOKENS: usize = 128;
 
 pub(super) struct LlamaBatchPlan {
     ranges: Vec<Range<usize>>,
@@ -20,9 +16,17 @@ impl LlamaBatchPlan {
     pub(super) fn new(
         inputs: &[PreparedLlamaInput],
         context_size: u32,
-        multisequence: bool,
+        token_budget: Option<usize>,
     ) -> Result<Self, ModelError> {
-        let token_budget = GEMMA_BATCH_TOKENS.min(context_size as usize);
+        if context_size == 0 || token_budget == Some(0) {
+            return Err(ModelError::invalid_argument(
+                "llama.cpp context size and batch token budget must be greater than zero",
+            ));
+        }
+        // The backend decides whether a model supports multi-sequence batching.
+        // None keeps one sequence per batch. A budget only limits packing:
+        // longer valid inputs still run whole, in a batch of their own.
+        let token_budget = token_budget.map(|budget| budget.min(context_size as usize));
         let mut ranges = Vec::new();
         let mut start = 0;
         let mut tokens = 0;
@@ -35,7 +39,9 @@ impl LlamaBatchPlan {
                     "llama.cpp embedding input must fit the nonempty context",
                 ));
             }
-            if index > start && (!multisequence || tokens + length > token_budget) {
+            if index > start
+                && token_budget.is_none_or(|budget| length > budget.saturating_sub(tokens))
+            {
                 ranges.push(start..index);
                 start = index;
                 tokens = 0;

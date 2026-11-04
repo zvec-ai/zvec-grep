@@ -528,8 +528,10 @@ Index embedding concurrency:
   Applies only to index construction and updates, including automatic indexing
   and refresh; query-vector inference keeps its own defaults. The CLI option
   is accepted only with --index and is never saved in workspace settings.
-  llama.cpp: CPU compute threads on one shared context; defaults to 1. GPU
-    requests use the same CPU thread budget; GPU batching is independent.
+  llama.cpp: one shared context. CPU: compute threads, with no cap of 8;
+    defaults to the available CPU thread count capped at 4. GPU: batching
+    tier capped at 8, defaulting to 1, with one CPU support thread. Higher
+    GPU tiers allow larger batches and may use more memory.
   Transformers/ORT: in-flight batch limit capped at 8; defaults to 1. Native
     sessions honor that budget; CoreML uses one physical session.
   Potion/model2vec: concurrent batch tasks; defaults to 2, with an independent

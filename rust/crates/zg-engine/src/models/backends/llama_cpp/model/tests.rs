@@ -1,6 +1,18 @@
 use super::*;
 use crate::models::catalog::{EmbeddingCatalogEntry, get_embedding_model_catalog_entry};
 
+mod qwen;
+
+fn init_llama_test_logs() {
+    // Correctness runs retain native offload and resolved budget evidence.
+    // This is deliberately separate from the production micro-benchmark.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info,zg_engine=debug")
+        .with_ansi(false)
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
 #[test]
 fn cpu_model_parameters_exclude_gpu_devices_and_layers() {
     let _registry = lock_backend_registry();
@@ -73,13 +85,16 @@ fn pins_main_compatible_sources_and_cache_name() {
 #[test]
 fn user_concurrency_controls_cpu_threads_per_context() {
     for count in [1, 2, 4, 8, 24] {
-        let threads = inference_threads(count).expect("thread count");
+        let threads = LlamaExecutionBudget::resolve("gemma-embedding", false, count)
+            .expect("thread count")
+            .threads;
         assert_eq!(usize::try_from(threads).expect("positive threads"), count);
         let params = llama_context_params(
             "gemma-embedding",
             LlamaContextProfile {
                 context_size: 2_048,
                 batch_capacity: 128,
+                micro_batch_capacity: 128,
                 sequence_capacity: 4,
                 threads,
             },
@@ -89,8 +104,13 @@ fn user_concurrency_controls_cpu_threads_per_context() {
         assert_eq!(params.n_batch(), 128);
         assert_eq!(params.n_seq_max(), 4);
     }
-    assert_eq!(inference_threads(0).expect("backend default"), 1);
-    assert!(inference_threads(usize::MAX).is_err());
+    assert_eq!(
+        LlamaExecutionBudget::resolve("gemma-embedding", false, 0)
+            .expect("valid test configuration")
+            .threads,
+        i32::try_from(default_cpu_concurrency()).expect("automatic CPU thread count")
+    );
+    assert!(LlamaExecutionBudget::resolve("gemma-embedding", false, usize::MAX).is_err());
 }
 
 #[test]
@@ -101,22 +121,177 @@ fn context_batch_capacity_tracks_tokens_instead_of_full_context() {
 }
 
 #[test]
-fn embeddinggemma_micro_batch_covers_long_inputs_without_changing_qwen() {
-    for tokens in [1, 32, 255, 256, 257, 1_024, 2_048] {
-        let batch = llama_batch_capacity(tokens, 2_048).expect("batch capacity");
-        let gemma = llama_micro_batch_capacity("gemma-embedding", batch);
-        assert_eq!(gemma, batch);
-        assert!(usize::try_from(gemma).expect("micro batch") >= tokens);
-        assert_eq!(llama_micro_batch_capacity("qwen3", batch), batch.min(256));
+fn context_profile_reuses_cpu_allocations_across_thread_budgets() {
+    let current = LlamaContextProfile {
+        context_size: 8_192,
+        batch_capacity: 8_192,
+        micro_batch_capacity: 256,
+        sequence_capacity: 1,
+        threads: 1,
+    };
+    for threads in [1, 2, 4, 8] {
+        let desired = LlamaContextProfile { threads, ..current };
+        assert!(current.can_reuse_for(desired));
+        assert!(desired.can_reuse_for(current));
     }
 }
 
 #[test]
-fn multisequence_batching_is_limited_to_gpu_gemma() {
-    assert!(use_multisequence_batching("gemma-embedding", true));
-    assert!(!use_multisequence_batching("gemma-embedding", false));
-    assert!(!use_multisequence_batching("qwen3", true));
-    assert!(!use_multisequence_batching("qwen3", false));
+fn context_profile_requires_recreation_for_each_capacity_growth() {
+    let current = LlamaContextProfile {
+        context_size: 512,
+        batch_capacity: 256,
+        micro_batch_capacity: 128,
+        sequence_capacity: 4,
+        threads: 1,
+    };
+    for desired in [
+        LlamaContextProfile {
+            context_size: 1_024,
+            ..current
+        },
+        LlamaContextProfile {
+            batch_capacity: 512,
+            ..current
+        },
+        LlamaContextProfile {
+            micro_batch_capacity: 256,
+            ..current
+        },
+        LlamaContextProfile {
+            sequence_capacity: 8,
+            ..current
+        },
+    ] {
+        assert!(!current.can_reuse_for(desired), "desired={desired:?}");
+    }
+}
+
+#[test]
+fn qwen_context_reuses_larger_sequence_and_batch_capacity_for_short_queries() {
+    let current = LlamaContextProfile {
+        context_size: 8_192,
+        batch_capacity: 8_192,
+        micro_batch_capacity: 2_048,
+        sequence_capacity: 8,
+        threads: 1,
+    };
+    let query = LlamaContextProfile {
+        context_size: 256,
+        batch_capacity: 128,
+        micro_batch_capacity: 128,
+        sequence_capacity: 1,
+        threads: 1,
+    };
+    assert!(current.can_reuse_for(query));
+    let at_micro_batch_limit = LlamaContextProfile {
+        batch_capacity: 256,
+        micro_batch_capacity: 256,
+        ..query
+    };
+    assert!(current.can_reuse_for(at_micro_batch_limit));
+}
+
+#[test]
+fn qwen_context_recreates_when_long_inputs_need_a_lower_micro_batch_budget() {
+    let current = LlamaContextProfile {
+        context_size: 8_192,
+        batch_capacity: 8_192,
+        micro_batch_capacity: 2_048,
+        sequence_capacity: 8,
+        threads: 1,
+    };
+    for batch_capacity in [512, 8_192] {
+        let reduced = LlamaContextProfile {
+            context_size: batch_capacity,
+            batch_capacity,
+            micro_batch_capacity: 256,
+            sequence_capacity: 1,
+            threads: 1,
+        };
+        assert!(!current.can_reuse_for(reduced));
+        assert!(reduced.can_reuse_for(reduced));
+    }
+}
+
+#[test]
+fn gemma_context_reuses_capacity_when_the_whole_batch_fits_the_lower_tier() {
+    let current = LlamaContextProfile {
+        context_size: 2_048,
+        batch_capacity: 1_024,
+        micro_batch_capacity: 1_024,
+        sequence_capacity: 16,
+        threads: 1,
+    };
+    let reduced = LlamaContextProfile {
+        batch_capacity: 128,
+        micro_batch_capacity: 128,
+        sequence_capacity: 4,
+        ..current
+    };
+    assert!(current.can_reuse_for(reduced));
+}
+
+#[test]
+fn embeddinggemma_micro_batch_covers_long_inputs_without_changing_qwen() {
+    for tokens in [1, 32, 255, 256, 257, 1_024, 2_048] {
+        let batch = llama_batch_capacity(tokens, 2_048).expect("batch capacity");
+        let gemma = llama_micro_batch_capacity("gemma-embedding", batch, None);
+        assert_eq!(gemma, batch);
+        assert!(usize::try_from(gemma).expect("micro batch") >= tokens);
+        assert_eq!(
+            llama_micro_batch_capacity("qwen3", batch, None),
+            batch.min(256)
+        );
+        assert_eq!(
+            llama_micro_batch_capacity("qwen3", batch, Some(1_024)),
+            batch.min(1_024)
+        );
+    }
+}
+
+#[test]
+fn multisequence_batching_is_limited_to_validated_gpu_models() {
+    for architecture in ["gemma-embedding", "qwen3"] {
+        assert!(
+            LlamaExecutionBudget::resolve(architecture, true, 1)
+                .expect("valid test configuration")
+                .batch_tokens
+                .is_some()
+        );
+        assert!(
+            LlamaExecutionBudget::resolve(architecture, false, 1)
+                .expect("valid test configuration")
+                .batch_tokens
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn automatic_cpu_budget_preserves_parallel_compute_while_one_is_explicit() {
+    let model = LlamaCppEmbeddingModel::new(
+        entry("local/embeddinggemma-300m"),
+        ModelConfig {
+            device: Some(Device::Cpu),
+            ..ModelConfig::default()
+        },
+        ModelComputeRuntime::shared(),
+    );
+    let available = std::thread::available_parallelism()
+        .expect("valid test configuration")
+        .get();
+    assert_eq!(model.concurrency_defaults().initial, available.min(4));
+    assert_eq!(
+        model.concurrency_defaults().initial,
+        default_cpu_concurrency()
+    );
+    assert_eq!(
+        LlamaExecutionBudget::resolve("gemma-embedding", false, 1)
+            .expect("valid test configuration")
+            .threads,
+        1
+    );
 }
 
 #[tokio::test]
@@ -140,6 +315,7 @@ async fn cached_embeddinggemma_cuda_batches_preserve_vectors_and_context_limits(
 }
 
 async fn embeddinggemma_batches_preserve_vectors_and_context_limits(device: Device) {
+    init_llama_test_logs();
     let cache = env::var_os("ZVEC_GREP_TEST_MODEL_CACHE")
         .map(PathBuf::from)
         .expect("ZVEC_GREP_TEST_MODEL_CACHE must point at the model cache");
@@ -184,10 +360,9 @@ async fn embeddinggemma_batches_preserve_vectors_and_context_limits(device: Devi
         assert_gemma_sequence_isolation(&loaded, &inputs);
     }
     for concurrency in [1, 2, 4, 8] {
-        let threads = inference_threads(concurrency).expect("thread count");
         let result = loaded
             .contexts
-            .run(prepared(), 2_048, threads, None)
+            .run(prepared(), 2_048, concurrency, None)
             .expect("batched inference");
         assert_eq!(result.truncated, [4]);
         for (actual, expected) in result.vectors.iter().zip(&expected) {
@@ -208,7 +383,7 @@ async fn embeddinggemma_batches_preserve_vectors_and_context_limits(device: Devi
                     truncated: Vec::new(),
                 },
                 2_048,
-                threads,
+                concurrency,
                 None,
             )
             .expect("reuse after batch");
@@ -253,7 +428,7 @@ fn gemma_batch_fixture(model: &LlamaModel) -> Vec<PreparedLlamaInput> {
 }
 
 fn assert_embedding_close(actual: &[f32], expected: &[f32]) {
-    assert_eq!(actual.len(), 768);
+    assert!(!actual.is_empty());
     assert_eq!(actual.len(), expected.len());
     assert!(actual.iter().all(|value| value.is_finite()));
     let norm = expected.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>();
@@ -377,6 +552,7 @@ async fn cached_embeddinggemma_cuda_handles_long_inputs_and_reuse() {
 }
 
 async fn embeddinggemma_handles_long_inputs_and_reuse(device: Device) {
+    init_llama_test_logs();
     let cache = env::var_os("ZVEC_GREP_TEST_MODEL_CACHE")
         .map(PathBuf::from)
         .expect("ZVEC_GREP_TEST_MODEL_CACHE must point at the model cache");

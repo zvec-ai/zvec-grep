@@ -778,6 +778,39 @@ async fn native_batches_share_admission_across_independent_leases() {
     }
 }
 
+#[tokio::test]
+async fn llama_automatic_and_explicit_budgets_remain_distinct_at_dispatch() {
+    let fixture = Arc::new(GatedFixtureModel::new());
+    let manager = ModelRuntimeManager::with_factory({
+        let fixture = Arc::clone(&fixture);
+        move |_, _, _| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
+    });
+    let request = |budget| {
+        ModelRuntimeRequest::new("local/embeddinggemma-300m", ModelConfig::default(), budget)
+    };
+    let automatic = manager.acquire(request(None)).expect("automatic budget");
+    let explicit = manager.acquire(request(Some(1))).expect("explicit budget");
+    assert!(Arc::ptr_eq(&automatic.entry, &explicit.entry));
+    assert!(Arc::ptr_eq(
+        &automatic.operation.permits,
+        &explicit.operation.permits
+    ));
+    assert_eq!(automatic.operation.execution_concurrency, 0);
+    assert_eq!(explicit.operation.execution_concurrency, 1);
+    fixture.release.add_permits(2);
+    let inputs = [vec![Content::Text("fixture".into())]];
+    automatic
+        .embed(&inputs, EmbeddingOptions::default(), None)
+        .await
+        .expect("automatic dispatch");
+    explicit
+        .embed(&inputs, EmbeddingOptions::default(), None)
+        .await
+        .expect("explicit dispatch");
+    assert_eq!(*fixture.budgets.lock().expect("recorded budgets"), [0, 1]);
+    assert_eq!(manager.snapshot().cached_runtimes, 1);
+}
+
 #[test]
 fn local_variants_reuse_equivalent_limits_and_release_idle_resources() {
     let (manager, creations) = fixture_cache(CachePolicy::default());
@@ -940,9 +973,17 @@ async fn dropping_an_embedding_future_releases_activity_but_keeps_its_model_leas
 #[test]
 fn concurrency_policy_prefers_user_and_preserves_catalog_backend_defaults() {
     let manager = ModelRuntimeManager::new();
+    let llama_default = if matches!(
+        crate::config::default_runtime_device(),
+        None | Some(crate::domain::model::Device::Cpu)
+    ) {
+        std::thread::available_parallelism().map_or(1, |cores| cores.get().min(4))
+    } else {
+        1
+    };
     for (reference, initial, maximum) in [
         ("local/potion-code-16m-v2", 2, 2),
-        ("local/embeddinggemma-300m", 1, 1),
+        ("local/embeddinggemma-300m", llama_default, llama_default),
         ("local/all-minilm-l6-v2", 1, 1),
         ("qwen/text-embedding-v4", 8, 12),
         ("qwen/qwen3-vl-embedding", 4, 8),
@@ -955,6 +996,11 @@ fn concurrency_policy_prefers_user_and_preserves_catalog_backend_defaults() {
             .acquire(ModelRuntimeRequest::new(reference, config.clone(), None))
             .expect("catalog model should be created without loading resources");
         assert_eq!(lease.operation.limit, initial, "{reference}");
+        assert_eq!(
+            lease.operation.execution_concurrency,
+            if is_llama(reference) { 0 } else { initial },
+            "{reference}"
+        );
         assert_eq!(lease.concurrency_defaults().maximum, maximum, "{reference}");
         let explicit = manager
             .acquire(ModelRuntimeRequest::new(reference, config, Some(24)))
@@ -963,6 +1009,10 @@ fn concurrency_policy_prefers_user_and_preserves_catalog_backend_defaults() {
         assert_eq!(
             explicit.operation.limit,
             if local_native { 8 } else { 24 },
+            "{reference}"
+        );
+        assert_eq!(
+            explicit.operation.execution_concurrency, explicit.operation.limit,
             "{reference}"
         );
         assert_eq!(Arc::ptr_eq(&lease.entry, &explicit.entry), !local_native);

@@ -39,13 +39,15 @@ use crate::models::{
     catalog::LlamaCppConfig,
     runtime::ModelComputeRuntime,
     spi::{
-        EmbeddingModel, EmbeddingOptions, EmbeddingPrepareOptions, ModelError, input_text,
-        validate_inputs, validate_result,
+        EmbeddingConcurrencyDefaults, EmbeddingModel, EmbeddingOptions, EmbeddingPrepareOptions,
+        ModelError, input_text, validate_inputs, validate_result,
     },
 };
 
 mod batching;
 use batching::LlamaBatchPlan;
+mod policy;
+use policy::{LlamaExecutionBudget, default_cpu_concurrency};
 
 static LLAMA_BACKEND: super::backend_loading::BackendInitialization<InitializedBackend> =
     super::backend_loading::BackendInitialization::new();
@@ -144,8 +146,23 @@ struct PreparedLlamaBatch {
 struct LlamaContextProfile {
     context_size: u32,
     batch_capacity: u32,
+    micro_batch_capacity: u32,
     sequence_capacity: u32,
     threads: i32,
+}
+
+impl LlamaContextProfile {
+    fn can_reuse_for(self, desired: Self) -> bool {
+        // Thread budgets are updated in place after acquiring the context.
+        self.context_size >= desired.context_size
+            && self.batch_capacity >= desired.batch_capacity
+            && self.micro_batch_capacity >= desired.micro_batch_capacity
+            // A small query may reuse a larger physical-batch capacity.
+            // Long causal inputs must honor a reduced micro-batch budget.
+            && (self.micro_batch_capacity == desired.micro_batch_capacity
+                || desired.batch_capacity <= desired.micro_batch_capacity)
+            && self.sequence_capacity >= desired.sequence_capacity
+    }
 }
 
 struct LlamaWorkerLease<'a> {
@@ -298,6 +315,20 @@ impl EmbeddingModel for LlamaCppEmbeddingModel {
         &self.info
     }
 
+    fn concurrency_defaults(&self) -> EmbeddingConcurrencyDefaults {
+        // Keep automatic CPU inference distinct from an explicit one-thread
+        // request. GPU admission remains one; its budget controls token packing.
+        let initial = if matches!(resolve_device(self.device), None | Some(Device::Cpu)) {
+            default_cpu_concurrency()
+        } else {
+            1
+        };
+        EmbeddingConcurrencyDefaults {
+            initial,
+            maximum: initial,
+        }
+    }
+
     async fn prepare(&self, options: EmbeddingPrepareOptions) -> Result<(), ModelError> {
         self.ensure_loaded(options.on_progress, options.signal.as_ref())
             .await
@@ -323,7 +354,7 @@ impl EmbeddingModel for LlamaCppEmbeddingModel {
             .collect::<Result<Vec<_>, ModelError>>()?;
         let entry = self.entry;
         let signal = options.signal;
-        let execution_concurrency = options.execution_concurrency.max(1);
+        let execution_concurrency = options.execution_concurrency;
         let loaded = Arc::clone(&model);
         let texts_for_first_attempt = texts.clone();
         let signal_for_first_attempt = signal.clone();
@@ -511,15 +542,6 @@ fn report_warning(
     }
 }
 
-fn inference_threads(execution_concurrency: usize) -> Result<i32, ModelError> {
-    // On GPU this controls CPU-side work only; it never changes GPU batch size
-    // or allocates more contexts. Keep explicit overrides meaningful on fallback.
-    i32::try_from(execution_concurrency.max(1)).map_err(|error| {
-        ModelError::invalid_argument("llama.cpp thread count exceeds the native limit")
-            .with_cause(error)
-    })
-}
-
 fn embed_texts(
     loaded: &LoadedLlamaModel,
     texts: &[String],
@@ -559,19 +581,12 @@ fn embed_texts(
         }
         inputs.push(PreparedLlamaInput { index, tokens });
     }
-    let threads = inference_threads(execution_concurrency)?;
     loaded.contexts.run(
         PreparedLlamaBatch { inputs, truncated },
         context_size_u32,
-        threads,
+        execution_concurrency,
         signal,
     )
-}
-
-fn use_multisequence_batching(architecture: &str, gpu: bool) -> bool {
-    // CPU measurements showed no consistent throughput benefit and larger
-    // numerical differences with Q8 batch kernels. Keep its single-sequence path.
-    gpu && architecture == "gemma-embedding"
 }
 
 impl LlamaContextPool {
@@ -588,7 +603,7 @@ impl LlamaContextPool {
         &self,
         prepared: PreparedLlamaBatch,
         context_size: u32,
-        threads: i32,
+        execution_concurrency: usize,
         signal: Option<&CancellationToken>,
     ) -> Result<EmbeddingResult, ModelError> {
         check_cancelled(signal)?;
@@ -601,20 +616,40 @@ impl LlamaContextPool {
                 ModelError::internal("Unable to read llama.cpp model architecture")
                     .with_cause(error)
             })?;
-        let plan = LlamaBatchPlan::new(
-            &inputs,
-            context_size,
-            use_multisequence_batching(&architecture, self.gpu),
-        )?;
+        let budget = LlamaExecutionBudget::resolve(&architecture, self.gpu, execution_concurrency)?;
+        let plan = LlamaBatchPlan::new(&inputs, context_size, budget.batch_tokens)?;
+        // A causal embedding batch needs KV for its live tokens, not the model's
+        // maximum input length for every sequence. Longer inputs grow it later.
+        let native_context_size = if architecture == "qwen3" {
+            plan.token_capacity.max(256).min(context_size)
+        } else {
+            context_size
+        };
+        let micro_batch_capacity =
+            llama_micro_batch_capacity(&architecture, plan.token_capacity, budget.batch_tokens);
+        tracing::debug!(
+            architecture,
+            gpu = self.gpu,
+            execution_concurrency,
+            desired_threads = budget.threads,
+            desired_batch_token_budget = ?budget.batch_tokens,
+            desired_context_tokens = native_context_size,
+            desired_batch_tokens = plan.token_capacity,
+            desired_micro_batch_tokens = micro_batch_capacity,
+            desired_sequences = plan.sequence_capacity,
+            desired_contexts = 1,
+            "llama.cpp embedding execution budget"
+        );
         let worker = self.lease_worker(signal)?;
         let (response, receiver) = mpsc::sync_channel(1);
         let job = LlamaWorkerJob {
             inputs,
             profile: LlamaContextProfile {
-                context_size,
+                context_size: native_context_size,
                 batch_capacity: plan.token_capacity,
+                micro_batch_capacity,
                 sequence_capacity: plan.sequence_capacity,
-                threads,
+                threads: budget.threads,
             },
             plan,
             signal: signal.cloned(),
@@ -724,21 +759,27 @@ impl Drop for LlamaWorkerLease<'_> {
 fn llama_context_worker(model: &LlamaModel, receiver: &mpsc::Receiver<LlamaWorkerMessage>) {
     let mut context = None;
     let mut profile = None;
-    while let Ok(message) = receiver.recv() {
+    loop {
+        let message = match receiver.recv_timeout(Duration::from_secs(30)) {
+            Ok(message) => message,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Bound the lifetime of high-water KV/compute allocations after
+                // a long input or a larger GPU budget, without resizing on queries.
+                context = None;
+                profile = None;
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         let LlamaWorkerMessage::Embed(job) = message else {
             break;
         };
         let desired = job.profile;
-        let reusable = profile.is_some_and(|current: LlamaContextProfile| {
-            current.context_size == desired.context_size
-                && current.threads == desired.threads
-                && current.batch_capacity >= desired.batch_capacity
-                && current.sequence_capacity >= desired.sequence_capacity
-        });
+        let reusable =
+            profile.is_some_and(|current: LlamaContextProfile| current.can_reuse_for(desired));
         if !reusable {
-            // The pinned safe binding has no thread setter. Release the old
-            // context before changing its thread budget or growing capacity;
-            // the loaded model and dedicated worker remain shared.
+            // Release before growing; never retain two native contexts. Thread
+            // budget changes use the safe setter and retain all allocations.
             context = None;
             profile = None;
             match create_llama_context(model, desired) {
@@ -751,6 +792,24 @@ fn llama_context_worker(model: &LlamaModel, receiver: &mpsc::Receiver<LlamaWorke
                     continue;
                 }
             }
+        }
+        if let (Some(context), Some(profile)) = (context.as_mut(), profile.as_mut())
+            && profile.threads != desired.threads
+        {
+            context.set_n_threads(desired.threads, desired.threads);
+            profile.threads = desired.threads;
+        }
+        if let Some(active) = profile {
+            tracing::debug!(
+                reused = reusable,
+                active_context_tokens = active.context_size,
+                active_batch_tokens = active.batch_capacity,
+                active_micro_batch_tokens = active.micro_batch_capacity,
+                active_sequences = active.sequence_capacity,
+                active_threads = active.threads,
+                active_contexts = 1,
+                "llama.cpp active context profile"
+            );
         }
         let result = context
             .as_mut()
@@ -787,29 +846,33 @@ fn llama_context_params(architecture: &str, profile: LlamaContextProfile) -> Lla
         .with_n_ctx(NonZeroU32::new(profile.context_size))
         .with_n_batch(profile.batch_capacity)
         .with_n_seq_max(profile.sequence_capacity)
-        .with_n_ubatch(llama_micro_batch_capacity(
-            architecture,
-            profile.batch_capacity,
-        ))
+        .with_n_ubatch(profile.micro_batch_capacity)
         .with_n_threads(profile.threads)
         .with_n_threads_batch(profile.threads)
         .with_embeddings(true);
-    // Gemma has no KV cache. Keep the full per-input context length when
-    // increasing sequence capacity instead of dividing it among sequences.
-    if architecture == "gemma-embedding" {
+    // Share the token capacity across independent sequence IDs. Dividing n_ctx
+    // into fixed per-sequence slices would shorten otherwise valid inputs.
+    if matches!(architecture, "gemma-embedding" | "qwen3") {
         params.with_kv_unified(true)
     } else {
         params
     }
 }
 
-fn llama_micro_batch_capacity(architecture: &str, batch_capacity: u32) -> u32 {
+fn llama_micro_batch_capacity(
+    architecture: &str,
+    batch_capacity: u32,
+    token_budget: Option<usize>,
+) -> u32 {
     if architecture == "gemma-embedding" {
         // The non-causal encoder must process the whole input in one physical
         // batch. Splitting at 256 tokens triggers a native assertion.
         batch_capacity.max(1)
     } else {
-        batch_capacity.clamp(1, 256)
+        // Causal models can split a long input across physical batches. On GPU
+        // the tier controls that working set too; CPU keeps a fixed micro-batch.
+        let limit = token_budget.map_or(256, |budget| u32::try_from(budget).unwrap_or(u32::MAX));
+        batch_capacity.clamp(1, limit.max(1))
     }
 }
 
@@ -826,8 +889,10 @@ fn run_llama_worker_job(
                 let sequence = i32::try_from(sequence).map_err(|error| {
                     ModelError::internal("Too many llama.cpp embedding sequences").with_cause(error)
                 })?;
+                // Embedding mode requires all token outputs, including LAST
+                // pooling. Let the native pooling choose each sequence's result.
                 batch
-                    .add_sequence(&input.tokens, sequence, inputs.len() > 1)
+                    .add_sequence(&input.tokens, sequence, true)
                     .map_err(|error| {
                         ModelError::internal("Unable to prepare llama.cpp embedding batch")
                             .with_cause(error)

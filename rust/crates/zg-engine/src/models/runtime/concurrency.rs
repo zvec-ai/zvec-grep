@@ -74,7 +74,7 @@ fn resolve_override(
 }
 
 /// Transformer session budgets are fixed when their runtime is created.
-/// llama.cpp serializes one context and applies the thread budget per request,
+/// llama.cpp serializes one context and applies its compute budget per request,
 /// so callers with different budgets share the same model runtime.
 pub(crate) fn local_runtime_limit(reference: &str, requested: Option<usize>) -> Option<usize> {
     if is_transformers(reference) {
@@ -84,7 +84,7 @@ pub(crate) fn local_runtime_limit(reference: &str, requested: Option<usize>) -> 
     }
 }
 
-/// llama.cpp owns one context per cached model. Its thread budget must not
+/// llama.cpp owns one context per cached model. Its compute budget must not
 /// increase application batch admission, including across independent leases.
 pub(crate) fn batch_concurrency(reference: &str, requested: Option<usize>) -> Option<usize> {
     if is_llama(reference) {

@@ -127,6 +127,7 @@ pub(crate) struct ModelRuntimeLease {
 
 struct OperationConcurrency {
     limit: usize,
+    execution_concurrency: usize,
     permits: Arc<Semaphore>,
 }
 
@@ -226,6 +227,13 @@ impl ModelRuntimeManager {
             key.local_limit.or(embedding_concurrency),
             entry.runtime.model.concurrency_defaults(),
         );
+        // llama.cpp resolves automatic compute budgets after choosing the
+        // actual device, so GPU fallback must retain the automatic sentinel.
+        let execution_concurrency = if is_llama(&reference) {
+            embedding_concurrency.unwrap_or(0)
+        } else {
+            concurrency
+        };
         entry.leases.fetch_add(1, Ordering::AcqRel);
         retired.extend(state.retire_idle(self.inner.policy, Instant::now()));
         state.wake_maintenance();
@@ -239,6 +247,7 @@ impl ModelRuntimeManager {
             manager: Arc::downgrade(&self.inner),
             operation: Arc::new(OperationConcurrency {
                 limit: concurrency,
+                execution_concurrency,
                 permits,
             }),
         };
@@ -459,7 +468,7 @@ impl ModelRuntimeLease {
             .acquire_operation_permit(options.signal.as_ref())
             .await?;
         let _active = ActiveEmbeddingGuard::new(&self.entry.runtime.active_embeddings);
-        options.execution_concurrency = self.operation.limit;
+        options.execution_concurrency = self.operation.execution_concurrency;
         if let Some(reporter) = progress {
             let model_progress = options.on_progress.take();
             let operation = Arc::clone(&self.operation);

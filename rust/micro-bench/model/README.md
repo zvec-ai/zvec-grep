@@ -54,14 +54,20 @@ record the number of returned vectors without asserting its size or contents.
 Use production `resolve_index_concurrency` and `batch_concurrency`. Clear inherited
 indexing concurrency overrides so `default` uses the backend default:
 
-- llama.cpp has one in-flight batch; C controls native context parallelism within it.
+- llama.cpp has one in-flight batch on one shared context. On CPU, C controls
+  compute threads without a cap of eight; the default is the available logical
+  CPU count capped at four. On GPU, C selects a token-packing tier capped at
+  eight, defaulting to one, with one CPU support thread. Gemma and Qwen pack
+  sequences within the embedding call; C does not increase context count.
 - Transformers/ONNX uses the production in-flight batch limit, capped at eight;
   its current default is one.
 - model2vec uses its production default (currently two) or the explicit budget.
 
 Record requested C, resolved runtime budget and configured in-flight batch count.
 `default` remains a distinct case from an explicit value even if they resolve to
-the same budget. Do not add extra batch workers on top of a native context budget.
+the same budget. Do not add extra batch workers on top of the native execution
+budget. CPU and GPU C values have different meanings; retain the requested-device
+and fallback limitations below when interpreting results.
 
 The fixed first column records the **requested device only**. Actual execution device
 and fallback are not verified. External GPU utilization is a resource observation,
