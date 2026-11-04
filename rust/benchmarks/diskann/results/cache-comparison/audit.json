@@ -1,0 +1,11 @@
+{
+  "processes_verified": 140,
+  "pilot_processes": 35,
+  "final_validation_processes": 15,
+  "measured_processes": 90,
+  "ordered_ids_identical_between_zvec_variants": true,
+  "minimum_test_recall": 0.931,
+  "raw_evidence_uncompressed_sha256": "03f5518725d69eaa03829b304fca953b601d39d7de8c11bc616c50853b0aa633",
+  "cache_budget_mib": 64,
+  "measured_major_faults_max": 0
+}

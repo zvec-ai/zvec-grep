@@ -1,0 +1,10 @@
+{
+  "source": "macOS unified log; /usr/bin/log show --last 5m --style compact --predicate eventMessage CONTAINS zvec-cache-cohere",
+  "observed_events": [
+    "2026-11-04 18:13:31.208 amfid: /private/tmp/zvec-cache-cohere-20261104/microsoft/native-retest not valid; AppleMobileFileIntegrityError Code=-423: The file is adhoc signed or signed by an unknown certificate chain",
+    "2026-11-04 18:13:31.836 XprotectService: File /tmp/zvec-cache-cohere-20261104/microsoft/native-retest failed on loadCmd /tmp/zvec-cache-cohere-20261104/microsoft/libzvec_c_api.dylib",
+    "2026-11-04 18:14:54.284 XprotectService: File /tmp/zvec-cache-cohere-20261104/microsoft/microsoft-retest failed on loadCmd /tmp/zvec-cache-cohere-20261104/microsoft/libzvec_c_api.dylib"
+  ],
+  "scope": "Extracted diagnostic messages; not a full system log. No security settings were changed.",
+  "recovery": "Use the unchanged, previously verified Microsoft executable and original library paths; restart all final validation and measurement processes."
+}

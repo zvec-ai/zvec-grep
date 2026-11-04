@@ -1,0 +1,8 @@
+{
+  "stage": "validation",
+  "backend": "microsoft",
+  "count": 200000,
+  "repeat": 0,
+  "budget_mib": 0,
+  "updated": "2026-11-04T18:13:31.192910+08:00"
+}

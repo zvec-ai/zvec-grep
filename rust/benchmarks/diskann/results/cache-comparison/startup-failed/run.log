@@ -1,0 +1,14 @@
+{"stage": "validation", "backend": "baseline", "count": 200000, "repeat": 0, "budget_mib": 0, "updated": "2026-11-04T18:13:04.765343+08:00"}
+{"stage": "validation", "backend": "optimized", "count": 200000, "repeat": 0, "budget_mib": 64, "updated": "2026-11-04T18:13:22.648334+08:00"}
+{"stage": "validation", "backend": "microsoft", "count": 200000, "repeat": 0, "budget_mib": 0, "updated": "2026-11-04T18:13:31.192910+08:00"}
+Traceback (most recent call last):
+  File "/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/zvec-grep/rust/benchmarks/diskann/run_cache_comparison.py", line 201, in <module>
+    if __name__=='__main__': main()
+                             ^^^^^^
+  File "/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/zvec-grep/rust/benchmarks/diskann/run_cache_comparison.py", line 171, in main
+    invoke('microsoft',n,0,'validation',0)
+  File "/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/zvec-grep/rust/benchmarks/diskann/run_cache_comparison.py", line 127, in invoke
+    subprocess.run(command,stdout=out,stderr=err,env=process_env,check=True)
+  File "/opt/homebrew/Cellar/python@3.12/3.12.4/Frameworks/Python.framework/Versions/3.12/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/usr/bin/time', '-l', '/tmp/zvec-cache-cohere-20261104/microsoft/native-retest', '/private/tmp/zvec-cohere-million/experiment/indexes/diskann_fp16-200000-768/index', '/tmp/zvec-cohere-million/data/validation/queries.f32', '200000', '128', '/private/tmp/zvec-cohere-pq64-20261104/preparation/codes.bin']' returned non-zero exit status 1.

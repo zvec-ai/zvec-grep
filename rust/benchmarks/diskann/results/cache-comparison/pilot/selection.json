@@ -1,0 +1,10 @@
+{
+  "budget_mib": 64,
+  "validation_geometric_mean_qps": {
+    "16": 86.78925987812113,
+    "32": 90.47387134823055,
+    "64": 121.74509522113787
+  },
+  "rule": "smallest budget reaching 90% of best geometric-mean validation QPS across five scales; 2 processes per budget/scale",
+  "frozen_at": "2026-11-04T18:12:43.848408+08:00"
+}

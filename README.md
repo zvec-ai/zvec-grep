@@ -58,6 +58,11 @@ A [paired comparison with the previous Microsoft Rust/SQLite adapter](rust/bench
 uses the same Cohere samples and warmup protocol, with graph, recall, and cache-policy
 differences documented alongside QPS and process RSS.
 
+The [bounded node-page cache experiment](rust/benchmarks/diskann/REPORT_CACHE_CN.md)
+compares local macOS zvec builds with the same indexes and search parameters.
+It reports the throughput gain and RSS cost separately; released SDK binaries
+do not yet contain this local source change.
+
 **Install**: `npm install -g @zvec/zvec-grep`, or via Homebrew (macOS/Linux):
 `brew install zvec-grep`
 

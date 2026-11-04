@@ -1,0 +1,155 @@
+{
+  "start": "2026-11-04T18:13:04.603957+08:00",
+  "stage": "measure",
+  "counts": [
+    200000,
+    400000,
+    600000,
+    800000,
+    1000000
+  ],
+  "settings": {
+    "200000": {
+      "backend": "zvec",
+      "count": 200000,
+      "effort": 96,
+      "expected_validation_recall": 0.9275
+    },
+    "400000": {
+      "backend": "zvec",
+      "count": 400000,
+      "effort": 96,
+      "expected_validation_recall": 0.924
+    },
+    "600000": {
+      "backend": "zvec",
+      "count": 600000,
+      "effort": 96,
+      "expected_validation_recall": 0.9285
+    },
+    "800000": {
+      "backend": "zvec",
+      "count": 800000,
+      "effort": 96,
+      "expected_validation_recall": 0.9225
+    },
+    "1000000": {
+      "backend": "zvec",
+      "count": 1000000,
+      "effort": 128,
+      "expected_validation_recall": 0.931
+    }
+  },
+  "backends": [
+    "baseline",
+    "optimized",
+    "microsoft"
+  ],
+  "microsoft_settings": {
+    "200000": {
+      "backend": "microsoft",
+      "count": 200000,
+      "effort": 128,
+      "expected_validation_recall": 0.971
+    },
+    "400000": {
+      "backend": "microsoft",
+      "count": 400000,
+      "effort": 128,
+      "expected_validation_recall": 0.9575
+    },
+    "600000": {
+      "backend": "microsoft",
+      "count": 600000,
+      "effort": 128,
+      "expected_validation_recall": 0.948
+    },
+    "800000": {
+      "backend": "microsoft",
+      "count": 800000,
+      "effort": 128,
+      "expected_validation_recall": 0.9485
+    },
+    "1000000": {
+      "backend": "microsoft",
+      "count": 1000000,
+      "effort": 128,
+      "expected_validation_recall": 0.946
+    }
+  },
+  "microsoft_indexes": "/private/tmp/zvec-cohere-million/experiment/indexes",
+  "pq_preparation": "/private/tmp/zvec-cohere-pq64-20261104/preparation",
+  "pq_codes_sha256": "f09864b337238aa83c18abbcccdd023328b34a24eb34d9ad62bd115baab5aecc",
+  "microsoft_source_sha256": {
+    "rust/crates/zg-diskann/src/lib.rs": "34427006a2eb3b477943e728ed86c5952087afc39b1c6f7b414abec921768d1d",
+    "rust/crates/zg-diskann/src/provider.rs": "56669c6de111605df307b18d9fc2cbac82db34dd6ba32510233cb775fc8fef7a",
+    "rust/crates/zg-diskann/src/experimental_pq.rs": "81cd246edfda8dc8d27791fe7f8fb00d1eb48999d0524ecc8700c8ab6c5eae37",
+    "rust/crates/zg-diskann/src/node.rs": "2a20dadb8939eef2fb9720d91bbf70351023ec35623d88e1531dcaf26bd253ba",
+    "rust/crates/zg-diskann/src/tests.rs": "74cc32e2bfecc5fb1458af104526f38db397f0903302702e0c40195a39ce8688",
+    "rust/crates/zg-diskann/src/experimental_pq/tests.rs": "4a657896a80944e47c11077ab736b299af9a1a15f83cf2a15c471b6d10d495fb"
+  },
+  "microsoft_harness_sha256": "f60f2c38f5581075e21feba5157b5628b9d56ddb73bd072b15dee2c474615e9e",
+  "schedule": "six rounds; alternate scale order and rotate/reverse backend order",
+  "data": "/tmp/zvec-cohere-million/data",
+  "data_manifest_sha256": "4c56167ebc49c2b574b6740376e2ca9bb8764665faeccef385ac817935d5b919",
+  "indexes": "/tmp/zvec-local-cohere-20261104/experiment/indexes",
+  "source": "/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/zvec",
+  "source_base_commit": "960ecbc23f566df729429bdff655ece6dbb2261c",
+  "source_commit": "e31ce799b1a05b2a2f32237261029a6166b3d4e1",
+  "source_sha256": {
+    "src/core/algorithm/diskann/diskann_read_cache.h": "0fb1b4c6072b299c67ad2c9cc4be6463fcf2a37dbfccaab39a3d079c000e8233",
+    "src/core/algorithm/diskann/diskann_file_reader.h": "e9a7911a918ca2413c74fe4249a811474df970c2363afe9376eaaa9ad88a29af",
+    "src/core/algorithm/diskann/diskann_file_reader.cc": "d307a5f75a5faf1dd2b0da305e4a46763fdb8e488558f7ec5cc620d6b619e2ba",
+    "src/core/algorithm/diskann/diskann_indexer.cc": "4e2c8d3d809f3fad64695aa91462f4642b87f9033c93ee40216b951818480dfd"
+  },
+  "harness_sha256": "aea202a14242573e800951f9d6c1eb8420a79b39feab7fc21972c53b011efbf9",
+  "runner_sha256": "e879d64eb5248fb09d810d52c4606df8aa300516f3f7cee52ee1dd8944f17d70",
+  "binaries": {
+    "baseline": {
+      "path": "/tmp/zvec-cache-cohere-20261104/baseline/native-retest",
+      "sha256": "c7c693a5b93701c06f86088aca795a76d7bb3ecaa7c4530250db2ce600c24299"
+    },
+    "optimized": {
+      "path": "/tmp/zvec-cache-cohere-20261104/optimized/native-retest",
+      "sha256": "ae28fe8a69259b998d3454bd3d240ac358cedbb2505461a516a363346fb1b93a"
+    },
+    "microsoft": {
+      "path": "/tmp/zvec-cache-cohere-20261104/microsoft/native-retest",
+      "sha256": "c231f0e4fefc1fec82d53e3b39a2356fe824543b5b4bd1b7dfb19d760a7e895f"
+    }
+  },
+  "libraries": {
+    "baseline": {
+      "path": "/tmp/zvec-cache-cohere-20261104/baseline/libzvec_c_api.dylib",
+      "sha256": "d9ad81542a3b186a7caf68f9ae9bd3eba67ea4f9e414920fd7cbc944087e3496"
+    },
+    "optimized": {
+      "path": "/tmp/zvec-cache-cohere-20261104/optimized/libzvec_c_api.dylib",
+      "sha256": "8277cf186d789e4ab5023b73ba7ef439e4704d2dac1afe0f0e91df7da32eb84e"
+    },
+    "microsoft": {
+      "path": "/tmp/zvec-cache-cohere-20261104/microsoft/libzvec_c_api.dylib",
+      "sha256": "d9ad81542a3b186a7caf68f9ae9bd3eba67ea4f9e414920fd7cbc944087e3496"
+    }
+  },
+  "query_concurrency": 1,
+  "num_threads": 1,
+  "warmup_independent": 20,
+  "warmup_full_passes": 2,
+  "measured_passes": 5,
+  "distinct_queries": 200,
+  "top_k": 10,
+  "metric": "cosine",
+  "precision": "FP16",
+  "pq_chunks": 64,
+  "search_parameters_unchanged": true,
+  "graph_and_pq_unchanged": true,
+  "selection_rule": "smallest budget reaching 90% of best geometric-mean validation QPS across five scales; 2 processes per budget/scale",
+  "cache_scope": "fixed per file reader; F_NOCACHE retained for misses",
+  "cache_budget_candidates_mib": [
+    16,
+    32,
+    64
+  ],
+  "file_cache": "not purged"
+}

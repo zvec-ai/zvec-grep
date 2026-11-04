@@ -1,0 +1,5287 @@
+[
+  {
+    "batch_s": 12.660120625,
+    "count": 200000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 12.659609160000011,
+    "open_resources": {
+      "involuntary_switches": 203,
+      "major_faults": 265,
+      "minor_faults": 2504,
+      "system_s": 0.010487000000000002,
+      "user_s": 0.0015929999999999998,
+      "voluntary_switches": 13
+    },
+    "open_s": 0.023591125,
+    "p50_ms": 12.430209,
+    "p95_ms": 15.279124999999999,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 79.8641191876142,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1389,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.208698,
+          "user_s": 0.095913,
+          "voluntary_switches": 30759
+        },
+        "wall_s": 2.5042535
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 80.31089281427198,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1365,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.202563,
+          "user_s": 0.094362,
+          "voluntary_switches": 30759
+        },
+        "wall_s": 2.490322209
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 79.60776724482898,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1452,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.20398,
+          "user_s": 0.09294799999999998,
+          "voluntary_switches": 30759
+        },
+        "wall_s": 2.512317666
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 78.35661241293218,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1737,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.216978,
+          "user_s": 0.10251499999999997,
+          "voluntary_switches": 30759
+        },
+        "wall_s": 2.552432958
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 79.72356914317545,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1491,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.20612199999999992,
+          "user_s": 0.09562399999999999,
+          "voluntary_switches": 30759
+        },
+        "wall_s": 2.508668417
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 80.23361889188365,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1350,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.20100699999999994,
+          "user_s": 0.09247300000000003,
+          "voluntary_switches": 30759
+        },
+        "wall_s": 2.492720667
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 77.10156951783003,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1959,
+          "major_faults": 0,
+          "minor_faults": 10,
+          "system_s": 0.23102699999999987,
+          "user_s": 0.10556300000000007,
+          "voluntary_switches": 30759
+        },
+        "wall_s": 2.593980917
+      }
+    ],
+    "qps": 78.9881889454746,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 226,
+      "major_faults": 9,
+      "minor_faults": 239,
+      "system_s": 0.026069000000000002,
+      "user_s": 0.010907,
+      "voluntary_switches": 3077
+    },
+    "warmup20_s": 0.257968583,
+    "backend": "baseline",
+    "budget_mib": 0,
+    "repeat": 0,
+    "phase": "validation",
+    "recall_at_10": 0.9275,
+    "results_sha256": "5c130b769889e1ec5660a01dfaffb5089e0c79b81fa3000abe4b23150c9cd559",
+    "rss_mib": 61.984375,
+    "cpu_s": 1.5482369999999999,
+    "measured_major_faults": 0,
+    "voluntary_switches": 153795,
+    "raw_file": "raw/validation-baseline-0-200000-0.jsonl",
+    "finished": "2026-11-04T18:03:29.587258+08:00"
+  },
+  {
+    "batch_s": 13.585897914999999,
+    "count": 400000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 13.585444837999999,
+    "open_resources": {
+      "involuntary_switches": 323,
+      "major_faults": 522,
+      "minor_faults": 3732,
+      "system_s": 0.013344,
+      "user_s": 0.002124,
+      "voluntary_switches": 15
+    },
+    "open_s": 0.035588167,
+    "p50_ms": 13.469834,
+    "p95_ms": 16.45075,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 74.41475931173974,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1500,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.233734,
+          "user_s": 0.10689000000000001,
+          "voluntary_switches": 32786
+        },
+        "wall_s": 2.687638875
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 74.05526082876227,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1460,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.226586,
+          "user_s": 0.10192500000000002,
+          "voluntary_switches": 32786
+        },
+        "wall_s": 2.700685917
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 74.27748665765021,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1366,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.223288,
+          "user_s": 0.10022600000000001,
+          "voluntary_switches": 32786
+        },
+        "wall_s": 2.6926059159999998
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 73.25372506006012,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1489,
+          "major_faults": 0,
+          "minor_faults": 12,
+          "system_s": 0.22446699999999997,
+          "user_s": 0.101379,
+          "voluntary_switches": 32785
+        },
+        "wall_s": 2.730236583
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 73.73445861948449,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1657,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.23423499999999997,
+          "user_s": 0.10302200000000006,
+          "voluntary_switches": 32786
+        },
+        "wall_s": 2.712436
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 74.62276211583328,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1481,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.222731,
+          "user_s": 0.100684,
+          "voluntary_switches": 32786
+        },
+        "wall_s": 2.6801473749999998
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 72.18986405212381,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 2044,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.24667499999999998,
+          "user_s": 0.11170899999999995,
+          "voluntary_switches": 32786
+        },
+        "wall_s": 2.770472041
+      }
+    ],
+    "qps": 73.60573487718571,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 130,
+      "major_faults": 9,
+      "minor_faults": 238,
+      "system_s": 0.022637,
+      "user_s": 0.010505,
+      "voluntary_switches": 3211
+    },
+    "warmup20_s": 0.263766959,
+    "backend": "baseline",
+    "budget_mib": 0,
+    "repeat": 0,
+    "phase": "validation",
+    "recall_at_10": 0.924,
+    "results_sha256": "bf322daf50bdc1123f0bdf69d7079f84753cbef70f49cc5fa3855696dcc31b14",
+    "rss_mib": 85.15625,
+    "cpu_s": 1.668416,
+    "measured_major_faults": 0,
+    "voluntary_switches": 163929,
+    "raw_file": "raw/validation-baseline-0-400000-0.jsonl",
+    "finished": "2026-11-04T18:03:48.926154+08:00"
+  },
+  {
+    "batch_s": 13.751113414999999,
+    "count": 600000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 13.750630585000014,
+    "open_resources": {
+      "involuntary_switches": 361,
+      "major_faults": 779,
+      "minor_faults": 4800,
+      "system_s": 0.016055,
+      "user_s": 0.0025119999999999995,
+      "voluntary_switches": 15
+    },
+    "open_s": 0.045285583,
+    "p50_ms": 13.632458,
+    "p95_ms": 16.176375,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 66.6935747451774,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 3643,
+          "major_faults": 0,
+          "minor_faults": 17,
+          "system_s": 0.302942,
+          "user_s": 0.124388,
+          "voluntary_switches": 33235
+        },
+        "wall_s": 2.998789625
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 60.807066342479835,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 4032,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.306881,
+          "user_s": 0.122009,
+          "voluntary_switches": 33235
+        },
+        "wall_s": 3.289091417
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 72.390664927535,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1673,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.248853,
+          "user_s": 0.11231000000000002,
+          "voluntary_switches": 33235
+        },
+        "wall_s": 2.762787166
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 72.88253239833547,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1627,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.24184800000000006,
+          "user_s": 0.10987800000000003,
+          "voluntary_switches": 33235
+        },
+        "wall_s": 2.74414175
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 72.80195098308342,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1527,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.23470800000000014,
+          "user_s": 0.107825,
+          "voluntary_switches": 33238
+        },
+        "wall_s": 2.747179125
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 73.28184196676905,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1478,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.23018500000000008,
+          "user_s": 0.10178100000000001,
+          "voluntary_switches": 33241
+        },
+        "wall_s": 2.729189041
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 72.25912991965859,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1875,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.255752,
+          "user_s": 0.11853500000000006,
+          "voluntary_switches": 33241
+        },
+        "wall_s": 2.767816333
+      }
+    ],
+    "qps": 72.72138406692066,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 136,
+      "major_faults": 9,
+      "minor_faults": 276,
+      "system_s": 0.023323,
+      "user_s": 0.010877999999999999,
+      "voluntary_switches": 3323
+    },
+    "warmup20_s": 0.283179916,
+    "backend": "baseline",
+    "budget_mib": 0,
+    "repeat": 0,
+    "phase": "validation",
+    "recall_at_10": 0.9285,
+    "results_sha256": "eb57d03bc09b2c32611710cc5d15975811fd373e40d4774a28bc34ef4eb1b391",
+    "rss_mib": 107.03125,
+    "cpu_s": 1.7616750000000003,
+    "measured_major_faults": 0,
+    "voluntary_switches": 166190,
+    "raw_file": "raw/validation-baseline-0-600000-0.jsonl",
+    "finished": "2026-11-04T18:04:09.353498+08:00"
+  },
+  {
+    "batch_s": 13.984183709000002,
+    "count": 800000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 13.983672612000019,
+    "open_resources": {
+      "involuntary_switches": 480,
+      "major_faults": 1036,
+      "minor_faults": 5941,
+      "system_s": 0.022841,
+      "user_s": 0.0031989999999999996,
+      "voluntary_switches": 15
+    },
+    "open_s": 0.072671375,
+    "p50_ms": 13.678875,
+    "p95_ms": 16.632082999999998,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 74.48362826276717,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1319,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.21478999999999998,
+          "user_s": 0.097871,
+          "voluntary_switches": 33160
+        },
+        "wall_s": 2.685153834
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 74.03974387407709,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1345,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.21897500000000003,
+          "user_s": 0.10075699999999999,
+          "voluntary_switches": 33160
+        },
+        "wall_s": 2.701251916
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 71.7833284834722,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1823,
+          "major_faults": 0,
+          "minor_faults": 2,
+          "system_s": 0.24691600000000002,
+          "user_s": 0.11605500000000002,
+          "voluntary_switches": 33160
+        },
+        "wall_s": 2.78616225
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 70.93741742064398,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 2069,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.259182,
+          "user_s": 0.11748999999999998,
+          "voluntary_switches": 33160
+        },
+        "wall_s": 2.819386542
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 73.46489589247177,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1488,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.21978600000000004,
+          "user_s": 0.09789199999999998,
+          "voluntary_switches": 33160
+        },
+        "wall_s": 2.722388667
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 71.82945675741001,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1495,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.22720200000000013,
+          "user_s": 0.10174099999999997,
+          "voluntary_switches": 33160
+        },
+        "wall_s": 2.784373
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 69.64095647327053,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1720,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.2494099999999999,
+          "user_s": 0.11230499999999999,
+          "voluntary_switches": 33160
+        },
+        "wall_s": 2.87187325
+      }
+    ],
+    "qps": 71.50935805830522,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 256,
+      "major_faults": 9,
+      "minor_faults": 297,
+      "system_s": 0.030112999999999997,
+      "user_s": 0.013290999999999999,
+      "voluntary_switches": 3355
+    },
+    "warmup20_s": 0.291736875,
+    "backend": "baseline",
+    "budget_mib": 0,
+    "repeat": 0,
+    "phase": "validation",
+    "recall_at_10": 0.9225,
+    "results_sha256": "f76fcc981971c89231deb2c3d429cd4d8621d3899ba8002a4d393520b6c26d04",
+    "rss_mib": 129.1875,
+    "cpu_s": 1.747979,
+    "measured_major_faults": 0,
+    "voluntary_switches": 165800,
+    "raw_file": "raw/validation-baseline-0-800000-0.jsonl",
+    "finished": "2026-11-04T18:04:29.166876+08:00"
+  },
+  {
+    "batch_s": 18.014866834,
+    "count": 1000000,
+    "effort": 128,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 18.014325328000005,
+    "open_resources": {
+      "involuntary_switches": 548,
+      "major_faults": 1293,
+      "minor_faults": 7091,
+      "system_s": 0.025214,
+      "user_s": 0.0035559999999999993,
+      "voluntary_switches": 20
+    },
+    "open_s": 0.088122875,
+    "p50_ms": 17.8445,
+    "p95_ms": 20.738542,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 54.5963793232316,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1833,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.321116,
+          "user_s": 0.136353,
+          "voluntary_switches": 43867
+        },
+        "wall_s": 3.663246583
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 54.65122890375088,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1720,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.32166100000000003,
+          "user_s": 0.13824299999999998,
+          "voluntary_switches": 43866
+        },
+        "wall_s": 3.6595700410000003
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 53.88725903491015,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 2681,
+          "major_faults": 0,
+          "minor_faults": 8,
+          "system_s": 0.3417880000000001,
+          "user_s": 0.14177800000000002,
+          "voluntary_switches": 43865
+        },
+        "wall_s": 3.711452458
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 55.61065966389954,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1953,
+          "major_faults": 0,
+          "minor_faults": 1,
+          "system_s": 0.3195859999999999,
+          "user_s": 0.13710199999999995,
+          "voluntary_switches": 43866
+        },
+        "wall_s": 3.596432792
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 55.623373581247634,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1919,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.31742800000000004,
+          "user_s": 0.1381,
+          "voluntary_switches": 43866
+        },
+        "wall_s": 3.59561075
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 55.74017553278028,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1686,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.3128000000000002,
+          "user_s": 0.137583,
+          "voluntary_switches": 43866
+        },
+        "wall_s": 3.58807625
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 56.76505192277729,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1460,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.28376,
+          "user_s": 0.12050300000000003,
+          "voluntary_switches": 43866
+        },
+        "wall_s": 3.523294584
+      }
+    ],
+    "qps": 55.50970813243371,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 188,
+      "major_faults": 9,
+      "minor_faults": 303,
+      "system_s": 0.033976000000000006,
+      "user_s": 0.014662,
+      "voluntary_switches": 4374
+    },
+    "warmup20_s": 0.382602833,
+    "backend": "baseline",
+    "budget_mib": 0,
+    "repeat": 0,
+    "phase": "validation",
+    "recall_at_10": 0.931,
+    "results_sha256": "b886f9b9859ce98afe872a302caa9bbb2a38061072094db6f7dd835521f0ef5e",
+    "rss_mib": 151.34375,
+    "cpu_s": 2.2504280000000003,
+    "measured_major_faults": 0,
+    "voluntary_switches": 219329,
+    "raw_file": "raw/validation-baseline-0-1000000-0.jsonl",
+    "finished": "2026-11-04T18:04:55.054008+08:00"
+  },
+  {
+    "batch_s": 9.504587,
+    "count": 200000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 9.504124964,
+    "open_resources": {
+      "involuntary_switches": 87,
+      "major_faults": 7,
+      "minor_faults": 3794,
+      "system_s": 0.009656999999999999,
+      "user_s": 0.002209000000000001,
+      "voluntary_switches": 8
+    },
+    "open_s": 0.015463166,
+    "p50_ms": 9.427334,
+    "p95_ms": 11.729083,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 106.52332649241596,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1160,
+          "major_faults": 0,
+          "minor_faults": 7,
+          "system_s": 0.142563,
+          "user_s": 0.096291,
+          "voluntary_switches": 22958
+        },
+        "wall_s": 1.877523042
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 106.11838128878254,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1244,
+          "major_faults": 0,
+          "minor_faults": 1,
+          "system_s": 0.146635,
+          "user_s": 0.101643,
+          "voluntary_switches": 22911
+        },
+        "wall_s": 1.884687625
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 103.12706171782922,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1307,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.16315999999999997,
+          "user_s": 0.111351,
+          "voluntary_switches": 22912
+        },
+        "wall_s": 1.939355167
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 104.34982005776158,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1266,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.15265499999999993,
+          "user_s": 0.10705300000000001,
+          "voluntary_switches": 22909
+        },
+        "wall_s": 1.916630042
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 105.58750838281667,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1264,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.14674900000000002,
+          "user_s": 0.10171399999999997,
+          "voluntary_switches": 22907
+        },
+        "wall_s": 1.894163458
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 106.54413857753734,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1223,
+          "major_faults": 0,
+          "minor_faults": 10,
+          "system_s": 0.145003,
+          "user_s": 0.09962199999999999,
+          "voluntary_switches": 22912
+        },
+        "wall_s": 1.877156291
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 106.53700164676694,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1213,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.143884,
+          "user_s": 0.09856799999999999,
+          "voluntary_switches": 22909
+        },
+        "wall_s": 1.877282042
+      }
+    ],
+    "qps": 105.2123569388128,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 154,
+      "major_faults": 9,
+      "minor_faults": 231,
+      "system_s": 0.020595999999999996,
+      "user_s": 0.010889000000000001,
+      "voluntary_switches": 2556
+    },
+    "warmup20_s": 0.217564625,
+    "backend": "optimized",
+    "budget_mib": 16,
+    "repeat": 0,
+    "phase": "validation",
+    "recall_at_10": 0.9275,
+    "results_sha256": "5c130b769889e1ec5660a01dfaffb5089e0c79b81fa3000abe4b23150c9cd559",
+    "rss_mib": 77.921875,
+    "cpu_s": 1.2697589999999999,
+    "measured_major_faults": 0,
+    "voluntary_switches": 114549,
+    "raw_file": "raw/validation-optimized-16-200000-0.jsonl",
+    "finished": "2026-11-04T18:05:13.359006+08:00"
+  },
+  {
+    "batch_s": 8.366477291999999,
+    "count": 200000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 8.36609521199999,
+    "open_resources": {
+      "involuntary_switches": 82,
+      "major_faults": 7,
+      "minor_faults": 4790,
+      "system_s": 0.006398000000000001,
+      "user_s": 0.0023729999999999997,
+      "voluntary_switches": 1
+    },
+    "open_s": 0.009107542,
+    "p50_ms": 8.309291,
+    "p95_ms": 10.530083000000001,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 115.6162536827975,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1199,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.13652,
+          "user_s": 0.10042599999999999,
+          "voluntary_switches": 20811
+        },
+        "wall_s": 1.729860583
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 118.73815187306974,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1240,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.13631399999999996,
+          "user_s": 0.10303499999999999,
+          "voluntary_switches": 20121
+        },
+        "wall_s": 1.684378583
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 117.90965055116867,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1158,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.125977,
+          "user_s": 0.09615499999999999,
+          "voluntary_switches": 20143
+        },
+        "wall_s": 1.6962139999999999
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 119.69693631059242,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1110,
+          "major_faults": 0,
+          "minor_faults": 1,
+          "system_s": 0.12351299999999998,
+          "user_s": 0.093717,
+          "voluntary_switches": 20138
+        },
+        "wall_s": 1.6708865419999999
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 120.65906692356295,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1108,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.12359599999999993,
+          "user_s": 0.09339800000000004,
+          "voluntary_switches": 20136
+        },
+        "wall_s": 1.6575629589999998
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 121.02670895414914,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1107,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.12738899999999997,
+          "user_s": 0.09233799999999992,
+          "voluntary_switches": 20151
+        },
+        "wall_s": 1.652527791
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 118.39321464808208,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1228,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.138251,
+          "user_s": 0.1059810000000001,
+          "voluntary_switches": 20131
+        },
+        "wall_s": 1.689286
+      }
+    ],
+    "qps": 119.52461772127165,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 123,
+      "major_faults": 9,
+      "minor_faults": 253,
+      "system_s": 0.016582,
+      "user_s": 0.010868,
+      "voluntary_switches": 2545
+    },
+    "warmup20_s": 0.208291333,
+    "backend": "optimized",
+    "budget_mib": 32,
+    "repeat": 0,
+    "phase": "validation",
+    "recall_at_10": 0.9275,
+    "results_sha256": "5c130b769889e1ec5660a01dfaffb5089e0c79b81fa3000abe4b23150c9cd559",
+    "rss_mib": 93.65625,
+    "cpu_s": 1.120315,
+    "measured_major_faults": 0,
+    "voluntary_switches": 100699,
+    "raw_file": "raw/validation-optimized-32-200000-0.jsonl",
+    "finished": "2026-11-04T18:05:25.405636+08:00"
+  },
+  {
+    "batch_s": 5.576625373999999,
+    "count": 200000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 5.576294134999998,
+    "open_resources": {
+      "involuntary_switches": 82,
+      "major_faults": 7,
+      "minor_faults": 6839,
+      "system_s": 0.008269,
+      "user_s": 0.003347,
+      "voluntary_switches": 1
+    },
+    "open_s": 0.0116335,
+    "p50_ms": 5.572709000000001,
+    "p95_ms": 7.233458,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 125.14678027845129,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1148,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.129005,
+          "user_s": 0.101625,
+          "voluntary_switches": 18944
+        },
+        "wall_s": 1.598123416
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 177.1180392164472,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1065,
+          "major_faults": 0,
+          "minor_faults": 2,
+          "system_s": 0.09163100000000002,
+          "user_s": 0.095486,
+          "voluntary_switches": 12915
+        },
+        "wall_s": 1.129190459
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 177.21721342480433,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1023,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.086595,
+          "user_s": 0.09022,
+          "voluntary_switches": 12971
+        },
+        "wall_s": 1.128558542
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 182.62473983108353,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 999,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.08112400000000003,
+          "user_s": 0.08843200000000001,
+          "voluntary_switches": 12883
+        },
+        "wall_s": 1.095141875
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 181.29435797608528,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1012,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.08249800000000002,
+          "user_s": 0.087727,
+          "voluntary_switches": 12961
+        },
+        "wall_s": 1.103178291
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 175.63566031837075,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1080,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.08759900000000004,
+          "user_s": 0.09501499999999996,
+          "voluntary_switches": 12926
+        },
+        "wall_s": 1.138720916
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 180.01382956245612,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1015,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.083179,
+          "user_s": 0.08861699999999995,
+          "voluntary_switches": 12913
+        },
+        "wall_s": 1.11102575
+      }
+    ],
+    "qps": 179.3199171424206,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 119,
+      "major_faults": 9,
+      "minor_faults": 248,
+      "system_s": 0.017353,
+      "user_s": 0.011255,
+      "voluntary_switches": 2545
+    },
+    "warmup20_s": 0.209986958,
+    "backend": "optimized",
+    "budget_mib": 64,
+    "repeat": 0,
+    "phase": "validation",
+    "recall_at_10": 0.9275,
+    "results_sha256": "5c130b769889e1ec5660a01dfaffb5089e0c79b81fa3000abe4b23150c9cd559",
+    "rss_mib": 125.578125,
+    "cpu_s": 0.871006,
+    "measured_major_faults": 0,
+    "voluntary_switches": 64654,
+    "raw_file": "raw/validation-optimized-64-200000-0.jsonl",
+    "finished": "2026-11-04T18:05:33.966494+08:00"
+  },
+  {
+    "batch_s": 10.479768542,
+    "count": 400000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 10.47936212599999,
+    "open_resources": {
+      "involuntary_switches": 79,
+      "major_faults": 7,
+      "minor_faults": 5273,
+      "system_s": 0.009003,
+      "user_s": 0.0023390000000000004,
+      "voluntary_switches": 9
+    },
+    "open_s": 0.012783125,
+    "p50_ms": 10.476417,
+    "p95_ms": 12.871417,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 95.29857012238541,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1191,
+          "major_faults": 0,
+          "minor_faults": 8,
+          "system_s": 0.162253,
+          "user_s": 0.105638,
+          "voluntary_switches": 25451
+        },
+        "wall_s": 2.098667375
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 93.75830456857848,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1311,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.17142999999999997,
+          "user_s": 0.111634,
+          "voluntary_switches": 25401
+        },
+        "wall_s": 2.133144375
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 95.75122491250582,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1211,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.16624300000000003,
+          "user_s": 0.11074700000000001,
+          "voluntary_switches": 25405
+        },
+        "wall_s": 2.088746125
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 96.02521815815673,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1178,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.164207,
+          "user_s": 0.107319,
+          "voluntary_switches": 25394
+        },
+        "wall_s": 2.082786208
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 96.67640419607015,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1171,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.15963499999999997,
+          "user_s": 0.10523500000000002,
+          "voluntary_switches": 25406
+        },
+        "wall_s": 2.068757125
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 95.0928088674067,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1232,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.17015499999999995,
+          "user_s": 0.10899499999999995,
+          "voluntary_switches": 25397
+        },
+        "wall_s": 2.103208459
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 93.62109728021936,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1341,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.17671499999999996,
+          "user_s": 0.11779499999999998,
+          "voluntary_switches": 25399
+        },
+        "wall_s": 2.136270625
+      }
+    ],
+    "qps": 95.42195478767283,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 120,
+      "major_faults": 9,
+      "minor_faults": 242,
+      "system_s": 0.017129,
+      "user_s": 0.011067999999999998,
+      "voluntary_switches": 2665
+    },
+    "warmup20_s": 0.217365875,
+    "backend": "optimized",
+    "budget_mib": 16,
+    "repeat": 0,
+    "phase": "validation",
+    "recall_at_10": 0.924,
+    "results_sha256": "bf322daf50bdc1123f0bdf69d7079f84753cbef70f49cc5fa3855696dcc31b14",
+    "rss_mib": 101.03125,
+    "cpu_s": 1.3870459999999998,
+    "measured_major_faults": 0,
+    "voluntary_switches": 127001,
+    "raw_file": "raw/validation-optimized-16-400000-0.jsonl",
+    "finished": "2026-11-04T18:05:48.969258+08:00"
+  },
+  {
+    "batch_s": 9.720928542000001,
+    "count": 400000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 9.720474026999998,
+    "open_resources": {
+      "involuntary_switches": 83,
+      "major_faults": 7,
+      "minor_faults": 6291,
+      "system_s": 0.009525,
+      "user_s": 0.002842,
+      "voluntary_switches": 1
+    },
+    "open_s": 0.012361083,
+    "p50_ms": 9.728250000000001,
+    "p95_ms": 11.978416000000001,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 101.59044071256905,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1302,
+          "major_faults": 0,
+          "minor_faults": 7,
+          "system_s": 0.159695,
+          "user_s": 0.110832,
+          "voluntary_switches": 23653
+        },
+        "wall_s": 1.9686891659999999
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 104.54004341025303,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1216,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.14972499999999997,
+          "user_s": 0.10633099999999998,
+          "voluntary_switches": 23217
+        },
+        "wall_s": 1.9131425
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 103.31198640460542,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1346,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.16020299999999998,
+          "user_s": 0.11663300000000001,
+          "voluntary_switches": 23240
+        },
+        "wall_s": 1.935883792
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 103.25482220244723,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1349,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.16009100000000004,
+          "user_s": 0.11635800000000002,
+          "voluntary_switches": 23223
+        },
+        "wall_s": 1.9369555410000001
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 101.56226674003769,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1270,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.15436300000000003,
+          "user_s": 0.10975099999999993,
+          "voluntary_switches": 23239
+        },
+        "wall_s": 1.969235292
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 103.15020068193887,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1397,
+          "major_faults": 0,
+          "minor_faults": 1,
+          "system_s": 0.160076,
+          "user_s": 0.11623299999999992,
+          "voluntary_switches": 23228
+        },
+        "wall_s": 1.938920125
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 103.0963019587423,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1429,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.16283899999999996,
+          "user_s": 0.11667499999999997,
+          "voluntary_switches": 23236
+        },
+        "wall_s": 1.9399337920000002
+      }
+    ],
+    "qps": 102.87083128730193,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 124,
+      "major_faults": 9,
+      "minor_faults": 239,
+      "system_s": 0.017619000000000003,
+      "user_s": 0.011186999999999999,
+      "voluntary_switches": 2652
+    },
+    "warmup20_s": 0.219384917,
+    "backend": "optimized",
+    "budget_mib": 32,
+    "repeat": 0,
+    "phase": "validation",
+    "recall_at_10": 0.924,
+    "results_sha256": "bf322daf50bdc1123f0bdf69d7079f84753cbef70f49cc5fa3855696dcc31b14",
+    "rss_mib": 116.984375,
+    "cpu_s": 1.3732219999999997,
+    "measured_major_faults": 0,
+    "voluntary_switches": 116166,
+    "raw_file": "raw/validation-optimized-32-400000-0.jsonl",
+    "finished": "2026-11-04T18:06:02.849800+08:00"
+  },
+  {
+    "batch_s": 7.275726542999999,
+    "count": 400000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 7.2752673509999966,
+    "open_resources": {
+      "involuntary_switches": 81,
+      "major_faults": 7,
+      "minor_faults": 8339,
+      "system_s": 0.010845,
+      "user_s": 0.0036660000000000004,
+      "voluntary_switches": 1
+    },
+    "open_s": 0.015018584,
+    "p50_ms": 7.2944580000000006,
+    "p95_ms": 9.140291999999999,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 107.50008374122149,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1423,
+          "major_faults": 0,
+          "minor_faults": 12,
+          "system_s": 0.161215,
+          "user_s": 0.119927,
+          "voluntary_switches": 21954
+        },
+        "wall_s": 1.8604636669999999
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 138.57737052062706,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1228,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.12014600000000003,
+          "user_s": 0.11077600000000001,
+          "voluntary_switches": 16820
+        },
+        "wall_s": 1.443237083
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 136.93075531518122,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1312,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.12743200000000005,
+          "user_s": 0.11873900000000004,
+          "voluntary_switches": 16893
+        },
+        "wall_s": 1.46059225
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 139.048005480566,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1160,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.11735899999999999,
+          "user_s": 0.10499599999999998,
+          "voluntary_switches": 16848
+        },
+        "wall_s": 1.4383521670000001
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 138.837535873233,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1225,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.120359,
+          "user_s": 0.11333399999999993,
+          "voluntary_switches": 16852
+        },
+        "wall_s": 1.440532625
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 136.11255118001216,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1412,
+          "major_faults": 0,
+          "minor_faults": 1,
+          "system_s": 0.129347,
+          "user_s": 0.12021899999999996,
+          "voluntary_switches": 16891
+        },
+        "wall_s": 1.4693722089999999
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 136.3440562416178,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1337,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.12918799999999997,
+          "user_s": 0.12318499999999999,
+          "voluntary_switches": 16824
+        },
+        "wall_s": 1.466877292
+      }
+    ],
+    "qps": 137.44331842186995,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 123,
+      "major_faults": 9,
+      "minor_faults": 241,
+      "system_s": 0.018848000000000004,
+      "user_s": 0.011621999999999999,
+      "voluntary_switches": 2652
+    },
+    "warmup20_s": 0.220563208,
+    "backend": "optimized",
+    "budget_mib": 64,
+    "repeat": 0,
+    "phase": "validation",
+    "recall_at_10": 0.924,
+    "results_sha256": "bf322daf50bdc1123f0bdf69d7079f84753cbef70f49cc5fa3855696dcc31b14",
+    "rss_mib": 149.03125,
+    "cpu_s": 1.2041579999999998,
+    "measured_major_faults": 0,
+    "voluntary_switches": 84308,
+    "raw_file": "raw/validation-optimized-64-400000-0.jsonl",
+    "finished": "2026-11-04T18:06:13.709453+08:00"
+  },
+  {
+    "batch_s": 11.020014707000001,
+    "count": 600000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 11.019512752000006,
+    "open_resources": {
+      "involuntary_switches": 91,
+      "major_faults": 7,
+      "minor_faults": 6598,
+      "system_s": 0.015514,
+      "user_s": 0.003219999999999999,
+      "voluntary_switches": 10
+    },
+    "open_s": 0.0214225,
+    "p50_ms": 10.860790999999999,
+    "p95_ms": 13.480291,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 89.91845014760958,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1638,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.20962899999999998,
+          "user_s": 0.13667500000000002,
+          "voluntary_switches": 26084
+        },
+        "wall_s": 2.2242376249999998
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 89.34075457201311,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1586,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.19885899999999995,
+          "user_s": 0.13005599999999998,
+          "voluntary_switches": 26060
+        },
+        "wall_s": 2.23862
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 90.87908189269382,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1504,
+          "major_faults": 0,
+          "minor_faults": 1,
+          "system_s": 0.19404900000000003,
+          "user_s": 0.12854699999999997,
+          "voluntary_switches": 26047
+        },
+        "wall_s": 2.200726458
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 90.58257506501226,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1550,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.19572999999999996,
+          "user_s": 0.129083,
+          "voluntary_switches": 26045
+        },
+        "wall_s": 2.207930166
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 91.07819102546243,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1317,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.18057599999999996,
+          "user_s": 0.117251,
+          "voluntary_switches": 26052
+        },
+        "wall_s": 2.1959153750000002
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 91.98355994574098,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1414,
+          "major_faults": 0,
+          "minor_faults": 2,
+          "system_s": 0.18730399999999992,
+          "user_s": 0.12074000000000007,
+          "voluntary_switches": 26050
+        },
+        "wall_s": 2.174301583
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 89.24025255214573,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1439,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.188423,
+          "user_s": 0.12085599999999996,
+          "voluntary_switches": 26051
+        },
+        "wall_s": 2.241141125
+      }
+    ],
+    "qps": 90.74398052888188,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 170,
+      "major_faults": 9,
+      "minor_faults": 281,
+      "system_s": 0.024716,
+      "user_s": 0.015224999999999999,
+      "voluntary_switches": 2796
+    },
+    "warmup20_s": 0.242822584,
+    "backend": "optimized",
+    "budget_mib": 16,
+    "repeat": 0,
+    "phase": "validation",
+    "recall_at_10": 0.9285,
+    "results_sha256": "eb57d03bc09b2c32611710cc5d15975811fd373e40d4774a28bc34ef4eb1b391",
+    "rss_mib": 123.078125,
+    "cpu_s": 1.5625589999999998,
+    "measured_major_faults": 0,
+    "voluntary_switches": 130245,
+    "raw_file": "raw/validation-optimized-16-600000-0.jsonl",
+    "finished": "2026-11-04T18:06:29.540290+08:00"
+  },
+  {
+    "batch_s": 10.109772040000001,
+    "count": 600000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 10.109324757000014,
+    "open_resources": {
+      "involuntary_switches": 85,
+      "major_faults": 7,
+      "minor_faults": 7621,
+      "system_s": 0.012281,
+      "user_s": 0.0031620000000000003,
+      "voluntary_switches": 1
+    },
+    "open_s": 0.017383167,
+    "p50_ms": 10.068999999999999,
+    "p95_ms": 12.614917,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 98.04140638305252,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1218,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.166593,
+          "user_s": 0.112447,
+          "voluntary_switches": 24528
+        },
+        "wall_s": 2.039954417
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 98.61309716724622,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1207,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.16360400000000003,
+          "user_s": 0.11377899999999999,
+          "voluntary_switches": 24212
+        },
+        "wall_s": 2.028128167
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 99.71990965948578,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1174,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.15868400000000005,
+          "user_s": 0.10887799999999997,
+          "voluntary_switches": 24224
+        },
+        "wall_s": 2.005617541
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 97.86603118990413,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1231,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.17010599999999998,
+          "user_s": 0.11712600000000001,
+          "voluntary_switches": 24229
+        },
+        "wall_s": 2.04361
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 98.26050653536771,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1174,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.15878800000000004,
+          "user_s": 0.11146399999999995,
+          "voluntary_switches": 24228
+        },
+        "wall_s": 2.03540575
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 98.61065398498947,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1270,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.17366799999999993,
+          "user_s": 0.121946,
+          "voluntary_switches": 24227
+        },
+        "wall_s": 2.028178416
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 100.15221469098655,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1159,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.15655799999999997,
+          "user_s": 0.10889700000000002,
+          "voluntary_switches": 24230
+        },
+        "wall_s": 1.996960333
+      }
+    ],
+    "qps": 98.9141986627821,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 128,
+      "major_faults": 9,
+      "minor_faults": 285,
+      "system_s": 0.020304999999999997,
+      "user_s": 0.012199999999999999,
+      "voluntary_switches": 2785
+    },
+    "warmup20_s": 0.233532917,
+    "backend": "optimized",
+    "budget_mib": 32,
+    "repeat": 0,
+    "phase": "validation",
+    "recall_at_10": 0.9285,
+    "results_sha256": "eb57d03bc09b2c32611710cc5d15975811fd373e40d4774a28bc34ef4eb1b391",
+    "rss_mib": 139.0,
+    "cpu_s": 1.386115,
+    "measured_major_faults": 0,
+    "voluntary_switches": 121138,
+    "raw_file": "raw/validation-optimized-32-600000-0.jsonl",
+    "finished": "2026-11-04T18:06:44.013242+08:00"
+  },
+  {
+    "batch_s": 7.729522124000001,
+    "count": 600000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 7.729155582000005,
+    "open_resources": {
+      "involuntary_switches": 82,
+      "major_faults": 7,
+      "minor_faults": 9672,
+      "system_s": 0.013822000000000001,
+      "user_s": 0.0041659999999999996,
+      "voluntary_switches": 1
+    },
+    "open_s": 0.0192375,
+    "p50_ms": 7.769833,
+    "p95_ms": 9.716333,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 103.37899630292881,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1157,
+          "major_faults": 0,
+          "minor_faults": 7,
+          "system_s": 0.155612,
+          "user_s": 0.114043,
+          "voluntary_switches": 23084
+        },
+        "wall_s": 1.9346289589999999
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 125.98764137334663,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1210,
+          "major_faults": 0,
+          "minor_faults": 15,
+          "system_s": 0.13535499999999998,
+          "user_s": 0.114865,
+          "voluntary_switches": 18358
+        },
+        "wall_s": 1.5874572919999999
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 128.6750637251029,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1094,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.12282100000000001,
+          "user_s": 0.10622000000000001,
+          "voluntary_switches": 18451
+        },
+        "wall_s": 1.554302708
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 130.07713411456575,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1080,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.11967500000000003,
+          "user_s": 0.10417900000000002,
+          "voluntary_switches": 18380
+        },
+        "wall_s": 1.53754925
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 129.1921193928558,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1094,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.11973,
+          "user_s": 0.10533300000000007,
+          "voluntary_switches": 18436
+        },
+        "wall_s": 1.5480820419999999
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 129.35891369113645,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1081,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.12054500000000001,
+          "user_s": 0.10477499999999995,
+          "voluntary_switches": 18417
+        },
+        "wall_s": 1.546085958
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 129.5754579459398,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1094,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.12171900000000002,
+          "user_s": 0.10527200000000003,
+          "voluntary_switches": 18408
+        },
+        "wall_s": 1.5435021660000001
+      }
+    ],
+    "qps": 129.37410411117415,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 124,
+      "major_faults": 9,
+      "minor_faults": 287,
+      "system_s": 0.021207000000000004,
+      "user_s": 0.012974,
+      "voluntary_switches": 2785
+    },
+    "warmup20_s": 0.234114541,
+    "backend": "optimized",
+    "budget_mib": 64,
+    "repeat": 0,
+    "phase": "validation",
+    "recall_at_10": 0.9285,
+    "results_sha256": "eb57d03bc09b2c32611710cc5d15975811fd373e40d4774a28bc34ef4eb1b391",
+    "rss_mib": 171.203125,
+    "cpu_s": 1.1302690000000002,
+    "measured_major_faults": 0,
+    "voluntary_switches": 92092,
+    "raw_file": "raw/validation-optimized-64-600000-0.jsonl",
+    "finished": "2026-11-04T18:06:55.560924+08:00"
+  },
+  {
+    "batch_s": 10.986865041999998,
+    "count": 800000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 10.986438549999999,
+    "open_resources": {
+      "involuntary_switches": 81,
+      "major_faults": 7,
+      "minor_faults": 8000,
+      "system_s": 0.014691,
+      "user_s": 0.0032199999999999998,
+      "voluntary_switches": 10
+    },
+    "open_s": 0.020062333,
+    "p50_ms": 10.914541999999999,
+    "p95_ms": 13.217041,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 91.40505335753308,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1215,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.17479,
+          "user_s": 0.113425,
+          "voluntary_switches": 26560
+        },
+        "wall_s": 2.188062833
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 91.13009692767977,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1209,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.172271,
+          "user_s": 0.110595,
+          "voluntary_switches": 26547
+        },
+        "wall_s": 2.194664625
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 91.27228544566472,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1218,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.17238900000000001,
+          "user_s": 0.11380999999999997,
+          "voluntary_switches": 26550
+        },
+        "wall_s": 2.191245667
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 91.08722506113574,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1213,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.17360299999999995,
+          "user_s": 0.11532199999999998,
+          "voluntary_switches": 26548
+        },
+        "wall_s": 2.195697584
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 91.35862901628224,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1211,
+          "major_faults": 0,
+          "minor_faults": 8,
+          "system_s": 0.17229100000000008,
+          "user_s": 0.11316900000000002,
+          "voluntary_switches": 26544
+        },
+        "wall_s": 2.189174708
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 90.67438335893846,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1218,
+          "major_faults": 0,
+          "minor_faults": 1,
+          "system_s": 0.17423699999999998,
+          "user_s": 0.11749100000000001,
+          "voluntary_switches": 26547
+        },
+        "wall_s": 2.205694625
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 90.7007900308193,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1226,
+          "major_faults": 0,
+          "minor_faults": 1,
+          "system_s": 0.1732880000000001,
+          "user_s": 0.11441500000000004,
+          "voluntary_switches": 26544
+        },
+        "wall_s": 2.205052458
+      }
+    ],
+    "qps": 91.01777405813702,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 127,
+      "major_faults": 9,
+      "minor_faults": 291,
+      "system_s": 0.020495,
+      "user_s": 0.011837999999999998,
+      "voluntary_switches": 2815
+    },
+    "warmup20_s": 0.234585375,
+    "backend": "optimized",
+    "budget_mib": 16,
+    "repeat": 0,
+    "phase": "validation",
+    "recall_at_10": 0.9225,
+    "results_sha256": "f76fcc981971c89231deb2c3d429cd4d8621d3899ba8002a4d393520b6c26d04",
+    "rss_mib": 145.203125,
+    "cpu_s": 1.4400150000000003,
+    "measured_major_faults": 0,
+    "voluntary_switches": 132733,
+    "raw_file": "raw/validation-optimized-16-800000-0.jsonl",
+    "finished": "2026-11-04T18:07:11.252222+08:00"
+  },
+  {
+    "batch_s": 16.093083917999998,
+    "count": 800000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 16.09255574599999,
+    "open_resources": {
+      "involuntary_switches": 86,
+      "major_faults": 7,
+      "minor_faults": 9025,
+      "system_s": 0.015106,
+      "user_s": 0.003578,
+      "voluntary_switches": 1
+    },
+    "open_s": 0.019994125,
+    "p50_ms": 13.397041999999999,
+    "p95_ms": 29.386459,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 95.96596090437633,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1234,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.168233,
+          "user_s": 0.114969,
+          "voluntary_switches": 25059
+        },
+        "wall_s": 2.084072291
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 97.26472741468957,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1175,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.162321,
+          "user_s": 0.11421800000000001,
+          "voluntary_switches": 24750
+        },
+        "wall_s": 2.056243875
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 80.54914106274413,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1467,
+          "major_faults": 0,
+          "minor_faults": 1,
+          "system_s": 0.18001700000000004,
+          "user_s": 0.11825600000000003,
+          "voluntary_switches": 24741
+        },
+        "wall_s": 2.482956334
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 51.12409858168315,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 2538,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.223163,
+          "user_s": 0.13026300000000002,
+          "voluntary_switches": 24739
+        },
+        "wall_s": 3.912049416
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 53.179142183211184,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 2363,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.224862,
+          "user_s": 0.13411,
+          "voluntary_switches": 24739
+        },
+        "wall_s": 3.760873
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 80.12277745204219,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1552,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.188809,
+          "user_s": 0.123506,
+          "voluntary_switches": 24760
+        },
+        "wall_s": 2.496169084
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 58.122029271925534,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1426,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.17038900000000012,
+          "user_s": 0.11958900000000006,
+          "voluntary_switches": 24734
+        },
+        "wall_s": 3.441036084
+      }
+    ],
+    "qps": 62.13849409444185,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 131,
+      "major_faults": 9,
+      "minor_faults": 293,
+      "system_s": 0.020689000000000003,
+      "user_s": 0.012445999999999999,
+      "voluntary_switches": 2806
+    },
+    "warmup20_s": 0.235424667,
+    "backend": "optimized",
+    "budget_mib": 32,
+    "repeat": 0,
+    "phase": "validation",
+    "recall_at_10": 0.9225,
+    "results_sha256": "f76fcc981971c89231deb2c3d429cd4d8621d3899ba8002a4d393520b6c26d04",
+    "rss_mib": 161.0625,
+    "cpu_s": 1.6129640000000003,
+    "measured_major_faults": 0,
+    "voluntary_switches": 123713,
+    "raw_file": "raw/validation-optimized-32-800000-0.jsonl",
+    "finished": "2026-11-04T18:07:31.782075+08:00"
+  },
+  {
+    "batch_s": 8.334995917,
+    "count": 800000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 8.334593011999992,
+    "open_resources": {
+      "involuntary_switches": 83,
+      "major_faults": 7,
+      "minor_faults": 11078,
+      "system_s": 0.017343,
+      "user_s": 0.004808,
+      "voluntary_switches": 6
+    },
+    "open_s": 0.0340625,
+    "p50_ms": 8.134041,
+    "p95_ms": 10.348792000000001,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 46.271861647133676,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 2297,
+          "major_faults": 0,
+          "minor_faults": 8,
+          "system_s": 0.22199400000000002,
+          "user_s": 0.135812,
+          "voluntary_switches": 23752
+        },
+        "wall_s": 4.32228125
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 106.64630666384689,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1202,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.13336600000000004,
+          "user_s": 0.110535,
+          "voluntary_switches": 19374
+        },
+        "wall_s": 1.875357959
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 122.00730999233366,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1103,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.125512,
+          "user_s": 0.10645900000000003,
+          "voluntary_switches": 19429
+        },
+        "wall_s": 1.639246042
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 121.0411384266215,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1114,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.12690200000000007,
+          "user_s": 0.10661100000000001,
+          "voluntary_switches": 19379
+        },
+        "wall_s": 1.652330791
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 120.50050787288802,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1148,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.13325900000000002,
+          "user_s": 0.11066799999999993,
+          "voluntary_switches": 19423
+        },
+        "wall_s": 1.659744042
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 117.61177238611097,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1142,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.134274,
+          "user_s": 0.11216499999999996,
+          "voluntary_switches": 19412
+        },
+        "wall_s": 1.7005100419999999
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 118.82376356447526,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1149,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.12957000000000007,
+          "user_s": 0.10982800000000004,
+          "voluntary_switches": 19383
+        },
+        "wall_s": 1.683165
+      }
+    ],
+    "qps": 119.97606357075794,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 260,
+      "major_faults": 9,
+      "minor_faults": 296,
+      "system_s": 0.026383,
+      "user_s": 0.014778000000000001,
+      "voluntary_switches": 2805
+    },
+    "warmup20_s": 0.857839292,
+    "backend": "optimized",
+    "budget_mib": 64,
+    "repeat": 0,
+    "phase": "validation",
+    "recall_at_10": 0.9225,
+    "results_sha256": "f76fcc981971c89231deb2c3d429cd4d8621d3899ba8002a4d393520b6c26d04",
+    "rss_mib": 193.1875,
+    "cpu_s": 1.195248,
+    "measured_major_faults": 0,
+    "voluntary_switches": 97026,
+    "raw_file": "raw/validation-optimized-64-800000-0.jsonl",
+    "finished": "2026-11-04T18:07:47.266200+08:00"
+  },
+  {
+    "batch_s": 17.398809916,
+    "count": 1000000,
+    "effort": 128,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 17.398313490999975,
+    "open_resources": {
+      "involuntary_switches": 626,
+      "major_faults": 1293,
+      "minor_faults": 8125,
+      "system_s": 0.042083,
+      "user_s": 0.005991,
+      "voluntary_switches": 13
+    },
+    "open_s": 0.562294583,
+    "p50_ms": 16.362458,
+    "p95_ms": 24.176916,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 57.649336774675135,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1529,
+          "major_faults": 0,
+          "minor_faults": 7,
+          "system_s": 0.25180199999999997,
+          "user_s": 0.15412,
+          "voluntary_switches": 35465
+        },
+        "wall_s": 3.4692506659999998
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 43.993856511342806,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 4980,
+          "major_faults": 0,
+          "minor_faults": 145,
+          "system_s": 0.34698499999999993,
+          "user_s": 0.174171,
+          "voluntary_switches": 35428
+        },
+        "wall_s": 4.546089292
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 52.75532315223739,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1958,
+          "major_faults": 0,
+          "minor_faults": 280,
+          "system_s": 0.2848050000000001,
+          "user_s": 0.16296200000000005,
+          "voluntary_switches": 35452
+        },
+        "wall_s": 3.791086625
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 52.68595177854039,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1893,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.28539899999999996,
+          "user_s": 0.16691599999999995,
+          "voluntary_switches": 35438
+        },
+        "wall_s": 3.796078333
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 53.018144592079615,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1685,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.2726019999999998,
+          "user_s": 0.16110999999999998,
+          "voluntary_switches": 35457
+        },
+        "wall_s": 3.772293458
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 67.487770688703,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1373,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.2424320000000002,
+          "user_s": 0.15100200000000008,
+          "voluntary_switches": 35435
+        },
+        "wall_s": 2.963499875
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 65.0226423064214,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1471,
+          "major_faults": 0,
+          "minor_faults": 1,
+          "system_s": 0.24753500000000006,
+          "user_s": 0.15181599999999995,
+          "voluntary_switches": 35456
+        },
+        "wall_s": 3.075851625
+      }
+    ],
+    "qps": 57.475195420141745,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 1103,
+      "major_faults": 9,
+      "minor_faults": 304,
+      "system_s": 0.076141,
+      "user_s": 0.036843,
+      "voluntary_switches": 3613
+    },
+    "warmup20_s": 5.895105333,
+    "backend": "optimized",
+    "budget_mib": 16,
+    "repeat": 0,
+    "phase": "validation",
+    "recall_at_10": 0.931,
+    "results_sha256": "b886f9b9859ce98afe872a302caa9bbb2a38061072094db6f7dd835521f0ef5e",
+    "rss_mib": 167.09375,
+    "cpu_s": 2.126579,
+    "measured_major_faults": 0,
+    "voluntary_switches": 177238,
+    "raw_file": "raw/validation-optimized-16-1000000-0.jsonl",
+    "finished": "2026-11-04T18:08:19.230652+08:00"
+  },
+  {
+    "batch_s": 14.435261831999998,
+    "count": 1000000,
+    "effort": 128,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 14.434748326999983,
+    "open_resources": {
+      "involuntary_switches": 83,
+      "major_faults": 7,
+      "minor_faults": 10429,
+      "system_s": 0.018151,
+      "user_s": 0.004215,
+      "voluntary_switches": 12
+    },
+    "open_s": 0.023719625,
+    "p50_ms": 14.177708,
+    "p95_ms": 17.403209,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 70.90547157925906,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1335,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.22959500000000002,
+          "user_s": 0.151984,
+          "voluntary_switches": 33572
+        },
+        "wall_s": 2.820656792
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 71.01380326362575,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1417,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.23267299999999996,
+          "user_s": 0.154003,
+          "voluntary_switches": 33423
+        },
+        "wall_s": 2.816353875
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 66.62034886911542,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 2105,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.272076,
+          "user_s": 0.164404,
+          "voluntary_switches": 33414
+        },
+        "wall_s": 3.00208575
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 69.54139896629799,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1769,
+          "major_faults": 0,
+          "minor_faults": 5,
+          "system_s": 0.255246,
+          "user_s": 0.15749600000000002,
+          "voluntary_switches": 33421
+        },
+        "wall_s": 2.875984708
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 69.95746891953618,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 2167,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.26723300000000005,
+          "user_s": 0.164346,
+          "voluntary_switches": 33416
+        },
+        "wall_s": 2.858879875
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 69.7583580730827,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1546,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.2513049999999999,
+          "user_s": 0.15461500000000006,
+          "voluntary_switches": 33420
+        },
+        "wall_s": 2.867039958
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 70.63963915285935,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1685,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.24911799999999973,
+          "user_s": 0.15517099999999995,
+          "voluntary_switches": 33423
+        },
+        "wall_s": 2.831271541
+      }
+    ],
+    "qps": 69.27480856517657,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 174,
+      "major_faults": 9,
+      "minor_faults": 311,
+      "system_s": 0.029082999999999998,
+      "user_s": 0.016517999999999998,
+      "voluntary_switches": 3589
+    },
+    "warmup20_s": 0.319334417,
+    "backend": "optimized",
+    "budget_mib": 32,
+    "repeat": 0,
+    "phase": "validation",
+    "recall_at_10": 0.931,
+    "results_sha256": "b886f9b9859ce98afe872a302caa9bbb2a38061072094db6f7dd835521f0ef5e",
+    "rss_mib": 183.046875,
+    "cpu_s": 2.09101,
+    "measured_major_faults": 0,
+    "voluntary_switches": 167094,
+    "raw_file": "raw/validation-optimized-32-1000000-0.jsonl",
+    "finished": "2026-11-04T18:08:39.674676+08:00"
+  },
+  {
+    "batch_s": 12.629608790999999,
+    "count": 1000000,
+    "effort": 128,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 12.629156371000002,
+    "open_resources": {
+      "involuntary_switches": 89,
+      "major_faults": 7,
+      "minor_faults": 12474,
+      "system_s": 0.020002000000000002,
+      "user_s": 0.005288000000000001,
+      "voluntary_switches": 1
+    },
+    "open_s": 0.025277625,
+    "p50_ms": 12.421708,
+    "p95_ms": 15.726125,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 65.28031051827858,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 2016,
+          "major_faults": 0,
+          "minor_faults": 14,
+          "system_s": 0.270459,
+          "user_s": 0.165882,
+          "voluntary_switches": 31712
+        },
+        "wall_s": 3.063710917
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 71.0536723581814,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1581,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.23112700000000003,
+          "user_s": 0.154822,
+          "voluntary_switches": 29585
+        },
+        "wall_s": 2.814773584
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 74.2760889704307,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1911,
+          "major_faults": 0,
+          "minor_faults": 5,
+          "system_s": 0.24812800000000002,
+          "user_s": 0.16460300000000005,
+          "voluntary_switches": 29598
+        },
+        "wall_s": 2.692656584
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 80.53262668637838,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1289,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.203098,
+          "user_s": 0.143177,
+          "voluntary_switches": 29574
+        },
+        "wall_s": 2.4834655
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 80.05576819306019,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1304,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.20530999999999988,
+          "user_s": 0.14468800000000004,
+          "voluntary_switches": 29609
+        },
+        "wall_s": 2.498258458
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 81.04163901340223,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1275,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.19635599999999998,
+          "user_s": 0.14006000000000007,
+          "voluntary_switches": 29582
+        },
+        "wall_s": 2.467867166
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 80.40650043409882,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1405,
+          "major_faults": 0,
+          "minor_faults": 2,
+          "system_s": 0.20102599999999993,
+          "user_s": 0.14033299999999993,
+          "voluntary_switches": 29583
+        },
+        "wall_s": 2.487361083
+      }
+    ],
+    "qps": 79.17901627425002,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 160,
+      "major_faults": 9,
+      "minor_faults": 315,
+      "system_s": 0.028654999999999996,
+      "user_s": 0.016438,
+      "voluntary_switches": 3584
+    },
+    "warmup20_s": 0.309643834,
+    "backend": "optimized",
+    "budget_mib": 64,
+    "repeat": 0,
+    "phase": "validation",
+    "recall_at_10": 0.931,
+    "results_sha256": "b886f9b9859ce98afe872a302caa9bbb2a38061072094db6f7dd835521f0ef5e",
+    "rss_mib": 215.296875,
+    "cpu_s": 1.786779,
+    "measured_major_faults": 0,
+    "voluntary_switches": 147946,
+    "raw_file": "raw/validation-optimized-64-1000000-0.jsonl",
+    "finished": "2026-11-04T18:08:58.543532+08:00"
+  },
+  {
+    "batch_s": 12.667147917,
+    "count": 1000000,
+    "effort": 128,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 12.666651748999993,
+    "open_resources": {
+      "involuntary_switches": 84,
+      "major_faults": 7,
+      "minor_faults": 12474,
+      "system_s": 0.019524,
+      "user_s": 0.005202,
+      "voluntary_switches": 1
+    },
+    "open_s": 0.02639075,
+    "p50_ms": 12.456667,
+    "p95_ms": 15.365584,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 75.47524402561554,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1412,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.21561999999999998,
+          "user_s": 0.142139,
+          "voluntary_switches": 31712
+        },
+        "wall_s": 2.6498755000000003
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 80.71042663776477,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1290,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.19849,
+          "user_s": 0.14074299999999998,
+          "voluntary_switches": 29586
+        },
+        "wall_s": 2.477994583
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 78.83375446922794,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1546,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.21935499999999997,
+          "user_s": 0.15295000000000003,
+          "voluntary_switches": 29598
+        },
+        "wall_s": 2.536984333
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 80.57928853423707,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1394,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.20832099999999998,
+          "user_s": 0.147532,
+          "voluntary_switches": 29574
+        },
+        "wall_s": 2.482027375
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 79.20013408582702,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1535,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.2180700000000001,
+          "user_s": 0.15394000000000008,
+          "voluntary_switches": 29609
+        },
+        "wall_s": 2.5252482499999998
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 76.43077089460833,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1725,
+          "major_faults": 0,
+          "minor_faults": 5,
+          "system_s": 0.22394800000000004,
+          "user_s": 0.15174599999999994,
+          "voluntary_switches": 29582
+        },
+        "wall_s": 2.616747125
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 79.80397481524776,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1426,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.21649600000000002,
+          "user_s": 0.1487090000000001,
+          "voluntary_switches": 29583
+        },
+        "wall_s": 2.506140834
+      }
+    ],
+    "qps": 78.94436905232202,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 162,
+      "major_faults": 9,
+      "minor_faults": 306,
+      "system_s": 0.028581,
+      "user_s": 0.016047,
+      "voluntary_switches": 3584
+    },
+    "warmup20_s": 0.320301791,
+    "backend": "optimized",
+    "budget_mib": 64,
+    "repeat": 1,
+    "phase": "validation",
+    "recall_at_10": 0.931,
+    "results_sha256": "b886f9b9859ce98afe872a302caa9bbb2a38061072094db6f7dd835521f0ef5e",
+    "rss_mib": 214.90625,
+    "cpu_s": 1.8410670000000002,
+    "measured_major_faults": 0,
+    "voluntary_switches": 147946,
+    "raw_file": "raw/validation-optimized-64-1000000-1.jsonl",
+    "finished": "2026-11-04T18:09:16.722829+08:00"
+  },
+  {
+    "batch_s": 14.178468582999999,
+    "count": 1000000,
+    "effort": 128,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 14.177839569000021,
+    "open_resources": {
+      "involuntary_switches": 143,
+      "major_faults": 7,
+      "minor_faults": 10451,
+      "system_s": 0.021568,
+      "user_s": 0.005162999999999999,
+      "voluntary_switches": 1
+    },
+    "open_s": 0.02785425,
+    "p50_ms": 14.00375,
+    "p95_ms": 17.0915,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 68.66951905542673,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1770,
+          "major_faults": 0,
+          "minor_faults": 7,
+          "system_s": 0.272466,
+          "user_s": 0.169327,
+          "voluntary_switches": 33572
+        },
+        "wall_s": 2.912500375
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 68.95074433042144,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1922,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.274595,
+          "user_s": 0.169431,
+          "voluntary_switches": 33423
+        },
+        "wall_s": 2.900621334
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 70.07888852662698,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1668,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.2533789999999999,
+          "user_s": 0.16115200000000002,
+          "voluntary_switches": 33414
+        },
+        "wall_s": 2.853926542
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 71.00047028936508,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1489,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.24655700000000003,
+          "user_s": 0.15653000000000006,
+          "voluntary_switches": 33421
+        },
+        "wall_s": 2.81688275
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 69.83160675413046,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1489,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.25238800000000006,
+          "user_s": 0.16125199999999995,
+          "voluntary_switches": 33416
+        },
+        "wall_s": 2.864032625
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 71.222191367938,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1472,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.24772300000000014,
+          "user_s": 0.15696399999999988,
+          "voluntary_switches": 33420
+        },
+        "wall_s": 2.808113541
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 70.53397081348372,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1933,
+          "major_faults": 0,
+          "minor_faults": 5,
+          "system_s": 0.2716820000000002,
+          "user_s": 0.16697000000000006,
+          "voluntary_switches": 33423
+        },
+        "wall_s": 2.835513125
+      }
+    ],
+    "qps": 70.52947884646733,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 329,
+      "major_faults": 9,
+      "minor_faults": 291,
+      "system_s": 0.037461,
+      "user_s": 0.019738,
+      "voluntary_switches": 3589
+    },
+    "warmup20_s": 0.329329916,
+    "backend": "optimized",
+    "budget_mib": 32,
+    "repeat": 1,
+    "phase": "validation",
+    "recall_at_10": 0.931,
+    "results_sha256": "b886f9b9859ce98afe872a302caa9bbb2a38061072094db6f7dd835521f0ef5e",
+    "rss_mib": 183.109375,
+    "cpu_s": 2.0745970000000002,
+    "measured_major_faults": 0,
+    "voluntary_switches": 167094,
+    "raw_file": "raw/validation-optimized-32-1000000-1.jsonl",
+    "finished": "2026-11-04T18:09:37.098415+08:00"
+  },
+  {
+    "batch_s": 15.011889457999999,
+    "count": 1000000,
+    "effort": 128,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 15.011360443999994,
+    "open_resources": {
+      "involuntary_switches": 112,
+      "major_faults": 7,
+      "minor_faults": 9404,
+      "system_s": 0.01899,
+      "user_s": 0.004109999999999999,
+      "voluntary_switches": 1
+    },
+    "open_s": 0.023192541,
+    "p50_ms": 14.981292,
+    "p95_ms": 17.829583,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 68.92186871296329,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1573,
+          "major_faults": 0,
+          "minor_faults": 7,
+          "system_s": 0.268653,
+          "user_s": 0.160507,
+          "voluntary_switches": 35465
+        },
+        "wall_s": 2.901836583
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 66.53038011442757,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1846,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.29190299999999997,
+          "user_s": 0.16785599999999998,
+          "voluntary_switches": 35428
+        },
+        "wall_s": 3.006145458
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 64.10957351867518,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1885,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.291303,
+          "user_s": 0.169431,
+          "voluntary_switches": 35452
+        },
+        "wall_s": 3.119658875
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 65.4728091017869,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 2092,
+          "major_faults": 0,
+          "minor_faults": 5,
+          "system_s": 0.296694,
+          "user_s": 0.16984600000000005,
+          "voluntary_switches": 35438
+        },
+        "wall_s": 3.054703208
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 67.83311358230912,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1560,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.2642610000000001,
+          "user_s": 0.16049400000000003,
+          "voluntary_switches": 35458
+        },
+        "wall_s": 2.9484125
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 67.78792506563732,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1555,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.25894099999999987,
+          "user_s": 0.15789700000000007,
+          "voluntary_switches": 35435
+        },
+        "wall_s": 2.950377959
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 68.05644932389042,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1479,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.25495500000000004,
+          "user_s": 0.156601,
+          "voluntary_switches": 35456
+        },
+        "wall_s": 2.938736916
+      }
+    ],
+    "qps": 66.61386648214953,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 172,
+      "major_faults": 9,
+      "minor_faults": 314,
+      "system_s": 0.030843,
+      "user_s": 0.01745,
+      "voluntary_switches": 3613
+    },
+    "warmup20_s": 0.300070625,
+    "backend": "optimized",
+    "budget_mib": 16,
+    "repeat": 1,
+    "phase": "validation",
+    "recall_at_10": 0.931,
+    "results_sha256": "b886f9b9859ce98afe872a302caa9bbb2a38061072094db6f7dd835521f0ef5e",
+    "rss_mib": 167.03125,
+    "cpu_s": 2.1804230000000002,
+    "measured_major_faults": 0,
+    "voluntary_switches": 177239,
+    "raw_file": "raw/validation-optimized-16-1000000-1.jsonl",
+    "finished": "2026-11-04T18:09:58.379744+08:00"
+  },
+  {
+    "batch_s": 8.325322791,
+    "count": 800000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 8.32482357599999,
+    "open_resources": {
+      "involuntary_switches": 474,
+      "major_faults": 1036,
+      "minor_faults": 10044,
+      "system_s": 0.022853000000000002,
+      "user_s": 0.00489,
+      "voluntary_switches": 11
+    },
+    "open_s": 0.067809958,
+    "p50_ms": 8.169791,
+    "p95_ms": 10.306584,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 100.30079370520563,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1234,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.168604,
+          "user_s": 0.116768,
+          "voluntary_switches": 23752
+        },
+        "wall_s": 1.994002167
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 116.34165975409606,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1501,
+          "major_faults": 0,
+          "minor_faults": 12,
+          "system_s": 0.156973,
+          "user_s": 0.125885,
+          "voluntary_switches": 19374
+        },
+        "wall_s": 1.7190746670000001
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 118.80690840145554,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1354,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.147256,
+          "user_s": 0.11683800000000005,
+          "voluntary_switches": 19429
+        },
+        "wall_s": 1.683403791
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 120.48309501784168,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1180,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.141613,
+          "user_s": 0.11721799999999999,
+          "voluntary_switches": 19379
+        },
+        "wall_s": 1.659983917
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 119.92485508580323,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1163,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.14177099999999998,
+          "user_s": 0.11677099999999996,
+          "voluntary_switches": 19423
+        },
+        "wall_s": 1.6677110000000002
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 121.5051941705645,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1128,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.136278,
+          "user_s": 0.11279700000000004,
+          "voluntary_switches": 19412
+        },
+        "wall_s": 1.646020167
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 119.8894200413806,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1209,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.1381539999999999,
+          "user_s": 0.11315299999999995,
+          "voluntary_switches": 19383
+        },
+        "wall_s": 1.668203916
+      }
+    ],
+    "qps": 120.11546279995764,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 130,
+      "major_faults": 9,
+      "minor_faults": 294,
+      "system_s": 0.022038,
+      "user_s": 0.012791999999999998,
+      "voluntary_switches": 2805
+    },
+    "warmup20_s": 0.255956,
+    "backend": "optimized",
+    "budget_mib": 64,
+    "repeat": 1,
+    "phase": "validation",
+    "recall_at_10": 0.9225,
+    "results_sha256": "f76fcc981971c89231deb2c3d429cd4d8621d3899ba8002a4d393520b6c26d04",
+    "rss_mib": 193.09375,
+    "cpu_s": 1.2818489999999998,
+    "measured_major_faults": 0,
+    "voluntary_switches": 97026,
+    "raw_file": "raw/validation-optimized-64-800000-1.jsonl",
+    "finished": "2026-11-04T18:10:10.777822+08:00"
+  },
+  {
+    "batch_s": 10.880559291,
+    "count": 800000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 10.880062089999994,
+    "open_resources": {
+      "involuntary_switches": 81,
+      "major_faults": 7,
+      "minor_faults": 9031,
+      "system_s": 0.015581,
+      "user_s": 0.003958,
+      "voluntary_switches": 1
+    },
+    "open_s": 0.0196455,
+    "p50_ms": 10.442833,
+    "p95_ms": 15.154458,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 95.35377794202232,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1215,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.171134,
+          "user_s": 0.113372,
+          "voluntary_switches": 25059
+        },
+        "wall_s": 2.097452291
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 96.26490757937616,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1226,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.17050500000000002,
+          "user_s": 0.11651700000000001,
+          "voluntary_switches": 24750
+        },
+        "wall_s": 2.077600291
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 95.35840007676352,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1310,
+          "major_faults": 0,
+          "minor_faults": 8,
+          "system_s": 0.177539,
+          "user_s": 0.118929,
+          "voluntary_switches": 24741
+        },
+        "wall_s": 2.097350625
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 96.73932061482331,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1234,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.16974899999999993,
+          "user_s": 0.11666399999999999,
+          "voluntary_switches": 24739
+        },
+        "wall_s": 2.067411666
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 96.13604402323638,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1229,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.17734799999999995,
+          "user_s": 0.11842800000000003,
+          "voluntary_switches": 24739
+        },
+        "wall_s": 2.080385167
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 95.77210260476022,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1221,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.17001699999999997,
+          "user_s": 0.11849299999999996,
+          "voluntary_switches": 24760
+        },
+        "wall_s": 2.088290792
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 78.5200219309091,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1426,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.18928199999999995,
+          "user_s": 0.12718999999999991,
+          "voluntary_switches": 24734
+        },
+        "wall_s": 2.547121041
+      }
+    ],
+    "qps": 91.90704018562384,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 124,
+      "major_faults": 9,
+      "minor_faults": 294,
+      "system_s": 0.019997,
+      "user_s": 0.011916999999999999,
+      "voluntary_switches": 2806
+    },
+    "warmup20_s": 0.2333045,
+    "backend": "optimized",
+    "budget_mib": 32,
+    "repeat": 1,
+    "phase": "validation",
+    "recall_at_10": 0.9225,
+    "results_sha256": "f76fcc981971c89231deb2c3d429cd4d8621d3899ba8002a4d393520b6c26d04",
+    "rss_mib": 160.875,
+    "cpu_s": 1.4836389999999997,
+    "measured_major_faults": 0,
+    "voluntary_switches": 123713,
+    "raw_file": "raw/validation-optimized-32-800000-1.jsonl",
+    "finished": "2026-11-04T18:10:26.116883+08:00"
+  },
+  {
+    "batch_s": 11.211988583,
+    "count": 800000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 11.211484793999995,
+    "open_resources": {
+      "involuntary_switches": 81,
+      "major_faults": 7,
+      "minor_faults": 8004,
+      "system_s": 0.015595,
+      "user_s": 0.0035859999999999998,
+      "voluntary_switches": 1
+    },
+    "open_s": 0.019231417,
+    "p50_ms": 11.117,
+    "p95_ms": 13.466041,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 86.70151561835684,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1947,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.22846100000000003,
+          "user_s": 0.131649,
+          "voluntary_switches": 26560
+        },
+        "wall_s": 2.30676475
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 90.20020105101653,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1267,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.18551800000000002,
+          "user_s": 0.11681999999999998,
+          "voluntary_switches": 26547
+        },
+        "wall_s": 2.217289958
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 90.05572928601536,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1247,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.18887899999999996,
+          "user_s": 0.11931999999999998,
+          "voluntary_switches": 26550
+        },
+        "wall_s": 2.220847042
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 89.75185130369574,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1275,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.19360899999999992,
+          "user_s": 0.12279400000000001,
+          "voluntary_switches": 26548
+        },
+        "wall_s": 2.228366291
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 90.14118194960258,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1246,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.1850750000000001,
+          "user_s": 0.12123399999999995,
+          "voluntary_switches": 26544
+        },
+        "wall_s": 2.218741708
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 87.88282258449897,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1385,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.20031699999999986,
+          "user_s": 0.12473900000000004,
+          "voluntary_switches": 26547
+        },
+        "wall_s": 2.275757584
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 88.17269313930629,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1519,
+          "major_faults": 0,
+          "minor_faults": 1,
+          "system_s": 0.21795300000000006,
+          "user_s": 0.13451599999999997,
+          "voluntary_switches": 26544
+        },
+        "wall_s": 2.268275958
+      }
+    ],
+    "qps": 89.19024422806086,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 163,
+      "major_faults": 9,
+      "minor_faults": 295,
+      "system_s": 0.023187999999999997,
+      "user_s": 0.013748999999999997,
+      "voluntary_switches": 2815
+    },
+    "warmup20_s": 0.249805292,
+    "backend": "optimized",
+    "budget_mib": 16,
+    "repeat": 1,
+    "phase": "validation",
+    "recall_at_10": 0.9225,
+    "results_sha256": "f76fcc981971c89231deb2c3d429cd4d8621d3899ba8002a4d393520b6c26d04",
+    "rss_mib": 144.90625,
+    "cpu_s": 1.6084359999999998,
+    "measured_major_faults": 0,
+    "voluntary_switches": 132733,
+    "raw_file": "raw/validation-optimized-16-800000-1.jsonl",
+    "finished": "2026-11-04T18:10:42.152323+08:00"
+  },
+  {
+    "batch_s": 9.749103751,
+    "count": 600000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 9.748557732999997,
+    "open_resources": {
+      "involuntary_switches": 367,
+      "major_faults": 779,
+      "minor_faults": 8898,
+      "system_s": 0.019496,
+      "user_s": 0.004517,
+      "voluntary_switches": 25
+    },
+    "open_s": 0.051592708,
+    "p50_ms": 9.020458999999999,
+    "p95_ms": 14.604458000000001,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 102.40563855604529,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1259,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.169796,
+          "user_s": 0.123439,
+          "voluntary_switches": 23084
+        },
+        "wall_s": 1.953017459
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 123.34733527672773,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1329,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.14984499999999998,
+          "user_s": 0.128602,
+          "voluntary_switches": 18359
+        },
+        "wall_s": 1.6214375410000001
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 117.52238140302332,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1514,
+          "major_faults": 0,
+          "minor_faults": 9,
+          "system_s": 0.14949999999999997,
+          "user_s": 0.12241800000000003,
+          "voluntary_switches": 18451
+        },
+        "wall_s": 1.7018035
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 121.36513322326527,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1158,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.128421,
+          "user_s": 0.10938399999999993,
+          "voluntary_switches": 18381
+        },
+        "wall_s": 1.64791975
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 124.61559011128561,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1211,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.13645000000000007,
+          "user_s": 0.11553000000000002,
+          "voluntary_switches": 18437
+        },
+        "wall_s": 1.604935625
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 80.98808020310648,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1760,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.15649199999999996,
+          "user_s": 0.122552,
+          "voluntary_switches": 18418
+        },
+        "wall_s": 2.469499209
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 86.02351566265655,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 2157,
+          "major_faults": 0,
+          "minor_faults": 1,
+          "system_s": 0.168207,
+          "user_s": 0.127096,
+          "voluntary_switches": 18409
+        },
+        "wall_s": 2.324945667
+      }
+    ],
+    "qps": 102.57353142820195,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 142,
+      "major_faults": 9,
+      "minor_faults": 284,
+      "system_s": 0.022674,
+      "user_s": 0.013461,
+      "voluntary_switches": 2825
+    },
+    "warmup20_s": 0.238464667,
+    "backend": "optimized",
+    "budget_mib": 64,
+    "repeat": 1,
+    "phase": "validation",
+    "recall_at_10": 0.9285,
+    "results_sha256": "eb57d03bc09b2c32611710cc5d15975811fd373e40d4774a28bc34ef4eb1b391",
+    "rss_mib": 171.21875,
+    "cpu_s": 1.33605,
+    "measured_major_faults": 0,
+    "voluntary_switches": 92096,
+    "raw_file": "raw/validation-optimized-64-600000-1.jsonl",
+    "finished": "2026-11-04T18:10:55.799382+08:00"
+  },
+  {
+    "batch_s": 11.568635749999999,
+    "count": 600000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 11.568135375000008,
+    "open_resources": {
+      "involuntary_switches": 88,
+      "major_faults": 7,
+      "minor_faults": 7621,
+      "system_s": 0.012868,
+      "user_s": 0.003343,
+      "voluntary_switches": 11
+    },
+    "open_s": 0.018857916,
+    "p50_ms": 11.07,
+    "p95_ms": 15.993792,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 75.43890237413962,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1867,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.197225,
+          "user_s": 0.126443,
+          "voluntary_switches": 24528
+        },
+        "wall_s": 2.651152041
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 81.64023810579543,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 2560,
+          "major_faults": 0,
+          "minor_faults": 11,
+          "system_s": 0.22098600000000002,
+          "user_s": 0.13845499999999997,
+          "voluntary_switches": 24212
+        },
+        "wall_s": 2.4497723750000002
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 78.21536777501429,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 2037,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.203932,
+          "user_s": 0.133314,
+          "voluntary_switches": 24224
+        },
+        "wall_s": 2.55704225
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 82.69744312878024,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1794,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.19632800000000006,
+          "user_s": 0.125971,
+          "voluntary_switches": 24232
+        },
+        "wall_s": 2.418454458
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 89.679744663831,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1558,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.18215500000000007,
+          "user_s": 0.120039,
+          "voluntary_switches": 24230
+        },
+        "wall_s": 2.230158
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 89.53372069351477,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1551,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.18352400000000002,
+          "user_s": 0.12077199999999999,
+          "voluntary_switches": 24230
+        },
+        "wall_s": 2.23379525
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 93.93262004258199,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1375,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.18381400000000014,
+          "user_s": 0.12012,
+          "voluntary_switches": 24232
+        },
+        "wall_s": 2.129185792
+      }
+    ],
+    "qps": 86.44061595594798,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 151,
+      "major_faults": 9,
+      "minor_faults": 283,
+      "system_s": 0.021672000000000004,
+      "user_s": 0.012355000000000001,
+      "voluntary_switches": 2785
+    },
+    "warmup20_s": 0.2913975,
+    "backend": "optimized",
+    "budget_mib": 32,
+    "repeat": 1,
+    "phase": "validation",
+    "recall_at_10": 0.9285,
+    "results_sha256": "eb57d03bc09b2c32611710cc5d15975811fd373e40d4774a28bc34ef4eb1b391",
+    "rss_mib": 139.15625,
+    "cpu_s": 1.5699690000000004,
+    "measured_major_faults": 0,
+    "voluntary_switches": 121148,
+    "raw_file": "raw/validation-optimized-32-600000-1.jsonl",
+    "finished": "2026-11-04T18:11:12.827374+08:00"
+  },
+  {
+    "batch_s": 11.598464581,
+    "count": 600000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 11.597936094000005,
+    "open_resources": {
+      "involuntary_switches": 155,
+      "major_faults": 7,
+      "minor_faults": 6603,
+      "system_s": 0.015904,
+      "user_s": 0.003409999999999999,
+      "voluntary_switches": 12
+    },
+    "open_s": 0.029113958,
+    "p50_ms": 11.323166,
+    "p95_ms": 15.177207999999998,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 92.10420755884329,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1251,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.17472700000000002,
+          "user_s": 0.10897399999999999,
+          "voluntary_switches": 26084
+        },
+        "wall_s": 2.1714534580000002
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 87.15037289016976,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1428,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.183645,
+          "user_s": 0.112599,
+          "voluntary_switches": 26060
+        },
+        "wall_s": 2.294884042
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 87.68912468703023,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1523,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.19386399999999998,
+          "user_s": 0.12087900000000001,
+          "voluntary_switches": 26047
+        },
+        "wall_s": 2.280784541
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 86.32733468151278,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1517,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.19638599999999995,
+          "user_s": 0.12367600000000001,
+          "voluntary_switches": 26045
+        },
+        "wall_s": 2.316763291
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 88.4780525344303,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1300,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.181875,
+          "user_s": 0.117178,
+          "voluntary_switches": 26052
+        },
+        "wall_s": 2.260447583
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 87.88752769418392,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1605,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.20398400000000005,
+          "user_s": 0.12851400000000002,
+          "voluntary_switches": 26050
+        },
+        "wall_s": 2.27563575
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 81.1413861487506,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 2454,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.24909599999999998,
+          "user_s": 0.148563,
+          "voluntary_switches": 26051
+        },
+        "wall_s": 2.464833416
+      }
+    ],
+    "qps": 86.21830872666955,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 156,
+      "major_faults": 9,
+      "minor_faults": 287,
+      "system_s": 0.021072000000000004,
+      "user_s": 0.012336999999999999,
+      "voluntary_switches": 2796
+    },
+    "warmup20_s": 0.2369115,
+    "backend": "optimized",
+    "budget_mib": 16,
+    "repeat": 1,
+    "phase": "validation",
+    "recall_at_10": 0.9285,
+    "results_sha256": "eb57d03bc09b2c32611710cc5d15975811fd373e40d4774a28bc34ef4eb1b391",
+    "rss_mib": 123.265625,
+    "cpu_s": 1.664015,
+    "measured_major_faults": 0,
+    "voluntary_switches": 130245,
+    "raw_file": "raw/validation-optimized-16-600000-1.jsonl",
+    "finished": "2026-11-04T18:11:29.217788+08:00"
+  },
+  {
+    "batch_s": 7.373528874,
+    "count": 400000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 7.373057539000008,
+    "open_resources": {
+      "involuntary_switches": 282,
+      "major_faults": 522,
+      "minor_faults": 7837,
+      "system_s": 0.014875000000000001,
+      "user_s": 0.0040950000000000005,
+      "voluntary_switches": 21
+    },
+    "open_s": 0.038080666,
+    "p50_ms": 7.363417,
+    "p95_ms": 9.409459,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 106.34505794243715,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1301,
+          "major_faults": 0,
+          "minor_faults": 7,
+          "system_s": 0.162939,
+          "user_s": 0.11680499999999999,
+          "voluntary_switches": 21954
+        },
+        "wall_s": 1.880670375
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 138.96684465651305,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1107,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.116753,
+          "user_s": 0.10383799999999999,
+          "voluntary_switches": 16820
+        },
+        "wall_s": 1.439192208
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 136.15406737330915,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1195,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.12286400000000003,
+          "user_s": 0.10772699999999999,
+          "voluntary_switches": 16893
+        },
+        "wall_s": 1.468924167
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 137.41151235368142,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1175,
+          "major_faults": 0,
+          "minor_faults": 2,
+          "system_s": 0.12180900000000006,
+          "user_s": 0.109068,
+          "voluntary_switches": 16848
+        },
+        "wall_s": 1.455482125
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 133.2915538955141,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1310,
+          "major_faults": 0,
+          "minor_faults": 5,
+          "system_s": 0.13289000000000006,
+          "user_s": 0.11565600000000004,
+          "voluntary_switches": 16852
+        },
+        "wall_s": 1.500470166
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 133.68768367956633,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1331,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.132293,
+          "user_s": 0.11794199999999999,
+          "voluntary_switches": 16891
+        },
+        "wall_s": 1.496024125
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 137.68147105431805,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1132,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.12481799999999998,
+          "user_s": 0.110456,
+          "voluntary_switches": 16824
+        },
+        "wall_s": 1.452628291
+      }
+    ],
+    "qps": 135.6202731538934,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 140,
+      "major_faults": 9,
+      "minor_faults": 236,
+      "system_s": 0.021127000000000003,
+      "user_s": 0.012682,
+      "voluntary_switches": 2676
+    },
+    "warmup20_s": 0.226980708,
+    "backend": "optimized",
+    "budget_mib": 64,
+    "repeat": 1,
+    "phase": "validation",
+    "recall_at_10": 0.924,
+    "results_sha256": "bf322daf50bdc1123f0bdf69d7079f84753cbef70f49cc5fa3855696dcc31b14",
+    "rss_mib": 149.09375,
+    "cpu_s": 1.1955230000000001,
+    "measured_major_faults": 0,
+    "voluntary_switches": 84308,
+    "raw_file": "raw/validation-optimized-64-400000-1.jsonl",
+    "finished": "2026-11-04T18:11:40.210481+08:00"
+  },
+  {
+    "batch_s": 9.862114084999998,
+    "count": 400000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 9.861692966999996,
+    "open_resources": {
+      "involuntary_switches": 81,
+      "major_faults": 7,
+      "minor_faults": 6289,
+      "system_s": 0.010182,
+      "user_s": 0.0029630000000000004,
+      "voluntary_switches": 1
+    },
+    "open_s": 0.013048583,
+    "p50_ms": 9.848875,
+    "p95_ms": 12.693959,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 101.86040818744446,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1193,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.159051,
+          "user_s": 0.110436,
+          "voluntary_switches": 23653
+        },
+        "wall_s": 1.963471417
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 101.81845427696048,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1308,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.164435,
+          "user_s": 0.11704999999999999,
+          "voluntary_switches": 23217
+        },
+        "wall_s": 1.964280458
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 101.65178214605857,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1310,
+          "major_faults": 0,
+          "minor_faults": 1,
+          "system_s": 0.160485,
+          "user_s": 0.11240699999999998,
+          "voluntary_switches": 23240
+        },
+        "wall_s": 1.967501167
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 101.54366249237526,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1346,
+          "major_faults": 0,
+          "minor_faults": 5,
+          "system_s": 0.16042200000000006,
+          "user_s": 0.11109600000000003,
+          "voluntary_switches": 23223
+        },
+        "wall_s": 1.969596084
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 101.26719653201494,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1348,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.16774199999999995,
+          "user_s": 0.11767600000000006,
+          "voluntary_switches": 23239
+        },
+        "wall_s": 1.974973208
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 101.7399416276852,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1230,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.16410800000000003,
+          "user_s": 0.112977,
+          "voluntary_switches": 23228
+        },
+        "wall_s": 1.9657962919999998
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 100.79388621217117,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1200,
+          "major_faults": 0,
+          "minor_faults": 1,
+          "system_s": 0.15735199999999994,
+          "user_s": 0.10879300000000003,
+          "voluntary_switches": 23236
+        },
+        "wall_s": 1.984247334
+      }
+    ],
+    "qps": 101.39813749680428,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 127,
+      "major_faults": 9,
+      "minor_faults": 241,
+      "system_s": 0.019916999999999997,
+      "user_s": 0.011974,
+      "voluntary_switches": 2652
+    },
+    "warmup20_s": 0.2223005,
+    "backend": "optimized",
+    "budget_mib": 32,
+    "repeat": 1,
+    "phase": "validation",
+    "recall_at_10": 0.924,
+    "results_sha256": "bf322daf50bdc1123f0bdf69d7079f84753cbef70f49cc5fa3855696dcc31b14",
+    "rss_mib": 116.984375,
+    "cpu_s": 1.3730580000000001,
+    "measured_major_faults": 0,
+    "voluntary_switches": 116166,
+    "raw_file": "raw/validation-optimized-32-400000-1.jsonl",
+    "finished": "2026-11-04T18:11:54.259940+08:00"
+  },
+  {
+    "batch_s": 10.632828376,
+    "count": 400000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 10.63233986100001,
+    "open_resources": {
+      "involuntary_switches": 81,
+      "major_faults": 7,
+      "minor_faults": 5271,
+      "system_s": 0.009294,
+      "user_s": 0.0024729999999999995,
+      "voluntary_switches": 1
+    },
+    "open_s": 0.011782667,
+    "p50_ms": 10.556875,
+    "p95_ms": 13.198625,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 94.40313323999224,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1243,
+          "major_faults": 0,
+          "minor_faults": 8,
+          "system_s": 0.17723,
+          "user_s": 0.11341599999999999,
+          "voluntary_switches": 25451
+        },
+        "wall_s": 2.11857375
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 95.08481625037543,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1203,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.167834,
+          "user_s": 0.10950200000000002,
+          "voluntary_switches": 25401
+        },
+        "wall_s": 2.10338525
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 94.9142474641694,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1228,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.16829100000000002,
+          "user_s": 0.10912799999999998,
+          "voluntary_switches": 25405
+        },
+        "wall_s": 2.107165208
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 95.59518307821865,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1207,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.167269,
+          "user_s": 0.108093,
+          "voluntary_switches": 25394
+        },
+        "wall_s": 2.092155625
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 94.59903371817008,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1247,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.17539400000000005,
+          "user_s": 0.11324800000000002,
+          "voluntary_switches": 25406
+        },
+        "wall_s": 2.1141865
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 92.16540130659727,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1591,
+          "major_faults": 0,
+          "minor_faults": 11,
+          "system_s": 0.19803399999999993,
+          "user_s": 0.126405,
+          "voluntary_switches": 25397
+        },
+        "wall_s": 2.170011709
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 93.0531482072836,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1571,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.19340500000000005,
+          "user_s": 0.12527199999999994,
+          "voluntary_switches": 25399
+        },
+        "wall_s": 2.149309334
+      }
+    ],
+    "qps": 94.04835332968982,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 130,
+      "major_faults": 9,
+      "minor_faults": 245,
+      "system_s": 0.019840000000000003,
+      "user_s": 0.011884000000000002,
+      "voluntary_switches": 2665
+    },
+    "warmup20_s": 0.250359,
+    "backend": "optimized",
+    "budget_mib": 16,
+    "repeat": 1,
+    "phase": "validation",
+    "recall_at_10": 0.924,
+    "results_sha256": "bf322daf50bdc1123f0bdf69d7079f84753cbef70f49cc5fa3855696dcc31b14",
+    "rss_mib": 101.15625,
+    "cpu_s": 1.4845389999999998,
+    "measured_major_faults": 0,
+    "voluntary_switches": 127001,
+    "raw_file": "raw/validation-optimized-16-400000-1.jsonl",
+    "finished": "2026-11-04T18:12:09.400942+08:00"
+  },
+  {
+    "batch_s": 5.661768709,
+    "count": 200000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 5.661397886999994,
+    "open_resources": {
+      "involuntary_switches": 175,
+      "major_faults": 265,
+      "minor_faults": 6585,
+      "system_s": 0.010543,
+      "user_s": 0.003648,
+      "voluntary_switches": 20
+    },
+    "open_s": 0.024524084,
+    "p50_ms": 5.663125,
+    "p95_ms": 7.346583,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 122.1175022238742,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1298,
+          "major_faults": 0,
+          "minor_faults": 8,
+          "system_s": 0.143851,
+          "user_s": 0.110693,
+          "voluntary_switches": 18944
+        },
+        "wall_s": 1.637766875
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 174.56876428723683,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1111,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.09740299999999996,
+          "user_s": 0.098447,
+          "voluntary_switches": 12915
+        },
+        "wall_s": 1.145680333
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 178.34301289144088,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1035,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.08834199999999998,
+          "user_s": 0.091034,
+          "voluntary_switches": 12971
+        },
+        "wall_s": 1.121434458
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 178.1724362173948,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1031,
+          "major_faults": 0,
+          "minor_faults": 8,
+          "system_s": 0.08890999999999999,
+          "user_s": 0.08975,
+          "voluntary_switches": 12883
+        },
+        "wall_s": 1.122508084
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 178.65806576961708,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1027,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.08813499999999996,
+          "user_s": 0.08979599999999999,
+          "voluntary_switches": 12961
+        },
+        "wall_s": 1.119456875
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 177.34461017816506,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1023,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.09068799999999999,
+          "user_s": 0.09184599999999998,
+          "voluntary_switches": 12926
+        },
+        "wall_s": 1.127747834
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 170.8494224441254,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1144,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.09433599999999998,
+          "user_s": 0.095777,
+          "voluntary_switches": 12913
+        },
+        "wall_s": 1.170621458
+      }
+    ],
+    "qps": 176.6232517429387,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 131,
+      "major_faults": 9,
+      "minor_faults": 246,
+      "system_s": 0.019928,
+      "user_s": 0.012023,
+      "voluntary_switches": 2553
+    },
+    "warmup20_s": 0.217516542,
+    "backend": "optimized",
+    "budget_mib": 64,
+    "repeat": 1,
+    "phase": "validation",
+    "recall_at_10": 0.9275,
+    "results_sha256": "5c130b769889e1ec5660a01dfaffb5089e0c79b81fa3000abe4b23150c9cd559",
+    "rss_mib": 125.734375,
+    "cpu_s": 0.9086139999999998,
+    "measured_major_faults": 0,
+    "voluntary_switches": 64654,
+    "raw_file": "raw/validation-optimized-64-200000-1.jsonl",
+    "finished": "2026-11-04T18:12:18.113589+08:00"
+  },
+  {
+    "batch_s": 8.447876916,
+    "count": 200000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 8.447505940000012,
+    "open_resources": {
+      "involuntary_switches": 80,
+      "major_faults": 7,
+      "minor_faults": 4817,
+      "system_s": 0.007116000000000001,
+      "user_s": 0.002543,
+      "voluntary_switches": 1
+    },
+    "open_s": 0.009652166,
+    "p50_ms": 8.402084,
+    "p95_ms": 10.769917,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 114.62780183381982,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1154,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.136898,
+          "user_s": 0.09797900000000001,
+          "voluntary_switches": 20811
+        },
+        "wall_s": 1.7447774169999999
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 119.38601266014048,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1123,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.132014,
+          "user_s": 0.097067,
+          "voluntary_switches": 20121
+        },
+        "wall_s": 1.675238125
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 117.19542838517891,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1132,
+          "major_faults": 0,
+          "minor_faults": 7,
+          "system_s": 0.131357,
+          "user_s": 0.09656199999999998,
+          "voluntary_switches": 20143
+        },
+        "wall_s": 1.7065512090000001
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 119.07125610947173,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1135,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.13066099999999997,
+          "user_s": 0.09711400000000003,
+          "voluntary_switches": 20138
+        },
+        "wall_s": 1.6796665
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 118.31194299151332,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1136,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.1356719999999999,
+          "user_s": 0.09984499999999996,
+          "voluntary_switches": 20136
+        },
+        "wall_s": 1.690446416
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 119.2158666261429,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1115,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.13153899999999996,
+          "user_s": 0.09699999999999998,
+          "voluntary_switches": 20151
+        },
+        "wall_s": 1.6776290409999999
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 118.09277220568512,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1125,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.13106399999999996,
+          "user_s": 0.096271,
+          "voluntary_switches": 20131
+        },
+        "wall_s": 1.6935837500000002
+      }
+    ],
+    "qps": 118.37293676782068,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 119,
+      "major_faults": 9,
+      "minor_faults": 230,
+      "system_s": 0.018001999999999997,
+      "user_s": 0.010894000000000001,
+      "voluntary_switches": 2545
+    },
+    "warmup20_s": 0.212282,
+    "backend": "optimized",
+    "budget_mib": 32,
+    "repeat": 1,
+    "phase": "validation",
+    "recall_at_10": 0.9275,
+    "results_sha256": "5c130b769889e1ec5660a01dfaffb5089e0c79b81fa3000abe4b23150c9cd559",
+    "rss_mib": 93.78125,
+    "cpu_s": 1.1470849999999997,
+    "measured_major_faults": 0,
+    "voluntary_switches": 100699,
+    "raw_file": "raw/validation-optimized-32-200000-1.jsonl",
+    "finished": "2026-11-04T18:12:30.240763+08:00"
+  },
+  {
+    "batch_s": 9.528545834,
+    "count": 200000,
+    "effort": 96,
+    "engine": "diskann",
+    "full_warmup_passes": 2,
+    "mean_ms": 9.528142249000004,
+    "open_resources": {
+      "involuntary_switches": 79,
+      "major_faults": 7,
+      "minor_faults": 3773,
+      "system_s": 0.0062169999999999994,
+      "user_s": 0.0019529999999999999,
+      "voluntary_switches": 1
+    },
+    "open_s": 0.008191041,
+    "p50_ms": 9.48675,
+    "p95_ms": 11.720292,
+    "passes": 5,
+    "phases": [
+      {
+        "pass": 0,
+        "phase": "warmup",
+        "qps": 104.78835864292324,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1184,
+          "major_faults": 0,
+          "minor_faults": 6,
+          "system_s": 0.150675,
+          "user_s": 0.098997,
+          "voluntary_switches": 22958
+        },
+        "wall_s": 1.9086089579999999
+      },
+      {
+        "pass": 1,
+        "phase": "warmup",
+        "qps": 104.41368388313447,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1181,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.149247,
+          "user_s": 0.098209,
+          "voluntary_switches": 22911
+        },
+        "wall_s": 1.9154577499999998
+      },
+      {
+        "pass": 2,
+        "phase": "measured",
+        "qps": 106.10124605303365,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1154,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.14608300000000002,
+          "user_s": 0.09845699999999999,
+          "voluntary_switches": 22912
+        },
+        "wall_s": 1.884992
+      },
+      {
+        "pass": 3,
+        "phase": "measured",
+        "qps": 104.71141597369834,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1176,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.154617,
+          "user_s": 0.10086200000000001,
+          "voluntary_switches": 22909
+        },
+        "wall_s": 1.910011417
+      },
+      {
+        "pass": 4,
+        "phase": "measured",
+        "qps": 103.52817996449706,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1246,
+          "major_faults": 0,
+          "minor_faults": 2,
+          "system_s": 0.1631229999999999,
+          "user_s": 0.10620800000000002,
+          "voluntary_switches": 22907
+        },
+        "wall_s": 1.931841167
+      },
+      {
+        "pass": 5,
+        "phase": "measured",
+        "qps": 105.11689094981158,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1165,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.15362399999999998,
+          "user_s": 0.09905599999999992,
+          "voluntary_switches": 22912
+        },
+        "wall_s": 1.9026437920000001
+      },
+      {
+        "pass": 6,
+        "phase": "measured",
+        "qps": 105.31540220517118,
+        "queries": 200,
+        "resources": {
+          "involuntary_switches": 1177,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "system_s": 0.151092,
+          "user_s": 0.09884499999999996,
+          "voluntary_switches": 22909
+        },
+        "wall_s": 1.8990574580000001
+      }
+    ],
+    "qps": 104.9478081358201,
+    "queries": 1000,
+    "stage": "queried",
+    "warmup20_resources": {
+      "involuntary_switches": 123,
+      "major_faults": 9,
+      "minor_faults": 252,
+      "system_s": 0.017195999999999996,
+      "user_s": 0.010873,
+      "voluntary_switches": 2556
+    },
+    "warmup20_s": 0.211094833,
+    "backend": "optimized",
+    "budget_mib": 16,
+    "repeat": 1,
+    "phase": "validation",
+    "recall_at_10": 0.9275,
+    "results_sha256": "5c130b769889e1ec5660a01dfaffb5089e0c79b81fa3000abe4b23150c9cd559",
+    "rss_mib": 77.65625,
+    "cpu_s": 1.2719669999999998,
+    "measured_major_faults": 0,
+    "voluntary_switches": 114549,
+    "raw_file": "raw/validation-optimized-16-200000-1.jsonl",
+    "finished": "2026-11-04T18:12:43.845140+08:00"
+  }
+]
