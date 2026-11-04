@@ -16,8 +16,11 @@ Cohere 20 万至 100 万的 [QPS/RSS 报告](rust/benchmarks/diskann/REPORT_BRIE
 
 该基准通过 Rust 调用层测量本地 C++ 向量索引，不包含完整 zg 查询流程，也不能直接代表应用所用的 SDK 0.8.0 预编译库。历史微软 DiskANN/SQLite 报告保留并单独标注。
 
+新增[与此前微软 Rust + SQLite/PQ 方案的对比](rust/benchmarks/diskann/REPORT_MICROSOFT_CN.md)：双方复用原有索引、重验独立验证集，用同一查询集预热与计时流程交替执行 6 轮。报告列明图参数、码本和缓存策略差异，并结合 CPU/墙钟时间评估 zvec 后续读盘与缓存优化方向。微软组为实验性的静态 PQ 适配方案，不等同于微软官方 SSD 存储实现。
+
 验证结果（macOS ARM64）：
 
+- 本轮 zvec / 微软方案对比完成 10 次验证和 60 次正式测量，全部返回 ID、GT、QPS、RSS 与汇总独立核验通过，测试集最低 Recall@10 为 93.10%；新增微软复测程序构建及 Clippy `-D warnings` 通过。
 - 本地源码 Cohere 基准完成 88 次验证参数试验和 60 次正式测量；测试集 Recall@10 均 ≥ 93.10%，GT、QPS、RSS 及汇总数据均独立核验通过。
 - 查询工作集预热复测另完成 60 次主对比和 30 次固定 ef 对照，全部正式计时阶段 `ru_majflt` 增量为 0；原参数下 HNSW 80 万 / 100 万中位数为 2755.61 / 2506.92 QPS。固定 ef 对照仍有小幅起伏，完整范围及全部原始数据保留。
 - 复测程序 Clippy 除 `chunks_exact_to_as_chunks` 风格提示外按 `-D warnings` 检查通过；为保持实际测量源码与记录的 SHA-256 一致，保留输入分块写法，以命令行单独豁免该提示。

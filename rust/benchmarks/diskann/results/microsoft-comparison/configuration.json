@@ -1,0 +1,140 @@
+{
+  "start": "2026-11-04T16:32:57.397458+08:00",
+  "counts": [
+    200000,
+    400000,
+    600000,
+    800000,
+    1000000
+  ],
+  "repeats": 6,
+  "parameters": [
+    {
+      "backend": "zvec",
+      "count": 200000,
+      "effort": 96,
+      "expected_validation_recall": 0.9275
+    },
+    {
+      "backend": "microsoft",
+      "count": 200000,
+      "effort": 128,
+      "expected_validation_recall": 0.971
+    },
+    {
+      "backend": "zvec",
+      "count": 400000,
+      "effort": 96,
+      "expected_validation_recall": 0.924
+    },
+    {
+      "backend": "microsoft",
+      "count": 400000,
+      "effort": 128,
+      "expected_validation_recall": 0.9575
+    },
+    {
+      "backend": "zvec",
+      "count": 600000,
+      "effort": 96,
+      "expected_validation_recall": 0.9285
+    },
+    {
+      "backend": "microsoft",
+      "count": 600000,
+      "effort": 128,
+      "expected_validation_recall": 0.948
+    },
+    {
+      "backend": "zvec",
+      "count": 800000,
+      "effort": 96,
+      "expected_validation_recall": 0.9225
+    },
+    {
+      "backend": "microsoft",
+      "count": 800000,
+      "effort": 128,
+      "expected_validation_recall": 0.9485
+    },
+    {
+      "backend": "zvec",
+      "count": 1000000,
+      "effort": 128,
+      "expected_validation_recall": 0.931
+    },
+    {
+      "backend": "microsoft",
+      "count": 1000000,
+      "effort": 128,
+      "expected_validation_recall": 0.946
+    }
+  ],
+  "zvec_source_commit": "960ecbc23f566df729429bdff655ece6dbb2261c",
+  "native_library_sha256": "d9ad81542a3b186a7caf68f9ae9bd3eba67ea4f9e414920fd7cbc944087e3496",
+  "library_path": "/private/tmp/zvec-local-cohere-20261104/build/lib/libzvec_c_api.dylib",
+  "binaries": {
+    "zvec": {
+      "path": "/private/tmp/zvec-local-cohere-20261104/rust-target/release/native-retest",
+      "sha256": "7af5d886eba1ccc5d69f3c44a1ecd95af3079280966009810f24499bdb7a892b"
+    },
+    "microsoft": {
+      "path": "/private/tmp/zvec-local-cohere-20261104/rust-target/release/microsoft-retest",
+      "sha256": "9f14d99bffa93d11698a5bf8b0ba7c6868229410960f2210ad49042d81c2052a"
+    }
+  },
+  "source_sha256": {
+    "rust/crates/zg-diskann/src/experimental_pq/tests.rs": "4a657896a80944e47c11077ab736b299af9a1a15f83cf2a15c471b6d10d495fb",
+    "rust/crates/zg-diskann/src/experimental_pq.rs": "81cd246edfda8dc8d27791fe7f8fb00d1eb48999d0524ecc8700c8ab6c5eae37",
+    "rust/crates/zg-diskann/src/lib.rs": "34427006a2eb3b477943e728ed86c5952087afc39b1c6f7b414abec921768d1d",
+    "rust/crates/zg-diskann/src/node.rs": "2a20dadb8939eef2fb9720d91bbf70351023ec35623d88e1531dcaf26bd253ba",
+    "rust/crates/zg-diskann/src/provider.rs": "56669c6de111605df307b18d9fc2cbac82db34dd6ba32510233cb775fc8fef7a",
+    "rust/crates/zg-diskann/src/tests.rs": "74cc32e2bfecc5fb1458af104526f38db397f0903302702e0c40195a39ce8688",
+    "rust/benchmarks/diskann/harness/src/bin/native-retest.rs": "aea202a14242573e800951f9d6c1eb8420a79b39feab7fc21972c53b011efbf9",
+    "rust/benchmarks/diskann/harness/src/bin/microsoft-retest.rs": "f60f2c38f5581075e21feba5157b5628b9d56ddb73bd072b15dee2c474615e9e",
+    "rust/benchmarks/diskann/harness/Cargo.lock": "3850a4c2d1d9b245bc90edc02f4fb8e59a49e9b6eb8fb7ef7db09c41463510fc",
+    "rust/benchmarks/diskann/harness/Cargo.toml": "3e7eea7f9fa51dd8f4598401668c636d1caf07cb25bd434bb838aad6c635f096",
+    "rust/benchmarks/diskann/run_microsoft_comparison.py": "684ef56031192ee16dd6bc09e3585ba7c053dabd075b11918d3cb1df5f4e3030"
+  },
+  "data_manifest_sha256": "4c56167ebc49c2b574b6740376e2ca9bb8764665faeccef385ac817935d5b919",
+  "pq_preparation_manifest_sha256": "b433e21492582610403a5f6a84c583abe0b7cd053dd737bb6f6a4cd64af96a34",
+  "pq_codes_sha256": "f09864b337238aa83c18abbcccdd023328b34a24eb34d9ad62bd115baab5aecc",
+  "implementations": {
+    "zvec": {
+      "library": "local zvec C++",
+      "max_degree": 32,
+      "build_list": 100,
+      "pq_chunks": 64
+    },
+    "microsoft": {
+      "library": "diskann / diskann-quantization 0.61.0",
+      "storage": "custom SQLite adapter",
+      "max_degree": 48,
+      "build_list": 100,
+      "pq_chunks": 64,
+      "rerank": 128,
+      "codebook": "shared across scales, trained on 32768 FP16-rounded vectors from first 200k"
+    }
+  },
+  "query_concurrency": 1,
+  "query_threads": 1,
+  "warmup_queries": 20,
+  "full_workload_warmup_passes": 2,
+  "distinct_measured_queries": 200,
+  "measured_passes": 5,
+  "queries_per_process": 1000,
+  "precision": "FP16 storage and FP16-rounded query input",
+  "metric": "cosine",
+  "top_k": 10,
+  "parameters_frozen_before_test": true,
+  "validation_threshold": 0.92,
+  "test_target": 0.9,
+  "indexes": "reuse unchanged previously verified graphs and PQ codes; no rebuilding or tuning",
+  "cache": "no purge; each implementation retains its own I/O/cache policy",
+  "schedule": "six rounds, reverse scale and backend order in odd rounds",
+  "native_experiment": "/private/tmp/zvec-local-cohere-20261104/experiment",
+  "microsoft_experiment": "/private/tmp/zvec-cohere-million/experiment",
+  "pq_experiment": "/private/tmp/zvec-cohere-pq64-20261104/experiment",
+  "pq_preparation": "/private/tmp/zvec-cohere-pq64-20261104/preparation",
+  "data": "/private/tmp/zvec-cohere-million/data"
+}

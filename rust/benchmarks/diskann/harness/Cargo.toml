@@ -28,6 +28,11 @@ name = "pq-bench"
 path = "src/bin/pq-bench.rs"
 required-features = ["experimental-pq"]
 
+[[bin]]
+name = "microsoft-retest"
+path = "src/bin/microsoft-retest.rs"
+required-features = ["experimental-pq"]
+
 [build-dependencies]
 zvec-rust-build = "=0.8.0"
 

@@ -54,6 +54,10 @@ native zvec DiskANN and HNSW on 200k–1M vectors using a local source build at
 published SDK binaries. Older reports explicitly marked as historical describe
 the previous Microsoft DiskANN/SQLite implementation.
 
+A [paired comparison with the previous Microsoft Rust/SQLite adapter](rust/benchmarks/diskann/REPORT_MICROSOFT_CN.md)
+uses the same Cohere samples and warmup protocol, with graph, recall, and cache-policy
+differences documented alongside QPS and process RSS.
+
 **Install**: `npm install -g @zvec/zvec-grep`, or via Homebrew (macOS/Linux):
 `brew install zvec-grep`
 

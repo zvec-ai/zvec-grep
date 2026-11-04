@@ -50,6 +50,9 @@ TypeScript 包直接使用 zvec Node.js SDK，无需再编译独立的 Rust 向�
 测量范围为向量查询，不代表完整应用或已发布 SDK 二进制的性能；
 标注为历史测试的旧报告对应此前的 Microsoft DiskANN/SQLite 实现。
 
+另有[与此前微软 Rust/SQLite 方案的交替对测](rust/benchmarks/diskann/REPORT_MICROSOFT_CN.md)，
+采用同一 Cohere 样本和预热流程，并列出图参数、实际召回率和缓存策略的差异。
+
 **安装**：`npm install -g @zvec/zvec-grep`，或通过 Homebrew（macOS/Linux）：
 `brew install zvec-grep`
 

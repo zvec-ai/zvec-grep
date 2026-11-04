@@ -1,0 +1,7 @@
+{
+  "all_60_measured_processes_verified": true,
+  "all_10_validation_processes_verified": true,
+  "raw_evidence_uncompressed_sha256": "ff219ef8e7c529f24f2e2d57940ea64e602fe4324526f6f8df26bb91d32f38d5",
+  "test_recall_min": 0.931,
+  "measured_major_faults_max": 8
+}
