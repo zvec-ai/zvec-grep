@@ -178,7 +178,11 @@ export class WatchManager {
     if (this.closed) {
       return;
     }
-    if (info?.isDirectory() && eventType === "rename") {
+    if (
+      this.useDirectoryWatchers &&
+      info?.isDirectory() &&
+      eventType === "rename"
+    ) {
       void this.watchDirectoryTree(path, factory);
     }
     this.options.onActivity?.();
