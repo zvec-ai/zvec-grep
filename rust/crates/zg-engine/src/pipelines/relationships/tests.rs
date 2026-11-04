@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    EngineError, EngineResult, ZvecGrep,
+    EngineError, EngineOptions, EngineRuntimeSnapshot, ZvecGrep,
     api::relationships::{RelationshipDirection, RelationshipOptions, RelationshipResult},
     domain::{
         CodeMetadata, Content, ContentKind, Entity, EntityFragment, EntityId, EntityMetadata,

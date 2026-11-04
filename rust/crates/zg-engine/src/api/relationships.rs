@@ -19,7 +19,7 @@ pub enum RelationshipDirection {
 }
 
 /// Reads an existing workspace index without loading models or refreshing it.
-/// Graph queries are disabled until graph extraction and resolution are enabled.
+/// Graph storage is disabled by default; configure it through [`crate::EngineOptions`].
 /// Each matched definition and its call sites are read from one consistent store snapshot.
 /// Different matches may reflect different indexing moments; roots changed since selection are skipped.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

@@ -43,6 +43,7 @@ pub(crate) async fn query(
     )
     .await?;
     let request = options.clone();
+    let engine_options = indexing.options;
     let read_sessions = read_sessions.cloned();
     // The blocking task owns admission and storage leases. Aborting the async
     // caller must not release them while native reads are still running.
@@ -67,7 +68,7 @@ pub(crate) async fn query(
                     .storage_generation()
                     .expect("published index generation"),
             )?,
-            None => ReadSessionLease::open(workspace.layout().index_dir())?,
+            None => ReadSessionLease::open(workspace.layout().index_dir(), engine_options)?,
         };
         let result = run(storage.storage());
         let close = storage.close();

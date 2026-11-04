@@ -66,7 +66,9 @@ impl Fixture {
         let graph_path = storage_home.join("graph/graph.sqlite");
         write_graph(&graph_path, &local, &remote[0]);
         write_workspace_manifest(layout.manifest_path(), &manifest).expect("publish manifest");
-        let engine = ZvecGrep::new();
+        let engine = ZvecGrep::with_options(EngineOptions {
+            graph_enabled: true,
+        });
         Self {
             engine,
             _directory: directory,
@@ -108,38 +110,9 @@ impl Fixture {
         entities
     }
 
-    // Query seeded graphs through an explicitly enabled store. Production service
-    // opens remain disabled until the indexing producer maintains graph data.
-    pub(super) async fn query(
-        &self,
-        direction: RelationshipDirection,
-        options: RelationshipOptions,
-    ) -> EngineResult<RelationshipResult> {
-        use crate::pipelines::relationships::pipeline::{normalize, query_symbols};
-        use crate::storage::graph::Direction;
-        let (name, scope) = normalize(&options)?;
-        let storage_path = self.storage_home().to_path_buf();
-        tokio::task::spawn_blocking(move || {
-            let store = IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
-                storage_path,
-                graph_enabled: true,
-            })?;
-            let direction = match direction {
-                RelationshipDirection::Callers => Direction::In,
-                RelationshipDirection::Callees => Direction::Out,
-            };
-            let result = query_symbols(&store, &name, scope.as_deref(), &options, direction);
-            let close = store.close();
-            let result = result?;
-            close?;
-            Ok(result)
-        })
-        .await
-        .expect("query worker")
-    }
-
     pub(super) async fn callers(&self, symbol: &str) -> RelationshipResult {
-        self.query(RelationshipDirection::Callers, self.options(symbol))
+        self.engine
+            .callers(self.options(symbol))
             .await
             .expect("callers")
     }
@@ -149,27 +122,23 @@ impl Fixture {
         symbol: &str,
         limit: usize,
     ) -> RelationshipResult {
-        self.query(
-            RelationshipDirection::Callers,
-            RelationshipOptions {
+        self.engine
+            .callers(RelationshipOptions {
                 limit: Some(limit),
                 ..self.options(symbol)
-            },
-        )
-        .await
-        .expect("limited callers")
+            })
+            .await
+            .expect("limited callers")
     }
 
     pub(super) async fn callees(&self, symbol: &str, limit: usize) -> RelationshipResult {
-        self.query(
-            RelationshipDirection::Callees,
-            RelationshipOptions {
+        self.engine
+            .callees(RelationshipOptions {
                 limit: Some(limit),
                 ..self.options(symbol)
-            },
-        )
-        .await
-        .expect("callees")
+            })
+            .await
+            .expect("callees")
     }
 
     pub(super) fn find_symbol(&self, name: &str, scope: Option<&str>) -> Entity {

@@ -125,7 +125,7 @@ pub(crate) async fn context(
                 .storage_generation()
                 .expect("published index generation"),
         )?,
-        None => ReadSessionLease::open(workspace.layout().index_dir())?,
+        None => ReadSessionLease::open(workspace.layout().index_dir(), indexing.options)?,
     };
     let result = query_storage(&acquired, &workspace, storage.storage(), options, &request).await;
     let close = storage.close();

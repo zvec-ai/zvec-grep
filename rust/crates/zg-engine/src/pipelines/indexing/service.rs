@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use zg_host_native::NativeScanner;
 
 use crate::{
-    EngineError,
+    EngineError, EngineOptions,
     api::{
         index::{
             IndexOptions, IndexResult,
@@ -59,15 +59,17 @@ const DEFAULT_LOCAL_EMBEDDING: &str = "local/potion-code-16m-v2";
 pub(crate) struct WorkspaceIndexService {
     pub(crate) writers: crate::pipelines::indexed_search::writer::WriterContexts,
     scanner: NativeScanner,
+    pub(crate) options: EngineOptions,
     #[cfg(test)]
     fail_index_completion: bool,
 }
 
 impl WorkspaceIndexService {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(options: EngineOptions) -> Self {
         Self {
             writers: crate::pipelines::indexed_search::writer::WriterContexts::default(),
             scanner: NativeScanner::default(),
+            options,
             #[cfg(test)]
             fail_index_completion: false,
         }
@@ -307,7 +309,7 @@ impl WorkspaceIndexService {
             return Ok(false);
         }
         let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
-            graph_enabled: false,
+            graph_enabled: self.options.graph_enabled,
             storage_path: workspace.layout().index_dir().to_path_buf(),
         })?;
         let status =
@@ -363,7 +365,7 @@ impl WorkspaceIndexService {
         let indexed = metadata_indexed && storage_exists;
         let status = if options.include_status && indexed {
             let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
-                graph_enabled: false,
+                graph_enabled: self.options.graph_enabled,
                 storage_path: workspace.layout().index_dir().to_path_buf(),
             })?;
             let status =
@@ -500,7 +502,7 @@ fn index_workspace_state(
 
 impl Default for WorkspaceIndexService {
     fn default() -> Self {
-        Self::new()
+        Self::new(EngineOptions::default())
     }
 }
 
@@ -858,7 +860,7 @@ mod tests {
         domain::{IndexDescriptor, IndexState, Workspace, WorkspaceLayout, model::Device},
     };
 
-    use super::{ModelRuntimeManager, WorkspaceIndexService};
+    use super::{EngineOptions, ModelRuntimeManager, WorkspaceIndexService};
 
     #[test]
     fn normalizes_selected_model_cache_paths() {
@@ -1138,7 +1140,7 @@ mod tests {
         let directory = tempdir().expect("workspace");
         let file = directory.path().join("file.txt");
         std::fs::write(&file, "text").expect("source file");
-        let service = WorkspaceIndexService::new();
+        let service = WorkspaceIndexService::new(EngineOptions::default());
         let models = ModelRuntimeManager::new();
         let error = service
             .index(
@@ -1161,7 +1163,7 @@ mod tests {
         };
         for fail in [false, true] {
             let directory = tempdir().expect("workspace");
-            let mut service = WorkspaceIndexService::new();
+            let mut service = WorkspaceIndexService::new(EngineOptions::default());
             service.fail_index_completion = fail;
             let models = ModelRuntimeManager::new();
             let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
@@ -1243,7 +1245,7 @@ mod tests {
         let original = directory.path().join("original");
         let moved = directory.path().join("moved");
         std::fs::create_dir(&original).expect("workspace root");
-        let service = WorkspaceIndexService::new();
+        let service = WorkspaceIndexService::new(EngineOptions::default());
         let models = ModelRuntimeManager::new();
         service
             .index(
@@ -1320,7 +1322,7 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
 
         assert!(
-            !WorkspaceIndexService::new()
+            !WorkspaceIndexService::new(EngineOptions::default())
                 .drop_index(&InfoOptions {
                     root: Some(directory.path().to_path_buf()),
                     include_status: false,
@@ -1345,7 +1347,7 @@ mod tests {
             fs::write(external.path().join("keep"), b"external data").expect("external data");
             symlink(external.path(), home.join(name)).expect("cleanup target alias");
 
-            let error = WorkspaceIndexService::new()
+            let error = WorkspaceIndexService::new(EngineOptions::default())
                 .drop_index(&InfoOptions {
                     root: Some(directory.path().to_path_buf()),
                     include_status: false,
@@ -1368,7 +1370,7 @@ mod tests {
         let home = layout.storage_dir().to_path_buf();
         let storage = home.join("index");
         std::fs::create_dir_all(&storage).expect("orphaned index");
-        let service = WorkspaceIndexService::new();
+        let service = WorkspaceIndexService::new(EngineOptions::default());
         let options = InfoOptions {
             root: Some(directory.path().to_path_buf()),
             include_status: false,
@@ -1393,7 +1395,7 @@ mod tests {
     #[tokio::test]
     async fn cancellation_discards_stage_and_normal_index_keeps_active_storage() {
         let directory = tempdir().expect("workspace");
-        let service = WorkspaceIndexService::new();
+        let service = WorkspaceIndexService::new(EngineOptions::default());
         let models = ModelRuntimeManager::new();
         let options = empty_index_options(directory.path());
         service
@@ -1471,7 +1473,7 @@ mod tests {
     #[tokio::test]
     async fn model_preferences_save_index_changes_but_not_query_overrides() {
         let directory = tempdir().expect("workspace");
-        let service = WorkspaceIndexService::new();
+        let service = WorkspaceIndexService::new(EngineOptions::default());
         let models = ModelRuntimeManager::new();
         service
             .index(&models, empty_index_options(directory.path()))
@@ -1571,7 +1573,7 @@ mod tests {
     #[tokio::test]
     async fn abandoned_rebuild_does_not_change_normal_index_settings_or_storage() {
         let directory = tempdir().expect("workspace");
-        let service = WorkspaceIndexService::new();
+        let service = WorkspaceIndexService::new(EngineOptions::default());
         let models = ModelRuntimeManager::new();
         let options = empty_index_options(directory.path());
         service
@@ -1671,7 +1673,7 @@ mod tests {
     #[tokio::test]
     async fn explicit_rebuild_starts_over_after_a_completed_publication() {
         let directory = tempdir().expect("workspace");
-        let service = WorkspaceIndexService::new();
+        let service = WorkspaceIndexService::new(EngineOptions::default());
         let models = ModelRuntimeManager::new();
         let options = empty_index_options(directory.path());
         service
@@ -1716,7 +1718,7 @@ mod tests {
     #[tokio::test]
     async fn failed_finalization_does_not_publish_an_incomplete_rebuild() {
         let directory = tempdir().expect("workspace");
-        let mut service = WorkspaceIndexService::new();
+        let mut service = WorkspaceIndexService::new(EngineOptions::default());
         let models = ModelRuntimeManager::new();
         let options = empty_index_options(directory.path());
         service
@@ -1786,7 +1788,7 @@ mod tests {
     #[tokio::test]
     async fn cancelled_refresh_scan_releases_its_read_lock() {
         let directory = tempdir().expect("workspace");
-        let service = WorkspaceIndexService::new();
+        let service = WorkspaceIndexService::new(EngineOptions::default());
         let models = ModelRuntimeManager::new();
         service
             .index(&models, empty_index_options(directory.path()))
@@ -1844,9 +1846,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn engine_options_control_graph_writes_and_cached_and_uncached_reads() {
+        use crate::api::relationships::{RelationshipDirection, RelationshipOptions};
+        for graph_enabled in [false, true] {
+            let directory = tempdir().expect("workspace");
+            let engine = crate::ZvecGrep::with_options(EngineOptions { graph_enabled });
+            engine
+                .index(empty_index_options(directory.path()))
+                .await
+                .expect("index empty workspace");
+            let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+            let workspace = super::read_workspace_manifest(directory.path(), &layout)
+                .expect("manifest")
+                .expect("published index");
+            assert_eq!(
+                workspace
+                    .layout()
+                    .index_dir()
+                    .join("graph/graph.sqlite")
+                    .exists(),
+                graph_enabled
+            );
+            for cached in [false, true] {
+                if cached {
+                    engine.enable_read_session_cache().expect("enable cache");
+                }
+                for direction in [
+                    RelationshipDirection::Callers,
+                    RelationshipDirection::Callees,
+                ] {
+                    let result = engine
+                        .relationships(
+                            direction,
+                            RelationshipOptions {
+                                root: Some(directory.path().to_path_buf()),
+                                symbol: "missing".into(),
+                                ..RelationshipOptions::default()
+                            },
+                        )
+                        .await;
+                    if graph_enabled {
+                        assert!(result.expect("enabled graph read").matches.is_empty());
+                    } else {
+                        assert_eq!(
+                            result.expect_err("disabled graph read").code(),
+                            crate::EngineError::UNSUPPORTED
+                        );
+                    }
+                }
+            }
+            engine.close();
+        }
+    }
+
+    #[tokio::test]
     async fn automatic_refresh_does_not_create_a_missing_index() {
         let directory = tempdir().expect("workspace");
-        let service = WorkspaceIndexService::new();
+        let service = WorkspaceIndexService::new(EngineOptions::default());
         let models = ModelRuntimeManager::new();
         let refresh = crate::pipelines::indexed_search::service::refresh_options(
             &crate::api::context::ContextOptions::default(),
@@ -1864,7 +1920,7 @@ mod tests {
     #[tokio::test]
     async fn automatic_refresh_rechecks_index_after_waiting_for_a_writer() {
         let directory = tempdir().expect("workspace");
-        let service = WorkspaceIndexService::new();
+        let service = WorkspaceIndexService::new(EngineOptions::default());
         let models = ModelRuntimeManager::new();
         service
             .index(&models, empty_index_options(directory.path()))
@@ -1905,7 +1961,7 @@ mod tests {
     #[tokio::test]
     async fn unrelated_workspaces_can_share_a_directory_name() {
         let directory = tempdir().expect("workspaces");
-        let service = WorkspaceIndexService::new();
+        let service = WorkspaceIndexService::new(EngineOptions::default());
         let models = ModelRuntimeManager::new();
         for parent in ["first", "second"] {
             let root = directory.path().join(parent).join("docs");
@@ -1933,7 +1989,7 @@ mod tests {
         let child = root.join("sub");
         std::fs::create_dir(root.join("docs")).expect("parent sources");
         std::fs::create_dir_all(child.join("src")).expect("child sources");
-        let service = WorkspaceIndexService::new();
+        let service = WorkspaceIndexService::new(EngineOptions::default());
         let models = ModelRuntimeManager::new();
         let mut parent_options = empty_index_options(&root);
         parent_options.embedding.as_mut().expect("model").reference =
@@ -2053,7 +2109,7 @@ mod tests {
         let replacement = directory.path().join("replacement");
         std::fs::create_dir(&deleted).expect("original root");
         std::fs::create_dir(&replacement).expect("replacement root");
-        let service = WorkspaceIndexService::new();
+        let service = WorkspaceIndexService::new(EngineOptions::default());
         let models = ModelRuntimeManager::new();
         service
             .index(&models, empty_index_options(&deleted))
@@ -2087,7 +2143,7 @@ mod tests {
         let replacement = directory.path().join("replacement");
         std::fs::create_dir(&original).expect("original root");
         std::fs::create_dir(&replacement).expect("replacement root");
-        let service = WorkspaceIndexService::new();
+        let service = WorkspaceIndexService::new(EngineOptions::default());
         let models = ModelRuntimeManager::new();
         service
             .index(&models, empty_index_options(&original))
@@ -2119,7 +2175,7 @@ mod tests {
         let copy = directory.path().join("copy");
         std::fs::create_dir(&original).expect("original root");
         std::fs::create_dir_all(copy.join(".zvec-grep/temp")).expect("copy home");
-        let service = WorkspaceIndexService::new();
+        let service = WorkspaceIndexService::new(EngineOptions::default());
         let models = ModelRuntimeManager::new();
         service
             .index(&models, empty_index_options(&original))
@@ -2170,7 +2226,7 @@ mod tests {
         let external = root.parent().expect("parent").join("external.ignore");
         std::fs::write(&external, "").expect("external rules");
         std::fs::write(root.join("config/rules.ignore"), "*\n").expect("internal rules");
-        let service = WorkspaceIndexService::new();
+        let service = WorkspaceIndexService::new(EngineOptions::default());
         let models = ModelRuntimeManager::new();
         service
             .index(
@@ -2212,7 +2268,7 @@ mod tests {
         let directory = tempdir().expect("workspace");
         std::fs::write(directory.path().join("source.txt"), "source text").expect("source file");
         std::fs::write(directory.path().join("empty.txt"), "").expect("empty file");
-        let service = WorkspaceIndexService::new();
+        let service = WorkspaceIndexService::new(EngineOptions::default());
         let models = ModelRuntimeManager::new();
         let result = service
             .index(
@@ -2399,7 +2455,7 @@ mod tests {
         let directory = tempdir().expect("workspace");
         std::fs::write(directory.path().join("invalid.ignore"), "[z-a]\n")
             .expect("invalid ignore rules");
-        let service = WorkspaceIndexService::new();
+        let service = WorkspaceIndexService::new(EngineOptions::default());
         let models = ModelRuntimeManager::new();
         for scan in [
             ScanRulesUpdate {
@@ -2434,7 +2490,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_scan_update_preserves_manifest_and_pending_rebuild() {
         let directory = tempdir().expect("workspace");
-        let service = WorkspaceIndexService::new();
+        let service = WorkspaceIndexService::new(EngineOptions::default());
         let models = ModelRuntimeManager::new();
         service
             .index(&models, empty_index_options(directory.path()))
@@ -2481,7 +2537,7 @@ mod tests {
     #[tokio::test]
     async fn initial_model_failure_leaves_no_workspace_metadata() {
         let directory = tempdir().expect("workspace");
-        let service = WorkspaceIndexService::new();
+        let service = WorkspaceIndexService::new(EngineOptions::default());
         let models = ModelRuntimeManager::new();
         let mut options = empty_index_options(directory.path());
         options.embedding.as_mut().expect("model spec").revision = Some("unsupported".into());
@@ -2524,7 +2580,7 @@ mod tests {
     #[tokio::test]
     async fn initial_build_cancellation_leaves_no_published_or_pending_index() {
         let directory = tempdir().expect("workspace");
-        let service = WorkspaceIndexService::new();
+        let service = WorkspaceIndexService::new(EngineOptions::default());
         let models = ModelRuntimeManager::new();
         let signal = tokio_util::sync::CancellationToken::new();
         signal.cancel();
@@ -2561,7 +2617,7 @@ mod tests {
     #[tokio::test]
     async fn index_concurrency_is_ephemeral_and_queries_ignore_refresh_overrides() {
         let directory = tempdir().expect("workspace");
-        let service = WorkspaceIndexService::new();
+        let service = WorkspaceIndexService::new(EngineOptions::default());
         let models = ModelRuntimeManager::new();
         let mut options = empty_index_options(directory.path());
         options.embedding.as_mut().expect("model").reference = "local/all-minilm-l6-v2".into();
@@ -2620,7 +2676,7 @@ mod tests {
         let sources = directory.path().join("sources");
         std::fs::create_dir(&sources).expect("source directory");
         std::fs::create_dir(directory.path().join("model-cache")).expect("saved model cache");
-        let service = WorkspaceIndexService::new();
+        let service = WorkspaceIndexService::new(EngineOptions::default());
         let models = ModelRuntimeManager::new();
         let mut options = empty_index_options(directory.path());
         options.scan.globs = Some(vec!["sources/**".into()]);
