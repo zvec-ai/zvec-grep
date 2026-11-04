@@ -73,6 +73,10 @@ impl WorkspaceIndexService {
         }
     }
 
+    /// Runs the indexing pipeline in one linear sequence: recovery, model
+    /// resolution, build, and publication are order-dependent, so the steps
+    /// stay visible here instead of behind helpers.
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn index(
         &self,
         models: &ModelRuntimeManager,
@@ -130,7 +134,7 @@ impl WorkspaceIndexService {
         let IndexModels {
             runtimes: acquired,
             descriptor,
-        } = acquire_index_models(models, existing.as_ref(), &options)?;
+        } = acquire_index_models(models, existing.as_ref(), &options, graph_indexing)?;
         if !rebuilding
             && let Some(previous) = existing
                 .as_ref()
@@ -149,6 +153,7 @@ impl WorkspaceIndexService {
             &options,
             &acquired,
             &descriptor,
+            graph_indexing,
             scan,
             rebuilding,
         )?;
@@ -461,6 +466,7 @@ fn index_workspace_state(
     options: &IndexOptions,
     models: &[ModelRuntimeLease],
     descriptor: &IndexDescriptor,
+    graph_indexing: bool,
     scan: crate::domain::ScanRules,
     rebuilding: bool,
 ) -> Result<Workspace, EngineError> {
@@ -486,6 +492,7 @@ fn index_workspace_state(
         descriptor.default_embedding_model().clone(),
         descriptor.embedding_routes().clone(),
         configs,
+        graph_indexing,
         descriptor.fts(),
     )?;
     Workspace::new(
@@ -558,12 +565,14 @@ fn acquire_index_models(
     models: &ModelRuntimeManager,
     existing: Option<&Workspace>,
     options: &IndexOptions,
+    graph_indexing: bool,
 ) -> Result<IndexModels, EngineError> {
     let model = acquire_model(models, existing, options)?;
     let descriptor = IndexDescriptor::new(
         model.info().clone(),
         std::collections::BTreeMap::new(),
         std::collections::BTreeMap::new(),
+        graph_indexing,
         crate::domain::FTS_CONFIG,
     )?;
     if !descriptor
@@ -1012,7 +1021,7 @@ mod tests {
             ..IndexOptions::default()
         };
         let acquired =
-            super::acquire_index_models(&models, None, &options).expect("model metadata");
+            super::acquire_index_models(&models, None, &options, false).expect("model metadata");
         let workspace = super::index_workspace_state(
             directory.path(),
             &layout,
@@ -1020,6 +1029,7 @@ mod tests {
             &options,
             &acquired.runtimes,
             &acquired.descriptor,
+            false,
             crate::domain::ScanRules::default(),
             true,
         )
@@ -1613,6 +1623,7 @@ mod tests {
                 index.default_embedding_model().clone(),
                 index.embedding_routes().clone(),
                 configs,
+                index.graph_indexing(),
                 index.fts(),
             )
             .expect("descriptor");

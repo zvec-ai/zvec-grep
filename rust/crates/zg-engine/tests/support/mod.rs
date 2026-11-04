@@ -113,7 +113,8 @@ pub fn configure_remote_model(root: &Path, address: SocketAddr) -> std::io::Resu
                     "qwen/text-embedding-v4": {
                         "endpoint": format!("http://{address}/embeddings")
                     }
-                }
+                },
+                "graphIndexing": false
             }
         }
     });

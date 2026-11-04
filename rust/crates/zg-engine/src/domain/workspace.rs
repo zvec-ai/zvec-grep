@@ -7,7 +7,7 @@ use crate::{
     utils::{current_username, directory_exists, file_exists, resolve_directory},
 };
 
-use super::{FileFormat, GlobRule, IndexState, SourcePath};
+use super::{FileFormat, GlobRule, IndexDescriptor, IndexState, SourcePath};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,10 +24,6 @@ pub(crate) struct Workspace {
     created_epoch_ms: u64,
     #[serde(rename = "updatedTime")]
     updated_epoch_ms: u64,
-    /// Whether this workspace extracts and persists the code graph. Absent in
-    /// manifests written before the switch existed, which read as `false`.
-    #[serde(default)]
-    graph_indexing: bool,
     index: IndexState,
 }
 
@@ -52,7 +48,6 @@ impl Workspace {
             storage_generation,
             created_epoch_ms,
             updated_epoch_ms,
-            graph_indexing: false,
             index,
         };
         workspace.validate()?;
@@ -68,7 +63,6 @@ impl Workspace {
         storage_generation: Option<String>,
         created_epoch_ms: u64,
         updated_epoch_ms: u64,
-        graph_indexing: bool,
         index: IndexState,
     ) -> EngineResult<Self> {
         let changed = source_root.environment_changed();
@@ -80,7 +74,6 @@ impl Workspace {
             storage_generation,
             created_epoch_ms,
             updated_epoch_ms,
-            graph_indexing,
             index,
         };
         workspace.validate()?;
@@ -166,14 +159,22 @@ impl Workspace {
     }
 
     /// Whether indexing this workspace extracts, assembles, and persists the
-    /// code graph. Off by default; a workspace switched on must be rebuilt so
-    /// the graph and the rest of the index describe the same content.
+    /// code graph. The published index descriptor carries the answer: an index
+    /// is built with or without a graph, and both must describe the same
+    /// content, so a disabled index reports `false`.
     pub(crate) fn graph_indexing(&self) -> bool {
-        self.graph_indexing
+        self.index
+            .descriptor()
+            .is_some_and(IndexDescriptor::graph_indexing)
     }
 
+    /// Records the graph setting on the published index descriptor, the only
+    /// place it lives. A workspace without an enabled index has nothing to
+    /// describe, so the call is a no-op there.
     pub(crate) fn set_graph_indexing(&mut self, enabled: bool) {
-        self.graph_indexing = enabled;
+        if let IndexState::Enabled(index) = &mut self.index {
+            index.set_graph_indexing(enabled);
+        }
     }
 
     pub(crate) fn record_update(&mut self, updated_epoch_ms: u64) {
@@ -565,8 +566,14 @@ mod tests {
             ModelInfo::new("local", "test-model", [ContentKind::Code], 1).expect("model metadata");
         let embedding = EmbeddingModelInfo::new(model, 8, EmbeddingMetric::Cosine, None, None)
             .expect("embedding metadata");
-        let index = IndexDescriptor::new(embedding, BTreeMap::new(), BTreeMap::new(), FTS_CONFIG)
-            .expect("index descriptor");
+        let index = IndexDescriptor::new(
+            embedding,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            false,
+            FTS_CONFIG,
+        )
+        .expect("index descriptor");
         Workspace::new(
             root,
             WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout"),
@@ -592,7 +599,6 @@ mod tests {
             serde_json::from_value(saved["storageGeneration"].clone()).expect("storage generation"),
             serde_json::from_value(saved["createdTime"].clone()).expect("created time"),
             serde_json::from_value(saved["updatedTime"].clone()).expect("updated time"),
-            saved["graphIndexing"].as_bool().unwrap_or_default(),
             serde_json::from_value(saved["index"].clone()).expect("index fields"),
         )
         .expect("workspace from manifest")

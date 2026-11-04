@@ -1254,6 +1254,7 @@ mod tests {
                             ..Default::default()
                         },
                     )]),
+                    false,
                     crate::domain::FTS_CONFIG,
                 )
                 .expect("index descriptor"),

@@ -19,10 +19,6 @@ struct ManifestFields {
     storage_generation: Option<String>,
     created_time: u64,
     updated_time: u64,
-    /// Missing from manifests written before the graph switch existed; those
-    /// workspaces index without a graph, the same as an explicit `false`.
-    #[serde(default)]
-    graph_indexing: bool,
     index: IndexState,
 }
 
@@ -41,7 +37,6 @@ impl ManifestFields {
             self.storage_generation,
             self.created_time,
             self.updated_time,
-            self.graph_indexing,
             self.index,
         )
     }
@@ -368,6 +363,7 @@ mod tests {
                     .expect("valid embedding metadata"),
                     std::collections::BTreeMap::new(),
                     BTreeMap::from([("local/minilm".into(), ModelConfig::default())]),
+                    false,
                     crate::domain::FTS_CONFIG,
                 )
                 .expect("index descriptor"),
@@ -578,33 +574,38 @@ mod tests {
     }
 
     #[test]
-    fn graph_indexing_persists_and_reads_as_off_when_absent() {
+    fn graph_indexing_persists_on_the_index_descriptor() {
         let directory = tempdir().expect("workspace");
         let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
         fs::create_dir(layout.storage_dir()).expect("storage directory");
         let mut manifest = fixture_manifest(&layout);
         assert!(!manifest.graph_indexing(), "the switch defaults to off");
         manifest.set_graph_indexing(true);
+        assert!(manifest.graph_indexing());
 
-        let value = serde_json::to_value(&manifest).expect("manifest JSON");
-        assert_eq!(value["graphIndexing"], serde_json::json!(true));
+        let mut value = serde_json::to_value(&manifest).expect("manifest JSON");
+        assert_eq!(
+            value["index"]["descriptor"]["graphIndexing"],
+            serde_json::json!(true)
+        );
+        assert!(
+            value.get("graphIndexing").is_none(),
+            "the workspace no longer stores the switch"
+        );
         assert!(
             decode_manifest(&value, &layout)
                 .expect("round trip")
                 .graph_indexing()
         );
 
-        // Manifests written before the switch existed carry no field at all.
-        let mut legacy = value;
-        legacy
+        // The setting is required: there is no older layout to fall back to.
+        value["index"]["descriptor"]
             .as_object_mut()
-            .expect("manifest object")
+            .expect("descriptor object")
             .remove("graphIndexing");
         assert!(
-            !decode_manifest(&legacy, &layout)
-                .expect("legacy manifest")
-                .graph_indexing(),
-            "a manifest without the switch keeps indexing without a graph"
+            decode_manifest(&value, &layout).is_err(),
+            "a descriptor without the switch is invalid"
         );
 
         write_workspace_manifest(layout.manifest_path(), &manifest).expect("write manifest");

@@ -3260,6 +3260,7 @@ mod tests {
                     .expect("valid embedding metadata"),
                     std::collections::BTreeMap::new(),
                     std::collections::BTreeMap::new(),
+                    false,
                     crate::domain::FTS_CONFIG,
                 )
                 .expect("index descriptor"),
@@ -3833,6 +3834,7 @@ mod tests {
                         first.info.clone(),
                         BTreeMap::from([(ContentKind::Image, second.info.clone())]),
                         std::collections::BTreeMap::new(),
+                        false,
                         crate::domain::FTS_CONFIG,
                     )
                     .expect("index descriptor"),
