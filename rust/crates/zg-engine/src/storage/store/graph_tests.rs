@@ -125,15 +125,13 @@ fn node(id: &str) -> FileGraphNode {
         name: Some(id.into()),
         qualified_name: id.into(),
         language: "rust".into(),
-        start_line: 1,
-        end_line: 1,
-        start_column: 0,
-        end_column: 1,
+        range: None,
         signature: None,
         doc: None,
         arity: None,
         visibility: None,
         is_exported: false,
+        is_declaration: false,
     }
 }
 
@@ -332,7 +330,10 @@ fn disabled_graph_rejects_data_and_resolution_without_changing_files() {
             )
             .expect_err("nonempty graph must not be discarded");
         assert_eq!(error.code(), EngineError::UNSUPPORTED);
-        assert!(error.message().contains("graph indexing is disabled"));
+        assert!(
+            error.message().contains("indexes without a code graph"),
+            "the error must say why the graph cannot be stored: {error}"
+        );
     }
     assert_eq!(
         store

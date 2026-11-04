@@ -64,7 +64,7 @@ pub(crate) struct TextRange {
     end: TextPosition,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
 struct TextPosition {
     byte_offset: usize,
     line: usize,
@@ -152,5 +152,52 @@ impl TextRange {
             )));
         }
         Ok(())
+    }
+}
+
+/// Decoding rebuilds the range through [`TextRange::from_coordinates`], so a
+/// deserialized value carries the same coordinate invariants as a collected
+/// one instead of trusting the encoded numbers.
+impl<'de> serde::Deserialize<'de> for TextRange {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// Mirrors the serialized field names of [`TextRange`].
+        #[derive(serde::Deserialize)]
+        struct Coordinates {
+            start: TextPosition,
+            end: TextPosition,
+        }
+
+        let Coordinates { start, end } = Coordinates::deserialize(deserializer)?;
+        Self::from_coordinates(
+            start.byte_offset,
+            end.byte_offset,
+            start.line,
+            end.line,
+            start.byte_column,
+            end.byte_column,
+        )
+        .map_err(<D::Error as serde::de::Error>::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserialization_restores_ranges_and_rejects_inconsistent_coordinates() {
+        let range = TextRange::from_coordinates(4, 9, 2, 2, 0, 5).expect("valid range");
+        let encoded = serde_json::to_value(range).expect("serialize range");
+        assert_eq!(
+            serde_json::from_value::<TextRange>(encoded).expect("decode range"),
+            range
+        );
+
+        // The same shape with offsets that disagree with the line numbers.
+        let inconsistent = serde_json::json!({
+            "start": {"byte_offset": 4, "line": 9, "byte_column": 0},
+            "end": {"byte_offset": 9, "line": 12, "byte_column": 5},
+        });
+        assert!(serde_json::from_value::<TextRange>(inconsistent).is_err());
     }
 }

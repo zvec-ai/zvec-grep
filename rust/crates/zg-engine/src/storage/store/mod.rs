@@ -124,13 +124,23 @@ fn validate_models(embeddings: &[EmbeddingModelInfo]) -> EngineResult<()> {
 }
 
 impl IndexStore {
+    /// Opens storage without graph access, which is all a reader needs: query
+    /// paths answer from files, entities, and fragments. Indexing opens through
+    /// [`Self::open_with_graph`] instead, because only the workspace setting
+    /// decides whether this workspace keeps a graph.
     pub(crate) fn open(options: WorkspaceIndexStorageOptions) -> EngineResult<Self> {
-        // Graph extraction and resolution are not enabled in this release.
-        // Re-enabling graph indexing requires rebuilding any unmaintained graph.
         Self::open_with_graph(options, false)
     }
 
-    fn open_with_graph(
+    /// Whether this store can persist walk-time graphs. Indexing skips graph
+    /// assembly when the answer is no, because a store without a graph
+    /// rejects any non-empty graph write.
+    pub(crate) fn graph_enabled(&self) -> bool {
+        self.read(|state| Ok(state.graph.is_some()))
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn open_with_graph(
         options: WorkspaceIndexStorageOptions,
         graph_enabled: bool,
     ) -> EngineResult<Self> {
@@ -180,8 +190,9 @@ impl IndexStore {
             None
         } else {
             let graph_path = path.join("graph").join("graph.sqlite");
-            // Current extractors produce no graph, so pre-graph indexes can
-            // initialize an empty database without rebuilding canonical data.
+            // An index built before its workspace asked for a graph still owns
+            // a valid canonical index; creating the empty database on first use
+            // keeps that build usable instead of forcing a rebuild.
             let graph =
                 SqliteGraphStorage::open(&graph_path, OpenMode::ReadWrite).map_err(graph_error)?;
             sync_directory(&path.join("graph"))?;
@@ -548,7 +559,7 @@ fn invalidation_entity_ids(state: &StoreState, file_id: FileId) -> EngineResult<
         return Ok(Vec::new());
     };
     // An empty graph has no incoming relationships to invalidate. Avoid a
-    // canonical entity scan on every file while extractors produce no graph.
+    // canonical entity scan on every file when the graph is empty or absent.
     if graph.is_empty().map_err(graph_error)? {
         return Ok(Vec::new());
     }
@@ -556,7 +567,10 @@ fn invalidation_entity_ids(state: &StoreState, file_id: FileId) -> EngineResult<
 }
 
 fn graph_disabled() -> EngineError {
-    EngineError::unsupported("graph indexing is disabled")
+    EngineError::unsupported(
+        "this workspace indexes without a code graph, so graph data cannot be stored; \
+         enable graph indexing and rebuild the index",
+    )
 }
 
 fn graph_error(error: graph::Error) -> EngineError {
