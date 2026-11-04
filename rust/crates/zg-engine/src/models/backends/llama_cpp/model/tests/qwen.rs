@@ -9,6 +9,31 @@ async fn cached_qwen3_cpu_batches_preserve_vectors_and_kv_isolation() {
     qwen_batches_preserve_vectors_and_kv_isolation(Device::Cpu).await;
 }
 
+#[tokio::test]
+#[ignore = "requires cached Qwen3 embedding; compares thread-budget reuse with fresh CPU contexts"]
+async fn cached_qwen3_cpu_thread_changes_match_fresh_contexts() {
+    let loaded = load_qwen_fixture(Device::Cpu).await;
+    let mut input = qwen_batch_fixture(&loaded.model).remove(2);
+    input.index = 0;
+    for concurrency in [1, 2, 4, 8, 1] {
+        let actual = qwen_infer(&loaded, vec![input.clone()], concurrency);
+        let fresh = LlamaContextPool::new(Arc::clone(&loaded.model), false);
+        let expected = fresh
+            .run(
+                PreparedLlamaBatch {
+                    inputs: vec![input.clone()],
+                    truncated: Vec::new(),
+                },
+                QWEN_CONTEXT_SIZE,
+                concurrency,
+                None,
+            )
+            .expect("fresh CPU context");
+        eprintln!("CPU thread-budget fresh/reused comparison C={concurrency}");
+        assert_embedding_close(&actual[0], &expected.vectors[0]);
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[tokio::test]
 #[ignore = "requires cached Qwen3 embedding and Metal; no CPU fallback"]
@@ -98,6 +123,35 @@ fn qwen_infer(
     result.vectors
 }
 
+fn qwen_individual_reference(
+    loaded: &LoadedLlamaModel,
+    inputs: &[PreparedLlamaInput],
+    concurrency: usize,
+) -> Vec<Vec<f32>> {
+    let fresh = LlamaContextPool::new(Arc::clone(&loaded.model), loaded.gpu);
+    inputs
+        .iter()
+        .map(|input| {
+            fresh
+                .run(
+                    PreparedLlamaBatch {
+                        inputs: vec![PreparedLlamaInput {
+                            index: 0,
+                            tokens: input.tokens.clone(),
+                        }],
+                        truncated: Vec::new(),
+                    },
+                    QWEN_CONTEXT_SIZE,
+                    concurrency,
+                    None,
+                )
+                .expect("individual reference with matching CPU threads")
+                .vectors
+                .remove(0)
+        })
+        .collect()
+}
+
 async fn qwen_batches_preserve_vectors_and_kv_isolation(device: Device) {
     let loaded = load_qwen_fixture(device).await;
     assert_single_worker_ownership(&loaded);
@@ -119,6 +173,12 @@ async fn qwen_batches_preserve_vectors_and_kv_isolation(device: Device) {
     assert_embedding_close(&expected[0], &expected[5]);
 
     for concurrency in [1, 2, 4, 8] {
+        // Native CPU flash attention can partition a one-token tail differently
+        // across thread counts. Compare reuse against a fresh context with the
+        // same compute budget, retaining the strict vector error threshold.
+        let cpu_reference =
+            (!loaded.gpu).then(|| qwen_individual_reference(&loaded, &inputs, concurrency));
+        let expected = cpu_reference.as_ref().unwrap_or(&expected);
         // Submit out of index order so both batch planning and output reordering
         // must preserve each sequence's own pooled embedding.
         let reordered = [6, 2, 0, 7, 3, 5, 1, 4]
@@ -127,7 +187,7 @@ async fn qwen_batches_preserve_vectors_and_kv_isolation(device: Device) {
             .collect();
         let result = qwen_infer(&loaded, reordered, concurrency);
         assert_eq!(result.len(), expected.len());
-        for (actual, expected) in result.iter().zip(&expected) {
+        for (actual, expected) in result.iter().zip(expected) {
             assert_embedding_close(actual, expected);
         }
         assert_embedding_close(&result[0], &result[5]);
@@ -138,7 +198,7 @@ async fn qwen_batches_preserve_vectors_and_kv_isolation(device: Device) {
         assert_embedding_close(&query[0], &expected[0]);
         let repeated = qwen_infer(&loaded, inputs.clone(), concurrency);
         assert_eq!(repeated.len(), expected.len());
-        for (actual, expected) in repeated.iter().zip(&expected) {
+        for (actual, expected) in repeated.iter().zip(expected) {
             assert_embedding_close(actual, expected);
         }
         assert_single_worker_ownership(&loaded);
@@ -147,7 +207,12 @@ async fn qwen_batches_preserve_vectors_and_kv_isolation(device: Device) {
     if loaded.gpu {
         assert_qwen_sequence_isolation(&loaded, &inputs);
     }
-    assert_qwen_failure_recovery(&loaded, &inputs, &expected);
+    let recovery_reference = if loaded.gpu {
+        expected
+    } else {
+        qwen_individual_reference(&loaded, &inputs, 4)
+    };
+    assert_qwen_failure_recovery(&loaded, &inputs, &recovery_reference);
 }
 
 fn assert_qwen_sequence_isolation(loaded: &LoadedLlamaModel, inputs: &[PreparedLlamaInput]) {
