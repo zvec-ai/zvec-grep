@@ -1072,7 +1072,12 @@ mod tests {
             super::CURRENT_INDEX_VERSION,
         ))
         .expect("current index");
-        for version in [None, Some(0), Some(1), Some(3), Some(5), Some(u32::MAX)] {
+        for version in [None, Some(0), Some(1), Some(2), Some(5), Some(u32::MAX)] {
+            assert_ne!(
+                version,
+                Some(super::CURRENT_INDEX_VERSION),
+                "samples must stay incompatible with the current version"
+            );
             let error = crate::workspace::manifest::require_current_index_version(version)
                 .expect_err("incompatible index format");
             assert_eq!(error.code(), crate::EngineError::INDEX_INCOMPATIBLE);

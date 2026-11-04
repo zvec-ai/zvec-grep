@@ -11,7 +11,7 @@ pub(crate) mod manifest;
 
 // Compatibility version of the workspace index contents; the workspace owns the
 // check, so an index written by another version is rebuilt instead of opened.
-pub(crate) const CURRENT_INDEX_VERSION: u32 = 2;
+pub(crate) const CURRENT_INDEX_VERSION: u32 = 3;
 
 /// Finds the nearest workspace at or above the given directory.
 pub(crate) fn find_nearest_workspace(
