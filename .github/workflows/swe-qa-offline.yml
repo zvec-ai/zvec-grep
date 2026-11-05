@@ -66,6 +66,15 @@ jobs:
         run: >-
           uv run --project benchmarks/swe-qa-bench python -m unittest discover
           -s benchmarks/swe-qa-bench/tests -v
+      - name: Verify OpenCode request contract without model calls
+        run: |
+          opencode_version="$(uv run --project benchmarks/swe-qa-bench python -c 'from zg_bench.settings import OPENCODE_VERSION; print(OPENCODE_VERSION)')"
+          npm install --prefix "$RUNNER_TEMP/opencode-contract" --no-audit --no-fund "opencode-ai@$opencode_version"
+          export OPENCODE_BENCHMARK_TEST_BINARY="$RUNNER_TEMP/opencode-contract/node_modules/.bin/opencode"
+          test -x "$OPENCODE_BENCHMARK_TEST_BINARY"
+          # The installed client talks only to the test's localhost fake provider.
+          uv run --project benchmarks/swe-qa-bench python -m unittest discover \
+            -s benchmarks/swe-qa-bench/tests -p test_opencode.py -v
       - name: Verify Harbor container shutdown without model calls
         env:
           ZG_BENCH_RUN_DOCKER_TESTS: "1"

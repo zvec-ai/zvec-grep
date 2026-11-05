@@ -237,12 +237,27 @@ for GLM-5.2 without `thinking_budget`, it limits thinking and the answer togethe
 The benchmark retains the same requested fields across these models, but their
 effective sampling settings and token budgets are not identical.
 
-Qwen3.8 Max enables `preserve_thinking` by default. Its OpenCode model config
-sets `interleaved: {"field": "reasoning_content"}` so historical reasoning is
-returned in the separate `reasoning_content` field, rather than concatenated
-into answer content. See the [thinking guide](https://help.aliyun.com/zh/model-studio/deep-thinking)
-and [Qwen3.8 Max model information](https://help.aliyun.com/zh/model-studio/qwen3-8-max).
+Qwen3.8 Max (custom-openai) and GLM-5.2 (custom-openai / DashScope) both
+explicitly set `interleaved: {"field": "reasoning_content"}` to return historical
+reasoning in a separate field without appending it to answer `content`. This
+is an OpenCode message-mapping setting, not the switch that enables thinking.
+Bailian defaults to Qwen `preserve_thinking=true` and GLM `clear_thinking=false`;
+both use the reasoning history supplied by the client. Qwen requires complete
+reasoning replay; omitting it is not a valid token-saving optimization. See the
+[Bailian Chat reference](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)
+and [GLM documentation](https://help.aliyun.com/zh/model-studio/glm).
 The older, separate Qwen3.7 configuration still keeps thinking disabled.
+
+**Interpreting historical configurations:** an absent `interleaved` field in
+older GLM configurations does not mean reasoning history was omitted. With the
+verified OpenCode `1.18.4`, `ai 6.0.168`, and `@ai-sdk/openai-compatible 2.0.41`,
+both the default SDK path and the explicit mapping serialize nonempty reasoning
+as `reasoning_content`. Empty reasoning may differ only by an omitted field
+versus an empty string. The shared explicit setting makes the contract clear;
+it does not justify rewriting historical reports or concluding that older GLM
+runs omitted reasoning. This verifies client behavior, not every historical
+HTTP request. Equivalent replay behavior does not imply equal reasoning volume,
+effective budgets, or cache costs across models.
 
 Both execution and judging omit `response_format`. The judge's prompt still
 requires JSON, with strict score parsing and retries on invalid responses.
@@ -266,11 +281,14 @@ search, file reads, and the zvec-grep MCP remain available. This is a web-tool
 restriction, not container network isolation; shell commands and setup/model
 connections still have network access.
 
-CI also checks the pinned OpenCode binary against a local fake provider to
-verify the sampling parameters, enabled Qwen3.8 Max / GLM thinking, the actual
-`reasoning_effort = "high"` request field, and web-tool restrictions in
-consecutive tool-calling requests, including Qwen's historical
-`reasoning_content` field, without using model credentials.
+CI checks the pinned OpenCode binary against a local fake provider, inspecting
+actual HTTP requests for sampling parameters, enabled Qwen3.8 Max / GLM thinking,
+`reasoning_effort = "high"`, and web-tool restrictions. Reasoning checks cover
+both models' tool and subagent continuations, multiple SSE reasoning chunks,
+empty reasoning, and the legacy path without an explicit mapping, verifying
+complete `reasoning_content` replay without mixing it into answer content.
+These tests need no model credentials and do not measure live Bailian quality
+or billing effects.
 
 Each task runs Baseline and zvec-grep on the same runner, judges the paired
 results, and uploads Harbor evidence and an independent task report as

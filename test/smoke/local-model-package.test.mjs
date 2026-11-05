@@ -9,6 +9,7 @@ import test from "node:test";
 const execFileAsync = promisify(execFile);
 const DEFAULT_MODEL = "local/potion-code-16m-v2";
 const TRANSFORMERS_SMOKE_MODEL = "local/all-minilm-l6-v2";
+const LLAMA_SMOKE_MODEL = "local/embeddinggemma-300m";
 
 function runNpm(args, options) {
   const npmExecPath = process.env.npm_execpath;
@@ -103,19 +104,29 @@ test("packed package runs a real local embedding model end to end", async (t) =>
   await writeFile(
     embeddingSmokeScript,
     [
+      "import { writeSync } from 'node:fs';",
       "import { createEmbeddingModel } from '@zvec/zvec-grep';",
       "const reference = process.env.ZVEC_GREP_SMOKE_MODEL;",
+      "const phase = (name) => writeSync(1, 'ZVEC_GREP_SMOKE_PHASE=' + JSON.stringify({ phase: name, round: process.env.ZVEC_GREP_SMOKE_ROUND }) + '\\n');",
+      "phase('start');",
       "const model = createEmbeddingModel(reference, { modelCacheDir: process.env.ZVEC_GREP_MODEL_CACHE, device: process.env.ZVEC_GREP_SMOKE_DEVICE });",
+      "let summary;",
       "try {",
+      "  phase('embed');",
       "  const result = await model.embed([{ kind: 'text', text: 'CrossPlatformPotionNeedle validates package-local embedding.' }], { purpose: 'query' });",
       "  const vector = result.vectors[0];",
       "  if (!vector || vector.length !== model.info.dimension || vector.some((value) => !Number.isFinite(value))) throw new Error('invalid embedding vector');",
       "  const norm = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0));",
       "  if (!(norm > 0 && Number.isFinite(norm))) throw new Error('invalid embedding norm');",
-      "  console.log('ZVEC_GREP_SMOKE_RESULT=' + JSON.stringify({ dimension: vector.length, norm }));",
+      "  summary = { dimension: vector.length, norm };",
+      "  phase('embedded');",
       "} finally {",
+      "  phase('dispose');",
       "  await model.dispose();",
+      "  phase('disposed');",
       "}",
+      "phase('complete');",
+      "writeSync(1, 'ZVEC_GREP_SMOKE_RESULT=' + JSON.stringify(summary) + '\\n');",
       "",
     ].join("\n"),
   );
@@ -131,7 +142,7 @@ test("packed package runs a real local embedding model end to end", async (t) =>
   }
 
   for (const device of devices) {
-    await t.test(`device: ${device}`, async () => {
+    await t.test(`device: ${device}`, async (deviceTest) => {
       const workspaceDirectory = join(consumerDirectory, `workspace-${device}`);
       await mkdir(workspaceDirectory, { recursive: true });
       const packageHome = join(temporaryDirectory, `home-${device}`);
@@ -151,26 +162,47 @@ test("packed package runs a real local embedding model end to end", async (t) =>
         runtimeEnvironment.ZVEC_GREP_DEVICE = device;
       }
 
-      const directEmbedding = await execFileAsync(
-        process.execPath,
-        [embeddingSmokeScript],
-        {
-          cwd: workspaceDirectory,
-          env: {
-            ...runtimeEnvironment,
-            ZVEC_GREP_SMOKE_MODEL: modelReference,
-            ZVEC_GREP_SMOKE_DEVICE: device,
+      // Repeat independent native lifecycles to expose intermittent disposal
+      // crashes. Every round must succeed; a failure is never retried.
+      const lifecycleRounds = modelReference === LLAMA_SMOKE_MODEL ? 3 : 1;
+      for (let round = 1; round <= lifecycleRounds; round++) {
+        deviceTest.diagnostic(
+          `direct embedding lifecycle round ${round}/${lifecycleRounds}`,
+        );
+        const directEmbedding = await execFileAsync(
+          process.execPath,
+          [embeddingSmokeScript],
+          {
+            cwd: workspaceDirectory,
+            env: {
+              ...runtimeEnvironment,
+              ZVEC_GREP_SMOKE_MODEL: modelReference,
+              ZVEC_GREP_SMOKE_DEVICE: device,
+              ZVEC_GREP_SMOKE_ROUND: String(round),
+            },
+            timeout: 600_000,
           },
-          timeout: 600_000,
-        },
-      );
-      const resultLine = directEmbedding.stdout
-        .split(/\r?\n/)
-        .find((line) => line.startsWith("ZVEC_GREP_SMOKE_RESULT="));
-      assert.ok(resultLine, "direct embedding did not report a result");
-      const embeddingResult = JSON.parse(resultLine.split("=", 2)[1]);
-      assert.ok(embeddingResult.dimension > 0);
-      assert.ok(embeddingResult.norm > 0);
+        );
+        const lines = directEmbedding.stdout.split(/\r?\n/);
+        const phases = lines
+          .filter((line) => line.startsWith("ZVEC_GREP_SMOKE_PHASE="))
+          .map((line) => JSON.parse(line.split("=", 2)[1]).phase);
+        assert.deepEqual(phases, [
+          "start",
+          "embed",
+          "embedded",
+          "dispose",
+          "disposed",
+          "complete",
+        ]);
+        const resultLine = lines.find((line) =>
+          line.startsWith("ZVEC_GREP_SMOKE_RESULT="),
+        );
+        assert.ok(resultLine, "direct embedding did not complete disposal");
+        const embeddingResult = JSON.parse(resultLine.split("=", 2)[1]);
+        assert.ok(embeddingResult.dimension > 0);
+        assert.ok(embeddingResult.norm > 0);
+      }
 
       await writeFile(
         join(workspaceDirectory, "fixture.ts"),
