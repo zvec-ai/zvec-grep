@@ -7,53 +7,32 @@ fn minilm() -> TransformersConfig {
 }
 
 #[test]
-fn concurrency_is_a_bounded_compute_budget() {
-    assert_eq!(cpu_threads(1), 1);
-    assert!((1..=crate::models::runtime::LOCAL_CONCURRENCY_CAP).contains(&cpu_threads(usize::MAX)));
+fn execution_budget_uses_hardware_for_cpu_and_two_lanes_for_cuda() {
+    assert_eq!(cpu_threads(0), 1);
+    assert_eq!(cpu_threads(usize::MAX), hardware_threads());
     let entry = minilm();
-    assert_eq!(
-        execution_limit(entry, TransformersExecutionProvider::Cuda, 1),
-        1
-    );
-    assert_eq!(
-        execution_limit(entry, TransformersExecutionProvider::Cuda, usize::MAX),
-        4
-    );
-    assert_eq!(
-        execution_limit(entry, TransformersExecutionProvider::DirectMl, 4),
-        1
-    );
+    for requested in [0, 1, 2, 4, usize::MAX] {
+        assert_eq!(
+            execution_limit(entry, TransformersExecutionProvider::Cuda, requested),
+            requested.clamp(1, 2)
+        );
+    }
     let mut other = entry;
-    other.reference = "local/unmeasured-model";
+    other.reference = "local/other-model";
     assert_eq!(
         execution_limit(other, TransformersExecutionProvider::Cuda, 4),
-        1
+        2
     );
 }
 
 #[test]
-fn padded_shape_and_recent_queries_bound_merged_work() {
+fn batch_limits_are_static_and_independent_of_execution_lanes() {
     let entry = minilm();
-    let policy = BatchPolicy::default();
-    assert!(policy.fits(entry, 16, 64, false));
-    assert!(!policy.fits(entry, 32, 32, false));
-    assert!(policy.fits(entry, 8, 160, false));
-    assert!(!policy.fits(entry, 16, 160, false));
-    assert!(!policy.fits(entry, 8, 256, false));
-    assert!(!policy.fits(entry, 8, 160, true));
-    assert_eq!(BatchPolicy::request_limit(entry, 4, true), 2);
-    assert!(!policy.fits(entry, usize::MAX, usize::MAX, false));
-}
-
-#[test]
-fn slow_batches_reduce_the_budget_after_warmup() {
-    let entry = minilm();
-    let mut policy = BatchPolicy::default();
-    for _ in 0..3 {
-        policy.observe(16, 64, Duration::from_millis(40), 4);
-    }
-    assert!(policy.fits(entry, 16, 64, false));
-    policy.observe(16, 64, Duration::from_millis(40), 4);
-    assert!(!policy.fits(entry, 16, 64, false));
-    assert!(policy.fits(entry, 8, 64, false));
+    assert!(BatchPolicy::fits(entry, 16, 256));
+    assert!(!BatchPolicy::fits(entry, 17, 64));
+    assert!(!BatchPolicy::fits(entry, 16, 257));
+    assert!(!BatchPolicy::fits(entry, usize::MAX, usize::MAX));
+    assert_eq!(BatchPolicy::length_bucket(65), 128);
+    assert_eq!(BatchPolicy::length_bucket(128), 128);
+    assert_eq!(BatchPolicy::length_bucket(129), 256);
 }

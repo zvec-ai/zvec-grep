@@ -30,8 +30,8 @@ use crate::models::{
     catalog::TransformersConfig,
     runtime::ModelComputeRuntime,
     spi::{
-        EmbeddingModel, EmbeddingOptions, EmbeddingPrepareOptions, ModelError, input_text,
-        validate_inputs, validate_result,
+        EmbeddingConcurrencyDefaults, EmbeddingModel, EmbeddingOptions, EmbeddingPrepareOptions,
+        ModelError, ModelExecutionStats, input_text, validate_inputs, validate_result,
     },
 };
 
@@ -246,6 +246,34 @@ impl EmbeddingModel for TransformersEmbeddingModel {
         &self.info
     }
 
+    fn concurrency_defaults(&self) -> EmbeddingConcurrencyDefaults {
+        match resolve_execution_provider(self.device) {
+            TransformersExecutionProvider::Cpu => EmbeddingConcurrencyDefaults {
+                initial: policy::hardware_threads().div_ceil(2),
+                maximum: policy::hardware_threads(),
+            },
+            TransformersExecutionProvider::Cuda => EmbeddingConcurrencyDefaults {
+                initial: 1,
+                maximum: policy::CUDA_LANES,
+            },
+            _ => EmbeddingConcurrencyDefaults::default(),
+        }
+    }
+
+    fn admission_concurrency(&self, _execution: usize) -> usize {
+        if resolve_execution_provider(self.device) == TransformersExecutionProvider::Cuda {
+            8
+        } else {
+            3
+        }
+    }
+
+    fn execution_stats(&self) -> Option<ModelExecutionStats> {
+        lock_std_mutex(&self.state)
+            .as_ref()
+            .map(|loaded| loaded.sessions.stats())
+    }
+
     fn execution_concurrency(&self, requested: usize) -> usize {
         policy::execution_limit(
             self.entry,
@@ -286,7 +314,7 @@ impl EmbeddingModel for TransformersEmbeddingModel {
         let initial_budget = if options.purpose == EmbeddingPurpose::Document {
             options.execution_concurrency
         } else {
-            1
+            self.concurrency_defaults().initial
         };
         let loaded = self
             .ensure_loaded(
@@ -598,12 +626,17 @@ fn append_padded_row(
     );
 }
 
+#[derive(Debug)]
+struct NativeOutput {
+    shape: Vec<i64>,
+    data: Vec<f32>,
+}
+
 fn run_session(
     session: &mut Session,
     prepared: &PreparedBatch,
-    entry: TransformersConfig,
     signal: Option<&CancellationToken>,
-) -> Result<EmbeddingResult, ModelError> {
+) -> Result<NativeOutput, ModelError> {
     check_cancelled(signal)?;
     let mut inputs = HashMap::<String, DynTensor>::new();
     for input in session.inputs() {
@@ -652,9 +685,17 @@ fn run_session(
     let data = data.to_vec();
     drop(outputs);
     check_cancelled(signal)?;
+    Ok(NativeOutput { shape, data })
+}
+
+fn finish_output(
+    output: &NativeOutput,
+    prepared: &PreparedBatch,
+    entry: TransformersConfig,
+) -> Result<EmbeddingResult, ModelError> {
     let vectors = pool_output(
-        &shape,
-        &data,
+        &output.shape,
+        &output.data,
         &prepared.attention_mask,
         prepared.batch_size,
         prepared.sequence_length,

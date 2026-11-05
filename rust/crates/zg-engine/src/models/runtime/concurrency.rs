@@ -43,7 +43,7 @@ fn resolve_override(
     mut environment: impl FnMut(&str) -> Option<String>,
     mut warn: impl FnMut(String),
 ) -> Result<Option<usize>, ModelError> {
-    if requested == Some(0) {
+    if requested == Some(0) && !is_transformers(reference) {
         return Err(ModelError::invalid_argument(
             "Embedding concurrency must be greater than zero",
         ));
@@ -63,7 +63,7 @@ fn resolve_override(
     }
     if value.bytes().all(|byte| byte.is_ascii_digit())
         && let Ok(parsed) = value.parse::<usize>()
-        && parsed > 0
+        && (parsed > 0 || is_transformers(reference))
     {
         return Ok(Some(parsed));
     }
@@ -73,9 +73,12 @@ fn resolve_override(
     Ok(None)
 }
 
-/// Local native resources must not be shared across different fixed budgets.
+/// Budget normalization before backend-specific limits are known. Transformers
+/// resolve their default and hardware limit on the model, including its provider.
 pub(crate) fn local_runtime_limit(reference: &str, requested: Option<usize>) -> Option<usize> {
-    if is_transformers(reference) || is_llama(reference) {
+    if is_transformers(reference) {
+        requested.map(|value| value.max(1))
+    } else if is_llama(reference) {
         Some(requested.unwrap_or(1).clamp(1, LOCAL_CONCURRENCY_CAP))
     } else {
         None
@@ -88,7 +91,7 @@ pub(crate) fn batch_concurrency(reference: &str, requested: Option<usize>) -> Op
     if is_llama(reference) {
         Some(1)
     } else if is_transformers(reference) {
-        Some(requested.unwrap_or(1).clamp(1, LOCAL_CONCURRENCY_CAP))
+        requested.map(|value| value.max(1))
     } else {
         requested
     }

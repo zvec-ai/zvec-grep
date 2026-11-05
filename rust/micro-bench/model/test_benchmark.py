@@ -11,9 +11,21 @@ from unittest.mock import patch
 import report
 import suite
 from evidence import publish_round, save
+from execution import COUNTERS
 from measurement import case_identity, case_path, checked_accounting, fingerprint, resource_summary, validate_accounting
 from run import clock
 from verify import check_table, verify
+
+
+def execution_fixture(provider="cpu"):
+    before = dict.fromkeys(COUNTERS, 10)
+    before.update(actual_provider=provider,session_count=1,cpu_threads=2,
+                  max_native_batch_rows=4,max_padded_tokens=128,native_inflight_peak=1)
+    measured = dict(before, **{name:20 for name in COUNTERS})
+    measured.update(native_runs=5,native_rows=20)
+    after = dict(before, **{name:before[name]+measured[name] for name in COUNTERS})
+    return dict(before=before,after=after,measured=measured,
+                counter_scope="measured_embedding_phase",peak_scope="runtime_including_warmup")
 
 
 class SamplingTests(unittest.TestCase):
@@ -98,8 +110,60 @@ class AccountingTests(unittest.TestCase):
         self.rows["embedding"][0].pop("finished_ns")
         self.assertIn("malformed benchmark evidence",checked_accounting(self.result,self.rows,32,4)[0])
 
+    def test_execution_deltas_and_actual_admission_are_verified(self):
+        self.result.update(effective_execution_concurrency=1,admission_concurrency=2,index_inflight_batches=2)
+        self.result["embedding"]["execution"] = execution_fixture()
+        self.assertEqual(self.validate(),[])
+        # A lazily initialized second CUDA worker is a gauge change, not a
+        # counter reset or an invalid measurement.
+        for snapshot in ("after","measured"):
+            self.result["embedding"]["execution"][snapshot]["session_count"] = 2
+        self.assertEqual(self.validate(),[])
+        self.result["embedding"]["execution"]["measured"]["native_rows"] += 1
+        self.assertIn("execution: incorrect measured delta for native_rows",self.validate())
+        self.result["index_inflight_batches"] = 8
+        self.assertIn("execution: benchmark workers differ from runtime admission",self.validate())
+
+    def test_fixed_batch_profile_rejects_hidden_coalescing(self):
+        self.result.update(fixed_batch=True,effective_execution_concurrency=1,
+                           admission_concurrency=2,index_inflight_batches=2)
+        execution = execution_fixture("cuda")
+        self.result["embedding"]["execution"] = execution
+        self.assertEqual(self.validate(),[])
+        for snapshot in ("before","after","measured"):
+            execution[snapshot]["max_native_batch_rows"] = 8
+        self.assertIn("execution: fixed-batch profile merged request batches",self.validate())
+
 
 class WorkflowTests(unittest.TestCase):
+    def test_report_preserves_gpu_memory_and_displays_actual_cpu_fallback(self):
+        for device,provider,memory in (("metal","cpu",None),("cuda","cuda",512*1024**2),("cpu","cpu",None)):
+            with self.subTest(device=device),tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                case = dict(model="local/test",device=device,budget="1",input_tokens=32,batch_size=4)
+                folder = case_path(root,case,1)
+                folder.mkdir(parents=True)
+                record = dict(schema_version=5,experiment_fingerprint="experiment",
+                    case_fingerprint=case_identity("experiment",case,1),protocol_pass=True,
+                    benchmark=dict(effective_execution_concurrency=1,admission_concurrency=2,index_inflight_batches=2,
+                        embedding=dict(issued=5,completed=5,errors=0,timeout=0,execution=execution_fixture(provider))),
+                    gpu=dict(process_memory_peak_bytes=memory,
+                             phases=dict(embedding=dict(mean_percent=20,peak_percent=30))))
+                save(folder/"result.json",record)
+                row,aggregate = report.summarize_case(root,case,1,"experiment")
+                self.assertEqual(row[4],"512.00" if memory else "N/A")
+                self.assertEqual(row[6],"20.00 / 30.00")
+                self.assertIn(f"actual={provider}",row[0])
+                self.assertIn("Ceff=1 · Q=2 · sessions=1 · threads=2 · native B=4",row[0])
+                self.assertEqual(aggregate["execution"][0]["inference_ns"],20)
+                table = [dict(zip(report.HEADERS,row))]
+                self.assertEqual(check_table([case],1,{fingerprint(case):[record]},set(),table,[aggregate]),[])
+                report.render_html(root,"# Test\n\nMachine",[row],[aggregate])
+                rendered = (root/"REPORT.html").read_text()
+                self.assertEqual("CPU fallback" in rendered,device == "metal")
+                aggregate["execution"][0]["session_count"] = 999
+                self.assertTrue(check_table([case],1,{fingerprint(case):[record]},set(),table,[aggregate]))
+
     def test_table_verification_checks_raw_rounds_and_failure_mask(self):
         case = dict(model="local/test",device="cpu",budget="1",input_tokens=32,batch_size=1)
         for passed in (True,False):
@@ -182,7 +246,7 @@ class WorkflowTests(unittest.TestCase):
 
                 changed_length = list(base)
                 changed_length[changed_length.index("--lengths")+1] = "16"
-                for command in (base,changed_length+["--smoke"]):
+                for command in (base,changed_length+["--smoke"],base+["--smoke","--fixed-batch"]):
                     with patch.object(sys,"argv",command),self.assertRaisesRegex(RuntimeError,"configuration changed"):
                         suite.main()
                 info["source_sha256"]["source"] = "changed"

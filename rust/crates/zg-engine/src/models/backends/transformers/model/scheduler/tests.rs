@@ -35,15 +35,19 @@ async fn request(
                 ..EmbeddingOptions::default()
             },
             reply,
+            enqueued: Instant::now(),
+            ready: Instant::now()
+                .checked_sub(policy::BATCH_WAIT)
+                .expect("recent instant"),
             _admission: admission,
         },
         receiver,
     )
 }
 
-fn infer_count(work: Option<Work>) -> usize {
+fn infer_count(work: Work) -> usize {
     match work {
-        Some(Work::Infer(requests)) => requests.len(),
+        Work::Infer(requests) => requests.len(),
         _ => panic!("expected ready inference"),
     }
 }
@@ -56,7 +60,8 @@ async fn queries_precede_documents_and_are_never_coalesced() {
     let (query, _query) = request(&queue, EmbeddingPurpose::Query, 64).await;
     state.push_back(document);
     state.push_back(query);
-    let Some(Work::Infer(mut selected)) = state.next(entry(), TransformersExecutionProvider::Cuda)
+    let Work::Infer(mut selected) =
+        state.next(entry(), TransformersExecutionProvider::Cuda, Instant::now())
     else {
         panic!("query ready")
     };
@@ -64,7 +69,7 @@ async fn queries_precede_documents_and_are_never_coalesced() {
     assert_eq!(selected.remove(0).options.purpose, EmbeddingPurpose::Query);
     assert_eq!(state.documents.len(), 1);
     assert_eq!(
-        infer_count(state.next(entry(), TransformersExecutionProvider::Cuda)),
+        infer_count(state.next(entry(), TransformersExecutionProvider::Cuda, Instant::now())),
         1
     );
 }
@@ -74,8 +79,8 @@ async fn cpu_serializes_batches_and_cuda_limits_padded_shape() {
     for (provider, width, expected) in [
         (TransformersExecutionProvider::Cpu, 64, 1),
         (TransformersExecutionProvider::Cuda, 64, 4),
-        (TransformersExecutionProvider::Cuda, 160, 2),
-        (TransformersExecutionProvider::Cuda, 256, 1),
+        (TransformersExecutionProvider::Cuda, 160, 4),
+        (TransformersExecutionProvider::Cuda, 256, 4),
     ] {
         let queue = InferenceQueue::default();
         let mut state = QueueState::default();
@@ -85,7 +90,10 @@ async fn cpu_serializes_batches_and_cuda_limits_padded_shape() {
             state.push_back(request);
             receivers.push(receiver);
         }
-        assert_eq!(infer_count(state.next(entry(), provider)), expected);
+        assert_eq!(
+            infer_count(state.next(entry(), provider, Instant::now())),
+            expected
+        );
         assert_eq!(state.documents.len(), 4 - expected);
     }
 }
@@ -197,11 +205,10 @@ async fn dropped_and_cancelled_requests_do_not_run_or_hold_permits() {
     signal.cancel();
     second.options.signal = Some(signal);
     state.push_back(second);
-    assert!(
-        state
-            .next(entry(), TransformersExecutionProvider::Cuda)
-            .is_none()
-    );
+    assert!(matches!(
+        state.next(entry(), TransformersExecutionProvider::Cuda, Instant::now()),
+        Work::Empty
+    ));
     assert_eq!(
         receiver
             .await
@@ -271,4 +278,175 @@ async fn dropping_a_worker_releases_pending_calls_without_stopping_a_new_generat
     });
     assert!(receiver.await.expect("new worker error").is_err());
     assert_eq!(queue.query_slots.available_permits(), 4);
+}
+
+#[tokio::test]
+async fn coalescing_is_independent_of_concurrency_and_fixed_batches_bypass_it() {
+    for budget in [1, 2] {
+        let queue = InferenceQueue::default();
+        let mut state = QueueState::default();
+        let mut receivers = Vec::new();
+        for width in [64, 128, 64, 64] {
+            let (mut request, receiver) = request(&queue, EmbeddingPurpose::Document, width).await;
+            request.options.execution_concurrency = budget;
+            state.push_back(request);
+            receivers.push(receiver);
+        }
+        assert_eq!(
+            infer_count(state.next(entry(), TransformersExecutionProvider::Cuda, Instant::now())),
+            3
+        );
+        assert_eq!(state.documents.len(), 1);
+    }
+    let queue = InferenceQueue::default();
+    let mut state = QueueState::default();
+    let mut receivers = Vec::new();
+    for _ in 0..3 {
+        let (mut request, receiver) = request(&queue, EmbeddingPurpose::Document, 64).await;
+        request.options.fixed_batch = true;
+        request.ready = Instant::now();
+        state.push_back(request);
+        receivers.push(receiver);
+    }
+    assert_eq!(
+        infer_count(state.next(entry(), TransformersExecutionProvider::Cuda, Instant::now())),
+        1
+    );
+}
+
+#[tokio::test]
+async fn coalescing_wait_is_bounded_and_queries_skip_it() {
+    let queue = InferenceQueue::default();
+    let mut state = QueueState::default();
+    let (mut document, _document) = request(&queue, EmbeddingPurpose::Document, 64).await;
+    let ready = Instant::now();
+    document.ready = ready;
+    state.push_back(document);
+    assert!(
+        matches!(state.next(entry(), TransformersExecutionProvider::Cuda, ready), Work::Wait(until) if until == ready + policy::BATCH_WAIT)
+    );
+    let (query, _query) = request(&queue, EmbeddingPurpose::Query, 64).await;
+    state.push_back(query);
+    assert_eq!(
+        infer_count(state.next(entry(), TransformersExecutionProvider::Cuda, ready)),
+        1
+    );
+    assert_eq!(
+        infer_count(state.next(
+            entry(),
+            TransformersExecutionProvider::Cuda,
+            ready + policy::BATCH_WAIT
+        )),
+        1
+    );
+}
+
+#[tokio::test]
+async fn merged_resources_retain_every_admission_and_lease_until_native_completion() {
+    let queue = InferenceQueue::default();
+    let first_lease = Arc::new(());
+    let second_lease = Arc::new(());
+    let (mut first, _first_reply) = request(&queue, EmbeddingPurpose::Document, 64).await;
+    let (mut second, _second_reply) = request(&queue, EmbeddingPurpose::Document, 64).await;
+    first.options.execution_lease = Some(first_lease.clone());
+    second.options.execution_lease = Some(second_lease.clone());
+    let resources = Arc::new(BatchResources {
+        requests: StdMutex::new(vec![first, second]),
+    });
+    let native_owned = Arc::clone(&resources);
+    drop(resources);
+    assert_eq!(queue.document_slots.available_permits(), 14);
+    assert_eq!(Arc::strong_count(&first_lease), 2);
+    assert_eq!(Arc::strong_count(&second_lease), 2);
+    drop(native_owned);
+    assert_eq!(queue.document_slots.available_permits(), 16);
+    assert_eq!(Arc::strong_count(&first_lease), 1);
+    assert_eq!(Arc::strong_count(&second_lease), 1);
+}
+
+#[tokio::test]
+async fn single_lane_waiter_does_not_block_a_two_lane_request_or_an_eligible_query() {
+    let queue = InferenceQueue::default();
+    let mut state = QueueState::default();
+    let mut receivers = Vec::new();
+    for (purpose, budget) in [
+        (EmbeddingPurpose::Document, 1),
+        (EmbeddingPurpose::Document, 2),
+        (EmbeddingPurpose::Query, 1),
+    ] {
+        let (mut request, receiver) = request(&queue, purpose, 64).await;
+        request.options.execution_concurrency = budget;
+        request.options.fixed_batch = true;
+        state.push_back(request);
+        receivers.push(receiver);
+    }
+    // Lane 0 is occupied. Lane 1 remains usable by the C2 document, while
+    // the C1 document/query remain in their queues instead of pre-dispatching.
+    let Work::Infer(selected) = state.next_eligible(
+        entry(),
+        TransformersExecutionProvider::Cuda,
+        Instant::now(),
+        |options| options.execution_concurrency == 2,
+    ) else {
+        panic!("eligible C2 request");
+    };
+    assert_eq!(selected[0].options.execution_concurrency, 2);
+    assert_eq!(state.documents.len(), 1);
+    assert_eq!(state.queries.len(), 1);
+    // Once lane 0 becomes available, the query wins over the waiting document.
+    let Work::Infer(selected) = state.next_eligible(
+        entry(),
+        TransformersExecutionProvider::Cuda,
+        Instant::now(),
+        |_| true,
+    ) else {
+        panic!("eligible query");
+    };
+    assert_eq!(selected[0].options.purpose, EmbeddingPurpose::Query);
+    assert_eq!(state.documents.len(), 1);
+    assert!(matches!(
+        state.next_eligible(
+            entry(),
+            TransformersExecutionProvider::Cuda,
+            Instant::now(),
+            |_| false
+        ),
+        Work::Blocked
+    ));
+}
+
+#[tokio::test]
+async fn eight_admitted_minilm_requests_form_two_batches_at_both_execution_budgets() {
+    for budget in [1, 2] {
+        for rows in [1, 4] {
+            let queue = InferenceQueue::default();
+            let mut state = QueueState::default();
+            let mut receivers = Vec::new();
+            let now = Instant::now();
+            for _ in 0..8 {
+                let (mut request, receiver) = request(&queue, EmbeddingPurpose::Document, 64).await;
+                request.options.execution_concurrency = budget;
+                request.ready = now;
+                request.prepared.as_mut().expect("prepared").batch_size = rows;
+                state.push_back(request);
+                receivers.push(receiver);
+            }
+            for _ in 0..2 {
+                let Work::Infer(requests) =
+                    state.next(entry(), TransformersExecutionProvider::Cuda, now)
+                else {
+                    panic!("ready native batch");
+                };
+                assert_eq!(requests.len(), 4);
+                assert_eq!(
+                    requests
+                        .iter()
+                        .map(|request| request.prepared.as_ref().expect("prepared").batch_size)
+                        .sum::<usize>(),
+                    4 * rows
+                );
+            }
+            assert!(state.documents.is_empty());
+        }
+    }
 }

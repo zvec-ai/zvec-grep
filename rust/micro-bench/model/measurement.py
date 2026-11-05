@@ -4,6 +4,8 @@ import json
 import math
 import os
 
+from execution import validate_execution
+
 PHASES = ("embedding",)
 POLICY = dict(schema_version=5, cpu_window_seconds=1.0, maximum_sample_gap_seconds=0.25,
               background_threshold_cores=1.0, background_warning_fraction=0.1,
@@ -12,11 +14,14 @@ POLICY = dict(schema_version=5, cpu_window_seconds=1.0, maximum_sample_gap_secon
               isolation="fresh process and runtime manager per round",
               input_format="fixed Document template; nominal input size, no tokenizer or output correctness checks",
               input_length_semantics="nominal",
+              concurrency="production runtime execution budget and admission workers; batch size independent",
+              execution_diagnostics="optional backend-neutral snapshots; measured counter deltas; runtime peaks include warmup",
               corpus_schedule="deterministic inputs with L whitespace-separated words; closed-loop shared work queue")
 
 
-def profile(smoke):
+def profile(smoke, fixed_batch=False):
     return dict(name="smoke" if smoke else "baseline", duration_seconds=1 if smoke else 15,
+                fixed_batch=fixed_batch,
                 maximum_duration_seconds=10 if smoke else 120,
                 minimum_batches=3 if smoke else POLICY["minimum_batches"])
 
@@ -53,7 +58,7 @@ def fingerprint(value):
 
 
 def experiment_config(args, info, models):
-    return dict(policy=POLICY, profile=profile(args.smoke), rounds=args.rounds, seed=args.seed,
+    return dict(policy=POLICY, profile=profile(args.smoke,args.fixed_batch), rounds=args.rounds, seed=args.seed,
                 cooldown_seconds=args.cooldown, timeout_seconds=args.timeout,
                 budgets=args.embedding_concurrency, devices=args.devices, models=models,
                 lengths=args.lengths, batch_sizes=args.batch_sizes,
@@ -144,6 +149,7 @@ def validate_accounting(result, requests, input_tokens, batch_size):
     summary = result.get("embedding", {})
     if not isinstance(summary,dict):
         return errors+["invalid embedding summary"]
+    errors.extend(validate_execution(result))
     rows = requests.get("embedding", [])
     if set(requests) != {"embedding"} or not rows:
         return errors+["missing embedding rows or unexpected phases"]

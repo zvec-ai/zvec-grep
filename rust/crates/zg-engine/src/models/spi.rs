@@ -56,6 +56,9 @@ pub struct EmbeddingOptions {
     /// per-request local inference resources without exposing another public
     /// tuning knob.
     pub(crate) execution_concurrency: usize,
+    /// Preserve this request's native batch shape for controlled comparisons.
+    /// Production requests retain bounded dynamic batching by default.
+    pub(crate) fixed_batch: bool,
     /// Keeps runtime admission and native resources alive until queued/native
     /// work has settled, even if the caller drops its future.
     pub(crate) execution_lease: Option<Arc<dyn Send + Sync>>,
@@ -87,6 +90,7 @@ impl fmt::Debug for EmbeddingOptions {
             .field("has_signal", &self.signal.is_some())
             .field("has_progress_callback", &self.on_progress.is_some())
             .field("execution_concurrency", &self.execution_concurrency)
+            .field("fixed_batch", &self.fixed_batch)
             .field("has_execution_lease", &self.execution_lease.is_some())
             .field("has_trace_headers", &self.trace_headers.is_some())
             .finish()
@@ -109,6 +113,29 @@ impl Default for EmbeddingConcurrencyDefaults {
     }
 }
 
+/// A cumulative, backend-neutral snapshot of one cached model runtime.
+///
+/// Durations are summed work time rather than elapsed wall time. Queue time is
+/// measured per request, from admission into the backend until native execution
+/// starts. Counters include warmup; benchmark consumers subtract snapshots.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct ModelExecutionStats {
+    pub(crate) actual_provider: &'static str,
+    pub(crate) session_count: usize,
+    pub(crate) cpu_threads: usize,
+    pub(crate) prepared_batches: u64,
+    pub(crate) native_runs: u64,
+    pub(crate) native_rows: u64,
+    pub(crate) padded_tokens: u64,
+    pub(crate) max_native_batch_rows: usize,
+    pub(crate) max_padded_tokens: usize,
+    pub(crate) preparation_ns: u64,
+    pub(crate) inference_ns: u64,
+    pub(crate) postprocessing_ns: u64,
+    pub(crate) queue_wait_ns: u64,
+    pub(crate) native_inflight_peak: usize,
+}
+
 #[async_trait]
 pub trait EmbeddingModel: Send + Sync {
     fn info(&self) -> &EmbeddingModelInfo;
@@ -119,6 +146,16 @@ pub trait EmbeddingModel: Send + Sync {
 
     fn execution_concurrency(&self, requested: usize) -> usize {
         requested.max(1)
+    }
+
+    /// Requests admitted for execution and bounded preparation/prefetch. This
+    /// need not equal the backend's native execution budget.
+    fn admission_concurrency(&self, execution: usize) -> usize {
+        execution.max(1)
+    }
+
+    fn execution_stats(&self) -> Option<ModelExecutionStats> {
+        None
     }
 
     /// Loads shared local resources before an operation dispatches embedding work.

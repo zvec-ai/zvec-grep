@@ -586,7 +586,7 @@ pub struct IndexArgs {
     pub api_key: Option<String>,
     #[arg(long)]
     pub endpoint: Option<String>,
-    #[arg(long = "embedding-concurrency", value_parser = parse_positive_usize)]
+    #[arg(long = "embedding-concurrency")]
     pub embedding_concurrency: Option<usize>,
     #[arg(long = "allow-remote")]
     pub allow_remote: bool,
@@ -2990,23 +2990,28 @@ mod tests {
     #[test]
     fn embedding_concurrency_is_forwarded_in_all_index_modes() {
         for mode in ["direct", "server", "auto"] {
-            for options in [
-                vec!["--index", "--embedding-concurrency", "4"],
-                vec!["--embedding-concurrency", "4", "--index"],
-                vec!["--index", "--embedding-concurrency=4"],
-                vec!["--embedding-concurrency=4", "--index"],
-            ] {
-                let cli = Cli::try_parse_from(["zg", "--mode", mode].into_iter().chain(options))
-                    .expect("index override");
-                let current_dir = std::env::current_dir().expect("working directory");
-                let CliPlan::Index {
-                    operation: IndexOperation::Build(request),
-                    ..
-                } = cli.into_plan(current_dir).expect("index plan")
-                else {
-                    panic!("index")
-                };
-                assert_eq!(request.embedding_concurrency, Some(4));
+            for value in [0, 4, usize::MAX] {
+                let number = value.to_string();
+                let inline = format!("--embedding-concurrency={value}");
+                for options in [
+                    vec!["--index", "--embedding-concurrency", &number],
+                    vec!["--embedding-concurrency", &number, "--index"],
+                    vec!["--index", &inline],
+                    vec![&inline, "--index"],
+                ] {
+                    let cli =
+                        Cli::try_parse_from(["zg", "--mode", mode].into_iter().chain(options))
+                            .expect("index override");
+                    let current_dir = std::env::current_dir().expect("working directory");
+                    let CliPlan::Index {
+                        operation: IndexOperation::Build(request),
+                        ..
+                    } = cli.into_plan(current_dir).expect("index plan")
+                    else {
+                        panic!("index")
+                    };
+                    assert_eq!(request.embedding_concurrency, Some(value));
+                }
             }
         }
     }
@@ -3052,7 +3057,7 @@ mod tests {
 
     #[test]
     fn embedding_concurrency_rejects_invalid_index_values() {
-        for value in ["0", "-1", "1.5", "invalid", "999999999999999999999999999"] {
+        for value in ["-1", "1.5", "invalid", "999999999999999999999999999"] {
             for option in [
                 vec!["--embedding-concurrency".to_owned(), value.to_owned()],
                 vec![format!("--embedding-concurrency={value}")],

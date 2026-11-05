@@ -537,14 +537,15 @@ async fn cached_minilm_uses_cuda() {
             model.embed(
                 &inputs,
                 EmbeddingOptions {
-                    execution_concurrency: 4,
+                    execution_concurrency: 2,
+                    fixed_batch: true,
                     ..EmbeddingOptions::default()
                 },
             )
         }))
         .await;
         for result in results {
-            let result = result.expect("merged CUDA batch");
+            let result = result.expect("independent CUDA batch");
             for (actual, expected) in result.vectors.iter().zip(&reference.vectors) {
                 assert!(
                     actual
@@ -560,8 +561,8 @@ async fn cached_minilm_uses_cuda() {
         TransformersExecutionProvider::Cuda
     );
     assert_eq!(loaded.sessions.configuration(), (1, 1));
-    assert!(loaded.sessions.largest_batch() > entry.max_batch_size);
-    assert!(loaded.sessions.largest_batch() <= 16);
+    assert!((1..=2).contains(&loaded.sessions.stats().session_count));
+    assert!(loaded.sessions.largest_batch() <= entry.max_batch_size);
 }
 
 #[cfg(target_os = "macos")]

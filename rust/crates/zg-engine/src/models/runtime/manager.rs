@@ -25,7 +25,7 @@ use crate::models::{
     backends::create_embedding_model,
     spi::{
         EmbeddingConcurrencyDefaults, EmbeddingModel, EmbeddingOptions, EmbeddingPrepareOptions,
-        ModelError, ModelProgressReporter,
+        ModelError, ModelExecutionStats, ModelProgressReporter,
     },
 };
 
@@ -82,7 +82,7 @@ struct ModelRuntimeEntry {
 struct ModelRuntime {
     model: Arc<dyn EmbeddingModel>,
     active_embeddings: AtomicUsize,
-    // Native callers with the same budget share admission across all leases.
+    // llama.cpp callers with the same budget share admission across all leases.
     batch_permits: Option<Arc<Semaphore>>,
 }
 
@@ -126,7 +126,10 @@ pub(crate) struct ModelRuntimeLease {
 }
 
 struct OperationConcurrency {
+    /// Native execution budget passed to the backend.
     limit: usize,
+    /// Active plus prepared/queued requests admitted by this operation.
+    admission: usize,
     permits: Arc<Semaphore>,
 }
 
@@ -180,7 +183,7 @@ impl ModelRuntimeManager {
             options,
             embedding_concurrency,
         } = request;
-        validate_embedding_concurrency(embedding_concurrency)?;
+        validate_embedding_concurrency(&reference, embedding_concurrency)?;
         let key = ModelRuntimeKey::for_request(&reference, &options, embedding_concurrency);
         // Declare retired handles before the guard so even an error releases the
         // manager lock before running native model destructors.
@@ -226,7 +229,13 @@ impl ModelRuntimeManager {
             local_runtime_limit(&reference, embedding_concurrency).or(embedding_concurrency),
             entry.runtime.model.concurrency_defaults(),
         );
-        let concurrency = entry.runtime.model.execution_concurrency(requested);
+        let concurrency = entry.runtime.model.execution_concurrency(requested).max(1);
+        let admission = if key.local_limit.is_some() {
+            batch_concurrency(&reference, key.local_limit).unwrap_or(concurrency)
+        } else {
+            entry.runtime.model.admission_concurrency(concurrency)
+        }
+        .clamp(1, Semaphore::MAX_PERMITS);
         if embedding_concurrency.is_some_and(|value| value != concurrency) {
             tracing::info!(
                 model = reference,
@@ -240,7 +249,7 @@ impl ModelRuntimeManager {
         state.wake_maintenance();
         let permits = entry.runtime.batch_permits.clone().unwrap_or_else(|| {
             // Preserve the requested budget without overflowing Tokio's permit counter.
-            Arc::new(Semaphore::new(concurrency.min(Semaphore::MAX_PERMITS)))
+            Arc::new(Semaphore::new(admission))
         });
         let lease = ModelRuntimeLease {
             key,
@@ -248,6 +257,7 @@ impl ModelRuntimeManager {
             manager: Arc::downgrade(&self.inner),
             operation: Arc::new(OperationConcurrency {
                 limit: concurrency,
+                admission,
                 permits,
             }),
         };
@@ -436,9 +446,21 @@ impl ModelRuntimeLease {
         self.entry.runtime.model.concurrency_defaults()
     }
 
+    pub(crate) fn execution_concurrency(&self) -> usize {
+        self.operation.limit
+    }
+
+    pub(crate) fn admission_concurrency(&self) -> usize {
+        self.operation.admission
+    }
+
+    pub(crate) fn execution_stats(&self) -> Option<ModelExecutionStats> {
+        self.entry.runtime.model.execution_stats()
+    }
+
     pub(crate) fn index_batch_concurrency(&self, requested: Option<usize>) -> Option<usize> {
         if is_transformers(&self.key.reference) {
-            Some(self.operation.limit)
+            Some(self.admission_concurrency())
         } else {
             batch_concurrency(&self.key.reference, requested)
         }
@@ -453,7 +475,7 @@ impl ModelRuntimeLease {
         mut options: EmbeddingPrepareOptions,
         progress: Option<ModelProgressReporter>,
     ) -> Result<(), ModelError> {
-        options.execution_concurrency = self.operation.limit;
+        options.execution_concurrency = self.execution_concurrency();
         options.execution_lease = Some(Arc::new(ActiveEmbeddingGuard::new(
             Arc::clone(&self.entry.runtime),
             self.manager.clone(),
@@ -469,7 +491,15 @@ impl ModelRuntimeLease {
                 reporter.report(progress, concurrency);
             }));
         }
-        self.entry.runtime.model.prepare(options).await
+        self.entry.runtime.model.prepare(options).await?;
+        tracing::debug!(
+            model = self.key.reference,
+            execution_concurrency = self.execution_concurrency(),
+            admission_concurrency = self.admission_concurrency(),
+            stats = ?self.execution_stats(),
+            "Prepared embedding runtime"
+        );
+        Ok(())
     }
 
     pub(crate) async fn embed(
@@ -486,7 +516,7 @@ impl ModelRuntimeLease {
             self.manager.clone(),
             Some(permit),
         )));
-        options.execution_concurrency = self.operation.limit;
+        options.execution_concurrency = self.execution_concurrency();
         if let Some(reporter) = progress {
             let model_progress = options.on_progress.take();
             let operation = Arc::clone(&self.operation);
@@ -506,6 +536,12 @@ impl ModelRuntimeLease {
     ) -> Result<OwnedSemaphorePermit, ModelError> {
         if let Some(signal) = signal {
             tokio::select! {
+                biased;
+                () = signal.cancelled() => {
+                    Err(ModelError::cancelled(
+                        "Embedding was cancelled while waiting for compute capacity",
+                    ))
+                }
                 permit = Arc::clone(&self.operation.permits).acquire_owned() => {
                     permit.map_err(|error| {
                         ModelError::internal(
@@ -513,11 +549,6 @@ impl ModelRuntimeLease {
                         )
                             .with_cause(error)
                     })
-                }
-                () = signal.cancelled() => {
-                    Err(ModelError::cancelled(
-                        "Embedding was cancelled while waiting for compute capacity",
-                    ))
                 }
             }
         } else {
@@ -627,8 +658,11 @@ fn secret_fingerprint(secret: &str) -> u64 {
     hasher.finish()
 }
 
-fn validate_embedding_concurrency(concurrency: Option<usize>) -> Result<(), ModelError> {
-    if concurrency == Some(0) {
+fn validate_embedding_concurrency(
+    reference: &str,
+    concurrency: Option<usize>,
+) -> Result<(), ModelError> {
+    if concurrency == Some(0) && !is_transformers(reference) {
         return Err(ModelError::new(
             crate::EngineError::INVALID_ARGUMENT,
             "Embedding concurrency must be greater than zero",

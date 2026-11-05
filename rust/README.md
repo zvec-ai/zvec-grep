@@ -77,8 +77,9 @@ remains line-oriented.
 Index embedding concurrency is configured with
 `zg --index --embedding-concurrency <n>`.
 The option is rejected outside `--index`. For automatic indexing and
-refreshes as well, set `ZVEC_GREP_EMBEDDING_CONCURRENCY=<n>`. Values must be
-positive integers. Explicit CLI/API index settings take precedence over this
+refreshes as well, set `ZVEC_GREP_EMBEDDING_CONCURRENCY=<n>`. Transformers/ORT clamps
+unsigned integers to its supported range, including zero to one; other backends
+require positive integers. Explicit CLI/API index settings take precedence over this
 environment variable, followed by the legacy
 `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` for llama.cpp indexing, then backend defaults.
 Invalid environment values warn and select the automatic default. These overrides
@@ -87,30 +88,34 @@ Direct and Server indexing use the same engine boundary; restart the Server afte
 changing its inherited environment, while explicit CLI overrides need no restart.
 
 For llama.cpp, the limit controls contexts within a serialized batch and is capped
-at eight, defaulting to one. Transformers/ORT shares one native session between
-indexing and queries for the same model, cache and device, regardless of concurrency:
+at eight, defaulting to one. Transformers/ORT shares a bounded runtime between
+indexing and queries for the same model, cache and device:
 
-- CPU uses the budget for intra-op threads, capped by available parallelism,
-  physical cores and eight. One batch runs at a time; tokenization is sequential.
+- CPU uses the budget for intra-op threads, capped by available hardware threads.
+  The default is half the available threads, rounded up. One native Session runs
+  one batch at a time; tokenization and pooling can overlap native inference.
   A later index operation with a different budget replaces the session between
   batches, destroying the previous session before loading its replacement.
   Queries reuse the currently configured threads and do not trigger replacement.
-- CUDA keeps one batch in flight and uses the budget to combine ready document
-  batches. MiniLM can combine up to four base batches (16 inputs), bounded by
-  1,536 padded tokens. Other ONNX models retain their catalog batch ceiling.
-  Queries run first without waiting to fill a batch. Recent queries reduce the
-  aggregation limits; batches exceeding the internal 20 ms target reduce the
-  token budget after warm-up. These are scheduling heuristics, not latency or
-  total-VRAM guarantees. Already-running inference is not preempted.
+- CUDA uses one execution lane by default, with at most two. Each lane exclusively
+  owns its Session on a fixed worker thread; no Session receives concurrent Run
+  calls. The second Session loads lazily when overlapping work needs it.
+  Document batching is independent of this budget: MiniLM combines up to four
+  similar-length requests, 16 inputs and 4,096 padded tokens, waiting at most 1 ms
+  for aggregation. Other ONNX models retain their catalog batch and token ceilings.
+  Queries run first without waiting to fill a batch; running inference is not
+  preempted. CPU preparation and pooling overlap native execution.
 - Pending inputs have separate document/query limits: 16/4 requests and
   32/8 MiB of copied text, with at most 8 MiB per request. Full queues apply
   cancellable backpressure. A cancelled member of a merged batch does not cancel
   other members. Native work retains runtime ownership until it settles.
 
-The effective backend budget is reported when it is lower than requested. The
-default remains one. Weight storage is not multiplied by concurrency, although
-activation buffers and allocator caches can increase memory use. The CLI option
-does not expose thread, session or batch-size settings.
+The effective backend budget is reported when it differs from the request.
+Admission includes bounded prefetch capacity and is separate from native execution
+concurrency: CUDA admits eight requests per operation for either one or two lanes,
+so one lane can prepare its next batch in advance. A second CUDA
+Session duplicates native weights and workspaces; input and activation buffers
+also contribute to memory use. The CLI option does not change the batch limits.
 
 Potion/model2vec defaults to two batch tasks and retains an independent CPU worker
 capacity; remote models retain adaptive request scheduling. Their overrides are

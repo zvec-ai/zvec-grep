@@ -10,7 +10,8 @@ engine's normal postprocessing. Scanning, chunking, storage and retrieval are
 outside this boundary. Model correctness is covered by the model tests, not this
 micro-benchmark: there are no token-length, vector-value, normalization,
 repeatability or truncation checks, and no boundary-audit prerequisite. The
-benchmark adds no backend/runtime statistics probes.
+benchmark also snapshots optional backend-neutral execution diagnostics exposed
+by the runtime; it does not call backend-specific measurement APIs.
 
 ## Matrix and input generation
 
@@ -35,7 +36,8 @@ MODEL/DEVICE/lL/bBATCH/cCONCURRENCY/r01/result.json
 Generate a deterministic pool of eight input variants, each containing L
 whitespace-separated words. Use the same `EmbeddingPurpose::Document` format for
 every call. Record generator identity, input hashes and byte counts. Do not run a
-tokenizer probe or inspect how the backend transforms the inputs. Prefixes,
+separate tokenizer probe. Native row/token counters describe actual execution;
+they do not validate model outputs. Prefixes,
 special tokens, token filtering and truncation remain ordinary engine behavior.
 
 **L is the number of whitespace-separated words per generated input, not the
@@ -51,22 +53,39 @@ record the number of returned vectors without asserting its size or contents.
 
 ## Concurrency and device configuration
 
-Use production `resolve_index_concurrency` and `batch_concurrency`. Clear inherited
+Use production `resolve_index_concurrency` and
+`model.index_batch_concurrency(index_limit)`, falling back to the model's initial
+concurrency only when no explicit admission policy is provided. Clear inherited
 indexing concurrency overrides so `default` uses the backend default:
 
 - llama.cpp has one in-flight batch; C controls native context parallelism within it.
-- Transformers/ONNX uses the production in-flight batch limit, capped at eight;
-  its current default is one.
+- Transformers/ONNX separates execution C from admission/prefetch Q. CPU C
+  controls native threads, clamped to the available logical hardware threads;
+  CUDA C controls the bounded native execution lanes. The runtime selects Q.
 - model2vec uses its production default (currently two) or the explicit budget.
 
-Record requested C, resolved runtime budget and configured in-flight batch count.
+Record requested C, resolved index budget, effective execution budget and actual
+admission worker count. The benchmark starts exactly the production admission Q.
 `default` remains a distinct case from an explicit value even if they resolve to
 the same budget. Do not add extra batch workers on top of a native context budget.
 
-The fixed first column records the **requested device only**. Actual execution device
-and fallback are not verified. External GPU utilization is a resource observation,
-not evidence that this case executed on that GPU. Do not infer a provider from
-CPU/GPU activity.
+The first column records requested device and, when runtime diagnostics are
+available, actual provider, effective C, Q, native session count, CPU threads and
+mean native batch rows. An observed `METAL → cpu` is explicitly labeled CPU
+fallback. The provider is the backend's observation, not inferred from CPU/GPU
+activity; it does not assert that every graph node ran on an accelerator. Older
+records without diagnostics retain their requested-device label without inventing
+an actual provider. External GPU utilization is device-wide, including activity
+from other applications even for a CPU-fallback case.
+
+The default matrix retains production dynamic batching. Batch rows, padded-token
+budget, length bucketing and the coalescing window are independent of execution C.
+Run a **separate** output directory with `--fixed-batch` to disable cross-request
+coalescing and compare CUDA C=1 versus C=2 at the same actual native batch shape.
+This flag applies to warmup and measured calls, is fingerprinted in the profile,
+and is labeled in the report title. Verify observed native batch rows before
+attributing throughput differences to execution parallelism. Production and
+fixed-batch profiles measure different workloads and must not be merged.
 
 The known CPU-only model2vec capability can skip non-CPU cases. Save a bound
 `case-status.json` with the reason, keep its table row, and omit its measurement
@@ -111,6 +130,17 @@ storage-cold timing.
   are separate from known batch timeout counts. Missing batch evidence is N/A or
   explicitly partial, never an invented zero or one. Keep counts and failure
   information in JSON rather than a table column.
+- **Execution diagnostics:** retain snapshots immediately before and after the
+  measured phase. Subtract cumulative prepared-batch, native-run, native-row,
+  padded-token and preparation/inference/postprocessing/queue-wait nanosecond
+  counters to exclude warmup. Native shape and in-flight peaks are explicitly
+  scoped to the entire runtime, including warmup. Phase timers are summed work,
+  not elapsed phase time; concurrent work can exceed wall time. Queue wait is
+  submission-to-native-start and includes preparation/coalescing, so these timers
+  are not additive. Session count is the live end-of-phase gauge; before/after
+  snapshots retain any lazy lane initialization. CPU threads is the configured
+  ORT intra-op thread count per session, not the process's total thread count.
+  Preserve per-round values in aggregate JSON.
 - **RSS:** process RSS sampling peak during embedding. It includes the harness,
   request records and allocator caches, and is not an exact allocation peak.
 - **GPU memory:** embedding-phase process GPU memory peak when observable.
@@ -157,13 +187,17 @@ whose completion marker exists but required evidence files are missing.
 
 Python checks measurement records: case identity, request IDs, input scheduling,
 timestamps, counts, throughput arithmetic, percentile calculations and planned
-coverage. It does not verify model outputs, actual token lengths or providers.
+coverage. When execution diagnostics exist, check snapshot deltas, resource
+identity, peak scope, actual admission workers and fixed-batch shape limits. This
+checks recorded evidence, not model outputs or independent provider correctness.
 `protocol_pass` means execution and measurement-accounting success, not model
 correctness. Performance-comparison eligibility additionally requires the
 baseline profile and adequate resource sampling. Unavailable metrics stay N/A.
 
 Schema 5 uses new result directories. Do not rewrite or resume historical v3/v4
-datasets under this protocol.
+datasets under this protocol. Execution diagnostics and batching profile fields
+are additive to schema 5; older schema 5 records without them remain readable.
+The new policy/source fingerprint still requires a fresh experiment directory.
 
 ## Single-table output
 
@@ -174,7 +208,7 @@ title, hardware/OS information and a filter field. Historical reports may fill
 missing hardware labels from a timestamped `environment-extra.json` bound to the
 original machine record; never replace recorded values or modify the manifest.
 
-1. Model / L / B / C / requested device, for example `L=32 · B=1 · C=1 · CPU`.
+1. Model / L / B / requested C/device, plus observed execution diagnostics when available.
 2. Batch p50 latency in milliseconds.
 3. Vector throughput in vectors/s.
 4. Embedding-phase RSS peak in MiB.
@@ -211,6 +245,10 @@ python3 micro-bench/model/suite.py --build-json build-v5.jsonl --cache /absolute
 python3 micro-bench/model/suite.py --build-json build-v5.jsonl --cache /absolute/cache --output /absolute/results-v5 --lengths 32 256 1024 --batch-sizes 1 4 16 --embedding-concurrency default 1 2 4 8 --devices cpu metal
 python3 micro-bench/model/verify.py /absolute/results-v5
 ```
+
+For a fixed-batch CUDA execution comparison, use a separate output directory and
+append `--models local/all-minilm-l6-v2 --devices cuda --embedding-concurrency 1 2
+--fixed-batch`. The ordinary MiniLM production matrix omits `--fixed-batch`.
 
 Use `--models` for a subset, `--devices cpu` for CPU-only execution and `--smoke`
 for bounded runner validation. Build and runner tests precede performance runs;

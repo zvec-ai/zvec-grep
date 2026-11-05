@@ -517,7 +517,7 @@ Embedding options:
   --endpoint <url>                  Embedding provider endpoint
   --model-cache <path>              Local model cache directory
   --device <device>                 auto, cpu, metal, vulkan, cuda
-  --embedding-concurrency <n>        Positive embedding concurrency (index only)
+  --embedding-concurrency <n>        Embedding execution budget (index only)
   --allow-remote                    Allow Remote Embedding for this command only
 
 Explicit --device and --model-cache values are saved after successful indexing;
@@ -529,8 +529,11 @@ Index embedding concurrency:
   and refresh; query-vector inference keeps its own defaults. The CLI option
   is accepted only with --index and is never saved in workspace settings.
   llama.cpp: context limit capped at 8, with serialized batches; defaults to 1.
-  Transformers/ORT: in-flight batch limit capped at 8; defaults to 1. Native
-    sessions honor that budget; CoreML uses one physical session.
+  Transformers/ORT CPU: native threads from 1 to hardware concurrency;
+    defaults to half the available hardware threads, rounded up.
+  Transformers/ORT CUDA: concurrent native execution lanes, from 1 to 2;
+    defaults to 1. Batch size and prefetch capacity are independent budgets.
+    Zero is normalized to 1; other backends require positive values.
   Potion/model2vec: concurrent batch tasks; defaults to 2, with an independent
     CPU worker-pool capacity. No cap of 8 is applied.
   Remote: concurrent requests; adaptive scheduling may reduce the limit after
@@ -585,7 +588,7 @@ Environment:
   ZVEC_GREP_DEVICE       Local embedding device: auto, cpu, metal, vulkan, or cuda
 
 Index-only embedding concurrency:
-  ZVEC_GREP_EMBEDDING_CONCURRENCY  Positive index/update concurrency override
+  ZVEC_GREP_EMBEDDING_CONCURRENCY  Index/update execution concurrency override
   Applies to automatic indexing and refresh, never query-vector inference.
   Explicit CLI/API index settings take precedence. Invalid values warn and use
   automatic selection. Server mode reads the Server process environment;
@@ -893,7 +896,7 @@ Embedding:
   ZVEC_GREP_DEVICE       Local embedding device: auto, cpu, metal, vulkan, or cuda
 
 Index-only embedding concurrency:
-  ZVEC_GREP_EMBEDDING_CONCURRENCY  Positive index/update concurrency override
+  ZVEC_GREP_EMBEDDING_CONCURRENCY  Index/update execution concurrency override
   Applies to automatic indexing and refresh, never query-vector inference.
   Precedence: explicit CLI/API index setting, this variable, legacy llama.cpp
   index setting, then backend defaults. Invalid values warn and use defaults.
