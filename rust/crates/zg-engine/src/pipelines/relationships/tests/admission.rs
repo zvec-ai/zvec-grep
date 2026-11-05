@@ -323,7 +323,7 @@ async fn waiting_relationship_reads_leave_the_async_worker_free_and_retain_the_w
 }
 
 #[tokio::test]
-async fn disabled_storage_rejects_old_graphs_after_read_admission() {
+async fn disabled_workspaces_reject_old_graphs_before_read_admission() {
     let fixture = Fixture::new();
     let manifest = fixture.manifest();
     let disabled = Workspace::new(
@@ -371,12 +371,8 @@ async fn disabled_storage_rejects_old_graphs_after_read_admission() {
                 )
                 .await
                 .expect_err("disabled even with an old readable graph");
-            if state == "writer" {
-                assert_eq!(error.code(), EngineError::RESOURCE_BUSY);
-            } else {
-                assert_eq!(error.code(), EngineError::UNSUPPORTED, "{state}");
-                assert!(error.message().contains("disabled"), "{state}: {error}");
-            }
+            assert_eq!(error.code(), EngineError::UNSUPPORTED, "{state}");
+            assert!(error.message().contains("disabled"), "{state}: {error}");
         }
         drop(writer);
     }

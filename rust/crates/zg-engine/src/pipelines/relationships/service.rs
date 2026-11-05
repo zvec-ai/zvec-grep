@@ -30,6 +30,19 @@ pub(crate) async fn query(
     wait.check_cancelled()?;
     let requested = resolve_directory(options.root.as_deref())?;
     let (source_root, layout) = find_nearest_workspace(&requested)?.ok_or_else(missing_index)?;
+    let workspace = read_workspace_manifest(&source_root, &layout)?.ok_or_else(missing_index)?;
+    if !workspace.index_enabled() {
+        return Err(missing_index());
+    }
+    // Reject disabled workspaces before waiting for a reader or borrowing a writer.
+    // Storage still uses the current configuration after admission, since a rebuild may intervene.
+    if !workspace
+        .index()
+        .descriptor()
+        .is_some_and(IndexDescriptor::graph_indexing)
+    {
+        return Err(EngineError::unsupported("graph support is disabled"));
+    }
     let direction = match direction {
         RelationshipDirection::Callers => Direction::In,
         RelationshipDirection::Callees => Direction::Out,
