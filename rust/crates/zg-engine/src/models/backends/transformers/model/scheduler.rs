@@ -161,8 +161,11 @@ impl InferenceQueue {
             let Ok(Some(request)) = result else {
                 return;
             };
+            let queue = Arc::clone(&loaded.queue);
+            let available = loaded.sessions.availability_handle();
+            let weak = Arc::downgrade(&loaded);
             let generation = {
-                let mut state = lock_std_mutex(&loaded.queue.state);
+                let mut state = lock_std_mutex(&queue.state);
                 state.push_back(request);
                 if state.running {
                     None
@@ -172,13 +175,14 @@ impl InferenceQueue {
                     Some(state.generation)
                 }
             };
-            loaded.queue.changed.notify_one();
+            drop(loaded);
+            queue.changed.notify_one();
             if let Some(generation) = generation {
                 let guard = DriverGuard {
-                    queue: Arc::clone(&loaded.queue),
+                    queue: Arc::clone(&queue),
                     generation,
                 };
-                tokio::spawn(drive(loaded, entry, compute, guard));
+                tokio::spawn(drive(weak, queue, available, entry, compute, guard));
             }
         });
         let cancellation = async {
@@ -248,7 +252,21 @@ impl Request {
         } else {
             result
         };
-        let _ = self.reply.send(result);
+        let Self {
+            reply,
+            options,
+            prepared,
+            texts,
+            _admission: admission,
+            ..
+        } = self;
+        // Completion also acknowledges ownership release. A caller may drop the
+        // model immediately after its final response and then exit the process.
+        drop(options);
+        drop(admission);
+        drop(prepared);
+        drop(texts);
+        let _ = reply.send(result);
     }
 }
 
@@ -412,7 +430,9 @@ fn prepare(
 }
 
 async fn drive(
-    loaded: Arc<LoadedTransformersModel>,
+    weak: std::sync::Weak<LoadedTransformersModel>,
+    queue: Arc<InferenceQueue>,
+    availability: Arc<Notify>,
     entry: TransformersConfig,
     compute: ModelComputeRuntime,
     _guard: DriverGuard,
@@ -420,14 +440,17 @@ async fn drive(
     let mut active = JoinSet::new();
     loop {
         while active.try_join_next().is_some() {}
-        let changed = loaded.queue.changed.notified();
-        let available = loaded.sessions.availability().notified();
+        let changed = queue.changed.notified();
+        let available = availability.notified();
         tokio::pin!(changed, available);
         changed.as_mut().enable();
         available.as_mut().enable();
+        let Some(loaded) = weak.upgrade() else {
+            return;
+        };
         let mut reservation = None;
         let work = {
-            let mut state = lock_std_mutex(&loaded.queue.state);
+            let mut state = lock_std_mutex(&queue.state);
             let work = state.next_eligible(
                 entry,
                 loaded.sessions.provider(),
@@ -446,7 +469,7 @@ async fn drive(
             Work::Infer(requests) => {
                 active.spawn(infer(
                     requests,
-                    Arc::clone(&loaded),
+                    loaded,
                     entry,
                     compute.clone(),
                     reservation.expect("selected native lane"),
@@ -457,6 +480,9 @@ async fn drive(
             Work::Empty if active.is_empty() => return,
             Work::Empty | Work::Blocked => None,
         };
+        // An idle driver must not keep Sessions alive after the final caller
+        // drops its model. In-flight tasks and requests retain their own leases.
+        drop(loaded);
         let wait = async {
             if let Some(until) = deadline {
                 tokio::time::sleep_until(until.into()).await;
@@ -538,6 +564,9 @@ async fn infer(
                 });
                 loaded.sessions.record_postprocessing(started.elapsed());
                 let requests = std::mem::take(&mut *lock_std_mutex(&resources.requests));
+                drop(prepared);
+                drop(resources);
+                drop(loaded);
                 finish(requests, result);
             })
             .await;

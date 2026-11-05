@@ -450,3 +450,43 @@ async fn eight_admitted_minilm_requests_form_two_batches_at_both_execution_budge
         }
     }
 }
+
+#[tokio::test]
+async fn request_completion_waits_for_execution_lease_and_admission_release() {
+    struct DropGate {
+        started: Option<oneshot::Sender<()>>,
+        release: StdMutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl Drop for DropGate {
+        fn drop(&mut self) {
+            let _ = self.started.take().expect("drop once").send(());
+            lock_std_mutex(&self.release)
+                .recv()
+                .expect("allow lease destruction");
+        }
+    }
+    let queue = InferenceQueue::default();
+    let (mut request, mut reply) = request(&queue, EmbeddingPurpose::Document, 2).await;
+    let (started, dropping) = oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    request.options.execution_lease = Some(Arc::new(DropGate {
+        started: Some(started),
+        release: StdMutex::new(released),
+    }));
+    let completion = std::thread::spawn(move || {
+        request.complete(Ok(EmbeddingResult {
+            vectors: vec![vec![1.0]; 4],
+            truncated: vec![],
+        }));
+    });
+    dropping.await.expect("lease destructor entered");
+    assert!(matches!(
+        reply.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert_eq!(queue.document_slots.available_permits(), 15);
+    release.send(()).expect("release lease");
+    assert!(reply.await.expect("reply follows cleanup").is_ok());
+    assert_eq!(queue.document_slots.available_permits(), 16);
+    completion.join().expect("completion thread");
+}

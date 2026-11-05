@@ -12,6 +12,7 @@ struct FakeRunner {
     started: tokio::sync::mpsc::UnboundedSender<Started>,
     fail: Arc<AtomicBool>,
     shared: Arc<Shared>,
+    drops: Option<tokio::sync::mpsc::UnboundedSender<std::thread::ThreadId>>,
 }
 
 impl Runner for FakeRunner {
@@ -47,11 +48,25 @@ impl Drop for FakeRunner {
     fn drop(&mut self) {
         lock_std_mutex(&self.shared.stats).session_count -= 1;
         self.shared.available.notify_waiters();
+        if let Some(drops) = &self.drops {
+            let _ = drops.send(std::thread::current().id());
+        }
     }
 }
 
 fn owner(
     provider: TransformersExecutionProvider,
+) -> (
+    Arc<SessionOwner>,
+    tokio::sync::mpsc::UnboundedReceiver<Started>,
+    Arc<AtomicBool>,
+) {
+    owner_with_drops(provider, None)
+}
+
+fn owner_with_drops(
+    provider: TransformersExecutionProvider,
+    drops: Option<tokio::sync::mpsc::UnboundedSender<std::thread::ThreadId>>,
 ) -> (
     Arc<SessionOwner>,
     tokio::sync::mpsc::UnboundedReceiver<Started>,
@@ -69,6 +84,7 @@ fn owner(
             started: started.clone(),
             fail: Arc::clone(&worker_fail),
             shared: Arc::clone(&worker_shared),
+            drops: drops.clone(),
         }))
     });
     (
@@ -174,7 +190,19 @@ async fn dropping_waiter_and_owner_keeps_execution_lease_until_native_return() {
     let running = starts.recv().await.expect("native owns request");
     task.abort();
     assert!(task.await.expect_err("aborted waiter").is_cancelled());
-    drop(owner);
+    let shared = Arc::clone(&owner.shared);
+    let (dropping, started_drop) = oneshot::channel();
+    let (dropped_owner, mut finished_drop) = oneshot::channel();
+    let shutdown = std::thread::spawn(move || {
+        let _ = dropping.send(());
+        drop(owner);
+        let _ = dropped_owner.send(());
+    });
+    started_drop.await.expect("owner shutdown started");
+    assert!(matches!(
+        finished_drop.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
     assert!(matches!(
         released.try_recv(),
         Err(oneshot::error::TryRecvError::Empty)
@@ -183,6 +211,104 @@ async fn dropping_waiter_and_owner_keeps_execution_lease_until_native_return() {
     released
         .await
         .expect("lease released after native completion");
+    finished_drop.await.expect("owner shutdown joins worker");
+    shutdown.join().expect("shutdown thread");
+    assert_eq!(lock_std_mutex(&shared.stats).session_count, 0);
+}
+
+#[tokio::test]
+async fn normal_owner_drop_joins_every_session_destructor() {
+    let (drops, mut destroyed) = tokio::sync::mpsc::unbounded_channel();
+    let (owner, mut starts, _) = owner_with_drops(TransformersExecutionProvider::Cuda, Some(drops));
+    let first = start(
+        &owner,
+        EmbeddingOptions {
+            execution_concurrency: 2,
+            ..EmbeddingOptions::default()
+        },
+    );
+    let second = start(
+        &owner,
+        EmbeddingOptions {
+            execution_concurrency: 2,
+            ..EmbeddingOptions::default()
+        },
+    );
+    let a = starts.recv().await.expect("first native start");
+    let b = starts.recv().await.expect("second native start");
+    a.release.send(()).expect("complete first");
+    b.release.send(()).expect("complete second");
+    assert!(first.await.expect("first task").is_ok());
+    assert!(second.await.expect("second task").is_ok());
+    assert!(
+        owner
+            .try_reserve(&EmbeddingOptions {
+                execution_concurrency: 1,
+                ..EmbeddingOptions::default()
+            })
+            .is_some()
+    );
+    let shared = Arc::clone(&owner.shared);
+    drop(owner);
+    assert_eq!(lock_std_mutex(&shared.stats).session_count, 0);
+    let x = destroyed
+        .try_recv()
+        .expect("first destructor finished before owner drop returned");
+    let y = destroyed
+        .try_recv()
+        .expect("second destructor finished before owner drop returned");
+    assert!(x == a.thread || x == b.thread);
+    assert!(y == a.thread || y == b.thread);
+    assert_ne!(x, y);
+}
+
+#[tokio::test]
+async fn final_owner_released_on_native_thread_destroys_session_before_reply_without_self_join() {
+    let (drops, mut destroyed) = tokio::sync::mpsc::unbounded_channel();
+    let (owner, mut starts, _) = owner_with_drops(TransformersExecutionProvider::Cuda, Some(drops));
+    owner
+        .start_worker(0)
+        .expect("start worker")
+        .recv()
+        .expect("worker ready")
+        .expect("initialized");
+    let options = EmbeddingOptions {
+        execution_concurrency: 1,
+        execution_lease: Some(owner.clone()),
+        ..EmbeddingOptions::default()
+    };
+    let Reservation { lane, permit } = owner.try_reserve(&options).expect("reserve native lane");
+    let (reply, completed) = oneshot::channel();
+    lock_std_mutex(&owner.workers[lane])
+        .as_ref()
+        .expect("worker")
+        .send(Message::Run(Box::new(Job {
+            prepared: batch(),
+            entry: entry(),
+            options,
+            enqueued: vec![],
+            reply,
+            _permit: permit,
+        })))
+        .expect("send native job");
+    let running = starts.recv().await.expect("native owns final model lease");
+    let shared = Arc::clone(&owner.shared);
+    drop(owner);
+    running.release.send(()).expect("native finishes");
+    assert!(
+        completed
+            .await
+            .expect("reply after self teardown")
+            .result
+            .is_ok()
+    );
+    assert_eq!(lock_std_mutex(&shared.stats).session_count, 0);
+    assert_eq!(
+        destroyed
+            .try_recv()
+            .expect("Session destructor precedes reply"),
+        running.thread
+    );
 }
 
 #[tokio::test]

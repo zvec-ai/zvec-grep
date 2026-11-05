@@ -55,7 +55,9 @@ struct Shared {
 }
 
 struct Worker {
-    sender: mpsc::Sender<Message>,
+    sender: Option<mpsc::Sender<Message>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    stopping: Arc<AtomicBool>,
 }
 
 enum Message {
@@ -123,10 +125,11 @@ impl SessionOwner {
         let worker_shared = Arc::clone(&shared);
         let reporter = reporter.clone();
         let factory: Arc<Factory> = Arc::new(move |lane| {
-            if lane != 0 && worker_shared.fallback.load(Ordering::Acquire) {
+            let fallback = worker_shared.fallback.load(Ordering::Acquire);
+            if lane != 0 && fallback {
                 return Err(ModelError::internal("ONNX GPU lane retired").shared());
             }
-            let provider = if worker_shared.fallback.load(Ordering::Acquire) {
+            let provider = if fallback {
                 TransformersExecutionProvider::Cpu
             } else {
                 requested
@@ -227,8 +230,13 @@ impl SessionOwner {
         stats.postprocessing_ns = stats.postprocessing_ns.saturating_add(nanoseconds(elapsed));
     }
 
+    #[cfg(test)]
     pub(super) fn availability(&self) -> &Notify {
         &self.shared.available
+    }
+
+    pub(super) fn availability_handle(&self) -> Arc<Notify> {
+        Arc::clone(&self.shared.available)
     }
 
     pub(super) fn try_reserve(&self, options: &EmbeddingOptions) -> Option<Reservation> {
@@ -298,7 +306,7 @@ impl SessionOwner {
                 // Lane 1 finishes any owned GPU job, then destroys its Session.
                 // Only lane 0 may create a CPU fallback Session.
                 if let Some(worker) = &*lock_std_mutex(&self.workers[1]) {
-                    let _ = worker.sender.send(Message::Retire);
+                    let _ = worker.send(Message::Retire);
                 }
                 if first_fallback {
                     let warning = format!(
@@ -357,7 +365,6 @@ impl SessionOwner {
         lock_std_mutex(&self.workers[lane])
             .as_ref()
             .expect("worker started")
-            .sender
             .send(Message::Run(Box::new(job)))
             .map_err(|_| ModelError::internal("ONNX native worker stopped").shared())?;
         receiver.await.map_err(|error| {
@@ -397,6 +404,10 @@ impl Shared {
 }
 
 impl Worker {
+    fn send(&self, message: Message) -> Result<(), mpsc::SendError<Message>> {
+        self.sender.as_ref().expect("worker is alive").send(message)
+    }
+
     fn start(
         lane: usize,
         requested: TransformersExecutionProvider,
@@ -405,7 +416,9 @@ impl Worker {
         ready: mpsc::Sender<Result<(), ModelError>>,
     ) -> Result<Self, ModelError> {
         let (sender, receiver) = mpsc::channel();
-        std::thread::Builder::new()
+        let stopping = Arc::new(AtomicBool::new(false));
+        let worker_stopping = Arc::clone(&stopping);
+        let thread = std::thread::Builder::new()
             .name(format!("zg-ort-{lane}"))
             .spawn(move || {
                 let mut runner = factory(lane);
@@ -452,21 +465,52 @@ impl Worker {
                             Err(ModelError::internal("ONNX native worker panicked").shared())
                         }
                     };
+                    // Lease and permit live through native completion even if the
+                    // receiver, request task, or model owner has been dropped.
+                    // Release them before acknowledging completion: the final
+                    // lease may destroy this owner on its own native thread.
+                    drop(prepared);
+                    drop(options);
+                    drop(permit);
+                    if worker_stopping.load(Ordering::Acquire) {
+                        // Self-join is impossible. Complete Session destruction
+                        // here before waking a caller that may exit the process.
+                        drop(runner);
+                        runner = Err(ModelError::internal("ONNX native worker stopped").shared());
+                    }
                     let _ = reply.send(NativeCompletion {
                         result,
                         retry_on_cpu,
                         started: native_started,
                     });
-                    // Lease and permit live through native completion even if the
-                    // receiver, request task, or model owner has been dropped.
-                    drop(options);
-                    drop(permit);
                 }
             })
             .map_err(|error| {
                 ModelError::internal("Unable to start ONNX native worker").with_cause(error)
             })?;
-        Ok(Self { sender })
+        Ok(Self {
+            sender: Some(sender),
+            thread: Some(thread),
+            stopping,
+        })
+    }
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.stopping.store(true, Ordering::Release);
+        // Disconnect the queue before joining so an idle worker can terminate.
+        drop(self.sender.take());
+        if let Some(thread) = self.thread.take() {
+            if thread.thread().id() == std::thread::current().id() {
+                // Releasing the final runtime lease inside a native job can
+                // destroy this owner. That worker drops its Session before reply.
+                return;
+            }
+            if thread.join().is_err() {
+                tracing::warn!("ONNX native worker panicked during shutdown");
+            }
+        }
     }
 }
 
