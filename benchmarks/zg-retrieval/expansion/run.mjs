@@ -1,13 +1,25 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { arch, cpus, platform } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { fileHash, run, writeJson } from "../core/io.mjs";
+import { fileHash, writeJson } from "../core/io.mjs";
 import { embeddingRuntime } from "../core/embedding.mjs";
+import {
+  BENCHMARK_CONCURRENCY,
+  ResourceMonitor,
+  daemonPid,
+  mapConcurrent,
+  measureIndex,
+} from "../core/performance.mjs";
+import { statistics } from "../metrics/statistics.mjs";
+import {
+  markdownPerformance,
+  summarizePerformance,
+} from "../reports/performance.mjs";
 import { scoreFileRetrieval } from "../metrics/files.mjs";
 import { scoreNdcg } from "../metrics/ndcg.mjs";
 import { summarizeRepeatedQuality } from "../metrics/repetitions.mjs";
@@ -15,7 +27,12 @@ import {
   parseVisibleResponse,
   validateSearchRoute,
 } from "../engines/zg/parse.mjs";
-import { freePort, packageCandidate } from "../engines/zg/run.mjs";
+import {
+  freePort,
+  packageCandidate,
+  candidateCommand,
+  runCandidate,
+} from "../engines/zg/run.mjs";
 import { snapshotIndex } from "../engines/zg/snapshot.mjs";
 import { PILOT_SUITES_BY_ID } from "./config.mjs";
 import {
@@ -70,6 +87,7 @@ export function summarizePilotRows(
         ? valid.reduce((sum, row) => sum + select(row), 0) / valid.length
         : null;
     const latencies = selected.flatMap(measuredCallLatencies);
+    const timing = statistics(latencies);
     return {
       mode,
       completed: valid.length,
@@ -92,6 +110,8 @@ export function summarizePilotRows(
           : null,
         latency_ms_p50: median(latencies),
         latency_sample_count: latencies.length,
+        latency_ms_p95: timing.p95,
+        latency_ms_p99: timing.p99,
       },
     };
   });
@@ -205,6 +225,10 @@ export function markdownPilotReport(report) {
   }
   lines.push(
     "",
+    markdownPerformance(summarizePerformance(report.performance_groups ?? [])),
+  );
+  lines.push(
+    "",
     config.report.note,
     "",
     "Each completed query/mode averages five call-level quality scores. Stable Top 10 means all five ordered public result locations match exactly. Incomplete queries are listed below and are never silently scored as zero. Output is public MCP text bytes from the fifth call; Avg RT and P50 RT cover successful calls from integrity-verified groups and exclude indexing.",
@@ -239,10 +263,16 @@ export function markdownPilotReport(report) {
         `- \`${String(failure.task_id).replaceAll("`", "")}\`: ${String(failure.reason).replaceAll(/\r?\n/g, " ")}`,
       );
   }
-  return `${lines.join("\n")}\n`;
+  return `${lines.join("\n")}\n`.replaceAll(
+    "Rust MCP default presentation",
+    report.runtime === "node-0.2.2"
+      ? "Node.js 0.2.2 MCP default presentation"
+      : "Rust MCP default presentation",
+  );
 }
 
 async function writeReport(output, report, pilot) {
+  report.performance = summarizePerformance(report.performance_groups);
   report.summary = summarizePilotRows(
     report.rows,
     pilot.modes,
@@ -259,12 +289,14 @@ async function writeReport(output, report, pilot) {
   await writeFile(join(output, "report.md"), markdownPilotReport(report));
 }
 
-async function runGroup(pilot, group, candidate, options, report, mcp) {
+export async function runGroup(pilot, group, candidate, options, report, mcp) {
   const embedding = embeddingRuntime(pilot.model);
   const groupRows = [];
+  const measured = { id: group.id, index: null, query: {} };
+  report.performance_groups.push(measured);
   const evidence = join(options.output, "evidence", group.id);
   await mkdir(evidence, { recursive: true });
-  const root = resolve(group.root);
+  const root = await realpath(group.root);
   const indexTimeoutMs = pilot.config.indexTimeoutMinutes * 60_000;
   const home = join(evidence, "runtime-home");
   const opencode = join(evidence, "opencode.json");
@@ -292,8 +324,8 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
   };
   let client;
   try {
-    const install = await run(
-      candidate.cli,
+    const install = await runCandidate(
+      candidate,
       [
         "--install",
         "--target",
@@ -313,51 +345,55 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
         command.length >= 3 &&
         command.every((part) => typeof part === "string"),
     );
-    await run(candidate.cli, ["--server", "off"], { cwd: root, env });
+    await runCandidate(candidate, ["--server", "off"], { cwd: root, env });
     const indexStart = performance.now();
     try {
-      const indexed = await run(
-        candidate.cli,
-        [
-          "--index",
-          root,
-          "--mode",
-          "direct",
-          "--embedding",
-          pilot.model,
-          "--model-cache",
-          options.modelCache,
-          ...(!embedding.remote ? ["--device", "cpu"] : []),
-          ...embedding.indexArguments,
-          "--max-filesize",
-          "1000000",
-          "--iglob",
-          group.indexGlob,
-          "--debug",
-        ],
-        {
-          cwd: root,
-          env,
-          timeout: indexTimeoutMs,
-        },
-      );
+      const invocation = candidateCommand(candidate, [
+        "--index",
+        root,
+        "--mode",
+        "direct",
+        "--embedding",
+        pilot.model,
+        "--model-cache",
+        options.modelCache,
+        ...(!embedding.remote ? ["--device", "cpu"] : []),
+        ...embedding.indexArguments,
+        ...candidate.indexConcurrencyArguments,
+        "--max-filesize",
+        "1000000",
+        "--iglob",
+        group.indexGlob,
+        "--debug",
+      ]);
+      const indexed = await measureIndex(invocation.command, invocation.args, {
+        cwd: root,
+        env,
+        timeout: indexTimeoutMs,
+      });
+      measured.index = indexed.measurements;
       await writeJson(join(evidence, "index.json"), indexed);
     } catch (error) {
+      measured.index = error.measurements ?? null;
       await writeJson(
         join(evidence, "index.json"),
         error.result ?? { error: error.message },
       );
       throw error;
     } finally {
-      report.index_seconds[group.id] = (performance.now() - indexStart) / 1000;
+      report.index_seconds[group.id] =
+        (measured.index?.total_ms ?? performance.now() - indexStart) / 1000;
     }
     if (embedding.remote)
-      await run(candidate.cli, embedding.grantArguments(root), {
+      await runCandidate(candidate, embedding.grantArguments(root), {
         cwd: root,
         env,
       });
     const before = await snapshotIndex({
       cli: candidate.cli,
+      runtime: candidate.runtime,
+      runStatus: (_cli, args, options) =>
+        runCandidate(candidate, args, options),
       root,
       output: join(evidence, "status-before"),
       env,
@@ -382,7 +418,7 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
     const listed = await client.listTools();
     assert.ok(listed.tools.some((tool) => tool.name === "zvec_grep_search"));
     for (const mode of pilot.modes) {
-      for (const task of group.tasks) {
+      const modeRows = group.tasks.map((task) => {
         const row = {
           task_id: task.id,
           mode,
@@ -394,68 +430,105 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
         };
         report.rows.push(row);
         groupRows.push(row);
-        for (let repetition = 1; repetition <= REPETITIONS; repetition++) {
-          const args = searchArguments(task, root, mode);
-          const started = performance.now();
-          let response;
-          let error = null;
-          let parsedItems = null;
-          try {
-            response = await client.callTool(
-              { name: "zvec_grep_search", arguments: args },
-              undefined,
-              { timeout: 120_000 },
-            );
-            assert.notEqual(response.isError, true, "MCP product error");
-            const parsed = parseVisibleResponse(response);
-            validateSearchRoute(parsed.items, mode);
-            parsedItems = parsed.items.map(
-              ({ rank, path, range, matched_by }) => ({
-                rank,
-                path,
-                range,
-                matched_by,
-              }),
-            );
-            if (repetition === REPETITIONS) {
-              row.file = scoreFileRetrieval(parsed.items, task.targets);
-              row.ndcg = scoreNdcg(parsed.items, task.targets);
-              row.output_bytes = Buffer.byteLength(parsed.text, "utf8");
-              row.items = parsedItems;
+        return { task, row };
+      });
+      const monitor = new ResourceMonitor(async () => [
+        transport.pid,
+        await daemonPid(env.ZVEC_GREP_HOME),
+      ]).start();
+      let completed;
+      try {
+        completed = await mapConcurrent(
+          modeRows.flatMap(({ task, row }) =>
+            Array.from({ length: REPETITIONS }, (_, index) => ({
+              task,
+              row,
+              repetition: index + 1,
+            })),
+          ),
+          async ({ task, row, repetition }) => {
+            const args = searchArguments(task, root, mode);
+            const started = performance.now();
+            let response;
+            let error = null;
+            let parsedItems = null;
+            let latency;
+            try {
+              response = await client.callTool(
+                { name: "zvec_grep_search", arguments: args },
+                undefined,
+                { timeout: 120_000 },
+              );
+              latency = performance.now() - started;
+              assert.notEqual(response.isError, true, "MCP product error");
+              const parsed = parseVisibleResponse(response);
+              validateSearchRoute(parsed.items, mode);
+              parsedItems = parsed.items.map(
+                ({ rank, path, range, matched_by }) => ({
+                  rank,
+                  path,
+                  range,
+                  matched_by,
+                }),
+              );
+              if (repetition === REPETITIONS) {
+                row.file = scoreFileRetrieval(parsed.items, task.targets);
+                row.ndcg = scoreNdcg(parsed.items, task.targets);
+                row.output_bytes = Buffer.byteLength(parsed.text, "utf8");
+                row.items = parsedItems;
+              }
+            } catch (failure) {
+              error = failure.message;
+              response ??= {
+                isError: true,
+                content: [{ type: "text", text: error }],
+              };
             }
-          } catch (failure) {
-            error = failure.message;
-            response ??= {
-              isError: true,
-              content: [{ type: "text", text: error }],
-            };
-          }
-          const latency = performance.now() - started;
-          const raw = join(
-            evidence,
-            "raw",
-            `${encodeURIComponent(task.id)}-${mode}-${repetition}.json`,
-          );
-          await writeJson(raw, {
-            request: { name: "zvec_grep_search", arguments: args },
-            response,
-          });
-          row.calls.push({
-            repetition,
-            status: error ? "failed" : "success",
-            latency_ms: latency,
-            items: parsedItems,
-            raw_sha256: await fileHash(raw),
-            error,
-          });
-          if (error)
-            report.failures.push({
-              task_id: task.id,
-              mode,
-              repetition,
-              reason: error,
+            latency ??= performance.now() - started;
+            const raw = join(
+              evidence,
+              "raw",
+              `${encodeURIComponent(task.id)}-${mode}-${repetition}.json`,
+            );
+            await writeJson(raw, {
+              request: { name: "zvec_grep_search", arguments: args },
+              response,
             });
-        }
+            const call = {
+              repetition,
+              status: error ? "failed" : "success",
+              latency_ms: latency,
+              items: parsedItems,
+              raw_sha256: await fileHash(raw),
+              error,
+            };
+            if (error)
+              report.failures.push({
+                task_id: task.id,
+                mode,
+                repetition,
+                reason: error,
+              });
+            return { row, call };
+          },
+        );
+      } finally {
+        measured.query[mode] = await monitor.stop();
+        measured.query[mode].concurrency = BENCHMARK_CONCURRENCY;
+        measured.query[mode].status = "failed";
+      }
+      measured.query[mode].status = "success";
+      measured.query[mode].samples_ms = completed.map(
+        ({ call }) => call.latency_ms,
+      );
+      measured.query[mode].latency_ms = statistics(
+        measured.query[mode].samples_ms,
+      );
+      measured.query[mode].failed_calls = completed.filter(
+        ({ call }) => call.status === "failed",
+      ).length;
+      for (const { row, call } of completed) row.calls.push(call);
+      for (const { row, task } of modeRows) {
         row.status =
           row.calls.length === REPETITIONS &&
           row.calls.every((call) => call.status === "success") &&
@@ -469,6 +542,9 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
     }
     const after = await snapshotIndex({
       cli: candidate.cli,
+      runtime: candidate.runtime,
+      runStatus: (_cli, args, options) =>
+        runCandidate(candidate, args, options),
       root,
       output: join(evidence, "status-after"),
       env,
@@ -487,9 +563,11 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
     throw error;
   } finally {
     if (client) await client.close().catch(() => undefined);
-    await run(candidate.cli, ["--server", "off"], { cwd: root, env }).catch(
-      () => undefined,
-    );
+    await runCandidate(candidate, ["--server", "off"], {
+      cwd: root,
+      env,
+    }).catch(() => undefined);
+    await writeJson(join(evidence, "performance.json"), measured);
   }
 }
 
@@ -532,10 +610,12 @@ export async function main(args = process.argv.slice(2)) {
     rows: [],
     failures: [],
     index_seconds: {},
+    performance_groups: [],
   };
   try {
     const candidate = await packageCandidate(values.package, output);
     report.package = candidate.identity;
+    report.runtime = candidate.runtime;
     const require = createRequire(join(candidate.consumer, "package.json"));
     const mcp = {
       Client: (

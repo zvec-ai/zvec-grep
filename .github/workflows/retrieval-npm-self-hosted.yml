@@ -1,0 +1,66 @@
+name: Retrieval npm comparison on fixed hardware
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+# One paired run owns this machine at a time, including runs on other branches.
+concurrency:
+  group: retrieval-npm-fixed-hardware
+  cancel-in-progress: false
+
+jobs:
+  comparison:
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'zvec-ai/zvec-grep'
+    runs-on: [zvec-retrieval-benchmark]
+    timeout-minutes: 1440
+    env:
+      RETRIEVAL_EMBEDDING: local
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/retrieval-authorize
+        id: access
+      - name: Set isolated working directory
+        run: echo "RETRIEVAL_WORK=$RUNNER_TEMP/retrieval-npm-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24.21.0"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Run both published products through all four suites sequentially
+        run: |
+          flock -n "$HOME/.zvec-retrieval-benchmark.lock" \
+            node benchmarks/zg-retrieval/self-hosted/run.mjs --output "$RETRIEVAL_WORK"
+      - name: Publish comparison
+        if: ${{ always() && steps.access.outcome == 'success' }}
+        run: |
+          if [ -f "$RETRIEVAL_WORK/comparison/summary.md" ]; then
+            cat "$RETRIEVAL_WORK/comparison/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Preserve reports and public evidence
+        if: ${{ always() && steps.access.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: retrieval-npm-self-hosted
+          path: |
+            ${{ env.RETRIEVAL_WORK }}/
+            !${{ env.RETRIEVAL_WORK }}/**/consumer/**
+            !${{ env.RETRIEVAL_WORK }}/**/runtime-home/**
+            !${{ env.RETRIEVAL_WORK }}/corpus/**
+            !${{ env.RETRIEVAL_WORK }}/prefixes/**
+            !${{ env.RETRIEVAL_WORK }}/packages/**
+            !${{ env.RETRIEVAL_WORK }}/venvs/**
+            !${{ env.RETRIEVAL_WORK }}/model-cache/**
+            !${{ env.RETRIEVAL_WORK }}/warmup/**
+            !${{ env.RETRIEVAL_WORK }}/**/evidence/full-corpus/**
+            !${{ env.RETRIEVAL_WORK }}/**/evidence/corpus/**
+            !${{ env.RETRIEVAL_WORK }}/**/corpus/**
+            !${{ env.RETRIEVAL_WORK }}/**/source/**
+          include-hidden-files: false
+          if-no-files-found: error
+          retention-days: 30
