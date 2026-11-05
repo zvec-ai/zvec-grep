@@ -320,10 +320,7 @@ impl IndexStore {
                 .map_err(|_| graph_disabled())?
                 .get_pending_refs(&ids)
                 .map_err(graph_error)?;
-            let endpoints = refs
-                .iter()
-                .map(|r| r.target_id.clone())
-                .collect::<Vec<_>>();
+            let endpoints = refs.iter().map(|r| r.target_id.clone()).collect::<Vec<_>>();
             let visible = visible_endpoints(state, &endpoints)?;
             let valid = resolutions
                 .iter()
