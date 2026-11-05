@@ -1,0 +1,21 @@
+{
+  "binary": "/tmp/zvec-bounded-scalar-20261105/buffered-v1/memory-bench",
+  "binary_sha256": "e35fa846c657e1792599198c75cba1d604685b405432804e5d54c38d7c486ee3",
+  "library": "/tmp/zvec-bounded-scalar-20261105/buffered-v1/libzvec_c_api.dylib",
+  "library_sha256": "2e6949512053982fc7c0b4d25c30afd535f4e0561becd7b9e3b4885847dbc612",
+  "runner_sha256": "76c2a72bbaec9aaa6bb82c9b2df8d9dcec430a20318b45d3dd253e0a822274ab",
+  "scalar_caches": [
+    0,
+    1,
+    2,
+    4
+  ],
+  "counts": [
+    1000000
+  ],
+  "repeats": 1,
+  "warmup_sha256": "ba3c331d2e03f570f7e984d713d77daf843ea9e21d87c45fb686e786ba618858",
+  "validation_sha256": "73be1d63a1ec9a183b2071d458c841a84a63cde48607ee05805fa0077a510e45",
+  "node_cache_mib": 8,
+  "workers": 32
+}

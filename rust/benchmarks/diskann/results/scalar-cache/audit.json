@@ -1,0 +1,46 @@
+{
+  "passed": true,
+  "verified_processes": 82,
+  "formal_processes": 42,
+  "validation_processes": 27,
+  "pilot_processes": 13,
+  "disjoint_fp32_fp16_source_ids": true,
+  "each_test_query_once_per_backend_scale": true,
+  "formal_queries": 3500,
+  "previously_used_queries": true,
+  "actual_loaded_library_checked": true,
+  "ordered_ids_match_previous_baseline_all_formal_queries": true,
+  "minimum_formal_recall": 0.922,
+  "comparisons": [
+    {
+      "count": 600000,
+      "qps_ratio": 1.1152767777927874,
+      "rss_ratio": 1.1132437619961613,
+      "paired_wins": 6,
+      "pairs": 7,
+      "minimum_pair_ratio": 0.9843856727241805,
+      "rss_saved_vs_baseline_mib": 10.625
+    },
+    {
+      "count": 800000,
+      "qps_ratio": 1.1941049459904185,
+      "rss_ratio": 1.1197972661649516,
+      "paired_wins": 7,
+      "pairs": 7,
+      "minimum_pair_ratio": 1.0059236251210928,
+      "rss_saved_vs_baseline_mib": 14.578125
+    },
+    {
+      "count": 1000000,
+      "qps_ratio": 1.0764443696978392,
+      "rss_ratio": 1.1239374828626267,
+      "paired_wins": 6,
+      "pairs": 7,
+      "minimum_pair_ratio": 0.8514570838815271,
+      "rss_saved_vs_baseline_mib": 18.703125
+    }
+  ],
+  "cpp_tests_passed": 136,
+  "cpp_tests_skipped": 1,
+  "raw_sha256": "59681a9caeb25cfc0a03bb3f33f0acc9b9e178cc9a0ee798da043b16a04175a1"
+}

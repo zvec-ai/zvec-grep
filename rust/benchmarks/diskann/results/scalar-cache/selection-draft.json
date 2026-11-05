@@ -1,0 +1,21 @@
+{
+  "settings": {
+    "600000": {
+      "effort": 84,
+      "validation_recall": 0.92225
+    },
+    "800000": {
+      "effort": 84,
+      "validation_recall": 0.92
+    },
+    "1000000": {
+      "effort": 90,
+      "validation_recall": 0.919
+    }
+  },
+  "workers": 32,
+  "cache_mib": 8,
+  "validation_threshold": 0.915,
+  "rule": "Keep previous graph/PQ/search parameters; choose the smallest tested positive scalar cache (1 MiB) on validation only; confirm three alternating runs against f8a36342 and Microsoft before single-pass regression.",
+  "scalar_cache_mib": 1
+}

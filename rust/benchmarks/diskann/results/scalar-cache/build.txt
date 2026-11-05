@@ -1,0 +1,8 @@
+ninja: Entering directory `/tmp/zvec-local-cohere-20261104/build'
+[0/2] Re-checking globbed directories...
+[1/3] cd /tmp/zvec-local-cohere-20261104/build/thirdparty/antlr/antlr4/runtime/Cpp/runtime && /opt/homebrew/Cellar/cmake/3.29.6/bin/cmake -E make_directory /tmp/zvec-local-cohere-20261104/build/external/usr/local/lib
+[2/3] Building CXX object src/db/CMakeFiles/zvec.dir/index/segment/segment.cc.o
+[3/3] Linking CXX static library lib/libzvec.a
+ld: warning: ignoring duplicate libraries: 'external/usr/local/lib//liblz4.a', 'lib/libzvec_ailego.a'
+/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/install_name_tool: warning: changes being made to the file will invalidate the code signature in: /tmp/zvec-bounded-scalar-20261105/final/memory-bench
+/tmp/zvec-bounded-scalar-20261105/final/memory-bench: replacing existing signature

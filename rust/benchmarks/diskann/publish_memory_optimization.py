@@ -195,7 +195,7 @@ export ZVEC_DISKANN_READ_WORKERS=32
 
 复现脚本：[构建](build_memory_variant.py)、[独立链接与加载校验](prepare_memory_binaries.py)、[验证预算](run_memory_pilot.py)、[归因对照](run_memory_controls.py)、[冻结对比](run_memory_comparison.py)、[核验与绘图](publish_memory_optimization.py)。入口程序为 [memory-bench.rs](harness/src/bin/memory-bench.rs)，绝对链接和签名信息见[加载隔离记录](results/memory-optimization/loader-isolation.json)；完整本机目录 `/tmp/zvec-memory-opt-20261105`。此前 64 MiB 配置的报告见[上一轮](REPORT_UNSEEN_SPEED_CN.md)。
 '''
-    (HERE/'REPORT_NODE_CN.md').write_text(report)
+    (HERE/'REPORT_MEMORY_BASELINE_CN.md').write_text(report)
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt

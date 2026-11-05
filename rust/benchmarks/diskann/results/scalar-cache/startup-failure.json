@@ -1,0 +1,6 @@
+{
+  "excluded": true,
+  "query_results": 0,
+  "reason": "Initial prototype process terminated before library verification; no benchmark output.",
+  "stderr": "time: command terminated abnormally\n        9.23 real         0.00 user         0.00 sys\n               32768  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                  74  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                   6  involuntary context switches\n             1541762  instructions retired\n             1568047  cycles elapsed\n               98376  peak memory footprint\ntime: signal: Invalid argument\n"
+}
