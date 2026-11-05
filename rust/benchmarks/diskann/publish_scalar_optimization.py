@@ -206,7 +206,7 @@ export ZVEC_DISKANN_SCALAR_CACHE_MIB=1
 
 复现入口：[构建](build_scalar_variant.py)、[预算试验](run_scalar_pilot.py)、[冻结对比](run_scalar_comparison.py)、[核验与绘图](publish_scalar_optimization.py)。本机完整目录为 `/tmp/zvec-bounded-scalar-20261105`。[上一轮报告](REPORT_MEMORY_BASELINE_CN.md)保留原有数据和内存优化说明。
 '''
-    (HERE/'REPORT_NODE_CN.md').write_text(report)
+    (HERE/'REPORT_SCALAR_CACHE_CN.md').write_text(report)
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt

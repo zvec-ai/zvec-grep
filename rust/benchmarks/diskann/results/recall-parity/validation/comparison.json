@@ -1,0 +1,35 @@
+{
+  "all_scales_at_least_parity": true,
+  "all_scales_above_recall_floor": true,
+  "all_scales_faster": true,
+  "all_scales_recall_comparable": false,
+  "scales": [
+    {
+      "phase": "validation",
+      "count": 600000,
+      "qps_ratio": 1.0407089093751987,
+      "faster": true,
+      "at_least_parity": true,
+      "above_recall_floor": true,
+      "recall_comparable": false
+    },
+    {
+      "phase": "validation",
+      "count": 800000,
+      "qps_ratio": 1.0223281511401527,
+      "faster": true,
+      "at_least_parity": true,
+      "above_recall_floor": true,
+      "recall_comparable": true
+    },
+    {
+      "phase": "validation",
+      "count": 1000000,
+      "qps_ratio": 1.0302644738604665,
+      "faster": true,
+      "at_least_parity": true,
+      "above_recall_floor": true,
+      "recall_comparable": false
+    }
+  ]
+}

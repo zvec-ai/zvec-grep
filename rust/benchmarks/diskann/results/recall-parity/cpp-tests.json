@@ -1,0 +1,58 @@
+{
+  "turbo_pq_int8_quantizer_test": {
+    "exit_code": 0,
+    "passed": 38,
+    "skipped": 2,
+    "read_cache_mib": 8,
+    "scalar_cache_mib": 1,
+    "workers": 24
+  },
+  "diskann_cache_test": {
+    "exit_code": 0,
+    "passed": 12,
+    "skipped": 0,
+    "read_cache_mib": 8,
+    "scalar_cache_mib": 1,
+    "workers": 24
+  },
+  "diskann_read_executor_test": {
+    "exit_code": 0,
+    "passed": 7,
+    "skipped": 0,
+    "read_cache_mib": 8,
+    "scalar_cache_mib": 1,
+    "workers": 24
+  },
+  "diskann_file_reader_test": {
+    "exit_code": 0,
+    "passed": 17,
+    "skipped": 0,
+    "read_cache_mib": 8,
+    "scalar_cache_mib": 1,
+    "workers": 24
+  },
+  "diskann_mobile_compat_test": {
+    "exit_code": 0,
+    "passed": 10,
+    "skipped": 0,
+    "read_cache_mib": 8,
+    "scalar_cache_mib": 1,
+    "workers": 24
+  },
+  "diskann_legacy_pq_test": {
+    "exit_code": 0,
+    "passed": 7,
+    "skipped": 0,
+    "read_cache_mib": 8,
+    "scalar_cache_mib": 1,
+    "workers": 24
+  },
+  "diskann_mobile_collection_test": {
+    "exit_code": 0,
+    "passed": 4,
+    "skipped": 0,
+    "read_cache_mib": 8,
+    "scalar_cache_mib": 1,
+    "workers": 24
+  }
+}

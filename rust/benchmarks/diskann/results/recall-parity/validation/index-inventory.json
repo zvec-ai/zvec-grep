@@ -1,0 +1,170 @@
+{
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-600000/LOCK": [
+    0,
+    1793874218604627001
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-600000/manifest.3": [
+    191,
+    1793874474932514885
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-600000/del.0": [
+    72,
+    1793874218661264581
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-600000/idmap.0/OPTIONS-000007": [
+    7045,
+    1793874218650783606
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-600000/idmap.0/000004.log": [
+    0,
+    1793874218635240368
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-600000/idmap.0/IDENTITY": [
+    36,
+    1793874218605974210
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-600000/idmap.0/LOCK": [
+    0,
+    1793874218605788258
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-600000/idmap.0/CURRENT": [
+    16,
+    1793874218640607080
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-600000/idmap.0/LOG": [
+    0,
+    1793874218605295273
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-600000/idmap.0/000008.sst": [
+    13382718,
+    1793874224900982830
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-600000/idmap.0/MANIFEST-000005": [
+    194,
+    1793874475082726288
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-600000/0/scalar.0.ipc": [
+    12636962,
+    1793874224919174113
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-600000/0/embedding.index.3.proxima": [
+    1274815424,
+    1793874474914505386
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/microsoft/diskann_fp16-600000-768/index": [
+    1250385920,
+    1793695743351004240
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-800000/LOCK": [
+    0,
+    1793874475184865800
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-800000/manifest.3": [
+    191,
+    1793874822350401264
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-800000/del.0": [
+    72,
+    1793874475270253111
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-800000/idmap.0/OPTIONS-000007": [
+    7045,
+    1793874475260014814
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-800000/idmap.0/000004.log": [
+    0,
+    1793874475245425288
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-800000/idmap.0/IDENTITY": [
+    36,
+    1793874475185945264
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-800000/idmap.0/LOCK": [
+    0,
+    1793874475185765763
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-800000/idmap.0/CURRENT": [
+    16,
+    1793874475249778767
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-800000/idmap.0/LOG": [
+    0,
+    1793874475185351136
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-800000/idmap.0/000008.sst": [
+    17843421,
+    1793874485188045298
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-800000/idmap.0/MANIFEST-000005": [
+    194,
+    1793874822615137779
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-800000/0/scalar.0.ipc": [
+    16849058,
+    1793874485214733213
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-800000/0/embedding.index.3.proxima": [
+    1699619776,
+    1793874822334618691
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/microsoft/diskann_fp16-800000-768/index": [
+    1667203072,
+    1793699194431128986
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-1000000/LOCK": [
+    0,
+    1793871329889308695
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-1000000/manifest.3": [
+    191,
+    1793871856345535926
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-1000000/del.0": [
+    72,
+    1793871329946354473
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-1000000/idmap.0/OPTIONS-000007": [
+    7045,
+    1793871329936038144
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-1000000/idmap.0/000004.log": [
+    0,
+    1793871329921646183
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-1000000/idmap.0/IDENTITY": [
+    36,
+    1793871329891032604
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-1000000/idmap.0/LOCK": [
+    0,
+    1793871329890821776
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-1000000/idmap.0/CURRENT": [
+    16,
+    1793871329926771035
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-1000000/idmap.0/LOG": [
+    0,
+    1793871329890165462
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-1000000/idmap.0/000008.sst": [
+    22304201,
+    1793871343124596739
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-1000000/idmap.0/MANIFEST-000005": [
+    194,
+    1793871856765975509
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-1000000/0/scalar.0.ipc": [
+    21061162,
+    1793871343160308130
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/native/diskann-1000000/0/embedding.index.3.proxima": [
+    2124420032,
+    1793871856329213744
+  ],
+  "/tmp/zvec-recall-parity-20261105/comparison-indexes/microsoft/diskann_fp16-1000000-768/index": [
+    2084012032,
+    1793702465304801955
+  ]
+}

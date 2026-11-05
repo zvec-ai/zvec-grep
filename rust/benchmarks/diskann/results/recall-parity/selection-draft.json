@@ -1,0 +1,21 @@
+{
+  "workers": 24,
+  "cache_mib": 8,
+  "scalar_cache_mib": 1,
+  "settings": {
+    "600000": {
+      "effort": 104
+    },
+    "800000": {
+      "effort": 104
+    },
+    "1000000": {
+      "effort": 104
+    }
+  },
+  "status": "frozen second validation: shared >=90% recall floor; actual quality is not assumed equal",
+  "qps_equivalence_min_ratio": 0.95,
+  "recall_floor": 0.9,
+  "note": "Practical QPS parity predefined as no more than 5% below Microsoft on each aggregate. Both actual recall values are reported; recall matching tolerance is 0.1 percentage point for diagnostics, not an assertion of identical quality.",
+  "variant": "norm-native-link"
+}

@@ -1,0 +1,14 @@
+{
+  "degree": 64,
+  "construction_list": 200,
+  "pq_chunks": 64,
+  "dimension": 768,
+  "precision": "FP16",
+  "metric": "Cosine",
+  "library": "/tmp/zvec-bounded-scalar-20261105/final/libzvec_c_api.dylib",
+  "binary": "/tmp/zvec-recall-parity-20261105/graph64/graph-build",
+  "binary_sha256": "1e1ac2297cececfa3bdc7ecf1691852a467802b7ee7c6feed23534bb8996d22c",
+  "library_sha256": "64b0ef3031b602973359bc09e1194d263d5dcebc06604a152a7ca27115e9e6cd",
+  "builder_source_sha256": "712bf71afc45538adb5f764c28e2404610db5818b702e75ad4c2e0fb2a5421a3",
+  "base_file": "/tmp/zvec-cohere-million/data/base.f32"
+}

@@ -1,0 +1,113 @@
+{
+  "start": "2026-11-05T18:37:33.258660+08:00",
+  "stage": "validation",
+  "selection": {
+    "workers": 24,
+    "cache_mib": 8,
+    "scalar_cache_mib": 1,
+    "settings": {
+      "600000": {
+        "effort": 144
+      },
+      "800000": {
+        "effort": 112
+      },
+      "1000000": {
+        "effort": 136
+      }
+    },
+    "status": "frozen for three alternating validation rounds",
+    "qps_equivalence_min_ratio": 0.95,
+    "recall_floor": 0.9,
+    "note": "Practical QPS parity predefined as no more than 5% below Microsoft on each aggregate. Both actual recall values are reported; recall matching tolerance is 0.1 percentage point for diagnostics, not an assertion of identical quality.",
+    "variant": "norm-native-link"
+  },
+  "source": "/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/zvec",
+  "source_base": "6473f807",
+  "graph_build_configuration_sha256": "233e59b58346c65583c91231bf756d86652b4beaeec8ba0380b17fc0a7a8edf3",
+  "source_commit": "ee621da1d69201610591e6187716789881dbe723",
+  "source_sha256": {
+    "src/core/algorithm/diskann/diskann_indexer.h": "4796f9d2286af77ce44bdf1c43de6d2dc384d9b856dbd2cd2fcdd086618ea0c7",
+    "src/core/algorithm/diskann/diskann_dist_calculator.h": "f869d4ea8be4932349803dbc89324a46c7b6c47123ef92538a7a7113ca829459",
+    "src/core/algorithm/diskann/diskann_indexer.cc": "d2fc17d0b44264e7144da45407f9695a88eb841bbf82dcbbd89ca294b3fc2440",
+    "src/core/algorithm/diskann/diskann_file_reader.h": "6258ceae3a049094580b3dba48c58c50e705e763cd7478a2eb247ba82e8376e5",
+    "src/core/algorithm/diskann/diskann_file_reader.cc": "edbf3e558b17260bd0ea4cbe10498e7bfb1f2d6d74f601c5e1623fdb9c7c0b22",
+    "src/core/algorithm/diskann/diskann_read_executor.h": "efb5f7732128ab6be5fc031b18a8ade89e4f4b4b721b4e8f6a6d9ef8d7796303",
+    "src/core/algorithm/diskann/diskann_read_cache.h": "0cfcdfe70581bd69f70017f3c193a831823a523dd1ac5021a77c0f308803d6d0",
+    "src/turbo/quantizer/pq_int8_quantizer/pq_int8_quantizer.h": "9fd3bfbc4f1d1d1f4c73c2fa0004fe44a6b215783cdcb48975aabce84e0a4725",
+    "src/turbo/quantizer/pq_int8_quantizer/pq_int8_quantizer.cc": "8d37a36ad289a3292b85aaa9e0b7bbfa9cc6188899376f9c528849f8752e10b8",
+    "src/db/index/segment/segment.cc": "9f0d410028724cbff423bff09c6a20f1a06f7c88ad0f3e2754cfc67816ed1422",
+    "src/db/index/storage/mmap_forward_store.cc": "8c02f1f0840b4a3f184dc6b5a4c22e785c7c99e7a1618b84eea22b70687fcd9a",
+    "src/db/index/storage/mmap_forward_store.h": "0d52cc9c265488753c041e5715fc76293d3b8b2134c228235169bce881f835ea",
+    "src/core/algorithm/diskann/diskann_searcher_entity.h": "e35b6e381499c421e24a84894249c3fc679e385daa88809cbf291b08b8874710",
+    "src/core/algorithm/diskann/diskann_searcher_entity.cc": "c260ea3f1b4e28e69d08a887476d4a4286c985b8d594a559ac8bd89e746b7150"
+  },
+  "binaries": {
+    "baseline": {
+      "path": "/tmp/zvec-bounded-scalar-20261105/final/memory-bench",
+      "sha256": "3d8c4cf77ff1bdc1b3f7242570bea7828440ec5cf500fd73b4924f9f69afa7d3"
+    },
+    "zvec": {
+      "path": "/tmp/zvec-recall-parity-20261105/norm-native-link/memory-bench",
+      "sha256": "296a6ca62d8c7717a232015f1b6c95982cb49c72928a08cc4ea4812d14feac12"
+    },
+    "microsoft": {
+      "path": "/tmp/zvec-recall-parity-20261105/norm-native-link/memory-bench",
+      "sha256": "296a6ca62d8c7717a232015f1b6c95982cb49c72928a08cc4ea4812d14feac12"
+    }
+  },
+  "libraries": {
+    "baseline": {
+      "path": "/tmp/zvec-bounded-scalar-20261105/final/libzvec_c_api.dylib",
+      "sha256": "64b0ef3031b602973359bc09e1194d263d5dcebc06604a152a7ca27115e9e6cd"
+    },
+    "zvec": {
+      "path": "/tmp/zvec-recall-parity-20261105/norm-native-link/libzvec_c_api.dylib",
+      "sha256": "0686d32d59eb7f026fa32dded5e64e6f5e7a28ded90eb9010ec6650c3b99ebdb"
+    },
+    "microsoft": {
+      "path": "/tmp/zvec-recall-parity-20261105/norm-native-link/libzvec_c_api.dylib",
+      "sha256": "0686d32d59eb7f026fa32dded5e64e6f5e7a28ded90eb9010ec6650c3b99ebdb"
+    }
+  },
+  "harness_sha256": "1585a92afeb9bcd95636f9e13a7fa8ddc7b87c40deb7c49f1edb8ed919ae75f8",
+  "runner_sha256": "f07697ec65f8d1502cc536c3b066a2c5276d5ba817778698c24ebe0d54d838e9",
+  "microsoft_source_sha256": {
+    "rust/crates/zg-diskann/src/lib.rs": "34427006a2eb3b477943e728ed86c5952087afc39b1c6f7b414abec921768d1d",
+    "rust/crates/zg-diskann/src/provider.rs": "56669c6de111605df307b18d9fc2cbac82db34dd6ba32510233cb775fc8fef7a",
+    "rust/crates/zg-diskann/src/experimental_pq.rs": "81cd246edfda8dc8d27791fe7f8fb00d1eb48999d0524ecc8700c8ab6c5eae37",
+    "rust/crates/zg-diskann/src/node.rs": "2a20dadb8939eef2fb9720d91bbf70351023ec35623d88e1531dcaf26bd253ba",
+    "rust/crates/zg-diskann/src/tests.rs": "74cc32e2bfecc5fb1458af104526f38db397f0903302702e0c40195a39ce8688",
+    "rust/crates/zg-diskann/src/experimental_pq/tests.rs": "4a657896a80944e47c11077ab736b299af9a1a15f83cf2a15c471b6d10d495fb"
+  },
+  "indexes": "/tmp/zvec-recall-parity-20261105/comparison-indexes/native",
+  "microsoft_indexes": "/tmp/zvec-recall-parity-20261105/comparison-indexes/microsoft",
+  "pq_preparation": "/private/tmp/zvec-cohere-pq64-20261104/preparation",
+  "data": "/tmp/zvec-disjoint-cohere-20261105/data",
+  "data_manifest_sha256": "095509977baa23a1eff1954f8d52deb5a9bdf1e56fc465ad33d86676ac3655fc",
+  "holdout_manifest_sha256": "f5d88dd43f48dfd977c5acd27d4af48cb4cfe39e347a52031bd97e018d3f8fe4",
+  "counts": [
+    600000,
+    800000,
+    1000000
+  ],
+  "warmup_queries": 600,
+  "validation_queries": 400,
+  "regression_queries": 3500,
+  "previously_used_test_queries": true,
+  "cache_mib": 8,
+  "read_workers": 24,
+  "query_concurrency": 1,
+  "test_passes": 1,
+  "test_warmup_passes": 0,
+  "scalar_cache_mib": 1,
+  "build_degree": 64,
+  "build_list": 200,
+  "microsoft_build_degree": 48,
+  "microsoft_build_list": 100,
+  "performance_equivalence_min_ratio": 0.95,
+  "recall_comparability_tolerance": 0.001,
+  "native_file_policy": "graph: F_NOCACHE retained, read-ahead disabled; scalar: 4 KiB buffered pages, no persistent mmap",
+  "os_file_cache": "not purged; both backends use independent APFS clones made before validation",
+  "test_order": "seven disjoint regression shards, each once; alternate scale and backend orders"
+}

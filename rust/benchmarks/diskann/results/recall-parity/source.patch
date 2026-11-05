@@ -1,0 +1,597 @@
+diff --git a/DISKANN_READ_CACHE_CN.md b/DISKANN_READ_CACHE_CN.md
+index 029f6adb..dd158c1a 100644
+--- a/DISKANN_READ_CACHE_CN.md
++++ b/DISKANN_READ_CACHE_CN.md
+@@ -36,3 +36,13 @@ macOS 节点读取路径配置至少 24 个 I/O 工作线程时，搜索批次
+ 其他类型、压缩缓冲区或非映射来源使用通用 Arrow 批次 LRU；单批超过预算时直接读取而不缓存。扫描使用独立读取器，不污染点查缓存。结果复制到自己的小缓冲区，避免一个主键结果长期持有整批数据。缓存和读取器访问有锁保护，正在读取的批次通过共享所有权保持有效。
+ 
+ 这里限制的是保留的缓存数据，不是进程 RSS 的硬上限：Arrow 元数据、活动批次、并发请求结果、PQ 编码、分配器及线程仍使用额外内存。普通文件读取还会利用系统文件缓存；进程 RSS 降低不能直接推导为整机物理内存等量下降。图节点读取仍保留原来的 `F_NOCACHE` 策略。
++
++## 余弦 PQ 导航与缓存命中提前展开
++
++DiskANN 的旧 PQ 码本按 SquaredEuclidean 初始化，即使最终查询度量是 Cosine。PQ 重建向量通常不再是单位向量，直接按重建 L2 距离排序，会引入重建向量长度差异。现在对于未中心化、未旋转的 PQ_INT8 码本，Cosine 查询使用 `1 - dot(q, reconstructed) / (norm(q) * norm(reconstructed))` 做近似导航。原向量的最终精确打分保持原有度量；没有改写码本、PQ 编码或磁盘格式，不需要为这项代码改动重建索引。
++
++查询 LUT 将负点积与重建范数平方放在相邻位置，一次读取 PQ 码即可累积两项。ARM64 使用 NEON 双浮点累积，其他平台使用标量实现。范数表复用码本已有的各子中心范数，查询只增加与码本大小相关的临时空间，没有新增随向量数增长的范数数组。中心化、OPQ 和度量覆盖路径保留原有实现；零范数返回有限的距离 1。
++
++macOS 节点缓存命中时，在选择本批后续磁盘候选前立即展开该节点。这使缓存里发现的更好候选有机会替换尚未提交的读取。缓存仍复制完整节点到查询自己的 scratch 区域，只有未命中节点提交到原线程池，保持原预算与 F_NOCACHE 策略。该调整会改变图遍历顺序，缓存填充又可能受 I/O 调度影响，因此不保证不同运行的有序结果逐项相同；应验证 Recall@k 和性能范围。
++
++上文关于距离、遍历顺序不变的说明描述的是此前缓存实现。当前实现的两项变化如本节所述。诊断 `requests` 只统计提交给 reader 的批量请求，不包含提前命中并展开的节点；不能再直接用它作为全部展开节点数。
+diff --git a/src/core/algorithm/diskann/diskann_dist_calculator.h b/src/core/algorithm/diskann/diskann_dist_calculator.h
+index 4716b5b6..bfbc47bc 100644
+--- a/src/core/algorithm/diskann/diskann_dist_calculator.h
++++ b/src/core/algorithm/diskann/diskann_dist_calculator.h
+@@ -15,6 +15,7 @@
+ 
+ #include <memory>
+ #include <vector>
++#include <turbo/quantizer/pq_int8_quantizer/pq_int8_quantizer.h>
+ #include <turbo/quantizer/quantizer.h>
+ #include <zvec/ailego/utility/float_helper.h>
+ #include <zvec/core/framework/index_context.h>
+@@ -51,6 +52,7 @@ class DistCalculator {
+ 
+   inline void update_distance(const IndexMetric::MatrixDistance &distance) {
+     distance_ = distance;
++    cosine_metric_ = false;
+   }
+ 
+   //! Reset query vector data
+@@ -119,17 +121,28 @@ class DistCalculator {
+   }
+ 
+   inline void bind_quantizer(const turbo::Quantizer *quantizer,
+-                             const uint8_t *codes, uint32_t code_size) {
++                             const uint8_t *codes, uint32_t code_size,
++                             const float *inverse_norms = nullptr) {
++    inverse_norms_ = inverse_norms;
+     quantizer_ = quantizer;
+     quant_codes_ = codes;
+     quant_code_size_ = code_size;
+   }
+ 
+   void quantize_query(const void *query_rotated) {
+-    quant_query_scratch_.resize(quantizer_->quantized_query_vector_length());
+-    quantizer_->quantize_query(query_rotated, quant_query_scratch_.data());
+-    quant_dist_impl_ =
+-        quantizer_->distance(quant_query_scratch_.data(), IndexQueryMeta());
++    cosine_pq_ = cosine_metric_
++                     ? dynamic_cast<const turbo::PqInt8Quantizer *>(quantizer_)
++                     : nullptr;
++    quant_query_scratch_.resize(quantizer_->quantized_query_vector_length() *
++                                (cosine_pq_ && !inverse_norms_ ? 2 : 1));
++    if (!cosine_pq_ || !cosine_pq_->quantize_cosine_query(
++                           query_rotated, quant_query_scratch_.data(), !inverse_norms_)) {
++      cosine_pq_ = nullptr;
++      quantizer_->quantize_query(query_rotated, quant_query_scratch_.data());
++    }
++    if (!cosine_pq_)
++      quant_dist_impl_ =
++          quantizer_->distance(quant_query_scratch_.data(), IndexQueryMeta());
+   }
+ 
+   void quantized_dist(const diskann_id_t *ids, uint32_t n, float *dists) {
+@@ -138,7 +151,17 @@ class DistCalculator {
+       quant_dp_list_[i] =
+           quant_codes_ + static_cast<size_t>(ids[i]) * quant_code_size_;
+     }
+-    quant_dist_impl_.batch(quant_dp_list_.data(), n, dists);
++    if (cosine_pq_ && inverse_norms_) {
++      cosine_pq_->calc_distance_dp_query_batch(quant_dp_list_.data(), n,
++                                                quant_query_scratch_.data(), dists);
++      for (uint32_t i = 0; i < n; ++i)
++        dists[i] = 1.0f + dists[i] * inverse_norms_[ids[i]];
++    } else if (cosine_pq_) {
++      cosine_pq_->cosine_distance_batch(quant_dp_list_.data(),
++                                        quant_query_scratch_.data(), n, dists);
++    } else {
++      quant_dist_impl_.batch(quant_dp_list_.data(), n, dists);
++    }
+   }
+ 
+   inline void clear() {
+@@ -170,6 +193,8 @@ class DistCalculator {
+   void bind_distance(const IndexMeta &meta, const IndexMetric::Pointer &measure,
+                      const turbo::Quantizer::Pointer &external_quantizer) {
+     data_quantizer_.reset();
++    cosine_metric_ =
++        meta.metric_name() == "Cosine" && measure->name() == "Cosine";
+ 
+     // load(storage, metric) and IndexFlow can override the persisted metric.
+     // A quantizer chosen for that persisted metric must not replace the
+@@ -241,6 +266,9 @@ class DistCalculator {
+   bool error_{false};
+ 
+   const turbo::Quantizer *quantizer_{nullptr};
++  const turbo::PqInt8Quantizer *cosine_pq_{nullptr};
++  bool cosine_metric_{false};
++  const float *inverse_norms_{nullptr};
+   const uint8_t *quant_codes_{nullptr};
+   uint32_t quant_code_size_{0};
+ 
+diff --git a/src/core/algorithm/diskann/diskann_file_reader.h b/src/core/algorithm/diskann/diskann_file_reader.h
+index fe5067c4..5cd051b0 100644
+--- a/src/core/algorithm/diskann/diskann_file_reader.h
++++ b/src/core/algorithm/diskann/diskann_file_reader.h
+@@ -208,6 +208,11 @@ class LinuxAlignedFileReader : public AlignedFileReader {
+   size_t read_workers() const {
+     return read_executor_ ? read_executor_->workers() : 1;
+   }
++  // Copy a cached node without scheduling I/O; callers may expand it before
++  // choosing the rest of the disk frontier. No cache-owned pointer escapes.
++  bool try_read_cached(const AlignedRead &req) {
++    return read_cache_ && read_cache_->try_read(req.offset, req.len, req.buf);
++  }
+   size_t read_cache_bytes() const {
+     return read_cache_ ? read_cache_->allocated_bytes() : 0;
+   }
+diff --git a/src/core/algorithm/diskann/diskann_indexer.cc b/src/core/algorithm/diskann/diskann_indexer.cc
+index 72d7000b..af2d5bd1 100644
+--- a/src/core/algorithm/diskann/diskann_indexer.cc
++++ b/src/core/algorithm/diskann/diskann_indexer.cc
+@@ -78,6 +78,9 @@ DiskAnnIndexer::~DiskAnnIndexer() {
+ int DiskAnnIndexer::init(DiskAnnSearcherEntity &entity,
+                          turbo::Quantizer::Pointer quantizer) {
+   node_record_reads_ = false;
++#if defined(__APPLE__)
++  std::vector<float>().swap(cosine_inverse_norms_);
++#endif
+   auto storage = entity.get_storage();
+   auto vector_segment = entity.get_vector_segment();
+   if (!storage || !vector_segment) {
+@@ -269,7 +272,26 @@ int DiskAnnIndexer::init(DiskAnnSearcherEntity &entity,
+     // Small indexes must not each reserve the full default budget.
+     cache_bytes = std::min(cache_bytes, vector_segment_bytes);
+     auto *file_reader = static_cast<LinuxAlignedFileReader *>(reader_.get());
+-    ret = file_reader->configure_read_cache(cache_bytes, max_node_size_);
++    // Charge an optional FP32 norm table to the existing read-cache budget.
++    // Keep at least half for node payloads; large corpora fall back to fused ADC.
++    size_t norm_bytes = 0;
++    auto *pq = dynamic_cast<const turbo::PqInt8Quantizer *>(quantizer_.get());
++    if (pq && meta_.metric_name() == "Cosine" && entity.doc_cnt() > 0 &&
++        entity.doc_cnt() <= cache_bytes / (2 * sizeof(float))) {
++      try {
++        cosine_inverse_norms_.resize(entity.doc_cnt());
++        if (pq->cosine_inverse_norms(quant_codes_, entity.doc_cnt(),
++                                     entity.pq_chunk_num(), cosine_inverse_norms_.data())) {
++          norm_bytes = cosine_inverse_norms_.capacity() * sizeof(float);
++        } else {
++          std::vector<float>().swap(cosine_inverse_norms_);
++        }
++      } catch (const std::bad_alloc &) {
++        std::vector<float>().swap(cosine_inverse_norms_);
++        return IndexError_NoMemory;
++      }
++    }
++    ret = file_reader->configure_read_cache(cache_bytes - norm_bytes, max_node_size_);
+     if (ret != 0) return ret;
+     node_record_reads_ = true;
+     size_t workers = 0;
+@@ -1284,7 +1306,11 @@ int DiskAnnIndexer::cached_beam_search_impl(DiskAnnContext *ctx) {
+           ? 1
+           : DiskAnnUtil::div_round_up(max_node_size_, DiskAnnUtil::kSectorSize);
+ 
+-  dc.bind_quantizer(quantizer_.get(), quant_codes_, quant_code_size_);
++  const float *norms = nullptr;
++#if defined(__APPLE__)
++  if (!cosine_inverse_norms_.empty()) norms = cosine_inverse_norms_.data();
++#endif
++  dc.bind_quantizer(quantizer_.get(), quant_codes_, quant_code_size_, norms);
+   dc.quantize_query(ctx->query_rotated());
+ 
+   ailego::ElapsedTime query_timer;
+@@ -1376,6 +1402,18 @@ int DiskAnnIndexer::cached_beam_search_impl(DiskAnnContext *ctx) {
+     stats.cpu_us += cpu_timer.micro_seconds();
+   };
+ 
++  const auto expand_node = [&](diskann_id_t id, uint8_t *node_disk_buf) {
++    const float exact = dc.dist(ctx->query(), node_disk_buf);
++    if ((!ctx->filter().is_valid() || !ctx->filter()(get_key(id))) &&
++        (!topk_heap.full() || exact < topk_heap.front().second.dist_)) {
++      topk_heap.emplace(id, VectorInfo(exact, make_vector_copy(node_disk_buf)));
++    }
++    auto *node_buf = DiskAnnUtil::offset_to_node_neighbor(node_disk_buf,
++                                                          meta_.element_size());
++    expand_neighbors(reinterpret_cast<const diskann_id_t *>(node_buf + 1),
++                     *node_buf);
++  };
++
+   PendingBatch pending;
+ 
+   while (candidates.has_unexpanded_node() && num_ios < io_limit_) {
+@@ -1399,6 +1437,20 @@ int DiskAnnIndexer::cached_beam_search_impl(DiskAnnContext *ctx) {
+             neighbor.id, iter->second.first, iter->second.second));
+         stats.cache_hits++;
+       } else {
++#if defined(__APPLE__)
++        // No frontier I/O has been submitted yet, so the first sector is
++        // scratch space. Expand resident nodes now: their better candidates
++        // can displace unnecessary disk reads in this same frontier.
++        if (node_record_reads_) {
++          auto req = node_read(neighbor.id, sector_buffer);
++          if (static_cast<LinuxAlignedFileReader *>(reader_.get())
++                  ->try_read_cached(req)) {
++            ++stats.cache_hits;
++            expand_node(neighbor.id, static_cast<uint8_t *>(req.buf));
++            continue;
++          }
++        }
++#endif
+         frontier.push_back(neighbor.id);
+       }
+     }
+@@ -1476,28 +1528,7 @@ int DiskAnnIndexer::cached_beam_search_impl(DiskAnnContext *ctx) {
+           uint8_t *node_disk_buf = DiskAnnUtil::offset_to_node(
+               node_per_sector_, max_node_size_, frontier_neighbor.second,
+               frontier_neighbor.first);
+-          uint32_t *node_buf = DiskAnnUtil::offset_to_node_neighbor(
+-              node_disk_buf, meta_.element_size());
+-          uint32_t neighbor_num = *node_buf;
+-
+-          void *node_fp_coords = node_disk_buf;
+-
+-          float cur_expanded_dist = dc.dist(ctx->query(), node_fp_coords);
+-
+-          if (!ctx->filter().is_valid() ||
+-              !ctx->filter()(get_key(frontier_neighbor.first))) {
+-            if (!topk_heap.full() ||
+-                cur_expanded_dist < topk_heap.front().second.dist_) {
+-              topk_heap.emplace(frontier_neighbor.first,
+-                                VectorInfo(cur_expanded_dist,
+-                                           make_vector_copy(node_fp_coords)));
+-            }
+-          }
+-
+-          diskann_id_t *node_neighbors =
+-              reinterpret_cast<diskann_id_t *>(node_buf + 1);
+-
+-          expand_neighbors(node_neighbors, neighbor_num);
++          expand_node(frontier_neighbor.first, node_disk_buf);
+         }
+       }
+     }
+diff --git a/src/core/algorithm/diskann/diskann_indexer.h b/src/core/algorithm/diskann/diskann_indexer.h
+index 5112124c..b73e6aa2 100644
+--- a/src/core/algorithm/diskann/diskann_indexer.h
++++ b/src/core/algorithm/diskann/diskann_indexer.h
+@@ -108,6 +108,9 @@ class DiskAnnIndexer {
+   uint32_t node_per_sector_{0};
+   uint32_t max_node_size_{0};
+   bool node_record_reads_{false};
++#if defined(__APPLE__)
++  std::vector<float> cosine_inverse_norms_;
++#endif
+   uint64_t quant_code_size_{0};
+   uint64_t disk_bytes_per_point_{0};
+   uint64_t index_segment_offset_{0};
+diff --git a/src/turbo/quantizer/pq_int8_quantizer/pq_int8_quantizer.cc b/src/turbo/quantizer/pq_int8_quantizer/pq_int8_quantizer.cc
+index a7226a9c..3b5edd6f 100644
+--- a/src/turbo/quantizer/pq_int8_quantizer/pq_int8_quantizer.cc
++++ b/src/turbo/quantizer/pq_int8_quantizer/pq_int8_quantizer.cc
+@@ -22,6 +22,7 @@
+ #include <vector>
+ #include <ailego/algorithm/kmeans.h>
+ #include <ailego/math/normalizer.h>
++#include <zvec/ailego/internal/platform.h>
+ #include <zvec/core/framework/index_factory.h>
+ #include <zvec/core/framework/index_threads.h>
+ #include "quantizer/common/pq_training_samples.h"
+@@ -589,6 +590,100 @@ void PqInt8Quantizer::quantize_query(const void *input, void *output) const {
+   }
+ }
+ 
++bool PqInt8Quantizer::quantize_cosine_query(const void *input,
++                                            void *output, bool include_norms) const {
++  if (!num_chunk_ || use_zero_mean_ || opq_.enabled() || !input || !output ||
++      sub_centroid_norms_.size() !=
++          static_cast<size_t>(num_chunk_) * kNumCentroids)
++    return false;
++  const auto *bytes = static_cast<const uint8_t *>(input);
++  auto *lut = static_cast<float *>(output);
++  float squared_norm = 0.0f;
++  for (uint32_t i = 0; i < original_dim_; ++i) {
++    const float value =
++        input_data_type_ == DataType::kFp16
++            ? static_cast<float>(static_cast<const ailego::Float16 *>(input)[i])
++            : static_cast<const float *>(input)[i];
++    squared_norm += value * value;
++  }
++  const float inverse_norm =
++      squared_norm > 0.0f ? 1.0f / std::sqrt(squared_norm) : 0.0f;
++  for (uint32_t m = 0; m < num_chunk_; ++m) {
++    ip_batch_fn_(
++        const_cast<const void **>(centroid_ptrs_cache_[m].data()),
++        bytes + static_cast<size_t>(chunk_offsets_[m]) * element_size(),
++        kNumCentroids, chunk_dim(m), lut + m * kNumCentroids, nullptr);
++  }
++  if (!include_norms) {
++    for (size_t i = 0; i < static_cast<size_t>(num_chunk_) * kNumCentroids; ++i)
++      lut[i] *= inverse_norm;
++    return true;
++  }
++  // Expand backward in the caller's double-sized buffer, without a temporary
++  // allocation. Keeping each dot/norm pair together halves code traversals.
++  for (size_t i = static_cast<size_t>(num_chunk_) * kNumCentroids; i-- > 0;) {
++    lut[2 * i] = lut[i] * inverse_norm;
++    lut[2 * i + 1] = sub_centroid_norms_[i];
++  }
++  return true;
++}
++
++bool PqInt8Quantizer::cosine_inverse_norms(const uint8_t *codes, size_t count,
++                                           size_t stride, float *output) const {
++  if (!num_chunk_ || use_zero_mean_ || opq_.enabled() || !codes || !output ||
++      stride < num_chunk_ ||
++      sub_centroid_norms_.size() != static_cast<size_t>(num_chunk_) * kNumCentroids)
++    return false;
++  const void *batch[256];
++  for (size_t first = 0; first < count; first += 256) {
++    const size_t n = std::min<size_t>(256, count - first);
++    for (size_t i = 0; i < n; ++i) batch[i] = codes + (first + i) * stride;
++    batch_adc_fn_(batch, sub_centroid_norms_.data(), n, num_chunk_,
++                   output + first, nullptr);
++    for (size_t i = 0; i < n; ++i) {
++      float &v = output[first + i];
++      v = v > 0.0f ? 1.0f / std::sqrt(v) : 0.0f;
++    }
++  }
++  return true;
++}
++
++void PqInt8Quantizer::cosine_distance_batch(const void *const *codes,
++                                            const void *query_lut, size_t count,
++                                            float *distances) const {
++  const auto *lut = static_cast<const float *>(query_lut);
++  for (size_t i = 0; i < count; ++i) {
++    const auto *code = static_cast<const uint8_t *>(codes[i]);
++    float dot = 0.0f, norm = 0.0f;
++#if defined(AILEGO_ARM64_NEON)
++    float32x2_t a = vdup_n_f32(0), b = a, c = a, d = a;
++    size_t m = 0;
++    for (; m + 4 <= num_chunk_; m += 4) {
++      a = vadd_f32(a,
++                   vld1_f32(lut + 2 * ((m + 0) * kNumCentroids + code[m + 0])));
++      b = vadd_f32(b,
++                   vld1_f32(lut + 2 * ((m + 1) * kNumCentroids + code[m + 1])));
++      c = vadd_f32(c,
++                   vld1_f32(lut + 2 * ((m + 2) * kNumCentroids + code[m + 2])));
++      d = vadd_f32(d,
++                   vld1_f32(lut + 2 * ((m + 3) * kNumCentroids + code[m + 3])));
++    }
++    auto sum = vadd_f32(vadd_f32(a, c), vadd_f32(b, d));
++    for (; m < num_chunk_; ++m)
++      sum = vadd_f32(sum, vld1_f32(lut + 2 * (m * kNumCentroids + code[m])));
++    dot = vget_lane_f32(sum, 0);
++    norm = vget_lane_f32(sum, 1);
++#else
++    for (size_t m = 0; m < num_chunk_; ++m) {
++      const auto *pair = lut + 2 * (m * kNumCentroids + code[m]);
++      dot += pair[0];
++      norm += pair[1];
++    }
++#endif
++    distances[i] = norm > 0.0f ? 1.0f + dot / std::sqrt(norm) : 1.0f;
++  }
++}
++
+ float PqInt8Quantizer::calc_distance_dp_query(const void *dp,
+                                               const void *query) const {
+   // dp = pq_code (uint8_t[num_chunk])
+diff --git a/src/turbo/quantizer/pq_int8_quantizer/pq_int8_quantizer.h b/src/turbo/quantizer/pq_int8_quantizer/pq_int8_quantizer.h
+index a607eb28..daac261a 100644
+--- a/src/turbo/quantizer/pq_int8_quantizer/pq_int8_quantizer.h
++++ b/src/turbo/quantizer/pq_int8_quantizer/pq_int8_quantizer.h
+@@ -79,6 +79,16 @@ class PqInt8Quantizer : public Quantizer, public PrecomputeTableQuantizer {
+ 
+   void quantize_query(const void *input, void *output) const override;
+ 
++  // Optional cosine ADC for uncentered/unrotated codebooks. Its query LUT
++  // uses two floats per centroid: negative dot/query norm and squared norm.
++  // It does not change the regular metric, codes, or serialization format.
++  bool quantize_cosine_query(const void *input, void *output,
++                             bool include_norms = true) const;
++  bool cosine_inverse_norms(const uint8_t *codes, size_t count,
++                            size_t stride, float *output) const;
++  void cosine_distance_batch(const void *const *codes, const void *query_lut,
++                             size_t count, float *distances) const;
++
+   float calc_distance_dp_query(const void *dp,
+                                const void *query) const override;
+ 
+diff --git a/tests/core/algorithm/diskann/diskann_file_reader_test.cc b/tests/core/algorithm/diskann/diskann_file_reader_test.cc
+index 8da4444f..798c1ef3 100644
+--- a/tests/core/algorithm/diskann/diskann_file_reader_test.cc
++++ b/tests/core/algorithm/diskann/diskann_file_reader_test.cc
+@@ -514,9 +514,15 @@ TEST(DiskAnnFileReaderTest, SectorTransferCachesOnlyLogicalNode) {
+   node.enclosing_buf = out.data();
+   std::vector<AlignedRead> reqs{node};
+   IOContext ctx{};
++  EXPECT_FALSE(reader.try_read_cached(node));
+   ASSERT_EQ(reader.read(reqs, ctx), 0);
+   EXPECT_EQ(std::memcmp(out.data(), source.data() + 123, 4096), 0);
+   std::fill(out.begin(), out.end(), 0xa5);
++  ASSERT_TRUE(reader.try_read_cached(node));
++  EXPECT_EQ(std::memcmp(out.data() + 1668, source.data() + 1791, 1668), 0);
++  EXPECT_EQ(out.front(), 0xa5);
++  EXPECT_EQ(out.back(), 0xa5);
++  std::fill(out.begin(), out.end(), 0xa5);
+   ASSERT_EQ(reader.read(reqs, ctx), 0);
+   EXPECT_EQ(std::memcmp(out.data() + 1668, source.data() + 123 + 1668, 1668),
+             0);
+diff --git a/tests/core/algorithm/diskann/diskann_legacy_pq_test.cc b/tests/core/algorithm/diskann/diskann_legacy_pq_test.cc
+index dac28d0a..31190005 100644
+--- a/tests/core/algorithm/diskann/diskann_legacy_pq_test.cc
++++ b/tests/core/algorithm/diskann/diskann_legacy_pq_test.cc
+@@ -19,6 +19,7 @@
+ #include <gtest/gtest.h>
+ #include <zvec/core/framework/index_framework.h>
+ #include <zvec/turbo/turbo.h>
++#include "diskann_dist_calculator.h"
+ #include "diskann_util.h"
+ 
+ namespace zvec {
+@@ -270,5 +271,56 @@ TEST(DiskAnnLegacyPq, DetectsQuantizerHeader) {
+   EXPECT_NE(0, DiskAnnUtil::normalize_pq_meta(meta, &header, &legacy));
+ }
+ 
++TEST(DiskAnnLegacyPqTest, CosineNavigationAndMetricOverride) {
++  auto pq_meta = make_meta(2);
++  auto pq = std::make_shared<turbo::PqInt8Quantizer>();
++  ailego::Params params;
++  params.set("num_chunk", uint32_t{1});
++  ASSERT_EQ(0, pq->init(pq_meta, params));
++  std::vector<float> book(256 * 2, 0.0f);
++  book[0] = 2.0f;
++  book[1] = 1.0f;
++  book[2] = 0.5f;
++  book[3] = 0.5f;
++  ASSERT_EQ(0, pq->import_codebook(book.data(), book.size() * sizeof(float)));
++  auto meta = make_meta(2);
++  meta.set_metric("Cosine", 0, ailego::Params());
++  auto metric = IndexFactory::CreateMetric("Cosine");
++  ASSERT_TRUE(metric);
++  ASSERT_EQ(0, metric->init(meta, meta.metric_params()));
++  DistCalculator dc(nullptr, meta, metric);
++  const uint8_t codes[] = {0, 1};
++  const diskann_id_t ids[] = {0, 1};
++  const float query[] = {1, 0};
++  float distances[2];
++  dc.bind_quantizer(pq.get(), codes, 1);
++  dc.quantize_query(query);
++  dc.quantized_dist(ids, 2, distances);
++  EXPECT_NEAR(1 - 2 / std::sqrt(5.0f), distances[0], 1e-6f);
++  EXPECT_NEAR(1 - 1 / std::sqrt(2.0f), distances[1], 1e-6f);
++  EXPECT_LT(distances[0], distances[1]);
++  float inverse_norms[2];
++  ASSERT_TRUE(pq->cosine_inverse_norms(codes, 2, 1, inverse_norms));
++  dc.bind_quantizer(pq.get(), codes, 1, inverse_norms);
++  dc.quantize_query(query);
++  dc.quantized_dist(ids, 2, distances);
++  EXPECT_NEAR(1 - 2 / std::sqrt(5.0f), distances[0], 1e-6f);
++  EXPECT_NEAR(1 - 1 / std::sqrt(2.0f), distances[1], 1e-6f);
++  auto l2 = IndexFactory::CreateMetric("SquaredEuclidean");
++  ASSERT_TRUE(l2);
++  ASSERT_EQ(0, l2->init(pq_meta, pq_meta.metric_params()));
++  dc.update(nullptr, meta, l2);
++  dc.quantize_query(query);
++  dc.quantized_dist(ids, 2, distances);
++  EXPECT_FLOAT_EQ(2.0f, distances[0]);
++  EXPECT_FLOAT_EQ(0.5f, distances[1]);
++  dc.update(nullptr, meta, metric);
++  dc.update_distance(l2->distance());
++  dc.quantize_query(query);
++  dc.quantized_dist(ids, 2, distances);
++  EXPECT_FLOAT_EQ(2.0f, distances[0]);
++  EXPECT_FLOAT_EQ(0.5f, distances[1]);
++}
++
+ }  // namespace core
+ }  // namespace zvec
+diff --git a/tests/turbo/turbo_pq_int8_quantizer_test.cc b/tests/turbo/turbo_pq_int8_quantizer_test.cc
+index 4368b69a..4764bfaa 100644
+--- a/tests/turbo/turbo_pq_int8_quantizer_test.cc
++++ b/tests/turbo/turbo_pq_int8_quantizer_test.cc
+@@ -1908,3 +1908,104 @@ TEST(PqInt8Quantizer, SymmetricBatchAndRestoredAdc) {
+       EXPECT_NEAR(original_adc(rows[i]), out[i], 1e-4f);
+   }
+ }
++
++// DiskANN's stored PQ codebook is L2 even when its final metric is cosine.
++// Compare the optional ADC against decoded vectors with unequal lengths,
++// including zero vectors, non-unit queries, uneven chunks and SIMD tails.
++TEST(PqInt8Quantizer, DiskAnnCosineAdcMatchesReconstruction) {
++  constexpr size_t dim = 17, chunks = 5, count = 19;
++  for (auto type : {IndexMeta::DT_FP32, IndexMeta::DT_FP16}) {
++    SCOPED_TRACE(type);
++    IndexMeta meta(type, dim);
++    meta.set_metric("SquaredEuclidean", 0, Params());
++    Params params;
++    params.set("num_chunk", uint32_t{chunks});
++    auto q = std::make_shared<turbo::PqInt8Quantizer>();
++    ASSERT_EQ(0, q->init(meta, params));
++    std::vector<float> book(dim * 256);
++    size_t offset = 0;
++    for (size_t m = 0; m < chunks; ++m) {
++      const size_t width = dim / chunks + (m < dim % chunks ? 1 : 0);
++      for (size_t c = 0; c < 256; ++c)
++        for (size_t d = 0; d < width; ++d)
++          book[offset++] = c ? (int((c * 7 + d * 11 + m) % 23) - 11) *
++                                   (0.03125f * (1 + c % 5))
++                             : 0.0f;
++    }
++    std::vector<Float16> half_book(book.begin(), book.end());
++    ASSERT_EQ(0, q->import_codebook(
++                     type == IndexMeta::DT_FP32
++                         ? static_cast<void *>(book.data())
++                         : static_cast<void *>(half_book.data()),
++                     dim * 256 * (type == IndexMeta::DT_FP32 ? 4 : 2)));
++    std::string serialized;
++    ASSERT_EQ(0, q->serialize(&serialized));
++    auto restored = std::make_shared<turbo::PqInt8Quantizer>();
++    ASSERT_EQ(0, restored->init(meta, params));
++    ASSERT_EQ(0, restored->deserialize(serialized));
++    std::vector<uint8_t> codes(count * chunks);
++    std::vector<const void *> rows;
++    for (size_t i = 0; i < count; ++i) {
++      for (size_t m = 0; m < chunks; ++m)
++        codes[i * chunks + m] = i ? (i * 19 + m * 7) % 256 : 0;
++      rows.push_back(codes.data() + i * chunks);
++    }
++    for (float scale : {0.0f, 1.0f, 4.0f}) {
++      std::vector<float> query(dim);
++      for (size_t j = 0; j < dim; ++j) query[j] = (int(j % 7) - 3) * scale;
++      std::vector<Float16> half_query(query.begin(), query.end());
++      const void *input = type == IndexMeta::DT_FP32
++                              ? static_cast<void *>(query.data())
++                              : static_cast<void *>(half_query.data());
++      std::vector<float> lut(2 * chunks * 256), actual(count),
++          restored_actual(count);
++      ASSERT_TRUE(q->quantize_cosine_query(input, lut.data()));
++      q->cosine_distance_batch(rows.data(), lut.data(), count, actual.data());
++      std::vector<float> inverse_norms(count), cached_norm_actual(count);
++      ASSERT_TRUE(q->cosine_inverse_norms(codes.data(), count, chunks,
++                                           inverse_norms.data()));
++      ASSERT_TRUE(q->quantize_cosine_query(input, lut.data(), false));
++      q->calc_distance_dp_query_batch(rows.data(), count, lut.data(),
++                                       cached_norm_actual.data());
++      for (size_t i = 0; i < count; ++i)
++        EXPECT_NEAR(actual[i], 1 + cached_norm_actual[i] * inverse_norms[i], 2e-5f);
++      ASSERT_TRUE(restored->quantize_cosine_query(input, lut.data()));
++      restored->cosine_distance_batch(rows.data(), lut.data(), count,
++                                      restored_actual.data());
++      for (size_t i = 0; i < count; ++i) {
++        std::string decoded;
++        ASSERT_EQ(0,
++                  q->dequantize(rows[i], IndexQueryMeta(type, dim), &decoded));
++        double dot = 0, qnorm = 0, vnorm = 0;
++        for (size_t j = 0; j < dim; ++j) {
++          const float v = reinterpret_cast<const float *>(decoded.data())[j];
++          dot += query[j] * v;
++          qnorm += query[j] * query[j];
++          vnorm += v * v;
++        }
++        const float expected =
++            qnorm > 0 && vnorm > 0 ? 1 - dot / std::sqrt(qnorm * vnorm) : 1;
++        EXPECT_NEAR(expected, actual[i], 2e-5f) << i;
++        EXPECT_FLOAT_EQ(actual[i], restored_actual[i]);
++      }
++    }
++  }
++}
++
++TEST(PqInt8Quantizer, DiskAnnCosineAdcRejectsUnsupportedPreprocessing) {
++  std::vector<float> input(8, 1), output(2 * 2 * 256);
++  turbo::PqInt8Quantizer uninitialized;
++  EXPECT_FALSE(
++      uninitialized.quantize_cosine_query(input.data(), output.data()));
++  for (bool centered : {false, true}) {
++    IndexMeta meta(IndexMeta::DT_FP32, 8);
++    meta.set_metric("SquaredEuclidean", 0, Params());
++    Params params;
++    params.set("num_chunk", uint32_t{2});
++    params.set("use_zero_mean", centered);
++    if (!centered) params.set("rotate_type", "opq");
++    turbo::PqInt8Quantizer q;
++    ASSERT_EQ(0, q.init(meta, params));
++    EXPECT_FALSE(q.quantize_cosine_query(input.data(), output.data()));
++  }
++}
