@@ -531,6 +531,29 @@ jobs:
           assert len(binaries) == 1, f"Expected one zg-engine test executable: {binaries}"
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"path={binaries[0]}\n")
+      - name: Verify both live model download sources independently
+        if: ${{ !matrix.cuda && matrix.platform == 'linux' }}
+        shell: python
+        env:
+          MODEL_TEST_BINARY: ${{ steps.model-test.outputs.path }}
+        run: |
+          import os, pathlib, re, subprocess
+          # Both tests use fresh temporary caches and only their selected source.
+          # Reuse the CPU test executable; no inference or extra build is needed.
+          logs = pathlib.Path("model-logs")
+          logs.mkdir(exist_ok=True)
+          log_path = logs / "live-sources.log"
+          try:
+              with log_path.open("w", encoding="utf-8") as log:
+                  subprocess.run([os.environ["MODEL_TEST_BINARY"],
+                      "models::artifacts::downloader::tests::live_sources::",
+                      "--ignored", "--nocapture", "--test-threads=1"],
+                      stdout=log, stderr=subprocess.STDOUT, timeout=900, check=True)
+              output = log_path.read_text(encoding="utf-8", errors="replace")
+              if not re.search(r"test result: ok\. 2 passed; 0 failed; 0 ignored;", output):
+                  raise RuntimeError("Expected exactly two passing live-source tests, with none skipped")
+          finally:
+              print(log_path.read_text(encoding="utf-8", errors="replace"), flush=True)
       - name: Verify real models using the existing test binary
         if: ${{ !matrix.cuda || runner.os != 'Linux' }}
         shell: python

@@ -189,6 +189,20 @@ HTTP status errors, certificate errors, and integrity failures do not trigger an
 IPv4 retry. Proxy settings remain in effect; with a proxy, the IPv4 constraint
 applies to the connection to the proxy, which may resolve the destination itself.
 
+The two live-source download tests are ignored by ordinary `cargo test` runs.
+Run both explicitly from `rust/`:
+
+```sh
+cargo test --locked -p zg-engine --lib models::artifacts::downloader::tests::live_sources:: -- --ignored --nocapture --test-threads=1
+```
+
+Each test fully downloads the four pinned Jina artifacts from its selected source
+(Hugging Face or ModelScope) into a fresh temporary cache and verifies their
+integrity. They require live network access and download about 164 MB per source
+(328 MB combined), without falling back to the other source or running inference.
+The normal Linux CPU CI job explicitly runs both using its existing test binary
+and requires two passing tests; CUDA and Windows-only manual runs skip this gate.
+
 The daemon enables an index read-session cache with a 60-second idle timeout.
 Sequential and concurrent queries reuse the same generation's native storage
 handles. Each request still reads current workspace metadata and resolves its

@@ -9,6 +9,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+mod live_sources;
 mod network;
 mod proxy;
 
@@ -183,6 +184,21 @@ fn encodes_source_urls_like_node() {
     assert_eq!(
         artifact_url(&source, "onnx/model q4.onnx"),
         "https://huggingface.co/owner/model's%20name/resolve/release%2F(one)!/onnx/model%20q4.onnx"
+    );
+}
+
+#[test]
+fn encodes_modelscope_source_url_with_models_prefix() {
+    let source = ArtifactSource::model_scope(
+        ArtifactSourceConfig {
+            repo: "owner/model's name",
+            revision: "release/(one)!",
+        },
+        PathBuf::from("cache"),
+    );
+    assert_eq!(
+        artifact_url(&source, "onnx/model q4.onnx"),
+        "https://modelscope.cn/models/owner/model's%20name/resolve/release%2F(one)!/onnx/model%20q4.onnx"
     );
 }
 
