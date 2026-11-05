@@ -12,7 +12,7 @@ use std::{
 };
 
 use crate::{
-    EngineError, EngineOptions, EngineResult,
+    EngineError, EngineResult,
     domain::WorkspaceLayout,
     workspace::lock::{LockGuard, LockMode, can_retain_read_cache, try_acquire_file_lock},
 };
@@ -37,7 +37,6 @@ struct CacheOwner {
 struct CacheInner {
     state: Mutex<CacheState>,
     idle_timeout: Duration,
-    options: EngineOptions,
     closed: AtomicBool,
 }
 
@@ -72,19 +71,17 @@ pub(crate) struct ReadSessionLease {
 }
 
 impl ReadSessionCache {
-    pub(crate) fn new(idle_timeout: Duration, options: EngineOptions) -> std::io::Result<Self> {
-        Self::spawn(idle_timeout, options, maintain)
+    pub(crate) fn new(idle_timeout: Duration) -> std::io::Result<Self> {
+        Self::spawn(idle_timeout, maintain)
     }
 
     fn spawn(
         idle_timeout: Duration,
-        options: EngineOptions,
         maintenance: impl FnOnce(&Weak<CacheInner>) + Send + 'static,
     ) -> std::io::Result<Self> {
         let inner = Arc::new(CacheInner {
             state: Mutex::new(CacheState::default()),
             idle_timeout,
-            options,
             closed: AtomicBool::new(false),
         });
         let weak = Arc::downgrade(&inner);
@@ -105,15 +102,18 @@ impl ReadSessionCache {
     }
 
     /// The caller holds the workspace read lock throughout the lease.
+    /// `graph_enabled` comes from the published descriptor; changing it requires
+    /// a rebuild, so the generation also identifies the graph configuration.
     pub(crate) fn acquire(
         &self,
         layout: &WorkspaceLayout,
         storage_home: &Path,
         generation: &str,
+        graph_enabled: bool,
     ) -> EngineResult<ReadSessionLease> {
         self.acquire_with(layout, storage_home, generation, || {
             IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
-                graph_enabled: self.owner.inner.options.graph_enabled,
+                graph_enabled,
                 storage_path: storage_home.to_path_buf(),
             })
         })
@@ -273,11 +273,11 @@ impl CacheInner {
 }
 
 impl ReadSessionLease {
-    pub(crate) fn open(storage_home: &Path, options: EngineOptions) -> EngineResult<Self> {
+    pub(crate) fn open(storage_home: &Path, graph_enabled: bool) -> EngineResult<Self> {
         Ok(Self {
             session: Arc::new(ReadSession {
                 storage: IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
-                    graph_enabled: options.graph_enabled,
+                    graph_enabled,
                     storage_path: storage_home.to_path_buf(),
                 })?,
                 storage_home: storage_home.to_path_buf(),

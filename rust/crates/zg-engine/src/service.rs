@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use crate::{
-    EngineError, EngineOptions,
+    EngineError,
     api::{
         context::{ContextOptions, ContextResult},
         index::{IndexOptions, IndexResult},
@@ -30,10 +30,10 @@ pub(crate) struct EngineService {
 
 impl EngineService {
     #[must_use]
-    pub(crate) fn new(options: EngineOptions) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             direct_search: DirectSearchService::new(),
-            indexing: WorkspaceIndexService::new(options),
+            indexing: WorkspaceIndexService::new(),
             models: ModelRuntimeManager::new(),
             read_sessions: Arc::new(Mutex::new(None)),
             closed: Arc::new(AtomicBool::new(false)),
@@ -180,10 +180,9 @@ impl EngineService {
         self.ensure_open()?;
         if cache.is_none() {
             *cache = Some(
-                ReadSessionCache::new(std::time::Duration::from_secs(60), self.indexing.options)
-                    .map_err(|error| {
-                        EngineError::from_io("start index read cache maintenance", &error)
-                    })?,
+                ReadSessionCache::new(std::time::Duration::from_secs(60)).map_err(|error| {
+                    EngineError::from_io("start index read cache maintenance", &error)
+                })?,
             );
         }
         Ok(())

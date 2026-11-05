@@ -36,7 +36,7 @@ async fn unreadable_graphs_do_not_break_search_but_relationships_report_the_erro
             "empty" => fs::write(&fixture.graph_path, []).expect("empty database"),
             "schema" => rusqlite::Connection::open(&fixture.graph_path)
                 .expect("graph")
-                .pragma_update(None, "user_version", 999)
+                .pragma_update(None, "application_id", 999)
                 .expect("unsupported schema"),
             "corrupt" => {
                 fs::write(&fixture.graph_path, b"not a SQLite database").expect("corrupt database");
@@ -184,9 +184,7 @@ async fn invalid_query_fails_before_opening_a_workspace() {
 #[tokio::test]
 async fn relationship_queries_borrow_incremental_writers_even_when_registered_late() {
     let fixture = Fixture::new();
-    let indexing = WorkspaceIndexService::new(EngineOptions {
-        graph_enabled: true,
-    });
+    let indexing = WorkspaceIndexService::new();
     let session = fixture.writer_session();
     let options = RelationshipOptions {
         lock_timeout_ms: Some(2_000),
@@ -234,9 +232,7 @@ async fn relationship_queries_borrow_incremental_writers_even_when_registered_la
 #[tokio::test]
 async fn relationship_queries_never_borrow_unpublished_generations() {
     let fixture = Fixture::new();
-    let indexing = WorkspaceIndexService::new(EngineOptions {
-        graph_enabled: true,
-    });
+    let indexing = WorkspaceIndexService::new();
     let manifest = fixture.manifest();
     let lock = Arc::new(
         acquire_workspace_lock(&fixture.layout(), LockMode::Exclusive, "rebuild")
@@ -282,9 +278,7 @@ async fn relationship_queries_never_borrow_unpublished_generations() {
 #[tokio::test]
 async fn waiting_relationship_reads_leave_the_async_worker_free_and_retain_the_writer_lease() {
     let fixture = Fixture::new();
-    let indexing = Arc::new(WorkspaceIndexService::new(EngineOptions {
-        graph_enabled: true,
-    }));
+    let indexing = Arc::new(WorkspaceIndexService::new());
     let session = fixture.writer_session();
     let writer = indexing.writers.register(session, true);
     let session = Arc::clone(&writer.session);
@@ -331,6 +325,29 @@ async fn waiting_relationship_reads_leave_the_async_worker_free_and_retain_the_w
 #[tokio::test]
 async fn disabled_storage_rejects_old_graphs_after_read_admission() {
     let fixture = Fixture::new();
+    let manifest = fixture.manifest();
+    let disabled = Workspace::new(
+        &fixture.root,
+        fixture.layout(),
+        manifest.scan().clone(),
+        Some(CURRENT_INDEX_VERSION),
+        manifest.storage_generation().map(str::to_owned),
+        1,
+        1,
+        IndexState::Enabled(Box::new(
+            IndexDescriptor::new(
+                schema(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                false,
+                FTS_CONFIG,
+            )
+            .expect("graph-disabled descriptor"),
+        )),
+    )
+    .expect("graph-disabled workspace with stale SQLite data");
+    write_workspace_manifest(fixture.layout().manifest_path(), &disabled)
+        .expect("publish graph-disabled workspace");
     let engine = ZvecGrep::new();
     for state in ["idle", "writer", "missing"] {
         let writer = (state == "writer").then(|| {

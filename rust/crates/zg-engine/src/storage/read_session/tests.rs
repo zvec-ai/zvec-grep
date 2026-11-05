@@ -46,7 +46,7 @@ impl Fixture {
         let home_lock = acquire_workspace_lock(&self.layout, LockMode::Shared, "test.query")
             .expect("read lock");
         let lease = cache
-            .acquire(&self.layout, &self.storage_home, "initial")
+            .acquire(&self.layout, &self.storage_home, "initial", false)
             .expect("read session");
         (home_lock, lease)
     }
@@ -173,37 +173,27 @@ fn write_text(layout: &WorkspaceLayout, storage_home: &Path, text: &str) {
 }
 
 fn cache() -> ReadSessionCache {
-    ReadSessionCache::new(Duration::from_secs(60), crate::EngineOptions::default())
-        .expect("cache worker")
+    ReadSessionCache::new(Duration::from_secs(60)).expect("cache worker")
 }
 
 fn manually_reaped_cache() -> ReadSessionCache {
     // Tests that advance time or assert one reap's result must own maintenance.
     // A concurrent worker can hold the slot, making that pass skip it correctly.
-    ReadSessionCache::spawn(
-        Duration::from_secs(60),
-        crate::EngineOptions::default(),
-        |_| {},
-    )
-    .expect("manual cache")
+    ReadSessionCache::spawn(Duration::from_secs(60), |_| {}).expect("manual cache")
 }
 
 fn assert_shutdown_waits_for_maintenance(shutdown: fn(ReadSessionCache), callers: usize) {
     let (started, running) = std::sync::mpsc::channel();
     let (release, released) = std::sync::mpsc::channel();
-    let cache = ReadSessionCache::spawn(
-        Duration::from_secs(60),
-        crate::EngineOptions::default(),
-        move |weak| {
-            // Native retirement can keep the inner state alive after the last
-            // public cache handle is dropped. Shutdown must wait for that work.
-            let _inner = weak.upgrade().expect("cache state");
-            started.send(()).expect("worker started");
-            released
-                .recv_timeout(Duration::from_secs(5))
-                .expect("release maintenance");
-        },
-    )
+    let cache = ReadSessionCache::spawn(Duration::from_secs(60), move |weak| {
+        // Native retirement can keep the inner state alive after the last
+        // public cache handle is dropped. Shutdown must wait for that work.
+        let _inner = weak.upgrade().expect("cache state");
+        started.send(()).expect("worker started");
+        released
+            .recv_timeout(Duration::from_secs(5))
+            .expect("release maintenance");
+    })
     .expect("cache worker");
     running
         .recv_timeout(Duration::from_secs(5))
@@ -273,7 +263,7 @@ fn dropping_a_clone_preserves_the_cache_until_the_last_owner() {
     drop(lease);
     drop(cache);
     let lease = remaining
-        .acquire(&fixture.layout, &fixture.storage_home, "initial")
+        .acquire(&fixture.layout, &fixture.storage_home, "initial", false)
         .expect("remaining cache owner");
     assert!(Weak::ptr_eq(&session, &Arc::downgrade(&lease.session)));
     drop(lease);
@@ -373,8 +363,7 @@ fn concurrent_cache_misses_open_one_session() {
 #[test]
 fn maintenance_expires_idle_handles_without_another_request() {
     let fixture = Fixture::new();
-    let cache = ReadSessionCache::new(Duration::from_millis(20), crate::EngineOptions::default())
-        .expect("cache worker");
+    let cache = ReadSessionCache::new(Duration::from_millis(20)).expect("cache worker");
     let (home_lock, lease) = fixture.read(&cache);
     let session = Arc::downgrade(&lease.session);
     drop(lease);
@@ -436,7 +425,7 @@ fn generation_replacement_and_shutdown_preserve_inflight_readers() {
     let (home_lock, first) = fixture.read(&cache);
     let previous = Arc::downgrade(&first.session);
     let second = cache
-        .acquire(&fixture.layout, &replacement, "replacement")
+        .acquire(&fixture.layout, &replacement, "replacement", false)
         .expect("new generation");
     assert!(!Weak::ptr_eq(&previous, &Arc::downgrade(&second.session)));
     assert_eq!(
@@ -458,7 +447,7 @@ fn generation_replacement_and_shutdown_preserve_inflight_readers() {
     cache.close();
     assert!(
         cache
-            .acquire(&fixture.layout, &replacement, "replacement")
+            .acquire(&fixture.layout, &replacement, "replacement", false)
             .is_err()
     );
     assert!(second.storage().list_files().is_ok());
@@ -511,14 +500,18 @@ fn failed_open_can_be_retried_without_leaking_a_residency_lock() {
     let missing = fixture.layout.staged_index_dir().to_path_buf();
     let reader =
         acquire_workspace_lock(&fixture.layout, LockMode::Shared, "test.query").expect("reader");
-    assert!(cache.acquire(&fixture.layout, &missing, "missing").is_err());
+    assert!(
+        cache
+            .acquire(&fixture.layout, &missing, "missing", false)
+            .is_err()
+    );
     drop(reader);
     fs::create_dir_all(&missing).expect("new generation");
     write_text(&fixture.layout, &missing, "vineyard");
     let _reader =
         acquire_workspace_lock(&fixture.layout, LockMode::Shared, "test.query").expect("reader");
     let lease = cache
-        .acquire(&fixture.layout, &missing, "missing")
+        .acquire(&fixture.layout, &missing, "missing", false)
         .expect("retry opens published storage");
     assert_eq!(
         lease
@@ -533,7 +526,7 @@ fn failed_open_can_be_retried_without_leaking_a_residency_lock() {
 #[tokio::test]
 async fn indexed_queries_reuse_storage_but_resolve_the_current_manifest() {
     let fixture = Fixture::new();
-    let indexing = WorkspaceIndexService::new(crate::EngineOptions::default());
+    let indexing = WorkspaceIndexService::new();
     let models = ModelRuntimeManager::new();
     let cache = cache();
     let (mut manifest, options) = fixture.publish();
@@ -619,7 +612,7 @@ async fn indexed_queries_reuse_storage_but_resolve_the_current_manifest() {
 async fn benchmark_warm_queries() {
     let fixture = Fixture::new();
     let (_, options) = fixture.publish();
-    let indexing = WorkspaceIndexService::new(crate::EngineOptions::default());
+    let indexing = WorkspaceIndexService::new();
     let models = ModelRuntimeManager::new();
     let cache = cache();
     for (name, selected_cache) in [("uncached", None), ("resident", Some(&cache))] {
@@ -702,7 +695,7 @@ fn changing_generation_retires_a_session_even_at_the_same_index_path() {
     let original = Arc::downgrade(&first.session);
     drop(first);
     let replacement = cache
-        .acquire(&fixture.layout, &fixture.storage_home, "replacement")
+        .acquire(&fixture.layout, &fixture.storage_home, "replacement", false)
         .expect("new generation");
     assert_eq!(original.strong_count(), 0);
     assert_ne!(replacement.session.generation, "initial");

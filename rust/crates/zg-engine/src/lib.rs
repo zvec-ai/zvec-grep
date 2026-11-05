@@ -30,14 +30,6 @@ use api::{
 
 pub use error::{EngineError, EngineResult, ErrorReport, ErrorSite};
 
-/// Initialization options shared by an engine's storage reads and writes.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct EngineOptions {
-    /// Enable graph storage and relationship reads. Defaults to false.
-    /// This does not enable graph extraction or reference resolution.
-    pub graph_enabled: bool,
-}
-
 /// Process-level resource counts used by resident daemon diagnostics.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct EngineRuntimeSnapshot {
@@ -55,14 +47,8 @@ pub struct ZvecGrep {
 impl ZvecGrep {
     #[must_use]
     pub fn new() -> Self {
-        Self::with_options(EngineOptions::default())
-    }
-
-    /// Creates an engine with fixed storage capabilities for its lifetime.
-    #[must_use]
-    pub fn with_options(options: EngineOptions) -> Self {
         Self {
-            service: service::EngineService::new(options),
+            service: service::EngineService::new(),
         }
     }
 

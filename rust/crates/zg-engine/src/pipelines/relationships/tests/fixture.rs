@@ -25,7 +25,7 @@ impl Fixture {
             1,
             1,
             IndexState::Enabled(Box::new(
-                IndexDescriptor::new(schema(), BTreeMap::new(), BTreeMap::new(), FTS_CONFIG)
+                IndexDescriptor::new(schema(), BTreeMap::new(), BTreeMap::new(), true, FTS_CONFIG)
                     .expect("index descriptor"),
             )),
         )
@@ -66,9 +66,7 @@ impl Fixture {
         let graph_path = storage_home.join("graph/graph.sqlite");
         write_graph(&graph_path, &local, &remote[0]);
         write_workspace_manifest(layout.manifest_path(), &manifest).expect("publish manifest");
-        let engine = ZvecGrep::with_options(EngineOptions {
-            graph_enabled: true,
-        });
+        let engine = ZvecGrep::new();
         Self {
             engine,
             _directory: directory,
@@ -243,6 +241,7 @@ pub(super) fn write_symbols(
                         documentation: None,
                         visibility: None,
                         language: None,
+                        ..CodeMetadata::default()
                     })
                 }),
                 fragments,

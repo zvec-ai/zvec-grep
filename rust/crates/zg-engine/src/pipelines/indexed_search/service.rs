@@ -8,7 +8,7 @@ use crate::{
         context::{ContextOptions, ContextResult},
         index::IndexOptions,
     },
-    domain::{IndexState, Workspace, model::ModelConfig},
+    domain::{IndexDescriptor, IndexState, Workspace, model::ModelConfig},
     models::{ModelError, ModelRuntimeLease, ModelRuntimeManager, ModelRuntimeRequest},
     pipelines::{
         indexing::service::{
@@ -117,6 +117,10 @@ pub(crate) async fn context(
         ));
     }
     let acquired = query_models(models, &workspace, options, &request)?;
+    let graph_enabled = workspace
+        .index()
+        .descriptor()
+        .is_some_and(IndexDescriptor::graph_indexing);
     let storage = match read_sessions {
         Some(cache) => cache.acquire(
             &layout,
@@ -124,8 +128,9 @@ pub(crate) async fn context(
             workspace
                 .storage_generation()
                 .expect("published index generation"),
+            graph_enabled,
         )?,
-        None => ReadSessionLease::open(workspace.layout().index_dir(), indexing.options)?,
+        None => ReadSessionLease::open(workspace.layout().index_dir(), graph_enabled)?,
     };
     let result = query_storage(&acquired, &workspace, storage.storage(), options, &request).await;
     let close = storage.close();

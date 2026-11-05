@@ -3,6 +3,7 @@
 use crate::{
     EngineError, EngineResult,
     api::relationships::{RelationshipDirection, RelationshipOptions, RelationshipResult},
+    domain::IndexDescriptor,
     pipelines::{
         indexing::service::WorkspaceIndexService,
         read_access::{ReadSource, acquire_read_source},
@@ -43,7 +44,6 @@ pub(crate) async fn query(
     )
     .await?;
     let request = options.clone();
-    let engine_options = indexing.options;
     let read_sessions = read_sessions.cloned();
     // The blocking task owns admission and storage leases. Aborting the async
     // caller must not release them while native reads are still running.
@@ -60,6 +60,10 @@ pub(crate) async fn query(
         if !workspace.index_enabled() || !directory_exists(workspace.layout().index_dir())? {
             return Err(missing_index());
         }
+        let graph_enabled = workspace
+            .index()
+            .descriptor()
+            .is_some_and(IndexDescriptor::graph_indexing);
         let storage = match read_sessions {
             Some(cache) => cache.acquire(
                 &layout,
@@ -67,8 +71,9 @@ pub(crate) async fn query(
                 workspace
                     .storage_generation()
                     .expect("published index generation"),
+                graph_enabled,
             )?,
-            None => ReadSessionLease::open(workspace.layout().index_dir(), engine_options)?,
+            None => ReadSessionLease::open(workspace.layout().index_dir(), graph_enabled)?,
         };
         let result = run(storage.storage());
         let close = storage.close();
