@@ -188,6 +188,10 @@ impl WorkspaceIndexService {
         Ok(indexed)
     }
 
+    /// Opens the pass storage, runs the pipeline, sweeps cross-file references,
+    /// and publishes. The steps are order-dependent — storage closes before the
+    /// manifest selects the new generation — so they stay visible in one place.
+    #[allow(clippy::too_many_lines)]
     async fn run_index(
         &self,
         workspace: &Workspace,
