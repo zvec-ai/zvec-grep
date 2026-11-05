@@ -575,35 +575,52 @@ async fn long_entities_store_original_content_once_and_project_fragment_metadata
             .await?;
         assert_eq!(result.items.len(), 1);
         let item = &result.items[0];
-        let Some(zg_engine::api::context::result::ContentRange::Text {
-            start_line,
-            end_line,
+        let zg_engine::api::context::result::ContentRange::Text {
             start_byte_offset,
             end_byte_offset,
-            start_byte_column,
-            end_byte_column,
-        }) = &item.excerpt_range
+            ..
+        } = &item.content_range
         else {
-            panic!("text source excerpt");
+            panic!("text source content");
         };
-        assert_eq!(Some(&item.content_range), item.excerpt_range.as_ref());
         assert_eq!(
             source.get(*start_byte_offset..*end_byte_offset),
             Some(item.content.as_str())
         );
-        for (offset, line, column) in [
-            (*start_byte_offset, *start_line, *start_byte_column),
-            (*end_byte_offset, *end_line, *end_byte_column),
+        assert!(*start_byte_offset == 0 || source.as_bytes()[start_byte_offset - 1] == b'\n');
+        assert!(
+            *end_byte_offset == source.len() || source.as_bytes()[end_byte_offset - 1] == b'\n'
+        );
+        for range in [
+            &item.content_range,
+            item.excerpt_range.as_ref().expect("matched fragment"),
         ] {
-            let prefix = &source[..offset];
-            assert_eq!(
-                line,
-                prefix.bytes().filter(|byte| *byte == b'\n').count() + 1
-            );
-            assert_eq!(
-                column,
-                prefix.rfind('\n').map_or(offset, |last| offset - last - 1)
-            );
+            let zg_engine::api::context::result::ContentRange::Text {
+                start_line,
+                end_line,
+                start_byte_offset: matched_start,
+                end_byte_offset: matched_end,
+                start_byte_column,
+                end_byte_column,
+            } = range
+            else {
+                panic!("text source range");
+            };
+            assert!(start_byte_offset <= matched_start && matched_end <= end_byte_offset);
+            for (offset, line, column) in [
+                (*matched_start, *start_line, *start_byte_column),
+                (*matched_end, *end_line, *end_byte_column),
+            ] {
+                let prefix = &source[..offset];
+                assert_eq!(
+                    line,
+                    prefix.bytes().filter(|byte| *byte == b'\n').count() + 1
+                );
+                assert_eq!(
+                    column,
+                    prefix.rfind('\n').map_or(offset, |last| offset - last - 1)
+                );
+            }
         }
         assert_eq!(
             item.content_role,
