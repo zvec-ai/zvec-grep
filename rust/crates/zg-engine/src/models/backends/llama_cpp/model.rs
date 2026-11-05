@@ -160,6 +160,7 @@ impl LlamaCppEmbeddingModel {
             .cache_dir
             .or_else(|| env::var_os("ZVEC_GREP_MODEL_CACHE").map(PathBuf::from))
             .unwrap_or_else(|| default_model_cache(LocalModelBackend::LlamaCpp));
+        let entry = with_context_size_override(entry, env::var(CONTEXT_SIZE_ENV).ok().as_deref());
         Self {
             entry,
             info: EmbeddingModelInfo::new(
@@ -506,6 +507,31 @@ fn report_warning(
     } else {
         tracing::warn!("{message}");
     }
+}
+
+/// Overrides the catalog context size, which also bounds the advertised max input
+/// tokens and therefore the chunk budget of new indexes.
+const CONTEXT_SIZE_ENV: &str = "ZVEC_GREP_LLAMA_CONTEXT_SIZE";
+
+fn positive_env_value(name: &str, value: Option<&str>) -> Option<usize> {
+    let value = value?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    match value.parse::<usize>() {
+        Ok(parsed) if parsed > 0 => Some(parsed),
+        _ => {
+            tracing::warn!("{name} must be a positive integer; ignoring {value:?}");
+            None
+        }
+    }
+}
+
+fn with_context_size_override(mut entry: LlamaCppConfig, value: Option<&str>) -> LlamaCppConfig {
+    if let Some(context_size) = positive_env_value(CONTEXT_SIZE_ENV, value) {
+        entry.context_size = context_size;
+    }
+    entry
 }
 
 fn threads_per_context(gpu: bool, execution_concurrency: usize) -> i32 {
