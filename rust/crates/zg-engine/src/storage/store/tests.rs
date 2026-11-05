@@ -2168,3 +2168,190 @@ fn resolver_records_candidates_for_ambiguous_names() {
     assert_eq!(page.refs.len(), 1);
     assert_eq!(page.refs[0].candidates.as_ref().map(Vec::len), Some(2));
 }
+
+#[test]
+fn resolver_defers_scoped_import_instead_of_binding_a_same_named_entity() {
+    let home = tempfile::tempdir().expect("workspace");
+    let storage = open_graph(home.path());
+    // An entity whose name happens to match the last path segment of the
+    // specifier; the name tail of `@/utils` is `utils` after splitting.
+    index_code_file(
+        &storage,
+        "src/utils.ts",
+        "export function utils() {}",
+        "utils",
+        FileGraphResult::default(),
+    );
+    let importer = index_code_file(
+        &storage,
+        "src/app.ts",
+        "import { utils } from '@/utils'",
+        "main",
+        FileGraphResult {
+            pending_refs: vec![import_reference(SELF_ENDPOINT, "@/utils")],
+            ..FileGraphResult::default()
+        },
+    );
+    let sweep = resolve_pending(&storage).expect("sweep");
+    assert_eq!(
+        sweep.resolved, 0,
+        "a module specifier is not an entity name: {sweep:?}"
+    );
+    assert_eq!(
+        sweep.failed, 0,
+        "a path alias may still route inside the workspace: {sweep:?}"
+    );
+    let page = storage.list_pending_refs(10, 0).expect("queue");
+    assert_eq!(
+        page.refs.len(),
+        1,
+        "the import stays queued for later passes"
+    );
+    assert_eq!(page.refs[0].reference.ref_kind, GraphEdgeKind::Imports);
+    assert!(resolved_edges(&storage, importer).is_empty());
+}
+
+#[test]
+fn resolver_still_binds_rust_use_through_the_name_index() {
+    let home = tempfile::tempdir().expect("workspace");
+    let storage = open_graph(home.path());
+    index_code_file(
+        &storage,
+        "src/model.rs",
+        "pub fn Widget() {}",
+        "Widget",
+        FileGraphResult::default(),
+    );
+    let importer = index_code_file(
+        &storage,
+        "src/main.rs",
+        "use crate::model::Widget;",
+        "run",
+        FileGraphResult {
+            pending_refs: vec![import_reference(SELF_ENDPOINT, "crate::model::Widget")],
+            ..FileGraphResult::default()
+        },
+    );
+    let sweep = resolve_pending(&storage).expect("sweep");
+    assert_eq!(sweep.resolved, 1, "a `use` specifier is a name binding");
+    let edges = resolved_edges(&storage, importer);
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].kind, GraphEdgeKind::Imports);
+    assert_eq!(edges[0].provenance, EdgeProvenance::WorkspaceUnique);
+}
+
+#[test]
+fn resolver_returns_an_empty_sweep_when_the_workspace_has_no_graph() {
+    let home = tempfile::tempdir().expect("workspace");
+    let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        storage_path: home.path().to_owned(),
+        embeddings: vec![schema()],
+    })
+    .expect("open graph-free storage");
+    let sweep = resolve_pending(&storage).expect("a graph-free workspace has nothing to resolve");
+    assert_eq!(sweep.scanned, 0, "no snapshot is built without a graph");
+    assert_eq!(sweep.resolved, 0);
+    assert_eq!(sweep.failed, 0);
+}
+
+#[test]
+fn resolver_keeps_self_receiver_pending_when_the_member_belongs_to_another_class() {
+    let home = tempfile::tempdir().expect("workspace");
+    let storage = open_graph(home.path());
+    let path = "src/models.py";
+    let text = "class A:\n    def run(self):\n        self.save()\n\nclass B:\n    def save(self):\n        pass\n";
+    let (template, entry) = fixture(None, "code", text, vec![1.0, 0.0, 0.0]);
+    let relative_path = SourcePath::new(path).expect("source path");
+    let id = storage
+        .resolve_file_ids(&[relative_path.to_path_buf()])
+        .expect("reserve file ID")[0];
+    // `A.run` calls `self.save()`, and the only `save` in the file belongs to
+    // the unrelated class `B`. A same-file uniqueness test would bind it.
+    let members: [(&str, Option<&str>, SymbolType); 4] = [
+        ("A", None, SymbolType::Class),
+        ("run", Some("A"), SymbolType::Function),
+        ("B", None, SymbolType::Class),
+        ("save", Some("B"), SymbolType::Function),
+    ];
+    let domain_entities: Vec<Entity> = members
+        .iter()
+        .map(|(name, scope, kind)| {
+            fixture_entity(
+                id,
+                Content::Code(format!("{name}\n{text}")),
+                Some(EntityMetadata::Code(CodeMetadata {
+                    symbol_type: Some(*kind),
+                    symbol_name: Some((*name).to_owned()),
+                    scope: scope.map(str::to_owned),
+                    ..CodeMetadata::default()
+                })),
+            )
+        })
+        .collect();
+    let run_id = domain_entities[1].id().as_str().to_owned();
+    let graph = FileGraphResult {
+        nodes: members
+            .iter()
+            .zip(&domain_entities)
+            .map(|((name, scope, kind), entity)| FileGraphNode {
+                id: entity.id().as_str().to_owned(),
+                kind: *kind,
+                name: Some((*name).to_owned()),
+                qualified_name: scope
+                    .map_or_else(|| (*name).to_owned(), |scope| format!("{scope}::{name}")),
+                language: "python".to_owned(),
+                range: None,
+                signature: None,
+                doc: None,
+                arity: Some(0),
+                visibility: None,
+                is_exported: true,
+                is_declaration: false,
+            })
+            .collect(),
+        pending_refs: vec![PendingRef {
+            owner_id: run_id,
+            ref_name: "save".to_owned(),
+            receiver_name: Some("self".to_owned()),
+            ref_kind: GraphEdgeKind::Calls,
+            arity: Some(0),
+            line: 3,
+            column: 8,
+            status: PendingRefStatus::Pending,
+            metadata: std::collections::BTreeMap::new(),
+        }],
+        ..FileGraphResult::default()
+    };
+    let file = FileRecord::new(
+        id,
+        relative_path,
+        template.snapshot().clone(),
+        FileIndexStatus::Indexed {
+            indexed_epoch_ms: 1,
+            entity_count: members.len() as u64,
+        },
+    )
+    .expect("file record");
+    let fixtures: Vec<FixtureEntity> = domain_entities
+        .into_iter()
+        .map(|entity| FixtureEntity {
+            model: entry.model.clone(),
+            vector: entry.vector.clone(),
+            fts_text: entry.fts_text.clone(),
+            entity,
+        })
+        .collect();
+    let (entities, entries) = fixture_records(&fixtures);
+    storage
+        .replace_file_with_graph(&file, &entities, &entries, &graph)
+        .expect("index class file");
+
+    let sweep = resolve_pending(&storage).expect("sweep");
+    assert_eq!(
+        sweep.resolved, 0,
+        "self.save() must not bind to B.save: {sweep:?}"
+    );
+    let page = storage.list_pending_refs(10, 0).expect("queue");
+    assert_eq!(page.refs.len(), 1, "the receiver call stays queued");
+    assert!(resolved_edges(&storage, id).is_empty());
+}
