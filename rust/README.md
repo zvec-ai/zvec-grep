@@ -181,6 +181,14 @@ dropped, and native model destruction runs outside the cache lock.
 surfaces model downloads through `IndexProgress::embedding`. The reporter is
 runtime-only and is omitted from serialized daemon requests.
 
+Model artifact downloads send a `zvec-grep/<version>` User-Agent, including after
+CDN redirects. A transient connection failure or header/read timeout retries the
+same artifact once over IPv4 before trying the next source (Hugging Face, then
+ModelScope). Failed partial files are discarded and the retry is cancellable.
+HTTP status errors, certificate errors, and integrity failures do not trigger an
+IPv4 retry. Proxy settings remain in effect; with a proxy, the IPv4 constraint
+applies to the connection to the proxy, which may resolve the destination itself.
+
 The daemon enables an index read-session cache with a 60-second idle timeout.
 Sequential and concurrent queries reuse the same generation's native storage
 handles. Each request still reads current workspace metadata and resolves its

@@ -9,6 +9,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+mod network;
+mod proxy;
+
 use super::*;
 use crate::domain::model::ModelProgress;
 use crate::models::artifacts::ArtifactSourceConfig;
@@ -57,7 +60,7 @@ async fn resolve(
     reporter: &ModelDownloadProgressReporter,
 ) -> Result<ResolvedArtifacts, ModelError> {
     resolve_model_artifacts(
-        &reqwest::Client::new(),
+        &ArtifactHttpClient::new(),
         ResolveArtifacts {
             model: "local/test-model",
             sources: sources(root, base_url),
@@ -81,6 +84,14 @@ impl TestServer {
         handler: impl Fn(usize, String, TcpStream) + Send + Sync + 'static,
     ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        Self::spawn_on(listener, expected_requests, handler)
+    }
+
+    fn spawn_on(
+        listener: TcpListener,
+        expected_requests: usize,
+        handler: impl Fn(usize, String, TcpStream) + Send + Sync + 'static,
+    ) -> Self {
         let address = listener.local_addr().expect("test server address");
         let requests = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&requests);
@@ -92,11 +103,18 @@ impl TestServer {
                 counted.fetch_add(1, Ordering::SeqCst);
                 let handler = Arc::clone(&handler);
                 workers.push(thread::spawn(move || {
-                    let mut line = String::new();
-                    BufReader::new(stream.try_clone().expect("clone request stream"))
-                        .read_line(&mut line)
-                        .expect("read request line");
-                    handler(index, line, stream);
+                    let mut reader =
+                        BufReader::new(stream.try_clone().expect("clone request stream"));
+                    let mut request = String::new();
+                    loop {
+                        let mut line = String::new();
+                        let read = reader.read_line(&mut line).expect("read request headers");
+                        request.push_str(&line);
+                        if read == 0 || line == "\r\n" {
+                            break;
+                        }
+                    }
+                    handler(index, request, stream);
                 }));
             }
             for worker in workers {
@@ -355,7 +373,7 @@ async fn unavailable_hugging_face_falls_back_to_modelscope() {
 #[tokio::test]
 async fn interrupted_stream_falls_back_and_removes_partial_file() {
     let root = tempfile::tempdir().expect("cache root");
-    let server = TestServer::spawn(2, |_index, request, mut stream| {
+    let server = TestServer::spawn(3, |_index, request, mut stream| {
         if request.contains("/owner/model/") {
             write!(
                 stream,
@@ -373,7 +391,7 @@ async fn interrupted_stream_falls_back_and_removes_partial_file() {
         .await
         .expect("interrupted stream fallback");
     assert!(resolved.paths[ARTIFACTS[0].path].starts_with(root.path().join("modelscope")));
-    assert_eq!(server.finish(), 2);
+    assert_eq!(server.finish(), 3);
     assert!(partial_files(root.path()).is_empty());
 }
 
@@ -391,7 +409,7 @@ async fn does_not_fallback_for_unauthorized_or_cancelled_requests() {
     let signal = CancellationToken::new();
     signal.cancel();
     let error = resolve_model_artifacts(
-        &reqwest::Client::new(),
+        &ArtifactHttpClient::new(),
         ResolveArtifacts {
             model: "local/test-model",
             sources: sources(root.path(), None),
@@ -424,7 +442,7 @@ async fn modelscope_fallback_preserves_cancellation_code() {
         ARTIFACTS.iter().map(|artifact| artifact.path.to_owned()),
     );
     let error = resolve_model_artifacts(
-        &reqwest::Client::new(),
+        &ArtifactHttpClient::new(),
         ResolveArtifacts {
             model: "local/test-model",
             sources: sources(root.path(), Some(&server.base_url)),
@@ -443,7 +461,7 @@ async fn modelscope_fallback_preserves_cancellation_code() {
 #[tokio::test]
 async fn response_header_timeout_falls_back_without_total_download_deadline() {
     let root = tempfile::tempdir().expect("cache root");
-    let server = TestServer::spawn(2, |_index, request, stream| {
+    let server = TestServer::spawn(3, |_index, request, stream| {
         if request.contains("/owner/model/") {
             thread::sleep(Duration::from_millis(75));
             let _ = stream.shutdown(std::net::Shutdown::Both);
@@ -456,7 +474,7 @@ async fn response_header_timeout_falls_back_without_total_download_deadline() {
         .map(|source| source.with_timeouts(short, Duration::from_millis(50)));
     let events = Arc::new(Mutex::new(Vec::new()));
     let resolved = resolve_model_artifacts(
-        &reqwest::Client::new(),
+        &ArtifactHttpClient::new(),
         ResolveArtifacts {
             model: "local/test-model",
             sources,
@@ -468,13 +486,13 @@ async fn response_header_timeout_falls_back_without_total_download_deadline() {
     .await
     .expect("timeout fallback");
     assert!(resolved.paths[ARTIFACTS[0].path].starts_with(root.path().join("modelscope")));
-    assert_eq!(server.finish(), 2);
+    assert_eq!(server.finish(), 3);
 }
 
 #[tokio::test]
 async fn read_idle_timeout_falls_back_and_preserves_both_source_errors() {
     let root = tempfile::tempdir().expect("cache root");
-    let server = TestServer::spawn(2, |_index, request, mut stream| {
+    let server = TestServer::spawn(3, |_index, request, mut stream| {
         if request.contains("/owner/model/") {
             write!(
                 stream,
@@ -493,7 +511,7 @@ async fn read_idle_timeout_falls_back_and_preserves_both_source_errors() {
         .map(|source| source.with_timeouts(Duration::from_millis(50), short));
     let events = Arc::new(Mutex::new(Vec::new()));
     let error = resolve_model_artifacts(
-        &reqwest::Client::new(),
+        &ArtifactHttpClient::new(),
         ResolveArtifacts {
             model: "local/test-model",
             sources,
@@ -509,7 +527,7 @@ async fn read_idle_timeout_falls_back_and_preserves_both_source_errors() {
     assert!(message.contains("ModelScope"), "{message}");
     assert!(message.contains("timed out"), "{message}");
     assert!(message.contains("500"), "{message}");
-    assert_eq!(server.finish(), 2);
+    assert_eq!(server.finish(), 3);
 }
 
 #[tokio::test]
