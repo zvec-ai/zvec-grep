@@ -90,7 +90,11 @@ fn collect_relationships(
         check_cancelled(options.signal.as_ref())?;
         view.ensure_graph()?;
         let definitions = find_symbols(view, name, scope, filter)?;
-        if definitions.is_empty() && name.contains('.') && !dotted.0.is_empty() {
+        if definitions.is_empty()
+            && name
+                .rsplit_once('.')
+                .is_some_and(|(scope, name)| !scope.is_empty() && !name.is_empty())
+        {
             name = &dotted.0;
             scope = dotted.1.as_deref();
             find_symbols(view, name, scope, filter)

@@ -6,7 +6,6 @@ fn invalid_queries_fail_validation() {
         (String::new(), None),
         ("   ".into(), None),
         ("scope::".into(), None),
-        ("scope.".into(), None),
         ("::".into(), None),
         ("x".repeat(1025), None),
         ("run".into(), Some(0)),
@@ -206,7 +205,7 @@ async fn symbol_spellings_select_expected_scopes() {
         .expect_err("empty name");
     assert_eq!(
         error.message(),
-        "expected a symbol name after '::' or '.', e.g. 'Foo::bar'"
+        "expected a symbol name after '::', e.g. 'Foo::bar'"
     );
 }
 
@@ -378,6 +377,7 @@ async fn literal_dotted_names_round_trip_before_qualified_fallback() {
     for (query, expected) in [
         ("api::user.get", "api::user.get"),
         ("api::user.", "api::user."),
+        ("user.", "api::user."),
         ("::user.get", "user.get"),
         ("pkg.Type.run", "pkg.Type::run"),
     ] {
@@ -387,5 +387,8 @@ async fn literal_dotted_names_round_trip_before_qualified_fallback() {
         let retry = fixture.callers(&matches[0].symbol.name).await;
         // An unqualified literal name may match the same name in several scopes.
         assert!(retry.matches.iter().any(|m| m.symbol == matches[0].symbol));
+    }
+    for query in ["scope.", ".run"] {
+        assert!(fixture.callers(query).await.matches.is_empty(), "{query}");
     }
 }
