@@ -412,7 +412,7 @@ const RELATIONSHIP_HELP: &str = r"Usage:
 Options:
   -g, --glob <GLOB>                Workspace-relative glob; prefix ! to exclude; repeatable
   --iglob <GLOB>                   Case-insensitive glob; repeatable
-  --limit <N>                      Maximum edges per matching symbol (default: 20)
+  --limit <N>                      Maximum call sites per matching symbol (default: 20, max: 50)
   --mode <direct|server|auto>       Select the execution mode (default: auto)
 
 Globs follow the same ordered rules as ordinary search and filter definitions
@@ -422,7 +422,9 @@ returned as separate JSON matches. truncated indicates additional visible call s
 Each edge's filePath, line, and column identify the call site in the caller file,
 including calls without symbol metadata. Unresolved references
 are excluded, so empty results do not prove that a relationship is absent.
-Requires an existing graph index; does not refresh or build it.";
+Output is one compact JSON object; terminal and piped output use the same format.
+Requires graph indexing enabled with zg --index --graph; add --rebuild for an existing index.
+A query does not refresh or build the index.";
 
 const SEARCH_HELP: &str = r#"Usage:
   zg <query> [options]
@@ -528,10 +530,14 @@ const INDEX_HELP: &str = r"Usage:
 
 Index options:
   --rebuild                         Rebuild the existing index
+  --graph[=true|false]               Enable or disable graph indexing; omitted keeps saved setting
   --drop                            Permanently remove the workspace index
   --debug                           Print skipped-file diagnostics to stderr
   --mode <direct|server|auto>       Select indexing transport
   --color <auto|always|never>       Color output (default: auto)
+
+Graph indexing defaults to disabled for new indexes. Changing it on an existing
+index requires --rebuild, for example: zg --index --rebuild --graph.
 
 Dropping an index runs immediately without a confirmation prompt.
 

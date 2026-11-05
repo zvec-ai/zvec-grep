@@ -57,8 +57,8 @@ use zg_engine::{
             result::{IndexCompatibility, InfoSource, WorkspaceIndexPolicy},
         },
         relationships::{
-            MAX_RELATIONSHIP_SYMBOL_CHARS, MAX_SYMBOL_MATCHES, RelationshipDirection,
-            RelationshipOptions, RelationshipResult, SymbolDefinition,
+            MAX_RELATIONSHIP_EDGES, MAX_RELATIONSHIP_SYMBOL_CHARS, MAX_SYMBOL_MATCHES,
+            RelationshipDirection, RelationshipOptions, RelationshipResult, SymbolDefinition,
         },
     },
 };
@@ -104,7 +104,7 @@ pub const AGENT_INSTRUCTIONS: &str = concat!(
     "Use zvec-grep with these workspace retrieval rules:\n",
     workspace_evidence_rules!(),
     search_routing_rules!("native Grep or rg", "Read, Grep, or rg"),
-    "- For known symbol names, use zvec_grep_callers or zvec_grep_callees for persisted call relationships. Same-name definitions are returned as separate matches. Unresolved references are excluded, so empty results do not prove a relationship is absent.\n",
+    "- For workspaces indexed with graph support, use zvec_grep_callers or zvec_grep_callees for known symbols. Empty results do not prove absence. Enable graph indexing only with user authorization: zg --index --graph (add --rebuild for an existing index).\n",
     "- Every workspace operation requires an absolute root path visible to the daemon.\n",
     "- Respect declined or cancelled index setup; do not repeat it without a renewed user request.\n",
     "- Use returned search evidence without a status preflight.\n",
@@ -116,7 +116,7 @@ pub const FULL_INSTRUCTIONS: &str = concat!(
     "Use zvec-grep with these workspace retrieval and lifecycle rules:\n",
     workspace_evidence_rules!(),
     search_routing_rules!("zvec_grep_rg", "Read or zvec_grep_rg"),
-    "- For known symbol names, use zvec_grep_callers or zvec_grep_callees for persisted call relationships. Same-name definitions are returned as separate matches. Unresolved references are excluded, so empty results do not prove a relationship is absent.\n",
+    "- For workspaces indexed with graph support, use zvec_grep_callers or zvec_grep_callees for known symbols. Empty results do not prove absence. Enable graph indexing only with user authorization: zg --index --graph (add --rebuild for an existing index).\n",
     "- Every workspace operation requires an absolute root path visible to the daemon.\n",
     "- Respect declined or cancelled index setup; do not repeat it without a renewed user request.\n",
     "- Use the zvec_grep_* tools directly for workspace search, status, indexing, deletion, and exhaustive lexical search.\n",
@@ -340,7 +340,7 @@ impl ZvecGrepMcpServer {
         for name in ["zvec_grep_callers", "zvec_grep_callees"] {
             let route = router.map.get_mut(name).expect("relationship route");
             route.attr.description = route.attr.description.as_ref().map(|description| {
-                format!("{description} Queries matching more than {MAX_SYMBOL_MATCHES} indexed definitions fail; narrow the scope or use globs to filter workspace-relative definition paths.").into()
+                format!("{description} Accepts name, scope::name or scope.name; ::name selects top-level definitions. Queries matching more than {MAX_SYMBOL_MATCHES} indexed definitions fail; narrow the scope or use globs. limit counts call sites per definition (default 20, maximum {MAX_RELATIONSHIP_EDGES}); truncated marks omitted sites. Exact misses may return suggestions without edges. Requires graph indexing enabled with zg --index --graph (add --rebuild for an existing index). Reads persisted resolved calls without refreshing; empty results do not prove absence.").into()
             });
         }
         if toolset == McpToolset::Full {
@@ -401,7 +401,7 @@ impl ZvecGrepMcpServer {
 impl ZvecGrepMcpServer {
     #[tool(
         name = "zvec_grep_callers",
-        description = "Incoming persisted call sites for an exact or scope-qualified symbol name (Class::method or Class.method, as shown by rg). ::name selects only top-level definitions; plain name matches any scope, and ::ns::name is equivalent to ns::name. Returns matches for exact definitions. When none match, matches is empty and suggestions contains up to 5 similarly named definitions without edges; retry with a suggestion's exact name. Suggestions are best-effort, not an exhaustive symbol search. Same-name definitions remain separate matches. Each edge describes the caller symbol or null if unavailable; filePath, line, and column locate the call in the caller file even when symbol is null. limit caps edges per match (default 20), and truncated indicates additional visible call sites beyond the limit. Each match and its call sites share one consistent index snapshot. Different matches may reflect different indexing moments; definitions changed during the query are skipped. Unresolved references are excluded, so empty results do not prove absence. Requires an existing graph index; does not refresh or build it.",
+        description = "Incoming call sites for a symbol. Each edge describes its caller; filePath, line and column locate the call in the caller file.",
         output_schema = output_schema::<RelationshipOutput>(),
         annotations(
             title = "Incoming call sites for a symbol",
@@ -422,7 +422,7 @@ impl ZvecGrepMcpServer {
 
     #[tool(
         name = "zvec_grep_callees",
-        description = "Outgoing persisted call sites for an exact or scope-qualified symbol name (Class::method or Class.method, as shown by rg). ::name selects only top-level definitions; plain name matches any scope, and ::ns::name is equivalent to ns::name. Returns matches for exact definitions. When none match, matches is empty and suggestions contains up to 5 similarly named definitions without edges; retry with a suggestion's exact name. Suggestions are best-effort, not an exhaustive symbol search. Same-name definitions remain separate matches. Each edge describes the callee symbol or null if unavailable; filePath, line, and column locate the call in the caller file even when symbol is null. limit caps edges per match (default 20), and truncated indicates additional visible call sites beyond the limit. Each match and its call sites share one consistent index snapshot. Different matches may reflect different indexing moments; definitions changed during the query are skipped. Unresolved references are excluded, so empty results do not prove absence. Requires an existing graph index; does not refresh or build it.",
+        description = "Outgoing call sites for a symbol. Each edge describes its callee; filePath, line and column locate the call in the caller file.",
         output_schema = output_schema::<RelationshipOutput>(),
         annotations(
             title = "Outgoing call sites for a symbol",
@@ -848,7 +848,7 @@ pub struct RelationshipInput {
     /// Absolute workspace root visible to the daemon.
     #[schemars(length(min = 1, max = 1024))]
     pub root: String,
-    /// Symbol name or scope-qualified name, such as `Class::method` or `Class.method` (as shown by rg); `::name` selects only top-level definitions.
+    /// Symbol name or scope-qualified name, such as `Class::method` or `Class.method`; `::name` selects only top-level definitions.
     #[schemars(length(min = 1, max = MAX_RELATIONSHIP_SYMBOL_CHARS))]
     pub symbol: String,
     /// Ordered workspace-relative glob rules for definitions and suggestions; call-site files remain unrestricted.
@@ -856,8 +856,8 @@ pub struct RelationshipInput {
     pub globs: Option<GlobListInput>,
     /// Ordered case-insensitive glob rules, applied after globs, as in search.
     pub insensitive_globs: Option<PathListInput>,
-    /// Maximum edges per matching symbol; defaults to 20.
-    #[schemars(range(min = 1), extend("type" = "integer"))]
+    /// Maximum call sites per matching symbol; defaults to 20, capped at 50.
+    #[schemars(range(min = 1, max = MAX_RELATIONSHIP_EDGES), extend("type" = "integer"))]
     pub limit: Option<usize>,
 }
 
@@ -979,6 +979,9 @@ pub struct SearchInput {
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct IndexInput {
+    /// Persist graph indexing; omitted keeps the saved setting. Changes require rebuild.
+    #[schemars(extend("type" = "boolean"))]
+    pub graph_indexing: Option<bool>,
     /// Absolute workspace root visible to the daemon.
     #[schemars(length(min = 1, max = 1024))]
     pub root: String,
@@ -1881,6 +1884,7 @@ impl IndexInput {
             options: Box::new(IndexOptions {
                 root: Some(root),
                 rebuild: self.rebuild.unwrap_or(false),
+                graph_indexing: self.graph_indexing,
                 reset_paths: self.reset_paths.unwrap_or(false),
                 scan,
                 embedding,
@@ -1901,6 +1905,7 @@ impl IndexInput {
             || self.endpoint.is_some()
             || self.embedding.is_some()
             || self.rebuild.is_some()
+            || self.graph_indexing.is_some()
             || self.reset_paths.is_some()
             || self.included_formats.is_some()
             || self.excluded_formats.is_some()
@@ -3270,17 +3275,8 @@ mod tests {
         ] {
             let instructions = server.get_info().instructions.expect("instructions");
             assert!(instructions.contains("Respect declined or cancelled index setup"));
-            let legacy_instructions = instructions
-                .lines()
-                .filter(|line| {
-                    !line.starts_with(
-                        "- For known symbol names, use zvec_grep_callers or zvec_grep_callees",
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
             assert_eq!(
-                Some(legacy_instructions.as_str()),
+                Some(instructions.as_str()),
                 expected[profile]["instructions"].as_str()
             );
             let search = server
@@ -3345,6 +3341,7 @@ mod tests {
                     "zvec_grep_index" => &[
                         ("drop", "boolean"),
                         ("rebuild", "boolean"),
+                        ("graphIndexing", "boolean"),
                         ("resetPaths", "boolean"),
                         ("includeHidden", "boolean"),
                         ("useDefaultIgnores", "boolean"),
@@ -3440,6 +3437,7 @@ mod tests {
             "drop",
             "rebuild",
             "resetPaths",
+            "graphIndexing",
             "includeHidden",
             "useDefaultIgnores",
             "nestedGit",
@@ -3510,6 +3508,18 @@ mod tests {
 
     #[test]
     fn index_updates_preserve_explicit_values() {
+        for value in [None, Some(false), Some(true)] {
+            let parsed: IndexInput = serde_json::from_value(serde_json::json!({
+                "root": test_root(), "graphIndexing": value
+            }))
+            .expect("graph setting");
+            let IndexToolRequest::Index { options, .. } = parsed.into_request().expect("index")
+            else {
+                panic!("index");
+            };
+            assert_eq!(options.graph_indexing, value);
+        }
+
         let parsed: IndexInput = serde_json::from_value(serde_json::json!({
             "root": test_root(), "globs": [], "includedFormats": [], "excludedFormats": [],
             "includeHidden": false, "followSymlinks": false, "nestedGit": false, "ignoreFiles": [],
@@ -4049,6 +4059,7 @@ mod tests {
 
     fn index_input() -> IndexInput {
         IndexInput {
+            graph_indexing: None,
             root: test_root().display().to_string(),
             api_key: None,
             device: None,

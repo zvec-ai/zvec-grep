@@ -83,6 +83,7 @@ fn relationship_tools_advertise_read_only_schemas_in_both_toolsets() {
             );
             let properties = &value["inputSchema"]["properties"];
             assert_eq!(properties["limit"]["minimum"], 1);
+            assert_eq!(properties["limit"]["maximum"], MAX_RELATIONSHIP_EDGES);
             assert_eq!(properties["symbol"]["minLength"], 1);
             assert_eq!(
                 properties["symbol"]["maxLength"],
@@ -214,6 +215,7 @@ async fn relationship_wire_calls_route_without_indexing_and_return_matching_json
                 json!({"root": root(), "symbol": "::"}),
                 json!({"root": root(), "symbol": "Foo::"}),
                 json!({"root": root(), "symbol": "run", "limit": 0}),
+                json!({"root": root(), "symbol": "run", "limit": MAX_RELATIONSHIP_EDGES + 1}),
                 json!({"root": root(), "symbol": "run", "globs": [{"pattern": ""}]}),
                 json!({"root": root(), "symbol": "run", "globs": "!"}),
                 json!({"root": root(), "symbol": "run", "globs": "["}),

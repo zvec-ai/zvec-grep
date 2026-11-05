@@ -587,6 +587,9 @@ pub use zg_engine::api::relationships::RelationshipDirection;
 #[derive(Debug, Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct IndexArgs {
+    /// Persist graph indexing; changing an existing index requires --rebuild.
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    pub graph: Option<bool>,
     pub root: Option<PathBuf>,
     #[arg(long)]
     pub mode: Option<ClientMode>,
@@ -1602,6 +1605,7 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
     };
     if args.drop {
         if args.rebuild
+            || args.graph.is_some()
             || args.reset_paths
             || args.embedding.is_some()
             || args.model_cache.is_some()
@@ -1653,6 +1657,7 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
         operation: IndexOperation::Build(Box::new(IndexOptions {
             root: Some(root),
             rebuild: args.rebuild,
+            graph_indexing: args.graph,
             reset_paths: args.reset_paths,
             scan,
             embedding,
@@ -2705,6 +2710,7 @@ mod tests {
         }
         for (symbol, limit, message) in [
             (" ".to_owned(), "1", "symbol must contain"),
+            ("run".to_owned(), "51", "relationship limit must not exceed"),
             (
                 "x".repeat(zg_engine::api::relationships::MAX_RELATIONSHIP_SYMBOL_CHARS + 1),
                 "1",
@@ -3321,6 +3327,30 @@ mod tests {
             assert!(Cli::try_parse_from(["zg", "--", option]).is_ok());
             assert!(Cli::try_parse_from(["zg", "--rg", "-e", option]).is_ok());
         }
+    }
+
+    #[test]
+    fn graph_indexing_preserves_explicit_values_and_omission() {
+        for (flags, expected) in [
+            (vec![], None),
+            (vec!["--graph"], Some(true)),
+            (vec!["--graph=true"], Some(true)),
+            (vec!["--graph=false"], Some(false)),
+        ] {
+            let cli = Cli::try_parse_from(["zg", "--index"].into_iter().chain(flags))
+                .expect("graph setting");
+            let CliPlan::Index {
+                operation: IndexOperation::Build(options),
+                ..
+            } = cli.into_plan(std::env::temp_dir()).expect("index plan")
+            else {
+                panic!("index");
+            };
+            assert_eq!(options.graph_indexing, expected);
+        }
+        let cli = Cli::try_parse_from(["zg", "--index", "--drop", "--graph=false"])
+            .expect("argument shape");
+        assert!(cli.into_plan(std::env::temp_dir()).is_err());
     }
 
     #[test]

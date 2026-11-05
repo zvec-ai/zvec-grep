@@ -226,7 +226,7 @@ fn check_localhost_migration(decoy_status: u16, migrate: bool) -> Result<(), Box
     if migrate {
         assert_command_success(&output);
         assert_ne!(after["pid"], original["pid"]);
-        assert_eq!(after["daemonProtocolVersion"], 1);
+        assert_eq!(after["daemonProtocolVersion"], 2);
         assert_healthy(&target)?;
     } else {
         assert_failure(&output, "cannot identify a unique healthy daemon");

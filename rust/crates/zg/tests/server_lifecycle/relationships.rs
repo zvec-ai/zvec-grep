@@ -35,8 +35,8 @@ fn persisted_calls_match_across_direct_daemon_and_mcp() -> Result<(), Box<dyn Er
     let workspace = TempDir::new()?;
     let embedding = EmbeddingServer::start()?;
     std::fs::write(
-        workspace.path().join("calls.py"),
-        "def target():\n    pass\n\ndef caller():\n    target()\n",
+        workspace.path().join("calls.rs"),
+        "fn target() {\n}\n\nfn caller() {\n    target();\n}\n",
     )?;
     std::fs::create_dir(workspace.path().join("src"))?;
     std::fs::write(
@@ -53,6 +53,7 @@ fn persisted_calls_match_across_direct_daemon_and_mcp() -> Result<(), Box<dyn Er
         .env("ZVEC_GREP_API_KEY", "local-test-key")
         .args([
             "--index",
+            "--graph",
             "--mode",
             "direct",
             "--allow-remote",
@@ -63,9 +64,6 @@ fn persisted_calls_match_across_direct_daemon_and_mcp() -> Result<(), Box<dyn Er
         .arg(format!("http://{}/embeddings", embedding.address))
         .output()?;
     assert_command_success(&indexed);
-    // Seed one resolved call against the actual canonical symbols; these
-    // transport tests do not depend on reference resolution.
-    seed_persisted_call(workspace.path())?;
     // Relationship reads must work with the embedding service shut down.
     drop(embedding);
     let (mut guard, _) = start_server(&binary, &home, "agent", None, |_| {})?;
@@ -99,7 +97,7 @@ fn persisted_calls_match_across_direct_daemon_and_mcp() -> Result<(), Box<dyn Er
             assert_eq!(reply["matches"][0]["truncated"], false);
             assert_eq!(reply["matches"][0]["edges"][0]["symbol"]["name"], endpoint);
             assert_eq!(reply["matches"][0]["edges"][0]["line"], 5);
-            assert_eq!(reply["matches"][0]["edges"][0]["filePath"], "calls.py");
+            assert_eq!(reply["matches"][0]["edges"][0]["filePath"], "calls.rs");
             replies.push(reply);
             let (reader, writer) = std::io::pipe()?;
             drop(reader);
@@ -129,7 +127,7 @@ fn assert_glob_filters(
 ) -> Result<(), Box<dyn Error>> {
     let nested = workspace.join("src");
     std::fs::create_dir_all(&nested)?;
-    for (id, path, expected) in [(50, "calls.py", 1), (51, "missing.py", 0)] {
+    for (id, path, expected) in [(50, "calls.rs", 1), (51, "missing.py", 0)] {
         for mode in ["direct", "server"] {
             let output = Command::new(binary)
                 .current_dir(workspace)
@@ -161,7 +159,7 @@ fn assert_glob_filters(
         ("direct", "nested_entry", "main.py", "src/main.py", false),
         ("server", "nested_entry", "main.py", "src/main.py", false),
         ("server", "NESTED_ENTRY", "main.py", "src/main.py", true),
-        ("direct", "target", "calls.py", "calls.py", false),
+        ("direct", "target", "calls.rs", "calls.rs", false),
     ] {
         let output = Command::new(binary)
             .current_dir(&nested)
@@ -221,62 +219,5 @@ fn assert_suggestions(
     assert_eq!(mcp["result"]["structuredContent"], reply);
     let text = mcp["result"]["content"][0]["text"].as_str().ok_or("text")?;
     assert_eq!(serde_json::from_str::<serde_json::Value>(text)?, reply);
-    Ok(())
-}
-
-fn seed_persisted_call(root: &std::path::Path) -> Result<(), Box<dyn Error>> {
-    let home = root.join(".zvec-grep");
-    let storage = home.join("index");
-    let config = zvec_rust::ConfigBuilder::new()
-        .num_threads(2)
-        .memory_limit(512 * 1024 * 1024)
-        .build();
-    zvec_rust::initialize(Some(&config))?;
-    let mut options = zvec_rust::CollectionOptions::new()?;
-    options.set_read_only(true)?;
-    let entities_path = storage.join("entities");
-    let entities =
-        zvec_rust::Collection::open(entities_path.to_str().ok_or("entity path")?, Some(&options))?;
-    let mut query = zvec_rust::SearchQuery::scalar(100)?;
-    query.set_output_fields(&["entity_id", "file_id", "metadata"])?;
-    let mut symbols = std::collections::HashMap::new();
-    for entity in entities.query(&query)? {
-        let Some(metadata) = entity.get_string("metadata")? else {
-            continue;
-        };
-        let metadata: serde_json::Value = serde_json::from_str(&metadata)?;
-        if let Some(name) = metadata["symbol_name"].as_str() {
-            symbols.insert(
-                name.to_owned(),
-                (
-                    entity.get_u32("file_id")?.ok_or("file ID")?,
-                    entity.get_string("entity_id")?.ok_or("entity ID")?,
-                ),
-            );
-        }
-    }
-    let (file_id, caller) = symbols.get("caller").ok_or("caller definition")?;
-    let (_, target) = symbols.get("target").ok_or("target definition")?;
-    // Default indexing leaves graph writes disabled. Supply a read fixture
-    // and its matching workspace setting before any query or daemon opens it.
-    assert!(!storage.join("graph/graph.sqlite").exists());
-    std::fs::create_dir_all(storage.join("graph"))?;
-    let graph = rusqlite::Connection::open(storage.join("graph/graph.sqlite"))?;
-    graph.execute_batch(
-        "PRAGMA application_id = 0x5a475250;
-         CREATE TABLE edges (
-             id INTEGER PRIMARY KEY, file_id INTEGER, source TEXT, target TEXT,
-             kind TEXT, status TEXT, line INTEGER, col INTEGER, provenance TEXT,
-             metadata TEXT NOT NULL DEFAULT '{}'
-         );",
-    )?;
-    graph.execute(
-        "INSERT INTO edges (file_id, source, target, kind, status, line, col, provenance) VALUES (?, ?, ?, 'calls', 'resolved', 5, 4, 'file_local')",
-        rusqlite::params![file_id, caller, target],
-    )?;
-    let manifest_path = home.join("manifest.json");
-    let mut manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
-    manifest["index"]["descriptor"]["graphIndexing"] = json!(true);
-    std::fs::write(manifest_path, serde_json::to_vec(&manifest)?)?;
     Ok(())
 }

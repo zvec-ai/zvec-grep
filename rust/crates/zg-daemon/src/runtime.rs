@@ -487,8 +487,8 @@ async fn execute_relationships(
     request.signal = Some(signal);
     engine_execution(
         state
-            .engine
-            .relationships(direction, request)
+            .runtimes
+            .relationships(&state.engine, direction, request)
             .await
             .map(|result| match direction {
                 RelationshipDirection::Callers => DaemonReply::Callers(result),
