@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 
 const repository = new URL("../../../", import.meta.url);
 const workflow = await readFile(
@@ -90,7 +91,85 @@ test("Retrieval-only retains its reusable and manual candidate/embedding inputs"
     "quarry",
     "results",
   ]);
-  assert.doesNotMatch(workflow, /setup-node|node-version|NODE_VERSION/);
+});
+
+test("suite runner selection keeps both sides of fork PRs on hosted hardware", () => {
+  const expression = jobs.authorize.match(
+    /benchmark-runner:\s*\$\{\{([\s\S]*?)\}\}/,
+  )?.[1];
+  assert.ok(expression, "missing benchmark runner selection");
+  const upstream = "zvec-ai/zvec-grep";
+  const fork = "contributor/zvec-grep";
+  for (const [repository, eventName, headRepository, expected] of [
+    [upstream, "pull_request", upstream, "zvec-retrieval-benchmark"],
+    [upstream, "pull_request", fork, "ubuntu-24.04"],
+    [fork, "pull_request", fork, "ubuntu-24.04"],
+    [fork, "workflow_dispatch", undefined, "ubuntu-24.04"],
+    [upstream, "workflow_dispatch", undefined, "zvec-retrieval-benchmark"],
+    [upstream, "issue_comment", undefined, "zvec-retrieval-benchmark"],
+  ]) {
+    const github = {
+      repository,
+      event_name: eventName,
+      event: headRepository
+        ? { pull_request: { head: { repo: { full_name: headRepository } } } }
+        : {},
+    };
+    // The two reusable calls receive different candidate repositories. Runner
+    // selection must use the shared PR event, including for the upstream base.
+    for (const candidateRepository of [upstream, headRepository ?? upstream]) {
+      assert.equal(
+        runInNewContext(expression, {
+          github,
+          inputs: { candidate_repository: candidateRepository },
+        }),
+        expected,
+        `${repository} ${eventName} candidate=${candidateRepository}`,
+      );
+    }
+  }
+});
+
+test("measurement jobs pin their runtime and share the benchmark host lock", () => {
+  for (const suite of ["sweqa", "beir", "duretrieval", "quarry"]) {
+    assert.match(
+      jobs[suite],
+      /runs-on: \$\{\{ needs\.authorize\.outputs\.benchmark-runner \}\}/,
+      suite,
+    );
+    const setup = steps(jobs[suite]).find((step) =>
+      step.includes("actions/setup-node@"),
+    );
+    assert.ok(setup, `${suite}: explicit Node setup`);
+    assert.match(setup, /node-version: ["']24\.21\.0["']/);
+    const run = steps(jobs[suite]).find((step) =>
+      /node benchmarks\/zg-retrieval\/(?:expansion\/)?run\.mjs/.test(step),
+    );
+    assert.match(run, /flock -n "\$HOME\/\.zvec-retrieval-benchmark\.lock"/);
+    // A shared Actions concurrency group would cancel all but one pending
+    // suite. The single runner queues jobs; the file lock guards measurements.
+    assert.doesNotMatch(jobs[suite], /^ {4}concurrency:/m);
+  }
+  for (const name of [
+    "authorize",
+    "quality-contract",
+    "package-candidate",
+    "results",
+  ])
+    assert.match(jobs[name], /^ {4}runs-on: ubuntu-24\.04$/m, name);
+});
+
+test("Parquet dependencies use temporary virtual environments on persistent runners", () => {
+  for (const suite of ["beir", "duretrieval"]) {
+    const install = steps(jobs[suite]).find((step) =>
+      step.includes("python -m venv"),
+    );
+    assert.ok(install, `${suite}: isolated Python dependencies`);
+    assert.ok(install.includes(`$RUNNER_TEMP/retrieval-${suite}-venv`));
+    assert.match(install, /GITHUB_PATH/);
+    assert.match(install, /\/bin\/python" -m pip install/);
+    assert.ok(install.includes(`requirements-${suite}.txt`));
+  }
 });
 
 test("PR updates run Retrieval-only at the fork head SHA with local embedding and no forwarded secrets", () => {

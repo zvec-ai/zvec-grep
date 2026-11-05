@@ -9,6 +9,7 @@ import {
   summarizeFileRetrieval,
 } from "../metrics/files.mjs";
 import { summarizeMeasurements } from "../metrics/measurements.mjs";
+import { markdownPerformance, summarizePerformance } from "./performance.mjs";
 import { summarizeNdcg } from "../metrics/summary.mjs";
 import { validateZgReport, ZG_MODES } from "./validation.mjs";
 
@@ -231,6 +232,17 @@ function compareValidatedReports(baseline, candidate, before, after) {
       }),
     ),
     tasks: pairs,
+    performance: Object.fromEntries(
+      [
+        ["baseline", baseline],
+        ["candidate", candidate],
+      ].map(([side, report]) => [
+        side,
+        summarizePerformance(
+          report.repositories.map((repo) => repo.performance ?? {}),
+        ),
+      ]),
+    ),
   };
 }
 
@@ -274,6 +286,14 @@ export function markdownComparison(result) {
     "File Hit@1/5/10 and MRR@10 weight original questions equally. nDCG@10 first averages questions within each repository, then weights repositories equally. Native ranks are preserved without deduplication. These SWE-QA accepted-file projection scores measure file localization, not sufficient answer evidence; five repetitions are not independent questions.",
   ];
   const warnings = [...new Set(result.warnings)];
+  for (const side of ["baseline", "candidate"])
+    if (result.performance?.[side])
+      lines.push(
+        "",
+        `## ${side} performance`,
+        "",
+        markdownPerformance(result.performance[side]),
+      );
   if (warnings.length)
     lines.push(
       "",
