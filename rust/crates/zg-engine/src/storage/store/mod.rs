@@ -550,7 +550,7 @@ fn replace_file(
     // zvec writes are durable on success: record retry intent before advancing SQLite.
     if let Ok(storage) = state.graph.as_mut() {
         storage
-            .write_file_graph_with_language(file.id().get(), language, graph, &old_ids)
+            .write_file_graph(file.id().get(), Some(language), graph, &old_ids)
             .map_err(graph_error)?;
     }
     state.fragments.delete_file(file.id())?;

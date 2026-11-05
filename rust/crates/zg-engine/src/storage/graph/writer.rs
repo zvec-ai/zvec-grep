@@ -14,20 +14,23 @@ impl SqliteGraphStorage {
     /// an empty slice for a new file. Snapshot node IDs validate ownership.
     /// The implicit file endpoint is `f{file_id}`, matching
     /// the zvec file document key. Cross-file edges are written by the resolver.
-    /// `language` labels pending references for the resolver's language gate.
+    /// `language` labels pending references for the resolver's language gate;
+    /// `None` records `unknown`, so the gate only keeps candidates that carry
+    /// the same absent evidence.
     /// Read old IDs before mutating zvec, under the same workspace write lock.
     /// This transaction covers SQLite only; the coordinator owns cross-store recovery.
     ///
     /// # Errors
     /// Rejects invalid ownership, duplicate/empty IDs, non-local edges, invalid
     /// positions, read-only connections, and SQLite failures. Failures roll back.
-    pub(crate) fn write_file_graph_with_language(
+    pub(crate) fn write_file_graph(
         &mut self,
         file_id: u32,
-        language: &str,
+        language: Option<&str>,
         graph: &FileGraphResult,
         old_entity_ids: &[String],
     ) -> Result<()> {
+        let language = language.unwrap_or("unknown");
         let file_node_id = format!("f{file_id}");
         validate(&file_node_id, graph, old_entity_ids)?;
         let tx = self
@@ -100,7 +103,8 @@ impl SqliteGraphStorage {
     }
 
     /// Deletes owned rows and invalidates incoming references, including imports
-    /// targeting the file itself. Repeating deletion is safe.
+    /// targeting the file itself. Repeating deletion is safe. Deletion carries no
+    /// language evidence, so it records `unknown`.
     ///
     /// # Errors
     /// Rejects empty IDs and SQLite failures. The complete mutation is atomic.
@@ -109,24 +113,7 @@ impl SqliteGraphStorage {
         file_id: u32,
         old_entity_ids: &[String],
     ) -> Result<()> {
-        self.write_file_graph_with_language(
-            file_id,
-            "unknown",
-            &FileGraphResult::default(),
-            old_entity_ids,
-        )
-    }
-
-    /// Snapshot write without a persisted language. Tests that do not exercise
-    /// import resolution use this entry point.
-    #[cfg(test)]
-    pub(crate) fn write_file_graph(
-        &mut self,
-        file_id: u32,
-        graph: &FileGraphResult,
-        old_entity_ids: &[String],
-    ) -> Result<()> {
-        self.write_file_graph_with_language(file_id, "unknown", graph, old_entity_ids)
+        self.write_file_graph(file_id, None, &FileGraphResult::default(), old_entity_ids)
     }
 }
 
