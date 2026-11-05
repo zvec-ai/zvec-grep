@@ -16,12 +16,13 @@ fn assert_user_agent(request: &str) {
 }
 
 fn respond_partial(stream: &mut TcpStream) {
-    write!(
-        stream,
+    let headers = format!(
         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         BYTES.len()
-    )
-    .expect("write response headers");
+    );
+    stream
+        .write_all(headers.as_bytes())
+        .expect("write response headers");
     stream.write_all(&BYTES[..4]).expect("write partial body");
     stream.flush().expect("flush partial body");
 }
@@ -257,11 +258,12 @@ async fn modelscope_redirect_preserves_user_agent_at_the_cdn() {
             respond(stream, 503, b"");
         } else {
             assert!(request.contains("/iic/model/"));
-            write!(
-                stream,
+            let response = format!(
                 "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            )
-            .expect("redirect to another origin");
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("redirect to another origin");
         }
     });
     let events = Arc::new(Mutex::new(Vec::new()));

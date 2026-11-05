@@ -48,11 +48,14 @@ async fn connect_proxy_failure(status: Option<u16>) -> reqwest::Error {
             }
         }
         if let Some(status) = status {
-            write!(
-                stream,
+            // A CONNECT client may close as soon as it sees a rejected status.
+            // Format in memory so interpolation cannot split the socket writes.
+            let response = format!(
                 "HTTP/1.1 {status} Rejected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            )
-            .expect("reject CONNECT");
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("reject CONNECT");
         }
         // None closes the proxy connection before a tunnel response arrives.
     });
@@ -93,6 +96,24 @@ async fn connect_proxy_eof_allows_ipv4_retry_without_exposing_secrets() {
 async fn connect_proxy_authentication_and_unsuccessful_responses_do_not_retry() {
     for status in [407, 502] {
         let error = connect_proxy_failure(Some(status)).await;
+        let mut cause = Some(&error as &(dyn std::error::Error + 'static));
+        let tunnel_error = loop {
+            let current = cause.expect("CONNECT failure contains a tunnel error");
+            if let Some(error) = current.downcast_ref::<ProxyTunnelError>() {
+                break error;
+            }
+            cause = current.source();
+        };
+        // In particular, a truncated 407 prefix must not pass this test as a
+        // generic unsuccessful tunnel just because both errors prohibit retry.
+        assert!(
+            matches!(
+                (status, tunnel_error),
+                (407, ProxyTunnelError::ProxyAuthRequired)
+                    | (502, ProxyTunnelError::TunnelUnsuccessful)
+            ),
+            "CONNECT status {status} must retain its structured error"
+        );
         let failure = network_error("unable to request model artifact", error);
         assert!(!failure.ipv4_retry_allowed(), "status {status}: {failure}");
     }

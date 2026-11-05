@@ -141,13 +141,15 @@ impl TestServer {
 
 fn respond(mut stream: TcpStream, status: u16, body: &[u8]) {
     let reason = if status == 200 { "OK" } else { "Unavailable" };
-    write!(
-        stream,
+    // Error responses may be rejected as soon as their headers arrive. Queue
+    // the complete response together before the client can close the socket.
+    let mut response = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     )
-    .expect("write response headers");
-    stream.write_all(body).expect("write response body");
+    .into_bytes();
+    response.extend_from_slice(body);
+    stream.write_all(&response).expect("write response");
 }
 
 fn partial_files(path: &Path) -> Vec<PathBuf> {
@@ -391,12 +393,13 @@ async fn interrupted_stream_falls_back_and_removes_partial_file() {
     let root = tempfile::tempdir().expect("cache root");
     let server = TestServer::spawn(3, |_index, request, mut stream| {
         if request.contains("/owner/model/") {
-            write!(
-                stream,
+            let headers = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 BYTES.len()
-            )
-            .expect("write response headers");
+            );
+            stream
+                .write_all(headers.as_bytes())
+                .expect("write response headers");
             stream.write_all(&BYTES[..4]).expect("write partial body");
         } else {
             respond(stream, 200, BYTES);
@@ -510,12 +513,13 @@ async fn read_idle_timeout_falls_back_and_preserves_both_source_errors() {
     let root = tempfile::tempdir().expect("cache root");
     let server = TestServer::spawn(3, |_index, request, mut stream| {
         if request.contains("/owner/model/") {
-            write!(
-                stream,
+            let headers = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 BYTES.len()
-            )
-            .expect("write response headers");
+            );
+            stream
+                .write_all(headers.as_bytes())
+                .expect("write response headers");
             stream.flush().expect("flush response headers");
             thread::sleep(Duration::from_millis(75));
         } else {
