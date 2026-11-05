@@ -19,8 +19,8 @@ use crate::{
     },
     models::{
         artifacts::{
-            ArtifactSource, LocalModelBackend, ModelDownloadProgressReporter, ResolveArtifacts,
-            default_model_cache, resolve_model_artifacts,
+            ArtifactHttpClient, ArtifactSource, LocalModelBackend, ModelDownloadProgressReporter,
+            ResolveArtifacts, default_model_cache, resolve_model_artifacts,
         },
         catalog::Model2VecConfig,
         runtime::ModelComputeRuntime,
@@ -276,13 +276,13 @@ trait TokenizerRuntime: Send + Sync {
 }
 
 struct DefaultModel2VecDependencies {
-    client: reqwest::Client,
+    client: ArtifactHttpClient,
 }
 
 impl DefaultModel2VecDependencies {
     fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: ArtifactHttpClient::new(),
         }
     }
 }
