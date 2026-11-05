@@ -77,6 +77,13 @@ pub(crate) struct ResolutionSweep {
     reason = "One sweep walks the rule chain in order; splitting it would hide the precedence"
 )]
 pub(crate) fn resolve_pending(store: &IndexStore) -> crate::EngineResult<ResolutionSweep> {
+    if !store.graph_enabled() {
+        // A workspace without a graph has nothing to resolve. Answering here
+        // keeps the snapshot's whole-workspace file and entity projection off
+        // every indexing pass, and stops the caller from reporting an absent
+        // feature as a failed sweep on each refresh.
+        return Ok(ResolutionSweep::default());
+    }
     let snapshot = store.resolution_snapshot()?;
     let mut sweep = ResolutionSweep::default();
     let mut resolutions = Vec::new();
@@ -125,6 +132,17 @@ pub(crate) fn resolve_pending(store: &IndexStore) -> crate::EngineResult<Resolut
                 resolutions.push(resolution);
                 continue;
             }
+            if stored.reference.ref_kind == GraphEdgeKind::Imports && stored.language != "rust" {
+                // Only Rust's `use a::b` addresses an item by name: its
+                // specifier is a name binding, so the name index is the only
+                // rule that can answer it. A TS/JS or Python import addresses
+                // a module instead; when the path rules above could not place
+                // it — a scoped package, a `paths` alias — a name match would
+                // be a coincidence, and the wrong bind also rewrites this
+                // file's import scope for every later bare-name resolution.
+                // Defer instead.
+                continue;
+            }
             if let Some(resolution) = resolve_alias_bound(
                 store,
                 &snapshot,
@@ -163,11 +181,6 @@ pub(crate) fn resolve_pending(store: &IndexStore) -> crate::EngineResult<Resolut
                 };
                 filter_compatible_hits(&snapshot, stored, raw, &mut candidate_paths)
             };
-            if let Some(resolution) = resolve_receiver_local(stored, &hits) {
-                resolutions.push(resolution);
-                sweep.file_scoped += 1;
-                continue;
-            }
             if let Some(resolution) = resolve_receiver_class(store, &snapshot, stored, &hits)? {
                 // The receiver names the enclosing instance or superclass, so
                 // the member's declaring scope is pinned to the owner's class
@@ -772,35 +785,6 @@ fn alias_target_file_uncached(
     None
 }
 
-/// Binds a `self.`/`this.` receiver call to the one entity declaring the
-/// invoked member in the same file: the receiver names the enclosing
-/// instance, so a unique same-file declaration is that member's definition.
-/// Members inherited from base classes and members declared more than once
-/// in the file stay pending.
-fn resolve_receiver_local(
-    stored: &StoredPendingRef,
-    hits: &[NameIndexEntry],
-) -> Option<Resolution> {
-    if !matches!(
-        stored.reference.receiver_name.as_deref(),
-        Some("self" | "this")
-    ) {
-        return None;
-    }
-    let local: Vec<&NameIndexEntry> = hits
-        .iter()
-        .filter(|hit| hit.file_id == stored.file_id)
-        .collect();
-    if let [hit] = local.as_slice() {
-        return Some(Resolution {
-            ref_id: stored.id,
-            target_id: hit.entity_id.clone(),
-            provenance: EdgeProvenance::FileScoped,
-        });
-    }
-    None
-}
-
 /// Resolves a receiver call that names the enclosing instance (`self`,
 /// `this`, Python's `me`) or the superclass (`super`): the receiver's type
 /// is the class owning the call site, so the invoked member's declaring
@@ -1086,9 +1070,9 @@ fn resolve_qualified_name(
 /// Scoped specifiers (`@scope/pkg`) and path aliases (`@/x`) always stay
 /// queued: a workspace's own package name or `paths` mapping can route them
 /// inside the workspace while no file or directory spells the scope, so
-/// existence cannot be proven either way. They are safe to hold — their
-/// name tails contain `/`, which entity names never do, so the uniqueness
-/// rule cannot mis-bind them.
+/// existence cannot be proven either way. Holding them is safe because
+/// non-Rust import references never reach the name index: their specifier
+/// addresses a module, and only path rules can place it.
 fn is_unresolvable_import(
     snapshot: &ResolutionSnapshot,
     reference: &StoredPendingRef,
