@@ -46,7 +46,7 @@ impl Fixture {
         let home_lock = acquire_workspace_lock(&self.layout, LockMode::Shared, "test.query")
             .expect("read lock");
         let lease = cache
-            .acquire(&self.layout, &self.storage_home, "initial")
+            .acquire(&self.layout, &self.storage_home, "initial", false)
             .expect("read session");
         (home_lock, lease)
     }
@@ -112,6 +112,7 @@ fn write_text(layout: &WorkspaceLayout, storage_home: &Path, text: &str) {
     let _lock = acquire_workspace_lock(layout, LockMode::Exclusive, "test.write")
         .expect("writer drains cache");
     let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        graph_enabled: false,
         storage_path: storage_home.to_path_buf(),
         embeddings: vec![schema()],
     })
@@ -262,7 +263,7 @@ fn dropping_a_clone_preserves_the_cache_until_the_last_owner() {
     drop(lease);
     drop(cache);
     let lease = remaining
-        .acquire(&fixture.layout, &fixture.storage_home, "initial")
+        .acquire(&fixture.layout, &fixture.storage_home, "initial", false)
         .expect("remaining cache owner");
     assert!(Weak::ptr_eq(&session, &Arc::downgrade(&lease.session)));
     drop(lease);
@@ -424,7 +425,7 @@ fn generation_replacement_and_shutdown_preserve_inflight_readers() {
     let (home_lock, first) = fixture.read(&cache);
     let previous = Arc::downgrade(&first.session);
     let second = cache
-        .acquire(&fixture.layout, &replacement, "replacement")
+        .acquire(&fixture.layout, &replacement, "replacement", false)
         .expect("new generation");
     assert!(!Weak::ptr_eq(&previous, &Arc::downgrade(&second.session)));
     assert_eq!(
@@ -446,7 +447,7 @@ fn generation_replacement_and_shutdown_preserve_inflight_readers() {
     cache.close();
     assert!(
         cache
-            .acquire(&fixture.layout, &replacement, "replacement")
+            .acquire(&fixture.layout, &replacement, "replacement", false)
             .is_err()
     );
     assert!(second.storage().list_files().is_ok());
@@ -499,14 +500,18 @@ fn failed_open_can_be_retried_without_leaking_a_residency_lock() {
     let missing = fixture.layout.staged_index_dir().to_path_buf();
     let reader =
         acquire_workspace_lock(&fixture.layout, LockMode::Shared, "test.query").expect("reader");
-    assert!(cache.acquire(&fixture.layout, &missing, "missing").is_err());
+    assert!(
+        cache
+            .acquire(&fixture.layout, &missing, "missing", false)
+            .is_err()
+    );
     drop(reader);
     fs::create_dir_all(&missing).expect("new generation");
     write_text(&fixture.layout, &missing, "vineyard");
     let _reader =
         acquire_workspace_lock(&fixture.layout, LockMode::Shared, "test.query").expect("reader");
     let lease = cache
-        .acquire(&fixture.layout, &missing, "missing")
+        .acquire(&fixture.layout, &missing, "missing", false)
         .expect("retry opens published storage");
     assert_eq!(
         lease
@@ -653,6 +658,7 @@ fn cold_open_does_not_block_another_workspaces_cache_hit() {
                     started.send(()).expect("opening");
                     released.recv().expect("allow native open");
                     IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
+                        graph_enabled: false,
                         storage_path: cold.storage_home.clone(),
                     })
                 })
@@ -689,7 +695,7 @@ fn changing_generation_retires_a_session_even_at_the_same_index_path() {
     let original = Arc::downgrade(&first.session);
     drop(first);
     let replacement = cache
-        .acquire(&fixture.layout, &fixture.storage_home, "replacement")
+        .acquire(&fixture.layout, &fixture.storage_home, "replacement", false)
         .expect("new generation");
     assert_eq!(original.strong_count(), 0);
     assert_ne!(replacement.session.generation, "initial");

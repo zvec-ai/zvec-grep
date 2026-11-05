@@ -102,14 +102,18 @@ impl ReadSessionCache {
     }
 
     /// The caller holds the workspace read lock throughout the lease.
+    /// `graph_enabled` comes from the published descriptor; changing it requires
+    /// a rebuild, so the generation also identifies the graph configuration.
     pub(crate) fn acquire(
         &self,
         layout: &WorkspaceLayout,
         storage_home: &Path,
         generation: &str,
+        graph_enabled: bool,
     ) -> EngineResult<ReadSessionLease> {
         self.acquire_with(layout, storage_home, generation, || {
             IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
+                graph_enabled,
                 storage_path: storage_home.to_path_buf(),
             })
         })
@@ -269,10 +273,11 @@ impl CacheInner {
 }
 
 impl ReadSessionLease {
-    pub(crate) fn open(storage_home: &Path) -> EngineResult<Self> {
+    pub(crate) fn open(storage_home: &Path, graph_enabled: bool) -> EngineResult<Self> {
         Ok(Self {
             session: Arc::new(ReadSession {
                 storage: IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
+                    graph_enabled,
                     storage_path: storage_home.to_path_buf(),
                 })?,
                 storage_home: storage_home.to_path_buf(),

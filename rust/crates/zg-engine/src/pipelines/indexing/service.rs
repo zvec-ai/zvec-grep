@@ -201,16 +201,14 @@ impl WorkspaceIndexService {
         } else {
             workspace.layout().index_dir()
         };
-        let storage = IndexStore::open_with_graph(
-            WorkspaceIndexStorageOptions::ReadWrite {
-                storage_path: storage_path.to_path_buf(),
-                embeddings: models.iter().map(|model| model.info().clone()).collect(),
-            },
-            workspace
+        let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+            graph_enabled: workspace
                 .index()
                 .descriptor()
                 .is_some_and(IndexDescriptor::graph_indexing),
-        )?;
+            storage_path: storage_path.to_path_buf(),
+            embeddings: models.iter().map(|model| model.info().clone()).collect(),
+        })?;
         let writer = self.writers.register(
             crate::pipelines::indexed_search::writer::WriterSession::new(
                 storage,
@@ -313,6 +311,10 @@ impl WorkspaceIndexService {
             return Ok(false);
         }
         let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
+            graph_enabled: workspace
+                .index()
+                .descriptor()
+                .is_some_and(IndexDescriptor::graph_indexing),
             storage_path: workspace.layout().index_dir().to_path_buf(),
         })?;
         let status =
@@ -368,6 +370,10 @@ impl WorkspaceIndexService {
         let indexed = metadata_indexed && storage_exists;
         let status = if options.include_status && indexed {
             let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
+                graph_enabled: workspace
+                    .index()
+                    .descriptor()
+                    .is_some_and(IndexDescriptor::graph_indexing),
                 storage_path: workspace.layout().index_dir().to_path_buf(),
             })?;
             let status =
@@ -1845,6 +1851,63 @@ mod tests {
             .index()
             .descriptor()
             .is_some_and(IndexDescriptor::graph_indexing)
+    }
+
+    #[tokio::test]
+    async fn workspace_setting_controls_graph_writes_and_cached_and_uncached_reads() {
+        use crate::api::relationships::{RelationshipDirection, RelationshipOptions};
+        for graph_enabled in [false, true] {
+            let directory = tempdir().expect("workspace");
+            let engine = crate::ZvecGrep::new();
+            engine
+                .index(IndexOptions {
+                    graph_indexing: Some(graph_enabled),
+                    ..empty_index_options(directory.path())
+                })
+                .await
+                .expect("index empty workspace");
+            let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+            let workspace = super::read_workspace_manifest(directory.path(), &layout)
+                .expect("manifest")
+                .expect("published index");
+            assert_eq!(
+                workspace
+                    .layout()
+                    .index_dir()
+                    .join("graph/graph.sqlite")
+                    .exists(),
+                graph_enabled
+            );
+            for cached in [false, true] {
+                if cached {
+                    engine.enable_read_session_cache().expect("enable cache");
+                }
+                for direction in [
+                    RelationshipDirection::Callers,
+                    RelationshipDirection::Callees,
+                ] {
+                    let result = engine
+                        .relationships(
+                            direction,
+                            RelationshipOptions {
+                                root: Some(directory.path().to_path_buf()),
+                                symbol: "missing".into(),
+                                ..RelationshipOptions::default()
+                            },
+                        )
+                        .await;
+                    if graph_enabled {
+                        assert!(result.expect("enabled graph read").matches.is_empty());
+                    } else {
+                        assert_eq!(
+                            result.expect_err("disabled graph read").code(),
+                            crate::EngineError::UNSUPPORTED
+                        );
+                    }
+                }
+            }
+            engine.close();
+        }
     }
 
     #[tokio::test]
