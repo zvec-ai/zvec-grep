@@ -63,8 +63,8 @@ fn persisted_calls_match_across_direct_daemon_and_mcp() -> Result<(), Box<dyn Er
         .arg(format!("http://{}/embeddings", embedding.address))
         .output()?;
     assert_command_success(&indexed);
-    // Graph extraction is a separate change. Seed one persisted call against
-    // the actual canonical symbols so this test exercises the query chain.
+    // Seed one resolved call against the actual canonical symbols; these
+    // transport tests do not depend on reference resolution.
     seed_persisted_call(workspace.path())?;
     // Relationship reads must work with the embedding service shut down.
     drop(embedding);
@@ -257,14 +257,13 @@ fn seed_persisted_call(root: &std::path::Path) -> Result<(), Box<dyn Error>> {
     }
     let (file_id, caller) = symbols.get("caller").ok_or("caller definition")?;
     let (_, target) = symbols.get("target").ok_or("target definition")?;
-    // Default indexing leaves graph writes disabled. Supply a version-1 read
-    // fixture with the columns consumed by the reader to exercise the transports.
+    // Default indexing leaves graph writes disabled. Supply a read fixture
+    // and its matching workspace setting before any query or daemon opens it.
     assert!(!storage.join("graph/graph.sqlite").exists());
     std::fs::create_dir_all(storage.join("graph"))?;
     let graph = rusqlite::Connection::open(storage.join("graph/graph.sqlite"))?;
     graph.execute_batch(
-        "PRAGMA user_version = 1;
-         PRAGMA application_id = 0x5a475250;
+        "PRAGMA application_id = 0x5a475250;
          CREATE TABLE edges (
              id INTEGER PRIMARY KEY, file_id INTEGER, source TEXT, target TEXT,
              kind TEXT, status TEXT, line INTEGER, col INTEGER, provenance TEXT,
@@ -275,5 +274,9 @@ fn seed_persisted_call(root: &std::path::Path) -> Result<(), Box<dyn Error>> {
         "INSERT INTO edges (file_id, source, target, kind, status, line, col, provenance) VALUES (?, ?, ?, 'calls', 'resolved', 5, 4, 'file_local')",
         rusqlite::params![file_id, caller, target],
     )?;
+    let manifest_path = home.join("manifest.json");
+    let mut manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
+    manifest["index"]["descriptor"]["graphIndexing"] = json!(true);
+    std::fs::write(manifest_path, serde_json::to_vec(&manifest)?)?;
     Ok(())
 }
