@@ -1,0 +1,48 @@
+diff --git a/src/core/algorithm/diskann/diskann_indexer.cc b/src/core/algorithm/diskann/diskann_indexer.cc
+index b5f4fdc0..f50a41b9 100644
+--- a/src/core/algorithm/diskann/diskann_indexer.cc
++++ b/src/core/algorithm/diskann/diskann_indexer.cc
+@@ -78,6 +78,20 @@ DiskAnnIndexer::~DiskAnnIndexer() {
+ int DiskAnnIndexer::init(DiskAnnSearcherEntity &entity,
+                          turbo::Quantizer::Pointer quantizer) {
+   node_record_reads_ = false;
++  search_beam_width_ = 0;
++#if defined(__APPLE__) && TARGET_OS_OSX
++  if (const char *text = std::getenv("ZVEC_DISKANN_SEARCH_BEAM")) {
++    size_t value = 0;
++    if (!*text) return IndexError_InvalidArgument;
++    for (const char *p = text; *p; ++p) {
++      if (*p < '0' || *p > '9') return IndexError_InvalidArgument;
++      value = value * 10 + static_cast<size_t>(*p - '0');
++      if (value > 32) return IndexError_InvalidArgument;
++    }
++    if (!value) return IndexError_InvalidArgument;
++    search_beam_width_ = static_cast<uint32_t>(value);
++  }
++#endif
+   auto storage = entity.get_storage();
+   auto vector_segment = entity.get_vector_segment();
+   if (!storage || !vector_segment) {
+@@ -1322,7 +1336,9 @@ int DiskAnnIndexer::cached_beam_search_impl(DiskAnnContext *ctx) {
+       std::max(1u, static_cast<uint32_t>(DiskAnnUtil::kMaxSectorReadNum /
+                                          sector_num_per_node));
+   uint32_t effective_beam_width = std::min(
+-      std::max(8u, std::min(ctx->list_size() / 5, 32u)), max_beam_width);
++      search_beam_width_ ? search_beam_width_
++                         : std::max(8u, std::min(ctx->list_size() / 5, 32u)),
++      max_beam_width);
+ 
+   std::vector<diskann_id_t> frontier;
+   frontier.reserve(2 * effective_beam_width);
+diff --git a/src/core/algorithm/diskann/diskann_indexer.h b/src/core/algorithm/diskann/diskann_indexer.h
+index 5112124c..43d2a33d 100644
+--- a/src/core/algorithm/diskann/diskann_indexer.h
++++ b/src/core/algorithm/diskann/diskann_indexer.h
+@@ -132,6 +132,7 @@ class DiskAnnIndexer {
+   std::map<diskann_id_t, void *> coord_cache_;
+   std::map<diskann_id_t, std::pair<uint32_t, diskann_id_t *>> neighbor_cache_;
+   uint32_t beam_width_{2};
++  uint32_t search_beam_width_{0};
+   uint32_t io_limit_{std::numeric_limits<uint32_t>::max()};
+ 
+   uint64_t doc_cnt_{0};

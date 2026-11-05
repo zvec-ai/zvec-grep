@@ -69,11 +69,17 @@ results, and retests zvec against the Microsoft Rust/SQLite adapter on 200k–1M
 Cohere vectors. It reports I/O worker counts alongside QPS, RSS, and recall.
 
 The latest [disjoint warmup, single-pass query report](rust/benchmarks/diskann/REPORT_NODE_CN.md)
-uses 600 warmup, 400 validation, and 3,000 test queries with no overlap.
-Every test query runs once per backend and scale across six fresh processes.
-All shards exceed 90% recall: zvec is faster at 200k, roughly tied at 400k,
-and slower than the Microsoft adapter at 600k–1M. The report includes RSS and
-cache-budget memory controls; the earlier [repeated warm-query results](rust/benchmarks/diskann/REPORT_NODE_WARM_CN.md) remain available separately.
+tests local zvec `047ebaf4` on 600k–1M vectors. With 600 independent warmup
+queries, 400 validation queries, and 500 previously unused test queries,
+zvec is 15.60%–18.86% faster than the Microsoft Rust/SQLite adapter at
+91.96%–93.20% recall. Each test query runs once per backend and scale.
+A separate 3,000-query regression also leads in aggregate at all three scales.
+The report separates code and search-effort gains and discloses the 24 I/O
+workers, 64 MiB cache, unequal actual recall, and higher zvec RSS. Released SDK
+binaries do not yet contain these changes. The earlier
+[unknown-query baseline](rust/benchmarks/diskann/REPORT_UNSEEN_BASELINE_CN.md)
+and [repeated warm-query results](rust/benchmarks/diskann/REPORT_NODE_WARM_CN.md)
+remain available separately.
 
 **Install**: `npm install -g @zvec/zvec-grep`, or via Homebrew (macOS/Linux):
 `brew install zvec-grep`

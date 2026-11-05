@@ -1,0 +1,7 @@
+{
+  "action": "copy previously built baseline executable into a new directory",
+  "observed_exit_code": 137,
+  "stdout_bytes": 0,
+  "stderr": "",
+  "resolution": "use the original working baseline path and a freshly linked candidate executable; no formal test queries were executed by the failed process"
+}

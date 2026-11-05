@@ -1,0 +1,424 @@
+diff --git a/DISKANN_READ_CACHE_CN.md b/DISKANN_READ_CACHE_CN.md
+index 905840e7..086f4c27 100644
+--- a/DISKANN_READ_CACHE_CN.md
++++ b/DISKANN_READ_CACHE_CN.md
+@@ -4,11 +4,13 @@ macOS 的 FileReadStorage 路径为每个 DiskANN 图文件设置固定预算的
+ 
+ 缓存保存图文件中完整的单个节点记录，包含 FP16/FP32 原向量、邻居数量与邻居槽位。记录长度来自索引元数据，不硬编码向量维度或邻居数。例如本轮百万 Cohere 索引的记录长 1708 字节，包含 1536 字节 FP16 向量、4 字节计数和 42 个邻居槽位；这是图文件观察到的最大容量，配置的构图出度仍为 32。记录没有再次量化或改写，磁盘布局、图结构、PQ 和距离计算不变。
+ 
+-缓存数据区按记录紧凑排列；最多 16 路组相联、second-chance 淘汰，减少接近容量时的哈希冲突淘汰。预算放不下完整一组时，逐步缩小路数直到能容纳；容量同时计算实际数据和元数据。路数不是线程数。锁只覆盖查找、复制与发布，磁盘 I/O 在锁外进行。并发未命中可能重复读取，但只缓存完整且成功读取的记录。
++缓存数据区按记录紧凑排列；最多 16 路组相联，减少接近容量时的哈希冲突淘汰。Clock 淘汰给新节点 1 次保留机会，重复命中累积到最多 3 次；扫描时逐次扣减，避免一次性访问过早淘汰常用节点，同时允许工作集变化后淘汰旧热点。预算放不下完整一组时，逐步缩小路数直到能容纳；容量同时计算实际数据和元数据。路数不是线程数。锁只覆盖查找、复制与发布，磁盘 I/O 在锁外进行。并发未命中可能重复读取，但只缓存完整且成功读取的记录。
+ 
+ 读盘仍使用原来的扇区范围、扇区长度和 scratch buffer，保留 `F_NOCACHE` 与关闭预读设置。请求同时描述逻辑节点范围和包围它的磁盘传输范围；未命中时按原扇区读取，缓存只留下目标节点。命中时只复制逻辑节点区域。大节点跨越多页时，同样读取完整扇区范围并缓存整条记录。请求范围与目标缓冲区偏移必须匹配；并行前检查实际磁盘传输的目标范围是否重叠。这样可以提高缓存利用率，又避免把磁盘 I/O 拆成大量小尺寸请求。索引文件无需重建，原有节点解码位置不变。
+ 
+-每个 reader 复用固定的读取线程池，默认 4 个工作线程，通过 `ZVEC_DISKANN_READ_WORKERS=1..8` 配置。1 在查询线程上串行读取；该参数独立于查询并发和计算线程数。缓存命中在调用线程直接完成，仅把多个未命中请求送入线程池；没有未命中时不唤醒线程，只有一次未命中时直接读取。多个查询共享同一个池，批次轮转分配读取机会，不为每个节点创建线程或分配任务对象。
++每个 reader 复用固定的读取线程池，默认 4 个工作线程，通过 `ZVEC_DISKANN_READ_WORKERS=1..32` 配置。1 在查询线程上串行读取；该参数独立于查询并发和计算线程数。缓存命中在调用线程直接完成，仅把多个未命中请求送入线程池；没有未命中时不唤醒线程，只有一次未命中时直接读取。多个查询共享同一个池，批次轮转分配工作线程，再通过批次内原子索引领取请求，避免每次读取前后争用全局队列锁。小批次只唤醒所需数量的线程，不为每个节点创建线程或分配任务对象。更大的 I/O 并发可以覆盖更多读盘等待，但线程数增加并不保证性能持续提高；每个图文件均有自己的线程上限。
++
++图搜索还在 PQ 距离计算前排除已经访问的邻居，并复用每个查询的邻居与距离临时数组；保持首次访问的候选插入顺序。只有可能进入 top-k 的候选才复制原向量，比较规则与原 heap 相同。以上修改复用原图、PQ、精度和磁盘格式。搜索参数 L 仍独立决定搜索工作量与召回率，应只在独立验证集上选择。
+ 
+ 一个批次全部完成后，搜索按原提交顺序处理节点。出错时也先回收全部任务，再返回按请求顺序出现的第一个错误，避免调用者释放缓冲区后后台仍在写入。目标缓冲区可能重叠时保持串行。关闭时先回收线程，再释放缓存与文件；重开文件时清空缓存，保留原有文件身份校验。配置和关闭要求没有进行中的查询。
+ 
+@@ -16,4 +18,4 @@ macOS 的 FileReadStorage 路径为每个 DiskANN 图文件设置固定预算的
+ 
+ 诊断可设置 `ZVEC_DISKANN_PROFILE_READS=1`，在 reader 关闭时输出 JSON。`requests` 与 `requested_bytes` 是逻辑节点请求；`pread_syscalls` 是实际系统调用数，`read_bytes` 是成功传输的字节（含扇区中未被缓存的部分）；`read_ns` 为各线程读取函数耗时之和，`batch_ns` 为批次墙钟时间。统计覆盖 reader 配置后的生命周期，包含初始化读取和预热；不是正式计时阶段的单独统计。并行耗时允许超过墙钟时间，也不等于 SSD 纯服务时间或物理介质实际传输量。正式 QPS 测试关闭诊断。
+ 
+-测试覆盖预算与线程数解析、固定记录容量、小预算与大记录、整数边界、缓存命中和淘汰、并发访问、失败不入缓存、非对齐逻辑范围、整页传输、目标缓冲区范围验证、跨页节点、文件重开、异常回收，以及小节点和多页节点的建库／加载／查询闭环。Cohere 对比复用原索引、FP16、PQ64、GT 与冻结的 L，两版均为 64 MiB 缓存和 8 个读取工作线程，并重新对测微软 Rust/SQLite/PQ 方案。
++测试覆盖预算与线程数解析、固定记录容量、小预算与大记录、整数边界、热点保留与过期淘汰、32 线程池的逐请求执行与异常回收、并发访问、失败不入缓存、非对齐逻辑范围、整页传输、目标缓冲区范围验证、跨页节点、文件重开，以及小节点和多页节点的建库／加载／查询闭环。Cohere 对比使用互斥预热集、验证集和单遍测试集；参数在验证集冻结后，再对比 QPS、RSS 和 Recall@10。
+diff --git a/src/core/algorithm/diskann/diskann_file_reader.cc b/src/core/algorithm/diskann/diskann_file_reader.cc
+index c9ef2dd7..2525f54d 100644
+--- a/src/core/algorithm/diskann/diskann_file_reader.cc
++++ b/src/core/algorithm/diskann/diskann_file_reader.cc
+@@ -815,7 +815,7 @@ int LinuxAlignedFileReader::read_cached(const AlignedRead &req) {
+ }
+ 
+ int LinuxAlignedFileReader::configure_read_workers(size_t workers) {
+-  if (workers < 1 || workers > 8) return IndexError_InvalidArgument;
++  if (workers < 1 || workers > 32) return IndexError_InvalidArgument;
+   try {
+     std::unique_ptr<DiskAnnReadExecutor> next;
+     if (workers > 1) next.reset(new DiskAnnReadExecutor(workers));
+diff --git a/src/core/algorithm/diskann/diskann_indexer.cc b/src/core/algorithm/diskann/diskann_indexer.cc
+index b5f4fdc0..7aef6d3a 100644
+--- a/src/core/algorithm/diskann/diskann_indexer.cc
++++ b/src/core/algorithm/diskann/diskann_indexer.cc
+@@ -275,7 +275,7 @@ int DiskAnnIndexer::init(DiskAnnSearcherEntity &entity,
+     size_t workers = 0;
+     if (!DiskAnnReadExecutor::parse_workers(
+             std::getenv("ZVEC_DISKANN_READ_WORKERS"), &workers)) {
+-      LOG_ERROR("ZVEC_DISKANN_READ_WORKERS must be an integer in [1, 8]");
++      LOG_ERROR("ZVEC_DISKANN_READ_WORKERS must be an integer in [1, 32]");
+       return IndexError_InvalidArgument;
+     }
+     ret = file_reader->configure_read_workers(workers);
+@@ -1337,6 +1337,35 @@ int DiskAnnIndexer::cached_beam_search_impl(DiskAnnContext *ctx) {
+       cached_neighbors;
+   cached_neighbors.reserve(2 * effective_beam_width);
+ 
++  // Previously visited neighbors cannot enter the candidate queue again.
++  // Filter them before the PQ lookup, retaining the first-visit order, and
++  // reuse the temporary arrays across all expanded nodes in this query.
++  std::vector<diskann_id_t> unseen_neighbors;
++  std::vector<float> neighbor_distances;
++  unseen_neighbors.reserve(max_degree_);
++  neighbor_distances.reserve(max_degree_);
++  const auto expand_neighbors = [&](const diskann_id_t *neighbors,
++                                    uint32_t count) {
++    cpu_timer.reset();
++    unseen_neighbors.clear();
++    for (uint32_t i = 0; i < count; ++i) {
++      const auto id = neighbors[i];
++      if (!visit_filter.visited(id)) {
++        visit_filter.set_visited(id);
++        unseen_neighbors.push_back(id);
++      }
++    }
++    if (!unseen_neighbors.empty()) {
++      neighbor_distances.resize(unseen_neighbors.size());
++      dc.quantized_dist(unseen_neighbors.data(), unseen_neighbors.size(),
++                        neighbor_distances.data());
++      stats.dist_num += unseen_neighbors.size();
++      for (size_t i = 0; i < unseen_neighbors.size(); ++i)
++        candidates.insert(Neighbor(unseen_neighbors[i], neighbor_distances[i]));
++    }
++    stats.cpu_us += cpu_timer.micro_seconds();
++  };
++
+   PendingBatch pending;
+ 
+   while (candidates.has_unexpanded_node() && num_ios < io_limit_) {
+@@ -1405,30 +1434,18 @@ int DiskAnnIndexer::cached_beam_search_impl(DiskAnnContext *ctx) {
+ 
+       if (!ctx->filter().is_valid() ||
+           !ctx->filter()(get_key(std::get<0>(cached_neighbor)))) {
+-        topk_heap.emplace(std::get<0>(cached_neighbor),
+-                          VectorInfo(cur_expanded_dist,
+-                                     make_vector_copy(node_fp_coords_copy)));
++        if (!topk_heap.full() ||
++            cur_expanded_dist < topk_heap.front().second.dist_) {
++          topk_heap.emplace(std::get<0>(cached_neighbor),
++                            VectorInfo(cur_expanded_dist,
++                                       make_vector_copy(node_fp_coords_copy)));
++        }
+       }
+ 
+       uint32_t neighbor_num = std::get<1>(cached_neighbor);
+       diskann_id_t *node_neighbors = std::get<2>(cached_neighbor);
+ 
+-      cpu_timer.reset();
+-
+-      std::vector<float> distances(neighbor_num);
+-      dc.quantized_dist(node_neighbors, neighbor_num, distances.data());
+-
+-      stats.dist_num += neighbor_num;
+-      stats.cpu_us += cpu_timer.micro_seconds();
+-
+-      for (uint64_t m = 0; m < neighbor_num; ++m) {
+-        diskann_id_t id = node_neighbors[m];
+-        if (!visit_filter.visited(id)) {
+-          visit_filter.set_visited(id);
+-          Neighbor nn(id, distances[m]);
+-          candidates.insert(nn);
+-        }
+-      }
++      expand_neighbors(node_neighbors, neighbor_num);
+     }
+ 
+     if (!frontier.empty()) {
+@@ -1459,33 +1476,18 @@ int DiskAnnIndexer::cached_beam_search_impl(DiskAnnContext *ctx) {
+ 
+           if (!ctx->filter().is_valid() ||
+               !ctx->filter()(get_key(frontier_neighbor.first))) {
+-            topk_heap.emplace(frontier_neighbor.first,
+-                              VectorInfo(cur_expanded_dist,
+-                                         make_vector_copy(node_fp_coords)));
++            if (!topk_heap.full() ||
++                cur_expanded_dist < topk_heap.front().second.dist_) {
++              topk_heap.emplace(frontier_neighbor.first,
++                                VectorInfo(cur_expanded_dist,
++                                           make_vector_copy(node_fp_coords)));
++            }
+           }
+ 
+           diskann_id_t *node_neighbors =
+               reinterpret_cast<diskann_id_t *>(node_buf + 1);
+ 
+-          cpu_timer.reset();
+-          std::vector<float> distances(neighbor_num);
+-          dc.quantized_dist(node_neighbors, neighbor_num, distances.data());
+-
+-          stats.dist_num += neighbor_num;
+-          stats.cpu_us += cpu_timer.micro_seconds();
+-
+-          cpu_timer.reset();
+-          for (uint64_t m = 0; m < neighbor_num; ++m) {
+-            diskann_id_t id = node_neighbors[m];
+-            if (!visit_filter.visited(id)) {
+-              visit_filter.set_visited(id);
+-              stats.dist_num++;
+-              Neighbor nn(id, distances[m]);
+-              candidates.insert(nn);
+-            }
+-          }
+-
+-          stats.cpu_us += cpu_timer.micro_seconds();
++          expand_neighbors(node_neighbors, neighbor_num);
+         }
+       }
+     }
+diff --git a/src/core/algorithm/diskann/diskann_read_cache.h b/src/core/algorithm/diskann/diskann_read_cache.h
+index e6776fba..7678ac73 100644
+--- a/src/core/algorithm/diskann/diskann_read_cache.h
++++ b/src/core/algorithm/diskann/diskann_read_cache.h
+@@ -18,6 +18,7 @@ namespace zvec {
+ namespace core {
+ 
+ // A per-file cache for immutable, fixed-size DiskANN records. Clock replacement
++// gives repeatedly hit nodes up to three chances to survive one-time scans.
+ // sets bound both payload and bookkeeping; no per-hit heap allocation or
+ // whole-index table. I/O happens outside the set lock. Concurrent misses may
+ // duplicate a read, but never publish partial data or retain caller buffers.
+@@ -67,7 +68,7 @@ class DiskAnnReadCache {
+         auto &entry = set.entries[i];
+         if (entry.valid && entry.offset == key) {
+           std::memcpy(out + consumed, payload(slot, i), record_bytes_);
+-          entry.referenced = true;
++          if (entry.chances < 3) ++entry.chances;
+           found = true;
+           break;
+         }
+@@ -101,21 +102,22 @@ class DiskAnnReadCache {
+         for (size_t i = 0; i < ways_; ++i) {
+           auto &entry = set.entries[i];
+           if (entry.valid && entry.offset == key) {
+-            entry.referenced = true;
++            if (entry.chances < 3) ++entry.chances;
+             published = true;
+             break;
+           }
+         }
+         if (published) continue;
+         while (set.entries[set.hand].valid &&
+-               set.entries[set.hand].referenced) {
+-          set.entries[set.hand].referenced = false;
++               set.entries[set.hand].chances) {
++          --set.entries[set.hand].chances;
+           set.hand = (set.hand + 1) % ways_;
+         }
+         auto &entry = set.entries[set.hand];
+         std::memcpy(payload(slot, set.hand), out + consumed, record_bytes_);
+         entry.offset = key;
+-        entry.valid = entry.referenced = true;
++        entry.valid = true;
++        entry.chances = 1;
+         set.hand = (set.hand + 1) % ways_;
+       }
+     }
+@@ -143,7 +145,7 @@ class DiskAnnReadCache {
+   struct Entry {
+     uint64_t offset{0};
+     bool valid{false};
+-    bool referenced{false};
++    uint8_t chances{0};
+   };
+   struct Set {
+     std::mutex mutex;
+diff --git a/src/core/algorithm/diskann/diskann_read_executor.h b/src/core/algorithm/diskann/diskann_read_executor.h
+index 75bb4391..8313c88c 100644
+--- a/src/core/algorithm/diskann/diskann_read_executor.h
++++ b/src/core/algorithm/diskann/diskann_read_executor.h
+@@ -7,6 +7,8 @@
+ // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ #pragma once
+ 
++#include <algorithm>
++#include <atomic>
+ #include <condition_variable>
+ #include <cstddef>
+ #include <exception>
+@@ -20,7 +22,8 @@ namespace core {
+ 
+ // A fixed per-reader pool for portable pread batches. No per-request tasks or
+ // threads are allocated. Concurrent callers share the same workers; queued
+-// batches rotate fairly. run() drains every request before returning/throwing,
++// batch assignments rotate. Workers claim request indices atomically, avoiding
++// a contended queue lock around every pread. run() drains the batch before returning/throwing,
+ // so workers never retain caller buffers. Configure/close requires no callers.
+ class DiskAnnReadExecutor {
+  public:
+@@ -50,11 +53,15 @@ class DiskAnnReadExecutor {
+       for (size_t i = 0; i < count; ++i) callback(i);
+       return;
+     }
+-    Batch batch(count, callback);
++    Batch batch(count, std::min(count, threads_.size()), callback);
+     std::unique_lock<std::mutex> lock(mutex_);
+     append(&batch);
+-    ready_.notify_all();
+-    finished_.wait(lock, [&] { return batch.completed == count; });
++    if (batch.workers == threads_.size()) {
++      ready_.notify_all();
++    } else {
++      for (size_t i = 0; i < batch.workers; ++i) ready_.notify_one();
++    }
++    finished_.wait(lock, [&] { return batch.completed == batch.workers; });
+     if (batch.error) std::rethrow_exception(batch.error);
+   }
+ 
+@@ -63,18 +70,27 @@ class DiskAnnReadExecutor {
+       *workers = 4;
+       return true;
+     }
+-    if (value[0] < '1' || value[0] > '8' || value[1] != '\0') return false;
+-    *workers = static_cast<size_t>(value[0] - '0');
++    if (!*value) return false;
++    size_t parsed = 0;
++    for (const char *p = value; *p; ++p) {
++      if (*p < '0' || *p > '9') return false;
++      parsed = parsed * 10 + static_cast<size_t>(*p - '0');
++      if (parsed > 32) return false;
++    }
++    if (!parsed) return false;
++    *workers = parsed;
+     return true;
+   }
+ 
+  private:
+   struct Batch {
+-    Batch(size_t n, const std::function<void(size_t)> &fn)
+-        : count(n), callback(fn) {}
++    Batch(size_t n, size_t w, const std::function<void(size_t)> &fn)
++        : count(n), workers(w), callback(fn) {}
+     const size_t count;
++    const size_t workers;
+     const std::function<void(size_t)> &callback;
+-    size_t next{0}, completed{0};
++    std::atomic<size_t> next{0};
++    size_t assigned{0}, completed{0};
+     Batch *link{nullptr};
+     std::exception_ptr error;
+   };
+@@ -94,18 +110,21 @@ class DiskAnnReadExecutor {
+       Batch *batch = head_;
+       head_ = batch->link;
+       if (!head_) tail_ = nullptr;
+-      const size_t index = batch->next++;
+-      if (batch->next < batch->count) append(batch);
++      if (++batch->assigned < batch->workers) append(batch);
+       lock.unlock();
+       std::exception_ptr error;
+-      try {
+-        batch->callback(index);
+-      } catch (...) {
+-        error = std::current_exception();
++      for (;;) {
++        const size_t index = batch->next.fetch_add(1, std::memory_order_relaxed);
++        if (index >= batch->count) break;
++        try {
++          batch->callback(index);
++        } catch (...) {
++          if (!error) error = std::current_exception();
++        }
+       }
+       lock.lock();
+       if (error && !batch->error) batch->error = error;
+-      const bool completed = ++batch->completed == batch->count;
++      const bool completed = ++batch->completed == batch->workers;
+       // No access to batch after releasing the lock: its caller may return.
+       lock.unlock();
+       if (completed) finished_.notify_all();
+diff --git a/tests/core/algorithm/diskann/diskann_cache_test.cc b/tests/core/algorithm/diskann/diskann_cache_test.cc
+index 539e64d0..a8bf95f3 100644
+--- a/tests/core/algorithm/diskann/diskann_cache_test.cc
++++ b/tests/core/algorithm/diskann/diskann_cache_test.cc
+@@ -38,6 +38,31 @@ TEST(DiskAnnReadCacheTest, BudgetValidation) {
+   }
+ }
+ 
++TEST(DiskAnnReadCacheTest, RepeatedHitsSurviveOneTimeScans) {
++  constexpr size_t bytes = 32, budget = 1024;
++  DiskAnnReadCache cache(budget, bytes);
++  ASSERT_EQ(cache.capacity(), 16u);  // Exactly one replacement set.
++  EXPECT_LE(cache.allocated_bytes(), budget);
++  std::array<uint8_t, bytes> out{};
++  auto read = [](uint64_t offset, size_t length, void *dst) {
++    std::memset(dst, offset / bytes, length);
++    return 0;
++  };
++  for (size_t i = 0; i < cache.capacity(); ++i)
++    ASSERT_EQ(cache.read(i * bytes, bytes, out.data(), read), 0);
++  // Many hits must saturate, rather than overflow the small credit counter.
++  for (size_t i = 0; i < 1000; ++i)
++    ASSERT_TRUE(cache.try_read(0, bytes, out.data()));
++  for (size_t i = cache.capacity(); i < 2 * cache.capacity() - 1; ++i)
++    ASSERT_EQ(cache.read(i * bytes, bytes, out.data(), read), 0);
++  EXPECT_TRUE(cache.try_read(0, bytes, out.data()));
++  EXPECT_EQ(out.front(), 0);
++  // A formerly hot record must still be evictable as the workload changes.
++  for (size_t i = 32; i < 256; ++i)
++    ASSERT_EQ(cache.read(i * bytes, bytes, out.data(), read), 0);
++  EXPECT_FALSE(cache.try_read(0, bytes, out.data()));
++}
++
+ TEST(DiskAnnReadCacheTest, PackedRecordsKeepBoundsAndSupportHitProbe) {
+   constexpr size_t bytes = 1668, budget = 64 * 1024;
+   DiskAnnReadCache cache(budget, bytes), pages(budget);
+diff --git a/tests/core/algorithm/diskann/diskann_file_reader_test.cc b/tests/core/algorithm/diskann/diskann_file_reader_test.cc
+index 62408932..8da4444f 100644
+--- a/tests/core/algorithm/diskann/diskann_file_reader_test.cc
++++ b/tests/core/algorithm/diskann/diskann_file_reader_test.cc
+@@ -573,7 +573,7 @@ TEST(DiskAnnFileReaderTest, ParallelReadsDrainErrorsAndPreserveOrder) {
+   LinuxAlignedFileReader reader;
+   reader.open(file.path());
+   EXPECT_NE(reader.configure_read_workers(0), 0);
+-  EXPECT_NE(reader.configure_read_workers(9), 0);
++  EXPECT_NE(reader.configure_read_workers(33), 0);
+   ASSERT_EQ(reader.configure_read_workers(4), 0);
+   ASSERT_EQ(reader.configure_read_cache(64 * 1024), 0);
+   auto output = make_aligned_buffer(source.size());
+diff --git a/tests/core/algorithm/diskann/diskann_read_executor_test.cc b/tests/core/algorithm/diskann/diskann_read_executor_test.cc
+index ff70d8ce..4edfdd29 100644
+--- a/tests/core/algorithm/diskann/diskann_read_executor_test.cc
++++ b/tests/core/algorithm/diskann/diskann_read_executor_test.cc
+@@ -14,9 +14,9 @@ TEST(DiskAnnReadExecutorTest, ValidatesWorkerLimit) {
+   size_t workers = 0;
+   EXPECT_TRUE(DiskAnnReadExecutor::parse_workers(nullptr, &workers));
+   EXPECT_EQ(workers, 4u);
+-  for (auto text : {"1", "2", "4", "8"})
++  for (auto text : {"1", "2", "4", "8", "9", "16", "24", "32"})
+     EXPECT_TRUE(DiskAnnReadExecutor::parse_workers(text, &workers));
+-  for (auto text : {"", "0", "9", "-1", "+2", " 4", "4x", "44", "99999999"})
++  for (auto text : {"", "0", "33", "-1", "+2", " 4", "4x", "44", "99999999"})
+     EXPECT_FALSE(DiskAnnReadExecutor::parse_workers(text, &workers));
+ }
+ 
+@@ -77,3 +77,30 @@ TEST(DiskAnnReadExecutorTest, ExceptionDrainsAndPoolRemainsUsable) {
+   pool.run(10, [&](size_t) { ++calls; });
+   EXPECT_EQ(calls.load(), 110u);
+ }
++
++TEST(DiskAnnReadExecutorTest, WidePoolExecutesEachIndexExactlyOnce) {
++  DiskAnnReadExecutor pool(32);
++  for (size_t count : {1u, 2u, 7u, 32u, 33u, 97u}) {
++    for (size_t repeat = 0; repeat < 20; ++repeat) {
++      std::array<std::atomic<size_t>, 97> calls{};
++      pool.run(count, [&](size_t i) {
++        ASSERT_LT(i, count);
++        ++calls[i];
++      });
++      for (size_t i = 0; i < calls.size(); ++i)
++        EXPECT_EQ(calls[i].load(), i < count ? 1u : 0u);
++    }
++  }
++}
++
++TEST(DiskAnnReadExecutorTest, ShortExceptionalBatchDrainsWithWidePool) {
++  DiskAnnReadExecutor pool(32);
++  std::atomic<size_t> calls{0};
++  EXPECT_THROW(pool.run(3, [&](size_t i) {
++    ++calls;
++    if (i == 0) throw std::runtime_error("first request failed");
++  }), std::runtime_error);
++  EXPECT_EQ(calls.load(), 3u);
++  pool.run(100, [&](size_t) { ++calls; });
++  EXPECT_EQ(calls.load(), 103u);
++}

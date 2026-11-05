@@ -1,0 +1,4 @@
+ninja: Entering directory `/tmp/zvec-local-cohere-20261104/build'
+[0/2] Re-checking globbed directories...
+ninja: no work to do.
+ld: warning: ignoring duplicate libraries: 'external/usr/local/lib//liblz4.a', 'lib/libzvec_ailego.a'

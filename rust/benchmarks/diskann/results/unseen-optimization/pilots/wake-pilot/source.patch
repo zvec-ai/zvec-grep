@@ -1,0 +1,274 @@
+diff --git a/src/core/algorithm/diskann/diskann_file_reader.cc b/src/core/algorithm/diskann/diskann_file_reader.cc
+index c9ef2dd7..2525f54d 100644
+--- a/src/core/algorithm/diskann/diskann_file_reader.cc
++++ b/src/core/algorithm/diskann/diskann_file_reader.cc
+@@ -815,7 +815,7 @@ int LinuxAlignedFileReader::read_cached(const AlignedRead &req) {
+ }
+ 
+ int LinuxAlignedFileReader::configure_read_workers(size_t workers) {
+-  if (workers < 1 || workers > 8) return IndexError_InvalidArgument;
++  if (workers < 1 || workers > 32) return IndexError_InvalidArgument;
+   try {
+     std::unique_ptr<DiskAnnReadExecutor> next;
+     if (workers > 1) next.reset(new DiskAnnReadExecutor(workers));
+diff --git a/src/core/algorithm/diskann/diskann_indexer.cc b/src/core/algorithm/diskann/diskann_indexer.cc
+index b5f4fdc0..7aef6d3a 100644
+--- a/src/core/algorithm/diskann/diskann_indexer.cc
++++ b/src/core/algorithm/diskann/diskann_indexer.cc
+@@ -275,7 +275,7 @@ int DiskAnnIndexer::init(DiskAnnSearcherEntity &entity,
+     size_t workers = 0;
+     if (!DiskAnnReadExecutor::parse_workers(
+             std::getenv("ZVEC_DISKANN_READ_WORKERS"), &workers)) {
+-      LOG_ERROR("ZVEC_DISKANN_READ_WORKERS must be an integer in [1, 8]");
++      LOG_ERROR("ZVEC_DISKANN_READ_WORKERS must be an integer in [1, 32]");
+       return IndexError_InvalidArgument;
+     }
+     ret = file_reader->configure_read_workers(workers);
+@@ -1337,6 +1337,35 @@ int DiskAnnIndexer::cached_beam_search_impl(DiskAnnContext *ctx) {
+       cached_neighbors;
+   cached_neighbors.reserve(2 * effective_beam_width);
+ 
++  // Previously visited neighbors cannot enter the candidate queue again.
++  // Filter them before the PQ lookup, retaining the first-visit order, and
++  // reuse the temporary arrays across all expanded nodes in this query.
++  std::vector<diskann_id_t> unseen_neighbors;
++  std::vector<float> neighbor_distances;
++  unseen_neighbors.reserve(max_degree_);
++  neighbor_distances.reserve(max_degree_);
++  const auto expand_neighbors = [&](const diskann_id_t *neighbors,
++                                    uint32_t count) {
++    cpu_timer.reset();
++    unseen_neighbors.clear();
++    for (uint32_t i = 0; i < count; ++i) {
++      const auto id = neighbors[i];
++      if (!visit_filter.visited(id)) {
++        visit_filter.set_visited(id);
++        unseen_neighbors.push_back(id);
++      }
++    }
++    if (!unseen_neighbors.empty()) {
++      neighbor_distances.resize(unseen_neighbors.size());
++      dc.quantized_dist(unseen_neighbors.data(), unseen_neighbors.size(),
++                        neighbor_distances.data());
++      stats.dist_num += unseen_neighbors.size();
++      for (size_t i = 0; i < unseen_neighbors.size(); ++i)
++        candidates.insert(Neighbor(unseen_neighbors[i], neighbor_distances[i]));
++    }
++    stats.cpu_us += cpu_timer.micro_seconds();
++  };
++
+   PendingBatch pending;
+ 
+   while (candidates.has_unexpanded_node() && num_ios < io_limit_) {
+@@ -1405,30 +1434,18 @@ int DiskAnnIndexer::cached_beam_search_impl(DiskAnnContext *ctx) {
+ 
+       if (!ctx->filter().is_valid() ||
+           !ctx->filter()(get_key(std::get<0>(cached_neighbor)))) {
+-        topk_heap.emplace(std::get<0>(cached_neighbor),
+-                          VectorInfo(cur_expanded_dist,
+-                                     make_vector_copy(node_fp_coords_copy)));
++        if (!topk_heap.full() ||
++            cur_expanded_dist < topk_heap.front().second.dist_) {
++          topk_heap.emplace(std::get<0>(cached_neighbor),
++                            VectorInfo(cur_expanded_dist,
++                                       make_vector_copy(node_fp_coords_copy)));
++        }
+       }
+ 
+       uint32_t neighbor_num = std::get<1>(cached_neighbor);
+       diskann_id_t *node_neighbors = std::get<2>(cached_neighbor);
+ 
+-      cpu_timer.reset();
+-
+-      std::vector<float> distances(neighbor_num);
+-      dc.quantized_dist(node_neighbors, neighbor_num, distances.data());
+-
+-      stats.dist_num += neighbor_num;
+-      stats.cpu_us += cpu_timer.micro_seconds();
+-
+-      for (uint64_t m = 0; m < neighbor_num; ++m) {
+-        diskann_id_t id = node_neighbors[m];
+-        if (!visit_filter.visited(id)) {
+-          visit_filter.set_visited(id);
+-          Neighbor nn(id, distances[m]);
+-          candidates.insert(nn);
+-        }
+-      }
++      expand_neighbors(node_neighbors, neighbor_num);
+     }
+ 
+     if (!frontier.empty()) {
+@@ -1459,33 +1476,18 @@ int DiskAnnIndexer::cached_beam_search_impl(DiskAnnContext *ctx) {
+ 
+           if (!ctx->filter().is_valid() ||
+               !ctx->filter()(get_key(frontier_neighbor.first))) {
+-            topk_heap.emplace(frontier_neighbor.first,
+-                              VectorInfo(cur_expanded_dist,
+-                                         make_vector_copy(node_fp_coords)));
++            if (!topk_heap.full() ||
++                cur_expanded_dist < topk_heap.front().second.dist_) {
++              topk_heap.emplace(frontier_neighbor.first,
++                                VectorInfo(cur_expanded_dist,
++                                           make_vector_copy(node_fp_coords)));
++            }
+           }
+ 
+           diskann_id_t *node_neighbors =
+               reinterpret_cast<diskann_id_t *>(node_buf + 1);
+ 
+-          cpu_timer.reset();
+-          std::vector<float> distances(neighbor_num);
+-          dc.quantized_dist(node_neighbors, neighbor_num, distances.data());
+-
+-          stats.dist_num += neighbor_num;
+-          stats.cpu_us += cpu_timer.micro_seconds();
+-
+-          cpu_timer.reset();
+-          for (uint64_t m = 0; m < neighbor_num; ++m) {
+-            diskann_id_t id = node_neighbors[m];
+-            if (!visit_filter.visited(id)) {
+-              visit_filter.set_visited(id);
+-              stats.dist_num++;
+-              Neighbor nn(id, distances[m]);
+-              candidates.insert(nn);
+-            }
+-          }
+-
+-          stats.cpu_us += cpu_timer.micro_seconds();
++          expand_neighbors(node_neighbors, neighbor_num);
+         }
+       }
+     }
+diff --git a/src/core/algorithm/diskann/diskann_read_executor.h b/src/core/algorithm/diskann/diskann_read_executor.h
+index 75bb4391..8313c88c 100644
+--- a/src/core/algorithm/diskann/diskann_read_executor.h
++++ b/src/core/algorithm/diskann/diskann_read_executor.h
+@@ -7,6 +7,8 @@
+ // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ #pragma once
+ 
++#include <algorithm>
++#include <atomic>
+ #include <condition_variable>
+ #include <cstddef>
+ #include <exception>
+@@ -20,7 +22,8 @@ namespace core {
+ 
+ // A fixed per-reader pool for portable pread batches. No per-request tasks or
+ // threads are allocated. Concurrent callers share the same workers; queued
+-// batches rotate fairly. run() drains every request before returning/throwing,
++// batch assignments rotate. Workers claim request indices atomically, avoiding
++// a contended queue lock around every pread. run() drains the batch before returning/throwing,
+ // so workers never retain caller buffers. Configure/close requires no callers.
+ class DiskAnnReadExecutor {
+  public:
+@@ -50,11 +53,15 @@ class DiskAnnReadExecutor {
+       for (size_t i = 0; i < count; ++i) callback(i);
+       return;
+     }
+-    Batch batch(count, callback);
++    Batch batch(count, std::min(count, threads_.size()), callback);
+     std::unique_lock<std::mutex> lock(mutex_);
+     append(&batch);
+-    ready_.notify_all();
+-    finished_.wait(lock, [&] { return batch.completed == count; });
++    if (batch.workers == threads_.size()) {
++      ready_.notify_all();
++    } else {
++      for (size_t i = 0; i < batch.workers; ++i) ready_.notify_one();
++    }
++    finished_.wait(lock, [&] { return batch.completed == batch.workers; });
+     if (batch.error) std::rethrow_exception(batch.error);
+   }
+ 
+@@ -63,18 +70,27 @@ class DiskAnnReadExecutor {
+       *workers = 4;
+       return true;
+     }
+-    if (value[0] < '1' || value[0] > '8' || value[1] != '\0') return false;
+-    *workers = static_cast<size_t>(value[0] - '0');
++    if (!*value) return false;
++    size_t parsed = 0;
++    for (const char *p = value; *p; ++p) {
++      if (*p < '0' || *p > '9') return false;
++      parsed = parsed * 10 + static_cast<size_t>(*p - '0');
++      if (parsed > 32) return false;
++    }
++    if (!parsed) return false;
++    *workers = parsed;
+     return true;
+   }
+ 
+  private:
+   struct Batch {
+-    Batch(size_t n, const std::function<void(size_t)> &fn)
+-        : count(n), callback(fn) {}
++    Batch(size_t n, size_t w, const std::function<void(size_t)> &fn)
++        : count(n), workers(w), callback(fn) {}
+     const size_t count;
++    const size_t workers;
+     const std::function<void(size_t)> &callback;
+-    size_t next{0}, completed{0};
++    std::atomic<size_t> next{0};
++    size_t assigned{0}, completed{0};
+     Batch *link{nullptr};
+     std::exception_ptr error;
+   };
+@@ -94,18 +110,21 @@ class DiskAnnReadExecutor {
+       Batch *batch = head_;
+       head_ = batch->link;
+       if (!head_) tail_ = nullptr;
+-      const size_t index = batch->next++;
+-      if (batch->next < batch->count) append(batch);
++      if (++batch->assigned < batch->workers) append(batch);
+       lock.unlock();
+       std::exception_ptr error;
+-      try {
+-        batch->callback(index);
+-      } catch (...) {
+-        error = std::current_exception();
++      for (;;) {
++        const size_t index = batch->next.fetch_add(1, std::memory_order_relaxed);
++        if (index >= batch->count) break;
++        try {
++          batch->callback(index);
++        } catch (...) {
++          if (!error) error = std::current_exception();
++        }
+       }
+       lock.lock();
+       if (error && !batch->error) batch->error = error;
+-      const bool completed = ++batch->completed == batch->count;
++      const bool completed = ++batch->completed == batch->workers;
+       // No access to batch after releasing the lock: its caller may return.
+       lock.unlock();
+       if (completed) finished_.notify_all();
+diff --git a/tests/core/algorithm/diskann/diskann_file_reader_test.cc b/tests/core/algorithm/diskann/diskann_file_reader_test.cc
+index 62408932..8da4444f 100644
+--- a/tests/core/algorithm/diskann/diskann_file_reader_test.cc
++++ b/tests/core/algorithm/diskann/diskann_file_reader_test.cc
+@@ -573,7 +573,7 @@ TEST(DiskAnnFileReaderTest, ParallelReadsDrainErrorsAndPreserveOrder) {
+   LinuxAlignedFileReader reader;
+   reader.open(file.path());
+   EXPECT_NE(reader.configure_read_workers(0), 0);
+-  EXPECT_NE(reader.configure_read_workers(9), 0);
++  EXPECT_NE(reader.configure_read_workers(33), 0);
+   ASSERT_EQ(reader.configure_read_workers(4), 0);
+   ASSERT_EQ(reader.configure_read_cache(64 * 1024), 0);
+   auto output = make_aligned_buffer(source.size());
+diff --git a/tests/core/algorithm/diskann/diskann_read_executor_test.cc b/tests/core/algorithm/diskann/diskann_read_executor_test.cc
+index ff70d8ce..404c2da3 100644
+--- a/tests/core/algorithm/diskann/diskann_read_executor_test.cc
++++ b/tests/core/algorithm/diskann/diskann_read_executor_test.cc
+@@ -14,9 +14,9 @@ TEST(DiskAnnReadExecutorTest, ValidatesWorkerLimit) {
+   size_t workers = 0;
+   EXPECT_TRUE(DiskAnnReadExecutor::parse_workers(nullptr, &workers));
+   EXPECT_EQ(workers, 4u);
+-  for (auto text : {"1", "2", "4", "8"})
++  for (auto text : {"1", "2", "4", "8", "9", "16", "24", "32"})
+     EXPECT_TRUE(DiskAnnReadExecutor::parse_workers(text, &workers));
+-  for (auto text : {"", "0", "9", "-1", "+2", " 4", "4x", "44", "99999999"})
++  for (auto text : {"", "0", "33", "-1", "+2", " 4", "4x", "44", "99999999"})
+     EXPECT_FALSE(DiskAnnReadExecutor::parse_workers(text, &workers));
+ }
+ 

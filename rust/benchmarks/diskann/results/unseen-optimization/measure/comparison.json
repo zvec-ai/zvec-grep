@@ -1,0 +1,41 @@
+{
+  "all_scales_faster": true,
+  "scales": [
+    {
+      "phase": "holdout",
+      "count": 600000,
+      "qps_ratio": 1.1559631743469185,
+      "faster": true
+    },
+    {
+      "phase": "holdout",
+      "count": 800000,
+      "qps_ratio": 1.1886179762435827,
+      "faster": true
+    },
+    {
+      "phase": "holdout",
+      "count": 1000000,
+      "qps_ratio": 1.1622634172011534,
+      "faster": true
+    },
+    {
+      "phase": "regression",
+      "count": 600000,
+      "qps_ratio": 1.1862119088699303,
+      "faster": true
+    },
+    {
+      "phase": "regression",
+      "count": 800000,
+      "qps_ratio": 1.1247300343278508,
+      "faster": true
+    },
+    {
+      "phase": "regression",
+      "count": 1000000,
+      "qps_ratio": 1.08632711136557,
+      "faster": true
+    }
+  ]
+}

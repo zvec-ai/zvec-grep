@@ -182,6 +182,8 @@ def main():
     faults=[r for r in runs if r['phase']=='measure' and r['major_faults']>0]
     report=f'''# Cohere：独立预热、单遍未知查询的 DiskANN 对比
 
+历史基线：本文使用源码 `7d3a413e`，保留首次未知查询测试的数据和当时结论。后续源码 `047ebaf4` 在 60 万至 100 万下的优化、全新查询确认及单遍回归见[最新报告](REPORT_NODE_CN.md)。
+
 测试日期：2026-11-05。Apple M3 Pro、36 GiB、macOS，本地 zvec 源码 `{config['source_commit'][:8]}`。
 
 本轮使用互不重叠的 **600 条预热查询、400 条参数验证查询和 3,000 条正式查询**。正式查询分成六组，每组 500 条，在新的查询进程中只执行一遍。两种实现使用相同分组与顺序，正式查询没有用于预热或调参。
@@ -269,7 +271,7 @@ zvec 保留 `F_NOCACHE`、关闭预读；微软 SQLite 读取仍可使用系统�
 
 本轮未改动 zvec 核心库，复用此前已通过 [40 项 C++ 测试](results/node-comparison/cpp-tests.json)的 `7d3a413e` 动态库。已发布 Rust／Node SDK 二进制尚未替换。
 '''
-    (HERE/'REPORT_NODE_CN.md').write_text(report)
+    (HERE/'REPORT_UNSEEN_BASELINE_CN.md').write_text(report)
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt

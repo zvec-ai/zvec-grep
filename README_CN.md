@@ -61,10 +61,13 @@ zvec 源码修改前后，在相同索引和搜索参数下列出吞吐量收益
 固定 64 MiB 缓存和搜索结果，通过有限的 I/O 工作线程并行读取节点页，
 重新对比 20 万至 100 万 Cohere 向量下的 QPS、RSS 和召回率，并列明与微软方案的差异。
 
-最新[独立预热、单遍未知查询报告](rust/benchmarks/diskann/REPORT_NODE_CN.md) 使用互不重叠的
-600 条预热、400 条验证和 3,000 条正式查询；六个正式分片每条只执行一次。
-全部分组召回率高于 90%；20 万时 zvec 更快，40 万基本持平，60 万至 100 万时微软适配层更快。
-报告同时列出 RSS 和缓存开关的内存对照；此前的[重复热查询结果](rust/benchmarks/diskann/REPORT_NODE_WARM_CN.md)单独保留。
+最新[独立预热、单遍未知查询报告](rust/benchmarks/diskann/REPORT_NODE_CN.md) 使用本地 zvec `047ebaf4`，
+覆盖 60 万至 100 万向量。600 条预热、400 条验证和 500 条此前未使用的测试查询互不重叠，
+每条测试查询在每个实现、每个规模下只执行一次；zvec QPS 比微软 Rust/SQLite 适配层高
+15.60%–18.86%，召回率为 91.96%–93.20%。另有 3,000 条单遍回归查询，三个规模汇总也均领先。
+报告区分代码和搜索参数收益，并列明 24 个 I/O 工作线程、64 MiB 缓存、实际召回差异及更高的 zvec RSS。
+已发布 SDK 二进制尚未包含此改动；此前的[未知查询基线](rust/benchmarks/diskann/REPORT_UNSEEN_BASELINE_CN.md)
+和[重复热查询结果](rust/benchmarks/diskann/REPORT_NODE_WARM_CN.md)单独保留。
 
 **安装**：`npm install -g @zvec/zvec-grep`，或通过 Homebrew（macOS/Linux）：
 `brew install zvec-grep`

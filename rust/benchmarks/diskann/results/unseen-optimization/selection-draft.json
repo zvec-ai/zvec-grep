@@ -1,0 +1,23 @@
+{
+  "settings": {
+    "600000": {
+      "effort": 96,
+      "validation_recall": 0.91875
+    },
+    "800000": {
+      "effort": 96,
+      "validation_recall": 0.917
+    },
+    "1000000": {
+      "effort": 108,
+      "validation_recall": 0.91575
+    }
+  },
+  "workers": 24,
+  "worker_geomeans": {
+    "20": 541.9442823204072,
+    "24": 548.4401509520803
+  },
+  "validation_threshold": 0.915,
+  "rule": "smallest tested L meeting 91.5% on independent validation; choose worker count by geometric mean of two-run median QPS across all three scales; final tests not consulted"
+}

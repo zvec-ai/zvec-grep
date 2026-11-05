@@ -1,0 +1,97 @@
+{
+  "passed": true,
+  "records_checked": 153,
+  "pilot_records": 76,
+  "validation_records": 35,
+  "formal_records": 42,
+  "fresh_holdout_queries": 500,
+  "excluded_previous_source_rows": 4440,
+  "unique_fp32_and_fp16": true,
+  "test_passes": 1,
+  "test_warmup_passes": 0,
+  "gt_checks": [
+    {
+      "count": 600000,
+      "query_positions": [
+        0,
+        217,
+        499
+      ],
+      "method": "independent scalar dot and full stable sort",
+      "passed": true
+    },
+    {
+      "count": 800000,
+      "query_positions": [
+        0,
+        217,
+        499
+      ],
+      "method": "independent scalar dot and full stable sort",
+      "passed": true
+    },
+    {
+      "count": 1000000,
+      "query_positions": [
+        0,
+        217,
+        499
+      ],
+      "method": "independent scalar dot and full stable sort",
+      "passed": true
+    }
+  ],
+  "source_binary_and_index_checks": true,
+  "equal_L_ordered_results_unchanged": true,
+  "comparisons": [
+    {
+      "phase": "holdout",
+      "count": 600000,
+      "qps_ratio": 1.1559631743469183,
+      "paired_wins": 1,
+      "pairs": 1,
+      "minimum_pair_ratio": 1.1559631743469185
+    },
+    {
+      "phase": "regression",
+      "count": 600000,
+      "qps_ratio": 1.1862119088699303,
+      "paired_wins": 6,
+      "pairs": 6,
+      "minimum_pair_ratio": 1.052609446795397
+    },
+    {
+      "phase": "holdout",
+      "count": 800000,
+      "qps_ratio": 1.1886179762435827,
+      "paired_wins": 1,
+      "pairs": 1,
+      "minimum_pair_ratio": 1.1886179762435827
+    },
+    {
+      "phase": "regression",
+      "count": 800000,
+      "qps_ratio": 1.124730034327851,
+      "paired_wins": 5,
+      "pairs": 6,
+      "minimum_pair_ratio": 0.9609804740516851
+    },
+    {
+      "phase": "holdout",
+      "count": 1000000,
+      "qps_ratio": 1.1622634172011537,
+      "paired_wins": 1,
+      "pairs": 1,
+      "minimum_pair_ratio": 1.1622634172011534
+    },
+    {
+      "phase": "regression",
+      "count": 1000000,
+      "qps_ratio": 1.0863271113655701,
+      "paired_wins": 5,
+      "pairs": 6,
+      "minimum_pair_ratio": 0.9894535641216826
+    }
+  ],
+  "raw_evidence_sha256": "a71746d6c65fbf46dc411fe7eddfd8d8e65c114c47dadd6a19304f1bd0ca7d94"
+}

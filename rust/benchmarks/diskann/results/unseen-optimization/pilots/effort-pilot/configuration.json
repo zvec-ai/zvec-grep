@@ -1,0 +1,28 @@
+{
+  "binary": "/tmp/zvec-unseen-opt-20261105/rust-target/release/disjoint-bench",
+  "binary_sha256": "508cc011226c70e6953468ac39988dadae069d6f3cbacd0c6e1628b511eda904",
+  "library": "/tmp/zvec-unseen-opt-20261105/rust-target/release/libzvec_c_api.dylib",
+  "library_sha256": "822f35bced79bc0ec7f907a0db93173339bbf838ebebad8cca23ce43ea4fa070",
+  "warmup_sha256": "ba3c331d2e03f570f7e984d713d77daf843ea9e21d87c45fb686e786ba618858",
+  "validation_sha256": "73be1d63a1ec9a183b2071d458c841a84a63cde48607ee05805fa0077a510e45",
+  "counts": [
+    600000,
+    800000,
+    1000000
+  ],
+  "beams": [
+    0
+  ],
+  "efforts": [
+    96,
+    104,
+    112,
+    120,
+    128
+  ],
+  "workers": [
+    24
+  ],
+  "profile": false,
+  "repeats": 1
+}
