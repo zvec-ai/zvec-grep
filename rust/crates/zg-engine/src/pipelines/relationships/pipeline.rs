@@ -90,7 +90,7 @@ fn collect_relationships(
         check_cancelled(options.signal.as_ref())?;
         view.ensure_graph()?;
         let definitions = find_symbols(view, name, scope, filter)?;
-        if definitions.is_empty() && name.contains('.') {
+        if definitions.is_empty() && name.contains('.') && !dotted.0.is_empty() {
             name = &dotted.0;
             scope = dotted.1.as_deref();
             find_symbols(view, name, scope, filter)
@@ -390,47 +390,54 @@ fn neighborhood(
     signal: Option<&CancellationToken>,
 ) -> EngineResult<Vec<(FileEdge, PathBuf)>> {
     check_cancelled(signal)?;
-    let mut rows = storage.neighborhood(id, direction, kinds)?.into_iter();
-    let mut edges = Vec::new();
-    let mut hydration_size = limit.clamp(1, ENDPOINT_BATCH_SIZE);
-    let mut checked = HashSet::new();
-    let mut visible = HashMap::new();
-    while edges.len() < limit {
-        check_cancelled(signal)?;
-        let batch: Vec<_> = rows.by_ref().take(hydration_size).collect();
-        if batch.is_empty() {
-            break;
+    storage.neighborhood(id, direction, kinds, |rows| {
+        let mut edges = Vec::new();
+        let mut hydration_size = limit.clamp(1, ENDPOINT_BATCH_SIZE);
+        let mut checked = HashSet::new();
+        let mut visible = HashMap::new();
+        while edges.len() < limit {
+            check_cancelled(signal)?;
+            let mut batch = Vec::with_capacity(hydration_size);
+            for _ in 0..hydration_size {
+                check_cancelled(signal)?;
+                let Some(edge) = rows.next() else { break };
+                batch.push(edge?);
+                check_cancelled(signal)?;
+            }
+            if batch.is_empty() {
+                break;
+            }
+            // SQLite can be ahead of zvec after a failed write. Filter both
+            // endpoints before counting a row toward the requested limit.
+            let ids: Vec<_> = batch
+                .iter()
+                .flat_map(|edge| [&edge.source, &edge.target])
+                .map(|id| EntityId::from_string(id.clone()))
+                .filter(|id| checked.insert(id.clone()))
+                .collect();
+            visible.extend(endpoint_paths(storage, &ids)?);
+            check_cancelled(signal)?;
+            let before = edges.len();
+            let remaining = limit - before;
+            edges.extend(
+                batch
+                    .into_iter()
+                    .filter_map(|edge| {
+                        let path = visible.get(&EntityId::from_string(edge.source.clone()))?;
+                        visible.get(&EntityId::from_string(edge.target.clone()))?;
+                        Some((edge, path.clone()))
+                    })
+                    .take(remaining),
+            );
+            // Avoid reading unused endpoints, but grow batches across invisible stretches.
+            hydration_size = if edges.len() == before {
+                hydration_size.saturating_mul(2).min(ENDPOINT_BATCH_SIZE)
+            } else {
+                (limit - edges.len()).clamp(1, ENDPOINT_BATCH_SIZE)
+            };
         }
-        // SQLite can be ahead of zvec after a failed write. Filter both
-        // endpoints before counting a row toward the requested limit.
-        let ids: Vec<_> = batch
-            .iter()
-            .flat_map(|edge| [&edge.source, &edge.target])
-            .map(|id| EntityId::from_string(id.clone()))
-            .filter(|id| checked.insert(id.clone()))
-            .collect();
-        visible.extend(endpoint_paths(storage, &ids)?);
-        check_cancelled(signal)?;
-        let before = edges.len();
-        let remaining = limit - before;
-        edges.extend(
-            batch
-                .into_iter()
-                .filter_map(|edge| {
-                    let path = visible.get(&EntityId::from_string(edge.source.clone()))?;
-                    visible.get(&EntityId::from_string(edge.target.clone()))?;
-                    Some((edge, path.clone()))
-                })
-                .take(remaining),
-        );
-        // Avoid reading unused endpoints, but grow batches across invisible stretches.
-        hydration_size = if edges.len() == before {
-            hydration_size.saturating_mul(2).min(ENDPOINT_BATCH_SIZE)
-        } else {
-            (limit - edges.len()).clamp(1, ENDPOINT_BATCH_SIZE)
-        };
-    }
-    Ok(edges)
+        Ok(edges)
+    })
 }
 
 /// Smaller ranks are better; reverse containment needs a meaningful name length.

@@ -14,7 +14,7 @@ use std::{
 struct ObservedStore<'a> {
     store: &'a IndexStore,
     after_snapshot: &'a dyn Fn(usize),
-    after_edges: &'a dyn Fn(&str),
+    after_edge: &'a dyn Fn(&str),
     snapshots: Cell<usize>,
     endpoint_batches: Cell<usize>,
     after_endpoint_read: Option<&'a dyn Fn()>,
@@ -24,12 +24,12 @@ impl<'a> ObservedStore<'a> {
     fn new(
         store: &'a IndexStore,
         after_snapshot: &'a dyn Fn(usize),
-        after_edges: &'a dyn Fn(&str),
+        after_edge: &'a dyn Fn(&str),
     ) -> Self {
         Self {
             store,
             after_snapshot,
-            after_edges,
+            after_edge,
             snapshots: Cell::new(0),
             endpoint_batches: Cell::new(0),
             after_endpoint_read: None,
@@ -50,7 +50,7 @@ impl RelationshipStorage for ObservedStore<'_> {
     ) -> EngineResult<T> {
         let result = self.store.read_snapshot(|view| {
             operation(&view.observe_reads(
-                self.after_edges,
+                self.after_edge,
                 &self.endpoint_batches,
                 self.after_endpoint_read,
             ))
@@ -131,7 +131,7 @@ fn writers_run_between_definitions_without_reusing_old_endpoint_descriptions() {
     let store = fixture.open_store();
     let first_id = RefCell::new(None);
     let changed = Cell::new(false);
-    let after_edges = |id: &str| {
+    let after_edge = |id: &str| {
         first_id.borrow_mut().get_or_insert_with(|| id.to_owned());
     };
     let update = |_| {
@@ -157,7 +157,7 @@ fn writers_run_between_definitions_without_reusing_old_endpoint_descriptions() {
             );
         }
     };
-    let observed = ObservedStore::new(&store, &update, &after_edges);
+    let observed = ObservedStore::new(&store, &update, &after_edge);
     let result = query_symbols(
         &observed,
         "run",
@@ -230,10 +230,14 @@ fn writer_waits_for_all_endpoint_batches_and_next_snapshot_drops_removed_calls()
         );
         done_tx.send(()).expect("replacement committed");
     });
-    let after_edges = |_: &str| {
+    let started = Cell::new(false);
+    let after_edge = |_: &str| {
+        if started.replace(true) {
+            return;
+        }
         start_tx
             .send(())
-            .expect("start writer after reading SQLite rows");
+            .expect("start writer while reading SQLite rows");
         ready_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("writer started");
@@ -253,7 +257,7 @@ fn writer_waits_for_all_endpoint_batches_and_next_snapshot_drops_removed_calls()
                 .expect("writer proceeds after the definition");
         }
     };
-    let observed = ObservedStore::new(&store, &after_snapshot, &after_edges);
+    let observed = ObservedStore::new(&store, &after_snapshot, &after_edge);
     let options = RelationshipOptions {
         limit: Some(1),
         ..fixture.options("::run")
@@ -284,8 +288,8 @@ fn writer_waits_for_all_endpoint_batches_and_next_snapshot_drops_removed_calls()
 }
 
 #[test]
-fn cancellation_stops_endpoint_hydration_and_releases_the_snapshot() {
-    for after_edges in [true, false] {
+fn cancellation_stops_sqlite_traversal_and_hydration_and_releases_the_snapshot() {
+    for after_edge in [true, false] {
         let fixture = Fixture::new();
         let target = fixture.find_symbol("run", Some(""));
         let graph = rusqlite::Connection::open(&fixture.graph_path).expect("graph");
@@ -303,13 +307,17 @@ fn cancellation_stops_endpoint_hydration_and_releases_the_snapshot() {
         drop(graph);
         let store = fixture.open_store();
         let signal = CancellationToken::new();
-        let on_edges = |_: &str| {
-            if after_edges {
+        let on_edge = |_: &str| {
+            assert!(
+                !signal.is_cancelled(),
+                "must not read another row after cancellation"
+            );
+            if after_edge {
                 signal.cancel();
             }
         };
         let on_endpoint = || signal.cancel();
-        let mut observed = ObservedStore::new(&store, &|_| {}, &on_edges);
+        let mut observed = ObservedStore::new(&store, &|_| {}, &on_edge);
         observed.after_endpoint_read = Some(&on_endpoint);
         let options = RelationshipOptions {
             limit: Some(1),
@@ -319,7 +327,7 @@ fn cancellation_stops_endpoint_hydration_and_releases_the_snapshot() {
         let error = query_symbols(&observed, "run", Some(""), &options, Direction::In)
             .expect_err("cancel within a definition");
         assert_eq!(error.code(), EngineError::CANCELLED);
-        assert_eq!(observed.endpoint_batches.get(), usize::from(!after_edges));
+        assert_eq!(observed.endpoint_batches.get(), usize::from(!after_edge));
         store
             .delete_file(target.file_id())
             .expect("snapshot lock released");

@@ -689,36 +689,39 @@ fn neighborhood_filters_direction_and_kinds() {
         &[],
     )
     .expect("write");
-    assert_eq!(
-        db.neighborhood("b", Direction::Both, None).expect("both"),
-        edges[..5]
-    );
-    assert_eq!(
-        db.neighborhood("b", Direction::In, None).expect("in"),
-        vec![
-            edges[0].clone(),
-            edges[1].clone(),
-            edges[2].clone(),
-            edges[4].clone()
-        ]
-    );
-    assert_eq!(
-        db.neighborhood("b", Direction::Out, None).expect("out"),
-        edges[2..4]
-    );
-    assert_eq!(
-        db.neighborhood(
-            "b",
+    for (direction, kinds, expected) in [
+        (Direction::Both, None, edges[..5].to_vec()),
+        (
+            Direction::In,
+            None,
+            vec![
+                edges[0].clone(),
+                edges[1].clone(),
+                edges[2].clone(),
+                edges[4].clone(),
+            ],
+        ),
+        (Direction::Out, None, edges[2..4].to_vec()),
+        (
             Direction::Both,
-            Some(&[
-                GraphEdgeKind::Imports,
-                GraphEdgeKind::Calls,
-                GraphEdgeKind::Calls
-            ])
-        )
-        .expect("kinds"),
-        edges[..4]
-    );
+            Some(
+                [
+                    GraphEdgeKind::Imports,
+                    GraphEdgeKind::Calls,
+                    GraphEdgeKind::Calls,
+                ]
+                .as_slice(),
+            ),
+            edges[..4].to_vec(),
+        ),
+    ] {
+        let mut actual = db
+            .neighborhood("b", direction, kinds)
+            .expect("neighborhood");
+        // Compare every stored row, including duplicates, without requiring query order.
+        actual.sort_by_key(|edge| edge.line);
+        assert_eq!(actual, expected);
+    }
     assert!(
         db.neighborhood("b", Direction::Both, Some(&[]))
             .expect("empty kinds")
@@ -745,11 +748,11 @@ fn neighborhood_returns_all_edges_without_a_limit() {
         .collect();
     db.write_file_graph(1, &graph(&["a", "b"], edges.clone(), vec![]), &[])
         .expect("write");
-    assert_eq!(
-        db.neighborhood("a", Direction::Both, None)
-            .expect("all edges"),
-        edges
-    );
+    let mut actual = db
+        .neighborhood("a", Direction::Both, None)
+        .expect("all edges");
+    actual.sort_by_key(|edge| edge.line);
+    assert_eq!(actual, edges);
 }
 
 #[test]

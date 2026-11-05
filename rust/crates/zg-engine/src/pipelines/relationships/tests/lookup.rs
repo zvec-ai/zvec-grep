@@ -6,6 +6,7 @@ fn invalid_queries_fail_validation() {
         (String::new(), None),
         ("   ".into(), None),
         ("scope::".into(), None),
+        ("scope.".into(), None),
         ("::".into(), None),
         ("x".repeat(1025), None),
         ("run".into(), Some(0)),
@@ -51,20 +52,30 @@ async fn exact_definitions_keep_scopes_order_and_per_symbol_limits() {
         groups[0].edges[0].symbol.as_ref().expect("caller").name,
         "invoke"
     );
+    let lines = groups[0]
+        .edges
+        .iter()
+        .map(|edge| edge.line)
+        .collect::<std::collections::HashSet<_>>();
     assert_eq!(
-        (groups[0].edges[0].line, groups[0].edges[0].column),
-        (Some(1), Some(4))
+        lines.len(),
+        20,
+        "keep distinct call sites without requiring their order"
     );
-    assert_eq!(
-        groups[0].edges[19].line,
-        Some(20),
-        "keep distinct callsites"
-    );
+    assert!(groups[0].edges.iter().all(|edge| {
+        edge.line.is_some_and(|line| (1..=25).contains(&line)) && edge.column == Some(4)
+    }));
 
     engine
         .enable_read_session_cache()
         .expect("enable read cache");
-    assert_eq!(fixture.callers("run").await.matches, groups,);
+    let cached = fixture.callers("run").await.matches;
+    assert_eq!(cached.len(), groups.len());
+    for (mut actual, mut expected) in cached.into_iter().zip(groups) {
+        actual.edges.sort_by_key(|edge| (edge.line, edge.column));
+        expected.edges.sort_by_key(|edge| (edge.line, edge.column));
+        assert_eq!(actual, expected);
+    }
 
     let limited = fixture.callers_with_limit("run", 2).await.matches;
     assert_eq!(
@@ -361,10 +372,12 @@ async fn literal_dotted_names_round_trip_before_qualified_fallback() {
             ("get", Some("api::user"), 2, "get() {}"),
             ("user.get", None, 3, "function dotted() {}"),
             ("run", Some("pkg.Type"), 4, "run() {}"),
+            ("user.", Some("api"), 5, "'user.': () => 1"),
         ],
     );
     for (query, expected) in [
         ("api::user.get", "api::user.get"),
+        ("api::user.", "api::user."),
         ("::user.get", "user.get"),
         ("pkg.Type.run", "pkg.Type::run"),
     ] {

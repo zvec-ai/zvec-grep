@@ -30,6 +30,7 @@ pub struct RelationshipOptions {
     /// Symbol name, optionally qualified as `scope::name` or `scope.name` (as shown by rg).
     /// `::name` selects only top-level definitions; plain `name` matches any scope.
     /// Literal symbol names take precedence over dotted qualification.
+    /// After `::`, a trailing dot is part of the literal name.
     /// Absolute qualified paths such as `::ns::name` are equivalent to `ns::name`.
     /// Missing or unrepresentable exact definitions may return similarly named suggestions without edges.
     /// Queries exceeding [`MAX_SYMBOL_MATCHES`] indexed definitions fail; narrow the scope or use `globs`.
@@ -58,7 +59,7 @@ impl RelationshipOptions {
                 "symbol must contain between 1 and {MAX_RELATIONSHIP_SYMBOL_CHARS} characters",
             )));
         }
-        if symbol.ends_with("::") || symbol.ends_with('.') {
+        if symbol.ends_with("::") || (symbol.ends_with('.') && !symbol.contains("::")) {
             return Err(crate::EngineError::invalid_argument(
                 "expected a symbol name after '::' or '.', e.g. 'Foo::bar'",
             ));
