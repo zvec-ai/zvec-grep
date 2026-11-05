@@ -212,7 +212,7 @@ async fn relationship_wire_calls_route_without_indexing_and_return_matching_json
                 json!({"root": root(), "symbol": " "}),
                 json!({"root": root(), "symbol": "x".repeat(MAX_RELATIONSHIP_SYMBOL_CHARS + 1)}),
                 json!({"root": root(), "symbol": "::"}),
-                json!({"root": root(), "symbol": "Foo."}),
+                json!({"root": root(), "symbol": "Foo::"}),
                 json!({"root": root(), "symbol": "run", "limit": 0}),
                 json!({"root": root(), "symbol": "run", "globs": [{"pattern": ""}]}),
                 json!({"root": root(), "symbol": "run", "globs": "!"}),

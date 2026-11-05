@@ -2713,12 +2713,12 @@ mod tests {
             (
                 "::".to_owned(),
                 "1",
-                "expected a symbol name after '::' or '.', e.g. 'Foo::bar'",
+                "expected a symbol name after '::', e.g. 'Foo::bar'",
             ),
             (
-                "Foo.".to_owned(),
+                "Foo::".to_owned(),
                 "1",
-                "expected a symbol name after '::' or '.', e.g. 'Foo::bar'",
+                "expected a symbol name after '::', e.g. 'Foo::bar'",
             ),
             (
                 "target".to_owned(),
