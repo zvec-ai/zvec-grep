@@ -1,0 +1,82 @@
+    Checking cfg-if v1.0.4
+    Checking libc v0.2.189
+    Checking libm v0.2.16
+    Checking crossbeam-utils v0.8.23
+    Checking pin-project-lite v0.2.17
+    Checking futures-core v0.3.34
+    Checking futures-sink v0.3.34
+    Checking memchr v2.8.3
+    Checking zerocopy v0.8.56
+    Checking bytemuck v1.25.2
+    Checking slab v0.4.12
+    Checking futures-task v0.3.34
+    Checking futures-io v0.3.34
+    Checking either v1.19.0
+    Checking futures-channel v0.3.34
+    Checking thiserror v2.0.20
+    Checking foldhash v0.1.5
+    Checking once_cell v1.21.4
+    Checking foldhash v0.2.0
+    Checking libsqlite3-sys v0.35.0
+    Checking anyhow v1.0.104
+    Checking hashbrown v0.15.5
+    Checking tokio v1.53.1
+    Checking crossbeam-epoch v0.9.21
+    Checking hashbrown v0.16.1
+    Checking futures-util v0.3.34
+    Checking tracing-core v0.1.36
+    Checking getrandom v0.3.4
+    Checking zvec-rust-sys v0.8.0
+    Checking fallible-iterator v0.3.0
+    Checking fallible-streaming-iterator v0.1.9
+    Checking rand_core v0.9.5
+    Checking crossbeam-deque v0.8.8
+    Checking smallvec v1.15.2
+    Checking tracing v0.1.44
+    Checking hashlink v0.10.0
+    Checking num-traits v0.2.19
+    Checking bitflags v2.13.1
+   Compiling zvec-qps-bench v0.1.0 (/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/zvec-grep/rust/benchmarks/diskann/harness)
+    Checking zvec-rust v0.8.0
+    Checking rayon-core v1.13.0
+    Checking zmij v1.0.23
+    Checking serde_core v1.0.229
+    Checking itoa v1.0.18
+    Checking rusqlite v0.37.0
+    Checking rayon v1.12.0
+    Checking serde_json v1.0.151
+    Checking futures-executor v0.3.34
+    Checking futures v0.3.34
+    Checking ppv-lite86 v0.2.21
+    Checking rand_chacha v0.9.0
+    Checking rand v0.9.5
+    Checking rand_distr v0.5.1
+    Checking half v2.7.1
+    Checking diskann-wide v0.61.0
+    Checking zg-zvec-fp16 v0.3.0 (/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/zvec-grep/rust/crates/zg-zvec-fp16)
+    Checking diskann-vector v0.61.0
+    Checking diskann-utils v0.61.0
+    Checking diskann-quantization v0.61.0
+    Checking diskann v0.61.0
+    Checking zg-diskann v0.3.0 (/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/zvec-grep/rust/crates/zg-diskann)
+error: large size difference between variants
+  --> src/bin/memory-bench.rs:48:1
+   |
+48 | / enum Engine {
+49 | |     Native(Collection),
+   | |     ------------------ the second-largest variant contains at least 8 bytes
+50 | |     Microsoft(VectorIndex, PqIndex),
+   | |     ------------------------------- the largest variant contains at least 400 bytes
+51 | | }
+   | |_^ the entire enum is at least 400 bytes
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#large_enum_variant
+   = note: `-D clippy::large-enum-variant` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::large_enum_variant)]`
+help: consider boxing the large fields or introducing indirection in some other way to reduce the total size of the enum
+   |
+50 -     Microsoft(VectorIndex, PqIndex),
+50 +     Microsoft(Box<VectorIndex>, PqIndex),
+   |
+
+error: could not compile `zvec-qps-bench` (bin "memory-bench") due to 1 previous error

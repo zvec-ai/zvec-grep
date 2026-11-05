@@ -1,0 +1,34 @@
+ninja: Entering directory `/tmp/zvec-local-cohere-20261104/build'
+[0/2] Re-checking globbed directories...
+[1/20] Building CXX object src/core/algorithm/diskann/CMakeFiles/core_knn_diskann_objects.dir/diskann_indexer.cc.o
+[2/20] Building CXX object src/core/algorithm/diskann/CMakeFiles/core_knn_diskann_objects.dir/diskann_context.cc.o
+[3/20] Building CXX object src/core/algorithm/diskann/CMakeFiles/core_knn_diskann_objects.dir/diskann_file_reader.cc.o
+/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/zvec/src/core/algorithm/diskann/diskann_file_reader.cc:866:23: warning: declaration shadows a local variable [-Wshadow]
+      const uintptr_t begin = reinterpret_cast<uintptr_t>(
+                      ^
+/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/zvec/src/core/algorithm/diskann/diskann_file_reader.cc:849:16: note: previous declaration is here
+    const auto begin = profile_reads_ ? std::chrono::steady_clock::now()
+               ^
+1 warning generated.
+[4/20] Building CXX object src/core/algorithm/diskann/CMakeFiles/core_knn_diskann_objects.dir/diskann_builder_entity.cc.o
+[5/20] Building CXX object src/core/algorithm/diskann/CMakeFiles/core_knn_diskann_objects.dir/diskann_searcher.cc.o
+[6/20] Building CXX object src/core/algorithm/diskann/CMakeFiles/core_knn_diskann_objects.dir/diskann_reducer_entity.cc.o
+[7/20] Building CXX object src/core/algorithm/diskann/CMakeFiles/core_knn_diskann_objects.dir/diskann_reducer.cc.o
+[8/20] Building CXX object src/core/algorithm/diskann/CMakeFiles/core_knn_diskann_objects.dir/diskann_builder.cc.o
+[9/20] Building CXX object src/core/algorithm/diskann/CMakeFiles/core_knn_diskann_objects.dir/diskann_searcher_entity.cc.o
+[10/20] Building CXX object src/core/algorithm/diskann/CMakeFiles/core_knn_diskann_objects.dir/diskann_algorithm.cc.o
+[11/20] Building CXX object src/core/algorithm/diskann/CMakeFiles/core_knn_diskann_objects.dir/diskann_streamer.cc.o
+[12/20] Linking CXX static library lib/libcore_knn_diskann.a
+[13/20] Linking CXX shared library lib/libcore_knn_diskann.dylib
+ld: warning: ignoring duplicate libraries: 'lib/libcore_framework.a', 'lib/libzvec_ailego.a'
+[14/20] Linking CXX executable bin/diskann_read_executor_test
+ld: warning: ignoring duplicate libraries: 'lib/libgtest.a', 'lib/libzvec_ailego.a'
+[15/20] Building CXX object tests/core/algorithm/diskann/CMakeFiles/diskann_cache_test.dir/diskann_cache_test.cc.o
+[16/20] Linking CXX executable bin/diskann_cache_test
+ld: warning: ignoring duplicate libraries: 'lib/libgtest.a', 'lib/libzvec_ailego.a'
+[17/20] Building CXX object tests/core/algorithm/diskann/CMakeFiles/diskann_file_reader_test.dir/diskann_file_reader_test.cc.o
+[18/20] Linking CXX executable bin/diskann_file_reader_test
+ld: warning: ignoring duplicate libraries: 'lib/libgtest.a', 'lib/libzvec_ailego.a'
+[19/20] Building CXX object tests/core/algorithm/diskann/CMakeFiles/diskann_mobile_compat_test.dir/diskann_mobile_compat_test.cc.o
+[20/20] Linking CXX executable bin/diskann_mobile_compat_test
+ld: warning: ignoring duplicate libraries: 'lib/libgtest.a', 'lib/libzvec_ailego.a'

@@ -1,0 +1,22 @@
+ninja: Entering directory `/tmp/zvec-local-cohere-20261104/build'
+[0/2] Re-checking globbed directories...
+[1/12] Building CXX object src/core/CMakeFiles/zvec_core.dir/algorithm/diskann/diskann_reducer_entity.cc.o
+[2/12] Building CXX object src/core/CMakeFiles/zvec_core.dir/algorithm/diskann/diskann_searcher_entity.cc.o
+[3/12] Building CXX object src/core/CMakeFiles/zvec_core.dir/algorithm/diskann/diskann_builder_entity.cc.o
+[4/12] Building CXX object src/core/CMakeFiles/zvec_core.dir/algorithm/diskann/diskann_reducer.cc.o
+[5/12] Building CXX object src/core/CMakeFiles/zvec_core.dir/algorithm/diskann/diskann_algorithm.cc.o
+[6/12] Building CXX object src/core/CMakeFiles/zvec_core.dir/algorithm/diskann/diskann_file_reader.cc.o
+/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/zvec/src/core/algorithm/diskann/diskann_file_reader.cc:866:23: warning: declaration shadows a local variable [-Wshadow]
+      const uintptr_t begin = reinterpret_cast<uintptr_t>(
+                      ^
+/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/zvec/src/core/algorithm/diskann/diskann_file_reader.cc:849:16: note: previous declaration is here
+    const auto begin = profile_reads_ ? std::chrono::steady_clock::now()
+               ^
+1 warning generated.
+[7/12] Building CXX object src/core/CMakeFiles/zvec_core.dir/algorithm/diskann/diskann_context.cc.o
+[8/12] Building CXX object src/core/CMakeFiles/zvec_core.dir/algorithm/diskann/diskann_searcher.cc.o
+[9/12] Building CXX object src/core/CMakeFiles/zvec_core.dir/algorithm/diskann/diskann_streamer.cc.o
+[10/12] Building CXX object src/core/CMakeFiles/zvec_core.dir/algorithm/diskann/diskann_builder.cc.o
+[11/12] Building CXX object src/core/CMakeFiles/zvec_core.dir/algorithm/diskann/diskann_indexer.cc.o
+[12/12] Linking CXX static library lib/libzvec_core.a
+ld: warning: ignoring duplicate libraries: 'external/usr/local/lib//liblz4.a', 'lib/libzvec_ailego.a'

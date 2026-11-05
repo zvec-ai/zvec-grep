@@ -1,0 +1,7 @@
+{
+  "runner_sha256": "b4348510f465cae7a10099c84c35813720bb840d88329f7cdeb83b14f3e60802",
+  "warmup_sha256": "ba3c331d2e03f570f7e984d713d77daf843ea9e21d87c45fb686e786ba618858",
+  "validation_sha256": "73be1d63a1ec9a183b2071d458c841a84a63cde48607ee05805fa0077a510e45",
+  "query_scope": "independent validation only",
+  "all_equal_L_ids_identical": true
+}

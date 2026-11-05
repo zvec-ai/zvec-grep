@@ -1,0 +1,4 @@
+{
+  "stage": "invalid-loader-validation",
+  "reason": "The candidate executable initially hard-linked the baseline inode. Alternating launches produced inconsistent recall and RSS, consistent with native loader path reuse. No actual loaded-library guard was present; all 27 validation processes excluded. Replaced with separate executables, absolute dylib load commands, ad-hoc signatures and dladdr checks before any query. No formal queries executed in the excluded stage."
+}

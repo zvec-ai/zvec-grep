@@ -1,0 +1,2 @@
+   Compiling zvec-qps-bench v0.1.0 (/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/zvec-grep/rust/benchmarks/diskann/harness)
+    Finished `release` profile [optimized] target(s) in 0.80s

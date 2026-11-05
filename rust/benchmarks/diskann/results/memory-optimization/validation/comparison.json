@@ -1,0 +1,23 @@
+{
+  "all_scales_faster": true,
+  "scales": [
+    {
+      "phase": "validation",
+      "count": 600000,
+      "qps_ratio": 1.1291510353092606,
+      "faster": true
+    },
+    {
+      "phase": "validation",
+      "count": 800000,
+      "qps_ratio": 1.2261269687825636,
+      "faster": true
+    },
+    {
+      "phase": "validation",
+      "count": 1000000,
+      "qps_ratio": 1.1219908298166497,
+      "faster": true
+    }
+  ]
+}

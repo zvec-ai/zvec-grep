@@ -160,6 +160,8 @@ def main():
     z=row(1000000,'zvec');m=row(1000000,'microsoft');minimum=min(r['recall_at_10'] for r in formal)
     report=f'''# Cohere：zvec DiskANN 未知查询优化验证
 
+历史配置：本文保留源码 `047ebaf4`、64 MiB 缓存的结果；后续降低 RSS 的配置与单遍回归见[最新报告](REPORT_NODE_CN.md)。
+
 测试日期：2026-11-05。Apple M3 Pro、36 GiB、macOS；本地 zvec 源码 `{config['source_commit'][:8]}`。
 
 **60 万、80 万、100 万三个规模均达到本轮目标。** 在代码和参数冻结后，用此前从未使用的 500 条查询单遍确认，zvec 的 QPS 比微软方案高 **15.60%–18.86%**，Recall@10 为 **91.96%–93.20%**。随后对既有 3,000 条查询做单遍回归，三个规模合并 QPS 仍高 **8.63%–18.62%**。此前[未知查询基线](REPORT_UNSEEN_BASELINE_CN.md)中大规模落后的结论已由本轮结果更新。
@@ -254,7 +256,7 @@ export ZVEC_DISKANN_READ_WORKERS=24
 
 复现脚本：[候选构建](build_unseen_variant.py)、[候选验证](run_unseen_pilot.py)、[新查询与 GT](prepare_unseen_holdout.py)、[冻结对比](run_unseen_comparison.py)、[报告核验与绘图](publish_unseen_optimization.py)。参数见 `--help`；本机完整实验目录为 `/tmp/zvec-unseen-opt-20261105`，需保留配置记录中的 Cohere 数据、索引、基线程序和本地动态库。
 '''
-    (HERE/'REPORT_NODE_CN.md').write_text(report)
+    (HERE/'REPORT_UNSEEN_SPEED_CN.md').write_text(report)
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt

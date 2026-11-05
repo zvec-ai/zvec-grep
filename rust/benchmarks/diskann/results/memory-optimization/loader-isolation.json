@@ -1,0 +1,14 @@
+{
+  "baseline": {
+    "binary": "/tmp/zvec-memory-opt-20261105/baseline/memory-bench",
+    "binary_sha256": "37716bf2f2038094c7c5589e05275cb4b11e238da352a678f47a974112cbcf71",
+    "library": "/tmp/zvec-unseen-opt-20261105/final/libzvec_c_api.dylib",
+    "otool": "/tmp/zvec-memory-opt-20261105/baseline/memory-bench:\n\t/tmp/zvec-unseen-opt-20261105/final/libzvec_c_api.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t/usr/lib/libiconv.2.dylib (compatibility version 7.0.0, current version 7.0.0)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1345.120.2)\n"
+  },
+  "candidate": {
+    "binary": "/tmp/zvec-memory-opt-20261105/rust-target/release/memory-bench",
+    "binary_sha256": "eb198f0cbb0ab0562049f383660a51e7337b0ccc3a4d209f28009d71885db23c",
+    "library": "/tmp/zvec-memory-opt-20261105/final/libzvec_c_api.dylib",
+    "otool": "/tmp/zvec-memory-opt-20261105/rust-target/release/memory-bench:\n\t/tmp/zvec-memory-opt-20261105/final/libzvec_c_api.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t/usr/lib/libiconv.2.dylib (compatibility version 7.0.0, current version 7.0.0)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1345.120.2)\n"
+  }
+}

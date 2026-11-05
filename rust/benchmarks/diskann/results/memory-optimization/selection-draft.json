@@ -1,0 +1,20 @@
+{
+  "settings": {
+    "600000": {
+      "effort": 84,
+      "validation_recall": 0.92225
+    },
+    "800000": {
+      "effort": 84,
+      "validation_recall": 0.92
+    },
+    "1000000": {
+      "effort": 90,
+      "validation_recall": 0.919
+    }
+  },
+  "workers": 32,
+  "cache_mib": 8,
+  "validation_threshold": 0.915,
+  "rule": "Use validation only: smallest tested L with recall >=91.5%; retain 8 MiB for more throughput margin than 4 MiB; confirm against both previous native configuration and Microsoft in three alternating rounds before single-pass regression"
+}

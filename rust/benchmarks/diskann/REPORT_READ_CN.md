@@ -1,6 +1,6 @@
 # zvec DiskANN 读取瓶颈与 QPS/RSS 对比
 
-后续[节点缓存的重复热查询测试](REPORT_NODE_WARM_CN.md) 在相同缓存预算和 I/O 线程数下继续优化；[未知查询基线](REPORT_UNSEEN_BASELINE_CN.md)随后发现大规模仍落后。最新[独立预热、单遍未知查询报告](REPORT_NODE_CN.md)使用源码 `047ebaf4` 和 500 条全新查询，在 60 万至 100 万规模下 QPS 均超过微软适配层，召回率保持 90% 以上，同时列明线程数、搜索参数及 RSS 代价。本文保留此前并行读取阶段的数据。
+后续[节点缓存测试](REPORT_NODE_WARM_CN.md)、[未知查询基线](REPORT_UNSEEN_BASELINE_CN.md)及[64 MiB 配置](REPORT_UNSEEN_SPEED_CN.md)继续定位瓶颈。最新[内存优化与单遍查询报告](REPORT_NODE_CN.md)使用源码 `f8a36342`，在 60 万至 100 万规模下降低 RSS，并保持汇总 QPS 超过微软适配层、召回率超过 90%。本文保留此前并行读取阶段的数据。
 
 测试日期：2026-11-04。Apple M3 Pro、36 GiB 内存、macOS。本地 zvec 源码从 `e31ce799` 到 `37ff6bd5`，两版均使用 **64 MiB 节点页缓存**。
 

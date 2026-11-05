@@ -1,0 +1,40 @@
+{
+  "passed": true,
+  "verified_processes": 77,
+  "formal_processes": 42,
+  "exploratory_processes": 54,
+  "excluded_loader_processes": 27,
+  "disjoint_fp32_fp16_source_ids": true,
+  "each_test_query_once_per_backend_scale": true,
+  "formal_queries": 3500,
+  "previously_used_queries": true,
+  "actual_loaded_library_checked": true,
+  "minimum_formal_recall": 0.922,
+  "comparisons": [
+    {
+      "count": 600000,
+      "qps_ratio": 1.1611317658987437,
+      "rss_ratio": 1.2308094905792044,
+      "paired_wins": 7,
+      "pairs": 7,
+      "minimum_pair_ratio": 1.0569717066053397
+    },
+    {
+      "count": 800000,
+      "qps_ratio": 1.2121609033532645,
+      "rss_ratio": 1.263165975740826,
+      "paired_wins": 7,
+      "pairs": 7,
+      "minimum_pair_ratio": 1.1162992664367293
+    },
+    {
+      "count": 1000000,
+      "qps_ratio": 1.095604054107455,
+      "rss_ratio": 1.2887700534759359,
+      "paired_wins": 6,
+      "pairs": 7,
+      "minimum_pair_ratio": 0.9938441790341228
+    }
+  ],
+  "raw_sha256": "b60cb64dd6eff59291232375685d1f901c5c0bf5e85c087d6022e0bea0f7b3a9"
+}

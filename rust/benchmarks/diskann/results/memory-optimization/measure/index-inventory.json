@@ -1,0 +1,170 @@
+{
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-600000/LOCK": [
+    0,
+    1793773756006455606
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-600000/manifest.3": [
+    190,
+    1793773939150507218
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-600000/del.0": [
+    72,
+    1793773756132811543
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-600000/idmap.0/OPTIONS-000007": [
+    7045,
+    1793773756122219895
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-600000/idmap.0/000004.log": [
+    0,
+    1793773756106274840
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-600000/idmap.0/IDENTITY": [
+    36,
+    1793773756007682280
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-600000/idmap.0/LOCK": [
+    0,
+    1793773756007478321
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-600000/idmap.0/CURRENT": [
+    16,
+    1793773756111997041
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-600000/idmap.0/LOG": [
+    0,
+    1793773756007005193
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-600000/idmap.0/000008.sst": [
+    13382718,
+    1793773764657755947
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-600000/idmap.0/MANIFEST-000005": [
+    194,
+    1793773939436281086
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-600000/0/scalar.0.ipc": [
+    12636962,
+    1793773764692768411
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-600000/0/embedding.index.3.proxima": [
+    1274815424,
+    1793773939127185826
+  ],
+  "/private/tmp/zvec-cohere-million/experiment/indexes/diskann_fp16-600000-768/index": [
+    1250385920,
+    1793695743351004240
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-800000/LOCK": [
+    0,
+    1793774584173039335
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-800000/manifest.3": [
+    190,
+    1793774873919492482
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-800000/del.0": [
+    72,
+    1793774584243382954
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-800000/idmap.0/OPTIONS-000007": [
+    7045,
+    1793774584233075249
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-800000/idmap.0/000004.log": [
+    0,
+    1793774584218660328
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-800000/idmap.0/IDENTITY": [
+    36,
+    1793774584189420156
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-800000/idmap.0/LOCK": [
+    0,
+    1793774584189149992
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-800000/idmap.0/CURRENT": [
+    16,
+    1793774584222987334
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-800000/idmap.0/LOG": [
+    0,
+    1793774584173774912
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-800000/idmap.0/000008.sst": [
+    17843421,
+    1793774594620471349
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-800000/idmap.0/MANIFEST-000005": [
+    194,
+    1793774874394811959
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-800000/0/scalar.0.ipc": [
+    16849058,
+    1793774594655184391
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-800000/0/embedding.index.3.proxima": [
+    1699619776,
+    1793774873904201569
+  ],
+  "/private/tmp/zvec-cohere-million/experiment/indexes/diskann_fp16-800000-768/index": [
+    1667203072,
+    1793699194431128986
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-1000000/LOCK": [
+    0,
+    1793775670376869068
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-1000000/manifest.3": [
+    190,
+    1793775964914664834
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-1000000/del.0": [
+    72,
+    1793775670422414362
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-1000000/idmap.0/OPTIONS-000007": [
+    7045,
+    1793775670414104222
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-1000000/idmap.0/000004.log": [
+    0,
+    1793775670401470533
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-1000000/idmap.0/IDENTITY": [
+    36,
+    1793775670378023558
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-1000000/idmap.0/LOCK": [
+    0,
+    1793775670377837185
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-1000000/idmap.0/CURRENT": [
+    16,
+    1793775670405984955
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-1000000/idmap.0/LOG": [
+    0,
+    1793775670377414980
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-1000000/idmap.0/000008.sst": [
+    22304201,
+    1793775681855185355
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-1000000/idmap.0/MANIFEST-000005": [
+    194,
+    1793775965278813570
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-1000000/0/scalar.0.ipc": [
+    21061162,
+    1793775681871996677
+  ],
+  "/tmp/zvec-local-cohere-20261104/experiment/indexes/diskann-1000000/0/embedding.index.3.proxima": [
+    2124420032,
+    1793775964898845714
+  ],
+  "/private/tmp/zvec-cohere-million/experiment/indexes/diskann_fp16-1000000-768/index": [
+    2084012032,
+    1793702465304801955
+  ]
+}

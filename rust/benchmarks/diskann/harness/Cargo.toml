@@ -42,3 +42,8 @@ path = "src/bin/disjoint-bench.rs"
 required-features = ["experimental-pq"]
 
 [workspace]
+
+[[bin]]
+name = "memory-bench"
+path = "src/bin/memory-bench.rs"
+required-features = ["experimental-pq"]

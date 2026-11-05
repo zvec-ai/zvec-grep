@@ -1,0 +1,443 @@
+diff --git a/DISKANN_READ_CACHE_CN.md b/DISKANN_READ_CACHE_CN.md
+index 086f4c27..3c06c1bd 100644
+--- a/DISKANN_READ_CACHE_CN.md
++++ b/DISKANN_READ_CACHE_CN.md
+@@ -6,12 +6,18 @@ macOS 的 FileReadStorage 路径为每个 DiskANN 图文件设置固定预算的
+ 
+ 缓存数据区按记录紧凑排列；最多 16 路组相联，减少接近容量时的哈希冲突淘汰。Clock 淘汰给新节点 1 次保留机会，重复命中累积到最多 3 次；扫描时逐次扣减，避免一次性访问过早淘汰常用节点，同时允许工作集变化后淘汰旧热点。预算放不下完整一组时，逐步缩小路数直到能容纳；容量同时计算实际数据和元数据。路数不是线程数。锁只覆盖查找、复制与发布，磁盘 I/O 在锁外进行。并发未命中可能重复读取，但只缓存完整且成功读取的记录。
+ 
++每组另外记录最近 32 个未命中节点的偏移，元数据也计入原预算。组满后优先让重复访问的节点进入缓存，大多数一次性访问直接返回读取结果；每 16 次首次访问放行一次，使过期热点仍能逐步淘汰。历史只影响是否缓存完整节点，不改变返回的字节、查询结果或缓存容量上限。
++
+ 读盘仍使用原来的扇区范围、扇区长度和 scratch buffer，保留 `F_NOCACHE` 与关闭预读设置。请求同时描述逻辑节点范围和包围它的磁盘传输范围；未命中时按原扇区读取，缓存只留下目标节点。命中时只复制逻辑节点区域。大节点跨越多页时，同样读取完整扇区范围并缓存整条记录。请求范围与目标缓冲区偏移必须匹配；并行前检查实际磁盘传输的目标范围是否重叠。这样可以提高缓存利用率，又避免把磁盘 I/O 拆成大量小尺寸请求。索引文件无需重建，原有节点解码位置不变。
+ 
+ 每个 reader 复用固定的读取线程池，默认 4 个工作线程，通过 `ZVEC_DISKANN_READ_WORKERS=1..32` 配置。1 在查询线程上串行读取；该参数独立于查询并发和计算线程数。缓存命中在调用线程直接完成，仅把多个未命中请求送入线程池；没有未命中时不唤醒线程，只有一次未命中时直接读取。多个查询共享同一个池，批次轮转分配工作线程，再通过批次内原子索引领取请求，避免每次读取前后争用全局队列锁。小批次只唤醒所需数量的线程，不为每个节点创建线程或分配任务对象。更大的 I/O 并发可以覆盖更多读盘等待，但线程数增加并不保证性能持续提高；每个图文件均有自己的线程上限。
+ 
+ 图搜索还在 PQ 距离计算前排除已经访问的邻居，并复用每个查询的邻居与距离临时数组；保持首次访问的候选插入顺序。只有可能进入 top-k 的候选才复制原向量，比较规则与原 heap 相同。以上修改复用原图、PQ、精度和磁盘格式。搜索参数 L 仍独立决定搜索工作量与召回率，应只在独立验证集上选择。
+ 
++macOS 节点读取路径配置至少 24 个 I/O 工作线程时，搜索批次宽度改为 `min(max(8, L/3), 32)`，其他路径和窄线程池仍用原来的 `L/5`。两者都受 scratch buffer 扇区容量约束。这项改动改变图探索顺序和工作量，因此需要重新验证召回率，不能声称同 L 的有序结果必然不变。
++
++加载 DiskANN key 与 ID 映射时，以 4 KiB 临时块检查全部值：连续递增的 key 只保存起始值，恒等映射不再保存数组；不满足条件时保留原数组与二分查找语义，直接读入最终缓冲区，避免整段临时拷贝。检查使用减法避免高位 key 回绕，保留原磁盘格式、clone 共享语义和存储释放后的读取能力。PQ64 仍完整常驻内存，不降低编码精度。该压缩是否生效取决于真实索引内容，不假定所有索引的 key 都连续。
++
+ 一个批次全部完成后，搜索按原提交顺序处理节点。出错时也先回收全部任务，再返回按请求顺序出现的第一个错误，避免调用者释放缓冲区后后台仍在写入。目标缓冲区可能重叠时保持串行。关闭时先回收线程，再释放缓存与文件；重开文件时清空缓存，保留原有文件身份校验。配置和关闭要求没有进行中的查询。
+ 
+ 该功能只自动启用在 macOS FileReadStorage；已有 BufferPool 不重复分配此缓存，Linux、Windows、iOS 默认路径保持不变。已有 `cache_node_num` BFS 预加载缓存属于另一份内存，显式开启时另计。本应用依赖的已发布 SDK 0.8.0 二进制尚未包含这些源码修改，需要自行重新编译并链接。
+diff --git a/src/core/algorithm/diskann/diskann_indexer.cc b/src/core/algorithm/diskann/diskann_indexer.cc
+index 7aef6d3a..72d7000b 100644
+--- a/src/core/algorithm/diskann/diskann_indexer.cc
++++ b/src/core/algorithm/diskann/diskann_indexer.cc
+@@ -1321,8 +1321,18 @@ int DiskAnnIndexer::cached_beam_search_impl(DiskAnnContext *ctx) {
+   uint32_t max_beam_width =
+       std::max(1u, static_cast<uint32_t>(DiskAnnUtil::kMaxSectorReadNum /
+                                          sector_num_per_node));
+-  uint32_t effective_beam_width = std::min(
+-      std::max(8u, std::min(ctx->list_size() / 5, 32u)), max_beam_width);
++  // Wide portable read pools can overlap more cache misses in one search hop.
++  // Preserve the original beam for narrow pools and other storage paths.
++  uint32_t beam_divisor = 5;
++#if defined(__APPLE__) && TARGET_OS_OSX
++  if (node_record_reads_ &&
++      static_cast<LinuxAlignedFileReader *>(reader_.get())->read_workers() >=
++          24)
++    beam_divisor = 3;
++#endif
++  uint32_t effective_beam_width =
++      std::min(std::max(8u, std::min(ctx->list_size() / beam_divisor, 32u)),
++               max_beam_width);
+ 
+   std::vector<diskann_id_t> frontier;
+   frontier.reserve(2 * effective_beam_width);
+diff --git a/src/core/algorithm/diskann/diskann_read_cache.h b/src/core/algorithm/diskann/diskann_read_cache.h
+index 7678ac73..f15f1327 100644
+--- a/src/core/algorithm/diskann/diskann_read_cache.h
++++ b/src/core/algorithm/diskann/diskann_read_cache.h
+@@ -7,6 +7,7 @@
+ // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ #pragma once
+ 
++#include <algorithm>
+ #include <array>
+ #include <cstddef>
+ #include <cstdint>
+@@ -19,7 +20,8 @@ namespace core {
+ 
+ // A per-file cache for immutable, fixed-size DiskANN records. Clock replacement
+ // gives repeatedly hit nodes up to three chances to survive one-time scans.
+-// sets bound both payload and bookkeeping; no per-hit heap allocation or
++// A small bounded admission history protects residents from one-time scans.
++// Sets bound both payload and bookkeeping; no per-hit heap allocation or
+ // whole-index table. I/O happens outside the set lock. Concurrent misses may
+ // duplicate a read, but never publish partial data or retain caller buffers.
+ class DiskAnnReadCache {
+@@ -108,6 +110,19 @@ class DiskAnnReadCache {
+           }
+         }
+         if (published) continue;
++        // Admission history uses metadata only. Once a set is full, a node
++        // seen twice competes with its residents; most one-time scans bypass
++        // the payload cache. Periodic admission lets obsolete residents age.
++        bool seen = false;
++        for (size_t i = 0; i < set.ghost_count; ++i)
++          seen = seen || set.ghosts[i] == key;
++        if (!seen) {
++          set.ghosts[set.ghost_hand] = key;
++          set.ghost_hand = (set.ghost_hand + 1) % set.ghosts.size();
++          set.ghost_count = std::min(set.ghost_count + 1, set.ghosts.size());
++        }
++        if (set.entries[set.hand].valid && !seen && (++set.misses % 16 != 0))
++          continue;
+         while (set.entries[set.hand].valid &&
+                set.entries[set.hand].chances) {
+           --set.entries[set.hand].chances;
+@@ -151,6 +166,8 @@ class DiskAnnReadCache {
+     std::mutex mutex;
+     std::array<Entry, 16> entries;
+     size_t hand{0};
++    std::array<uint64_t, 32> ghosts{};
++    size_t ghost_hand{0}, ghost_count{0}, misses{0};
+   };
+   static uint64_t hash(uint64_t key) {
+     // Mix the full offset: vector segments need not start at file offset 0.
+diff --git a/src/core/algorithm/diskann/diskann_searcher_entity.cc b/src/core/algorithm/diskann/diskann_searcher_entity.cc
+index e5eb03c2..ea7bb6f8 100644
+--- a/src/core/algorithm/diskann/diskann_searcher_entity.cc
++++ b/src/core/algorithm/diskann/diskann_searcher_entity.cc
+@@ -13,6 +13,8 @@
+ // limitations under the License.
+ 
+ #include "diskann_searcher_entity.h"
++#include <array>
++#include <limits>
+ #include "diskann_util.h"
+ 
+ namespace zvec {
+@@ -23,6 +25,9 @@ void DiskAnnSearcherEntity::clear() {
+   pq_codes_.reset();
+   key_buffer_.reset();
+   key_mapping_buffer_.reset();
++  sequential_keys_ = false;
++  identity_mapping_ = false;
++  first_key_ = 0;
+   entrypoints_.clear();
+   meta_.clear();
+   meta_header_ = {};
+@@ -56,6 +61,9 @@ const DiskAnnEntity::Pointer DiskAnnSearcherEntity::clone() const {
+   entity->pq_codes_ = pq_codes_;
+   entity->key_buffer_ = key_buffer_;
+   entity->key_mapping_buffer_ = key_mapping_buffer_;
++  entity->sequential_keys_ = sequential_keys_;
++  entity->identity_mapping_ = identity_mapping_;
++  entity->first_key_ = first_key_;
+   entity->entrypoints_ = entrypoints_;
+ 
+   return DiskAnnEntity::Pointer(entity.release());
+@@ -248,17 +256,38 @@ int DiskAnnSearcherEntity::load_key_segment() {
+     return IndexError_InvalidFormat;
+   }
+ 
+-  size_t key_data_len = doc_cnt() * sizeof(diskann_key_t);
+-
+-  IndexStorage::MemoryBlock data;
+-  if (key_segment_->read(0, data, key_data_len) != key_data_len) {
+-    LOG_ERROR("Read segment %s failed", kDiskAnnKeySegmentId.c_str());
+-    return IndexError_ReadData;
++  if (doc_cnt() > std::numeric_limits<size_t>::max() / sizeof(diskann_key_t))
++    return IndexError_InvalidFormat;
++  const size_t key_data_len = doc_cnt() * sizeof(diskann_key_t);
++  if (key_segment_->data_size() < key_data_len) return IndexError_ReadData;
++  // Probe in bounded chunks instead of allocating an index-sized temporary.
++  // Sequential internal keys need only their first value; arbitrary keys keep
++  // the original representation and lookup semantics.
++  std::array<diskann_key_t, 512> chunk{};
++  sequential_keys_ = doc_cnt() != 0;
++  key_buffer_.reset();
++  for (size_t begin = 0; begin < doc_cnt() && sequential_keys_;
++       begin += chunk.size()) {
++    const size_t count = std::min(chunk.size(), size_t(doc_cnt() - begin));
++    const size_t bytes = count * sizeof(diskann_key_t);
++    if (key_segment_->fetch(begin * sizeof(diskann_key_t), chunk.data(),
++                            bytes) != bytes)
++      return IndexError_ReadData;
++    if (begin == 0) first_key_ = chunk[0];
++    for (size_t i = 0; i < count; ++i) {
++      if (chunk[i] < first_key_ || chunk[i] - first_key_ != begin + i) {
++        sequential_keys_ = false;
++        break;
++      }
++    }
+   }
++  if (sequential_keys_) return 0;
+ 
+   try {
+     auto key_buffer = std::make_shared<std::string>(key_data_len, '\0');
+-    memcpy(&(*key_buffer)[0], data.data(), key_data_len);
++    if (key_data_len &&
++        key_segment_->fetch(0, &(*key_buffer)[0], key_data_len) != key_data_len)
++      return IndexError_ReadData;
+     key_buffer_ = std::move(key_buffer);
+   } catch (const std::bad_alloc &) {
+     LOG_ERROR("Failed to allocate DiskAnn key buffer");
+@@ -312,19 +341,38 @@ int DiskAnnSearcherEntity::load_key_mapping_segment() {
+     return IndexError_InvalidFormat;
+   }
+ 
+-  size_t key_mapping_data_len = doc_cnt() * sizeof(diskann_id_t);
+-
+-  IndexStorage::MemoryBlock data;
+-  if (key_mapping_segment_->read(0, data, key_mapping_data_len) !=
+-      key_mapping_data_len) {
+-    LOG_ERROR("Read segment %s failed", kDiskAnnKeyMappingSegmentId.c_str());
++  if (doc_cnt() > std::numeric_limits<size_t>::max() / sizeof(diskann_id_t))
++    return IndexError_InvalidFormat;
++  const size_t key_mapping_data_len = doc_cnt() * sizeof(diskann_id_t);
++  if (key_mapping_segment_->data_size() < key_mapping_data_len)
+     return IndexError_ReadData;
++  std::array<diskann_id_t, 1024> chunk{};
++  identity_mapping_ = true;
++  key_mapping_buffer_.reset();
++  for (size_t begin = 0; begin < doc_cnt() && identity_mapping_;
++       begin += chunk.size()) {
++    const size_t count = std::min(chunk.size(), size_t(doc_cnt() - begin));
++    const size_t bytes = count * sizeof(diskann_id_t);
++    if (key_mapping_segment_->fetch(begin * sizeof(diskann_id_t), chunk.data(),
++                                    bytes) != bytes)
++      return IndexError_ReadData;
++    for (size_t i = 0; i < count; ++i) {
++      if (chunk[i] != begin + i) {
++        identity_mapping_ = false;
++        break;
++      }
++    }
+   }
++  if (identity_mapping_) return 0;
+ 
+   try {
+     auto key_mapping_buffer =
+         std::make_shared<std::string>(key_mapping_data_len, '\0');
+-    memcpy(&(*key_mapping_buffer)[0], data.data(), key_mapping_data_len);
++    if (key_mapping_data_len &&
++        key_mapping_segment_->fetch(0, &(*key_mapping_buffer)[0],
++                                    key_mapping_data_len) !=
++            key_mapping_data_len)
++      return IndexError_ReadData;
+     key_mapping_buffer_ = std::move(key_mapping_buffer);
+   } catch (const std::bad_alloc &) {
+     LOG_ERROR("Failed to allocate DiskAnn key mapping buffer");
+@@ -336,11 +384,15 @@ int DiskAnnSearcherEntity::load_key_mapping_segment() {
+ 
+ //! Get vector local id by key
+ diskann_id_t DiskAnnSearcherEntity::get_id(diskann_key_t key) const {
++  if (sequential_keys_ && identity_mapping_) {
++    return key >= first_key_ && key - first_key_ < doc_cnt()
++               ? static_cast<diskann_id_t>(key - first_key_)
++               : kInvalidId;
++  }
+   const diskann_id_t *key_mapping_data_ptr =
+-      reinterpret_cast<const diskann_id_t *>(key_mapping_buffer_->data());
+-
+-  const diskann_key_t *key_data_ptr =
+-      reinterpret_cast<const diskann_key_t *>(key_buffer_->data());
++      identity_mapping_
++          ? nullptr
++          : reinterpret_cast<const diskann_id_t *>(key_mapping_buffer_->data());
+ 
+   //! Do binary search
+   diskann_id_t start = 0UL;
+@@ -348,9 +400,9 @@ diskann_id_t DiskAnnSearcherEntity::get_id(diskann_key_t key) const {
+   diskann_id_t idx = 0u;
+   while (start < end) {
+     idx = start + (end - start) / 2;
+-    diskann_id_t local_id = key_mapping_data_ptr[idx];
++    diskann_id_t local_id = identity_mapping_ ? idx : key_mapping_data_ptr[idx];
+ 
+-    const diskann_key_t local_key = key_data_ptr[local_id];
++    const diskann_key_t local_key = get_key(local_id);
+ 
+     if (local_key < key) {
+       start = idx + 1;
+@@ -365,6 +417,7 @@ diskann_id_t DiskAnnSearcherEntity::get_id(diskann_key_t key) const {
+ }
+ 
+ diskann_key_t DiskAnnSearcherEntity::get_key(diskann_id_t id) const {
++  if (sequential_keys_) return first_key_ + id;
+   const diskann_key_t *key_data_ptr =
+       reinterpret_cast<const diskann_key_t *>(key_buffer_->data());
+ 
+diff --git a/src/core/algorithm/diskann/diskann_searcher_entity.h b/src/core/algorithm/diskann/diskann_searcher_entity.h
+index b2a7bb81..fa5b5c3f 100644
+--- a/src/core/algorithm/diskann/diskann_searcher_entity.h
++++ b/src/core/algorithm/diskann/diskann_searcher_entity.h
+@@ -93,6 +93,10 @@ class DiskAnnSearcherEntity : public DiskAnnEntity {
+   std::shared_ptr<const std::string> pq_codes_;
+   std::shared_ptr<const std::string> key_buffer_;
+   std::shared_ptr<const std::string> key_mapping_buffer_;
++  // Lossless compact forms, enabled only after validating every stored value.
++  bool sequential_keys_{false};
++  bool identity_mapping_{false};
++  diskann_key_t first_key_{0};
+   std::vector<diskann_id_t> entrypoints_;
+ };
+ 
+diff --git a/tests/core/algorithm/diskann/diskann_cache_test.cc b/tests/core/algorithm/diskann/diskann_cache_test.cc
+index a8bf95f3..295c2033 100644
+--- a/tests/core/algorithm/diskann/diskann_cache_test.cc
++++ b/tests/core/algorithm/diskann/diskann_cache_test.cc
+@@ -39,7 +39,7 @@ TEST(DiskAnnReadCacheTest, BudgetValidation) {
+ }
+ 
+ TEST(DiskAnnReadCacheTest, RepeatedHitsSurviveOneTimeScans) {
+-  constexpr size_t bytes = 32, budget = 1024;
++  constexpr size_t bytes = 32, budget = 1536;
+   DiskAnnReadCache cache(budget, bytes);
+   ASSERT_EQ(cache.capacity(), 16u);  // Exactly one replacement set.
+   EXPECT_LE(cache.allocated_bytes(), budget);
+@@ -58,11 +58,32 @@ TEST(DiskAnnReadCacheTest, RepeatedHitsSurviveOneTimeScans) {
+   EXPECT_TRUE(cache.try_read(0, bytes, out.data()));
+   EXPECT_EQ(out.front(), 0);
+   // A formerly hot record must still be evictable as the workload changes.
+-  for (size_t i = 32; i < 256; ++i)
++  for (size_t i = 32; i < 4096; ++i)
+     ASSERT_EQ(cache.read(i * bytes, bytes, out.data(), read), 0);
+   EXPECT_FALSE(cache.try_read(0, bytes, out.data()));
+ }
+ 
++TEST(DiskAnnReadCacheTest, RepeatedMissIsAdmittedWithoutCachingFirstScan) {
++  constexpr size_t bytes = 32, budget = 1536;
++  DiskAnnReadCache cache(budget, bytes);
++  ASSERT_EQ(cache.capacity(), 16u);
++  std::array<uint8_t, bytes> out{};
++  auto read = [](uint64_t offset, size_t length, void *dst) {
++    std::memset(dst, offset / bytes, length);
++    return 0;
++  };
++  for (size_t i = 0; i < cache.capacity(); ++i)
++    ASSERT_EQ(cache.read(i * bytes, bytes, out.data(), read), 0);
++  const uint64_t next = cache.capacity() * bytes;
++  ASSERT_EQ(cache.read(next, bytes, out.data(), read), 0);
++  EXPECT_EQ(out.front(), 16);
++  EXPECT_FALSE(cache.try_read(next, bytes, out.data()));
++  ASSERT_EQ(cache.read(next, bytes, out.data(), read), 0);
++  EXPECT_TRUE(cache.try_read(next, bytes, out.data()));
++  EXPECT_EQ(out.front(), 16);
++  EXPECT_LE(cache.allocated_bytes(), budget);
++}
++
+ TEST(DiskAnnReadCacheTest, PackedRecordsKeepBoundsAndSupportHitProbe) {
+   constexpr size_t bytes = 1668, budget = 64 * 1024;
+   DiskAnnReadCache cache(budget, bytes), pages(budget);
+diff --git a/tests/core/algorithm/diskann/diskann_mobile_compat_test.cc b/tests/core/algorithm/diskann/diskann_mobile_compat_test.cc
+index 097f0b49..28e2423a 100644
+--- a/tests/core/algorithm/diskann/diskann_mobile_compat_test.cc
++++ b/tests/core/algorithm/diskann/diskann_mobile_compat_test.cc
+@@ -19,14 +19,18 @@
+ #include <array>
+ #include <cstdint>
+ #include <cstring>
++#include <limits>
++#include <numeric>
+ #include <string>
+ #include <thread>
+ #include <vector>
+ #include <gtest/gtest.h>
+ #include <zvec/ailego/container/vector.h>
++#include <zvec/ailego/hash/crc32c.h>
+ #include <zvec/core/framework/index_framework.h>
+ #include "diskann_builder.h"
+ #include "diskann_file_reader.h"
++#include "diskann_searcher_entity.h"
+ #include "diskann_util.h"
+ 
+ namespace zvec::core {
+@@ -417,6 +421,93 @@ static void build_dump_load_and_search(size_t kDimension) {
+       context->result().end());
+ }
+ 
++// Exercise persisted metadata directly, independently of graph construction.
++static bool write_key_fixture(const char *path,
++                              const std::vector<diskann_key_t> &keys,
++                              const std::vector<diskann_id_t> &mapping,
++                              size_t count) {
++  auto dumper = IndexFactory::CreateDumper("FileDumper");
++  if (!dumper || dumper->create(path) != 0) return false;
++  auto append = [&](const std::string &name, const void *data, size_t bytes) {
++    return dumper->write(data, bytes) == bytes &&
++           dumper->append(name, bytes, 0, ailego::Crc32c::Hash(data, bytes)) ==
++               0;
++  };
++  DiskAnnMetaHeader header;
++  header.doc_cnt = count;
++  header.ndims = 4;
++  DiskAnnPqMeta pq;
++  pq.chunk_num = 1;
++  pq.quantizer_meta_buffer_size = sizeof(turbo::QuantizerSerHeader);
++  std::string codes(count, '\0');
++  const uint32_t zero = 0;
++  return append(DiskAnnEntity::kDiskAnnMetaSegmentId, &header,
++                sizeof(header)) &&
++         append(DiskAnnEntity::kDiskAnnPqMetaSegmentId, &pq, sizeof(pq)) &&
++         append(DiskAnnEntity::kDiskAnnPqDataSegmentId, codes.data(),
++                codes.size()) &&
++         append(DiskAnnEntity::kDiskAnnKeySegmentId, keys.data(),
++                keys.size() * sizeof(keys[0])) &&
++         append(DiskAnnEntity::kDiskAnnKeyMappingSegmentId, mapping.data(),
++                mapping.size() * sizeof(mapping[0])) &&
++         append(DiskAnnEntity::kDiskAnnEntryPointSegmentId, &zero,
++                sizeof(zero)) &&
++         append(DiskAnnEntity::kDiskAnnVectorSegmentId, &zero, sizeof(zero)) &&
++         dumper->close() == 0;
++}
++
++TEST(DiskAnnMobileCompatTest, CompactKeysAndFallbackSurviveCloneAndReload) {
++  std::vector<diskann_key_t> sequential(2051);
++  std::iota(sequential.begin(), sequential.end(), uint64_t{100});
++  const uint64_t high = std::numeric_limits<uint64_t>::max();
++  const std::vector<std::vector<diskann_key_t>> cases{
++      sequential,          {8, 12, 31}, {90, 4, 77}, {high - 2, high - 1, high},
++      {high - 1, high, 0}, {42}};
++  DiskAnnSearcherEntity entity;
++  IndexMeta meta(IndexMeta::DataType::DT_FP32, 4);
++  meta.set_metric("SquaredEuclidean", 0, ailego::Params());
++  for (const auto &keys : cases) {
++    TemporaryFile file;
++    std::vector<diskann_id_t> mapping(keys.size());
++    std::iota(mapping.begin(), mapping.end(), 0);
++    std::sort(mapping.begin(), mapping.end(),
++              [&](auto a, auto b) { return keys[a] < keys[b]; });
++    ASSERT_TRUE(write_key_fixture(file.path(), keys, mapping, keys.size()));
++    auto storage = IndexFactory::CreateStorage("FileReadStorage");
++    ASSERT_EQ(storage->open(file.path(), false), 0);
++    ASSERT_EQ(entity.load(meta, storage), 0);
++    auto clone = entity.clone();
++    ASSERT_NE(clone, nullptr);
++    entity.clear();
++    storage.reset();
++    for (size_t i = 0; i < keys.size(); ++i) {
++      EXPECT_EQ(clone->get_key(i), keys[i]);
++      EXPECT_EQ(clone->get_id(keys[i]), i);
++    }
++    EXPECT_EQ(clone->get_id(3), kInvalidId);
++    EXPECT_EQ(clone->get_id(99), kInvalidId);
++  }
++}
++
++TEST(DiskAnnMobileCompatTest, CompactKeysRejectTruncatedSegments) {
++  IndexMeta meta(IndexMeta::DataType::DT_FP32, 4);
++  meta.set_metric("SquaredEuclidean", 0, ailego::Params());
++  for (bool truncate_keys : {false, true}) {
++    TemporaryFile file;
++    std::vector<diskann_key_t> keys{100, 101, 102};
++    std::vector<diskann_id_t> mapping{0, 1, 2};
++    if (truncate_keys)
++      keys.pop_back();
++    else
++      mapping.pop_back();
++    ASSERT_TRUE(write_key_fixture(file.path(), keys, mapping, 3));
++    auto storage = IndexFactory::CreateStorage("FileReadStorage");
++    ASSERT_EQ(storage->open(file.path(), false), 0);
++    DiskAnnSearcherEntity entity;
++    EXPECT_NE(entity.load(meta, storage), 0);
++  }
++}
++
+ TEST(DiskAnnMobileCompatTest, BuildDumpLoadAndSearch) {
+   build_dump_load_and_search(10);
+ }
