@@ -250,11 +250,8 @@ impl WalkContext {
         });
     }
 
-    /// Buffers a name-based reference. Duplicate references (same owner, kind,
-    /// receiver, and name — e.g. a callee invoked in a loop) collapse to the
-    /// first occurrence; per-site evidence can be accumulated later via
-    /// metadata. Distinct receivers stay separate: `left_api.work()` and
-    /// `right_api.work()` can bind different declarations.
+    /// Buffers a name-based reference, deduplicating repeated collection at the
+    /// same source position. Calls at different positions remain distinct.
     pub(crate) fn add_name_edge(&mut self, edge: NameEdge) {
         if !self.collecting {
             return;

@@ -83,33 +83,7 @@ fn alias_table(name_edges: &[NameEdge]) -> HashMap<(usize, String), String> {
         .collect()
 }
 
-/// Receivers whose owner binds them to more than one type (`x = new X()`
-/// ... later `x = new Y()`) keep their call sites apart: only per-site
-/// evidence lets the resolver pick the binding in force at each call.
-/// Every other receiver resolves identically from any of its sites, so
-/// repeated spellings of one call shape collapse to the first.
-fn rebinding_receivers(name_edges: &[NameEdge]) -> HashSet<(usize, String)> {
-    let mut binding_types: HashMap<(usize, String), HashSet<&str>> = HashMap::new();
-    for edge in name_edges
-        .iter()
-        .filter(|edge| edge.ref_kind == GraphEdgeKind::Declares)
-    {
-        if let Some(bound) = edge.bound_type.as_deref() {
-            binding_types
-                .entry((edge.owner_index, edge.ref_name.clone()))
-                .or_default()
-                .insert(bound);
-        }
-    }
-    binding_types
-        .into_iter()
-        .filter(|(_, types)| types.len() > 1)
-        .map(|(key, _)| key)
-        .collect()
-}
-
-/// One name-reference site: two references collapse only when they share the
-/// owner, kind, receiver, name, and call arity.
+/// Shape used to collapse non-call, non-binding references.
 type RefSite = (GraphEdgeKind, usize, Option<String>, String, Option<usize>);
 
 /// Partitions the walk buffers against the completed symbol table.
@@ -140,19 +114,14 @@ pub(crate) fn partition_walk(
         head_fragment_indices,
     };
     let aliases = alias_table(&name_edges);
-    let rebinding_receivers = rebinding_receivers(&name_edges);
     let mut collapsed: HashSet<RefSite> = HashSet::new();
     for edge in name_edges {
-        let rebinding_call = edge.ref_kind == GraphEdgeKind::Calls
-            && edge.receiver_name.as_deref().is_some_and(|receiver| {
-                rebinding_receivers.contains(&(edge.owner_index, receiver.to_owned()))
-            });
-        if !rebinding_call && edge.ref_kind != GraphEdgeKind::Declares {
-            // Binding rows never collapse: the resolver's binding table
-            // orders them by line, so a rebinding row is load-bearing even
-            // when an earlier row binds the same name. Arity is part of the
-            // site: `x.run()` and `x.run(1)` may name different overloads, so
-            // collapsing them would discard one of the two shapes.
+        if !matches!(
+            edge.ref_kind,
+            GraphEdgeKind::Calls | GraphEdgeKind::Declares
+        ) {
+            // Preserve each call position and binding declaration. The walk already
+            // deduplicates collecting the same call site more than once.
             let site = (
                 edge.ref_kind,
                 edge.owner_index,

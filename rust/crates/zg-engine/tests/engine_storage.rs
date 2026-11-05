@@ -24,10 +24,64 @@ use zg_engine::{
         },
         index::{IndexOptions, options::WorkspaceChange},
         info::InfoOptions,
+        relationships::RelationshipOptions,
     },
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+#[tokio::test]
+async fn indexed_calls_preserve_distinct_source_positions() -> TestResult {
+    let temporary = tempdir()?;
+    let root = temporary.path();
+    let server = EmbeddingServer::start()?;
+    configure_remote_model(root, server.address)?;
+    fs::write(
+        root.join("calls.rs"),
+        "fn target() {}\nfn caller() {\n    target(); target();\n    target();\n}\n",
+    )?;
+    let engine = ZvecGrep::new();
+    let indexed = engine
+        .index(IndexOptions {
+            graph_indexing: Some(true),
+            rebuild: true,
+            ..index_options(root)
+        })
+        .await?;
+    assert_eq!((indexed.files_added, indexed.files_failed), (1, 0));
+    engine.close();
+    let engine = ZvecGrep::new();
+    let options = RelationshipOptions {
+        root: Some(root.to_path_buf()),
+        symbol: "caller".into(),
+        limit: Some(3),
+        ..RelationshipOptions::default()
+    };
+    let result = engine.callees(options.clone()).await?;
+    assert_eq!(result.matches.len(), 1);
+    let matched = &result.matches[0];
+    assert_eq!(matched.edges.len(), 3);
+    assert!(!matched.truncated);
+    let positions = matched
+        .edges
+        .iter()
+        .map(|edge| (edge.line, edge.column))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        positions,
+        BTreeSet::from([(Some(3), Some(4)), (Some(3), Some(14)), (Some(4), Some(4))])
+    );
+    let limited = engine
+        .callees(RelationshipOptions {
+            limit: Some(1),
+            ..options
+        })
+        .await?;
+    assert_eq!(limited.matches[0].edges.len(), 1);
+    assert!(limited.matches[0].truncated);
+    engine.close();
+    Ok(())
+}
 
 #[tokio::test]
 async fn extensionless_scripts_preserve_outline_language_across_reopen() -> TestResult {

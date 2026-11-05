@@ -97,7 +97,7 @@ pub struct CallSite {
     pub column: Option<usize>,
 }
 
-/// One matched definition and its call sites, preserving repeated calls.
+/// One matched definition and its resolved call sites, preserving distinct source locations.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SymbolRelationships {
