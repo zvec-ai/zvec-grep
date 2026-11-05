@@ -58,7 +58,8 @@ impl ConnectProxy {
                     .expect("proxy requests")
                     .push((route, request));
                 if let Some(status) = status {
-                    respond(reader.into_inner(), status, b"");
+                    respond_to_connect(reader.into_inner(), status)
+                        .expect("write CONNECT response");
                 }
                 // No response closes CONNECT before a tunnel is established.
             }
@@ -94,6 +95,15 @@ impl Drop for ConnectProxy {
     fn drop(&mut self) {
         let _ = self.shutdown();
     }
+}
+
+fn respond_to_connect(mut stream: TcpStream, status: u16) -> io::Result<()> {
+    // CONNECT clients can reject the status prefix without reading the remaining
+    // headers. Formatting directly into TcpStream splits the response into writes,
+    // so the client can close before the status or later headers have been sent.
+    let response =
+        format!("HTTP/1.1 {status} Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    stream.write_all(response.as_bytes())
 }
 
 fn proxy_builder(url: &str) -> reqwest::ClientBuilder {
