@@ -1,0 +1,7 @@
+{
+  "library_lines": [
+    "dyld[393]: <D39A701D-E6C4-3D14-9C74-3752670B8997> /private/tmp/zvec-disjoint-cohere-20261105/rust-target/release/libzvec_c_api.dylib"
+  ],
+  "returncode": 101,
+  "overlap_rejected": true
+}

@@ -1,0 +1,6 @@
+{
+  "returncode": 101,
+  "stdout": "",
+  "stderr": "\nthread 'main' (38854394) panicked at src/bin/disjoint-bench.rs:104:9:\nwarmup/test overlap or duplicate query\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n",
+  "queries_executed": 0
+}

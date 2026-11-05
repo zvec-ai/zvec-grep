@@ -36,4 +36,9 @@ required-features = ["experimental-pq"]
 [build-dependencies]
 zvec-rust-build = "=0.8.0"
 
+[[bin]]
+name = "disjoint-bench"
+path = "src/bin/disjoint-bench.rs"
+required-features = ["experimental-pq"]
+
 [workspace]

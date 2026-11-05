@@ -1,0 +1,106 @@
+{
+  "passed": true,
+  "query_rows_unique": 4000,
+  "fp32_and_fp16_unique": true,
+  "previous_queries_excluded": true,
+  "formal_processes": 60,
+  "formal_queries_per_backend_scale": 3000,
+  "records_checked": 79,
+  "fresh_process_single_test_pass": true,
+  "test_queries_never_used_for_warmup_or_selection": true,
+  "gt_independent_spotchecks": [
+    {
+      "count": 200000,
+      "shard": 3,
+      "query_position": 217,
+      "method": "independent scalar dot and full stable sort",
+      "passed": true
+    },
+    {
+      "count": 400000,
+      "shard": 3,
+      "query_position": 217,
+      "method": "independent scalar dot and full stable sort",
+      "passed": true
+    },
+    {
+      "count": 600000,
+      "shard": 3,
+      "query_position": 217,
+      "method": "independent scalar dot and full stable sort",
+      "passed": true
+    },
+    {
+      "count": 800000,
+      "shard": 3,
+      "query_position": 217,
+      "method": "independent scalar dot and full stable sort",
+      "passed": true
+    },
+    {
+      "count": 1000000,
+      "shard": 3,
+      "query_position": 217,
+      "method": "independent scalar dot and full stable sort",
+      "passed": true
+    }
+  ],
+  "summary_recomputed": true,
+  "source_and_binary_hashes_verified": true,
+  "memory_source_sha256": {
+    "src/core/algorithm/diskann/diskann_searcher_entity.cc": "f6610f589ead6ada0a99695c7cd8ac1025c88fc2efc4487c618f553c12365777"
+  },
+  "indexes_unchanged": true,
+  "comparison": [
+    {
+      "count": 200000,
+      "qps_ratio": 1.1721271940471725,
+      "paired_wins": 6
+    },
+    {
+      "count": 400000,
+      "qps_ratio": 1.0034915542247291,
+      "paired_wins": 4
+    },
+    {
+      "count": 600000,
+      "qps_ratio": 0.8543762804628763,
+      "paired_wins": 0
+    },
+    {
+      "count": 800000,
+      "qps_ratio": 0.8058654485658296,
+      "paired_wins": 0
+    },
+    {
+      "count": 1000000,
+      "qps_ratio": 0.7829089468990186,
+      "paired_wins": 0
+    }
+  ],
+  "memory_control": [
+    {
+      "cache_mib": 0,
+      "rss_mib": 156.609375,
+      "qps": 259.7301614653132,
+      "recall": 0.92775
+    },
+    {
+      "cache_mib": 64,
+      "rss_mib": 220.703125,
+      "qps": 369.0576385011823,
+      "recall": 0.92775
+    }
+  ],
+  "profile": {
+    "batches": 11531,
+    "requests": 217861,
+    "requested_bytes": 372106588,
+    "miss_reads": 139464,
+    "read_bytes": 571244544,
+    "pread_syscalls": 139464,
+    "read_ns": 13475886490,
+    "batch_ns": 2312504842
+  },
+  "raw_evidence_sha256": "83ff2a7bc33f8980e4d041ca13f60e9fcdea53c247068d2cc943f0954a348643"
+}

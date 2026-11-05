@@ -1,0 +1,47 @@
+{
+  "selected_at": "2026-11-05T14:05:52.582736+08:00",
+  "settings": {
+    "zvec-200000": {
+      "effort": 96,
+      "validation_recall": 0.931
+    },
+    "microsoft-200000": {
+      "effort": 128,
+      "validation_recall": 0.96425
+    },
+    "zvec-400000": {
+      "effort": 96,
+      "validation_recall": 0.921
+    },
+    "microsoft-400000": {
+      "effort": 128,
+      "validation_recall": 0.95475
+    },
+    "zvec-600000": {
+      "effort": 128,
+      "validation_recall": 0.93525
+    },
+    "microsoft-600000": {
+      "effort": 128,
+      "validation_recall": 0.9505
+    },
+    "zvec-800000": {
+      "effort": 128,
+      "validation_recall": 0.93025
+    },
+    "microsoft-800000": {
+      "effort": 128,
+      "validation_recall": 0.942
+    },
+    "zvec-1000000": {
+      "effort": 128,
+      "validation_recall": 0.92775
+    },
+    "microsoft-1000000": {
+      "effort": 128,
+      "validation_recall": 0.9445
+    }
+  },
+  "threshold": 0.92,
+  "test_results_seen": false
+}

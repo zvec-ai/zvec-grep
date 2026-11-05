@@ -278,7 +278,7 @@ export ZVEC_DISKANN_READ_WORKERS=8
 
 复现脚本为 [run_node_comparison.py](run_node_comparison.py) 和 [publish_node_comparison.py](publish_node_comparison.py)。保留原数据、索引和配置对应的二进制与库，在新的实验目录运行 `run_node_comparison.py --base BASE --data DATA --indexes INDEXES --source ZVEC_SOURCE --stage measure`；`BASE/measure` 必须不存在。发布脚本另需构建、C++ 测试及诊断记录。首次执行时路径检查曾误将上一版程序的 `@rpath` 链接当成绝对链接，已在任何查询开始前修正；这次预检查失败不计为有效测量。
 '''
-(here/'REPORT_NODE_CN.md').write_text(report)
+(here/'REPORT_NODE_WARM_CN.md').write_text('> 历史重复热查询结果。独立预热、单遍未知查询的最新结果见 [当前报告](REPORT_NODE_CN.md)。\n\n'+report)
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt

@@ -1,0 +1,67 @@
+{
+  "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+  "source_commit": "7d3a413e1f1e5367dc45402b2e28a9ed254343f3",
+  "native_library_sha256": "3e7534960cb0c74bac91079bea64202f5fd7689a8bd971b6eaad98cc79c83244",
+  "native_library_reused_from": "results/node-comparison/build.json",
+  "new_harness": true,
+  "command": "ZVEC_LIB_DIR=/tmp/zvec-node-cohere-20261104/optimized ZVEC_AUTO_BUILD=0 CARGO_TARGET_DIR=/tmp/zvec-disjoint-cohere-20261105/rust-target RUSTFLAGS=\"-C link-arg=-Wl,-headerpad_max_install_names\" cargo build --release --manifest-path harness/Cargo.toml --features experimental-pq --bin disjoint-bench",
+  "overlap_rejection_passed": true,
+  "source_and_binary": {
+    "start": "2026-11-05T14:05:15.275103+08:00",
+    "base": "/tmp/zvec-disjoint-cohere-20261105",
+    "source_commit": "7d3a413e1f1e5367dc45402b2e28a9ed254343f3",
+    "source": "/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/zvec",
+    "native_source_sha256": {
+      "src/core/algorithm/diskann/diskann_read_cache.h": "be5beb2c40f166b28b021f5841338a67575a482c4e8625f7ba755a26cf993aec",
+      "src/core/algorithm/diskann/diskann_read_executor.h": "92248e4cc41db6431e147c53543ecf89324efe0c25f656e1659bdef0a4937358",
+      "src/core/algorithm/diskann/diskann_file_reader.h": "0435ce0496b2042ea7b6c808b0800ea3dbc711ebb158ddb5cea23675a9b6d052",
+      "src/core/algorithm/diskann/diskann_file_reader.cc": "2d28bad5fe6462ff36b7b22070311babcab2b611373640995b8cb42687a82137",
+      "src/core/algorithm/diskann/diskann_indexer.cc": "0414e078a0c0be3fe323cda43236fa4f9eb2f8b68c55dcbda40eb88b37ec7c40",
+      "src/core/algorithm/diskann/diskann_indexer.h": "15f0fb7b35d26a9fabd16e74e0aef88d42666731d6672fe8c840f7af1b30ac47"
+    },
+    "microsoft_source_sha256": {
+      "rust/crates/zg-diskann/src/lib.rs": "34427006a2eb3b477943e728ed86c5952087afc39b1c6f7b414abec921768d1d",
+      "rust/crates/zg-diskann/src/provider.rs": "56669c6de111605df307b18d9fc2cbac82db34dd6ba32510233cb775fc8fef7a",
+      "rust/crates/zg-diskann/src/experimental_pq.rs": "81cd246edfda8dc8d27791fe7f8fb00d1eb48999d0524ecc8700c8ab6c5eae37",
+      "rust/crates/zg-diskann/src/node.rs": "2a20dadb8939eef2fb9720d91bbf70351023ec35623d88e1531dcaf26bd253ba",
+      "rust/crates/zg-diskann/src/tests.rs": "74cc32e2bfecc5fb1458af104526f38db397f0903302702e0c40195a39ce8688",
+      "rust/crates/zg-diskann/src/experimental_pq/tests.rs": "4a657896a80944e47c11077ab736b299af9a1a15f83cf2a15c471b6d10d495fb"
+    },
+    "binary": {
+      "path": "/tmp/zvec-disjoint-cohere-20261105/rust-target/release/disjoint-bench",
+      "sha256": "508cc011226c70e6953468ac39988dadae069d6f3cbacd0c6e1628b511eda904"
+    },
+    "library": {
+      "path": "/tmp/zvec-disjoint-cohere-20261105/rust-target/release/libzvec_c_api.dylib",
+      "sha256": "3e7534960cb0c74bac91079bea64202f5fd7689a8bd971b6eaad98cc79c83244"
+    },
+    "source_files_sha256": {
+      "harness/src/bin/disjoint-bench.rs": "8bf7c48066fd2ad222c7f79d272adbb827cc36f4654d633aa7d4ff0c00725505",
+      "harness/Cargo.toml": "f0ad5ae4a57e071589385142b2d5f41c523ccd488eb2d4cf8330a00965e93fa5",
+      "harness/Cargo.lock": "3850a4c2d1d9b245bc90edc02f4fb8e59a49e9b6eb8fb7ef7db09c41463510fc",
+      "prepare_disjoint.py": "33c9881e8b7f1c416ea908e70b8b1499a641245746be75f57594b7278dc6a51b",
+      "run_disjoint_comparison.py": "151c3f91a1729fb4ba344a67e71e86aa0b0585ecc7e22c562c03feba0c511340"
+    },
+    "data_manifest_sha256": "095509977baa23a1eff1954f8d52deb5a9bdf1e56fc465ad33d86676ac3655fc",
+    "indexes": "/tmp/zvec-local-cohere-20261104/experiment/indexes",
+    "microsoft_indexes": "/private/tmp/zvec-cohere-million/experiment/indexes",
+    "pq_preparation": "/private/tmp/zvec-cohere-pq64-20261104/preparation",
+    "pq_codes_sha256": "f09864b337238aa83c18abbcccdd023328b34a24eb34d9ad62bd115baab5aecc",
+    "cache_mib": 64,
+    "read_workers": 8,
+    "query_concurrency": 1,
+    "warmup_queries": 600,
+    "validation_queries": 400,
+    "test_queries": 3000,
+    "shards": 6,
+    "queries_per_shard": 500,
+    "test_passes": 1,
+    "test_warmup_passes": 0,
+    "selection": "start at previous L; raise only on independent 400-query validation until recall >= 92%; freeze before all test runs",
+    "schedule": "alternate scale order by shard; backend order alternates by shard and scale",
+    "qps_definition": "3000 / sum(single-pass timed seconds over six distinct shards)",
+    "rss_definition": "median of six whole-process peak RSS values; MiB",
+    "os_file_cache": "not purged; process/reader cache fresh each run",
+    "same_dylib_for_both": true
+  }
+}
