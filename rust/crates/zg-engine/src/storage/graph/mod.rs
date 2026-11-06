@@ -7,6 +7,7 @@
 //! This module does not resolve names, run FTS, or manage workspace locks.
 //! `IndexStore` owns the connection and coordinates file replacement.
 
+mod invalidation;
 mod pending;
 mod reader;
 mod schema;

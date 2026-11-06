@@ -130,8 +130,9 @@ impl SqliteGraphStorage {
 
     /// Atomically terminates pending references whose specifier cannot
     /// address any workspace module. Failed rows drop out of the queue until
-    /// the owning file is rewritten; they carry no target, so invalidation
-    /// never resurrects them. The same caller serialization as
+    /// the owning file is rewritten or a later pass requeues them because the
+    /// evidence behind them changed; they carry no target, so endpoint
+    /// invalidation alone never revives them. The same caller serialization as
     /// `apply_resolutions` applies.
     ///
     /// # Errors

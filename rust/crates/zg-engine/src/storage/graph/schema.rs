@@ -44,6 +44,10 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
     } else {
         validate(&tx)?;
     }
+    // Indexes are additive, so an existing database keeps its rows and gains
+    // the ones it was built without. A read-only open cannot write and only
+    // loses the index acceleration; the next writable open catches up.
+    tx.execute_batch(INDEXES)?;
     tx.commit()?;
     Ok(())
 }
@@ -51,8 +55,9 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
 // Direct local edges and references share one table. Resolution fills the target
 // on the existing reference row; invalidation clears it and retains the evidence.
 // `failed` terminates import references whose specifier addresses modules
-// outside the workspace; they carry no target, so invalidation cannot
-// resurrect them and only a rewrite of the owning file re-enqueues them.
+// outside the workspace; they carry no target, so endpoint invalidation cannot
+// revive them. Rewriting the owning file re-enqueues them, and so does a later
+// pass that requeues the evidence they depended on.
 const SCHEMA: &str = "
 CREATE TABLE edges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,9 +87,24 @@ CREATE TABLE edges (
             AND (provenance IS NULL OR provenance <> 'file_local'))
     )
 ) STRICT;
-CREATE INDEX edges_file ON edges(file_id);
-CREATE INDEX edges_source_kind ON edges(source, kind);
-CREATE INDEX edges_target_kind ON edges(target, kind);
+";
+
+// Created on every writable open, not only when the table is: an index is
+// derived data, so a database built by an older binary gains the ones added
+// since without a rebuild. A database whose columns predate one of these
+// indexes fails here with `no such column`, which is the same rebuild signal
+// the first read of that column would have produced.
+const INDEXES: &str = "
+CREATE INDEX IF NOT EXISTS edges_file ON edges(file_id);
+CREATE INDEX IF NOT EXISTS edges_source_kind ON edges(source, kind);
+CREATE INDEX IF NOT EXISTS edges_target_kind ON edges(target, kind);
 -- Index only the pending queue so resolved queries use the endpoint indexes.
-CREATE INDEX edges_pending_id ON edges(id) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS edges_pending_id ON edges(id) WHERE status = 'pending';
+-- The incremental requeue probes this column by value on every pass. The
+-- partial predicate repeats the probe's `reference_name IS NOT NULL` verbatim,
+-- because SQLite only considers a partial index when the query implies its
+-- predicate; it also leaves out `contains` edges and the `file_local` rows that
+-- the CHECK constraint pins to a NULL `reference_name`.
+CREATE INDEX IF NOT EXISTS edges_name_tail ON edges(name_tail)
+    WHERE reference_name IS NOT NULL;
 ";

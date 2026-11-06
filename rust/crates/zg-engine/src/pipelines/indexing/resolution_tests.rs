@@ -209,10 +209,10 @@ fn import_target_files(store: &IndexStore, file: FileId) -> Vec<FileId> {
             Ok(targets
                 .into_iter()
                 .map(|target| {
-                    metadata
-                        .get(&target)
-                        .expect("import target has entity metadata")
-                        .0
+                    metadata.get(&target).map_or_else(
+                        || panic!("import target {target:?} has no entity metadata"),
+                        |entry| entry.0,
+                    )
                 })
                 .collect())
         })
@@ -627,5 +627,147 @@ fn sweep_keeps_java_on_demand_import_pending() {
             .any(|reference| reference.file_id == app.get()
                 && reference.reference.ref_kind == GraphEdgeKind::Imports),
         "the on-demand import stays queued"
+    );
+}
+
+/// Persisted targets of one file's resolved import edges. A relative
+/// specifier binds to the module's file endpoint (`f{file_id}`), so the raw
+/// target is the assertion, not an entity file lookup.
+fn import_target_ids(store: &IndexStore, file: FileId) -> Vec<String> {
+    store
+        .read_snapshot(|view| {
+            view.neighborhood(
+                &format!("f{}", file.get()),
+                Direction::Out,
+                Some(&[GraphEdgeKind::Imports]),
+                |rows| rows.map(|edge| edge.map(|edge| edge.target)).collect(),
+            )
+        })
+        .expect("resolved import targets")
+}
+
+#[test]
+fn incremental_added_module_requeues_import_preference() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    let nested = index_source(&store, "src/lib/index.ts", "export function work() {\n}\n");
+    let main = index_source(
+        &store,
+        "src/main.ts",
+        "import { work } from './lib';\n\nexport function run() {\n  work();\n}\n",
+    );
+    let owner = pending_call_owner(&store, main, "work");
+    // The first pass has no resolved rows to revisit; it only clears what it
+    // accumulated while writing.
+    assert_eq!(
+        store.requeue_stale_resolutions().expect("requeue"),
+        0,
+        "a fresh graph holds no resolved references"
+    );
+    resolve_pending(&store, None).expect("first sweep");
+    assert_eq!(
+        import_target_ids(&store, main),
+        vec![format!("f{}", nested.get())]
+    );
+    assert_eq!(call_target_files(&store, &owner), vec![nested]);
+
+    // Creating the sibling module makes `./lib` prefer `src/lib.ts`. Neither
+    // file that already resolved is rewritten, so only the pass-level requeue
+    // can reach those rows.
+    let sibling = index_source(&store, "src/lib.ts", "export function work() {\n}\n");
+    let requeued = store.requeue_stale_resolutions().expect("requeue");
+    assert!(
+        requeued >= 2,
+        "the import and its scoped call return to the queue: {requeued}"
+    );
+    resolve_pending(&store, None).expect("second sweep");
+    assert_eq!(
+        import_target_ids(&store, main),
+        vec![format!("f{}", sibling.get())],
+        "the shorter module wins once it exists"
+    );
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![sibling],
+        "the call follows the re-resolved import"
+    );
+}
+
+#[test]
+fn incremental_added_duplicate_name_requeues_unique_resolution() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    let first = index_source(&store, "src/a.ts", "export function work() {\n}\n");
+    let caller = index_source(
+        &store,
+        "src/b.ts",
+        "export function run() {\n  work();\n}\n",
+    );
+    let owner = pending_call_owner(&store, caller, "work");
+    store.requeue_stale_resolutions().expect("requeue");
+    resolve_pending(&store, None).expect("first sweep");
+    assert_eq!(call_target_files(&store, &owner), vec![first]);
+
+    // A second definition of the same name breaks the former unique match
+    // without touching any endpoint the first resolution stored.
+    index_source(&store, "src/c.ts", "export function work() {\n}\n");
+    let requeued = store.requeue_stale_resolutions().expect("requeue");
+    assert!(
+        requeued >= 1,
+        "the unique call returns to the queue: {requeued}"
+    );
+    let sweep = resolve_pending(&store, None).expect("second sweep");
+    assert!(
+        call_target_files(&store, &owner).is_empty(),
+        "the call no longer binds one workspace-wide definition"
+    );
+    assert!(
+        sweep.candidates_recorded >= 1,
+        "the second definition is recorded as ambiguity: {sweep:?}"
+    );
+}
+
+#[test]
+fn incremental_requeue_revives_failed_import() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    let app = index_source(
+        &store,
+        "src/app.ts",
+        "import react from 'react';\n\nexport function mount() {\n}\n",
+    );
+    store.requeue_stale_resolutions().expect("requeue");
+    let sweep = resolve_pending(&store, None).expect("first sweep");
+    assert_eq!(
+        sweep.failed, 1,
+        "the bare package import terminates: {sweep:?}"
+    );
+    assert!(
+        store
+            .list_pending_refs(10, 0)
+            .expect("queue")
+            .refs
+            .iter()
+            .all(|reference| reference.reference.ref_kind != GraphEdgeKind::Imports),
+        "a failed reference leaves the queue"
+    );
+
+    // A pass that changes the module path set requeues failed rows as well:
+    // "no workspace module" was only true at the time it was recorded.
+    index_source(&store, "src/extra.ts", "export function extra() {\n}\n");
+    let requeued = store.requeue_stale_resolutions().expect("requeue");
+    assert!(
+        requeued >= 1,
+        "the failed import returns to the queue: {requeued}"
+    );
+    assert!(
+        store
+            .list_pending_refs(10, 0)
+            .expect("queue")
+            .refs
+            .iter()
+            .any(|reference| reference.file_id == app.get()
+                && reference.reference.ref_kind == GraphEdgeKind::Imports),
+        "the terminated import is pending again"
     );
 }

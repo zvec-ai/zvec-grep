@@ -14,6 +14,9 @@ impl SqliteGraphStorage {
     /// an empty slice for a new file. Snapshot node IDs validate ownership.
     /// The implicit file endpoint is `f{file_id}`, matching
     /// the zvec file document key. Cross-file edges are written by the resolver.
+    /// Invalidation here is bounded by endpoint identity; the workspace-wide
+    /// evidence resolution also reads (name candidates, module paths) requeues
+    /// once per pass through `IndexStore::requeue_stale_resolutions`.
     /// `language` labels pending references for the resolver's language gate;
     /// `None` records `unknown`, so the gate only keeps candidates that carry
     /// the same absent evidence.
