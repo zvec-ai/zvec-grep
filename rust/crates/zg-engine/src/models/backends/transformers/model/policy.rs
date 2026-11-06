@@ -87,19 +87,13 @@ impl BatchPolicy {
     }
 
     pub(super) fn max_rows(entry: TransformersConfig) -> usize {
-        if entry.reference == "local/all-minilm-l6-v2" {
-            16
-        } else {
-            entry.max_batch_size
-        }
+        // Coalescing shares the model's batch budget; it must not multiply
+        // per-session activation memory by the number of admitted requests.
+        entry.max_batch_size
     }
 
     pub(super) fn fits(entry: TransformersConfig, rows: usize, width: usize) -> bool {
-        let token_budget = if entry.reference == "local/all-minilm-l6-v2" {
-            4096
-        } else {
-            entry.max_batch_size.saturating_mul(entry.max_input_tokens)
-        };
+        let token_budget = entry.max_batch_size.saturating_mul(entry.max_input_tokens);
         rows <= Self::max_rows(entry) && rows.saturating_mul(width) <= token_budget
     }
 

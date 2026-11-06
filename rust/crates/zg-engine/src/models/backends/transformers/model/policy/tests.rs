@@ -44,9 +44,9 @@ fn session_setting_is_a_positive_count_with_default_one() {
 #[test]
 fn batch_limits_are_static_and_independent_of_execution_lanes() {
     let entry = minilm();
-    assert!(BatchPolicy::fits(entry, 16, 256));
-    assert!(!BatchPolicy::fits(entry, 17, 64));
-    assert!(!BatchPolicy::fits(entry, 16, 257));
+    assert!(BatchPolicy::fits(entry, 4, 256));
+    assert!(!BatchPolicy::fits(entry, 5, 64));
+    assert!(!BatchPolicy::fits(entry, 4, 257));
     assert!(!BatchPolicy::fits(entry, usize::MAX, usize::MAX));
     assert_eq!(BatchPolicy::length_bucket(65), 128);
     assert_eq!(BatchPolicy::length_bucket(128), 128);

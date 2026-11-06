@@ -14,18 +14,30 @@ async fn request(
     Request,
     oneshot::Receiver<Result<EmbeddingResult, ModelError>>,
 ) {
+    request_rows(queue, purpose, width, 4).await
+}
+
+async fn request_rows(
+    queue: &InferenceQueue,
+    purpose: EmbeddingPurpose,
+    width: usize,
+    rows: usize,
+) -> (
+    Request,
+    oneshot::Receiver<Result<EmbeddingResult, ModelError>>,
+) {
     let (reply, receiver) = oneshot::channel();
     let admission = queue.admit(128, purpose, None).await.expect("admission");
     (
         Request {
             texts: vec!["fixture".into()],
             prepared: Some(PreparedBatch {
-                input_ids: vec![1; 4 * width],
-                attention_mask: vec![1; 4 * width],
-                token_type_ids: vec![0; 4 * width],
-                position_ids: vec![0; 4 * width],
+                input_ids: vec![1; rows * width],
+                attention_mask: vec![1; rows * width],
+                token_type_ids: vec![0; rows * width],
+                position_ids: vec![0; rows * width],
                 padding_input_id: 0,
-                batch_size: 4,
+                batch_size: rows,
                 sequence_length: width,
                 truncated: vec![1],
             }),
@@ -76,17 +88,18 @@ async fn queries_precede_documents_and_are_never_coalesced() {
 
 #[tokio::test]
 async fn cpu_serializes_batches_and_cuda_limits_padded_shape() {
-    for (provider, width, expected) in [
-        (TransformersExecutionProvider::Cpu, 64, 1),
-        (TransformersExecutionProvider::Cuda, 64, 4),
-        (TransformersExecutionProvider::Cuda, 160, 4),
-        (TransformersExecutionProvider::Cuda, 256, 4),
+    for (provider, width, rows, expected) in [
+        (TransformersExecutionProvider::Cpu, 64, 1, 1),
+        (TransformersExecutionProvider::Cuda, 64, 1, 4),
+        (TransformersExecutionProvider::Cuda, 160, 2, 2),
+        (TransformersExecutionProvider::Cuda, 256, 4, 1),
     ] {
         let queue = InferenceQueue::default();
         let mut state = QueueState::default();
         let mut receivers = Vec::new();
         for _ in 0..4 {
-            let (request, receiver) = request(&queue, EmbeddingPurpose::Document, width).await;
+            let (request, receiver) =
+                request_rows(&queue, EmbeddingPurpose::Document, width, rows).await;
             state.push_back(request);
             receivers.push(receiver);
         }
@@ -287,7 +300,8 @@ async fn coalescing_is_independent_of_concurrency_and_fixed_batches_bypass_it() 
         let mut state = QueueState::default();
         let mut receivers = Vec::new();
         for width in [64, 128, 64, 64] {
-            let (mut request, receiver) = request(&queue, EmbeddingPurpose::Document, width).await;
+            let (mut request, receiver) =
+                request_rows(&queue, EmbeddingPurpose::Document, width, 1).await;
             request.options.execution_concurrency = budget;
             state.push_back(request);
             receivers.push(receiver);
@@ -318,7 +332,7 @@ async fn coalescing_is_independent_of_concurrency_and_fixed_batches_bypass_it() 
 async fn coalescing_wait_is_bounded_and_queries_skip_it() {
     let queue = InferenceQueue::default();
     let mut state = QueueState::default();
-    let (mut document, _document) = request(&queue, EmbeddingPurpose::Document, 64).await;
+    let (mut document, _document) = request_rows(&queue, EmbeddingPurpose::Document, 64, 1).await;
     let ready = Instant::now();
     document.ready = ready;
     state.push_back(document);
@@ -416,39 +430,85 @@ async fn single_lane_waiter_does_not_block_a_two_lane_request_or_an_eligible_que
 }
 
 #[tokio::test]
-async fn eight_admitted_minilm_requests_form_two_batches_at_both_execution_budgets() {
+async fn admitted_requests_share_the_model_batch_limit_at_both_execution_budgets() {
     for budget in [1, 2] {
-        for rows in [1, 4] {
+        for rows in [1, 2, 4] {
             let queue = InferenceQueue::default();
             let mut state = QueueState::default();
             let mut receivers = Vec::new();
             let now = Instant::now();
             for _ in 0..8 {
-                let (mut request, receiver) = request(&queue, EmbeddingPurpose::Document, 64).await;
+                let (mut request, receiver) =
+                    request_rows(&queue, EmbeddingPurpose::Document, 64, rows).await;
                 request.options.execution_concurrency = budget;
                 request.ready = now;
-                request.prepared.as_mut().expect("prepared").batch_size = rows;
                 state.push_back(request);
                 receivers.push(receiver);
             }
-            for _ in 0..2 {
+            let requests_per_batch = entry().max_batch_size / rows;
+            for _ in 0..8 / requests_per_batch {
                 let Work::Infer(requests) =
                     state.next(entry(), TransformersExecutionProvider::Cuda, now)
                 else {
                     panic!("ready native batch");
                 };
-                assert_eq!(requests.len(), 4);
+                assert_eq!(requests.len(), requests_per_batch);
                 assert_eq!(
                     requests
                         .iter()
                         .map(|request| request.prepared.as_ref().expect("prepared").batch_size)
                         .sum::<usize>(),
-                    4 * rows
+                    entry().max_batch_size
                 );
             }
             assert!(state.documents.is_empty());
         }
     }
+}
+
+#[tokio::test]
+async fn mixed_request_sizes_preserve_pending_work_and_discard_cancelled_members() {
+    let queue = InferenceQueue::default();
+    let mut state = QueueState::default();
+    let mut receivers = Vec::new();
+    for rows in [3, 2, 1] {
+        let (request, receiver) = request_rows(&queue, EmbeddingPurpose::Document, 64, rows).await;
+        state.push_back(request);
+        receivers.push(receiver);
+    }
+    let (mut cancelled, reply) = request_rows(&queue, EmbeddingPurpose::Document, 64, 1).await;
+    let signal = CancellationToken::new();
+    signal.cancel();
+    cancelled.options.signal = Some(signal);
+    state.push_back(cancelled);
+    let Work::Infer(selected) =
+        state.next(entry(), TransformersExecutionProvider::Cuda, Instant::now())
+    else {
+        panic!("ready batch")
+    };
+    assert_eq!(
+        selected
+            .iter()
+            .map(|request| request.prepared.as_ref().expect("prepared").batch_size)
+            .collect::<Vec<_>>(),
+        [3, 1]
+    );
+    assert_eq!(
+        reply.await.expect("reply").expect_err("cancelled").code(),
+        crate::EngineError::CANCELLED
+    );
+    assert_eq!(state.documents.len(), 1);
+    let Work::Infer(remaining) =
+        state.next(entry(), TransformersExecutionProvider::Cuda, Instant::now())
+    else {
+        panic!("remaining request")
+    };
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(
+        remaining[0].prepared.as_ref().expect("prepared").batch_size,
+        2
+    );
+    assert!(state.documents.is_empty());
 }
 
 #[tokio::test]

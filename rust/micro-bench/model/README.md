@@ -80,6 +80,8 @@ from other applications even for a CPU-fallback case.
 
 The default matrix retains production dynamic batching. Batch rows, padded-token
 budget, length bucketing and the coalescing window are independent of execution C.
+Coalesced batches share the catalog's per-model batch limit (4 rows for MiniLM).
+Full batches execute immediately; smaller requests can merge within that limit.
 Run a **separate** output directory with `--fixed-batch` to disable cross-request
 coalescing and compare CUDA C=1 versus C=2 at the same actual native batch shape.
 This flag applies to warmup and measured calls, is fingerprinted in the profile,
