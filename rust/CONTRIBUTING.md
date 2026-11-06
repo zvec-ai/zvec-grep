@@ -115,7 +115,7 @@ workspace and real-model verification. Push/PR runs use ordinary Linux, macOS
 and Windows runners. The independent non-CUDA quality job runs formatting,
 per-package checks, Clippy and npm packaging tests. Each test job compiles the
 workspace tests once, runs them with pinned cargo-nextest 0.9.148 and checks the
-CLI. It reuses the compiled `zg-engine` test binary for all three real models
+CLI. It reuses the compiled `zg-engine` test binary for all four real models
 without a separate Cargo build per model.
 
 For manual `workflow_dispatch`, set `cuda_verify=true` to build CUDA-enabled
@@ -135,10 +135,13 @@ This workflow does not call `rust-package-build.yml` or build/install npm packag
 it is not a substitute for package-level GPU validation.
 
 The CPU model stage runs the existing ignored real-model test for Model2Vec
-(`local/potion-code-16m-v2`), Transformers/ORT (`local/all-minilm-l6-v2`) and
-llama.cpp (`local/embeddinggemma-300m`). Separate GPU jobs run ORT and GGUF
+(`local/potion-code-16m-v2`), Transformers/ORT (`local/all-minilm-l6-v2`), native
+Bekko (`local/bekko-256-int8`) and llama.cpp (`local/embeddinggemma-300m`).
+The Bekko smoke also compares every output component with its pinned ONNX
+reference, including truncation boundaries and concurrent batches.
+Separate GPU jobs run ORT and GGUF
 with `ZVEC_GREP_SMOKE_DEVICE=cuda`, sequentially within each platform job;
-Model2Vec remains CPU-only. Linux uses separate CUDA 12/cuDNN and CUDA 13 runtime
+Model2Vec and Bekko remain CPU-only. Linux uses separate CUDA 12/cuDNN and CUDA 13 runtime
 containers for these GPU cases, with the same compiled test executable. Windows
 installs both runtime families before executing the downloaded test binaries.
 The test downloads, loads and embeds with each model and checks vector dimensions

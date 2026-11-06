@@ -540,6 +540,7 @@ jobs:
           import os, pathlib, re, subprocess
           cases = [("cpu", "model2vec", "local/potion-code-16m-v2"),
                    ("cpu", "onnx", "local/all-minilm-l6-v2"),
+                   ("cpu", "bekko", "local/bekko-256-int8"),
                    ("cpu", "gguf", "local/embeddinggemma-300m"),
                    ("cpu", "gguf-long-input", "local/embeddinggemma-300m")]
           logs = pathlib.Path("model-logs")
@@ -618,6 +619,7 @@ jobs:
           for spec in \
             'cpu|model2vec|local/potion-code-16m-v2|zvec-grep-cuda-ci' \
             'cpu|onnx|local/all-minilm-l6-v2|zvec-grep-cuda-ci' \
+            'cpu|bekko|local/bekko-256-int8|zvec-grep-cuda-ci' \
             'cpu|gguf|local/embeddinggemma-300m|zvec-grep-cuda-ci' \
             'cpu|gguf-long-input|local/embeddinggemma-300m|zvec-grep-cuda-ci'; do
             IFS='|' read -r device backend model runtime_image <<< "$spec"

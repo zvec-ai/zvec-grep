@@ -90,12 +90,18 @@ fn download(entry: EmbeddingCatalogEntry) -> &'static ArtifactDownloadConfig {
         EmbeddingCatalogEntry::LlamaCpp(e) => e.download,
         EmbeddingCatalogEntry::Model2Vec(e) => e.download,
         EmbeddingCatalogEntry::Transformers(e) => e.download,
+        EmbeddingCatalogEntry::Bekko(e) => e.download,
         EmbeddingCatalogEntry::Qwen(_) => panic!("local models only"),
     }
 }
 
 fn metadata(entry: EmbeddingCatalogEntry) -> Value {
     let (batch, limit, semantics) = match entry {
+        EmbeddingCatalogEntry::Bekko(e) => (
+            e.max_batch_size,
+            e.max_input_tokens,
+            json!({"dtype":"row-wise-int8","normalize":true,"pooling":"FP32 mean retaining unknown ids","query_prefix":null,"document_prefix":null}),
+        ),
         EmbeddingCatalogEntry::LlamaCpp(e) => (
             e.max_batch_size,
             e.context_size,
@@ -116,7 +122,7 @@ fn metadata(entry: EmbeddingCatalogEntry) -> Value {
     let d = download(entry);
     json!({"model":entry.reference(),"backend":entry.backend(),"dimension":entry.dimension(),"max_batch_size":batch,
         "max_input_tokens":limit,"semantics":semantics,"revision":d.hugging_face.revision,
-        "fallback_revision":d.model_scope.revision,"artifacts":d.artifacts.iter().map(|a|json!({"path":a.path,"size":a.size,"sha256":a.sha256})).collect::<Vec<_>>()})
+        "fallback_revision":d.model_scope.map(|source| source.revision),"artifacts":d.artifacts.iter().map(|a|json!({"path":a.path,"size":a.size,"sha256":a.sha256})).collect::<Vec<_>>()})
 }
 
 pub(super) async fn verify_artifacts(entry: EmbeddingCatalogEntry, cache: &Path) -> Value {
@@ -192,7 +198,7 @@ async fn verifies_gguf_in_modelscope_cache() {
     };
     const DOWNLOAD: ArtifactDownloadConfig = ArtifactDownloadConfig {
         hugging_face: SOURCE,
-        model_scope: SOURCE,
+        model_scope: Some(SOURCE),
         artifacts: &[ArtifactConfig {
             path: "model.gguf",
             size: 3,
