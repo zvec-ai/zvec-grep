@@ -211,6 +211,36 @@ test("scanner applies ignore files, hidden and generated directories, size, bina
   );
 });
 
+test("scanner indexes nested git repositories when noIgnore is set", async (t) => {
+  const root = await createTemporaryDirectory(t, "zvec-scanner-nested-git-");
+  await mkdir(join(root, "services", "service-a"), { recursive: true });
+  await writeFile(join(root, "README.md"), "outer\n");
+  await writeFile(join(root, ".gitignore"), "services/\n");
+  await mkdir(join(root, "services", "service-a", ".git"), {
+    recursive: true,
+  });
+  await writeFile(
+    join(root, "services", "service-a", "src.txt"),
+    "NEEDLE_MARKER\n",
+  );
+
+  const defaultScan = await scanRootPaths("workspace-index", [
+    { absolutePath: root, recursive: true },
+  ]);
+  assert.deepEqual(
+    defaultScan.files.map((file) => file.relativePath),
+    ["README.md"],
+  );
+
+  const noIgnoreScan = await scanRootPaths("workspace-index", [
+    { absolutePath: root, recursive: true, noIgnore: true },
+  ]);
+  assert.deepEqual(noIgnoreScan.files.map((file) => file.relativePath).sort(), [
+    "README.md",
+    "services/service-a/src.txt",
+  ]);
+});
+
 test("scanner reuses unchanged indexed file metadata without binary sniffing", async (t) => {
   const root = await createTemporaryDirectory(t, "zvec-scanner-known-files-");
   const path = join(root, "binary.md");
