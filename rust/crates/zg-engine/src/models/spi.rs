@@ -53,8 +53,7 @@ pub struct EmbeddingOptions {
     pub signal: Option<CancellationToken>,
     pub on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
     /// Runtime-owned execution budget. Backends use this to size their
-    /// per-request local inference resources without exposing another public
-    /// tuning knob.
+    /// per-request local inference resources within their configured pools.
     pub(crate) execution_concurrency: usize,
     /// Preserve this request's native batch shape for controlled comparisons.
     /// Production requests retain bounded dynamic batching by default.
@@ -70,7 +69,7 @@ pub struct EmbeddingOptions {
 pub(crate) struct EmbeddingPrepareOptions {
     pub(crate) signal: Option<CancellationToken>,
     pub(crate) on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
-    /// Initial native execution budget; preparation must not create extra models.
+    /// Initial native execution budget; preparation initializes the configured pool.
     pub(crate) execution_concurrency: usize,
     pub(crate) execution_lease: Option<Arc<dyn Send + Sync>>,
 }
@@ -115,15 +114,17 @@ impl Default for EmbeddingConcurrencyDefaults {
 
 /// A cumulative, backend-neutral snapshot of one cached model runtime.
 ///
-/// Durations are summed work time rather than elapsed wall time. Queue time is
-/// measured per request, from admission into the backend until native execution
-/// starts. Counters include warmup; benchmark consumers subtract snapshots.
+/// Durations are summed observations, not a disjoint wall-time breakdown.
+/// Counters include warmup; benchmark consumers subtract snapshots.
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub(crate) struct ModelExecutionStats {
     pub(crate) actual_provider: &'static str,
     pub(crate) session_count: usize,
+    /// ORT intra-op threads per session (including its calling thread).
     pub(crate) cpu_threads: usize,
+    pub(crate) cpu_threads_total: usize,
     pub(crate) prepared_batches: u64,
+    pub(crate) pool_reconfigurations: u64,
     pub(crate) native_runs: u64,
     pub(crate) native_rows: u64,
     pub(crate) padded_tokens: u64,
@@ -132,7 +133,10 @@ pub(crate) struct ModelExecutionStats {
     pub(crate) preparation_ns: u64,
     pub(crate) inference_ns: u64,
     pub(crate) postprocessing_ns: u64,
-    pub(crate) queue_wait_ns: u64,
+    /// Per request: backend submission through native start, including CPU
+    /// preparation, compute scheduling, coalescing and native-slot waiting.
+    /// Excludes runtime/backend admission and overlaps `preparation_ns`.
+    pub(crate) backend_to_native_ns: u64,
     pub(crate) native_inflight_peak: usize,
 }
 

@@ -8,7 +8,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, oneshot};
+use tokio::sync::{Notify, oneshot};
 
 use super::{
     Arc, Device, EmbeddingOptions, EmbeddingPurpose, ModelDownloadProgressReporter, ModelError,
@@ -19,8 +19,7 @@ use super::{
 use crate::models::spi::ModelExecutionStats;
 
 pub(super) struct SessionOwner {
-    workers: [StdMutex<Option<Worker>>; policy::CUDA_LANES],
-    slots: [Arc<Semaphore>; policy::CUDA_LANES],
+    workers: Vec<StdMutex<Option<Worker>>>,
     factory: Arc<Factory>,
     shared: Arc<Shared>,
     requested: TransformersExecutionProvider,
@@ -29,11 +28,7 @@ pub(super) struct SessionOwner {
 type Factory = dyn Fn(usize) -> Result<Box<dyn Runner>, ModelError> + Send + Sync;
 
 trait Runner {
-    fn configure(
-        &mut self,
-        _options: &EmbeddingOptions,
-        _force_cpu: bool,
-    ) -> Result<(), ModelError> {
+    fn configure(&mut self, _threads: usize, _force_cpu: bool) -> Result<(), ModelError> {
         Ok(())
     }
 
@@ -52,6 +47,22 @@ struct Shared {
     stats: StdMutex<ModelExecutionStats>,
     inflight: AtomicUsize,
     generation: AtomicUsize,
+    pool: StdMutex<PoolState>,
+}
+
+struct PoolState {
+    busy: Vec<Option<EmbeddingPurpose>>,
+    cpu_threads: Option<usize>,
+    changing: bool,
+    drain: bool,
+}
+
+/// Owned by the reservation and every native configuration job. If the async
+/// waiter is cancelled, new work still waits until all native changes settle.
+struct PoolTransition {
+    shared: Arc<Shared>,
+    threads: usize,
+    succeeded: AtomicBool,
 }
 
 struct Worker {
@@ -62,7 +73,11 @@ struct Worker {
 
 enum Message {
     Run(Box<Job>),
-    Retire,
+    Configure {
+        threads: usize,
+        transition: Arc<PoolTransition>,
+        reply: oneshot::Sender<Result<(), ModelError>>,
+    },
 }
 
 struct Job {
@@ -72,6 +87,7 @@ struct Job {
     enqueued: Vec<Instant>,
     reply: oneshot::Sender<NativeCompletion>,
     _permit: LanePermit,
+    cpu_threads: Option<usize>,
 }
 
 struct NativeCompletion {
@@ -81,20 +97,34 @@ struct NativeCompletion {
 }
 
 struct LanePermit {
-    permit: Option<OwnedSemaphorePermit>,
-    available: Arc<Notify>,
+    lane: usize,
+    shared: Arc<Shared>,
 }
 
 pub(super) struct Reservation {
     lane: usize,
     permit: LanePermit,
+    cpu_threads: Option<usize>,
+    transition: Option<Arc<PoolTransition>>,
 }
 
 impl Drop for LanePermit {
     fn drop(&mut self) {
-        // Notify after releasing the lane, so a woken waiter can reserve it.
-        drop(self.permit.take());
-        self.available.notify_waiters();
+        lock_std_mutex(&self.shared.pool).busy[self.lane] = None;
+        self.shared.available.notify_waiters();
+    }
+}
+
+impl Drop for PoolTransition {
+    fn drop(&mut self) {
+        let mut pool = lock_std_mutex(&self.shared.pool);
+        pool.cpu_threads = self
+            .succeeded
+            .load(Ordering::Acquire)
+            .then_some(self.threads);
+        pool.changing = false;
+        drop(pool);
+        self.shared.available.notify_waiters();
     }
 }
 
@@ -112,6 +142,7 @@ impl SessionOwner {
         model_path: PathBuf,
         device: Option<Device>,
         concurrency: usize,
+        session_count: usize,
         reporter: &ModelDownloadProgressReporter,
     ) -> Result<Self, ModelError> {
         let requested = resolve_execution_provider(device);
@@ -121,21 +152,19 @@ impl SessionOwner {
                 tracing::warn!("{warning}");
             }
         }
-        let shared = Arc::new(Shared::new(requested));
+        let shared = Arc::new(Shared::new(requested, session_count, concurrency));
         let worker_shared = Arc::clone(&shared);
-        let reporter = reporter.clone();
         let factory: Arc<Factory> = Arc::new(move |lane| {
             let fallback = worker_shared.fallback.load(Ordering::Acquire);
-            if lane != 0 && fallback {
-                return Err(ModelError::internal("ONNX GPU lane retired").shared());
-            }
             let provider = if fallback {
                 TransformersExecutionProvider::Cpu
             } else {
                 requested
             };
             let threads = if provider == TransformersExecutionProvider::Cpu {
-                policy::cpu_threads(concurrency)
+                lock_std_mutex(&worker_shared.pool)
+                    .cpu_threads
+                    .unwrap_or_else(|| policy::threads_per_session(concurrency, session_count))
             } else {
                 1
             };
@@ -147,30 +176,49 @@ impl SessionOwner {
                 lane,
                 shared: Arc::clone(&worker_shared),
             };
-            if let Err(error) = state.ensure_session() {
-                if lane != 0 || provider == TransformersExecutionProvider::Cpu {
-                    return Err(error);
-                }
-                let warning = format!(
-                    "Transformers {} embedding initialization failed ({}), falling back to CPU.",
-                    provider.name(),
-                    error
-                );
-                if !reporter.warning(warning.clone()) {
-                    tracing::warn!("{warning}");
-                }
-                worker_shared.fallback.store(true, Ordering::Release);
-                state.provider = TransformersExecutionProvider::Cpu;
-                state.threads = policy::cpu_threads(concurrency);
-                state.ensure_session()?;
-            }
+            state.ensure_session()?;
             Ok(Box::new(state))
         });
         let owner = Self::new(requested, shared, factory);
-        owner.start_worker(0)?.recv().map_err(|error| {
-            ModelError::internal("ONNX worker initialization stopped").with_cause(error)
-        })??;
+        if let Err(error) = owner.initialize() {
+            if requested == TransformersExecutionProvider::Cpu {
+                return Err(error);
+            }
+            // Dispose the entire partial GPU pool before constructing the CPU
+            // pool. A successful preparation always owns exactly S sessions.
+            for worker in &owner.workers {
+                drop(lock_std_mutex(worker).take());
+            }
+            let warning = format!(
+                "Transformers {} embedding initialization failed ({}), falling back to CPU.",
+                requested.name(),
+                error
+            );
+            if !reporter.warning(warning.clone()) {
+                tracing::warn!("{warning}");
+            }
+            owner.shared.fallback.store(true, Ordering::Release);
+            lock_std_mutex(&owner.shared.pool).cpu_threads =
+                Some(policy::threads_per_session(concurrency, session_count));
+            owner.initialize()?;
+        }
+        tracing::info!(
+            provider = owner.provider().name(),
+            sessions = session_count,
+            execution_budget = concurrency,
+            threads_per_session = owner.stats().cpu_threads,
+            "Initialized ORT session pool"
+        );
         Ok(owner)
+    }
+
+    fn initialize(&self) -> Result<(), ModelError> {
+        for lane in 0..self.workers.len() {
+            self.start_worker(lane)?.recv().map_err(|error| {
+                ModelError::internal("ONNX worker initialization stopped").with_cause(error)
+            })??;
+        }
+        Ok(())
     }
 
     fn new(
@@ -178,9 +226,9 @@ impl SessionOwner {
         shared: Arc<Shared>,
         factory: Arc<Factory>,
     ) -> Self {
+        let session_count = lock_std_mutex(&shared.pool).busy.len();
         Self {
-            workers: std::array::from_fn(|_| StdMutex::new(None)),
-            slots: std::array::from_fn(|_| Arc::new(Semaphore::new(1))),
+            workers: (0..session_count).map(|_| StdMutex::new(None)).collect(),
             factory,
             shared,
             requested,
@@ -240,23 +288,66 @@ impl SessionOwner {
     }
 
     pub(super) fn try_reserve(&self, options: &EmbeddingOptions) -> Option<Reservation> {
-        let lanes = if self.provider() == TransformersExecutionProvider::Cuda {
-            options.execution_concurrency.clamp(1, policy::CUDA_LANES)
-        } else {
-            1
-        };
-        for lane in 0..lanes {
-            if let Ok(permit) = Arc::clone(&self.slots[lane]).try_acquire_owned() {
-                return Some(Reservation {
-                    lane,
-                    permit: LanePermit {
-                        permit: Some(permit),
-                        available: Arc::clone(&self.shared.available),
-                    },
-                });
-            }
+        let mut pool = lock_std_mutex(&self.shared.pool);
+        if pool.changing {
+            return None;
         }
-        None
+        let busy = pool.busy.iter().flatten().count();
+        let cpu_threads = if self.provider() == TransformersExecutionProvider::Cpu {
+            let desired = if options.purpose == EmbeddingPurpose::Query {
+                pool.cpu_threads.unwrap_or_else(|| {
+                    policy::threads_per_session(options.execution_concurrency, pool.busy.len())
+                })
+            } else {
+                policy::threads_per_session(options.execution_concurrency, pool.busy.len())
+            };
+            if busy > 0 && (pool.drain || pool.cpu_threads != Some(desired)) {
+                pool.drain = true;
+                return None;
+            }
+            pool.drain = false;
+            Some(desired)
+        } else {
+            // C limits document executions, not numbered slots. Queries have
+            // their own one-run budget and may use any idle session in the pool.
+            let active = pool
+                .busy
+                .iter()
+                .flatten()
+                .filter(|purpose| **purpose == options.purpose)
+                .count();
+            let limit = if options.purpose == EmbeddingPurpose::Query {
+                1
+            } else {
+                options.execution_concurrency.clamp(1, pool.busy.len())
+            };
+            if active >= limit {
+                return None;
+            }
+            None
+        };
+        let lane = pool.busy.iter().position(Option::is_none)?;
+        let transition =
+            if let Some(threads) = cpu_threads.filter(|_| pool.cpu_threads != cpu_threads) {
+                pool.changing = true;
+                Some(Arc::new(PoolTransition {
+                    shared: Arc::clone(&self.shared),
+                    threads,
+                    succeeded: AtomicBool::new(false),
+                }))
+            } else {
+                None
+            };
+        pool.busy[lane] = Some(options.purpose);
+        Some(Reservation {
+            lane,
+            permit: LanePermit {
+                lane,
+                shared: Arc::clone(&self.shared),
+            },
+            cpu_threads,
+            transition,
+        })
     }
 
     async fn reserve(&self, options: &EmbeddingOptions) -> Result<Reservation, ModelError> {
@@ -303,11 +394,8 @@ impl SessionOwner {
             {
                 let first_fallback = !self.shared.fallback.swap(true, Ordering::AcqRel);
                 lock_std_mutex(&self.shared.stats).actual_provider = "cpu";
-                // Lane 1 finishes any owned GPU job, then destroys its Session.
-                // Only lane 0 may create a CPU fallback Session.
-                if let Some(worker) = &*lock_std_mutex(&self.workers[1]) {
-                    let _ = worker.send(Message::Retire);
-                }
+                // New work drains all GPU jobs, then converts the entire fixed
+                // pool to CPU before running any fallback inference.
                 if first_fallback {
                     let warning = format!(
                         "Transformers {} embedding inference failed ({}), falling back to CPU.",
@@ -346,13 +434,24 @@ impl SessionOwner {
         enqueued: Vec<Instant>,
         reservation: Option<Reservation>,
     ) -> Result<NativeCompletion, ModelError> {
-        let Reservation { lane, permit } = if let Some(reservation) = reservation {
+        let Reservation {
+            lane,
+            permit,
+            cpu_threads,
+            transition,
+        } = if let Some(reservation) = reservation {
             reservation
         } else {
             self.reserve(&options).await?
         };
         // Initialization happens on the native worker, never on a Tokio thread.
         drop(self.start_worker(lane)?);
+        if let Some(transition) = transition {
+            self.configure_pool(&transition).await?;
+            transition.succeeded.store(true, Ordering::Release);
+            // Publish the new uniform CPU budget before admitting other jobs.
+            drop(transition);
+        }
         let (reply, receiver) = oneshot::channel();
         let job = Job {
             prepared,
@@ -361,6 +460,7 @@ impl SessionOwner {
             enqueued,
             reply,
             _permit: permit,
+            cpu_threads,
         };
         lock_std_mutex(&self.workers[lane])
             .as_ref()
@@ -372,6 +472,47 @@ impl SessionOwner {
                 .with_cause(error)
                 .shared()
         })
+    }
+
+    async fn configure_pool(&self, transition: &Arc<PoolTransition>) -> Result<(), ModelError> {
+        let mut replies = Vec::with_capacity(self.workers.len());
+        for lane in 0..self.workers.len() {
+            drop(self.start_worker(lane)?);
+            let (reply, receiver) = oneshot::channel();
+            lock_std_mutex(&self.workers[lane])
+                .as_ref()
+                .expect("worker started")
+                .send(Message::Configure {
+                    threads: transition.threads,
+                    transition: Arc::clone(transition),
+                    reply,
+                })
+                .map_err(|_| ModelError::internal("ONNX configuration worker stopped").shared())?;
+            replies.push(receiver);
+        }
+        let mut failure = None;
+        for reply in replies {
+            if let Err(error) = reply
+                .await
+                .map_err(|error| {
+                    ModelError::internal("ONNX pool configuration stopped").with_cause(error)
+                })
+                .and_then(std::convert::identity)
+            {
+                failure.get_or_insert(error);
+            }
+        }
+        if let Some(error) = failure {
+            return Err(error.shared());
+        }
+        lock_std_mutex(&self.shared.stats).pool_reconfigurations += 1;
+        tracing::debug!(
+            sessions = self.workers.len(),
+            threads_per_session = transition.threads,
+            actual_thread_budget = self.workers.len().saturating_mul(transition.threads),
+            "Configured ORT CPU session pool"
+        );
+        Ok(())
     }
 
     #[cfg(test)]
@@ -389,7 +530,7 @@ impl SessionOwner {
 }
 
 impl Shared {
-    fn new(provider: TransformersExecutionProvider) -> Self {
+    fn new(provider: TransformersExecutionProvider, sessions: usize, budget: usize) -> Self {
         Self {
             fallback: AtomicBool::new(false),
             available: Arc::new(Notify::new()),
@@ -399,6 +540,13 @@ impl Shared {
             }),
             inflight: AtomicUsize::new(0),
             generation: AtomicUsize::new(0),
+            pool: StdMutex::new(PoolState {
+                busy: vec![None; sessions],
+                cpu_threads: (provider == TransformersExecutionProvider::Cpu)
+                    .then(|| policy::threads_per_session(budget, sessions)),
+                changing: false,
+                drain: false,
+            }),
         }
     }
 }
@@ -424,11 +572,36 @@ impl Worker {
                 let mut runner = factory(lane);
                 let _ = ready.send(runner.as_ref().map(|_| ()).map_err(Clone::clone));
                 for message in receiver {
-                    let Message::Run(job) = message else {
-                        drop(runner);
-                        // A retired CUDA lane stays empty until the owner is dropped.
-                        runner = Err(ModelError::internal("ONNX GPU lane retired").shared());
-                        continue;
+                    let job = match message {
+                        Message::Run(job) => job,
+                        Message::Configure {
+                            threads,
+                            transition,
+                            reply,
+                        } => {
+                            let attempted = catch_unwind(AssertUnwindSafe(|| {
+                                if runner.is_err() {
+                                    runner = factory(lane);
+                                }
+                                runner
+                                    .as_mut()
+                                    .map_err(|error| error.clone())?
+                                    .configure(threads, true)
+                            }));
+                            let result = if let Ok(result) = attempted {
+                                result
+                            } else {
+                                drop(runner);
+                                runner = factory(lane);
+                                Err(ModelError::internal("ONNX configuration worker panicked")
+                                    .shared())
+                            };
+                            // Release native ownership before waking the async
+                            // waiter, including during cancellation/shutdown.
+                            drop(transition);
+                            let _ = reply.send(result);
+                            continue;
+                        }
                     };
                     let Job {
                         prepared,
@@ -437,19 +610,20 @@ impl Worker {
                         enqueued,
                         reply,
                         _permit: permit,
+                        cpu_threads,
                     } = *job;
-                    let force_cpu = shared.fallback.load(Ordering::Acquire);
-                    let retry_on_cpu = requested != TransformersExecutionProvider::Cpu
-                        && (!force_cpu || lane != 0);
+                    let force_cpu = cpu_threads.is_some();
+                    let retry_on_cpu =
+                        requested != TransformersExecutionProvider::Cpu && !force_cpu;
                     let mut native_started = false;
-                    let result = if lane != 0 && force_cpu {
-                        Err(ModelError::internal("ONNX GPU lane retired").shared())
+                    let result = if shared.fallback.load(Ordering::Acquire) && !force_cpu {
+                        Err(ModelError::internal("ONNX GPU pool is falling back to CPU").shared())
                     } else if let Err(error) = check_cancelled(options.signal.as_ref()) {
                         Err(error)
                     } else {
                         let result = catch_unwind(AssertUnwindSafe(|| {
                             let runner = runner.as_mut().map_err(|error| error.clone())?;
-                            runner.configure(&options, force_cpu)?;
+                            runner.configure(cpu_threads.unwrap_or(1), force_cpu)?;
                             check_cancelled(options.signal.as_ref())?;
                             let _measurement =
                                 NativeMeasurement::start(&shared, &prepared, &enqueued);
@@ -533,6 +707,9 @@ impl SessionState {
             };
             if self.lane == 0 {
                 stats.cpu_threads = self.threads;
+                stats.cpu_threads_total = self
+                    .threads
+                    .saturating_mul(lock_std_mutex(&self.shared.pool).busy.len());
                 self.shared.generation.fetch_add(1, Ordering::Release);
             }
         }
@@ -541,21 +718,14 @@ impl SessionState {
 }
 
 impl Runner for SessionState {
-    fn configure(&mut self, options: &EmbeddingOptions, force_cpu: bool) -> Result<(), ModelError> {
-        check_cancelled(options.signal.as_ref())?;
+    fn configure(&mut self, threads: usize, force_cpu: bool) -> Result<(), ModelError> {
         if force_cpu && self.provider != TransformersExecutionProvider::Cpu {
             self.clear();
             self.provider = TransformersExecutionProvider::Cpu;
-            self.threads = policy::cpu_threads(options.execution_concurrency);
         }
-        if self.provider == TransformersExecutionProvider::Cpu
-            && options.purpose == EmbeddingPurpose::Document
-        {
-            let threads = policy::cpu_threads(options.execution_concurrency);
-            if self.threads != threads {
-                self.clear();
-                self.threads = threads;
-            }
+        if self.threads != threads {
+            self.clear();
+            self.threads = threads;
         }
         self.ensure_session()
     }
@@ -596,8 +766,8 @@ impl<'a> NativeMeasurement<'a> {
         let mut stats = lock_std_mutex(&shared.stats);
         stats.native_inflight_peak = stats.native_inflight_peak.max(inflight);
         for queued in enqueued {
-            stats.queue_wait_ns = stats
-                .queue_wait_ns
+            stats.backend_to_native_ns = stats
+                .backend_to_native_ns
                 .saturating_add(nanoseconds(queued.elapsed()));
         }
         stats.native_runs += 1;

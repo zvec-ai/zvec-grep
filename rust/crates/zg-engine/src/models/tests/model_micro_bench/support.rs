@@ -79,10 +79,25 @@ impl Config {
     }
 
     pub fn workers(&self, model: &ModelRuntimeLease) -> usize {
+        if let Ok(value) = env::var("ZG_MODEL_BENCH_CLIENTS") {
+            let clients = value
+                .parse::<usize>()
+                .expect("positive benchmark client count");
+            assert!(clients > 0, "positive benchmark client count");
+            return clients;
+        }
         // Same successful-work admission as indexing's resolve_index_batch_policy.
         model
             .index_batch_concurrency(self.index_limit)
             .unwrap_or(model.concurrency_defaults().initial)
+    }
+
+    pub fn client_mode() -> &'static str {
+        if env::var_os("ZG_MODEL_BENCH_CLIENTS").is_some() {
+            "fixed"
+        } else {
+            "production"
+        }
     }
 }
 
@@ -102,18 +117,23 @@ pub(super) fn execution_measurement(
     }
     difference!(
         prepared_batches,
+        pool_reconfigurations,
         native_runs,
         native_rows,
         padded_tokens,
         preparation_ns,
         inference_ns,
         postprocessing_ns,
-        queue_wait_ns,
+        backend_to_native_ns,
     );
     json!({
         "before": before, "after": after, "measured": measured,
         "counter_scope": "measured_embedding_phase",
         "peak_scope": "runtime_including_warmup",
+        "timing_scope": {
+            "backend_to_native_ns": "per request: backend submission to native start; includes preparation and scheduling; excludes runtime/backend admission; overlaps preparation_ns",
+            "work_ns": "preparation/inference/postprocessing are summed work durations, not disjoint end-to-end latency components",
+        },
     })
 }
 
@@ -311,27 +331,30 @@ fn execution_measurement_excludes_warmup_and_labels_runtime_peaks() {
         actual_provider: "cpu",
         session_count: 1,
         cpu_threads: 2,
+        cpu_threads_total: 2,
         prepared_batches: 3,
+        pool_reconfigurations: 1,
         native_runs: 3,
         native_rows: 12,
         padded_tokens: 384,
         preparation_ns: 30,
         inference_ns: 300,
         postprocessing_ns: 15,
-        queue_wait_ns: 9,
+        backend_to_native_ns: 9,
         max_native_batch_rows: 4,
         max_padded_tokens: 128,
         native_inflight_peak: 1,
     };
     let after = ModelExecutionStats {
         prepared_batches: 5,
+        pool_reconfigurations: 2,
         native_runs: 5,
         native_rows: 20,
         padded_tokens: 640,
         preparation_ns: 50,
         inference_ns: 500,
         postprocessing_ns: 25,
-        queue_wait_ns: 15,
+        backend_to_native_ns: 15,
         ..before.clone()
     };
     let measured = execution_measurement(Some(before), Some(after));
@@ -341,7 +364,15 @@ fn execution_measurement_excludes_warmup_and_labels_runtime_peaks() {
     assert_eq!(measured["measured"]["preparation_ns"], 20);
     assert_eq!(measured["measured"]["inference_ns"], 200);
     assert_eq!(measured["measured"]["postprocessing_ns"], 10);
-    assert_eq!(measured["measured"]["queue_wait_ns"], 6);
+    assert_eq!(measured["measured"]["backend_to_native_ns"], 6);
+    assert_eq!(measured["measured"]["pool_reconfigurations"], 1);
+    assert!(measured["measured"].get("queue_wait_ns").is_none());
+    assert!(
+        measured["timing_scope"]["backend_to_native_ns"]
+            .as_str()
+            .expect("timing scope")
+            .contains("overlaps preparation_ns")
+    );
     assert_eq!(measured["measured"]["actual_provider"], "cpu");
     assert_eq!(measured["peak_scope"], "runtime_including_warmup");
     assert!(execution_measurement(None, None).is_null());

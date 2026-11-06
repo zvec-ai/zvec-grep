@@ -529,10 +529,12 @@ Index embedding concurrency:
   and refresh; query-vector inference keeps its own defaults. The CLI option
   is accepted only with --index and is never saved in workspace settings.
   llama.cpp: context limit capped at 8, with serialized batches; defaults to 1.
-  Transformers/ORT CPU: native threads from 1 to hardware concurrency;
-    defaults to half the available hardware threads, rounded up.
-  Transformers/ORT CUDA: concurrent native execution lanes, from 1 to 2;
-    defaults to 1. Batch size and prefetch capacity are independent budgets.
+  Transformers/ORT: ZVEC_GREP_ORT_SESSION fixes Sessions per model/device (default 1).
+    CPU: total native thread budget, capped by hardware concurrency; defaults
+    to half the available threads. Each Session gets max(1, floor(budget/Sessions));
+    a budget below the Session count warns and uses one thread per Session.
+    CUDA: concurrent document batches, default 1; requests above the Session
+    count warn and use the pool size. Batch and prefetch are independent of C.
     Zero is normalized to 1; other backends require positive values.
   Potion/model2vec: concurrent batch tasks; defaults to 2, with an independent
     CPU worker-pool capacity. No cap of 8 is applied.
@@ -894,6 +896,9 @@ Embedding:
   ZVEC_GREP_ENDPOINT     Remote Embedding endpoint fallback
   ZVEC_GREP_MODEL_CACHE  Local embedding model cache directory
   ZVEC_GREP_DEVICE       Local embedding device: auto, cpu, metal, vulkan, or cuda
+  ZVEC_GREP_ORT_SESSION  Fixed ORT Sessions per CPU/CUDA model runtime (default 1)
+    CPU and CUDA pools each get this count, not a combined process-wide total.
+    Invalid values warn and use 1. Changing it requires restarting the Server.
 
 Index-only embedding concurrency:
   ZVEC_GREP_EMBEDDING_CONCURRENCY  Index/update execution concurrency override

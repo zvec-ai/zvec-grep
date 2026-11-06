@@ -91,10 +91,18 @@ impl Drop for DriverGuard {
 
 impl Default for InferenceQueue {
     fn default() -> Self {
+        Self::new(16)
+    }
+}
+
+impl InferenceQueue {
+    pub(super) fn new(document_slots: usize) -> Self {
         Self {
             state: StdMutex::default(),
             changed: Notify::new(),
-            document_slots: Arc::new(Semaphore::new(16)),
+            document_slots: Arc::new(Semaphore::new(
+                document_slots.clamp(1, Semaphore::MAX_PERMITS),
+            )),
             document_bytes: Arc::new(Semaphore::new(DOCUMENT_BYTES)),
             query_slots: Arc::new(Semaphore::new(4)),
             query_bytes: Arc::new(Semaphore::new(QUERY_BYTES)),
@@ -154,7 +162,7 @@ impl InferenceQueue {
             _admission: admission,
         };
         // CPU preparation has an independent shared compute budget. It can run
-        // while either native lane is busy, including at execution concurrency 1.
+        // while native sessions are busy, including at execution concurrency 1.
         tokio::spawn(async move {
             let worker = Arc::clone(&loaded);
             let result = compute.run(move || prepare(request, &worker, entry)).await;

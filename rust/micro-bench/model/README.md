@@ -87,6 +87,15 @@ and is labeled in the report title. Verify observed native batch rows before
 attributing throughput differences to execution parallelism. Production and
 fixed-batch profiles measure different workloads and must not be merged.
 
+`--ort-sessions S` sets the production `ZVEC_GREP_ORT_SESSION` pool count for each
+fresh process (default 1; ambient shell values are overridden). Use separate
+output directories for different S values. `--clients K` fixes the closed-loop
+caller count independently of runtime admission; omit it to retain production
+admission. Both settings are fingerprinted and checked against observed results.
+Keep K and actual native batch shapes fixed when comparing session configurations.
+Reports separate client count K, admission Q, actual Sessions, threads per Session,
+total native threads and native batch rows. Call latency includes runtime admission.
+
 The known CPU-only model2vec capability can skip non-CPU cases. Save a bound
 `case-status.json` with the reason, keep its table row, and omit its measurement
 rounds. A skip record cannot coexist with measured rounds. Other backends are not
@@ -253,3 +262,28 @@ append `--models local/all-minilm-l6-v2 --devices cuda --embedding-concurrency 1
 Use `--models` for a subset, `--devices cpu` for CPU-only execution and `--smoke`
 for bounded runner validation. Build and runner tests precede performance runs;
 no correctness audit is required to start a measurement.
+
+## Timing diagnostics
+
+`backend_to_native_ns` sums each request's time from backend submission to native
+inference start. It includes preparation and scheduling, and excludes waiting for
+runtime/backend admission. It overlaps `preparation_ns`: do not add these fields
+to reconstruct latency. Preparation/inference/postprocessing are summed work time,
+not a disjoint wall-time breakdown. Use `call_latency` for the full runtime call,
+including admission. Historical records called this same overlapping measurement
+`queue_wait_ns`; their values are preserved. `pool_reconfigurations` counts
+successful whole-pool CPU reconfigurations, excluding initial preparation.
+
+## Optional mixed MiniLM regression
+
+The ignored `models::tests::model_micro_bench::mixed_minilm::cached_minilm_documents_and_queries`
+test uses the same pinned cache and a release build. Set `ZG_MODEL_BENCH_MODEL=local/all-minilm-l6-v2`,
+`ZG_MODEL_BENCH_CACHE`, `ZG_MODEL_BENCH_DEVICE=cpu|cuda` and `ZVEC_GREP_ORT_SESSION`.
+It runs eight document clients and one query client through shared runtime leases,
+first with equal document budgets, then mixed budgets (CPU 16/8, CUDA 8/1).
+Each scenario lasts at least 15 seconds and collects at least 100 query calls;
+every result is checked against fixed-batch reference vectors. CPU machines must
+expose at least 16 hardware threads for these two budgets to be distinct.
+`ZG_MIXED_RESULT` contains request timestamps, p50/p95 latency and pool rebuilds.
+This is a correctness/latency regression, not a performance-only shape case or
+an end-to-end indexing/storage/retrieval benchmark.

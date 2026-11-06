@@ -268,6 +268,19 @@ async fn local_model_shape() {
     )));
     provenance["input_template"] = json!("Document; deterministic whitespace-separated words");
     provenance["input_length_semantics"] = json!("nominal");
+    provenance["clients"] = json!(workers);
+    provenance["client_mode"] = json!(Config::client_mode());
+    let ort_sessions = std::env::var("ZVEC_GREP_ORT_SESSION")
+        .ok()
+        .map_or(1, |value| {
+            value
+                .parse::<usize>()
+                .expect("explicit benchmark ORT pool size")
+        });
+    provenance["ort_sessions"] = json!(ort_sessions);
+    provenance["call_latency_scope"] = json!(
+        "runtime entry before admission through completed result; input fixture cloning excluded"
+    );
     phase("warmup", origin);
     let warmup = warmup(&model, &data, workers, fixed_batch).await;
     let execution_before = model.execution_stats();
@@ -283,6 +296,7 @@ async fn local_model_shape() {
         json!({"schema_version":5,"protocol_pass":embedding["protocol_pass"],
             "provenance":provenance,"input_tokens":target,"batch_size":requested_batch,
             "fixed_batch":fixed_batch,
+            "clients":workers,"client_mode":Config::client_mode(),"ort_sessions":ort_sessions,
             "embedding_concurrency":config.requested,"resolved_index_concurrency":config.index_limit,
             "effective_execution_concurrency":model.execution_concurrency(),
             "admission_concurrency":model.admission_concurrency(),

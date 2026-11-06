@@ -59,6 +59,8 @@ def fingerprint(value):
 
 def experiment_config(args, info, models):
     return dict(policy=POLICY, profile=profile(args.smoke,args.fixed_batch), rounds=args.rounds, seed=args.seed,
+                benchmark_controls=dict(clients=getattr(args,"clients",None),
+                                        ort_sessions=getattr(args,"ort_sessions",1)),
                 cooldown_seconds=args.cooldown, timeout_seconds=args.timeout,
                 budgets=args.embedding_concurrency, devices=args.devices, models=models,
                 lengths=args.lengths, batch_sizes=args.batch_sizes,

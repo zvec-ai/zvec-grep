@@ -486,6 +486,140 @@ async fn cached_minilm_runs_real_onnx_inference() {
     }
 }
 
+fn assert_pool_vectors(result: &EmbeddingResult, reference: &EmbeddingResult, dimension: usize) {
+    assert_eq!(result.truncated, reference.truncated);
+    assert_eq!(result.vectors.len(), reference.vectors.len());
+    for (actual, expected) in result.vectors.iter().zip(&reference.vectors) {
+        assert_eq!(actual.len(), dimension);
+        assert!(
+            actual
+                .iter()
+                .zip(expected)
+                .all(|(a, b)| a.is_finite() && (a - b).abs() <= 1e-5)
+        );
+    }
+}
+
+fn pool_fixture_model(
+    entry: TransformersConfig,
+    cache: &Path,
+    device: Device,
+    sessions: usize,
+) -> TransformersEmbeddingModel {
+    let mut model = TransformersEmbeddingModel::new(
+        entry,
+        ModelConfig {
+            cache_dir: Some(cache.to_path_buf()),
+            device: Some(device),
+            ..ModelConfig::default()
+        },
+        crate::models::runtime::ModelComputeRuntime::shared(),
+    );
+    model.session_count = sessions;
+    model
+}
+
+#[tokio::test]
+#[ignore = "requires pinned MiniLM cache; set ZG_MODEL_BENCH_DEVICE=cuda for a CUDA build/device"]
+async fn cached_minilm_fixed_session_pool_matches_single_session() {
+    let cache = env::var_os("ZVEC_GREP_TEST_MODEL_CACHE")
+        .map(PathBuf::from)
+        .expect("ZVEC_GREP_TEST_MODEL_CACHE must point at pinned models");
+    let device = if env::var("ZG_MODEL_BENCH_DEVICE").is_ok_and(|v| v == "cuda") {
+        Device::Cuda
+    } else {
+        Device::Cpu
+    };
+    let entry = crate::models::catalog::get_embedding_model_catalog_entry("local/all-minilm-l6-v2")
+        .and_then(crate::models::catalog::EmbeddingCatalogEntry::transformers_config)
+        .expect("MiniLM");
+    let create = |sessions| pool_fixture_model(entry, &cache, device, sessions);
+    let inputs = [
+        "find authentication middleware".to_owned(),
+        "parse a configuration file".to_owned(),
+        "embedding token ".repeat(120),
+        "long truncation boundary ".repeat(150),
+    ]
+    .map(|text| vec![Content::Text(text)]);
+    let reference_model = create(1);
+    let reference = reference_model
+        .embed(
+            &inputs,
+            EmbeddingOptions {
+                execution_concurrency: 1,
+                fixed_batch: true,
+                ..EmbeddingOptions::default()
+            },
+        )
+        .await
+        .expect("single-session reference");
+    drop(reference_model);
+    for sessions in [1, 2, 4] {
+        let model = create(sessions);
+        model
+            .prepare(EmbeddingPrepareOptions {
+                execution_concurrency: 1,
+                ..EmbeddingPrepareOptions::default()
+            })
+            .await
+            .expect("eager fixed-size pool");
+        let loaded = Arc::clone(lock_std_mutex(&model.state).as_ref().expect("prepared"));
+        assert_eq!(loaded.sessions.stats().session_count, sessions);
+        assert_eq!(
+            loaded.sessions.provider(),
+            resolve_execution_provider(Some(device)),
+            "unexpected CPU fallback"
+        );
+        for requested in [1, 8, 1] {
+            let budget = model.execution_concurrency(requested);
+            let results = futures_util::future::join_all((0..8).map(|_| {
+                model.embed(
+                    &inputs,
+                    EmbeddingOptions {
+                        execution_concurrency: budget,
+                        fixed_batch: true,
+                        ..EmbeddingOptions::default()
+                    },
+                )
+            }))
+            .await;
+            for result in results {
+                assert_pool_vectors(
+                    &result.expect("pooled inference"),
+                    &reference,
+                    entry.dimension,
+                );
+            }
+            let stats = loaded.sessions.stats();
+            assert_eq!(stats.session_count, sessions);
+            let threads = if device == Device::Cpu {
+                policy::threads_per_session(budget, sessions)
+            } else {
+                1
+            };
+            assert_eq!(stats.cpu_threads, threads);
+            assert_eq!(stats.cpu_threads_total, sessions * threads);
+        }
+        let signal = CancellationToken::new();
+        signal.cancel();
+        assert_eq!(
+            model
+                .embed(
+                    &inputs,
+                    EmbeddingOptions {
+                        signal: Some(signal),
+                        ..EmbeddingOptions::default()
+                    }
+                )
+                .await
+                .expect_err("cancelled request")
+                .code(),
+            crate::EngineError::CANCELLED
+        );
+        assert_eq!(loaded.sessions.stats().session_count, sessions);
+    }
+}
+
 #[cfg(all(target_os = "linux", feature = "cuda"))]
 #[tokio::test]
 #[ignore = "requires ZVEC_GREP_TEST_MODEL_CACHE with a pinned ONNX model"]

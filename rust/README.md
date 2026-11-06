@@ -91,31 +91,42 @@ For llama.cpp, the limit controls contexts within a serialized batch and is capp
 at eight, defaulting to one. Transformers/ORT shares a bounded runtime between
 indexing and queries for the same model, cache and device:
 
-- CPU uses the budget for intra-op threads, capped by available hardware threads.
-  The default is half the available threads, rounded up. One native Session runs
-  one batch at a time; tokenization and pooling can overlap native inference.
-  A later index operation with a different budget replaces the session between
-  batches, destroying the previous session before loading its replacement.
-  Queries reuse the currently configured threads and do not trigger replacement.
-- CUDA uses one execution lane by default, with at most two. Each lane exclusively
-  owns its Session on a fixed worker thread; no Session receives concurrent Run
-  calls. The second Session loads lazily when overlapping work needs it.
+- `ZVEC_GREP_ORT_SESSION=S` fixes the number of Sessions in each CPU or CUDA model
+  runtime. Both default to one. A positive integer is required; invalid values
+  warn and use one. Each model/device runtime creates its own S Sessions during
+  preparation, including Sessions not currently executing work. This is not a
+  process-wide total. Restart the Server after changing its environment.
+- CPU uses C as the total intra-op thread budget, clamped to available hardware
+  threads; the default is half the available threads, rounded up. Each of the S
+  Sessions uses `max(1, floor(C/S))` threads. When C < S, a warning reports the
+  actual S-thread budget. Rounding may leave some of C unused. Tokenization and
+  pooling have a separate shared CPU budget, so C does not cap all process threads.
+  Budget changes drain native work and reconfigure all Sessions before admitting
+  the new budget. Queries reuse the existing configuration.
+- CUDA uses C as the number of simultaneous document inference batches, defaulting
+  to one. C > S warns and executes at S. Each Session exclusively owns its fixed
+  worker thread; no Session receives concurrent Run calls. Lowering C keeps all S
+  Sessions and their resident memory. A query can use any idle Session, with at
+  most one query batch executing alongside document work.
   Document batching is independent of this budget: MiniLM combines up to four
   similar-length requests, 16 inputs and 4,096 padded tokens, waiting at most 1 ms
   for aggregation. Other ONNX models retain their catalog batch and token ceilings.
   Queries run first without waiting to fill a batch; running inference is not
   preempted. CPU preparation and pooling overlap native execution.
-- Pending inputs have separate document/query limits: 16/4 requests and
-  32/8 MiB of copied text, with at most 8 MiB per request. Full queues apply
+- Pending inputs have separate document/query limits: document admission is S+2
+  requests on CPU and 4*(S+1) on CUDA; queries have four slots. Copied text remains
+  bounded by 32/8 MiB respectively, with at most 8 MiB per request. Full queues apply
   cancellable backpressure. A cancelled member of a merged batch does not cancel
   other members. Native work retains runtime ownership until it settles.
 
 The effective backend budget is reported when it differs from the request.
-Admission includes bounded prefetch capacity and is separate from native execution
-concurrency: CUDA admits eight requests per operation for either one or two lanes,
-so one lane can prepare its next batch in advance. A second CUDA
-Session duplicates native weights and workspaces; input and activation buffers
-also contribute to memory use. The CLI option does not change the batch limits.
+Admission includes bounded prefetch capacity and is independent of C, so a single
+executing Session can prepare its next batch in advance. Extra Sessions allocate
+their own weights and workspaces; batch activations also contribute to memory.
+Initialization failure releases the partial pool before CPU fallback; inference
+fallback drains GPU work and converts all S Sessions to CPU. The CLI option does
+not change pool size or batch limits. Diagnostics report actual Sessions, threads
+per Session, total native threads, and actual native batch sizes separately.
 
 Potion/model2vec defaults to two batch tasks and retains an independent CPU worker
 capacity; remote models retain adaptive request scheduling. Their overrides are

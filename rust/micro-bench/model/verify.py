@@ -9,7 +9,7 @@ import statistics
 from measurement import checked_accounting, case_identity, case_path, fingerprint, matrix_cases
 from evidence import missing_round_evidence, save
 from report import HEADERS, display
-from execution import execution_label
+from execution import execution_label, validate_controls
 
 
 def check_table(cases, rounds, records_by_case, skipped_cases, table, metrics):
@@ -138,6 +138,12 @@ def verify(root, require_complete=True):
                 if record.get("provenance",{}).get(name) != config["provenance"][name]:
                     errors.append(f"{key}: provenance mismatch: {name}")
             benchmark = record.get("benchmark")
+            if "benchmark_controls" in config:
+                controls = config["benchmark_controls"]
+                if any(actual.get(name) != value for name, value in controls.items()):
+                    errors.append(f"{key}: wrong recorded benchmark controls")
+                errors.extend(f"{key}: {error}" for error in validate_controls(
+                    benchmark, controls.get("clients"), controls.get("ort_sessions", 1)))
             if not benchmark:
                 if record.get("protocol_pass") or (record.get("exit_code") == 0 and not record.get("hard_timeout")):
                     errors.append(f"{key}: missing successful result")

@@ -44,6 +44,8 @@ pub(crate) struct TransformersEmbeddingModel {
     client: reqwest::Client,
     state: Arc<StdMutex<Option<Arc<LoadedTransformersModel>>>>,
     loading: Arc<Mutex<()>>,
+    session_count: usize,
+    last_execution_budget: StdMutex<Option<usize>>,
 }
 
 struct LoadedTransformersModel {
@@ -113,6 +115,11 @@ impl TransformersEmbeddingModel {
             client: reqwest::Client::new(),
             state: Arc::new(StdMutex::new(None)),
             loading: Arc::new(Mutex::new(())),
+            session_count: policy::pool_size(
+                resolve_execution_provider(options.device),
+                policy::configured_session_count(),
+            ),
+            last_execution_budget: StdMutex::new(None),
         }
     }
 
@@ -215,6 +222,7 @@ impl TransformersEmbeddingModel {
         })?;
         let tokenizers = prepare_tokenizers(tokenizer, self.entry)?;
         let device = self.device;
+        let session_count = self.session_count;
         let state = Arc::clone(&self.state);
         let signal = signal.cloned();
         self.compute_runtime
@@ -224,13 +232,21 @@ impl TransformersEmbeddingModel {
                 let _execution_lease = execution_lease;
                 let _gate = gate;
                 check_cancelled(signal.as_ref())?;
-                let sessions =
-                    session::SessionOwner::load(model_path, device, concurrency, &reporter)?;
+                let sessions = session::SessionOwner::load(
+                    model_path,
+                    device,
+                    concurrency,
+                    session_count,
+                    &reporter,
+                )?;
                 check_cancelled(signal.as_ref())?;
                 let loaded = Arc::new(LoadedTransformersModel {
                     tokenizers,
                     sessions,
-                    queue: Arc::new(scheduler::InferenceQueue::default()),
+                    queue: Arc::new(scheduler::InferenceQueue::new(policy::admission(
+                        resolve_execution_provider(device),
+                        session_count,
+                    ))),
                 });
                 *lock_std_mutex(&state) = Some(Arc::clone(&loaded));
                 reporter.finish();
@@ -254,18 +270,14 @@ impl EmbeddingModel for TransformersEmbeddingModel {
             },
             TransformersExecutionProvider::Cuda => EmbeddingConcurrencyDefaults {
                 initial: 1,
-                maximum: policy::CUDA_LANES,
+                maximum: self.session_count,
             },
             _ => EmbeddingConcurrencyDefaults::default(),
         }
     }
 
     fn admission_concurrency(&self, _execution: usize) -> usize {
-        if resolve_execution_provider(self.device) == TransformersExecutionProvider::Cuda {
-            8
-        } else {
-            3
-        }
+        policy::admission(resolve_execution_provider(self.device), self.session_count)
     }
 
     fn execution_stats(&self) -> Option<ModelExecutionStats> {
@@ -275,11 +287,32 @@ impl EmbeddingModel for TransformersEmbeddingModel {
     }
 
     fn execution_concurrency(&self, requested: usize) -> usize {
-        policy::execution_limit(
-            self.entry,
-            resolve_execution_provider(self.device),
-            requested,
-        )
+        let provider = resolve_execution_provider(self.device);
+        let effective = policy::execution_limit(provider, requested, self.session_count);
+        let mut last = lock_std_mutex(&self.last_execution_budget);
+        if *last != Some(requested) {
+            if provider == TransformersExecutionProvider::Cpu && effective < self.session_count {
+                tracing::warn!(
+                    model = self.entry.reference,
+                    requested,
+                    effective,
+                    sessions = self.session_count,
+                    threads_per_session = 1,
+                    actual_thread_budget = self.session_count,
+                    "ORT CPU thread budget is smaller than the session count; using one thread per session"
+                );
+            } else if provider == TransformersExecutionProvider::Cuda && requested > effective {
+                tracing::warn!(
+                    model = self.entry.reference,
+                    requested,
+                    effective,
+                    sessions = self.session_count,
+                    "ORT CUDA concurrency exceeds the session count; using the pool size"
+                );
+            }
+            *last = Some(requested);
+        }
+        effective
     }
 
     async fn prepare(&self, options: EmbeddingPrepareOptions) -> Result<(), ModelError> {
