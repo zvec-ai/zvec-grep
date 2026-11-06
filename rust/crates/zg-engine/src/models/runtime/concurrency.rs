@@ -18,7 +18,7 @@ pub(crate) fn is_llama(reference: &str) -> bool {
 fn uses_bounded_batches(reference: &str) -> bool {
     matches!(
         get_embedding_model_catalog_entry(reference),
-        Some(EmbeddingCatalogEntry::Transformers(_) | EmbeddingCatalogEntry::StaticInt8(_))
+        Some(EmbeddingCatalogEntry::Transformers(_) | EmbeddingCatalogEntry::Bekko(_))
     )
 }
 

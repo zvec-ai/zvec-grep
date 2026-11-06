@@ -136,7 +136,7 @@ it is not a substitute for package-level GPU validation.
 
 The CPU model stage runs the existing ignored real-model test for Model2Vec
 (`local/potion-code-16m-v2`), Transformers/ORT (`local/all-minilm-l6-v2`), native
-static INT8 (`local/bekko-256-int8`) and llama.cpp (`local/embeddinggemma-300m`).
+Bekko (`local/bekko-256-int8`) and llama.cpp (`local/embeddinggemma-300m`).
 The Bekko smoke also compares every output component with its pinned ONNX
 reference, including truncation boundaries and concurrent batches.
 Separate GPU jobs run ORT and GGUF

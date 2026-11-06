@@ -15,7 +15,7 @@ use crate::{
             ArtifactSource, LocalModelBackend, ModelDownloadProgressReporter, ResolveArtifacts,
             default_model_cache, resolve_model_artifacts,
         },
-        catalog::StaticInt8Config,
+        catalog::BekkoConfig,
         runtime::ModelComputeRuntime,
         spi::{
             EmbeddingModel, EmbeddingOptions, EmbeddingPrepareOptions, ModelError, input_text,
@@ -29,8 +29,8 @@ use super::{
     table::{Table, check_cancelled},
 };
 
-pub(crate) struct StaticInt8EmbeddingModel {
-    entry: StaticInt8Config,
+pub(crate) struct BekkoEmbeddingModel {
+    entry: BekkoConfig,
     info: EmbeddingModelInfo,
     cache: PathBuf,
     compute: ModelComputeRuntime,
@@ -43,9 +43,9 @@ struct Loaded {
     table: Table,
 }
 
-impl StaticInt8EmbeddingModel {
+impl BekkoEmbeddingModel {
     pub(crate) fn new(
-        entry: StaticInt8Config,
+        entry: BekkoConfig,
         options: ModelConfig,
         compute: ModelComputeRuntime,
     ) -> Self {
@@ -61,17 +61,17 @@ impl StaticInt8EmbeddingModel {
                     ],
                     entry.max_batch_size,
                 )
-                .expect("valid static model metadata"),
+                .expect("valid Bekko model metadata"),
                 entry.dimension,
                 entry.metric,
                 Some(entry.max_input_tokens),
                 None,
             )
-            .expect("valid static embedding metadata"),
+            .expect("valid Bekko embedding metadata"),
             cache: options
                 .cache_dir
                 .or_else(|| env::var_os("ZVEC_GREP_MODEL_CACHE").map(PathBuf::from))
-                .unwrap_or_else(|| default_model_cache(LocalModelBackend::StaticInt8)),
+                .unwrap_or_else(|| default_model_cache(LocalModelBackend::Bekko)),
             compute,
             client: reqwest::Client::new(),
             state: Mutex::new(None),
@@ -87,7 +87,7 @@ impl StaticInt8EmbeddingModel {
         let cancellation = signal.cloned().unwrap_or_default();
         let mut state = tokio::select! {
             biased;
-            () = cancellation.cancelled() => return Err(ModelError::cancelled("Static model preparation was cancelled")),
+            () = cancellation.cancelled() => return Err(ModelError::cancelled("Bekko model preparation was cancelled")),
             state = self.state.lock() => state,
         };
         check_cancelled(signal)?;
@@ -141,17 +141,17 @@ impl StaticInt8EmbeddingModel {
         let model_path = resolved
             .paths
             .get(self.entry.model_file)
-            .ok_or_else(|| ModelError::storage_failure("Static embedding artifact is missing"))?;
+            .ok_or_else(|| ModelError::storage_failure("Bekko embedding artifact is missing"))?;
         let tokenizer_path = resolved
             .paths
             .get("tokenizer.json")
-            .ok_or_else(|| ModelError::storage_failure("Static tokenizer artifact is missing"))?;
-        let bytes = fs::read(model_path).await.map_err(|e| {
-            ModelError::storage_failure("Unable to read static model").with_cause(e)
-        })?;
+            .ok_or_else(|| ModelError::storage_failure("Bekko tokenizer artifact is missing"))?;
+        let bytes = fs::read(model_path)
+            .await
+            .map_err(|e| ModelError::storage_failure("Unable to read Bekko model").with_cause(e))?;
         check_cancelled(signal)?;
         let tokenizer = fs::read(tokenizer_path).await.map_err(|e| {
-            ModelError::storage_failure("Unable to read static tokenizer").with_cause(e)
+            ModelError::storage_failure("Unable to read Bekko tokenizer").with_cause(e)
         })?;
         let entry = self.entry;
         let signal = signal.cloned();
@@ -165,7 +165,7 @@ impl StaticInt8EmbeddingModel {
                     signal.as_ref(),
                 )?;
                 let mut tokenizer = Tokenizer::from_bytes(tokenizer).map_err(|e| {
-                    ModelError::storage_failure("Invalid static tokenizer").with_cause(e)
+                    ModelError::storage_failure("Invalid Bekko tokenizer").with_cause(e)
                 })?;
                 tokenizer.with_padding(None);
                 // A single pass retains one extra token for the truncation flag.
@@ -173,13 +173,13 @@ impl StaticInt8EmbeddingModel {
                 tokenizer
                     .with_truncation(Some(TruncationParams {
                         max_length: entry.max_input_tokens.checked_add(1).ok_or_else(|| {
-                            ModelError::invalid_argument("Invalid static token limit")
+                            ModelError::invalid_argument("Invalid Bekko token limit")
                         })?,
                         direction: TruncationDirection::Right,
                         ..TruncationParams::default()
                     }))
                     .map_err(|e| {
-                        ModelError::storage_failure("Invalid static tokenizer truncation")
+                        ModelError::storage_failure("Invalid Bekko tokenizer truncation")
                             .with_cause(e)
                     })?;
                 check_cancelled(signal.as_ref())?;
@@ -192,7 +192,7 @@ impl StaticInt8EmbeddingModel {
 }
 
 #[async_trait]
-impl EmbeddingModel for StaticInt8EmbeddingModel {
+impl EmbeddingModel for BekkoEmbeddingModel {
     fn info(&self) -> &EmbeddingModelInfo {
         &self.info
     }

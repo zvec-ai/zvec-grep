@@ -1,4 +1,4 @@
-//! Extract only the exact row-wise INT8 lookup/mean graph we implement.
+//! Extract only the exact Bekko row-wise INT8 lookup/mean graph we implement.
 //! Artifacts are hash-verified by the shared downloader before reaching here.
 
 use std::collections::HashMap;

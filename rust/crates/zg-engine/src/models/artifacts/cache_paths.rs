@@ -7,7 +7,7 @@ pub(crate) enum LocalModelBackend {
     LlamaCpp,
     Model2Vec,
     Transformers,
-    StaticInt8,
+    Bekko,
 }
 
 pub(crate) fn default_model_cache(backend: LocalModelBackend) -> PathBuf {
@@ -30,7 +30,7 @@ pub(super) fn default_model_cache_from_env(
                         home.push(variable("HOMEPATH")?);
                         Some(home)
                     }
-                    LocalModelBackend::Transformers | LocalModelBackend::StaticInt8 => None,
+                    LocalModelBackend::Transformers | LocalModelBackend::Bekko => None,
                 })
             } else {
                 variable("HOME")
@@ -39,7 +39,7 @@ pub(super) fn default_model_cache_from_env(
                 if windows
                     && matches!(
                         backend,
-                        LocalModelBackend::Transformers | LocalModelBackend::StaticInt8
+                        LocalModelBackend::Transformers | LocalModelBackend::Bekko
                     )
                 {
                     // Preserve the existing Windows Transformers download location.
@@ -61,7 +61,7 @@ mod tests {
         LocalModelBackend::LlamaCpp,
         LocalModelBackend::Model2Vec,
         LocalModelBackend::Transformers,
-        LocalModelBackend::StaticInt8,
+        LocalModelBackend::Bekko,
     ];
 
     #[test]
@@ -76,7 +76,7 @@ mod tests {
                     if windows
                         && matches!(
                             backend,
-                            LocalModelBackend::Transformers | LocalModelBackend::StaticInt8
+                            LocalModelBackend::Transformers | LocalModelBackend::Bekko
                         )
                     {
                         PathBuf::from("/profile/models")

@@ -14,9 +14,9 @@ pub(super) fn embed_texts(
     signal: Option<&CancellationToken>,
 ) -> Result<EmbeddingResult, ModelError> {
     collect_batch(texts, signal, |text| {
-        let encoding = tokenizer.encode(text, false).map_err(|e| {
-            ModelError::invalid_argument("Static tokenization failed").with_cause(e)
-        })?;
+        let encoding = tokenizer
+            .encode(text, false)
+            .map_err(|e| ModelError::invalid_argument("Bekko tokenization failed").with_cause(e))?;
         let ids = encoding.get_ids();
         let vector = table.embed(&ids[..ids.len().min(limit)], signal)?;
         Ok((vector, ids.len() > limit))

@@ -14,7 +14,7 @@ It downloads 52,000,965 bytes of INT8 weights plus a 5,104,874-byte tokenizer,
 verified by SHA-256. Mean pooling and the 256-dimensional normalized output
 remain FP32. Queries and documents have no prefix or special tokens, with a
 32,768-token limit. Only Hugging Face is configured for this model.
-The Rust static INT8 backend reads the quantized table and per-token scales
+The Rust Bekko backend (`bekko`) reads the quantized table and per-token scales
 directly from the pinned ONNX file; inference runs on the shared CPU pool
 without an ONNX session or padded batches. It retains unknown tokens and
 matches the ONNX FP32 multiply, accumulation and mean before normalization.

@@ -18,10 +18,10 @@ use crate::{
 };
 
 fn reference_model() -> TransformersEmbeddingModel {
-    let EmbeddingCatalogEntry::StaticInt8(entry) =
+    let EmbeddingCatalogEntry::Bekko(entry) =
         get_embedding_model_catalog_entry("local/bekko-256-int8").expect("Bekko")
     else {
-        panic!("native static backend");
+        panic!("native Bekko backend");
     };
     TransformersEmbeddingModel::new(
         TransformersConfig {

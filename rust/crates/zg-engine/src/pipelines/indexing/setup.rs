@@ -35,7 +35,7 @@ pub(crate) async fn index_setup(options: IndexSetupOptions) -> Result<IndexSetup
             EmbeddingCatalogEntry::LlamaCpp(model) => Some(model.download),
             EmbeddingCatalogEntry::Model2Vec(model) => Some(model.download),
             EmbeddingCatalogEntry::Transformers(model) => Some(model.download),
-            EmbeddingCatalogEntry::StaticInt8(model) => Some(model.download),
+            EmbeddingCatalogEntry::Bekko(model) => Some(model.download),
             EmbeddingCatalogEntry::Qwen(_) => None,
         };
         let provider = reference.split('/').next().unwrap_or_default();

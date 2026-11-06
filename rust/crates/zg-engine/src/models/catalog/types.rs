@@ -7,7 +7,7 @@ pub(crate) enum EmbeddingCatalogEntry {
     Qwen(QwenConfig),
     Transformers(TransformersConfig),
     Model2Vec(Model2VecConfig),
-    StaticInt8(StaticInt8Config),
+    Bekko(BekkoConfig),
 }
 
 impl EmbeddingCatalogEntry {
@@ -18,7 +18,7 @@ impl EmbeddingCatalogEntry {
             Self::Qwen(_) => "qwen",
             Self::Transformers(_) => "transformers",
             Self::Model2Vec(_) => "model2vec",
-            Self::StaticInt8(_) => "static-int8",
+            Self::Bekko(_) => "bekko",
         }
     }
 
@@ -28,7 +28,7 @@ impl EmbeddingCatalogEntry {
             Self::Qwen(entry) => entry.reference,
             Self::Transformers(entry) => entry.reference,
             Self::Model2Vec(entry) => entry.reference,
-            Self::StaticInt8(entry) => entry.reference,
+            Self::Bekko(entry) => entry.reference,
         }
     }
 
@@ -39,7 +39,7 @@ impl EmbeddingCatalogEntry {
             Self::Qwen(entry) => entry.dimension,
             Self::Transformers(entry) => entry.dimension,
             Self::Model2Vec(entry) => entry.dimension,
-            Self::StaticInt8(entry) => entry.dimension,
+            Self::Bekko(entry) => entry.dimension,
         }
     }
 
@@ -71,9 +71,9 @@ impl EmbeddingCatalogEntry {
     }
 }
 
-/// Pinned row-wise INT8 lookup + FP32 mean graph, evaluated directly on CPU.
+/// Pinned Bekko row-wise INT8 lookup + FP32 mean graph, evaluated directly on CPU.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct StaticInt8Config {
+pub(crate) struct BekkoConfig {
     pub(crate) reference: &'static str,
     pub(crate) provider: &'static str,
     pub(crate) model: &'static str,

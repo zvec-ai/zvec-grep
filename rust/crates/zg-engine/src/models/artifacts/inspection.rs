@@ -21,13 +21,13 @@ pub(in crate::models) async fn cached_source(
         EmbeddingCatalogEntry::LlamaCpp(_) => LocalModelBackend::LlamaCpp,
         EmbeddingCatalogEntry::Model2Vec(_) => LocalModelBackend::Model2Vec,
         EmbeddingCatalogEntry::Transformers(_) => LocalModelBackend::Transformers,
-        EmbeddingCatalogEntry::StaticInt8(_) => LocalModelBackend::StaticInt8,
+        EmbeddingCatalogEntry::Bekko(_) => LocalModelBackend::Bekko,
         EmbeddingCatalogEntry::Qwen(_) => return None,
     };
     let cache = cache.map_or_else(|| default_model_cache(backend), Path::to_path_buf);
     let cache = cache.as_path();
     let (download, sources) = match entry {
-        EmbeddingCatalogEntry::StaticInt8(model) => (
+        EmbeddingCatalogEntry::Bekko(model) => (
             model.download,
             [
                 Some(ArtifactSource::hugging_face(

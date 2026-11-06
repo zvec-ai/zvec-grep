@@ -33,7 +33,7 @@ impl Table {
             }
         }
         let count = u32::try_from(ids.len().max(1))
-            .map_err(|_| ModelError::invalid_argument("Static token count is too large"))?;
+            .map_err(|_| ModelError::invalid_argument("Bekko token count is too large"))?;
         #[allow(clippy::cast_precision_loss)]
         let divisor = count as f32;
         for value in &mut vector {
@@ -60,12 +60,12 @@ impl Table {
 }
 
 fn invalid_token(id: u32) -> ModelError {
-    ModelError::invalid_argument(format!("Static embedding token ID out of range: {id}"))
+    ModelError::invalid_argument(format!("Bekko embedding token ID out of range: {id}"))
 }
 
 pub(super) fn check_cancelled(signal: Option<&CancellationToken>) -> Result<(), ModelError> {
     if signal.is_some_and(CancellationToken::is_cancelled) {
-        Err(ModelError::cancelled("Static embedding was cancelled"))
+        Err(ModelError::cancelled("Bekko embedding was cancelled"))
     } else {
         Ok(())
     }

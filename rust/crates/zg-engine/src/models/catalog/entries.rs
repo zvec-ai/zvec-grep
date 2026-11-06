@@ -1,5 +1,5 @@
 use super::types::{
-    EmbeddingCatalogEntry, LlamaCppConfig, Model2VecConfig, QwenConfig, StaticInt8Config,
+    BekkoConfig, EmbeddingCatalogEntry, LlamaCppConfig, Model2VecConfig, QwenConfig,
     TransformersConfig,
 };
 use crate::domain::model::EmbeddingMetric;
@@ -560,7 +560,7 @@ const CATALOG: [EmbeddingCatalogEntry; 15] = [
         max_input_tokens: 8_192,
         max_batch_size: 2,
     }),
-    EmbeddingCatalogEntry::StaticInt8(StaticInt8Config {
+    EmbeddingCatalogEntry::Bekko(BekkoConfig {
         reference: "local/bekko-256-int8",
         provider: "local",
         model: "bekko-256-int8",

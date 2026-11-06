@@ -37,7 +37,7 @@ fn tensor(name: &str, dtype: u64, dims: &[u64], raw: &[u8]) -> Vec<u8> {
     )
 }
 
-pub(in crate::models::backends::static_int8) fn fixture() -> Vec<u8> {
+pub(in crate::models::backends::bekko) fn fixture() -> Vec<u8> {
     let mut graph = Vec::new();
     for node in NODES {
         let mut data = Vec::new();
@@ -72,7 +72,7 @@ pub(in crate::models::backends::static_int8) fn fixture() -> Vec<u8> {
 
 #[test]
 fn loads_signed_weights_and_per_row_scales() {
-    let table = load(&fixture(), 3, 2, None).expect("static graph");
+    let table = load(&fixture(), 3, 2, None).expect("Bekko graph");
     assert_eq!(table.weights, [3, 4, 0, 2, 255, 0]);
     assert_eq!(table.scales, [2.0, 0.5, 1.0]);
     assert_eq!(table.embed(&[2], None).expect("signed row"), [-1.0, 0.0]);

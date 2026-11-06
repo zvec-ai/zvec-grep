@@ -90,14 +90,14 @@ fn download(entry: EmbeddingCatalogEntry) -> &'static ArtifactDownloadConfig {
         EmbeddingCatalogEntry::LlamaCpp(e) => e.download,
         EmbeddingCatalogEntry::Model2Vec(e) => e.download,
         EmbeddingCatalogEntry::Transformers(e) => e.download,
-        EmbeddingCatalogEntry::StaticInt8(e) => e.download,
+        EmbeddingCatalogEntry::Bekko(e) => e.download,
         EmbeddingCatalogEntry::Qwen(_) => panic!("local models only"),
     }
 }
 
 fn metadata(entry: EmbeddingCatalogEntry) -> Value {
     let (batch, limit, semantics) = match entry {
-        EmbeddingCatalogEntry::StaticInt8(e) => (
+        EmbeddingCatalogEntry::Bekko(e) => (
             e.max_batch_size,
             e.max_input_tokens,
             json!({"dtype":"row-wise-int8","normalize":true,"pooling":"FP32 mean retaining unknown ids","query_prefix":null,"document_prefix":null}),

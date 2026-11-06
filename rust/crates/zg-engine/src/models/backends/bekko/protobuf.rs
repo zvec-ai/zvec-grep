@@ -1,4 +1,4 @@
-//! Bounded reader for the small ONNX protobuf subset used by pinned static graphs.
+//! Bounded reader for the small ONNX protobuf subset used by the pinned Bekko graph.
 
 use crate::models::spi::ModelError;
 
@@ -93,7 +93,7 @@ impl<'a> Reader<'a> {
 }
 
 pub(super) fn invalid() -> ModelError {
-    ModelError::storage_failure("Invalid or unsupported static INT8 ONNX graph")
+    ModelError::storage_failure("Invalid or unsupported Bekko INT8 ONNX graph")
 }
 
 #[cfg(test)]

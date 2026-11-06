@@ -8,14 +8,14 @@ use crate::models::{
 
 struct Fixture {
     root: tempfile::TempDir,
-    entry: StaticInt8Config,
+    entry: BekkoConfig,
 }
 
 impl Fixture {
     fn new(valid_graph: bool, valid_tokenizer: bool) -> Self {
         let root = tempfile::tempdir().expect("isolated cache");
         let source = ArtifactSourceConfig {
-            repo: "fixture/static",
+            repo: "fixture/bekko",
             revision: "pinned",
         };
         let snapshot = root.path().join(source.repo).join(source.revision);
@@ -56,10 +56,10 @@ impl Fixture {
         }));
         Self {
             root,
-            entry: StaticInt8Config {
-                reference: "local/static-fixture",
+            entry: BekkoConfig {
+                reference: "local/bekko-fixture",
                 provider: "local",
-                model: "static-fixture",
+                model: "bekko-fixture",
                 download,
                 model_file: "onnx/model.onnx",
                 vocabulary_size: 3,
@@ -71,8 +71,8 @@ impl Fixture {
         }
     }
 
-    fn model(&self) -> StaticInt8EmbeddingModel {
-        StaticInt8EmbeddingModel::new(
+    fn model(&self) -> BekkoEmbeddingModel {
+        BekkoEmbeddingModel::new(
             self.entry,
             ModelConfig {
                 cache_dir: Some(self.root.path().to_path_buf()),
@@ -85,10 +85,10 @@ impl Fixture {
 
 #[test]
 fn bekko_catalog_preserves_pinned_assets_and_public_limits() {
-    let EmbeddingCatalogEntry::StaticInt8(entry) =
+    let EmbeddingCatalogEntry::Bekko(entry) =
         get_embedding_model_catalog_entry("local/bekko-256-int8").expect("Bekko")
     else {
-        panic!("native static backend");
+        panic!("native Bekko backend");
     };
     assert_eq!(entry.model_file, "onnx/model_int8_dim256.onnx");
     assert_eq!(
@@ -106,7 +106,7 @@ fn bekko_catalog_preserves_pinned_assets_and_public_limits() {
     );
     assert!(entry.download.model_scope.is_none());
     let model =
-        StaticInt8EmbeddingModel::new(entry, ModelConfig::default(), ModelComputeRuntime::shared());
+        BekkoEmbeddingModel::new(entry, ModelConfig::default(), ModelComputeRuntime::shared());
     assert_eq!(model.concurrency_defaults().initial, 1);
 }
 
@@ -115,7 +115,7 @@ async fn cached_artifacts_prepare_once_without_ort_and_keep_token_semantics() {
     let fixture = Fixture::new(true, true);
     assert!(
         model_is_cached(
-            EmbeddingCatalogEntry::StaticInt8(fixture.entry),
+            EmbeddingCatalogEntry::Bekko(fixture.entry),
             Some(fixture.root.path())
         )
         .await

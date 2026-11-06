@@ -49,7 +49,7 @@ fn print_current_catalog_fixture() {
 #[allow(clippy::too_many_lines)]
 fn entry_value(entry: EmbeddingCatalogEntry) -> Value {
     match entry {
-        EmbeddingCatalogEntry::StaticInt8(_) => {
+        EmbeddingCatalogEntry::Bekko(_) => {
             unreachable!("Rust-only models are excluded from the TS oracle")
         }
         EmbeddingCatalogEntry::LlamaCpp(LlamaCppConfig {
