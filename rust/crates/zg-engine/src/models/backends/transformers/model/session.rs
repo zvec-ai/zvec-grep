@@ -207,7 +207,8 @@ impl SessionOwner {
             sessions = session_count,
             execution_budget = concurrency,
             threads_per_session = owner.stats().cpu_threads,
-            "Initialized ORT session pool"
+            "Transformers ONNX {} embedding execution provider selected",
+            owner.provider().name()
         );
         Ok(owner)
     }
