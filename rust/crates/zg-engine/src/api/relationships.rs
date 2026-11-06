@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 /// Maximum number of exact definitions in a relationship query.
 pub const MAX_SYMBOL_MATCHES: usize = 10;
+/// Maximum returned call sites per matched definition.
+pub const MAX_RELATIONSHIP_EDGES: usize = 50;
 /// Maximum length of a relationship symbol query in characters.
 pub const MAX_RELATIONSHIP_SYMBOL_CHARS: usize = 1024;
 
@@ -27,7 +29,7 @@ pub enum RelationshipDirection {
 pub struct RelationshipOptions {
     /// Workspace location. `None` uses the working directory.
     pub root: Option<PathBuf>,
-    /// Symbol name, optionally qualified as `scope::name` or `scope.name` (as shown by rg).
+    /// Symbol name, optionally qualified as `scope::name` or `scope.name`.
     /// `::name` selects only top-level definitions; plain `name` matches any scope.
     /// Literal symbol names take precedence over dotted qualification.
     /// A trailing dot is part of the literal name.
@@ -38,7 +40,7 @@ pub struct RelationshipOptions {
     /// Ordered workspace-relative glob rules, using the same semantics as indexed search.
     /// Filter definitions and suggestions; call-site files remain unrestricted.
     pub globs: Vec<GlobRule>,
-    /// Maximum returned call sites per matched symbol; defaults to 20.
+    /// Maximum returned call sites per matched symbol; defaults to 20, capped at [`MAX_RELATIONSHIP_EDGES`].
     pub limit: Option<usize>,
     /// Maximum workspace lock wait in milliseconds; defaults to 30 seconds.
     pub lock_timeout_ms: Option<u64>,
@@ -51,7 +53,7 @@ impl RelationshipOptions {
     /// Validate query parameters before opening storage or contacting a daemon.
     ///
     /// # Errors
-    /// Returns an invalid-argument error for an empty/overlong symbol, invalid glob, or zero limit.
+    /// Returns an invalid-argument error for an empty/overlong symbol, invalid glob, or out-of-range limit.
     pub fn validate(&self) -> crate::EngineResult<()> {
         let symbol = self.symbol.trim();
         if symbol.is_empty() || symbol.chars().count() > MAX_RELATIONSHIP_SYMBOL_CHARS {
@@ -69,6 +71,14 @@ impl RelationshipOptions {
             return Err(crate::EngineError::invalid_argument(
                 "relationship limit must be positive",
             ));
+        }
+        if self
+            .limit
+            .is_some_and(|limit| limit > MAX_RELATIONSHIP_EDGES)
+        {
+            return Err(crate::EngineError::invalid_argument(format!(
+                "relationship limit must not exceed {MAX_RELATIONSHIP_EDGES}",
+            )));
         }
         Ok(())
     }

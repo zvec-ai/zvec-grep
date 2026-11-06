@@ -25,6 +25,7 @@ use zg_engine::{
             options::{ScanRulesUpdate, WorkspaceChange as IndexChange},
         },
         info::{InfoOptions, InfoResult, result::IndexStatusSnapshot},
+        relationships::{RelationshipDirection, RelationshipOptions, RelationshipResult},
     },
 };
 use zg_host_native::{
@@ -960,6 +961,19 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
         options: InfoOptions,
     ) -> Result<InfoResult, EngineError> {
         WorkspaceRuntimeManager::info(self, engine, options).await
+    }
+
+    async fn relationships(
+        &self,
+        engine: &ZvecGrep,
+        direction: RelationshipDirection,
+        mut request: RelationshipOptions,
+    ) -> Result<RelationshipResult, EngineError> {
+        if request.signal.is_none() {
+            request.signal = Some(self.inner.shutdown.child_token());
+        }
+        let _activity = self.existing_activity(request.root.as_deref())?;
+        engine.relationships(direction, request).await
     }
 
     async fn search(
@@ -2344,6 +2358,11 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_closes_all_watchers_and_rejects_later_jobs() {
+        use zg_engine::{
+            ZvecGrep,
+            api::relationships::{RelationshipDirection, RelationshipOptions},
+        };
+        use zg_transport_mcp::IndexOperationProvider;
         let workspace = tempdir().expect("workspace should be created");
         let executor = Arc::new(RecordingExecutor::default());
         let (_sender, receiver) = mpsc::channel(1);
@@ -2367,7 +2386,26 @@ mod tests {
 
         assert_eq!(watchers.closes.load(Ordering::Acquire), 1);
         assert_eq!(manager.snapshot().active_runtimes, 0);
-        assert!(manager.submit_index(options, false).await.is_err());
+        assert!(manager.submit_index(options.clone(), false).await.is_err());
+        let engine = ZvecGrep::new();
+        for direction in [
+            RelationshipDirection::Callers,
+            RelationshipDirection::Callees,
+        ] {
+            let error = manager
+                .relationships(
+                    &engine,
+                    direction,
+                    RelationshipOptions {
+                        root: options.root.clone(),
+                        symbol: "run".into(),
+                        ..RelationshipOptions::default()
+                    },
+                )
+                .await
+                .expect_err("closed runtimes reject reads");
+            assert_eq!(error.code(), EngineError::RESOURCE_CLOSED);
+        }
     }
     #[tokio::test]
     async fn manual_updates_replace_the_watcher_once_without_replaying_configuration() {

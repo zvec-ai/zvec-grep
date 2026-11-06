@@ -1,9 +1,13 @@
 use super::*;
+use crate::api::relationships::MAX_RELATIONSHIP_EDGES;
 
 #[tokio::test]
 async fn callees_keep_repeated_sites_and_cross_file_edges_but_omit_missing_endpoints() {
     let fixture = Fixture::new();
-    let groups = fixture.callees("invoke", 100).await.matches;
+    let groups = fixture
+        .callees("invoke", MAX_RELATIONSHIP_EDGES)
+        .await
+        .matches;
     assert_eq!(groups.len(), 1);
     let group = &groups[0];
     assert!(!group.truncated);
@@ -75,7 +79,10 @@ async fn unfinished_cross_file_endpoints_are_filtered_before_limit() {
             )
             .expect("unfinished canonical file");
         store.close().expect("persist unfinished state");
-        let groups = fixture.callees("invoke", 100).await.matches;
+        let groups = fixture
+            .callees("invoke", MAX_RELATIONSHIP_EDGES)
+            .await
+            .matches;
         assert!(!groups[0].truncated);
         assert_eq!(groups[0].edges.len(), 48);
         assert!(
@@ -211,7 +218,7 @@ async fn limited_queries_skip_unneeded_endpoint_metadata_and_bodies() {
             corrupt_entity_bodies(fixture.storage_home(), std::slice::from_ref(caller.id()));
             (RelationshipDirection::Callers, "red::run")
         };
-        for limit in [1, 1000] {
+        for limit in [1, MAX_RELATIONSHIP_EDGES] {
             let result = fixture
                 .engine
                 .relationships(
@@ -228,7 +235,11 @@ async fn limited_queries_skip_unneeded_endpoint_metadata_and_bodies() {
                 assert!(groups[0].truncated, "{corruption}");
                 assert_eq!(groups[0].edges[0].file_path, PathBuf::from("a.rs"));
             } else {
-                assert!(result.is_err(), "reading {corruption} must still fail");
+                assert_eq!(
+                    result.expect_err("corrupt endpoint").code(),
+                    EngineError::STORAGE_FAILURE,
+                    "{corruption}"
+                );
             }
         }
     }
@@ -260,7 +271,10 @@ async fn file_level_callers_keep_their_paths_without_symbol_metadata() {
             target.entity.id().as_str(),
         );
     }
-    let groups = fixture.callers_with_limit("red::run", 100).await.matches;
+    let groups = fixture
+        .callers_with_limit("red::run", MAX_RELATIONSHIP_EDGES)
+        .await
+        .matches;
     assert_eq!(groups[0].edges.len(), 27);
     assert!(!groups[0].truncated);
     let mut paths: Vec<_> = groups[0]

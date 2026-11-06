@@ -353,6 +353,16 @@ fn closed_stdout_preserves_success_and_readiness_errors() {
             assert_eq!(output.status.code(), Some(0), "{args:?}: {output:?}");
             assert!(output.stderr.is_empty(), "{args:?}: {output:?}");
         }
+        // Graph indexing is disabled by default. A closed pipe must not hide
+        // this query error; successful relationship output uses a graph-enabled fixture.
+        for tool in ["--callers", "--callees"] {
+            let output = with_closed_stdout(fixture.command(&[tool, "foo", "--mode", mode]));
+            assert_eq!(output.status.code(), Some(1), "{tool} {mode}: {output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("graph support is disabled"),
+                "{tool} {mode}: {output:?}"
+            );
+        }
     }
     fixture.success(&["--server", "off"]);
     fixture.server_started = false;
