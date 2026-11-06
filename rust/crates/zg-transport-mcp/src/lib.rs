@@ -58,7 +58,7 @@ use zg_engine::{
         },
         relationships::{
             MAX_RELATIONSHIP_EDGES, MAX_RELATIONSHIP_SYMBOL_CHARS, MAX_SYMBOL_MATCHES,
-            RelationshipDirection, RelationshipOptions, RelationshipResult, SymbolDefinition,
+            RelationshipDirection, RelationshipOptions, RelationshipResult,
         },
     },
 };
@@ -340,7 +340,7 @@ impl ZvecGrepMcpServer {
         for name in ["zvec_grep_callers", "zvec_grep_callees"] {
             let route = router.map.get_mut(name).expect("relationship route");
             route.attr.description = route.attr.description.as_ref().map(|description| {
-                format!("{description} Accepts name, scope::name or scope.name; ::name selects top-level definitions. Queries matching more than {MAX_SYMBOL_MATCHES} indexed definitions fail; narrow the scope or use globs. limit counts call sites per definition (default 20, maximum {MAX_RELATIONSHIP_EDGES}); truncated marks omitted sites. Exact misses may return suggestions without edges. Text coordinates are one-based; structuredContent columns are zero-based byte offsets. Requires graph indexing enabled with zg --index --graph (add --rebuild for an existing index). Reads persisted resolved calls without refreshing; empty results do not prove absence.").into()
+                format!("{description} Accepts name, scope::name or scope.name; ::name selects top-level definitions. Queries matching more than {MAX_SYMBOL_MATCHES} indexed definitions fail; narrow the scope or use globs. limit counts call sites per definition (default 20, maximum {MAX_RELATIONSHIP_EDGES}); a truncation notice marks omitted sites. Exact misses may return suggestions without call sites. Returns readable text with one-based line and byte-column numbers. Requires graph indexing enabled with zg --index --graph (add --rebuild for an existing index). Reads persisted resolved calls without refreshing; empty results do not prove absence.").into()
             });
         }
         if toolset == McpToolset::Full {
@@ -401,8 +401,7 @@ impl ZvecGrepMcpServer {
 impl ZvecGrepMcpServer {
     #[tool(
         name = "zvec_grep_callers",
-        description = "Incoming call sites for a symbol. Each edge describes its caller; filePath, line and column locate the call in the caller file.",
-        output_schema = output_schema::<RelationshipOutput>(),
+        description = "Incoming call sites for a symbol. Shows caller definitions and call-site locations in the caller files.",
         annotations(
             title = "Incoming call sites for a symbol",
             read_only_hint = true,
@@ -422,8 +421,7 @@ impl ZvecGrepMcpServer {
 
     #[tool(
         name = "zvec_grep_callees",
-        description = "Outgoing call sites for a symbol. Each edge describes its callee; filePath, line and column locate the call in the caller file.",
-        output_schema = output_schema::<RelationshipOutput>(),
+        description = "Outgoing call sites for a symbol. Shows callee definitions and call-site locations in the caller file.",
         annotations(
             title = "Outgoing call sites for a symbol",
             read_only_hint = true,
@@ -859,53 +857,6 @@ pub struct RelationshipInput {
     /// Maximum call sites per matching symbol; defaults to 20, capped at 50.
     #[schemars(range(min = 1, max = MAX_RELATIONSHIP_EDGES), extend("type" = "integer"))]
     pub limit: Option<usize>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct RelationshipOutput {
-    matches: Vec<RelationshipMatchOutput>,
-    /// Similarly named definitions to retry; only populated when matches is empty, with no edges.
-    suggestions: Vec<RelationshipSymbolOutput>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct RelationshipMatchOutput {
-    #[serde(flatten)]
-    symbol: RelationshipSymbolOutput,
-    truncated: bool,
-    edges: Vec<RelationshipEdgeOutput>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct RelationshipSymbolOutput {
-    name: String,
-    file_path: String,
-    start_line: usize,
-    end_line: usize,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct RelationshipEdgeOutput {
-    /// Workspace-relative caller file containing the call site.
-    file_path: String,
-    symbol: Option<RelationshipSymbolOutput>,
-    line: Option<usize>,
-    column: Option<usize>,
-}
-
-impl From<&SymbolDefinition> for RelationshipSymbolOutput {
-    fn from(symbol: &SymbolDefinition) -> Self {
-        Self {
-            name: symbol.name.clone(),
-            file_path: symbol.file_path.to_string_lossy().into_owned(),
-            start_line: symbol.start_line,
-            end_line: symbol.end_line,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -2241,28 +2192,6 @@ fn relationship_result_to_tool_result(
     result: &RelationshipResult,
     direction: RelationshipDirection,
 ) -> CallToolResult {
-    let output = RelationshipOutput {
-        matches: result
-            .matches
-            .iter()
-            .map(|matched| RelationshipMatchOutput {
-                symbol: (&matched.symbol).into(),
-                truncated: matched.truncated,
-                edges: matched
-                    .edges
-                    .iter()
-                    .map(|edge| RelationshipEdgeOutput {
-                        file_path: edge.file_path.to_string_lossy().into_owned(),
-                        symbol: edge.symbol.as_ref().map(Into::into),
-                        line: edge.line,
-                        column: edge.column,
-                    })
-                    .collect(),
-            })
-            .collect(),
-        suggestions: result.suggestions.iter().map(Into::into).collect(),
-    };
-    let value = serde_json::json!(output);
     let mut bytes = Vec::new();
     zg_cli::write_relationships(
         &mut bytes,
@@ -2273,9 +2202,7 @@ fn relationship_result_to_tool_result(
     )
     .expect("writing relationships to a byte buffer cannot fail");
     let text = String::from_utf8(bytes).expect("relationship output is UTF-8");
-    let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
-    result.structured_content = Some(value);
-    result
+    CallToolResult::success(vec![ContentBlock::text(text)])
 }
 
 fn structured_result(value: impl Serialize) -> CallToolResult {

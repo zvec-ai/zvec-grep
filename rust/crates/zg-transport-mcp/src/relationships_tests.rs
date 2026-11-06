@@ -97,8 +97,7 @@ fn relationship_tools_advertise_read_only_schemas_in_both_toolsets() {
                         "more than {MAX_SYMBOL_MATCHES} indexed definitions"
                     ))
             );
-            assert!(value["outputSchema"]["properties"]["matches"].is_object());
-            assert!(value["outputSchema"]["properties"]["suggestions"].is_object());
+            assert!(value.get("outputSchema").is_none());
         }
     }
 }
@@ -185,7 +184,7 @@ impl RelationshipsOnly {
 }
 
 #[tokio::test]
-async fn relationship_wire_calls_route_without_indexing_and_return_text_and_json() {
+async fn relationship_wire_calls_route_without_indexing_and_return_only_text() {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let provider = Arc::new(RelationshipsOnly {
             calls: Mutex::new(Vec::new()),
@@ -242,23 +241,8 @@ async fn relationship_wire_calls_route_without_indexing_and_return_text_and_json
                 .expect("relationship call");
             let value = serde_json::to_value(response).expect("response JSON");
             assert_ne!(value["isError"], true);
-            assert_eq!(value["structuredContent"]["suggestions"], json!([]));
-            let matches = &value["structuredContent"]["matches"];
-            assert_eq!(matches[0]["name"], " Subject::run ");
-            assert_eq!(matches[0]["filePath"], "src/subject.rs");
-            assert_eq!(matches[0]["truncated"], true);
-            assert_eq!(matches[0]["edges"][0]["symbol"]["name"], endpoint);
-            assert_eq!(matches[0]["edges"][0]["column"], 0);
-            assert!(matches[0]["edges"][1]["symbol"].is_null());
-            assert_eq!(matches[0]["edges"][1]["filePath"], "src/top_level.rs");
-            assert_eq!(
-                matches[0]["edges"][0]["filePath"],
-                if name == "zvec_grep_callers" {
-                    "src/edge.rs"
-                } else {
-                    "src/subject.rs"
-                }
-            );
+            assert!(value.get("structuredContent").is_none());
+            assert_eq!(value["content"].as_array().expect("content").len(), 1);
             let text = value["content"][0]["text"].as_str().expect("text result");
             assert!(text.contains(endpoint), "{text}");
             assert!(text.contains("(symbol unavailable)"), "{text}");

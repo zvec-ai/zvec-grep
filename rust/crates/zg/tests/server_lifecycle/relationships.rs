@@ -107,14 +107,7 @@ fn persisted_calls_match_across_direct_daemon_and_mcp() -> Result<(), Box<dyn Er
             "params": {"name": format!("zvec_grep_{tool}"), "arguments": {"root": workspace.path(), "symbol": format!(" {symbol} ")}}
         }))?;
         assert_eq!(mcp["result"]["content"][0]["text"], replies[0]);
-        let reply = &mcp["result"]["structuredContent"];
-        assert_eq!(reply["matches"].as_array().ok_or("matches array")?.len(), 1);
-        assert_eq!(reply["suggestions"], json!([]));
-        assert_eq!(reply["matches"][0]["name"], symbol);
-        assert_eq!(reply["matches"][0]["truncated"], false);
-        assert_eq!(reply["matches"][0]["edges"][0]["symbol"]["name"], endpoint);
-        assert_eq!(reply["matches"][0]["edges"][0]["line"], 5);
-        assert_eq!(reply["matches"][0]["edges"][0]["filePath"], "calls.rs");
+        assert!(mcp["result"].get("structuredContent").is_none());
     }
     assert_suggestions(&binary, home.path(), workspace.path(), &mut bridge)?;
     assert_glob_filters(&binary, home.path(), workspace.path(), &mut bridge)?;
@@ -131,7 +124,7 @@ fn assert_glob_filters(
 ) -> Result<(), Box<dyn Error>> {
     let nested = workspace.join("src");
     std::fs::create_dir_all(&nested)?;
-    for (id, path, expected) in [(50, "calls.rs", 1), (51, "missing.py", 0)] {
+    for (id, path, matched) in [(50, "calls.rs", true), (51, "missing.py", false)] {
         let mcp = bridge.request(&json!({
             "jsonrpc": "2.0", "id": id, "method": "tools/call",
             "params": {"name": "zvec_grep_callers", "arguments": {"root": workspace, "symbol": "target", "globs": path}}
@@ -150,13 +143,12 @@ fn assert_glob_filters(
                 String::from_utf8(output.stdout)?
             );
         }
-        assert_eq!(
-            mcp["result"]["structuredContent"]["matches"]
-                .as_array()
-                .ok_or("MCP matches")?
-                .len(),
-            expected
-        );
+        let text = mcp["result"]["content"][0]["text"].as_str().ok_or("text")?;
+        if matched {
+            assert!(text.starts_with("target  calls.rs:1\n"), "{text}");
+        } else {
+            assert_eq!(text, "No matches.\n");
+        }
     }
     for (mode, symbol, path, expected_path, suggestions) in [
         ("direct", "nested_entry", "main.py", "src/main.py", false),
@@ -205,16 +197,9 @@ fn assert_suggestions(
         "jsonrpc": "2.0", "id": 20, "method": "tools/call",
         "params": {"name": "zvec_grep_callers", "arguments": {"root": workspace, "symbol": "WrongScope::TARGET"}}
     }))?;
-    let reply = &mcp["result"]["structuredContent"];
-    assert_eq!(reply["matches"], json!([]));
-    assert_eq!(
-        reply["suggestions"].as_array().ok_or("suggestions")?.len(),
-        1
-    );
-    assert_eq!(reply["suggestions"][0]["name"], "target");
     let text = mcp["result"]["content"][0]["text"].as_str().ok_or("text")?;
     assert_eq!(text, String::from_utf8(output.stdout)?);
     assert!(text.starts_with("No matches."));
-    assert!(text.contains("Suggestions (retry with an exact name):"));
+    assert!(text.contains("Suggestions (retry with an exact name):\n  target  calls.rs:1\n"));
     Ok(())
 }

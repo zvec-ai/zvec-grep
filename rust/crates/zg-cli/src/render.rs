@@ -427,7 +427,7 @@ Call-site locations always refer to the caller file, including calls without
 symbol metadata. Text line and byte-column numbers are one-based.
 A truncation notice indicates additional visible call sites beyond the limit.
 Unresolved references are excluded, so empty results do not prove that a relationship is absent.
-Output is readable text, shared with MCP text content. MCP also returns structured JSON.
+Output is readable text, shared with MCP text content.
 Requires graph indexing enabled with zg --index --graph; add --rebuild for an existing index.
 A query does not refresh or build the index.";
 
