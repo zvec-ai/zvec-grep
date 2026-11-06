@@ -10,6 +10,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use tokio_util::sync::CancellationToken;
+
 use super::{
     IndexStore, StoreState, graph_disabled, graph_error, read_view::visible_endpoint_files,
 };
@@ -42,7 +44,9 @@ pub(crate) struct ResolutionSnapshot {
 impl ResolutionSnapshot {
     /// Name-index hits for `name`, or `None` while any same-named entity's
     /// file is not currently Indexed. A hidden definition could change
-    /// uniqueness, so the resolver defers instead of resolving.
+    /// uniqueness, so the resolver defers instead of resolving. Bodyless
+    /// C/C++ declarations stay in the set: which candidate they name depends
+    /// on the reference's language, which only the resolver knows.
     pub(crate) fn lookup_candidates(&self, name: &str) -> Option<&[NameIndexEntry]> {
         let Some(candidates) = self.names.get(name) else {
             return Some(&[]);
@@ -141,9 +145,9 @@ struct SymbolIndex {
 }
 
 impl SymbolIndex {
-    fn read(state: &StoreState) -> EngineResult<Self> {
+    fn read(state: &StoreState, signal: Option<&CancellationToken>) -> EngineResult<Self> {
         let mut index = Self::default();
-        for (entity_id, file_id, metadata) in state.entities.list_symbol_projection()? {
+        for (entity_id, file_id, metadata) in state.entities.list_symbol_projection(signal)? {
             index.owners.insert(entity_id.clone(), file_id.get());
             // Unnamed entities cannot be referenced by name, so they stay out
             // of both views, matching the file graph's name index.
@@ -179,14 +183,13 @@ impl SymbolIndex {
                 },
             );
         }
+        // Candidate order stays stable. The set stays whole, bodyless
+        // declarations included: preferring a definition needs the reference's
+        // language, and this index is shared by every language. The resolver
+        // applies that preference per reference, after its language gate, over
+        // candidates spelling the same qualified name.
         for candidates in index.names.values_mut() {
             candidates.sort_by(|left, right| left.entity_id.cmp(&right.entity_id));
-            // Any definition beats every same-named declaration (C/C++
-            // ODR-style preference), so a bodyless declaration never reaches
-            // the rules while a definition exists.
-            if candidates.iter().any(|candidate| !candidate.is_declaration) {
-                candidates.retain(|candidate| !candidate.is_declaration);
-            }
         }
         Ok(index)
     }
@@ -217,11 +220,17 @@ fn import_scopes(
 
 impl IndexStore {
     /// One consistent read of every resolver input that lives outside the
-    /// graph. Build it once per sweep; writeback revalidates visibility.
-    pub(crate) fn resolution_snapshot(&self) -> EngineResult<ResolutionSnapshot> {
+    /// graph. Build it once per sweep; writeback revalidates visibility. The
+    /// entity projection dominates the read and honors `signal`, so a pass
+    /// cancelled while the snapshot builds returns the cancellation instead of
+    /// filling an index it will discard.
+    pub(crate) fn resolution_snapshot(
+        &self,
+        signal: Option<&CancellationToken>,
+    ) -> EngineResult<ResolutionSnapshot> {
         self.read(|state| {
             let paths = PathIndex::read(state)?;
-            let symbols = SymbolIndex::read(state)?;
+            let symbols = SymbolIndex::read(state, signal)?;
             let imports = import_scopes(state, &symbols.owners, &paths.indexed)?;
             Ok(ResolutionSnapshot {
                 names: symbols.names,
@@ -320,8 +329,21 @@ impl IndexStore {
                 .map_err(|_| graph_disabled())?
                 .get_pending_refs(&ids)
                 .map_err(graph_error)?;
-            let endpoints = refs.iter().map(|r| r.target_id.clone()).collect::<Vec<_>>();
+            let endpoints = refs
+                .iter()
+                .map(|r| r.reference.owner_id.clone())
+                .chain(resolutions.iter().map(|r| r.target_id.clone()))
+                .collect::<Vec<_>>();
             let visible = visible_endpoints(state, &endpoints)?;
+            let eligible = refs
+                .iter()
+                .filter(|r| {
+                    visible
+                        .get(&r.reference.owner_id)
+                        .is_some_and(|file| file.get() == r.file_id)
+                })
+                .map(|r| r.id)
+                .collect::<HashSet<_>>();
             let valid = resolutions
                 .iter()
                 .filter(|r| eligible.contains(&r.ref_id) && visible.contains_key(&r.target_id))
@@ -376,13 +398,13 @@ impl IndexStore {
 
     /// Terminate pending references whose specifier addresses no workspace
     /// module. Only visible rows change, so hidden files stay queued.
-    pub(crate) fn apply_failures(&self, ref_ids: &[i64]) -> EngineResult<usize> {
+    pub(crate) fn apply_failures(&self, failures: &[i64]) -> EngineResult<usize> {
         self.write(|state| {
-            let eligible = eligible_ref_ids(state, ref_ids)?;
-            let valid = ref_ids
+            let eligible = eligible_ref_ids(state, failures)?;
+            let valid = failures
                 .iter()
-                .copied()
                 .filter(|id| eligible.contains(id))
+                .copied()
                 .collect::<Vec<_>>();
             state
                 .graph
@@ -425,7 +447,7 @@ impl IndexStore {
 }
 
 fn graph(state: &StoreState) -> EngineResult<&super::super::graph::SqliteGraphStorage> {
-    state.graph.as_ref().ok_or_else(graph_disabled)
+    state.graph.as_ref().map_err(|_| graph_disabled())
 }
 
 fn is_indexed(state: &StoreState, file_id: u32) -> EngineResult<bool> {

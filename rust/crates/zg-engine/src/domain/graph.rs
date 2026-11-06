@@ -50,7 +50,9 @@ pub(crate) enum EdgeProvenance {
     /// The winning candidate was the only exported one.
     ExportBound,
     FileLocal,
-    /// A receiver-qualified call bound to a same-file declaration.
+    /// A call bound to a same-file declaration: by receiver inference, by the
+    /// enclosing instance, or as the file's lone indexed location of a bare
+    /// name.
     FileScoped,
     /// A bare name bound through the file's resolved import scope.
     ImportBound,
