@@ -155,7 +155,8 @@ fn each_physical_job_sizes_qwen_kv_from_its_own_tokens() {
             tokens: vec![LlamaToken::new(7); length],
         })
         .collect::<Vec<_>>();
-    let budget = LlamaExecutionBudget::resolve("qwen3", true, 4, 1).expect("GPU budget");
+    let budget = LlamaExecutionBudget::resolve("qwen3", LlamaExecutionBackend::OtherGpu, 4, 1)
+        .expect("packing-capable GPU budget");
     let execution = LlamaBatchExecution {
         architecture: "qwen3".to_owned(),
         context_size: 8_192,
@@ -194,6 +195,41 @@ fn each_physical_job_sizes_qwen_kv_from_its_own_tokens() {
             .collect::<Vec<_>>(),
         [32, 256, 128]
     );
+}
+
+#[test]
+fn cuda_keeps_whole_sequences_in_separate_jobs_without_reducing_context_budget() {
+    let inputs = [32, 8_192, 64, 64]
+        .into_iter()
+        .enumerate()
+        .map(|(index, length)| PreparedLlamaInput {
+            index,
+            tokens: vec![LlamaToken::new(7); length],
+        })
+        .collect::<Vec<_>>();
+    let budget = LlamaExecutionBudget::resolve("qwen3", LlamaExecutionBackend::Cuda, 4, 1)
+        .expect("CUDA budget");
+    assert_eq!(budget.contexts, 4);
+    let execution = LlamaBatchExecution {
+        architecture: "qwen3".to_owned(),
+        context_size: 8_192,
+        budget,
+        concurrency: 4,
+    };
+    let batches = LlamaBatchPlan::new(&inputs, 8_192, budget.batch_tokens)
+        .expect("CUDA plan")
+        .into_batches(inputs.clone());
+    assert_eq!(batches.len(), inputs.len());
+    for (batch, expected) in batches.iter().zip(&inputs) {
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].index, expected.index);
+        assert_eq!(batch[0].tokens, expected.tokens);
+        let plan = LlamaBatchPlan::new(batch, 8_192, budget.batch_tokens).expect("single job");
+        let profile = execution.context_profile(&plan);
+        assert_eq!(profile.sequence_capacity, 1);
+        assert!(profile.context_size as usize >= expected.tokens.len());
+        assert!(profile.micro_batch_capacity <= 256);
+    }
 }
 
 #[test]

@@ -36,6 +36,29 @@ fn automatic_cpu_concurrency(available: usize, contexts: usize) -> usize {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LlamaExecutionBackend {
+    Cpu,
+    Cuda,
+    OtherGpu,
+}
+
+impl LlamaExecutionBackend {
+    pub(super) fn from_gpu_device(backend: &str, name: &str) -> Self {
+        if backend.to_ascii_lowercase().contains("cuda")
+            || name.to_ascii_lowercase().contains("cuda")
+        {
+            Self::Cuda
+        } else {
+            Self::OtherGpu
+        }
+    }
+
+    pub(super) const fn is_gpu(self) -> bool {
+        !matches!(self, Self::Cpu)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct LlamaExecutionBudget {
     pub(super) contexts: usize,
     pub(super) threads: i32,
@@ -45,17 +68,24 @@ pub(super) struct LlamaExecutionBudget {
 impl LlamaExecutionBudget {
     pub(super) fn resolve(
         architecture: &str,
-        gpu: bool,
+        backend: LlamaExecutionBackend,
         concurrency: usize,
         cpu_contexts: usize,
     ) -> Result<Self, ModelError> {
-        if gpu {
+        if backend.is_gpu() {
             // Packing is independent of C. First form useful physical batches,
             // then distribute those batches across the shared context pool.
-            let batch_tokens = match architecture {
-                "gemma-embedding" => Some(128),
-                "qwen3" => Some(256),
-                _ => None,
+            // CUDA packing failed the T4 singleton-equivalence regressions.
+            // Keep one sequence per CUDA job; preserve other GPU backends'
+            // existing packing policy based on the actual selected device.
+            let batch_tokens = if backend == LlamaExecutionBackend::OtherGpu {
+                match architecture {
+                    "gemma-embedding" => Some(128),
+                    "qwen3" => Some(256),
+                    _ => None,
+                }
+            } else {
+                None
             };
             Ok(Self {
                 contexts: concurrency.max(1),

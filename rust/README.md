@@ -102,11 +102,18 @@ execution. Contexts share model weights, but have independent KV and working
 buffers; increasing `C` can increase memory use and does not guarantee a speedup.
 CPU support work uses one native compute thread per GPU context.
 
-Gemma and Qwen GPU sequence packing is managed internally, independently of `C`.
-Inputs are packed by token count before batches are assigned to available
-contexts; each input, including all of its micro-batches, stays on one context.
-Long inputs execute individually within the model's input limit, without being
-truncated to the packing budget. Qwen KV capacity follows actual batch needs.
+On Metal, Gemma and Qwen sequence packing is managed internally, independently
+of `C`, with token budgets of 128 and 256 respectively. Inputs are packed before
+batches are assigned to available contexts. CUDA keeps each input sequence in
+a separate native job to preserve embedding consistency: multi-sequence packing
+has not passed equivalence checks on T4 with the pinned CUDA runtime.
+CUDA still distributes jobs across up to `C` contexts.
+
+Each input, including all of its native micro-batches, stays on one context.
+Native token-batch and micro-batch sizes are internal controls, independent of
+`C`; Qwen micro-batches use at most 256 tokens on CUDA. Gemma processes a valid
+long input whole, and long inputs are not truncated to a sequence-packing budget.
+Qwen KV capacity follows actual batch needs.
 
 Different llama.cpp concurrency values share one model runtime and context pool.
 Contexts are created on demand; independent calls do not each allocate a separate

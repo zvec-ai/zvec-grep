@@ -47,7 +47,9 @@ use crate::models::{
 mod batching;
 use batching::LlamaBatchPlan;
 mod policy;
-use policy::{LlamaExecutionBudget, configured_cpu_contexts, default_cpu_concurrency};
+use policy::{
+    LlamaExecutionBackend, LlamaExecutionBudget, configured_cpu_contexts, default_cpu_concurrency,
+};
 mod pool;
 use pool::{LlamaContextPoolState, LlamaResponseSender};
 
@@ -102,7 +104,7 @@ struct LoadedLlamaModel {
 
 struct LlamaContextPool {
     model: Arc<LlamaModel>,
-    gpu: bool,
+    backend: LlamaExecutionBackend,
     cpu_contexts: usize,
     state: StdMutex<LlamaContextPoolState>,
     changed: Condvar,
@@ -368,7 +370,7 @@ impl EmbeddingModel for LlamaCppEmbeddingModel {
         if matches!(resolve_device(self.device), None | Some(Device::Cpu)) {
             LlamaExecutionBudget::resolve(
                 "",
-                false,
+                LlamaExecutionBackend::Cpu,
                 options.execution_concurrency,
                 self.cpu_context_count()?,
             )
@@ -442,7 +444,7 @@ fn load_model_with_fallback(
     let backend = initialize_llama_backend(wants_gpu, &registry)?;
     if wants_gpu {
         if let Some(selected) = select_gpu_device(device) {
-            match load_gpu_model(backend, path, selected.index) {
+            match load_gpu_model(backend, path, &selected) {
                 Ok(model) => {
                     tracing::debug!(
                         requested_device = requested_device_name(device),
@@ -489,16 +491,23 @@ const fn resolve_device(device: Option<Device>) -> Option<Device> {
 fn load_gpu_model(
     backend: &LlamaBackend,
     path: &Path,
-    device_index: usize,
+    device: &LlamaBackendDevice,
 ) -> Result<LoadedLlamaModel, ModelError> {
     let params = LlamaModelParams::default()
-        .with_devices(&[device_index])
+        .with_devices(&[device.index])
         .map_err(|error| {
             ModelError::internal("Unable to select llama.cpp GPU device").with_cause(error)
         })?
         .with_n_gpu_layers(u32::MAX);
     LlamaModel::load_from_file(backend, path, &params)
-        .map(|model| loaded_llama_model(model, path, true, 1))
+        .map(|model| {
+            loaded_llama_model(
+                model,
+                path,
+                LlamaExecutionBackend::from_gpu_device(&device.backend, &device.name),
+                1,
+            )
+        })
         .map_err(|error| {
             ModelError::storage_failure("Unable to load llama.cpp GPU embedding model")
                 .with_cause(error)
@@ -512,7 +521,7 @@ fn load_cpu_model(
 ) -> Result<LoadedLlamaModel, ModelError> {
     let params = cpu_model_params()?;
     LlamaModel::load_from_file(backend, path, &params)
-        .map(|model| loaded_llama_model(model, path, false, cpu_contexts))
+        .map(|model| loaded_llama_model(model, path, LlamaExecutionBackend::Cpu, cpu_contexts))
         .map_err(|error| {
             ModelError::storage_failure("Unable to load llama.cpp embedding model")
                 .with_cause(error)
@@ -531,15 +540,15 @@ fn cpu_model_params() -> Result<LlamaModelParams, ModelError> {
 fn loaded_llama_model(
     model: LlamaModel,
     path: &Path,
-    gpu: bool,
+    backend: LlamaExecutionBackend,
     cpu_contexts: usize,
 ) -> LoadedLlamaModel {
     let model = Arc::new(model);
     LoadedLlamaModel {
-        contexts: LlamaContextPool::new(Arc::clone(&model), gpu, cpu_contexts),
+        contexts: LlamaContextPool::new(Arc::clone(&model), backend, cpu_contexts),
         model,
         model_path: path.to_path_buf(),
-        gpu,
+        gpu: backend.is_gpu(),
     }
 }
 

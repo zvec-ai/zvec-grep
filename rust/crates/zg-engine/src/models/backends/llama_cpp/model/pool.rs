@@ -3,10 +3,11 @@ use std::collections::{BTreeMap, VecDeque};
 
 use super::{
     Arc, AtomicBool, CancellationToken, Condvar, Duration, EmbeddingResult, LlamaBatchPlan,
-    LlamaContextPool, LlamaContextProfile, LlamaContextWorker, LlamaExecutionBudget, LlamaModel,
-    LlamaWorkerJob, LlamaWorkerLease, LlamaWorkerMessage, LlamaWorkerResponse, ModelError,
-    Ordering, PoisonError, PreparedLlamaBatch, PreparedLlamaInput, StdMutex, check_cancelled,
-    llama_context_worker, llama_micro_batch_capacity, lock_llama_mutex, mpsc, thread,
+    LlamaContextPool, LlamaContextProfile, LlamaContextWorker, LlamaExecutionBackend,
+    LlamaExecutionBudget, LlamaModel, LlamaWorkerJob, LlamaWorkerLease, LlamaWorkerMessage,
+    LlamaWorkerResponse, ModelError, Ordering, PoisonError, PreparedLlamaBatch, PreparedLlamaInput,
+    StdMutex, check_cancelled, llama_context_worker, llama_micro_batch_capacity, lock_llama_mutex,
+    mpsc, thread,
 };
 
 #[derive(Default)]
@@ -228,10 +229,14 @@ fn collect_completed(
 }
 
 impl LlamaContextPool {
-    pub(super) fn new(model: Arc<LlamaModel>, gpu: bool, cpu_contexts: usize) -> Self {
+    pub(super) fn new(
+        model: Arc<LlamaModel>,
+        backend: LlamaExecutionBackend,
+        cpu_contexts: usize,
+    ) -> Self {
         Self {
             model,
-            gpu,
+            backend,
             cpu_contexts,
             state: StdMutex::new(LlamaContextPoolState::default()),
             changed: Condvar::new(),
@@ -258,7 +263,7 @@ impl LlamaContextPool {
             })?;
         let budget = LlamaExecutionBudget::resolve(
             &architecture,
-            self.gpu,
+            self.backend,
             execution_concurrency,
             self.cpu_contexts,
         )?;
@@ -346,7 +351,8 @@ impl LlamaContextPool {
         let profile = execution.context_profile(&plan);
         tracing::debug!(
             architecture = execution.architecture,
-            gpu = self.gpu,
+            gpu = self.backend.is_gpu(),
+            backend = ?self.backend,
             execution_concurrency = execution.concurrency,
             desired_threads = profile.threads,
             desired_contexts = execution.budget.contexts,

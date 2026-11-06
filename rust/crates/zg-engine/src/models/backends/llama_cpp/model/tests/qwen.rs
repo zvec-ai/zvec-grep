@@ -17,7 +17,7 @@ async fn cached_qwen3_cpu_thread_changes_match_fresh_contexts() {
     input.index = 0;
     for concurrency in [1, 2, 4, 8, 1] {
         let actual = qwen_infer(&loaded, vec![input.clone()], concurrency);
-        let fresh = LlamaContextPool::new(Arc::clone(&loaded.model), false, 1);
+        let fresh = LlamaContextPool::new(Arc::clone(&loaded.model), loaded.contexts.backend, 1);
         let expected = fresh
             .run(
                 PreparedLlamaBatch {
@@ -76,6 +76,14 @@ async fn load_qwen_fixture(device: Device) -> Arc<LoadedLlamaModel> {
     model.cpu_contexts = Ok(1);
     let loaded = model.ensure_loaded(None, None).await.expect("cached model");
     assert_eq!(loaded.gpu, device != Device::Cpu);
+    assert_eq!(
+        loaded.contexts.backend,
+        match device {
+            Device::Cpu => LlamaExecutionBackend::Cpu,
+            Device::Cuda => LlamaExecutionBackend::Cuda,
+            _ => LlamaExecutionBackend::OtherGpu,
+        }
+    );
     loaded
 }
 
@@ -140,7 +148,7 @@ fn qwen_individual_reference(
     inputs: &[PreparedLlamaInput],
     concurrency: usize,
 ) -> Vec<Vec<f32>> {
-    let fresh = LlamaContextPool::new(Arc::clone(&loaded.model), loaded.gpu, 1);
+    let fresh = LlamaContextPool::new(Arc::clone(&loaded.model), loaded.contexts.backend, 1);
     inputs
         .iter()
         .map(|input| {
@@ -199,7 +207,8 @@ async fn qwen_batches_preserve_vectors_and_kv_isolation(device: Device) {
             .collect();
         let result = qwen_infer(&loaded, reordered, concurrency);
         assert_eq!(result.len(), expected.len());
-        for (actual, expected) in result.iter().zip(expected) {
+        for (index, (actual, expected)) in result.iter().zip(expected).enumerate() {
+            eprintln!("Qwen batch equivalence C={concurrency} input={index}");
             assert_embedding_close(actual, expected);
         }
         assert_embedding_close(&result[0], &result[5]);

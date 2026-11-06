@@ -62,9 +62,15 @@ indexing concurrency overrides so `default` uses the backend default:
   to K with at least one thread per context. Record any nondefault K in the
   experiment metadata; keep it fixed when comparing C values.
 - llama.cpp Metal/CUDA uses C as the concurrent context and in-flight batch
-  limit, defaulting to one. Contexts share one model runtime and pool; Gemma
-  and Qwen token packing is internal and independent of C. GPU contexts each
-  use one CPU support compute thread. Multiple callers share the native limit.
+  limit, defaulting to one. Contexts share one model runtime and pool, and each
+  uses one CPU support compute thread. Multiple callers share the native limit.
+  Metal packs Gemma/Qwen sequences with internal token budgets of 128/256,
+  independently of C. CUDA keeps each input sequence in a separate native job
+  to preserve embedding consistency: multi-sequence packing has not passed
+  equivalence checks on T4 with the pinned CUDA runtime.
+  CUDA still schedules jobs across up to C contexts; native
+  token-batch and micro-batch sizes remain internal controls, with Qwen CUDA
+  micro-batches capped at 256 tokens and valid Gemma inputs processed whole.
 - Transformers/ONNX uses the production in-flight batch limit, capped at eight;
   its current default is one.
 - model2vec uses its production default (currently two) or the explicit budget.

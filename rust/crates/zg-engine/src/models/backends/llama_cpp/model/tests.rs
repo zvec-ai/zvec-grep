@@ -149,9 +149,10 @@ fn pins_main_compatible_sources_and_cache_name() {
 #[test]
 fn user_concurrency_controls_cpu_threads_per_context() {
     for count in [1, 2, 4, 8, 24] {
-        let threads = LlamaExecutionBudget::resolve("gemma-embedding", false, count, 1)
-            .expect("thread count")
-            .threads;
+        let threads =
+            LlamaExecutionBudget::resolve("gemma-embedding", LlamaExecutionBackend::Cpu, count, 1)
+                .expect("thread count")
+                .threads;
         assert_eq!(usize::try_from(threads).expect("positive threads"), count);
         let params = llama_context_params(
             "gemma-embedding",
@@ -169,12 +170,15 @@ fn user_concurrency_controls_cpu_threads_per_context() {
         assert_eq!(params.n_seq_max(), 4);
     }
     assert_eq!(
-        LlamaExecutionBudget::resolve("gemma-embedding", false, 0, 1)
+        LlamaExecutionBudget::resolve("gemma-embedding", LlamaExecutionBackend::Cpu, 0, 1)
             .expect("valid test configuration")
             .threads,
         i32::try_from(default_cpu_concurrency(1)).expect("automatic CPU thread count")
     );
-    assert!(LlamaExecutionBudget::resolve("gemma-embedding", false, usize::MAX, 1).is_err());
+    assert!(
+        LlamaExecutionBudget::resolve("gemma-embedding", LlamaExecutionBackend::Cpu, usize::MAX, 1)
+            .is_err()
+    );
 }
 
 #[test]
@@ -315,20 +319,21 @@ fn embeddinggemma_micro_batch_covers_long_inputs_without_changing_qwen() {
 }
 
 #[test]
-fn multisequence_batching_is_limited_to_validated_gpu_models() {
+fn multisequence_batching_keeps_cpu_and_cuda_on_single_sequence_jobs() {
     for architecture in ["gemma-embedding", "qwen3"] {
-        assert!(
-            LlamaExecutionBudget::resolve(architecture, true, 1, 1)
-                .expect("valid test configuration")
-                .batch_tokens
-                .is_some()
-        );
-        assert!(
-            LlamaExecutionBudget::resolve(architecture, false, 1, 1)
-                .expect("valid test configuration")
-                .batch_tokens
-                .is_none()
-        );
+        for backend in [
+            LlamaExecutionBackend::Cpu,
+            LlamaExecutionBackend::Cuda,
+            LlamaExecutionBackend::OtherGpu,
+        ] {
+            assert_eq!(
+                LlamaExecutionBudget::resolve(architecture, backend, 1, 1)
+                    .expect("valid test configuration")
+                    .batch_tokens
+                    .is_some(),
+                backend == LlamaExecutionBackend::OtherGpu
+            );
+        }
     }
 }
 
@@ -352,7 +357,7 @@ fn automatic_cpu_budget_preserves_parallel_compute_while_one_is_explicit() {
         default_cpu_concurrency(1)
     );
     assert_eq!(
-        LlamaExecutionBudget::resolve("gemma-embedding", false, 1, 1)
+        LlamaExecutionBudget::resolve("gemma-embedding", LlamaExecutionBackend::Cpu, 1, 1)
             .expect("valid test configuration")
             .threads,
         1
@@ -459,6 +464,14 @@ async fn embeddinggemma_batches_preserve_vectors_and_context_limits(device: Devi
     model.cpu_contexts = Ok(1);
     let loaded = model.ensure_loaded(None, None).await.expect("cached model");
     assert_eq!(loaded.gpu, device != Device::Cpu);
+    assert_eq!(
+        loaded.contexts.backend,
+        match device {
+            Device::Cpu => LlamaExecutionBackend::Cpu,
+            Device::Cuda => LlamaExecutionBackend::Cuda,
+            _ => LlamaExecutionBackend::OtherGpu,
+        }
+    );
     assert_context_worker_ownership(&loaded);
     let inputs = gemma_batch_fixture(&loaded.model);
     assert_eq!(inputs[4].tokens.len(), 2_048);
@@ -485,6 +498,7 @@ async fn embeddinggemma_batches_preserve_vectors_and_context_limits(device: Devi
             .expect("individual inference");
         expected.push(result.vectors[0].clone());
     }
+    assert_embedding_close(&expected[0], &expected[5]);
     if loaded.gpu {
         assert_gemma_sequence_isolation(&loaded, &inputs);
     }
@@ -494,31 +508,12 @@ async fn embeddinggemma_batches_preserve_vectors_and_context_limits(device: Devi
             .run(prepared(), 2_048, concurrency, None)
             .expect("batched inference");
         assert_eq!(result.truncated, [4]);
-        for (actual, expected) in result.vectors.iter().zip(&expected) {
+        for (index, (actual, expected)) in result.vectors.iter().zip(&expected).enumerate() {
+            eprintln!("Gemma batch equivalence C={concurrency} input={index}");
             assert_embedding_close(actual, expected);
         }
         assert_eq!(result.vectors.len(), inputs.len());
-        let state = lock_llama_mutex(&loaded.contexts.state);
-        assert!(!state.workers.is_empty());
-        assert!(
-            state
-                .workers
-                .iter()
-                .all(|worker| !worker.busy.load(Ordering::Acquire))
-        );
-        let physical_batches = LlamaBatchPlan::new(&inputs, 2_048, loaded.gpu.then_some(128))
-            .expect("physical batch plan")
-            .into_batches(inputs.clone())
-            .len();
-        assert_eq!(
-            state.workers.len(),
-            if loaded.gpu {
-                concurrency.min(physical_batches)
-            } else {
-                1
-            }
-        );
-        drop(state);
+        assert_gemma_context_limit(&loaded, &inputs, concurrency);
 
         // A larger sequence/token profile must remain safe for a later single query.
         let result = loaded
@@ -536,6 +531,37 @@ async fn embeddinggemma_batches_preserve_vectors_and_context_limits(device: Devi
         assert_embedding_close(&result.vectors[0], &expected[0]);
     }
     assert_gemma_batch_failure_recovery(&loaded, &inputs, &expected);
+}
+
+fn assert_gemma_context_limit(
+    loaded: &LoadedLlamaModel,
+    inputs: &[PreparedLlamaInput],
+    concurrency: usize,
+) {
+    let state = lock_llama_mutex(&loaded.contexts.state);
+    assert!(!state.workers.is_empty());
+    assert!(
+        state
+            .workers
+            .iter()
+            .all(|worker| !worker.busy.load(Ordering::Acquire))
+    );
+    let packing =
+        LlamaExecutionBudget::resolve("gemma-embedding", loaded.contexts.backend, concurrency, 1)
+            .expect("actual backend packing budget")
+            .batch_tokens;
+    let physical_batches = LlamaBatchPlan::new(inputs, 2_048, packing)
+        .expect("physical batch plan")
+        .into_batches(inputs.to_vec())
+        .len();
+    assert_eq!(
+        state.workers.len(),
+        if loaded.gpu {
+            concurrency.min(physical_batches)
+        } else {
+            1
+        }
+    );
 }
 
 fn assert_context_worker_ownership(loaded: &LoadedLlamaModel) {
@@ -569,7 +595,7 @@ fn assert_cpu_two_context_pool(
     context_size: u32,
 ) {
     assert!(!loaded.gpu);
-    let pool = LlamaContextPool::new(Arc::clone(&loaded.model), false, 2);
+    let pool = LlamaContextPool::new(Arc::clone(&loaded.model), LlamaExecutionBackend::Cpu, 2);
     let prepared = || PreparedLlamaBatch {
         inputs: inputs.to_vec(),
         truncated: Vec::new(),
@@ -577,7 +603,7 @@ fn assert_cpu_two_context_pool(
     for concurrency in [2, 4, 8] {
         // Native CPU flash attention depends on T, so K=1 reference C=T,
         // never the K=2 operation's total C.
-        let fresh = LlamaContextPool::new(Arc::clone(&loaded.model), false, 1);
+        let fresh = LlamaContextPool::new(Arc::clone(&loaded.model), LlamaExecutionBackend::Cpu, 1);
         let expected = fresh
             .run(prepared(), context_size, concurrency / 2, None)
             .expect("same-T fresh CPU oracle");
