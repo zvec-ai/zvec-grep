@@ -337,7 +337,7 @@ impl LanguageAdapter {
                 let definition = inner_python_definition(node).unwrap_or(node);
                 extract_generic_signature(definition, source)
             }
-            Language::Php => extract_generic_signature(php_declaration(node), source),
+            Language::Php => extract_php_signature(node, source),
             _ => extract_generic_signature(node, source),
         }
     }
@@ -866,6 +866,14 @@ fn extract_php_name(node: Node<'_>, source: &[u8]) -> Option<String> {
             .into_iter()
             .find(|child| child.kind() == "name")
     })?;
+    // A by-reference promoted parameter wraps its `variable_name` in `by_ref`.
+    let name = if name.kind() == "by_ref" {
+        named_children(name)
+            .into_iter()
+            .find(|child| child.kind() == "variable_name")?
+    } else {
+        name
+    };
     let name = if name.kind() == "variable_name" {
         named_children(name)
             .into_iter()
@@ -874,6 +882,26 @@ fn extract_php_name(node: Node<'_>, source: &[u8]) -> Option<String> {
         name
     };
     Some(text(name, source).to_owned())
+}
+
+// A split element keeps the statement's modifiers and type but only its own
+// name and value, so siblings do not repeat each other's declarations.
+fn extract_php_signature(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if !is_php_element(node) {
+        return extract_generic_signature(node, source);
+    }
+    let statement = php_declaration(node);
+    let first_element = named_children(statement)
+        .into_iter()
+        .find(|child| is_php_element(*child))?;
+    let prefix = extract_signature_prefix(statement, source, first_element.start_byte());
+    let element = extract_generic_signature(node, source)?;
+    let prefix = prefix.trim();
+    Some(if prefix.is_empty() {
+        element
+    } else {
+        format!("{prefix} {element}")
+    })
 }
 
 fn classify_php(node: Node<'_>) -> Option<SymbolType> {
@@ -971,20 +999,24 @@ fn append_signature(
         out.push(' ');
         return;
     }
-    let body = node.child_by_field_name("body").or_else(|| {
-        named_children(node).into_iter().find(|child| {
-            matches!(
-                child.kind(),
-                "statement_block"
-                    | "compound_statement"
-                    | "block"
-                    | "class_body"
-                    | "declaration_list"
-                    | "field_declaration_list"
-                    | "property_hook_list"
-            )
-        })
-    });
+    // PHP names a ternary's true branch `body`, but it is a value, not an implementation.
+    let body = node
+        .child_by_field_name("body")
+        .filter(|_| node.kind() != "conditional_expression")
+        .or_else(|| {
+            named_children(node).into_iter().find(|child| {
+                matches!(
+                    child.kind(),
+                    "statement_block"
+                        | "compound_statement"
+                        | "block"
+                        | "class_body"
+                        | "declaration_list"
+                        | "field_declaration_list"
+                        | "property_hook_list"
+                )
+            })
+        });
     let mut offset = node.start_byte();
     for child in named_children(node) {
         if child.start_byte() >= end_byte {

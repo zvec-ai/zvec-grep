@@ -136,11 +136,15 @@ fn extract_code(
 
     let mut output = Vec::new();
     let mut entity_heads = Vec::with_capacity(entities.len());
-    for entity in entities {
+    for entity in &entities {
         // Fragments are appended contiguously in walk order, so the output
         // length before each append is that entity's head fragment index.
         entity_heads.push(output.len());
-        append_entity(source, &entity, max_chars, overlap_chars, &mut output);
+        append_entity(source, entity, max_chars, overlap_chars, &mut output);
+    }
+    // Gap chunks follow every entity, so they leave the head indexes intact.
+    if code_format == FileFormat::Php && !output.is_empty() {
+        append_php_gaps(source, &entities, max_chars, overlap_chars, &mut output);
     }
     if output.is_empty() {
         Ok(ExtractionOutput {
@@ -391,6 +395,67 @@ fn append_entity(
         content: Content::Text(content),
         metadata: Some(metadata),
     });
+}
+
+// PHP files mix declarations with templates and top-level statements. The
+// source outside every declaration stays searchable as plain-text chunks.
+fn append_php_gaps(
+    source: &TextSource,
+    entities: &[CodeEntity<'_>],
+    max_chars: usize,
+    overlap_chars: usize,
+    output: &mut Vec<ExtractedEntity>,
+) {
+    let mut covered = entities
+        .iter()
+        .map(|entity| {
+            // Comments already stored as documentation count as covered.
+            let mut start = entity.node.start_byte();
+            if entity.documentation.is_some() {
+                let mut sibling = entity.node.prev_named_sibling();
+                while let Some(comment) = sibling.filter(|node| node.kind() == "comment") {
+                    start = comment.start_byte();
+                    sibling = comment.prev_named_sibling();
+                }
+            }
+            (start, entity.node.end_byte())
+        })
+        .collect::<Vec<_>>();
+    covered.sort_unstable();
+    let mut gaps = Vec::new();
+    let mut offset = 0;
+    for (start, end) in covered {
+        if start > offset {
+            gaps.push((offset, start));
+        }
+        offset = offset.max(end);
+    }
+    gaps.push((offset, source.text.len()));
+
+    let line_offsets = line_byte_offsets(&source.text);
+    let mut gap_source = source.clone();
+    for (start, end) in gaps {
+        let gap = &source.text[start..end];
+        let text = gap.trim();
+        if is_bare_php_tags(text) {
+            continue;
+        }
+        let text_start = start + (gap.len() - gap.trim_start().len());
+        text.clone_into(&mut gap_source.text);
+        let chunks = fallback(&gap_source, max_chars, overlap_chars);
+        let remapped =
+            remap_script_block_entities(source, chunks, output.len(), &line_offsets, text_start);
+        output.extend(remapped);
+    }
+}
+
+fn is_bare_php_tags(text: &str) -> bool {
+    text.replace("<?php", "")
+        .replace("<?=", "")
+        .replace("<?", "")
+        .replace("?>", "")
+        .trim()
+        .is_empty()
 }
 
 fn code_entity_metadata(entity: &CodeEntity<'_>) -> EntityMetadata {
@@ -761,10 +826,12 @@ mod tests {
                 "    set(string $v) { $this->a = $v; }",
                 "  }",
                 "  private(set) int $counter = 0;",
+                "  const LIMIT = true ? 10 : 20;",
                 "  public static function make(int $limit): static { return new static($limit); }",
                 "  public function __construct(",
                 "    private Logger $logger,",
                 "    protected(set) string $tag,",
+                "    public array &$items,",
                 "    int $plain,",
                 "  ) {}",
                 "}",
@@ -774,7 +841,7 @@ mod tests {
             .join("\n"),
         );
         let fragments = extract(&source, ChunkOptions::default()).expect("php extraction");
-        let expected: [(&str, SymbolType, &str, &str, Option<&str>); 14] = [
+        let expected: [(&str, SymbolType, &str, &str, Option<&str>); 16] = [
             (
                 "ChargerInterface",
                 SymbolType::Interface,
@@ -835,7 +902,21 @@ mod tests {
                 "MAX",
                 SymbolType::Value,
                 "App::BaseCharger",
-                "public const int MAX = 100, MIN = 0",
+                "public const int MAX = 100",
+                None,
+            ),
+            (
+                "LIMIT",
+                SymbolType::Value,
+                "App::BaseCharger",
+                "const LIMIT = true ? 10 : 20",
+                None,
+            ),
+            (
+                "items",
+                SymbolType::Value,
+                "App::BaseCharger",
+                "public array &$items",
                 None,
             ),
             (
@@ -885,6 +966,10 @@ mod tests {
                     visibility: None,
                     language: Some(CodeLanguage::Php),
                     documentation: documentation.map(str::to_owned),
+                    // Every function in the table takes one parameter.
+                    arity: (kind == SymbolType::Function).then_some(1),
+                    is_exported: false,
+                    is_declaration: false,
                 })),
                 "{name}"
             );
@@ -909,29 +994,33 @@ mod tests {
         // Multi-line signatures keep their source layout, like other languages.
         assert!(matches!(
             test_metadata(named(&fragments, "__construct")),
-            Some(EntityMetadata::Code(CodeMetadata { signature: Some(signature), .. }))
+            Some(EntityMetadata::Code(CodeMetadata { signature: Some(signature), arity: Some(4), .. }))
                 if signature.starts_with("public function __construct(\n")
                     && signature.ends_with("int $plain,\n  )")
         ));
-        // Both MIN constants are indexed, each under its own scope.
-        let min_scopes = fragments
+        // Both MIN constants are indexed, each under its own scope, and a split
+        // element carries only its own declaration.
+        let min_constants = fragments
             .iter()
             .filter_map(|fragment| match test_metadata(fragment) {
                 Some(EntityMetadata::Code(CodeMetadata {
                     symbol_name: Some(name),
-                    scope,
+                    scope: Some(scope),
+                    signature: Some(signature),
                     ..
-                })) if name == "MIN" => scope.clone(),
+                })) if name == "MIN" => Some((scope.as_str(), signature.as_str())),
                 _ => None,
             })
             .collect::<HashSet<_>>();
         assert_eq!(
-            min_scopes,
+            min_constants,
             HashSet::from([
-                "App::ChargeStatus".to_owned(),
-                "App::BaseCharger".to_owned()
+                ("App::ChargeStatus", "const int MIN = 1"),
+                ("App::BaseCharger", "public const int MIN = 0")
             ])
         );
+        // The braced namespace covers the whole file, so no plain chunks remain.
+        assert!(plain_chunks(&fragments).is_empty());
         // A plain constructor parameter declares no property.
         assert!(fragments.iter().all(|fragment| !matches!(
             test_metadata(fragment),
@@ -965,6 +1054,73 @@ mod tests {
             test_metadata(named(&fragments, "render")),
             Some(EntityMetadata::Code(CodeMetadata { scope: Some(scope), .. })) if scope == "Widget"
         ));
+        // Template markup between declarations stays searchable.
+        assert_eq!(
+            plain_chunks(&fragments),
+            [
+                "<html><body>\n<?php",
+                "?>\n<h1><?= title('home') ?></h1>\n<?php",
+                "?>\n</body></html>"
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_php_statements_outside_declarations_searchable() {
+        let text = [
+            "<?php",
+            "namespace App;",
+            "",
+            "use App\\Billing\\Key;",
+            "",
+            "/** Reads the key. */",
+            "function key(): string { return getenv('BILLING_KEY'); }",
+            "",
+            "echo key();",
+        ]
+        .join("\n");
+        let source = test_source(FileFormat::Php, "bootstrap.php", &text);
+        let fragments = extract(&source, ChunkOptions::default()).expect("php extraction");
+        assert!(matches!(
+            test_metadata(named(&fragments, "key")),
+            Some(EntityMetadata::Code(CodeMetadata { documentation: Some(doc), .. }))
+                if doc == "Reads the key."
+        ));
+        // Imports and statements become chunks, while the docblock stays with
+        // its function and bare open tags are skipped.
+        assert_eq!(
+            plain_chunks(&fragments),
+            ["use App\\Billing\\Key;", "echo key();"]
+        );
+        for fragment in &fragments {
+            let Range::Text(range) = fragment.source_range() else {
+                panic!("text range");
+            };
+            let (Content::Code(content) | Content::Text(content)) = test_content(fragment) else {
+                panic!("text content");
+            };
+            assert_eq!(
+                &text[range.start_byte_offset()..range.end_byte_offset()],
+                content
+            );
+        }
+        assert!(
+            fragments
+                .iter()
+                .enumerate()
+                .all(|(index, fragment)| fragment.index() == index)
+        );
+    }
+
+    fn plain_chunks(fragments: &[ExtractedEntity]) -> Vec<String> {
+        fragments
+            .iter()
+            .filter(|fragment| test_metadata(fragment).is_none())
+            .map(|fragment| match test_content(fragment) {
+                Content::Code(text) | Content::Text(text) => text,
+                content @ Content::Image(_) => panic!("unexpected content {content:?}"),
+            })
+            .collect()
     }
 
     #[test]
