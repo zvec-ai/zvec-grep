@@ -533,7 +533,6 @@ async fn cached_minilm_fixed_session_pool_matches_single_session() {
     let entry = crate::models::catalog::get_embedding_model_catalog_entry("local/all-minilm-l6-v2")
         .and_then(crate::models::catalog::EmbeddingCatalogEntry::transformers_config)
         .expect("MiniLM");
-    let create = |sessions| pool_fixture_model(entry, &cache, device, sessions);
     let inputs = [
         "find authentication middleware".to_owned(),
         "parse a configuration file".to_owned(),
@@ -541,7 +540,7 @@ async fn cached_minilm_fixed_session_pool_matches_single_session() {
         "long truncation boundary ".repeat(150),
     ]
     .map(|text| vec![Content::Text(text)]);
-    let reference_model = create(1);
+    let reference_model = pool_fixture_model(entry, &cache, device, 1);
     let reference = reference_model
         .embed(
             &inputs,
@@ -555,7 +554,7 @@ async fn cached_minilm_fixed_session_pool_matches_single_session() {
         .expect("single-session reference");
     drop(reference_model);
     for sessions in [1, 2, 4] {
-        let model = create(sessions);
+        let model = pool_fixture_model(entry, &cache, device, sessions);
         model
             .prepare(EmbeddingPrepareOptions {
                 execution_concurrency: 1,
@@ -570,7 +569,9 @@ async fn cached_minilm_fixed_session_pool_matches_single_session() {
             resolve_execution_provider(Some(device)),
             "unexpected CPU fallback"
         );
-        for requested in [1, 8, 1] {
+        let mut retained_threads = 1;
+        let mut expected_reconfigurations = 0;
+        for requested in [1, 8, 1, 16, 1] {
             let budget = model.execution_concurrency(requested);
             let results = futures_util::future::join_all((0..8).map(|_| {
                 model.embed(
@@ -592,13 +593,16 @@ async fn cached_minilm_fixed_session_pool_matches_single_session() {
             }
             let stats = loaded.sessions.stats();
             assert_eq!(stats.session_count, sessions);
-            let threads = if device == Device::Cpu {
+            let desired = if device == Device::Cpu {
                 policy::threads_per_session(budget, sessions)
             } else {
                 1
             };
-            assert_eq!(stats.cpu_threads, threads);
-            assert_eq!(stats.cpu_threads_total, sessions * threads);
+            expected_reconfigurations += u64::from(desired > retained_threads);
+            retained_threads = retained_threads.max(desired);
+            assert_eq!(stats.cpu_threads, retained_threads);
+            assert_eq!(stats.cpu_threads_total, sessions * retained_threads);
+            assert_eq!(stats.pool_reconfigurations, expected_reconfigurations);
         }
         let signal = CancellationToken::new();
         signal.cancel();

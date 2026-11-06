@@ -120,7 +120,8 @@ impl Default for EmbeddingConcurrencyDefaults {
 pub(crate) struct ModelExecutionStats {
     pub(crate) actual_provider: &'static str,
     pub(crate) session_count: usize,
-    /// ORT intra-op threads per session (including its calling thread).
+    /// Actual retained ORT intra-op threads per session (including its calling
+    /// thread). May exceed a later request's smaller CPU budget.
     pub(crate) cpu_threads: usize,
     pub(crate) cpu_threads_total: usize,
     pub(crate) prepared_batches: u64,

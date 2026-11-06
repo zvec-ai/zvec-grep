@@ -96,13 +96,19 @@ indexing and queries for the same model, cache and device:
   warn and use one. Each model/device runtime creates its own S Sessions during
   preparation, including Sessions not currently executing work. This is not a
   process-wide total. Restart the Server after changing its environment.
-- CPU uses C as the total intra-op thread budget, clamped to available hardware
-  threads; the default is half the available threads, rounded up. Each of the S
-  Sessions uses `max(1, floor(C/S))` threads. When C < S, a warning reports the
-  actual S-thread budget. Rounding may leave some of C unused. Tokenization and
-  pooling have a separate shared CPU budget, so C does not cap all process threads.
-  Budget changes drain native work and reconfigure all Sessions before admitting
-  the new budget. Queries reuse the existing configuration.
+- CPU uses C to request a total intra-op thread budget, clamped to available
+  hardware threads; the default is half the available threads, rounded up.
+  Initially each of the S Sessions uses `max(1, floor(C/S))` threads. A larger
+  per-Session request drains native work and reconfigures the fixed pool once.
+  Smaller requests reuse the largest configuration admitted during this runtime's
+  lifetime: lowering C does not reduce its actual thread budget or retained
+  memory. This avoids rebuilding Sessions when Server clients use different C.
+  Queries reuse that configuration. A warning reports reuse of a larger pool
+  once per retained configuration; diagnostics show actual threads separately
+  from requested C. Unloading the runtime or restarting the Server resets it.
+  When C < S, at least S threads are required; an existing pool may retain more.
+  Rounding may leave some of C unused. Tokenization and pooling have a separate
+  shared CPU budget, so C does not cap all process threads.
 - CUDA uses C as the number of simultaneous document inference batches, defaulting
   to one. C > S warns and executes at S. Each Session exclusively owns its fixed
   worker thread; no Session receives concurrent Run calls. Lowering C keeps all S

@@ -53,6 +53,10 @@ struct Shared {
 struct PoolState {
     busy: Vec<Option<EmbeddingPurpose>>,
     cpu_threads: Option<usize>,
+    // Retain the largest admitted configuration even if a transition is
+    // cancelled or fails after only some native sessions have changed.
+    cpu_threads_high_water: usize,
+    retained_budget_reported: bool,
     changing: bool,
     drain: bool,
 }
@@ -162,9 +166,7 @@ impl SessionOwner {
                 requested
             };
             let threads = if provider == TransformersExecutionProvider::Cpu {
-                lock_std_mutex(&worker_shared.pool)
-                    .cpu_threads
-                    .unwrap_or_else(|| policy::threads_per_session(concurrency, session_count))
+                lock_std_mutex(&worker_shared.pool).cpu_threads_high_water
             } else {
                 1
             };
@@ -295,18 +297,31 @@ impl SessionOwner {
         }
         let busy = pool.busy.iter().flatten().count();
         let cpu_threads = if self.provider() == TransformersExecutionProvider::Cpu {
+            let requested =
+                policy::threads_per_session(options.execution_concurrency, pool.busy.len());
             let desired = if options.purpose == EmbeddingPurpose::Query {
-                pool.cpu_threads.unwrap_or_else(|| {
-                    policy::threads_per_session(options.execution_concurrency, pool.busy.len())
-                })
+                pool.cpu_threads_high_water
             } else {
-                policy::threads_per_session(options.execution_concurrency, pool.busy.len())
+                requested.max(pool.cpu_threads_high_water)
             };
             if busy > 0 && (pool.drain || pool.cpu_threads != Some(desired)) {
                 pool.drain = true;
                 return None;
             }
             pool.drain = false;
+            if options.purpose == EmbeddingPurpose::Document
+                && requested < desired
+                && !pool.retained_budget_reported
+            {
+                pool.retained_budget_reported = true;
+                tracing::warn!(
+                    requested_concurrency = options.execution_concurrency,
+                    sessions = pool.busy.len(),
+                    threads_per_session = desired,
+                    actual_thread_budget = desired.saturating_mul(pool.busy.len()),
+                    "ORT CPU reuses its larger thread pool; lowering concurrency does not lower the retained thread budget"
+                );
+            }
             Some(desired)
         } else {
             // C limits document executions, not numbered slots. Queries have
@@ -330,6 +345,10 @@ impl SessionOwner {
         let lane = pool.busy.iter().position(Option::is_none)?;
         let transition =
             if let Some(threads) = cpu_threads.filter(|_| pool.cpu_threads != cpu_threads) {
+                if threads > pool.cpu_threads_high_water {
+                    pool.cpu_threads_high_water = threads;
+                    pool.retained_budget_reported = false;
+                }
                 pool.changing = true;
                 Some(Arc::new(PoolTransition {
                     shared: Arc::clone(&self.shared),
@@ -545,6 +564,8 @@ impl Shared {
                 busy: vec![None; sessions],
                 cpu_threads: (provider == TransformersExecutionProvider::Cpu)
                     .then(|| policy::threads_per_session(budget, sessions)),
+                cpu_threads_high_water: policy::threads_per_session(budget, sessions),
+                retained_budget_reported: false,
                 changing: false,
                 drain: false,
             }),

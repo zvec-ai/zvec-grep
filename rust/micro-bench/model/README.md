@@ -95,6 +95,11 @@ admission. Both settings are fingerprinted and checked against observed results.
 Keep K and actual native batch shapes fixed when comparing session configurations.
 Reports separate client count K, admission Q, actual Sessions, threads per Session,
 total native threads and native batch rows. Call latency includes runtime admission.
+In a shared CPU runtime, only requests for a larger per-Session thread count
+reconfigure the pool. Smaller C retains its largest admitted configuration;
+resolved/effective request C is not the actual retained thread budget. Use
+`cpu_threads` and `cpu_threads_total` for actual native thread configuration.
+Fresh-process shape cases start without a previous larger budget.
 
 The known CPU-only model2vec capability can skip non-CPU cases. Save a bound
 `case-status.json` with the reason, keep its table row, and omit its measurement
@@ -284,6 +289,10 @@ first with equal document budgets, then mixed budgets (CPU 16/8, CUDA 8/1).
 Each scenario lasts at least 15 seconds and collects at least 100 query calls;
 every result is checked against fixed-batch reference vectors. CPU machines must
 expose at least 16 hardware threads for these two budgets to be distinct.
-`ZG_MIXED_RESULT` contains request timestamps, p50/p95 latency and pool rebuilds.
+The higher budget prepares each scenario; lower-budget requests must then reuse
+the pool with zero rebuilds. `ZG_MIXED_RESULT` contains request timestamps,
+p50/p95 latency, actual retained threads per request and pool rebuilds. The
+separate `cached_minilm_fixed_session_pool_matches_single_session` test checks
+growth and reuse with C=1/8/1/16/1 for S=1/2/4, including output correctness.
 This is a correctness/latency regression, not a performance-only shape case or
 an end-to-end indexing/storage/retrieval benchmark.

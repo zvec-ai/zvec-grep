@@ -82,8 +82,10 @@ async fn client(
         .expect("mixed request inference");
         let finished = Instant::now();
         assert_vectors(&output, expected);
+        let stats = model.execution_stats().expect("actual runtime threads");
         rows.push(json!({"worker":worker,"purpose":if worker == 8 {"query"} else {"document"},
             "requested_c":budget,"effective_c":model.execution_concurrency(),
+            "cpu_threads":stats.cpu_threads,"cpu_threads_total":stats.cpu_threads_total,
             "started_ns":nanos(started.duration_since(origin)),"finished_ns":nanos(finished.duration_since(origin)),
             "latency_ns":nanos(finished.duration_since(started)),"vectors":output.vectors.len()}));
         if worker == 8 {
@@ -231,14 +233,9 @@ async fn scenario(config: &Config, mixed_budgets: bool) -> Value {
         }
     );
     let changes = after.pool_reconfigurations - before.pool_reconfigurations;
-    if config.device == Device::Cpu && mixed_budgets {
-        assert!(
-            changes > 0,
-            "different CPU budgets must exercise pool reconfiguration"
-        );
-    } else {
-        assert_eq!(changes, 0, "stable CPU/CUDA pool must not rebuild");
-    }
+    assert_eq!(changes, 0, "smaller budgets must reuse the prepared pool");
+    assert_eq!(after.cpu_threads, before.cpu_threads);
+    assert_eq!(after.cpu_threads_total, before.cpu_threads_total);
     let result = json!({"mixed_budgets":mixed_budgets,"requested_document_c":[high,low],
         "elapsed_seconds":elapsed,"documents":summarize(&rows,"document",elapsed),"queries":summarize(&rows,"query",elapsed),
         "execution":support::execution_measurement(Some(before),Some(after)),"rows":rows});

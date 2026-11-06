@@ -530,9 +530,11 @@ Index embedding concurrency:
   is accepted only with --index and is never saved in workspace settings.
   llama.cpp: context limit capped at 8, with serialized batches; defaults to 1.
   Transformers/ORT: ZVEC_GREP_ORT_SESSION fixes Sessions per model/device (default 1).
-    CPU: total native thread budget, capped by hardware concurrency; defaults
+    CPU: requested native thread budget, capped by hardware concurrency; defaults
     to half the available threads. Each Session gets max(1, floor(budget/Sessions));
-    a budget below the Session count warns and uses one thread per Session.
+    a budget below the Session count requires at least one thread per Session.
+    Shared runtimes retain their largest thread configuration: lowering C reuses
+    it without reducing actual threads. Unload/restart to reset the retained budget.
     CUDA: concurrent document batches, default 1; requests above the Session
     count warn and use the pool size. Batch and prefetch are independent of C.
     Zero is normalized to 1; other backends require positive values.

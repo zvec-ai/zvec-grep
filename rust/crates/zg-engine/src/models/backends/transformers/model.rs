@@ -297,9 +297,9 @@ impl EmbeddingModel for TransformersEmbeddingModel {
                     requested,
                     effective,
                     sessions = self.session_count,
-                    threads_per_session = 1,
-                    actual_thread_budget = self.session_count,
-                    "ORT CPU thread budget is smaller than the session count; using one thread per session"
+                    minimum_threads_per_session = 1,
+                    minimum_thread_budget = self.session_count,
+                    "ORT CPU thread budget is smaller than the session count; each session needs at least one thread and may retain a larger existing pool"
                 );
             } else if provider == TransformersExecutionProvider::Cuda && requested > effective {
                 tracing::warn!(
