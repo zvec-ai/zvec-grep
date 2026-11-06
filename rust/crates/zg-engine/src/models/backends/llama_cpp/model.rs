@@ -320,7 +320,7 @@ impl LlamaCppEmbeddingModel {
         self.cpu_contexts
             .as_ref()
             .copied()
-            .map_err(|message| ModelError::invalid_argument(message.clone()))
+            .map_err(|message| ModelError::invalid_argument(message.clone()).shared())
     }
 }
 
@@ -474,7 +474,7 @@ fn load_model_with_fallback(
     let contexts = cpu_contexts
         .as_ref()
         .copied()
-        .map_err(|message| ModelError::invalid_argument(message.clone()))?;
+        .map_err(|message| ModelError::invalid_argument(message.clone()).shared())?;
     load_cpu_model(backend, path, contexts)
 }
 

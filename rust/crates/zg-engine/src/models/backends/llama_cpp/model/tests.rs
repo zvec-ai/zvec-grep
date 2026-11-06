@@ -389,7 +389,11 @@ fn outer_batch_admission_uses_cpu_contexts_or_requested_gpu_contexts() {
     assert_eq!(model.concurrency_defaults().initial, 1);
     model.device = Some(Device::Cpu);
     assert_eq!(model.batch_concurrency(Some(4)), Some(1));
-    assert!(model.cpu_context_count().is_err());
+    let error = model
+        .cpu_context_count()
+        .expect_err("invalid CPU context setting");
+    assert_eq!(error.code(), crate::EngineError::INVALID_ARGUMENT);
+    assert!(error.should_fail_fast());
 }
 
 #[tokio::test]
@@ -414,6 +418,7 @@ async fn incompatible_explicit_cpu_budget_fails_before_artifact_loading() {
         .await
         .expect_err("invalid C/K partition");
     assert_eq!(error.code(), crate::EngineError::INVALID_ARGUMENT);
+    assert!(error.should_fail_fast());
     assert!(model.state.lock().await.is_none());
 }
 

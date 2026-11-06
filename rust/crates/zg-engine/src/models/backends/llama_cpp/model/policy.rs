@@ -68,7 +68,8 @@ impl LlamaExecutionBudget {
             if cpu_contexts == 0 {
                 return Err(ModelError::invalid_argument(format!(
                     "{CPU_CONTEXTS_ENV} must be greater than zero"
-                )));
+                ))
+                .shared());
             }
             let total_threads = if concurrency == 0 {
                 default_cpu_concurrency(cpu_contexts)
@@ -79,12 +80,14 @@ impl LlamaExecutionBudget {
                 return Err(ModelError::invalid_argument(format!(
                     "llama.cpp CPU concurrency must be at least {cpu_contexts} and divisible by \
                      {CPU_CONTEXTS_ENV}={cpu_contexts}"
-                )));
+                ))
+                .shared());
             }
             let threads = total_threads / cpu_contexts;
             let threads = i32::try_from(threads).map_err(|error| {
                 ModelError::invalid_argument("llama.cpp thread count exceeds the native limit")
                     .with_cause(error)
+                    .shared()
             })?;
             // Every CPU job keeps the validated single-sequence path. The
             // model's K contexts share C total native compute threads.

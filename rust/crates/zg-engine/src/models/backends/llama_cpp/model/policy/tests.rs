@@ -42,7 +42,10 @@ fn cpu_budget_partitions_total_compute_threads_without_enabling_batching() {
         }
     }
     for (concurrency, contexts) in [(1, 2), (3, 2), (8, 3), (1, 0), (usize::MAX, 1)] {
-        assert!(LlamaExecutionBudget::resolve("qwen3", false, concurrency, contexts).is_err());
+        let error = LlamaExecutionBudget::resolve("qwen3", false, concurrency, contexts)
+            .expect_err("invalid CPU execution configuration");
+        assert_eq!(error.code(), crate::EngineError::INVALID_ARGUMENT);
+        assert!(error.should_fail_fast());
     }
 }
 
@@ -107,7 +110,9 @@ fn automatic_budget_is_resolved_again_for_the_actual_fallback_device() {
         );
         assert_eq!(cpu_explicit.threads, 1);
         assert!(LlamaExecutionBudget::resolve(architecture, true, 1, 2).is_ok());
-        assert!(LlamaExecutionBudget::resolve(architecture, false, 1, 2).is_err());
+        let error = LlamaExecutionBudget::resolve(architecture, false, 1, 2)
+            .expect_err("incompatible CPU fallback budget");
+        assert!(error.should_fail_fast());
         assert!(LlamaExecutionBudget::resolve(architecture, false, 0, 2).is_ok());
     }
 }
