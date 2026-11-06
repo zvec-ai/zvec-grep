@@ -1352,6 +1352,7 @@ fn index_template(options: &IndexOptions) -> IndexOptions {
     template.reset_paths = false;
     template.changes.clear();
     template.scan = ScanRulesUpdate::default();
+    template.graph_indexing = None;
     template.embedding = None;
     template
 }
@@ -2416,6 +2417,7 @@ mod tests {
                         max_depth: Some(None),
                         ..ScanRulesUpdate::default()
                     },
+                    graph_indexing: Some(true),
                     ..IndexOptions::default()
                 },
                 true,
@@ -2444,6 +2446,10 @@ mod tests {
             let watched = &calls[2];
             assert_eq!(watched.embedding_concurrency, None);
             assert_eq!(watched.scan, ScanRulesUpdate::default());
+            assert_eq!(
+                watched.graph_indexing, None,
+                "the graph switch is a saved setting, never a replayed request"
+            );
             assert!(!watched.rebuild);
             assert!(!watched.reset_paths);
             assert!(!watched.allow_remote);

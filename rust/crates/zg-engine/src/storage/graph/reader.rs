@@ -3,18 +3,20 @@ use crate::domain::{FileEdge, GraphEdgeKind};
 use rusqlite::{Row, params_from_iter};
 
 impl SqliteGraphStorage {
-    /// All resolved one-hop edges in insertion order, with no result limit.
+    /// Stream resolved one-hop edges from one SQL execution, without ordering them.
+    /// The callback may stop before exhausting the cursor.
     /// `None` selects all kinds; `Some(&[])` selects none.
     /// Self-loops appear once; distinct stored call sites are preserved.
     ///
     /// # Errors
     /// Rejects blank IDs, invalid stored data, and SQLite errors.
-    pub(crate) fn neighborhood(
+    pub(crate) fn scan_neighborhood<T>(
         &self,
         id: &str,
         direction: Direction,
         kinds: Option<&[GraphEdgeKind]>,
-    ) -> Result<Vec<FileEdge>> {
+        read: impl FnOnce(&mut dyn Iterator<Item = Result<FileEdge>>) -> T,
+    ) -> Result<T> {
         nonempty(id)?;
         let endpoint = match direction {
             Direction::In => "target = ?1",
@@ -28,7 +30,7 @@ impl SqliteGraphStorage {
         let mut values = vec![id];
         if let Some(kinds) = kinds {
             if kinds.is_empty() {
-                return Ok(Vec::new());
+                return Ok(read(&mut std::iter::empty()));
             }
             let mut names: Vec<&str> = kinds.iter().map(|kind| kind.as_str()).collect();
             names.sort_unstable();
@@ -38,11 +40,21 @@ impl SqliteGraphStorage {
             sql.push(')');
             values.extend(names);
         }
-        sql.push_str(" ORDER BY id");
         let mut statement = self.connection.prepare(&sql)?;
-        Ok(statement
+        let mut rows = statement
             .query_map(params_from_iter(values), edge_from_row)?
-            .collect::<rusqlite::Result<_>>()?)
+            .map(|row| row.map_err(super::Error::from));
+        Ok(read(&mut rows))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn neighborhood(
+        &self,
+        id: &str,
+        direction: Direction,
+        kinds: Option<&[GraphEdgeKind]>,
+    ) -> Result<Vec<FileEdge>> {
+        self.scan_neighborhood(id, direction, kinds, |rows| rows.collect())?
     }
 }
 

@@ -34,6 +34,7 @@ fn model() -> EmbeddingModelInfo {
 
 fn metadata_store(path: &Path) -> IndexStore {
     IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        graph_enabled: false,
         storage_path: path.to_owned(),
         embeddings: vec![model()],
     })
@@ -126,6 +127,9 @@ fn metadata_fragments(
             visibility: None,
             language: None,
             documentation: Some("Produces the seasonal crop.".into()),
+            arity: None,
+            is_exported: false,
+            is_declaration: false,
         })),
         vec![
             EntityFragment {
@@ -406,6 +410,7 @@ fn entity_content_is_canonical_and_fragments_have_one_model() {
         other = serde_json::from_value(metadata).expect("valid model metadata");
     }
     let store = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        graph_enabled: false,
         storage_path: home.path().to_owned(),
         embeddings: vec![text, other],
     })
@@ -489,6 +494,7 @@ fn fragment_ids_cannot_be_reused_by_another_file_in_a_different_model_table() {
         second = serde_json::from_value(metadata).expect("valid model metadata");
     }
     let store = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        graph_enabled: false,
         storage_path: home.path().to_owned(),
         embeddings: vec![first, second],
     })
@@ -762,6 +768,7 @@ fn maximum_u32_directory_id_survives_reopen_and_filters_both_retrieval_collectio
         .expect("optimize tables");
     store.close().expect("close writer");
     let reader = IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
+        graph_enabled: true,
         storage_path: temporary.path().to_owned(),
     })
     .expect("reopen");

@@ -93,7 +93,7 @@ pub fn configure_remote_model(root: &Path, address: SocketAddr) -> std::io::Resu
             "recordedUsername": std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).ok(),
         },
         "scan": {},
-        "indexVersion": 2,
+        "indexVersion": 3,
         "storageGeneration": generation,
         "createdTime": 1,
         "updatedTime": 1,
@@ -113,7 +113,8 @@ pub fn configure_remote_model(root: &Path, address: SocketAddr) -> std::io::Resu
                     "qwen/text-embedding-v4": {
                         "endpoint": format!("http://{address}/embeddings")
                     }
-                }
+                },
+                "graphIndexing": false
             }
         }
     });

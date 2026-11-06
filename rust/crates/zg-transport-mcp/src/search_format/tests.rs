@@ -140,6 +140,93 @@ fn generated_outline_cases() -> Vec<McpSearchPresentationCase> {
         .collect()
 }
 
+fn line_aligned_fragment_cases() -> Vec<McpSearchPresentationCase> {
+    let mut cases = Vec::new();
+    for newline in ["\n", "\r\n"] {
+        for (line, matched) in [
+            ("            node.name,", "e.name,"),
+            (
+                "    @only_required_for_messages(\"invalid-metaclass\")",
+                "ages(\"invalid-metaclass\")",
+            ),
+        ] {
+            let start = "before".len() + newline.len();
+            let end = start + line.len() + newline.len();
+            let matched_start = start + line.find(matched).expect("matched suffix");
+            let mut value = fixtures().remove(0).result;
+            value["items"].as_array_mut().expect("items").truncate(1);
+            let item = &mut value["items"][0];
+            item["rank"] = 1.into();
+            item["relative_path"] = "example.py".into();
+            item["metadata"] = serde_json::Value::Null;
+            item["range"] = serde_json::json!({
+                "kind": "text", "start_line": 1, "end_line": 3,
+                "start_byte_offset": 0, "end_byte_offset": end + "after".len(),
+                "start_byte_column": 0, "end_byte_column": "after".len()
+            });
+            item["content_range"] = serde_json::json!({
+                "kind": "text", "start_line": 2, "end_line": 3,
+                "start_byte_offset": start, "end_byte_offset": end,
+                "start_byte_column": 0, "end_byte_column": 0
+            });
+            item["excerpt_range"] = serde_json::json!({
+                "kind": "text", "start_line": 2, "end_line": 2,
+                "start_byte_offset": matched_start, "end_byte_offset": start + line.len(),
+                "start_byte_column": matched_start - start, "end_byte_column": line.len()
+            });
+            item["content"] = format!("{line}{newline}").into();
+            let expected = format!("freshness: fresh\n#1 example.py:1-3\n  2: {line}\n");
+            cases.push(McpSearchPresentationCase {
+                id: format!("complete-fragment-lines-{newline:?}-{matched}"),
+                result: value,
+                expected_short: expected.clone(),
+                expected_full: expected,
+            });
+        }
+    }
+    cases
+}
+
+fn long_line_fragment_cases() -> Vec<McpSearchPresentationCase> {
+    let mut cases = Vec::new();
+    for newline in ["\n", "\r\n"] {
+        for (prefix, retained_prefix) in [
+            ("p".repeat(300), "p".repeat(29)),
+            ("中😀".repeat(150), format!("😀{}", "中😀".repeat(14))),
+        ] {
+            // Keep a needle at the very end of the original 160-character preview.
+            let fragment = format!("e.name,{}needle", "x".repeat(147));
+            let line = format!("{prefix}nod{fragment}tail");
+            let start = "before".len() + newline.len();
+            let end = start + line.len() + newline.len();
+            let matched_start = start + prefix.len() + "nod".len();
+            let mut case = line_aligned_fragment_cases().remove(0);
+            let item = &mut case.result["items"][0];
+            item["range"]["end_byte_offset"] = (end + "after".len()).into();
+            item["content_range"] = serde_json::json!({
+                "kind": "text", "start_line": 2, "end_line": 3,
+                "start_byte_offset": start, "end_byte_offset": end,
+                "start_byte_column": 0, "end_byte_column": 0
+            });
+            item["excerpt_range"] = serde_json::json!({
+                "kind": "text", "start_line": 2, "end_line": 2,
+                "start_byte_offset": matched_start,
+                "end_byte_offset": matched_start + fragment.len(),
+                "start_byte_column": prefix.len() + "nod".len(),
+                "end_byte_column": prefix.len() + "nod".len() + fragment.len()
+            });
+            item["content"] = format!("{line}{newline}").into();
+            case.id = format!("long-line-fragment-{}-{newline:?}", prefix.len());
+            case.expected_short = format!(
+                "freshness: fresh\n#1 example.py:1-3\n  2: ...{retained_prefix}nod{fragment}...\n"
+            );
+            case.expected_full = format!("freshness: fresh\n#1 example.py:1-3\n  2: {line}\n");
+            cases.push(case);
+        }
+    }
+    cases
+}
+
 fn grouped_cases() -> Vec<McpSearchPresentationCase> {
     let mut case = fixtures().remove(1);
     case.id = "separate-query-group-results".into();
@@ -177,6 +264,27 @@ fn global_staleness_cases() -> Vec<McpSearchPresentationCase> {
             })
         })
         .collect()
+}
+
+#[test]
+fn both_previews_preserve_complete_lines_around_partial_matches() {
+    for case in line_aligned_fragment_cases()
+        .into_iter()
+        .chain(long_line_fragment_cases())
+    {
+        let result: ContextResult = serde_json::from_value(case.result).expect("context");
+        for (preview, expected) in [
+            (SearchPreview::Short, &case.expected_short),
+            (SearchPreview::Full, &case.expected_full),
+        ] {
+            assert_eq!(
+                &format_search_result(&result, preview),
+                expected,
+                "{} {preview:?}",
+                case.id
+            );
+        }
+    }
 }
 
 #[test]
@@ -345,7 +453,7 @@ impl IndexOperationProvider for FixedSearch {
 #[tokio::test]
 async fn public_tool_preview_matches_cli_without_changing_retrieval() {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        let cases = fixtures().into_iter().chain(source_range_cases()).chain(generated_outline_cases()).chain(grouped_cases()).chain(global_staleness_cases()).collect::<Vec<_>>();
+        let cases = fixtures().into_iter().chain(source_range_cases()).chain(generated_outline_cases()).chain(line_aligned_fragment_cases()).chain(long_line_fragment_cases()).chain(grouped_cases()).chain(global_staleness_cases()).collect::<Vec<_>>();
         for toolset in [McpToolset::Agent, McpToolset::Full] {
             let backend = Arc::new(FixedSearch {
                 result: Mutex::new(serde_json::from_value(cases[0].result.clone()).expect("fixture")),

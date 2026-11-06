@@ -6,7 +6,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::{IndexStore, StoreState, graph_disabled, graph_error};
+use super::{
+    IndexStore, StoreState, graph_disabled, graph_error, read_view::visible_endpoint_files,
+};
 use crate::{
     EngineError, EngineResult,
     domain::{EntityId, FileId},
@@ -31,7 +33,7 @@ impl IndexStore {
             let mut page = state
                 .graph
                 .as_ref()
-                .ok_or_else(graph_disabled)?
+                .map_err(|_| graph_disabled())?
                 .list_pending_refs(limit, cursor)
                 .map_err(graph_error)?;
             let ids = page
@@ -103,7 +105,7 @@ impl IndexStore {
             let refs = state
                 .graph
                 .as_ref()
-                .ok_or_else(graph_disabled)?
+                .map_err(|_| graph_disabled())?
                 .get_pending_refs(&ids)
                 .map_err(graph_error)?;
             let endpoints = refs
@@ -129,7 +131,7 @@ impl IndexStore {
             let mut stats = state
                 .graph
                 .as_mut()
-                .ok_or_else(graph_disabled)?
+                .map_err(|_| graph_disabled())?
                 .apply_resolutions(&valid)
                 .map_err(graph_error)?;
             stats.stale += resolutions.len() - valid.len();
@@ -144,30 +146,8 @@ fn visible_endpoints(state: &StoreState, ids: &[String]) -> EngineResult<HashMap
         .cloned()
         .map(EntityId::from_string)
         .collect::<Vec<_>>();
-    let mut owners = state
-        .entities
-        .fetch_file_ids(&entity_ids)?
+    Ok(visible_endpoint_files(state, &entity_ids)?
         .into_iter()
-        .map(|(id, file_id)| (id.as_str().to_owned(), file_id))
-        .collect::<HashMap<_, _>>();
-    for id in ids {
-        if let Some(file_id) = id.strip_prefix('f').and_then(|id| id.parse::<u32>().ok())
-            && *id == format!("f{file_id}")
-        {
-            owners.insert(id.clone(), FileId::new(file_id));
-        }
-    }
-    let file_ids = owners
-        .values()
-        .copied()
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let files = state.files.fetch(&file_ids)?;
-    owners.retain(|_, file_id| {
-        files
-            .get(file_id)
-            .is_some_and(|file| file.index_status().is_indexed())
-    });
-    Ok(owners)
+        .map(|(id, file)| (id.as_str().to_owned(), file.id()))
+        .collect())
 }

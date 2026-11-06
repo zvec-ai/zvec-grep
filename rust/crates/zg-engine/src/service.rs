@@ -9,11 +9,12 @@ use crate::{
         context::{ContextOptions, ContextResult},
         index::{IndexOptions, IndexResult},
         info::{InfoOptions, InfoResult},
+        relationships::{RelationshipDirection, RelationshipOptions, RelationshipResult},
     },
     models::ModelRuntimeManager,
     pipelines::{
         direct_search::DirectSearchService, indexed_search,
-        indexing::service::WorkspaceIndexService,
+        indexing::service::WorkspaceIndexService, relationships,
     },
     storage::read_session::ReadSessionCache,
 };
@@ -79,6 +80,21 @@ impl EngineService {
             )
             .await
         }
+    }
+
+    pub(crate) async fn relationships(
+        &self,
+        direction: RelationshipDirection,
+        options: RelationshipOptions,
+    ) -> Result<RelationshipResult, EngineError> {
+        self.ensure_open()?;
+        relationships::service::query(
+            &self.indexing,
+            &options,
+            self.read_session_cache().as_ref(),
+            direction,
+        )
+        .await
     }
 
     fn read_session_cache(&self) -> Option<ReadSessionCache> {

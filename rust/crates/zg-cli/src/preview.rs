@@ -63,6 +63,76 @@ pub fn split_lines(content: &str) -> impl Iterator<Item = &str> {
         .chain((content.is_empty() || content.ends_with('\n')).then_some(""))
 }
 
+/// Keep the fragment's 160-character budget independently of restored line
+/// prefixes. Add at most 32 prefix characters and mark any omitted context.
+pub(crate) fn short_source_line(item: &ContextItem, offset: usize, line: &str) -> String {
+    bounded_source_line(item, offset, line, truncate_chars)
+}
+
+/// The single-line summary keeps its existing UTF-16 budget while using the
+/// same evidence window as the compact preview.
+pub(crate) fn minimal_source_line(item: &ContextItem, offset: usize, line: &str) -> String {
+    bounded_source_line(item, offset, line, truncate_utf16)
+}
+
+fn bounded_source_line(
+    item: &ContextItem,
+    offset: usize,
+    line: &str,
+    truncate: fn(&str, usize) -> String,
+) -> String {
+    const SOURCE_CHARS: usize = 160;
+    const PREFIX_CHARS: usize = 32;
+    let ordinary = truncate(line, SOURCE_CHARS);
+    if ordinary == line {
+        return ordinary;
+    }
+    let prefix_bytes = match (&item.excerpt_range, &item.content_range) {
+        (
+            Some(ContentRange::Text {
+                start_line,
+                start_byte_column,
+                ..
+            }),
+            ContentRange::Text {
+                start_line: first,
+                start_byte_column: first_column,
+                ..
+            },
+        ) if first.checked_add(offset) == Some(*start_line) => {
+            start_byte_column.saturating_sub(if offset == 0 { *first_column } else { 0 })
+        }
+        _ => 0,
+    };
+    // Invalid or mismatched coordinates retain the normal line-prefix preview.
+    let prefix = line.get(..prefix_bytes).unwrap_or_default();
+    if prefix.is_empty() {
+        return ordinary;
+    }
+    let start = prefix
+        .char_indices()
+        .rev()
+        .nth(PREFIX_CHARS - 1)
+        .map_or(0, |(start, _)| start);
+    let mut text = if start == 0 {
+        String::new()
+    } else {
+        "...".to_owned()
+    };
+    text.push_str(&prefix[start..]);
+    text.push_str(&truncate(&line[prefix.len()..], SOURCE_CHARS));
+    text
+}
+
+fn truncate_chars(line: &str, max: usize) -> String {
+    let mut chars = line.chars();
+    let mut text: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        text.push_str("...");
+    }
+    text
+}
+
 /// Applies the Node.js UTF-16 length limit without splitting a Unicode scalar.
 #[must_use]
 pub fn truncate_utf16(value: &str, max: usize) -> String {

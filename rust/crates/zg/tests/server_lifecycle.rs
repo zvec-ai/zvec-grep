@@ -1465,7 +1465,7 @@ fn indexed_fragment_coordinates_survive_direct_server_and_mcp() -> Result<(), Bo
     bridge.notify(
         &json!({ "jsonrpc": "2.0", "method": "notifications/initialized", "params": {} }),
     )?;
-    for preview in ["short", "full"] {
+    for preview in ["none", "short", "full"] {
         let mut outputs = Vec::new();
         for mode in ["direct", "server"] {
             let reply = Command::new(&binary)
@@ -1484,11 +1484,20 @@ fn indexed_fragment_coordinates_survive_direct_server_and_mcp() -> Result<(), Bo
                 .output()?;
             assert_command_success(&reply);
             let text = String::from_utf8(reply.stdout)?;
-            assert!(text.contains("\n  2: xxx"), "{mode} {preview}: {text}");
+            let line_prefix = match preview {
+                "none" => "\n2\t...xxx",
+                "short" => "\n  2: ...xxx",
+                _ => "\n  2: xxx",
+            };
+            assert!(text.contains(line_prefix), "{mode} {preview}: {text}");
             assert!(!text.contains("\n  1: xxx"), "{mode} {preview}: {text}");
+            assert!(!text.contains("\n1\txxx"), "{mode} {preview}: {text}");
             outputs.push((text, String::from_utf8(reply.stderr)?));
         }
         assert_eq!(outputs[0], outputs[1], "direct/server {preview}");
+        if preview == "none" {
+            continue; // MCP exposes only short and full previews.
+        }
         let reply = bridge.request(&json!({
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": { "name": "zvec_grep_search", "arguments": {
