@@ -256,10 +256,20 @@ impl WorkspaceIndexService {
         // Cross-file resolution runs once per pass, after every file snapshot is
         // durable. A failed sweep degrades to "still pending": unresolved
         // references stay queued for the next pass instead of failing an index
-        // whose zvec side has already been published.
+        // whose zvec side has already been published. The sweep honors the
+        // pass's signal, so a cancelled pass stops resolving, keeps the
+        // remaining references queued, and releases this writer below.
         let result = result.inspect(|_indexed| {
-            match super::graph_resolver::resolve_pending(&writer.session.storage) {
+            match super::graph_resolver::resolve_pending(
+                &writer.session.storage,
+                options.signal.as_ref(),
+            ) {
                 Ok(sweep) => tracing::debug!(sweep = ?sweep, "graph resolution sweep"),
+                Err(error) if error.code() == EngineError::CANCELLED => {
+                    // The cancellation itself is reported after storage closes;
+                    // degrading here would double-report a failed sweep.
+                    tracing::debug!(%error, "graph resolution sweep stopped for cancellation");
+                }
                 Err(error) => {
                     tracing::warn!(%error, "graph resolution sweep failed; references stay pending");
                 }

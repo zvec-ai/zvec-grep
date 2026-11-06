@@ -4,16 +4,11 @@
 //! inheritance bases. Names, ownership and paths live in zvec, which the
 //! resolver reads into its own snapshot.
 
-#[cfg(test)]
-use super::Direction;
-#[cfg(test)]
-use super::decode_enum;
 use super::{
-    DeclaredBinding, ImportReference, Result, SqliteGraphStorage, decode_metadata, nonempty,
+    DeclaredBinding, Direction, ImportReference, Result, SqliteGraphStorage, decode_enum,
+    decode_metadata, nonempty,
 };
-#[cfg(test)]
 use crate::domain::{FileEdge, GraphEdgeKind};
-#[cfg(test)]
 use rusqlite::{Row, params_from_iter};
 use serde_json::Value;
 
@@ -200,7 +195,6 @@ pub(crate) fn parse_file_endpoint(target: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-#[cfg(test)]
 fn edge_from_row(row: &Row<'_>) -> rusqlite::Result<FileEdge> {
     Ok(FileEdge {
         kind: decode_enum(row.get(0)?)?,

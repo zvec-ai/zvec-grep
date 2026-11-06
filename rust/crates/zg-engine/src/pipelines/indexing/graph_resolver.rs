@@ -9,15 +9,20 @@
 //! the file's imports pin them to one module, `self`/`this` receiver calls
 //! bind to the one same-file declaration of the invoked member, qualified
 //! `Class::method` receivers bind to the entity whose `qualified_name`
-//! spells the same path, export/arity evidence narrows the remaining
+//! spells the same path, Java imports bind to the type or static member their
+//! specifier spells, export/arity evidence narrows the remaining
 //! ambiguities, external import specifiers terminate as failed, and
 //! [`IndexStore::apply_resolutions`] writes each batch atomically.
 
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 use std::path::Path;
 
+use tokio_util::sync::CancellationToken;
+
+use super::pipeline::throw_if_cancelled;
 use crate::domain::{
     EdgeProvenance, FileFormat, GraphEdgeKind, formats_for_path, reference_compatible_with,
 };
@@ -53,30 +58,37 @@ pub(crate) struct ResolutionSweep {
 /// file endpoints, workspace-unique names onto their single definition,
 /// ambiguous bare names onto the one module their file imports,
 /// `self`/`this` receiver calls onto the one same-file declaration, and
-/// qualified `Class::method` receivers onto the entity declaring that
-/// exact `qualified_name`. Ambiguities surviving these rules narrow through
-/// export visibility and declared arity when the evidence picks exactly one
-/// candidate, and import specifiers that address modules outside the
-/// workspace terminate as failed.
+/// qualified `Class::method` receivers onto the entity whose `qualified_name`
+/// spells that scope and member. Ambiguities surviving these rules narrow
+/// through export visibility and declared arity when the evidence picks
+/// exactly one candidate, and import specifiers that address modules outside
+/// the workspace terminate as failed.
 ///
-/// Matching stays conservative. Same-file name hits stay pending — partition
-/// already resolved unambiguous local names, so a survivor in the same file
-/// is a receiver-typed call that needs type inference, except where the
-/// receiver names the enclosing instance (`self`/`this`) and the file declares
-/// the member exactly once — and names that stay ambiguous after every
-/// evidence rule record their candidate set for consumers.
+/// Matching stays conservative. A receiver-qualified same-file hit stays
+/// pending — partition already resolved unambiguous local names, so such a
+/// survivor needs type inference, except where the receiver names the
+/// enclosing instance (`self`/`this`) and the file declares the member exactly
+/// once. A bare name's lone same-file hit, by contrast, binds as `FileScoped`:
+/// the in-file symbol table skips declaration entities, so no earlier rule
+/// could have claimed it. Names that stay ambiguous after every evidence rule
+/// record their candidate set for consumers.
 ///
 /// The entire read/resolve/writeback cycle runs under the caller's graph
 /// storage lock, matching the serialization contract of `apply_resolutions`.
+/// The pass's cancellation token bounds that work: a cancelled sweep stops at
+/// the next boundary — before the whole-workspace snapshot projection, between
+/// references, and at every page writeback — so the queue's remainder stays
+/// pending and the caller can release the workspace writer without waiting for
+/// the backlog to drain.
 ///
 /// # Errors
 /// Propagates storage failures. Completed writeback batches remain committed;
-/// references not yet written stay pending for a later sweep.
-#[expect(
-    clippy::too_many_lines,
-    reason = "One sweep walks the rule chain in order; splitting it would hide the precedence"
-)]
-pub(crate) fn resolve_pending(store: &IndexStore) -> crate::EngineResult<ResolutionSweep> {
+/// references not yet written stay pending for a later sweep. A cancelled pass
+/// returns [`EngineError::CANCELLED`].
+pub(crate) fn resolve_pending(
+    store: &IndexStore,
+    signal: Option<&CancellationToken>,
+) -> crate::EngineResult<ResolutionSweep> {
     if !store.graph_enabled() {
         // A workspace without a graph has nothing to resolve. Answering here
         // keeps the snapshot's whole-workspace file and entity projection off
@@ -84,180 +96,357 @@ pub(crate) fn resolve_pending(store: &IndexStore) -> crate::EngineResult<Resolut
         // feature as a failed sweep on each refresh.
         return Ok(ResolutionSweep::default());
     }
-    let snapshot = store.resolution_snapshot()?;
+    // The projection reads every file and named entity in the workspace: check
+    // before paying for it, and let it honor the same token mid-read, so a
+    // cancellation during either step ends here instead of growing an index the
+    // pass will discard.
+    throw_if_cancelled(signal)?;
+    let snapshot = store.resolution_snapshot(signal)?;
     let mut sweep = ResolutionSweep::default();
-    let mut resolutions = Vec::new();
-    let mut failures: Vec<i64> = Vec::new();
-    let mut candidate_sets: Vec<(i64, Vec<String>)> = Vec::new();
-    let mut importing_paths: HashMap<u32, Option<String>> = HashMap::new();
-    let mut candidate_paths: HashMap<u32, Option<String>> = HashMap::new();
-    let mut importing_files: HashMap<u32, Vec<u32>> = HashMap::new();
-    let mut module_paths: HashMap<(String, String), bool> = HashMap::new();
-    let mut alias_bindings: HashMap<u32, Vec<AliasBinding>> = HashMap::new();
-    let mut alias_targets: HashMap<(String, String), Option<u32>> = HashMap::new();
+    let mut caches = RuleCaches::default();
     let mut cursor = 0;
     loop {
-        let page = store.list_pending_refs(1000, cursor)?;
+        let page = store.list_pending_refs(PENDING_PAGE, cursor)?;
         sweep.scanned += page.refs.len();
+        let mut batch = QueuedBatch::default();
         for stored in &page.refs {
-            if stored.reference.ref_kind == GraphEdgeKind::Declares {
-                // Binding evidence for `resolve_receiver_typed`, not a call
-                // site: the bound variable name must never reach the
-                // name-index lookup below. Declares edges stay pending in
-                // the table for every later sweep to re-read.
-                continue;
-            }
-            if is_unresolvable_import(&snapshot, stored, &mut module_paths) {
-                failures.push(stored.id);
-                continue;
-            }
-            if let Some(resolution) = resolve_import(&snapshot, stored, &mut importing_paths) {
-                // The batch applies after the loop, so fold this sweep's fresh
-                // import targets into the in-memory scope for bare names.
-                if let Some(target_file) = resolution
-                    .target_id
-                    .strip_prefix('f')
-                    .and_then(|digits| digits.parse::<u32>().ok())
-                {
-                    let modules = match importing_files.entry(stored.file_id) {
-                        Entry::Occupied(entry) => entry.into_mut(),
-                        Entry::Vacant(entry) => {
-                            entry.insert(snapshot.imported_file_ids(stored.file_id).to_vec())
-                        }
-                    };
-                    if !modules.contains(&target_file) {
-                        modules.push(target_file);
-                    }
+            // Each reference issues several storage lookups and rule passes, so
+            // a full page is not a short step; check between references rather
+            // than only at the page boundary.
+            throw_if_cancelled(signal)?;
+            match classify(store, &snapshot, stored, &mut caches)? {
+                // Declares edges stay pending as receiver-typed evidence, and
+                // refs no rule reaches wait for a later sweep.
+                Outcome::Deferred => {}
+                Outcome::Failed => batch.failures.push(stored.id),
+                Outcome::Resolved { resolution, rule } => {
+                    sweep.record(rule);
+                    batch.resolutions.push(resolution);
                 }
-                resolutions.push(resolution);
-                continue;
-            }
-            if stored.reference.ref_kind == GraphEdgeKind::Imports && stored.language != "rust" {
-                // Only Rust's `use a::b` addresses an item by name: its
-                // specifier is a name binding, so the name index is the only
-                // rule that can answer it. A TS/JS or Python import addresses
-                // a module instead; when the path rules above could not place
-                // it — a scoped package, a `paths` alias — a name match would
-                // be a coincidence, and the wrong bind also rewrites this
-                // file's import scope for every later bare-name resolution.
-                // Defer instead.
-                continue;
-            }
-            if let Some(resolution) = resolve_alias_bound(
-                store,
-                &snapshot,
-                stored,
-                &mut alias_bindings,
-                &mut importing_paths,
-                &mut alias_targets,
-            )? {
-                // An `as` alias never names an indexed symbol itself, so the
-                // bare-name lookup below would only park the call; the alias
-                // binding pins its imported name's module directly.
-                resolutions.push(resolution);
-                sweep.import_bound += 1;
-                continue;
-            }
-            if let Some(resolution) = resolve_namespace_bound(
-                store,
-                &snapshot,
-                stored,
-                &mut alias_bindings,
-                &mut importing_paths,
-                &mut alias_targets,
-            )? {
-                // The receiver names a module object, so the bare-name lookup
-                // below would only see workspace-wide ambiguity; the binding
-                // scopes the member to its one module.
-                resolutions.push(resolution);
-                sweep.import_bound += 1;
-                continue;
-            }
-            let hits = {
-                let Some(raw) = snapshot.lookup_candidates(&stored.name_tail) else {
-                    // Hidden candidates must not turn an ambiguous name into
-                    // a seemingly unique match against an unfinished snapshot.
-                    continue;
-                };
-                filter_compatible_hits(&snapshot, stored, raw, &mut candidate_paths)
-            };
-            if let Some(resolution) = resolve_receiver_class(store, &snapshot, stored, &hits)? {
-                // The receiver names the enclosing instance or superclass, so
-                // the member's declaring scope is pinned to the owner's class
-                // hierarchy before workspace-wide ambiguity is considered.
-                resolutions.push(resolution);
-                sweep.file_scoped += 1;
-                continue;
-            }
-            if let Some(resolution) = resolve_receiver_typed(store, &snapshot, stored, &hits)? {
-                // The receiver names a local whose declared type pins the
-                // member's declaring scope before workspace-wide ambiguity
-                // is considered.
-                resolutions.push(resolution);
-                sweep.file_scoped += 1;
-                continue;
-            }
-            if let Some(resolution) = resolve_qualified_name(stored, &hits) {
-                resolutions.push(resolution);
-                sweep.qualified_name_match += 1;
-                continue;
-            }
-            if let [hit] = hits.as_slice() {
-                if hit.file_id != stored.file_id {
-                    resolutions.push(Resolution {
-                        ref_id: stored.id,
-                        target_id: hit.entity_id.clone(),
-                        provenance: EdgeProvenance::WorkspaceUnique,
-                    });
-                } else if stored.reference.receiver_name.is_none() {
-                    // Bare name, same file, single hit: the in-file symbol table
-                    // skips declaration entities, so a pending bare call can only
-                    // mean this one indexed location. Receiver-qualified calls
-                    // still stay pending — a same-file receiver bind would be a
-                    // type-inference guess.
-                    resolutions.push(Resolution {
-                        ref_id: stored.id,
-                        target_id: hit.entity_id.clone(),
-                        provenance: EdgeProvenance::FileScoped,
-                    });
-                }
-            } else if hits.len() > 1 {
-                if let Some(resolution) =
-                    resolve_import_bound(&snapshot, stored, &hits, &mut importing_files)
-                {
-                    resolutions.push(resolution);
-                    sweep.import_bound += 1;
-                    continue;
-                }
-                if let Some(resolution) = resolve_export_bound(stored, &hits) {
-                    resolutions.push(resolution);
-                    sweep.export_bound += 1;
-                    continue;
-                }
-                if let Some(resolution) = resolve_arity_bound(stored, &hits) {
-                    resolutions.push(resolution);
-                    sweep.arity_bound += 1;
-                    continue;
-                }
-                candidate_sets.push((
-                    stored.id,
-                    hits.into_iter().map(|hit| hit.entity_id).collect(),
-                ));
+                Outcome::Ambiguous(candidates) => batch.candidates.push((stored.id, candidates)),
             }
         }
+        // Write back at the page boundary: everything decided so far is
+        // durable, so a cancelled or failing later page leaves its references
+        // pending without discarding the work already done.
+        batch.write_back(store, &mut sweep)?;
         let Some(next) = page.next_cursor else {
             break;
         };
+        throw_if_cancelled(signal)?;
         cursor = next;
     }
-    let stats = store.apply_resolutions(&resolutions)?;
-    sweep.resolved = stats.resolved;
-    sweep.stale = stats.stale;
-    sweep.failed = store.apply_failures(&failures)?;
-    if !candidate_sets.is_empty() {
-        sweep.candidates_recorded = store.record_candidates(&candidate_sets)?;
-    }
     Ok(sweep)
+}
+
+/// References per queue page: large enough to amortize the cursor query and
+/// one writeback transaction, small enough to bound both the memory each page
+/// holds and how much work a cancelled pass can still complete.
+const PENDING_PAGE: usize = 1000;
+
+/// Decisions gathered for one queue page, flushed before the next page reads.
+#[derive(Default)]
+struct QueuedBatch {
+    resolutions: Vec<Resolution>,
+    failures: Vec<i64>,
+    candidates: Vec<(i64, Vec<String>)>,
+}
+
+impl QueuedBatch {
+    /// Applies this page's decisions and folds their counts into `sweep`.
+    /// Storage revalidates every row, so proposals whose reference or endpoint
+    /// a concurrent write hid are dropped into the stale count instead of
+    /// binding.
+    fn write_back(
+        self,
+        store: &IndexStore,
+        sweep: &mut ResolutionSweep,
+    ) -> crate::EngineResult<()> {
+        if !self.resolutions.is_empty() {
+            let stats = store.apply_resolutions(&self.resolutions)?;
+            sweep.resolved += stats.resolved;
+            sweep.stale += stats.stale;
+        }
+        if !self.failures.is_empty() {
+            sweep.failed += store.apply_failures(&self.failures)?;
+        }
+        if !self.candidates.is_empty() {
+            sweep.candidates_recorded += store.record_candidates(&self.candidates)?;
+        }
+        Ok(())
+    }
+}
+
+/// What the rule chain concluded about one pending reference.
+enum Outcome {
+    /// A rule bound the reference onto an indexed target.
+    Resolved { resolution: Resolution, rule: Rule },
+    /// The specifier addresses a module outside the workspace.
+    Failed,
+    /// No rule reaches the reference yet, so it stays pending.
+    Deferred,
+    /// Every evidence rule left the reference ambiguous.
+    Ambiguous(Vec<String>),
+}
+
+/// Which rule bound a reference, kept apart so the sweep can count it.
+#[derive(Clone, Copy)]
+enum Rule {
+    /// A relative import specifier placed on a file endpoint.
+    Import,
+    /// An alias, namespace, or module binding of an ambiguous bare name.
+    ImportBound,
+    /// A receiver pinned to its enclosing instance, superclass, or declared type.
+    Receiver,
+    /// A qualified `Class::method` matched by `qualified_name`.
+    QualifiedName,
+    /// A workspace-unique name, or the one same-file declaration of a bare call.
+    Unique,
+    /// The one exported candidate.
+    ExportBound,
+    /// The one arity-matching candidate.
+    ArityBound,
+}
+
+/// Per-sweep memos every rule reads and extends.
+///
+/// Grouping them keeps the chain's hidden coupling visible: each rule both
+/// consumes evidence gathered by earlier references and adds its own.
+#[derive(Default)]
+struct RuleCaches {
+    importing_paths: HashMap<u32, Option<String>>,
+    candidate_paths: HashMap<u32, Option<String>>,
+    importing_files: HashMap<u32, Vec<u32>>,
+    module_paths: HashMap<(String, String), bool>,
+    alias_bindings: HashMap<u32, Vec<AliasBinding>>,
+    alias_targets: HashMap<(String, String), Option<u32>>,
+}
+
+impl ResolutionSweep {
+    fn record(&mut self, rule: Rule) {
+        match rule {
+            Rule::Import | Rule::Unique => {}
+            Rule::ImportBound => self.import_bound += 1,
+            Rule::Receiver => self.file_scoped += 1,
+            Rule::QualifiedName => self.qualified_name_match += 1,
+            Rule::ExportBound => self.export_bound += 1,
+            Rule::ArityBound => self.arity_bound += 1,
+        }
+    }
+}
+
+/// Runs the path and binding rules in precedence order, then hands the
+/// reference to the name rules.
+///
+/// Order carries the semantics: an import specifier outranks every name rule.
+/// Rust's `use` and Java's `import` name an entity, so they continue into the
+/// name rules; an import that addresses a module instead defers rather than
+/// guessing at a same-named symbol when the path rules could not place it.
+fn classify(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Outcome> {
+    if stored.reference.ref_kind == GraphEdgeKind::Declares {
+        // Binding evidence for `resolve_receiver_typed`, not a call site: the
+        // bound variable name must never reach the name-index lookup below.
+        // Declares edges stay pending in the table for every later sweep.
+        return Ok(Outcome::Deferred);
+    }
+    if is_unresolvable_import(snapshot, stored, &mut caches.module_paths) {
+        return Ok(Outcome::Failed);
+    }
+    if let Some(resolution) = resolve_import(snapshot, stored, &mut caches.importing_paths) {
+        // The batch applies after the loop, so fold this sweep's fresh import
+        // targets into the in-memory scope for bare names.
+        record_import_scope(snapshot, stored, &resolution, &mut caches.importing_files);
+        return Ok(Outcome::Resolved {
+            resolution,
+            rule: Rule::Import,
+        });
+    }
+    if stored.reference.ref_kind == GraphEdgeKind::Imports
+        && !matches!(stored.language.as_str(), "rust" | "java")
+    {
+        // Rust's `use a::b` and Java's `import p.Widget` both address an item
+        // by name — a name binding, or a type or static member — so the name
+        // index can answer them. A TS/JS or Python import addresses a module
+        // instead; when the path rules above could not place it — a scoped
+        // package, a `paths` alias — a name match would be a coincidence, and
+        // the wrong bind also rewrites this file's import scope for every
+        // later bare-name resolution. Defer instead.
+        return Ok(Outcome::Deferred);
+    }
+    if let Some(resolution) = resolve_alias_bound(
+        store,
+        snapshot,
+        stored,
+        &mut caches.alias_bindings,
+        &mut caches.importing_paths,
+        &mut caches.alias_targets,
+    )? {
+        // An `as` alias never names an indexed symbol itself, so the bare-name
+        // lookup below would only park the call; the alias binding pins its
+        // imported name's module directly.
+        return Ok(Outcome::Resolved {
+            resolution,
+            rule: Rule::ImportBound,
+        });
+    }
+    if let Some(resolution) = resolve_namespace_bound(
+        store,
+        snapshot,
+        stored,
+        &mut caches.alias_bindings,
+        &mut caches.importing_paths,
+        &mut caches.alias_targets,
+    )? {
+        // The receiver names a module object, so the bare-name lookup below
+        // would only see workspace-wide ambiguity; the binding scopes the
+        // member to its one module.
+        return Ok(Outcome::Resolved {
+            resolution,
+            rule: Rule::ImportBound,
+        });
+    }
+    classify_names(store, snapshot, stored, caches)
+}
+
+/// Runs the name-index rules: receivers, qualified names, uniqueness, and the
+/// import/export/arity bounds that narrow an ambiguous set.
+fn classify_names(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Outcome> {
+    let hits = {
+        let Some(raw) = snapshot.lookup_candidates(&stored.name_tail) else {
+            // Hidden candidates must not turn an ambiguous name into
+            // a seemingly unique match against an unfinished snapshot.
+            return Ok(Outcome::Deferred);
+        };
+        // The language gate runs first: preference for definitions is only
+        // meaningful among candidates that can host this reference.
+        let compatible = filter_compatible_hits(snapshot, stored, raw, &mut caches.candidate_paths);
+        prefer_definitions(compatible)
+    };
+    if stored.reference.ref_kind == GraphEdgeKind::Imports && stored.language == "java" {
+        // A Java import names an entity rather than a module, and only its own
+        // specifier can place it: the package segment never reaches the index,
+        // so the rule matches the candidate's declared path against the tail
+        // of the specifier. A specifier that identifies no single candidate
+        // stays pending — the bare-name rules below would bind the short name
+        // (`work`) and drop the class that disambiguates it.
+        return Ok(match resolve_java_import(stored, &hits) {
+            Some(resolution) => Outcome::Resolved {
+                resolution,
+                rule: Rule::ImportBound,
+            },
+            None => Outcome::Deferred,
+        });
+    }
+    if let Some(resolution) = resolve_receiver_class(store, snapshot, stored, &hits)? {
+        // The receiver names the enclosing instance or superclass, so the
+        // member's declaring scope is pinned to the owner's class hierarchy
+        // before workspace-wide ambiguity is considered.
+        return Ok(Outcome::Resolved {
+            resolution,
+            rule: Rule::Receiver,
+        });
+    }
+    if let Some(resolution) = resolve_receiver_typed(store, snapshot, stored, &hits)? {
+        // The receiver names a local whose declared type pins the member's
+        // declaring scope before workspace-wide ambiguity is considered.
+        return Ok(Outcome::Resolved {
+            resolution,
+            rule: Rule::Receiver,
+        });
+    }
+    if let Some(resolution) = resolve_qualified_name(stored, &hits) {
+        return Ok(Outcome::Resolved {
+            resolution,
+            rule: Rule::QualifiedName,
+        });
+    }
+    if let [hit] = hits.as_slice() {
+        if hit.file_id != stored.file_id {
+            return Ok(Outcome::Resolved {
+                resolution: Resolution {
+                    ref_id: stored.id,
+                    target_id: hit.entity_id.clone(),
+                    provenance: EdgeProvenance::WorkspaceUnique,
+                },
+                rule: Rule::Unique,
+            });
+        }
+        if stored.reference.receiver_name.is_none() {
+            // Bare name, same file, single hit: the in-file symbol table
+            // skips declaration entities, so a pending bare call can only
+            // mean this one indexed location. Receiver-qualified calls
+            // still stay pending — a same-file receiver bind would be a
+            // type-inference guess.
+            return Ok(Outcome::Resolved {
+                resolution: Resolution {
+                    ref_id: stored.id,
+                    target_id: hit.entity_id.clone(),
+                    provenance: EdgeProvenance::FileScoped,
+                },
+                rule: Rule::Unique,
+            });
+        }
+        return Ok(Outcome::Deferred);
+    }
+    if hits.len() > 1 {
+        if let Some(resolution) =
+            resolve_import_bound(snapshot, stored, &hits, &mut caches.importing_files)
+        {
+            return Ok(Outcome::Resolved {
+                resolution,
+                rule: Rule::ImportBound,
+            });
+        }
+        if let Some(resolution) = resolve_export_bound(stored, &hits) {
+            return Ok(Outcome::Resolved {
+                resolution,
+                rule: Rule::ExportBound,
+            });
+        }
+        if let Some(resolution) = resolve_arity_bound(stored, &hits) {
+            return Ok(Outcome::Resolved {
+                resolution,
+                rule: Rule::ArityBound,
+            });
+        }
+        return Ok(Outcome::Ambiguous(
+            hits.into_iter().map(|hit| hit.entity_id).collect(),
+        ));
+    }
+    Ok(Outcome::Deferred)
+}
+
+/// Folds a fresh import target into this sweep's in-memory import scope.
+fn record_import_scope(
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    resolution: &Resolution,
+    importing_files: &mut HashMap<u32, Vec<u32>>,
+) {
+    let Some(target_file) = resolution
+        .target_id
+        .strip_prefix('f')
+        .and_then(|digits| digits.parse::<u32>().ok())
+    else {
+        return;
+    };
+    let modules = match importing_files.entry(stored.file_id) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => entry.insert(snapshot.imported_file_ids(stored.file_id).to_vec()),
+    };
+    if !modules.contains(&target_file) {
+        modules.push(target_file);
+    }
 }
 
 /// Drops name-index candidates whose file language cannot host the
@@ -266,6 +455,8 @@ pub(crate) fn resolve_pending(store: &IndexStore) -> crate::EngineResult<Resolut
 /// sets — then reasons over same-language evidence only. The gate never
 /// discards on missing information: unknown reference languages, missing
 /// candidate paths, and unregistered extensions all keep their entries.
+/// [`prefer_definitions`] runs right after it, so a definition only ever
+/// supersedes a declaration of the reference's own language.
 fn filter_compatible_hits(
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
@@ -297,6 +488,33 @@ fn filter_compatible_hits(
         }
     }
     filtered
+}
+
+/// Drops the bodyless declarations a definition of the same symbol supersedes.
+/// A C/C++ prototype and the definition carrying the same qualified name
+/// describe one symbol, so the definition stands for both; only that spelling
+/// pairs them, because a same-named entity under another qualified name — or
+/// in another language — is a different symbol and must never hide the
+/// declaration. Call this after the language gate, never on the whole name
+/// index: shrinking the shared set would let an unrelated language's
+/// definition erase the only candidate a reference can bind.
+fn prefer_definitions<T: Borrow<NameIndexEntry>>(hits: Vec<T>) -> Vec<T> {
+    let mut defined = HashSet::new();
+    for hit in &hits {
+        let hit: &NameIndexEntry = hit.borrow();
+        if !hit.is_declaration {
+            defined.insert(hit.qualified_name.clone());
+        }
+    }
+    if defined.is_empty() {
+        return hits;
+    }
+    hits.into_iter()
+        .filter(|hit| {
+            let hit: &NameIndexEntry = hit.borrow();
+            !hit.is_declaration || !defined.contains(&hit.qualified_name)
+        })
+        .collect()
 }
 
 /// Resolves an import specifier onto the target file's endpoint
@@ -336,16 +554,14 @@ fn resolve_import(
         _ => join_specifier(importing_dir(&path), &module),
     };
     let base = base?;
-    for candidate in path_variants(&base, extensions_for(&stored.language)) {
-        if let Some(file_id) = snapshot.file_id_by_path(&candidate) {
-            return Some(Resolution {
-                ref_id: stored.id,
-                target_id: format!("f{file_id}"),
-                provenance: EdgeProvenance::ImportScoped,
-            });
-        }
-    }
-    None
+    let file_id = path_variants(&base, extensions_for(&stored.language))
+        .into_iter()
+        .find_map(|candidate| snapshot.file_id_by_path(&candidate))?;
+    Some(Resolution {
+        ref_id: stored.id,
+        target_id: format!("f{file_id}"),
+        provenance: EdgeProvenance::ImportScoped,
+    })
 }
 
 /// Resolves an ambiguous bare-name reference through the file's imports:
@@ -520,6 +736,10 @@ fn bind_in_module(
         .iter()
         .filter(|hit| hit.file_id == target_file)
         .collect();
+    // A module may hold a prototype and the definition of one symbol; the
+    // definition stands for both, so the uniqueness check below must not see
+    // two candidates for it.
+    let scoped = prefer_definitions(scoped);
     if let [hit] = scoped.as_slice() {
         return Some(Resolution {
             ref_id: stored.id,
@@ -707,6 +927,10 @@ fn rust_alias_pairs(statement: &str) -> Vec<(String, Option<String>)> {
 /// relative, and Rust use paths name their module with the first segment
 /// (a leading `crate::` addresses the workspace root). `None` keeps the
 /// reference with the general rules.
+///
+/// The sweep shares this memo, so it keys on the normalized workspace-relative
+/// base rather than the raw specifier: `./util` addresses a different module
+/// in every directory.
 fn alias_target_file(
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
@@ -715,24 +939,23 @@ fn alias_target_file(
     targets: &mut HashMap<(String, String), Option<u32>>,
 ) -> Option<u32> {
     let language = stored.language.as_str();
-    match targets.entry((language.to_owned(), binding.specifier.clone())) {
+    let base = alias_target_base(snapshot, stored, binding, importing_paths)?;
+    match targets.entry((language.to_owned(), base.clone())) {
         Entry::Occupied(entry) => *entry.get(),
-        Entry::Vacant(entry) => *entry.insert(alias_target_file_uncached(
-            snapshot,
-            stored,
-            binding,
-            importing_paths,
-        )),
+        Entry::Vacant(entry) => *entry.insert(alias_target_at(snapshot, language, &base)),
     }
 }
 
-/// Uncached specifier resolution behind [`alias_target_file`].
-fn alias_target_file_uncached(
+/// Workspace-relative module path a binding addresses, before extension
+/// probing: TS/JS specifiers join the importing file's directory, while
+/// Python's dotted paths and Rust's leading module segment address the
+/// workspace root. `None` for specifiers no rule can place.
+fn alias_target_base(
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
     binding: &AliasBinding,
     importing_paths: &mut HashMap<u32, Option<String>>,
-) -> Option<u32> {
+) -> Option<String> {
     let language = stored.language.as_str();
     let module: String = match language {
         "typescript" | "javascript" => {
@@ -752,12 +975,14 @@ fn alias_target_file_uncached(
                 .specifier
                 .strip_prefix("crate::")
                 .unwrap_or(&binding.specifier);
-            let first = crate_path.split("::").find(|segment| !segment.is_empty())?;
-            first.to_owned()
+            crate_path
+                .split("::")
+                .find(|segment| !segment.is_empty())?
+                .to_owned()
         }
         _ => return None,
     };
-    let base = match language {
+    match language {
         "typescript" | "javascript" => {
             let path = match importing_paths.entry(stored.file_id) {
                 Entry::Occupied(entry) => entry.get().clone(),
@@ -765,34 +990,83 @@ fn alias_target_file_uncached(
                     .insert(snapshot.file_path(stored.file_id).map(str::to_owned))
                     .clone(),
             };
-            let path = path?;
-            join_specifier(importing_dir(&path), &module)?
+            join_specifier(importing_dir(&path?), &module)
         }
         // Python and Rust specifiers address the workspace root.
-        _ => module,
-    };
-    let mut variants = path_variants(&base, extensions_for(language));
+        _ => Some(module),
+    }
+}
+
+/// Probes one normalized module base for the indexed file behind it: the
+/// literal path, then per-language extensions and index files.
+fn alias_target_at(snapshot: &ResolutionSnapshot, language: &str, base: &str) -> Option<u32> {
+    let mut variants = path_variants(base, extensions_for(language));
     if language == "rust" {
         // Rust modules live in `<base>.rs` or `<base>/mod.rs`; the index
         // variant path_variants emits covers neither.
         variants.push(format!("{base}/mod.rs"));
     }
-    for candidate in variants {
-        if let Some(file_id) = snapshot.file_id_by_path(&candidate) {
-            return Some(file_id);
+    variants
+        .iter()
+        .find_map(|candidate| snapshot.file_id_by_path(candidate))
+}
+
+/// Receivers naming the enclosing instance rather than a named local: `self`
+/// (Rust, Python), `cls` (Python class methods), and `this` (C-family, Java,
+/// JavaScript). Both receiver rules read this one list so a language can
+/// never be taught a spelling in only one of them.
+fn is_self_receiver(language: &str, receiver: &str) -> bool {
+    match language {
+        "python" => matches!(receiver, "self" | "cls"),
+        _ => matches!(receiver, "self" | "this"),
+    }
+}
+
+/// Binds a member call to the nearest declaration among `scopes`, which the
+/// caller orders by precedence: the receiver's own class first, then its
+/// bases by distance. The closest scope declaring the member decides, since
+/// an override hides the declaration its base would contribute — the one
+/// declaration there binds, while several (overloads this rule cannot
+/// separate) leave the call to the rules below rather than binding an
+/// ancestor the override replaced.
+fn bind_nearest_member(
+    stored: &StoredPendingRef,
+    hits: &[NameIndexEntry],
+    scopes: &[String],
+) -> Option<Resolution> {
+    for scope in scopes {
+        let matched: Vec<&NameIndexEntry> = hits
+            .iter()
+            .filter(|hit| {
+                hit.qualified_name
+                    .rsplit_once("::")
+                    .is_some_and(|(candidate, _)| candidate == scope.as_str())
+            })
+            .collect();
+        match matched.as_slice() {
+            [] => {}
+            [hit] => {
+                return Some(Resolution {
+                    ref_id: stored.id,
+                    target_id: hit.entity_id.clone(),
+                    provenance: EdgeProvenance::FileScoped,
+                });
+            }
+            _ => return None,
         }
     }
     None
 }
 
 /// Resolves a receiver call that names the enclosing instance (`self`,
-/// `this`, Python's `me`) or the superclass (`super`): the receiver's type
+/// `this`, Python's `cls`) or the superclass (`super`): the receiver's type
 /// is the class owning the call site, so the invoked member's declaring
 /// scope must be that class or — through the class's extends/implements
 /// edges — one of its bases. `super` skips the enclosing class and
-/// addresses the direct bases only. A unique scope-matched declaration
-/// binds; members the hierarchy declares ambiguously and receivers of
-/// classes without a persisted owner record stay pending.
+/// addresses the direct bases only. The hierarchy is searched nearest
+/// first, so an override wins over the base method it replaces;
+/// declarations the nearest declaring scope holds ambiguously and receivers
+/// of classes without a persisted owner record stay pending.
 ///
 /// # Errors
 /// Propagates graph storage failures; an unresolvable reference is `None`.
@@ -810,12 +1084,7 @@ fn resolve_receiver_class(
         return Ok(None);
     };
     let superclass = receiver == "super";
-    let self_names: &[&str] = if stored.language == "python" {
-        &["self", "me"]
-    } else {
-        &["self", "this"]
-    };
-    if !superclass && !self_names.contains(&receiver) {
+    if !superclass && !is_self_receiver(&stored.language, receiver) {
         return Ok(None);
     }
     let Some(owner) = snapshot.entity_record(&reference.owner_id) else {
@@ -852,22 +1121,7 @@ fn resolve_receiver_class(
             8,
         )?;
     }
-    let matched: Vec<&NameIndexEntry> = hits
-        .iter()
-        .filter(|hit| {
-            hit.qualified_name
-                .rsplit_once("::")
-                .is_some_and(|(scope, _)| scopes.iter().any(|candidate| candidate == scope))
-        })
-        .collect();
-    if let [hit] = matched.as_slice() {
-        return Ok(Some(Resolution {
-            ref_id: stored.id,
-            target_id: hit.entity_id.clone(),
-            provenance: EdgeProvenance::FileScoped,
-        }));
-    }
-    Ok(None)
+    Ok(bind_nearest_member(stored, hits, &scopes))
 }
 
 /// Binds a receiver call through the owner's declared bindings: a local
@@ -892,9 +1146,9 @@ fn resolve_receiver_typed(
     let Some(receiver) = reference.receiver_name.as_deref() else {
         return Ok(None);
     };
-    // The self/this family has its own hierarchy rule; typed bindings only
+    // The self family has its own hierarchy rule; typed bindings only
     // address named locals and parameters.
-    if matches!(receiver, "self" | "this" | "me" | "super") {
+    if receiver == "super" || is_self_receiver(&stored.language, receiver) {
         return Ok(None);
     }
     let bindings = store.declared_bindings(&reference.owner_id)?;
@@ -930,8 +1184,8 @@ fn resolve_receiver_typed(
     if shared_scopes.any(|scope| scope != type_scope) {
         return Ok(None);
     }
-    // The member's declaring scope is the bound type's own or any ancestor
-    // the inheritance chain adds, mirroring the self-receiver hierarchy.
+    // The member's declaring scope is the bound type's own, then its
+    // ancestors nearest first, mirroring the self-receiver hierarchy.
     let mut scopes = vec![type_scope.clone()];
     collect_base_scopes(
         store,
@@ -941,30 +1195,18 @@ fn resolve_receiver_typed(
         &mut HashSet::new(),
         8,
     )?;
-    let matched: Vec<&NameIndexEntry> = hits
-        .iter()
-        .filter(|hit| {
-            hit.qualified_name
-                .rsplit_once("::")
-                .is_some_and(|(scope, _)| scopes.iter().any(|candidate| candidate == scope))
-        })
-        .collect();
-    if let [hit] = matched.as_slice() {
-        return Ok(Some(Resolution {
-            ref_id: stored.id,
-            target_id: hit.entity_id.clone(),
-            provenance: EdgeProvenance::FileScoped,
-        }));
-    }
-    Ok(None)
+    Ok(bind_nearest_member(stored, hits, &scopes))
 }
 
 /// Appends the qualified names of every base class reachable from
-/// `class_scope` through extends/implements edges. `remaining` bounds the
-/// chain depth (one hop for `super` receivers, a fixed limit for the
-/// transitive `self` chain) and `visited` guards against inheritance
-/// cycles; a class whose entities spell its scope ambiguously ends the
-/// walk conservatively.
+/// `class_scope` through extends/implements edges, nearest first: the direct
+/// bases before their own bases, so reading `scopes` in order walks the
+/// hierarchy by distance from `class_scope` — the order member lookup needs
+/// to let an override shadow the declarations of the bases it replaces.
+/// `remaining` bounds the chain depth (one hop for `super` receivers, a
+/// fixed limit for the transitive `self` chain) and `visited` guards against
+/// inheritance cycles; a class whose entities spell its scope ambiguously
+/// ends that branch conservatively.
 ///
 /// # Errors
 /// Propagates graph storage failures.
@@ -976,34 +1218,46 @@ fn collect_base_scopes(
     visited: &mut HashSet<String>,
     remaining: usize,
 ) -> crate::EngineResult<()> {
-    if remaining == 0 || !visited.insert(class_scope.to_owned()) {
-        return Ok(());
-    }
-    let Some(class_id) = class_entity_id(snapshot, class_scope) else {
-        return Ok(());
-    };
-    let (resolved, pending) = store.inheritance_bases(&class_id)?;
-    let mut bases = resolved;
-    for name in pending {
-        // Hidden candidates must not turn an ambiguous base name into a
-        // seemingly unique ancestor.
-        if let [hit] = snapshot.lookup_candidates(&name).unwrap_or_default() {
-            bases.push(hit.entity_id.clone());
+    visited.insert(class_scope.to_owned());
+    let mut frontier = vec![class_scope.to_owned()];
+    for _ in 0..remaining {
+        let mut bases = Vec::new();
+        for scope in &frontier {
+            let Some(class_id) = class_entity_id(snapshot, scope) else {
+                continue;
+            };
+            let (resolved, pending) = store.inheritance_bases(&class_id)?;
+            bases.extend(resolved);
+            for name in pending {
+                // Hidden candidates must not turn an ambiguous base name into
+                // a seemingly unique ancestor.
+                let candidates = prefer_definitions(
+                    snapshot
+                        .lookup_candidates(&name)
+                        .unwrap_or_default()
+                        .iter()
+                        .collect::<Vec<_>>(),
+                );
+                if let [hit] = candidates.as_slice() {
+                    bases.push(hit.entity_id.clone());
+                }
+            }
         }
-    }
-    for base_id in bases {
-        let Some(base) = snapshot.entity_record(&base_id) else {
-            continue;
-        };
-        scopes.push(base.qualified_name.clone());
-        collect_base_scopes(
-            store,
-            snapshot,
-            &base.qualified_name,
-            scopes,
-            visited,
-            remaining - 1,
-        )?;
+        let mut next = Vec::new();
+        for base_id in bases {
+            let Some(base) = snapshot.entity_record(&base_id) else {
+                continue;
+            };
+            let scope = base.qualified_name.clone();
+            if visited.insert(scope.clone()) {
+                scopes.push(scope.clone());
+                next.push(scope);
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
     }
     Ok(())
 }
@@ -1018,19 +1272,29 @@ fn class_entity_id(snapshot: &ResolutionSnapshot, class_scope: &str) -> Option<S
         .iter()
         .filter(|hit| hit.qualified_name == class_scope)
         .collect();
+    // A prototype and the definition of one class share the qualified name;
+    // they name one symbol, so the hierarchy resolves through either.
+    let matched = prefer_definitions(matched);
     if let [hit] = matched.as_slice() {
         return Some(hit.entity_id.clone());
     }
     None
 }
 
-/// Binds a qualified call (`Class::method()`, including receivers spelled as
-/// full `crate::path::Class` paths reduced to their last `::` segment) to the
-/// entity whose `qualified_name` spells exactly that scope and member. The
-/// qualified name carries the declaring scope, so a unique match resolves
-/// even when the short member name is ambiguous workspace-wide. Duplicate
-/// `qualified_name` declarations and instance-style dotted receivers, which
-/// never spell a `::`-scoped path, stay pending.
+/// Binds a qualified call (`Class::method()`) to the entity whose
+/// `qualified_name` spells the member under the receiver's scope. Extraction
+/// builds that name from the declaring breadcrumb joined with `::`, which
+/// fixes what a receiver can spell: either the whole receiver (`ns::Class`
+/// indexes a type nested in `ns`) or only its last `::` segment (`Class`
+/// indexes a top-level type). The first spelling keeps `crate::ns::Class`
+/// verbatim and so matches nothing, while the second drops `crate` and every
+/// enclosing module — `crate::Class::method()` therefore binds a top-level
+/// type, and `crate::ns::Class::method()` binds neither the nested nor the
+/// top-level one and stays pending. Because the qualified name carries the
+/// declaring scope, a unique match resolves even when the short member name
+/// is ambiguous workspace-wide. Duplicate `qualified_name` declarations and
+/// instance-style dotted receivers, which never spell a `::`-scoped path,
+/// stay pending.
 fn resolve_qualified_name(
     stored: &StoredPendingRef,
     hits: &[NameIndexEntry],
@@ -1060,19 +1324,60 @@ fn resolve_qualified_name(
     None
 }
 
+/// Binds a Java import specifier to the one candidate it names.
+///
+/// Java imports address entities, not modules: `import p.Widget;` names the
+/// type `Widget`, while `import static p.Util.work;` names the member `work`
+/// of class `Util`. The specifier carries the package, but a class's indexed
+/// `qualified_name` starts at the class itself, so the match is a dotted
+/// suffix on a segment boundary: `p.Util.work` names `Util::work` and
+/// `p.Outer.Inner` names `Outer::Inner`, never `Other::work`. On-demand forms
+/// (`p.*`, `p.Util.*`) name no single target and stay pending.
+///
+/// The package itself is no evidence: two same-named classes in different
+/// packages share one indexed name, so a specifier that reaches both stays
+/// ambiguous. The bound edge contributes its target's file to this file's
+/// import scope on the next sweep, like every entity-targeted import.
+fn resolve_java_import(stored: &StoredPendingRef, hits: &[NameIndexEntry]) -> Option<Resolution> {
+    let mut matched = hits
+        .iter()
+        .filter(|hit| import_names(&stored.reference.ref_name, &hit.qualified_name));
+    let hit = matched.next()?;
+    if matched.next().is_some() {
+        return None;
+    }
+    Some(Resolution {
+        ref_id: stored.id,
+        target_id: hit.entity_id.clone(),
+        provenance: EdgeProvenance::ImportBound,
+    })
+}
+
+/// Whether a Java import specifier can spell `qualified_name`: the name
+/// itself, or a dotted suffix that starts after a package segment.
+fn import_names(specifier: &str, qualified_name: &str) -> bool {
+    let path = qualified_name.replace("::", ".");
+    match specifier.strip_suffix(&path) {
+        Some(prefix) => prefix.is_empty() || prefix.ends_with('.'),
+        None => false,
+    }
+}
+
 /// Reports import references whose specifier can never address a workspace
 /// module: TS/JS bare package specifiers (anything not starting with `./`
 /// or `../`, reduced to its first path segment) and Python's bare top-level
 /// module imports (`import re`). A specifier whose leading segment matches
 /// a workspace file or directory — a monorepo package, a top-level module —
-/// stays in the queue for path-based rules instead of failing.
+/// stays in the queue for path-based rules instead.
 ///
 /// Scoped specifiers (`@scope/pkg`) and path aliases (`@/x`) always stay
 /// queued: a workspace's own package name or `paths` mapping can route them
 /// inside the workspace while no file or directory spells the scope, so
-/// existence cannot be proven either way. Holding them is safe because
-/// non-Rust import references never reach the name index: their specifier
-/// addresses a module, and only path rules can place it.
+/// existence cannot be proven either way. Holding them is safe because a
+/// module specifier never reaches the name index: only the path rules can
+/// place it, and `classify` defers it when they cannot. Languages whose
+/// imports name an entity instead — Rust's `use`, Java's `import` — are
+/// answered from the name index, so they must never be failed here.
 fn is_unresolvable_import(
     snapshot: &ResolutionSnapshot,
     reference: &StoredPendingRef,

@@ -600,13 +600,11 @@ fn open(path: &Path, read_only: bool) -> IndexStore {
 /// Opens a writable store whose index stores the code graph, the shape the
 /// cross-file resolver sweeps.
 fn open_graph(path: &Path) -> IndexStore {
-    IndexStore::open_with_graph(
-        WorkspaceIndexStorageOptions::ReadWrite {
-            storage_path: path.to_owned(),
-            embeddings: vec![schema()],
-        },
-        true,
-    )
+    IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        storage_path: path.to_owned(),
+        graph_enabled: true,
+        embeddings: vec![schema()],
+    })
     .expect("open real zvec storage with a graph")
 }
 
@@ -2060,7 +2058,7 @@ fn resolver_binds_workspace_unique_cross_file_call() {
             ..FileGraphResult::default()
         },
     );
-    let sweep = resolve_pending(&storage).expect("sweep");
+    let sweep = resolve_pending(&storage, None).expect("sweep");
     assert_eq!(sweep.scanned, 1);
     assert_eq!(sweep.resolved, 1);
     assert_eq!(sweep.failed, 0);
@@ -2100,7 +2098,7 @@ fn resolver_maps_relative_import_onto_file_endpoint() {
             ..FileGraphResult::default()
         },
     );
-    let sweep = resolve_pending(&storage).expect("sweep");
+    let sweep = resolve_pending(&storage, None).expect("sweep");
     assert_eq!(sweep.resolved, 1);
     assert_eq!(sweep.failed, 0);
     // The target is the file endpoint of the imported module.
@@ -2125,7 +2123,7 @@ fn resolver_fails_import_of_missing_package() {
             ..FileGraphResult::default()
         },
     );
-    let sweep = resolve_pending(&storage).expect("sweep");
+    let sweep = resolve_pending(&storage, None).expect("sweep");
     assert_eq!(sweep.resolved, 0);
     assert_eq!(sweep.failed, 1);
     assert!(
@@ -2160,7 +2158,7 @@ fn resolver_records_candidates_for_ambiguous_names() {
             ..FileGraphResult::default()
         },
     );
-    let sweep = resolve_pending(&storage).expect("sweep");
+    let sweep = resolve_pending(&storage, None).expect("sweep");
     assert_eq!(sweep.scanned, 1);
     assert_eq!(sweep.resolved, 0, "two definitions stay ambiguous");
     assert_eq!(sweep.candidates_recorded, 1);
@@ -2192,7 +2190,7 @@ fn resolver_defers_scoped_import_instead_of_binding_a_same_named_entity() {
             ..FileGraphResult::default()
         },
     );
-    let sweep = resolve_pending(&storage).expect("sweep");
+    let sweep = resolve_pending(&storage, None).expect("sweep");
     assert_eq!(
         sweep.resolved, 0,
         "a module specifier is not an entity name: {sweep:?}"
@@ -2232,7 +2230,7 @@ fn resolver_still_binds_rust_use_through_the_name_index() {
             ..FileGraphResult::default()
         },
     );
-    let sweep = resolve_pending(&storage).expect("sweep");
+    let sweep = resolve_pending(&storage, None).expect("sweep");
     assert_eq!(sweep.resolved, 1, "a `use` specifier is a name binding");
     let edges = resolved_edges(&storage, importer);
     assert_eq!(edges.len(), 1);
@@ -2245,10 +2243,12 @@ fn resolver_returns_an_empty_sweep_when_the_workspace_has_no_graph() {
     let home = tempfile::tempdir().expect("workspace");
     let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         storage_path: home.path().to_owned(),
+        graph_enabled: false,
         embeddings: vec![schema()],
     })
     .expect("open graph-free storage");
-    let sweep = resolve_pending(&storage).expect("a graph-free workspace has nothing to resolve");
+    let sweep =
+        resolve_pending(&storage, None).expect("a graph-free workspace has nothing to resolve");
     assert_eq!(sweep.scanned, 0, "no snapshot is built without a graph");
     assert_eq!(sweep.resolved, 0);
     assert_eq!(sweep.failed, 0);
@@ -2346,7 +2346,7 @@ fn resolver_keeps_self_receiver_pending_when_the_member_belongs_to_another_class
         .replace_file_with_graph(&file, &entities, &entries, &graph)
         .expect("index class file");
 
-    let sweep = resolve_pending(&storage).expect("sweep");
+    let sweep = resolve_pending(&storage, None).expect("sweep");
     assert_eq!(
         sweep.resolved, 0,
         "self.save() must not bind to B.save: {sweep:?}"

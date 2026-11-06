@@ -2256,7 +2256,10 @@ fn task_control(signal: Option<CancellationToken>) -> TaskControl {
     TaskControl::new(signal.unwrap_or_default())
 }
 
-fn throw_if_cancelled(signal: Option<&CancellationToken>) -> Result<(), EngineError> {
+/// Reports the pass's cancellation as the engine's cancellation error. Every
+/// phase that can run for a while — extraction batches, embedding queues, and
+/// the cross-file resolution sweep — calls this at its own boundaries.
+pub(crate) fn throw_if_cancelled(signal: Option<&CancellationToken>) -> Result<(), EngineError> {
     if signal.is_some_and(CancellationToken::is_cancelled) {
         Err(EngineError::cancelled("indexing was cancelled"))
     } else {
