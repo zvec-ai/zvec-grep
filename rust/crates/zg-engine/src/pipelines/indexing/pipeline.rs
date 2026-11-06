@@ -74,6 +74,10 @@ pub(crate) trait IndexEmbeddingRuntime: Send + Sync {
 
     fn concurrency_defaults(&self) -> EmbeddingConcurrencyDefaults;
 
+    fn batch_concurrency(&self, requested: Option<usize>) -> Option<usize> {
+        crate::models::batch_concurrency(&self.info().model().reference(), requested)
+    }
+
     async fn prepare(
         &self,
         options: EmbeddingPrepareOptions,
@@ -96,6 +100,10 @@ impl IndexEmbeddingRuntime for ModelRuntimeLease {
 
     fn concurrency_defaults(&self) -> EmbeddingConcurrencyDefaults {
         self.concurrency_defaults()
+    }
+
+    fn batch_concurrency(&self, requested: Option<usize>) -> Option<usize> {
+        self.batch_concurrency(requested)
     }
 
     async fn prepare(
@@ -1650,7 +1658,7 @@ fn resolve_index_batch_policy(
         return resolve_embedding_policy(requested, model.concurrency_defaults());
     }
     resolve_embedding_policy(
-        crate::models::batch_concurrency(&model.info().model().reference(), requested),
+        model.batch_concurrency(requested),
         model.concurrency_defaults(),
     )
 }
@@ -2935,6 +2943,7 @@ mod tests {
 
     struct ConcurrentModel {
         info: EmbeddingModelInfo,
+        batch_limit: Option<usize>,
         prepare_calls: AtomicUsize,
         prepare_failures: AtomicUsize,
         calls: AtomicUsize,
@@ -3009,6 +3018,7 @@ mod tests {
                     None,
                 )
                 .expect("valid embedding metadata"),
+                batch_limit: None,
                 prepare_calls: AtomicUsize::new(0),
                 prepare_failures: AtomicUsize::new(0),
                 calls: AtomicUsize::new(0),
@@ -3020,6 +3030,26 @@ mod tests {
                 rejected_text: None,
             }
         }
+    }
+
+    #[test]
+    fn index_batch_policy_uses_backend_admission_instead_of_thread_budget() {
+        let mut model = ConcurrentModel::new();
+        model.batch_limit = Some(2);
+        for requested in [None, Some(1), Some(8), Some(16)] {
+            let policy = resolve_index_batch_policy(requested, &model).expect("batch policy");
+            assert_eq!(policy.initial, 2);
+            assert_eq!(policy.maximum, 2);
+        }
+        assert!(resolve_index_batch_policy(Some(0), &model).is_err());
+
+        model.batch_limit = None;
+        let explicit = resolve_index_batch_policy(Some(8), &model).expect("explicit admission");
+        assert_eq!(explicit.initial, 8);
+        assert_eq!(explicit.maximum, 8);
+        let automatic = resolve_index_batch_policy(None, &model).expect("default admission");
+        assert_eq!(automatic.initial, 2);
+        assert_eq!(automatic.maximum, 2);
     }
 
     impl DrainingFailureModel {
@@ -3091,6 +3121,10 @@ mod tests {
                 initial: 2,
                 maximum: 2,
             }
+        }
+
+        fn batch_concurrency(&self, requested: Option<usize>) -> Option<usize> {
+            self.batch_limit.or(requested)
         }
 
         async fn prepare(

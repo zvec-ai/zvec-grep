@@ -81,32 +81,42 @@ refreshes as well, set `ZVEC_GREP_EMBEDDING_CONCURRENCY=<n>`. Values must be
 positive integers. Explicit CLI/API index settings take precedence over this
 environment variable, followed by the legacy
 `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` for llama.cpp indexing, then backend defaults.
-Invalid environment values warn and select the automatic default. These overrides
+Invalid values for these concurrency overrides warn and select the automatic default. These overrides
 do not configure query-vector inference and are not persisted in workspace settings.
 Direct and Server indexing use the same engine boundary; restart the Server after
 changing its inherited environment, while explicit CLI overrides need no restart.
 
-For llama.cpp, each cached model uses one shared context and serializes embedding
-calls. On CPU, the value sets compute threads (`n_threads` and `n_threads_batch`),
-without the cap of eight; it must fit the native signed 32-bit thread parameter.
-The CPU default is the available logical CPU count capped at four. Thread-budget
-changes update the existing context in place, and CPU inputs execute one sequence
-at a time.
+For llama.cpp on CPU, `C` is the total native compute-thread budget. Set
+`ZVEC_GREP_LLAMA_CPU_CONTEXTS=K` to choose the context count (default `1`). Each
+context uses `T=C/K` for both `n_threads` and `n_threads_batch`; these parameters
+apply to different computation modes and are not added together. Explicit `C`
+must be at least `K` and divisible by `K`, and `T` must fit the native signed
+32-bit thread parameter. Invalid CPU context settings fail explicitly. Automatic
+selection uses `T=max(1, min(logical_cpus, 4)/K)` with integer division and
+`C=K*T`, so query inference also has a valid budget for the configured context
+count. This is a compute budget, not the process's total OS thread count.
 
-On GPU, the value selects a token-packing tier capped at eight, defaulting to one;
-CPU support work uses one compute thread independently of that tier. Gemma and
-Qwen combine inputs from the same embedding call into multi-sequence batches.
-Higher tiers allow larger total-token batches and may increase throughput and
-working memory; they do not allocate more contexts or guarantee a speedup. An
-input longer than the packing budget executes individually within the model's
-input limit, so the tier is not a hard memory limit. Qwen's KV capacity follows
-the actual batch requirements. After 30 seconds without work, the context is
-released to reclaim retained capacity while the loaded model remains cached.
+On Metal/CUDA, `C` is the maximum number of concurrently executing contexts,
+defaulting to `1`. The CPU context environment variable does not affect GPU
+execution. Contexts share model weights, but have independent KV and working
+buffers; increasing `C` can increase memory use and does not guarantee a speedup.
+CPU support work uses one native compute thread per GPU context.
 
-Different llama.cpp concurrency values share the same model runtime and admission
-limit. Query-vector inference keeps its own execution defaults and shares that
-admission; there is no cross-call batching or query preemption within an active
-embedding call.
+Gemma and Qwen GPU sequence packing is managed internally, independently of `C`.
+Inputs are packed by token count before batches are assigned to available
+contexts; each input, including all of its micro-batches, stays on one context.
+Long inputs execute individually within the model's input limit, without being
+truncated to the packing budget. Qwen KV capacity follows actual batch needs.
+
+Different llama.cpp concurrency values share one model runtime and context pool.
+Contexts are created on demand; independent calls do not each allocate a separate
+pool. On GPU, the shared pool's execution limit is the largest active operation
+budget, while each operation also honors its own limit. CPU execution is bounded
+by the configured `K`. Idle excess contexts are retired, and native context
+capacity is released after 30 seconds without work. Query-vector inference keeps
+its own defaults and shares the pool; active native inference is not preempted.
+The CPU context setting is captured when the model runtime is created; restart
+the Server after changing it. GPU fallback resolves the budget using CPU rules.
 
 Transformers/ORT limits in-flight batches to at most eight, defaulting to one.
 ORT may create sessions within this budget;

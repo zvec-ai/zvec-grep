@@ -149,7 +149,7 @@ fn pins_main_compatible_sources_and_cache_name() {
 #[test]
 fn user_concurrency_controls_cpu_threads_per_context() {
     for count in [1, 2, 4, 8, 24] {
-        let threads = LlamaExecutionBudget::resolve("gemma-embedding", false, count)
+        let threads = LlamaExecutionBudget::resolve("gemma-embedding", false, count, 1)
             .expect("thread count")
             .threads;
         assert_eq!(usize::try_from(threads).expect("positive threads"), count);
@@ -169,12 +169,12 @@ fn user_concurrency_controls_cpu_threads_per_context() {
         assert_eq!(params.n_seq_max(), 4);
     }
     assert_eq!(
-        LlamaExecutionBudget::resolve("gemma-embedding", false, 0)
+        LlamaExecutionBudget::resolve("gemma-embedding", false, 0, 1)
             .expect("valid test configuration")
             .threads,
-        i32::try_from(default_cpu_concurrency()).expect("automatic CPU thread count")
+        i32::try_from(default_cpu_concurrency(1)).expect("automatic CPU thread count")
     );
-    assert!(LlamaExecutionBudget::resolve("gemma-embedding", false, usize::MAX).is_err());
+    assert!(LlamaExecutionBudget::resolve("gemma-embedding", false, usize::MAX, 1).is_err());
 }
 
 #[test]
@@ -318,13 +318,13 @@ fn embeddinggemma_micro_batch_covers_long_inputs_without_changing_qwen() {
 fn multisequence_batching_is_limited_to_validated_gpu_models() {
     for architecture in ["gemma-embedding", "qwen3"] {
         assert!(
-            LlamaExecutionBudget::resolve(architecture, true, 1)
+            LlamaExecutionBudget::resolve(architecture, true, 1, 1)
                 .expect("valid test configuration")
                 .batch_tokens
                 .is_some()
         );
         assert!(
-            LlamaExecutionBudget::resolve(architecture, false, 1)
+            LlamaExecutionBudget::resolve(architecture, false, 1, 1)
                 .expect("valid test configuration")
                 .batch_tokens
                 .is_none()
@@ -334,7 +334,7 @@ fn multisequence_batching_is_limited_to_validated_gpu_models() {
 
 #[test]
 fn automatic_cpu_budget_preserves_parallel_compute_while_one_is_explicit() {
-    let model = LlamaCppEmbeddingModel::new(
+    let mut model = LlamaCppEmbeddingModel::new(
         entry("local/embeddinggemma-300m"),
         ModelConfig {
             device: Some(Device::Cpu),
@@ -342,20 +342,79 @@ fn automatic_cpu_budget_preserves_parallel_compute_while_one_is_explicit() {
         },
         ModelComputeRuntime::shared(),
     );
+    model.cpu_contexts = Ok(1);
     let available = std::thread::available_parallelism()
         .expect("valid test configuration")
         .get();
     assert_eq!(model.concurrency_defaults().initial, available.min(4));
     assert_eq!(
         model.concurrency_defaults().initial,
-        default_cpu_concurrency()
+        default_cpu_concurrency(1)
     );
     assert_eq!(
-        LlamaExecutionBudget::resolve("gemma-embedding", false, 1)
+        LlamaExecutionBudget::resolve("gemma-embedding", false, 1, 1)
             .expect("valid test configuration")
             .threads,
         1
     );
+}
+
+#[test]
+fn outer_batch_admission_uses_cpu_contexts_or_requested_gpu_contexts() {
+    let mut model = LlamaCppEmbeddingModel::new(
+        entry("local/embeddinggemma-300m"),
+        ModelConfig {
+            device: Some(Device::Cpu),
+            ..ModelConfig::default()
+        },
+        ModelComputeRuntime::shared(),
+    );
+    model.cpu_contexts = Ok(3);
+    for requested in [None, Some(1), Some(8), Some(24)] {
+        assert_eq!(model.batch_concurrency(requested), Some(3));
+    }
+    assert_eq!(
+        model.concurrency_defaults().initial,
+        default_cpu_concurrency(3)
+    );
+    model.device = Some(Device::Metal);
+    for requested in [None, Some(1), Some(8), Some(24)] {
+        assert_eq!(
+            model.batch_concurrency(requested),
+            Some(requested.unwrap_or(1))
+        );
+    }
+    model.cpu_contexts = Err("invalid captured CPU context configuration".to_owned());
+    assert_eq!(model.batch_concurrency(Some(4)), Some(4));
+    assert_eq!(model.concurrency_defaults().initial, 1);
+    model.device = Some(Device::Cpu);
+    assert_eq!(model.batch_concurrency(Some(4)), Some(1));
+    assert!(model.cpu_context_count().is_err());
+}
+
+#[tokio::test]
+async fn incompatible_explicit_cpu_budget_fails_before_artifact_loading() {
+    let mut model = LlamaCppEmbeddingModel::new(
+        entry("local/embeddinggemma-300m"),
+        ModelConfig {
+            device: Some(Device::Cpu),
+            ..ModelConfig::default()
+        },
+        ModelComputeRuntime::shared(),
+    );
+    model.cpu_contexts = Ok(2);
+    let error = model
+        .embed(
+            &[vec![Content::Text("fixture".to_owned())]],
+            EmbeddingOptions {
+                execution_concurrency: 3,
+                ..EmbeddingOptions::default()
+            },
+        )
+        .await
+        .expect_err("invalid C/K partition");
+    assert_eq!(error.code(), crate::EngineError::INVALID_ARGUMENT);
+    assert!(model.state.lock().await.is_none());
 }
 
 #[tokio::test]
@@ -383,7 +442,7 @@ async fn embeddinggemma_batches_preserve_vectors_and_context_limits(device: Devi
     let cache = env::var_os("ZVEC_GREP_TEST_MODEL_CACHE")
         .map(PathBuf::from)
         .expect("ZVEC_GREP_TEST_MODEL_CACHE must point at the model cache");
-    let model = LlamaCppEmbeddingModel::new(
+    let mut model = LlamaCppEmbeddingModel::new(
         entry("local/embeddinggemma-300m"),
         ModelConfig {
             cache_dir: Some(cache),
@@ -392,9 +451,10 @@ async fn embeddinggemma_batches_preserve_vectors_and_context_limits(device: Devi
         },
         ModelComputeRuntime::shared(),
     );
+    model.cpu_contexts = Ok(1);
     let loaded = model.ensure_loaded(None, None).await.expect("cached model");
     assert_eq!(loaded.gpu, device != Device::Cpu);
-    assert_single_worker_ownership(&loaded);
+    assert_context_worker_ownership(&loaded);
     let inputs = gemma_batch_fixture(&loaded.model);
     assert_eq!(inputs[4].tokens.len(), 2_048);
     let prepared = || PreparedLlamaBatch {
@@ -434,8 +494,25 @@ async fn embeddinggemma_batches_preserve_vectors_and_context_limits(device: Devi
         }
         assert_eq!(result.vectors.len(), inputs.len());
         let state = lock_llama_mutex(&loaded.contexts.state);
-        let worker = state.worker.as_ref().expect("one worker");
-        assert!(!worker.busy.load(Ordering::Acquire));
+        assert!(!state.workers.is_empty());
+        assert!(
+            state
+                .workers
+                .iter()
+                .all(|worker| !worker.busy.load(Ordering::Acquire))
+        );
+        let physical_batches = LlamaBatchPlan::new(&inputs, 2_048, loaded.gpu.then_some(128))
+            .expect("physical batch plan")
+            .into_batches(inputs.clone())
+            .len();
+        assert_eq!(
+            state.workers.len(),
+            if loaded.gpu {
+                concurrency.min(physical_batches)
+            } else {
+                1
+            }
+        );
         drop(state);
 
         // A larger sequence/token profile must remain safe for a later single query.
@@ -456,17 +533,129 @@ async fn embeddinggemma_batches_preserve_vectors_and_context_limits(device: Devi
     assert_gemma_batch_failure_recovery(&loaded, &inputs, &expected);
 }
 
-fn assert_single_worker_ownership(loaded: &LoadedLlamaModel) {
-    let first = loaded.contexts.lease_worker(None).expect("first lease");
+fn assert_context_worker_ownership(loaded: &LoadedLlamaModel) {
+    let operation = loaded.contexts.register_operation(1);
+    let first = loaded
+        .contexts
+        .lease_worker(&operation, None)
+        .expect("first lease");
     assert!(first.worker.busy.load(Ordering::Acquire));
     let signal = CancellationToken::new();
     signal.cancel();
-    assert!(loaded.contexts.lease_worker(Some(&signal)).is_err());
+    assert!(
+        loaded
+            .contexts
+            .lease_worker(&operation, Some(&signal))
+            .is_err()
+    );
     assert!(first.worker.busy.load(Ordering::Acquire));
     let original = Arc::clone(&first.worker);
     drop(first);
-    let next = loaded.contexts.lease_worker(None).expect("released worker");
+    let next = loaded
+        .contexts
+        .lease_worker(&operation, None)
+        .expect("released worker");
     assert!(Arc::ptr_eq(&original, &next.worker));
+}
+
+fn assert_cpu_two_context_pool(
+    loaded: &LoadedLlamaModel,
+    inputs: &[PreparedLlamaInput],
+    context_size: u32,
+) {
+    assert!(!loaded.gpu);
+    let pool = LlamaContextPool::new(Arc::clone(&loaded.model), false, 2);
+    let prepared = || PreparedLlamaBatch {
+        inputs: inputs.to_vec(),
+        truncated: Vec::new(),
+    };
+    for concurrency in [2, 4, 8] {
+        // Native CPU flash attention depends on T, so K=1 reference C=T,
+        // never the K=2 operation's total C.
+        let fresh = LlamaContextPool::new(Arc::clone(&loaded.model), false, 1);
+        let expected = fresh
+            .run(prepared(), context_size, concurrency / 2, None)
+            .expect("same-T fresh CPU oracle");
+        let result = pool
+            .run(prepared(), context_size, concurrency, None)
+            .expect("two-context CPU inference");
+        assert_eq!(result.vectors.len(), inputs.len());
+        for (actual, expected) in result.vectors.iter().zip(&expected.vectors) {
+            assert_embedding_close(actual, expected);
+        }
+        {
+            let operation = pool.register_operation(2);
+            let first = pool.lease_worker(&operation, None).expect("first context");
+            let second = pool.lease_worker(&operation, None).expect("second context");
+            assert!(!Arc::ptr_eq(&first.worker, &second.worker));
+            assert_eq!(lock_llama_mutex(&pool.state).workers.len(), 2);
+            let cancelled = CancellationToken::new();
+            cancelled.cancel();
+            assert!(pool.lease_worker(&operation, Some(&cancelled)).is_err());
+            assert!(first.worker.busy.load(Ordering::Acquire));
+            assert!(second.worker.busy.load(Ordering::Acquire));
+        }
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        let error = pool
+            .run(prepared(), context_size, concurrency, Some(&cancelled))
+            .expect_err("cancelled request");
+        assert_eq!(error.code(), crate::EngineError::CANCELLED);
+        let mut invalid = inputs[..2].to_vec();
+        invalid[1].tokens = vec![LlamaToken::new(-1)];
+        assert!(
+            pool.run(
+                PreparedLlamaBatch {
+                    inputs: invalid,
+                    truncated: Vec::new()
+                },
+                context_size,
+                concurrency,
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            lock_llama_mutex(&pool.state)
+                .workers
+                .iter()
+                .all(|worker| !worker.busy.load(Ordering::Acquire))
+        );
+        let recovered = pool
+            .run(prepared(), context_size, concurrency, None)
+            .expect("recovery after cancellation and invalid tokens");
+        for (actual, expected) in recovered.vectors.iter().zip(&expected.vectors) {
+            assert_embedding_close(actual, expected);
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires cached embeddinggemma; CPU K=2 with C=2/4/8 and same-T reference"]
+async fn cached_embeddinggemma_cpu_two_contexts_preserve_vectors_and_recover() {
+    init_llama_test_logs();
+    let cache = env::var_os("ZVEC_GREP_TEST_MODEL_CACHE")
+        .map(PathBuf::from)
+        .expect("model cache");
+    let mut model = LlamaCppEmbeddingModel::new(
+        entry("local/embeddinggemma-300m"),
+        ModelConfig {
+            cache_dir: Some(cache),
+            device: Some(Device::Cpu),
+            ..ModelConfig::default()
+        },
+        ModelComputeRuntime::shared(),
+    );
+    model.cpu_contexts = Ok(2);
+    let loaded = model
+        .ensure_loaded(None, None)
+        .await
+        .expect("cached CPU model");
+    let inputs = gemma_batch_fixture(&loaded.model)
+        .into_iter()
+        .take(4)
+        .collect::<Vec<_>>();
+    assert_cpu_two_context_pool(&loaded, &inputs, 2_048);
 }
 
 fn gemma_batch_fixture(model: &LlamaModel) -> Vec<PreparedLlamaInput> {
@@ -620,7 +809,7 @@ async fn embeddinggemma_handles_long_inputs_and_reuse(device: Device) {
     let cache = env::var_os("ZVEC_GREP_TEST_MODEL_CACHE")
         .map(PathBuf::from)
         .expect("ZVEC_GREP_TEST_MODEL_CACHE must point at the model cache");
-    let model = LlamaCppEmbeddingModel::new(
+    let mut model = LlamaCppEmbeddingModel::new(
         entry("local/embeddinggemma-300m"),
         ModelConfig {
             cache_dir: Some(cache),
@@ -629,6 +818,7 @@ async fn embeddinggemma_handles_long_inputs_and_reuse(device: Device) {
         },
         ModelComputeRuntime::shared(),
     );
+    model.cpu_contexts = Ok(1);
     let loaded = model.ensure_loaded(None, None).await.expect("cached model");
     assert_eq!(loaded.gpu, device != Device::Cpu);
     let tokens = loaded

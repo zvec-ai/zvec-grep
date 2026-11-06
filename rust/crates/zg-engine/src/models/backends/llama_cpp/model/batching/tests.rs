@@ -127,6 +127,20 @@ fn empty_input_does_not_dispatch_native_work() {
 }
 
 #[test]
+fn physical_batches_own_whole_inputs_and_preserve_original_indices() {
+    let original = inputs(&[32, 64, 8_192, 16, 16]);
+    let plan = LlamaBatchPlan::new(&original, 8_192, Some(256)).expect("plan");
+    let batches = plan.into_batches(original.clone());
+    assert_eq!(batches.iter().map(Vec::len).collect::<Vec<_>>(), [2, 1, 2]);
+    assert_eq!(batches[1][0].tokens.len(), 8_192);
+    let flattened = batches.into_iter().flatten().collect::<Vec<_>>();
+    for (actual, expected) in flattened.iter().zip(&original) {
+        assert_eq!(actual.index, expected.index);
+        assert_eq!(actual.tokens, expected.tokens);
+    }
+}
+
+#[test]
 fn cancellation_stops_dispatch_between_batches_and_before_first_batch() {
     let inputs = inputs(&[512, 512, 512]);
     let plan = LlamaBatchPlan::new(&inputs, 2_048, Some(128)).expect("plan");

@@ -17,7 +17,7 @@ async fn cached_qwen3_cpu_thread_changes_match_fresh_contexts() {
     input.index = 0;
     for concurrency in [1, 2, 4, 8, 1] {
         let actual = qwen_infer(&loaded, vec![input.clone()], concurrency);
-        let fresh = LlamaContextPool::new(Arc::clone(&loaded.model), false);
+        let fresh = LlamaContextPool::new(Arc::clone(&loaded.model), false, 1);
         let expected = fresh
             .run(
                 PreparedLlamaBatch {
@@ -32,6 +32,17 @@ async fn cached_qwen3_cpu_thread_changes_match_fresh_contexts() {
         eprintln!("CPU thread-budget fresh/reused comparison C={concurrency}");
         assert_embedding_close(&actual[0], &expected.vectors[0]);
     }
+}
+
+#[tokio::test]
+#[ignore = "requires cached Qwen3 embedding; CPU K=2 with C=2/4/8 and same-T reference"]
+async fn cached_qwen3_cpu_two_contexts_preserve_vectors_and_recover() {
+    let loaded = load_qwen_fixture(Device::Cpu).await;
+    assert_cpu_two_context_pool(
+        &loaded,
+        &qwen_batch_fixture(&loaded.model),
+        QWEN_CONTEXT_SIZE,
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -53,7 +64,7 @@ async fn load_qwen_fixture(device: Device) -> Arc<LoadedLlamaModel> {
     let cache = env::var_os("ZVEC_GREP_TEST_MODEL_CACHE")
         .map(PathBuf::from)
         .expect("ZVEC_GREP_TEST_MODEL_CACHE must point at the model cache");
-    let model = LlamaCppEmbeddingModel::new(
+    let mut model = LlamaCppEmbeddingModel::new(
         entry("local/qwen3-embedding-0.6b"),
         ModelConfig {
             cache_dir: Some(cache),
@@ -62,6 +73,7 @@ async fn load_qwen_fixture(device: Device) -> Arc<LoadedLlamaModel> {
         },
         ModelComputeRuntime::shared(),
     );
+    model.cpu_contexts = Ok(1);
     let loaded = model.ensure_loaded(None, None).await.expect("cached model");
     assert_eq!(loaded.gpu, device != Device::Cpu);
     loaded
@@ -128,7 +140,7 @@ fn qwen_individual_reference(
     inputs: &[PreparedLlamaInput],
     concurrency: usize,
 ) -> Vec<Vec<f32>> {
-    let fresh = LlamaContextPool::new(Arc::clone(&loaded.model), loaded.gpu);
+    let fresh = LlamaContextPool::new(Arc::clone(&loaded.model), loaded.gpu, 1);
     inputs
         .iter()
         .map(|input| {
@@ -154,7 +166,7 @@ fn qwen_individual_reference(
 
 async fn qwen_batches_preserve_vectors_and_kv_isolation(device: Device) {
     let loaded = load_qwen_fixture(device).await;
-    assert_single_worker_ownership(&loaded);
+    assert_context_worker_ownership(&loaded);
     let inputs = qwen_batch_fixture(&loaded.model);
     let expected = inputs
         .iter()
@@ -201,7 +213,7 @@ async fn qwen_batches_preserve_vectors_and_kv_isolation(device: Device) {
         for (actual, expected) in repeated.iter().zip(expected) {
             assert_embedding_close(actual, expected);
         }
-        assert_single_worker_ownership(&loaded);
+        assert_context_worker_ownership(&loaded);
     }
 
     if loaded.gpu {
@@ -216,9 +228,9 @@ async fn qwen_batches_preserve_vectors_and_kv_isolation(device: Device) {
 }
 
 fn assert_qwen_sequence_isolation(loaded: &LoadedLlamaModel, inputs: &[PreparedLlamaInput]) {
-    // Both short pairs and a pair crossing the 256-token micro-batch boundary
-    // must preserve the target when another sequence's token values change.
-    for target in [0, 2] {
+    // Both pairs fit the fixed 256-token packing budget and must isolate
+    // the target when another sequence's token values change.
+    for target in [0, 3] {
         let mut pair = vec![inputs[target].clone(), inputs[1].clone()];
         pair[0].index = 0;
         pair[1].index = 1;
@@ -259,7 +271,7 @@ fn assert_qwen_failure_recovery(
             )
             .is_err()
     );
-    assert_single_worker_ownership(loaded);
+    assert_context_worker_ownership(loaded);
     assert!(
         loaded
             .contexts
@@ -282,7 +294,7 @@ fn assert_qwen_failure_recovery(
     for (actual, expected) in recovered.iter().zip(expected) {
         assert_embedding_close(actual, expected);
     }
-    assert_single_worker_ownership(loaded);
+    assert_context_worker_ownership(loaded);
 }
 
 #[tokio::test]
@@ -328,5 +340,5 @@ async fn qwen_handles_full_context_and_reuse(device: Device) {
     assert!(long.iter().any(|value| value.abs() > 0.0));
     let after = infer(32);
     assert_embedding_close(&after, &before);
-    assert_single_worker_ownership(&loaded);
+    assert_context_worker_ownership(&loaded);
 }

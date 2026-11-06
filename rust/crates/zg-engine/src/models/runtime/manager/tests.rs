@@ -81,6 +81,7 @@ struct ProgressFixtureModel {
 
 struct GatedFixtureModel {
     info: EmbeddingModelInfo,
+    batch_limit: Option<usize>,
     active: AtomicUsize,
     maximum_active: AtomicUsize,
     started: AtomicUsize,
@@ -93,6 +94,7 @@ impl GatedFixtureModel {
         let model = ConcurrentFixtureModel::new();
         Self {
             info: model.info,
+            batch_limit: None,
             active: AtomicUsize::new(0),
             maximum_active: AtomicUsize::new(0),
             started: AtomicUsize::new(0),
@@ -106,6 +108,11 @@ impl GatedFixtureModel {
 impl EmbeddingModel for GatedFixtureModel {
     fn info(&self) -> &EmbeddingModelInfo {
         &self.info
+    }
+
+    fn batch_concurrency(&self, requested: Option<usize>) -> Option<usize> {
+        self.batch_limit
+            .or_else(|| batch_concurrency(&self.info.model().reference(), requested))
     }
 
     async fn embed(
@@ -707,75 +714,71 @@ async fn forwards_preparation_progress_to_both_callbacks_with_effective_concurre
 }
 
 #[tokio::test]
-async fn native_batches_share_admission_across_independent_leases() {
-    for (reference, requested, second_budget, allowed) in [
-        ("local/all-minilm-l6-v2", 2, 2, 2),
-        ("local/embeddinggemma-300m", 8, 1, 1),
-    ] {
-        let fixture = Arc::new(GatedFixtureModel::new());
-        let manager = ModelRuntimeManager::with_factory({
-            let fixture = Arc::clone(&fixture);
-            move |_, _, _| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
-        });
-        let request =
-            |budget| ModelRuntimeRequest::new(reference, ModelConfig::default(), Some(budget));
-        let first = manager
-            .acquire(request(requested))
-            .expect("first operation");
-        let second = manager
-            .acquire(request(second_budget))
-            .expect("second operation");
-        assert!(Arc::ptr_eq(&first.entry, &second.entry));
-        let inputs = [vec![Content::Text("fixture".into())]];
-        let embeddings = async {
-            tokio::join!(
-                first.embed(&inputs, EmbeddingOptions::default(), None),
-                first.embed(&inputs, EmbeddingOptions::default(), None),
-                second.embed(&inputs, EmbeddingOptions::default(), None),
-                second.embed(&inputs, EmbeddingOptions::default(), None),
-            )
-        };
-        let observe = async {
-            while fixture.started.load(Ordering::Acquire) < allowed {
-                tokio::task::yield_now().await;
-            }
-            assert_eq!(fixture.started.load(Ordering::Acquire), allowed);
-            assert_eq!(first.operation.permits.available_permits(), 0);
-            assert!(Arc::ptr_eq(
-                &first.operation.permits,
-                &second.operation.permits
-            ));
-            let cancelled = CancellationToken::new();
-            cancelled.cancel();
-            assert_eq!(
-                second
-                    .embed(
-                        &inputs,
-                        EmbeddingOptions {
-                            signal: Some(cancelled),
-                            ..EmbeddingOptions::default()
-                        },
-                        None
-                    )
-                    .await
-                    .expect_err("cancelled waiting batch")
-                    .code(),
-                crate::EngineError::CANCELLED
-            );
-            fixture.release.add_permits(4);
-        };
-        let ((a, b, c, d), ()) = tokio::join!(embeddings, observe);
-        for result in [a, b, c, d] {
-            result.expect("embedding batch");
+async fn transformer_batches_share_admission_across_independent_leases() {
+    let (reference, requested, second_budget, allowed) = ("local/all-minilm-l6-v2", 2, 2, 2);
+    let fixture = Arc::new(GatedFixtureModel::new());
+    let manager = ModelRuntimeManager::with_factory({
+        let fixture = Arc::clone(&fixture);
+        move |_, _, _| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
+    });
+    let request =
+        |budget| ModelRuntimeRequest::new(reference, ModelConfig::default(), Some(budget));
+    let first = manager
+        .acquire(request(requested))
+        .expect("first operation");
+    let second = manager
+        .acquire(request(second_budget))
+        .expect("second operation");
+    assert!(Arc::ptr_eq(&first.entry, &second.entry));
+    let inputs = [vec![Content::Text("fixture".into())]];
+    let embeddings = async {
+        tokio::join!(
+            first.embed(&inputs, EmbeddingOptions::default(), None),
+            first.embed(&inputs, EmbeddingOptions::default(), None),
+            second.embed(&inputs, EmbeddingOptions::default(), None),
+            second.embed(&inputs, EmbeddingOptions::default(), None),
+        )
+    };
+    let observe = async {
+        while fixture.started.load(Ordering::Acquire) < allowed {
+            tokio::task::yield_now().await;
         }
-        assert_eq!(fixture.maximum_active.load(Ordering::Acquire), allowed);
-        let mut observed = fixture.budgets.lock().expect("recorded budgets").clone();
-        observed.sort_unstable();
-        let mut expected = vec![requested, requested, second_budget, second_budget];
-        expected.sort_unstable();
-        assert_eq!(observed, expected);
-        assert_eq!(manager.snapshot().cached_runtimes, 1);
+        assert_eq!(fixture.started.load(Ordering::Acquire), allowed);
+        assert_eq!(first.operation.permits.available_permits(), 0);
+        assert!(Arc::ptr_eq(
+            &first.operation.permits,
+            &second.operation.permits
+        ));
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert_eq!(
+            second
+                .embed(
+                    &inputs,
+                    EmbeddingOptions {
+                        signal: Some(cancelled),
+                        ..EmbeddingOptions::default()
+                    },
+                    None
+                )
+                .await
+                .expect_err("cancelled waiting batch")
+                .code(),
+            crate::EngineError::CANCELLED
+        );
+        fixture.release.add_permits(4);
+    };
+    let ((a, b, c, d), ()) = tokio::join!(embeddings, observe);
+    for result in [a, b, c, d] {
+        result.expect("embedding batch");
     }
+    assert_eq!(fixture.maximum_active.load(Ordering::Acquire), allowed);
+    let mut observed = fixture.budgets.lock().expect("recorded budgets").clone();
+    observed.sort_unstable();
+    let mut expected = vec![requested, requested, second_budget, second_budget];
+    expected.sort_unstable();
+    assert_eq!(observed, expected);
+    assert_eq!(manager.snapshot().cached_runtimes, 1);
 }
 
 #[tokio::test]
@@ -791,7 +794,7 @@ async fn llama_automatic_and_explicit_budgets_remain_distinct_at_dispatch() {
     let automatic = manager.acquire(request(None)).expect("automatic budget");
     let explicit = manager.acquire(request(Some(1))).expect("explicit budget");
     assert!(Arc::ptr_eq(&automatic.entry, &explicit.entry));
-    assert!(Arc::ptr_eq(
+    assert!(!Arc::ptr_eq(
         &automatic.operation.permits,
         &explicit.operation.permits
     ));
@@ -809,6 +812,89 @@ async fn llama_automatic_and_explicit_budgets_remain_distinct_at_dispatch() {
         .expect("explicit dispatch");
     assert_eq!(*fixture.budgets.lock().expect("recorded budgets"), [0, 1]);
     assert_eq!(manager.snapshot().cached_runtimes, 1);
+}
+
+#[tokio::test]
+async fn llama_batch_admission_is_separate_from_operation_execution_budget() {
+    // CPU-like admission is fixed at K while GPU-like admission follows C.
+    for (batch_limit, first_budget, second_budget, first_batches, second_batches) in
+        [(Some(2), 8, 16, 2, 2), (None, 4, 2, 4, 2)]
+    {
+        let fixture = Arc::new(GatedFixtureModel {
+            batch_limit,
+            ..GatedFixtureModel::new()
+        });
+        let manager = ModelRuntimeManager::with_factory({
+            let fixture = Arc::clone(&fixture);
+            move |_, _, _| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
+        });
+        let request = |budget| {
+            ModelRuntimeRequest::new(
+                "local/embeddinggemma-300m",
+                ModelConfig::default(),
+                Some(budget),
+            )
+        };
+        let first = manager
+            .acquire(request(first_budget))
+            .expect("first budget");
+        let second = manager
+            .acquire(request(second_budget))
+            .expect("second budget");
+        assert!(Arc::ptr_eq(&first.entry, &second.entry));
+        assert!(first.entry.runtime.batch_permits.is_none());
+        assert!(!Arc::ptr_eq(
+            &first.operation.permits,
+            &second.operation.permits
+        ));
+        for (lease, budget, batches) in [
+            (&first, first_budget, first_batches),
+            (&second, second_budget, second_batches),
+        ] {
+            assert_eq!(lease.operation.limit, budget);
+            assert_eq!(lease.batch_concurrency(Some(budget)), Some(batches));
+            assert_eq!(lease.operation.permits.available_permits(), batches);
+            let permits: Vec<_> = (0..batches)
+                .map(|_| {
+                    Arc::clone(&lease.operation.permits)
+                        .try_acquire_owned()
+                        .expect("batch admission")
+                })
+                .collect();
+            assert!(
+                Arc::clone(&lease.operation.permits)
+                    .try_acquire_owned()
+                    .is_err()
+            );
+            let cancelled = CancellationToken::new();
+            cancelled.cancel();
+            assert_eq!(
+                lease
+                    .acquire_operation_permit(Some(&cancelled))
+                    .await
+                    .expect_err("cancelled batch waiting for admission")
+                    .code(),
+                crate::EngineError::CANCELLED
+            );
+            drop(permits);
+            assert_eq!(lease.operation.permits.available_permits(), batches);
+        }
+        fixture.release.add_permits(2);
+        let inputs = [vec![Content::Text("fixture".into())]];
+        first
+            .embed(&inputs, EmbeddingOptions::default(), None)
+            .await
+            .expect("first operation dispatch");
+        second
+            .embed(&inputs, EmbeddingOptions::default(), None)
+            .await
+            .expect("second operation dispatch");
+        assert_eq!(
+            *fixture.budgets.lock().expect("recorded budgets"),
+            [first_budget, second_budget]
+        );
+        assert_eq!(manager.snapshot().cached_runtimes, 1);
+    }
 }
 
 #[test]

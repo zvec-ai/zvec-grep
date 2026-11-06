@@ -51,14 +51,20 @@ record the number of returned vectors without asserting its size or contents.
 
 ## Concurrency and device configuration
 
-Use production `resolve_index_concurrency` and `batch_concurrency`. Clear inherited
+Use production `resolve_index_concurrency` and the runtime lease's backend-specific
+`batch_concurrency`. Clear inherited
 indexing concurrency overrides so `default` uses the backend default:
 
-- llama.cpp has one in-flight batch on one shared context. On CPU, C controls
-  compute threads without a cap of eight; the default is the available logical
-  CPU count capped at four. On GPU, C selects a token-packing tier capped at
-  eight, defaulting to one, with one CPU support thread. Gemma and Qwen pack
-  sequences within the embedding call; C does not increase context count.
+- llama.cpp CPU uses C as its total compute-thread budget and
+  `ZVEC_GREP_LLAMA_CPU_CONTEXTS=K` (default 1) as its context and in-flight batch
+  limit, with C/K threads per context. Explicit C must be divisible by K and
+  at least K. Automatic selection aligns the logical CPU count capped at four
+  to K with at least one thread per context. Record any nondefault K in the
+  experiment metadata; keep it fixed when comparing C values.
+- llama.cpp Metal/CUDA uses C as the concurrent context and in-flight batch
+  limit, defaulting to one. Contexts share one model runtime and pool; Gemma
+  and Qwen token packing is internal and independent of C. GPU contexts each
+  use one CPU support compute thread. Multiple callers share the native limit.
 - Transformers/ONNX uses the production in-flight batch limit, capped at eight;
   its current default is one.
 - model2vec uses its production default (currently two) or the explicit budget.
@@ -68,6 +74,9 @@ Record requested C, resolved runtime budget and configured in-flight batch count
 the same budget. Do not add extra batch workers on top of the native execution
 budget. CPU and GPU C values have different meanings; retain the requested-device
 and fallback limitations below when interpreting results.
+Latency includes admission and queueing. In particular, GPU C>1 runs multiple
+batch calls concurrently; B=1 at C>1 is a loaded single-item workload, not an
+isolated query-latency measurement.
 
 The fixed first column records the **requested device only**. Actual execution device
 and fallback are not verified. External GPU utilization is a resource observation,

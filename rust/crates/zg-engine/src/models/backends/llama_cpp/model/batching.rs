@@ -13,6 +13,17 @@ pub(super) struct LlamaBatchPlan {
 }
 
 impl LlamaBatchPlan {
+    pub(super) fn into_batches(
+        self,
+        inputs: Vec<PreparedLlamaInput>,
+    ) -> Vec<Vec<PreparedLlamaInput>> {
+        let mut inputs = inputs.into_iter();
+        self.ranges
+            .into_iter()
+            .map(|range| inputs.by_ref().take(range.len()).collect())
+            .collect()
+    }
+
     pub(super) fn new(
         inputs: &[PreparedLlamaInput],
         context_size: u32,

@@ -82,7 +82,8 @@ struct ModelRuntimeEntry {
 struct ModelRuntime {
     model: Arc<dyn EmbeddingModel>,
     active_embeddings: AtomicUsize,
-    // Native callers share admission across all leases of this runtime.
+    // Fixed transformer session budgets share admission across all runtime leases.
+    // llama.cpp owns admission to its native context pool inside the backend.
     batch_permits: Option<Arc<Semaphore>>,
 }
 
@@ -206,9 +207,9 @@ impl ModelRuntimeManager {
                 runtime: Arc::new(ModelRuntime {
                     model,
                     active_embeddings: AtomicUsize::new(0),
-                    batch_permits: (key.local_limit.is_some() || is_llama(&reference)).then(|| {
+                    batch_permits: key.local_limit.map(|limit| {
                         Arc::new(Semaphore::new(
-                            batch_concurrency(&reference, key.local_limit).unwrap_or(1),
+                            batch_concurrency(&reference, Some(limit)).unwrap_or(1),
                         ))
                     }),
                 }),
@@ -238,8 +239,17 @@ impl ModelRuntimeManager {
         retired.extend(state.retire_idle(self.inner.policy, Instant::now()));
         state.wake_maintenance();
         let permits = entry.runtime.batch_permits.clone().unwrap_or_else(|| {
-            // Preserve the requested budget without overflowing Tokio's permit counter.
-            Arc::new(Semaphore::new(concurrency.min(Semaphore::MAX_PERMITS)))
+            let batch_concurrency = resolve_embedding_concurrency(
+                entry
+                    .runtime
+                    .model
+                    .batch_concurrency(key.local_limit.or(embedding_concurrency)),
+                entry.runtime.model.concurrency_defaults(),
+            );
+            // Bound admission without overflowing Tokio's permit counter.
+            Arc::new(Semaphore::new(
+                batch_concurrency.min(Semaphore::MAX_PERMITS),
+            ))
         });
         let lease = ModelRuntimeLease {
             key,
@@ -434,6 +444,10 @@ impl ModelRuntimeLease {
 
     pub(crate) fn concurrency_defaults(&self) -> EmbeddingConcurrencyDefaults {
         self.entry.runtime.model.concurrency_defaults()
+    }
+
+    pub(crate) fn batch_concurrency(&self, requested: Option<usize>) -> Option<usize> {
+        self.entry.runtime.model.batch_concurrency(requested)
     }
 
     pub(crate) fn info(&self) -> &EmbeddingModelInfo {

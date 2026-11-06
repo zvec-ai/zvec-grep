@@ -113,6 +113,13 @@ pub trait EmbeddingModel: Send + Sync {
         EmbeddingConcurrencyDefaults::default()
     }
 
+    /// Resolves the number of batches an operation may dispatch concurrently.
+    /// This can differ from its execution budget, such as CPU threads shared
+    /// across a fixed number of native contexts.
+    fn batch_concurrency(&self, requested: Option<usize>) -> Option<usize> {
+        super::runtime::batch_concurrency(&self.info().model().reference(), requested)
+    }
+
     /// Loads shared local resources before an operation dispatches embedding work.
     /// Remote and already-ready models may keep the default no-op implementation.
     async fn prepare(&self, _options: EmbeddingPrepareOptions) -> Result<(), ModelError> {
