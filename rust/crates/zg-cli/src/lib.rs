@@ -78,7 +78,7 @@ pub use path_lookup::{write_path_lookup_result, write_path_lookup_with_terminals
 pub use render::{
     HelpTopicError, help_text, print_help, write_context_result, write_context_status,
     write_context_status_with_options, write_context_with_options, write_file_paths,
-    write_index_incompatible_error, write_warning,
+    write_index_incompatible_error, write_relationships, write_warning,
 };
 
 #[derive(Debug, Parser)]
@@ -576,6 +576,8 @@ pub struct RelationshipArgs {
     pub glob_rules: Vec<GlobRule>,
     #[arg(long)]
     pub limit: Option<usize>,
+    #[arg(long, value_enum)]
+    pub color: Option<ColorMode>,
     #[arg(long, env = "ZVEC_GREP_MODE", default_value = "auto")]
     pub mode: ClientMode,
     #[arg(long, env = "ZVEC_GREP_HOME")]
@@ -707,6 +709,7 @@ pub enum CliPlan {
     },
     Relationships {
         direction: RelationshipDirection,
+        color: ColorMode,
         mode: ClientMode,
         home: Option<PathBuf>,
         request: RelationshipOptions,
@@ -1457,6 +1460,7 @@ fn relationship_plan(
     request.validate()?;
     Ok(CliPlan::Relationships {
         direction,
+        color: args.color.unwrap_or_default(),
         mode: args.mode,
         home: args.home,
         request,
@@ -2620,6 +2624,8 @@ mod tests {
                 "3",
                 "--mode",
                 "server",
+                "--color",
+                "never",
             ])
             .expect("parse relationship command")
             .into_plan(cwd.clone())
@@ -2627,6 +2633,7 @@ mod tests {
             let CliPlan::Relationships {
                 direction,
                 mode,
+                color,
                 request,
                 ..
             } = plan
@@ -2634,6 +2641,7 @@ mod tests {
                 panic!("relationship plan expected");
             };
             assert_eq!(direction, expected);
+            assert_eq!(color, super::ColorMode::Never);
             assert_eq!(mode, super::ClientMode::Server);
             assert_eq!(request.root, Some(cwd.join("nested")));
             assert_eq!(request.symbol, " Class::method ");

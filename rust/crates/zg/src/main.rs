@@ -230,10 +230,11 @@ async fn execute_plan(plan: CliPlan) -> Result<ExitCode, Box<dyn Error>> {
         CliPlan::Files { request, null } => return Ok(execute_files(*request, null).await),
         CliPlan::Relationships {
             direction,
+            color,
             mode,
             home,
             request,
-        } => execute_relationships(direction, mode, home.as_deref(), request).await,
+        } => execute_relationships(direction, mode, home.as_deref(), request, color).await,
         CliPlan::Query {
             mode,
             home,
@@ -486,6 +487,7 @@ async fn execute_relationships(
     mode: ClientMode,
     home: Option<&Path>,
     request: RelationshipOptions,
+    color: zg_cli::ColorMode,
 ) -> Result<(), Box<dyn Error>> {
     let result = if use_server(mode, home).await? {
         let home = zg_daemon::resolve_home(home.map(Path::to_owned))?;
@@ -504,7 +506,13 @@ async fn execute_relationships(
         engine.close();
         result?
     };
-    writeln!(zg_cli::stdout(), "{}", serde_json::to_string(&result)?)?;
+    zg_cli::write_relationships(
+        zg_cli::stdout(),
+        &result,
+        direction,
+        color,
+        zg_cli::stdout_supports_ansi(),
+    )?;
     Ok(())
 }
 

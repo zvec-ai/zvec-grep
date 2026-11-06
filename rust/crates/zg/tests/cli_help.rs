@@ -160,7 +160,9 @@ fn relationship_help_explains_persisted_edges_and_limit() {
         let help = stdout(&[&format!("--{command}"), "--help"]);
         assert_eq!(help, stdout(&["--help", command]));
         assert!(help.contains("--limit <N>"));
-        assert!(help.contains("truncated"));
+        assert!(help.contains("truncation notice"));
+        assert!(help.contains("readable text"));
+        assert!(help.contains("--color <auto|always|never>"));
         assert!(help.contains("does not refresh or build"));
     }
 }

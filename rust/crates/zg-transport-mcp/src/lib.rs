@@ -340,7 +340,7 @@ impl ZvecGrepMcpServer {
         for name in ["zvec_grep_callers", "zvec_grep_callees"] {
             let route = router.map.get_mut(name).expect("relationship route");
             route.attr.description = route.attr.description.as_ref().map(|description| {
-                format!("{description} Accepts name, scope::name or scope.name; ::name selects top-level definitions. Queries matching more than {MAX_SYMBOL_MATCHES} indexed definitions fail; narrow the scope or use globs. limit counts call sites per definition (default 20, maximum {MAX_RELATIONSHIP_EDGES}); truncated marks omitted sites. Exact misses may return suggestions without edges. Requires graph indexing enabled with zg --index --graph (add --rebuild for an existing index). Reads persisted resolved calls without refreshing; empty results do not prove absence.").into()
+                format!("{description} Accepts name, scope::name or scope.name; ::name selects top-level definitions. Queries matching more than {MAX_SYMBOL_MATCHES} indexed definitions fail; narrow the scope or use globs. limit counts call sites per definition (default 20, maximum {MAX_RELATIONSHIP_EDGES}); truncated marks omitted sites. Exact misses may return suggestions without edges. Text coordinates are one-based; structuredContent columns are zero-based byte offsets. Requires graph indexing enabled with zg --index --graph (add --rebuild for an existing index). Reads persisted resolved calls without refreshing; empty results do not prove absence.").into()
             });
         }
         if toolset == McpToolset::Full {
@@ -386,7 +386,7 @@ impl ZvecGrepMcpServer {
         })
         .await;
         Ok(match result {
-            Ok(result) => relationship_result_to_tool_result(&result),
+            Ok(result) => relationship_result_to_tool_result(&result, direction),
             Err(error) => error_result(&error),
         })
     }
@@ -2237,7 +2237,10 @@ fn output_schema<T: JsonSchema>() -> Arc<rmcp::model::JsonObject> {
     )
 }
 
-fn relationship_result_to_tool_result(result: &RelationshipResult) -> CallToolResult {
+fn relationship_result_to_tool_result(
+    result: &RelationshipResult,
+    direction: RelationshipDirection,
+) -> CallToolResult {
     let output = RelationshipOutput {
         matches: result
             .matches
@@ -2260,7 +2263,16 @@ fn relationship_result_to_tool_result(result: &RelationshipResult) -> CallToolRe
         suggestions: result.suggestions.iter().map(Into::into).collect(),
     };
     let value = serde_json::json!(output);
-    let text = value.to_string();
+    let mut bytes = Vec::new();
+    zg_cli::write_relationships(
+        &mut bytes,
+        result,
+        direction,
+        zg_cli::ColorMode::Never,
+        false,
+    )
+    .expect("writing relationships to a byte buffer cannot fail");
+    let text = String::from_utf8(bytes).expect("relationship output is UTF-8");
     let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
     result.structured_content = Some(value);
     result

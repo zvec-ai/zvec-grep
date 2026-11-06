@@ -185,7 +185,7 @@ impl RelationshipsOnly {
 }
 
 #[tokio::test]
-async fn relationship_wire_calls_route_without_indexing_and_return_matching_json() {
+async fn relationship_wire_calls_route_without_indexing_and_return_text_and_json() {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let provider = Arc::new(RelationshipsOnly {
             calls: Mutex::new(Vec::new()),
@@ -260,10 +260,11 @@ async fn relationship_wire_calls_route_without_indexing_and_return_matching_json
                 }
             );
             let text = value["content"][0]["text"].as_str().expect("text result");
-            assert_eq!(
-                serde_json::from_str::<serde_json::Value>(text).expect("text JSON"),
-                value["structuredContent"]
-            );
+            assert!(text.contains(endpoint), "{text}");
+            assert!(text.contains("(symbol unavailable)"), "{text}");
+            assert!(text.contains("... more call sites omitted"), "{text}");
+            let call_file = if name == "zvec_grep_callers" { "src/edge.rs" } else { "src/subject.rs" };
+            assert!(text.contains(&format!("call at {call_file}:12:1")), "{text}");
         }
         {
             let calls = provider.calls.lock().expect("recorded calls");

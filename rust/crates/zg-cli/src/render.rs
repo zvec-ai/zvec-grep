@@ -1,5 +1,8 @@
 mod compact;
 mod context;
+mod relationships;
+
+pub use relationships::write_relationships;
 
 #[cfg(test)]
 use crate::highlight::QueryHighlighter;
@@ -413,16 +416,18 @@ Options:
   -g, --glob <GLOB>                Workspace-relative glob; prefix ! to exclude; repeatable
   --iglob <GLOB>                   Case-insensitive glob; repeatable
   --limit <N>                      Maximum call sites per matching symbol (default: 20, max: 50)
+  --color <auto|always|never>       Control ANSI colors (default: auto)
   --mode <direct|server|auto>       Select the execution mode (default: auto)
 
 Globs follow the same ordered rules as ordinary search and filter definitions
 and suggestions, not call-site files.
 Names may be scope-qualified, such as Class::method. Same-name definitions are
-returned as separate JSON matches. truncated indicates additional visible call sites beyond the limit.
-Each edge's filePath, line, and column identify the call site in the caller file,
-including calls without symbol metadata. Unresolved references
-are excluded, so empty results do not prove that a relationship is absent.
-Output is one compact JSON object; terminal and piped output use the same format.
+shown separately, with each related definition and its call-site location.
+Call-site locations always refer to the caller file, including calls without
+symbol metadata. Text line and byte-column numbers are one-based.
+A truncation notice indicates additional visible call sites beyond the limit.
+Unresolved references are excluded, so empty results do not prove that a relationship is absent.
+Output is readable text, shared with MCP text content. MCP also returns structured JSON.
 Requires graph indexing enabled with zg --index --graph; add --rebuild for an existing index.
 A query does not refresh or build the index.";
 
