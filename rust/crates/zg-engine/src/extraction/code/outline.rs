@@ -13,6 +13,7 @@ const MAX_CALLS: usize = 24;
 const MAX_MEMBERS: usize = 32;
 const MAX_LINE_CHARS: usize = 180;
 const MAX_OUTLINE_CHARS: usize = 3_600;
+const PHP_OPEN_TAG: &str = "<?php ";
 
 pub(crate) fn code_outline(
     path: &Path,
@@ -38,12 +39,21 @@ pub(crate) fn code_outline(
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("tsx"));
     let mut parser = Parser::new();
-    let mut tree = parse_source(&mut parser, source, format, jsx)?;
-    let mut bytes = source.as_bytes();
+    // Stored PHP entities have no open tag, and the full grammar would read
+    // them as inline HTML. A synthetic tag keeps `?>text<?php` switches valid.
+    let php_source;
+    let parse_input = if format == FileFormat::Php {
+        php_source = format!("{PHP_OPEN_TAG}{source}");
+        php_source.as_str()
+    } else {
+        source
+    };
+    let mut tree = parse_source(&mut parser, parse_input, format, jsx)?;
+    let mut bytes = parse_input.as_bytes();
     let wrapped_source;
     if matches!(
         format,
-        FileFormat::Java | FileFormat::JavaScript | FileFormat::TypeScript
+        FileFormat::Java | FileFormat::JavaScript | FileFormat::Php | FileFormat::TypeScript
     ) && metadata.symbol_type == Some(SymbolType::Function)
         && !has_complete_entity(
             tree.root_node(),
@@ -54,7 +64,12 @@ pub(crate) fn code_outline(
     {
         // Stored methods and constructors lack their class body; restore that
         // syntax before finding calls, including calls in constructor arguments.
-        wrapped_source = format!("class OutlineContainer {{\n{source}\n}}");
+        let open_tag = if format == FileFormat::Php {
+            PHP_OPEN_TAG
+        } else {
+            ""
+        };
+        wrapped_source = format!("{open_tag}class OutlineContainer {{\n{source}\n}}");
         tree = parse_source(&mut parser, &wrapped_source, format, jsx)?;
         bytes = wrapped_source.as_bytes();
     }
@@ -102,7 +117,8 @@ pub(crate) fn code_outline(
 }
 
 fn parse_source(parser: &mut Parser, source: &str, format: FileFormat, jsx: bool) -> Option<Tree> {
-    parser.set_language(&grammar(format, jsx)?).ok()?;
+    let language = grammar(format, jsx)?;
+    parser.set_language(&language).ok()?;
     let tree = parser.parse(source, None)?;
     if format == FileFormat::TypeScript && !jsx && tree.root_node().has_error() {
         // Stored component snippets do not retain script lang="tsx". Recover
@@ -157,6 +173,7 @@ fn outline_format(path: &Path, language: Option<Language>) -> Option<FileFormat>
             Language::Go => FileFormat::Go,
             Language::Java => FileFormat::Java,
             Language::JavaScript => FileFormat::JavaScript,
+            Language::Php => FileFormat::Php,
             Language::Python => FileFormat::Python,
             Language::Rust => FileFormat::Rust,
             Language::TypeScript => FileFormat::TypeScript,
@@ -244,16 +261,19 @@ fn collect_calls(root: Node<'_>, source: &[u8], calls: &mut Vec<String>) {
             "call"
                 | "call_expression"
                 | "function_call_expression"
+                | "member_call_expression"
                 | "method_invocation"
+                | "nullsafe_member_call_expression"
                 | "object_creation_expression"
                 | "new_expression"
+                | "scoped_call_expression"
         ) {
             let target = ["function", "name", "constructor", "type"]
                 .into_iter()
                 .find_map(|field| node.child_by_field_name(field))
                 .or_else(|| node.named_child(0));
             if let Some(target) = target
-                && let Ok(text) = target.utf8_text(source)
+                && let Ok(text) = call_target_text(node, target, source)
             {
                 let name = one_line(text);
                 let name = name.strip_prefix("new ").unwrap_or(&name).trim();
@@ -269,6 +289,34 @@ fn collect_calls(root: Node<'_>, source: &[u8], calls: &mut Vec<String>) {
         }
         pending.extend(named_children(node).into_iter().rev());
     }
+}
+
+// PHP member and static calls name only the method, so the receiver or class
+// stays in the target and `Audit::record` and `Ledger::record` remain distinct.
+fn call_target_text<'a>(
+    call: Node<'_>,
+    target: Node<'_>,
+    source: &'a [u8],
+) -> Result<&'a str, std::str::Utf8Error> {
+    let receiver = match call.kind() {
+        "member_call_expression" | "nullsafe_member_call_expression" => {
+            call.child_by_field_name("object")
+        }
+        "scoped_call_expression" => call.child_by_field_name("scope"),
+        _ => None,
+    };
+    let name = target.utf8_text(source)?;
+    let Some(receiver) = receiver else {
+        return Ok(name);
+    };
+    let qualified = std::str::from_utf8(&source[receiver.start_byte()..target.end_byte()])?;
+    // A long receiver, such as a chained call with closure arguments, would
+    // push the target past the line limit, so the bare method name stands in.
+    Ok(if qualified.chars().count() <= MAX_LINE_CHARS {
+        qualified
+    } else {
+        name
+    })
 }
 
 fn one_line(value: &str) -> String {
@@ -634,5 +682,55 @@ mod tests {
         assert_eq!(calls.split(", ").count(), MAX_CALLS);
         assert!(calls.ends_with("call_23"));
         assert_eq!(clip("中文测试", 3), "...");
+    }
+
+    #[test]
+    fn stored_php_entities_outline_without_an_open_tag() {
+        let method = code_outline(
+            Path::new("Charger.php"),
+            &Content::Code(
+                "public function charge(int $cents): bool {\n  $this->wallet->debit($cents);\n  return Audit::record(helper($cents)) ?? $this->log?->flush();\n}"
+                    .into(),
+            ),
+            Some(&metadata(SymbolType::Function, "charge")),
+        )
+        .expect("php method outline");
+        assert!(
+            method.ends_with(
+                "calls: $this->wallet->debit, Audit::record, helper, $this->log?->flush"
+            ),
+            "{method}"
+        );
+
+        // Same-named methods on different classes stay distinct, and template
+        // text between PHP tags is not mistaken for calls.
+        let template = code_outline(
+            Path::new("view.php"),
+            &Content::Code(
+                "function render() {\n  Audit::record();\n  Ledger::record();\n  record();\n  ?>page text<?php\n  track();\n}"
+                    .into(),
+            ),
+            Some(&metadata(SymbolType::Function, "render")),
+        )
+        .expect("php template outline");
+        assert!(
+            template.ends_with("calls: Audit::record, Ledger::record, record, track"),
+            "{template}"
+        );
+
+        let class = code_outline(
+            Path::new("Charger.php"),
+            &Content::Code(
+                "class Charger {\n  public const int MAX = 1;\n  public function __construct(private Wallet $wallet) {}\n}"
+                    .into(),
+            ),
+            Some(&metadata(SymbolType::Class, "Charger")),
+        )
+        .expect("php class outline");
+        assert!(
+            class.contains("- value public const int MAX = 1"),
+            "{class}"
+        );
+        assert!(class.contains("- value private Wallet $wallet"), "{class}");
     }
 }
