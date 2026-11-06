@@ -260,6 +260,19 @@ impl WorkspaceIndexService {
         // pass's signal, so a cancelled pass stops resolving, keeps the
         // remaining references queued, and releases this writer below.
         let result = result.inspect(|_indexed| {
+            // An incremental pass patches the previous graph: rows it resolved
+            // in an earlier pass are invisible to the sweep, so a changed name
+            // candidate set or import path would never reach them. Requeue
+            // them first. A rebuild writes a fresh graph and has none.
+            if !rebuilding {
+                match writer.session.storage.requeue_stale_resolutions() {
+                    Ok(0) => {}
+                    Ok(requeued) => tracing::debug!(requeued, "requeued stale references"),
+                    Err(error) => {
+                        tracing::warn!(%error, "reference requeue failed; resolutions stay stale");
+                    }
+                }
+            }
             match super::graph_resolver::resolve_pending(
                 &writer.session.storage,
                 options.signal.as_ref(),

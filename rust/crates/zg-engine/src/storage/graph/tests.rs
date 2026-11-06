@@ -309,6 +309,73 @@ fn file_level_import_targets_are_invalidated_without_entity_ids() {
 }
 
 #[test]
+fn writable_open_adds_the_index_a_database_was_built_without() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("graph.sqlite");
+    let mut db = open(&path);
+    db.write_file_graph(
+        1,
+        None,
+        &graph(&["a"], vec![], vec![reference("a", "target")]),
+        &[],
+    )
+    .expect("write");
+    drop(db);
+
+    let raw = Connection::open(&path).expect("inspect");
+    raw.execute("DROP INDEX edges_name_tail", [])
+        .expect("drop index");
+    let index_sql = |raw: &Connection| {
+        raw.query_row(
+            "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = 'edges_name_tail'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+    };
+    assert!(index_sql(&raw).is_none());
+    drop(raw);
+
+    let _db = open(&path);
+    let raw = Connection::open(&path).expect("inspect");
+    let sql = index_sql(&raw).expect("index restored by a writable open");
+    assert!(sql.contains("name_tail"), "index covers name_tail: {sql}");
+    assert!(
+        sql.contains("reference_name IS NOT NULL"),
+        "index stays partial on the probe predicate: {sql}"
+    );
+    assert_eq!(
+        raw.query_row("SELECT count(*) FROM edges", [], |row| row.get::<_, i64>(0))
+            .expect("rows survive"),
+        1
+    );
+}
+
+#[test]
+fn requeue_matches_a_name_that_only_appears_as_the_receiver() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    db.write_file_graph(
+        1,
+        None,
+        &graph(&["a"], vec![], vec![reference("a", "target")]),
+        &[],
+    )
+    .expect("write");
+    let resolution = proposal(&db, "b");
+    db.apply_resolutions(&[resolution]).expect("resolve");
+    assert_eq!(db.list_pending_refs(100, 0).expect("pending").refs.len(), 0);
+
+    // `reference` stores the receiver `module` and the name tail `target`, so
+    // only the receiver arm can match `module`.
+    assert_eq!(
+        db.requeue_stale_resolutions(&["module".into()], false, false)
+            .expect("requeue"),
+        1
+    );
+    assert_eq!(db.list_pending_refs(100, 0).expect("pending").refs.len(), 1);
+}
+
+#[test]
 fn pagination_is_pending_only_and_readers_do_not_truncate_edges() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
     let refs = (0..=MAX_PENDING_PAGE_SIZE)
