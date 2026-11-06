@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
 BENCHMARK_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = BENCHMARK_ROOT / "benchmark.toml"
 DEFAULT_ARTIFACTS_DIR = BENCHMARK_ROOT / "artifacts"
@@ -46,6 +45,10 @@ class RunConfig:
     trials_per_case: int
     infrastructure_retries: int
     idle_timeout_seconds: int
+    temperature: float = 0.0
+    seed: int = 42
+    max_output_tokens: int = 32000
+    context_limit: int = 1000000
 
 
 @dataclass(frozen=True)
@@ -117,3 +120,8 @@ def _validate(config: BenchmarkConfig) -> None:
         raise ConfigError("run model cannot be empty")
     if not config.run.reasoning_effort.strip():
         raise ConfigError("run reasoning_effort cannot be empty")
+
+    if not 0 <= config.run.temperature <= 2:
+        raise ConfigError("temperature must be between 0 and 2")
+    if not 0 < config.run.max_output_tokens < config.run.context_limit:
+        raise ConfigError("max_output_tokens must be positive and below context_limit")

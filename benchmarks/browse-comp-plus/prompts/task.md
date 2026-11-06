@@ -1,6 +1,16 @@
 Answer the following question using only the local corpus in the current directory.
 Do not use the internet.
 
+The absolute path of the current directory and corpus root is:
+
+```text
+{workspace_root}
+```
+
+When a tool requires an absolute corpus root or document path, copy this directory
+exactly, preserving all punctuation and spaces. Append the document filename when
+needed; do not reconstruct the directory name.
+
 Question:
 
 {query}

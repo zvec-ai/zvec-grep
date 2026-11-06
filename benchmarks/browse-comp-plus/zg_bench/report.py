@@ -274,11 +274,26 @@ def _tool_interaction_batches(
     rounds: list[dict[str, set[str]]] = []
     active: set[str] = set()
     round_by_item: dict[str, int] = {}
+    opencode_rounds: dict[str, int] = {}
     with events_path.open(encoding="utf-8", errors="replace") as source:
         for line in source:
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
+                continue
+            if event.get("type") == "tool_use":
+                # OpenCode emits completed tools only, so model message IDs
+                # group parallel calls into the same interaction batch.
+                part = event.get("part") or {}
+                message_id = str(part.get("messageID", part.get("id", "")))
+                if message_id not in opencode_rounds:
+                    opencode_rounds[message_id] = len(rounds)
+                    rounds.append({"evidence": set(), "gold": set()})
+                round_index = opencode_rounds[message_id]
+                state = part.get("state") or {}
+                observed = extract_docids(state.get("input"), state.get("output"))
+                rounds[round_index]["evidence"].update(observed & evidence)
+                rounds[round_index]["gold"].update(observed & gold)
                 continue
             item = event.get("item") or {}
             item_type = item.get("type")
@@ -345,9 +360,17 @@ def _interaction_quality(
         gold = _expected_docids(query["gold_docs"])
         for profile in PROFILES:
             result = _result(trial, profile)
+            # Evidence may have moved from a case runner to the aggregate runner.
+            # Keep raw result bytes intact: smoke audits hash the original result.
+            events = (
+                Path(trial[profile]["result"]).parent
+                / "attempts"
+                / f"attempt-{int(result['attempt']):03d}"
+                / "events.jsonl"
+            )
             values[profile].append(
                 _tool_interaction_batches(
-                    Path(result["paths"]["events"]), evidence=evidence, gold=gold
+                    events, evidence=evidence, gold=gold
                 )
             )
 
@@ -672,9 +695,18 @@ def _environment_rows(environment: dict[str, Any]) -> str:
         ("CPU", environment["cpu_model"]),
         ("CPU count", cpu_counts),
         ("Python", environment["python"]),
-        ("Codex", environment["codex_version"]),
-        ("Codex executable", environment["codex_bin"]),
-        ("Codex sandbox", environment["codex_sandbox"]),
+        (
+            "Agent",
+            environment.get("opencode_version", environment.get("codex_version", "-")),
+        ),
+        (
+            "Agent executable",
+            environment.get("opencode_bin", environment.get("codex_bin", "-")),
+        ),
+        (
+            "Agent isolation",
+            environment.get("agent_isolation", environment.get("codex_sandbox", "-")),
+        ),
         ("Web search", environment["web_search"]),
         ("History persistence", environment["history_persistence"]),
         (
