@@ -77,25 +77,67 @@ remains line-oriented.
 Index embedding concurrency is configured with
 `zg --index --embedding-concurrency <n>`.
 The option is rejected outside `--index`. For automatic indexing and
-refreshes as well, set `ZVEC_GREP_EMBEDDING_CONCURRENCY=<n>`. Values must be
-positive integers. Explicit CLI/API index settings take precedence over this
+refreshes as well, set `ZVEC_GREP_EMBEDDING_CONCURRENCY=<n>`. Transformers/ORT clamps
+unsigned integers to its supported range, including zero to one; other backends
+require positive integers. Explicit CLI/API index settings take precedence over this
 environment variable, followed by the legacy
 `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` for llama.cpp indexing, then backend defaults.
 Invalid environment values warn and select the automatic default. These overrides
-do not configure query-vector inference and are not persisted in workspace settings.
+do not configure a separate query worker and are not persisted in workspace settings.
 Direct and Server indexing use the same engine boundary; restart the Server after
 changing its inherited environment, while explicit CLI overrides need no restart.
 
 For llama.cpp, the limit controls contexts within a serialized batch and is capped
-at eight, defaulting to one. Transformers/ORT limits in-flight batches to at most
-eight, defaulting to one. ORT may create sessions within this budget;
-CoreML retains one physical session. Potion/model2vec defaults to two batch tasks
-and retains an independent CPU worker capacity; remote models retain adaptive
-request scheduling. Model2vec and remote overrides are not capped at eight.
+at eight, defaulting to one. Transformers/ORT shares a bounded runtime between
+indexing and queries for the same model, cache and device:
 
-Matching local concurrency configurations share runtime admission. Different
-configurations use separate cached native resources; active leases keep their
-models alive, while unused variants are released when switching configurations.
+- `ZVEC_GREP_ORT_SESSION=S` fixes the number of Sessions in each CPU or CUDA model
+  runtime. Both default to one. A positive integer is required; invalid values
+  warn and use one. Each model/device runtime creates its own S Sessions during
+  preparation, including Sessions not currently executing work. This is not a
+  process-wide total. Restart the Server after changing its environment.
+- CPU uses C to request a total intra-op thread budget, clamped to available
+  hardware threads; the default is half the available threads, rounded up.
+  Initially each of the S Sessions uses `max(1, floor(C/S))` threads. A larger
+  per-Session request drains native work and reconfigures the fixed pool once.
+  Smaller requests reuse the largest configuration admitted during this runtime's
+  lifetime: lowering C does not reduce its actual thread budget or retained
+  memory. This avoids rebuilding Sessions when Server clients use different C.
+  Queries reuse that configuration. A warning reports reuse of a larger pool
+  once per retained configuration; diagnostics show actual threads separately
+  from requested C. Unloading the runtime or restarting the Server resets it.
+  When C < S, at least S threads are required; an existing pool may retain more.
+  Rounding may leave some of C unused. Tokenization and pooling have a separate
+  shared CPU budget, so C does not cap all process threads.
+- CUDA uses C as the number of simultaneous document inference batches, defaulting
+  to one. C > S warns and executes at S. Each Session exclusively owns its fixed
+  worker thread; no Session receives concurrent Run calls. Lowering C keeps all S
+  Sessions and their resident memory. A query can use any idle Session, with at
+  most one query batch executing alongside document work.
+  Document batching is independent of this budget: MiniLM combines up to four
+  similar-length requests, 16 inputs and 4,096 padded tokens, waiting at most 1 ms
+  for aggregation. Other ONNX models retain their catalog batch and token ceilings.
+  Queries run first without waiting to fill a batch; running inference is not
+  preempted. CPU preparation and pooling overlap native execution.
+- Pending inputs have separate document/query limits: document admission is S+2
+  requests on CPU and 4*(S+1) on CUDA; queries have four slots. Copied text remains
+  bounded by 32/8 MiB respectively, with at most 8 MiB per request. Full queues apply
+  cancellable backpressure. A cancelled member of a merged batch does not cancel
+  other members. Native work retains runtime ownership until it settles.
+
+The effective backend budget is reported when it differs from the request.
+Admission includes bounded prefetch capacity and is independent of C, so a single
+executing Session can prepare its next batch in advance. Extra Sessions allocate
+their own weights and workspaces; batch activations also contribute to memory.
+Initialization failure releases the partial pool before CPU fallback; inference
+fallback drains GPU work and converts all S Sessions to CPU. The CLI option does
+not change pool size or batch limits. Diagnostics report actual Sessions, threads
+per Session, total native threads, and actual native batch sizes separately.
+
+Potion/model2vec defaults to two batch tasks and retains an independent CPU worker
+capacity; remote models retain adaptive request scheduling. Their overrides are
+not capped at eight. llama.cpp continues to cache separate native resources for
+different fixed context budgets, retiring unused variants when switching.
 
 `zg --install --upgrade-installed` migrates existing user-level MCP launchers
 from 0.2.x without selecting agents or installing new integrations. It changes

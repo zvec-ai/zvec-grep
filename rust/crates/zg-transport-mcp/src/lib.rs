@@ -789,8 +789,8 @@ pub struct SearchInput {
     /// Exclude matching file-name categories, taking precedence over categories.
     pub excluded_categories: Option<PathListInput>,
     /// Index-only refresh budget; query-vector inference keeps its own defaults.
-    /// Controls llama.cpp contexts or concurrent batches/requests for other backends.
-    #[schemars(range(min = 1), extend("type" = "integer"))]
+    /// Transformers clamp zero to one and apply backend resource limits; other backends require a positive value.
+    #[schemars(range(min = 0), extend("type" = "integer"))]
     pub embedding_concurrency: Option<usize>,
     /// Collapse all query groups into one ranked plan.
     #[schemars(extend("type" = "boolean"))]
@@ -871,9 +871,9 @@ pub struct IndexInput {
     #[serde(rename = "follow", alias = "followSymlinks")]
     #[schemars(extend("type" = "boolean"))]
     pub follow_symlinks: Option<bool>,
-    /// Index-only execution budget: llama.cpp contexts, local batches, or remote requests.
-    /// llama.cpp and Transformers limits are capped at eight.
-    #[schemars(range(min = 1), extend("type" = "integer"))]
+    /// Index-only execution budget: CPU threads or CUDA execution lanes for Transformers, llama.cpp contexts, or remote requests.
+    /// Transformers clamp zero to one and apply backend resource limits; other backends require a positive value. llama.cpp is capped at eight.
+    #[schemars(range(min = 0), extend("type" = "integer"))]
     pub embedding_concurrency: Option<usize>,
     /// Include bounded skipped-file diagnostics after completion.
     #[schemars(extend("type" = "boolean"))]
@@ -1539,9 +1539,6 @@ impl SearchInput {
         {
             return Err(format!("limit must be between 1 and {MAX_SEARCH_LIMIT}"));
         }
-        if self.embedding_concurrency == Some(0) {
-            return Err("embeddingConcurrency must be greater than zero".to_owned());
-        }
         if self.symbol_types.len() > 7 {
             return Err("symbolTypes accepts at most 7 values".to_owned());
         }
@@ -1654,9 +1651,6 @@ impl IndexInput {
         }
         if let Some(api_key) = &self.api_key {
             validate_text("apiKey", api_key, 1, 8_192)?;
-        }
-        if self.embedding_concurrency == Some(0) {
-            return Err("embeddingConcurrency must be greater than zero".to_owned());
         }
         if let Some(endpoint) = &self.endpoint {
             validate_text("endpoint", endpoint, 1, 2_048)?;
@@ -3149,7 +3143,7 @@ mod tests {
                     assert!(property.get("anyOf").is_none());
                     assert!(property.get("oneOf").is_none());
                 }
-                assert_eq!(schema["properties"]["embeddingConcurrency"]["minimum"], 1);
+                assert_eq!(schema["properties"]["embeddingConcurrency"]["minimum"], 0);
                 if tool.name == AGENT_TOOL_NAME {
                     assert_eq!(schema["properties"]["limit"]["minimum"], 1);
                     assert_eq!(schema["properties"]["limit"]["maximum"], 50);
@@ -3210,6 +3204,33 @@ mod tests {
         let typed: SearchInput = serde_json::from_value(arguments).expect("typed arguments");
         assert_eq!(typed.limit, Some(15));
         assert_eq!(typed.fuse, Some(true));
+    }
+
+    #[test]
+    fn zero_embedding_concurrency_is_forwarded_for_model_specific_validation() {
+        let search = serde_json::from_value::<SearchInput>(serde_json::json!({
+            "root": test_root(),
+            "query": "needle",
+            "embeddingConcurrency": 0,
+        }))
+        .expect("nonnegative concurrency")
+        .into_request()
+        .expect("saved model is resolved by the engine");
+        assert_eq!(search.embedding_concurrency, Some(0));
+        for reference in ["local/all-minilm-l6-v2", "local/potion-code-16m-v2"] {
+            let request = serde_json::from_value::<IndexInput>(serde_json::json!({
+                "root": test_root(),
+                "embedding": reference,
+                "embeddingConcurrency": 0,
+            }))
+            .expect("nonnegative concurrency")
+            .into_request()
+            .expect("model-specific validation belongs to the engine");
+            let IndexToolRequest::Index { options, .. } = request else {
+                panic!("index request");
+            };
+            assert_eq!(options.embedding_concurrency, Some(0));
+        }
     }
 
     #[test]

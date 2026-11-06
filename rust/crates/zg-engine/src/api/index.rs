@@ -47,8 +47,9 @@ pub mod options {
         pub scan: ScanRulesUpdate,
         /// The single model used to embed text content in this workspace.
         pub embedding: Option<EmbeddingModelSpec>,
-        /// Index-only embedding concurrency: llama.cpp contexts, local inference
-        /// batches, or remote requests. Local native limits are capped at eight.
+        /// Index-only embedding concurrency: llama.cpp contexts (up to eight),
+        /// ORT CPU threads (up to available hardware threads), ORT CUDA execution
+        /// lanes (up to two), or remote requests. ORT clamps zero to one.
         /// Omitted values use `ZVEC_GREP_EMBEDDING_CONCURRENCY`, the legacy
         /// llama.cpp index override, then the backend default; never persisted.
         pub embedding_concurrency: Option<usize>,

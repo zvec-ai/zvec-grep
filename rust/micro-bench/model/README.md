@@ -10,7 +10,8 @@ engine's normal postprocessing. Scanning, chunking, storage and retrieval are
 outside this boundary. Model correctness is covered by the model tests, not this
 micro-benchmark: there are no token-length, vector-value, normalization,
 repeatability or truncation checks, and no boundary-audit prerequisite. The
-benchmark adds no backend/runtime statistics probes.
+benchmark also snapshots optional backend-neutral execution diagnostics exposed
+by the runtime; it does not call backend-specific measurement APIs.
 
 ## Matrix and input generation
 
@@ -35,7 +36,8 @@ MODEL/DEVICE/lL/bBATCH/cCONCURRENCY/r01/result.json
 Generate a deterministic pool of eight input variants, each containing L
 whitespace-separated words. Use the same `EmbeddingPurpose::Document` format for
 every call. Record generator identity, input hashes and byte counts. Do not run a
-tokenizer probe or inspect how the backend transforms the inputs. Prefixes,
+separate tokenizer probe. Native row/token counters describe actual execution;
+they do not validate model outputs. Prefixes,
 special tokens, token filtering and truncation remain ordinary engine behavior.
 
 **L is the number of whitespace-separated words per generated input, not the
@@ -51,22 +53,55 @@ record the number of returned vectors without asserting its size or contents.
 
 ## Concurrency and device configuration
 
-Use production `resolve_index_concurrency` and `batch_concurrency`. Clear inherited
+Use production `resolve_index_concurrency` and
+`model.index_batch_concurrency(index_limit)`, falling back to the model's initial
+concurrency only when no explicit admission policy is provided. Clear inherited
 indexing concurrency overrides so `default` uses the backend default:
 
 - llama.cpp has one in-flight batch; C controls native context parallelism within it.
-- Transformers/ONNX uses the production in-flight batch limit, capped at eight;
-  its current default is one.
+- Transformers/ONNX separates execution C from admission/prefetch Q. CPU C
+  controls native threads, clamped to the available logical hardware threads;
+  CUDA C controls the bounded native execution lanes. The runtime selects Q.
 - model2vec uses its production default (currently two) or the explicit budget.
 
-Record requested C, resolved runtime budget and configured in-flight batch count.
+Record requested C, resolved index budget, effective execution budget and actual
+admission worker count. The benchmark starts exactly the production admission Q.
 `default` remains a distinct case from an explicit value even if they resolve to
 the same budget. Do not add extra batch workers on top of a native context budget.
 
-The fixed first column records the **requested device only**. Actual execution device
-and fallback are not verified. External GPU utilization is a resource observation,
-not evidence that this case executed on that GPU. Do not infer a provider from
-CPU/GPU activity.
+The first column records requested device and, when runtime diagnostics are
+available, actual provider, effective C, Q, native session count, CPU threads and
+mean native batch rows. An observed `METAL → cpu` is explicitly labeled CPU
+fallback. The provider is the backend's observation, not inferred from CPU/GPU
+activity; it does not assert that every graph node ran on an accelerator. Older
+records without diagnostics retain their requested-device label without inventing
+an actual provider. External GPU utilization is device-wide, including activity
+from other applications even for a CPU-fallback case.
+
+The default matrix retains production dynamic batching. Batch rows, padded-token
+budget, length bucketing and the coalescing window are independent of execution C.
+Coalesced batches share the catalog's per-model batch limit (4 rows for MiniLM).
+Full batches execute immediately; smaller requests can merge within that limit.
+Run a **separate** output directory with `--fixed-batch` to disable cross-request
+coalescing and compare CUDA C=1 versus C=2 at the same actual native batch shape.
+This flag applies to warmup and measured calls, is fingerprinted in the profile,
+and is labeled in the report title. Verify observed native batch rows before
+attributing throughput differences to execution parallelism. Production and
+fixed-batch profiles measure different workloads and must not be merged.
+
+`--ort-sessions S` sets the production `ZVEC_GREP_ORT_SESSION` pool count for each
+fresh process (default 1; ambient shell values are overridden). Use separate
+output directories for different S values. `--clients K` fixes the closed-loop
+caller count independently of runtime admission; omit it to retain production
+admission. Both settings are fingerprinted and checked against observed results.
+Keep K and actual native batch shapes fixed when comparing session configurations.
+Reports separate client count K, admission Q, actual Sessions, threads per Session,
+total native threads and native batch rows. Call latency includes runtime admission.
+In a shared CPU runtime, only requests for a larger per-Session thread count
+reconfigure the pool. Smaller C retains its largest admitted configuration;
+resolved/effective request C is not the actual retained thread budget. Use
+`cpu_threads` and `cpu_threads_total` for actual native thread configuration.
+Fresh-process shape cases start without a previous larger budget.
 
 The known CPU-only model2vec capability can skip non-CPU cases. Save a bound
 `case-status.json` with the reason, keep its table row, and omit its measurement
@@ -111,6 +146,17 @@ storage-cold timing.
   are separate from known batch timeout counts. Missing batch evidence is N/A or
   explicitly partial, never an invented zero or one. Keep counts and failure
   information in JSON rather than a table column.
+- **Execution diagnostics:** retain snapshots immediately before and after the
+  measured phase. Subtract cumulative prepared-batch, native-run, native-row,
+  padded-token and preparation/inference/postprocessing/queue-wait nanosecond
+  counters to exclude warmup. Native shape and in-flight peaks are explicitly
+  scoped to the entire runtime, including warmup. Phase timers are summed work,
+  not elapsed phase time; concurrent work can exceed wall time. Queue wait is
+  submission-to-native-start and includes preparation/coalescing, so these timers
+  are not additive. Session count is the live end-of-phase gauge; before/after
+  snapshots retain any lazy lane initialization. CPU threads is the configured
+  ORT intra-op thread count per session, not the process's total thread count.
+  Preserve per-round values in aggregate JSON.
 - **RSS:** process RSS sampling peak during embedding. It includes the harness,
   request records and allocator caches, and is not an exact allocation peak.
 - **GPU memory:** embedding-phase process GPU memory peak when observable.
@@ -157,13 +203,17 @@ whose completion marker exists but required evidence files are missing.
 
 Python checks measurement records: case identity, request IDs, input scheduling,
 timestamps, counts, throughput arithmetic, percentile calculations and planned
-coverage. It does not verify model outputs, actual token lengths or providers.
+coverage. When execution diagnostics exist, check snapshot deltas, resource
+identity, peak scope, actual admission workers and fixed-batch shape limits. This
+checks recorded evidence, not model outputs or independent provider correctness.
 `protocol_pass` means execution and measurement-accounting success, not model
 correctness. Performance-comparison eligibility additionally requires the
 baseline profile and adequate resource sampling. Unavailable metrics stay N/A.
 
 Schema 5 uses new result directories. Do not rewrite or resume historical v3/v4
-datasets under this protocol.
+datasets under this protocol. Execution diagnostics and batching profile fields
+are additive to schema 5; older schema 5 records without them remain readable.
+The new policy/source fingerprint still requires a fresh experiment directory.
 
 ## Single-table output
 
@@ -174,7 +224,7 @@ title, hardware/OS information and a filter field. Historical reports may fill
 missing hardware labels from a timestamped `environment-extra.json` bound to the
 original machine record; never replace recorded values or modify the manifest.
 
-1. Model / L / B / C / requested device, for example `L=32 · B=1 · C=1 · CPU`.
+1. Model / L / B / requested C/device, plus observed execution diagnostics when available.
 2. Batch p50 latency in milliseconds.
 3. Vector throughput in vectors/s.
 4. Embedding-phase RSS peak in MiB.
@@ -212,6 +262,39 @@ python3 micro-bench/model/suite.py --build-json build-v5.jsonl --cache /absolute
 python3 micro-bench/model/verify.py /absolute/results-v5
 ```
 
+For a fixed-batch CUDA execution comparison, use a separate output directory and
+append `--models local/all-minilm-l6-v2 --devices cuda --embedding-concurrency 1 2
+--fixed-batch`. The ordinary MiniLM production matrix omits `--fixed-batch`.
+
 Use `--models` for a subset, `--devices cpu` for CPU-only execution and `--smoke`
 for bounded runner validation. Build and runner tests precede performance runs;
 no correctness audit is required to start a measurement.
+
+## Timing diagnostics
+
+`backend_to_native_ns` sums each request's time from backend submission to native
+inference start. It includes preparation and scheduling, and excludes waiting for
+runtime/backend admission. It overlaps `preparation_ns`: do not add these fields
+to reconstruct latency. Preparation/inference/postprocessing are summed work time,
+not a disjoint wall-time breakdown. Use `call_latency` for the full runtime call,
+including admission. Historical records called this same overlapping measurement
+`queue_wait_ns`; their values are preserved. `pool_reconfigurations` counts
+successful whole-pool CPU reconfigurations, excluding initial preparation.
+
+## Optional mixed MiniLM regression
+
+The ignored `models::tests::model_micro_bench::mixed_minilm::cached_minilm_documents_and_queries`
+test uses the same pinned cache and a release build. Set `ZG_MODEL_BENCH_MODEL=local/all-minilm-l6-v2`,
+`ZG_MODEL_BENCH_CACHE`, `ZG_MODEL_BENCH_DEVICE=cpu|cuda` and `ZVEC_GREP_ORT_SESSION`.
+It runs eight document clients and one query client through shared runtime leases,
+first with equal document budgets, then mixed budgets (CPU 16/8, CUDA 8/1).
+Each scenario lasts at least 15 seconds and collects at least 100 query calls;
+every result is checked against fixed-batch reference vectors. CPU machines must
+expose at least 16 hardware threads for these two budgets to be distinct.
+The higher budget prepares each scenario; lower-budget requests must then reuse
+the pool with zero rebuilds. `ZG_MIXED_RESULT` contains request timestamps,
+p50/p95 latency, actual retained threads per request and pool rebuilds. The
+separate `cached_minilm_fixed_session_pool_matches_single_session` test checks
+growth and reuse with C=1/8/1/16/1 for S=1/2/4, including output correctness.
+This is a correctness/latency regression, not a performance-only shape case or
+an end-to-end indexing/storage/retrieval benchmark.

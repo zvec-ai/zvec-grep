@@ -74,6 +74,10 @@ pub(crate) trait IndexEmbeddingRuntime: Send + Sync {
 
     fn concurrency_defaults(&self) -> EmbeddingConcurrencyDefaults;
 
+    fn batch_concurrency(&self, requested: Option<usize>) -> Option<usize> {
+        crate::models::batch_concurrency(&self.info().model().reference(), requested)
+    }
+
     async fn prepare(
         &self,
         options: EmbeddingPrepareOptions,
@@ -90,6 +94,9 @@ pub(crate) trait IndexEmbeddingRuntime: Send + Sync {
 
 #[async_trait]
 impl IndexEmbeddingRuntime for ModelRuntimeLease {
+    fn batch_concurrency(&self, requested: Option<usize>) -> Option<usize> {
+        self.index_batch_concurrency(requested)
+    }
     fn info(&self) -> &EmbeddingModelInfo {
         self.info()
     }
@@ -1646,11 +1653,16 @@ fn resolve_index_batch_policy(
     requested: Option<usize>,
     model: &dyn IndexEmbeddingRuntime,
 ) -> Result<EmbeddingConcurrencyPolicy, EngineError> {
-    if requested == Some(0) {
+    if requested == Some(0)
+        && !matches!(
+            crate::models::get_embedding_model_catalog_entry(&model.info().model().reference()),
+            Some(crate::models::EmbeddingCatalogEntry::Transformers(_))
+        )
+    {
         return resolve_embedding_policy(requested, model.concurrency_defaults());
     }
     resolve_embedding_policy(
-        crate::models::batch_concurrency(&model.info().model().reference(), requested),
+        model.batch_concurrency(requested),
         model.concurrency_defaults(),
     )
 }

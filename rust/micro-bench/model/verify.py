@@ -9,6 +9,7 @@ import statistics
 from measurement import checked_accounting, case_identity, case_path, fingerprint, matrix_cases
 from evidence import missing_round_evidence, save
 from report import HEADERS, display
+from execution import execution_label, validate_controls
 
 
 def check_table(cases, rounds, records_by_case, skipped_cases, table, metrics):
@@ -49,6 +50,20 @@ def check_table(cases, rounds, records_by_case, skipped_cases, table, metrics):
             for r in records for name in ("issued","completed","errors","timeout"))
         label = (f'{case["model"].removeprefix("local/")} · L={case["input_tokens"]} '
                  f'· B={case["batch_size"]} · C={case["budget"]} · {case["device"].upper()}')
+        execution = []
+        for record in successful:
+            benchmark = record.get("benchmark") or {}
+            observed = value(benchmark,("embedding","execution"))
+            if observed is None:
+                continue
+            entry = dict(observed["measured"])
+            for name in ("effective_execution_concurrency", "admission_concurrency", "index_inflight_batches"):
+                entry[name] = benchmark.get(name)
+            entry["native_batch_rows_mean"] = entry["native_rows"]/entry["native_runs"] if entry["native_runs"] else None
+            entry["counter_scope"],entry["peak_scope"] = observed["counter_scope"],observed["peak_scope"]
+            execution.append(entry)
+        if execution:
+            label += " · " + execution_label(execution)
         expected_row = [label,display(expected_metrics["batch_p50"],3,False),
             display(expected_metrics["vectors_s"]),display(expected_metrics["rss_peak_mib"]),
             display(expected_metrics["vram_peak_mib"]),
@@ -58,6 +73,8 @@ def check_table(cases, rounds, records_by_case, skipped_cases, table, metrics):
                 or any(r.get("hard_timeout") for r in records) or counts["errors"] or counts["timeout"] or not complete):
             expected_row[1:] = ["-"]*(len(HEADERS)-1)
         aggregate = by_case[key]
+        if aggregate.get("execution", []) != execution:
+            errors.append(f"{label}: aggregate execution diagnostics disagree with raw rounds")
         if aggregate.get("metrics") != expected_metrics:
             errors.append(f"{label}: aggregate metrics disagree with raw rounds")
         if aggregate.get("batch_counts") != counts or aggregate.get("batch_accounting_complete") != complete:
@@ -115,10 +132,18 @@ def verify(root, require_complete=True):
             actual = record.get("configuration",{})
             if any(actual.get(k) != case[k] for k in ("model","device","input_tokens","batch_size")) or str(actual.get("embedding_concurrency")) != case["budget"]:
                 errors.append(f"{key}: wrong recorded shape or concurrency")
+            if actual.get("fixed_batch",False) != config["profile"].get("fixed_batch",False):
+                errors.append(f"{key}: wrong recorded batching policy")
             for name in ("binary_sha256","source_sha256"):
                 if record.get("provenance",{}).get(name) != config["provenance"][name]:
                     errors.append(f"{key}: provenance mismatch: {name}")
             benchmark = record.get("benchmark")
+            if "benchmark_controls" in config:
+                controls = config["benchmark_controls"]
+                if any(actual.get(name) != value for name, value in controls.items()):
+                    errors.append(f"{key}: wrong recorded benchmark controls")
+                errors.extend(f"{key}: {error}" for error in validate_controls(
+                    benchmark, controls.get("clients"), controls.get("ort_sessions", 1)))
             if not benchmark:
                 if record.get("protocol_pass") or (record.get("exit_code") == 0 and not record.get("hard_timeout")):
                     errors.append(f"{key}: missing successful result")
@@ -133,6 +158,8 @@ def verify(root, require_complete=True):
                     requests[value["phase"]] = value["rows"]
             request_count += sum(len(v) for v in requests.values())
             accounting = checked_accounting(benchmark,requests,case["input_tokens"],case["batch_size"])
+            if benchmark.get("fixed_batch",False) != config["profile"].get("fixed_batch",False):
+                accounting.append("recorded batching policy differs from requested profile")
             if accounting != record.get("accounting_errors"):
                 errors.append(f"{key}: collector/raw accounting disagreement")
             if record.get("protocol_pass") and accounting:

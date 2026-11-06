@@ -16,6 +16,7 @@ use crate::{
 };
 
 mod fixed_shape;
+mod mixed_minilm;
 mod support;
 use support::Config;
 

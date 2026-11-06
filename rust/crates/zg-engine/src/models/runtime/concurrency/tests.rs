@@ -82,17 +82,30 @@ fn invalid_environment_warns_and_uses_auto_without_legacy_retry() {
 }
 
 #[test]
-fn native_limits_cap_at_eight_and_llama_batches_are_serial() {
+fn transformer_limits_are_resolved_by_the_backend_and_llama_policy_is_preserved() {
     let llama = "local/embeddinggemma-300m";
     let transformers = "local/all-minilm-l6-v2";
     assert_eq!(local_runtime_limit(llama, Some(24)), Some(8));
     assert_eq!(local_runtime_limit(llama, None), Some(1));
-    assert_eq!(local_runtime_limit(transformers, Some(24)), Some(8));
-    assert_eq!(local_runtime_limit(transformers, None), Some(1));
+    assert_eq!(local_runtime_limit(transformers, Some(24)), Some(24));
+    assert_eq!(local_runtime_limit(transformers, Some(0)), Some(1));
+    assert_eq!(
+        local_runtime_limit(transformers, Some(usize::MAX)),
+        Some(usize::MAX)
+    );
+    assert_eq!(local_runtime_limit(transformers, None), None);
     assert_eq!(batch_concurrency(llama, Some(24)), Some(1));
-    assert_eq!(batch_concurrency(transformers, Some(24)), Some(8));
+    assert_eq!(batch_concurrency(transformers, Some(24)), Some(24));
+    assert_eq!(batch_concurrency(transformers, Some(0)), Some(1));
     for reference in ["local/potion-code-16m-v2", "qwen/text-embedding-v4"] {
         assert_eq!(local_runtime_limit(reference, Some(24)), None);
         assert_eq!(batch_concurrency(reference, Some(24)), Some(24));
     }
+}
+
+#[test]
+fn transformer_zero_override_reaches_backend_normalization() {
+    let reference = "local/all-minilm-l6-v2";
+    assert_eq!(resolve(reference, Some(0), "8", "4"), (Some(0), vec![]));
+    assert_eq!(resolve(reference, None, "0", "4"), (Some(0), vec![]));
 }
