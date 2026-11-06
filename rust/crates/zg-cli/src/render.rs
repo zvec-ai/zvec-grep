@@ -528,7 +528,13 @@ Index embedding concurrency:
   Applies only to index construction and updates, including automatic indexing
   and refresh; query-vector inference keeps its own defaults. The CLI option
   is accepted only with --index and is never saved in workspace settings.
-  llama.cpp: context limit capped at 8, with serialized batches; defaults to 1.
+  llama.cpp CPU: total compute-thread budget C. Set
+    ZVEC_GREP_LLAMA_CPU_CONTEXTS=K (default 1); each context uses C/K threads.
+    Explicit C must be >=K and divisible by K. Automatic selection aligns
+    the CPU count capped at 4 to K, with at least one thread per context.
+  llama.cpp Metal/CUDA: concurrent context limit, default 1. Batching is
+    managed internally. More contexts may improve throughput and use more
+    memory. Contexts share model weights and are created on demand.
   Transformers/ORT: in-flight batch limit capped at 8; defaults to 1. Native
     sessions honor that budget; CoreML uses one physical session.
   Potion/model2vec: concurrent batch tasks; defaults to 2, with an independent

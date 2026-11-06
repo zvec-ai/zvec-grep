@@ -51,17 +51,38 @@ record the number of returned vectors without asserting its size or contents.
 
 ## Concurrency and device configuration
 
-Use production `resolve_index_concurrency` and `batch_concurrency`. Clear inherited
+Use production `resolve_index_concurrency` and the runtime lease's backend-specific
+`batch_concurrency`. Clear inherited
 indexing concurrency overrides so `default` uses the backend default:
 
-- llama.cpp has one in-flight batch; C controls native context parallelism within it.
+- llama.cpp CPU uses C as its total compute-thread budget and
+  `ZVEC_GREP_LLAMA_CPU_CONTEXTS=K` (default 1) as its context and in-flight batch
+  limit, with C/K threads per context. Explicit C must be divisible by K and
+  at least K. Automatic selection aligns the logical CPU count capped at four
+  to K with at least one thread per context. Record any nondefault K in the
+  experiment metadata; keep it fixed when comparing C values.
+- llama.cpp Metal/CUDA uses C as the concurrent context and in-flight batch
+  limit, defaulting to one. Contexts share one model runtime and pool, and each
+  uses one CPU support compute thread. Multiple callers share the native limit.
+  Metal packs Gemma/Qwen sequences with internal token budgets of 128/256,
+  independently of C. CUDA keeps each input sequence in a separate native job
+  to preserve embedding consistency: multi-sequence packing has not passed
+  equivalence checks on T4 with the pinned CUDA runtime.
+  CUDA still schedules jobs across up to C contexts; native
+  token-batch and micro-batch sizes remain internal controls, with Qwen CUDA
+  micro-batches capped at 256 tokens and valid Gemma inputs processed whole.
 - Transformers/ONNX uses the production in-flight batch limit, capped at eight;
   its current default is one.
 - model2vec uses its production default (currently two) or the explicit budget.
 
 Record requested C, resolved runtime budget and configured in-flight batch count.
 `default` remains a distinct case from an explicit value even if they resolve to
-the same budget. Do not add extra batch workers on top of a native context budget.
+the same budget. Do not add extra batch workers on top of the native execution
+budget. CPU and GPU C values have different meanings; retain the requested-device
+and fallback limitations below when interpreting results.
+Latency includes admission and queueing. In particular, GPU C>1 runs multiple
+batch calls concurrently; B=1 at C>1 is a loaded single-item workload, not an
+isolated query-latency measurement.
 
 The fixed first column records the **requested device only**. Actual execution device
 and fallback are not verified. External GPU utilization is a resource observation,

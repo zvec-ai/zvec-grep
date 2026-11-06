@@ -16,7 +16,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use super::compute::ModelComputeRuntime;
-use super::concurrency::{batch_concurrency, local_runtime_limit};
+use super::concurrency::{batch_concurrency, is_llama, local_runtime_limit};
 use crate::domain::{
     Content,
     model::{Device, EmbeddingModelInfo, EmbeddingResult, ModelConfig},
@@ -82,7 +82,8 @@ struct ModelRuntimeEntry {
 struct ModelRuntime {
     model: Arc<dyn EmbeddingModel>,
     active_embeddings: AtomicUsize,
-    // Native callers with the same budget share admission across all leases.
+    // Fixed transformer session budgets share admission across all runtime leases.
+    // llama.cpp owns admission to its native context pool inside the backend.
     batch_permits: Option<Arc<Semaphore>>,
 }
 
@@ -127,6 +128,7 @@ pub(crate) struct ModelRuntimeLease {
 
 struct OperationConcurrency {
     limit: usize,
+    execution_concurrency: usize,
     permits: Arc<Semaphore>,
 }
 
@@ -205,9 +207,9 @@ impl ModelRuntimeManager {
                 runtime: Arc::new(ModelRuntime {
                     model,
                     active_embeddings: AtomicUsize::new(0),
-                    batch_permits: key.local_limit.is_some().then(|| {
+                    batch_permits: key.local_limit.map(|limit| {
                         Arc::new(Semaphore::new(
-                            batch_concurrency(&reference, key.local_limit).unwrap_or(1),
+                            batch_concurrency(&reference, Some(limit)).unwrap_or(1),
                         ))
                     }),
                 }),
@@ -226,12 +228,28 @@ impl ModelRuntimeManager {
             key.local_limit.or(embedding_concurrency),
             entry.runtime.model.concurrency_defaults(),
         );
+        // llama.cpp resolves automatic compute budgets after choosing the
+        // actual device, so GPU fallback must retain the automatic sentinel.
+        let execution_concurrency = if is_llama(&reference) {
+            embedding_concurrency.unwrap_or(0)
+        } else {
+            concurrency
+        };
         entry.leases.fetch_add(1, Ordering::AcqRel);
         retired.extend(state.retire_idle(self.inner.policy, Instant::now()));
         state.wake_maintenance();
         let permits = entry.runtime.batch_permits.clone().unwrap_or_else(|| {
-            // Preserve the requested budget without overflowing Tokio's permit counter.
-            Arc::new(Semaphore::new(concurrency.min(Semaphore::MAX_PERMITS)))
+            let batch_concurrency = resolve_embedding_concurrency(
+                entry
+                    .runtime
+                    .model
+                    .batch_concurrency(key.local_limit.or(embedding_concurrency)),
+                entry.runtime.model.concurrency_defaults(),
+            );
+            // Bound admission without overflowing Tokio's permit counter.
+            Arc::new(Semaphore::new(
+                batch_concurrency.min(Semaphore::MAX_PERMITS),
+            ))
         });
         let lease = ModelRuntimeLease {
             key,
@@ -239,6 +257,7 @@ impl ModelRuntimeManager {
             manager: Arc::downgrade(&self.inner),
             operation: Arc::new(OperationConcurrency {
                 limit: concurrency,
+                execution_concurrency,
                 permits,
             }),
         };
@@ -427,6 +446,10 @@ impl ModelRuntimeLease {
         self.entry.runtime.model.concurrency_defaults()
     }
 
+    pub(crate) fn batch_concurrency(&self, requested: Option<usize>) -> Option<usize> {
+        self.entry.runtime.model.batch_concurrency(requested)
+    }
+
     pub(crate) fn info(&self) -> &EmbeddingModelInfo {
         self.entry.runtime.model.info()
     }
@@ -459,7 +482,7 @@ impl ModelRuntimeLease {
             .acquire_operation_permit(options.signal.as_ref())
             .await?;
         let _active = ActiveEmbeddingGuard::new(&self.entry.runtime.active_embeddings);
-        options.execution_concurrency = self.operation.limit;
+        options.execution_concurrency = self.operation.execution_concurrency;
         if let Some(reporter) = progress {
             let model_progress = options.on_progress.take();
             let operation = Arc::clone(&self.operation);

@@ -6,7 +6,7 @@ use crate::{
         catalog::{
             EmbeddingCatalogEntry, get_embedding_model_catalog_entry, list_embedding_models,
         },
-        runtime::{batch_concurrency, resolve_index_concurrency},
+        runtime::resolve_index_concurrency,
         spi::EmbeddingPrepareOptions,
     },
 };
@@ -80,7 +80,8 @@ impl Config {
 
     pub fn workers(&self, model: &ModelRuntimeLease) -> usize {
         // Same successful-work admission as indexing's resolve_index_batch_policy.
-        batch_concurrency(&self.reference, self.index_limit)
+        model
+            .batch_concurrency(self.index_limit)
             .unwrap_or(model.concurrency_defaults().initial)
     }
 }
@@ -224,16 +225,17 @@ async fn verifies_gguf_in_modelscope_cache() {
 
 #[test]
 fn cli_concurrency_controls_batch_workers() {
-    for (reference, requested, expected) in [
-        ("local/embeddinggemma-300m", Some(4), 1),
-        ("local/all-minilm-l6-v2", Some(24), 8),
-        ("local/potion-code-16m-v2", Some(24), 24),
-        ("local/potion-code-16m-v2", None, 2),
+    for (reference, device, requested, expected) in [
+        ("local/embeddinggemma-300m", Device::Metal, Some(4), 4),
+        ("local/embeddinggemma-300m", Device::Metal, None, 1),
+        ("local/all-minilm-l6-v2", Device::Cpu, Some(24), 8),
+        ("local/potion-code-16m-v2", Device::Cpu, Some(24), 24),
+        ("local/potion-code-16m-v2", Device::Cpu, None, 2),
     ] {
         let config = Config {
             reference: reference.into(),
             cache: PathBuf::from("/unused"),
-            device: Device::Cpu,
+            device,
             requested,
             index_limit: requested,
             entry: get_embedding_model_catalog_entry(reference).expect("model"),
