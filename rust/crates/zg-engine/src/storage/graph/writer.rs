@@ -8,11 +8,18 @@ use super::{Error, Result, SqliteGraphStorage, nonempty};
 const TARGET_ID_BATCH_SIZE: usize = 512;
 
 impl SqliteGraphStorage {
-    /// Atomically replaces one file's local graph and invalidates inbound edges.
+    /// Atomically replaces one file's local graph rows and invalidates inbound
+    /// edges.
     /// `old_entity_ids` must contain **all** pre-update entity IDs from zvec; pass
     /// an empty slice for a new file. Snapshot node IDs validate ownership.
     /// The implicit file endpoint is `f{file_id}`, matching
     /// the zvec file document key. Cross-file edges are written by the resolver.
+    /// Invalidation here is bounded by endpoint identity; the workspace-wide
+    /// evidence resolution also reads (name candidates, module paths) requeues
+    /// once per pass through `IndexStore::requeue_stale_resolutions`.
+    /// `language` labels pending references for the resolver's language gate;
+    /// `None` records `unknown`, so the gate only keeps candidates that carry
+    /// the same absent evidence.
     /// Read old IDs before mutating zvec, under the same workspace write lock.
     /// This transaction covers SQLite only; the coordinator owns cross-store recovery.
     ///
@@ -22,9 +29,11 @@ impl SqliteGraphStorage {
     pub(crate) fn write_file_graph(
         &mut self,
         file_id: u32,
+        language: Option<&str>,
         graph: &FileGraphResult,
         old_entity_ids: &[String],
     ) -> Result<()> {
+        let language = language.unwrap_or("unknown");
         let file_node_id = format!("f{file_id}");
         validate(&file_node_id, graph, old_entity_ids)?;
         let tx = self
@@ -37,10 +46,11 @@ impl SqliteGraphStorage {
         for chunk in targets.chunks(TARGET_ID_BATCH_SIZE) {
             let placeholders = vec!["?"; chunk.len()].join(",");
             // Even unchanged target IDs require re-resolution. Preserve the row ID
-            // and reference evidence for the next resolution pass.
+            // and reference evidence for the next resolution pass, but discard
+            // candidates recorded against the previous snapshot.
             tx.execute(
                 &format!(
-                    "UPDATE edges SET status = 'pending', target = NULL, provenance = NULL
+                    "UPDATE edges SET status = 'pending', target = NULL, provenance = NULL, candidates = NULL
                   WHERE target IN ({placeholders}) AND file_id <> ? AND reference_name IS NOT NULL"
                 ),
                 params_from_iter(
@@ -73,8 +83,8 @@ impl SqliteGraphStorage {
                 ])?;
             }
             let mut insert = tx.prepare("INSERT INTO edges
-                (file_id, source, reference_name, receiver_name, kind, arity, line, col, status, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)")?;
+                (file_id, source, reference_name, receiver_name, kind, arity, line, col, language, name_tail, status, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)")?;
             for reference in &graph.pending_refs {
                 insert.execute(params![
                     file_id,
@@ -85,6 +95,8 @@ impl SqliteGraphStorage {
                     reference.arity,
                     reference.line,
                     reference.column,
+                    language,
+                    name_tail(&reference.ref_name),
                     serde_json::to_string(&reference.metadata)?
                 ])?;
             }
@@ -94,7 +106,8 @@ impl SqliteGraphStorage {
     }
 
     /// Deletes owned rows and invalidates incoming references, including imports
-    /// targeting the file itself. Repeating deletion is safe.
+    /// targeting the file itself. Repeating deletion is safe. Deletion carries no
+    /// language evidence, so it records `unknown`.
     ///
     /// # Errors
     /// Rejects empty IDs and SQLite failures. The complete mutation is atomic.
@@ -103,8 +116,16 @@ impl SqliteGraphStorage {
         file_id: u32,
         old_entity_ids: &[String],
     ) -> Result<()> {
-        self.write_file_graph(file_id, &FileGraphResult::default(), old_entity_ids)
+        self.write_file_graph(file_id, None, &FileGraphResult::default(), old_entity_ids)
     }
+}
+
+/// Last component of a referenced name, matching the name index's namespace:
+/// `a::b::c`, `a.b.c` and `a/b/c` all index as `c`.
+fn name_tail(name: &str) -> &str {
+    name.rsplit([':', '.', '/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(name)
 }
 
 pub(super) fn validate(

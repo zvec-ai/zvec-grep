@@ -67,9 +67,8 @@ pub(crate) use source::FileSnapshot;
 pub(crate) use source::Range;
 pub(crate) use source::SourcePath;
 pub(crate) use source::TextRange;
-// Consumed by the cross-file reference resolver; dormant until it lands.
-#[allow(unused_imports)]
-pub(crate) use source::formats_for_path;
+// Consumed by the cross-file reference resolver.
+pub(crate) use source::{formats_for_path, reference_compatible_with};
 
 // Workspaces.
 pub use workspace::ScanRules;
