@@ -531,6 +531,7 @@ Index embedding concurrency:
   llama.cpp: context limit capped at 8, with serialized batches; defaults to 1.
   Transformers/ORT: in-flight batch limit capped at 8; defaults to 1. Native
     sessions honor that budget; CoreML uses one physical session.
+  Bekko/static INT8: CPU batch tasks; defaults to 1, capped at 8.
   Potion/model2vec: concurrent batch tasks; defaults to 2, with an independent
     CPU worker-pool capacity. No cap of 8 is applied.
   Remote: concurrent requests; adaptive scheduling may reduce the limit after

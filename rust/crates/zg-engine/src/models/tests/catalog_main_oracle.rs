@@ -30,6 +30,8 @@ fn actual_catalog() -> Value {
     Value::Array(
         list_embedding_models()
             .into_iter()
+            // Bekko is a Rust-only addition; keep the historical TS oracle frozen.
+            .filter(|entry| entry.reference() != "local/bekko-256-int8")
             .map(entry_value)
             .collect(),
     )
@@ -47,6 +49,9 @@ fn print_current_catalog_fixture() {
 #[allow(clippy::too_many_lines)]
 fn entry_value(entry: EmbeddingCatalogEntry) -> Value {
     match entry {
+        EmbeddingCatalogEntry::StaticInt8(_) => {
+            unreachable!("Rust-only models are excluded from the TS oracle")
+        }
         EmbeddingCatalogEntry::LlamaCpp(LlamaCppConfig {
             reference,
             provider,
@@ -114,6 +119,7 @@ fn entry_value(entry: EmbeddingCatalogEntry) -> Value {
             revision,
             download,
             dtype,
+            add_special_tokens: _,
             dimension,
             metric,
             pooling,
@@ -208,8 +214,8 @@ fn source_value(download: &ArtifactDownloadConfig) -> Value {
             "revision": download.hugging_face.revision,
         },
         "modelScope": {
-            "repo": download.model_scope.repo,
-            "revision": download.model_scope.revision,
+            "repo": download.model_scope.expect("legacy mirror").repo,
+            "revision": download.model_scope.expect("legacy mirror").revision,
         },
     })
 }

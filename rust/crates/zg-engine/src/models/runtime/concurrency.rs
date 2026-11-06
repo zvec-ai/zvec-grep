@@ -15,10 +15,10 @@ pub(crate) fn is_llama(reference: &str) -> bool {
     )
 }
 
-fn is_transformers(reference: &str) -> bool {
+fn uses_bounded_batches(reference: &str) -> bool {
     matches!(
         get_embedding_model_catalog_entry(reference),
-        Some(EmbeddingCatalogEntry::Transformers(_))
+        Some(EmbeddingCatalogEntry::Transformers(_) | EmbeddingCatalogEntry::StaticInt8(_))
     )
 }
 
@@ -75,7 +75,7 @@ fn resolve_override(
 
 /// Local native resources must not be shared across different fixed budgets.
 pub(crate) fn local_runtime_limit(reference: &str, requested: Option<usize>) -> Option<usize> {
-    if is_transformers(reference) || is_llama(reference) {
+    if uses_bounded_batches(reference) || is_llama(reference) {
         Some(requested.unwrap_or(1).clamp(1, LOCAL_CONCURRENCY_CAP))
     } else {
         None
@@ -87,7 +87,7 @@ pub(crate) fn local_runtime_limit(reference: &str, requested: Option<usize>) -> 
 pub(crate) fn batch_concurrency(reference: &str, requested: Option<usize>) -> Option<usize> {
     if is_llama(reference) {
         Some(1)
-    } else if is_transformers(reference) {
+    } else if uses_bounded_batches(reference) {
         Some(requested.unwrap_or(1).clamp(1, LOCAL_CONCURRENCY_CAP))
     } else {
         requested

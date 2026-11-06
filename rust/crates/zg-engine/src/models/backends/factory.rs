@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use super::{
     llama_cpp::LlamaCppEmbeddingModel, model2vec::Model2VecEmbeddingModel,
-    qwen::QwenEmbeddingModel, transformers::TransformersEmbeddingModel,
+    qwen::QwenEmbeddingModel, static_int8::StaticInt8EmbeddingModel,
+    transformers::TransformersEmbeddingModel,
 };
 use crate::domain::model::ModelConfig;
 use crate::models::{
@@ -33,6 +34,11 @@ pub fn create_embedding_model(
     })?;
     let options = options.unwrap_or_default();
     match entry {
+        EmbeddingCatalogEntry::StaticInt8(config) => Ok(Arc::new(StaticInt8EmbeddingModel::new(
+            config,
+            options,
+            compute_runtime,
+        ))),
         EmbeddingCatalogEntry::Model2Vec(config) => Ok(Arc::new(Model2VecEmbeddingModel::new(
             config,
             options,

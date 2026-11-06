@@ -7,6 +7,29 @@ everyday use. This page covers implementation behavior, native builds, and
 packaging. The repository root retains the legacy TypeScript implementation and
 its separate checks.
 
+The Rust catalog includes `local/bekko-256-int8`, using the pinned
+[Bekko static ONNX weights](https://huggingface.co/hotchpotch/bekko-static-embedding-v1/tree/c18167b8f244c1bc6de21ce9b710bac8a29c4615/onnx).
+Select it with `zg --index --embedding local/bekko-256-int8 --device cpu`.
+It downloads 52,000,965 bytes of INT8 weights plus a 5,104,874-byte tokenizer,
+verified by SHA-256. Mean pooling and the 256-dimensional normalized output
+remain FP32. Queries and documents have no prefix or special tokens, with a
+32,768-token limit. Only Hugging Face is configured for this model.
+The Rust static INT8 backend reads the quantized table and per-token scales
+directly from the pinned ONNX file; inference runs on the shared CPU pool
+without an ONNX session or padded batches. It retains unknown tokens and
+matches the ONNX FP32 multiply, accumulation and mean before normalization.
+Batch rows tokenize and aggregate in parallel within the shared compute pool;
+each row retains its sequential arithmetic, and output order is preserved.
+Single-input requests stay on the current compute worker.
+The real Bekko CI smoke compares all 256 output components against the ONNX
+reference, including empty inputs, unknown tokens, truncation boundaries and
+concurrent batches.
+The maximum batch size is 32 and default indexing concurrency is 1.
+`ZVEC_GREP_BEKKO_PARITY_INPUTS` optionally adds a JSON array of corpus texts to
+that smoke test for local differential validation.
+Existing indexes must be rebuilt when switching embedding models, even when
+their vector dimensions match. The legacy TypeScript catalog is unchanged.
+
 Run the development commands below from `rust/` (`cd rust` from the repository
 root). See the [contributor guide](CONTRIBUTING.md) for checks and conventions.
 
