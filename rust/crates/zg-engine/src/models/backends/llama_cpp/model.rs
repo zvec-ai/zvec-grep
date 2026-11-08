@@ -81,7 +81,6 @@ pub(crate) struct LlamaCppEmbeddingModel {
     model_cache_dir: PathBuf,
     device: Option<Device>,
     compute_runtime: ModelComputeRuntime,
-    client: reqwest::Client,
     state: Mutex<Option<Arc<LoadedLlamaModel>>>,
 }
 
@@ -182,7 +181,6 @@ impl LlamaCppEmbeddingModel {
             model_cache_dir,
             device: options.device,
             compute_runtime,
-            client: reqwest::Client::new(),
             state: Mutex::new(None),
         }
     }
@@ -224,23 +222,20 @@ impl LlamaCppEmbeddingModel {
             .join("llama-cpp")
             .join(self.entry.download.model_scope.repo.replace('/', "--"))
             .join(self.entry.download.model_scope.revision);
-        let resolved = resolve_model_artifacts(
-            &self.client,
-            ResolveArtifacts {
-                model: self.entry.reference,
-                sources: [
-                    ArtifactSource::hugging_face(
-                        self.entry.download.hugging_face,
-                        self.model_cache_dir.clone(),
-                    )
-                    .with_local_path(artifact.path, self.entry.cache_file),
-                    ArtifactSource::model_scope(self.entry.download.model_scope, model_scope),
-                ],
-                artifacts: self.entry.download.artifacts,
-                reporter: &reporter,
-                signal,
-            },
-        )
+        let resolved = resolve_model_artifacts(ResolveArtifacts {
+            model: self.entry.reference,
+            sources: [
+                ArtifactSource::hugging_face(
+                    self.entry.download.hugging_face,
+                    self.model_cache_dir.clone(),
+                )
+                .with_local_path(artifact.path, self.entry.cache_file),
+                ArtifactSource::model_scope(self.entry.download.model_scope, model_scope),
+            ],
+            artifacts: self.entry.download.artifacts,
+            reporter: &reporter,
+            signal,
+        })
         .await?;
         let path = resolved.paths.get(artifact.path).cloned().ok_or_else(|| {
             ModelError::storage_failure("Resolved llama.cpp model artifact is missing")

@@ -275,15 +275,11 @@ trait TokenizerRuntime: Send + Sync {
     fn unknown_token_id(&self) -> Option<u32>;
 }
 
-struct DefaultModel2VecDependencies {
-    client: reqwest::Client,
-}
+struct DefaultModel2VecDependencies;
 
 impl DefaultModel2VecDependencies {
     fn new() -> Self {
-        Self {
-            client: reqwest::Client::new(),
-        }
+        Self
     }
 }
 
@@ -314,16 +310,13 @@ impl Model2VecDependencies for DefaultModel2VecDependencies {
                 .with_local_path(entry.model_file, local_model)
                 .with_local_path(entry.tokenizer_file, "tokenizer/tokenizer.json"),
         ];
-        let resolved = resolve_model_artifacts(
-            &self.client,
-            ResolveArtifacts {
-                model: entry.reference,
-                sources,
-                artifacts: entry.download.artifacts,
-                reporter,
-                signal,
-            },
-        )
+        let resolved = resolve_model_artifacts(ResolveArtifacts {
+            model: entry.reference,
+            sources,
+            artifacts: entry.download.artifacts,
+            reporter,
+            signal,
+        })
         .await?;
         Ok(Model2VecResolvedArtifacts {
             model_path: resolved

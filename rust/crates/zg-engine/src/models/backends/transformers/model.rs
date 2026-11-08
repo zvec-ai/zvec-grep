@@ -49,7 +49,6 @@ pub(crate) struct TransformersEmbeddingModel {
     model_cache_dir: PathBuf,
     device: Option<Device>,
     compute_runtime: ModelComputeRuntime,
-    client: reqwest::Client,
     state: Mutex<Option<Arc<LoadedTransformersModel>>>,
 }
 
@@ -155,7 +154,6 @@ impl TransformersEmbeddingModel {
             model_cache_dir,
             device: options.device,
             compute_runtime,
-            client: reqwest::Client::new(),
             state: Mutex::new(None),
         }
     }
@@ -202,19 +200,16 @@ impl TransformersEmbeddingModel {
             .join("transformers-js")
             .join(self.entry.download.model_scope.repo.replace('/', "--"))
             .join(self.entry.download.model_scope.revision);
-        let resolved = resolve_model_artifacts(
-            &self.client,
-            ResolveArtifacts {
-                model: self.entry.reference,
-                sources: [
-                    ArtifactSource::hugging_face(self.entry.download.hugging_face, hugging_face),
-                    ArtifactSource::model_scope(self.entry.download.model_scope, model_scope),
-                ],
-                artifacts: self.entry.download.artifacts,
-                reporter: &reporter,
-                signal,
-            },
-        )
+        let resolved = resolve_model_artifacts(ResolveArtifacts {
+            model: self.entry.reference,
+            sources: [
+                ArtifactSource::hugging_face(self.entry.download.hugging_face, hugging_face),
+                ArtifactSource::model_scope(self.entry.download.model_scope, model_scope),
+            ],
+            artifacts: self.entry.download.artifacts,
+            reporter: &reporter,
+            signal,
+        })
         .await?;
         let model_path = resolved.paths.get(model_artifact).cloned().ok_or_else(|| {
             ModelError::storage_failure("Resolved Transformers model artifact is missing")

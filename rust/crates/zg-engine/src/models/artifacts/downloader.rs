@@ -38,6 +38,19 @@ use crate::models::error::ModelError;
 #[cfg(test)]
 use sysinfo::System;
 
+/// Outbound User-Agent for model HTTP traffic. `ModelScope`'s LFS CDN rejects
+/// UA-less artifact requests with 403 after its 302 redirect.
+pub(crate) const HTTP_USER_AGENT: &str = concat!("zg/", env!("CARGO_PKG_VERSION"));
+
+fn http_client() -> Result<reqwest::Client, ModelError> {
+    reqwest::Client::builder()
+        .user_agent(HTTP_USER_AGENT)
+        .build()
+        .map_err(|error| {
+            ModelError::internal("Unable to initialize artifact HTTP client").with_cause(error)
+        })
+}
+
 pub(crate) struct ResolveArtifacts<'a> {
     pub(crate) model: &'static str,
     pub(crate) sources: [ArtifactSource; 2],
@@ -52,9 +65,9 @@ pub(crate) struct ResolvedArtifacts {
 }
 
 pub(crate) async fn resolve_model_artifacts(
-    client: &reqwest::Client,
     mut request: ResolveArtifacts<'_>,
 ) -> Result<ResolvedArtifacts, ModelError> {
+    let client = http_client()?;
     validate_request(&request).map_err(ArtifactDownloadError::into_model_error)?;
     request.sources.sort_by_key(|source| match source.kind {
         ArtifactSourceKind::HuggingFace => 0,
@@ -82,7 +95,7 @@ pub(crate) async fn resolve_model_artifacts(
 
     let mut primary_error = None;
     for (index, (source, manifest)) in request.sources.iter().zip(&manifests).enumerate() {
-        match download_source_snapshot(client, &request, source, manifest).await {
+        match download_source_snapshot(&client, &request, source, manifest).await {
             Ok(()) => return resolved_result(source, request.artifacts),
             Err(error) => {
                 if error.is_cancelled() {

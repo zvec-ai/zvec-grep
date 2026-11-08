@@ -8,6 +8,7 @@ use crate::domain::{Content, FileFormat};
 
 use crate::domain::model::{EmbeddingModelInfo, EmbeddingResult, ModelConfig, ModelInfo};
 use crate::models::{
+    artifacts::HTTP_USER_AGENT,
     catalog::QwenConfig,
     spi::{
         EmbeddingConcurrencyDefaults, EmbeddingModel, EmbeddingOptions, EmbeddingTraceHeaders,
@@ -311,6 +312,7 @@ struct ReqwestQwenHttpClient {
 impl ReqwestQwenHttpClient {
     fn new() -> Result<Self, ModelError> {
         let client = reqwest::Client::builder()
+            .user_agent(HTTP_USER_AGENT)
             .timeout(REMOTE_TIMEOUT)
             .build()
             .map_err(|error| {

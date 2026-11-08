@@ -56,16 +56,13 @@ async fn resolve(
     base_url: Option<&str>,
     reporter: &ModelDownloadProgressReporter,
 ) -> Result<ResolvedArtifacts, ModelError> {
-    resolve_model_artifacts(
-        &reqwest::Client::new(),
-        ResolveArtifacts {
-            model: "local/test-model",
-            sources: sources(root, base_url),
-            artifacts: ARTIFACTS,
-            reporter,
-            signal: None,
-        },
-    )
+    resolve_model_artifacts(ResolveArtifacts {
+        model: "local/test-model",
+        sources: sources(root, base_url),
+        artifacts: ARTIFACTS,
+        reporter,
+        signal: None,
+    })
     .await
 }
 
@@ -390,19 +387,52 @@ async fn does_not_fallback_for_unauthorized_or_cancelled_requests() {
 
     let signal = CancellationToken::new();
     signal.cancel();
-    let error = resolve_model_artifacts(
-        &reqwest::Client::new(),
-        ResolveArtifacts {
-            model: "local/test-model",
-            sources: sources(root.path(), None),
-            artifacts: ARTIFACTS,
-            reporter: &reporter(&events),
-            signal: Some(&signal),
-        },
-    )
+    let error = resolve_model_artifacts(ResolveArtifacts {
+        model: "local/test-model",
+        sources: sources(root.path(), None),
+        artifacts: ARTIFACTS,
+        reporter: &reporter(&events),
+        signal: Some(&signal),
+    })
     .await
     .expect_err("cancelled resolution");
     assert_eq!(error.code(), crate::EngineError::CANCELLED);
+}
+#[tokio::test]
+async fn artifact_requests_send_user_agent() {
+    let root = tempfile::tempdir().expect("cache root");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind user-agent server");
+    let address = listener.local_addr().expect("user-agent server address");
+    let headers: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&headers);
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept user-agent request");
+        let mut reader = BufReader::new(stream.try_clone().expect("clone user-agent stream"));
+        let mut line = String::new();
+        loop {
+            line.clear();
+            reader.read_line(&mut line).expect("read request header");
+            if line.trim_end().is_empty() {
+                break;
+            }
+            captured.lock().expect("header lock").push(line.clone());
+        }
+        respond(stream, 401, b"");
+    });
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let base_url = format!("http://{address}");
+    let error = resolve(root.path(), Some(&base_url), &reporter(&events))
+        .await
+        .expect_err("401 must fail without fallback");
+    server.join().expect("user-agent server");
+    assert!(error.to_string().contains("401"));
+    let headers = headers.lock().expect("header lock");
+    assert!(
+        headers.iter().any(|header| header
+            .trim_end()
+            .eq_ignore_ascii_case(&format!("user-agent: {HTTP_USER_AGENT}"))),
+        "expected user-agent {HTTP_USER_AGENT} in request headers {headers:?}"
+    );
 }
 
 #[tokio::test]
@@ -423,16 +453,13 @@ async fn modelscope_fallback_preserves_cancellation_code() {
         })),
         ARTIFACTS.iter().map(|artifact| artifact.path.to_owned()),
     );
-    let error = resolve_model_artifacts(
-        &reqwest::Client::new(),
-        ResolveArtifacts {
-            model: "local/test-model",
-            sources: sources(root.path(), Some(&server.base_url)),
-            artifacts: ARTIFACTS,
-            reporter: &reporter,
-            signal: Some(&signal),
-        },
-    )
+    let error = resolve_model_artifacts(ResolveArtifacts {
+        model: "local/test-model",
+        sources: sources(root.path(), Some(&server.base_url)),
+        artifacts: ARTIFACTS,
+        reporter: &reporter,
+        signal: Some(&signal),
+    })
     .await
     .expect_err("ModelScope cancellation must be preserved");
 
@@ -455,16 +482,13 @@ async fn response_header_timeout_falls_back_without_total_download_deadline() {
     let sources = sources(root.path(), Some(&server.base_url))
         .map(|source| source.with_timeouts(short, Duration::from_millis(50)));
     let events = Arc::new(Mutex::new(Vec::new()));
-    let resolved = resolve_model_artifacts(
-        &reqwest::Client::new(),
-        ResolveArtifacts {
-            model: "local/test-model",
-            sources,
-            artifacts: ARTIFACTS,
-            reporter: &reporter(&events),
-            signal: None,
-        },
-    )
+    let resolved = resolve_model_artifacts(ResolveArtifacts {
+        model: "local/test-model",
+        sources,
+        artifacts: ARTIFACTS,
+        reporter: &reporter(&events),
+        signal: None,
+    })
     .await
     .expect("timeout fallback");
     assert!(resolved.paths[ARTIFACTS[0].path].starts_with(root.path().join("modelscope")));
@@ -492,16 +516,13 @@ async fn read_idle_timeout_falls_back_and_preserves_both_source_errors() {
     let sources = sources(root.path(), Some(&server.base_url))
         .map(|source| source.with_timeouts(Duration::from_millis(50), short));
     let events = Arc::new(Mutex::new(Vec::new()));
-    let error = resolve_model_artifacts(
-        &reqwest::Client::new(),
-        ResolveArtifacts {
-            model: "local/test-model",
-            sources,
-            artifacts: ARTIFACTS,
-            reporter: &reporter(&events),
-            signal: None,
-        },
-    )
+    let error = resolve_model_artifacts(ResolveArtifacts {
+        model: "local/test-model",
+        sources,
+        artifacts: ARTIFACTS,
+        reporter: &reporter(&events),
+        signal: None,
+    })
     .await
     .expect_err("both sources must fail");
     let message = error.to_string();
