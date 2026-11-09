@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use zg_engine::api::relationships::{RelationshipDirection, RelationshipResult, SymbolDefinition};
+use zg_engine::api::relationships::{Direction, RelationshipResult, SymbolDefinition};
 
 use crate::{
     ColorMode, output_path,
@@ -14,14 +14,15 @@ use crate::{
 pub fn write_relationships(
     mut writer: impl Write,
     result: &RelationshipResult,
-    direction: RelationshipDirection,
+    direction: Direction,
     color: ColorMode,
     terminal: bool,
 ) -> io::Result<()> {
     let theme = StatusTheme::new(color, terminal);
     let label = match direction {
-        RelationshipDirection::Callers => "Callers",
-        RelationshipDirection::Callees => "Callees",
+        Direction::In => "Callers",
+        Direction::Out => "Callees",
+        Direction::Both => "Callers and callees",
     };
     if result.matches.is_empty() {
         writeln!(writer, "No matches.")?;
@@ -98,7 +99,7 @@ mod tests {
         }
     }
 
-    fn render(result: &RelationshipResult, direction: RelationshipDirection) -> String {
+    fn render(result: &RelationshipResult, direction: Direction) -> String {
         let mut output = Vec::new();
         write_relationships(&mut output, result, direction, ColorMode::Never, false)
             .expect("render relationships");
@@ -135,7 +136,7 @@ mod tests {
             suggestions: Vec::new(),
         };
         assert_eq!(
-            render(&result, RelationshipDirection::Callees),
+            render(&result, Direction::Out),
             concat!(
                 "run  main.rs:1\n  Callees:\n",
                 "    send  net.rs:1\n      call at main.rs:3:1\n",
@@ -149,20 +150,17 @@ mod tests {
             truncated: false,
             edges: Vec::new(),
         });
-        let text = render(&result, RelationshipDirection::Callers);
+        let text = render(&result, Direction::In);
         assert!(text.contains("\nrun  other.rs:1\n  Callers:\n    No resolved call sites.\n"));
     }
 
     #[test]
     fn suggestions_are_not_presented_as_relationship_matches() {
         let mut result = RelationshipResult::default();
-        assert_eq!(
-            render(&result, RelationshipDirection::Callers),
-            "No matches.\n"
-        );
+        assert_eq!(render(&result, Direction::In), "No matches.\n");
         result.suggestions.push(symbol("run\n", "main.rs"));
         assert_eq!(
-            render(&result, RelationshipDirection::Callers),
+            render(&result, Direction::In),
             concat!(
                 "No matches.\n\nSuggestions (retry with an exact name):\n",
                 "  run   main.rs:1\n",

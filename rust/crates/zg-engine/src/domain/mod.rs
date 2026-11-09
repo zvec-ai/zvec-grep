@@ -42,6 +42,7 @@ pub use metadata::SymbolType;
 pub use metadata::Visibility;
 
 // Shared graph contracts for extraction and persistence.
+pub use graph::Direction;
 pub(crate) use graph::EdgeProvenance;
 pub(crate) use graph::FileEdge;
 pub(crate) use graph::FileGraphNode;

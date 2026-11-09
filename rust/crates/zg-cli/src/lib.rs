@@ -584,7 +584,7 @@ pub struct RelationshipArgs {
     pub home: Option<PathBuf>,
 }
 
-pub use zg_engine::api::relationships::RelationshipDirection;
+pub use zg_engine::api::relationships::Direction;
 
 #[derive(Debug, Args)]
 #[allow(clippy::struct_excessive_bools)]
@@ -708,7 +708,7 @@ pub enum CliPlan {
         null: bool,
     },
     Relationships {
-        direction: RelationshipDirection,
+        direction: Direction,
         color: ColorMode,
         mode: ClientMode,
         home: Option<PathBuf>,
@@ -937,12 +937,8 @@ impl Cli {
             return Ok(CliPlan::Help(None));
         };
         match command {
-            CommandLine::Callers(args) => {
-                relationship_plan(args, &current_dir, RelationshipDirection::Callers)
-            }
-            CommandLine::Callees(args) => {
-                relationship_plan(args, &current_dir, RelationshipDirection::Callees)
-            }
+            CommandLine::Callers(args) => relationship_plan(args, &current_dir, Direction::In),
+            CommandLine::Callees(args) => relationship_plan(args, &current_dir, Direction::Out),
             CommandLine::Query(args) => query_plan(args, current_dir),
             CommandLine::Index(args) => index_plan(args, &current_dir),
             CommandLine::Status(args) => Ok(CliPlan::Status {
@@ -1449,7 +1445,7 @@ fn validate_query(args: &QueryArgs, mode: ClientMode) -> Result<(), CliError> {
 fn relationship_plan(
     args: RelationshipArgs,
     current_dir: &Path,
-    direction: RelationshipDirection,
+    direction: Direction,
 ) -> Result<CliPlan, CliError> {
     let request = RelationshipOptions {
         root: Some(resolve_from(current_dir, args.root.as_deref())),
@@ -2609,8 +2605,8 @@ mod tests {
     #[test]
     fn relationship_commands_preserve_direction_root_and_edge_limit() {
         for (command, expected) in [
-            ("--callers", super::RelationshipDirection::Callers),
-            ("--callees", super::RelationshipDirection::Callees),
+            ("--callers", super::Direction::In),
+            ("--callees", super::Direction::Out),
         ] {
             let directory = tempfile::tempdir().expect("workspace parent");
             let cwd = directory.path().canonicalize().expect("cwd");

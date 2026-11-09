@@ -17,7 +17,7 @@ use tracing::{info, warn};
 use zg_daemon_protocol::{DaemonCommand, DaemonReply, ErrorReply, ExecutionResult};
 use zg_engine::{
     ZvecGrep,
-    api::relationships::{RelationshipDirection, RelationshipOptions},
+    api::relationships::{Direction, RelationshipOptions, RelationshipResult},
 };
 use zg_transport_mcp::{
     IndexOperationProvider, McpToolset, ServerStatusProvider, ServerStatusSnapshot,
@@ -317,10 +317,10 @@ async fn execute_command(
             )
         }
         DaemonCommand::Callers(request) => {
-            execute_relationships(&state, RelationshipDirection::Callers, request).await
+            execute_relationships(&state, Direction::In, request, DaemonReply::Callers).await
         }
         DaemonCommand::Callees(request) => {
-            execute_relationships(&state, RelationshipDirection::Callees, request).await
+            execute_relationships(&state, Direction::Out, request, DaemonReply::Callees).await
         }
         DaemonCommand::Index(request) => match state.runtimes.submit_index(request, true).await {
             Ok(submitted) if submitted.job.state == JobState::Succeeded => {
@@ -479,8 +479,9 @@ async fn wait_for_shutdown_signal() {
 
 async fn execute_relationships(
     state: &ControlState,
-    direction: RelationshipDirection,
+    direction: Direction,
     mut request: RelationshipOptions,
+    reply: fn(RelationshipResult) -> DaemonReply,
 ) -> ExecutionResult {
     let signal = state.shutdown.child_token();
     let _guard = signal.clone().drop_guard();
@@ -490,10 +491,7 @@ async fn execute_relationships(
             .runtimes
             .relationships(&state.engine, direction, request)
             .await
-            .map(|result| match direction {
-                RelationshipDirection::Callers => DaemonReply::Callers(result),
-                RelationshipDirection::Callees => DaemonReply::Callees(result),
-            }),
+            .map(reply),
     )
 }
 

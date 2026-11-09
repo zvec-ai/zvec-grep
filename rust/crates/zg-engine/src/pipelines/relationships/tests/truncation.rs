@@ -205,7 +205,7 @@ async fn limited_queries_skip_unneeded_endpoint_metadata_and_bodies() {
                 extra[0].id().as_str(),
             );
             corrupt_entity_identity(fixture.storage_home(), std::slice::from_ref(extra[0].id()));
-            (RelationshipDirection::Callees, "invoke")
+            (Direction::Out, "invoke")
         } else {
             let target = fixture.find_symbol("run", Some("red"));
             let caller = fixture.find_symbol("helper", Some("red"));
@@ -216,7 +216,7 @@ async fn limited_queries_skip_unneeded_endpoint_metadata_and_bodies() {
                 target.id().as_str(),
             );
             corrupt_entity_bodies(fixture.storage_home(), std::slice::from_ref(caller.id()));
-            (RelationshipDirection::Callers, "red::run")
+            (Direction::In, "red::run")
         };
         for limit in [1, MAX_RELATIONSHIP_EDGES] {
             let result = fixture

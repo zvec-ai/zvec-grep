@@ -25,7 +25,7 @@ use zg_engine::{
             options::{ScanRulesUpdate, WorkspaceChange as IndexChange},
         },
         info::{InfoOptions, InfoResult, result::IndexStatusSnapshot},
-        relationships::{RelationshipDirection, RelationshipOptions, RelationshipResult},
+        relationships::{Direction, RelationshipOptions, RelationshipResult},
     },
 };
 use zg_host_native::{
@@ -966,7 +966,7 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
     async fn relationships(
         &self,
         engine: &ZvecGrep,
-        direction: RelationshipDirection,
+        direction: Direction,
         mut request: RelationshipOptions,
     ) -> Result<RelationshipResult, EngineError> {
         if request.signal.is_none() {
@@ -2360,7 +2360,7 @@ mod tests {
     async fn shutdown_closes_all_watchers_and_rejects_later_jobs() {
         use zg_engine::{
             ZvecGrep,
-            api::relationships::{RelationshipDirection, RelationshipOptions},
+            api::relationships::{Direction, RelationshipOptions},
         };
         use zg_transport_mcp::IndexOperationProvider;
         let workspace = tempdir().expect("workspace should be created");
@@ -2388,10 +2388,7 @@ mod tests {
         assert_eq!(manager.snapshot().active_runtimes, 0);
         assert!(manager.submit_index(options.clone(), false).await.is_err());
         let engine = ZvecGrep::new();
-        for direction in [
-            RelationshipDirection::Callers,
-            RelationshipDirection::Callees,
-        ] {
+        for direction in [Direction::In, Direction::Out] {
             let error = manager
                 .relationships(
                     &engine,

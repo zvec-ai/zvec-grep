@@ -2,7 +2,7 @@
 
 use crate::{
     EngineError, EngineResult,
-    api::relationships::{RelationshipDirection, RelationshipOptions, RelationshipResult},
+    api::relationships::{Direction, RelationshipOptions, RelationshipResult},
     domain::IndexDescriptor,
     pipelines::{
         indexing::service::WorkspaceIndexService,
@@ -10,7 +10,6 @@ use crate::{
     },
     storage::{
         IndexStore,
-        graph::Direction,
         read_session::{ReadSessionCache, ReadSessionLease},
     },
     utils::{directory_exists, resolve_directory},
@@ -23,7 +22,7 @@ pub(crate) async fn query(
     indexing: &WorkspaceIndexService,
     options: &RelationshipOptions,
     read_sessions: Option<&ReadSessionCache>,
-    direction: RelationshipDirection,
+    direction: Direction,
 ) -> EngineResult<RelationshipResult> {
     let (name, scope) = normalize(options)?;
     let wait = LockWait::new(options.signal.as_ref(), options.lock_timeout_ms)?;
@@ -43,10 +42,6 @@ pub(crate) async fn query(
     {
         return Err(EngineError::unsupported("graph support is disabled"));
     }
-    let direction = match direction {
-        RelationshipDirection::Callers => Direction::In,
-        RelationshipDirection::Callees => Direction::Out,
-    };
     let source = acquire_read_source(
         &source_root,
         &layout,

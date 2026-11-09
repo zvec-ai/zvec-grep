@@ -123,10 +123,10 @@ impl IndexOperationProvider for RelationshipsOnly {
     async fn relationships(
         &self,
         _: &ZvecGrep,
-        direction: RelationshipDirection,
+        direction: Direction,
         request: RelationshipOptions,
     ) -> Result<RelationshipResult, EngineError> {
-        Ok(self.read(direction == RelationshipDirection::Callers, request))
+        Ok(self.read(direction == Direction::In, request))
     }
 }
 

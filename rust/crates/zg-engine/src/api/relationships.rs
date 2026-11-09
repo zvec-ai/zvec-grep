@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-pub use crate::domain::GlobRule;
+pub use crate::domain::{Direction, GlobRule};
 
 use serde::{Deserialize, Serialize};
 
@@ -12,13 +12,6 @@ pub const MAX_SYMBOL_MATCHES: usize = 10;
 pub const MAX_RELATIONSHIP_EDGES: usize = 50;
 /// Maximum length of a relationship symbol query in characters.
 pub const MAX_RELATIONSHIP_SYMBOL_CHARS: usize = 1024;
-
-/// Direction of a symbol's persisted call relationships.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RelationshipDirection {
-    Callers,
-    Callees,
-}
 
 /// Reads an existing workspace index without loading models or refreshing it.
 /// Requires a workspace indexed with [`crate::api::index::IndexOptions::graph_indexing`].

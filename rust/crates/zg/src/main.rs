@@ -16,8 +16,8 @@ use tokio::runtime::Builder;
 use tracing::debug;
 use tracing_subscriber::EnvFilter;
 use zg_cli::{
-    Cli, CliPlan, ClientMode, IndexOperation, InstallOutcome, McpInstallTransport, McpToolset,
-    RelationshipDirection, ServerPlan, ServerStartArgs,
+    Cli, CliPlan, ClientMode, Direction, IndexOperation, InstallOutcome, McpInstallTransport,
+    McpToolset, ServerPlan, ServerStartArgs,
 };
 use zg_daemon::{DaemonStatus, ListenAddress, McpToolset as DaemonMcpToolset, ServerConfig};
 use zg_daemon_protocol::{DaemonCommand, DaemonReply};
@@ -483,7 +483,7 @@ async fn start_installed_server(outcome: &InstallOutcome) -> Result<DaemonStatus
 }
 
 async fn execute_relationships(
-    direction: RelationshipDirection,
+    direction: Direction,
     mode: ClientMode,
     home: Option<&Path>,
     request: RelationshipOptions,
@@ -492,12 +492,18 @@ async fn execute_relationships(
     let result = if use_server(mode, home).await? {
         let home = zg_daemon::resolve_home(home.map(Path::to_owned))?;
         let command = match direction {
-            RelationshipDirection::Callers => DaemonCommand::Callers(request),
-            RelationshipDirection::Callees => DaemonCommand::Callees(request),
+            Direction::In => DaemonCommand::Callers(request),
+            Direction::Out => DaemonCommand::Callees(request),
+            Direction::Both => {
+                return Err(EngineError::unsupported(
+                    "daemon relationship commands require a single direction",
+                )
+                .into());
+            }
         };
         match (direction, zg_daemon::execute_command(&home, command).await?) {
-            (RelationshipDirection::Callers, DaemonReply::Callers(result))
-            | (RelationshipDirection::Callees, DaemonReply::Callees(result)) => result,
+            (Direction::In, DaemonReply::Callers(result))
+            | (Direction::Out, DaemonReply::Callees(result)) => result,
             _ => return Err(protocol_mismatch("relationships")),
         }
     } else {

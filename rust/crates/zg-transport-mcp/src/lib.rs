@@ -57,8 +57,8 @@ use zg_engine::{
             result::{IndexCompatibility, InfoSource, WorkspaceIndexPolicy},
         },
         relationships::{
-            MAX_RELATIONSHIP_EDGES, MAX_RELATIONSHIP_SYMBOL_CHARS, MAX_SYMBOL_MATCHES,
-            RelationshipDirection, RelationshipOptions, RelationshipResult,
+            Direction, MAX_RELATIONSHIP_EDGES, MAX_RELATIONSHIP_SYMBOL_CHARS, MAX_SYMBOL_MATCHES,
+            RelationshipOptions, RelationshipResult,
         },
     },
 };
@@ -238,7 +238,7 @@ pub trait IndexOperationProvider: Send + Sync {
     async fn relationships(
         &self,
         engine: &ZvecGrep,
-        direction: RelationshipDirection,
+        direction: Direction,
         request: RelationshipOptions,
     ) -> Result<RelationshipResult, EngineError> {
         engine.relationships(direction, request).await
@@ -373,7 +373,7 @@ impl ZvecGrepMcpServer {
         &self,
         input: RelationshipInput,
         context: RequestContext<RoleServer>,
-        direction: RelationshipDirection,
+        direction: Direction,
     ) -> Result<CallToolResult, ErrorData> {
         let mut request = input
             .into_request()
@@ -415,8 +415,7 @@ impl ZvecGrepMcpServer {
         Parameters(input): Parameters<RelationshipInput>,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.relationship_query(input, context, RelationshipDirection::Callers)
-            .await
+        self.relationship_query(input, context, Direction::In).await
     }
 
     #[tool(
@@ -435,7 +434,7 @@ impl ZvecGrepMcpServer {
         Parameters(input): Parameters<RelationshipInput>,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.relationship_query(input, context, RelationshipDirection::Callees)
+        self.relationship_query(input, context, Direction::Out)
             .await
     }
 
@@ -2190,7 +2189,7 @@ fn output_schema<T: JsonSchema>() -> Arc<rmcp::model::JsonObject> {
 
 fn relationship_result_to_tool_result(
     result: &RelationshipResult,
-    direction: RelationshipDirection,
+    direction: Direction,
 ) -> CallToolResult {
     let mut bytes = Vec::new();
     zg_cli::write_relationships(

@@ -25,7 +25,7 @@ use api::{
     index::{IndexOptions, IndexResult},
     info::{InfoOptions, InfoResult},
     paths::{PathLookupResult, PathsOptions, PathsResult},
-    relationships::{RelationshipDirection, RelationshipOptions, RelationshipResult},
+    relationships::{Direction, RelationshipOptions, RelationshipResult},
 };
 
 pub use error::{EngineError, EngineResult, ErrorReport, ErrorSite};
@@ -106,20 +106,18 @@ impl ZvecGrep {
 
     /// Finds incoming calls for matching symbol definitions in an existing index.
     pub async fn callers(&self, options: RelationshipOptions) -> EngineResult<RelationshipResult> {
-        self.relationships(RelationshipDirection::Callers, options)
-            .await
+        self.relationships(Direction::In, options).await
     }
 
     /// Finds outgoing calls for matching symbol definitions in an existing index.
     pub async fn callees(&self, options: RelationshipOptions) -> EngineResult<RelationshipResult> {
-        self.relationships(RelationshipDirection::Callees, options)
-            .await
+        self.relationships(Direction::Out, options).await
     }
 
     /// Finds persisted call relationships in the requested direction.
     pub async fn relationships(
         &self,
-        direction: RelationshipDirection,
+        direction: Direction,
         options: RelationshipOptions,
     ) -> EngineResult<RelationshipResult> {
         self.service

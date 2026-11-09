@@ -7,6 +7,19 @@ use serde::{Deserialize, Serialize};
 use super::metadata::SymbolType;
 use super::source::TextRange;
 
+/// Direction of a one-hop query relative to its endpoint.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    /// Edges targeting the queried endpoint.
+    In,
+    /// Edges originating from the queried endpoint.
+    Out,
+    /// Edges in either direction.
+    #[default]
+    Both,
+}
+
 /// Kinds produced by the extraction layer.
 ///
 /// Resolved edges and buffered name references share this vocabulary because
