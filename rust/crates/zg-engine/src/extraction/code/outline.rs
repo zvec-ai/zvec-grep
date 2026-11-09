@@ -7,6 +7,7 @@ use super::{
     grammar,
 };
 use crate::domain::{Content, EntityMetadata, FileFormat, Language, SymbolType};
+use crate::extraction::graph::{is_call_scan_barrier, is_unreported_call};
 use tree_sitter::{Node, Parser, Tree};
 
 const MAX_CALLS: usize = 24;
@@ -50,6 +51,8 @@ pub(crate) fn code_outline(
     };
     let mut tree = parse_source(&mut parser, parse_input, format, jsx)?;
     let mut bytes = parse_input.as_bytes();
+    // The synthetic tag is not stored content, so the entity may follow it.
+    let content_start = parse_input.len() - source.len();
     let wrapped_source;
     if matches!(
         format,
@@ -59,6 +62,7 @@ pub(crate) fn code_outline(
             tree.root_node(),
             adapter,
             bytes,
+            content_start,
             metadata.symbol_name.as_deref(),
         )
     {
@@ -138,6 +142,7 @@ fn has_complete_entity(
     root: Node<'_>,
     adapter: &LanguageAdapter,
     source: &[u8],
+    content_start: usize,
     name: Option<&str>,
 ) -> bool {
     let Some(mut entity) = find_entity(root, adapter, source, name) else {
@@ -157,9 +162,10 @@ fn has_complete_entity(
     // A nested declaration with the same name does not establish the syntax of
     // the stored outer entity. Only declaration wrappers and whitespace may lie
     // outside it; method bodies must be reconstructed in their class context.
-    source[..entity.start_byte()]
-        .iter()
-        .all(u8::is_ascii_whitespace)
+    entity.start_byte() >= content_start
+        && source[content_start..entity.start_byte()]
+            .iter()
+            .all(u8::is_ascii_whitespace)
         && source[entity.end_byte()..]
             .iter()
             .all(u8::is_ascii_whitespace)
@@ -273,9 +279,10 @@ fn collect_calls(root: Node<'_>, source: &[u8], calls: &mut Vec<String>) {
                 .find_map(|field| node.child_by_field_name(field))
                 .or_else(|| node.named_child(0));
             if let Some(target) = target
-                && let Ok(text) = call_target_text(node, target, source)
+                && !is_unreported_call(node, source)
+                && let Ok(name) = call_target_text(node, target, source)
             {
-                let name = one_line(text);
+                let name = one_line(&name);
                 let name = name.strip_prefix("new ").unwrap_or(&name).trim();
                 if name.chars().count() <= MAX_LINE_CHARS
                     && name.chars().any(|character| {
@@ -287,17 +294,22 @@ fn collect_calls(root: Node<'_>, source: &[u8], calls: &mut Vec<String>) {
                 }
             }
         }
-        pending.extend(named_children(node).into_iter().rev());
+        pending.extend(
+            named_children(node)
+                .into_iter()
+                .filter(|child| !is_call_scan_barrier(*child))
+                .rev(),
+        );
     }
 }
 
 // PHP member and static calls name only the method, so the receiver or class
 // stays in the target and `Audit::record` and `Ledger::record` remain distinct.
-fn call_target_text<'a>(
+fn call_target_text(
     call: Node<'_>,
     target: Node<'_>,
-    source: &'a [u8],
-) -> Result<&'a str, std::str::Utf8Error> {
+    source: &[u8],
+) -> Result<String, std::str::Utf8Error> {
     let receiver = match call.kind() {
         "member_call_expression" | "nullsafe_member_call_expression" => {
             call.child_by_field_name("object")
@@ -307,16 +319,66 @@ fn call_target_text<'a>(
     };
     let name = target.utf8_text(source)?;
     let Some(receiver) = receiver else {
-        return Ok(name);
+        return Ok(name.to_owned());
     };
-    let qualified = std::str::from_utf8(&source[receiver.start_byte()..target.end_byte()])?;
+    // The target ends where the arguments start, so a dynamic name such as
+    // `$this->{'dyn'}` keeps its closing brace.
+    let end = call
+        .child_by_field_name("arguments")
+        .map_or(target.end_byte(), |arguments| arguments.start_byte());
+    let qualified = token_text(call, receiver.start_byte(), end, source)?;
     // A long receiver, such as a chained call with closure arguments, would
     // push the target past the line limit, so the bare method name stands in.
     Ok(if qualified.chars().count() <= MAX_LINE_CHARS {
         qualified
     } else {
-        name
+        name.to_owned()
     })
+}
+
+// Joins the tokens in `start..end` without comments or layout, so the same
+// call reads the same however it is formatted. A space stays only where the
+// source separates two word tokens that would otherwise merge, as in
+// `new Ledger`. Adjacent tokens such as `$` and `this` stay joined.
+fn token_text(
+    root: Node<'_>,
+    start: usize,
+    end: usize,
+    source: &[u8],
+) -> Result<String, std::str::Utf8Error> {
+    let mut text = String::new();
+    let mut previous_end = start;
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        if node.end_byte() <= start || node.start_byte() >= end || node.kind() == "comment" {
+            continue;
+        }
+        if node.child_count() > 0 {
+            let mut cursor = node.walk();
+            let children: Vec<_> = node.children(&mut cursor).collect();
+            pending.extend(children.into_iter().rev());
+            continue;
+        }
+        // The caller drops names past the line limit, so a long chain stops
+        // here instead of joining every token of every earlier link.
+        if text.len() > MAX_LINE_CHARS * 4 {
+            break;
+        }
+        let token = node.utf8_text(source)?;
+        let joins_words = node.start_byte() > previous_end
+            && text.chars().last().is_some_and(is_word_char)
+            && token.chars().next().is_some_and(is_word_char);
+        if joins_words {
+            text.push(' ');
+        }
+        text.push_str(token);
+        previous_end = node.end_byte();
+    }
+    Ok(text)
+}
+
+fn is_word_char(character: char) -> bool {
+    character.is_alphanumeric() || matches!(character, '_' | '$' | '\\')
 }
 
 fn one_line(value: &str) -> String {
@@ -685,6 +747,32 @@ mod tests {
     }
 
     #[test]
+    fn php_functions_skip_the_method_wrapper() {
+        // The synthetic open tag precedes every stored PHP entity, so a
+        // complete top-level function must not be reparsed as a method.
+        let source = format!("{PHP_OPEN_TAG}function charge() {{ debit(); }}");
+        let adapter = resolve_adapter(FileFormat::Php).expect("php adapter");
+        let mut parser = Parser::new();
+        let tree = parse_source(&mut parser, &source, FileFormat::Php, false).expect("parses");
+        assert!(has_complete_entity(
+            tree.root_node(),
+            adapter,
+            source.as_bytes(),
+            PHP_OPEN_TAG.len(),
+            Some("charge"),
+        ));
+        let method = format!("{PHP_OPEN_TAG}public function charge() {{ debit(); }}");
+        let tree = parse_source(&mut parser, &method, FileFormat::Php, false).expect("parses");
+        assert!(!has_complete_entity(
+            tree.root_node(),
+            adapter,
+            method.as_bytes(),
+            PHP_OPEN_TAG.len(),
+            Some("charge"),
+        ));
+    }
+
+    #[test]
     fn stored_php_entities_outline_without_an_open_tag() {
         let method = code_outline(
             Path::new("Charger.php"),
@@ -716,6 +804,40 @@ mod tests {
         assert!(
             template.ends_with("calls: Audit::record, Ledger::record, record, track"),
             "{template}"
+        );
+
+        // First-class callables create closures without calling, while spreads
+        // and calls inside the receiver still count.
+        let callables = code_outline(
+            Path::new("handler.php"),
+            &Content::Code(
+                "function handler() {\n  $audit = Audit::record(...);\n  Ledger::record(...$args);\n  return $this->factory()->make(...);\n}"
+                    .into(),
+            ),
+            Some(&metadata(SymbolType::Function, "handler")),
+        )
+        .expect("php callable outline");
+        assert!(
+            callables.ends_with("calls: Ledger::record, $this->factory"),
+            "{callables}"
+        );
+
+        // Call names ignore layout and comments, and code that only defines a
+        // class or closure, or runs on reflection in an attribute, is no call.
+        let shapes = code_outline(
+            Path::new("shapes.php"),
+            &Content::Code(
+                "#[Assert(new Length(5))]\nfunction shapes() {\n  $this->repo\n      ->find();\n  $this /* note */ -> go();\n  $this->{'dyn'}();\n  $handler = new class { public function run() { inner(); } };\n  (function () { iife(); })();\n  static::create();\n  parent::__construct();\n  $made = [new static(), new self()];\n  return (new Ledger)->post();\n}"
+                    .into(),
+            ),
+            Some(&metadata(SymbolType::Function, "shapes")),
+        )
+        .expect("php shapes outline");
+        assert!(
+            shapes.ends_with(
+                "calls: $this->repo->find, $this->go, $this->{'dyn'}, inner, iife, static::create, parent::__construct, (new Ledger)->post, Ledger"
+            ),
+            "{shapes}"
         );
 
         let class = code_outline(

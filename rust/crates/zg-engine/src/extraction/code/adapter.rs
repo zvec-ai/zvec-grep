@@ -845,7 +845,7 @@ fn is_php_element(node: Node<'_>) -> bool {
 }
 
 // Elements share the modifiers, type and documentation of their statement.
-fn php_declaration(node: Node<'_>) -> Node<'_> {
+pub(super) fn php_declaration(node: Node<'_>) -> Node<'_> {
     if is_php_element(node) {
         node.parent().unwrap_or(node)
     } else {

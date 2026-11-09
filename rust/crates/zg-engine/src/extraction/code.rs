@@ -11,7 +11,7 @@ use crate::{
     utils::line_byte_offsets,
 };
 
-use self::adapter::{LanguageAdapter, named_children, resolve_adapter};
+use self::adapter::{LanguageAdapter, named_children, php_declaration, resolve_adapter};
 use super::graph::{
     WalkContext, collect_import_edge, collect_inheritance_edges, is_import_node, partition_walk,
     scan_binding_declarations, scan_call_edges, scan_return_types,
@@ -243,9 +243,11 @@ fn walk_code_node<'tree>(
 
         if is_entity {
             let start_index = out.len();
+            let mut entity_indexes = Vec::new();
             for entity in adapter.resolve_entities(child, source) {
                 let entity_index = graph_context.next_entity_index();
                 first_entity_index.get_or_insert(entity_index);
+                entity_indexes.push(entity_index);
                 scope_entity_index = Some(entity_index);
                 let name = adapter.extract_name(entity, source);
                 let entity_breadcrumb = adapter.scope_breadcrumb(entity, source, breadcrumb);
@@ -290,21 +292,26 @@ fn walk_code_node<'tree>(
                     |node: Node<'_>| adapter.is_entity(node) || adapter.is_scope(node);
                 let boundary: Option<&dyn Fn(Node<'_>) -> bool> =
                     is_scope.then_some(&member_owned as &dyn Fn(Node<'_>) -> bool);
-                scan_call_edges(
-                    first_entity.node,
-                    first_entity_index,
-                    source,
-                    graph_context,
-                    boundary,
-                );
-                scan_binding_declarations(
-                    first_entity.node,
-                    first_entity_index,
-                    source,
-                    format,
-                    graph_context,
-                    boundary,
-                );
+                // A split PHP statement resolves to its elements, so the first
+                // element's subtree misses the initializers of the others,
+                // as in `const A = new Foo, B = new Bar;`.
+                let scanned = if format == FileFormat::Php {
+                    entity_indexes.len()
+                } else {
+                    1
+                };
+                for (offset, entity_index) in entity_indexes.iter().take(scanned).enumerate() {
+                    let entity_node = out[start_index + offset].node;
+                    scan_call_edges(entity_node, *entity_index, source, graph_context, boundary);
+                    scan_binding_declarations(
+                        entity_node,
+                        *entity_index,
+                        source,
+                        format,
+                        graph_context,
+                        boundary,
+                    );
+                }
                 collect_inheritance_edges(
                     first_entity.node,
                     source,
@@ -406,21 +413,26 @@ fn append_php_gaps(
     overlap_chars: usize,
     output: &mut Vec<ExtractedEntity>,
 ) {
-    let mut covered = entities
-        .iter()
-        .map(|entity| {
-            // Comments already stored as documentation count as covered.
-            let mut start = entity.node.start_byte();
-            if entity.documentation.is_some() {
-                let mut sibling = entity.node.prev_named_sibling();
-                while let Some(comment) = sibling.filter(|node| node.kind() == "comment") {
-                    start = comment.start_byte();
-                    sibling = comment.prev_named_sibling();
-                }
+    let mut covered = Vec::with_capacity(entities.len() * 2);
+    for entity in entities {
+        covered.push((entity.node.start_byte(), entity.node.end_byte()));
+        // Comments stored as documentation count as covered. Split elements
+        // inherit theirs from the statement, so walk back from there, as
+        // `extract_doc` does, leaving comments between elements searchable.
+        if entity.documentation.is_some() {
+            let declaration = php_declaration(entity.node);
+            let mut sibling = declaration.prev_named_sibling();
+            let mut run: Option<(usize, usize)> = None;
+            while let Some(comment) = sibling.filter(|node| node.kind() == "comment") {
+                run = Some((
+                    comment.start_byte(),
+                    run.map_or(comment.end_byte(), |run| run.1),
+                ));
+                sibling = comment.prev_named_sibling();
             }
-            (start, entity.node.end_byte())
-        })
-        .collect::<Vec<_>>();
+            covered.extend(run);
+        }
+    }
     covered.sort_unstable();
     let mut gaps = Vec::new();
     let mut offset = 0;
@@ -437,7 +449,7 @@ fn append_php_gaps(
     for (start, end) in gaps {
         let gap = &source.text[start..end];
         let text = gap.trim();
-        if is_bare_php_tags(text) {
+        if !has_searchable_text(text) {
             continue;
         }
         let text_start = start + (gap.len() - gap.trim_start().len());
@@ -449,13 +461,15 @@ fn append_php_gaps(
     }
 }
 
-fn is_bare_php_tags(text: &str) -> bool {
+// Bare open or close tags and separators left between split elements, such
+// as a lone `;`, carry nothing worth searching.
+fn has_searchable_text(text: &str) -> bool {
     text.replace("<?php", "")
         .replace("<?=", "")
         .replace("<?", "")
         .replace("?>", "")
-        .trim()
-        .is_empty()
+        .chars()
+        .any(char::is_alphanumeric)
 }
 
 fn code_entity_metadata(entity: &CodeEntity<'_>) -> EntityMetadata {
@@ -1112,6 +1126,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn keeps_comments_between_split_php_elements_searchable() {
+        let source = test_source(
+            FileFormat::Php,
+            "constants.php",
+            &[
+                "<?php",
+                "/** Shared documentation. */",
+                "const /* ALPHA_MARKER */ A = 1,",
+                "      /* BETA_MARKER */ B = 2;",
+            ]
+            .join("\n"),
+        );
+        let fragments = extract(&source, ChunkOptions::default()).expect("php extraction");
+        for name in ["A", "B"] {
+            assert!(
+                matches!(
+                    test_metadata(named(&fragments, name)),
+                    Some(EntityMetadata::Code(CodeMetadata { documentation: Some(doc), .. }))
+                        if doc == "Shared documentation."
+                ),
+                "{name}"
+            );
+        }
+        // Only the statement's documentation is covered. Comments between
+        // elements stay searchable, and the trailing `;` is not a chunk.
+        assert_eq!(
+            plain_chunks(&fragments),
+            ["const /* ALPHA_MARKER */", ",\n      /* BETA_MARKER */"]
+        );
+    }
+
     fn plain_chunks(fragments: &[ExtractedEntity]) -> Vec<String> {
         fragments
             .iter()
@@ -1416,6 +1462,93 @@ mod tests {
             calls,
             vec!["factory"],
             "only the receiver's own call is a bindable name"
+        );
+    }
+
+    #[test]
+    fn php_member_and_static_calls_reach_the_graph() {
+        // PHP names the method in its own field, so the receiver must be
+        // rejoined. Code that runs nothing at the site (attribute arguments,
+        // first-class callables, inline class and closure definitions) is no
+        // call, matching the outline. Each element of a split statement owns
+        // its own initializer.
+        use super::{Parser, WalkContext, grammar, resolve_adapter};
+        use crate::domain::GraphEdgeKind;
+
+        let source = concat!(
+            "<?php\n",
+            "class Svc {\n",
+            "    #[Assert(new Length(5))]\n",
+            "    public function run() {\n",
+            "        $this->repo->find();\n",
+            "        $this?->log?->flush();\n",
+            "        Audit::record();\n",
+            "        \\App\\Audit::trace();\n",
+            "        $this->factory()->make();\n",
+            "        $cb = helper(...);\n",
+            "        $anon = new class {};\n",
+            "        (function () { iife(); })();\n",
+            "        self::boot();\n",
+            "        static::create();\n",
+            "        parent::__construct();\n",
+            "        return [new static(), new self(), new parent()];\n",
+            "    }\n",
+            "}\n",
+            "const A = new Foo, B = new Bar;\n",
+        );
+        let adapter = resolve_adapter(FileFormat::Php).expect("php adapter");
+        let language = grammar(FileFormat::Php, false).expect("php grammar");
+        let mut parser = Parser::new();
+        parser.set_language(&language).expect("grammar loads");
+        let tree = parser.parse(source, None).expect("source parses");
+
+        let mut entities = Vec::new();
+        let mut graph_context = WalkContext::new();
+        super::walk_code_node(
+            tree.root_node(),
+            adapter,
+            source.as_bytes(),
+            &[],
+            &mut entities,
+            &mut graph_context,
+            FileFormat::Php,
+        );
+
+        let owner = |name: &str| {
+            entities
+                .iter()
+                .position(|entity| entity.name.as_deref() == Some(name))
+                .expect("entity exists")
+        };
+        let calls: Vec<(usize, &str, Option<&str>)> = graph_context
+            .name_edges()
+            .iter()
+            .filter(|edge| edge.ref_kind == GraphEdgeKind::Calls)
+            .map(|edge| {
+                (
+                    edge.owner_index,
+                    edge.ref_name.as_str(),
+                    edge.receiver_name.as_deref(),
+                )
+            })
+            .collect();
+        let run = owner("run");
+        assert_eq!(
+            calls,
+            vec![
+                (run, "find", Some("$this.repo")),
+                (run, "flush", Some("$this.log")),
+                (run, "record", Some("Audit")),
+                (run, "trace", None),
+                (run, "make", None),
+                (run, "factory", Some("$this")),
+                (run, "iife", None),
+                (run, "boot", Some("self")),
+                (run, "create", Some("static")),
+                (run, "__construct", Some("parent")),
+                (owner("A"), "Foo", None),
+                (owner("B"), "Bar", None),
+            ]
         );
     }
 
