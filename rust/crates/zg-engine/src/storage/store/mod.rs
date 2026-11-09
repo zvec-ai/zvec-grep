@@ -1,7 +1,7 @@
 //! Index lifecycle and operations that span multiple tables.
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
@@ -61,32 +61,7 @@ struct StoreState {
     optimize_marker: PathBuf,
     needs_optimize: bool,
     closed: bool,
-    resolution_invalidation: ResolutionInvalidation,
 }
-
-/// Evidence one pass changed that can make an already-resolved reference
-/// stale.
-///
-/// The resolver reads a workspace-wide name index and import path set, but the
-/// queue only revisits `pending` rows. A pass therefore accumulates what it
-/// changed and requeues the affected rows before its sweep; the accumulation
-/// stays in memory and is consumed once.
-#[derive(Default)]
-struct ResolutionInvalidation {
-    /// Symbol names written by replaced files. A second entity of the same
-    /// name can break a former unique or qualified-name match.
-    names: BTreeSet<String>,
-    /// Whether a file appeared or disappeared this pass. That can reorder the
-    /// preferred `path_variants` entry of any import.
-    paths_changed: bool,
-    /// Set once `names` outgrows what we are willing to materialize; the
-    /// requeue then conservatively covers every resolved reference.
-    overflow: bool,
-}
-
-/// Name budget for one pass's requeue. Larger passes fall back to the blanket
-/// requeue, which needs no name list and is the cheaper of the two then.
-const MAX_INVALIDATION_NAMES: usize = 4096;
 
 pub(crate) struct IndexStore {
     shared: Mutex<Option<Arc<SharedStore>>>,
@@ -244,7 +219,6 @@ impl IndexStore {
                 optimize_marker,
                 needs_optimize,
                 closed: false,
-                resolution_invalidation: ResolutionInvalidation::default(),
             }),
             schema,
             read_only,
@@ -444,8 +418,6 @@ impl IndexStore {
     pub(crate) fn delete_file(&self, file_id: FileId) -> EngineResult<()> {
         self.write(|state| {
             state.needs_optimize = true;
-            // A vanished file can change which module path an import prefers.
-            state.resolution_invalidation.paths_changed = true;
             let old_ids = invalidation_entity_ids(state, file_id)?;
             state.files.mark_deleting(file_id)?;
             if let Ok(graph) = state.graph.as_mut() {
@@ -459,39 +431,27 @@ impl IndexStore {
         })
     }
 
-    /// Requeues references whose evidence changed during this pass and
-    /// consumes the pass's accumulation.
+    /// Requeues references whose evidence changed during this pass.
     ///
     /// The resolution sweep only reads `pending` rows, so a resolved reference
     /// never sees a changed candidate set or module path again unless a pass
     /// explicitly requeues it. Endpoint invalidation covers references that
     /// pointed at a replaced file; this covers the workspace-wide sets that
-    /// endpoint identity cannot express. A pass without graph storage has
-    /// nothing to requeue.
+    /// endpoint identity cannot express. The evidence lives in the graph
+    /// database, recorded with the file writes that produced it, so a pass that
+    /// fails or is cancelled before this call requeues on the next one. A pass
+    /// without graph storage has nothing to requeue.
     ///
     /// # Errors
     /// Rejects SQLite failures. The caller degrades like a failed sweep: the
-    /// canonical index stays published and the stale resolutions survive.
+    /// canonical index stays published, the stale resolutions survive, and the
+    /// evidence stays recorded.
     pub(crate) fn requeue_stale_resolutions(&self) -> EngineResult<usize> {
         self.write(|state| {
-            let invalidation = std::mem::take(&mut state.resolution_invalidation);
-            if invalidation.names.is_empty()
-                && !invalidation.paths_changed
-                && !invalidation.overflow
-            {
-                return Ok(0);
-            }
             let Ok(graph) = state.graph.as_mut() else {
                 return Ok(0);
             };
-            let names = invalidation.names.into_iter().collect::<Vec<_>>();
-            graph
-                .requeue_stale_resolutions(
-                    &names,
-                    invalidation.paths_changed,
-                    invalidation.overflow,
-                )
-                .map_err(graph_error)
+            graph.requeue_stale_resolutions().map_err(graph_error)
         })
     }
 
@@ -595,22 +555,10 @@ fn replace_file(
     // Endpoint invalidation below only revisits references that pointed at this
     // file's old entities. A file that appeared, or one that introduces a name
     // another entity already uses, changes the workspace-wide sets resolution
-    // reads without touching those endpoints, so the pass requeues those rows
-    // once before its sweep instead.
+    // reads without touching those endpoints, so the graph records that
+    // evidence with the rows it can stale and the pass requeues them once
+    // before its sweep.
     let appeared = state.files.fetch(&[file.id()])?.is_empty();
-    {
-        let invalidation = &mut state.resolution_invalidation;
-        invalidation.paths_changed |= appeared;
-        if !invalidation.overflow {
-            invalidation
-                .names
-                .extend(graph.nodes.iter().filter_map(|node| node.name.clone()));
-            if invalidation.names.len() > MAX_INVALIDATION_NAMES {
-                invalidation.names.clear();
-                invalidation.overflow = true;
-            }
-        }
-    }
     state.needs_optimize = true;
     let directories = state.directories.ensure(file.relative_path())?;
     // Encode every projection before removing any of the previous file's data.
@@ -633,7 +581,7 @@ fn replace_file(
     // zvec writes are durable on success: record retry intent before advancing SQLite.
     if let Ok(storage) = state.graph.as_mut() {
         storage
-            .write_file_graph(file.id().get(), Some(language), graph, &old_ids)
+            .write_file_graph(file.id().get(), Some(language), graph, &old_ids, appeared)
             .map_err(graph_error)?;
     }
     state.fragments.delete_file(file.id())?;

@@ -15,8 +15,11 @@ impl SqliteGraphStorage {
     /// The implicit file endpoint is `f{file_id}`, matching
     /// the zvec file document key. Cross-file edges are written by the resolver.
     /// Invalidation here is bounded by endpoint identity; the workspace-wide
-    /// evidence resolution also reads (name candidates, module paths) requeues
-    /// once per pass through `IndexStore::requeue_stale_resolutions`.
+    /// evidence resolution also reads (name candidates, module paths) is
+    /// recorded in the same transaction and requeued once per pass through
+    /// `IndexStore::requeue_stale_resolutions`.
+    /// `paths_changed` reports that this write made the file appear or
+    /// disappear, which can reorder the preferred path variant of every import.
     /// `language` labels pending references for the resolver's language gate;
     /// `None` records `unknown`, so the gate only keeps candidates that carry
     /// the same absent evidence.
@@ -32,6 +35,7 @@ impl SqliteGraphStorage {
         language: Option<&str>,
         graph: &FileGraphResult,
         old_entity_ids: &[String],
+        paths_changed: bool,
     ) -> Result<()> {
         let language = language.unwrap_or("unknown");
         let file_node_id = format!("f{file_id}");
@@ -101,6 +105,15 @@ impl SqliteGraphStorage {
                 ])?;
             }
         }
+        // Recorded with the rows it can stale, not once per pass: a pass that
+        // publishes this file and then fails or is cancelled before its sweep
+        // would otherwise lose the only record that earlier resolutions are
+        // stale, and no later pass revisits them.
+        Self::record_stale_evidence(
+            &tx,
+            paths_changed,
+            graph.nodes.iter().filter_map(|node| node.name.as_deref()),
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -116,7 +129,14 @@ impl SqliteGraphStorage {
         file_id: u32,
         old_entity_ids: &[String],
     ) -> Result<()> {
-        self.write_file_graph(file_id, None, &FileGraphResult::default(), old_entity_ids)
+        // A vanished file can change which module path an import prefers.
+        self.write_file_graph(
+            file_id,
+            None,
+            &FileGraphResult::default(),
+            old_entity_ids,
+            true,
+        )
     }
 }
 

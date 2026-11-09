@@ -852,3 +852,47 @@ fn sweep_binds_a_bare_call_to_its_import_over_a_same_named_member() {
         "the bare call binds the imported definition: {sweep:?}"
     );
 }
+
+#[test]
+fn stale_evidence_requeues_after_a_pass_stops_before_its_sweep() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    let nested = index_source(&store, "src/lib/index.ts", "export function work() {\n}\n");
+    let main = index_source(
+        &store,
+        "src/main.ts",
+        "import { work } from './lib';\n\nexport function run() {\n  work();\n}\n",
+    );
+    let owner = pending_call_owner(&store, main, "work");
+    store.requeue_stale_resolutions().expect("requeue");
+    resolve_pending(&store, None).expect("first sweep");
+    assert_eq!(
+        import_target_ids(&store, main),
+        vec![format!("f{}", nested.get())]
+    );
+
+    // A pass publishes the sibling module and then fails or is cancelled
+    // before its sweep. The earlier import and call keep their stale target,
+    // and the file stays indexed, so no later pass rewrites it: only the
+    // evidence recorded with that write can repair them.
+    let sibling = index_source(&store, "src/lib.ts", "export function work() {\n}\n");
+    store.close().expect("close");
+    drop(store);
+
+    // A fresh process opens the same index, as the next pass would.
+    let store = open(home.path());
+    let requeued = store
+        .requeue_stale_resolutions()
+        .expect("requeue after reopen");
+    assert!(
+        requeued >= 2,
+        "the import and its scoped call return to the queue: {requeued}"
+    );
+    resolve_pending(&store, None).expect("second sweep");
+    assert_eq!(
+        import_target_ids(&store, main),
+        vec![format!("f{}", sibling.get())],
+        "the shorter module wins once it exists"
+    );
+    assert_eq!(call_target_files(&store, &owner), vec![sibling]);
+}

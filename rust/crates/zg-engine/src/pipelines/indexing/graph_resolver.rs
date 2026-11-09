@@ -6,13 +6,13 @@
 //! relative import specifiers resolve through [`ResolutionSnapshot::file_id_by_path`],
 //! [`ResolutionSnapshot::lookup_candidates`] narrows name candidates, ambiguous
 //! bare names resolve through [`ResolutionSnapshot::imported_file_ids`] when
-//! the file's imports pin them to one module, `self`/`this` receiver calls
-//! bind to the one same-file declaration of the invoked member, qualified
-//! `Class::method` receivers bind to the entity whose `qualified_name`
-//! spells the same path, Java imports bind to the type or static member their
-//! specifier spells, export/arity evidence narrows the remaining
-//! ambiguities, external import specifiers terminate as failed, and
-//! [`IndexStore::apply_resolutions`] writes each batch atomically.
+//! the file's imports pin them to one module, `self`/`this`/`super` receiver
+//! calls bind the nearest declaration along the extends/implements
+//! hierarchy, qualified `Class::method` receivers bind to the entity whose
+//! `qualified_name` spells the same path, Java imports bind to the type or
+//! static member their specifier spells, export/arity evidence narrows the
+//! remaining ambiguities, external import specifiers terminate as failed,
+//! and [`IndexStore::apply_resolutions`] writes each batch atomically.
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
@@ -764,6 +764,26 @@ fn bind_in_module(
 /// `None` marks a module-level or namespace binding.
 type AliasPairs = fn(&str) -> Vec<(String, Option<String>)>;
 
+/// Statement text with trailing line comments removed.
+///
+/// Tree-sitter's import nodes already exclude comments, so this only guards raw
+/// text that still carries one: a comment spelling ` as ` or ` from ` would
+/// otherwise leak into a binding's local name or cut the clause in the wrong
+/// place.
+fn without_line_comments<'a>(statement: &'a str, marker: &str) -> std::borrow::Cow<'a, str> {
+    use std::borrow::Cow;
+    if !statement.contains(marker) {
+        return Cow::Borrowed(statement);
+    }
+    Cow::Owned(
+        statement
+            .lines()
+            .map(|line| line.split_once(marker).map_or(line, |(code, _)| code))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
 /// Loads the file's import edges and parses their statement text into `as`
 /// alias bindings. Only statements spelling an explicit `as` produce
 /// bindings: unaliased imports keep flowing through the bare-name and
@@ -803,6 +823,8 @@ fn load_alias_bindings(
 /// binds the module itself (`imported` stays `None`). Default imports and
 /// unaliased names never spell a binding.
 fn ts_alias_pairs(statement: &str) -> Vec<(String, Option<String>)> {
+    let statement = without_line_comments(statement, "//");
+    let statement = statement.as_ref();
     let Some(clause_end) = statement.rfind(" from ") else {
         return Vec::new();
     };
@@ -853,6 +875,8 @@ fn ts_alias_pairs(statement: &str) -> Vec<(String, Option<String>)> {
 /// namespace bindings whose imported half stays `None`. Unaliased forms
 /// never spell an `as`, so they stay unparsed.
 fn python_alias_pairs(statement: &str) -> Vec<(String, Option<String>)> {
+    let statement = without_line_comments(statement, "#");
+    let statement = statement.as_ref();
     let trimmed = statement.trim_start();
     // `from m import ...` spells statement-level names; a leading `import`
     // binds the module itself as a namespace.
@@ -909,6 +933,8 @@ fn python_namespace_pairs(names: &str) -> Vec<(String, Option<String>)> {
 /// per-item module paths the statement text alone cannot pin, so they
 /// stay unparsed.
 fn rust_alias_pairs(statement: &str) -> Vec<(String, Option<String>)> {
+    let statement = without_line_comments(statement, "//");
+    let statement = statement.as_ref();
     if statement.contains('{') {
         return Vec::new();
     }
@@ -1595,5 +1621,91 @@ fn extensions_for(language: &str) -> &'static [&'static str] {
         "c" => &[".c", ".h"],
         "cpp" => &[".cpp", ".cc", ".cxx", ".hpp", ".h"],
         _ => &[],
+    }
+}
+
+#[cfg(test)]
+mod alias_pair_tests {
+    use super::{python_alias_pairs, rust_alias_pairs, ts_alias_pairs};
+
+    fn pairs(items: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
+        items
+            .iter()
+            .map(|(local, imported)| ((*local).to_owned(), imported.map(str::to_owned)))
+            .collect()
+    }
+
+    #[test]
+    fn ts_reads_multiline_named_type_and_namespace_imports() {
+        assert_eq!(
+            ts_alias_pairs("import {\n  work as leftWork,\n  other as second,\n} from './left'"),
+            pairs(&[("leftWork", Some("work")), ("second", Some("other"))])
+        );
+        assert_eq!(
+            ts_alias_pairs("import type { Work as W } from './types'"),
+            pairs(&[("W", Some("Work"))])
+        );
+        assert_eq!(
+            ts_alias_pairs("import * as leftApi from './left'"),
+            pairs(&[("leftApi", None)])
+        );
+        // A default import spells no named binding, and neither does an
+        // aliased default export, which no named lookup can reach.
+        assert!(ts_alias_pairs("import work from './left'").is_empty());
+        assert!(ts_alias_pairs("import { default as thing } from './m'").is_empty());
+    }
+
+    #[test]
+    fn python_reads_parenthesized_comma_and_plain_imports() {
+        assert_eq!(
+            python_alias_pairs(
+                "from pkg import (\n    work as leftWork,\n    other,\n    second as s,\n)"
+            ),
+            pairs(&[("leftWork", Some("work")), ("s", Some("second"))])
+        );
+        assert_eq!(
+            python_alias_pairs("from pkg.sub import a, b as c"),
+            pairs(&[("c", Some("b"))])
+        );
+        // A leading `import` binds modules, so every alias names a namespace.
+        assert_eq!(
+            python_alias_pairs("import left.module as lm, other.mod as om"),
+            pairs(&[("lm", None), ("om", None)])
+        );
+    }
+
+    #[test]
+    fn rust_reads_path_aliases_and_skips_brace_groups() {
+        assert_eq!(
+            rust_alias_pairs("use crate::util::work as left_work;"),
+            pairs(&[("left_work", Some("work"))])
+        );
+        // A brace group needs per-item module paths the text alone cannot pin.
+        assert!(rust_alias_pairs("use crate::util::{work as left_work};").is_empty());
+        assert!(rust_alias_pairs("use crate::util::work;").is_empty());
+    }
+
+    #[test]
+    fn trailing_comments_never_spell_a_binding() {
+        // The comment names ` from ` and ` as `; neither may cut the clause or
+        // extend a local name.
+        assert_eq!(
+            ts_alias_pairs("import { work as w } from './left' // moved from './right'"),
+            pairs(&[("w", Some("work"))])
+        );
+        assert_eq!(
+            python_alias_pairs(
+                "from pkg import (\n    work as w,  # re-export\n    other as o,\n)"
+            ),
+            pairs(&[("w", Some("work")), ("o", Some("other"))])
+        );
+        assert_eq!(
+            python_alias_pairs("from pkg import work as w  # re-export"),
+            pairs(&[("w", Some("work"))])
+        );
+        assert_eq!(
+            rust_alias_pairs("use crate::util::work as w; // alias"),
+            pairs(&[("w", Some("work"))])
+        );
     }
 }

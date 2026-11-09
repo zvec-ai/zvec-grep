@@ -48,6 +48,7 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
     // the ones it was built without. A read-only open cannot write and only
     // loses the index acceleration; the next writable open catches up.
     tx.execute_batch(INDEXES)?;
+    tx.execute_batch(INVALIDATION)?;
     tx.commit()?;
     Ok(())
 }
@@ -107,4 +108,17 @@ CREATE INDEX IF NOT EXISTS edges_pending_id ON edges(id) WHERE status = 'pending
 -- the CHECK constraint pins to a NULL `reference_name`.
 CREATE INDEX IF NOT EXISTS edges_name_tail ON edges(name_tail)
     WHERE reference_name IS NOT NULL;
+";
+
+// Evidence a pass recorded but has not requeued yet. It lives in the database
+// rather than in memory so that a pass which publishes files and then fails or
+// is cancelled before its sweep still repairs those resolutions on the next
+// open. Created on every writable open like the indexes, so a database built
+// without the table gains it without a rebuild.
+const INVALIDATION: &str = "
+CREATE TABLE IF NOT EXISTS zg_stale_names (
+    kind INTEGER NOT NULL CHECK (kind IN (0, 1)),
+    name TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (kind, name)
+) STRICT;
 ";

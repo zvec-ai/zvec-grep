@@ -809,6 +809,7 @@ fn retry_replaces_a_committed_graph_when_canonical_entities_are_still_old() {
                     None,
                     &interrupted.graph,
                     &state.entities.list_ids_for_file(original.file.id())?,
+                    false,
                 )
                 .map_err(graph_error)
         })
@@ -908,7 +909,13 @@ fn process_exit_during_canonical_replacement_recovers_from_durable_status() {
                     .graph
                     .as_mut()
                     .expect("test state")
-                    .write_file_graph(original.file.id().get(), None, &interrupted.graph, &old_ids)
+                    .write_file_graph(
+                        original.file.id().get(),
+                        None,
+                        &interrupted.graph,
+                        &old_ids,
+                        false,
+                    )
                     .map_err(graph_error)?;
                 state.entities.delete_file(original.file.id())?;
                 state
