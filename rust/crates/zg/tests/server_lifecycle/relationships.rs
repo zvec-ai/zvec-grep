@@ -32,7 +32,8 @@ fn persisted_calls_match_across_direct_daemon_and_mcp() -> Result<(), Box<dyn Er
     assert_persisted_calls(Path::new("calls.rs"))
 }
 
-#[cfg(unix)]
+// macOS test filesystems reject non-UTF-8 filenames on creation.
+#[cfg(target_os = "linux")]
 #[test]
 fn non_unicode_relationship_paths_match_across_direct_daemon_and_mcp() -> Result<(), Box<dyn Error>>
 {
