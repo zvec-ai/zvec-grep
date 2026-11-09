@@ -1645,10 +1645,31 @@ fn resolve_export_bound(stored: &StoredPendingRef, hits: &[NameIndexEntry]) -> O
 /// all declare their arity, a single match is the invoked overload.
 /// Candidates with unknown arity cannot rule themselves out, so their
 /// presence keeps the reference pending.
+///
+/// A receiver narrows the candidates to the scope it spells first, because an
+/// argument count says nothing across scopes: two classes may declare a
+/// `match` taking one argument, and picking the member whose count happens to
+/// agree is a guess rather than evidence. Only a receiver that names a
+/// declaring scope — `Class::method`, whose candidates are that class's
+/// overloads — narrows anything, so a call through an untyped `expr` keeps
+/// its reference pending.
 fn resolve_arity_bound(stored: &StoredPendingRef, hits: &[NameIndexEntry]) -> Option<Resolution> {
     let expected = stored.reference.arity?;
+    let candidates: Vec<&NameIndexEntry> = match stored.reference.receiver_name.as_deref() {
+        None => hits.iter().collect(),
+        Some(receiver) => {
+            let scope = receiver.rsplit("::").next().unwrap_or(receiver);
+            hits.iter()
+                .filter(|hit| {
+                    hit.qualified_name
+                        .rsplit_once("::")
+                        .is_some_and(|(owner, _)| owner == scope)
+                })
+                .collect()
+        }
+    };
     let mut matched = None;
-    for hit in hits {
+    for hit in candidates {
         match hit.arity {
             Some(arity) if arity as usize == expected => {
                 if matched.is_some() {
