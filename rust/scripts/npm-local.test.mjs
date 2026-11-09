@@ -365,6 +365,33 @@ test("explicit prebuilt mode selects CUDA without probing nvcc and still honors 
   }
 });
 
+test("Linux packaging pins manylinux 2.28 and audits the complete native payload", async () => {
+  const workflow = await readFile(new URL("../../.github/workflows/rust-package-build.yml", import.meta.url), "utf8");
+  for (const [architecture, digest] of [
+    ["x86_64", "d5f19b5957cf25df7ac15465924cafe2358754a187e510af386bf9596598a372"],
+    ["aarch64", "34368babc008d6405b4b74c77868d6a5d15b6010cb953574d1f2bb9184392a9b"],
+  ]) {
+    assert.ok(workflow.includes(`quay.io/pypa/manylinux_2_28_${architecture}:2026.03.01-1@sha256:${digest}`));
+  }
+  assert.match(workflow, /--file rust\/scripts\/release-builder\.Dockerfile/);
+  assert.match(workflow, /v6-manylinux2\.28/);
+  assert.match(workflow, /check-glibc\.py \/work-target\/release\/zg-cuda-staging --max 2\.28/);
+  assert.match(workflow, /check-glibc\.py dist\/npm\/release\/staging\/\$\{\{ inputs\.target \}\} --max 2\.28/);
+  assert.doesNotMatch(workflow, /ubuntu:20\.04|glibc 2\.31|--max 2\.31/);
+  const builder = await readFile(new URL("./release-builder.Dockerfile", import.meta.url), "utf8");
+  assert.match(builder, /clang-devel/);
+  assert.match(builder, /cp312-cp312/);
+  assert.match(builder, /glibc 2\.28/);
+});
+
+test("Linux CPU validation uses a clean glibc 2.28 image rather than the builder", async () => {
+  for (const name of ["rust-package-build", "rust-publish", "rust-ci"]) {
+    const workflow = await readFile(new URL(`../../.github/workflows/${name}.yml`, import.meta.url), "utf8");
+    assert.match(workflow, /almalinux:8\.10@sha256:2d0f2eb2a83cc09dbc2eb92fade4dbe8f709628149e81aa00aec70630406603b/);
+    assert.match(workflow, /test "\$\(getconf GNU_LIBC_VERSION\)" = "glibc 2\.28"/);
+  }
+});
+
 test("Windows ARM64 publishing requires its CPU SDK without source compiler overrides", async () => {
   const entry = selectPlatform(manifest, "win32", "arm64");
   assert.equal(resolveBuildVariant(entry, false,

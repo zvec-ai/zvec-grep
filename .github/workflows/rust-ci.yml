@@ -146,7 +146,7 @@ jobs:
         run: node --test scripts/npm-*.test.mjs npm/meta/install.test.cjs
 
   ort-glibc:
-    name: ORT on glibc 2.31 (${{ matrix.target }})
+    name: ORT on glibc 2.28 (${{ matrix.target }})
     needs: source
     permissions:
       contents: read
@@ -174,14 +174,14 @@ jobs:
       - name: Prepare and audit official CPU runtime
         run: |
           python3 scripts/prepare-onnxruntime.py --target ${{ matrix.target }} --cache-dir target/ort-prebuilt --destination target/ort-cpu
-          python3 scripts/check-glibc.py target/ort-cpu --max 2.31
-      - name: Load CPU runtime on glibc 2.31
+          python3 scripts/check-glibc.py target/ort-cpu --max 2.28
+      - name: Load CPU runtime on glibc 2.28
         run: |
-          docker run --rm --volume "$PWD:/work:ro" --workdir /work ubuntu:20.04 bash -euc '
-            apt-get update -qq
-            apt-get install -y --no-install-recommends python3 libstdc++6 >/dev/null
-            test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.31"
-            python3 scripts/check-onnxruntime.py target/ort-cpu/libonnxruntime.so.1
+          docker run --rm --volume "$PWD:/work:ro" --workdir /work \
+            almalinux:8.10@sha256:2d0f2eb2a83cc09dbc2eb92fade4dbe8f709628149e81aa00aec70630406603b bash -euc '
+            dnf install --assumeyes --setopt=install_weak_deps=False python3.12 libstdc++ >/dev/null
+            test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.28"
+            python3.12 scripts/check-onnxruntime.py target/ort-cpu/libonnxruntime.so.1
           '
       - name: Verify Vulkan does not require a custom ORT at build time
         run: |
@@ -193,7 +193,7 @@ jobs:
         if: matrix.cuda
         run: |
           python3 scripts/prepare-onnxruntime.py --target ${{ matrix.target }} --cuda --cache-dir target/ort-prebuilt --destination target/ort-cuda
-          python3 scripts/check-glibc.py target/ort-cuda --max 2.31
+          python3 scripts/check-glibc.py target/ort-cuda --max 2.28
 
   ort-models:
     name: ONNX catalog and CPU runtime comparison (${{ matrix.target }})

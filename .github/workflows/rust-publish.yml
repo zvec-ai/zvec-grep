@@ -275,7 +275,7 @@ jobs:
         with:
           path: ${{ runner.temp }}/zvec-grep-model-cache
           key: cuda-cli-models-v1-${{ runner.os }}-${{ hashFiles('rust/crates/zg-engine/src/models/catalog/**', 'rust/scripts/cuda/e2e.py') }}
-      - name: Install and exercise Linux artifacts on Ubuntu 20.04 without CUDA libraries
+      - name: Install and exercise Linux artifacts on glibc 2.28 without CUDA libraries
         if: runner.os == 'Linux'
         shell: bash
         working-directory: ${{ github.workspace }}
@@ -287,13 +287,13 @@ jobs:
             --volume "${GITHUB_WORKSPACE}:/work" \
             --volume "${node_root}:/opt/node:ro" \
             --volume "${RUNNER_TEMP}/zvec-grep-model-cache:/model-cache" \
-            --workdir /work/rust --env DEBIAN_FRONTEND=noninteractive \
+            --workdir /work/rust \
             --env RELEASE_TARGET=${{ matrix.target }} \
             --env PATH=/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-            ubuntu:20.04 bash -euo pipefail -c '
-              apt-get update -qq
-              apt-get install --yes --no-install-recommends python3 ca-certificates libstdc++6 >/dev/null
-              test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.31"
+            almalinux:8.10@sha256:2d0f2eb2a83cc09dbc2eb92fade4dbe8f709628149e81aa00aec70630406603b bash -euo pipefail -c '
+              dnf install --assumeyes --setopt=install_weak_deps=False python3.12 ca-certificates libstdc++ >/dev/null
+              ln -s /usr/bin/python3.12 /usr/local/bin/python3
+              test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.28"
               npm run release:artifact-smoke -- --expect-cpu
               if [[ "$RELEASE_TARGET" == linux-x64-gnu ]]; then
                 python3 scripts/cuda/e2e.py --cpu-only \
