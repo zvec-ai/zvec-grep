@@ -523,23 +523,28 @@ fn language_compatible(reference: Option<FileFormat>, path: Option<&str>) -> boo
 /// describe one symbol, so the definition stands for both; only that spelling
 /// pairs them, because a same-named entity under another qualified name — or
 /// in another language — is a different symbol and must never hide the
-/// declaration. A qualified name does not identify a C++ overload either, so
-/// the two also need compatible arities: `void f(int, int);` and
-/// `void f(int) {}` are different symbols, and letting the definition hide
-/// the declaration would leave the caller a single candidate that the
-/// workspace-unique rule then binds without checking its argument count.
+/// declaration. A qualified name does not identify a C++ overload either, and
+/// neither does an argument count: `void f(const char*);` and `void f(int) {}`
+/// both take one argument, so hiding the declaration would leave the caller a
+/// single candidate that the workspace-unique rule binds without evidence.
+/// The pair therefore also needs agreement on the parameters themselves, and
+/// when that evidence is missing both candidates stay, leaving the reference
+/// ambiguous instead of pointing at the wrong implementation.
 /// Call this after the language gate, never on the whole name index: shrinking
 /// the shared set would let an unrelated language's definition erase the only
 /// candidate a reference can bind.
 fn prefer_definitions<T: Borrow<NameIndexEntry>>(hits: Vec<T>) -> Vec<T> {
-    let mut defined: HashMap<String, Vec<Option<u32>>> = HashMap::new();
+    /// One definition's evidence: its counted parameters and the normalized
+    /// parameter list that tells its overload apart.
+    type Evidence = (Option<u32>, Option<String>);
+    let mut defined: HashMap<String, Vec<Evidence>> = HashMap::new();
     for hit in &hits {
         let hit: &NameIndexEntry = hit.borrow();
         if !hit.is_declaration {
             defined
                 .entry(hit.qualified_name.clone())
                 .or_default()
-                .push(hit.arity);
+                .push((hit.arity, hit.parameters.clone()));
         }
     }
     if defined.is_empty() {
@@ -549,13 +554,134 @@ fn prefer_definitions<T: Borrow<NameIndexEntry>>(hits: Vec<T>) -> Vec<T> {
         .filter(|hit| {
             let hit: &NameIndexEntry = hit.borrow();
             !hit.is_declaration
-                || !defined.get(&hit.qualified_name).is_some_and(|arities| {
-                    arities
-                        .iter()
-                        .any(|&arity| compatible_arity(arity, hit.arity))
+                || !defined.get(&hit.qualified_name).is_some_and(|definitions| {
+                    definitions.iter().any(|(arity, parameters)| {
+                        same_symbol(
+                            hit.arity,
+                            hit.parameters.as_deref(),
+                            *arity,
+                            parameters.as_deref(),
+                        )
+                    })
                 })
         })
         .collect()
+}
+
+/// Whether one qualified name's declaration and definition describe the same
+/// symbol: compatible arities, and — for symbols that take parameters — the
+/// same parameter list.
+fn same_symbol(
+    declaration_arity: Option<u32>,
+    declaration_parameters: Option<&str>,
+    definition_arity: Option<u32>,
+    definition_parameters: Option<&str>,
+) -> bool {
+    if !compatible_arity(declaration_arity, definition_arity) {
+        return false;
+    }
+    if declaration_arity.is_none() && definition_arity.is_none() {
+        // A symbol that takes no parameters has no overload set to separate:
+        // `class Foo;` and `class Foo {}` name one class.
+        return true;
+    }
+    declaration_parameters
+        .zip(definition_parameters)
+        .is_some_and(|(declared, defined)| same_parameters(declared, defined))
+}
+
+/// Whether two parameter lists describe one overload. A definition names its
+/// parameters while a declaration often does not, so a parameter matches when
+/// its tokens are equal or one side carries a single extra trailing identifier
+/// (`int` against `int value`, `const char*` against `const char* path`).
+/// Everything else stays unproven: `unsigned long` against `unsigned` and
+/// `const char*` against `int` are different parameters, and a comparison that
+/// cannot tell them apart would merge unrelated overloads.
+fn same_parameters(declared: &str, defined: &str) -> bool {
+    let declared = split_parameters(declared);
+    let defined = split_parameters(defined);
+    declared.len() == defined.len()
+        && declared
+            .iter()
+            .zip(defined.iter())
+            .all(|(left, right)| same_parameter(left, right))
+}
+
+/// Splits a normalized parameter list at the commas that separate parameters,
+/// leaving the ones nested in template arguments or function pointers.
+fn split_parameters(list: &str) -> Vec<&str> {
+    let mut parameters = Vec::new();
+    let mut depth = 0usize;
+    let mut begin = 0usize;
+    for (offset, character) in list.char_indices() {
+        match character {
+            '(' | '[' | '{' | '<' => depth += 1,
+            ')' | ']' | '}' | '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parameters.push(list[begin..offset].trim());
+                begin = offset + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parameters.push(list[begin..].trim());
+    parameters
+}
+
+fn same_parameter(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    let left: Vec<&str> = left.split_whitespace().collect();
+    let right: Vec<&str> = right.split_whitespace().collect();
+    let (longer, shorter) = if left.len() > right.len() {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    longer.len() == shorter.len() + 1
+        && longer[..shorter.len()] == shorter[..]
+        && is_parameter_name(longer[shorter.len()])
+}
+
+/// Whether the token a parameter adds to its type can be that parameter's name.
+/// `int` against `int value` and `const char*` against `const char* path` differ
+/// by one, but `unsigned` against `unsigned long` differ by one too, and reading
+/// `long` as a name would merge two different parameters.
+fn is_parameter_name(token: &str) -> bool {
+    let mut characters = token.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_alphabetic() || first == '_')
+        && characters.all(|character| character.is_alphanumeric() || character == '_')
+        && !matches!(
+            token,
+            "auto"
+                | "bool"
+                | "char"
+                | "char8_t"
+                | "char16_t"
+                | "char32_t"
+                | "class"
+                | "const"
+                | "double"
+                | "enum"
+                | "float"
+                | "int"
+                | "long"
+                | "register"
+                | "restrict"
+                | "short"
+                | "signed"
+                | "size_t"
+                | "struct"
+                | "typename"
+                | "union"
+                | "unsigned"
+                | "void"
+                | "volatile"
+                | "wchar_t"
+        )
 }
 
 /// Whether two arities can describe one symbol. A side without a counted
@@ -1988,6 +2114,35 @@ mod java_import_tests {
         assert!(!java_import_match(Some("com.acme"), "Util", "Util"));
         // A file whose package is unknown carries no evidence.
         assert!(!java_import_match(None, "com.acme.Util", "Util"));
+    }
+}
+
+#[cfg(test)]
+mod overload_evidence_tests {
+    use super::same_parameters;
+
+    #[test]
+    fn a_parameter_name_does_not_separate_one_overload() {
+        assert!(same_parameters("int", "int value"));
+        assert!(same_parameters("const char*", "const char* path"));
+        assert!(same_parameters(
+            "const std::string&, int",
+            "const std::string& name, int"
+        ));
+    }
+
+    #[test]
+    fn a_type_word_is_no_parameter_name() {
+        // `unsigned` and `unsigned long` are different parameters, so reading
+        // `long` as a name would merge them.
+        assert!(!same_parameters("unsigned", "unsigned long"));
+        assert!(!same_parameters("unsigned long", "unsigned"));
+    }
+
+    #[test]
+    fn different_types_and_counts_never_pair() {
+        assert!(!same_parameters("const char*", "int"));
+        assert!(!same_parameters("int, int", "int"));
     }
 }
 

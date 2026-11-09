@@ -526,6 +526,104 @@ fn sweep_keeps_a_cpp_overload_declaration_from_a_differently_shaped_definition()
 }
 
 #[test]
+fn sweep_keeps_an_equal_arity_overload_pending_when_the_parameter_types_differ() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    // One argument on both sides, but `const char*` and `int` are different
+    // overloads: an equal count does not establish identity, so the
+    // declaration must not give way to the definition.
+    index_source(
+        &store,
+        "include/api.hpp",
+        "void compute(const char* path);\n",
+    );
+    index_source(&store, "src/impl.cpp", "void compute(int value) {\n}\n");
+    let caller = index_source(
+        &store,
+        "src/app.cpp",
+        "void run() {\n  compute(\"x\");\n}\n",
+    );
+    let owner = pending_call_owner(&store, caller, "compute");
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
+    assert_eq!(
+        sweep.arity_bound, 0,
+        "a count must not decide between two one-argument overloads: {sweep:?}"
+    );
+    assert!(
+        call_target_files(&store, &owner).is_empty(),
+        "the call names no single overload: {sweep:?}"
+    );
+    assert!(
+        sweep.candidates_recorded >= 1,
+        "the surviving candidates are recorded: {sweep:?}"
+    );
+    assert!(
+        store
+            .list_pending_refs(10, 0)
+            .expect("queue")
+            .refs
+            .iter()
+            .any(|queued| queued.file_id == caller.get() && queued.reference.ref_name == "compute"),
+        "the equally shaped overloads stay queued"
+    );
+}
+
+#[test]
+fn sweep_pairs_a_declaration_with_the_definition_naming_the_same_parameters() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    // The definition names the parameter the declaration leaves out; the types
+    // agree, so both describe one overload and the definition stands for it.
+    index_source(
+        &store,
+        "include/api.hpp",
+        "void compute(const char* path);\n",
+    );
+    let definition = index_source(
+        &store,
+        "src/impl.cpp",
+        "void compute(const char* path) {\n}\n",
+    );
+    let caller = index_source(
+        &store,
+        "src/app.cpp",
+        "void run() {\n  compute(\"x\");\n}\n",
+    );
+    let owner = pending_call_owner(&store, caller, "compute");
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![definition],
+        "the parameter names do not separate one overload: {sweep:?}"
+    );
+}
+
+#[test]
+fn sweep_pairs_a_declaration_with_the_default_argument_the_definition_omits() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    // A header may state a default the definition is not allowed to repeat;
+    // the default is no part of the parameter, so both name one overload.
+    index_source(
+        &store,
+        "include/api.hpp",
+        "void compute(int retries = 3);\n",
+    );
+    let definition = index_source(&store, "src/impl.cpp", "void compute(int retries) {\n}\n");
+    let caller = index_source(&store, "src/app.cpp", "void run() {\n  compute(1);\n}\n");
+    let owner = pending_call_owner(&store, caller, "compute");
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![definition],
+        "the default argument names no second overload: {sweep:?}"
+    );
+}
+
+#[test]
 fn sweep_binds_an_overload_by_the_scope_the_receiver_spells() {
     let home = tempfile::tempdir().expect("workspace");
     let store = open(home.path());

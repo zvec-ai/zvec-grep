@@ -171,6 +171,7 @@ impl SymbolIndex {
                     is_exported: metadata.is_exported,
                     arity,
                     is_declaration: metadata.is_declaration,
+                    parameters: parameter_evidence(metadata.signature.as_deref()),
                     package: metadata.package.clone(),
                 });
             index.records.insert(
@@ -195,6 +196,84 @@ impl SymbolIndex {
         }
         Ok(index)
     }
+}
+
+/// The parameter list a signature states, normalized for comparison: one
+/// uniform spelling for whitespace and for the spacing around `*` and `&`.
+///
+/// The list is the last parenthesis group that sits at the outermost nesting
+/// level, which covers a trailing qualifier (`f() const`) and an operator name
+/// (`operator()(int)`). `None` when the signature records no group at all, so
+/// an entity without that evidence never stands in for one that has it.
+fn parameter_evidence(signature: Option<&str>) -> Option<String> {
+    let signature = signature?;
+    let (start, end) = outer_parameter_group(signature)?;
+    let mut parameters = Vec::new();
+    let mut depth = 0usize;
+    let mut begin = start;
+    for (offset, character) in signature[start..end].char_indices() {
+        match character {
+            '(' | '[' | '{' | '<' => depth += 1,
+            ')' | ']' | '}' | '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parameters.push(normalize_parameter(&signature[begin..start + offset]));
+                begin = start + offset + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parameters.push(normalize_parameter(&signature[begin..end]));
+    Some(parameters.join(","))
+}
+
+/// The span between the parentheses of the last outermost group in a
+/// signature: `void f(int)` and `int g() const` both name their parameter list
+/// there, and `void operator()(int)` skips the operator's own parentheses.
+fn outer_parameter_group(signature: &str) -> Option<(usize, usize)> {
+    let mut group = None;
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (offset, character) in signature.char_indices() {
+        match character {
+            '(' => {
+                if depth == 0 {
+                    start = offset;
+                }
+                depth += 1;
+            }
+            ')' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    group = Some((start + 1, offset));
+                }
+            }
+            _ => {}
+        }
+    }
+    group
+}
+
+/// One parameter without its default argument, whitespace collapsed, and
+/// pointer/reference spacing made uniform: `const char * value` reads
+/// `const char* value`, `const char *` reads `const char*`, and `int count = 0`
+/// reads `int count`, because a header may state a default the definition is
+/// not allowed to repeat.
+fn normalize_parameter(parameter: &str) -> String {
+    let parameter = parameter.split('=').next().unwrap_or(parameter);
+    let collapsed = parameter.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut normalized = String::with_capacity(collapsed.len());
+    for character in collapsed.chars() {
+        if character == ' ' && (normalized.is_empty() || normalized.ends_with(['*', '&', ' '])) {
+            continue;
+        }
+        if matches!(character, '*' | '&') {
+            while normalized.ends_with(' ') {
+                normalized.pop();
+            }
+        }
+        normalized.push(character);
+    }
+    normalized.trim().to_owned()
 }
 
 /// Files whose modules one file's resolved imports point at, deduplicated:
