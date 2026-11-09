@@ -1,4 +1,4 @@
-use crate::domain::{EdgeProvenance, FileGraphResult, PendingRefStatus};
+use crate::domain::{EdgeProvenance, FileGraphResult, GraphEdgeKind, PendingRefStatus};
 use rusqlite::{TransactionBehavior, params, params_from_iter};
 use std::collections::HashSet;
 
@@ -20,6 +20,9 @@ impl SqliteGraphStorage {
     /// `IndexStore::requeue_stale_resolutions`.
     /// `paths_changed` reports that this write made the file appear or
     /// disappear, which can reorder the preferred path variant of every import.
+    /// A file that spells or drops an extends/implements edge also stales every
+    /// member call that resolved through that chain, which no symbol it owns
+    /// names; the write records that evidence as well.
     /// `language` labels pending references for the resolver's language gate;
     /// `None` records `unknown`, so the gate only keeps candidates that carry
     /// the same absent evidence.
@@ -67,6 +70,16 @@ impl SqliteGraphStorage {
                 ),
             )?;
         }
+        // Taken before the rows are replaced: the old edges name the bases this
+        // file leaves behind, the new output the bases it joins. A pass that
+        // writes a file without touching its bases keeps the calls bound.
+        let hierarchy_changed = spells_hierarchy(graph)
+            || tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM edges WHERE file_id = ?1
+                 AND kind IN ('extends', 'implements'))",
+                [file_id],
+                |row| row.get::<_, bool>(0),
+            )?;
         tx.execute("DELETE FROM edges WHERE file_id = ?", [file_id])?;
         {
             let mut insert = tx.prepare(
@@ -112,6 +125,7 @@ impl SqliteGraphStorage {
         Self::record_stale_evidence(
             &tx,
             paths_changed,
+            hierarchy_changed,
             graph.nodes.iter().filter_map(|node| node.name.as_deref()),
         )?;
         tx.commit()?;
@@ -146,6 +160,18 @@ fn name_tail(name: &str) -> &str {
     name.rsplit([':', '.', '/', '\\'])
         .find(|part| !part.is_empty())
         .unwrap_or(name)
+}
+
+/// Whether one file's extraction output spells an inheritance edge, either
+/// resolved during the walk or left for the resolver.
+fn spells_hierarchy(graph: &FileGraphResult) -> bool {
+    let inheritance =
+        |kind: GraphEdgeKind| matches!(kind, GraphEdgeKind::Extends | GraphEdgeKind::Implements);
+    graph.edges.iter().any(|edge| inheritance(edge.kind))
+        || graph
+            .pending_refs
+            .iter()
+            .any(|reference| inheritance(reference.ref_kind))
 }
 
 pub(super) fn validate(

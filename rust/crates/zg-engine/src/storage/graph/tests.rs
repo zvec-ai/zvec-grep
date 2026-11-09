@@ -72,6 +72,33 @@ fn proposal(storage: &SqliteGraphStorage, target: &str) -> Resolution {
     }
 }
 
+/// The proposal a hierarchy rule writes: `bind_nearest_member` stamps every
+/// receiver call it binds through extends/implements `file_scoped`.
+fn hierarchy_proposal(storage: &SqliteGraphStorage, target: &str) -> Resolution {
+    let pending = storage.list_pending_refs(100, 0).expect("read refs");
+    let stored = &pending.refs[0];
+    Resolution {
+        ref_id: stored.id,
+        target_id: target.into(),
+        provenance: EdgeProvenance::FileScoped,
+    }
+}
+
+/// One inheritance clause as extraction leaves it for the resolver.
+fn hierarchy_reference(owner: &str, name: &str) -> PendingRef {
+    PendingRef {
+        owner_id: owner.into(),
+        ref_name: name.into(),
+        receiver_name: None,
+        ref_kind: GraphEdgeKind::Extends,
+        arity: None,
+        line: 2,
+        column: 0,
+        status: PendingRefStatus::Pending,
+        metadata: Metadata::default(),
+    }
+}
+
 fn open(path: &Path) -> SqliteGraphStorage {
     SqliteGraphStorage::open(path, OpenMode::ReadWrite).expect("open writer")
 }
@@ -428,6 +455,116 @@ fn stale_evidence_survives_a_reopen_until_the_requeue_consumes_it() {
         db.requeue_stale_resolutions().expect("consumed"),
         0,
         "a second requeue has nothing left to replay"
+    );
+}
+
+#[test]
+fn hierarchy_change_requeues_member_calls_bound_through_the_chain() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    db.write_file_graph(
+        1,
+        None,
+        &graph(&["a"], vec![], vec![reference("a", "target")]),
+        &[],
+        false,
+    )
+    .expect("write");
+    let resolution = hierarchy_proposal(&db, "b");
+    db.apply_resolutions(&[resolution]).expect("resolve");
+    assert_eq!(db.list_pending_refs(100, 0).expect("pending").refs.len(), 0);
+
+    // The base swap spells `Mid` and its new base, neither of which the call
+    // or its target names: only the inheritance evidence reaches the call.
+    db.write_file_graph(
+        2,
+        None,
+        &graph(&["Mid"], vec![], vec![hierarchy_reference("Mid", "B")]),
+        &[],
+        false,
+    )
+    .expect("hierarchy evidence");
+    assert_eq!(db.requeue_stale_resolutions().expect("requeue"), 1);
+    // The write also queued its own inheritance clause; only the earlier
+    // member call is the requeue's evidence.
+    let pending = db.list_pending_refs(100, 0).expect("pending");
+    assert!(
+        pending
+            .refs
+            .iter()
+            .any(|stored| stored.reference.ref_name == "target"),
+        "the hierarchy-bound member call returns to the queue"
+    );
+    assert_eq!(
+        db.requeue_stale_resolutions().expect("consumed"),
+        0,
+        "the hierarchy evidence is consumed with the requeue"
+    );
+}
+
+#[test]
+fn a_write_without_inheritance_keeps_hierarchy_bindings() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    db.write_file_graph(
+        1,
+        None,
+        &graph(&["a"], vec![], vec![reference("a", "target")]),
+        &[],
+        false,
+    )
+    .expect("write");
+    let resolution = hierarchy_proposal(&db, "b");
+    db.apply_resolutions(&[resolution]).expect("resolve");
+
+    // Rewriting an unrelated file records its names but no inheritance
+    // evidence, so the bound member call stays out of the sweep.
+    db.write_file_graph(2, None, &graph(&["unrelated"], vec![], vec![]), &[], false)
+        .expect("write");
+    assert_eq!(db.requeue_stale_resolutions().expect("requeue"), 0);
+    assert_eq!(db.list_pending_refs(100, 0).expect("pending").refs.len(), 0);
+}
+
+#[test]
+fn hierarchy_change_keeps_bindings_that_never_read_the_chain() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    db.write_file_graph(
+        1,
+        None,
+        &graph(
+            &["a"],
+            vec![],
+            vec![reference("a", "first"), reference("a", "second")],
+        ),
+        &[],
+        false,
+    )
+    .expect("write");
+    let pending = db.list_pending_refs(100, 0).expect("refs");
+    db.apply_resolutions(&[
+        Resolution {
+            ref_id: pending.refs[0].id,
+            target_id: "b".into(),
+            provenance: EdgeProvenance::FileScoped,
+        },
+        Resolution {
+            ref_id: pending.refs[1].id,
+            target_id: "b".into(),
+            provenance: EdgeProvenance::WorkspaceUnique,
+        },
+    ])
+    .expect("resolve");
+
+    db.write_file_graph(
+        2,
+        None,
+        &graph(&["Mid"], vec![], vec![hierarchy_reference("Mid", "B")]),
+        &[],
+        false,
+    )
+    .expect("hierarchy evidence");
+    assert_eq!(
+        db.requeue_stale_resolutions().expect("requeue"),
+        1,
+        "only the hierarchy-bound call returns to the queue"
     );
 }
 

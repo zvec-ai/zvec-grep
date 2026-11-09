@@ -918,3 +918,66 @@ fn stale_evidence_requeues_after_a_pass_stops_before_its_sweep() {
     );
     assert_eq!(call_target_files(&store, &owner), vec![sibling]);
 }
+
+#[test]
+fn sweep_rebinds_a_member_call_after_its_intermediate_base_changes() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    let base_a = index_source(
+        &store,
+        "a.py",
+        "class A:\n    def save(self):\n        pass\n",
+    );
+    let base_b = index_source(
+        &store,
+        "b.py",
+        "class B:\n    def save(self):\n        pass\n",
+    );
+    index_source(
+        &store,
+        "mid.py",
+        "from a import A\n\n\nclass Mid(A):\n    pass\n",
+    );
+    let child = index_source(
+        &store,
+        "child.py",
+        "from mid import Mid\n\n\nclass Child(Mid):\n    def run(self):\n        self.save()\n",
+    );
+    let owner = pending_receiver_call_owner(&store, child, "self");
+    // Imports and inheritance clauses need their own passes before the call
+    // can walk the chain.
+    for _ in 0..3 {
+        store.requeue_stale_resolutions().expect("requeue");
+        resolve_pending(&store, None).expect("sweep");
+    }
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![base_a],
+        "the chain reaches A.save"
+    );
+
+    // Only the intermediate class moves to another base: neither `save` nor
+    // `self` is written anywhere, and neither the call nor its obsolete target
+    // belongs to the rewritten file, so only inheritance evidence can return
+    // it to the queue.
+    index_source(
+        &store,
+        "mid.py",
+        "from b import B\n\n\nclass Mid(B):\n    pass\n",
+    );
+    let requeued = store
+        .requeue_stale_resolutions()
+        .expect("requeue after the base swap");
+    assert!(
+        requeued >= 1,
+        "the member call returns to the queue: {requeued}"
+    );
+    for _ in 0..2 {
+        resolve_pending(&store, None).expect("sweep after the base swap");
+    }
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![base_b],
+        "the call follows the replaced base"
+    );
+}
