@@ -171,6 +171,7 @@ impl SymbolIndex {
                     is_exported: metadata.is_exported,
                     arity,
                     is_declaration: metadata.is_declaration,
+                    package: metadata.package.clone(),
                 });
             index.records.insert(
                 entity_id.clone(),

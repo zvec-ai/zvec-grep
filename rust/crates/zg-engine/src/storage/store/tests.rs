@@ -652,6 +652,7 @@ fn fixture(
                 arity: None,
                 is_exported: false,
                 is_declaration: false,
+                package: None,
             })),
         ),
         vector,
@@ -1950,6 +1951,7 @@ fn index_code_file(
             arity: Some(0),
             is_exported: true,
             is_declaration: false,
+            package: None,
         })),
     );
     let graph = FileGraphResult {

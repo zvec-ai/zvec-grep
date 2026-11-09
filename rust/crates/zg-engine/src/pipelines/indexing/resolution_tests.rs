@@ -765,6 +765,41 @@ fn sweep_resolves_a_java_import_below_its_source_root() {
     );
 }
 
+#[test]
+fn sweep_keeps_a_java_import_pending_when_the_directory_looks_like_the_package() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    // The path ends in `java/util`, but the class declares
+    // `example.java.util`: the directory spell is not package identity, and
+    // `import java.util.List` must not bind an unrelated workspace class.
+    index_source(
+        &store,
+        "src/main/java/example/java/util/List.java",
+        "package example.java.util;\n\npublic class List {\n}\n",
+    );
+    let app = index_source(
+        &store,
+        "src/main/java/app/Use.java",
+        "package app;\n\nimport java.util.List;\n\nclass Use {\n}\n",
+    );
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
+    assert!(
+        import_target_files(&store, app).is_empty(),
+        "the declared package, not the directory tail, establishes the identity"
+    );
+    assert!(
+        store
+            .list_pending_refs(10, 0)
+            .expect("queue")
+            .refs
+            .iter()
+            .any(|reference| reference.file_id == app.get()
+                && reference.reference.ref_kind == GraphEdgeKind::Imports),
+        "the import stays queued until its package is confirmed"
+    );
+}
+
 /// Persisted targets of one file's resolved import edges. A relative
 /// specifier binds to the module's file endpoint (`f{file_id}`), so the raw
 /// target is the assertion, not an entity file lookup.

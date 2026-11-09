@@ -25,6 +25,7 @@ fn code(kind: SymbolType, name: &str, scope: Option<&str>) -> CodeMetadata {
         arity: None,
         is_exported: false,
         is_declaration: false,
+        package: None,
     }
 }
 

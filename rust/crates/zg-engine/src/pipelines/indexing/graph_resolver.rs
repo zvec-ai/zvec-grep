@@ -344,7 +344,7 @@ fn classify_names(
         // specifier that identifies no single candidate stays pending — the
         // bare-name rules below would bind the short name (`work`) and drop
         // the class that disambiguates it.
-        return Ok(match resolve_java_import(snapshot, stored, &hits) {
+        return Ok(match resolve_java_import(stored, &hits) {
             Some(resolution) => Outcome::Resolved {
                 resolution,
                 rule: Rule::ImportBound,
@@ -1541,25 +1541,17 @@ fn resolve_qualified_name(
 /// names `Outer::Inner`, never `Other::work`. On-demand forms (`p.*`,
 /// `p.Util.*`) name no single target and stay pending.
 ///
-/// The package the specifier states must also agree with where the class
-/// lives: a specifier for an external package would otherwise accept the
-/// workspace's only class of that name, since the package is the one part of
-/// the identity the name index does not carry. Without that confirmation the
-/// reference stays pending instead of binding an unrelated file into this
-/// file's import scope.
-fn resolve_java_import(
-    snapshot: &ResolutionSnapshot,
-    stored: &StoredPendingRef,
-    hits: &[NameIndexEntry],
-) -> Option<Resolution> {
+/// The package the specifier states must also agree with the package the
+/// declaring file records: a specifier for an external package would otherwise
+/// accept the workspace's only class of that name, since a Java name carries
+/// no package. Without that agreement — including when the declaring file's
+/// package is unknown — the reference stays pending instead of binding an
+/// unrelated file into this file's import scope.
+fn resolve_java_import(stored: &StoredPendingRef, hits: &[NameIndexEntry]) -> Option<Resolution> {
     let specifier = stored.reference.ref_name.as_str();
-    let mut matched = hits.iter().filter(|hit| {
-        java_import_match(
-            snapshot.file_path(hit.file_id),
-            specifier,
-            &hit.qualified_name,
-        )
-    });
+    let mut matched = hits
+        .iter()
+        .filter(|hit| java_import_match(hit.package.as_deref(), specifier, &hit.qualified_name));
     let hit = matched.next()?;
     if matched.next().is_some() {
         return None;
@@ -1571,15 +1563,18 @@ fn resolve_java_import(
     })
 }
 
-/// Whether a Java import specifier names `qualified_name`, declared in the
-/// file at `path`: the name as a dotted suffix past a package segment, and a
-/// package the class's location confirms. A class with no recorded path has
-/// no such evidence.
-fn java_import_match(path: Option<&str>, specifier: &str, qualified_name: &str) -> bool {
-    let Some(package) = specifier_package(specifier, qualified_name) else {
+/// Whether a Java import specifier names `qualified_name`, declared in
+/// `package`: the name as a dotted suffix past a package segment, and the
+/// package the specifier states equal to the one the file declares. A Java
+/// name carries no package, so the declared package is the only evidence that
+/// `java.util.List` is not the workspace's `my.List`; uniqueness inside the
+/// workspace cannot stand in for it, and a file whose package is unknown keeps
+/// the import pending.
+fn java_import_match(package: Option<&str>, specifier: &str, qualified_name: &str) -> bool {
+    let Some(stated) = specifier_package(specifier, qualified_name) else {
         return false;
     };
-    path.is_some_and(|path| declares_package(path, package))
+    package == Some(stated)
 }
 
 /// The package a specifier states before the name it spells: `p.Util.work`
@@ -1593,28 +1588,6 @@ fn specifier_package<'a>(specifier: &'a str, qualified_name: &str) -> Option<&'a
         return Some("");
     }
     prefix.strip_suffix('.')
-}
-
-/// Whether a class living at `path` can declare `package`.
-///
-/// The package survives only in that path: extraction indexes a class under
-/// the name it spells, so `my/Util.java` is the only evidence that `Util`
-/// belongs to package `my`. The index records paths relative to the workspace
-/// root, which in a typical layout sits above the Java source root
-/// (`src/main/java/com/acme/Util.java`), so the package names a trailing run
-/// of the file's directory segments. A class in the default package needs the
-/// file at the root itself.
-fn declares_package(path: &str, package: &str) -> bool {
-    let directory = path.rsplit_once('/').map_or("", |(directory, _)| directory);
-    let segments: Vec<&str> = directory
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .collect();
-    if package.is_empty() {
-        return segments.is_empty();
-    }
-    let stated: Vec<&str> = package.split('.').collect();
-    segments.len() >= stated.len() && segments[segments.len() - stated.len()..] == stated[..]
 }
 
 /// Reports import references whose specifier can never address a workspace
@@ -1977,52 +1950,43 @@ mod alias_pair_tests {
 
 #[cfg(test)]
 mod java_import_tests {
-    use super::{declares_package, java_import_match};
-
-    #[test]
-    fn a_package_names_a_trailing_run_of_the_files_directory() {
-        // The workspace root may sit above the Java source root, so only the
-        // package's position relative to the end can be compared.
-        assert!(declares_package(
-            "src/main/java/com/acme/Util.java",
-            "com.acme"
-        ));
-        assert!(declares_package("com/acme/Util.java", "com.acme"));
-        assert!(declares_package("Util.java", ""));
-        assert!(!declares_package("my/List.java", "java.util"));
-        assert!(!declares_package("my/List.java", "my.inner"));
-        assert!(!declares_package("com/acme/Util.java", "me.com.acme"));
-        // A named package needs a directory, and the default package needs none.
-        assert!(!declares_package("com/acme/Util.java", ""));
-        assert!(!declares_package("Util.java", "com.acme"));
-    }
+    use super::java_import_match;
 
     #[test]
     fn a_specifier_states_the_package_before_the_name() {
         assert!(java_import_match(
-            Some("com/acme/Util.java"),
+            Some("com.acme"),
             "com.acme.Util.work",
             "Util::work"
         ));
         assert!(java_import_match(
-            Some("com/acme/Outer.java"),
+            Some("com.acme"),
             "com.acme.Outer.Inner",
             "Outer::Inner"
         ));
-        assert!(java_import_match(Some("Util.java"), "Util", "Util"));
-        // The same class name in another package names nothing here.
-        assert!(!java_import_match(
-            Some("my/List.java"),
-            "java.util.List",
-            "List"
-        ));
+        assert!(java_import_match(Some(""), "Util", "Util"));
         // A name that does not start on a segment boundary spells another name.
         assert!(!java_import_match(
-            Some("com/acme/MyUtil.java"),
+            Some("com.acme"),
             "com.acme.MyUtil",
             "Util"
         ));
-        // A class with no recorded path carries no package evidence.
+    }
+
+    #[test]
+    fn only_the_declared_package_confirms_the_specifier() {
+        // The workspace's only `List` belongs to `my`, not to `java.util`.
+        assert!(!java_import_match(Some("my"), "java.util.List", "List"));
+        // A directory that happens to end in the package name is no evidence:
+        // a file under `.../example/java/util` may declare `example.java.util`.
+        assert!(!java_import_match(
+            Some("example.java.util"),
+            "java.util.List",
+            "List"
+        ));
+        // A class in a named package is not in the default package.
+        assert!(!java_import_match(Some("com.acme"), "Util", "Util"));
+        // A file whose package is unknown carries no evidence.
         assert!(!java_import_match(None, "com.acme.Util", "Util"));
     }
 }

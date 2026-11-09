@@ -39,6 +39,11 @@ pub(crate) struct NameIndexEntry {
     pub arity: Option<u32>,
     /// Pure declaration without a body (C/C++ prototypes).
     pub is_declaration: bool,
+    /// The Java `package` the declaring file states, empty for the default
+    /// package; `None` for other languages and for indexes written before the
+    /// field existed. A Java name carries no package, so import binding reads
+    /// the package from here rather than from the name.
+    pub package: Option<String>,
 }
 
 /// Name-index record for one entity. Entities without a symbol name are
