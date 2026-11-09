@@ -117,7 +117,7 @@ fn owner_with_size(
     });
     let owner = Arc::new(SessionOwner::new(provider, shared, factory));
     owner
-        .initialize()
+        .initialize(None)
         .expect("all configured sessions load up front");
     (owner, receiver, fail)
 }
@@ -746,7 +746,7 @@ async fn cancelled_fallback_keeps_pool_closed_until_native_changes_finish() {
         shared,
         factory,
     ));
-    owner.initialize().expect("pool loaded");
+    owner.initialize(None).expect("pool loaded");
     let options = EmbeddingOptions {
         execution_concurrency: 1,
         ..EmbeddingOptions::default()
@@ -844,7 +844,7 @@ async fn failed_pool_fallback_is_retried_before_inference() {
         shared,
         factory,
     ));
-    owner.initialize().expect("initial pool");
+    owner.initialize(None).expect("initial pool");
     let options = EmbeddingOptions {
         execution_concurrency: 1,
         ..Default::default()
@@ -893,7 +893,166 @@ fn partial_pool_initialization_failure_releases_every_created_session() {
         Arc::clone(&shared),
         factory,
     );
-    assert!(owner.initialize().is_err());
+    assert!(owner.initialize(None).is_err());
     drop(owner);
     assert_eq!(lock_std_mutex(&shared.stats).session_count, 0);
+}
+
+fn initializing_owner(
+    provider: TransformersExecutionProvider,
+    on_create: impl Fn(usize, bool) -> Result<(), ModelError> + Send + Sync + 'static,
+) -> SessionOwner {
+    let shared = Arc::new(Shared::new(provider, 4));
+    let worker_shared = Arc::clone(&shared);
+    let (started, _) = tokio::sync::mpsc::unbounded_channel();
+    let configured = Arc::new(StdMutex::new(vec![false; 4]));
+    let factory: Arc<Factory> = Arc::new(move |lane| {
+        on_create(lane, worker_shared.fallback.load(Ordering::Acquire))?;
+        lock_std_mutex(&worker_shared.stats).session_count += 1;
+        lock_std_mutex(&worker_shared.stats).session_initializations += 1;
+        Ok(Box::new(FakeRunner {
+            lane,
+            started: started.clone(),
+            fail: Arc::new(AtomicBool::new(false)),
+            shared: Arc::clone(&worker_shared),
+            drops: None,
+            configured: Arc::clone(&configured),
+        }))
+    });
+    SessionOwner::new(provider, shared, factory)
+}
+
+#[test]
+fn cancelled_initialization_stops_at_session_boundaries() {
+    for provider in [
+        TransformersExecutionProvider::Cpu,
+        TransformersExecutionProvider::Cuda,
+    ] {
+        for cancel_at in [None, Some(0), Some(3)] {
+            let signal = CancellationToken::new();
+            if cancel_at.is_none() {
+                signal.cancel();
+            }
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let worker_attempts = Arc::clone(&attempts);
+            let worker_signal = signal.clone();
+            let owner = initializing_owner(provider, move |lane, fallback| {
+                worker_attempts.fetch_add(1, Ordering::AcqRel);
+                assert!(!fallback, "cancellation must not trigger CPU fallback");
+                assert!(
+                    !worker_signal.is_cancelled(),
+                    "no new work after cancellation"
+                );
+                if Some(lane) == cancel_at {
+                    worker_signal.cancel();
+                }
+                Ok(())
+            });
+            let shared = Arc::clone(&owner.shared);
+            let reporter = ModelDownloadProgressReporter::new("fixture", None, []);
+            let error = owner
+                .initialize_with_fallback(Some(&signal), &reporter)
+                .expect_err("initialization cancelled");
+            assert_eq!(error.code(), crate::EngineError::CANCELLED);
+            assert_eq!(
+                attempts.load(Ordering::Acquire),
+                cancel_at.map_or(0, |lane| lane + 1)
+            );
+            assert_eq!(
+                owner.stats().session_count,
+                cancel_at.map_or(0, |lane| lane + 1)
+            );
+            assert!(!shared.fallback.load(Ordering::Acquire));
+            drop(owner);
+            assert_eq!(lock_std_mutex(&shared.stats).session_count, 0);
+        }
+    }
+}
+
+#[test]
+fn cancelled_gpu_initialization_does_not_start_cpu_fallback() {
+    let signal = CancellationToken::new();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let worker_attempts = Arc::clone(&attempts);
+    let worker_signal = signal.clone();
+    let owner = initializing_owner(
+        TransformersExecutionProvider::Cuda,
+        move |lane, fallback| {
+            worker_attempts.fetch_add(1, Ordering::AcqRel);
+            assert!(!fallback, "cancelled GPU failure must not load a CPU pool");
+            if lane == 1 {
+                worker_signal.cancel();
+                return Err(ModelError::internal("injected GPU initialization failure"));
+            }
+            Ok(())
+        },
+    );
+    let shared = Arc::clone(&owner.shared);
+    let reporter = ModelDownloadProgressReporter::new("fixture", None, []);
+    let error = owner
+        .initialize_with_fallback(Some(&signal), &reporter)
+        .expect_err("cancellation wins over GPU failure");
+    assert_eq!(error.code(), crate::EngineError::CANCELLED);
+    assert_eq!(attempts.load(Ordering::Acquire), 2);
+    assert_eq!(owner.stats().session_initializations, 1);
+    assert!(!shared.fallback.load(Ordering::Acquire));
+    drop(owner);
+    assert_eq!(lock_std_mutex(&shared.stats).session_count, 0);
+}
+
+#[test]
+fn cpu_fallback_initialization_honors_cancellation() {
+    for (cancel_at, fail_on_cancel) in [
+        (None, false),
+        (Some(0), false),
+        (Some(3), false),
+        (Some(1), true),
+    ] {
+        let signal = CancellationToken::new();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let worker_attempts = Arc::clone(&attempts);
+        let worker_signal = signal.clone();
+        let owner = initializing_owner(
+            TransformersExecutionProvider::Cuda,
+            move |lane, fallback| {
+                worker_attempts.fetch_add(1, Ordering::AcqRel);
+                assert!(
+                    !worker_signal.is_cancelled(),
+                    "no new work after cancellation"
+                );
+                if !fallback && lane == 1 {
+                    return Err(ModelError::internal("injected GPU initialization failure"));
+                }
+                if fallback && Some(lane) == cancel_at {
+                    worker_signal.cancel();
+                    if fail_on_cancel {
+                        return Err(ModelError::internal("injected CPU initialization failure"));
+                    }
+                }
+                Ok(())
+            },
+        );
+        let shared = Arc::clone(&owner.shared);
+        let reporter = ModelDownloadProgressReporter::new("fixture", None, []);
+        let result = owner.initialize_with_fallback(Some(&signal), &reporter);
+        if cancel_at.is_some() {
+            assert_eq!(
+                result.expect_err("CPU load cancelled").code(),
+                crate::EngineError::CANCELLED
+            );
+        } else {
+            result.expect("ordinary GPU failure still falls back successfully");
+        }
+        let cpu_attempts = cancel_at.map_or(4, |lane| lane + 1);
+        let cpu_sessions = cpu_attempts - usize::from(fail_on_cancel);
+        assert_eq!(attempts.load(Ordering::Acquire), 2 + cpu_attempts);
+        assert_eq!(owner.provider(), TransformersExecutionProvider::Cpu);
+        assert_eq!(owner.stats().session_count, cpu_sessions);
+        assert_eq!(
+            owner.stats().session_initializations,
+            1 + cpu_sessions as u64
+        );
+        drop(owner);
+        assert_eq!(lock_std_mutex(&shared.stats).session_count, 0);
+    }
 }

@@ -76,6 +76,15 @@ struct CachedRuntime {
     idle_since: Option<Instant>,
 }
 
+impl CachedRuntime {
+    fn evictable_since(&self) -> Option<Instant> {
+        self.idle_since.filter(|_| {
+            self.entry.leases.load(Ordering::Acquire) == 0
+                && self.entry.runtime.active_embeddings.load(Ordering::Acquire) == 0
+        })
+    }
+}
+
 struct ModelRuntimeEntry {
     runtime: Arc<ModelRuntime>,
     leases: AtomicUsize,
@@ -360,16 +369,7 @@ impl ManagerState {
             .iter()
             .filter_map(|(key, cached)| {
                 cached
-                    .idle_since
-                    .filter(|_| {
-                        cached.entry.leases.load(Ordering::Acquire) == 0
-                            && cached
-                                .entry
-                                .runtime
-                                .active_embeddings
-                                .load(Ordering::Acquire)
-                                == 0
-                    })
+                    .evictable_since()
                     .map(|idle_since| (key.clone(), idle_since))
             })
             .collect::<Vec<_>>();
@@ -387,6 +387,14 @@ impl ManagerState {
             }
         }
         retired
+    }
+
+    fn next_idle_deadline(&self, policy: CachePolicy) -> Option<Instant> {
+        self.entries
+            .values()
+            .filter_map(CachedRuntime::evictable_since)
+            .map(|idle_since| idle_since + policy.idle_timeout)
+            .min()
     }
 
     fn wake_maintenance(&self) {
@@ -427,15 +435,9 @@ fn maintain_cache(manager: &Weak<ManagerInner>, receiver: &Receiver<()>) {
             return;
         }
         let retired = state.retire_idle(inner.policy, Instant::now());
-        let deadline = state
-            .entries
-            .values()
-            .filter_map(|cached| {
-                cached
-                    .idle_since
-                    .map(|idle_since| idle_since + inner.policy.idle_timeout)
-            })
-            .min();
+        // Native work may outlive its last caller. Its completion wakes maintenance;
+        // an expired idle timestamp must not keep polling an ineligible entry.
+        let deadline = state.next_idle_deadline(inner.policy);
         drop(state);
         drop(inner);
         drop(retired);

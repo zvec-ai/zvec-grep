@@ -632,6 +632,63 @@ fn idle_ttl_starts_at_final_release_and_reacquisition_resets_it() {
 }
 
 #[test]
+fn maintenance_waits_for_native_completion_instead_of_polling_its_idle_deadline() {
+    for expired in [false, true] {
+        let (manager, _) = fixture_cache(CachePolicy {
+            capacity: 2,
+            ..CachePolicy::default()
+        });
+        let lease = acquire_fixture(&manager, "native");
+        let model = Arc::downgrade(&lease.entry.runtime.model);
+        let work = ActiveEmbeddingGuard::new(
+            Arc::clone(&lease.entry.runtime),
+            Arc::downgrade(&manager.inner),
+            None,
+        );
+        drop(lease);
+        let ttl = manager.inner.policy.idle_timeout;
+        let idle = idle_since(&manager, "native");
+        let now = idle + if expired { ttl } else { ttl / 2 };
+        {
+            let mut state = manager.lock_state();
+            assert!(state.retire_idle(manager.inner.policy, now).is_empty());
+            assert_eq!(state.next_idle_deadline(manager.inner.policy), None);
+        }
+        assert!(model.upgrade().is_some(), "native work retains the model");
+
+        // Ineligible entries must not mask another model's real eviction timer.
+        drop(acquire_fixture(&manager, "ready"));
+        let ready_deadline = idle_since(&manager, "ready") + ttl;
+        assert_eq!(
+            manager
+                .lock_state()
+                .next_idle_deadline(manager.inner.policy),
+            Some(ready_deadline)
+        );
+
+        // Completion makes the original timer eligible; advance the eviction
+        // clock explicitly instead of waiting for the real 15-minute timeout.
+        drop(work);
+        assert_eq!(manager.snapshot().active_embeddings, 0);
+        assert_eq!(
+            manager
+                .lock_state()
+                .next_idle_deadline(manager.inner.policy),
+            Some(idle + ttl)
+        );
+        reap_at(&manager, now);
+        assert_eq!(model.upgrade().is_none(), expired);
+        assert_eq!(
+            manager
+                .lock_state()
+                .next_idle_deadline(manager.inner.policy),
+            Some(if expired { ready_deadline } else { idle + ttl })
+        );
+        manager.close();
+    }
+}
+
+#[test]
 fn capacity_is_soft_for_active_models_and_trims_on_acquisition_and_release() {
     let (manager, creations) = fixture_cache(CachePolicy::default());
     let first = acquire_fixture(&manager, "first");

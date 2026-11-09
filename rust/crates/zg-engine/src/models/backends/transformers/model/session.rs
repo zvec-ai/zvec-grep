@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{Notify, oneshot};
+use tokio_util::sync::CancellationToken;
 
 use super::{
     Arc, Device, EmbeddingOptions, EmbeddingPurpose, ModelDownloadProgressReporter, ModelError,
@@ -140,6 +141,7 @@ impl SessionOwner {
         device: Option<Device>,
         session_count: usize,
         reporter: &ModelDownloadProgressReporter,
+        signal: Option<&CancellationToken>,
     ) -> Result<Self, ModelError> {
         let requested = resolve_execution_provider(device);
         if cfg!(target_os = "macos") && device == Some(Device::Metal) {
@@ -167,27 +169,7 @@ impl SessionOwner {
             Ok(Box::new(state))
         });
         let owner = Self::new(requested, shared, factory);
-        if let Err(error) = owner.initialize() {
-            if requested == TransformersExecutionProvider::Cpu {
-                return Err(error);
-            }
-            // Dispose the entire partial GPU pool before constructing the CPU
-            // pool. A successful preparation always owns exactly S sessions.
-            for worker in &owner.workers {
-                drop(lock_std_mutex(worker).take());
-            }
-            let warning = format!(
-                "Transformers {} embedding initialization failed ({}), falling back to CPU.",
-                requested.name(),
-                error
-            );
-            if !reporter.warning(warning.clone()) {
-                tracing::warn!("{warning}");
-            }
-            owner.shared.fallback.store(true, Ordering::Release);
-            lock_std_mutex(&owner.shared.pool).cpu_ready = true;
-            owner.initialize()?;
-        }
+        owner.initialize_with_fallback(signal, reporter)?;
         tracing::info!(
             provider = owner.provider().name(),
             sessions = session_count,
@@ -198,9 +180,45 @@ impl SessionOwner {
         Ok(owner)
     }
 
-    fn initialize(&self) -> Result<(), ModelError> {
+    fn initialize_with_fallback(
+        &self,
+        signal: Option<&CancellationToken>,
+        reporter: &ModelDownloadProgressReporter,
+    ) -> Result<(), ModelError> {
+        if let Err(error) = self.initialize(signal) {
+            check_cancelled(signal)?;
+            if self.requested == TransformersExecutionProvider::Cpu
+                || error.code() == crate::EngineError::CANCELLED
+            {
+                return Err(error);
+            }
+            // Dispose the entire partial GPU pool before constructing the CPU
+            // pool. A successful preparation always owns exactly S sessions.
+            for worker in &self.workers {
+                drop(lock_std_mutex(worker).take());
+            }
+            check_cancelled(signal)?;
+            let warning = format!(
+                "Transformers {} embedding initialization failed ({}), falling back to CPU.",
+                self.requested.name(),
+                error
+            );
+            if !reporter.warning(warning.clone()) {
+                tracing::warn!("{warning}");
+            }
+            self.shared.fallback.store(true, Ordering::Release);
+            lock_std_mutex(&self.shared.pool).cpu_ready = true;
+            self.initialize(signal)?;
+        }
+        Ok(())
+    }
+
+    fn initialize(&self, signal: Option<&CancellationToken>) -> Result<(), ModelError> {
         for lane in 0..self.workers.len() {
-            self.start_worker(lane)?.recv().map_err(|error| {
+            check_cancelled(signal)?;
+            let initialized = self.start_worker(lane)?.recv();
+            check_cancelled(signal)?;
+            initialized.map_err(|error| {
                 ModelError::internal("ONNX worker initialization stopped").with_cause(error)
             })??;
         }

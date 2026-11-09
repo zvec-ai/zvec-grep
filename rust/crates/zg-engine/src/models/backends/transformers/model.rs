@@ -230,8 +230,13 @@ impl TransformersEmbeddingModel {
                 let _execution_lease = execution_lease;
                 let _gate = gate;
                 check_cancelled(signal.as_ref())?;
-                let sessions =
-                    session::SessionOwner::load(model_path, device, session_count, &reporter)?;
+                let sessions = session::SessionOwner::load(
+                    model_path,
+                    device,
+                    session_count,
+                    &reporter,
+                    signal.as_ref(),
+                )?;
                 check_cancelled(signal.as_ref())?;
                 let loaded = Arc::new(LoadedTransformersModel {
                     tokenizers,
