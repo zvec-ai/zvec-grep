@@ -371,6 +371,14 @@ fn classify_names(
         });
     }
     if let [hit] = hits.as_slice() {
+        // A receiver this sweep could not type says nothing about which
+        // member it reaches: workspace-wide uniqueness is evidence for a
+        // bare name, never for a member call. Every receiver the rules above
+        // could pin already bound, so the rest stays pending rather than
+        // writing a type-inference guess into the graph.
+        if stored.reference.receiver_name.is_some() {
+            return Ok(Outcome::Deferred);
+        }
         if hit.file_id != stored.file_id {
             return Ok(Outcome::Resolved {
                 resolution: Resolution {
@@ -381,22 +389,17 @@ fn classify_names(
                 rule: Rule::Unique,
             });
         }
-        if stored.reference.receiver_name.is_none() {
-            // Bare name, same file, single hit: the in-file symbol table
-            // skips declaration entities, so a pending bare call can only
-            // mean this one indexed location. Receiver-qualified calls
-            // still stay pending — a same-file receiver bind would be a
-            // type-inference guess.
-            return Ok(Outcome::Resolved {
-                resolution: Resolution {
-                    ref_id: stored.id,
-                    target_id: hit.entity_id.clone(),
-                    provenance: EdgeProvenance::FileScoped,
-                },
-                rule: Rule::Unique,
-            });
-        }
-        return Ok(Outcome::Deferred);
+        // Bare name, same file, single hit: the in-file symbol table skips
+        // declaration entities, so a pending bare call can only mean this
+        // one indexed location.
+        return Ok(Outcome::Resolved {
+            resolution: Resolution {
+                ref_id: stored.id,
+                target_id: hit.entity_id.clone(),
+                provenance: EdgeProvenance::FileScoped,
+            },
+            rule: Rule::Unique,
+        });
     }
     if hits.len() > 1 {
         if let Some(resolution) =
@@ -532,13 +535,6 @@ fn resolve_import(
     if reference.ref_kind != GraphEdgeKind::Imports {
         return None;
     }
-    let module = match stored.language.as_str() {
-        "python" if !reference.ref_name.starts_with('.') => reference.ref_name.replace('.', "/"),
-        _ if reference.ref_name.starts_with("./") || reference.ref_name.starts_with("../") => {
-            reference.ref_name.clone()
-        }
-        _ => return None,
-    };
     let path = match importing_paths.entry(stored.file_id) {
         Entry::Occupied(entry) => entry.get().clone(),
         Entry::Vacant(entry) => entry
@@ -549,12 +545,20 @@ fn resolve_import(
         // A file without a persisted path cannot anchor a relative specifier.
         return None;
     };
-    let base = match stored.language.as_str() {
-        "python" => join_specifier("", &module),
-        _ => join_specifier(importing_dir(&path), &module),
+    let base = match (stored.language.as_str(), reference.ref_name.as_str()) {
+        // A dotted Python specifier addresses the workspace root
+        // (`from declare import x` reaches `declare.py`), except for the
+        // leading-dot form, which climbs from the importing module's package.
+        ("python", specifier) if specifier.starts_with('.') => {
+            python_relative_base(importing_dir(&path), specifier)?
+        }
+        ("python", specifier) => join_specifier("", &specifier.replace('.', "/"))?,
+        (_, specifier) if specifier.starts_with("./") || specifier.starts_with("../") => {
+            join_specifier(importing_dir(&path), specifier)?
+        }
+        _ => return None,
     };
-    let base = base?;
-    let file_id = path_variants(&base, extensions_for(&stored.language))
+    let file_id = path_variants(&base, &stored.language)
         .into_iter()
         .find_map(|candidate| snapshot.file_id_by_path(&candidate))?;
     Some(Resolution {
@@ -576,12 +580,18 @@ fn resolve_import_bound(
     importing_files: &mut HashMap<u32, Vec<u32>>,
 ) -> Option<Resolution> {
     let reference = &stored.reference;
+    // Only a same-file definition of the bare name shadows an import: the
+    // two namespaces collide, so the local one wins. A same-file *member* of
+    // that name does not — a method is reached through its receiver, which a
+    // bare call never spells — so it must not disqualify the import binding.
     if reference.receiver_name.is_some()
         || !matches!(
             reference.ref_kind,
             GraphEdgeKind::Calls | GraphEdgeKind::Extends | GraphEdgeKind::Implements
         )
-        || hits.iter().any(|hit| hit.file_id == stored.file_id)
+        || hits.iter().any(|hit| {
+            hit.file_id == stored.file_id && hit.qualified_name.rsplit_once("::").is_none()
+        })
     {
         return None;
     }
@@ -1000,7 +1010,7 @@ fn alias_target_base(
 /// Probes one normalized module base for the indexed file behind it: the
 /// literal path, then per-language extensions and index files.
 fn alias_target_at(snapshot: &ResolutionSnapshot, language: &str, base: &str) -> Option<u32> {
-    let mut variants = path_variants(base, extensions_for(language));
+    let mut variants = path_variants(base, language);
     if language == "rust" {
         // Rust modules live in `<base>.rs` or `<base>/mod.rs`; the index
         // variant path_variants emits covers neither.
@@ -1509,21 +1519,67 @@ fn join_specifier(dir: &str, specifier: &str) -> Option<String> {
     Some(segments.join("/")).filter(|joined| !joined.is_empty())
 }
 
+/// Resolves a Python relative specifier against the importing module's
+/// package: one leading dot is that package itself, and every further dot
+/// climbs one parent directory. The dotted tail then joins the climbed
+/// directory like an absolute module path, so `..json` imported from
+/// `pkg/json/tag.py` addresses `pkg/json` and lands on its `__init__.py`
+/// variant, while `...util` from `pkg/a/b.py` addresses the workspace-root
+/// `util` module.
+fn python_relative_base(dir: &str, specifier: &str) -> Option<String> {
+    let dots = specifier
+        .chars()
+        .take_while(|character| *character == '.')
+        .count();
+    let mut segments: Vec<&str> = dir
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    // The first dot names the importing package; each extra dot ascends one.
+    for _ in 1..dots {
+        segments.pop()?;
+    }
+    let tail = specifier[dots..].replace('.', "/");
+    let tail = tail.trim_matches('/');
+    let base = match (segments.is_empty(), tail.is_empty()) {
+        (true, true) => return None,
+        (true, false) => tail.to_owned(),
+        (false, true) => segments.join("/"),
+        (false, false) => format!("{}/{}", segments.join("/"), tail),
+    };
+    Some(base)
+}
+
 /// Path candidates for one specifier: the literal base first (explicit
-/// extensions win), then per-language extensions, then directory index files.
-fn path_variants(base: &str, extensions: &[&str]) -> Vec<String> {
+/// extensions win), then per-language extensions, then the directory entry
+/// the language resolves a directory to — a Python package's `__init__.py`,
+/// the TypeScript family's `index.<ext>`.
+fn path_variants(base: &str, language: &str) -> Vec<String> {
+    let extensions = extensions_for(language);
     let mut variants = vec![base.to_owned()];
     variants.extend(
         extensions
             .iter()
             .map(|extension| format!("{base}{extension}")),
     );
-    variants.extend(
-        extensions
-            .iter()
-            .map(|extension| format!("{base}/index{extension}")),
-    );
+    match index_entry_for(language) {
+        Some(entry) => variants.push(format!("{base}/{entry}")),
+        None => variants.extend(
+            extensions
+                .iter()
+                .map(|extension| format!("{base}/index{extension}")),
+        ),
+    }
     variants
+}
+
+/// The file a directory stands for, for languages whose package entry is not
+/// spelled `index.<ext>`.
+fn index_entry_for(language: &str) -> Option<&'static str> {
+    match language {
+        "python" => Some("__init__.py"),
+        _ => None,
+    }
 }
 
 /// Extension preference per reference language, mirroring the TypeScript

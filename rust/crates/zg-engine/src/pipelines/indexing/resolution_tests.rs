@@ -771,3 +771,84 @@ fn incremental_requeue_revives_failed_import() {
         "the terminated import is pending again"
     );
 }
+
+#[test]
+fn sweep_keeps_an_untyped_receiver_call_pending_when_the_member_name_is_unique() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    let caller = index_source(
+        &store,
+        "caller.py",
+        "def probe(expr):\n    return expr.match(1)\n",
+    );
+    index_source(
+        &store,
+        "unrelated.py",
+        concat!(
+            "class Other:\n",
+            "    def outer(self):\n",
+            "        def match(arg):\n",
+            "            return arg\n",
+            "        return match(0)\n",
+        ),
+    );
+
+    let receiver_owner = pending_receiver_call_owner(&store, caller, "expr");
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    // `match` is the only definition of that name in the workspace, but the
+    // sweep cannot type `expr`: workspace uniqueness answers a bare name, so
+    // the member call must stay pending instead of binding a guess. The
+    // same-file bare call in `unrelated.py` bound during partitioning and
+    // never reached the queue.
+    assert_eq!(
+        sweep.resolved, 0,
+        "the untyped receiver call must not bind: {sweep:?}"
+    );
+    assert!(
+        call_target_files(&store, &receiver_owner).is_empty(),
+        "an untyped receiver call must not bind"
+    );
+    assert!(
+        store
+            .list_pending_refs(10, 0)
+            .expect("queue")
+            .refs
+            .iter()
+            .any(|queued| queued.file_id == caller.get()
+                && queued.reference.ref_name == "match"
+                && queued.reference.receiver_name.as_deref() == Some("expr")),
+        "the untyped receiver call stays queued"
+    );
+}
+
+#[test]
+fn sweep_binds_a_bare_call_to_its_import_over_a_same_named_member() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    let json_module = index_source(
+        &store,
+        "pkg/json/__init__.py",
+        "def loads(s, **kwargs):\n    return s\n",
+    );
+    let tag = index_source(
+        &store,
+        "pkg/json/tag.py",
+        concat!(
+            "from ..json import loads\n\n\n",
+            "class TaggedJSONSerializer:\n",
+            "    def loads(self, value):\n",
+            "        return loads(value)\n",
+        ),
+    );
+
+    let owner = pending_call_owner(&store, tag, "loads");
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    // `loads` names both the imported module function and the enclosing
+    // method. The bare call spells no receiver, so the same-file method is
+    // not a shadowing definition and the import decides the target.
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![json_module],
+        "the bare call binds the imported definition: {sweep:?}"
+    );
+}
