@@ -81,21 +81,60 @@ refreshes as well, set `ZVEC_GREP_EMBEDDING_CONCURRENCY=<n>`. Values must be
 positive integers. Explicit CLI/API index settings take precedence over this
 environment variable, followed by the legacy
 `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` for llama.cpp indexing, then backend defaults.
-Invalid environment values warn and select the automatic default. These overrides
+Invalid values for these concurrency overrides warn and select the automatic default. These overrides
 do not configure query-vector inference and are not persisted in workspace settings.
 Direct and Server indexing use the same engine boundary; restart the Server after
 changing its inherited environment, while explicit CLI overrides need no restart.
 
-For llama.cpp, the limit controls contexts within a serialized batch and is capped
-at eight, defaulting to one. Transformers/ORT limits in-flight batches to at most
-eight, defaulting to one. ORT may create sessions within this budget;
+For llama.cpp on CPU, `C` is the total native compute-thread budget. Set
+`ZVEC_GREP_LLAMA_CPU_CONTEXTS=K` to choose the context count (default `1`). Each
+context uses `T=C/K` for both `n_threads` and `n_threads_batch`; these parameters
+apply to different computation modes and are not added together. Explicit `C`
+must be at least `K` and divisible by `K`, and `T` must fit the native signed
+32-bit thread parameter. Invalid CPU context settings fail explicitly. Automatic
+selection uses `T=max(1, min(logical_cpus, 4)/K)` with integer division and
+`C=K*T`, so query inference also has a valid budget for the configured context
+count. This is a compute budget, not the process's total OS thread count.
+
+On Metal/CUDA, `C` is the maximum number of concurrently executing contexts,
+defaulting to `1`. The CPU context environment variable does not affect GPU
+execution. Contexts share model weights, but have independent KV and working
+buffers; increasing `C` can increase memory use and does not guarantee a speedup.
+CPU support work uses one native compute thread per GPU context.
+
+On Metal, Gemma and Qwen sequence packing is managed internally, independently
+of `C`, with token budgets of 128 and 256 respectively. Inputs are packed before
+batches are assigned to available contexts. CUDA keeps each input sequence in
+a separate native job to preserve embedding consistency: multi-sequence packing
+has not passed equivalence checks on T4 with the pinned CUDA runtime.
+CUDA still distributes jobs across up to `C` contexts.
+
+Each input, including all of its native micro-batches, stays on one context.
+Native token-batch and micro-batch sizes are internal controls, independent of
+`C`; Qwen micro-batches use at most 256 tokens on CUDA. Gemma processes a valid
+long input whole, and long inputs are not truncated to a sequence-packing budget.
+Qwen KV capacity follows actual batch needs.
+
+Different llama.cpp concurrency values share one model runtime and context pool.
+Contexts are created on demand; independent calls do not each allocate a separate
+pool. On GPU, the shared pool's execution limit is the largest active operation
+budget, while each operation also honors its own limit. CPU execution is bounded
+by the configured `K`. Idle excess contexts are retired, and native context
+capacity is released after 30 seconds without work. Query-vector inference keeps
+its own defaults and shares the pool; active native inference is not preempted.
+The CPU context setting is captured when the model runtime is created; restart
+the Server after changing it. GPU fallback resolves the budget using CPU rules.
+
+Transformers/ORT limits in-flight batches to at most eight, defaulting to one.
+ORT may create sessions within this budget;
 CoreML retains one physical session. Potion/model2vec defaults to two batch tasks
 and retains an independent CPU worker capacity; remote models retain adaptive
 request scheduling. Model2vec and remote overrides are not capped at eight.
 
-Matching local concurrency configurations share runtime admission. Different
-configurations use separate cached native resources; active leases keep their
-models alive, while unused variants are released when switching configurations.
+Matching Transformers/ORT concurrency configurations share runtime admission.
+Different configurations use separate cached native resources; active leases
+keep their models alive, while unused variants are released when switching
+configurations.
 
 `zg --install --upgrade-installed` migrates existing user-level MCP launchers
 from 0.2.x without selecting agents or installing new integrations. It changes
@@ -679,8 +718,10 @@ bash scripts/check.sh
 ## Native and CUDA builds
 
 The safe llama API and the C5 FFI boundary share the same pinned
-`zvec-ai/llama-cpp-rs` revision (`b55399ac6c2035f2301120547c4c967e741d25d3`),
-from branch `prebuilt/0.1.154-cpu-r2-glibc-2.31`.
+`zvec-ai/llama-cpp-rs` revision (`94a4381c94fde24c9a55023c0ec64cb8d0629a7a`),
+from branch `codex/context-thread-budget`, based on
+`prebuilt/0.1.154-cpu-r2-glibc-2.31`. The safe binding adds an in-place CPU thread
+setter; the native source and SDK locks are unchanged.
 Its sys crate automatically selects a SHA256-pinned SDK when target, features
 and native options match. Linux x64 CPU, Linux ARM64 CPU and Linux x64 CUDA use
 `zvec-0.1.154-glibc-2.31-r1`, built on Ubuntu 20.04 and verified against a glibc

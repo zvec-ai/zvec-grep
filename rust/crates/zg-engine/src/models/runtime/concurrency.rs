@@ -73,17 +73,20 @@ fn resolve_override(
     Ok(None)
 }
 
-/// Local native resources must not be shared across different fixed budgets.
+/// Transformer session budgets are fixed when their runtime is created.
+/// llama.cpp applies its execution budget per request, so callers with different
+/// budgets share the same model runtime and its backend-owned context pool.
 pub(crate) fn local_runtime_limit(reference: &str, requested: Option<usize>) -> Option<usize> {
-    if is_transformers(reference) || is_llama(reference) {
+    if is_transformers(reference) {
         Some(requested.unwrap_or(1).clamp(1, LOCAL_CONCURRENCY_CAP))
     } else {
         None
     }
 }
 
-/// llama.cpp parallelizes contexts within a single batch; never multiply them
-/// by allowing several batches to execute on the same cached model.
+/// Catalog-only fallback for backends without a device-specific admission policy.
+/// llama.cpp overrides this through `EmbeddingModel::batch_concurrency` once its
+/// configured device and context budget are known.
 pub(crate) fn batch_concurrency(reference: &str, requested: Option<usize>) -> Option<usize> {
     if is_llama(reference) {
         Some(1)

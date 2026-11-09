@@ -54,7 +54,10 @@ pub struct EmbeddingOptions {
     pub on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
     /// Runtime-owned execution budget. Backends use this to size their
     /// per-request local inference resources without exposing another public
-    /// tuning knob.
+    /// tuning knob. For llama.cpp, zero preserves automatic selection until
+    /// the actual device is known, including GPU-to-CPU fallback; positive
+    /// values are explicit overrides. Other backends receive a resolved,
+    /// positive budget from the runtime.
     pub(crate) execution_concurrency: usize,
     /// Standard W3C trace headers propagated by remote embedding backends.
     pub(crate) trace_headers: Option<EmbeddingTraceHeaders>,
@@ -108,6 +111,13 @@ pub trait EmbeddingModel: Send + Sync {
 
     fn concurrency_defaults(&self) -> EmbeddingConcurrencyDefaults {
         EmbeddingConcurrencyDefaults::default()
+    }
+
+    /// Resolves the number of batches an operation may dispatch concurrently.
+    /// This can differ from its execution budget, such as CPU threads shared
+    /// across a fixed number of native contexts.
+    fn batch_concurrency(&self, requested: Option<usize>) -> Option<usize> {
+        super::runtime::batch_concurrency(&self.info().model().reference(), requested)
     }
 
     /// Loads shared local resources before an operation dispatches embedding work.
