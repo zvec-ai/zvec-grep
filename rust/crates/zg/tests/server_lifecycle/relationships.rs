@@ -29,13 +29,27 @@ fn invalid_relationship_queries_do_not_start_a_daemon() -> Result<(), Box<dyn Er
 
 #[test]
 fn persisted_calls_match_across_direct_daemon_and_mcp() -> Result<(), Box<dyn Error>> {
+    assert_persisted_calls(Path::new("calls.rs"))
+}
+
+#[cfg(unix)]
+#[test]
+fn non_unicode_relationship_paths_match_across_direct_daemon_and_mcp() -> Result<(), Box<dyn Error>>
+{
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+    assert_persisted_calls(&PathBuf::from(OsString::from_vec(
+        b"calls-\xff.rs".to_vec(),
+    )))
+}
+
+fn assert_persisted_calls(file: &Path) -> Result<(), Box<dyn Error>> {
     let _permit = server_test_permit();
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
     let home = TempDir::new()?;
     let workspace = TempDir::new()?;
     let embedding = EmbeddingServer::start()?;
     std::fs::write(
-        workspace.path().join("calls.rs"),
+        workspace.path().join(file),
         "fn target() {\n}\n\nfn caller() {\n    target();\n}\n",
     )?;
     std::fs::create_dir(workspace.path().join("src"))?;
@@ -80,7 +94,7 @@ fn persisted_calls_match_across_direct_daemon_and_mcp() -> Result<(), Box<dyn Er
         (3, "callees", "caller", "target"),
     ] {
         let mut replies = Vec::new();
-        for mode in ["direct", "server"] {
+        for mode in ["direct", "server", "auto"] {
             let mut command = Command::new(&binary);
             command
                 .arg(format!("--{tool}"))
@@ -93,7 +107,7 @@ fn persisted_calls_match_across_direct_daemon_and_mcp() -> Result<(), Box<dyn Er
             let text = String::from_utf8(output.stdout)?;
             assert!(text.contains(symbol));
             assert!(text.contains(endpoint));
-            assert!(text.contains("call at calls.rs:5:5"));
+            assert!(text.contains(&format!("call at {}:5:5", file.display())));
             replies.push(text);
             let (reader, writer) = std::io::pipe()?;
             drop(reader);
@@ -101,7 +115,7 @@ fn persisted_calls_match_across_direct_daemon_and_mcp() -> Result<(), Box<dyn Er
             assert_command_success(&output);
             assert!(output.stderr.is_empty(), "{tool} {mode}: {output:?}");
         }
-        assert_eq!(replies[0], replies[1]);
+        assert!(replies.iter().all(|reply| reply == &replies[0]));
         let mcp = bridge.request(&json!({
             "jsonrpc": "2.0", "id": id, "method": "tools/call",
             "params": {"name": format!("zvec_grep_{tool}"), "arguments": {"root": workspace.path(), "symbol": format!(" {symbol} ")}}
@@ -109,8 +123,10 @@ fn persisted_calls_match_across_direct_daemon_and_mcp() -> Result<(), Box<dyn Er
         assert_eq!(mcp["result"]["content"][0]["text"], replies[0]);
         assert!(mcp["result"].get("structuredContent").is_none());
     }
-    assert_suggestions(&binary, home.path(), workspace.path(), &mut bridge)?;
-    assert_glob_filters(&binary, home.path(), workspace.path(), &mut bridge)?;
+    assert_suggestions(&binary, home.path(), workspace.path(), &mut bridge, file)?;
+    if file.to_str().is_some() {
+        assert_glob_filters(&binary, home.path(), workspace.path(), &mut bridge)?;
+    }
     bridge.close()?;
     assert_command_success(&guard.stop()?);
     Ok(())
@@ -185,21 +201,30 @@ fn assert_suggestions(
     home: &Path,
     workspace: &Path,
     bridge: &mut StdioBridge,
+    file: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    let output = Command::new(binary)
-        .args(["--callers", "WrongScope::TARGET"])
-        .arg(workspace)
-        .args(["--mode", "direct", "--home"])
-        .arg(home)
-        .output()?;
-    assert_command_success(&output);
+    let mut replies = Vec::new();
+    for mode in ["direct", "server", "auto"] {
+        let output = Command::new(binary)
+            .args(["--callers", "WrongScope::TARGET"])
+            .arg(workspace)
+            .args(["--mode", mode, "--home"])
+            .arg(home)
+            .output()?;
+        assert_command_success(&output);
+        replies.push(String::from_utf8(output.stdout)?);
+    }
+    assert!(replies.iter().all(|reply| reply == &replies[0]));
     let mcp = bridge.request(&json!({
         "jsonrpc": "2.0", "id": 20, "method": "tools/call",
         "params": {"name": "zvec_grep_callers", "arguments": {"root": workspace, "symbol": "WrongScope::TARGET"}}
     }))?;
     let text = mcp["result"]["content"][0]["text"].as_str().ok_or("text")?;
-    assert_eq!(text, String::from_utf8(output.stdout)?);
+    assert_eq!(text, replies[0]);
     assert!(text.starts_with("No matches."));
-    assert!(text.contains("Suggestions (retry with an exact name):\n  target  calls.rs:1\n"));
+    assert!(text.contains(&format!(
+        "Suggestions (retry with an exact name):\n  target  {}:1\n",
+        file.display()
+    )));
     Ok(())
 }

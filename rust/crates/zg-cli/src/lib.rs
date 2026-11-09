@@ -829,6 +829,7 @@ impl Cli {
             Some(CommandLine::Index(args)) => (args.debug, args.color),
             Some(CommandLine::Status(args)) => (args.debug, args.color),
             Some(CommandLine::Auth(args)) => (false, args.color),
+            Some(CommandLine::Callers(args) | CommandLine::Callees(args)) => (false, args.color),
             _ => (false, None),
         };
         OutputOptions {
@@ -2093,6 +2094,8 @@ mod tests {
         ] {
             for mut arguments in [
                 vec!["zg", "needle"],
+                vec!["zg", "--callers", "foo"],
+                vec!["zg", "--callees", "foo"],
                 vec!["zg", "--index"],
                 vec!["zg", "--status"],
                 vec!["zg", "--auth", "status"],

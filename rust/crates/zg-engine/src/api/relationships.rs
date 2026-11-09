@@ -89,6 +89,7 @@ impl RelationshipOptions {
 #[serde(rename_all = "camelCase")]
 pub struct SymbolDefinition {
     pub name: String,
+    #[serde(with = "native_path")]
     pub file_path: PathBuf,
     pub start_line: usize,
     pub end_line: usize,
@@ -99,6 +100,7 @@ pub struct SymbolDefinition {
 #[serde(rename_all = "camelCase")]
 pub struct CallSite {
     /// Workspace-relative caller file containing this call site, even without a symbol.
+    #[serde(with = "native_path")]
     pub file_path: PathBuf,
     pub symbol: Option<SymbolDefinition>,
     /// One-based call-site line.
@@ -126,4 +128,36 @@ pub struct RelationshipResult {
     /// No usable exact definition matched; these similarly named definitions carry no edges.
     /// At most five best-effort suggestions, not an exhaustive list of similar symbols.
     pub suggestions: Vec<SymbolDefinition>,
+}
+
+// Keep ordinary JSON paths as strings. Serde's platform-tagged OsString encoding
+// preserves non-Unicode paths across daemon replies until the text renderer runs.
+mod native_path {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::{
+        ffi::OsString,
+        path::{Path, PathBuf},
+    };
+
+    pub(super) fn serialize<S: Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
+        match path.to_str() {
+            Some(text) => text.serialize(serializer),
+            None => path.as_os_str().serialize(serializer),
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<PathBuf, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum EncodedPath {
+            Text(String),
+            Native(OsString),
+        }
+        Ok(match EncodedPath::deserialize(deserializer)? {
+            EncodedPath::Text(text) => text.into(),
+            EncodedPath::Native(native) => native.into(),
+        })
+    }
 }

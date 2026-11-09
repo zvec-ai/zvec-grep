@@ -141,6 +141,53 @@ mod tests {
     }
 
     #[test]
+    fn relationship_replies_preserve_non_unicode_paths() {
+        use std::{ffi::OsString, path::PathBuf};
+        use zg_engine::api::relationships::{
+            CallSite, RelationshipResult, SymbolDefinition, SymbolRelationships,
+        };
+        #[cfg(unix)]
+        let path = {
+            use std::os::unix::ffi::OsStringExt;
+            PathBuf::from(OsString::from_vec(b"src/calls-\xff.rs".to_vec()))
+        };
+        #[cfg(windows)]
+        let path = {
+            use std::os::windows::ffi::OsStringExt;
+            PathBuf::from(OsString::from_wide(&[0xd800, 0x2e, 0x72, 0x73]))
+        };
+        let symbol = SymbolDefinition {
+            name: "run".into(),
+            file_path: path.clone(),
+            start_line: 1,
+            end_line: 3,
+        };
+        let result = RelationshipResult {
+            matches: vec![SymbolRelationships {
+                symbol: symbol.clone(),
+                truncated: false,
+                edges: vec![CallSite {
+                    file_path: path,
+                    symbol: Some(symbol.clone()),
+                    line: Some(2),
+                    column: Some(0),
+                }],
+            }],
+            suggestions: vec![symbol],
+        };
+        for reply in [
+            super::DaemonReply::Callers(result.clone()),
+            super::DaemonReply::Callees(result),
+        ] {
+            let bytes = serde_json::to_vec(&reply).expect("encode native paths");
+            assert_eq!(
+                serde_json::from_slice::<super::DaemonReply>(&bytes).expect("decode native paths"),
+                reply
+            );
+        }
+    }
+
+    #[test]
     fn index_round_trips_by_root_without_a_name() {
         use zg_engine::api::index::IndexOptions;
         let command = DaemonCommand::Index(IndexOptions {
