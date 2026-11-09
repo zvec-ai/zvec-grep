@@ -77,6 +77,7 @@ pub(crate) async fn run_server(
     init_logging: impl FnOnce(&std::path::Path) -> Result<(), DaemonError>,
 ) -> Result<(), DaemonError> {
     let idle_ttl = crate::configured_watcher_idle_timeout()?;
+    engine.enable_server_model_pools()?;
     engine.enable_read_session_cache()?;
     let token = crate::resolve_token(config.token_file.as_deref())?;
     let mut instance = InstanceLock::acquire(&config).await?;

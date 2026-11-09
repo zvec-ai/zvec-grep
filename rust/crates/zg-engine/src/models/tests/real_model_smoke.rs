@@ -84,6 +84,7 @@ async fn download_load_and_embed(reference: &str, cache_dir: PathBuf, device: De
             ..ModelConfig::default()
         }),
         ModelComputeRuntime::shared(),
+        1,
     )
     .expect("CI model must resolve through the catalog factory");
 

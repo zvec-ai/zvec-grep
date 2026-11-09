@@ -118,7 +118,7 @@ async fn native_work_retains_admission_and_runtime_after_caller_is_dropped() {
     });
     let manager = ModelRuntimeManager::with_factory({
         let fixture = Arc::clone(&fixture);
-        move |_, _, _| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
+        move |_, _, _, _sessions| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
     });
     let lease = manager
         .acquire(ModelRuntimeRequest::new(
@@ -154,7 +154,7 @@ async fn native_work_retains_admission_after_cancellation_or_failure_until_settl
         });
         let manager = ModelRuntimeManager::with_factory({
             let fixture = Arc::clone(&fixture);
-            move |_, _, _| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
+            move |_, _, _, _sessions| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
         });
         let lease = manager
             .acquire(ModelRuntimeRequest::new(
@@ -322,8 +322,9 @@ fn prefetch_fixture() -> (ModelRuntimeManager, Arc<PrefetchFixtureModel>) {
     let fixture = Arc::new(PrefetchFixtureModel::new());
     let manager = ModelRuntimeManager::with_factory({
         let fixture = Arc::clone(&fixture);
-        move |_, _, _| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
+        move |_, _, _, _sessions| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
     });
+    manager.set_server_pool_capacity(4).expect("server pool");
     (manager, fixture)
 }
 
@@ -547,7 +548,7 @@ fn fixture_cache(policy: CachePolicy) -> (ModelRuntimeManager, Arc<AtomicUsize>)
     let creations = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&creations);
     let manager = ModelRuntimeManager::with_policy(
-        Arc::new(move |_, _, _| {
+        Arc::new(move |_, _, _, _sessions| {
             count.fetch_add(1, Ordering::AcqRel);
             Ok(Arc::new(ProgressFixtureModel::new()))
         }),
@@ -728,7 +729,7 @@ impl Drop for DisposalFixture {
 fn maintenance_expires_idle_models_without_another_request_or_tokio_runtime() {
     let (disposed, observed) = mpsc::channel();
     let manager = ModelRuntimeManager::with_policy(
-        Arc::new(move |_, _, _| {
+        Arc::new(move |_, _, _, _sessions| {
             let disposed = disposed.clone();
             Ok(Arc::new(DisposalFixture {
                 inner: ProgressFixtureModel::new(),
@@ -760,7 +761,7 @@ fn maintenance_expires_idle_models_without_another_request_or_tokio_runtime() {
 #[test]
 fn dropping_the_manager_releases_idle_models_without_waiting_for_the_ttl() {
     let (disposed, observed) = mpsc::channel();
-    let manager = ModelRuntimeManager::with_factory(move |_, _, _| {
+    let manager = ModelRuntimeManager::with_factory(move |_, _, _, _sessions| {
         let disposed = disposed.clone();
         Ok(Arc::new(DisposalFixture {
             inner: ProgressFixtureModel::new(),
@@ -786,7 +787,7 @@ fn slow_model_disposal_does_not_hold_the_cache_lock() {
     let (entered, observed) = mpsc::channel();
     let (release, wait_for_release) = mpsc::channel();
     let gate = Arc::new(Mutex::new(wait_for_release));
-    let manager = ModelRuntimeManager::with_factory(move |reference, _, _| {
+    let manager = ModelRuntimeManager::with_factory(move |reference, _, _, _sessions| {
         let entered = entered.clone();
         let gate = Arc::clone(&gate);
         let blocks = reference == "first";
@@ -861,7 +862,7 @@ fn invalid_model_info_is_rejected_before_caching_or_leasing() {
     ] {
         let creations = Arc::new(AtomicUsize::new(0));
         let observed_creations = Arc::clone(&creations);
-        let manager = ModelRuntimeManager::with_factory(move |_, _, _| {
+        let manager = ModelRuntimeManager::with_factory(move |_, _, _, _sessions| {
             let mut model = ConcurrentFixtureModel::new();
             if observed_creations.fetch_add(1, Ordering::AcqRel) == 0 {
                 let mut data = serde_json::to_value(&model.info).expect("metadata");
@@ -902,7 +903,7 @@ async fn reuses_one_runtime_and_allows_shared_concurrent_embeddings() {
     let manager = ModelRuntimeManager::with_factory({
         let creations = Arc::clone(&creations);
         let fixture = Arc::clone(&fixture);
-        move |_reference, _options, _compute| {
+        move |_reference, _options, _compute, _sessions| {
             creations.fetch_add(1, Ordering::AcqRel);
             Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
         }
@@ -998,9 +999,10 @@ async fn forwards_preparation_progress_to_both_callbacks_with_effective_concurre
     use crate::domain::model::ModelProgress;
 
     let fixture = Arc::new(ProgressFixtureModel::new());
-    let manager = ModelRuntimeManager::with_factory(move |_reference, _options, _compute| {
-        Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
-    });
+    let manager =
+        ModelRuntimeManager::with_factory(move |_reference, _options, _compute, _sessions| {
+            Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
+        });
     let lease = manager
         .acquire(ModelRuntimeRequest::new(
             "local/fixture",
@@ -1075,7 +1077,7 @@ async fn native_batches_share_admission_across_independent_leases() {
         let fixture = Arc::new(GatedFixtureModel::new());
         let manager = ModelRuntimeManager::with_factory({
             let fixture = Arc::clone(&fixture);
-            move |_, _, _| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
+            move |_, _, _, _sessions| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
         });
         let request =
             || ModelRuntimeRequest::new(reference, ModelConfig::default(), Some(requested));
@@ -1130,8 +1132,9 @@ async fn native_batches_share_admission_across_independent_leases() {
 }
 
 #[test]
-fn ort_leases_share_one_runtime_across_budgets() {
+fn ort_server_leases_share_one_runtime_across_budgets() {
     let (manager, creations) = fixture_cache(CachePolicy::default());
+    manager.set_server_pool_capacity(4).expect("server pool");
     let request =
         |limit| ModelRuntimeRequest::new("local/all-minilm-l6-v2", ModelConfig::default(), limit);
     let index = manager.acquire(request(Some(24))).expect("index");
@@ -1157,7 +1160,9 @@ async fn user_concurrency_limits_tasks_without_splitting_the_shared_runtime() {
     let fixture = Arc::new(GatedFixtureModel::new());
     let manager = ModelRuntimeManager::with_factory({
         let fixture = Arc::clone(&fixture);
-        move |_reference, _options, _compute| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
+        move |_reference, _options, _compute, _sessions| {
+            Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
+        }
     });
     let lease = manager
         .acquire(ModelRuntimeRequest::new(
@@ -1204,7 +1209,9 @@ async fn cancelled_task_does_not_wait_for_an_operation_permit() {
     let fixture = Arc::new(GatedFixtureModel::new());
     let manager = ModelRuntimeManager::with_factory({
         let fixture = Arc::clone(&fixture);
-        move |_reference, _options, _compute| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
+        move |_reference, _options, _compute, _sessions| {
+            Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
+        }
     });
     let lease = manager
         .acquire(ModelRuntimeRequest::new(
@@ -1246,7 +1253,7 @@ async fn cancelled_task_does_not_wait_for_an_operation_permit() {
 #[tokio::test]
 async fn dropping_an_embedding_future_releases_activity_but_keeps_its_model_lease() {
     let fixture = Arc::new(GatedFixtureModel::new());
-    let manager = ModelRuntimeManager::with_factory(move |_, _, _| {
+    let manager = ModelRuntimeManager::with_factory(move |_, _, _, _sessions| {
         Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
     });
     let lease = acquire_fixture(&manager, "first");
@@ -1307,39 +1314,77 @@ fn concurrency_policy_prefers_user_and_preserves_catalog_backend_defaults() {
 }
 
 #[test]
-fn transformer_cpu_uses_hardware_default_and_clamps_explicit_budgets() {
-    let hardware = std::thread::available_parallelism().map_or(1, usize::from);
+fn transformer_direct_pool_size_follows_requested_concurrency() {
     let manager = ModelRuntimeManager::new();
+    for requested in [1, 2, 4, 8] {
+        let lease = manager
+            .acquire(ModelRuntimeRequest::new(
+                "local/all-minilm-l6-v2",
+                ModelConfig {
+                    device: Some(Device::Cpu),
+                    ..Default::default()
+                },
+                Some(requested),
+            ))
+            .expect("model does not load assets");
+        assert_eq!(
+            lease.execution_concurrency(),
+            super::super::ort_config::session_count(requested)
+        );
+        assert_eq!(
+            lease.concurrency_defaults().maximum,
+            super::super::ort_config::session_count(requested)
+        );
+    }
+}
+
+#[test]
+fn transformer_server_pool_caps_requests_and_is_reused_without_loading_assets() {
+    let manager = ModelRuntimeManager::new();
+    manager
+        .set_server_pool_capacity(4)
+        .expect("server capacity");
     let config = ModelConfig {
         device: Some(Device::Cpu),
-        ..ModelConfig::default()
+        ..Default::default()
     };
-    for (requested, expected) in [
-        (None, hardware.div_ceil(2)),
-        (Some(0), 1),
-        (Some(24), 24.min(hardware)),
-        (Some(usize::MAX), hardware),
-    ] {
+    let first = manager
+        .acquire(ModelRuntimeRequest::new(
+            "local/all-minilm-l6-v2",
+            config.clone(),
+            None,
+        ))
+        .expect("acquire configured pool");
+    let capacity = super::super::ort_config::session_count(4);
+    assert_eq!(first.execution_concurrency(), capacity);
+    for (requested, expected) in [(0, 1), (1, 1), (2, 2), (8, 4), (usize::MAX, 4)] {
         let lease = manager
             .acquire(ModelRuntimeRequest::new(
                 "local/all-minilm-l6-v2",
                 config.clone(),
-                requested,
+                Some(requested),
             ))
-            .expect("model creation does not load resources");
-        assert_eq!(lease.execution_concurrency(), expected);
-        assert_eq!(lease.concurrency_defaults().maximum, hardware);
+            .expect("acquire configured pool");
+        assert!(Arc::ptr_eq(&first.entry, &lease.entry));
+        assert_eq!(lease.execution_concurrency(), expected.min(capacity));
+        assert_eq!(lease.concurrency_defaults().maximum, capacity);
     }
+    manager.set_server_pool_capacity(4).expect("idempotent");
+    if capacity > 1 {
+        assert!(manager.set_server_pool_capacity(1).is_err());
+    }
+    assert_eq!(manager.snapshot().cached_runtimes, 1);
 }
 
 #[test]
 fn rejects_zero_user_concurrency_before_constructing_a_runtime() {
     let creations = Arc::new(AtomicUsize::new(0));
     let captured = Arc::clone(&creations);
-    let manager = ModelRuntimeManager::with_factory(move |_reference, _options, _compute| {
-        captured.fetch_add(1, Ordering::AcqRel);
-        Ok(Arc::new(ProgressFixtureModel::new()) as Arc<dyn EmbeddingModel>)
-    });
+    let manager =
+        ModelRuntimeManager::with_factory(move |_reference, _options, _compute, _sessions| {
+            captured.fetch_add(1, Ordering::AcqRel);
+            Ok(Arc::new(ProgressFixtureModel::new()) as Arc<dyn EmbeddingModel>)
+        });
 
     let error = manager
         .acquire(ModelRuntimeRequest::new(
@@ -1356,7 +1401,7 @@ fn rejects_zero_user_concurrency_before_constructing_a_runtime() {
 
 #[tokio::test]
 async fn large_remote_overrides_do_not_overflow_runtime_admission() {
-    let manager = ModelRuntimeManager::with_factory(|_reference, _options, _compute| {
+    let manager = ModelRuntimeManager::with_factory(|_reference, _options, _compute, _sessions| {
         Ok(Arc::new(ProgressFixtureModel::new()) as Arc<dyn EmbeddingModel>)
     });
     let lease = manager

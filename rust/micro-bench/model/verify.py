@@ -143,7 +143,9 @@ def verify(root, require_complete=True):
                 if any(actual.get(name) != value for name, value in controls.items()):
                     errors.append(f"{key}: wrong recorded benchmark controls")
                 errors.extend(f"{key}: {error}" for error in validate_controls(
-                    benchmark, controls.get("clients"), controls.get("ort_sessions", 1)))
+                    benchmark, controls.get("clients"),
+                    controls.get("server_concurrency") if "server_concurrency" in controls else controls.get("ort_sessions", 1),
+                    controls.get("ort_thread_budget")))
             if not benchmark:
                 if record.get("protocol_pass") or (record.get("exit_code") == 0 and not record.get("hard_timeout")):
                     errors.append(f"{key}: missing successful result")

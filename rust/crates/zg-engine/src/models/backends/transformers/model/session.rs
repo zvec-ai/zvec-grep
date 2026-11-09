@@ -13,7 +13,7 @@ use tokio::sync::{Notify, oneshot};
 use super::{
     Arc, Device, EmbeddingOptions, EmbeddingPurpose, ModelDownloadProgressReporter, ModelError,
     ModelProgress, NativeOutput, PathBuf, PreparedBatch, Session, StdMutex, TransformersConfig,
-    TransformersExecutionProvider, check_cancelled, load_session, lock_std_mutex, policy,
+    TransformersExecutionProvider, check_cancelled, load_session, lock_std_mutex,
     resolve_execution_provider, run_session,
 };
 use crate::models::spi::ModelExecutionStats;
@@ -28,7 +28,7 @@ pub(super) struct SessionOwner {
 type Factory = dyn Fn(usize) -> Result<Box<dyn Runner>, ModelError> + Send + Sync;
 
 trait Runner {
-    fn configure(&mut self, _threads: usize, _force_cpu: bool) -> Result<(), ModelError> {
+    fn configure(&mut self, _force_cpu: bool) -> Result<(), ModelError> {
         Ok(())
     }
 
@@ -46,26 +46,19 @@ struct Shared {
     available: Arc<Notify>,
     stats: StdMutex<ModelExecutionStats>,
     inflight: AtomicUsize,
-    generation: AtomicUsize,
     pool: StdMutex<PoolState>,
 }
 
 struct PoolState {
     busy: Vec<Option<EmbeddingPurpose>>,
-    cpu_threads: Option<usize>,
-    // Retain the largest admitted configuration even if a transition is
-    // cancelled or fails after only some native sessions have changed.
-    cpu_threads_high_water: usize,
-    retained_budget_reported: bool,
+    cpu_ready: bool,
     changing: bool,
-    drain: bool,
 }
 
 /// Owned by the reservation and every native configuration job. If the async
 /// waiter is cancelled, new work still waits until all native changes settle.
 struct PoolTransition {
     shared: Arc<Shared>,
-    threads: usize,
     succeeded: AtomicBool,
 }
 
@@ -77,8 +70,7 @@ struct Worker {
 
 enum Message {
     Run(Box<Job>),
-    Configure {
-        threads: usize,
+    Fallback {
         transition: Arc<PoolTransition>,
         reply: oneshot::Sender<Result<(), ModelError>>,
     },
@@ -91,7 +83,7 @@ struct Job {
     enqueued: Vec<Instant>,
     reply: oneshot::Sender<NativeCompletion>,
     _permit: LanePermit,
-    cpu_threads: Option<usize>,
+    force_cpu: bool,
 }
 
 struct NativeCompletion {
@@ -108,8 +100,8 @@ struct LanePermit {
 pub(super) struct Reservation {
     lane: usize,
     permit: LanePermit,
-    cpu_threads: Option<usize>,
     transition: Option<Arc<PoolTransition>>,
+    force_cpu: bool,
 }
 
 impl Drop for LanePermit {
@@ -122,10 +114,7 @@ impl Drop for LanePermit {
 impl Drop for PoolTransition {
     fn drop(&mut self) {
         let mut pool = lock_std_mutex(&self.shared.pool);
-        pool.cpu_threads = self
-            .succeeded
-            .load(Ordering::Acquire)
-            .then_some(self.threads);
+        pool.cpu_ready = self.succeeded.load(Ordering::Acquire);
         pool.changing = false;
         drop(pool);
         self.shared.available.notify_waiters();
@@ -136,8 +125,6 @@ struct SessionState {
     model_path: PathBuf,
     session: Option<Session>,
     provider: TransformersExecutionProvider,
-    threads: usize,
-    lane: usize,
     shared: Arc<Shared>,
 }
 
@@ -145,7 +132,6 @@ impl SessionOwner {
     pub(super) fn load(
         model_path: PathBuf,
         device: Option<Device>,
-        concurrency: usize,
         session_count: usize,
         reporter: &ModelDownloadProgressReporter,
     ) -> Result<Self, ModelError> {
@@ -156,26 +142,19 @@ impl SessionOwner {
                 tracing::warn!("{warning}");
             }
         }
-        let shared = Arc::new(Shared::new(requested, session_count, concurrency));
+        let shared = Arc::new(Shared::new(requested, session_count));
         let worker_shared = Arc::clone(&shared);
-        let factory: Arc<Factory> = Arc::new(move |lane| {
+        let factory: Arc<Factory> = Arc::new(move |_lane| {
             let fallback = worker_shared.fallback.load(Ordering::Acquire);
             let provider = if fallback {
                 TransformersExecutionProvider::Cpu
             } else {
                 requested
             };
-            let threads = if provider == TransformersExecutionProvider::Cpu {
-                lock_std_mutex(&worker_shared.pool).cpu_threads_high_water
-            } else {
-                1
-            };
             let mut state = SessionState {
                 model_path: model_path.clone(),
                 session: None,
                 provider,
-                threads,
-                lane,
                 shared: Arc::clone(&worker_shared),
             };
             state.ensure_session()?;
@@ -200,15 +179,13 @@ impl SessionOwner {
                 tracing::warn!("{warning}");
             }
             owner.shared.fallback.store(true, Ordering::Release);
-            lock_std_mutex(&owner.shared.pool).cpu_threads =
-                Some(policy::threads_per_session(concurrency, session_count));
+            lock_std_mutex(&owner.shared.pool).cpu_ready = true;
             owner.initialize()?;
         }
         tracing::info!(
             provider = owner.provider().name(),
             sessions = session_count,
-            execution_budget = concurrency,
-            threads_per_session = owner.stats().cpu_threads,
+            global_intra_threads = crate::models::runtime::ort_config::thread_budget(),
             "Transformers ONNX {} embedding execution provider selected",
             owner.provider().name()
         );
@@ -295,69 +272,34 @@ impl SessionOwner {
         if pool.changing {
             return None;
         }
-        let busy = pool.busy.iter().flatten().count();
-        let cpu_threads = if self.provider() == TransformersExecutionProvider::Cpu {
-            let requested =
-                policy::threads_per_session(options.execution_concurrency, pool.busy.len());
-            let desired = if options.purpose == EmbeddingPurpose::Query {
-                pool.cpu_threads_high_water
-            } else {
-                requested.max(pool.cpu_threads_high_water)
-            };
-            if busy > 0 && (pool.drain || pool.cpu_threads != Some(desired)) {
-                pool.drain = true;
-                return None;
-            }
-            pool.drain = false;
-            if options.purpose == EmbeddingPurpose::Document
-                && requested < desired
-                && !pool.retained_budget_reported
-            {
-                pool.retained_budget_reported = true;
-                tracing::warn!(
-                    requested_concurrency = options.execution_concurrency,
-                    sessions = pool.busy.len(),
-                    threads_per_session = desired,
-                    actual_thread_budget = desired.saturating_mul(pool.busy.len()),
-                    "ORT CPU reuses its larger thread pool; lowering concurrency does not lower the retained thread budget"
-                );
-            }
-            Some(desired)
+        let force_cpu = self.provider() == TransformersExecutionProvider::Cpu;
+        let cpu_fallback = force_cpu && !pool.cpu_ready;
+        if cpu_fallback && pool.busy.iter().any(Option::is_some) {
+            return None;
+        }
+        // Limit executions, not numbered slots. A query can use any idle lane.
+        let active = pool
+            .busy
+            .iter()
+            .flatten()
+            .filter(|purpose| **purpose == options.purpose)
+            .count();
+        let limit = if options.purpose == EmbeddingPurpose::Query {
+            1
         } else {
-            // C limits document executions, not numbered slots. Queries have
-            // their own one-run budget and may use any idle session in the pool.
-            let active = pool
-                .busy
-                .iter()
-                .flatten()
-                .filter(|purpose| **purpose == options.purpose)
-                .count();
-            let limit = if options.purpose == EmbeddingPurpose::Query {
-                1
-            } else {
-                options.execution_concurrency.clamp(1, pool.busy.len())
-            };
-            if active >= limit {
-                return None;
-            }
-            None
+            options.execution_concurrency.clamp(1, pool.busy.len())
         };
+        if active >= limit {
+            return None;
+        }
         let lane = pool.busy.iter().position(Option::is_none)?;
-        let transition =
-            if let Some(threads) = cpu_threads.filter(|_| pool.cpu_threads != cpu_threads) {
-                if threads > pool.cpu_threads_high_water {
-                    pool.cpu_threads_high_water = threads;
-                    pool.retained_budget_reported = false;
-                }
-                pool.changing = true;
-                Some(Arc::new(PoolTransition {
-                    shared: Arc::clone(&self.shared),
-                    threads,
-                    succeeded: AtomicBool::new(false),
-                }))
-            } else {
-                None
-            };
+        let transition = cpu_fallback.then(|| {
+            pool.changing = true;
+            Arc::new(PoolTransition {
+                shared: Arc::clone(&self.shared),
+                succeeded: AtomicBool::new(false),
+            })
+        });
         pool.busy[lane] = Some(options.purpose);
         Some(Reservation {
             lane,
@@ -365,8 +307,8 @@ impl SessionOwner {
                 lane,
                 shared: Arc::clone(&self.shared),
             },
-            cpu_threads,
             transition,
+            force_cpu,
         })
     }
 
@@ -457,8 +399,8 @@ impl SessionOwner {
         let Reservation {
             lane,
             permit,
-            cpu_threads,
             transition,
+            force_cpu,
         } = if let Some(reservation) = reservation {
             reservation
         } else {
@@ -467,9 +409,9 @@ impl SessionOwner {
         // Initialization happens on the native worker, never on a Tokio thread.
         drop(self.start_worker(lane)?);
         if let Some(transition) = transition {
-            self.configure_pool(&transition).await?;
+            self.fallback_pool(&transition).await?;
             transition.succeeded.store(true, Ordering::Release);
-            // Publish the new uniform CPU budget before admitting other jobs.
+            // Publish fallback only after every native worker has switched.
             drop(transition);
         }
         let (reply, receiver) = oneshot::channel();
@@ -480,7 +422,7 @@ impl SessionOwner {
             enqueued,
             reply,
             _permit: permit,
-            cpu_threads,
+            force_cpu,
         };
         lock_std_mutex(&self.workers[lane])
             .as_ref()
@@ -494,7 +436,7 @@ impl SessionOwner {
         })
     }
 
-    async fn configure_pool(&self, transition: &Arc<PoolTransition>) -> Result<(), ModelError> {
+    async fn fallback_pool(&self, transition: &Arc<PoolTransition>) -> Result<(), ModelError> {
         let mut replies = Vec::with_capacity(self.workers.len());
         for lane in 0..self.workers.len() {
             drop(self.start_worker(lane)?);
@@ -502,8 +444,7 @@ impl SessionOwner {
             lock_std_mutex(&self.workers[lane])
                 .as_ref()
                 .expect("worker started")
-                .send(Message::Configure {
-                    threads: transition.threads,
+                .send(Message::Fallback {
                     transition: Arc::clone(transition),
                     reply,
                 })
@@ -525,22 +466,12 @@ impl SessionOwner {
         if let Some(error) = failure {
             return Err(error.shared());
         }
-        lock_std_mutex(&self.shared.stats).pool_reconfigurations += 1;
+        lock_std_mutex(&self.shared.stats).pool_fallbacks += 1;
         tracing::debug!(
             sessions = self.workers.len(),
-            threads_per_session = transition.threads,
-            actual_thread_budget = self.workers.len().saturating_mul(transition.threads),
-            "Configured ORT CPU session pool"
+            "ORT session pool switched to CPU"
         );
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub(super) fn configuration(&self) -> (usize, usize) {
-        (
-            self.stats().cpu_threads.max(1),
-            self.shared.generation.load(Ordering::Acquire),
-        )
     }
 
     #[cfg(test)]
@@ -550,24 +481,20 @@ impl SessionOwner {
 }
 
 impl Shared {
-    fn new(provider: TransformersExecutionProvider, sessions: usize, budget: usize) -> Self {
+    fn new(provider: TransformersExecutionProvider, sessions: usize) -> Self {
         Self {
             fallback: AtomicBool::new(false),
             available: Arc::new(Notify::new()),
             stats: StdMutex::new(ModelExecutionStats {
                 actual_provider: provider.name(),
+                global_intra_threads: crate::models::runtime::ort_config::thread_budget(),
                 ..ModelExecutionStats::default()
             }),
             inflight: AtomicUsize::new(0),
-            generation: AtomicUsize::new(0),
             pool: StdMutex::new(PoolState {
                 busy: vec![None; sessions],
-                cpu_threads: (provider == TransformersExecutionProvider::Cpu)
-                    .then(|| policy::threads_per_session(budget, sessions)),
-                cpu_threads_high_water: policy::threads_per_session(budget, sessions),
-                retained_budget_reported: false,
+                cpu_ready: provider == TransformersExecutionProvider::Cpu,
                 changing: false,
-                drain: false,
             }),
         }
     }
@@ -596,11 +523,7 @@ impl Worker {
                 for message in receiver {
                     let job = match message {
                         Message::Run(job) => job,
-                        Message::Configure {
-                            threads,
-                            transition,
-                            reply,
-                        } => {
+                        Message::Fallback { transition, reply } => {
                             let attempted = catch_unwind(AssertUnwindSafe(|| {
                                 if runner.is_err() {
                                     runner = factory(lane);
@@ -608,7 +531,7 @@ impl Worker {
                                 runner
                                     .as_mut()
                                     .map_err(|error| error.clone())?
-                                    .configure(threads, true)
+                                    .configure(true)
                             }));
                             let result = if let Ok(result) = attempted {
                                 result
@@ -632,9 +555,8 @@ impl Worker {
                         enqueued,
                         reply,
                         _permit: permit,
-                        cpu_threads,
+                        force_cpu,
                     } = *job;
-                    let force_cpu = cpu_threads.is_some();
                     let retry_on_cpu =
                         requested != TransformersExecutionProvider::Cpu && !force_cpu;
                     let mut native_started = false;
@@ -645,7 +567,7 @@ impl Worker {
                     } else {
                         let result = catch_unwind(AssertUnwindSafe(|| {
                             let runner = runner.as_mut().map_err(|error| error.clone())?;
-                            runner.configure(cpu_threads.unwrap_or(1), force_cpu)?;
+                            runner.configure(force_cpu)?;
                             check_cancelled(options.signal.as_ref())?;
                             let _measurement =
                                 NativeMeasurement::start(&shared, &prepared, &enqueued);
@@ -719,35 +641,25 @@ impl SessionState {
 
     fn ensure_session(&mut self) -> Result<(), ModelError> {
         if self.session.is_none() {
-            self.session = Some(load_session(&self.model_path, self.provider, self.threads)?);
+            self.session = Some(load_session(&self.model_path, self.provider)?);
             let mut stats = lock_std_mutex(&self.shared.stats);
             stats.session_count += 1;
+            stats.session_initializations += 1;
             stats.actual_provider = if self.shared.fallback.load(Ordering::Acquire) {
                 "cpu"
             } else {
                 self.provider.name()
             };
-            if self.lane == 0 {
-                stats.cpu_threads = self.threads;
-                stats.cpu_threads_total = self
-                    .threads
-                    .saturating_mul(lock_std_mutex(&self.shared.pool).busy.len());
-                self.shared.generation.fetch_add(1, Ordering::Release);
-            }
         }
         Ok(())
     }
 }
 
 impl Runner for SessionState {
-    fn configure(&mut self, threads: usize, force_cpu: bool) -> Result<(), ModelError> {
+    fn configure(&mut self, force_cpu: bool) -> Result<(), ModelError> {
         if force_cpu && self.provider != TransformersExecutionProvider::Cpu {
             self.clear();
             self.provider = TransformersExecutionProvider::Cpu;
-        }
-        if self.threads != threads {
-            self.clear();
-            self.threads = threads;
         }
         self.ensure_session()
     }

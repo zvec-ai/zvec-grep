@@ -59,9 +59,9 @@ concurrency only when no explicit admission policy is provided. Clear inherited
 indexing concurrency overrides so `default` uses the backend default:
 
 - llama.cpp has one in-flight batch; C controls native context parallelism within it.
-- Transformers/ONNX separates execution C from admission/prefetch Q. CPU C
-  controls native threads, clamped to the available logical hardware threads;
-  CUDA C controls the bounded native execution lanes. The runtime selects Q.
+- Transformers/ONNX uses C sessions in direct mode. Resident mode fixes pool
+  capacity at server startup and caps request C to that capacity. All Sessions
+  share the process-global intra-op pool configured by T. The runtime selects Q.
 - model2vec uses its production default (currently two) or the explicit budget.
 
 Record requested C, resolved index budget, effective execution budget and actual
@@ -89,19 +89,20 @@ and is labeled in the report title. Verify observed native batch rows before
 attributing throughput differences to execution parallelism. Production and
 fixed-batch profiles measure different workloads and must not be merged.
 
-`--ort-sessions S` sets the production `ZVEC_GREP_ORT_SESSION` pool count for each
-fresh process (default 1; ambient shell values are overridden). Use separate
-output directories for different S values. `--clients K` fixes the closed-loop
-caller count independently of runtime admission; omit it to retain production
-admission. Both settings are fingerprinted and checked against observed results.
-Keep K and actual native batch shapes fixed when comparing session configurations.
-Reports separate client count K, admission Q, actual Sessions, threads per Session,
-total native threads and native batch rows. Call latency includes runtime admission.
-In a shared CPU runtime, only requests for a larger per-Session thread count
-reconfigure the pool. Smaller C retains its largest admitted configuration;
-resolved/effective request C is not the actual retained thread budget. Use
-`cpu_threads` and `cpu_threads_total` for actual native thread configuration.
-Fresh-process shape cases start without a previous larger budget.
+`--server-concurrency C` selects resident runtime behavior and fixes the pool
+capacity with the production `ZVEC_GREP_EMBEDDING_CONCURRENCY` variable. Omit it
+for direct mode, where each measured C controls session count. `--ort-thread-budget T`
+sets `ZVEC_GREP_ORT_THREAD_BUDGET`; omission uses the production automatic default.
+Ambient C/T overrides are cleared. Use separate output directories for different
+server capacities and T values. `--clients K` fixes caller count independently of
+production admission; omit it for the production workload. These controls are
+fingerprinted and validated against observed results.
+
+Reports record session count, global intra-op configuration, effective execution
+concurrency, admission and native batch shape. They never multiply shared thread
+configuration by session count. Changing request C in resident mode must preserve
+both the pool and its native Sessions. Each shape case uses a fresh process;
+shared-runtime reuse is covered separately by the mixed regression below.
 
 The known CPU-only model2vec capability can skip non-CPU cases. Save a bound
 `case-status.json` with the reason, keep its table row, and omit its measurement
@@ -154,8 +155,8 @@ storage-cold timing.
   not elapsed phase time; concurrent work can exceed wall time. Queue wait is
   submission-to-native-start and includes preparation/coalescing, so these timers
   are not additive. Session count is the live end-of-phase gauge; before/after
-  snapshots retain any lazy lane initialization. CPU threads is the configured
-  ORT intra-op thread count per session, not the process's total thread count.
+  snapshots retain session initialization counts. `global_intra_threads` is the
+  shared ORT intra-op configuration, not a per-session or total process thread count.
   Preserve per-round values in aggregate JSON.
 - **RSS:** process RSS sampling peak during embedding. It includes the harness,
   request records and allocator caches, and is not an exact allocation peak.
@@ -278,23 +279,25 @@ runtime/backend admission. It overlaps `preparation_ns`: do not add these fields
 to reconstruct latency. Preparation/inference/postprocessing are summed work time,
 not a disjoint wall-time breakdown. Use `call_latency` for the full runtime call,
 including admission. Historical records called this same overlapping measurement
-`queue_wait_ns`; their values are preserved. `pool_reconfigurations` counts
-successful whole-pool CPU reconfigurations, excluding initial preparation.
+`queue_wait_ns`; their values are preserved. `session_initializations` counts
+native Session creations; `pool_fallbacks` counts successful whole-pool GPU-to-CPU
+transitions. Neither should increase during a steady measured phase. Historical
+`pool_reconfigurations` and per-session thread fields retain their original meaning.
 
 ## Optional mixed MiniLM regression
 
 The ignored `models::tests::model_micro_bench::mixed_minilm::cached_minilm_documents_and_queries`
 test uses the same pinned cache and a release build. Set `ZG_MODEL_BENCH_MODEL=local/all-minilm-l6-v2`,
-`ZG_MODEL_BENCH_CACHE`, `ZG_MODEL_BENCH_DEVICE=cpu|cuda` and `ZVEC_GREP_ORT_SESSION`.
-It runs eight document clients and one query client through shared runtime leases,
-first with equal document budgets, then mixed budgets (CPU 16/8, CUDA 8/1).
+`ZG_MODEL_BENCH_CACHE`, `ZG_MODEL_BENCH_DEVICE=cpu|cuda`,
+`ZVEC_GREP_EMBEDDING_CONCURRENCY=4` and optionally `ZVEC_GREP_ORT_THREAD_BUDGET`.
+It runs eight document clients and one query client through resident runtime leases,
+first with equal document concurrency, then mixed full-capacity/one-session requests.
 Each scenario lasts at least 15 seconds and collects at least 100 query calls;
-every result is checked against fixed-batch reference vectors. CPU machines must
-expose at least 16 hardware threads for these two budgets to be distinct.
-The higher budget prepares each scenario; lower-budget requests must then reuse
-the pool with zero rebuilds. `ZG_MIXED_RESULT` contains request timestamps,
-p50/p95 latency, actual retained threads per request and pool rebuilds. The
-separate `cached_minilm_fixed_session_pool_matches_single_session` test checks
-growth and reuse with C=1/8/1/16/1 for S=1/2/4, including output correctness.
+every result is checked against fixed-batch reference vectors. Both scenarios
+must reuse the same initialized Sessions without rebuilding them.
+`ZG_MIXED_RESULT` contains request timestamps, p50/p95 latency, shared thread
+configuration and initialization counts. The separate
+`cached_minilm_fixed_session_pool_matches_single_session` test checks C=1/8/1/16/1
+requests against pools of 1/2/4 Sessions, including correctness and cancellation.
 This is a correctness/latency regression, not a performance-only shape case or
 an end-to-end indexing/storage/retrieval benchmark.

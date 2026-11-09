@@ -85,6 +85,7 @@ impl TransformersEmbeddingModel {
         entry: TransformersConfig,
         options: ModelConfig,
         compute_runtime: ModelComputeRuntime,
+        session_count: usize,
     ) -> Self {
         let model_cache_dir = options
             .cache_dir
@@ -117,7 +118,7 @@ impl TransformersEmbeddingModel {
             loading: Arc::new(Mutex::new(())),
             session_count: policy::pool_size(
                 resolve_execution_provider(options.device),
-                policy::configured_session_count(),
+                session_count.max(1),
             ),
             last_execution_budget: StdMutex::new(None),
         }
@@ -127,7 +128,6 @@ impl TransformersEmbeddingModel {
         &self,
         on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
         signal: Option<&CancellationToken>,
-        concurrency: usize,
         execution_lease: Option<Arc<dyn Send + Sync>>,
     ) -> Result<Arc<LoadedTransformersModel>, ModelError> {
         check_cancelled(signal)?;
@@ -146,15 +146,13 @@ impl TransformersEmbeddingModel {
         if let Some(loaded) = &*lock_std_mutex(&self.state) {
             return Ok(Arc::clone(loaded));
         }
-        self.load(on_progress, signal, concurrency, execution_lease, gate)
-            .await
+        self.load(on_progress, signal, execution_lease, gate).await
     }
 
     async fn load(
         &self,
         on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
         signal: Option<&CancellationToken>,
-        concurrency: usize,
         execution_lease: Option<Arc<dyn Send + Sync>>,
         gate: tokio::sync::OwnedMutexGuard<()>,
     ) -> Result<Arc<LoadedTransformersModel>, ModelError> {
@@ -232,13 +230,8 @@ impl TransformersEmbeddingModel {
                 let _execution_lease = execution_lease;
                 let _gate = gate;
                 check_cancelled(signal.as_ref())?;
-                let sessions = session::SessionOwner::load(
-                    model_path,
-                    device,
-                    concurrency,
-                    session_count,
-                    &reporter,
-                )?;
+                let sessions =
+                    session::SessionOwner::load(model_path, device, session_count, &reporter)?;
                 check_cancelled(signal.as_ref())?;
                 let loaded = Arc::new(LoadedTransformersModel {
                     tokenizers,
@@ -263,16 +256,9 @@ impl EmbeddingModel for TransformersEmbeddingModel {
     }
 
     fn concurrency_defaults(&self) -> EmbeddingConcurrencyDefaults {
-        match resolve_execution_provider(self.device) {
-            TransformersExecutionProvider::Cpu => EmbeddingConcurrencyDefaults {
-                initial: policy::hardware_threads().div_ceil(2),
-                maximum: policy::hardware_threads(),
-            },
-            TransformersExecutionProvider::Cuda => EmbeddingConcurrencyDefaults {
-                initial: 1,
-                maximum: self.session_count,
-            },
-            _ => EmbeddingConcurrencyDefaults::default(),
+        EmbeddingConcurrencyDefaults {
+            initial: self.session_count,
+            maximum: self.session_count,
         }
     }
 
@@ -291,23 +277,13 @@ impl EmbeddingModel for TransformersEmbeddingModel {
         let effective = policy::execution_limit(provider, requested, self.session_count);
         let mut last = lock_std_mutex(&self.last_execution_budget);
         if *last != Some(requested) {
-            if provider == TransformersExecutionProvider::Cpu && effective < self.session_count {
+            if requested > effective {
                 tracing::warn!(
                     model = self.entry.reference,
                     requested,
                     effective,
                     sessions = self.session_count,
-                    minimum_threads_per_session = 1,
-                    minimum_thread_budget = self.session_count,
-                    "ORT CPU thread budget is smaller than the session count; each session needs at least one thread and may retain a larger existing pool"
-                );
-            } else if provider == TransformersExecutionProvider::Cuda && requested > effective {
-                tracing::warn!(
-                    model = self.entry.reference,
-                    requested,
-                    effective,
-                    sessions = self.session_count,
-                    "ORT CUDA concurrency exceeds the session count; using the pool size"
+                    "ORT concurrency exceeds the session pool; using the pool capacity"
                 );
             }
             *last = Some(requested);
@@ -319,7 +295,6 @@ impl EmbeddingModel for TransformersEmbeddingModel {
         self.ensure_loaded(
             options.on_progress,
             options.signal.as_ref(),
-            options.execution_concurrency,
             options.execution_lease,
         )
         .await
@@ -344,16 +319,10 @@ impl EmbeddingModel for TransformersEmbeddingModel {
     ) -> Result<EmbeddingResult, ModelError> {
         validate_inputs(&self.info, inputs)?;
         check_cancelled(options.signal.as_ref())?;
-        let initial_budget = if options.purpose == EmbeddingPurpose::Document {
-            options.execution_concurrency
-        } else {
-            self.concurrency_defaults().initial
-        };
         let loaded = self
             .ensure_loaded(
                 options.on_progress.clone(),
                 options.signal.as_ref(),
-                initial_budget,
                 options.execution_lease.clone(),
             )
             .await
@@ -442,19 +411,10 @@ fn resolve_execution_provider(device: Option<Device>) -> TransformersExecutionPr
 fn load_session(
     path: &Path,
     provider: TransformersExecutionProvider,
-    threads: usize,
 ) -> Result<Session, ModelError> {
     let builder = Session::builder(&super::native_runtime::initialize()?)
         .map_err(|error| {
             ModelError::internal("Unable to configure ONNX embedding model").with_cause(error)
-        })?
-        .with_intra_threads(threads)
-        .map_err(|error| {
-            ModelError::internal("Unable to configure ONNX intra-op threads").with_cause(error)
-        })?
-        .with_inter_threads(1)
-        .map_err(|error| {
-            ModelError::internal("Unable to configure ONNX inter-op threads").with_cause(error)
         })?
         .with_parallel_execution(false)
         .map_err(|error| {

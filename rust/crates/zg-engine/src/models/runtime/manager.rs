@@ -29,7 +29,7 @@ use crate::models::{
     },
 };
 
-type ModelFactory = dyn Fn(&str, ModelConfig, ModelComputeRuntime) -> Result<Arc<dyn EmbeddingModel>, ModelError>
+type ModelFactory = dyn Fn(&str, ModelConfig, ModelComputeRuntime, usize) -> Result<Arc<dyn EmbeddingModel>, ModelError>
     + Send
     + Sync;
 
@@ -44,6 +44,7 @@ struct ManagerInner {
     compute_runtime: ModelComputeRuntime,
     state: Mutex<ManagerState>,
     policy: CachePolicy,
+    default_ort_sessions: usize,
 }
 
 #[derive(Default)]
@@ -51,6 +52,7 @@ struct ManagerState {
     closed: bool,
     entries: HashMap<ModelRuntimeKey, CachedRuntime>,
     maintenance: Option<SyncSender<()>>,
+    server_ort_sessions: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -115,6 +117,7 @@ struct ModelRuntimeKey {
     model_cache_dir: Option<PathBuf>,
     device: Option<Device>,
     local_limit: Option<usize>,
+    ort_sessions: Option<usize>,
 }
 
 /// A counted handle to a shared model runtime.
@@ -142,8 +145,8 @@ pub(crate) struct ModelRuntimeSnapshot {
 
 impl ModelRuntimeManager {
     pub(crate) fn new() -> Self {
-        Self::with_factory(|reference, options, compute| {
-            create_embedding_model(reference, Some(options), compute)
+        Self::with_factory(|reference, options, compute, sessions| {
+            create_embedding_model(reference, Some(options), compute, sessions)
         })
     }
 
@@ -152,6 +155,7 @@ impl ModelRuntimeManager {
             &str,
             ModelConfig,
             ModelComputeRuntime,
+            usize,
         ) -> Result<Arc<dyn EmbeddingModel>, ModelError>
         + Send
         + Sync
@@ -162,17 +166,44 @@ impl ModelRuntimeManager {
 
     fn with_policy(factory: Arc<ModelFactory>, policy: CachePolicy) -> Self {
         let compute_runtime = ModelComputeRuntime::shared();
+        // Freeze process compute settings before a daemon accepts requests, but
+        // keep native library loading lazy (including retrieve-only installs).
+        super::ort_config::thread_budget();
         Self {
             inner: Arc::new(ManagerInner {
                 factory,
                 compute_runtime,
                 state: Mutex::new(ManagerState::default()),
                 policy,
+                default_ort_sessions: super::ort_config::default_sessions(),
             }),
         }
     }
 
-    /// Returns a counted lease, reusing an existing runtime with the same key.
+    /// Resident callers share fixed model pools captured from the server's
+    /// startup environment. Request concurrency only limits execution.
+    pub(crate) fn enable_server_mode(&self) -> Result<(), ModelError> {
+        self.set_server_pool_capacity(self.inner.default_ort_sessions)
+    }
+
+    fn set_server_pool_capacity(&self, sessions: usize) -> Result<(), ModelError> {
+        let sessions = super::ort_config::session_count(sessions);
+        let mut state = self.lock_state();
+        if state.closed {
+            return Err(manager_closed());
+        }
+        if state.server_ort_sessions == Some(sessions) {
+            return Ok(());
+        }
+        if !state.entries.is_empty() {
+            return Err(ModelError::invalid_argument(
+                "Server model pools must be configured before acquiring models",
+            ));
+        }
+        state.server_ort_sessions = Some(sessions.max(1));
+        Ok(())
+    }
+
     /// Returns a counted lease, reusing an existing runtime with the same key.
     pub(crate) fn acquire(
         &self,
@@ -184,13 +215,20 @@ impl ModelRuntimeManager {
             embedding_concurrency,
         } = request;
         validate_embedding_concurrency(&reference, embedding_concurrency)?;
-        let key = ModelRuntimeKey::for_request(&reference, &options, embedding_concurrency);
+        let mut key = ModelRuntimeKey::for_request(&reference, &options, embedding_concurrency);
         // Declare retired handles before the guard so even an error releases the
         // manager lock before running native model destructors.
         let mut retired = Vec::new();
         let mut state = self.lock_state();
         if state.closed {
             return Err(manager_closed());
+        }
+        if is_transformers(&reference) {
+            key.ort_sessions = Some(state.server_ort_sessions.unwrap_or_else(|| {
+                super::ort_config::session_count(
+                    embedding_concurrency.unwrap_or(self.inner.default_ort_sessions),
+                )
+            }));
         }
         self.inner.start_maintenance(&mut state)?;
         retired.extend(state.retire_idle(self.inner.policy, Instant::now()));
@@ -202,8 +240,12 @@ impl ModelRuntimeManager {
             // Model construction is intentionally performed while holding the
             // short-lived manager lock. Backends load heavy resources lazily,
             // so this guarantees a single instance without blocking on I/O.
-            let model =
-                (self.inner.factory)(&reference, options, self.inner.compute_runtime.clone())?;
+            let model = (self.inner.factory)(
+                &reference,
+                options,
+                self.inner.compute_runtime.clone(),
+                key.ort_sessions.unwrap_or(1),
+            )?;
             let entry = Arc::new(ModelRuntimeEntry {
                 runtime: Arc::new(ModelRuntime {
                     model,
@@ -266,7 +308,6 @@ impl ModelRuntimeManager {
         Ok(lease)
     }
 
-    /// Stops new acquisitions and retires runtimes without active leases.
     /// Stops new acquisitions and retires runtimes without active leases.
     pub(crate) fn close(&self) {
         let mut state = self.lock_state();
@@ -439,6 +480,7 @@ impl ModelRuntimeLease {
         // Queries may borrow writer storage while using a separate native budget.
         let mut key = ModelRuntimeKey::new(&request.reference, &request.options);
         key.local_limit = self.key.local_limit;
+        key.ort_sessions = self.key.ort_sessions;
         self.key == key
     }
 
@@ -639,6 +681,7 @@ impl ModelRuntimeKey {
             local_limit: (!is_transformers(reference))
                 .then(|| local_runtime_limit(reference, None))
                 .flatten(),
+            ort_sessions: None,
         }
     }
 

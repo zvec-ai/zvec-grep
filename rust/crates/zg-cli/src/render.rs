@@ -529,14 +529,14 @@ Index embedding concurrency:
   and refresh; query-vector inference keeps its own defaults. The CLI option
   is accepted only with --index and is never saved in workspace settings.
   llama.cpp: context limit capped at 8, with serialized batches; defaults to 1.
-  Transformers/ORT: ZVEC_GREP_ORT_SESSION fixes Sessions per model/device (default 1).
-    CPU: requested native thread budget, capped by hardware concurrency; defaults
-    to half the available threads. Each Session gets max(1, floor(budget/Sessions));
-    a budget below the Session count requires at least one thread per Session.
-    Shared runtimes retain their largest thread configuration: lowering C reuses
-    it without reducing actual threads. Unload/restart to reset the retained budget.
-    CUDA: concurrent document batches, default 1; requests above the Session
-    count warn and use the pool size. Batch and prefetch are independent of C.
+  Transformers/ORT: C controls CPU/CUDA session count in direct mode (default 1),
+    capped by available hardware concurrency. Server pools use the startup
+    ZVEC_GREP_EMBEDDING_CONCURRENCY value; client C only limits execution within
+    the pool. Requests above capacity warn and are capped; omitted C uses capacity.
+    ZVEC_GREP_ORT_THREAD_BUDGET configures one global CPU intra-op pool shared by
+    all ORT models; defaults to half the available logical threads, rounded up.
+    Client C never resizes Server pools or changes their thread configuration.
+    Batch and prefetch limits are independent of the client's C.
     Zero is normalized to 1; other backends require positive values.
   Potion/model2vec: concurrent batch tasks; defaults to 2, with an independent
     CPU worker-pool capacity. No cap of 8 is applied.
@@ -898,17 +898,20 @@ Embedding:
   ZVEC_GREP_ENDPOINT     Remote Embedding endpoint fallback
   ZVEC_GREP_MODEL_CACHE  Local embedding model cache directory
   ZVEC_GREP_DEVICE       Local embedding device: auto, cpu, metal, vulkan, or cuda
-  ZVEC_GREP_ORT_SESSION  Fixed ORT Sessions per CPU/CUDA model runtime (default 1)
-    CPU and CUDA pools each get this count, not a combined process-wide total.
-    Invalid values warn and use 1. Changing it requires restarting the Server.
+  ZVEC_GREP_ORT_THREAD_BUDGET  Global ORT CPU intra-op thread configuration
+    Default: half the available logical threads, rounded up; capped by hardware.
+    All model/device pools share it. It is not a total process thread limit.
+    Restart the Server after changing it.
 
-Index-only embedding concurrency:
-  ZVEC_GREP_EMBEDDING_CONCURRENCY  Index/update execution concurrency override
-  Applies to automatic indexing and refresh, never query-vector inference.
-  Precedence: explicit CLI/API index setting, this variable, legacy llama.cpp
-  index setting, then backend defaults. Invalid values warn and use defaults.
-  Server mode reads the Server process environment; restart it after changes.
-  These overrides are not persisted in workspace settings.
+Embedding concurrency:
+  ZVEC_GREP_EMBEDDING_CONCURRENCY  Index/update concurrency default
+    ORT: direct-mode session count, or fixed per-model/device Server pool capacity.
+    CPU/CUDA default to 1. Client index overrides only limit pool execution;
+    they cannot expand Server capacity. Queries share the same model pool.
+    Other backends retain their index-only defaults and override precedence.
+  CLI/API index setting, this variable, legacy llama.cpp index setting, then defaults.
+  Invalid values warn and use defaults. Restart the Server after environment changes.
+  These settings are not persisted in workspace configuration.
 
 Qwen credential aliases:
   DASHSCOPE_API_KEY  Qwen credential fallback after ZVEC_GREP_API_KEY

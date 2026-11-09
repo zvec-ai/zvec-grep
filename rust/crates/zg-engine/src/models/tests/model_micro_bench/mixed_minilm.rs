@@ -85,7 +85,7 @@ async fn client(
         let stats = model.execution_stats().expect("actual runtime threads");
         rows.push(json!({"worker":worker,"purpose":if worker == 8 {"query"} else {"document"},
             "requested_c":budget,"effective_c":model.execution_concurrency(),
-            "cpu_threads":stats.cpu_threads,"cpu_threads_total":stats.cpu_threads_total,
+            "global_intra_threads":stats.global_intra_threads,"session_initializations":stats.session_initializations,
             "started_ns":nanos(started.duration_since(origin)),"finished_ns":nanos(finished.duration_since(origin)),
             "latency_ns":nanos(finished.duration_since(started)),"vectors":output.vectors.len()}));
         if worker == 8 {
@@ -161,12 +161,9 @@ async fn fixtures(document: &ModelRuntimeLease, query: &ModelRuntimeLease) -> Fi
 
 async fn scenario(config: &Config, mixed_budgets: bool) -> Value {
     let manager = ModelRuntimeManager::new();
-    let high = if config.device == Device::Cpu { 16 } else { 8 };
-    let low = if mixed_budgets {
-        if config.device == Device::Cpu { 8 } else { 1 }
-    } else {
-        high
-    };
+    manager.enable_server_mode().expect("fixed server pool");
+    let high = crate::models::runtime::ort_config::default_sessions();
+    let low = if mixed_budgets { 1 } else { high };
     let document = acquire(config, &manager, high);
     let other = acquire(config, &manager, low);
     let query = acquire(config, &manager, 1);
@@ -232,10 +229,9 @@ async fn scenario(config: &Config, mixed_budgets: bool) -> Value {
             "cuda"
         }
     );
-    let changes = after.pool_reconfigurations - before.pool_reconfigurations;
+    let changes = after.session_initializations - before.session_initializations;
     assert_eq!(changes, 0, "smaller budgets must reuse the prepared pool");
-    assert_eq!(after.cpu_threads, before.cpu_threads);
-    assert_eq!(after.cpu_threads_total, before.cpu_threads_total);
+    assert_eq!(after.global_intra_threads, before.global_intra_threads);
     let result = json!({"mixed_budgets":mixed_budgets,"requested_document_c":[high,low],
         "elapsed_seconds":elapsed,"documents":summarize(&rows,"document",elapsed),"queries":summarize(&rows,"query",elapsed),
         "execution":support::execution_measurement(Some(before),Some(after)),"rows":rows});

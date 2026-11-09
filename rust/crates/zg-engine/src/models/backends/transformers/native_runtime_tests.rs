@@ -8,6 +8,31 @@ const IDENTITY_MODEL: &[u8] = b"\x08\x08\x3a\x3e\x0a\x10\x0a\x01\x78\x12\x01\x79
 fn sessions_can_reload_and_process_exits_cleanly() {
     const CHILD: &str = "ZG_TEST_ORT_LIFECYCLE_CHILD";
     if env::var_os(CHILD).is_some() {
+        let environment = initialize().expect("load official ORT");
+        #[cfg(target_os = "linux")]
+        let global_threads = std::fs::read_dir("/proc/self/task")
+            .expect("enumerate native threads")
+            .count();
+        let mut sessions = Vec::new();
+        for _ in 0..4 {
+            sessions.push(
+                ort::session::Session::builder(&environment)
+                    .expect("builder")
+                    .with_parallel_execution(false)
+                    .expect("sequential graph")
+                    .commit_from_memory(IDENTITY_MODEL)
+                    .expect("shared-pool session"),
+            );
+        }
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            std::fs::read_dir("/proc/self/task")
+                .expect("enumerate native threads")
+                .count(),
+            global_threads,
+            "adding Sessions must not create independent ORT thread pools"
+        );
+        drop(sessions);
         for _ in 0..2 {
             let environment = initialize().expect("load official ORT");
             let invalid = ort::session::Session::builder(&environment)
@@ -16,8 +41,6 @@ fn sessions_can_reload_and_process_exits_cleanly() {
             assert!(invalid.is_err());
             let mut session = ort::session::Session::builder(&environment)
                 .expect("builder")
-                .with_intra_threads(1)
-                .expect("single thread")
                 .commit_from_memory(IDENTITY_MODEL)
                 .expect("load identity graph after failed load");
             let input =
@@ -42,6 +65,7 @@ fn sessions_can_reload_and_process_exits_cleanly() {
             "--nocapture",
         ])
         .env(CHILD, "1")
+        .env("ZVEC_GREP_ORT_THREAD_BUDGET", "3")
         .output()
         .expect("run lifecycle child");
     assert!(

@@ -99,16 +99,18 @@ def main():
                         help="Disable backend coalescing for a separate fixed-native-batch concurrency comparison")
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--clients", type=int, help="Fixed client count independent of runtime admission")
-    parser.add_argument("--ort-sessions", type=int, default=1,
-                        help="Production ORT session pool size per model/device (default: 1)")
+    parser.add_argument("--server-concurrency", type=int,
+                        help="Use resident model pools with this server capacity; omitted: direct mode")
+    parser.add_argument("--ort-thread-budget", type=int,
+                        help="Global ORT intra-op threads; omitted: production automatic default")
     parser.add_argument("--rounds", type=int, default=1, help="Independent rounds per case (default: 1)")
     parser.add_argument("--seed", type=int, default=1729)
     parser.add_argument("--cooldown", type=float, default=2, help="Idle seconds between measured processes")
     args = parser.parse_args()
     if args.rounds < 1 or args.cooldown < 0:
         parser.error("rounds must be positive and cooldown nonnegative")
-    if args.ort_sessions < 1 or (args.clients is not None and args.clients < 1):
-        parser.error("ORT sessions and clients must be positive")
+    if any(value is not None and value < 1 for value in (args.server_concurrency, args.ort_thread_budget, args.clients)):
+        parser.error("server concurrency, thread budget and clients must be positive")
     if len(set(args.devices)) != len(args.devices) or len(set(args.embedding_concurrency)) != len(args.embedding_concurrency):
         parser.error("devices and concurrency values must not contain duplicates")
     if any(v != "default" and (not v.isdecimal() or int(v) <= 0) for v in args.embedding_concurrency):

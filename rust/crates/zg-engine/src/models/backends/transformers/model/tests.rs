@@ -285,6 +285,7 @@ fn prefixes_and_catalog_info_match_main() {
         entry("mean", true),
         ModelConfig::default(),
         crate::models::runtime::ModelComputeRuntime::shared(),
+        1,
     );
     assert_eq!(model.info().max_input_tokens(), Some(2));
     assert_eq!(onnx_artifact("q4").expect("q4"), "onnx/model_q4.onnx");
@@ -304,6 +305,7 @@ async fn cancelled_initial_load_preserves_cancellation_code() {
             ..ModelConfig::default()
         },
         crate::models::runtime::ModelComputeRuntime::shared(),
+        1,
     );
     let signal = CancellationToken::new();
     signal.cancel();
@@ -339,9 +341,10 @@ async fn cached_minilm_runs_real_onnx_inference() {
             ..ModelConfig::default()
         },
         crate::models::runtime::ModelComputeRuntime::shared(),
+        1,
     );
     let loaded = model
-        .ensure_loaded(None, None, 1, None)
+        .ensure_loaded(None, None, None)
         .await
         .expect("download and load cached ONNX model");
     let prepared = prepare_batch(
@@ -447,7 +450,7 @@ async fn cached_minilm_runs_real_onnx_inference() {
         assert!((actual - expected).abs() < 1e-5);
     }
 
-    assert_eq!(loaded.sessions.configuration(), (1, 1));
+    assert_eq!(loaded.sessions.stats().session_initializations, 1);
     assert!(loaded.sessions.largest_batch() <= entry.max_batch_size);
     let inputs = [vec![Content::Text(
         "concurrent requests share one session".into(),
@@ -457,7 +460,7 @@ async fn cached_minilm_runs_real_onnx_inference() {
     )
     .await;
     assert!(results.into_iter().all(|result| result.is_ok()));
-    assert_eq!(loaded.sessions.configuration(), (1, 1));
+    assert_eq!(loaded.sessions.stats().session_initializations, 1);
     for budget in [4, 1] {
         model
             .embed(
@@ -469,9 +472,12 @@ async fn cached_minilm_runs_real_onnx_inference() {
                 },
             )
             .await
-            .expect("new CPU budget");
-        let configuration = loaded.sessions.configuration();
-        assert_eq!(configuration.0, policy::cpu_threads(budget));
+            .expect("request concurrency changes within the existing pool");
+        let configuration = loaded.sessions.stats().session_initializations;
+        assert_eq!(
+            configuration, 1,
+            "changing request C must not recreate sessions"
+        );
         model
             .embed(
                 &inputs,
@@ -482,7 +488,10 @@ async fn cached_minilm_runs_real_onnx_inference() {
             )
             .await
             .expect("query reuses configured session");
-        assert_eq!(loaded.sessions.configuration(), configuration);
+        assert_eq!(
+            loaded.sessions.stats().session_initializations,
+            configuration
+        );
     }
 }
 
@@ -506,7 +515,7 @@ fn pool_fixture_model(
     device: Device,
     sessions: usize,
 ) -> TransformersEmbeddingModel {
-    let mut model = TransformersEmbeddingModel::new(
+    TransformersEmbeddingModel::new(
         entry,
         ModelConfig {
             cache_dir: Some(cache.to_path_buf()),
@@ -514,9 +523,8 @@ fn pool_fixture_model(
             ..ModelConfig::default()
         },
         crate::models::runtime::ModelComputeRuntime::shared(),
-    );
-    model.session_count = sessions;
-    model
+        sessions,
+    )
 }
 
 #[tokio::test]
@@ -569,8 +577,6 @@ async fn cached_minilm_fixed_session_pool_matches_single_session() {
             resolve_execution_provider(Some(device)),
             "unexpected CPU fallback"
         );
-        let mut retained_threads = 1;
-        let mut expected_reconfigurations = 0;
         for requested in [1, 8, 1, 16, 1] {
             let budget = model.execution_concurrency(requested);
             let results = futures_util::future::join_all((0..8).map(|_| {
@@ -593,16 +599,12 @@ async fn cached_minilm_fixed_session_pool_matches_single_session() {
             }
             let stats = loaded.sessions.stats();
             assert_eq!(stats.session_count, sessions);
-            let desired = if device == Device::Cpu {
-                policy::threads_per_session(budget, sessions)
-            } else {
-                1
-            };
-            expected_reconfigurations += u64::from(desired > retained_threads);
-            retained_threads = retained_threads.max(desired);
-            assert_eq!(stats.cpu_threads, retained_threads);
-            assert_eq!(stats.cpu_threads_total, sessions * retained_threads);
-            assert_eq!(stats.pool_reconfigurations, expected_reconfigurations);
+            assert_eq!(
+                stats.global_intra_threads,
+                crate::models::runtime::ort_config::thread_budget()
+            );
+            assert_eq!(stats.session_initializations, sessions as u64);
+            assert_eq!(stats.pool_fallbacks, 0);
         }
         let signal = CancellationToken::new();
         signal.cancel();
@@ -641,6 +643,7 @@ async fn cached_minilm_uses_cuda() {
             ..ModelConfig::default()
         },
         crate::models::runtime::ModelComputeRuntime::shared(),
+        1,
     );
     let result = model
         .embed(
@@ -698,7 +701,7 @@ async fn cached_minilm_uses_cuda() {
         loaded.sessions.provider(),
         TransformersExecutionProvider::Cuda
     );
-    assert_eq!(loaded.sessions.configuration(), (1, 1));
+    assert_eq!(loaded.sessions.stats().session_initializations, 1);
     assert!((1..=2).contains(&loaded.sessions.stats().session_count));
     assert!(loaded.sessions.largest_batch() <= entry.max_batch_size);
 }
@@ -723,6 +726,7 @@ async fn cached_minilm_routes_metal_to_cpu_with_warning() {
             ..ModelConfig::default()
         },
         crate::models::runtime::ModelComputeRuntime::shared(),
+        1,
     );
     let result = model
         .embed(

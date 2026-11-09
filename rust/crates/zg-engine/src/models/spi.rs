@@ -120,12 +120,12 @@ impl Default for EmbeddingConcurrencyDefaults {
 pub(crate) struct ModelExecutionStats {
     pub(crate) actual_provider: &'static str,
     pub(crate) session_count: usize,
-    /// Actual retained ORT intra-op threads per session (including its calling
-    /// thread). May exceed a later request's smaller CPU budget.
-    pub(crate) cpu_threads: usize,
-    pub(crate) cpu_threads_total: usize,
+    /// Process-global ORT intra-op configuration, shared by all model pools.
+    /// This is not multiplied by `session_count` or a process-wide thread count.
+    pub(crate) global_intra_threads: usize,
+    pub(crate) session_initializations: u64,
     pub(crate) prepared_batches: u64,
-    pub(crate) pool_reconfigurations: u64,
+    pub(crate) pool_fallbacks: u64,
     pub(crate) native_runs: u64,
     pub(crate) native_rows: u64,
     pub(crate) padded_tokens: u64,

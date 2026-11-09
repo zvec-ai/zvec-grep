@@ -169,6 +169,38 @@ class AccountingTests(unittest.TestCase):
         execution["measured"]["cpu_threads_total"] = 3
         self.assertIn("execution: total native threads differ from session count times threads per session", self.validate())
 
+    def test_global_threads_and_server_capacity_are_verified(self):
+        self.result.update(runtime_mode="server",server_concurrency=4,hardware_threads=8,
+                           ort_thread_budget=4,resolved_index_concurrency=8,
+                           effective_execution_concurrency=4,admission_concurrency=6,
+                           index_inflight_batches=6,client_mode="production")
+        execution = execution_fixture("cuda")
+        self.result["embedding"]["execution"] = execution
+        execution["timing_scope"] = {"backend_to_native_ns":"includes preparation"}
+        for name in ("before","after","measured"):
+            snapshot = execution[name]
+            snapshot.pop("cpu_threads")
+            snapshot.update(global_intra_threads=4,session_count=4,pool_fallbacks=0,
+                            session_initializations=0 if name == "measured" else 4)
+            snapshot["backend_to_native_ns"] = snapshot.pop("queue_wait_ns")
+        self.assertEqual(self.validate(), [])
+        self.assertEqual(validate_controls(self.result,None,4), [])
+        self.assertTrue(validate_controls(self.result,None,None))
+        self.assertTrue(validate_controls(self.result,None,4,8))
+        self.result["effective_execution_concurrency"] = 8
+        self.assertIn("execution: effective concurrency differs from request capped to pool",self.validate())
+        self.result["effective_execution_concurrency"] = 4
+        execution["after"]["session_initializations"] += 1
+        execution["measured"]["session_initializations"] = 1
+        self.assertIn("execution: session pool was reloaded during measurement",self.validate())
+        execution["after"]["session_initializations"] -= 1
+        execution["measured"]["session_initializations"] = 0
+        self.result.update(runtime_mode="direct",server_concurrency=None,resolved_index_concurrency=4)
+        self.assertEqual(self.validate(), [])
+        self.assertEqual(validate_controls(self.result,None,None,4), [])
+        self.result["resolved_index_concurrency"] = 2
+        self.assertIn("execution: actual session count differs from configured pool capacity",self.validate())
+
 
 class WorkflowTests(unittest.TestCase):
     def test_report_preserves_gpu_memory_and_displays_actual_cpu_fallback(self):
@@ -260,7 +292,7 @@ class WorkflowTests(unittest.TestCase):
                 save(dest / "gpu-phases.json", [])
                 record = dict(schema_version=5, protocol_pass=False, exit_code=1, provenance=info,
                               configuration=dict(**case, embedding_concurrency=budget, profile="smoke",
-                                                 clients=args.clients, ort_sessions=args.ort_sessions),
+                                                 clients=args.clients, server_concurrency=args.server_concurrency, ort_thread_budget=args.ort_thread_budget),
                               experiment_fingerprint=args.experiment_fingerprint, case_fingerprint=args.case_fingerprint)
                 publish_round(dest, record, [], [], {})
                 return False

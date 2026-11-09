@@ -242,6 +242,25 @@ async fn local_model_shape() {
     let fixed_batch = std::env::var("ZG_MODEL_BENCH_FIXED_BATCH").is_ok_and(|v| v == "1");
     let mut provenance = support::verify_artifacts(config.entry, &config.cache).await;
     let manager = ModelRuntimeManager::new();
+    let server_concurrency =
+        if std::env::var("ZG_MODEL_BENCH_RUNTIME_MODE").as_deref() == Ok("server") {
+            manager.enable_server_mode().expect("server model pools");
+            Some(
+                std::env::var("ZVEC_GREP_EMBEDDING_CONCURRENCY")
+                    .expect("server capacity")
+                    .parse::<usize>()
+                    .expect("positive server capacity"),
+            )
+        } else {
+            None
+        };
+    let runtime_mode = if server_concurrency.is_some() {
+        "server"
+    } else {
+        "direct"
+    };
+    let hardware_threads = std::thread::available_parallelism().map_or(1, usize::from);
+    let ort_thread_budget = crate::models::runtime::ort_config::thread_budget();
     let origin = Instant::now();
     phase("before_load", origin);
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -270,14 +289,9 @@ async fn local_model_shape() {
     provenance["input_length_semantics"] = json!("nominal");
     provenance["clients"] = json!(workers);
     provenance["client_mode"] = json!(Config::client_mode());
-    let ort_sessions = std::env::var("ZVEC_GREP_ORT_SESSION")
-        .ok()
-        .map_or(1, |value| {
-            value
-                .parse::<usize>()
-                .expect("explicit benchmark ORT pool size")
-        });
-    provenance["ort_sessions"] = json!(ort_sessions);
+    provenance["runtime_mode"] = json!(runtime_mode);
+    provenance["server_concurrency"] = json!(server_concurrency);
+    provenance["ort_thread_budget"] = json!(ort_thread_budget);
     provenance["call_latency_scope"] = json!(
         "runtime entry before admission through completed result; input fixture cloning excluded"
     );
@@ -296,7 +310,9 @@ async fn local_model_shape() {
         json!({"schema_version":5,"protocol_pass":embedding["protocol_pass"],
             "provenance":provenance,"input_tokens":target,"batch_size":requested_batch,
             "fixed_batch":fixed_batch,
-            "clients":workers,"client_mode":Config::client_mode(),"ort_sessions":ort_sessions,
+            "clients":workers,"client_mode":Config::client_mode(),
+            "runtime_mode":runtime_mode,"server_concurrency":server_concurrency,
+            "ort_thread_budget":ort_thread_budget,"hardware_threads":hardware_threads,
             "embedding_concurrency":config.requested,"resolved_index_concurrency":config.index_limit,
             "effective_execution_concurrency":model.execution_concurrency(),
             "admission_concurrency":model.admission_concurrency(),

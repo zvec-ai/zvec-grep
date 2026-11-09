@@ -3,14 +3,22 @@
 COUNTERS = ("prepared_batches", "native_runs", "native_rows", "padded_tokens",
             "preparation_ns", "inference_ns", "postprocessing_ns")
 PEAKS = ("max_native_batch_rows", "max_padded_tokens", "native_inflight_peak")
-IDENTITY = ("actual_provider", "cpu_threads")
 
 
-def validate_controls(benchmark, clients, ort_sessions):
+def validate_controls(benchmark, clients, server_concurrency=None, ort_thread_budget=None):
     if not benchmark:
         return []
     errors = []
-    if benchmark.get("ort_sessions") != ort_sessions:
+    if "runtime_mode" in benchmark:
+        mode = "server" if server_concurrency is not None else "direct"
+        if benchmark.get("runtime_mode") != mode or benchmark.get("server_concurrency") != server_concurrency:
+            errors.append("recorded runtime mode or server capacity differs from requested setting")
+        hardware = benchmark.get("hardware_threads", 1)
+        expected = min(ort_thread_budget, hardware) if ort_thread_budget is not None else (hardware + 1) // 2
+        if benchmark.get("ort_thread_budget") != expected:
+            errors.append("recorded global ORT thread budget differs from requested setting")
+    elif benchmark.get("ort_sessions") != server_concurrency:
+        # Historical fixed-session results remain independently verifiable.
         errors.append("recorded ORT pool setting differs from requested setting")
     if clients is None:
         if benchmark.get("client_mode") != "production":
@@ -29,12 +37,14 @@ def validate_execution(benchmark):
     # Historical reports retain their original field; do not relabel it as
     # pure queue time. Newly generated reports must declare the timing scope.
     timing = "backend_to_native_ns" if "backend_to_native_ns" in measured else "queue_wait_ns"
+    shared_pool = "global_intra_threads" in measured
+    thread_gauge = "global_intra_threads" if shared_pool else "cpu_threads"
     counters = COUNTERS + (timing,)
     if timing == "backend_to_native_ns":
-        counters += ("pool_reconfigurations",)
+        counters += ("pool_fallbacks", "session_initializations") if shared_pool else ("pool_reconfigurations",)
         if not execution.get("timing_scope", {}).get(timing):
             errors.append("execution: missing backend-to-native timing scope")
-    for name in counters + PEAKS + ("session_count", "cpu_threads"):
+    for name in counters + PEAKS + ("session_count", thread_gauge):
         if any(type(snapshot.get(name)) is not int or snapshot[name] < 0
                for snapshot in (before, after, measured)):
             errors.append(f"execution: invalid {name}")
@@ -43,7 +53,7 @@ def validate_execution(benchmark):
     for name in counters:
         if after[name] < before[name] or measured[name] != after[name] - before[name]:
             errors.append(f"execution: incorrect measured delta for {name}")
-    if any(before[name] != after[name] or measured[name] != after[name] for name in IDENTITY):
+    if any(before[name] != after[name] or measured[name] != after[name] for name in ("actual_provider", thread_gauge)):
         errors.append("execution: provider or native resource identity changed during measurement")
     if measured["session_count"] != after["session_count"]:
         errors.append("execution: session count is not the end-of-phase gauge")
@@ -62,6 +72,19 @@ def validate_execution(benchmark):
             errors.append("execution: invalid fixed client count")
     elif benchmark.get("admission_concurrency") != benchmark.get("index_inflight_batches"):
         errors.append("execution: benchmark workers differ from runtime admission")
+    if shared_pool and measured["actual_provider"] in ("cpu", "cuda"):
+        hardware = benchmark.get("hardware_threads", 1)
+        requested = benchmark.get("resolved_index_concurrency")
+        capacity = benchmark.get("server_concurrency") if benchmark.get("runtime_mode") == "server" else requested
+        capacity = min(max(capacity or 1, 1), hardware)
+        if any(snapshot["session_count"] != capacity for snapshot in (before, after, measured)):
+            errors.append("execution: actual session count differs from configured pool capacity")
+        if benchmark.get("effective_execution_concurrency") != min(max(requested or capacity, 1), capacity):
+            errors.append("execution: effective concurrency differs from request capped to pool")
+        if measured["global_intra_threads"] != benchmark.get("ort_thread_budget"):
+            errors.append("execution: global thread configuration differs from benchmark provenance")
+        if measured["session_initializations"] or measured["pool_fallbacks"]:
+            errors.append("execution: session pool was reloaded during measurement")
     if "ort_sessions" in benchmark and measured["actual_provider"] in ("cpu", "cuda"):
         if any(snapshot["session_count"] != benchmark["ort_sessions"] for snapshot in (before, after, measured)):
             errors.append("execution: actual session count differs from configured fixed pool")
@@ -98,7 +121,9 @@ def execution_label(records):
     def values(name):
         return "/".join(sorted({f"{r[name]:g}" if isinstance(r.get(name), (int, float))
                                else str(r.get(name) or "N/A") for r in records}))
+    threads = (f'global intra-op={values("global_intra_threads")}' if all("global_intra_threads" in r for r in records)
+               else f'threads/session={values("cpu_threads")} · native threads={values("cpu_threads_total")}')
     return (f'actual={values("actual_provider")} · Ceff={values("effective_execution_concurrency")} '
             f'· K={values("index_inflight_batches")} · Q={values("admission_concurrency")} · sessions={values("session_count")} '
-            f'· threads/session={values("cpu_threads")} · native threads={values("cpu_threads_total")} '
+            f'· {threads} '
             f'· native B={values("native_batch_rows_mean")}')

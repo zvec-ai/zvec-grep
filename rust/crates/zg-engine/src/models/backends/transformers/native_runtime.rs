@@ -4,8 +4,9 @@ use std::{
     sync::{Mutex, OnceLock, PoisonError},
 };
 
-use ort::environment::Environment;
+use ort::environment::{Environment, GlobalThreadPoolOptions};
 
+use crate::models::runtime::ort_config;
 use crate::models::spi::ModelError;
 
 // ORT permits one environment per process. Keep it across model eviction/reload,
@@ -31,8 +32,16 @@ pub(super) fn initialize() -> Result<Environment, ModelError> {
         )?;
         #[cfg(target_os = "windows")]
         preload_directml(&path)?;
-        let environment = ort::init_from(&path)
-            .map_err(|error| format!("{}: {error}", path.display()))?
+        // Load the explicitly selected library before calling any ORT APIs,
+        // including construction of the threading options themselves.
+        let builder = ort::init_from(&path)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let threads = GlobalThreadPoolOptions::default()
+            .with_intra_threads(ort_config::thread_budget())
+            .and_then(|options| options.with_inter_threads(1))
+            .map_err(|error| format!("Unable to configure global ORT thread pool: {error}"))?;
+        let environment = builder
+            .with_global_thread_pool(threads)
             .build()
             .map_err(|error| format!("{}: {error}", path.display()))?;
         *ENVIRONMENT.lock().unwrap_or_else(PoisonError::into_inner) = Some(environment);

@@ -117,7 +117,8 @@ pub(super) fn execution_measurement(
     }
     difference!(
         prepared_batches,
-        pool_reconfigurations,
+        session_initializations,
+        pool_fallbacks,
         native_runs,
         native_rows,
         padded_tokens,
@@ -330,10 +331,10 @@ fn execution_measurement_excludes_warmup_and_labels_runtime_peaks() {
     let before = ModelExecutionStats {
         actual_provider: "cpu",
         session_count: 1,
-        cpu_threads: 2,
-        cpu_threads_total: 2,
+        global_intra_threads: 2,
+        session_initializations: 1,
         prepared_batches: 3,
-        pool_reconfigurations: 1,
+        pool_fallbacks: 1,
         native_runs: 3,
         native_rows: 12,
         padded_tokens: 384,
@@ -347,7 +348,7 @@ fn execution_measurement_excludes_warmup_and_labels_runtime_peaks() {
     };
     let after = ModelExecutionStats {
         prepared_batches: 5,
-        pool_reconfigurations: 2,
+        pool_fallbacks: 2,
         native_runs: 5,
         native_rows: 20,
         padded_tokens: 640,
@@ -365,7 +366,7 @@ fn execution_measurement_excludes_warmup_and_labels_runtime_peaks() {
     assert_eq!(measured["measured"]["inference_ns"], 200);
     assert_eq!(measured["measured"]["postprocessing_ns"], 10);
     assert_eq!(measured["measured"]["backend_to_native_ns"], 6);
-    assert_eq!(measured["measured"]["pool_reconfigurations"], 1);
+    assert_eq!(measured["measured"]["pool_fallbacks"], 1);
     assert!(measured["measured"].get("queue_wait_ns").is_none());
     assert!(
         measured["timing_scope"]["backend_to_native_ns"]

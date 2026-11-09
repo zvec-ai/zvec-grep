@@ -5,8 +5,7 @@ struct Started {
     thread: std::thread::ThreadId,
     force_cpu: bool,
     release: mpsc::Sender<()>,
-    threads: usize,
-    pool_threads: Vec<usize>,
+    pool_cpu: Vec<bool>,
 }
 
 struct FakeRunner {
@@ -15,14 +14,12 @@ struct FakeRunner {
     fail: Arc<AtomicBool>,
     shared: Arc<Shared>,
     drops: Option<tokio::sync::mpsc::UnboundedSender<std::thread::ThreadId>>,
-    threads: usize,
-    configured: Arc<StdMutex<Vec<usize>>>,
+    configured: Arc<StdMutex<Vec<bool>>>,
 }
 
 impl Runner for FakeRunner {
-    fn configure(&mut self, threads: usize, _force_cpu: bool) -> Result<(), ModelError> {
-        self.threads = threads;
-        lock_std_mutex(&self.configured)[self.lane] = threads;
+    fn configure(&mut self, force_cpu: bool) -> Result<(), ModelError> {
+        lock_std_mutex(&self.configured)[self.lane] |= force_cpu;
         Ok(())
     }
 
@@ -40,8 +37,7 @@ impl Runner for FakeRunner {
                 thread: std::thread::current().id(),
                 force_cpu,
                 release,
-                threads: self.threads,
-                pool_threads: lock_std_mutex(&self.configured).clone(),
+                pool_cpu: lock_std_mutex(&self.configured).clone(),
             })
             .expect("start event");
         released.recv().expect("release native run");
@@ -102,20 +98,20 @@ fn owner_with_size(
     Arc<AtomicBool>,
 ) {
     let (started, receiver) = tokio::sync::mpsc::unbounded_channel();
-    let shared = Arc::new(Shared::new(provider, sessions, 1));
+    let shared = Arc::new(Shared::new(provider, sessions));
     let worker_shared = Arc::clone(&shared);
     let fail = Arc::new(AtomicBool::new(false));
     let worker_fail = Arc::clone(&fail);
-    let configured = Arc::new(StdMutex::new(vec![1; sessions]));
+    let configured = Arc::new(StdMutex::new(vec![false; sessions]));
     let factory: Arc<Factory> = Arc::new(move |lane| {
         lock_std_mutex(&worker_shared.stats).session_count += 1;
+        lock_std_mutex(&worker_shared.stats).session_initializations += 1;
         Ok(Box::new(FakeRunner {
             lane,
             started: started.clone(),
             fail: Arc::clone(&worker_fail),
             shared: Arc::clone(&worker_shared),
             drops: drops.clone(),
-            threads: 1,
             configured: Arc::clone(&configured),
         }))
     });
@@ -312,7 +308,7 @@ async fn final_owner_released_on_native_thread_destroys_session_before_reply_wit
     let Reservation {
         lane,
         permit,
-        cpu_threads,
+        force_cpu,
         ..
     } = owner.try_reserve(&options).expect("reserve native lane");
     let (reply, completed) = oneshot::channel();
@@ -326,7 +322,7 @@ async fn final_owner_released_on_native_thread_destroys_session_before_reply_wit
             enqueued: vec![],
             reply,
             _permit: permit,
-            cpu_threads,
+            force_cpu,
         })))
         .expect("send native job");
     let running = starts.recv().await.expect("native owns final model lease");
@@ -523,38 +519,28 @@ async fn secondary_gpu_failure_drains_existing_gpu_work_before_converting_whole_
 }
 
 #[tokio::test]
-async fn cpu_pool_keeps_all_four_sessions_when_budget_is_one() {
+async fn cpu_pool_retains_four_sessions_but_c_one_runs_only_one_at_a_time() {
     let (owner, mut starts, _) = owner_with_size(TransformersExecutionProvider::Cpu, 4, None);
-    assert_eq!(
-        owner.stats().session_count,
-        4,
-        "pool is eager even before the first Run"
-    );
     let options = EmbeddingOptions {
         execution_concurrency: 1,
-        ..EmbeddingOptions::default()
+        ..Default::default()
     };
     let tasks = (0..4)
         .map(|_| start(&owner, options.clone()))
         .collect::<Vec<_>>();
-    let mut threads = std::collections::HashSet::new();
-    let mut events = Vec::new();
     for _ in 0..4 {
-        let event = starts.recv().await.expect("all four CPU sessions run");
-        assert_eq!(event.threads, 1);
-        assert_eq!(event.pool_threads, vec![1; 4]);
-        threads.insert(event.thread);
-        events.push(event);
-    }
-    assert_eq!(threads.len(), 4);
-    assert!(owner.try_reserve(&options).is_none());
-    for event in events {
-        event.release.send(()).expect("finish CPU run");
+        let event = starts.recv().await.expect("next CPU batch");
+        assert!(starts.try_recv().is_err());
+        assert!(owner.try_reserve(&options).is_none());
+        assert_eq!(owner.stats().session_count, 4);
+        event.release.send(()).expect("release native job");
     }
     for task in tasks {
-        assert!(task.await.expect("CPU task").is_ok());
+        task.await
+            .expect("join caller")
+            .expect("inference completes");
     }
-    assert_eq!(owner.stats().session_count, 4);
+    assert_eq!(owner.stats().native_inflight_peak, 1);
 }
 
 #[tokio::test]
@@ -606,103 +592,44 @@ async fn cuda_pool_keeps_four_sessions_and_clamps_execution_to_pool_size() {
 }
 
 #[tokio::test]
-async fn cpu_budget_growth_drains_pool_and_smaller_budgets_reuse_it() {
-    let hardware = policy::hardware_threads();
-    if hardware < 2 {
-        return;
+async fn changing_request_concurrency_reuses_every_cpu_session() {
+    let (owner, mut starts, _) = owner_with_size(TransformersExecutionProvider::Cpu, 4, None);
+    let mut threads = std::collections::HashMap::new();
+    for concurrency in [1, 4, 2, 8, 1] {
+        let options = EmbeddingOptions {
+            execution_concurrency: concurrency,
+            ..Default::default()
+        };
+        let mut tasks = Vec::new();
+        let mut events = Vec::new();
+        for _ in 0..concurrency.min(4) {
+            tasks.push(start(&owner, options.clone()));
+            let event = starts.recv().await.expect("native start");
+            if let Some(previous) = threads.insert(event.lane, event.thread) {
+                assert_eq!(previous, event.thread, "C never recreates native workers");
+            }
+            events.push(event);
+        }
+        assert!(owner.try_reserve(&options).is_none());
+        for event in events {
+            event.release.send(()).expect("release native job");
+        }
+        for task in tasks {
+            task.await
+                .expect("join caller")
+                .expect("inference completes");
+        }
+        assert_eq!(owner.stats().session_count, 4);
+        assert_eq!(owner.stats().session_initializations, 4);
+        assert_eq!(owner.stats().pool_fallbacks, 0);
     }
-    let sessions = if hardware >= 4 { 2 } else { 1 };
-    let (owner, mut starts, _) =
-        owner_with_size(TransformersExecutionProvider::Cpu, sessions, None);
-    let old = EmbeddingOptions {
-        execution_concurrency: 1,
-        ..EmbeddingOptions::default()
-    };
-    let tasks = (0..sessions)
-        .map(|_| start(&owner, old.clone()))
-        .collect::<Vec<_>>();
-    let mut events = Vec::new();
-    for _ in 0..sessions {
-        events.push(starts.recv().await.expect("old-budget run"));
-    }
-    let changed = EmbeddingOptions {
-        execution_concurrency: hardware,
-        ..old.clone()
-    };
-    assert!(
-        owner.try_reserve(&changed).is_none(),
-        "new budget must drain old native jobs"
-    );
-    let last = events.pop().expect("one last old job");
-    for event in events {
-        event.release.send(()).expect("complete other old jobs");
-    }
-    assert!(
-        owner.try_reserve(&changed).is_none(),
-        "one old session still owns native work"
-    );
-    assert!(
-        owner.try_reserve(&old).is_none(),
-        "do not refill a draining pool"
-    );
-    last.release.send(()).expect("complete final old job");
-    for task in tasks {
-        assert!(task.await.expect("old run").is_ok());
-    }
-    let next = start(&owner, changed);
-    let event = starts.recv().await.expect("new-budget run");
-    let threads = policy::threads_per_session(hardware, sessions);
-    assert_eq!(
-        event.pool_threads,
-        vec![threads; sessions],
-        "even idle sessions are reconfigured"
-    );
-    let smaller = owner.try_reserve(&old);
-    if sessions > 1 {
-        let reservation = smaller.expect("smaller C can use an idle session immediately");
-        assert!(reservation.transition.is_none());
-        assert_eq!(reservation.cpu_threads, Some(threads));
-        drop(reservation);
-    } else {
-        assert!(smaller.is_none(), "the only session is busy");
-    }
-    assert!(!lock_std_mutex(&owner.shared.pool).drain);
-    event.release.send(()).expect("complete new run");
-    assert!(next.await.expect("new run").is_ok());
-    for requested in [1, hardware, 1] {
-        let task = start(
-            &owner,
-            EmbeddingOptions {
-                execution_concurrency: requested,
-                ..old.clone()
-            },
-        );
-        let event = starts.recv().await.expect("reuse larger configuration");
-        assert_eq!(event.pool_threads, vec![threads; sessions]);
-        event.release.send(()).expect("finish retained-budget run");
-        assert!(task.await.expect("retained-budget task").is_ok());
-    }
-    assert_eq!(owner.stats().pool_reconfigurations, 1);
-    assert_eq!(owner.stats().session_count, sessions);
-    let query = start(
-        &owner,
-        EmbeddingOptions {
-            purpose: EmbeddingPurpose::Query,
-            ..old
-        },
-    );
-    let event = starts.recv().await.expect("query reuses CPU configuration");
-    assert_eq!(event.threads, threads);
-    assert_eq!(event.pool_threads, vec![threads; sessions]);
-    event.release.send(()).expect("complete query");
-    assert!(query.await.expect("query").is_ok());
 }
 
 #[tokio::test]
-async fn cancelled_reconfiguration_keeps_pool_closed_until_native_changes_finish() {
+async fn cancelled_fallback_keeps_pool_closed_until_native_changes_finish() {
     struct ConfigureRunner(tokio::sync::mpsc::UnboundedSender<mpsc::Sender<()>>);
     impl Runner for ConfigureRunner {
-        fn configure(&mut self, _threads: usize, _force_cpu: bool) -> Result<(), ModelError> {
+        fn configure(&mut self, _force_cpu: bool) -> Result<(), ModelError> {
             let (release, wait) = mpsc::channel();
             self.0.send(release).expect("configuration started");
             wait.recv().expect("release configuration");
@@ -719,14 +646,8 @@ async fn cancelled_reconfiguration_keeps_pool_closed_until_native_changes_finish
         }
     }
     let (configuring, mut configurations) = tokio::sync::mpsc::unbounded_channel();
-    let shared = Arc::new(Shared::new(TransformersExecutionProvider::Cpu, 2, 1));
-    {
-        let mut pool = lock_std_mutex(&shared.pool);
-        pool.cpu_threads = None;
-        // Simulate an interrupted larger configuration independently of the
-        // test machine's CPU count; the fake runners create no native threads.
-        pool.cpu_threads_high_water = 4;
-    }
+    let shared = Arc::new(Shared::new(TransformersExecutionProvider::Cuda, 2));
+    shared.fallback.store(true, Ordering::Release);
     let factory: Arc<Factory> =
         Arc::new(move |_| Ok(Box::new(ConfigureRunner(configuring.clone()))));
     let owner = Arc::new(SessionOwner::new(
@@ -774,20 +695,20 @@ async fn cancelled_reconfiguration_keeps_pool_closed_until_native_changes_finish
         retry.transition.is_some(),
         "cancelled configuration is retried before inference"
     );
-    assert_eq!(retry.cpu_threads, Some(4));
-    assert_eq!(lock_std_mutex(&owner.shared.pool).cpu_threads_high_water, 4);
+    assert!(retry.force_cpu);
+    assert!(!lock_std_mutex(&owner.shared.pool).cpu_ready);
     drop(retry);
 }
 
 #[tokio::test]
-async fn failed_pool_growth_recovers_at_high_water_for_a_smaller_request() {
+async fn failed_pool_fallback_is_retried_before_inference() {
     struct FailingConfigureRunner {
         inner: FakeRunner,
         fail_configure: Arc<AtomicBool>,
     }
     impl Runner for FailingConfigureRunner {
-        fn configure(&mut self, threads: usize, force_cpu: bool) -> Result<(), ModelError> {
-            self.inner.configure(threads, force_cpu)?;
+        fn configure(&mut self, force_cpu: bool) -> Result<(), ModelError> {
+            self.inner.configure(force_cpu)?;
             if self.inner.lane == 1 && self.fail_configure.swap(false, Ordering::AcqRel) {
                 return Err(ModelError::internal(
                     "injected partial configuration failure",
@@ -807,13 +728,14 @@ async fn failed_pool_growth_recovers_at_high_water_for_a_smaller_request() {
         }
     }
     let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
-    let shared = Arc::new(Shared::new(TransformersExecutionProvider::Cpu, 2, 1));
-    lock_std_mutex(&shared.pool).cpu_threads_high_water = 4;
+    let shared = Arc::new(Shared::new(TransformersExecutionProvider::Cuda, 2));
+    shared.fallback.store(true, Ordering::Release);
     let worker_shared = Arc::clone(&shared);
-    let configured = Arc::new(StdMutex::new(vec![1; 2]));
+    let configured = Arc::new(StdMutex::new(vec![false; 2]));
     let fail_configure = Arc::new(AtomicBool::new(true));
     let factory: Arc<Factory> = Arc::new(move |lane| {
         lock_std_mutex(&worker_shared.stats).session_count += 1;
+        lock_std_mutex(&worker_shared.stats).session_initializations += 1;
         Ok(Box::new(FailingConfigureRunner {
             inner: FakeRunner {
                 lane,
@@ -821,7 +743,6 @@ async fn failed_pool_growth_recovers_at_high_water_for_a_smaller_request() {
                 fail: Arc::new(AtomicBool::new(false)),
                 shared: Arc::clone(&worker_shared),
                 drops: None,
-                threads: 1,
                 configured: Arc::clone(&configured),
             },
             fail_configure: Arc::clone(&fail_configure),
@@ -844,35 +765,35 @@ async fn failed_pool_growth_recovers_at_high_water_for_a_smaller_request() {
             .is_err()
     );
     assert_eq!(owner.stats().native_runs, 0);
-    assert_eq!(owner.stats().pool_reconfigurations, 0);
-    assert_eq!(lock_std_mutex(&owner.shared.pool).cpu_threads, None);
+    assert_eq!(owner.stats().pool_fallbacks, 0);
+    assert!(!lock_std_mutex(&owner.shared.pool).cpu_ready);
     let retry = start(&owner, options);
     let event = starts.recv().await.expect("recovered smaller request");
-    assert_eq!(event.pool_threads, vec![4; 2]);
+    assert_eq!(event.pool_cpu, vec![true; 2]);
     event.release.send(()).expect("finish recovery");
     assert!(retry.await.expect("recovery task").is_ok());
-    assert_eq!(owner.stats().pool_reconfigurations, 1);
+    assert_eq!(owner.stats().pool_fallbacks, 1);
     assert_eq!(owner.stats().session_count, 2);
 }
 
 #[test]
 fn partial_pool_initialization_failure_releases_every_created_session() {
-    let shared = Arc::new(Shared::new(TransformersExecutionProvider::Cpu, 4, 1));
+    let shared = Arc::new(Shared::new(TransformersExecutionProvider::Cpu, 4));
     let (started, _) = tokio::sync::mpsc::unbounded_channel();
     let worker_shared = Arc::clone(&shared);
-    let configured = Arc::new(StdMutex::new(vec![1; 4]));
+    let configured = Arc::new(StdMutex::new(vec![false; 4]));
     let factory: Arc<Factory> = Arc::new(move |lane| {
         if lane == 2 {
             return Err(ModelError::internal("injected initialization failure"));
         }
         lock_std_mutex(&worker_shared.stats).session_count += 1;
+        lock_std_mutex(&worker_shared.stats).session_initializations += 1;
         Ok(Box::new(FakeRunner {
             lane,
             started: started.clone(),
             fail: Arc::new(AtomicBool::new(false)),
             shared: Arc::clone(&worker_shared),
             drops: None,
-            threads: 1,
             configured: Arc::clone(&configured),
         }))
     });

@@ -7,36 +7,20 @@ fn minilm() -> TransformersConfig {
 }
 
 #[test]
-fn execution_budget_uses_hardware_for_cpu_and_configured_pool_for_cuda() {
-    assert_eq!(cpu_threads(0), 1);
-    assert_eq!(cpu_threads(usize::MAX), hardware_threads());
-    for sessions in [1, 2, 4, 8] {
-        for requested in [0, 1, 2, 4, usize::MAX] {
-            assert_eq!(
-                execution_limit(TransformersExecutionProvider::Cuda, requested, sessions),
-                requested.clamp(1, sessions)
-            );
-            assert_eq!(
-                threads_per_session(requested, sessions),
-                (requested.clamp(1, hardware_threads()) / sessions).max(1)
-            );
-        }
-    }
-    assert_eq!(threads_per_session(1, 4), 1);
-}
-
-#[test]
-fn session_setting_is_a_positive_count_with_default_one() {
-    assert_eq!(parse_session_count(None), Some(1));
-    for value in ["0", "-1", "", "many", "1.5"] {
-        assert_eq!(parse_session_count(Some(value)), None);
-    }
-    assert_eq!(parse_session_count(Some(" 4 ")), Some(4));
+fn execution_is_capped_by_fixed_pool_for_both_cpu_and_cuda() {
     for provider in [
         TransformersExecutionProvider::Cpu,
         TransformersExecutionProvider::Cuda,
     ] {
-        assert_eq!(pool_size(provider, 4), 4);
+        for sessions in [1, 2, 4, 8] {
+            assert_eq!(pool_size(provider, sessions), sessions);
+            for requested in [0, 1, 2, 4, usize::MAX] {
+                assert_eq!(
+                    execution_limit(provider, requested, sessions),
+                    requested.clamp(1, sessions)
+                );
+            }
+        }
     }
     assert_eq!(pool_size(TransformersExecutionProvider::CoreMl, 4), 1);
 }
