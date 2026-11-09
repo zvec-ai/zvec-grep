@@ -198,13 +198,14 @@ impl SymbolIndex {
     }
 }
 
-/// The parameter list a signature states, normalized for comparison: one
-/// uniform spelling for whitespace and for the spacing around `*` and `&`.
+/// The parameter list a signature states, normalized for comparison: the
+/// function declarator's own parentheses, one uniform spelling for whitespace
+/// and for the spacing around `*` and `&`, and each parameter's type only.
 ///
-/// The list is the last parenthesis group that sits at the outermost nesting
-/// level, which covers a trailing qualifier (`f() const`) and an operator name
-/// (`operator()(int)`). `None` when the signature records no group at all, so
-/// an entity without that evidence never stands in for one that has it.
+/// A trailing qualifier's parentheses — `noexcept(true)`, `throw(...)`,
+/// `requires(...)` — are not the parameter list, and a list this function
+/// cannot place returns `None`, so an entity without that evidence never
+/// stands in for one that has it.
 fn parameter_evidence(signature: Option<&str>) -> Option<String> {
     let signature = signature?;
     let (start, end) = outer_parameter_group(signature)?;
@@ -226,9 +227,16 @@ fn parameter_evidence(signature: Option<&str>) -> Option<String> {
     Some(parameters.join(","))
 }
 
-/// The span between the parentheses of the last outermost group in a
-/// signature: `void f(int)` and `int g() const` both name their parameter list
-/// there, and `void operator()(int)` skips the operator's own parentheses.
+/// The span between the parentheses of the function declarator's parameter
+/// list: `void f(int)` and `int g() const` both name their parameter list
+/// there, `void operator()(int)` skips the operator's own empty pair, and
+/// `void f(int) noexcept(true)` does not mistake the qualifier's parentheses
+/// for the parameters.
+///
+/// The last group that a declarator can own wins, so a function-pointer
+/// parameter or a template argument in the prefix cannot shadow it; a
+/// signature whose only groups are qualifiers yields `None`, leaving the
+/// declaration unpaired rather than guessed.
 fn outer_parameter_group(signature: &str) -> Option<(usize, usize)> {
     let mut group = None;
     let mut depth = 0usize;
@@ -243,7 +251,9 @@ fn outer_parameter_group(signature: &str) -> Option<(usize, usize)> {
             }
             ')' if depth > 0 => {
                 depth -= 1;
-                if depth == 0 {
+                if depth == 0
+                    && declares_parameters(&signature[..start], &signature[start + 1..offset])
+                {
                     group = Some((start + 1, offset));
                 }
             }
@@ -253,27 +263,143 @@ fn outer_parameter_group(signature: &str) -> Option<(usize, usize)> {
     group
 }
 
-/// One parameter without its default argument, whitespace collapsed, and
-/// pointer/reference spacing made uniform: `const char * value` reads
-/// `const char* value`, `const char *` reads `const char*`, and `int count = 0`
-/// reads `int count`, because a header may state a default the definition is
-/// not allowed to repeat.
+/// Whether the text before a parenthesis and its body spell a function
+/// declarator's parameter list rather than a trailing qualifier.
+///
+/// A qualifier keyword never does. An empty body belongs to the function only
+/// when the text before it ends with its name; `operator()`'s own pair does
+/// not, which is what makes `operator()(int)` read one parameter.
+fn declares_parameters(preceding: &str, body: &str) -> bool {
+    let Some(word) = preceding.split_whitespace().last() else {
+        return false;
+    };
+    if matches!(
+        word,
+        "noexcept"
+            | "throw"
+            | "requires"
+            | "decltype"
+            | "alignas"
+            | "sizeof"
+            | "if"
+            | "for"
+            | "while"
+            | "switch"
+            | "catch"
+            | "static_assert"
+            | "__attribute__"
+            | "__declspec"
+    ) {
+        return false;
+    }
+    !body.trim().is_empty() || word != "operator"
+}
+
+/// One parameter without its default argument and without its name, whitespace
+/// collapsed, and pointer/reference spacing made uniform: `const char * value`,
+/// `const char* value` and `const char*` all read `const char*`, and
+/// `int count = 0` reads `int`, because a header may state a default or omit
+/// the name the definition carries.
 fn normalize_parameter(parameter: &str) -> String {
     let parameter = parameter.split('=').next().unwrap_or(parameter);
     let collapsed = parameter.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut normalized = String::with_capacity(collapsed.len());
-    for character in collapsed.chars() {
-        if character == ' ' && (normalized.is_empty() || normalized.ends_with(['*', '&', ' '])) {
-            continue;
-        }
-        if matches!(character, '*' | '&') {
-            while normalized.ends_with(' ') {
-                normalized.pop();
+    let mut characters = collapsed.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            ' ' => {
+                if normalized.ends_with(['*', '&']) {
+                    // Keep the space that separates a pointer from the name
+                    // it declares; drop the one before the `*` itself.
+                    if characters
+                        .peek()
+                        .is_some_and(|next| next.is_alphanumeric() || *next == '_')
+                    {
+                        normalized.push(' ');
+                    }
+                } else if !normalized.is_empty() && !normalized.ends_with(' ') {
+                    normalized.push(' ');
+                }
             }
+            '*' | '&' => {
+                while normalized.ends_with(' ') {
+                    normalized.pop();
+                }
+                normalized.push(character);
+                // `char *value` glues the name to the pointer; the space that
+                // a name cannot be read without is restored here so the name
+                // stays separable on both spellings.
+                if characters
+                    .peek()
+                    .is_some_and(|next| next.is_alphanumeric() || *next == '_')
+                {
+                    normalized.push(' ');
+                }
+            }
+            _ => normalized.push(character),
         }
-        normalized.push(character);
     }
-    normalized.trim().to_owned()
+    strip_parameter_name(normalized)
+}
+
+/// One parameter's type, with the name it declares removed: `int value` reads
+/// `int` and `const char* path` reads `const char*`.
+///
+/// A trailing identifier is a name only when a type precedes it; `unsigned
+/// long` and `struct Foo` keep every word, because reading `long` or `Foo` as
+/// a name would merge two different parameters.
+fn strip_parameter_name(parameter: String) -> String {
+    let Some((head, tail)) = parameter.rsplit_once(' ') else {
+        return parameter;
+    };
+    if !is_parameter_name(tail) {
+        return parameter;
+    }
+    let preceding = head.rsplit(' ').next().unwrap_or(head);
+    if matches!(
+        preceding,
+        "struct" | "class" | "enum" | "union" | "typename"
+    ) {
+        return parameter;
+    }
+    head.to_owned()
+}
+
+/// Whether a token can be a parameter's name rather than part of its type.
+fn is_parameter_name(token: &str) -> bool {
+    let mut characters = token.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_alphabetic() || first == '_')
+        && characters.all(|character| character.is_alphanumeric() || character == '_')
+        && !matches!(
+            token,
+            "auto"
+                | "bool"
+                | "char"
+                | "char8_t"
+                | "char16_t"
+                | "char32_t"
+                | "class"
+                | "const"
+                | "double"
+                | "enum"
+                | "float"
+                | "int"
+                | "long"
+                | "register"
+                | "restrict"
+                | "short"
+                | "signed"
+                | "size_t"
+                | "struct"
+                | "typename"
+                | "union"
+                | "unsigned"
+                | "void"
+                | "volatile"
+                | "wchar_t"
+        )
 }
 
 /// Files whose modules one file's resolved imports point at, deduplicated:
@@ -568,4 +694,74 @@ fn visible_endpoints(state: &StoreState, ids: &[String]) -> EngineResult<HashMap
         .into_iter()
         .map(|(id, file)| (id.as_str().to_owned(), file.id()))
         .collect())
+}
+
+#[cfg(test)]
+mod parameter_evidence_tests {
+    use super::parameter_evidence;
+
+    fn evidence(signature: &str) -> String {
+        parameter_evidence(Some(signature)).expect("signature states a parameter list")
+    }
+
+    #[test]
+    fn trailing_qualifier_parentheses_are_not_the_parameter_list() {
+        // `noexcept(true)` and `throw(...)` sit where a parameter list could
+        // be; reading them would give two different overloads the same
+        // parameters and let one stand in for the other.
+        assert_eq!(
+            evidence("void compute(const char*) noexcept(true);"),
+            "const char*"
+        );
+        assert_eq!(evidence("void compute(int) noexcept(true) {}"), "int");
+        assert_eq!(
+            evidence("void compute(const char*) throw();"),
+            "const char*"
+        );
+        assert_eq!(evidence("int f(int) requires (C<T>)"), "int");
+        // An operator name's own empty pair precedes the parameters.
+        assert_eq!(evidence("void operator()() const"), "");
+        assert_eq!(evidence("void operator()(int) const"), "int");
+    }
+
+    #[test]
+    fn pointer_and_reference_spacing_never_hides_the_type() {
+        // A prototype may name the parameter or leave it out, and the
+        // definition may spell the spacing differently; both sides must read
+        // the same type.
+        assert_eq!(
+            evidence("void f(const char*);"),
+            evidence("void f(const char* path);")
+        );
+        assert_eq!(
+            evidence("void f(const char *);"),
+            evidence("void f(const char *path);")
+        );
+        assert_eq!(
+            evidence("void f(const char * value);"),
+            evidence("void f(const char* value);")
+        );
+        assert_eq!(evidence("void f(char** argv);"), "char**");
+        assert_eq!(
+            evidence("void f(const std::string&);"),
+            evidence("void f(const std::string& value);")
+        );
+        assert_eq!(evidence("void f(int count);"), evidence("void f(int n);"));
+    }
+
+    #[test]
+    fn default_arguments_and_keywords_stay_distinct() {
+        // A header states the default the definition cannot repeat.
+        assert_eq!(evidence("void f(int count = 0);"), evidence("void f(int);"));
+        // `unsigned` and `unsigned long`, or `struct Foo` and `Foo`, are
+        // different types: the last word of each is a type, not a name.
+        assert_eq!(evidence("void f(unsigned);"), "unsigned");
+        assert_eq!(evidence("void f(unsigned long);"), "unsigned long");
+        assert_eq!(evidence("void f(struct Foo);"), "struct Foo");
+        assert_eq!(
+            evidence("void f(unsigned)"),
+            "unsigned",
+            "no trailing name to strip"
+        );
+    }
 }

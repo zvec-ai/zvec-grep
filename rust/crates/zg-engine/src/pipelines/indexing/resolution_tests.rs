@@ -349,6 +349,55 @@ fn sweep_binds_qualified_calls_only_when_the_receiver_spells_the_indexed_scope()
 }
 
 #[test]
+fn sweep_narrows_a_receiver_by_the_scope_its_whole_spelling_names() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    // `ns::Waldo::find` and a crate-root `Waldo::find` share a name tail and
+    // an argument count. Only the receiver's whole spelling names one of them:
+    // filtering by its last segment would hand the call to the namesake.
+    let nested = index_source(
+        &store,
+        "src/nested.rs",
+        concat!(
+            "pub mod ns {\n",
+            "    pub struct Waldo;\n\n",
+            "    impl Waldo {\n",
+            "        pub fn find(value: i32) -> i32 {\n",
+            "            value\n",
+            "        }\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+    index_source(
+        &store,
+        "src/top.rs",
+        concat!(
+            "pub struct Waldo;\n\n",
+            "impl Waldo {\n",
+            "    pub fn find(value: i32) -> i32 {\n",
+            "        value\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+    let caller = index_source(
+        &store,
+        "src/app.rs",
+        "pub fn drive() {\n    ns::Waldo::find(1);\n}\n",
+    );
+
+    let owner = pending_call_owner(&store, caller, "find");
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![nested],
+        "arity narrows within the scope the receiver spells: {sweep:?}"
+    );
+}
+
+#[test]
 fn sweep_binds_python_cls_receiver_to_the_enclosing_class() {
     let home = tempfile::tempdir().expect("workspace");
     let store = open(home.path());
@@ -620,6 +669,79 @@ fn sweep_pairs_a_declaration_with_the_default_argument_the_definition_omits() {
         call_target_files(&store, &owner),
         vec![definition],
         "the default argument names no second overload: {sweep:?}"
+    );
+}
+
+#[test]
+fn sweep_keeps_a_qualifier_parenthesis_out_of_the_parameter_list() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    // Both signatures end in `noexcept(true)`, whose parentheses sit where a
+    // parameter list could be. Reading them as the parameters would give the
+    // `const char*` override and the `int` one the same evidence, and the
+    // equal count would let the definition stand for the declaration.
+    index_source(
+        &store,
+        "include/api.hpp",
+        "void compute(const char*) noexcept(true);\n",
+    );
+    index_source(
+        &store,
+        "src/impl.cpp",
+        "void compute(int value) noexcept(true) {\n}\n",
+    );
+    let caller = index_source(
+        &store,
+        "src/app.cpp",
+        "void run() {\n  compute(\"x\");\n}\n",
+    );
+    let owner = pending_call_owner(&store, caller, "compute");
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
+    assert!(
+        call_target_files(&store, &owner).is_empty(),
+        "a trailing qualifier does not make two overloads one symbol: {sweep:?}"
+    );
+    assert!(
+        store
+            .list_pending_refs(10, 0)
+            .expect("queue")
+            .refs
+            .iter()
+            .any(|queued| queued.file_id == caller.get() && queued.reference.ref_name == "compute"),
+        "the two overloads stay queued: {sweep:?}"
+    );
+}
+
+#[test]
+fn sweep_pairs_an_unnamed_declaration_with_the_definition_that_names_its_parameters() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    // A header states types only and may leave a pointer unnamed; the
+    // definition names every parameter, and may name them differently. Names
+    // are no part of a parameter, so both spell one overload.
+    index_source(
+        &store,
+        "include/api.hpp",
+        "void compute(const char*, int);\n",
+    );
+    let definition = index_source(
+        &store,
+        "src/impl.cpp",
+        "void compute(const char* path, int retries) {\n}\n",
+    );
+    let caller = index_source(
+        &store,
+        "src/app.cpp",
+        "void run() {\n  compute(\"x\", 1);\n}\n",
+    );
+    let owner = pending_call_owner(&store, caller, "compute");
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![definition],
+        "the parameter names do not separate one overload: {sweep:?}"
     );
 }
 
@@ -1174,7 +1296,7 @@ fn sweep_keeps_an_untyped_receiver_call_pending_when_several_definitions_exist()
 }
 
 #[test]
-fn sweep_keeps_a_call_pending_when_an_enclosing_function_shadows_the_import() {
+fn sweep_binds_a_call_to_the_enclosing_binding_that_shadows_the_import() {
     let home = tempfile::tempdir().expect("workspace");
     let store = open(home.path());
     let module = index_source(&store, "util.py", "def work(x):\n    return x\n");
@@ -1194,25 +1316,100 @@ fn sweep_keeps_a_call_pending_when_an_enclosing_function_shadows_the_import() {
 
     let owner = pending_call_owner(&store, caller, "work");
     let sweep = resolve_pending(&store, None).expect("sweep");
-    // `outer::work` is a local binding of the enclosing function, not a
+    // `outer::work` is a lexical binding of the enclosing function, not a
     // member reached through a receiver: the bare call inside `inner` reads
-    // it, and the equal-arity pair to the import keeps the reference pending.
-    assert!(
-        call_target_files(&store, &owner).is_empty(),
-        "the import must not win over an enclosing binding: {sweep:?}"
+    // it, so the shadowed name is settled among this file's own candidates.
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![caller],
+        "the enclosing binding wins over the import: {sweep:?}"
     );
     assert_eq!(
         sweep.import_bound, 0,
         "no import decision is taken: {sweep:?}"
     );
-    assert!(
-        sweep.candidates_recorded >= 1,
-        "the shadowed name is recorded as ambiguity: {sweep:?}"
+    assert_eq!(
+        import_target_ids(&store, caller),
+        vec![format!("f{}", module.get())],
+        "the import itself still names the module: {sweep:?}"
+    );
+}
+
+#[test]
+fn sweep_keeps_an_argument_count_from_handing_a_shadowed_call_to_the_import() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    let module = index_source(&store, "util.py", "def work(x):\n    return x\n");
+    let caller = index_source(
+        &store,
+        "caller.py",
+        concat!(
+            "from util import work\n\n\n",
+            "def outer():\n",
+            "    def work(x, y=0):\n",
+            "        return 2\n\n",
+            "    def inner():\n",
+            "        return work(0)\n\n",
+            "    return inner()\n",
+        ),
+    );
+
+    let owner = pending_call_owner(&store, caller, "work");
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    // The call passes one argument while the enclosing binding declares two:
+    // a count that describes the imported function must not reach past this
+    // file's own binding to bind it.
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![caller],
+        "the count does not move the call to the import: {sweep:?}"
+    );
+    assert_eq!(
+        sweep.arity_bound, 0,
+        "the count is no evidence across scopes: {sweep:?}"
     );
     assert_eq!(
         import_target_ids(&store, caller),
         vec![format!("f{}", module.get())],
         "the import itself still names the module: {sweep:?}"
+    );
+}
+
+#[test]
+fn sweep_keeps_a_shadowed_call_pending_when_the_file_binds_the_name_twice() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    index_source(&store, "util.py", "def work(x):\n    return x\n");
+    let caller = index_source(
+        &store,
+        "caller.py",
+        concat!(
+            "from util import work\n\n\n",
+            "def work(x):\n",
+            "    return 1\n\n\n",
+            "def work(x, y):\n",
+            "    return 2\n\n\n",
+            "def run():\n",
+            "    return work(0)\n",
+        ),
+    );
+
+    let owner = pending_call_owner(&store, caller, "work");
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    // Two bindings of the name in this file leave it ambiguous; the import's
+    // namespace and the call's argument count answer other scopes.
+    assert!(
+        call_target_files(&store, &owner).is_empty(),
+        "no single lexical binding answers the call: {sweep:?}"
+    );
+    assert_eq!(
+        sweep.import_bound + sweep.arity_bound,
+        0,
+        "no other rule decides a shadowed name: {sweep:?}"
+    );
+    assert!(
+        sweep.candidates_recorded >= 1,
+        "the lexical candidates are recorded: {sweep:?}"
     );
 }
 

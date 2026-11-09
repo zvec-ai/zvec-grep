@@ -20,7 +20,7 @@ impl SqliteGraphStorage {
     /// `IndexStore::requeue_stale_resolutions`.
     /// `paths_changed` reports that this write made the file appear or
     /// disappear, which can reorder the preferred path variant of every import.
-    /// A file that spells or drops an extends/implements edge also stales every
+    /// A file whose extends/implements clauses change also stales every
     /// member call that resolved through that chain, which no symbol it owns
     /// names; the write records that evidence as well.
     /// `language` labels pending references for the resolver's language gate;
@@ -70,16 +70,12 @@ impl SqliteGraphStorage {
                 ),
             )?;
         }
-        // Taken before the rows are replaced: the old edges name the bases this
-        // file leaves behind, the new output the bases it joins. A pass that
-        // writes a file without touching its bases keeps the calls bound.
-        let hierarchy_changed = spells_hierarchy(graph)
-            || tx.query_row(
-                "SELECT EXISTS (SELECT 1 FROM edges WHERE file_id = ?1
-                 AND kind IN ('extends', 'implements'))",
-                [file_id],
-                |row| row.get::<_, bool>(0),
-            )?;
+        // Taken before the rows are replaced: the old rows name the bases this
+        // file leaves behind, the new output the bases it joins. Only an actual
+        // change stales the workspace's hierarchy-bound calls; merely owning an
+        // extends clause, as most class files do, must not requeue them on
+        // every save.
+        let hierarchy_changed = inheritance_edges(&tx, file_id)? != inheritance_evidence(graph);
         tx.execute("DELETE FROM edges WHERE file_id = ?", [file_id])?;
         {
             let mut insert = tx.prepare(
@@ -162,16 +158,63 @@ fn name_tail(name: &str) -> &str {
         .unwrap_or(name)
 }
 
-/// Whether one file's extraction output spells an inheritance edge, either
-/// resolved during the walk or left for the resolver.
-fn spells_hierarchy(graph: &FileGraphResult) -> bool {
-    let inheritance =
-        |kind: GraphEdgeKind| matches!(kind, GraphEdgeKind::Extends | GraphEdgeKind::Implements);
-    graph.edges.iter().any(|edge| inheritance(edge.kind))
-        || graph
+/// Whether a relationship kind spells a base this file inherits from.
+fn spells_inheritance(kind: GraphEdgeKind) -> bool {
+    matches!(kind, GraphEdgeKind::Extends | GraphEdgeKind::Implements)
+}
+
+/// The inheritance evidence a file's new output carries, one `(kind, source,
+/// base)` triple per clause: a resolved edge names its target, a pending one
+/// the reference it spells. Sorted and deduplicated so two writes of the same
+/// clauses compare equal.
+fn inheritance_evidence(graph: &FileGraphResult) -> Vec<(String, String, String)> {
+    let mut evidence: Vec<(String, String, String)> = graph
+        .edges
+        .iter()
+        .filter(|edge| spells_inheritance(edge.kind))
+        .map(|edge| {
+            (
+                edge.kind.as_str().to_owned(),
+                edge.source.clone(),
+                edge.target.clone(),
+            )
+        })
+        .collect();
+    evidence.extend(
+        graph
             .pending_refs
             .iter()
-            .any(|reference| inheritance(reference.ref_kind))
+            .filter(|reference| spells_inheritance(reference.ref_kind))
+            .map(|reference| {
+                (
+                    reference.ref_kind.as_str().to_owned(),
+                    reference.owner_id.clone(),
+                    reference.ref_name.clone(),
+                )
+            }),
+    );
+    evidence.sort();
+    evidence.dedup();
+    evidence
+}
+
+/// The inheritance evidence this file's stored rows carry now, read the same
+/// way as `inheritance_evidence` and therefore by spelling: a reference keeps
+/// the name it spells after it resolves, and a directly written edge names its
+/// target. Runs before the rows are replaced.
+fn inheritance_edges(
+    tx: &rusqlite::Transaction<'_>,
+    file_id: u32,
+) -> Result<Vec<(String, String, String)>> {
+    let mut statement = tx.prepare(
+        "SELECT kind, source, COALESCE(reference_name, target) FROM edges
+         WHERE file_id = ?1 AND kind IN ('extends', 'implements')",
+    )?;
+    let rows = statement.query_map([file_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+    let mut evidence = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    evidence.sort();
+    evidence.dedup();
+    Ok(evidence)
 }
 
 pub(super) fn validate(

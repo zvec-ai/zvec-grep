@@ -524,6 +524,78 @@ fn a_write_without_inheritance_keeps_hierarchy_bindings() {
 }
 
 #[test]
+fn a_rewrite_that_restates_the_same_inheritance_keeps_hierarchy_bindings() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    db.write_file_graph(
+        1,
+        None,
+        &graph(&["a"], vec![], vec![reference("a", "target")]),
+        &[],
+        false,
+    )
+    .expect("write");
+    let resolution = hierarchy_proposal(&db, "b");
+    db.apply_resolutions(&[resolution]).expect("resolve");
+
+    // Joining a base stales every call bound through the chain.
+    let clause = hierarchy_reference("Mid", "B");
+    db.write_file_graph(
+        2,
+        None,
+        &graph(&["Mid"], vec![], vec![clause.clone()]),
+        &[],
+        false,
+    )
+    .expect("first inheritance write");
+    assert_eq!(db.requeue_stale_resolutions().expect("requeue"), 1);
+
+    // Settle everything the write and the requeue left queued, so the second
+    // write starts from a clean queue: the inheriting file's own clause binds
+    // as an import, the replayed member call as the hierarchy rule writes it.
+    let pending = db.list_pending_refs(100, 0).expect("refs");
+    let resolutions: Vec<Resolution> = pending
+        .refs
+        .iter()
+        .map(|stored| Resolution {
+            ref_id: stored.id,
+            target_id: "b".into(),
+            provenance: if stored.reference.ref_kind == GraphEdgeKind::Extends {
+                EdgeProvenance::ImportScoped
+            } else {
+                EdgeProvenance::FileScoped
+            },
+        })
+        .collect();
+    db.apply_resolutions(&resolutions).expect("resolve");
+    assert_eq!(db.list_pending_refs(100, 0).expect("queue").refs.len(), 0);
+
+    // Editing a method body of a class file restates its base unchanged.
+    // Owning an extends clause is not a change to it: only the clauses
+    // themselves can stale a hierarchy-bound call.
+    let entities = ["Mid".to_owned()];
+    db.write_file_graph(
+        2,
+        None,
+        &graph(&["Mid"], vec![], vec![clause]),
+        &entities,
+        false,
+    )
+    .expect("second write");
+    assert_eq!(
+        db.requeue_stale_resolutions().expect("requeue"),
+        0,
+        "an unchanged base stales no binding"
+    );
+    let pending = db.list_pending_refs(100, 0).expect("queue");
+    assert_eq!(
+        pending.refs.len(),
+        1,
+        "only the rewritten file's own clause is queued: {pending:?}"
+    );
+    assert_eq!(pending.refs[0].reference.ref_name, "B");
+}
+
+#[test]
 fn hierarchy_change_keeps_bindings_that_never_read_the_chain() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
     db.write_file_graph(

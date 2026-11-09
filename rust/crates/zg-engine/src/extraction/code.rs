@@ -424,6 +424,11 @@ fn code_entity_metadata(entity: &CodeEntity<'_>) -> EntityMetadata {
 /// package), `None` for languages without the declaration. A Java symbol's
 /// name does not carry the package, so this is the only evidence that
 /// distinguishes `my.List` from a same-named class elsewhere.
+///
+/// The name is rebuilt from the declaration's identifiers rather than sliced
+/// from the source: comments and linebreaks between the segments are extras
+/// the grammar allows (`package com /* note */ . acme;`), and they would
+/// otherwise become part of the package this file is known by.
 fn java_package(node: Node<'_>, source: &[u8], format: FileFormat) -> Option<String> {
     if format != FileFormat::Java {
         return None;
@@ -435,9 +440,28 @@ fn java_package(node: Node<'_>, source: &[u8], format: FileFormat) -> Option<Str
     let declared = named_children(root)
         .into_iter()
         .find(|child| child.kind() == "package_declaration")
-        .and_then(|declaration| named_children(declaration).into_iter().next())
-        .and_then(|name| name.utf8_text(source).ok());
-    Some(declared.unwrap_or_default().trim().to_owned())
+        .and_then(|declaration| {
+            named_children(declaration)
+                .into_iter()
+                .find(|name| matches!(name.kind(), "identifier" | "scoped_identifier"))
+        })
+        .map(|name| dotted_name(name, source));
+    Some(declared.unwrap_or_default())
+}
+
+/// The dotted name a `package` declaration spells: an identifier is one
+/// segment, and a `scoped_identifier` nests its parts, so only identifiers
+/// themselves reach the result and a comment between them never does.
+fn dotted_name(node: Node<'_>, source: &[u8]) -> String {
+    if node.kind() == "identifier" {
+        return node.utf8_text(source).unwrap_or_default().trim().to_owned();
+    }
+    named_children(node)
+        .into_iter()
+        .map(|child| dotted_name(child, source))
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 #[derive(Debug)]
@@ -1185,6 +1209,36 @@ mod tests {
             ),
             "the default package is an empty declaration"
         );
+    }
+
+    #[test]
+    fn java_package_names_ignore_comments_and_formatting() {
+        // The grammar allows comments and linebreaks between a package
+        // declaration's identifiers; the package a file is known by is their
+        // dotted name, so an ordinary `import com.acme.Util;` still matches
+        // the file that declares it.
+        for declaration in [
+            "package com /* note */ . acme;",
+            "package /* lead */ com.acme;",
+            "package com.\n  acme;",
+        ] {
+            let source = test_source(
+                FileFormat::Java,
+                "src/main/java/com/acme/Util.java",
+                &format!("{declaration}\n\npublic class Util {{\n}}\n"),
+            );
+            let entities = extract_for_indexing(&source, ChunkOptions::default())
+                .expect("extraction")
+                .fragments;
+            assert!(
+                matches!(
+                    test_metadata(named(&entities, "Util")),
+                    Some(EntityMetadata::Code(CodeMetadata { package: Some(package), .. }))
+                        if package == "com.acme"
+                ),
+                "`{declaration}` records `com.acme`"
+            );
+        }
     }
 
     #[test]

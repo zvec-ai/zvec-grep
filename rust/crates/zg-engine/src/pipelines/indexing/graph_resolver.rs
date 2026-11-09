@@ -27,7 +27,7 @@ use crate::domain::{
     EdgeProvenance, FileFormat, GraphEdgeKind, SymbolType, formats_for_path,
     reference_compatible_with,
 };
-use crate::storage::graph::{NameIndexEntry, Resolution, StoredPendingRef};
+use crate::storage::graph::{DeclaredBinding, NameIndexEntry, Resolution, StoredPendingRef};
 use crate::storage::{IndexStore, ResolutionSnapshot};
 
 /// Outcome of one resolution sweep.
@@ -224,6 +224,10 @@ struct RuleCaches {
     module_paths: HashMap<(String, String), bool>,
     alias_bindings: HashMap<u32, Vec<AliasBinding>>,
     alias_targets: HashMap<(String, String), Option<u32>>,
+    /// Declarations read for one owner. Most untyped member calls reach the
+    /// same owner and every sweep pages them again, so the read happens once
+    /// per owner per sweep instead of once per call.
+    declared_bindings: HashMap<String, Vec<DeclaredBinding>>,
 }
 
 impl ResolutionSweep {
@@ -361,7 +365,7 @@ fn classify_names(
             rule: Rule::Receiver,
         });
     }
-    if let Some(resolution) = resolve_receiver_typed(store, snapshot, stored, &hits)? {
+    if let Some(resolution) = resolve_receiver_typed(store, snapshot, stored, &hits, caches)? {
         // The receiver names a local whose declared type pins the member's
         // declaring scope before workspace-wide ambiguity is considered.
         return Ok(Outcome::Resolved {
@@ -417,6 +421,9 @@ fn classify_names(
         });
     }
     if hits.len() > 1 {
+        if let Some(outcome) = resolve_lexical_binding(snapshot, stored, &hits) {
+            return Ok(outcome);
+        }
         if let Some(resolution) =
             resolve_import_bound(snapshot, stored, &hits, &mut caches.importing_files)
         {
@@ -590,21 +597,13 @@ fn same_symbol(
         .is_some_and(|(declared, defined)| same_parameters(declared, defined))
 }
 
-/// Whether two parameter lists describe one overload. A definition names its
-/// parameters while a declaration often does not, so a parameter matches when
-/// its tokens are equal or one side carries a single extra trailing identifier
-/// (`int` against `int value`, `const char*` against `const char* path`).
-/// Everything else stays unproven: `unsigned long` against `unsigned` and
-/// `const char*` against `int` are different parameters, and a comparison that
-/// cannot tell them apart would merge unrelated overloads.
+/// Whether two parameter lists describe one overload. The stored lists carry
+/// each parameter's type only — the name a declaration or definition spells is
+/// dropped where the signature is normalized — so identity is exact equality:
+/// `const char*` against `const char*` pairs, `unsigned long` against
+/// `unsigned` and `const char*` against `int` do not.
 fn same_parameters(declared: &str, defined: &str) -> bool {
-    let declared = split_parameters(declared);
-    let defined = split_parameters(defined);
-    declared.len() == defined.len()
-        && declared
-            .iter()
-            .zip(defined.iter())
-            .all(|(left, right)| same_parameter(left, right))
+    split_parameters(declared) == split_parameters(defined)
 }
 
 /// Splits a normalized parameter list at the commas that separate parameters,
@@ -628,60 +627,47 @@ fn split_parameters(list: &str) -> Vec<&str> {
     parameters
 }
 
-fn same_parameter(left: &str, right: &str) -> bool {
-    if left == right {
-        return true;
-    }
-    let left: Vec<&str> = left.split_whitespace().collect();
-    let right: Vec<&str> = right.split_whitespace().collect();
-    let (longer, shorter) = if left.len() > right.len() {
-        (left, right)
-    } else {
-        (right, left)
-    };
-    longer.len() == shorter.len() + 1
-        && longer[..shorter.len()] == shorter[..]
-        && is_parameter_name(longer[shorter.len()])
-}
-
-/// Whether the token a parameter adds to its type can be that parameter's name.
-/// `int` against `int value` and `const char*` against `const char* path` differ
-/// by one, but `unsigned` against `unsigned long` differ by one too, and reading
-/// `long` as a name would merge two different parameters.
-fn is_parameter_name(token: &str) -> bool {
-    let mut characters = token.chars();
-    characters
-        .next()
-        .is_some_and(|first| first.is_alphabetic() || first == '_')
-        && characters.all(|character| character.is_alphanumeric() || character == '_')
-        && !matches!(
-            token,
-            "auto"
-                | "bool"
-                | "char"
-                | "char8_t"
-                | "char16_t"
-                | "char32_t"
-                | "class"
-                | "const"
-                | "double"
-                | "enum"
-                | "float"
-                | "int"
-                | "long"
-                | "register"
-                | "restrict"
-                | "short"
-                | "signed"
-                | "size_t"
-                | "struct"
-                | "typename"
-                | "union"
-                | "unsigned"
-                | "void"
-                | "volatile"
-                | "wchar_t"
+/// Settles a bare name among the candidates the calling file itself binds.
+///
+/// A bare name reads the lexical binding its file spells — a top-level
+/// definition or one declared in an enclosing function — and that binding is
+/// what the call or base clause means. Import, export and argument-count rules
+/// answer the namespace a module publishes instead, so a name this file binds
+/// is settled among this file's own candidates: one binding is the target, and
+/// several leave the reference ambiguous rather than falling through to a rule
+/// that describes a different scope. A receiver names a member, and an import
+/// statement addresses a module, so neither reads a lexical binding.
+fn resolve_lexical_binding(
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    hits: &[NameIndexEntry],
+) -> Option<Outcome> {
+    if stored.reference.receiver_name.is_some()
+        || !matches!(
+            stored.reference.ref_kind,
+            GraphEdgeKind::Calls | GraphEdgeKind::Extends | GraphEdgeKind::Implements
         )
+    {
+        return None;
+    }
+    let lexical: Vec<&NameIndexEntry> = hits
+        .iter()
+        .filter(|hit| hit.file_id == stored.file_id && shadows_import(snapshot, hit))
+        .collect();
+    match lexical.as_slice() {
+        [] => None,
+        [hit] => Some(Outcome::Resolved {
+            resolution: Resolution {
+                ref_id: stored.id,
+                target_id: hit.entity_id.clone(),
+                provenance: EdgeProvenance::FileScoped,
+            },
+            rule: Rule::Unique,
+        }),
+        _ => Some(Outcome::Ambiguous(
+            lexical.iter().map(|hit| hit.entity_id.clone()).collect(),
+        )),
+    }
 }
 
 /// Whether two arities can describe one symbol. A side without a counted
@@ -742,13 +728,9 @@ fn resolve_import(
 /// Resolves an ambiguous bare-name reference through the file's imports:
 /// when the imports pin the name to exactly one module and that module
 /// declares it exactly once, the reference targets that definition.
-/// Receiver-typed calls wait for receiver inference, and a same-file lexical
-/// binding of the bare name shadows any import binding, so both stay with
-/// the general ambiguity path.
-///
-/// A lexical binding is a top-level definition or one declared inside a
-/// function or module scope; a class member is not, because a bare call never
-/// spells the receiver that reaches it.
+/// Receiver-typed calls wait for receiver inference; the caller has already
+/// set aside names a same-file lexical binding shadows, so every call that
+/// reaches this rule reads its module's namespace.
 fn resolve_import_bound(
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
@@ -761,9 +743,6 @@ fn resolve_import_bound(
             reference.ref_kind,
             GraphEdgeKind::Calls | GraphEdgeKind::Extends | GraphEdgeKind::Implements
         )
-        || hits
-            .iter()
-            .any(|hit| hit.file_id == stored.file_id && shadows_import(snapshot, hit))
     {
         return None;
     }
@@ -1456,6 +1435,7 @@ fn resolve_receiver_typed(
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
     hits: &[NameIndexEntry],
+    caches: &mut RuleCaches,
 ) -> crate::EngineResult<Option<Resolution>> {
     let reference = &stored.reference;
     if reference.ref_kind != GraphEdgeKind::Calls {
@@ -1469,15 +1449,20 @@ fn resolve_receiver_typed(
     if receiver == "super" || is_self_receiver(&stored.language, receiver) {
         return Ok(None);
     }
-    let bindings = store.declared_bindings(&reference.owner_id)?;
-    let bound_type = bindings
-        .into_iter()
-        .filter(|binding| {
-            binding.name == receiver
-                && usize::try_from(binding.line).is_ok_and(|line| line <= reference.line)
-        })
-        .map(|binding| binding.bound_type)
-        .next_back(); // bindings are line-ordered; the latest earlier one shadows
+    let bound_type = {
+        let bindings = match caches.declared_bindings.entry(reference.owner_id.clone()) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(store.declared_bindings(&reference.owner_id)?),
+        };
+        bindings
+            .iter()
+            .filter(|binding| {
+                binding.name == receiver
+                    && usize::try_from(binding.line).is_ok_and(|line| line <= reference.line)
+            })
+            .map(|binding| binding.bound_type.clone())
+            .next_back() // bindings are line-ordered; the latest earlier one shadows
+    };
     let Some(bound_type) = bound_type else {
         return Ok(None);
     };
@@ -1803,21 +1788,23 @@ fn resolve_export_bound(stored: &StoredPendingRef, hits: &[NameIndexEntry]) -> O
 /// that scope's own overloads are the only candidates and their counts
 /// separate them.
 ///
-/// An argument count says nothing across scopes — two classes may declare a
-/// `match` taking one argument — so a receiver that reproduces no candidate's
-/// scope narrows nothing and leaves the reference to the caller's guard.
+/// The receiver narrows candidates by its whole spelling: `ns::Waldo` and a
+/// top-level `Waldo` may both declare `find`, and keeping only the last
+/// segment would hand the call to the namespace's type' namesake. An argument
+/// count says nothing across scopes — two classes may declare a `match` taking
+/// one argument — so a receiver that reproduces no candidate's scope narrows
+/// nothing and leaves the reference to the caller's guard.
 fn resolve_receiver_arity(
     stored: &StoredPendingRef,
     hits: &[NameIndexEntry],
 ) -> Option<Resolution> {
     let receiver = stored.reference.receiver_name.as_deref()?;
     let expected = stored.reference.arity?;
-    let scope = receiver.rsplit("::").next().unwrap_or(receiver);
     let hit = unique_arity_match(
         hits.iter().filter(|hit| {
             hit.qualified_name
                 .rsplit_once("::")
-                .is_some_and(|(owner, _)| owner == scope)
+                .is_some_and(|(owner, _)| owner == receiver)
         }),
         expected,
     )?;
@@ -2122,25 +2109,21 @@ mod overload_evidence_tests {
     use super::same_parameters;
 
     #[test]
-    fn a_parameter_name_does_not_separate_one_overload() {
-        assert!(same_parameters("int", "int value"));
-        assert!(same_parameters("const char*", "const char* path"));
+    fn normalized_parameter_types_pair() {
+        // The stored lists carry types only, so the name a parameter spells
+        // never separates one overload.
+        assert!(same_parameters("int", "int"));
+        assert!(same_parameters("const char*", "const char*"));
         assert!(same_parameters(
             "const std::string&, int",
-            "const std::string& name, int"
+            "const std::string&, int"
         ));
     }
 
     #[test]
-    fn a_type_word_is_no_parameter_name() {
-        // `unsigned` and `unsigned long` are different parameters, so reading
-        // `long` as a name would merge them.
+    fn different_types_and_counts_never_pair() {
         assert!(!same_parameters("unsigned", "unsigned long"));
         assert!(!same_parameters("unsigned long", "unsigned"));
-    }
-
-    #[test]
-    fn different_types_and_counts_never_pair() {
         assert!(!same_parameters("const char*", "int"));
         assert!(!same_parameters("int, int", "int"));
     }
