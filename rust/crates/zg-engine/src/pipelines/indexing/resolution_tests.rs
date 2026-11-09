@@ -652,6 +652,66 @@ fn sweep_keeps_java_on_demand_import_pending() {
     );
 }
 
+#[test]
+fn sweep_keeps_a_java_import_of_another_package_pending() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    // The workspace's only `List` belongs to package `my`. The indexed name
+    // carries no package, so the specifier's tail alone would match it and
+    // pull an unrelated file into `app`'s import scope.
+    index_source(
+        &store,
+        "my/List.java",
+        "package my;\n\npublic class List {\n}\n",
+    );
+    let app = index_source(
+        &store,
+        "app/Use.java",
+        "package app;\n\nimport java.util.List;\n\nclass Use {\n  List make() {\n    return null;\n  }\n}\n",
+    );
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
+    assert!(
+        import_target_files(&store, app).is_empty(),
+        "another package's type is not the workspace's List"
+    );
+    assert!(
+        store
+            .list_pending_refs(10, 0)
+            .expect("queue")
+            .refs
+            .iter()
+            .any(|reference| reference.file_id == app.get()
+                && reference.reference.ref_kind == GraphEdgeKind::Imports),
+        "the import stays queued until its package is confirmed"
+    );
+}
+
+#[test]
+fn sweep_resolves_a_java_import_below_its_source_root() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    // The workspace root sits above the Java source root, so the package names
+    // only a trailing run of the class's directory.
+    let widget = index_source(
+        &store,
+        "src/main/java/com/acme/Widget.java",
+        "package com.acme;\n\npublic class Widget {\n}\n",
+    );
+    let app = index_source(
+        &store,
+        "src/main/java/com/acme/App.java",
+        "package com.acme;\n\nimport com.acme.Widget;\n\nclass App {\n  Widget make() {\n    return null;\n  }\n}\n",
+    );
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
+    assert_eq!(
+        import_target_files(&store, app),
+        vec![widget],
+        "a source root above the workspace root still spells the package"
+    );
+}
+
 /// Persisted targets of one file's resolved import edges. A relative
 /// specifier binds to the module's file endpoint (`f{file_id}`), so the raw
 /// target is the assertion, not an entity file lookup.
@@ -979,5 +1039,73 @@ fn sweep_rebinds_a_member_call_after_its_intermediate_base_changes() {
         call_target_files(&store, &owner),
         vec![base_b],
         "the call follows the replaced base"
+    );
+}
+
+#[test]
+fn sweep_keeps_a_python_member_pending_when_two_bases_declare_it() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    index_source(
+        &store,
+        "grand.py",
+        "class Grand:\n    def save(self):\n        pass\n",
+    );
+    index_source(
+        &store,
+        "a.py",
+        "from grand import Grand\n\n\nclass A(Grand):\n    pass\n",
+    );
+    index_source(
+        &store,
+        "b.py",
+        "class B:\n    def save(self):\n        pass\n",
+    );
+    let child = index_source(
+        &store,
+        "child.py",
+        "from a import A\nfrom b import B\n\n\nclass Child(A, B):\n    def run(self):\n        self.save()\n",
+    );
+    let owner = pending_receiver_call_owner(&store, child, "self");
+    // Python linearizes the bases: `Child, A, Grand, B` reaches `Grand.save`
+    // before `B.save`, while the walk offers `Child, A, B, Grand`. Both bases
+    // declare the member, so the winner depends on that order and the call
+    // stays pending rather than binding the base the walk reaches first.
+    for _ in 0..3 {
+        store.requeue_stale_resolutions().expect("requeue");
+        resolve_pending(&store, None).expect("sweep");
+    }
+    assert!(
+        call_target_files(&store, &owner).is_empty(),
+        "a branched hierarchy without its lookup order binds nothing"
+    );
+}
+
+#[test]
+fn sweep_binds_a_python_member_only_one_base_declares() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    let base = index_source(
+        &store,
+        "b.py",
+        "class B:\n    def save(self):\n        pass\n",
+    );
+    index_source(&store, "c.py", "class C:\n    pass\n");
+    let child = index_source(
+        &store,
+        "child.py",
+        "from b import B\nfrom c import C\n\n\nclass Child(B, C):\n    def run(self):\n        self.save()\n",
+    );
+    let owner = pending_receiver_call_owner(&store, child, "self");
+    // Only one base declares `save`, so every linearization reaches it and the
+    // walk may still bind without knowing the order.
+    for _ in 0..3 {
+        store.requeue_stale_resolutions().expect("requeue");
+        resolve_pending(&store, None).expect("sweep");
+    }
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![base],
+        "the one declaring base wins without an ordering decision"
     );
 }

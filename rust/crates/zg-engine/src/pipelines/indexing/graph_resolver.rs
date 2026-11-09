@@ -336,10 +336,11 @@ fn classify_names(
         // A Java import names an entity rather than a module, and only its own
         // specifier can place it: the package segment never reaches the index,
         // so the rule matches the candidate's declared path against the tail
-        // of the specifier. A specifier that identifies no single candidate
-        // stays pending — the bare-name rules below would bind the short name
-        // (`work`) and drop the class that disambiguates it.
-        return Ok(match resolve_java_import(stored, &hits) {
+        // of the specifier and the package against the file it lives in. A
+        // specifier that identifies no single candidate stays pending — the
+        // bare-name rules below would bind the short name (`work`) and drop
+        // the class that disambiguates it.
+        return Ok(match resolve_java_import(snapshot, stored, &hits) {
             Some(resolution) => Outcome::Resolved {
                 resolution,
                 rule: Rule::ImportBound,
@@ -1088,6 +1089,28 @@ fn is_self_receiver(language: &str, receiver: &str) -> bool {
     }
 }
 
+/// The candidates declaring a member inside `scope`, recognized by the
+/// qualified name extraction builds from the declaring breadcrumb.
+fn declarations_in<'a>(hits: &'a [NameIndexEntry], scope: &str) -> Vec<&'a NameIndexEntry> {
+    hits.iter()
+        .filter(|hit| {
+            hit.qualified_name
+                .rsplit_once("::")
+                .is_some_and(|(candidate, _)| candidate == scope)
+        })
+        .collect()
+}
+
+/// The resolution a member rule writes: the declaring scope came from the
+/// hierarchy, so the edge makes no workspace-wide claim.
+fn member_resolution(stored: &StoredPendingRef, hit: &NameIndexEntry) -> Resolution {
+    Resolution {
+        ref_id: stored.id,
+        target_id: hit.entity_id.clone(),
+        provenance: EdgeProvenance::FileScoped,
+    }
+}
+
 /// Binds a member call to the nearest declaration among `scopes`, which the
 /// caller orders by precedence: the receiver's own class first, then its
 /// bases by distance. The closest scope declaring the member decides, since
@@ -1101,27 +1124,75 @@ fn bind_nearest_member(
     scopes: &[String],
 ) -> Option<Resolution> {
     for scope in scopes {
-        let matched: Vec<&NameIndexEntry> = hits
-            .iter()
-            .filter(|hit| {
-                hit.qualified_name
-                    .rsplit_once("::")
-                    .is_some_and(|(candidate, _)| candidate == scope.as_str())
-            })
-            .collect();
-        match matched.as_slice() {
+        match declarations_in(hits, scope).as_slice() {
             [] => {}
-            [hit] => {
-                return Some(Resolution {
-                    ref_id: stored.id,
-                    target_id: hit.entity_id.clone(),
-                    provenance: EdgeProvenance::FileScoped,
-                });
-            }
+            [hit] => return Some(member_resolution(stored, hit)),
             _ => return None,
         }
     }
     None
+}
+
+/// Binds a member call across the hierarchy `caller` heads, reading `scopes`
+/// in the order the walk produced.
+///
+/// That order is distance from the caller, which reproduces the lookup order
+/// of single inheritance: the caller, then its base, then the base's base. A
+/// class with several bases leaves the order to the language — Python
+/// linearizes them (C3), so `Child(A, B)` with `A(Grand)` searches
+/// `Child, A, Grand, B` while this walk offers `Child, A, B, Grand` and would
+/// bind `B.save` over `Grand.save`. Where the walk cannot reproduce that
+/// order it declines to choose between the bases.
+fn bind_hierarchy_member(
+    stored: &StoredPendingRef,
+    hits: &[NameIndexEntry],
+    caller: Option<&str>,
+    scopes: &[String],
+    branched: bool,
+) -> Option<Resolution> {
+    if branched && stored.language == "python" {
+        return bind_sole_declaration(stored, hits, caller, scopes);
+    }
+    bind_nearest_member(stored, hits, scopes)
+}
+
+/// Binds a member call whose language searches the hierarchy in an order this
+/// walk cannot reproduce.
+///
+/// The caller heads every order a language can choose, and a member exactly
+/// one base declares is reached by every order too, so both still bind. Only
+/// several bases declaring it make the answer a function of the order, which
+/// stays pending rather than binding the base the walk happens to reach first.
+fn bind_sole_declaration(
+    stored: &StoredPendingRef,
+    hits: &[NameIndexEntry],
+    caller: Option<&str>,
+    scopes: &[String],
+) -> Option<Resolution> {
+    if let Some(caller) = caller {
+        match declarations_in(hits, caller).as_slice() {
+            [] => {}
+            [hit] => return Some(member_resolution(stored, hit)),
+            _ => return None,
+        }
+    }
+    let mut declaration: Option<&NameIndexEntry> = None;
+    for scope in scopes {
+        if Some(scope.as_str()) == caller {
+            continue;
+        }
+        match declarations_in(hits, scope).as_slice() {
+            [] => {}
+            [hit] => {
+                if declaration.is_some() {
+                    return None;
+                }
+                declaration = Some(hit);
+            }
+            _ => return None,
+        }
+    }
+    declaration.map(|hit| member_resolution(stored, hit))
 }
 
 /// Resolves a receiver call that names the enclosing instance (`self`,
@@ -1166,28 +1237,24 @@ fn resolve_receiver_class(
     }) else {
         return Ok(None);
     };
+    let caller = (!superclass).then_some(enclosing.as_str());
     let mut scopes = Vec::new();
-    if superclass {
-        collect_base_scopes(
-            store,
-            snapshot,
-            &enclosing,
-            &mut scopes,
-            &mut HashSet::new(),
-            1,
-        )?;
-    } else {
+    if !superclass {
         scopes.push(enclosing.clone());
-        collect_base_scopes(
-            store,
-            snapshot,
-            &enclosing,
-            &mut scopes,
-            &mut HashSet::new(),
-            8,
-        )?;
     }
-    Ok(bind_nearest_member(stored, hits, &scopes))
+    let branched = collect_base_scopes(
+        store,
+        snapshot,
+        &enclosing,
+        &mut scopes,
+        &mut HashSet::new(),
+        // `super` addresses the direct bases only; a self receiver walks the
+        // whole chain a fixed number of hops out.
+        if superclass { 1 } else { 8 },
+    )?;
+    Ok(bind_hierarchy_member(
+        stored, hits, caller, &scopes, branched,
+    ))
 }
 
 /// Binds a receiver call through the owner's declared bindings: a local
@@ -1253,7 +1320,7 @@ fn resolve_receiver_typed(
     // The member's declaring scope is the bound type's own, then its
     // ancestors nearest first, mirroring the self-receiver hierarchy.
     let mut scopes = vec![type_scope.clone()];
-    collect_base_scopes(
+    let branched = collect_base_scopes(
         store,
         snapshot,
         &type_scope,
@@ -1261,7 +1328,13 @@ fn resolve_receiver_typed(
         &mut HashSet::new(),
         8,
     )?;
-    Ok(bind_nearest_member(stored, hits, &scopes))
+    Ok(bind_hierarchy_member(
+        stored,
+        hits,
+        Some(type_scope.as_str()),
+        &scopes,
+        branched,
+    ))
 }
 
 /// Appends the qualified names of every base class reachable from
@@ -1274,6 +1347,10 @@ fn resolve_receiver_typed(
 /// inheritance cycles; a class whose entities spell its scope ambiguously
 /// ends that branch conservatively.
 ///
+/// Returns whether one class on the way declares several bases, the condition
+/// under which distance is no longer the language's own lookup order and the
+/// caller must not read `scopes` as a precedence order.
+///
 /// # Errors
 /// Propagates graph storage failures.
 fn collect_base_scopes(
@@ -1283,9 +1360,10 @@ fn collect_base_scopes(
     scopes: &mut Vec<String>,
     visited: &mut HashSet<String>,
     remaining: usize,
-) -> crate::EngineResult<()> {
+) -> crate::EngineResult<bool> {
     visited.insert(class_scope.to_owned());
     let mut frontier = vec![class_scope.to_owned()];
+    let mut branched = false;
     for _ in 0..remaining {
         let mut bases = Vec::new();
         for scope in &frontier {
@@ -1293,7 +1371,10 @@ fn collect_base_scopes(
                 continue;
             };
             let (resolved, pending) = store.inheritance_bases(&class_id)?;
-            bases.extend(resolved);
+            // Clauses, not resolved bases: a base the index cannot place still
+            // occupies a position in the order the language searches.
+            branched |= resolved.len() + pending.len() > 1;
+            let mut declared = resolved;
             for name in pending {
                 // Hidden candidates must not turn an ambiguous base name into
                 // a seemingly unique ancestor.
@@ -1305,9 +1386,10 @@ fn collect_base_scopes(
                         .collect::<Vec<_>>(),
                 );
                 if let [hit] = candidates.as_slice() {
-                    bases.push(hit.entity_id.clone());
+                    declared.push(hit.entity_id.clone());
                 }
             }
+            bases.extend(declared);
         }
         let mut next = Vec::new();
         for base_id in bases {
@@ -1325,7 +1407,7 @@ fn collect_base_scopes(
         }
         frontier = next;
     }
-    Ok(())
+    Ok(branched)
 }
 
 /// The entity whose qualified name spells `class_scope`, addressed through
@@ -1394,20 +1476,31 @@ fn resolve_qualified_name(
 ///
 /// Java imports address entities, not modules: `import p.Widget;` names the
 /// type `Widget`, while `import static p.Util.work;` names the member `work`
-/// of class `Util`. The specifier carries the package, but a class's indexed
-/// `qualified_name` starts at the class itself, so the match is a dotted
-/// suffix on a segment boundary: `p.Util.work` names `Util::work` and
-/// `p.Outer.Inner` names `Outer::Inner`, never `Other::work`. On-demand forms
-/// (`p.*`, `p.Util.*`) name no single target and stay pending.
+/// of class `Util`. A class's indexed `qualified_name` starts at the class
+/// itself, so the name part of the specifier matches as a dotted suffix on a
+/// segment boundary: `p.Util.work` names `Util::work` and `p.Outer.Inner`
+/// names `Outer::Inner`, never `Other::work`. On-demand forms (`p.*`,
+/// `p.Util.*`) name no single target and stay pending.
 ///
-/// The package itself is no evidence: two same-named classes in different
-/// packages share one indexed name, so a specifier that reaches both stays
-/// ambiguous. The bound edge contributes its target's file to this file's
-/// import scope on the next sweep, like every entity-targeted import.
-fn resolve_java_import(stored: &StoredPendingRef, hits: &[NameIndexEntry]) -> Option<Resolution> {
-    let mut matched = hits
-        .iter()
-        .filter(|hit| import_names(&stored.reference.ref_name, &hit.qualified_name));
+/// The package the specifier states must also agree with where the class
+/// lives: a specifier for an external package would otherwise accept the
+/// workspace's only class of that name, since the package is the one part of
+/// the identity the name index does not carry. Without that confirmation the
+/// reference stays pending instead of binding an unrelated file into this
+/// file's import scope.
+fn resolve_java_import(
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    hits: &[NameIndexEntry],
+) -> Option<Resolution> {
+    let specifier = stored.reference.ref_name.as_str();
+    let mut matched = hits.iter().filter(|hit| {
+        java_import_match(
+            snapshot.file_path(hit.file_id),
+            specifier,
+            &hit.qualified_name,
+        )
+    });
     let hit = matched.next()?;
     if matched.next().is_some() {
         return None;
@@ -1419,14 +1512,50 @@ fn resolve_java_import(stored: &StoredPendingRef, hits: &[NameIndexEntry]) -> Op
     })
 }
 
-/// Whether a Java import specifier can spell `qualified_name`: the name
-/// itself, or a dotted suffix that starts after a package segment.
-fn import_names(specifier: &str, qualified_name: &str) -> bool {
-    let path = qualified_name.replace("::", ".");
-    match specifier.strip_suffix(&path) {
-        Some(prefix) => prefix.is_empty() || prefix.ends_with('.'),
-        None => false,
+/// Whether a Java import specifier names `qualified_name`, declared in the
+/// file at `path`: the name as a dotted suffix past a package segment, and a
+/// package the class's location confirms. A class with no recorded path has
+/// no such evidence.
+fn java_import_match(path: Option<&str>, specifier: &str, qualified_name: &str) -> bool {
+    let Some(package) = specifier_package(specifier, qualified_name) else {
+        return false;
+    };
+    path.is_some_and(|path| declares_package(path, package))
+}
+
+/// The package a specifier states before the name it spells: `p.Util.work`
+/// states `p` for `Util::work`, and a specifier spelling only the name states
+/// the default package. `None` when the specifier does not end with the dotted
+/// name on a segment boundary.
+fn specifier_package<'a>(specifier: &'a str, qualified_name: &str) -> Option<&'a str> {
+    let name = qualified_name.replace("::", ".");
+    let prefix = specifier.strip_suffix(&name)?;
+    if prefix.is_empty() {
+        return Some("");
     }
+    prefix.strip_suffix('.')
+}
+
+/// Whether a class living at `path` can declare `package`.
+///
+/// The package survives only in that path: extraction indexes a class under
+/// the name it spells, so `my/Util.java` is the only evidence that `Util`
+/// belongs to package `my`. The index records paths relative to the workspace
+/// root, which in a typical layout sits above the Java source root
+/// (`src/main/java/com/acme/Util.java`), so the package names a trailing run
+/// of the file's directory segments. A class in the default package needs the
+/// file at the root itself.
+fn declares_package(path: &str, package: &str) -> bool {
+    let directory = path.rsplit_once('/').map_or("", |(directory, _)| directory);
+    let segments: Vec<&str> = directory
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if package.is_empty() {
+        return segments.is_empty();
+    }
+    let stated: Vec<&str> = package.split('.').collect();
+    segments.len() >= stated.len() && segments[segments.len() - stated.len()..] == stated[..]
 }
 
 /// Reports import references whose specifier can never address a workspace
@@ -1737,6 +1866,58 @@ mod alias_pair_tests {
             rust_alias_pairs("use crate::util::work as w; // alias"),
             pairs(&[("w", Some("work"))])
         );
+    }
+}
+
+#[cfg(test)]
+mod java_import_tests {
+    use super::{declares_package, java_import_match};
+
+    #[test]
+    fn a_package_names_a_trailing_run_of_the_files_directory() {
+        // The workspace root may sit above the Java source root, so only the
+        // package's position relative to the end can be compared.
+        assert!(declares_package(
+            "src/main/java/com/acme/Util.java",
+            "com.acme"
+        ));
+        assert!(declares_package("com/acme/Util.java", "com.acme"));
+        assert!(declares_package("Util.java", ""));
+        assert!(!declares_package("my/List.java", "java.util"));
+        assert!(!declares_package("my/List.java", "my.inner"));
+        assert!(!declares_package("com/acme/Util.java", "me.com.acme"));
+        // A named package needs a directory, and the default package needs none.
+        assert!(!declares_package("com/acme/Util.java", ""));
+        assert!(!declares_package("Util.java", "com.acme"));
+    }
+
+    #[test]
+    fn a_specifier_states_the_package_before_the_name() {
+        assert!(java_import_match(
+            Some("com/acme/Util.java"),
+            "com.acme.Util.work",
+            "Util::work"
+        ));
+        assert!(java_import_match(
+            Some("com/acme/Outer.java"),
+            "com.acme.Outer.Inner",
+            "Outer::Inner"
+        ));
+        assert!(java_import_match(Some("Util.java"), "Util", "Util"));
+        // The same class name in another package names nothing here.
+        assert!(!java_import_match(
+            Some("my/List.java"),
+            "java.util.List",
+            "List"
+        ));
+        // A name that does not start on a segment boundary spells another name.
+        assert!(!java_import_match(
+            Some("com/acme/MyUtil.java"),
+            "com.acme.MyUtil",
+            "Util"
+        ));
+        // A class with no recorded path carries no package evidence.
+        assert!(!java_import_match(None, "com.acme.Util", "Util"));
     }
 }
 
