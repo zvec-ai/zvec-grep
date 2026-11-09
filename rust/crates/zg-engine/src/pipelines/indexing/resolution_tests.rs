@@ -99,6 +99,30 @@ fn index_source(store: &IndexStore, path: &str, text: &str) -> FileId {
     id
 }
 
+/// Stores `path` as a `Failed` record, the way a pass that discovers a file but
+/// cannot index it does: the record exists, while the path never enters the
+/// snapshot's path lookup.
+fn fail_source(store: &IndexStore, path: &str) {
+    let relative_path = SourcePath::new(path).expect("source path");
+    let id = store
+        .resolve_file_ids(&[relative_path.to_path_buf()])
+        .expect("reserve file ID")[0];
+    let file = FileRecord::new(
+        id,
+        relative_path,
+        FileSnapshot {
+            size_bytes: 0,
+            modified_epoch_ms: Some(1),
+            content_hash: Some(crate::utils::sha256_hex(b"")),
+        },
+        FileIndexStatus::NotIndexed,
+    )
+    .expect("file record");
+    store
+        .mark_file_failed(&file, "embedding failed")
+        .expect("failed record");
+}
+
 #[test]
 fn sweep_resolves_relative_import_and_imported_call_from_real_extraction() {
     let home = tempfile::tempdir().expect("workspace");
@@ -977,6 +1001,66 @@ fn stale_evidence_requeues_after_a_pass_stops_before_its_sweep() {
         "the shorter module wins once it exists"
     );
     assert_eq!(call_target_files(&store, &owner), vec![sibling]);
+}
+
+#[test]
+fn sweep_rebinds_an_import_after_a_failed_file_becomes_indexed() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    let nested = index_source(&store, "lib/index.ts", "export function work() {\n}\n");
+    let main = index_source(
+        &store,
+        "main.ts",
+        "import { work } from './lib';\n\nexport function run() {\n  work();\n}\n",
+    );
+    let owner = pending_call_owner(&store, main, "work");
+    let sweep = resolve_pending(&store, None).expect("first sweep");
+    assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
+    assert_eq!(
+        import_target_ids(&store, main),
+        vec![format!("f{}", nested.get())],
+        "the directory entry is the only `./lib` module so far"
+    );
+
+    // The pass that discovers `lib.ts` cannot embed it: the record is stored as
+    // `Failed`, which keeps the path out of the snapshot's path lookup while the
+    // record itself already exists. Its requeue and sweep change nothing — the
+    // specifier still names the directory entry.
+    fail_source(&store, "lib.ts");
+    store
+        .requeue_stale_resolutions()
+        .expect("requeue after the failure");
+    resolve_pending(&store, None).expect("pass over the failed file");
+    assert_eq!(
+        import_target_ids(&store, main),
+        vec![format!("f{}", nested.get())],
+        "a failed file is no module path"
+    );
+
+    // Indexing it on a later pass enters the path set. `./lib` now names
+    // `lib.ts` before `lib/index.ts`, so the import — and the call that bound
+    // through its scope — must be resolved again instead of keeping the old
+    // endpoints.
+    let flat = index_source(&store, "lib.ts", "export function work() {\n}\n");
+    let requeued = store
+        .requeue_stale_resolutions()
+        .expect("requeue after it is indexed");
+    assert!(
+        requeued >= 2,
+        "the import and its scoped call return to the queue: {requeued}"
+    );
+    let sweep = resolve_pending(&store, None).expect("second sweep");
+    assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
+    assert_eq!(
+        import_target_ids(&store, main),
+        vec![format!("f{}", flat.get())],
+        "the newly indexed sibling wins the specifier"
+    );
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![flat],
+        "the call follows the import's new target"
+    );
 }
 
 #[test]

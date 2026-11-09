@@ -8,8 +8,8 @@ const STALE_NAME: i64 = 0;
 /// kinds: the table already carried this `kind` when inheritance evidence was
 /// added, and a wider `CHECK` would not reach an existing database.
 const STALE_STRUCTURE: i64 = 1;
-/// A file appeared or disappeared, which can reorder the module paths an
-/// import specifier reads.
+/// A file entered or left the indexed set, which can reorder the module paths
+/// an import specifier reads.
 const STRUCTURE_PATHS: &str = "";
 /// A file joined or left an inheritance chain, which changes the member a
 /// receiver call resolves to without changing any name it spells.
@@ -28,9 +28,12 @@ impl SqliteGraphStorage {
     /// target belonged to the replaced file. Resolution is also a function of
     /// two workspace-wide sets: the module paths an import specifier can name
     /// (`path_variants`), and the entities sharing a name with a reference.
-    /// Adding or replacing files changes both without touching any existing
-    /// endpoint, so the evidence is written with the graph rows themselves: a
-    /// pass that never reaches its sweep still leaves it for the next one.
+    /// Both change without touching any existing endpoint: a file that starts or
+    /// stops being indexed changes the first — a new file, a failed file that
+    /// later succeeds, a file whose indexing broke — and one that introduces a
+    /// shared name changes the second. The evidence is written with the graph
+    /// rows themselves, so a pass that never reaches its sweep still leaves it
+    /// for the next one.
     ///
     /// `hierarchy_changed` covers a third input that names cannot express: the
     /// extends/implements chain a receiver call resolves through. Swapping one
@@ -62,11 +65,11 @@ impl SqliteGraphStorage {
     ///
     /// The resolution sweep only reads `pending` rows, so a resolved reference
     /// never sees a changed candidate set or module path again unless a pass
-    /// explicitly requeues it. A path change marks a pass that added or removed
-    /// a file, which can reorder the preferred `path_variants` entry of every
-    /// import; import-scoped calls follow it because they bind through the
-    /// file's resolved imports. The recorded names hold every symbol this pass
-    /// wrote, because a second entity of the same name can break a former
+    /// explicitly requeues it. A path change marks a pass that changed which
+    /// paths are indexed, which can reorder the preferred `path_variants` entry
+    /// of every import; import-scoped calls follow it because they bind through
+    /// the file's resolved imports. The recorded names hold every symbol this
+    /// pass wrote, because a second entity of the same name can break a former
     /// unique match. A hierarchy change reaches a third set: member calls whose
     /// declaring scope was chosen by walking extends/implements, which no name
     /// in this pass spells. `overflow` replaces an oversized name set with a

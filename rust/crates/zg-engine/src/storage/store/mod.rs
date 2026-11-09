@@ -553,12 +553,22 @@ fn replace_file(
     state.entities.validate_ownership(entities, file.id())?;
     state.fragments.validate_ownership(entries, file.id())?;
     // Endpoint invalidation below only revisits references that pointed at this
-    // file's old entities. A file that appeared, or one that introduces a name
-    // another entity already uses, changes the workspace-wide sets resolution
-    // reads without touching those endpoints, so the graph records that
-    // evidence with the rows it can stale and the pass requeues them once
-    // before its sweep.
-    let appeared = state.files.fetch(&[file.id()])?.is_empty();
+    // file's old entities. A file that enters or leaves the indexed set, or one
+    // that introduces a name another entity already uses, changes the
+    // workspace-wide sets resolution reads without touching those endpoints, so
+    // the graph records that evidence with the rows it can stale and the pass
+    // requeues them once before its sweep.
+    //
+    // Membership is what an import specifier reads, not record existence: the
+    // snapshot's path lookup skips `Failed` and `NotIndexed` records, so a path
+    // that failed one pass and succeeded the next enters the set while its
+    // record already exists — and one that breaks leaves it the same way.
+    let previous_indexed = state
+        .files
+        .fetch(&[file.id()])?
+        .remove(&file.id())
+        .is_some_and(|previous| previous.index_status().is_indexed());
+    let paths_changed = previous_indexed != file.index_status().is_indexed();
     state.needs_optimize = true;
     let directories = state.directories.ensure(file.relative_path())?;
     // Encode every projection before removing any of the previous file's data.
@@ -581,7 +591,13 @@ fn replace_file(
     // zvec writes are durable on success: record retry intent before advancing SQLite.
     if let Ok(storage) = state.graph.as_mut() {
         storage
-            .write_file_graph(file.id().get(), Some(language), graph, &old_ids, appeared)
+            .write_file_graph(
+                file.id().get(),
+                Some(language),
+                graph,
+                &old_ids,
+                paths_changed,
+            )
             .map_err(graph_error)?;
     }
     state.fragments.delete_file(file.id())?;
