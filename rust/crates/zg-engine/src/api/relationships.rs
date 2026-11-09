@@ -1,33 +1,28 @@
-//! Symbol-based incoming and outgoing call queries.
+//! Symbol-based queries over persisted directed relationships.
 
 use std::path::{Path, PathBuf};
 
-pub use crate::domain::GlobRule;
+pub use crate::domain::{Direction, GlobRule, GraphEdgeKind};
 
 use serde::{Deserialize, Serialize};
 
 /// Maximum number of exact definitions in a relationship query.
 pub const MAX_SYMBOL_MATCHES: usize = 10;
+/// Maximum returned edges per matched definition.
+pub const MAX_RELATIONSHIP_EDGES: usize = 50;
 /// Maximum length of a relationship symbol query in characters.
 pub const MAX_RELATIONSHIP_SYMBOL_CHARS: usize = 1024;
 
-/// Direction of a symbol's persisted call relationships.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RelationshipDirection {
-    Callers,
-    Callees,
-}
-
 /// Reads an existing workspace index without loading models or refreshing it.
 /// Requires a workspace indexed with [`crate::api::index::IndexOptions::graph_indexing`].
-/// Each matched definition and its call sites are read from one consistent store snapshot.
+/// Each matched definition and its edges are read from one consistent store snapshot.
 /// Different matches may reflect different indexing moments; roots changed since selection are skipped.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RelationshipOptions {
     /// Workspace location. `None` uses the working directory.
     pub root: Option<PathBuf>,
-    /// Symbol name, optionally qualified as `scope::name` or `scope.name` (as shown by rg).
+    /// Symbol name, optionally qualified as `scope::name` or `scope.name`.
     /// `::name` selects only top-level definitions; plain `name` matches any scope.
     /// Literal symbol names take precedence over dotted qualification.
     /// A trailing dot is part of the literal name.
@@ -35,10 +30,13 @@ pub struct RelationshipOptions {
     /// Missing or unrepresentable exact definitions may return similarly named suggestions without edges.
     /// Queries exceeding [`MAX_SYMBOL_MATCHES`] indexed definitions fail; narrow the scope or use `globs`.
     pub symbol: String,
+    /// Edge types to include. `None` selects all types; an empty list selects none.
+    /// `callers` and `callees` always override this with `Calls`.
+    pub kinds: Option<Vec<GraphEdgeKind>>,
     /// Ordered workspace-relative glob rules, using the same semantics as indexed search.
-    /// Filter definitions and suggestions; call-site files remain unrestricted.
+    /// Filter definitions and suggestions; edge source files remain unrestricted.
     pub globs: Vec<GlobRule>,
-    /// Maximum returned call sites per matched symbol; defaults to 20.
+    /// Maximum returned edges per matched symbol; defaults to 20, capped at [`MAX_RELATIONSHIP_EDGES`].
     pub limit: Option<usize>,
     /// Maximum workspace lock wait in milliseconds; defaults to 30 seconds.
     pub lock_timeout_ms: Option<u64>,
@@ -51,7 +49,7 @@ impl RelationshipOptions {
     /// Validate query parameters before opening storage or contacting a daemon.
     ///
     /// # Errors
-    /// Returns an invalid-argument error for an empty/overlong symbol, invalid glob, or zero limit.
+    /// Returns an invalid-argument error for an empty/overlong symbol, invalid glob, or out-of-range limit.
     pub fn validate(&self) -> crate::EngineResult<()> {
         let symbol = self.symbol.trim();
         if symbol.is_empty() || symbol.chars().count() > MAX_RELATIONSHIP_SYMBOL_CHARS {
@@ -70,6 +68,14 @@ impl RelationshipOptions {
                 "relationship limit must be positive",
             ));
         }
+        if self
+            .limit
+            .is_some_and(|limit| limit > MAX_RELATIONSHIP_EDGES)
+        {
+            return Err(crate::EngineError::invalid_argument(format!(
+                "relationship limit must not exceed {MAX_RELATIONSHIP_EDGES}",
+            )));
+        }
         Ok(())
     }
 }
@@ -79,33 +85,38 @@ impl RelationshipOptions {
 #[serde(rename_all = "camelCase")]
 pub struct SymbolDefinition {
     pub name: String,
+    #[serde(with = "native_path")]
     pub file_path: PathBuf,
     pub start_line: usize,
     pub end_line: usize,
 }
 
-/// One call site. Unavailable endpoint metadata is represented by `None`.
+/// One resolved edge. `symbol` describes the opposite endpoint when available.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CallSite {
-    /// Workspace-relative caller file containing this call site, even without a symbol.
+pub struct RelationshipEdge {
+    pub kind: GraphEdgeKind,
+    /// Direction relative to the matched definition; self-loops are `Both`.
+    pub direction: Direction,
+    /// Workspace-relative source endpoint file, even without symbol metadata.
+    #[serde(with = "native_path")]
     pub file_path: PathBuf,
     pub symbol: Option<SymbolDefinition>,
-    /// One-based call-site line.
+    /// One-based source location of the relationship, when available.
     pub line: Option<usize>,
     /// Zero-based byte column.
     pub column: Option<usize>,
 }
 
-/// One matched definition and its resolved call sites, preserving distinct source locations.
+/// One matched definition and its resolved edges, preserving distinct source locations.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SymbolRelationships {
     #[serde(flatten)]
     pub symbol: SymbolDefinition,
-    /// Whether additional visible call sites were omitted by the per-symbol limit.
+    /// Whether additional visible edges were omitted by the per-symbol limit.
     pub truncated: bool,
-    pub edges: Vec<CallSite>,
+    pub edges: Vec<RelationshipEdge>,
 }
 
 /// Exact relationship matches, or suggestions to retry when no definition matched.
@@ -116,4 +127,36 @@ pub struct RelationshipResult {
     /// No usable exact definition matched; these similarly named definitions carry no edges.
     /// At most five best-effort suggestions, not an exhaustive list of similar symbols.
     pub suggestions: Vec<SymbolDefinition>,
+}
+
+// Keep ordinary JSON paths as strings. Serde's platform-tagged OsString encoding
+// preserves non-Unicode paths across daemon replies until the text renderer runs.
+mod native_path {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::{
+        ffi::OsString,
+        path::{Path, PathBuf},
+    };
+
+    pub(super) fn serialize<S: Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
+        match path.to_str() {
+            Some(text) => text.serialize(serializer),
+            None => path.as_os_str().serialize(serializer),
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<PathBuf, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum EncodedPath {
+            Text(String),
+            Native(OsString),
+        }
+        Ok(match EncodedPath::deserialize(deserializer)? {
+            EncodedPath::Text(text) => text.into(),
+            EncodedPath::Native(native) => native.into(),
+        })
+    }
 }

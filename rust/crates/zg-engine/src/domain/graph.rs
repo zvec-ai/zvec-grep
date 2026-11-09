@@ -7,6 +7,19 @@ use serde::{Deserialize, Serialize};
 use super::metadata::SymbolType;
 use super::source::TextRange;
 
+/// Direction of a one-hop query relative to its endpoint.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    /// Edges targeting the queried endpoint.
+    In,
+    /// Edges originating from the queried endpoint.
+    Out,
+    /// Edges in either direction.
+    #[default]
+    Both,
+}
+
 /// Kinds produced by the extraction layer.
 ///
 /// Resolved edges and buffered name references share this vocabulary because
@@ -19,7 +32,7 @@ use super::source::TextRange;
 /// edge during the walk, so a buffered name reference never carries it.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum GraphEdgeKind {
+pub enum GraphEdgeKind {
     Contains,
     Calls,
     Imports,
@@ -107,8 +120,9 @@ pub(crate) struct FileGraphResult {
 }
 
 impl GraphEdgeKind {
-    #[allow(dead_code)]
-    pub(crate) const fn as_str(self) -> &'static str {
+    /// Stable serialized name of this relationship kind.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Contains => "contains",
             Self::Calls => "calls",

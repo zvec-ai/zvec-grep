@@ -1855,7 +1855,7 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_setting_controls_graph_writes_and_cached_and_uncached_reads() {
-        use crate::api::relationships::{RelationshipDirection, RelationshipOptions};
+        use crate::api::relationships::{Direction, RelationshipOptions};
         for graph_enabled in [false, true] {
             let directory = tempdir().expect("workspace");
             let engine = crate::ZvecGrep::new();
@@ -1882,10 +1882,7 @@ mod tests {
                 if cached {
                     engine.enable_read_session_cache().expect("enable cache");
                 }
-                for direction in [
-                    RelationshipDirection::Callers,
-                    RelationshipDirection::Callees,
-                ] {
+                for direction in [Direction::In, Direction::Out] {
                     let result = engine
                         .relationships(
                             direction,

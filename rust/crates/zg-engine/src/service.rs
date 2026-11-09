@@ -9,7 +9,7 @@ use crate::{
         context::{ContextOptions, ContextResult},
         index::{IndexOptions, IndexResult},
         info::{InfoOptions, InfoResult},
-        relationships::{RelationshipDirection, RelationshipOptions, RelationshipResult},
+        relationships::{Direction, RelationshipOptions, RelationshipResult},
     },
     models::ModelRuntimeManager,
     pipelines::{
@@ -84,7 +84,7 @@ impl EngineService {
 
     pub(crate) async fn relationships(
         &self,
-        direction: RelationshipDirection,
+        direction: Direction,
         options: RelationshipOptions,
     ) -> Result<RelationshipResult, EngineError> {
         self.ensure_open()?;

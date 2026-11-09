@@ -11,6 +11,9 @@ mod setup;
 
 pub use search_format::SearchPreview;
 
+#[cfg(test)]
+mod relationships_tests;
+
 use std::{
     fmt,
     path::{Component, Path, PathBuf},
@@ -53,11 +56,18 @@ use zg_engine::{
             InfoOptions, InfoResult,
             result::{IndexCompatibility, InfoSource, WorkspaceIndexPolicy},
         },
+        relationships::{
+            Direction, MAX_RELATIONSHIP_EDGES, MAX_RELATIONSHIP_SYMBOL_CHARS, MAX_SYMBOL_MATCHES,
+            RelationshipOptions, RelationshipResult,
+        },
     },
 };
 
 pub const AGENT_TOOL_NAME: &str = "zvec_grep_search";
-pub const FULL_TOOL_NAMES: [&str; 6] = [
+pub const AGENT_TOOL_NAMES: [&str; 3] = ["zvec_grep_callees", "zvec_grep_callers", AGENT_TOOL_NAME];
+pub const FULL_TOOL_NAMES: [&str; 8] = [
+    "zvec_grep_callees",
+    "zvec_grep_callers",
     "zvec_grep_index",
     "zvec_grep_index_drop",
     "zvec_grep_index_status",
@@ -94,6 +104,7 @@ pub const AGENT_INSTRUCTIONS: &str = concat!(
     "Use zvec-grep with these workspace retrieval rules:\n",
     workspace_evidence_rules!(),
     search_routing_rules!("native Grep or rg", "Read, Grep, or rg"),
+    "- For workspaces indexed with graph support, use zvec_grep_callers or zvec_grep_callees for known symbols. Empty results do not prove absence. Enable graph indexing only with user authorization: zg --index --graph (add --rebuild for an existing index).\n",
     "- Every workspace operation requires an absolute root path visible to the daemon.\n",
     "- Respect declined or cancelled index setup; do not repeat it without a renewed user request.\n",
     "- Use returned search evidence without a status preflight.\n",
@@ -105,6 +116,7 @@ pub const FULL_INSTRUCTIONS: &str = concat!(
     "Use zvec-grep with these workspace retrieval and lifecycle rules:\n",
     workspace_evidence_rules!(),
     search_routing_rules!("zvec_grep_rg", "Read or zvec_grep_rg"),
+    "- For workspaces indexed with graph support, use zvec_grep_callers or zvec_grep_callees for known symbols. Empty results do not prove absence. Enable graph indexing only with user authorization: zg --index --graph (add --rebuild for an existing index).\n",
     "- Every workspace operation requires an absolute root path visible to the daemon.\n",
     "- Respect declined or cancelled index setup; do not repeat it without a renewed user request.\n",
     "- Use the zvec_grep_* tools directly for workspace search, status, indexing, deletion, and exhaustive lexical search.\n",
@@ -223,6 +235,15 @@ pub trait IndexOperationProvider: Send + Sync {
         engine.context(request).await
     }
 
+    async fn relationships(
+        &self,
+        engine: &ZvecGrep,
+        direction: Direction,
+        request: RelationshipOptions,
+    ) -> Result<RelationshipResult, EngineError> {
+        engine.relationships(direction, request).await
+    }
+
     fn runtime_snapshot(&self, _root: &Path) -> Option<IndexRuntimeSnapshot> {
         None
     }
@@ -316,6 +337,12 @@ impl ZvecGrepMcpServer {
         index_operations: Arc<dyn IndexOperationProvider>,
     ) -> Self {
         let mut router = Self::tool_router();
+        for name in ["zvec_grep_callers", "zvec_grep_callees"] {
+            let route = router.map.get_mut(name).expect("relationship route");
+            route.attr.description = route.attr.description.as_ref().map(|description| {
+                format!("{description} Accepts name, scope::name or scope.name; ::name selects top-level definitions. Queries matching more than {MAX_SYMBOL_MATCHES} indexed definitions fail; narrow the scope or use globs. limit counts call sites per definition (default 20, maximum {MAX_RELATIONSHIP_EDGES}); a truncation notice marks omitted sites. Exact misses may return suggestions without call sites. Returns readable text with one-based line and byte-column numbers. Requires graph indexing enabled with zg --index --graph (add --rebuild for an existing index). Reads persisted resolved calls without refreshing; empty results do not prove absence.").into()
+            });
+        }
         if toolset == McpToolset::Full {
             let search = router.map.get_mut(AGENT_TOOL_NAME).expect("search route");
             search.attr.description = search.attr.description.as_ref().map(|description| {
@@ -326,7 +353,7 @@ impl ZvecGrepMcpServer {
         }
         if toolset == McpToolset::Agent {
             for name in FULL_TOOL_NAMES {
-                if name != AGENT_TOOL_NAME {
+                if !AGENT_TOOL_NAMES.contains(&name) {
                     router.disable_route(name);
                 }
             }
@@ -342,6 +369,28 @@ impl ZvecGrepMcpServer {
         }
     }
 
+    async fn relationship_query(
+        &self,
+        input: RelationshipInput,
+        context: RequestContext<RoleServer>,
+        direction: Direction,
+    ) -> Result<CallToolResult, ErrorData> {
+        let mut request = input
+            .into_request()
+            .map_err(|message| ErrorData::invalid_params(message, None))?;
+        let result = request::run(&context, |_, signal| async move {
+            request.signal = Some(signal);
+            self.index_operations
+                .relationships(&self.engine, direction, request)
+                .await
+        })
+        .await;
+        Ok(match result {
+            Ok(result) => relationship_result_to_tool_result(&result, direction),
+            Err(error) => error_result(&error),
+        })
+    }
+
     #[must_use]
     pub fn listed_tools(&self) -> Vec<rmcp::model::Tool> {
         self.router.list_all()
@@ -350,6 +399,45 @@ impl ZvecGrepMcpServer {
 
 #[tool_router]
 impl ZvecGrepMcpServer {
+    #[tool(
+        name = "zvec_grep_callers",
+        description = "Incoming call sites for a symbol. Shows caller definitions and call-site locations in the caller files.",
+        annotations(
+            title = "Incoming call sites for a symbol",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn callers(
+        &self,
+        Parameters(input): Parameters<RelationshipInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.relationship_query(input, context, Direction::In).await
+    }
+
+    #[tool(
+        name = "zvec_grep_callees",
+        description = "Outgoing call sites for a symbol. Shows callee definitions and call-site locations in the caller file.",
+        annotations(
+            title = "Outgoing call sites for a symbol",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn callees(
+        &self,
+        Parameters(input): Parameters<RelationshipInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.relationship_query(input, context, Direction::Out)
+            .await
+    }
+
     #[tool(
         name = "zvec_grep_search",
         description = "Search a workspace index for semantic, relational, cross-file, or multi-hop evidence such as architecture, call chains, dependencies, lifecycle, data or control flow, design rationale, and comparisons. Use it when exact lookup alone cannot answer a workspace-grounded question. Results start with freshness and any global index diagnostics, followed by CLI-formatted bounded source snippets; set preview: \"full\" to return all available source content of each retrieved item without changing retrieval or ranking. Treat sufficient returned content as already-read evidence without a status preflight. Use native Grep or rg instead when exact lookup alone is sufficient. A missing index can request user model selection and authorization; accepted setup starts a background build and returns indexing status. Retry after completion.",
@@ -753,6 +841,25 @@ pub enum GlobListInput {
 // them to fields where null clears a saved setting (Option<Option<T>>).
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RelationshipInput {
+    /// Absolute workspace root visible to the daemon.
+    #[schemars(length(min = 1, max = 1024))]
+    pub root: String,
+    /// Symbol name or scope-qualified name, such as `Class::method` or `Class.method`; `::name` selects only top-level definitions.
+    #[schemars(length(min = 1, max = MAX_RELATIONSHIP_SYMBOL_CHARS))]
+    pub symbol: String,
+    /// Ordered workspace-relative glob rules for definitions and suggestions; call-site files remain unrestricted.
+    #[schemars(length(max = 128))]
+    pub globs: Option<GlobListInput>,
+    /// Ordered case-insensitive glob rules, applied after globs, as in search.
+    pub insensitive_globs: Option<PathListInput>,
+    /// Maximum call sites per matching symbol; defaults to 20, capped at 50.
+    #[schemars(range(min = 1, max = MAX_RELATIONSHIP_EDGES), extend("type" = "integer"))]
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SearchInput {
     /// Absolute workspace root visible to the daemon.
     #[schemars(length(min = 1, max = 1024))]
@@ -822,6 +929,9 @@ pub struct SearchInput {
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct IndexInput {
+    /// Persist graph indexing; omitted keeps the saved setting. Changes require rebuild.
+    #[schemars(extend("type" = "boolean"))]
+    pub graph_indexing: Option<bool>,
     /// Absolute workspace root visible to the daemon.
     #[schemars(length(min = 1, max = 1024))]
     pub root: String,
@@ -1530,6 +1640,24 @@ fn normalize_filter_names<T>(
         .transpose()
 }
 
+impl RelationshipInput {
+    fn into_request(self) -> Result<RelationshipOptions, String> {
+        let root = absolute_root(&self.root)?;
+        let request = RelationshipOptions {
+            root: Some(root),
+            symbol: self.symbol,
+            kinds: Some(vec![zg_engine::api::relationships::GraphEdgeKind::Calls]),
+            globs: normalize_globs(self.globs, self.insensitive_globs)?.unwrap_or_default(),
+            limit: self.limit,
+            ..RelationshipOptions::default()
+        };
+        request
+            .validate()
+            .map_err(|error| error.message().to_owned())?;
+        Ok(request)
+    }
+}
+
 impl SearchInput {
     fn into_request(self) -> Result<ContextOptions, String> {
         let root = absolute_root(&self.root)?;
@@ -1707,6 +1835,7 @@ impl IndexInput {
             options: Box::new(IndexOptions {
                 root: Some(root),
                 rebuild: self.rebuild.unwrap_or(false),
+                graph_indexing: self.graph_indexing,
                 reset_paths: self.reset_paths.unwrap_or(false),
                 scan,
                 embedding,
@@ -1727,6 +1856,7 @@ impl IndexInput {
             || self.endpoint.is_some()
             || self.embedding.is_some()
             || self.rebuild.is_some()
+            || self.graph_indexing.is_some()
             || self.reset_paths.is_some()
             || self.included_formats.is_some()
             || self.excluded_formats.is_some()
@@ -2056,6 +2186,23 @@ fn output_schema<T: JsonSchema>() -> Arc<rmcp::model::JsonObject> {
             .expect("MCP output schema must be an object")
             .clone(),
     )
+}
+
+fn relationship_result_to_tool_result(
+    result: &RelationshipResult,
+    direction: Direction,
+) -> CallToolResult {
+    let mut bytes = Vec::new();
+    zg_cli::write_relationships(
+        &mut bytes,
+        result,
+        direction,
+        zg_cli::ColorMode::Never,
+        false,
+    )
+    .expect("writing relationships to a byte buffer cannot fail");
+    let text = String::from_utf8(bytes).expect("relationship output is UTF-8");
+    CallToolResult::success(vec![ContentBlock::text(text)])
 }
 
 fn structured_result(value: impl Serialize) -> CallToolResult {
@@ -2945,6 +3092,9 @@ mod tests {
             let arguments = match tool.name.as_ref() {
                 "zvec_grep_search" => serde_json::json!({"root": test_root(), "query": "needle"}),
                 "zvec_grep_rg" => serde_json::json!({"root": test_root(), "command": "rg needle"}),
+                "zvec_grep_callers" | "zvec_grep_callees" => {
+                    serde_json::json!({"root": test_root(), "symbol": "run"})
+                }
                 "zvec_grep_server_status" => serde_json::json!({}),
                 _ => serde_json::json!({"root": test_root()}),
             };
@@ -3083,16 +3233,19 @@ mod tests {
     }
 
     #[test]
-    fn agent_server_exposes_only_search() {
+    fn agent_server_exposes_search_and_relationships() {
         let server = ZvecGrepMcpServer::agent_direct(Arc::new(ZvecGrep::new()));
         let tools = server.listed_tools();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, AGENT_TOOL_NAME);
+        let names = tools
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, super::AGENT_TOOL_NAMES);
         assert!(server.get_info().instructions.is_some());
     }
 
     #[test]
-    fn full_server_exposes_all_six_tools() {
+    fn full_server_exposes_all_eight_tools() {
         let server =
             ZvecGrepMcpServer::full_direct(Arc::new(ZvecGrep::new()), Arc::new(FixedStatus));
         let names = server
@@ -3127,6 +3280,7 @@ mod tests {
                     "zvec_grep_index" => &[
                         ("drop", "boolean"),
                         ("rebuild", "boolean"),
+                        ("graphIndexing", "boolean"),
                         ("resetPaths", "boolean"),
                         ("includeHidden", "boolean"),
                         ("useDefaultIgnores", "boolean"),
@@ -3222,6 +3376,7 @@ mod tests {
             "drop",
             "rebuild",
             "resetPaths",
+            "graphIndexing",
             "includeHidden",
             "useDefaultIgnores",
             "nestedGit",
@@ -3292,6 +3447,18 @@ mod tests {
 
     #[test]
     fn index_updates_preserve_explicit_values() {
+        for value in [None, Some(false), Some(true)] {
+            let parsed: IndexInput = serde_json::from_value(serde_json::json!({
+                "root": test_root(), "graphIndexing": value
+            }))
+            .expect("graph setting");
+            let IndexToolRequest::Index { options, .. } = parsed.into_request().expect("index")
+            else {
+                panic!("index");
+            };
+            assert_eq!(options.graph_indexing, value);
+        }
+
         let parsed: IndexInput = serde_json::from_value(serde_json::json!({
             "root": test_root(), "globs": [], "includedFormats": [], "excludedFormats": [],
             "includeHidden": false, "followSymlinks": false, "nestedGit": false, "ignoreFiles": [],
@@ -3831,6 +3998,7 @@ mod tests {
 
     fn index_input() -> IndexInput {
         IndexInput {
+            graph_indexing: None,
             root: test_root().display().to_string(),
             api_key: None,
             device: None,

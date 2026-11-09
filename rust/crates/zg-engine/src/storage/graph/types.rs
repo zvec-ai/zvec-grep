@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -7,15 +6,7 @@ use crate::domain::{EdgeProvenance, PendingRef};
 /// Extensible evidence attached to edges and unresolved references.
 pub(crate) type Metadata = BTreeMap<String, Value>;
 
-/// Direction of a one-hop query relative to its endpoint.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum Direction {
-    In,
-    Out,
-    #[default]
-    Both,
-}
+pub(crate) use crate::domain::Direction;
 
 /// A pending reference with its database identity.
 #[derive(Clone, Debug, PartialEq)]
