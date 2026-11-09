@@ -21,6 +21,12 @@ const release = {
   ],
 };
 
+function registryMetadataResponse(pkg, url) {
+  const metadata = { dist: { integrity: pkg.integrity } };
+  return { ok: true, json: async () => url.endsWith(`/${pkg.version}`)
+    ? metadata : { versions: { [pkg.version]: metadata } } };
+}
+
 async function artifactFixture(t, withComponents = false, componentTarget = "linux-x64-gnu") {
   const root = await mkdtemp(join(tmpdir(), "zg-artifact-smoke-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -425,12 +431,7 @@ test("registry smoke installs only the meta package and exercises a distinct upd
     release,
     baseline: "0.2.2",
     prefixRoot,
-    registryFetch: async () => ({
-      ok: true,
-      json: async () => ({
-        dist: { integrity: release.packages[0].integrity },
-      }),
-    }),
+    registryFetch: async (url) => registryMetadataResponse(release.packages[0], url),
     runNpm: (_, args, { env }) => {
       assert.ok(args.includes("--registry=https://registry.npmjs.org"));
       assert.ok(!args.some((arg) => arg.endsWith(".tgz")));
@@ -479,7 +480,7 @@ for (const contamination of ["receipt", "library", "cache", "download"]) {
     let probes = 0;
     await assert.rejects(smokeRegistryRelease({
       manifest: fixtureManifest, release, baseline: "0.2.2", prefixRoot,
-      registryFetch: async () => ({ ok: true, json: async () => ({ dist: { integrity: release.packages[0].integrity } }) }),
+      registryFetch: async (url) => registryMetadataResponse(release.packages[0], url),
       runNpm: async (_, args, { env }) => {
         assert.equal(args[0], "install", "explicit CUDA rebuild must follow CPU upgrade validation");
         installs++;
@@ -522,13 +523,15 @@ test("registry smoke waits for delayed metadata for every package before install
     manifest, release: candidate, baseline: "0.2.2", prefixRoot,
     registryWait: { timeoutMs: 1_000, intervalMs: 0 },
     registryFetch: async (url) => {
+      const path = decodeURIComponent(new URL(url).pathname);
       const pkg = candidate.packages.find((pkg) =>
-        url.endsWith(`/${encodeURIComponent(pkg.name)}/${pkg.version}`));
+        path === `/${pkg.name}` || path === `/${pkg.name}/${pkg.version}`);
       assert.ok(pkg);
+      if (!path.endsWith(`/${pkg.version}`)) return registryMetadataResponse(pkg, url);
       const count = (requests.get(pkg.name) ?? 0) + 1;
       requests.set(pkg.name, count);
       if (pkg === component && count < 3) return { status: 404 };
-      return { ok: true, json: async () => ({ dist: { integrity: pkg.integrity } }) };
+      return registryMetadataResponse(pkg, url);
     },
     runNpm: () => {
       assert.equal(requests.get(component.name), 3);
@@ -552,13 +555,48 @@ test("a missing registry candidate times out before any npm installation", async
   );
 });
 
+for (const delayedAccept of ["application/json", "application/vnd.npm.install-v1+json"]) {
+  test(`registry smoke waits for ${delayedAccept} after version metadata is visible`, async (t) => {
+    const prefixRoot = await mkdtemp(join(tmpdir(), "zg-registry-packument-"));
+    t.after(() => rm(prefixRoot, { recursive: true, force: true }));
+    const platform = {
+      name: "@zvec/zvec-grep-win32-arm64-msvc",
+      version: release.version,
+      integrity: "sha512-arm64-platform",
+    };
+    const candidate = { ...release, packages: [...release.packages, platform] };
+    let delayedRequests = 0;
+    await assert.rejects(smokeRegistryRelease({
+      manifest, release: candidate, baseline: "0.2.2", prefixRoot,
+      registryWait: { timeoutMs: 1_000, intervalMs: 0 },
+      registryFetch: async (url, { headers } = {}) => {
+        const path = decodeURIComponent(new URL(url).pathname);
+        const pkg = candidate.packages.find((pkg) =>
+          path === `/${pkg.name}` || path === `/${pkg.name}/${pkg.version}`);
+        assert.ok(pkg);
+        const metadata = { dist: { integrity: pkg.integrity } };
+        if (path.endsWith(`/${pkg.version}`)) return { ok: true, json: async () => metadata };
+        if (pkg === platform && headers?.accept === delayedAccept && ++delayedRequests < 3) {
+          // The package exists, but npm cannot resolve the newly published version.
+          return { ok: true, json: async () => ({ versions: {} }) };
+        }
+        return { ok: true, json: async () => ({ versions: { [pkg.version]: metadata } }) };
+      },
+      runNpm: () => {
+        assert.equal(delayedRequests, 3, "must not install before npm can resolve the platform package");
+        throw new Error("reached registry installation");
+      },
+    }), /reached registry installation/);
+  });
+}
+
 test("registry model failure prevents update, rollback and a success report", async (t) => {
   const prefixRoot = await mkdtemp(join(tmpdir(), "zg-registry-model-failure-"));
   t.after(() => rm(prefixRoot, { recursive: true, force: true }));
   const installs = [];
   await assert.rejects(smokeRegistryRelease({
     manifest, release, baseline: "0.2.2", prefixRoot,
-    registryFetch: async () => ({ ok: true, json: async () => ({ dist: { integrity: release.packages[0].integrity } }) }),
+    registryFetch: async (url) => registryMetadataResponse(release.packages[0], url),
     runNpm: (_, args) => installs.push(args.at(-1)),
     verifyInstalled: async () => { await mkdir(prefixRoot, { recursive: true }); return { components: [] }; },
     probe: async () => {},
