@@ -480,6 +480,28 @@ fn sweep_prefers_a_c_definition_over_the_declaration_of_the_same_symbol() {
 }
 
 #[test]
+fn sweep_keeps_a_cpp_overload_declaration_from_a_differently_shaped_definition() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    // A two-parameter prototype and a one-parameter definition share the
+    // qualified name `compute` but describe different overloads: letting the
+    // definition hide the declaration would leave the caller a single
+    // candidate, which the workspace-unique rule binds without checking the
+    // argument count.
+    let header = index_source(&store, "include/api.hpp", "void compute(int a, int b);\n");
+    index_source(&store, "src/impl.cpp", "void compute(int a) {\n}\n");
+    let caller = index_source(&store, "src/app.cpp", "void run() {\n  compute(1, 2);\n}\n");
+    let owner = pending_call_owner(&store, caller, "compute");
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![header],
+        "arity evidence picks the two-argument declaration, not the definition"
+    );
+}
+
+#[test]
 fn sweep_stops_before_writing_back_when_the_pass_is_cancelled() {
     let home = tempfile::tempdir().expect("workspace");
     let store = open(home.path());

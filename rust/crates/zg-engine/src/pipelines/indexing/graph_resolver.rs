@@ -474,23 +474,33 @@ fn filter_compatible_hits(
                 .insert(snapshot.file_path(hit.file_id).map(str::to_owned))
                 .clone(),
         };
-        let keep = match (FileFormat::parse(&stored.language), path.as_deref()) {
-            (Some(reference), Some(path)) => {
-                let formats = formats_for_path(Path::new(path));
-                // An unregistered extension is unknown evidence, so the gate
-                // never discards on missing information.
-                formats.iter().all(|format| *format == FileFormat::Unknown)
-                    || formats
-                        .iter()
-                        .any(|candidate| reference_compatible_with(reference, *candidate))
-            }
-            _ => true,
-        };
-        if keep {
+        if language_compatible(FileFormat::parse(&stored.language), path.as_deref()) {
             filtered.push(hit.clone());
         }
     }
     filtered
+}
+
+/// Whether a reference whose language is `reference` can address a candidate
+/// file at `path`.
+///
+/// Missing evidence keeps the candidate: the gate never discards on
+/// information it does not have. An unregistered extension is unknown
+/// evidence just like a reference the walk could not tag with a language —
+/// `unknown` is not a language of its own, so requiring an `unknown` candidate
+/// to match it would drop every candidate spelling a real one.
+fn language_compatible(reference: Option<FileFormat>, path: Option<&str>) -> bool {
+    let (Some(reference), Some(path)) = (reference, path) else {
+        return true;
+    };
+    if reference == FileFormat::Unknown {
+        return true;
+    }
+    let formats = formats_for_path(Path::new(path));
+    formats.iter().all(|format| *format == FileFormat::Unknown)
+        || formats
+            .iter()
+            .any(|candidate| reference_compatible_with(reference, *candidate))
 }
 
 /// Drops the bodyless declarations a definition of the same symbol supersedes.
@@ -498,15 +508,23 @@ fn filter_compatible_hits(
 /// describe one symbol, so the definition stands for both; only that spelling
 /// pairs them, because a same-named entity under another qualified name — or
 /// in another language — is a different symbol and must never hide the
-/// declaration. Call this after the language gate, never on the whole name
-/// index: shrinking the shared set would let an unrelated language's
-/// definition erase the only candidate a reference can bind.
+/// declaration. A qualified name does not identify a C++ overload either, so
+/// the two also need compatible arities: `void f(int, int);` and
+/// `void f(int) {}` are different symbols, and letting the definition hide
+/// the declaration would leave the caller a single candidate that the
+/// workspace-unique rule then binds without checking its argument count.
+/// Call this after the language gate, never on the whole name index: shrinking
+/// the shared set would let an unrelated language's definition erase the only
+/// candidate a reference can bind.
 fn prefer_definitions<T: Borrow<NameIndexEntry>>(hits: Vec<T>) -> Vec<T> {
-    let mut defined = HashSet::new();
+    let mut defined: HashMap<String, Vec<Option<u32>>> = HashMap::new();
     for hit in &hits {
         let hit: &NameIndexEntry = hit.borrow();
         if !hit.is_declaration {
-            defined.insert(hit.qualified_name.clone());
+            defined
+                .entry(hit.qualified_name.clone())
+                .or_default()
+                .push(hit.arity);
         }
     }
     if defined.is_empty() {
@@ -515,9 +533,21 @@ fn prefer_definitions<T: Borrow<NameIndexEntry>>(hits: Vec<T>) -> Vec<T> {
     hits.into_iter()
         .filter(|hit| {
             let hit: &NameIndexEntry = hit.borrow();
-            !hit.is_declaration || !defined.contains(&hit.qualified_name)
+            !hit.is_declaration
+                || !defined.get(&hit.qualified_name).is_some_and(|arities| {
+                    arities
+                        .iter()
+                        .any(|&arity| compatible_arity(arity, hit.arity))
+                })
         })
         .collect()
+}
+
+/// Whether two arities can describe one symbol. A side without a counted
+/// parameter list carries no evidence, so it neither confirms nor refutes the
+/// pair; two counted lists must agree.
+fn compatible_arity(left: Option<u32>, right: Option<u32>) -> bool {
+    left.is_none() || right.is_none() || left == right
 }
 
 /// Resolves an import specifier onto the target file's endpoint
@@ -1707,5 +1737,49 @@ mod alias_pair_tests {
             rust_alias_pairs("use crate::util::work as w; // alias"),
             pairs(&[("w", Some("work"))])
         );
+    }
+}
+
+#[cfg(test)]
+mod language_gate_tests {
+    use super::language_compatible;
+    use crate::domain::FileFormat;
+
+    #[test]
+    fn unknown_reference_language_keeps_every_candidate() {
+        // `unknown` marks a reference the walk could not tag with a language,
+        // not a language whose candidates must spell `unknown` too.
+        assert!(language_compatible(
+            Some(FileFormat::Unknown),
+            Some("src/lib.rs")
+        ));
+        assert!(language_compatible(Some(FileFormat::Unknown), None));
+    }
+
+    #[test]
+    fn missing_evidence_on_either_side_keeps_the_candidate() {
+        assert!(language_compatible(None, Some("src/lib.py")));
+        assert!(language_compatible(Some(FileFormat::Rust), None));
+        // An unregistered extension is unknown evidence, not a mismatch.
+        assert!(language_compatible(
+            Some(FileFormat::Rust),
+            Some("src/data.zzz")
+        ));
+    }
+
+    #[test]
+    fn known_languages_gate_on_the_shared_namespace() {
+        assert!(!language_compatible(
+            Some(FileFormat::Rust),
+            Some("src/lib.py")
+        ));
+        assert!(language_compatible(
+            Some(FileFormat::C),
+            Some("src/api.cpp")
+        ));
+        assert!(language_compatible(
+            Some(FileFormat::TypeScript),
+            Some("src/main.js")
+        ));
     }
 }
