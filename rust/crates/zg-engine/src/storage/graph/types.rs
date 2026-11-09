@@ -1,7 +1,7 @@
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-use crate::domain::{EdgeProvenance, PendingRef};
+use crate::domain::{EdgeProvenance, PendingRef, SymbolType};
 
 /// Extensible evidence attached to edges and unresolved references.
 pub(crate) type Metadata = BTreeMap<String, Value>;
@@ -31,6 +31,10 @@ pub(crate) struct NameIndexEntry {
     pub entity_id: String,
     pub file_id: u32,
     pub qualified_name: String,
+    /// What the entity declares. Read through a qualified name's owner: a
+    /// class scope holds members, while any other scope holds lexical
+    /// bindings that shadow an import of the same name.
+    pub symbol_type: Option<SymbolType>,
     pub is_exported: bool,
     pub arity: Option<u32>,
     /// Pure declaration without a body (C/C++ prototypes).

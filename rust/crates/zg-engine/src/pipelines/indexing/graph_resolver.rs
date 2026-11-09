@@ -24,7 +24,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::pipeline::throw_if_cancelled;
 use crate::domain::{
-    EdgeProvenance, FileFormat, GraphEdgeKind, formats_for_path, reference_compatible_with,
+    EdgeProvenance, FileFormat, GraphEdgeKind, SymbolType, formats_for_path,
+    reference_compatible_with,
 };
 use crate::storage::graph::{NameIndexEntry, Resolution, StoredPendingRef};
 use crate::storage::{IndexStore, ResolutionSnapshot};
@@ -374,15 +375,25 @@ fn classify_names(
             rule: Rule::QualifiedName,
         });
     }
+    if let Some(resolution) = resolve_receiver_arity(stored, &hits) {
+        // The receiver spells a declaring scope, so that scope's own
+        // overloads stay distinguishable by their parameter counts.
+        return Ok(Outcome::Resolved {
+            resolution,
+            rule: Rule::ArityBound,
+        });
+    }
+    if stored.reference.receiver_name.is_some() {
+        // A receiver this sweep could not pin — not to the owner's class
+        // hierarchy, not to a declared type, not to a scope its spelling
+        // reproduces — says nothing about which member it reaches.
+        // Workspace-wide uniqueness, exports and argument counts answer bare
+        // names only; applying them to a member call writes a guess into the
+        // graph, and a name that is unique today stops being unique as soon
+        // as a second class declares it. Defer to a later sweep instead.
+        return Ok(Outcome::Deferred);
+    }
     if let [hit] = hits.as_slice() {
-        // A receiver this sweep could not type says nothing about which
-        // member it reaches: workspace-wide uniqueness is evidence for a
-        // bare name, never for a member call. Every receiver the rules above
-        // could pin already bound, so the rest stays pending rather than
-        // writing a type-inference guess into the graph.
-        if stored.reference.receiver_name.is_some() {
-            return Ok(Outcome::Deferred);
-        }
         if hit.file_id != stored.file_id {
             return Ok(Outcome::Resolved {
                 resolution: Resolution {
@@ -605,9 +616,13 @@ fn resolve_import(
 /// Resolves an ambiguous bare-name reference through the file's imports:
 /// when the imports pin the name to exactly one module and that module
 /// declares it exactly once, the reference targets that definition.
-/// Receiver-typed calls wait for receiver inference, and a same-file top-level
-/// definition of the bare name shadows any import binding, so both stay with
+/// Receiver-typed calls wait for receiver inference, and a same-file lexical
+/// binding of the bare name shadows any import binding, so both stay with
 /// the general ambiguity path.
+///
+/// A lexical binding is a top-level definition or one declared inside a
+/// function or module scope; a class member is not, because a bare call never
+/// spells the receiver that reaches it.
 fn resolve_import_bound(
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
@@ -615,18 +630,14 @@ fn resolve_import_bound(
     importing_files: &mut HashMap<u32, Vec<u32>>,
 ) -> Option<Resolution> {
     let reference = &stored.reference;
-    // Only a same-file definition of the bare name shadows an import: the
-    // two namespaces collide, so the local one wins. A same-file *member* of
-    // that name does not — a method is reached through its receiver, which a
-    // bare call never spells — so it must not disqualify the import binding.
     if reference.receiver_name.is_some()
         || !matches!(
             reference.ref_kind,
             GraphEdgeKind::Calls | GraphEdgeKind::Extends | GraphEdgeKind::Implements
         )
-        || hits.iter().any(|hit| {
-            hit.file_id == stored.file_id && hit.qualified_name.rsplit_once("::").is_none()
-        })
+        || hits
+            .iter()
+            .any(|hit| hit.file_id == stored.file_id && shadows_import(snapshot, hit))
     {
         return None;
     }
@@ -648,6 +659,47 @@ fn resolve_import_bound(
         });
     }
     None
+}
+
+/// Whether a same-file candidate is a lexical binding of the referenced
+/// name, the namespace an import binding loses to.
+///
+/// A top-level definition lives in the module's own namespace, and one
+/// declared inside a function or another module scope — Python's `outer::work`
+/// is a local of `outer` — is a binding a bare call reads. A class member is
+/// not: a method is reached through a receiver that a bare call never spells,
+/// so it cannot shadow the import. The owner of the qualified name tells the
+/// two apart, and any owner not proven to declare a type keeps the
+/// conservative answer, because an unconfirmed member claim must not decide a
+/// bind.
+fn shadows_import(snapshot: &ResolutionSnapshot, hit: &NameIndexEntry) -> bool {
+    let Some((owner, _)) = hit.qualified_name.rsplit_once("::") else {
+        return true;
+    };
+    let tail = owner.rsplit("::").next().unwrap_or(owner);
+    // Hidden candidates answer nothing: an owner in an unfinished file may be
+    // another kind of scope, so the member claim stays unconfirmed.
+    let Some(candidates) = snapshot.lookup_candidates(tail) else {
+        return true;
+    };
+    let owners: Vec<&NameIndexEntry> = candidates
+        .iter()
+        .filter(|candidate| candidate.file_id == hit.file_id && candidate.qualified_name == owner)
+        .collect();
+    let member_scope = !owners.is_empty()
+        && owners
+            .iter()
+            .all(|candidate| candidate.symbol_type.is_some_and(is_type_scope));
+    !member_scope
+}
+
+/// Whether a scope of this symbol type declares members a receiver reaches,
+/// rather than lexical bindings a bare name reads.
+fn is_type_scope(symbol_type: SymbolType) -> bool {
+    matches!(
+        symbol_type,
+        SymbolType::Class | SymbolType::Interface | SymbolType::Enum
+    )
 }
 
 /// One `as` alias binding parsed from an import statement's raw text.
@@ -1647,34 +1699,57 @@ fn resolve_export_bound(stored: &StoredPendingRef, hits: &[NameIndexEntry]) -> O
     None
 }
 
-/// Narrows an ambiguous reference to the one candidate whose declared
+/// Resolves a receiver call through the declaring scope its receiver spells
+/// together with the call's argument count: `A::run(1)` names the scope, so
+/// that scope's own overloads are the only candidates and their counts
+/// separate them.
+///
+/// An argument count says nothing across scopes — two classes may declare a
+/// `match` taking one argument — so a receiver that reproduces no candidate's
+/// scope narrows nothing and leaves the reference to the caller's guard.
+fn resolve_receiver_arity(
+    stored: &StoredPendingRef,
+    hits: &[NameIndexEntry],
+) -> Option<Resolution> {
+    let receiver = stored.reference.receiver_name.as_deref()?;
+    let expected = stored.reference.arity?;
+    let scope = receiver.rsplit("::").next().unwrap_or(receiver);
+    let hit = unique_arity_match(
+        hits.iter().filter(|hit| {
+            hit.qualified_name
+                .rsplit_once("::")
+                .is_some_and(|(owner, _)| owner == scope)
+        }),
+        expected,
+    )?;
+    Some(Resolution {
+        ref_id: stored.id,
+        target_id: hit.entity_id.clone(),
+        provenance: EdgeProvenance::ArityBound,
+    })
+}
+
+/// Narrows an ambiguous bare name to the one candidate whose declared
 /// parameter count equals the call's argument count: among candidates that
 /// all declare their arity, a single match is the invoked overload.
 /// Candidates with unknown arity cannot rule themselves out, so their
 /// presence keeps the reference pending.
-///
-/// A receiver narrows the candidates to the scope it spells first, because an
-/// argument count says nothing across scopes: two classes may declare a
-/// `match` taking one argument, and picking the member whose count happens to
-/// agree is a guess rather than evidence. Only a receiver that names a
-/// declaring scope — `Class::method`, whose candidates are that class's
-/// overloads — narrows anything, so a call through an untyped `expr` keeps
-/// its reference pending.
 fn resolve_arity_bound(stored: &StoredPendingRef, hits: &[NameIndexEntry]) -> Option<Resolution> {
     let expected = stored.reference.arity?;
-    let candidates: Vec<&NameIndexEntry> = match stored.reference.receiver_name.as_deref() {
-        None => hits.iter().collect(),
-        Some(receiver) => {
-            let scope = receiver.rsplit("::").next().unwrap_or(receiver);
-            hits.iter()
-                .filter(|hit| {
-                    hit.qualified_name
-                        .rsplit_once("::")
-                        .is_some_and(|(owner, _)| owner == scope)
-                })
-                .collect()
-        }
-    };
+    let hit = unique_arity_match(hits.iter(), expected)?;
+    Some(Resolution {
+        ref_id: stored.id,
+        target_id: hit.entity_id.clone(),
+        provenance: EdgeProvenance::ArityBound,
+    })
+}
+
+/// The one candidate declaring exactly `expected` parameters, or `None` when
+/// several counts agree or any candidate's count is unknown.
+fn unique_arity_match<'entry>(
+    candidates: impl Iterator<Item = &'entry NameIndexEntry>,
+    expected: usize,
+) -> Option<&'entry NameIndexEntry> {
     let mut matched = None;
     for hit in candidates {
         match hit.arity {
@@ -1688,12 +1763,7 @@ fn resolve_arity_bound(stored: &StoredPendingRef, hits: &[NameIndexEntry]) -> Op
             None => return None,
         }
     }
-    let hit = matched?;
-    Some(Resolution {
-        ref_id: stored.id,
-        target_id: hit.entity_id.clone(),
-        provenance: EdgeProvenance::ArityBound,
-    })
+    matched
 }
 
 /// Directory prefix of a forward-slash workspace path; the workspace root
@@ -1764,24 +1834,32 @@ fn python_relative_base(dir: &str, specifier: &str) -> Option<String> {
 }
 
 /// Path candidates for one specifier: the literal base first (explicit
-/// extensions win), then per-language extensions, then the directory entry
-/// the language resolves a directory to — a Python package's `__init__.py`,
-/// the TypeScript family's `index.<ext>`.
+/// extensions win), then the module file per-language extensions, then the
+/// directory entry the language resolves a directory to — the TypeScript
+/// family's `index.<ext>`, a Python package's `__init__.py`.
+///
+/// Python orders the last two the other way round: its importer checks a
+/// directory package's `__init__` before a same-named module file, so
+/// `pkg/__init__.py` has to precede `pkg.py` for `from pkg import work` to
+/// reach the package both files spell.
 fn path_variants(base: &str, language: &str) -> Vec<String> {
     let extensions = extensions_for(language);
-    let mut variants = vec![base.to_owned()];
-    variants.extend(
+    let module_files = || {
         extensions
             .iter()
-            .map(|extension| format!("{base}{extension}")),
-    );
-    match index_entry_for(language) {
-        Some(entry) => variants.push(format!("{base}/{entry}")),
-        None => variants.extend(
+            .map(move |extension| format!("{base}{extension}"))
+    };
+    let mut variants = vec![base.to_owned()];
+    if let Some(entry) = index_entry_for(language) {
+        variants.push(format!("{base}/{entry}"));
+        variants.extend(module_files());
+    } else {
+        variants.extend(module_files());
+        variants.extend(
             extensions
                 .iter()
                 .map(|extension| format!("{base}/index{extension}")),
-        ),
+        );
     }
     variants
 }

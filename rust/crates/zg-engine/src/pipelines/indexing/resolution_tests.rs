@@ -526,6 +526,35 @@ fn sweep_keeps_a_cpp_overload_declaration_from_a_differently_shaped_definition()
 }
 
 #[test]
+fn sweep_binds_an_overload_by_the_scope_the_receiver_spells() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    // Two overloads of one class spell one qualified name, so the receiver
+    // alone cannot pick between them; the argument count can, because the
+    // candidates all belong to the scope the receiver names.
+    let header = index_source(
+        &store,
+        "include/api.hpp",
+        concat!(
+            "class Api {\n",
+            "public:\n",
+            "    void run(int value);\n",
+            "    void run(int value, int extra);\n",
+            "};\n",
+        ),
+    );
+    let caller = index_source(&store, "src/app.cpp", "void drive() {\n  Api::run(1);\n}\n");
+    let owner = pending_call_owner(&store, caller, "run");
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![header],
+        "the count separates the receiver's own overloads: {sweep:?}"
+    );
+}
+
+#[test]
 fn sweep_stops_before_writing_back_when_the_pass_is_cancelled() {
     let home = tempfile::tempdir().expect("workspace");
     let store = open(home.path());
@@ -956,6 +985,129 @@ fn sweep_binds_a_bare_call_to_its_import_over_a_same_named_member() {
         call_target_files(&store, &owner),
         vec![json_module],
         "the bare call binds the imported definition: {sweep:?}"
+    );
+}
+
+#[test]
+fn sweep_keeps_an_untyped_receiver_call_pending_when_several_definitions_exist() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    let caller = index_source(
+        &store,
+        "caller.py",
+        "def probe(expr):\n    return expr.match(1)\n",
+    );
+    index_source(
+        &store,
+        "unrelated.py",
+        concat!(
+            "class Other:\n",
+            "    def outer(self):\n",
+            "        def match(arg):\n",
+            "            return arg\n",
+            "        return match(0)\n",
+        ),
+    );
+    // A second definition leaves the name ambiguous, so the single-hit guard
+    // no longer covers the call and the fallbacks are asked to answer a
+    // member name without any receiver evidence.
+    index_source(&store, "extra.py", "def match(a, b):\n    return a\n");
+
+    let receiver_owner = pending_receiver_call_owner(&store, caller, "expr");
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    assert_eq!(
+        sweep.arity_bound, 0,
+        "an argument count must not decide across scopes: {sweep:?}"
+    );
+    assert_eq!(
+        sweep.resolved, 0,
+        "the untyped receiver call must not bind: {sweep:?}"
+    );
+    assert!(
+        call_target_files(&store, &receiver_owner).is_empty(),
+        "an untyped receiver call must not bind"
+    );
+    assert!(
+        store
+            .list_pending_refs(10, 0)
+            .expect("queue")
+            .refs
+            .iter()
+            .any(|queued| queued.file_id == caller.get()
+                && queued.reference.ref_name == "match"
+                && queued.reference.receiver_name.as_deref() == Some("expr")),
+        "the untyped receiver call stays queued"
+    );
+}
+
+#[test]
+fn sweep_keeps_a_call_pending_when_an_enclosing_function_shadows_the_import() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    let module = index_source(&store, "util.py", "def work(x):\n    return x\n");
+    let caller = index_source(
+        &store,
+        "caller.py",
+        concat!(
+            "from util import work\n\n\n",
+            "def outer():\n",
+            "    def work(x):\n",
+            "        return 2\n\n",
+            "    def inner():\n",
+            "        return work(0)\n\n",
+            "    return inner()\n",
+        ),
+    );
+
+    let owner = pending_call_owner(&store, caller, "work");
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    // `outer::work` is a local binding of the enclosing function, not a
+    // member reached through a receiver: the bare call inside `inner` reads
+    // it, and the equal-arity pair to the import keeps the reference pending.
+    assert!(
+        call_target_files(&store, &owner).is_empty(),
+        "the import must not win over an enclosing binding: {sweep:?}"
+    );
+    assert_eq!(
+        sweep.import_bound, 0,
+        "no import decision is taken: {sweep:?}"
+    );
+    assert!(
+        sweep.candidates_recorded >= 1,
+        "the shadowed name is recorded as ambiguity: {sweep:?}"
+    );
+    assert_eq!(
+        import_target_ids(&store, caller),
+        vec![format!("f{}", module.get())],
+        "the import itself still names the module: {sweep:?}"
+    );
+}
+
+#[test]
+fn sweep_prefers_a_python_package_over_a_same_named_module_file() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    index_source(&store, "pkg.py", "def work(x):\n    return x\n");
+    let package = index_source(&store, "pkg/__init__.py", "def work(x):\n    return x\n");
+    let caller = index_source(
+        &store,
+        "main.py",
+        "from pkg import work\n\n\ndef run():\n    return work(1)\n",
+    );
+
+    let owner = pending_call_owner(&store, caller, "work");
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    // Python checks the directory package's `__init__` before a same-named
+    // module file, so the import and the call behind it both name `pkg`.
+    assert_eq!(
+        import_target_ids(&store, caller),
+        vec![format!("f{}", package.get())],
+        "the package entry wins over `pkg.py`: {sweep:?}"
+    );
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![package],
+        "the call follows the import into the package: {sweep:?}"
     );
 }
 

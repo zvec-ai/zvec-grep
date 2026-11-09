@@ -167,6 +167,7 @@ impl SymbolIndex {
                     entity_id: entity_id.clone(),
                     file_id: file_id.get(),
                     qualified_name: qualified_name.clone(),
+                    symbol_type: metadata.symbol_type,
                     is_exported: metadata.is_exported,
                     arity,
                     is_declaration: metadata.is_declaration,
