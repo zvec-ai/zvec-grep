@@ -17,7 +17,7 @@ use tracing::{info, warn};
 use zg_daemon_protocol::{DaemonCommand, DaemonReply, ErrorReply, ExecutionResult};
 use zg_engine::{
     ZvecGrep,
-    api::relationships::{Direction, RelationshipOptions, RelationshipResult},
+    api::relationships::{Direction, GraphEdgeKind, RelationshipOptions, RelationshipResult},
 };
 use zg_transport_mcp::{
     IndexOperationProvider, McpToolset, ServerStatusProvider, ServerStatusSnapshot,
@@ -486,6 +486,7 @@ async fn execute_relationships(
     let signal = state.shutdown.child_token();
     let _guard = signal.clone().drop_guard();
     request.signal = Some(signal);
+    request.kinds = Some(vec![GraphEdgeKind::Calls]);
     engine_execution(
         state
             .runtimes

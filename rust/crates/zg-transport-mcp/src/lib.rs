@@ -1646,6 +1646,7 @@ impl RelationshipInput {
         let request = RelationshipOptions {
             root: Some(root),
             symbol: self.symbol,
+            kinds: Some(vec![zg_engine::api::relationships::GraphEdgeKind::Calls]),
             globs: normalize_globs(self.globs, self.insensitive_globs)?.unwrap_or_default(),
             limit: self.limit,
             ..RelationshipOptions::default()

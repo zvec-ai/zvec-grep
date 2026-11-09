@@ -1,6 +1,8 @@
 use std::io::{self, Write};
 
-use zg_engine::api::relationships::{Direction, RelationshipResult, SymbolDefinition};
+use zg_engine::api::relationships::{
+    Direction, GraphEdgeKind, RelationshipResult, SymbolDefinition,
+};
 
 use crate::{
     ColorMode, output_path,
@@ -19,10 +21,18 @@ pub fn write_relationships(
     terminal: bool,
 ) -> io::Result<()> {
     let theme = StatusTheme::new(color, terminal);
-    let label = match direction {
-        Direction::In => "Callers",
-        Direction::Out => "Callees",
-        Direction::Both => "Callers and callees",
+    let calls_only = result
+        .matches
+        .iter()
+        .flat_map(|matched| &matched.edges)
+        .all(|edge| edge.kind == GraphEdgeKind::Calls);
+    let label = match (calls_only, direction) {
+        (true, Direction::In) => "Callers",
+        (true, Direction::Out) => "Callees",
+        (true, Direction::Both) => "Callers and callees",
+        (false, Direction::In) => "Incoming relationships",
+        (false, Direction::Out) => "Outgoing relationships",
+        (false, Direction::Both) => "Relationships",
     };
     if result.matches.is_empty() {
         writeln!(writer, "No matches.")?;
@@ -41,7 +51,20 @@ pub fn write_relationships(
                 || "(symbol unavailable)".to_owned(),
                 |symbol| definition(symbol, theme),
             );
-            writeln!(writer, "    {endpoint}")?;
+            if calls_only && direction != Direction::Both {
+                writeln!(writer, "    {endpoint}")?;
+            } else {
+                let orientation = match edge.direction {
+                    Direction::In => "in",
+                    Direction::Out => "out",
+                    Direction::Both => "both",
+                };
+                writeln!(
+                    writer,
+                    "    {} ({orientation}) {endpoint}",
+                    edge.kind.as_str()
+                )?;
+            }
             let path = clean(&output_path(&edge.file_path).display().to_string());
             let location = match (edge.line, edge.column) {
                 (Some(line), Some(column)) => format!("{path}:{line}:{}", column.saturating_add(1)),
@@ -51,7 +74,11 @@ pub fn write_relationships(
             writeln!(
                 writer,
                 "      {} {}",
-                theme.label("call at"),
+                theme.label(if edge.kind == GraphEdgeKind::Calls {
+                    "call at"
+                } else {
+                    "at"
+                }),
                 theme.path(&location)
             )?;
         }
@@ -59,7 +86,11 @@ pub fn write_relationships(
             writeln!(
                 writer,
                 "    {}",
-                theme.warning("... more call sites omitted")
+                theme.warning(if calls_only {
+                    "... more call sites omitted"
+                } else {
+                    "... more relationships omitted"
+                })
             )?;
         }
     }
@@ -88,7 +119,7 @@ fn definition(symbol: &SymbolDefinition, theme: StatusTheme) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zg_engine::api::relationships::{CallSite, SymbolRelationships};
+    use zg_engine::api::relationships::{RelationshipEdge, SymbolRelationships};
 
     fn symbol(name: &str, path: &str) -> SymbolDefinition {
         SymbolDefinition {
@@ -113,19 +144,25 @@ mod tests {
                 symbol: symbol("run", "main.rs"),
                 truncated: true,
                 edges: vec![
-                    CallSite {
+                    RelationshipEdge {
+                        kind: zg_engine::api::relationships::GraphEdgeKind::Calls,
+                        direction: Direction::Out,
                         file_path: "main.rs".into(),
                         symbol: Some(symbol("send", "net.rs")),
                         line: Some(3),
                         column: Some(0),
                     },
-                    CallSite {
+                    RelationshipEdge {
+                        kind: zg_engine::api::relationships::GraphEdgeKind::Calls,
+                        direction: Direction::Out,
                         file_path: "main.rs".into(),
                         symbol: Some(symbol("send", "net.rs")),
                         line: Some(7),
                         column: None,
                     },
-                    CallSite {
+                    RelationshipEdge {
+                        kind: zg_engine::api::relationships::GraphEdgeKind::Calls,
+                        direction: Direction::Out,
                         file_path: "startup.rs".into(),
                         symbol: None,
                         line: None,
@@ -152,6 +189,11 @@ mod tests {
         });
         let text = render(&result, Direction::In);
         assert!(text.contains("\nrun  other.rs:1\n  Callers:\n    No resolved call sites.\n"));
+        result.matches[0].edges[0].kind = GraphEdgeKind::Imports;
+        let text = render(&result, Direction::Both);
+        assert!(text.contains("Relationships:"));
+        assert!(text.contains("imports (out) send  net.rs:1\n      at main.rs:3:1"));
+        assert!(text.contains("calls (out) send  net.rs:1\n      call at main.rs:7"));
     }
 
     #[test]

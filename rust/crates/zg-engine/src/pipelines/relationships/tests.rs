@@ -30,6 +30,7 @@ use fixture::*;
 
 mod admission;
 mod fixture;
+mod kinds;
 mod lookup;
 mod snapshots;
 mod suggestions;

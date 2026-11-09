@@ -79,11 +79,15 @@ mod tests {
     #[test]
     fn relationship_commands_and_replies_preserve_compact_payloads() {
         use zg_engine::api::relationships::{
-            CallSite, RelationshipOptions, SymbolDefinition, SymbolRelationships,
+            RelationshipEdge, RelationshipOptions, SymbolDefinition, SymbolRelationships,
         };
         let options = RelationshipOptions {
             root: Some("/workspace".into()),
             symbol: "Module::run".into(),
+            kinds: Some(vec![
+                zg_engine::api::relationships::GraphEdgeKind::Calls,
+                zg_engine::api::relationships::GraphEdgeKind::Imports,
+            ]),
             globs: vec!["src/main.rs".into()],
             limit: Some(2),
             ..RelationshipOptions::default()
@@ -95,6 +99,10 @@ mod tests {
             let encoded = serde_json::to_value(&command).expect("relationship command");
             assert!(encoded["request"].get("signal").is_none());
             assert_eq!(encoded["request"]["symbol"], "Module::run");
+            assert_eq!(
+                encoded["request"]["kinds"],
+                serde_json::json!(["calls", "imports"])
+            );
             assert_eq!(encoded["request"]["globs"][0]["pattern"], "src/main.rs");
             assert_eq!(
                 serde_json::from_value::<DaemonCommand>(encoded).expect("decode command"),
@@ -109,7 +117,9 @@ mod tests {
                 end_line: 8,
             },
             truncated: true,
-            edges: vec![CallSite {
+            edges: vec![RelationshipEdge {
+                kind: zg_engine::api::relationships::GraphEdgeKind::Calls,
+                direction: zg_engine::api::relationships::Direction::Out,
                 file_path: "src/caller.rs".into(),
                 symbol: None,
                 line: Some(5),
@@ -128,6 +138,11 @@ mod tests {
             assert_eq!(encoded["reply"]["matches"][0]["name"], "Module::run");
             assert_eq!(encoded["reply"]["matches"][0]["filePath"], "src/main.rs");
             assert_eq!(encoded["reply"]["matches"][0]["truncated"], true);
+            assert_eq!(encoded["reply"]["matches"][0]["edges"][0]["kind"], "calls");
+            assert_eq!(
+                encoded["reply"]["matches"][0]["edges"][0]["direction"],
+                "out"
+            );
             assert!(encoded["reply"]["matches"][0]["edges"][0]["symbol"].is_null());
             assert_eq!(
                 encoded["reply"]["matches"][0]["edges"][0]["filePath"],
@@ -144,7 +159,7 @@ mod tests {
     fn relationship_replies_preserve_non_unicode_paths() {
         use std::{ffi::OsString, path::PathBuf};
         use zg_engine::api::relationships::{
-            CallSite, RelationshipResult, SymbolDefinition, SymbolRelationships,
+            RelationshipEdge, RelationshipResult, SymbolDefinition, SymbolRelationships,
         };
         #[cfg(unix)]
         let path = {
@@ -166,7 +181,9 @@ mod tests {
             matches: vec![SymbolRelationships {
                 symbol: symbol.clone(),
                 truncated: false,
-                edges: vec![CallSite {
+                edges: vec![RelationshipEdge {
+                    kind: zg_engine::api::relationships::GraphEdgeKind::Calls,
+                    direction: zg_engine::api::relationships::Direction::Out,
                     file_path: path,
                     symbol: Some(symbol.clone()),
                     line: Some(2),

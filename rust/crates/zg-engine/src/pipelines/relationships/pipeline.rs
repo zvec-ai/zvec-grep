@@ -1,4 +1,4 @@
-//! Match canonical symbols, read call edges, and assemble bounded result groups.
+//! Match canonical symbols, read selected edges, and assemble bounded result groups.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -12,8 +12,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     EngineError, EngineResult,
     api::relationships::{
-        CallSite, MAX_SYMBOL_MATCHES, RelationshipOptions, RelationshipResult, SymbolDefinition,
-        SymbolRelationships,
+        MAX_SYMBOL_MATCHES, RelationshipEdge, RelationshipOptions, RelationshipResult,
+        SymbolDefinition, SymbolRelationships,
     },
     domain::{Entity, EntityId, EntityMetadata, FileEdge, FileRecord, GraphEdgeKind, Range},
     pipelines::indexed_search::path_filter::resolve_glob_filter,
@@ -115,6 +115,7 @@ fn collect_relationships(
                 stored,
                 options.limit.unwrap_or(20),
                 direction,
+                options.kinds.as_deref(),
                 options.signal.as_ref(),
             )
         })? {
@@ -162,6 +163,7 @@ fn collect_match(
     stored: &StoredEntity,
     limit: usize,
     direction: Direction,
+    kinds: Option<&[GraphEdgeKind]>,
     signal: Option<&CancellationToken>,
 ) -> EngineResult<Option<SymbolRelationships>> {
     let id = stored.entity.id();
@@ -177,13 +179,13 @@ fn collect_match(
     let Some(symbol) = describe(stored) else {
         return Ok(None);
     };
-    // Cache only within this definition's snapshot, including recursive calls.
+    // Cache only within this definition's snapshot, including self-loops.
     let mut symbols = HashMap::from([(id.clone(), Some(symbol.clone()))]);
     let mut edges = neighborhood(
         storage,
         id.as_str(),
         direction,
-        Some(&[GraphEdgeKind::Calls]),
+        kinds,
         limit.saturating_add(1),
         signal,
     )?;
@@ -218,7 +220,15 @@ fn collect_match(
         edges: edges
             .into_iter()
             .zip(targets)
-            .map(|((edge, file_path), target)| CallSite {
+            .map(|((edge, file_path), target)| RelationshipEdge {
+                kind: edge.kind,
+                direction: if edge.source == edge.target {
+                    Direction::Both
+                } else if edge.source == id.as_str() {
+                    Direction::Out
+                } else {
+                    Direction::In
+                },
                 file_path,
                 symbol: symbols.get(&target).cloned().flatten(),
                 line: edge.line,

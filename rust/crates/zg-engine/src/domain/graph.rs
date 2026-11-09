@@ -32,7 +32,7 @@ pub enum Direction {
 /// edge during the walk, so a buffered name reference never carries it.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum GraphEdgeKind {
+pub enum GraphEdgeKind {
     Contains,
     Calls,
     Imports,
@@ -120,8 +120,9 @@ pub(crate) struct FileGraphResult {
 }
 
 impl GraphEdgeKind {
-    #[allow(dead_code)]
-    pub(crate) const fn as_str(self) -> &'static str {
+    /// Stable serialized name of this relationship kind.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Contains => "contains",
             Self::Calls => "calls",

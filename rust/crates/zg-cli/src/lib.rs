@@ -1450,6 +1450,7 @@ fn relationship_plan(
     let request = RelationshipOptions {
         root: Some(resolve_from(current_dir, args.root.as_deref())),
         symbol: args.symbol,
+        kinds: Some(vec![zg_engine::api::relationships::GraphEdgeKind::Calls]),
         globs: args.glob_rules,
         limit: args.limit,
         ..RelationshipOptions::default()
@@ -2644,6 +2645,10 @@ mod tests {
             assert_eq!(mode, super::ClientMode::Server);
             assert_eq!(request.root, Some(cwd.join("nested")));
             assert_eq!(request.symbol, " Class::method ");
+            assert_eq!(
+                request.kinds,
+                Some(vec![zg_engine::api::relationships::GraphEdgeKind::Calls])
+            );
             assert_eq!(request.limit, Some(3));
             assert_eq!(request.globs, vec!["src/main.rs".into()]);
             let CliPlan::Relationships { request, .. } =

@@ -47,7 +47,7 @@ pub(crate) use graph::EdgeProvenance;
 pub(crate) use graph::FileEdge;
 pub(crate) use graph::FileGraphNode;
 pub(crate) use graph::FileGraphResult;
-pub(crate) use graph::GraphEdgeKind;
+pub use graph::GraphEdgeKind;
 pub(crate) use graph::PendingRef;
 pub(crate) use graph::PendingRefStatus;
 

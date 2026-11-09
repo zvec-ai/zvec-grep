@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use rmcp::{ServiceExt, model::CallToolRequestParams};
 use serde_json::json;
-use zg_engine::api::relationships::{CallSite, SymbolDefinition, SymbolRelationships};
+use zg_engine::api::relationships::{RelationshipEdge, SymbolDefinition, SymbolRelationships};
 
 use super::*;
 
@@ -133,6 +133,10 @@ impl IndexOperationProvider for RelationshipsOnly {
 impl RelationshipsOnly {
     fn read(&self, incoming: bool, request: RelationshipOptions) -> RelationshipResult {
         assert_eq!(request.globs, vec!["src/subject.rs".into()]);
+        assert_eq!(
+            request.kinds,
+            Some(vec![zg_engine::api::relationships::GraphEdgeKind::Calls])
+        );
         assert!(
             request
                 .signal
@@ -148,7 +152,13 @@ impl RelationshipsOnly {
             },
             truncated: true,
             edges: vec![
-                CallSite {
+                RelationshipEdge {
+                    kind: zg_engine::api::relationships::GraphEdgeKind::Calls,
+                    direction: if incoming {
+                        Direction::In
+                    } else {
+                        Direction::Out
+                    },
                     file_path: if incoming {
                         "src/edge.rs"
                     } else {
@@ -164,7 +174,13 @@ impl RelationshipsOnly {
                     line: Some(12),
                     column: Some(0),
                 },
-                CallSite {
+                RelationshipEdge {
+                    kind: zg_engine::api::relationships::GraphEdgeKind::Calls,
+                    direction: if incoming {
+                        Direction::In
+                    } else {
+                        Direction::Out
+                    },
                     file_path: "src/top_level.rs".into(),
                     symbol: None,
                     line: None,
