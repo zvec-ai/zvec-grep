@@ -181,6 +181,46 @@ dropped, and native model destruction runs outside the cache lock.
 surfaces model downloads through `IndexProgress::embedding`. The reporter is
 runtime-only and is omitted from serialized daemon requests.
 
+Model artifact downloads send a `zvec-grep/<version>` User-Agent, including after
+CDN redirects. A transient connection failure or header/read timeout retries the
+same artifact once over IPv4 before trying the next source (Hugging Face, then
+ModelScope). Failed partial files are discarded and the retry is cancellable.
+HTTP status errors, certificate errors, and integrity failures do not trigger an
+IPv4 retry. Proxy settings remain in effect; with a proxy, the IPv4 constraint
+applies to the connection to the proxy, which may resolve the destination itself.
+
+The two live-source download suites are ignored by ordinary `cargo test` runs.
+Run both explicitly from `rust/`:
+
+```sh
+cargo test --locked -p zg-engine --lib models::artifacts::downloader::tests::live_sources:: -- --ignored --nocapture --test-threads=1
+```
+
+Each suite dynamically enumerates every local catalog model and fully downloads
+its pinned artifacts from the selected source (Hugging Face or ModelScope), using
+a fresh temporary cache for every model/source pair and verifying artifact
+integrity. Remote API models are excluded. The current catalog has 11 local
+models and 34 artifacts, requiring about 2.48 GB per source (4.96 GB combined).
+The suites require live network access, never fall back to the other source, and
+do not run inference. They emit a catalog manifest and a JSON result for every
+model/source pair. The normal Linux CPU CI job runs both suites using its existing
+test binary, allows up to one hour, and requires passing results for every
+model/source pair in both catalog manifests; CUDA and Windows-only manual runs
+skip this gate.
+
+To recheck one model from one source after a failure, set
+`ZVEC_GREP_TEST_DOWNLOAD_MODEL` to its local catalog reference and select the exact
+source suite, for example:
+
+```sh
+ZVEC_GREP_TEST_DOWNLOAD_MODEL=local/potion-multilingual-128m cargo test --locked -p zg-engine --lib models::artifacts::downloader::tests::live_sources::downloads_all_local_models_from_hugging_face -- --ignored --exact --nocapture
+```
+
+An unknown model reference fails the test. Without this variable, both suites
+cover the full local catalog. Filtered runs still emit the complete catalog
+manifest, so CI rejects partial coverage and continues to require every
+model/source pair.
+
 The daemon enables an index read-session cache with a 60-second idle timeout.
 Sequential and concurrent queries reuse the same generation's native storage
 handles. Each request still reads current workspace metadata and resolves its
