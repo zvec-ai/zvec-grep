@@ -126,29 +126,11 @@ impl DecoyServer {
         let worker_requests = Arc::clone(&shutdown_requests);
         let thread = std::thread::spawn(move || {
             while !worker_stop.load(Ordering::SeqCst) {
-                let Ok((mut stream, _)) = listener.accept() else {
+                let Ok((stream, _)) = listener.accept() else {
                     std::thread::sleep(Duration::from_millis(5));
                     continue;
                 };
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                let mut reader = BufReader::new(&mut stream);
-                let mut line = String::new();
-                if reader.read_line(&mut line).is_err() {
-                    continue;
-                }
-                if line.starts_with("POST /control/shutdown ") {
-                    worker_requests.fetch_add(1, Ordering::SeqCst);
-                }
-                loop {
-                    line.clear();
-                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
-                        break;
-                    }
-                }
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 {status} Fixture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                );
+                let _ = Self::respond(stream, status, &worker_requests);
             }
         });
         Ok(Self {
@@ -156,6 +138,33 @@ impl DecoyServer {
             shutdown_requests,
             thread: Some(thread),
         })
+    }
+
+    fn respond(
+        mut stream: TcpStream,
+        status: u16,
+        shutdown_requests: &AtomicUsize,
+    ) -> std::io::Result<()> {
+        // Windows accepts sockets with the listener's nonblocking mode.
+        // The synchronous request reader must wait for bytes to arrive.
+        stream.set_nonblocking(false)?;
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        let mut reader = BufReader::new(&mut stream);
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        if line.starts_with("POST /control/shutdown ") {
+            shutdown_requests.fetch_add(1, Ordering::SeqCst);
+        }
+        loop {
+            line.clear();
+            if reader.read_line(&mut line)? == 0 || line == "\r\n" {
+                break;
+            }
+        }
+        write!(
+            stream,
+            "HTTP/1.1 {status} Fixture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
     }
 }
 
@@ -166,6 +175,29 @@ impl Drop for DecoyServer {
             let _ = thread.join();
         }
     }
+}
+
+#[test]
+fn decoy_waits_for_delayed_request_on_nonblocking_connection() -> Result<(), Box<dyn Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let mut client = TcpStream::connect(listener.local_addr()?)?;
+    client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let (stream, _) = listener.accept()?;
+    // Reproduce Windows' inherited nonblocking mode on every platform.
+    stream.set_nonblocking(true)?;
+    let request = std::thread::spawn(move || -> std::io::Result<String> {
+        std::thread::sleep(Duration::from_millis(50));
+        client
+            .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+        let mut response = String::new();
+        client.read_to_string(&mut response)?;
+        Ok(response)
+    });
+    let response = DecoyServer::respond(stream, 200, &AtomicUsize::new(0));
+    let received = request.join().expect("decoy client thread panicked");
+    response?;
+    assert!(received?.starts_with("HTTP/1.1 200"));
+    Ok(())
 }
 
 #[test]
