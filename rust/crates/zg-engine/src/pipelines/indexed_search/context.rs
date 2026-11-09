@@ -493,8 +493,12 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
             fragment.id.as_str()
         ))
     };
-    let (content, excerpt_range) = match (fragment.range, hit.entity.content()) {
-        (Range::Full, content) => (content_to_text(content), None),
+    let (content, content_range, excerpt_range) = match (fragment.range, hit.entity.content()) {
+        (Range::Full, content) => (
+            content_to_text(content),
+            hit.entity.source_range().into(),
+            None,
+        ),
         (Range::Byte(range), Content::Text(text) | Content::Code(text)) => {
             let start = usize::try_from(range.start_offset()).map_err(|_| {
                 invalid_fragment(EngineError::invalid_argument(
@@ -506,22 +510,43 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
                     "fragment end offset exceeds platform limits",
                 ))
             })?;
-            let content = crate::utils::slice_text(text, start, end).map_err(invalid_fragment)?;
             let lines = crate::utils::line_byte_offsets(text);
             let local = crate::utils::text_range_from_offsets(text, &lines, start, end)
                 .map_err(invalid_fragment)?;
-            let source = match hit.entity.source_range() {
-                Range::Full => local,
-                Range::Text(origin) => {
-                    crate::utils::map_text_range(local, origin).map_err(invalid_fragment)?
-                }
-                Range::Byte(_) => {
-                    return Err(invalid_fragment(EngineError::invalid_argument(
-                        "fragment content coordinates cannot be mapped to this entity source",
-                    )));
-                }
+            let to_source = |local| match hit.entity.source_range() {
+                Range::Full => Ok(local),
+                Range::Text(origin) => crate::utils::map_text_range(local, origin),
+                Range::Byte(_) => Err(EngineError::invalid_argument(
+                    "fragment content coordinates cannot be mapped to this entity source",
+                )),
             };
-            (content.to_owned(), Some(Range::Text(source).into()))
+            let source = to_source(local).map_err(invalid_fragment)?;
+            // Overlap may put fragment boundaries inside a token. Present complete
+            // boundary lines from the indexed entity, retaining the exact evidence
+            // coordinates separately. Empty spans must stay empty.
+            let (display_start, display_end) = if start == end {
+                (start, end)
+            } else {
+                (
+                    lines[local.start_line() - 1],
+                    if local.end_byte_column() == 0 {
+                        end
+                    } else {
+                        lines.get(local.end_line()).copied().unwrap_or(text.len())
+                    },
+                )
+            };
+            let display =
+                crate::utils::text_range_from_offsets(text, &lines, display_start, display_end)
+                    .map_err(invalid_fragment)?;
+            let content_range = to_source(display).map_err(invalid_fragment)?;
+            let content = crate::utils::slice_text(text, display_start, display_end)
+                .map_err(invalid_fragment)?;
+            (
+                content.to_owned(),
+                Range::Text(content_range).into(),
+                Some(Range::Text(source).into()),
+            )
         }
         _ => {
             return Err(invalid_fragment(EngineError::invalid_argument(
@@ -531,9 +556,7 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
     };
     Ok(ContextItemTarget {
         content,
-        content_range: excerpt_range
-            .clone()
-            .unwrap_or_else(|| hit.entity.source_range().into()),
+        content_range,
         content_role: ContextContentRole::Source,
         excerpt_range,
     })
@@ -606,6 +629,9 @@ fn content_to_text(content: &Content) -> String {
 }
 
 #[cfg(test)]
+mod fragment_tests;
+
+#[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
@@ -621,7 +647,7 @@ mod tests {
     use super::{normalize_context_request, select_and_rank_context_items};
 
     #[test]
-    fn best_fragment_preserves_original_content_and_source_range() {
+    fn best_fragment_preserves_evidence_and_expands_display_within_entity() {
         use crate::{
             domain::{
                 ByteRange, Content, Entity, EntityFragment, EntityId, FileId, FileIndexStatus,
@@ -637,6 +663,9 @@ mod tests {
         let fragment_range = Range::Byte(ByteRange::new(1, 12).expect("ordered byte offsets"));
         let fragment_source_range = Range::Text(
             TextRange::from_coordinates(10, 21, 2, 3, 3, 2).expect("fragment source range"),
+        );
+        let display_range = Range::Text(
+            TextRange::from_coordinates(9, 25, 2, 4, 2, 0).expect("display source range"),
         );
         let content = Content::Text(source.into());
         let entity_id = EntityId::new(file_id, &content, source_range).expect("entity id");
@@ -680,9 +709,9 @@ mod tests {
         };
         let target = super::context_item_target(&hit).expect("fragment content");
         assert_eq!(target.content_role, ContextContentRole::Source);
-        assert_eq!(target.content, "中😀\r\nβ");
+        assert_eq!(target.content, "A中😀\r\nβeta\n");
         assert_eq!(target.excerpt_range, Some(fragment_source_range.into()));
-        assert_eq!(target.content_range, fragment_source_range.into());
+        assert_eq!(target.content_range, display_range.into());
         assert_eq!(hit.entity.content(), &Content::Text(source.into()));
         let search = SearchPlanResult {
             routes: Vec::new(),
@@ -702,8 +731,8 @@ mod tests {
         .expect("context items");
         assert_eq!(items[0].range, source_range.into());
         assert_eq!(items[0].excerpt_range, Some(fragment_source_range.into()));
-        assert_eq!(items[0].content_range, fragment_source_range.into());
-        assert_eq!(items[0].content, "中😀\r\nβ");
+        assert_eq!(items[0].content_range, display_range.into());
+        assert_eq!(items[0].content, "A中😀\r\nβeta\n");
         hit.evidence.reverse();
         let target = super::context_item_target(&hit).expect("full content");
         assert_eq!(target.content, source);
@@ -782,10 +811,17 @@ mod tests {
             let start = usize::try_from(bytes.start_offset()).expect("start");
             let end = usize::try_from(bytes.end_offset()).expect("end");
             assert!(start > "# Heading\nprefix ".len());
-            assert_eq!(target.content, source[start..end]);
+            assert_eq!(target.content, source["# Heading\n".len()..end]);
             assert_eq!(target.content_range.start_line(), Some(2));
             assert_eq!(target.content_range.last_line(), Some(2));
-            assert_eq!(target.excerpt_range, Some(target.content_range));
+            let matched = crate::utils::text_range_from_offsets(
+                &source,
+                &crate::utils::line_byte_offsets(&source),
+                start,
+                end,
+            )
+            .expect("original fragment range");
+            assert_eq!(target.excerpt_range, Some(Range::Text(matched).into()));
             assert_eq!(target.content.ends_with('\n'), !newline.is_empty());
             assert!(matches!(hit.entity.content(), Content::Text(_)));
         }
@@ -882,6 +918,7 @@ mod tests {
                 .expect("valid embedding metadata"),
                 std::collections::BTreeMap::new(),
                 std::collections::BTreeMap::new(),
+                false,
                 crate::domain::FTS_CONFIG,
             )
             .expect("index descriptor"),

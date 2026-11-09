@@ -58,6 +58,7 @@ use zg_engine::api::{
         options::{Device, EmbeddingModelSpec, GlobRule, ScanRulesUpdate},
     },
     info::InfoOptions,
+    relationships::RelationshipOptions,
 };
 
 pub use authorization::{
@@ -77,7 +78,7 @@ pub use path_lookup::{write_path_lookup_result, write_path_lookup_with_terminals
 pub use render::{
     HelpTopicError, help_text, print_help, write_context_result, write_context_status,
     write_context_status_with_options, write_context_with_options, write_file_paths,
-    write_index_incompatible_error, write_warning,
+    write_index_incompatible_error, write_relationships, write_warning,
 };
 
 #[derive(Debug, Parser)]
@@ -97,6 +98,10 @@ pub struct Cli {
 pub enum CommandLine {
     /// Search indexed context or run managed ripgrep.
     Query(QueryArgs),
+    /// Show persisted incoming call sites for a symbol.
+    Callers(RelationshipArgs),
+    /// Show persisted outgoing call sites for a symbol.
+    Callees(RelationshipArgs),
     /// Build, rebuild, or drop the workspace index.
     Index(IndexArgs),
     /// Show workspace and index status.
@@ -558,8 +563,35 @@ impl QueryArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct RelationshipArgs {
+    /// Exact or scope-qualified symbol name, such as `Class::method`.
+    pub symbol: String,
+    /// Workspace root; defaults to the current directory.
+    pub root: Option<PathBuf>,
+    #[arg(short = 'g', long = "glob", value_name = "GLOB")]
+    pub globs: Vec<String>,
+    #[arg(long = "iglob", value_name = "GLOB")]
+    pub insensitive_globs: Vec<String>,
+    #[arg(skip)]
+    pub glob_rules: Vec<GlobRule>,
+    #[arg(long)]
+    pub limit: Option<usize>,
+    #[arg(long, value_enum)]
+    pub color: Option<ColorMode>,
+    #[arg(long, env = "ZVEC_GREP_MODE", default_value = "auto")]
+    pub mode: ClientMode,
+    #[arg(long, env = "ZVEC_GREP_HOME")]
+    pub home: Option<PathBuf>,
+}
+
+pub use zg_engine::api::relationships::Direction;
+
+#[derive(Debug, Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct IndexArgs {
+    /// Persist graph indexing; changing an existing index requires --rebuild.
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    pub graph: Option<bool>,
     pub root: Option<PathBuf>,
     #[arg(long)]
     pub mode: Option<ClientMode>,
@@ -674,6 +706,13 @@ pub enum CliPlan {
     Files {
         request: Box<FilesOptions>,
         null: bool,
+    },
+    Relationships {
+        direction: Direction,
+        color: ColorMode,
+        mode: ClientMode,
+        home: Option<PathBuf>,
+        request: RelationshipOptions,
     },
     Query {
         mode: ClientMode,
@@ -790,6 +829,7 @@ impl Cli {
             Some(CommandLine::Index(args)) => (args.debug, args.color),
             Some(CommandLine::Status(args)) => (args.debug, args.color),
             Some(CommandLine::Auth(args)) => (false, args.color),
+            Some(CommandLine::Callers(args) | CommandLine::Callees(args)) => (false, args.color),
             _ => (false, None),
         };
         OutputOptions {
@@ -856,6 +896,12 @@ impl Cli {
                 args.files.scan.glob_rules = ordered_glob_rules(submatches);
                 args.literal_value_count = literal_value_count;
             }
+            (
+                Some(CommandLine::Callers(args) | CommandLine::Callees(args)),
+                Some((_, submatches)),
+            ) => {
+                args.glob_rules = ordered_glob_rules(submatches);
+            }
             _ => {}
         }
         Ok(cli)
@@ -891,6 +937,8 @@ impl Cli {
             return Ok(CliPlan::Help(None));
         };
         match command {
+            CommandLine::Callers(args) => relationship_plan(args, &current_dir, Direction::In),
+            CommandLine::Callees(args) => relationship_plan(args, &current_dir, Direction::Out),
             CommandLine::Query(args) => query_plan(args, current_dir),
             CommandLine::Index(args) => index_plan(args, &current_dir),
             CommandLine::Status(args) => Ok(CliPlan::Status {
@@ -930,6 +978,8 @@ impl Cli {
 fn action_for_flag(value: &OsStr) -> Option<&'static str> {
     match value.to_str()? {
         "--index" => Some("index"),
+        "--callers" => Some("callers"),
+        "--callees" => Some("callees"),
         "--status" => Some("status"),
         "--install" => Some("install"),
         "--uninstall" => Some("uninstall"),
@@ -1392,6 +1442,29 @@ fn validate_query(args: &QueryArgs, mode: ClientMode) -> Result<(), CliError> {
     Ok(())
 }
 
+fn relationship_plan(
+    args: RelationshipArgs,
+    current_dir: &Path,
+    direction: Direction,
+) -> Result<CliPlan, CliError> {
+    let request = RelationshipOptions {
+        root: Some(resolve_from(current_dir, args.root.as_deref())),
+        symbol: args.symbol,
+        kinds: Some(vec![zg_engine::api::relationships::GraphEdgeKind::Calls]),
+        globs: args.glob_rules,
+        limit: args.limit,
+        ..RelationshipOptions::default()
+    };
+    request.validate()?;
+    Ok(CliPlan::Relationships {
+        direction,
+        color: args.color.unwrap_or_default(),
+        mode: args.mode,
+        home: args.home,
+        request,
+    })
+}
+
 fn query_plan(mut args: QueryArgs, current_dir: PathBuf) -> Result<CliPlan, CliError> {
     let mode = resolve_query_mode(&args)?;
     validate_query(&args, mode)?;
@@ -1534,6 +1607,7 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
     };
     if args.drop {
         if args.rebuild
+            || args.graph.is_some()
             || args.reset_paths
             || args.embedding.is_some()
             || args.model_cache.is_some()
@@ -1585,6 +1659,7 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
         operation: IndexOperation::Build(Box::new(IndexOptions {
             root: Some(root),
             rebuild: args.rebuild,
+            graph_indexing: args.graph,
             reset_paths: args.reset_paths,
             scan,
             embedding,
@@ -2016,6 +2091,8 @@ mod tests {
         ] {
             for mut arguments in [
                 vec!["zg", "needle"],
+                vec!["zg", "--callers", "foo"],
+                vec!["zg", "--callees", "foo"],
                 vec!["zg", "--index"],
                 vec!["zg", "--status"],
                 vec!["zg", "--auth", "status"],
@@ -2524,6 +2601,158 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "case failures: {failures:?}");
+    }
+
+    #[test]
+    fn relationship_commands_preserve_direction_root_and_edge_limit() {
+        for (command, expected) in [
+            ("--callers", super::Direction::In),
+            ("--callees", super::Direction::Out),
+        ] {
+            let directory = tempfile::tempdir().expect("workspace parent");
+            let cwd = directory.path().canonicalize().expect("cwd");
+            std::fs::create_dir_all(cwd.join("nested/.zvec-grep")).expect("workspace");
+            std::fs::write(cwd.join("nested/.zvec-grep/manifest.json"), "{}").expect("manifest");
+            let plan = Cli::try_parse_from([
+                "zg",
+                command,
+                " Class::method ",
+                "nested",
+                "--glob",
+                "src/main.rs",
+                "--limit",
+                "3",
+                "--mode",
+                "server",
+                "--color",
+                "never",
+            ])
+            .expect("parse relationship command")
+            .into_plan(cwd.clone())
+            .expect("relationship plan");
+            let CliPlan::Relationships {
+                direction,
+                mode,
+                color,
+                request,
+                ..
+            } = plan
+            else {
+                panic!("relationship plan expected");
+            };
+            assert_eq!(direction, expected);
+            assert_eq!(color, super::ColorMode::Never);
+            assert_eq!(mode, super::ClientMode::Server);
+            assert_eq!(request.root, Some(cwd.join("nested")));
+            assert_eq!(request.symbol, " Class::method ");
+            assert_eq!(
+                request.kinds,
+                Some(vec![zg_engine::api::relationships::GraphEdgeKind::Calls])
+            );
+            assert_eq!(request.limit, Some(3));
+            assert_eq!(request.globs, vec!["src/main.rs".into()]);
+            let CliPlan::Relationships { request, .. } =
+                Cli::try_parse_from(["zg", command, "name"])
+                    .expect("default arguments")
+                    .into_plan(cwd.clone())
+                    .expect("default plan")
+            else {
+                panic!("relationship plan expected");
+            };
+            assert_eq!(request.limit, None);
+            assert_eq!(request.root, Some(cwd));
+        }
+    }
+
+    #[test]
+    fn relationship_globs_share_query_order_and_workspace_relative_patterns() {
+        let directory = tempfile::tempdir().expect("directory");
+        let cwd = directory.path().to_path_buf();
+        let rules = [
+            "-g",
+            "src/**",
+            "--iglob",
+            "!**/TEST*",
+            "--glob",
+            "src/test_keep.rs",
+        ];
+        let mut query = vec!["zg", "needle"];
+        query.extend(rules);
+        let CliPlan::Query { request: query, .. } = Cli::try_parse_from(query)
+            .expect("query args")
+            .into_plan(cwd.clone())
+            .expect("query")
+        else {
+            panic!("query plan")
+        };
+        for command in ["--callers", "--callees"] {
+            let mut args = vec!["zg", command, "run"];
+            args.extend(rules);
+            let CliPlan::Relationships { request, .. } = Cli::try_parse_from(args)
+                .expect("relationship args")
+                .into_plan(cwd.clone())
+                .expect("relationship")
+            else {
+                panic!("relationship plan")
+            };
+            assert_eq!(request.globs, query.filter.globs);
+            assert_eq!(request.globs[0].pattern, "src/**");
+            assert!(request.globs[1].case_insensitive);
+            assert!(!request.globs[2].case_insensitive);
+            assert!(Cli::try_parse_from(["zg", command, "run", "--path", "src"]).is_err());
+            for pattern in ["", "!", "["] {
+                assert!(
+                    Cli::try_parse_from(["zg", command, "run", "-g", pattern])
+                        .ok()
+                        .and_then(|cli| cli.into_plan(cwd.clone()).ok())
+                        .is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn relationship_commands_reject_invalid_values_before_execution() {
+        for arguments in [
+            vec!["zg", "--callees", "name", "--limit", "-1"],
+            vec!["zg", "--callers", "name", "--refresh", "wait"],
+            vec!["zg", "--callees"],
+        ] {
+            assert!(Cli::try_parse_from(arguments).is_err());
+        }
+        for (symbol, limit, message) in [
+            (" ".to_owned(), "1", "symbol must contain"),
+            ("run".to_owned(), "51", "relationship limit must not exceed"),
+            (
+                "x".repeat(zg_engine::api::relationships::MAX_RELATIONSHIP_SYMBOL_CHARS + 1),
+                "1",
+                "symbol must contain",
+            ),
+            (
+                "::".to_owned(),
+                "1",
+                "expected a symbol name after '::', e.g. 'Foo::bar'",
+            ),
+            (
+                "Foo::".to_owned(),
+                "1",
+                "expected a symbol name after '::', e.g. 'Foo::bar'",
+            ),
+            (
+                "target".to_owned(),
+                "0",
+                "relationship limit must be positive",
+            ),
+        ] {
+            for command in ["--callers", "--callees"] {
+                let cli = Cli::try_parse_from(["zg", command, &symbol, "--limit", limit])
+                    .expect("parse input shape");
+                let error = cli
+                    .into_plan(std::env::temp_dir())
+                    .expect_err("reject before execution");
+                assert!(error.to_string().contains(message), "{error}");
+            }
+        }
     }
 
     #[test]
@@ -3115,6 +3344,30 @@ mod tests {
             assert!(Cli::try_parse_from(["zg", "--", option]).is_ok());
             assert!(Cli::try_parse_from(["zg", "--rg", "-e", option]).is_ok());
         }
+    }
+
+    #[test]
+    fn graph_indexing_preserves_explicit_values_and_omission() {
+        for (flags, expected) in [
+            (vec![], None),
+            (vec!["--graph"], Some(true)),
+            (vec!["--graph=true"], Some(true)),
+            (vec!["--graph=false"], Some(false)),
+        ] {
+            let cli = Cli::try_parse_from(["zg", "--index"].into_iter().chain(flags))
+                .expect("graph setting");
+            let CliPlan::Index {
+                operation: IndexOperation::Build(options),
+                ..
+            } = cli.into_plan(std::env::temp_dir()).expect("index plan")
+            else {
+                panic!("index");
+            };
+            assert_eq!(options.graph_indexing, expected);
+        }
+        let cli = Cli::try_parse_from(["zg", "--index", "--drop", "--graph=false"])
+            .expect("argument shape");
+        assert!(cli.into_plan(std::env::temp_dir()).is_err());
     }
 
     #[test]

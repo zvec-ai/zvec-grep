@@ -7,7 +7,8 @@ use zg_engine::api::context::result::{
 };
 
 use crate::{
-    OutputOptions, PreviewMode, highlight::QueryHighlighter, output_path, theme::StatusTheme,
+    OutputOptions, PreviewMode, highlight::QueryHighlighter, output_path,
+    preview::short_source_line, theme::StatusTheme,
 };
 
 pub(super) fn write_items(
@@ -107,12 +108,7 @@ pub(super) fn write_item_preview(
     let from = if short { anchor.saturating_sub(3) } else { 0 };
     for (offset, line) in lines.iter().enumerate().skip(from).take(max_lines) {
         let line = if short {
-            let mut chars = line.chars();
-            let mut text: String = chars.by_ref().take(160).collect();
-            if chars.next().is_some() {
-                text.push_str("...");
-            }
-            text
+            short_source_line(item, offset, line)
         } else {
             (*line).to_owned()
         };

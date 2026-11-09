@@ -25,6 +25,7 @@ use api::{
     index::{IndexOptions, IndexResult},
     info::{InfoOptions, InfoResult},
     paths::{PathLookupResult, PathsOptions, PathsResult},
+    relationships::{Direction, GraphEdgeKind, RelationshipOptions, RelationshipResult},
 };
 
 pub use error::{EngineError, EngineResult, ErrorReport, ErrorSite};
@@ -99,6 +100,36 @@ impl ZvecGrep {
     pub async fn index(&self, options: IndexOptions) -> EngineResult<IndexResult> {
         self.service
             .index(options)
+            .await
+            .map_err(|error| error.report_here())
+    }
+
+    /// Finds incoming calls for matching symbol definitions in an existing index.
+    pub async fn callers(
+        &self,
+        mut options: RelationshipOptions,
+    ) -> EngineResult<RelationshipResult> {
+        options.kinds = Some(vec![GraphEdgeKind::Calls]);
+        self.relationships(Direction::In, options).await
+    }
+
+    /// Finds outgoing calls for matching symbol definitions in an existing index.
+    pub async fn callees(
+        &self,
+        mut options: RelationshipOptions,
+    ) -> EngineResult<RelationshipResult> {
+        options.kinds = Some(vec![GraphEdgeKind::Calls]);
+        self.relationships(Direction::Out, options).await
+    }
+
+    /// Finds persisted relationships in the requested direction and edge types.
+    pub async fn relationships(
+        &self,
+        direction: Direction,
+        options: RelationshipOptions,
+    ) -> EngineResult<RelationshipResult> {
+        self.service
+            .relationships(direction, options)
             .await
             .map_err(|error| error.report_here())
     }

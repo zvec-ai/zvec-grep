@@ -14,6 +14,7 @@ pub(crate) use file::FileRecord;
 pub(crate) use file::FileSnapshot;
 pub use format::FileCategory;
 pub use format::FileFormat;
+pub(crate) use format::formats_for_path;
 pub(crate) use path::SourcePath;
 pub(crate) use range::ByteRange;
 pub(crate) use range::Range;

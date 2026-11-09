@@ -5,16 +5,40 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::metadata::SymbolType;
+use super::source::TextRange;
 
-/// Edge kinds produced by the extraction layer.
+/// Direction of a one-hop query relative to its endpoint.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    /// Edges targeting the queried endpoint.
+    In,
+    /// Edges originating from the queried endpoint.
+    Out,
+    /// Edges in either direction.
+    #[default]
+    Both,
+}
+
+/// Kinds produced by the extraction layer.
+///
+/// Resolved edges and buffered name references share this vocabulary because
+/// they become rows of the same table: the pending queue stores the kind the
+/// resolved edge will carry. Resolution state is therefore structural, not a
+/// kind — a [`PendingRef`] has no target, a [`FileEdge`] requires one — and the
+/// store keeps the same split in its `status` column.
+///
+/// `Contains` comes only from containment, which is collected as a resolved
+/// edge during the walk, so a buffered name reference never carries it.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum GraphEdgeKind {
+pub enum GraphEdgeKind {
     Contains,
     Calls,
     Imports,
     Extends,
     Implements,
+    Declares,
 }
 
 /// Evidence provenance recorded on persisted edges.
@@ -74,15 +98,17 @@ pub(crate) struct FileGraphNode {
     /// `scope::name` breadcrumb joined with `::`, or the bare name.
     pub qualified_name: String,
     pub language: String,
-    pub start_line: usize,
-    pub end_line: usize,
-    pub start_column: usize,
-    pub end_column: usize,
+    /// Extent of the entity in its source, absent when the entity carries no
+    /// text range (a whole-file or byte-only range has no coordinates).
+    pub range: Option<TextRange>,
     pub signature: Option<String>,
     pub doc: Option<String>,
     pub arity: Option<usize>,
     pub visibility: Option<String>,
     pub is_exported: bool,
+    /// Pure declaration without a body (C/C++ prototypes, in-class member
+    /// declarations); definitions shadow them in name-based binding.
+    pub is_declaration: bool,
 }
 
 /// Per-file graph extraction output, assembled after the walk and partition.
@@ -94,18 +120,22 @@ pub(crate) struct FileGraphResult {
 }
 
 impl GraphEdgeKind {
-    pub(crate) const fn as_str(self) -> &'static str {
+    /// Stable serialized name of this relationship kind.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Contains => "contains",
             Self::Calls => "calls",
             Self::Imports => "imports",
             Self::Extends => "extends",
             Self::Implements => "implements",
+            Self::Declares => "declares",
         }
     }
 }
 
 impl EdgeProvenance {
+    #[allow(dead_code)]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::FileLocal => "file_local",

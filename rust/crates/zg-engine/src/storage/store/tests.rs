@@ -415,6 +415,7 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
     )
     .expect("model");
     IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        graph_enabled: false,
         storage_path: home.to_owned(),
         embeddings: vec![original.clone()],
     })
@@ -452,6 +453,7 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
     .expect("embedding");
 
     IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        graph_enabled: false,
         storage_path: home.to_owned(),
         embeddings: vec![current.clone()],
     })
@@ -473,6 +475,7 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
         }
         let changed = serde_json::from_value(data).expect("valid model metadata");
         let error = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+            graph_enabled: false,
             storage_path: home.to_owned(),
             embeddings: vec![changed],
         })
@@ -511,9 +514,11 @@ fn rejects_corrupt_embedding_limits_before_opening_native_storage() {
         .expect("write corrupt descriptor");
         for options in [
             WorkspaceIndexStorageOptions::ReadOnly {
+                graph_enabled: true,
                 storage_path: directory.path().to_owned(),
             },
             WorkspaceIndexStorageOptions::ReadWrite {
+                graph_enabled: false,
                 storage_path: directory.path().to_owned(),
                 embeddings: vec![schema()],
             },
@@ -550,9 +555,11 @@ fn rejects_existing_collections_without_schema_before_opening_them() {
         fs::write(&marker, "existing data").expect("existing collection data");
         for options in [
             WorkspaceIndexStorageOptions::ReadOnly {
+                graph_enabled: true,
                 storage_path: directory.path().to_owned(),
             },
             WorkspaceIndexStorageOptions::ReadWrite {
+                graph_enabled: false,
                 storage_path: directory.path().to_owned(),
                 embeddings: vec![schema()],
             },
@@ -575,10 +582,12 @@ fn rejects_existing_collections_without_schema_before_opening_them() {
 fn open(path: &Path, read_only: bool) -> IndexStore {
     let options = if read_only {
         WorkspaceIndexStorageOptions::ReadOnly {
+            graph_enabled: true,
             storage_path: path.to_owned(),
         }
     } else {
         WorkspaceIndexStorageOptions::ReadWrite {
+            graph_enabled: false,
             storage_path: path.to_owned(),
             embeddings: vec![schema()],
         }
@@ -627,6 +636,9 @@ fn fixture(
                 visibility: None,
                 language: None,
                 documentation: None,
+                arity: None,
+                is_exported: false,
+                is_declaration: false,
             })),
         ),
         vector,
@@ -943,6 +955,7 @@ fn rejects_invalid_writes_without_poisoning_storage() {
     );
     assert!(
         IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
+            graph_enabled: true,
             storage_path: home.to_owned(),
         })
         .is_err(),
@@ -957,6 +970,7 @@ fn rejects_invalid_writes_without_poisoning_storage() {
     }
     assert!(
         IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+            graph_enabled: false,
             storage_path: home.to_owned(),
             embeddings: vec![incompatible],
         })
@@ -1270,6 +1284,7 @@ fn multi_model_schema() -> Vec<EmbeddingModelInfo> {
 
 fn open_multi_model(path: &Path) -> IndexStore {
     IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        graph_enabled: false,
         storage_path: path.to_owned(),
         embeddings: multi_model_schema(),
     })
@@ -1594,6 +1609,7 @@ fn colliding_model_collection_names_are_rejected_before_opening_storage() {
         })
         .collect::<Vec<_>>();
     let error = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        graph_enabled: false,
         storage_path: home.path().to_owned(),
         embeddings: embeddings.clone(),
     })
@@ -1618,6 +1634,7 @@ fn colliding_model_collection_names_are_rejected_before_opening_storage() {
     )
     .expect("write conflicting schema");
     let error = IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
+        graph_enabled: true,
         storage_path: home.path().to_owned(),
     })
     .err()
@@ -1640,6 +1657,7 @@ fn model_set_changes_require_rebuild_and_order_does_not() {
     let mut reversed = multi_model_schema();
     reversed.reverse();
     IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        graph_enabled: false,
         storage_path: home.path().to_owned(),
         embeddings: reversed,
     })
@@ -1649,6 +1667,7 @@ fn model_set_changes_require_rebuild_and_order_does_not() {
     for embeddings in [vec![schema()], vec![schema(), schema()]] {
         assert!(
             IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+                graph_enabled: false,
                 storage_path: home.path().to_owned(),
                 embeddings,
             })
@@ -1784,9 +1803,11 @@ fn native_path_schema_requires_rebuild_without_mutating_collections() {
     fs::write(&path, &bytes).expect("old descriptor");
     for options in [
         WorkspaceIndexStorageOptions::ReadOnly {
+            graph_enabled: true,
             storage_path: root.path().to_owned(),
         },
         WorkspaceIndexStorageOptions::ReadWrite {
+            graph_enabled: false,
             storage_path: root.path().to_owned(),
             embeddings: vec![schema()],
         },
@@ -1812,9 +1833,11 @@ fn missing_or_malformed_collections_are_not_recreated() {
         }
         for options in [
             WorkspaceIndexStorageOptions::ReadOnly {
+                graph_enabled: true,
                 storage_path: root.path().to_owned(),
             },
             WorkspaceIndexStorageOptions::ReadWrite {
+                graph_enabled: false,
                 storage_path: root.path().to_owned(),
                 embeddings: vec![schema()],
             },
@@ -1860,6 +1883,7 @@ fn critical_storage_symlinks_are_rejected_before_opening_the_target() {
         fs::write(&target, "preserve").expect("outside record");
         std::os::unix::fs::symlink(&target, index.join(name)).expect("alias");
         let error = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+            graph_enabled: false,
             storage_path: index,
             embeddings: vec![schema()],
         })

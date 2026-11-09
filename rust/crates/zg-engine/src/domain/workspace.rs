@@ -547,8 +547,14 @@ mod tests {
             ModelInfo::new("local", "test-model", [ContentKind::Code], 1).expect("model metadata");
         let embedding = EmbeddingModelInfo::new(model, 8, EmbeddingMetric::Cosine, None, None)
             .expect("embedding metadata");
-        let index = IndexDescriptor::new(embedding, BTreeMap::new(), BTreeMap::new(), FTS_CONFIG)
-            .expect("index descriptor");
+        let index = IndexDescriptor::new(
+            embedding,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            false,
+            FTS_CONFIG,
+        )
+        .expect("index descriptor");
         Workspace::new(
             root,
             WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout"),

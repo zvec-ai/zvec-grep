@@ -1,5 +1,8 @@
 mod compact;
 mod context;
+mod relationships;
+
+pub use relationships::write_relationships;
 
 #[cfg(test)]
 use crate::highlight::QueryHighlighter;
@@ -317,6 +320,7 @@ pub fn help_text(topic: Option<&str>) -> Result<String, HelpTopicError> {
     let text = match topic {
         None => return Ok(main_help()),
         Some("search") => SEARCH_HELP,
+        Some("callers" | "callees") => RELATIONSHIP_HELP,
         Some("index") => INDEX_HELP,
         Some("status") => STATUS_HELP,
         Some("config") => CONFIG_HELP,
@@ -360,6 +364,10 @@ Search:
   <query>        Search indexed context (no command prefix)
   --rg           Run managed ripgrep
 
+Relationships:
+  --callers      Show incoming call sites for a symbol
+  --callees      Show outgoing call sites for a symbol
+
 Management:
   --index        Build, rebuild, or drop the workspace index
   --status       Show workspace and index status
@@ -399,6 +407,29 @@ Run zg --help models or zg --help file-types for supported indexing capabilities
 Run zg --help environment for all variables, scopes, aliases, and precedence.
 Run zg --help search or zg --help <topic> for specific help.
 Use zg -h/--help for this page and zg -v/--version for the version."#;
+
+const RELATIONSHIP_HELP: &str = r"Usage:
+  zg --callers <symbol> [root] [options]
+  zg --callees <symbol> [root] [options]
+
+Options:
+  -g, --glob <GLOB>                Workspace-relative glob; prefix ! to exclude; repeatable
+  --iglob <GLOB>                   Case-insensitive glob; repeatable
+  --limit <N>                      Maximum call sites per matching symbol (default: 20, max: 50)
+  --color <auto|always|never>       Control ANSI colors (default: auto)
+  --mode <direct|server|auto>       Select the execution mode (default: auto)
+
+Globs follow the same ordered rules as ordinary search and filter definitions
+and suggestions, not call-site files.
+Names may be scope-qualified, such as Class::method. Same-name definitions are
+shown separately, with each related definition and its call-site location.
+Call-site locations always refer to the caller file, including calls without
+symbol metadata. Text line and byte-column numbers are one-based.
+A truncation notice indicates additional visible call sites beyond the limit.
+Unresolved references are excluded, so empty results do not prove that a relationship is absent.
+Output is readable text, shared with MCP text content.
+Requires graph indexing enabled with zg --index --graph; add --rebuild for an existing index.
+A query does not refresh or build the index.";
 
 const SEARCH_HELP: &str = r#"Usage:
   zg <query> [options]
@@ -504,10 +535,14 @@ const INDEX_HELP: &str = r"Usage:
 
 Index options:
   --rebuild                         Rebuild the existing index
+  --graph[=true|false]               Enable or disable graph indexing; omitted keeps saved setting
   --drop                            Permanently remove the workspace index
   --debug                           Print skipped-file diagnostics to stderr
   --mode <direct|server|auto>       Select indexing transport
   --color <auto|always|never>       Color output (default: auto)
+
+Graph indexing defaults to disabled for new indexes. Changing it on an existing
+index requires --rebuild, for example: zg --index --rebuild --graph.
 
 Dropping an index runs immediately without a confirmation prompt.
 
@@ -679,7 +714,7 @@ when the client disconnects.
 
 The server listens on loopback. Authentication is disabled by default; pass a
 token file or set ZVEC_GREP_SERVER_TOKEN to require Bearer authentication.
-The public MCP endpoint defaults to the agent toolset (indexed search only).
+The public MCP endpoint defaults to the agent toolset (indexed search and callers/callees).
 Use --mcp-toolset full, or ZVEC_GREP_MCP_TOOLSET=full, to expose managed rg and
 the four index and status tools. CLI managed rg, index, and status commands
 continue to use the daemon's internal administration endpoint.
@@ -1063,6 +1098,9 @@ mod output_tests {
             visibility: None,
             language: None,
             documentation: None,
+            arity: None,
+            is_exported: false,
+            is_declaration: false,
         }));
         for source in [ContextSource::Index, ContextSource::Rg] {
             result.source = source;
@@ -1420,6 +1458,9 @@ mod output_tests {
                 visibility: None,
                 language: None,
                 documentation: None,
+                arity: None,
+                is_exported: false,
+                is_declaration: false,
             }));
             let mut buffer = Vec::new();
             write_item_preview(

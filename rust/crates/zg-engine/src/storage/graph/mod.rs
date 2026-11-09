@@ -5,10 +5,9 @@
 //! the indexing coordinator owns consistency with zvec.
 //! Callers must serialize reference reads, resolution and writeback with file updates.
 //! This module does not resolve names, run FTS, or manage workspace locks.
-//! `IndexStore` owns the writable connection and coordinates file replacement.
+//! `IndexStore` owns the connection and coordinates file replacement.
 
 mod pending;
-#[cfg(test)]
 mod reader;
 mod schema;
 mod types;
@@ -29,10 +28,10 @@ pub(crate) enum Error {
     Io(#[from] std::io::Error),
     #[error("invalid graph input: {0}")]
     InvalidInput(&'static str),
-    #[error(
-        "unsupported graph database (version {version}, application {application_id}); rebuild the index"
-    )]
-    UnsupportedSchema { version: i64, application_id: i64 },
+    #[error("unexpected graph database owner (application {application_id}); rebuild the index")]
+    UnsupportedSchema { application_id: i64 },
+    #[error("graph database is missing the edges table; rebuild the index")]
+    IncompleteSchema,
     #[error("refusing to initialize an unrelated SQLite database")]
     ForeignDatabase,
 }
@@ -43,7 +42,6 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 /// Read-only opening never creates a database or modifies its schema.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OpenMode {
-    #[cfg(test)]
     ReadOnly,
     ReadWrite,
 }
@@ -74,13 +72,12 @@ impl SqliteGraphStorage {
     /// Opens an existing reader, or initializes a writer and its parent directory.
     ///
     /// # Errors
-    /// Rejects missing read-only databases, foreign/newer schemas, and SQLite/I/O errors.
+    /// Rejects missing read-only databases, unrelated databases, and SQLite/I/O errors.
     pub(crate) fn open(path: &Path, mode: OpenMode) -> Result<Self> {
         if path.as_os_str().is_empty() {
             return Err(Error::InvalidInput("database path is empty"));
         }
         let flags = match mode {
-            #[cfg(test)]
             OpenMode::ReadOnly => OpenFlags::SQLITE_OPEN_READ_ONLY,
             OpenMode::ReadWrite => {
                 if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -105,7 +102,6 @@ impl SqliteGraphStorage {
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.pragma_update(None, "foreign_keys", true)?;
         match mode {
-            #[cfg(test)]
             OpenMode::ReadOnly => schema::validate(&connection)?,
             OpenMode::ReadWrite => {
                 schema::initialize(&mut connection)?;

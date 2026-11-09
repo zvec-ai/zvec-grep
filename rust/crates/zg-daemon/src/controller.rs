@@ -30,7 +30,7 @@ const STARTUP_FILE: &str = "startup.lock";
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const SIGNAL_GRACE: Duration = Duration::from_secs(2);
-const DAEMON_PROTOCOL_VERSION: u32 = 1;
+const DAEMON_PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum StopMode {
@@ -422,7 +422,7 @@ async fn start_server_with_lock(
 ) -> Result<DaemonStatus, DaemonError> {
     let token = crate::resolve_token(config.token_file.as_deref())?;
     if let Some(record) = read_running_instance(&config.home).await?
-        && record.daemon_protocol_version.is_none()
+        && matches!(record.daemon_protocol_version, None | Some(1))
     {
         // A different target can be checked while the legacy service is still
         // available. Its own listening address must be released before binding.
@@ -569,6 +569,7 @@ pub async fn server_status(home: &Path) -> Result<DaemonStatus, DaemonError> {
     };
     match record.daemon_protocol_version {
         Some(DAEMON_PROTOCOL_VERSION) => {}
+        None | Some(1) => return Err(DaemonError::LegacyDaemon { pid: record.pid }),
         Some(actual) => {
             return Err(DaemonError::ProtocolMismatch {
                 pid: record.pid,
@@ -576,7 +577,6 @@ pub async fn server_status(home: &Path) -> Result<DaemonStatus, DaemonError> {
                 expected: DAEMON_PROTOCOL_VERSION,
             });
         }
-        None => return Err(DaemonError::LegacyDaemon { pid: record.pid }),
     }
     let address = record_address(&record, home).await?;
     let healthy = http_request(&address, "GET", "/healthz", Duration::from_secs(1), None)

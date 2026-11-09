@@ -384,6 +384,7 @@ mod tests {
                         "local/example".into(),
                         crate::domain::model::ModelConfig::default(),
                     )]),
+                    false,
                     crate::domain::FTS_CONFIG,
                 )
                 .expect("index descriptor"),
@@ -735,6 +736,7 @@ mod tests {
             index.default_embedding_model().clone(),
             index.embedding_routes().clone(),
             configs,
+            index.graph_indexing(),
             index.fts(),
         )
         .expect("descriptor");

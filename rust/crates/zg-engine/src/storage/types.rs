@@ -10,13 +10,17 @@ use crate::domain::{
     model::EmbeddingModelInfo,
 };
 
+/// Opening options. With `graph_enabled: false`, neither mode opens SQLite;
+/// canonical reads/writes remain available and graph operations report Unsupported.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum WorkspaceIndexStorageOptions {
     ReadOnly {
         storage_path: PathBuf,
+        graph_enabled: bool,
     },
     ReadWrite {
         storage_path: PathBuf,
+        graph_enabled: bool,
         embeddings: Vec<EmbeddingModelInfo>,
     },
 }
@@ -26,6 +30,14 @@ impl WorkspaceIndexStorageOptions {
         match self {
             Self::ReadOnly { storage_path, .. } | Self::ReadWrite { storage_path, .. } => {
                 storage_path
+            }
+        }
+    }
+
+    pub(crate) const fn graph_enabled(&self) -> bool {
+        match self {
+            Self::ReadOnly { graph_enabled, .. } | Self::ReadWrite { graph_enabled, .. } => {
+                *graph_enabled
             }
         }
     }
@@ -131,6 +143,7 @@ mod tests {
     fn storage_options_keep_mode_and_path_together() {
         let path = PathBuf::from("workspace-index");
         let options = WorkspaceIndexStorageOptions::ReadOnly {
+            graph_enabled: true,
             storage_path: path.clone(),
         };
 

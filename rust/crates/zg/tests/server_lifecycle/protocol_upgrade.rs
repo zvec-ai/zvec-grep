@@ -19,7 +19,7 @@ fn write_record(home: &Path, record: &serde_json::Value) -> Result<(), Box<dyn E
 
 fn legacy_record(home: &Path) -> Result<serde_json::Value, Box<dyn Error>> {
     let mut record = instance_record(home)?;
-    assert_eq!(record["daemonProtocolVersion"], 1);
+    assert_eq!(record["daemonProtocolVersion"], 2);
     let fields = record.as_object_mut().ok_or("instance record object")?;
     // Keep a real process and shutdown endpoint, but publish the Node.js record
     // shape. This exercises migration without requiring Node.js on the runner.
@@ -95,7 +95,7 @@ fn legacy_checks_fail_without_requests_or_direct_fallback_and_off_still_works()
     assert!(String::from_utf8_lossy(&stopped.stdout).contains("Server: stopped"));
     guard.active = true;
     assert_command_success(&cli(&guard, &["--server", "on", "--listen", &guard.listen]).output()?);
-    assert_eq!(instance_record(home.path())?["daemonProtocolVersion"], 1);
+    assert_eq!(instance_record(home.path())?["daemonProtocolVersion"], 2);
     assert_command_success(&guard.stop()?);
     Ok(())
 }
@@ -116,7 +116,9 @@ fn concurrent_starts_replace_one_legacy_daemon_and_reuse_the_new_protocol()
             .env_remove("ZVEC_GREP_SERVER_TOKEN")
             .env_remove("ZVEC_GREP_SERVER_TOKEN_FILE");
     })?;
-    let legacy = legacy_record(home.path())?;
+    let mut legacy = instance_record(home.path())?;
+    legacy["daemonProtocolVersion"] = json!(1);
+    write_record(home.path(), &legacy)?;
     let mut children = Vec::new();
     for _ in 0..4 {
         children.push(
@@ -143,7 +145,7 @@ fn concurrent_starts_replace_one_legacy_daemon_and_reuse_the_new_protocol()
         .map(Child::wait_with_output)
         .collect::<Result<Vec<_>, _>>()?;
     let current = instance_record(home.path())?;
-    assert_eq!(current["daemonProtocolVersion"], 1);
+    assert_eq!(current["daemonProtocolVersion"], 2);
     assert_eq!(current["mcpToolset"], "agent");
     assert_ne!(current["pid"], legacy["pid"]);
     assert_ne!(current["instanceToken"], legacy["instanceToken"]);
@@ -190,15 +192,19 @@ fn stdio_bootstrap_replaces_a_legacy_daemon_before_mcp_connects() -> Result<(), 
     }))?;
     bridge.notify(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))?;
     let tools = bridge.request(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}))?;
+    let mut names = tools["result"]["tools"]
+        .as_array()
+        .ok_or("tool list")?
+        .iter()
+        .map(|tool| tool["name"].as_str().ok_or("tool name"))
+        .collect::<Result<Vec<_>, _>>()?;
+    names.sort_unstable();
     assert_eq!(
-        tools["result"]["tools"]
-            .as_array()
-            .ok_or("tool list")?
-            .len(),
-        1
+        names,
+        ["zvec_grep_callees", "zvec_grep_callers", "zvec_grep_search"]
     );
     let current = instance_record(home.path())?;
-    assert_eq!(current["daemonProtocolVersion"], 1);
+    assert_eq!(current["daemonProtocolVersion"], 2);
     assert_ne!(current["pid"], legacy["pid"]);
     assert_ne!(current["instanceToken"], legacy["instanceToken"]);
     bridge.close()?;
@@ -212,7 +218,7 @@ fn unsupported_protocol_is_rejected_without_replacing_the_daemon() -> Result<(),
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
     let home = TempDir::new()?;
     let (mut guard, _) = start_server(&binary, &home, "agent", None, |_| {})?;
-    for version in [0, 2] {
+    for version in [0, 3] {
         let mut record = instance_record(home.path())?;
         record["daemonProtocolVersion"] = json!(version);
         write_record(home.path(), &record)?;
@@ -267,7 +273,7 @@ fn rejected_legacy_shutdown_preserves_the_daemon_until_credentials_are_provided(
             .arg(&token_file)
             .output()?,
     );
-    assert_eq!(instance_record(home.path())?["daemonProtocolVersion"], 1);
+    assert_eq!(instance_record(home.path())?["daemonProtocolVersion"], 2);
     assert_command_success(&guard.stop()?);
     Ok(())
 }

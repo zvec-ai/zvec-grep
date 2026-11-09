@@ -225,34 +225,70 @@ export async function checkPublishedPackage(entry, registryFetch = fetch, signal
       `npm registry returned ${response.status} for ${entry.name}@${entry.version}`,
     );
   const metadata = await response.json();
+  verifyPublishedIntegrity(entry, metadata);
+  return true;
+}
+
+function verifyPublishedIntegrity(entry, metadata) {
   if (metadata.dist?.integrity !== entry.integrity) {
     throw new Error(
       `npm already contains different bytes for ${entry.name}@${entry.version}; choose a new version`,
     );
   }
+}
+
+async function checkInstallMetadata(entry, accept, registryFetch, signal) {
+  // Match npm's package URL, including its escaped scope separator. Version
+  // metadata and full/abbreviated package documents can propagate independently.
+  const url = `https://registry.npmjs.org/${entry.name.replace("/", "%2f")}`;
+  const response = await registryFetch(url, {
+    headers: { accept },
+    signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
+  });
+  if (response.status === 404) return false;
+  if (!response.ok) {
+    throw new Error(`npm registry returned ${response.status} for ${entry.name}@${entry.version} (${accept})`);
+  }
+  const document = await response.json();
+  const metadata = document.versions?.[entry.version];
+  if (!metadata) return false;
+  verifyPublishedIntegrity(entry, metadata);
   return true;
 }
 
 export async function waitForPublishedPackages(packages, {
   registryFetch = fetch,
-  timeoutMs = 600_000,
+  timeoutMs = 1_200_000,
   intervalMs = 10_000,
 } = {}) {
   const signal = AbortSignal.timeout(timeoutMs);
-  const pending = [...packages];
+  const pending = packages.map((entry) => ({ entry, checks: [
+    { label: "version metadata" },
+    { label: "full package metadata", accept: "application/json" },
+    { label: "abbreviated package metadata", accept: "application/vnd.npm.install-v1+json" },
+  ] }));
+  const missing = () => pending.map(({ entry, checks }) =>
+    `${entry.name}@${entry.version} (${checks[0].label})`).join(", ");
   try {
     // Publication can succeed before every registry replica serves the metadata.
-    // Share one deadline across all packages and retain successful integrity checks.
+    // Share one deadline across all packages and retain successful integrity checks
+    // for each document. npm install must be able to resolve optional dependencies.
     while (pending.length) {
-      for (const entry of [...pending]) {
-        signal.throwIfAborted();
-        if (await checkPublishedPackage(entry, registryFetch, signal)) {
-          pending.splice(pending.indexOf(entry), 1);
+      for (const state of [...pending]) {
+        while (state.checks.length) {
+          signal.throwIfAborted();
+          const { accept } = state.checks[0];
+          const ready = accept
+            ? await checkInstallMetadata(state.entry, accept, registryFetch, signal)
+            : await checkPublishedPackage(state.entry, registryFetch, signal);
+          if (!ready) break;
+          state.checks.shift();
         }
+        if (!state.checks.length) pending.splice(pending.indexOf(state), 1);
       }
       if (pending.length) {
         console.log(`Waiting for npm registry metadata (${pending.length} packages): ${
-          pending.map((entry) => `${entry.name}@${entry.version}`).join(", ")
+          missing()
         }; retrying in ${intervalMs} ms`);
         await sleep(intervalMs, undefined, { signal });
       }
@@ -260,7 +296,7 @@ export async function waitForPublishedPackages(packages, {
   } catch (error) {
     if (signal.aborted) {
       throw new Error(`timed out after ${timeoutMs} ms waiting for npm registry metadata; registry candidate is missing: ${
-        pending.map((entry) => `${entry.name}@${entry.version}`).join(", ")
+        missing()
       }`, { cause: error });
     }
     throw error;
