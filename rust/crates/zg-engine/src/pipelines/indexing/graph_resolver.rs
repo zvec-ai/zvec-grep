@@ -40,7 +40,8 @@ pub(crate) struct ResolutionSweep {
     pub stale: usize,
     /// Ambiguous references resolved through import scoping this sweep.
     pub import_bound: usize,
-    /// Receiver-qualified calls bound to a same-file declaration this sweep.
+    /// Receiver-qualified calls bound through the owner's declarations or its
+    /// class hierarchy this sweep.
     pub file_scoped: usize,
     /// Qualified references bound through `qualified_name` this sweep.
     pub qualified_name_match: usize,
@@ -57,7 +58,8 @@ pub(crate) struct ResolutionSweep {
 /// Resolves pending references each sweep: relative import specifiers onto
 /// file endpoints, workspace-unique names onto their single definition,
 /// ambiguous bare names onto the one module their file imports,
-/// `self`/`this` receiver calls onto the one same-file declaration, and
+/// `self`/`this` receiver calls onto the class owning the call site, the
+/// nearest declaration along its extends/implements chain, and
 /// qualified `Class::method` receivers onto the entity whose `qualified_name`
 /// spells that scope and member. Ambiguities surviving these rules narrow
 /// through export visibility and declared arity when the evidence picks
@@ -66,9 +68,10 @@ pub(crate) struct ResolutionSweep {
 ///
 /// Matching stays conservative. A receiver-qualified same-file hit stays
 /// pending — partition already resolved unambiguous local names, so such a
-/// survivor needs type inference, except where the receiver names the
-/// enclosing instance (`self`/`this`) and the file declares the member exactly
-/// once. A bare name's lone same-file hit, by contrast, binds as `FileScoped`:
+/// survivor needs type inference; a `self`/`this` receiver is answered only
+/// through the owner's class hierarchy, and a member the nearest declaring
+/// scope holds ambiguously stays pending. A bare name's lone same-file hit,
+/// by contrast, binds as `FileScoped`:
 /// the in-file symbol table skips declaration entities, so no earlier rule
 /// could have claimed it. Names that stay ambiguous after every evidence rule
 /// record their candidate set for consumers.
@@ -602,8 +605,9 @@ fn resolve_import(
 /// Resolves an ambiguous bare-name reference through the file's imports:
 /// when the imports pin the name to exactly one module and that module
 /// declares it exactly once, the reference targets that definition.
-/// Receiver-typed calls wait for receiver inference, and a local definition
-/// shadows any import binding, so both stay with the general ambiguity path.
+/// Receiver-typed calls wait for receiver inference, and a same-file top-level
+/// definition of the bare name shadows any import binding, so both stay with
+/// the general ambiguity path.
 fn resolve_import_bound(
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
@@ -1200,10 +1204,13 @@ fn bind_sole_declaration(
 /// is the class owning the call site, so the invoked member's declaring
 /// scope must be that class or — through the class's extends/implements
 /// edges — one of its bases. `super` skips the enclosing class and
-/// addresses the direct bases only. The hierarchy is searched nearest
-/// first, so an override wins over the base method it replaces;
-/// declarations the nearest declaring scope holds ambiguously and receivers
-/// of classes without a persisted owner record stay pending.
+/// addresses the direct bases only. A single-inheritance hierarchy is
+/// searched nearest first, so an override wins over the base method it
+/// replaces; one that declares several bases leaves the order to the
+/// language, and only the conclusions every order shares still bind (see
+/// `bind_hierarchy_member`). Declarations the deciding scope holds
+/// ambiguously and receivers of classes without a persisted owner record
+/// stay pending.
 ///
 /// # Errors
 /// Propagates graph storage failures; an unresolvable reference is `None`.
