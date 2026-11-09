@@ -7,10 +7,12 @@ fn minilm() -> TransformersConfig {
 }
 
 #[test]
-fn execution_is_capped_by_fixed_pool_for_both_cpu_and_cuda() {
+fn execution_is_capped_by_fixed_pool_for_all_multi_session_providers() {
     for provider in [
         TransformersExecutionProvider::Cpu,
         TransformersExecutionProvider::Cuda,
+        TransformersExecutionProvider::DirectMl,
+        TransformersExecutionProvider::WebGpu,
     ] {
         for sessions in [1, 2, 4, 8] {
             assert_eq!(pool_size(provider, sessions), sessions);

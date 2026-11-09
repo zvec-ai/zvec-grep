@@ -96,9 +96,10 @@ indexing and queries for the same model, cache and device:
   CLI/API value, then `ZVEC_GREP_EMBEDDING_CONCURRENCY`, then the default.
 - Server startup captures `ZVEC_GREP_EMBEDDING_CONCURRENCY` as each model/device
   pool's capacity. Sessions are created lazily on first preparation. A client's
-  C only limits execution within that pool: requests above capacity warn and
-  are capped, omitted values use server capacity. Requests never resize the
-  resident pool or change its thread configuration. Different models/devices
+  C only limits its own operation within that pool: requests above capacity warn
+  and are capped, omitted values use server capacity. Requests never resize the
+  resident pool or change its thread configuration. Independent operations may
+  execute concurrently up to the shared pool capacity. Different models/devices
   have separate pools; C is not a process-wide session count.
 - `ZVEC_GREP_ORT_THREAD_BUDGET=T` configures the single process-global ORT
   intra-op pool shared by all Sessions. It defaults to half the available logical
@@ -109,9 +110,11 @@ indexing and queries for the same model, cache and device:
   threads. Sessions no longer divide T by C or rebuild to change thread budgets.
 - Each Session owns one fixed native worker; no Session receives concurrent Run
   calls. A query can use an idle Session, with at most one query batch alongside
-  document work. CPU and CUDA use the same fixed-pool execution limits.
+  document work. CPU, CUDA, DirectML and WebGPU use the same fixed-pool execution
+  limits; CoreML retains its single-session limit.
 - CUDA MiniLM coalescing stays within four inputs and 1,024 padded tokens,
-  waiting at most 1 ms for similar-length requests. Full batches run immediately.
+  waiting at most 1 ms for similar-length requests from the same operation. Full
+  batches run immediately.
   Other ONNX models retain their catalog batch and token ceilings. Queries run
   first without waiting to fill a batch; running inference is not preempted.
   CPU preparation and postprocessing overlap native execution.

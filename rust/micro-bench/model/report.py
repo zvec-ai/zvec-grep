@@ -225,8 +225,8 @@ def render_html(root,intro,rows,aggregates):
                         and all(r["actual_provider"].lower() in ("cpu", "cpuexecutionprovider") for r in execution) else "")
             identity += (f'<span class="case-shape">{html.escape(case["device"].upper())} → '
                          f'{html.escape(providers)}{fallback}</span>'
-                         f'<span class="case-shape" title="Ceff = 有效执行预算；Q = 实际准入 workers；global intra-op = 进程共享的 ORT 算子线程配置；历史 threads/session = 每个 Session 的线程配置；sessions = 阶段结束时数量；native B = 测量阶段每次 native run 的平均行数；阶段耗时和运行期峰值见 JSON">'
-                         f'{html.escape(execution_label(execution)).replace(" · threads=", "<br>threads=")}</span>')
+                         f'<span class="case-shape" title="Ceff = 有效执行预算；Q = 实际准入 workers；global intra-op = 进程共享的 ORT 算子线程配置；sessions = 阶段结束时数量；native B = 测量阶段每次 native run 的平均行数；阶段耗时和运行期峰值见 JSON">'
+                         f'{html.escape(execution_label(execution))}</span>')
         body.append('<tr><td>'+identity+'</td>'+"".join(f'<td>{html.escape(str(v))}</td>' for v in row[1:])+'</tr>')
     paragraphs = "".join(f'<p>{html.escape(p)}</p>' for p in intro.strip().split("\n\n")[1:])
     title = html.escape(intro.splitlines()[0].removeprefix("# "))

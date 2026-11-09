@@ -153,6 +153,109 @@ fn start(
     })
 }
 
+fn operation(concurrency: usize) -> EmbeddingOptions {
+    EmbeddingOptions {
+        execution_concurrency: concurrency,
+        execution_scope: Some(Arc::new(())),
+        ..EmbeddingOptions::default()
+    }
+}
+
+#[test]
+fn independent_operations_share_capacity_without_sharing_their_execution_limit() {
+    for provider in [
+        TransformersExecutionProvider::Cpu,
+        TransformersExecutionProvider::Cuda,
+        TransformersExecutionProvider::DirectMl,
+        TransformersExecutionProvider::WebGpu,
+    ] {
+        let (owner, _starts, _) = owner_with_size(provider, 4, None);
+        let first = operation(1);
+        let second = operation(1);
+        let third = operation(2);
+        let a = owner.try_reserve(&first).expect("first operation starts");
+        assert!(owner.try_reserve(&first).is_none());
+        let b = owner.try_reserve(&second).expect("independent C1 starts");
+        assert!(owner.try_reserve(&second).is_none());
+        let c = owner.try_reserve(&third).expect("C2 first batch");
+        let d = owner.try_reserve(&third).expect("C2 second batch");
+        assert!(owner.try_reserve(&operation(4)).is_none(), "pool is full");
+        drop(a);
+        assert!(
+            owner.try_reserve(&third).is_none(),
+            "C2 is still at its limit"
+        );
+        let a = owner
+            .try_reserve(&first)
+            .expect("C1 reuses the free session");
+        drop((a, b, c, d));
+        let queries = [operation(1), operation(1)].map(|mut options| {
+            options.purpose = EmbeddingPurpose::Query;
+            options
+        });
+        let query = owner.try_reserve(&queries[0]).expect("first query");
+        assert!(
+            owner.try_reserve(&queries[1]).is_none(),
+            "queries retain a pool-wide limit"
+        );
+        drop(query);
+        assert!(owner.try_reserve(&queries[1]).is_some());
+    }
+}
+
+#[tokio::test]
+async fn cancelled_operation_keeps_its_native_slot_without_blocking_other_clients() {
+    let (owner, mut starts, _) = owner_with_size(TransformersExecutionProvider::Cpu, 4, None);
+    let first = operation(1);
+    let second = operation(1);
+    let a = start(&owner, first.clone());
+    let running_a = starts.recv().await.expect("first operation running");
+    let b = start(&owner, second.clone());
+    let running_b = starts.recv().await.expect("second C1 overlaps first C1");
+    assert_ne!(running_a.lane, running_b.lane);
+    let signal = super::super::CancellationToken::new();
+    let waiting_options = EmbeddingOptions {
+        signal: Some(signal.clone()),
+        ..first.clone()
+    };
+    let mut waiting = Box::pin(owner.reserve(&waiting_options));
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+    signal.cancel();
+    assert_eq!(
+        waiting.await.err().expect("cancel waiting batch").code(),
+        crate::EngineError::CANCELLED
+    );
+    a.abort();
+    assert!(a.await.expect_err("drop first caller").is_cancelled());
+    assert!(
+        owner.try_reserve(&first).is_none(),
+        "native work still owns operation C"
+    );
+    running_b
+        .release
+        .send(())
+        .expect("complete second operation");
+    assert!(b.await.expect("second result").is_ok());
+    let next = owner
+        .try_reserve(&second)
+        .expect("other operation remains usable");
+    drop(next);
+    running_a
+        .release
+        .send(())
+        .expect("finish cancelled native work");
+    loop {
+        let available = owner.availability().notified();
+        tokio::pin!(available);
+        available.as_mut().enable();
+        if owner.try_reserve(&first).is_some() {
+            break;
+        }
+        available.await;
+    }
+    assert_eq!(owner.stats().session_initializations, 4);
+}
+
 #[tokio::test]
 async fn cuda_two_lanes_overlap_on_distinct_fixed_threads_without_a_third_session() {
     let (owner, mut starts, _) = owner(TransformersExecutionProvider::Cuda);
@@ -475,23 +578,11 @@ async fn cuda_limit_counts_active_jobs_instead_of_restricting_slot_numbers() {
 #[tokio::test]
 async fn secondary_gpu_failure_drains_existing_gpu_work_before_converting_whole_pool() {
     let (owner, mut starts, fail) = owner(TransformersExecutionProvider::Cuda);
-    let first = start(
-        &owner,
-        EmbeddingOptions {
-            execution_concurrency: 1,
-            ..EmbeddingOptions::default()
-        },
-    );
+    let first = start(&owner, operation(1));
     let first_gpu = starts.recv().await.expect("first GPU owns lane zero");
     assert_eq!(first_gpu.lane, 0);
     fail.store(true, Ordering::Release);
-    let second = start(
-        &owner,
-        EmbeddingOptions {
-            execution_concurrency: 2,
-            ..EmbeddingOptions::default()
-        },
-    );
+    let second = start(&owner, operation(1));
     let second_gpu = starts.recv().await.expect("second GPU owns lane one");
     assert_eq!(second_gpu.lane, 1);
     second_gpu.release.send(()).expect("fail secondary GPU");

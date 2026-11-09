@@ -55,6 +55,9 @@ pub struct EmbeddingOptions {
     /// Runtime-owned execution budget. Backends use this to size their
     /// per-request local inference resources within their configured pools.
     pub(crate) execution_concurrency: usize,
+    /// Identifies one runtime operation so shared pools limit its native work
+    /// independently of other clients. Cloned batch options retain this scope.
+    pub(crate) execution_scope: Option<Arc<()>>,
     /// Preserve this request's native batch shape for controlled comparisons.
     /// Production requests retain bounded dynamic batching by default.
     pub(crate) fixed_batch: bool,
@@ -69,9 +72,15 @@ pub struct EmbeddingOptions {
 pub(crate) struct EmbeddingPrepareOptions {
     pub(crate) signal: Option<CancellationToken>,
     pub(crate) on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
-    /// Initial native execution budget; preparation initializes the configured pool.
-    pub(crate) execution_concurrency: usize,
     pub(crate) execution_lease: Option<Arc<dyn Send + Sync>>,
+}
+
+pub(crate) fn same_execution_scope(first: Option<&Arc<()>>, second: Option<&Arc<()>>) -> bool {
+    match (first, second) {
+        (Some(first), Some(second)) => Arc::ptr_eq(first, second),
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -89,6 +98,7 @@ impl fmt::Debug for EmbeddingOptions {
             .field("has_signal", &self.signal.is_some())
             .field("has_progress_callback", &self.on_progress.is_some())
             .field("execution_concurrency", &self.execution_concurrency)
+            .field("has_execution_scope", &self.execution_scope.is_some())
             .field("fixed_batch", &self.fixed_batch)
             .field("has_execution_lease", &self.execution_lease.is_some())
             .field("has_trace_headers", &self.trace_headers.is_some())

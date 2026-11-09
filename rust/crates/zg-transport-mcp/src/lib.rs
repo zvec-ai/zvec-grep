@@ -788,8 +788,8 @@ pub struct SearchInput {
     pub categories: Option<PathListInput>,
     /// Exclude matching file-name categories, taking precedence over categories.
     pub excluded_categories: Option<PathListInput>,
-    /// Index-only refresh budget; query-vector inference keeps its own defaults.
-    /// Transformers clamp zero to one and apply backend resource limits; other backends require a positive value.
+    /// Index-only refresh concurrency. ORT direct mode sets the session count. In server mode, limits this operation's session use within the startup-configured pool; omitted uses pool capacity. Queries share the pool with their own limit.
+    /// ORT clamps zero to one and requests above pool capacity to capacity; it never resizes server pools or changes their shared CPU thread budget. Other backends require a positive value.
     #[schemars(range(min = 0), extend("type" = "integer"))]
     pub embedding_concurrency: Option<usize>,
     /// Collapse all query groups into one ranked plan.
@@ -871,8 +871,8 @@ pub struct IndexInput {
     #[serde(rename = "follow", alias = "followSymlinks")]
     #[schemars(extend("type" = "boolean"))]
     pub follow_symlinks: Option<bool>,
-    /// Index-only execution budget: CPU threads or CUDA execution lanes for Transformers, llama.cpp contexts, or remote requests.
-    /// Transformers clamp zero to one and apply backend resource limits; other backends require a positive value. llama.cpp is capped at eight.
+    /// Index-only concurrency: ORT sessions, llama.cpp contexts, or remote requests. ORT direct mode sets the session count. In server mode, limits this operation's session use within the startup-configured pool; omitted uses pool capacity.
+    /// ORT clamps zero to one and requests above pool capacity to capacity; it never resizes server pools or changes their shared CPU thread budget. Other backends require a positive value. llama.cpp is capped at eight.
     #[schemars(range(min = 0), extend("type" = "integer"))]
     pub embedding_concurrency: Option<usize>,
     /// Include bounded skipped-file diagnostics after completion.

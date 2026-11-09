@@ -159,11 +159,10 @@ async fn fixtures(document: &ModelRuntimeLease, query: &ModelRuntimeLease) -> Fi
     }
 }
 
-async fn scenario(config: &Config, mixed_budgets: bool) -> Value {
+async fn scenario(config: &Config, budgets: [usize; 2]) -> Value {
     let manager = ModelRuntimeManager::new();
     manager.enable_server_mode().expect("fixed server pool");
-    let high = crate::models::runtime::ort_config::default_sessions();
-    let low = if mixed_budgets { 1 } else { high };
+    let [high, low] = budgets;
     let document = acquire(config, &manager, high);
     let other = acquire(config, &manager, low);
     let query = acquire(config, &manager, 1);
@@ -232,7 +231,7 @@ async fn scenario(config: &Config, mixed_budgets: bool) -> Value {
     let changes = after.session_initializations - before.session_initializations;
     assert_eq!(changes, 0, "smaller budgets must reuse the prepared pool");
     assert_eq!(after.global_intra_threads, before.global_intra_threads);
-    let result = json!({"mixed_budgets":mixed_budgets,"requested_document_c":[high,low],
+    let result = json!({"requested_document_c":budgets,
         "elapsed_seconds":elapsed,"documents":summarize(&rows,"document",elapsed),"queries":summarize(&rows,"query",elapsed),
         "execution":support::execution_measurement(Some(before),Some(after)),"rows":rows});
     drop(document);
@@ -252,13 +251,15 @@ async fn cached_minilm_documents_and_queries() {
     let config = Config::environment();
     assert_eq!(config.reference, "local/all-minilm-l6-v2");
     let provenance = support::verify_artifacts(config.entry, &config.cache).await;
-    let steady = scenario(&config, false).await;
-    let mixed = scenario(&config, true).await;
+    let capacity = crate::models::runtime::ort_config::default_sessions();
+    let steady = scenario(&config, [capacity, capacity]).await;
+    let mixed = scenario(&config, [capacity, 1]).await;
+    let independent = scenario(&config, [1, 1]).await;
     println!(
         "ZG_MIXED_RESULT={}",
         json!({"protocol_pass":true,"provenance":provenance,
         "scope":"model-runtime document/query calls including admission; excludes indexing storage and retrieval; output checked against fixed-batch references",
         "document_clients":8,"query_clients":1,"query_pause_ms":25,
-        "scenarios":[steady,mixed]})
+        "scenarios":[steady,mixed,independent]})
     );
 }

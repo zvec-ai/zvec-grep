@@ -129,6 +129,7 @@ pub(crate) struct ModelRuntimeLease {
 }
 
 struct OperationConcurrency {
+    scope: Arc<()>,
     /// Native execution budget passed to the backend.
     limit: usize,
     /// Active plus prepared/queued requests admitted by this operation.
@@ -298,6 +299,7 @@ impl ModelRuntimeManager {
             entry,
             manager: Arc::downgrade(&self.inner),
             operation: Arc::new(OperationConcurrency {
+                scope: Arc::new(()),
                 limit: concurrency,
                 admission,
                 permits,
@@ -517,7 +519,6 @@ impl ModelRuntimeLease {
         mut options: EmbeddingPrepareOptions,
         progress: Option<ModelProgressReporter>,
     ) -> Result<(), ModelError> {
-        options.execution_concurrency = self.execution_concurrency();
         options.execution_lease = Some(Arc::new(ActiveEmbeddingGuard::new(
             Arc::clone(&self.entry.runtime),
             self.manager.clone(),
@@ -559,6 +560,7 @@ impl ModelRuntimeLease {
             Some(permit),
         )));
         options.execution_concurrency = self.execution_concurrency();
+        options.execution_scope = Some(Arc::clone(&self.operation.scope));
         if let Some(reporter) = progress {
             let model_progress = options.on_progress.take();
             let operation = Arc::clone(&self.operation);

@@ -564,10 +564,7 @@ async fn cached_minilm_fixed_session_pool_matches_single_session() {
     for sessions in [1, 2, 4] {
         let model = pool_fixture_model(entry, &cache, device, sessions);
         model
-            .prepare(EmbeddingPrepareOptions {
-                execution_concurrency: 1,
-                ..EmbeddingPrepareOptions::default()
-            })
+            .prepare(EmbeddingPrepareOptions::default())
             .await
             .expect("eager fixed-size pool");
         let loaded = Arc::clone(lock_std_mutex(&model.state).as_ref().expect("prepared"));

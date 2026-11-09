@@ -251,6 +251,7 @@ impl EmbeddingModel for GatedFixtureModel {
 struct PrefetchFixtureModel {
     gated: GatedFixtureModel,
     budgets: StdMutex<Vec<usize>>,
+    scopes: StdMutex<Vec<Option<Arc<()>>>>,
     fail_next: AtomicBool,
 }
 
@@ -259,6 +260,7 @@ impl PrefetchFixtureModel {
         Self {
             gated: GatedFixtureModel::new(),
             budgets: StdMutex::default(),
+            scopes: StdMutex::default(),
             fail_next: AtomicBool::new(false),
         }
     }
@@ -294,19 +296,15 @@ impl EmbeddingModel for PrefetchFixtureModel {
         })
     }
 
-    async fn prepare(&self, options: EmbeddingPrepareOptions) -> Result<(), ModelError> {
-        self.budgets
-            .lock()
-            .expect("budget lock")
-            .push(options.execution_concurrency);
-        Ok(())
-    }
-
     async fn embed(
         &self,
         inputs: &[Vec<Content>],
         options: EmbeddingOptions,
     ) -> Result<EmbeddingResult, ModelError> {
+        self.scopes
+            .lock()
+            .expect("scope lock")
+            .push(options.execution_scope.clone());
         self.budgets
             .lock()
             .expect("budget lock")
@@ -355,7 +353,13 @@ async fn prefetch_admission_is_independent_of_execution_and_releases_on_success(
     assert_eq!(fixture.gated.started.load(Ordering::Acquire), 3);
     assert_eq!(manager.snapshot().active_embeddings, 3);
     assert_eq!(lease.operation.permits.available_permits(), 0);
-    assert_eq!(*fixture.budgets.lock().expect("budget lock"), [1; 4]);
+    assert_eq!(*fixture.budgets.lock().expect("budget lock"), [1; 3]);
+    let scopes = fixture.scopes.lock().expect("scope lock").clone();
+    assert!(scopes.iter().all(|scope| {
+        scope
+            .as_ref()
+            .is_some_and(|scope| Arc::ptr_eq(scope, &lease.operation.scope))
+    }));
     let stats = lease.execution_stats().expect("backend statistics");
     assert_eq!(stats.actual_provider, "fixture");
     assert_eq!(stats.session_count, 1);
@@ -483,6 +487,11 @@ async fn different_operation_budgets_share_model_but_keep_their_admission_and_ex
     assert!(futures_util::poll!(&mut first_pending).is_pending());
     assert!(futures_util::poll!(&mut second_pending).is_pending());
     assert_eq!(*fixture.budgets.lock().expect("budget lock"), [1, 4]);
+    let scopes = fixture.scopes.lock().expect("scope lock").clone();
+    assert!(!Arc::ptr_eq(
+        scopes[0].as_ref().expect("first scope"),
+        scopes[1].as_ref().expect("second scope")
+    ));
     assert_eq!(first.operation.permits.available_permits(), 2);
     assert_eq!(second.operation.permits.available_permits(), 5);
     assert_eq!(manager.snapshot().cached_runtimes, 1);

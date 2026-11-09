@@ -18,14 +18,15 @@ from verify import check_table, verify
 
 
 def execution_fixture(provider="cpu"):
-    counters = COUNTERS + ("queue_wait_ns",)
-    before = dict.fromkeys(counters, 10)
-    before.update(actual_provider=provider,session_count=1,cpu_threads=2,
+    before = dict.fromkeys(COUNTERS, 10)
+    before.update(actual_provider=provider,session_count=1,global_intra_threads=2,
+                  session_initializations=1,pool_fallbacks=0,
                   max_native_batch_rows=4,max_padded_tokens=128,native_inflight_peak=1)
-    measured = dict(before, **{name:20 for name in counters})
-    measured.update(native_runs=5,native_rows=20)
-    after = dict(before, **{name:before[name]+measured[name] for name in counters})
+    measured = dict(before, **{name:20 for name in COUNTERS})
+    measured.update(native_runs=5,native_rows=20,session_initializations=0,pool_fallbacks=0)
+    after = dict(before, **{name:before[name]+measured[name] for name in COUNTERS})
     return dict(before=before,after=after,measured=measured,
+                timing_scope={"backend_to_native_ns":"includes preparation; excludes admission"},
                 counter_scope="measured_embedding_phase",peak_scope="runtime_including_warmup")
 
 
@@ -62,6 +63,8 @@ class AccountingTests(unittest.TestCase):
                      for i in range(100)]}
         self.elapsed = 10000/1e9
         self.result = dict(schema_version=5,input_tokens=32,batch_size=4,protocol_pass=True,
+            runtime_mode="direct",server_concurrency=None,hardware_threads=4,ort_thread_budget=2,
+            resolved_index_concurrency=1,client_mode="production",
             provenance=dict(inputs=[dict(id=i) for i in range(2)]),
             embedding=dict(started_ns=100,finished_ns=10100,elapsed_seconds=self.elapsed,
                 scheduled=100,issued=100,completed=100,timeout=0,errors=0,
@@ -115,11 +118,10 @@ class AccountingTests(unittest.TestCase):
         self.result.update(effective_execution_concurrency=1,admission_concurrency=2,index_inflight_batches=2)
         self.result["embedding"]["execution"] = execution_fixture()
         self.assertEqual(self.validate(),[])
-        # A lazily initialized second CUDA worker is a gauge change, not a
-        # counter reset or an invalid measurement.
+        # Prepared pools must stay fixed throughout measurement.
         for snapshot in ("after","measured"):
             self.result["embedding"]["execution"][snapshot]["session_count"] = 2
-        self.assertEqual(self.validate(),[])
+        self.assertIn("execution: actual session count differs from configured pool capacity",self.validate())
         self.result["embedding"]["execution"]["measured"]["native_rows"] += 1
         self.assertIn("execution: incorrect measured delta for native_rows",self.validate())
         self.result["index_inflight_batches"] = 8
@@ -135,39 +137,34 @@ class AccountingTests(unittest.TestCase):
             execution[snapshot]["max_native_batch_rows"] = 8
         self.assertIn("execution: fixed-batch profile merged request batches",self.validate())
 
-    def test_named_timing_requires_scope_and_keeps_historical_reports_readable(self):
+    def test_named_timing_requires_scope(self):
         self.result.update(effective_execution_concurrency=1, admission_concurrency=2, index_inflight_batches=2)
         execution = execution_fixture()
         self.result["embedding"]["execution"] = execution
         self.assertEqual(self.validate(), [])
-        for name in ("before", "after", "measured"):
-            snapshot = execution[name]
-            snapshot["backend_to_native_ns"] = snapshot.pop("queue_wait_ns")
-            snapshot["pool_reconfigurations"] = {"before":1,"after":3,"measured":2}[name]
+        execution.pop("timing_scope")
         self.assertIn("execution: missing backend-to-native timing scope", self.validate())
         execution["timing_scope"] = {"backend_to_native_ns":"includes preparation; excludes admission"}
         self.assertEqual(self.validate(), [])
-        execution["measured"]["pool_reconfigurations"] = 3
-        self.assertIn("execution: incorrect measured delta for pool_reconfigurations", self.validate())
+        execution["measured"]["backend_to_native_ns"] += 1
+        self.assertIn("execution: incorrect measured delta for backend_to_native_ns", self.validate())
 
     def test_fixed_pool_and_clients_are_verified_independently_of_admission(self):
         self.result.update(effective_execution_concurrency=1, admission_concurrency=3,
-                           index_inflight_batches=8, clients=8, client_mode="fixed", ort_sessions=1)
+                           index_inflight_batches=8, clients=8, client_mode="fixed",
+                           runtime_mode="server",server_concurrency=1)
         execution = execution_fixture()
-        for snapshot in execution.values():
-            if isinstance(snapshot, dict):
-                snapshot["cpu_threads_total"] = 2
         self.result["embedding"]["execution"] = execution
         self.assertEqual(self.validate(), [])
         self.assertEqual(validate_controls(self.result, 8, 1), [])
         self.assertTrue(validate_controls(self.result, 4, 1))
         self.assertTrue(validate_controls(self.result, None, 1))
-        self.result["ort_sessions"] = 2
-        self.assertIn("execution: actual session count differs from configured fixed pool", self.validate())
+        self.result["server_concurrency"] = 2
+        self.assertIn("execution: actual session count differs from configured pool capacity", self.validate())
         self.assertTrue(validate_controls(self.result, 8, 1))
-        self.result["ort_sessions"] = 1
-        execution["measured"]["cpu_threads_total"] = 3
-        self.assertIn("execution: total native threads differ from session count times threads per session", self.validate())
+        self.result["server_concurrency"] = 1
+        self.result["clients"] = 4
+        self.assertIn("execution: invalid fixed client count", self.validate())
 
     def test_global_threads_and_server_capacity_are_verified(self):
         self.result.update(runtime_mode="server",server_concurrency=4,hardware_threads=8,
@@ -179,10 +176,8 @@ class AccountingTests(unittest.TestCase):
         execution["timing_scope"] = {"backend_to_native_ns":"includes preparation"}
         for name in ("before","after","measured"):
             snapshot = execution[name]
-            snapshot.pop("cpu_threads")
             snapshot.update(global_intra_threads=4,session_count=4,pool_fallbacks=0,
                             session_initializations=0 if name == "measured" else 4)
-            snapshot["backend_to_native_ns"] = snapshot.pop("queue_wait_ns")
         self.assertEqual(self.validate(), [])
         self.assertEqual(validate_controls(self.result,None,4), [])
         self.assertTrue(validate_controls(self.result,None,None))
@@ -221,7 +216,7 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(row[4],"512.00" if memory else "N/A")
                 self.assertEqual(row[6],"20.00 / 30.00")
                 self.assertIn(f"actual={provider}",row[0])
-                self.assertIn("Ceff=1 · K=2 · Q=2 · sessions=1 · threads/session=2 · native threads=N/A · native B=4",row[0])
+                self.assertIn("Ceff=1 · K=2 · Q=2 · sessions=1 · global intra-op=2 · native B=4",row[0])
                 self.assertEqual(aggregate["execution"][0]["inference_ns"],20)
                 table = [dict(zip(report.HEADERS,row))]
                 self.assertEqual(check_table([case],1,{fingerprint(case):[record]},set(),table,[aggregate]),[])

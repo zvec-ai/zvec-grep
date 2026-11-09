@@ -356,6 +356,46 @@ async fn coalescing_wait_is_bounded_and_queries_skip_it() {
 }
 
 #[tokio::test]
+async fn coalescing_keeps_each_operations_execution_accounting_independent() {
+    let queue = InferenceQueue::default();
+    let mut state = QueueState::default();
+    let first_scope = Arc::new(());
+    let second_scope = Arc::new(());
+    let now = Instant::now();
+    let mut receivers = Vec::new();
+    for scope in [&first_scope, &second_scope, &first_scope, &second_scope] {
+        let (mut request, receiver) = request_rows(&queue, EmbeddingPurpose::Document, 64, 1).await;
+        request.options.execution_concurrency = 1;
+        request.options.execution_scope = Some(Arc::clone(scope));
+        request.ready = now;
+        state.push_back(request);
+        receivers.push(receiver);
+    }
+    assert!(
+        matches!(
+            state.next(entry(), TransformersExecutionProvider::Cuda, now),
+            Work::Wait(_)
+        ),
+        "two operations must not fill each other's native batch"
+    );
+    for scope in [&first_scope, &second_scope] {
+        let Work::Infer(requests) = state.next(
+            entry(),
+            TransformersExecutionProvider::Cuda,
+            now + policy::BATCH_WAIT,
+        ) else {
+            panic!("operation batch ready");
+        };
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| Arc::ptr_eq(
+            request.options.execution_scope.as_ref().expect("operation"),
+            scope
+        )));
+    }
+    assert!(state.documents.is_empty());
+}
+
+#[tokio::test]
 async fn merged_resources_retain_every_admission_and_lease_until_native_completion() {
     let queue = InferenceQueue::default();
     let first_lease = Arc::new(());

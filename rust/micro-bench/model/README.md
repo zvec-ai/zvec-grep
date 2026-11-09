@@ -278,11 +278,13 @@ inference start. It includes preparation and scheduling, and excludes waiting fo
 runtime/backend admission. It overlaps `preparation_ns`: do not add these fields
 to reconstruct latency. Preparation/inference/postprocessing are summed work time,
 not a disjoint wall-time breakdown. Use `call_latency` for the full runtime call,
-including admission. Historical records called this same overlapping measurement
-`queue_wait_ns`; their values are preserved. `session_initializations` counts
+including admission. `session_initializations` counts
 native Session creations; `pool_fallbacks` counts successful whole-pool GPU-to-CPU
-transitions. Neither should increase during a steady measured phase. Historical
-`pool_reconfigurations` and per-session thread fields retain their original meaning.
+transitions. Neither should increase during a steady measured phase.
+
+Historical main records without execution diagnostics remain readable. Intermediate
+PR reports use their archived source snapshot or the harness at their recorded
+commit; the current harness validates only the final execution format.
 
 ## Optional mixed MiniLM regression
 
@@ -291,9 +293,9 @@ test uses the same pinned cache and a release build. Set `ZG_MODEL_BENCH_MODEL=l
 `ZG_MODEL_BENCH_CACHE`, `ZG_MODEL_BENCH_DEVICE=cpu|cuda`,
 `ZVEC_GREP_EMBEDDING_CONCURRENCY=4` and optionally `ZVEC_GREP_ORT_THREAD_BUDGET`.
 It runs eight document clients and one query client through resident runtime leases,
-first with equal document concurrency, then mixed full-capacity/one-session requests.
+with full-capacity/full-capacity, full-capacity/one-session and one-session/one-session operations.
 Each scenario lasts at least 15 seconds and collects at least 100 query calls;
-every result is checked against fixed-batch reference vectors. Both scenarios
+every result is checked against fixed-batch reference vectors. All scenarios
 must reuse the same initialized Sessions without rebuilding them.
 `ZG_MIXED_RESULT` contains request timestamps, p50/p95 latency, shared thread
 configuration and initialization counts. The separate

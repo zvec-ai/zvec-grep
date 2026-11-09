@@ -17,6 +17,7 @@ use super::{
     TransformersConfig, TransformersExecutionProvider, check_cancelled, finish_output,
     lock_std_mutex, merge_prepared_batches, prepare_batch,
 };
+use crate::models::spi::same_execution_scope;
 
 const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 const DOCUMENT_BYTES: usize = 32 * 1024 * 1024;
@@ -306,8 +307,8 @@ impl QueueState {
     ) -> Work {
         discard_cancelled(&mut self.queries);
         discard_cancelled(&mut self.documents);
-        // Reservation happens while selecting work. A blocked C1 request stays
-        // queued, allowing a C2 request to use lane 1 and preserving query priority.
+        // Skip operations at their own C limit so other clients can use idle
+        // sessions. Reserve during selection to preserve query priority.
         if let Some(index) = self
             .queries
             .iter()
@@ -348,6 +349,7 @@ impl QueueState {
         let mut width = batch.sequence_length;
         let bucket = BatchPolicy::length_bucket(width);
         let budget = first.options.execution_concurrency;
+        let scope = first.options.execution_scope.clone();
         let mut requests = vec![first];
         let mut index = 0;
         while index < self.documents.len() && requests.len() < BatchPolicy::max_requests(entry) {
@@ -356,6 +358,7 @@ impl QueueState {
             let next_width = width.max(batch.sequence_length);
             if !next.options.fixed_batch
                 && next.options.execution_concurrency == budget
+                && same_execution_scope(next.options.execution_scope.as_ref(), scope.as_ref())
                 && BatchPolicy::length_bucket(batch.sequence_length) == bucket
                 && BatchPolicy::fits(entry, rows + batch.batch_size, next_width)
             {
@@ -385,6 +388,10 @@ impl QueueState {
             if index != first_index
                 && !request.options.fixed_batch
                 && request.options.execution_concurrency == first.options.execution_concurrency
+                && same_execution_scope(
+                    request.options.execution_scope.as_ref(),
+                    first.options.execution_scope.as_ref(),
+                )
                 && BatchPolicy::length_bucket(prepared.sequence_length) == bucket
                 && BatchPolicy::fits(entry, rows + prepared.batch_size, next_width)
             {

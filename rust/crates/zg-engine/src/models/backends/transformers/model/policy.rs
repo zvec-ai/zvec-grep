@@ -6,8 +6,8 @@ pub(super) const BATCH_WAIT: Duration = Duration::from_millis(1);
 
 pub(super) fn pool_size(provider: TransformersExecutionProvider, configured: usize) -> usize {
     match provider {
-        TransformersExecutionProvider::Cpu | TransformersExecutionProvider::Cuda => configured,
-        _ => 1,
+        TransformersExecutionProvider::CoreMl => 1,
+        _ => configured,
     }
 }
 
@@ -26,10 +26,8 @@ pub(super) fn execution_limit(
     sessions: usize,
 ) -> usize {
     match provider {
-        TransformersExecutionProvider::Cpu | TransformersExecutionProvider::Cuda => {
-            requested.clamp(1, sessions)
-        }
-        _ => 1,
+        TransformersExecutionProvider::CoreMl => 1,
+        _ => requested.clamp(1, sessions),
     }
 }
 

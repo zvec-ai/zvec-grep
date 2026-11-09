@@ -16,7 +16,7 @@ use super::{
     TransformersExecutionProvider, check_cancelled, load_session, lock_std_mutex,
     resolve_execution_provider, run_session,
 };
-use crate::models::spi::ModelExecutionStats;
+use crate::models::spi::{ModelExecutionStats, same_execution_scope};
 
 pub(super) struct SessionOwner {
     workers: Vec<StdMutex<Option<Worker>>>,
@@ -50,9 +50,15 @@ struct Shared {
 }
 
 struct PoolState {
-    busy: Vec<Option<EmbeddingPurpose>>,
+    busy: Vec<Option<ActiveExecution>>,
     cpu_ready: bool,
     changing: bool,
+}
+
+#[derive(Clone)]
+struct ActiveExecution {
+    purpose: EmbeddingPurpose,
+    scope: Option<Arc<()>>,
 }
 
 /// Owned by the reservation and every native configuration job. If the async
@@ -277,12 +283,20 @@ impl SessionOwner {
         if cpu_fallback && pool.busy.iter().any(Option::is_some) {
             return None;
         }
-        // Limit executions, not numbered slots. A query can use any idle lane.
+        // Each document operation has its own C within the shared pool. Query
+        // work retains one pool-wide lane budget and may use any idle session.
         let active = pool
             .busy
             .iter()
             .flatten()
-            .filter(|purpose| **purpose == options.purpose)
+            .filter(|active| {
+                active.purpose == options.purpose
+                    && (options.purpose == EmbeddingPurpose::Query
+                        || same_execution_scope(
+                            active.scope.as_ref(),
+                            options.execution_scope.as_ref(),
+                        ))
+            })
             .count();
         let limit = if options.purpose == EmbeddingPurpose::Query {
             1
@@ -300,7 +314,10 @@ impl SessionOwner {
                 succeeded: AtomicBool::new(false),
             })
         });
-        pool.busy[lane] = Some(options.purpose);
+        pool.busy[lane] = Some(ActiveExecution {
+            purpose: options.purpose,
+            scope: options.execution_scope.clone(),
+        });
         Some(Reservation {
             lane,
             permit: LanePermit {
