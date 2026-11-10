@@ -15,9 +15,17 @@ import {
   parseVisibleResponse,
   validateSearchRoute,
 } from "../engines/zg/parse.mjs";
-import { freePort, packageCandidate } from "../engines/zg/run.mjs";
+import {
+  assertFullPreviewSchema,
+  freePort,
+  packageCandidate,
+} from "../engines/zg/run.mjs";
 import { snapshotIndex } from "../engines/zg/snapshot.mjs";
-import { PILOT_SUITES_BY_ID } from "./config.mjs";
+import {
+  PILOT_PREVIEW,
+  PILOT_PROTOCOL,
+  PILOT_SUITES_BY_ID,
+} from "./config.mjs";
 import {
   loadPilot,
   prepareBeirDataset,
@@ -30,11 +38,12 @@ import {
 const REPETITIONS = 5;
 const LIMIT = 10;
 
-function searchArguments(task, root, mode) {
+export function searchArguments(task, root, mode) {
   return {
     root,
     ...(mode === "hybrid" ? { query: task.query } : { [mode]: [task.query] }),
     limit: LIMIT,
+    preview: PILOT_PREVIEW,
     autoUpdate: false,
     freshness: "eventual",
     preferSymbol: false,
@@ -170,7 +179,7 @@ export function markdownPilotReport(report) {
   const lines = [
     `## ${report.label} · ${report.status === "success" ? "✅ Complete" : "❌ Incomplete"}`,
     "",
-    `${planned} original queries · model \`${report.model}\` · Rust MCP default presentation · five calls/query`,
+    `${planned} original queries · model \`${report.model}\` · Rust MCP full preview · five calls/query`,
     "",
     "| Mode | Completed | Stable Top 10 | File Hit@1 | File Hit@5 | File Hit@10 | File MRR@10 | nDCG@10 | Mean output (KiB) | Avg RT (ms) | P50 RT (ms) |",
     "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -380,7 +389,11 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
     client = new mcp.Client({ name: "zg-retrieval-pilots", version: "1.0.0" });
     await client.connect(transport, { timeout: 120_000 });
     const listed = await client.listTools();
-    assert.ok(listed.tools.some((tool) => tool.name === "zvec_grep_search"));
+    const search = listed.tools.find(
+      (tool) => tool.name === "zvec_grep_search",
+    );
+    assert.ok(search, "candidate lacks the required public search endpoint");
+    assertFullPreviewSchema(search.inputSchema);
     for (const mode of pilot.modes) {
       for (const task of group.tasks) {
         const row = {
@@ -518,6 +531,8 @@ export async function main(args = process.argv.slice(2)) {
   await mkdir(options.modelCache, { recursive: true });
   const report = {
     schema_version: 2,
+    protocol: PILOT_PROTOCOL,
+    preview: PILOT_PREVIEW,
     quality_aggregation: "mean_of_five",
     suite: pilot.lock.suite,
     label: pilot.config.report.title,

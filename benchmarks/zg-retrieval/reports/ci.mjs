@@ -228,7 +228,7 @@ export async function buildCiSummary({
     schema_version: 5,
     status: errors.length ? "failed" : "success",
     model: suite.protocol.model,
-    preview: "mcp-default",
+    preview: "full",
     quality_metrics: QUALITY_METRICS,
     run_url: runUrl,
     harness_commit: harnessCommit,
@@ -254,7 +254,7 @@ export function markdownCiSummary(result) {
   const lines = [
     "# SWE-QA20 Retrieval-only results",
     "",
-    `**${status}** · 20 original questions · 11 pinned repositories · ZG hybrid / fts / vector · Rust MCP default presentation`,
+    `**${status}** · 20 original questions · 11 pinned repositories · ZG hybrid / fts / vector · Rust MCP full presentation`,
     "",
     "| Arm | Status | Coverage | Stable Top 10 | File Hit@1 | File Hit@5 | File Hit@10 | File MRR@10 | nDCG@10 | Mean output (KiB) | Avg RT (ms) | P50 RT (ms) |",
     "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -276,7 +276,7 @@ export function markdownCiSummary(result) {
   }
   lines.push(
     "",
-    "All three arms use the Rust public MCP default presentation and five calls per question. No preview override is sent. Each question/mode averages its five call-level quality scores; Hit/MRR then average questions and nDCG@10 averages repositories. Stable Top 10 means the five ordered public result locations match. Invalid evidence is excluded, never converted to a zero. Product errors with valid evidence retain zero quality credit. Partial scores are diagnostic and are not directly comparable with complete 20-question scores. Finding a file does not establish sufficient answer evidence.",
+    "All three arms use the Rust public MCP full presentation and five calls per question. Every request explicitly sets preview to full. Each question/mode averages its five call-level quality scores; Hit/MRR then average questions and nDCG@10 averages repositories. Stable Top 10 means the five ordered public result locations match. Invalid evidence is excluded, never converted to a zero. Product errors with valid evidence retain zero quality credit. Partial scores are diagnostic and are not directly comparable with complete 20-question scores. Finding a file does not establish sufficient answer evidence.",
     "",
     "Output is the mean UTF-8 byte count of successful fifth-call responses (1 KiB = 1024 bytes, not model tokens). Avg RT and P50 RT use successful valid MCP search calls, excluding indexing. Failed and invalid calls are excluded from these measurements. A complete successful arm has 20 output samples and 100 latency samples. Index loading and fixed mode order affect latency; these are observations of this run, not a controlled speed comparison.",
     "",

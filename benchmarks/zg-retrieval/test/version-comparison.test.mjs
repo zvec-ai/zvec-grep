@@ -32,14 +32,14 @@ function result(commit, value = 0.5) {
     status: "success",
     candidate: { commit },
     harness_commit: harnessSha,
-    sweqa: { status: "success", model: "local/code", rows },
+    sweqa: { status: "success", preview: "full", model: "local/code", rows },
     pilots: Object.fromEntries(
       ["beir", "duretrieval", "quarry"].map((name) => [
         name,
         {
           status: "success",
           model: "local/multilingual",
-          report: { summary: structuredClone(rows) },
+          report: { preview: "full", summary: structuredClone(rows) },
         },
       ]),
     ),
@@ -52,9 +52,11 @@ test("all suites and modes report signed head-minus-base deltas with pinned comm
   after.pilots.beir.report.summary[0].metrics.file_hit_at_1 = 1;
   const comparison = compareCombinedResults(before, after, metadata);
   assert.equal(comparison.rows.length, 12);
+  assert.equal(comparison.preview, "full");
   assert.equal(comparison.rows[0].metrics.file_hit_at_1.delta, -0.25);
   assert.equal(comparison.rows[3].metrics.file_hit_at_1.delta, 0.25);
   const markdown = markdownVersionComparison(comparison);
+  assert.match(markdown, /Both versions explicitly request `preview: "full"`/);
   assert.match(markdown, /0\.7500 \/ 0\.5000 \/ -0\.2500/);
   assert.match(markdown, /0\.7500 \/ 1\.0000 \/ \+0\.2500/);
   assert.ok(
@@ -92,6 +94,12 @@ test("incomplete, mixed-harness, wrong-commit and mixed-model results are reject
     },
     (before) => {
       before.sweqa.rows.pop();
+    },
+    (before) => {
+      before.sweqa.preview = "mcp-default";
+    },
+    (before) => {
+      before.pilots.quarry.report.preview = "short";
     },
     (before) => {
       before.sweqa.rows[0].metrics.ndcg_at_10 = null;

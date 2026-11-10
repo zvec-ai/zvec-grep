@@ -85,7 +85,7 @@ export function markdownReport(report) {
   const lines = [
     "# zg Retrieval-only",
     "",
-    `Status: **${report.integrity_passed ? "PASS" : "FAIL"}**. Dataset: **${queryCount} original questions / ${repoCount} repositories**. Quality: **mean of five calls per question and mode; Rust MCP default presentation**. Five repetitions are stability observations, not additional questions.`,
+    `Status: **${report.integrity_passed ? "PASS" : "FAIL"}**. Dataset: **${queryCount} original questions / ${repoCount} repositories**. Quality: **mean of five calls per question and mode; Rust MCP full presentation**. Five repetitions are stability observations, not additional questions.`,
     "",
     "| Arm | Coverage | Stable Top 10 | File Hit@1 | File Hit@5 | File Hit@10 | File MRR@10 | nDCG@10 | Output mean (KiB) | Avg RT (ms) | P50 RT (ms) |",
     "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
@@ -99,7 +99,7 @@ export function markdownReport(report) {
     "",
     "File Hit@1/5/10 and MRR@10 give every valid question equal weight, including misses and product-error zeros. nDCG@10 first averages valid questions within each represented repository, then weights those repositories equally. Invalid evidence is excluded, never scored as zero; partial scores are diagnostic and cannot be compared directly with complete 20-question scores. All five metrics use the same frozen accepted-file targets and native result ranks; repeated chunks consume ranks without file deduplication. Finding a file does not establish sufficient answer evidence.",
     "",
-    "Hybrid, fts and vector use the Rust public MCP default presentation on the same frozen repository index with the original query and Top-10 limit. The benchmark does not send a preview override because the current Rust MCP schema does not expose one. Presentation text and output length do not affect the five file-ranking metrics. Quality thresholds are report-only.",
+    "Hybrid, fts and vector use the Rust public MCP full presentation on the same frozen repository index with the original query and Top-10 limit. Every request explicitly sets preview to full, preserving all available content of each retrieved item. Presentation text and output length do not affect the five file-ranking metrics. Quality thresholds are report-only.",
     ...qaRetrievalMarkdown(
       modeEntries.map(([label, entry]) => [label, entry?.qa_retrieval]),
       queryCount,

@@ -185,7 +185,7 @@ function compareValidatedReports(baseline, candidate, before, after) {
   return {
     schema_version: 5,
     file_retrieval_contract: FILE_RETRIEVAL_CONTRACT,
-    preview: "mcp-default",
+    preview: "full",
     quality_repetition: 5,
     quality_aggregation: "mean_of_five",
     suite: structuredClone(baseline.suite),
@@ -258,7 +258,7 @@ export function markdownComparison(result) {
   const lines = [
     "# zg Retrieval-only version comparison",
     "",
-    `Scope: **${result.scope} / ${result.expected_task_ids.length} original questions**. All modes use the Rust public MCP default presentation. Quality averages five calls per query/mode. Delta is candidate minus baseline.`,
+    `Scope: **${result.scope} / ${result.expected_task_ids.length} original questions**. All modes use the Rust public MCP full presentation. Quality averages five calls per query/mode. Delta is candidate minus baseline.`,
     "",
     "Source, Gold, frozen accepted-file targets and protocol identities match; task/mode coverage and scoring eligibility are validated. All five metrics are recomputed from saved public result items. This is a report-only comparison with no quality threshold or causal attribution.",
     "",

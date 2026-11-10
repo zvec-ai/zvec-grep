@@ -29,7 +29,7 @@ function row(task_id, rank = null, options = {}) {
   const value = {
     task_id,
     mode: "hybrid",
-    preview: "mcp-default",
+    preview: "full",
     repetition: 5,
     quality_observation: true,
     repository: "example/repo",
@@ -91,7 +91,7 @@ function report(prototypes = [row("example:1", 1), row("example:2", 10)]) {
   return {
     schema_version: 7,
     file_retrieval_contract: FILE_RETRIEVAL_CONTRACT,
-    preview: "mcp-default",
+    preview: "full",
     quality_repetition: 5,
     quality_aggregation: "mean_of_five",
     observed_calls: ids.length * 3 * 5,
@@ -564,13 +564,16 @@ test("standalone validation covers all modes and total failure counts without mu
   );
 });
 
-test("schema 7 rejects legacy reports, preview matrices, and non-default result rows", () => {
+test("schema 7 rejects legacy reports, preview matrices, and non-full result rows", () => {
   for (const mutate of [
     ...[1, 2, 3, 4, 5].map((schema) => (r) => {
       r.schema_version = schema;
     }),
     (r) => {
       r.preview = "short";
+    },
+    (r) => {
+      r.preview = "mcp-default";
     },
     (r) => {
       delete r.preview;
@@ -611,7 +614,7 @@ test("three fixed arms are rendered without preview variants", () => {
   const before = report(),
     after = clone(before);
   const result = compareReports(before, after);
-  assert.equal(result.preview, "mcp-default");
+  assert.equal(result.preview, "full");
   assert.equal(Object.hasOwn(result, "previews"), false);
   const markdown = markdownComparison(result);
   for (const mode of ZG_MODES)

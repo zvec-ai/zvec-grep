@@ -1,3 +1,6 @@
+export const PILOT_PROTOCOL = "retrieval-pilots-mcp-full-v1";
+export const PILOT_PREVIEW = "full";
+
 // Suite metadata lives here; original queries, gold labels, and source hashes
 // remain in the corresponding data/*.json lock files.
 // targetKind selects document qrels or unique source-file paths; a null

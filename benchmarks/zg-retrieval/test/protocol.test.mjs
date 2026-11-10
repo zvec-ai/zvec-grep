@@ -235,6 +235,7 @@ test("each mode receives the unmodified original question exactly once, without 
         "autoUpdate",
         "freshness",
         "preferSymbol",
+        "preview",
       ].sort(),
     );
     assert.deepEqual(
@@ -244,7 +245,7 @@ test("each mode receives the unmodified original question exactly once, without 
     assert.equal(args.autoUpdate, false);
     assert.equal(args.freshness, "eventual");
     assert.equal(args.limit, 10);
-    assert.equal(Object.hasOwn(args, "preview"), false);
+    assert.equal(args.preview, "full");
     assert.equal(args.preferSymbol, false);
   }
   assert.throws(
@@ -255,9 +256,9 @@ test("each mode receives the unmodified original question exactly once, without 
     () =>
       requestArguments(task, "/app", "hybrid", {
         ...suite.protocol,
-        preview: "full",
+        preview: "short",
       }),
-    /requires the public MCP default presentation/,
+    /requires the public MCP full presentation/,
   );
 });
 
@@ -278,8 +279,7 @@ test("the fixed plan runs all three modes with five Rust MCP calls per question"
       assert.ok(
         repeats.every(
           (call) =>
-            call.task.task_id === task.task_id &&
-            call.preview === "mcp-default",
+            call.task.task_id === task.task_id && call.preview === "full",
         ),
       );
       assert.deepEqual(
@@ -454,7 +454,7 @@ test("complete product-error observations retain a zero score and denominator bu
   assert.deepEqual(report.integrity_errors, []);
   assert.equal(report.tasks.length, 3);
   assert.equal(report.schema_version, 7);
-  assert.equal(report.preview, "mcp-default");
+  assert.equal(report.preview, "full");
   assert.deepEqual(Object.keys(report.modes), ["hybrid", "fts", "vector"]);
   assert.equal(Object.hasOwn(report, "previews"), false);
   assert.equal(report.tasks[0].repetition, 5);
@@ -648,6 +648,12 @@ test("missing fts/vector arms cannot silently become a valid hybrid-only run", a
 });
 
 for (const [label, mutate] of [
+  [
+    "omitted full preview request",
+    (fixture) => {
+      delete fixture.calls[1].request.arguments.preview;
+    },
+  ],
   [
     "missing preview identity",
     (fixture) => {

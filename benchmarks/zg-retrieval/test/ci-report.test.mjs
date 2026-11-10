@@ -46,7 +46,7 @@ function qualityRow(task, mode, { failed = false, firstRank = 3 } = {}) {
   const row = {
     task_id: task.task_id,
     mode,
-    preview: "mcp-default",
+    preview: "full",
     repetition: 5,
     quality_observation: true,
     repository: task.repository,
@@ -100,7 +100,7 @@ function zgReport({ failedModes = [], rankForTask = () => 3 } = {}) {
   return {
     schema_version: 7,
     file_retrieval_contract: FILE_RETRIEVAL_CONTRACT,
-    preview: "mcp-default",
+    preview: "full",
     quality_repetition: 5,
     quality_aggregation: "mean_of_five",
     quality_score_valid: true,
@@ -170,7 +170,7 @@ test("summary schema 5 has exactly the fixed three Rust MCP ZG arms", async () =
   const result = await buildCiSummary({ zg: zgReport() });
   assert.equal(result.schema_version, 5);
   assert.equal(result.status, "success");
-  assert.equal(result.preview, "mcp-default");
+  assert.equal(result.preview, "full");
   assert.deepEqual(result.quality_metrics, [
     "file_hit_at_1",
     "file_hit_at_5",
@@ -659,7 +659,7 @@ test("Markdown exposes three arms, five quality metrics, stability and latency",
     candidateRef: "feature/rust-search",
   });
   const text = markdownCiSummary(result);
-  assert.match(text, /Rust public MCP default presentation/);
+  assert.match(text, /Rust public MCP full presentation/);
   assert.match(
     text,
     /Each question\/mode averages its five call-level quality scores/,

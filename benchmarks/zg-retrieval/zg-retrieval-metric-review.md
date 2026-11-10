@@ -1,6 +1,6 @@
 # Retrieval-only metric rationale and limitations
 
-The benchmark measures whether ZG retrieves and ranks annotated relevant files for 20 frozen SWE-QA questions across 11 pinned repositories. All three modes use the same 39 file targets and the Rust MCP default presentation. See the [test design](./zg-retrieval-only-sweqa20-design.md) for execution, formulas and artifact contracts.
+The benchmark measures whether ZG retrieves and ranks annotated relevant files for 20 frozen SWE-QA questions across 11 pinned repositories. All three modes use the same 39 file targets and explicit MCP `preview: "full"`. See the [test design](./zg-retrieval-only-sweqa20-design.md) for execution, formulas and artifact contracts.
 
 ## What the quality metrics measure
 
@@ -25,6 +25,12 @@ File matching evaluates location and ranking independently of how the product fo
 
 The metrics support concrete investigations: a Hit@10 regression means a labeled file disappeared from the search budget; stable Hit@10 with lower MRR suggests its first result moved later; lower nDCG can indicate that fewer labeled files were found or that they appeared later. Raw per-question results are needed to identify which case occurred. A miss alone cannot identify whether candidate generation, fusion, aggregation or ranking caused it.
 
+The separate QA diagnostics also score File Recall and Entity matches. Entity
+matching uses returned paths, symbols, locations and visible source to confirm
+the target. Full preview exposes available retrieved source, not entire files,
+and can resolve matches hidden by a short preview. It does not change Gold or
+matching rules, and it is not a content-coverage metric.
+
 ## Label limitations
 
 The 39 targets are projected from accepted paths in AI-assisted source annotations. They are partial positives and have not received independent blind human validation. Source anchors remain annotation provenance; they do not participate in scoring. The accepted/bridge distinction can exclude useful supporting files.
@@ -45,6 +51,6 @@ Installation, indexing and product-call failures fail operational integrity. Mis
 
 The file-ranking contract is `sweqa-file-hit-rr-v1`. The nDCG implementation is checked against the byte-identical pinned Python scoring reference in [`test/fixtures/ndcg-reference/`](./test/fixtures/ndcg-reference/), with its MIT attribution preserved. This reference is used only in unit tests.
 
-Protocol `sweqa20-zg-rust-three-modes-mcp-default-v7` fixes the original questions, repository commits, file labels, Rust MCP default presentation and three retrieval modes. ZG evidence uses schema 7: `quality_mean` contains five-call Hit/MRR/nDCG means and ranking stability; the representative fifth-call `file_retrieval` and `ndcg` retain target evidence. The CI overview uses schema 5 with fixed `zg-hybrid`, `zg-fts` and `zg-vector` rows.
+Protocol `sweqa20-zg-rust-three-modes-mcp-full-v8` fixes the original questions, repository commits, file labels, explicit full preview and three retrieval modes. ZG evidence remains schema 7 with `preview: "full"`: `quality_mean` contains five-call Hit/MRR/nDCG means and ranking stability; the representative fifth-call `file_retrieval` and `ndcg` retain target evidence. The CI overview uses schema 5 with fixed `zg-hybrid`, `zg-fts` and `zg-vector` rows.
 
-Comparisons require matching protocol and frozen inputs. Public responses are reparsed for scoring, and validators recompute aggregates instead of trusting saved derived values. Reports from other protocol versions require their matching scorer checkout; replaying saved evidence is not a new retrieval run.
+Comparisons require matching protocol and frozen inputs. Public responses are reparsed for scoring, and validators recompute aggregates instead of trusting saved derived values. Retain v7 default-short results and review them with their matching scorer checkout. They cannot be relabeled as full-preview results; replaying saved evidence is not a new retrieval run.

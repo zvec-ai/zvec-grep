@@ -9,7 +9,7 @@ import { scoreFileRetrieval } from "../metrics/files.mjs";
 import { scoreNdcg } from "../metrics/ndcg.mjs";
 import { validateSearchRoute } from "../engines/zg/parse.mjs";
 import { summarizeRepeatedQuality } from "../metrics/repetitions.mjs";
-import { PILOT_NAMES, PILOT_SUITES } from "./config.mjs";
+import { PILOT_NAMES, PILOT_SUITES, PILOT_PROTOCOL } from "./config.mjs";
 import { loadPilot, targetsForTask } from "./datasets.mjs";
 import {
   markdownPilotReport,
@@ -28,6 +28,8 @@ async function checkPilot(name, report, candidateCommit) {
     };
   try {
     assert.equal(report.schema_version, 2);
+    assert.equal(report.preview, "full", "pilot full preview required");
+    assert.equal(report.protocol, PILOT_PROTOCOL, "pilot protocol mismatch");
     assert.equal(report.quality_aggregation, "mean_of_five");
     assert.equal(report.suite, pilot.lock.suite);
     assert.equal(report.model, pilot.model);

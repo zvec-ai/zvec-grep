@@ -184,6 +184,22 @@ test("a fork PR gets all twelve comparison rows, commit links and a source run l
   assert.ok(input.body.includes(`/commit/${head}`));
   assert.match(input.body, /actions\/runs\/123\/attempts\/1/);
   assert.match(input.body, /Embedding: local\. e2e: skipped/);
+  assert.doesNotMatch(input.body, /explicitly request `preview: "full"`/);
+});
+
+test("the publisher labels validated full preview without relabeling historical results", async (t) => {
+  const x = await fixture(t);
+  const full = { ...report, preview: "full" };
+  assert.equal(validateComparison(full, request).preview, "full");
+  await x.write("comparison/summary.json", full);
+  await publish(x);
+  assert.match(x.messages()[0][1].body, /explicitly request `preview: "full"`/);
+  assert.equal(validateComparison(report, request).preview, undefined);
+  for (const preview of ["short", "mcp-default", "<script>", null])
+    assert.throws(
+      () => validateComparison({ ...report, preview }, request),
+      /Unsupported comparison preview/,
+    );
 });
 
 test("later results and failed-job reruns update one bot comment", async (t) => {

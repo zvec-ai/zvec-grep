@@ -58,6 +58,12 @@ export function compareCombinedResults(baseline, candidate, metadata) {
     const after = name === "sweqa" ? candidate.sweqa : candidate.pilots[name];
     assert.equal(before.status, "success", `${name}: baseline incomplete`);
     assert.equal(after.status, "success", `${name}: candidate incomplete`);
+    for (const suite of [before, after])
+      assert.equal(
+        name === "sweqa" ? suite.preview : suite.report.preview,
+        "full",
+        `${name}: full preview required for both versions`,
+      );
     assert.equal(
       before.model,
       after.model,
@@ -99,6 +105,7 @@ export function compareCombinedResults(baseline, candidate, metadata) {
     schema_version: 1,
     kind: "retrieval-version-comparison",
     status: "success",
+    preview: "full",
     ...metadata,
     harness_commit: baseline.harness_commit,
     rows,
@@ -162,6 +169,13 @@ export function markdownVersionComparison(result) {
     "| Suite | Mode | File Hit@1 | File Hit@5 | File Hit@10 | MRR@10 | nDCG@10 |",
     "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
   ];
+  if (result.preview === "full")
+    lines.splice(
+      8,
+      0,
+      'Both versions explicitly request `preview: "full"`. Full shows all available content of each retrieved item without changing retrieval or ranking.',
+      "",
+    );
   const cell = ({ baseline, candidate, delta }) =>
     `${baseline.toFixed(4)} / ${candidate.toFixed(4)} / ${delta > 0 ? "+" : ""}${delta.toFixed(4)}`;
   for (const row of result.rows) {

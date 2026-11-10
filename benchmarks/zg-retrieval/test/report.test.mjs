@@ -38,7 +38,7 @@ test("report has one three-arm table with Rust MCP output, fixed averages and pe
     integrity_passed: true,
     expected_task_ids: Array.from({ length: 20 }, (_, i) => `task:${i}`),
     schema_version: 7,
-    preview: "mcp-default",
+    preview: "full",
     modes: { hybrid: mode, fts: mode, vector: mode },
     tasks: [],
     repositories: Array.from({ length: 11 }, (_, i) => ({
@@ -54,12 +54,9 @@ test("report has one three-arm table with Rust MCP output, fixed averages and pe
       ),
     );
   assert.match(text, /20 original questions \/ 11 repositories/);
-  assert.match(
-    text,
-    /mean of five calls per question and mode; Rust MCP default/,
-  );
+  assert.match(text, /mean of five calls per question and mode; Rust MCP full/);
   assert.match(text, /weights those repositories equally/);
-  assert.match(text, /does not send a preview override/);
+  assert.match(text, /explicitly sets preview to full/);
   assert.match(text, /<details>/);
   assert.match(text, /100\*\* successful valid calls/);
   assert.doesNotMatch(

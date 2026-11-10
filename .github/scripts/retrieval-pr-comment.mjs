@@ -113,6 +113,8 @@ function validateDiagnostic(group, level, { title, metrics }) {
 
 export function validateComparison(report, request) {
   assert.equal(report.schema_version, 1, "Unsupported comparison schema");
+  if (report.preview !== undefined)
+    assert.equal(report.preview, "full", "Unsupported comparison preview");
   assert.equal(
     report.kind,
     "retrieval-version-comparison",
@@ -190,6 +192,7 @@ export function validateComparison(report, request) {
   // are never published, interpreted as code, or used to choose the target PR.
   return {
     schema_version: 1,
+    ...(report.preview === "full" ? { preview: "full" } : {}),
     kind: report.kind,
     status: "success",
     baseline: {

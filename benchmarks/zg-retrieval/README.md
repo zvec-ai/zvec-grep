@@ -1,6 +1,6 @@
 # ZG Retrieval-only benchmark
 
-The workflow measures **zg-hybrid, zg-fts and zg-vector** on four independent suites. The original SWE-QA20 suite uses 20 unchanged questions and 11 pinned repositories from [Actions run 35206585943](https://github.com/Cuiyus/zvec-grep/actions/runs/35206585943). The exploratory suites contain 20 original BEIR queries across four datasets, ten DuRetrieval queries and 20 original Quarry queries across eight languages; see the [pilot design](expansion/README.md). Each mode calls the Rust public MCP search endpoint directly with its default response presentation. No answering agent, query rewriting, subquery generation or LLM judge participates. See the [SWE-QA20 design](./zg-retrieval-only-sweqa20-design.md) for its frozen protocol and scoring details.
+The workflow measures **zg-hybrid, zg-fts and zg-vector** on four independent suites. The original SWE-QA20 suite uses 20 unchanged questions and 11 pinned repositories from [Actions run 35206585943](https://github.com/Cuiyus/zvec-grep/actions/runs/35206585943). The exploratory suites contain 20 original BEIR queries across four datasets, ten DuRetrieval queries and 20 original Quarry queries across eight languages; see the [pilot design](expansion/README.md). Each mode calls the Rust public MCP search endpoint directly with `preview: "full"`. No answering agent, query rewriting, subquery generation or LLM judge participates. See the [SWE-QA20 design](./zg-retrieval-only-sweqa20-design.md) for its frozen protocol and scoring details.
 
 ## Run CI and read the result
 
@@ -18,11 +18,11 @@ The **Retrieval results** job publishes one page with a suite overview and a sep
 
 | Arm | Public MCP search input | Presentation |
 | --- | --- | --- |
-| zg-hybrid | `query: originalQuestion` | Rust MCP default |
-| zg-fts | `fts: [originalQuestion]` | Rust MCP default |
-| zg-vector | `vector: [originalQuestion]` | Rust MCP default |
+| zg-hybrid | `query: originalQuestion` | `preview: "full"` |
+| zg-fts | `fts: [originalQuestion]` | `preview: "full"` |
+| zg-vector | `vector: [originalQuestion]` | `preview: "full"` |
 
-Every request also uses `limit: 10`, `autoUpdate: false`, `freshness: eventual` and `preferSymbol: false`. FTS and vector requests omit `query` and the other route. The benchmark leaves `preview` unset to measure the default presentation. The product retains its native chunking, aggregation, ranking and bounded response presentation.
+Every request explicitly uses `preview: "full"`, `limit: 10`, `autoUpdate: false`, `freshness: eventual` and `preferSymbol: false`. FTS and vector requests omit `query` and the other route. Full preview displays the available source from retrieved results; it does not fetch the entire file. Native chunking, aggregation and ranking remain unchanged.
 
 The public response parser requires the MCP `freshness:` header and accepts both the legacy MCP body and the CLI compact body. Compact output does not expose per-hit route labels, so unavailable routes remain `null`; the parser never invents route evidence from the requested mode. Route validation still rejects any reported label that conflicts with the requested mode. Global CLI freshness and indexing diagnostics remain visible evidence before the compact body; legacy trailing diagnostics are also supported.
 
@@ -73,7 +73,8 @@ five public responses per question and mode:
 
 - File Hit@1/5/10, Recall@1/5/10, MRR@10 and nDCG@10 against the new QA labels.
 - The same metrics for Entity, using returned paths, symbols, locations and
-  source content to confirm the fixed-source target.
+  source content to confirm the fixed-source target. Full preview can provide
+  more evidence for this check; Gold and matching rules remain unchanged.
 
 The QA section reports formal and diagnostic results separately, with a scored
 case count for each metric. Unknown matches and failed calls do not become
@@ -101,9 +102,9 @@ score.
 
 Evidence retention is 14 days. After a shared candidate build, SWE-QA20, BEIR, DuRetrieval and Quarry run as four independent suite jobs. Each suite publishes its own aggregate metrics and a per-question table even if an individual question fails. The final results job publishes the combined page. Missing artifacts and failed upstream jobs remain explicit in the overview.
 
-SWE-QA20 ZG reports use **schema 7**, with `preview: "mcp-default"`, three `modes`, and one quality row per question/mode. Its section uses the **schema 5** overview with fixed `zg-hybrid`, `zg-fts`, `zg-vector` rows; the combined page uses schema 1. The SWE-QA20 overview records coverage, failed task IDs/modes/reasons, the frozen harness commit and selected candidate ref/commit. Quality rows retain all five public result lists and measurement observations so validators can recompute the case mean, ranking stability, output size and latency. The representative fifth-call `file_retrieval` and `ndcg` fields remain for evidence; `quality_mean` supplies headline quality.
+SWE-QA20 ZG reports use **schema 7**, with `preview: "full"`, three `modes`, and one quality row per question/mode. Its section uses the **schema 5** overview with fixed `zg-hybrid`, `zg-fts`, `zg-vector` rows; the combined page uses schema 1. The SWE-QA20 overview records coverage, failed task IDs/modes/reasons, the frozen harness commit and selected candidate ref/commit. Quality rows retain all five public result lists and measurement observations so validators can recompute the case mean, ranking stability, output size and latency. The representative fifth-call `file_retrieval` and `ndcg` fields remain for evidence; `quality_mean` supplies headline quality.
 
-The protocol ID is `sweqa20-zg-rust-three-modes-mcp-default-v7`. The comparator accepts schema 7 reports with matching protocol and frozen inputs, Rust MCP default presentation and all three modes. Reports from other protocol versions require their matching scorer checkout. Replaying saved evidence is not a new retrieval run.
+The protocol ID is `sweqa20-zg-rust-three-modes-mcp-full-v8`. The comparator accepts schema 7 reports with matching protocol, frozen inputs, explicit full preview and all three modes. Keep earlier v7 default-short results and use their matching scorer checkout to review them. They are not full-preview results; replaying saved evidence is not a new retrieval run.
 
 ## Code structure
 

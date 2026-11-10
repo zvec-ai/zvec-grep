@@ -24,7 +24,7 @@ Install the packed native candidate outside the corpus and connect through its p
 | zg-fts | `fts: [originalQuestion]` | Native FTS retrieval |
 | zg-vector | `vector: [originalQuestion]` | Native vector retrieval |
 
-FTS/vector requests omit the primary `query` and the other route. All requests use `limit: 10`, `autoUpdate: false`, `freshness: eventual` and `preferSymbol: false`. The harness sends no `preview` field so the default bounded `short` presentation is measured as returned. Disabling symbol preference prevents vector-only requests from adding a symbol-oriented FTS route. Public `matchedBy` evidence is checked against the requested mode. Native file aggregation, fusion and ranking remain product behavior under test; the harness adds no reranker.
+FTS/vector requests omit the primary `query` and the other route. All requests explicitly use `preview: "full"`, `limit: 10`, `autoUpdate: false`, `freshness: eventual` and `preferSymbol: false`. Full preview displays available source from retrieved results, not the entire file. It changes presentation, not Gold or scoring rules. Disabling symbol preference prevents vector-only requests from adding a symbol-oriented FTS route. Public `matchedBy` evidence is checked against the requested mode. Native file aggregation, fusion and ranking remain product behavior under test; the harness adds no reranker.
 
 Modes run in fixed order **hybrid → fts → vector**. Within each mode, each original question runs five consecutive times. All five results contribute quality and ranking-stability observations; only the fifth supplies output size. This gives **20 × 3 × 5 = 300 MCP calls** and **60 question/mode quality summaries**. Repetitions are not independent questions.
 
@@ -57,7 +57,7 @@ Unretrieved targets remain in the ideal-gain denominator; later chunks from an a
 
 ## Integrity and labels
 
-Each question/mode/repetition has its own raw response and hash. Offline aggregation reparses public responses and verifies frozen identities, original questions, exclusive route arguments, omitted preview override, repetition count/order, corpus/model inventories and public index status. Three-mode coverage is mandatory even for an explicitly selected local subset. Saved derived scores are not trusted as scoring inputs.
+Each question/mode/repetition has its own raw response and hash. Offline aggregation reparses public responses and verifies frozen identities, original questions, exclusive route arguments, explicit full preview, repetition count/order, corpus/model inventories and public index status. Three-mode coverage is mandatory even for an explicitly selected local subset. Saved derived scores are not trusted as scoring inputs.
 
 Installation, indexing and product-call failures fail operational integrity. Product-call failures with valid evidence retain zero credit in the denominator. Failed calls are excluded from output and latency measurements. An isolated public-response format failure is excluded from diagnostic partial scores and listed by task ID, mode and reason; coverage shows the smaller denominator, and CI still fails. Protocol, identity, missing-call and other integrity errors withhold all aggregates. Quality values have no arbitrary pass threshold.
 
@@ -69,6 +69,6 @@ Labels came from AI-assisted source review and remain partial positives, without
 - `retrieval-zg-report`: `report.json`, `report.md` and per-call `scores.jsonl`.
 - `retrieval-data-<owner>__<repo>`: raw requests/responses, installation evidence, corpus/model inventories and public index status.
 
-The overview uses schema 5 and fixed `zg-hybrid`, `zg-fts`, `zg-vector` rows. It identifies the frozen harness commit and selected candidate ref/commit and lists failed tasks and their reasons. ZG reports use schema 7 with `preview: mcp-default`, three mode aggregates and 60 quality rows for a complete suite. `quality_mean` contains the five-call quality means and ranking stability; the representative fifth-call `file_retrieval` and `ndcg` retain detailed target evidence. Each quality row retains all five public result lists and measurement observations for recomputation.
+The overview uses schema 5 and fixed `zg-hybrid`, `zg-fts`, `zg-vector` rows. It identifies the frozen harness commit and selected candidate ref/commit and lists failed tasks and their reasons. ZG reports use schema 7 with `preview: "full"`, three mode aggregates and 60 quality rows for a complete suite. `quality_mean` contains the five-call quality means and ranking stability; the representative fifth-call `file_retrieval` and `ndcg` retain detailed target evidence. Each quality row retains all five public result lists and measurement observations for recomputation.
 
-The protocol ID is `sweqa20-zg-rust-three-modes-mcp-default-v7`. Compare only schema 7 reports with matching protocol and frozen inputs. Reports from other protocol versions require their matching scorer checkout; saved-evidence replay must not be presented as a new product run.
+The protocol ID is `sweqa20-zg-rust-three-modes-mcp-full-v8`; the report schema remains 7. Compare only reports with matching protocol and frozen inputs. Retain v7 default-short results and review them with their matching scorer checkout. Do not relabel them as full-preview results or present saved-evidence replay as a new product run.

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  assertFullPreviewSchema,
   findSchemaVariant,
   isProductPreparationFailure,
   nativeCandidate,
@@ -612,6 +613,25 @@ test("Rust JSON Schema nullable type arrays retain their concrete type", () => {
     true,
   );
   assert.equal(schemaAllowsType({ type: ["string", "null"] }, "array"), false);
+});
+
+test("search schemas must explicitly support full preview, including referenced variants", () => {
+  for (const preview of [
+    { type: "string", enum: ["short", "full"] },
+    { anyOf: [{ const: "short" }, { const: "full" }] },
+    { $ref: "#/$defs/Preview" },
+  ]) {
+    assertFullPreviewSchema({
+      properties: { preview },
+      $defs: { Preview: { type: "string", enum: ["short", "full"] } },
+    });
+  }
+  for (const preview of [undefined, { type: "string", enum: ["short"] }]) {
+    assert.throws(
+      () => assertFullPreviewSchema({ properties: { preview } }),
+      /must support preview: "full"/,
+    );
+  }
 });
 
 test("public index-readiness failures are product errors", () => {

@@ -38,8 +38,8 @@ runner and combined report free of repeated suite-specific constants.
   subset, not a score on DuReader's original full 8.09-million-passage corpus.
 
 Each suite uses its own specified embedding model. The MCP requests use the
-same fixed mode order (hybrid, fts, vector), `limit: 10`, no agent, and five
-calls per query; all five results supply quality and stability, while the fifth
+same fixed mode order (hybrid, fts, vector), explicit `preview: "full"`,
+`limit: 10`, no agent, and five calls per query; all five results supply quality and stability, while the fifth
 supplies output size. Results
 include File Hit@1/5/10, File MRR@10, binary file nDCG@10, ordered Top-10
 stability, mean public output, and mean and median call latency. Each query/mode
@@ -50,6 +50,12 @@ coverage and the same metrics as the overall pilot row; they do not change the
 existing per-query average. SWE-QA20 uses a repository macro average for its
 overall nDCG, while these pilots use a query average. Absolute scores across
 suites do not share a corpus or relevance definition.
+
+Full preview displays the available source from retrieved results, not entire
+files. Gold and file-scoring rules remain unchanged. Preserve earlier
+default-short artifacts and use their matching scorer for review; they are not
+full-preview runs.
+
 All four suites use the same public response parser. It tolerates one empty
 trailing source line immediately after a result's public range, matching the
 Rust MCP presentation of files ending in a newline. Nonempty or further

@@ -287,7 +287,7 @@ function validateQualityRow(row, label) {
   return { ...normalized, file_retrieval: file };
 }
 
-/** Validate the Rust MCP-default, three-mode report from saved public evidence. */
+/** Validate the Rust MCP-full, three-mode report from saved public evidence. */
 export function validateZgReport(
   report,
   label = "ZG",
@@ -321,8 +321,8 @@ export function validateZgReport(
   );
   assert.equal(
     report.preview,
-    "mcp-default",
-    `${label}: Rust MCP default presentation required`,
+    "full",
+    `${label}: Rust MCP full presentation required`,
   );
   for (const field of [
     "previews",
@@ -434,8 +434,8 @@ export function validateZgReport(
     const context = `${label}: ${row.task_id}/${row.mode}`;
     assert.equal(
       row.preview,
-      "mcp-default",
-      `${context}: Rust MCP default presentation required`,
+      "full",
+      `${context}: Rust MCP full presentation required`,
     );
     assert.ok(
       ids.includes(row.task_id) && modes.includes(row.mode),

@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { loadPilot } from "../expansion/datasets.mjs";
+import { PILOT_PREVIEW, PILOT_PROTOCOL } from "../expansion/config.mjs";
 import {
+  searchArguments,
   summarizePilotBreakdown,
   summarizePilotRows,
   markdownPilotReport,
@@ -13,6 +15,21 @@ import { parseVisibleResponse } from "../engines/zg/parse.mjs";
 import { scoreFileRetrieval } from "../metrics/files.mjs";
 import { scoreNdcg } from "../metrics/ndcg.mjs";
 import { summarizeRepeatedQuality } from "../metrics/repetitions.mjs";
+
+test("all pilot routes request full preview without changing the original query", () => {
+  const task = { query: "original question" };
+  for (const mode of ["hybrid", "fts", "vector"]) {
+    assert.deepEqual(searchArguments(task, "/corpus", mode), {
+      root: "/corpus",
+      ...(mode === "hybrid" ? { query: task.query } : { [mode]: [task.query] }),
+      limit: 10,
+      preview: "full",
+      autoUpdate: false,
+      freshness: "eventual",
+      preferSymbol: false,
+    });
+  }
+});
 
 test("expanded runner uses the flag-style Rust management interface", async () => {
   const source = await readFile(
@@ -271,6 +288,8 @@ test("a failed pilot query keeps partial aggregate and all per-query conclusions
   scored.output_bytes = 0;
   const report = {
     schema_version: 2,
+    protocol: PILOT_PROTOCOL,
+    preview: PILOT_PREVIEW,
     quality_aggregation: "mean_of_five",
     suite: pilot.lock.suite,
     label: "BEIR / four datasets (test)",
@@ -297,6 +316,22 @@ test("a failed pilot query keeps partial aggregate and all per-query conclusions
   assert.match(markdown, /\| scifact \| zg-hybrid \| 1\/10 \|/);
   assert.match(markdown, /\| nfcorpus \| zg-hybrid \| 0\/4 \|/);
   assert.match(markdown, /index failed/);
+  for (const change of [
+    { preview: "short" },
+    { preview: undefined },
+    { protocol: undefined },
+    { protocol: "legacy-default" },
+  ]) {
+    const changed = await buildCombined({
+      zg: null,
+      beir: { ...report, ...change },
+      duretrieval: null,
+      quarry: null,
+      candidateCommit: "a".repeat(40),
+    });
+    assert.equal(changed.pilots.beir.report, null);
+    assert.match(changed.pilots.beir.error, /preview|protocol/);
+  }
 });
 
 test("the shared parser accepts only one trailing empty Markdown line outside the public range", () => {
