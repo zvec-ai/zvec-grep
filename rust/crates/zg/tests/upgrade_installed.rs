@@ -181,6 +181,53 @@ fn preview_and_repeated_runs_preserve_comments_and_make_exactly_one_backup() {
 }
 
 #[test]
+fn cursor_jsonc_upgrade_preserves_comments_backups_and_directory_overrides() {
+    for directory in [".cursor", "custom cursor"] {
+        let fixture = Fixture::new();
+        let source = r#"{
+  // Keep user settings.
+  "theme": "dark",
+  "mcpServers": {
+    "zvec_grep": {
+      "command": "zg",
+      "args": ["server", /* Keep protocol. */ "--stdio"],
+      "env": {"CUSTOM": "preserved"}
+    },
+    "other": {"url": "https://example.test/mcp"}
+  }
+}
+"#;
+        let path = fixture.write(&format!("{directory}/mcp.json"), source);
+        let run = |dry_run| {
+            let mut command = fixture.command();
+            command.args(["--install", "--upgrade-installed"]);
+            if directory != ".cursor" {
+                command.env("CURSOR_CONFIG_DIR", fixture.path(directory));
+            }
+            if dry_run {
+                command.arg("--dry-run");
+            }
+            command.output().expect("run upgrade")
+        };
+
+        assert!(success(&run(true)).contains("Would upgrade: 1"));
+        assert_eq!(fs::read_to_string(&path).expect("preview"), source);
+        assert!(backups(&path).is_empty());
+
+        assert!(success(&run(false)).contains("Upgraded: 1"));
+        let expected = source.replace("\"server\"", "\"--server\"");
+        assert_eq!(fs::read_to_string(&path).expect("upgraded"), expected);
+        let saved = backups(&path);
+        assert_eq!(saved.len(), 1);
+        assert_eq!(fs::read_to_string(&saved[0]).expect("backup"), source);
+
+        assert!(success(&run(false)).contains("Upgraded: 0, compatible: 1"));
+        assert_eq!(fs::read_to_string(&path).expect("unchanged"), expected);
+        assert_eq!(backups(&path), saved);
+    }
+}
+
+#[test]
 fn toml_migration_changes_only_the_action_token() {
     let fixture = Fixture::new();
     let source = "# user settings\n[mcp_servers.other]\ncommand = 'other'\n\n# ZVEC_GREP_START\n[mcp_servers.zvec_grep]\ncommand = 'zg'\nargs = [\n 'server', # keep this comment\n '--stdio', '--mcp-toolset', 'full',\n]\ntool_timeout_sec = 913\nenabled = false\n[mcp_servers.zvec_grep.env]\nKEY = 'user value'\n# ZVEC_GREP_END\n";

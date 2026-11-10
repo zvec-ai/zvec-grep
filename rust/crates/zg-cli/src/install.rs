@@ -1276,14 +1276,20 @@ fn install_cursor(options: &AgentOptions) -> Result<(), InstallError> {
             server
         }
     };
-    install_strict_json_server(&path, "mcpServers", server, options.force, "Cursor")
+    update_jsonc_server(
+        &path,
+        &server,
+        options.force,
+        "Cursor",
+        is_managed_json_server,
+    )
 }
 
 fn uninstall_cursor() -> Result<(), InstallError> {
     let path = env_path("CURSOR_CONFIG_DIR")
         .unwrap_or_else(|| home_dir().join(".cursor"))
         .join("mcp.json");
-    remove_strict_json_server(&path, "mcpServers")
+    remove_jsonc_server(&path, "Cursor", is_managed_json_server)
 }
 
 fn install_qwen(options: &AgentOptions) -> Result<(), InstallError> {
