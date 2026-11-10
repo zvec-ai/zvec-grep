@@ -6,10 +6,11 @@ from pathlib import Path
 import statistics
 import sys
 
-from measurement import case_identity, case_path
+from measurement import case_identity, case_path, fingerprint
 from evidence import digest, save
+from execution import execution_label, execution_records
 
-REPORT_HASH = digest(Path(__file__))
+REPORT_HASH = fingerprint([digest(Path(__file__)), digest(Path(__file__).with_name("execution.py"))])
 HEADERS = ["模型 / L / B / C / 设备",
            "批延迟 p50 ms", "吞吐 vectors/s", "峰值 RSS MiB",
            "进程显存峰值 MiB", "CPU 均值 / 1秒峰值 %", "GPU 全卡均值 / 峰值 %"]
@@ -34,9 +35,11 @@ def display(stats, digits=2, spread=True):
     return value
 
 
-def case_label(case):
-    return (f'{case["model"].removeprefix("local/")} · L={case["input_tokens"]} '
-            f'· B={case["batch_size"]} · C={case["budget"]} · {case["device"].upper()}')
+def case_label(case, execution=()):
+    label = (f'{case["model"].removeprefix("local/")} · L={case["input_tokens"]} '
+             f'· B={case["batch_size"]} · C={case["budget"]} · {case["device"].upper()}')
+    observed = execution_label(execution)
+    return label + (" · " + observed if observed else "")
 
 
 def summarize_case(root, case, rounds, experiment):
@@ -117,7 +120,8 @@ def summarize_case(root, case, rounds, experiment):
             quality_notes.append(f"采样异常 {sampling_bad} 轮")
         if cpu_unavailable:
             quality_notes.append(f"CPU 峰值不可用 {cpu_unavailable} 轮")
-    row = [case_label(case),latencies["p50"],throughput,rss,vram,cpu,gpu]
+    execution = execution_records(successful)
+    row = [case_label(case, execution),latencies["p50"],throughput,rss,vram,cpu,gpu]
     if (status or len(records) != rounds or failures or hard_timeouts
             or counts["errors"] or counts["timeout"] or not accounting_complete):
         row[1:] = ["-"]*(len(HEADERS)-1)
@@ -127,7 +131,8 @@ def summarize_case(root, case, rounds, experiment):
         completed_rounds=len(records),protocol_pass_rounds=len(successful),failed_rounds=failures,
         hard_timeout_rounds=hard_timeouts,smoke_rounds=smoke_rounds,sample_target_missed_rounds=sample_target_missed,
         comparison_eligible_rounds=eligible,skipped=bool(status),skip_reason=status["reason"] if status else None,
-        input_length_semantics="nominal",metrics=metrics,batch_counts=counts,batch_accounting_complete=accounting_complete,
+        input_length_semantics="nominal",metrics=metrics,execution=execution,
+        batch_counts=counts,batch_accounting_complete=accounting_complete,
         background_warning_rounds=background,sampling_invalid_rounds=sampling_bad,
         cpu_peak_unavailable_rounds=cpu_unavailable,quality_notes=quality_notes,
         exclusion_reasons=sorted({reason for r in records for reason in r.get("exclusion_reasons",[])}),
@@ -161,6 +166,8 @@ def environment_intro(root, config):
     ram_text = f"{ram/1024**3:g} GiB" if isinstance(ram,(int,float)) and ram > 0 else "N/A"
     os_name = machine.get("os") or "N/A"
     title = "本地模型性能基准 v5"+("（短时验证）" if get(config,"profile","name") == "smoke" else "")
+    if get(config,"profile","fixed_batch"):
+        title += "（固定 native batch）"
     return (f"# {title}\n\n"
             f"机型：{model} · CPU：{cpu}（{physical} 物理核 / {logical} 逻辑核）\n\n"
             f"GPU：{gpus} · 内存：{ram_text} · 系统：{os_name}\n\n")
@@ -211,6 +218,15 @@ def render_html(root,intro,rows,aggregates):
         notes = html.escape("；".join(aggregate.get("quality_notes",[])))
         identity = (f'<a href="{html.escape(aggregate["result_path"])}" title="{notes}">{html.escape(case["model"].removeprefix("local/"))}</a>'
                     f'<span class="case-shape" title="L = 输入长度配置；B = batch size；C = CLI --embedding-concurrency；设备为请求配置">L={case["input_tokens"]} · B={case["batch_size"]} · C={html.escape(str(case["budget"]))} · {html.escape(case["device"].upper())}</span>')
+        execution = aggregate.get("execution", [])
+        if execution:
+            providers = "/".join(sorted({r["actual_provider"] for r in execution}))
+            fallback = ("（CPU fallback）" if case["device"] != "cpu"
+                        and all(r["actual_provider"].lower() in ("cpu", "cpuexecutionprovider") for r in execution) else "")
+            identity += (f'<span class="case-shape">{html.escape(case["device"].upper())} → '
+                         f'{html.escape(providers)}{fallback}</span>'
+                         f'<span class="case-shape" title="Ceff = 有效执行预算；Q = 实际准入 workers；global intra-op = 进程共享的 ORT 算子线程配置；sessions = 阶段结束时数量；native B = 测量阶段每次 native run 的平均行数；阶段耗时和运行期峰值见 JSON">'
+                         f'{html.escape(execution_label(execution))}</span>')
         body.append('<tr><td>'+identity+'</td>'+"".join(f'<td>{html.escape(str(v))}</td>' for v in row[1:])+'</tr>')
     paragraphs = "".join(f'<p>{html.escape(p)}</p>' for p in intro.strip().split("\n\n")[1:])
     title = html.escape(intro.splitlines()[0].removeprefix("# "))

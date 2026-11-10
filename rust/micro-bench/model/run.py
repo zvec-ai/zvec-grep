@@ -14,6 +14,7 @@ import time
 
 import psutil
 from evidence import digest, publish_round, save
+from execution import validate_controls
 from measurement import POLICY, PHASES, checked_accounting, background_summary, case_path, profile, resource_summary as summarize_resources, fingerprint
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -241,6 +242,18 @@ def run(args, budget, env, info):
                ZG_MODEL_BENCH_SECONDS=str(workload["duration_seconds"]),
                ZG_MODEL_BENCH_MAX_SECONDS=str(workload["maximum_duration_seconds"]),
                ZG_MODEL_BENCH_MIN_BATCHES=str(workload["minimum_batches"]))
+    clients = getattr(args, "clients", None)
+    server_concurrency = getattr(args, "server_concurrency", None)
+    ort_thread_budget = getattr(args, "ort_thread_budget", None)
+    env["ZG_MODEL_BENCH_RUNTIME_MODE"] = "server" if server_concurrency is not None else "direct"
+    if server_concurrency is not None:
+        env["ZVEC_GREP_EMBEDDING_CONCURRENCY"] = str(server_concurrency)
+    env.pop("ZVEC_GREP_ORT_THREAD_BUDGET", None)
+    if ort_thread_budget is not None:
+        env["ZVEC_GREP_ORT_THREAD_BUDGET"] = str(ort_thread_budget)
+    env.pop("ZG_MODEL_BENCH_CLIENTS", None)
+    if clients is not None:
+        env["ZG_MODEL_BENCH_CLIENTS"] = str(clients)
     state = dict(phase="startup", result=None)
     events, samples, backgrounds, read_errors = [], [], [], []
     requests = {}
@@ -352,6 +365,9 @@ def run(args, budget, env, info):
         exclusion.append("smoke profile: insufficient duration/sample count")
     result = state["result"]
     accounting_errors = checked_accounting(result,requests,args.input_tokens,args.batch_size)
+    accounting_errors.extend(validate_controls(result, clients, server_concurrency, ort_thread_budget))
+    if result and result.get("fixed_batch", False) is not True:
+        accounting_errors.append("recorded batching policy differs from requested profile")
     passed = bool(child.returncode == 0 and not timed_out and not read_errors and not accounting_errors
                   and result and result["protocol_pass"])
     if not passed:
@@ -390,6 +406,8 @@ def run(args, budget, env, info):
                   configuration=dict(embedding_concurrency=budget,
                   model=args.model, device=args.device, input_length_semantics="nominal",
                   input_tokens=args.input_tokens,batch_size=args.batch_size,
+                  fixed_batch=True,
+                  clients=clients, server_concurrency=server_concurrency, ort_thread_budget=ort_thread_budget,
                   profile=workload["name"], cache=str(args.cache.resolve())),
                   exit_code=child.returncode, hard_timeout=timed_out, protocol_pass=passed, reader_errors=read_errors, accounting_errors=accounting_errors,
                   eligible_for_comparison=passed and not exclusion, exclusion_reasons=exclusion,

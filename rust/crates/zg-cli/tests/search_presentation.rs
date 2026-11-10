@@ -294,6 +294,70 @@ fn short_and_full_keep_the_original_compact_layout_on_every_output() {
 }
 
 #[test]
+fn short_context_does_not_displace_fragment_lines_that_fit_in_the_preview() {
+    use std::fmt::Write as _;
+
+    let mut content = String::new();
+    for line in 1..=30 {
+        writeln!(content, "source-line-{line:02}").expect("source line");
+    }
+    let line_bytes = "source-line-01\n".len();
+    for matched_lines in [1, 7, 8, 9, 10, 12] {
+        let mut result = grouped_result();
+        result.group_results.clear();
+        result.items.truncate(1);
+        let item = &mut result.items[0];
+        item.content = content.clone();
+        item.content_range = ContentRange::Text {
+            start_line: 17,
+            end_line: 47,
+            start_byte_offset: 200,
+            end_byte_offset: 200 + content.len(),
+            start_byte_column: 0,
+            end_byte_column: 0,
+        };
+        item.range = item.content_range.clone();
+        item.excerpt_range = Some(ContentRange::Text {
+            start_line: 28,
+            end_line: 28 + matched_lines,
+            start_byte_offset: 200 + 11 * line_bytes,
+            end_byte_offset: 200 + (11 + matched_lines) * line_bytes,
+            start_byte_column: 0,
+            end_byte_column: 0,
+        });
+        let original = result.clone();
+        let mut bytes = Vec::new();
+        write_context_with_options(
+            &mut bytes,
+            &result,
+            OutputOptions {
+                preview: PreviewMode::Short,
+                color: ColorMode::Never,
+                ..OutputOptions::default()
+            },
+            false,
+        )
+        .expect("short render");
+        let output = String::from_utf8(bytes).expect("UTF-8");
+        for offset in 0..matched_lines.min(10) {
+            let required = format!("  {}: source-line-{:02}\n", 28 + offset, 12 + offset);
+            assert!(
+                output.contains(&required),
+                "{matched_lines} matched lines: {output}"
+            );
+        }
+        assert_eq!(
+            output
+                .lines()
+                .filter(|line| line.contains(": source-line-"))
+                .count(),
+            10
+        );
+        assert_eq!(result, original, "preview preserves retrieval metadata");
+    }
+}
+
+#[test]
 fn short_marks_truncated_source_lines_and_full_preserves_them() {
     for (content, short_line) in [
         ("a".repeat(160), "a".repeat(160)),

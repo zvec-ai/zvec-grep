@@ -15,7 +15,10 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use zg_daemon_protocol::{DaemonCommand, DaemonReply, ErrorReply, ExecutionResult};
-use zg_engine::ZvecGrep;
+use zg_engine::{
+    ZvecGrep,
+    api::relationships::{Direction, GraphEdgeKind, RelationshipOptions, RelationshipResult},
+};
 use zg_transport_mcp::{
     IndexOperationProvider, McpToolset, ServerStatusProvider, ServerStatusSnapshot,
     ZvecGrepMcpServer,
@@ -77,6 +80,7 @@ pub(crate) async fn run_server(
     init_logging: impl FnOnce(&std::path::Path) -> Result<(), DaemonError>,
 ) -> Result<(), DaemonError> {
     let idle_ttl = crate::configured_watcher_idle_timeout()?;
+    engine.enable_server_model_pools()?;
     engine.enable_read_session_cache()?;
     let token = crate::resolve_token(config.token_file.as_deref())?;
     let mut instance = InstanceLock::acquire(&config).await?;
@@ -100,23 +104,12 @@ pub(crate) async fn run_server(
     };
     let shutdown = CancellationToken::new();
     let runtimes = WorkspaceRuntimeManager::native_with_idle_ttl(Arc::clone(&engine), idle_ttl);
-    let status: Arc<dyn ServerStatusProvider> = Arc::new(RuntimeStatusProvider {
-        started: Instant::now(),
-        shutdown: shutdown.clone(),
-        runtimes: runtimes.clone(),
-        engine: Arc::clone(&engine),
-    });
-    let index_operations: Arc<dyn IndexOperationProvider> = Arc::new(runtimes.clone());
-    let mcp_server = match config.mcp_toolset.unwrap_or_default() {
-        McpToolset::Agent => {
-            ZvecGrepMcpServer::agent_with_index_operations(Arc::clone(&engine), index_operations)
-        }
-        McpToolset::Full => ZvecGrepMcpServer::full_with_index_operations(
-            Arc::clone(&engine),
-            status,
-            index_operations,
-        ),
-    };
+    let mcp_server = build_mcp_server(
+        config.mcp_toolset.unwrap_or_default(),
+        &engine,
+        &runtimes,
+        &shutdown,
+    );
     let mcp_config = StreamableHttpServerConfig::default()
         .with_cancellation_token(shutdown.child_token())
         .with_allowed_hosts([
@@ -175,6 +168,31 @@ pub(crate) async fn run_server(
     let release_result = instance.release().await;
     serve_result?;
     release_result
+}
+
+fn build_mcp_server(
+    toolset: McpToolset,
+    engine: &Arc<ZvecGrep>,
+    runtimes: &WorkspaceRuntimeManager,
+    shutdown: &CancellationToken,
+) -> ZvecGrepMcpServer {
+    let status: Arc<dyn ServerStatusProvider> = Arc::new(RuntimeStatusProvider {
+        started: Instant::now(),
+        shutdown: shutdown.clone(),
+        runtimes: runtimes.clone(),
+        engine: Arc::clone(engine),
+    });
+    let index_operations: Arc<dyn IndexOperationProvider> = Arc::new(runtimes.clone());
+    match toolset {
+        McpToolset::Agent => {
+            ZvecGrepMcpServer::agent_with_index_operations(Arc::clone(engine), index_operations)
+        }
+        McpToolset::Full => ZvecGrepMcpServer::full_with_index_operations(
+            Arc::clone(engine),
+            status,
+            index_operations,
+        ),
+    }
 }
 
 async fn health() -> Json<Value> {
@@ -312,6 +330,12 @@ async fn execute_command(
                     .await
                     .map(|reply| DaemonReply::Context(Box::new(reply))),
             )
+        }
+        DaemonCommand::Callers(request) => {
+            execute_relationships(&state, Direction::In, request, DaemonReply::Callers).await
+        }
+        DaemonCommand::Callees(request) => {
+            execute_relationships(&state, Direction::Out, request, DaemonReply::Callees).await
         }
         DaemonCommand::Index(request) => match state.runtimes.submit_index(request, true).await {
             Ok(submitted) if submitted.job.state == JobState::Succeeded => {
@@ -466,6 +490,25 @@ async fn wait_for_shutdown_signal() {
 #[cfg(not(unix))]
 async fn wait_for_shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+async fn execute_relationships(
+    state: &ControlState,
+    direction: Direction,
+    mut request: RelationshipOptions,
+    reply: fn(RelationshipResult) -> DaemonReply,
+) -> ExecutionResult {
+    let signal = state.shutdown.child_token();
+    let _guard = signal.clone().drop_guard();
+    request.signal = Some(signal);
+    request.kinds = Some(vec![GraphEdgeKind::Calls]);
+    engine_execution(
+        state
+            .runtimes
+            .relationships(&state.engine, direction, request)
+            .await
+            .map(reply),
+    )
 }
 
 #[cfg(test)]

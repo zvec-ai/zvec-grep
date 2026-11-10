@@ -170,6 +170,7 @@ impl Fixture {
         RelationshipOptions {
             root: Some(self.root.clone()),
             symbol: symbol.into(),
+            kinds: Some(vec![crate::domain::GraphEdgeKind::Calls]),
             ..RelationshipOptions::default()
         }
     }

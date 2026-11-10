@@ -7,6 +7,29 @@ everyday use. This page covers implementation behavior, native builds, and
 packaging. The repository root retains the legacy TypeScript implementation and
 its separate checks.
 
+The Rust catalog includes `local/bekko-256-int8`, using the pinned
+[Bekko static ONNX weights](https://huggingface.co/hotchpotch/bekko-static-embedding-v1/tree/c18167b8f244c1bc6de21ce9b710bac8a29c4615/onnx).
+Select it with `zg --index --embedding local/bekko-256-int8 --device cpu`.
+It downloads 52,000,965 bytes of INT8 weights plus a 5,104,874-byte tokenizer,
+verified by SHA-256. Mean pooling and the 256-dimensional normalized output
+remain FP32. Queries and documents have no prefix or special tokens, with a
+32,768-token limit. Only Hugging Face is configured for this model.
+The Rust Bekko backend (`bekko`) reads the quantized table and per-token scales
+directly from the pinned ONNX file; inference runs on the shared CPU pool
+without an ONNX session or padded batches. It retains unknown tokens and
+matches the ONNX FP32 multiply, accumulation and mean before normalization.
+Batch rows tokenize and aggregate in parallel within the shared compute pool;
+each row retains its sequential arithmetic, and output order is preserved.
+Single-input requests stay on the current compute worker.
+The real Bekko CI smoke compares all 256 output components against the ONNX
+reference, including empty inputs, unknown tokens, truncation boundaries and
+concurrent batches.
+The maximum batch size is 32 and default indexing concurrency is 1.
+`ZVEC_GREP_BEKKO_PARITY_INPUTS` optionally adds a JSON array of corpus texts to
+that smoke test for local differential validation.
+Existing indexes must be rebuilt when switching embedding models, even when
+their vector dimensions match. The legacy TypeScript catalog is unchanged.
+
 Run the development commands below from `rust/` (`cd rust` from the repository
 root). See the [contributor guide](CONTRIBUTING.md) for checks and conventions.
 
@@ -77,25 +100,65 @@ remains line-oriented.
 Index embedding concurrency is configured with
 `zg --index --embedding-concurrency <n>`.
 The option is rejected outside `--index`. For automatic indexing and
-refreshes as well, set `ZVEC_GREP_EMBEDDING_CONCURRENCY=<n>`. Values must be
-positive integers. Explicit CLI/API index settings take precedence over this
-environment variable, followed by the legacy
+refreshes as well, set `ZVEC_GREP_EMBEDDING_CONCURRENCY=<n>`. Transformers/ORT clamps
+positive integers to its supported range. Explicit zero is rejected for every
+backend. Explicit CLI/API index settings take precedence over this environment
+variable, followed by the legacy
 `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` for llama.cpp indexing, then backend defaults.
 Invalid environment values warn and select the automatic default. These overrides
-do not configure query-vector inference and are not persisted in workspace settings.
+do not configure a separate query worker and are not persisted in workspace settings.
 Direct and Server indexing use the same engine boundary; restart the Server after
 changing its inherited environment, while explicit CLI overrides need no restart.
 
 For llama.cpp, the limit controls contexts within a serialized batch and is capped
-at eight, defaulting to one. Transformers/ORT limits in-flight batches to at most
-eight, defaulting to one. ORT may create sessions within this budget;
-CoreML retains one physical session. Potion/model2vec defaults to two batch tasks
-and retains an independent CPU worker capacity; remote models retain adaptive
-request scheduling. Model2vec and remote overrides are not capped at eight.
+at eight, defaulting to one. Transformers/ORT shares a bounded runtime between
+indexing and queries for the same model, cache and device:
 
-Matching local concurrency configurations share runtime admission. Different
-configurations use separate cached native resources; active leases keep their
-models alive, while unused variants are released when switching configurations.
+- C controls the session count on both CPU and CUDA, defaulting to one and
+  capped to available hardware concurrency. Direct indexing uses the explicit
+  CLI/API value, then `ZVEC_GREP_EMBEDDING_CONCURRENCY`, then the default.
+- Server startup captures `ZVEC_GREP_EMBEDDING_CONCURRENCY` as each model/device
+  pool's capacity. Sessions are created lazily on first preparation. A client's
+  concurrency only limits its own operation within that pool: requests above capacity warn
+  and are capped, omitted values use server capacity. Requests never resize the
+  resident pool or change its thread configuration. Independent operations may
+  execute concurrently up to the shared pool capacity. Different models/devices
+  have separate pools; C is not a process-wide session count.
+- `ZVEC_GREP_ORT_THREAD_BUDGET=T` configures the single process-global ORT
+  intra-op pool shared by all Sessions. It defaults to half the available logical
+  threads, rounded up, and is capped to available hardware concurrency. Invalid
+  environment values warn and use defaults. Changing the server pool capacity or
+  global thread budget requires a Server restart; changing a client operation's
+  concurrency does not. T controls CPU operator parallelism, not GPU threads or all process
+  threads; native Run callers, tokenizers and other libraries have their own
+  threads. Sessions no longer divide T by C or rebuild to change thread budgets.
+- Each Session owns one fixed native worker; no Session receives concurrent Run
+  calls. A query can use an idle Session, with at most one query batch alongside
+  document work. CPU, CUDA, DirectML and WebGPU use the same fixed-pool execution
+  limits; CoreML retains its single-session limit.
+- Each request retains its input batch; the scheduler does not merge requests.
+  Upstream indexing still batches inputs using each model's catalog limits
+  (four texts per request for MiniLM). Queries run first; running inference is
+  not preempted. CPU preparation and postprocessing overlap native execution.
+- Pending inputs have separate document/query limits: document admission is capacity+2
+  requests on CPU and 4*(capacity+1) on CUDA; queries have four slots. Copied text remains
+  bounded by 32/8 MiB respectively, with at most 8 MiB per request. Full queues apply
+  cancellable backpressure. Native work retains runtime ownership until it settles.
+
+Explicit concurrency values must be positive. The effective backend budget is
+reported when it differs from the request.
+Admission includes bounded prefetch based on pool capacity, independent of a Server request's C, so a single
+executing Session can prepare its next batch in advance. Extra Sessions allocate
+their own weights and workspaces; batch activations also contribute to memory.
+Initialization failure releases the partial pool before CPU fallback; inference
+fallback drains GPU work and converts the entire pool to CPU. Batch limits remain
+independent of C and T. Diagnostics report actual Sessions, the global intra-op
+configuration, session initialization count, fallback count and native batch sizes.
+
+Potion/model2vec defaults to two batch tasks and retains an independent CPU worker
+capacity; remote models retain adaptive request scheduling. Their overrides are
+not capped at eight. llama.cpp continues to cache separate native resources for
+different fixed context budgets, retiring unused variants when switching.
 
 `zg --install --upgrade-installed` migrates existing user-level MCP launchers
 from 0.2.x without selecting agents or installing new integrations. It changes
@@ -180,6 +243,46 @@ dropped, and native model destruction runs outside the cache lock.
 `IndexOptions::on_progress` accepts an in-process `IndexProgressReporter` and
 surfaces model downloads through `IndexProgress::embedding`. The reporter is
 runtime-only and is omitted from serialized daemon requests.
+
+Model artifact downloads send a `zvec-grep/<version>` User-Agent, including after
+CDN redirects. A transient connection failure or header/read timeout retries the
+same artifact once over IPv4 before trying the next source (Hugging Face, then
+ModelScope). Failed partial files are discarded and the retry is cancellable.
+HTTP status errors, certificate errors, and integrity failures do not trigger an
+IPv4 retry. Proxy settings remain in effect; with a proxy, the IPv4 constraint
+applies to the connection to the proxy, which may resolve the destination itself.
+
+The two live-source download suites are ignored by ordinary `cargo test` runs.
+Run both explicitly from `rust/`:
+
+```sh
+cargo test --locked -p zg-engine --lib models::artifacts::downloader::tests::live_sources:: -- --ignored --nocapture --test-threads=1
+```
+
+Each suite dynamically enumerates every local catalog model and fully downloads
+its pinned artifacts when configured for the selected source (Hugging Face or
+ModelScope), using a fresh temporary cache for every model/source pair and
+verifying artifact integrity. Remote API models are excluded. Bekko is checked
+only from Hugging Face because it has no configured ModelScope mirror.
+The suites require live network access, never fall back to the other source, and
+do not run inference. They emit a catalog manifest and a JSON result for every
+configured model/source pair. The normal Linux CPU CI job runs both suites using
+its existing test binary, allows up to one hour, and requires passing results for
+every configured model/source pair in both catalog manifests; CUDA and
+Windows-only manual runs skip this gate.
+
+To recheck one model from one source after a failure, set
+`ZVEC_GREP_TEST_DOWNLOAD_MODEL` to its local catalog reference and select the exact
+source suite, for example:
+
+```sh
+ZVEC_GREP_TEST_DOWNLOAD_MODEL=local/potion-multilingual-128m cargo test --locked -p zg-engine --lib models::artifacts::downloader::tests::live_sources::downloads_all_local_models_from_hugging_face -- --ignored --exact --nocapture
+```
+
+An unknown model reference fails the test. Without this variable, both suites
+cover the full local catalog. Filtered runs still emit the complete catalog
+manifest, so CI rejects partial coverage and continues to require every
+model/source pair.
 
 The daemon enables an index read-session cache with a 60-second idle timeout.
 Sequential and concurrent queries reuse the same generation's native storage
@@ -281,12 +384,20 @@ compatibility remains separate and may require `zg --index --rebuild`.
 
 Searches default to `--preview short` in terminals, pipes, and redirected files.
 Use `none` for a one-line source summary, `short` for compact bounded source,
-`full` for compact full source, or `detail` for full previews with metadata,
+`full` for each complete indexed entity, or `detail` for full previews with metadata,
 outlines, and file/hit grouping. Short and full preserve the original Rust compact
 per-hit layout, including indented `line: source` rows. Every preview preserves each
 query group's results, ranks and matched content; only `--fuse` combines groups.
 Query echoes, group headings, hit counts and `matchedBy` labels are omitted from
-the CLI result display. Full previews do not retrieve an entire function or file.
+the CLI result display. Full previews use the complete stored entity (such as a
+Markdown section or code symbol), even when only one fragment matched. They do
+not expand to the entire file. Bounded previews remain anchored to the matched fragment.
+Short previews prioritize fragment lines within the ten-line limit, using any
+remaining space for surrounding entity context. Their displayed lines can differ
+from the former fragment-only previews.
+In server mode, the daemon returns complete entity content and the CLI applies
+the selected preview. Short preview limits displayed text, not the internal
+response payload. The daemon protocol and request/reply schema are unchanged.
 Metadata labels use purple, file locations use cyan, and query matches use yellow.
 Automatic colors are disabled for redirected output, `TERM=dumb`, or `NO_COLOR`;
 `--color always` explicitly enables colors, including through pipes, and
@@ -334,6 +445,25 @@ clients receive CLI initialization instructions. Native terminal tabs and Escape
 handling are controlled by the MCP host. For protocol `2026-07-28`, echo the exact
 `requestState` and unchanged tool arguments with `inputResponses.index_setup`;
 each model selection or remote authorization round issues a new, single-use state.
+
+`zg --callers <symbol> [root]` and `zg --callees <symbol> [root]` query an existing
+workspace graph. CLI `-g`/`--glob` and `--iglob` use the same ordered,
+workspace-relative glob rules as ordinary search (for example, `-g 'src/**'`).
+They filter definitions and suggestions, while call-site files remain unrestricted.
+Use `--limit N` to cap call sites per matching definition and
+`--mode direct|server|auto` to select execution. Scope-qualified names such as
+`Class::method` are supported. Same-name definitions remain separate, and repeated
+call sites retain their locations; `truncated` indicates additional visible call
+sites beyond the per-symbol limit. Endpoint visibility is checked before the limit;
+queries do not compute an exact total. Each definition and its call sites share a
+read snapshot; indexing may advance between definitions. Definitions changed since
+initial selection are skipped until the next query.
+Each edge has a caller `filePath` independently of its optional `symbol` metadata.
+Both MCP toolsets expose `zvec_grep_callers` and `zvec_grep_callees` with an absolute `root`, `symbol`,
+and optional `globs`, `insensitiveGlobs`, and `limit`, using the same glob inputs as
+search. These queries do not load models or refresh the index.
+Graph extraction and resolution must have populated the index for call edges to
+be available; unresolved references are excluded from results.
 
 This version indexes text and code with one embedding model per workspace. Choose
 it with `zg --index --embedding <model>` or set a default with
@@ -520,7 +650,8 @@ clients retain reverse form elicitation. Consent is rechecked before execution.
 Search accepts `preview: "short"` (the default) or `preview: "full"` in both
 toolsets. Both modes include a required MCP `freshness:` header and reuse CLI
 result content and diagnostic conditions. Short preview shows up to ten source lines around the matched range;
-full preview preserves all available source content of each retrieved item.
+full preview returns the complete stored entity for each indexed hit, even when
+only one fragment matched.
 Neither mode reads whole files, changes retrieval or ranking, or displays
 generated outlines. CLI `none` and `detail` previews remain CLI-only.
 
@@ -620,12 +751,17 @@ bash scripts/check.sh
 ## Native and CUDA builds
 
 The safe llama API and the C5 FFI boundary share the same pinned
-`zvec-ai/llama-cpp-rs` revision (`b55399ac6c2035f2301120547c4c967e741d25d3`),
-from branch `prebuilt/0.1.154-cpu-r2-glibc-2.31`.
+`zvec-ai/llama-cpp-rs` revision (`79305567e63ee551eb1798c0537eab87d9595a23`),
+from branch `prebuilt/0.1.154-cpu-r2-glibc-2.28`.
 Its sys crate automatically selects a SHA256-pinned SDK when target, features
 and native options match. Linux x64 CPU, Linux ARM64 CPU and Linux x64 CUDA use
-`zvec-0.1.154-glibc-2.31-r1`, built on Ubuntu 20.04 and verified against a glibc
-2.31 baseline. Windows x64/ARM64 CPU use `zvec-0.1.154-cpu-r2`; macOS and
+`zvec-0.1.154-glibc-2.28-r1`, built on manylinux 2.28 and verified with real
+CPU/CUDA inference in clean AlmaLinux 8.10 (glibc 2.28) containers. These Linux
+SDKs disable the optional upstream subprocess helper (`LLAMA_SUBPROCESS=OFF`);
+zg's inference and MCP server remain unchanged. SDK verification used EL8 GCC
+Toolset 13 for final static linkage; deployment machines do not need that
+compiler toolset.
+Windows x64/ARM64 CPU use `zvec-0.1.154-cpu-r2`; macOS and
 CUDA-enabled Windows x64 use `zvec-0.1.154-r1`. CUDA architecture coverage is
 unchanged. Matching builds reuse native
 libraries and bindings without executing bindgen, CMake, C++ or CUDA compilation;
@@ -634,6 +770,11 @@ the static CPU SDK, not the CUDA SDK; CUDA builds retain the shared core, CPU
 backends and both CUDA plugins. Custom native configurations use source builds
 in default `auto` mode. A download or integrity failure is an error, not a silent
 source fallback.
+
+The Linux release workflow audits the executable and all bundled shared
+libraries against glibc 2.28, including both x64 CUDA plugins. This gate also
+runs for validation-only candidates (`publish=false`); it is not part of
+ordinary PR CI.
 
 The fork no longer registers llama.cpp as a Git submodule. Cargo fetches only
 the Rust bindings; matching SDK builds never fetch native source. Only explicit
@@ -706,7 +847,7 @@ so neither a second CMake build nor the fallback toolchain is needed.
 Publish CI requires prebuilt llama SDKs on all six targets, including the
 Windows ARM64 static CPU SDK. CUDA Rust CI also requires
 prebuilt mode instead of recompiling only for its T4 GPU. Linux publish builds
-run in Ubuntu 20.04 containers without a CUDA compiler. Runtime libraries,
+run in digest-pinned `manylinux_2_28` containers without a CUDA compiler. Runtime libraries,
 driver checks, link audits and real CPU/GPU inference gates remain required. Runtime staging
 reads the current Cargo invocation's `GGML_BACKENDS_DIR`, not the newest directory
 under `target/build`; only runtime libraries, not SDK import archives or bindings,
@@ -954,13 +1095,14 @@ GGUF plugin and its dependencies before inference; this CI setup does not change
 the package's host CUDA runtime requirements.
 Publishing always requires GPU validation regardless of `cuda`. Candidate
 collection happens first, followed by parallel CPU and requested GPU validation.
-All selected platforms get the installed CLI/daemon checks; Linux/Windows x64
-also get the CPU model/fallback checks. A GPU failure does not block CPU checks
+All selected platforms get the installed CLI/daemon checks; Linux x64/ARM64
+and Windows x64 also get real GGUF/ONNX CPU model checks, with automatic CPU
+fallback checks on the CUDA-capable x64 packages. A GPU failure does not block CPU checks
 or candidate retention, but all required CPU/GPU checks must pass before npm
 publication. A downloadable candidate is not proof of runtime validation.
 CPU runners compile Rust and assemble the default CUDA-capable bundles using
-the pinned native SDK. Linux x64 and ARM64 use Ubuntu 20.04 containers on native
-runners, without nvcc. Windows needs the Rust/MSVC linker but
+the pinned native SDK. Linux x64 and ARM64 use digest-pinned `manylinux_2_28`
+containers on native runners, without nvcc. Windows needs the Rust/MSVC linker but
 does not install CUDA compilers for packaging. Ordinary PR CI
 does not compile CUDA packages. `rust-ci.yml` is the single entry point for
 workspace and real-model verification. Push/PR runs use ordinary runners on
@@ -972,7 +1114,7 @@ For manual runs, `cuda_verify=true` enables `zg/cuda` from the first compilation
 requiring the matching prebuilt SDK, but compilation, workspace tests, all three
 CPU model checks and build-cache uploads still run on ordinary CPU runners.
 These Linux workspace tests use an Ubuntu 24.04 builder without GPU access or
-CUDA runtime libraries; the npm release build uses Ubuntu 20.04 as described above.
+CUDA runtime libraries; the npm release build uses `manylinux_2_28` as described above.
 Windows uses `windows-2022`, matching the GPU image's OS generation.
 Before the test harness copies any libraries, CUDA jobs run `cargo build --features cuda`
 and exercise the original `target/debug/zg` with GGUF/ONNX CPU index and query.
@@ -998,14 +1140,19 @@ unchanged. Quality, default tests and CUDA builds have separate build caches.
 select `linux` or `windows` to limit test platforms. Optional `ref` selects the
 reviewed source; otherwise the workflow's selected commit is used. All jobs
 check out the same resolved SHA. This workflow does no npm packaging or publishing.
-Linux x64/ARM64 npm releases compile the CLI in Ubuntu 20.04 containers,
-reuse the pinned native SDKs, and audit the executable and bundled libraries
-against glibc 2.31. Downloaded npm artifacts are installed and exercised on
-Ubuntu 20.04, including CPU GGUF/ONNX inference for the x64 bundle without
-CUDA installed. Host runners may use newer Ubuntu images; they do not set the
-release binary's glibc baseline. CUDA acceleration still requires compatible
-NVIDIA drivers and CUDA/cuDNN host libraries. The separate ORT CI gate also
-audits official ORT 1.21 x64/ARM64 runtimes and loads them on Ubuntu 20.04.
+Linux x64/ARM64 npm releases compile the CLI in digest-pinned `manylinux_2_28`
+`2026.03.01-1` containers, reuse the pinned native SDKs, and audit the executable
+and bundled libraries against glibc 2.28. Downloaded npm artifacts are installed
+and exercised in clean AlmaLinux 8.10 (glibc 2.28) containers without CUDA.
+Both architectures load the installed ORT 1.21.0 library and verify API 21,
+then run real GGUF/ONNX CPU indexing and queries. ARM64 uses explicit CPU;
+x64 also verifies default automatic CPU fallback. Host runners may use newer
+Ubuntu images; they do not set the release binary's glibc baseline. CUDA
+acceleration still requires compatible NVIDIA drivers and CUDA/cuDNN host libraries.
+Linux release builds also execute the engine's ORT preparation build script with
+Vulkan enabled and Cargo offline in a network-disabled builder, using a verified
+CPU runtime cache and separate output. This is not a full Vulkan build. These
+checks live in the release workflow, not a separate ORT job in ordinary PR CI.
 Packaging selects Cargo/CMake parallelism from available CPUs and total memory
 with a conservative 3 GiB per-job budget, a minimum of 1 and a maximum of 8.
 The same limits are passed into the Linux builder. This is a resource

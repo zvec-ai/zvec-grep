@@ -22,6 +22,7 @@ fn entity(file_id: u32, metadata: bool) -> Entity {
                 arity: None,
                 is_exported: false,
                 is_declaration: false,
+                package: None,
             })
         }),
         vec![EntityFragment {

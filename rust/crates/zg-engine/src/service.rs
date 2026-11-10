@@ -9,7 +9,7 @@ use crate::{
         context::{ContextOptions, ContextResult},
         index::{IndexOptions, IndexResult},
         info::{InfoOptions, InfoResult},
-        relationships::{RelationshipDirection, RelationshipOptions, RelationshipResult},
+        relationships::{Direction, RelationshipOptions, RelationshipResult},
     },
     models::ModelRuntimeManager,
     pipelines::{
@@ -29,6 +29,13 @@ pub(crate) struct EngineService {
 }
 
 impl EngineService {
+    pub(crate) fn enable_server_model_pools(&self) -> Result<(), EngineError> {
+        self.ensure_open()?;
+        self.models
+            .enable_server_mode()
+            .map_err(crate::models::ModelError::into_engine_error)
+    }
+
     #[must_use]
     pub(crate) fn new() -> Self {
         Self {
@@ -84,7 +91,7 @@ impl EngineService {
 
     pub(crate) async fn relationships(
         &self,
-        direction: RelationshipDirection,
+        direction: Direction,
         options: RelationshipOptions,
     ) -> Result<RelationshipResult, EngineError> {
         self.ensure_open()?;

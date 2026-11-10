@@ -69,10 +69,7 @@ async fn unreadable_graphs_do_not_break_search_but_relationships_report_the_erro
         assert!(!result.items.is_empty(), "{damage}");
         // Even an exact miss must report an unreadable graph rather than silently return no edges.
         for name in ["run", "unknown_symbol"] {
-            for direction in [
-                RelationshipDirection::Callers,
-                RelationshipDirection::Callees,
-            ] {
+            for direction in [Direction::In, Direction::Out] {
                 let error = fixture
                     .engine
                     .relationships(direction, fixture.options(name))
@@ -191,7 +188,7 @@ async fn relationship_queries_borrow_incremental_writers_even_when_registered_la
         ..fixture.options("red::run")
     };
     let (groups, writer) = tokio::join!(
-        service::query(&indexing, &options, None, RelationshipDirection::Callers),
+        service::query(&indexing, &options, None, Direction::In),
         async {
             tokio::time::sleep(Duration::from_millis(20)).await;
             indexing.writers.register(session, true)
@@ -206,7 +203,7 @@ async fn relationship_queries_borrow_incremental_writers_even_when_registered_la
         lock_timeout_ms: Some(0),
         ..fixture.options("invoke")
     };
-    let groups = service::query(&indexing, &outgoing, None, RelationshipDirection::Callees)
+    let groups = service::query(&indexing, &outgoing, None, Direction::Out)
         .await
         .expect("borrow active writer without waiting for workspace lock")
         .matches;
@@ -217,12 +214,12 @@ async fn relationship_queries_borrow_incremental_writers_even_when_registered_la
         signal: Some(signal),
         ..outgoing.clone()
     };
-    let error = service::query(&indexing, &cancelled, None, RelationshipDirection::Callees)
+    let error = service::query(&indexing, &cancelled, None, Direction::Out)
         .await
         .expect_err("cancel before borrowing");
     assert_eq!(error.code(), EngineError::CANCELLED);
     writer.retire().await;
-    let error = service::query(&indexing, &outgoing, None, RelationshipDirection::Callees)
+    let error = service::query(&indexing, &outgoing, None, Direction::Out)
         .await
         .expect_err("retired writer cannot be borrowed");
     assert_eq!(error.code(), EngineError::RESOURCE_BUSY);
@@ -266,7 +263,7 @@ async fn relationship_queries_never_borrow_unpublished_generations() {
             lock_timeout_ms: Some(0),
             ..fixture.options("run")
         };
-        let error = service::query(&indexing, &options, None, RelationshipDirection::Callers)
+        let error = service::query(&indexing, &options, None, Direction::In)
             .await
             .expect_err("do not query an unpublished index even if registered");
         assert_eq!(error.code(), EngineError::RESOURCE_BUSY);
@@ -296,9 +293,8 @@ async fn waiting_relationship_reads_leave_the_async_worker_free_and_retain_the_w
     });
     ready_rx.recv().expect("writer acquired store");
     let options = fixture.options("red::run");
-    let query = tokio::spawn(async move {
-        service::query(&indexing, &options, None, RelationshipDirection::Callers).await
-    });
+    let query =
+        tokio::spawn(async move { service::query(&indexing, &options, None, Direction::In).await });
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert!(
         !query.is_finished(),
@@ -357,10 +353,7 @@ async fn disabled_workspaces_reject_old_graphs_before_read_admission() {
         if state == "missing" {
             fs::remove_file(&fixture.graph_path).expect("remove old graph");
         }
-        for direction in [
-            RelationshipDirection::Callers,
-            RelationshipDirection::Callees,
-        ] {
+        for direction in [Direction::In, Direction::Out] {
             let error = engine
                 .relationships(
                     direction,

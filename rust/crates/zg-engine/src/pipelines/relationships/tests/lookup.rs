@@ -9,6 +9,10 @@ fn invalid_queries_fail_validation() {
         ("::".into(), None),
         ("x".repeat(1025), None),
         ("run".into(), Some(0)),
+        (
+            "run".into(),
+            Some(crate::api::relationships::MAX_RELATIONSHIP_EDGES + 1),
+        ),
     ] {
         let options = RelationshipOptions {
             symbol,
@@ -348,7 +352,7 @@ async fn ordered_and_insensitive_globs_filter_definitions_but_not_call_sites() {
             .engine
             .callees(RelationshipOptions {
                 globs,
-                limit: Some(100),
+                limit: Some(crate::api::relationships::MAX_RELATIONSHIP_EDGES),
                 ..fixture.options("invoke")
             })
             .await
