@@ -205,7 +205,7 @@ async fn single_source_download_is_verified_and_can_recover_after_failure() {
         let mut source = sources(root.path(), Some(&server.base_url));
         source.truncate(1);
         let result = resolve_model_artifacts(
-            &reqwest::Client::new(),
+            &ArtifactHttpClient::new(),
             ResolveArtifacts {
                 model: "local/test-model",
                 sources: source,
@@ -244,7 +244,7 @@ async fn cancelled_single_source_does_not_publish_or_download() {
     let mut source = sources(root.path(), None);
     source.truncate(1);
     let error = resolve_model_artifacts(
-        &reqwest::Client::new(),
+        &ArtifactHttpClient::new(),
         ResolveArtifacts {
             model: "local/test-model",
             sources: source,
