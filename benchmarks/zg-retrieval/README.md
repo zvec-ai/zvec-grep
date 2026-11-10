@@ -59,6 +59,36 @@ fields are never inferred from a coverage bar. Raw stdout and stderr are retaine
 
 Rust candidates are built through the [shared package Action](../../.github/actions/rust-candidate-package/action.yml); its [manifest utility](../shared/rust-package-cache.mjs) binds each tarball to the exact source commit and package bytes. SWE-QA uses the same packaging path while retaining its own evaluation protocol.
 
+### QA pairs and File / Entity diagnostics
+
+The [QA dataset](gold/qa-pairs.md) adds the same 20 original questions with
+65 reviewed File targets and 114 Entity targets. Its source locations and
+declarations are tied to the pinned repositories, independently of ZG's parser.
+Seventeen cases permit diagnostic scoring; three have unresolved question
+interpretations. **No case is eligible for formal QA scoring yet:** the Gold
+completeness review is a separate requirement.
+
+The normal runner and report commands also compute these metrics from the same
+five public responses per question and mode:
+
+- File Hit@1/5/10, Recall@1/5/10, MRR@10 and nDCG@10 against the new QA labels.
+- The same metrics for Entity, using returned paths, symbols, locations and
+  source content to confirm the fixed-source target.
+
+The QA section reports formal and diagnostic results separately, with a scored
+case count for each metric. Unknown matches and failed calls do not become
+zeros. A repeated-run metric is withheld if any of its five observations is
+unknown. Both levels use equal question weights after averaging repeats.
+
+The existing File table, its labels and its aggregation remain unchanged.
+Its denominator differs from the new QA table. A QA diagnostic is not a formal
+Entity score or a claim that all answer evidence was found.
+
+Reports bind the QA dataset through `qa_gold`, retain per-call `qa_observations`,
+and expose `qa_retrieval` and `qa_quality_mean` beside the legacy fields.
+Validation recomputes these values from the saved public evidence and frozen QA
+labels. The CI summary includes the separate QA table.
+
 ## Reports and artifacts
 
 - `retrieval-results`: the unified `summary.md` and machine-readable `summary.json`.
@@ -79,7 +109,7 @@ The protocol ID is `sweqa20-zg-rust-three-modes-mcp-default-v7`. The comparator 
 zg-retrieval/
   *.mjs              Stable command-line entrypoints
   core/              Frozen suite, corpus, I/O and shared response scoring
-  metrics/           File ranking, nDCG and operational measurements
+  metrics/           File and Entity ranking, nDCG and operational measurements
   engines/zg/        Runner, public response parser, snapshots and evidence audit
   reports/           Validation, same-protocol comparisons and CI rendering
   configs/           Frozen protocol

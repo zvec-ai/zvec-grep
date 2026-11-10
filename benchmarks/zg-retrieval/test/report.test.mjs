@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { markdownReport } from "../reports/zg.mjs";
+import { markdownReport, qaRetrievalMarkdown } from "../reports/zg.mjs";
 
 test("report has one three-arm table with Rust MCP output, fixed averages and per-query evidence", () => {
   const mode = {
@@ -67,4 +67,95 @@ test("report has one three-arm table with Rust MCP output, fixed averages and pe
     /Legacy|anchor|nDCG@5|By category|Preparation and latency|Mean output bytes|short|Paired retrieval/,
   );
   assert.equal((text.match(/\| Arm \|/g) ?? []).length, 1);
+});
+
+function qaLevel(count = 2) {
+  const names = [
+    "hit_at_1",
+    "hit_at_5",
+    "hit_at_10",
+    "recall_at_1",
+    "recall_at_5",
+    "recall_at_10",
+    "mrr_at_10",
+    "ndcg_at_10",
+  ];
+  return {
+    ...Object.fromEntries(names.map((name) => [name, 0.5])),
+    scored_tasks: count,
+    metric_task_counts: Object.fromEntries(names.map((name) => [name, count])),
+  };
+}
+
+test("QA tables show diagnostic denominators and withhold unapproved formal scores", () => {
+  const qa = {
+    planned_tasks: 4,
+    formal: {
+      eligible_tasks: 0,
+      file: qaLevel(),
+      entity: qaLevel(),
+    },
+    diagnostic: {
+      eligible_tasks: 3,
+      file: qaLevel(),
+      entity: qaLevel(),
+    },
+    unavailable_tasks: [{ task_id: "ambiguous", reason: "ambiguous query" }],
+  };
+  qa.diagnostic.entity.recall_at_10 = null;
+  qa.diagnostic.entity.metric_task_counts.recall_at_10 = 0;
+  qa.diagnostic.entity.hit_at_1 = 0;
+  const report = {
+    modes: { hybrid: { qa_retrieval: qa } },
+    expected_task_ids: ["a", "b", "c", "ambiguous"],
+    tasks: [],
+    repositories: [],
+    integrity_passed: true,
+    integrity_errors: [],
+  };
+  const text = markdownReport(report);
+  assert.match(text, /### QA File Recall/);
+  assert.match(text, /### QA Entity retrieval/);
+  assert.match(text, /Recall@1 \| Recall@5 \| Recall@10/);
+  assert.match(text, /\| Formal \| zg-hybrid \| 0\/4 \| N\/A \(n=0\/0\)/);
+  const formal = text
+    .split("\n")
+    .filter((line) => line.startsWith("| Formal |"));
+  assert.ok(formal.every((line) => !line.includes("0.5000")));
+  assert.match(
+    text,
+    /\| Diagnostic \| zg-hybrid \| 3\/4 \| 0\.5000 \(n=2\/3\)/,
+  );
+  assert.match(text, /0\.0000 \(n=2\/3\)/);
+  assert.match(text, /N\/A \(n=0\/3\)/);
+  assert.match(text, /do not establish formal Entity performance/);
+  assert.match(text, /Unknown results never become zeros/);
+  assert.match(text, /QA scoring unavailable for 1\/4 questions/);
+});
+
+test("QA table renders approved metrics without turning an unscored metric into zero", () => {
+  const formal = {
+    eligible_tasks: 1,
+    file: qaLevel(1),
+    entity: qaLevel(1),
+  };
+  formal.entity.recall_at_10 = null;
+  formal.entity.metric_task_counts.recall_at_10 = 0;
+  const text = qaRetrievalMarkdown(
+    [
+      [
+        "zg-hybrid",
+        {
+          planned_tasks: 1,
+          formal,
+          diagnostic: { eligible_tasks: 0, file: null, entity: null },
+          unavailable_tasks: [],
+        },
+      ],
+    ],
+    1,
+  ).join("\n");
+  assert.match(text, /\| Formal \| zg-hybrid \| 1\/1 \| 0\.5000 \(n=1\/1\)/);
+  assert.match(text, /N\/A \(n=0\/1\)/);
+  assert.doesNotMatch(text, /0\.0000/);
 });

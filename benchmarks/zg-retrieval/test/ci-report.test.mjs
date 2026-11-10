@@ -20,6 +20,12 @@ import { summarizeMeasurements } from "../metrics/measurements.mjs";
 import { summarizeNdcg } from "../metrics/summary.mjs";
 import { scoreNdcg } from "../metrics/ndcg.mjs";
 import { summarizeRepeatedQuality } from "../metrics/repetitions.mjs";
+import {
+  publicQaItems,
+  scoreQaRetrieval,
+  summarizeRepeatedQaRetrieval,
+  summarizeQaRetrieval,
+} from "../metrics/entities.mjs";
 import { validateZgReport, ZG_MODES } from "../reports/validation.mjs";
 
 const suite = await loadSuite();
@@ -117,6 +123,34 @@ function zgReport({ failedModes = [], rankForTask = () => 3 } = {}) {
     })),
   };
 }
+
+function withQa(report = zgReport()) {
+  report.qa_gold = clone(suite.qa_gold);
+  for (const row of report.tasks) {
+    const pair = suite.qa_pairs[row.task_id];
+    row.qa_observations = row.quality_observations.map(
+      (observation, index) => ({
+        repetition: observation.repetition,
+        items: publicQaItems(observation.items),
+        status: row.measurement_observations[index].status,
+        execution_status: row.measurement_observations[index].execution_status,
+      }),
+    );
+    row.qa_retrieval = scoreQaRetrieval(row.items, pair, {
+      status: row.status,
+      executionStatus: row.execution_status,
+    });
+    row.qa_quality_mean = summarizeRepeatedQaRetrieval(
+      row.qa_observations,
+      pair,
+    );
+  }
+  for (const mode of ZG_MODES)
+    report.modes[mode].qa_retrieval = summarizeQaRetrieval(
+      report.tasks.filter((row) => row.mode === mode),
+    );
+  return report;
+}
 function assertUnavailable(result) {
   assert.equal(result.status, "failed");
   assert.deepEqual(
@@ -165,6 +199,144 @@ test("summary schema 5 has exactly the fixed three Rust MCP ZG arms", async () =
   assert.doesNotMatch(
     JSON.stringify(result),
     /comparison|previews|primary_preview/,
+  );
+});
+
+test("CI exposes diagnostic QA scores and denominators while formal scores remain N/A", async () => {
+  const report = withQa();
+  const result = await buildCiSummary({ zg: report });
+  assert.equal(result.status, "success", result.errors.join("\n"));
+  for (const [index, mode] of ZG_MODES.entries()) {
+    const qa = result.rows[index].qa_retrieval;
+    assert.deepEqual(qa, report.modes[mode].qa_retrieval);
+    assert.equal(qa.planned_tasks, 20);
+    assert.equal(qa.formal.eligible_tasks, 0);
+    assert.equal(qa.formal.entity.recall_at_10, null);
+    assert.equal(qa.formal.entity.metric_task_counts.recall_at_10, 0);
+    assert.ok(qa.diagnostic.eligible_tasks > 0);
+    assert.ok(qa.diagnostic.file.metric_task_counts.recall_at_10 > 0);
+    assert.ok(result.rows[index].metrics.file_mrr_at_10 > 0);
+  }
+  assert.ok(
+    result.tasks.some((task) => task.qa_quality_mean?.status === "diagnostic"),
+  );
+  const text = markdownCiSummary(result);
+  assert.match(text, /### QA File Recall/);
+  assert.match(text, /### QA Entity retrieval/);
+  assert.match(text, /\| Formal \| zg-hybrid \| 0\/20 \| N\/A \(n=0\/0\)/);
+  assert.match(text, /\| Diagnostic \| zg-hybrid \|/);
+  assert.match(text, /n=scored\/eligible questions/);
+  assert.match(text, /do not establish formal Entity performance/);
+  assert.deepEqual(result.quality_metrics, QUALITY_METRICS);
+});
+
+test("CI rejects altered QA provenance, scores, eligibility, observations and aggregates", async () => {
+  const mutations = [
+    (report) => {
+      report.qa_gold = { ...report.qa_gold, forged: true };
+    },
+    (report, row) => {
+      row.qa_retrieval.entity.recall_at_10 = 999;
+    },
+    (report, row) => {
+      row.qa_quality_mean.entity.recall_at_10 = 999;
+    },
+    (report, row) => {
+      row.qa_retrieval.formal_eligible = true;
+    },
+    (report, row) => {
+      row.qa_quality_mean.formal_eligible = true;
+    },
+    (report, row) => {
+      row.qa_observations.pop();
+    },
+    (report, row) => {
+      row.qa_observations[0].items[0].rank = 2;
+    },
+    (report, row) => {
+      row.qa_observations[0].execution_status = "product_error";
+    },
+    (report, row) => {
+      row.qa_observations[4].items[0].metadata = ["forged evidence"];
+    },
+    (report) => {
+      report.modes.hybrid.qa_retrieval.formal.eligible_tasks = 1;
+    },
+    (report) => {
+      report.modes.hybrid.qa_retrieval.diagnostic.entity.recall_at_10 = 999;
+    },
+  ];
+  for (const mutate of mutations) {
+    const report = withQa();
+    const row = report.tasks.find((task) => task.qa_retrieval?.entity);
+    assert.ok(row, "fixture needs a diagnostic QA question");
+    mutate(report, row);
+    assertUnavailable(await buildCiSummary({ zg: report }));
+  }
+});
+
+test("QA failed calls remain unscored without changing historical File error zeros", async () => {
+  const result = await buildCiSummary({
+    zg: withQa(zgReport({ failedModes: ["vector"] })),
+  });
+  assert.equal(result.status, "failed");
+  const vector = result.rows.find((row) => row.label === "zg-vector");
+  assert.equal(vector.metrics.file_hit_at_10, 0);
+  assert.equal(vector.qa_retrieval.formal.eligible_tasks, 0);
+  assert.equal(vector.qa_retrieval.diagnostic.entity.recall_at_10, null);
+  assert.equal(
+    vector.qa_retrieval.diagnostic.entity.metric_task_counts.recall_at_10,
+    0,
+  );
+  assert.ok(vector.qa_retrieval.diagnostic.eligible_tasks > 0);
+  assert.match(markdownCiSummary(result), /N\/A \(n=0\/[1-9]\d*\)/);
+});
+
+test("QA coverage keeps invalid questions in the planned denominator", async () => {
+  const report = withQa();
+  const row = report.tasks.find(
+    (task) =>
+      task.mode === "hybrid" && task.qa_quality_mean?.status === "diagnostic",
+  );
+  const previous = report.modes.hybrid.qa_retrieval;
+  row.status = "harness_invalid";
+  row.execution_status = "harness_invalid";
+  row.invalid_reason = "format_unknown: public source range mismatch";
+  row.ndcg = null;
+  row.file_retrieval = null;
+  row.qa_retrieval = null;
+  row.qa_quality_mean = null;
+  row.items = [];
+  row.measurement_observations = row.measurement_observations.map((sample) => ({
+    ...sample,
+    status: "harness_invalid",
+    execution_status: "harness_invalid",
+  }));
+  report.quality_score_valid = false;
+  report.integrity_passed = false;
+  report.integrity_errors = [
+    "one or more observations are experimentally invalid",
+  ];
+  report.modes.hybrid.qa_retrieval = summarizeQaRetrieval(
+    report.tasks.filter((task) => task.mode === "hybrid"),
+  );
+  const result = await buildCiSummary({ zg: report });
+  const hybrid = result.rows[0];
+  assert.equal(hybrid.status, "partial", result.errors.join("\n"));
+  assert.equal(hybrid.questions, 19);
+  assert.equal(hybrid.qa_retrieval.planned_tasks, 20);
+  assert.equal(
+    hybrid.qa_retrieval.diagnostic.eligible_tasks,
+    previous.diagnostic.eligible_tasks - 1,
+  );
+  assert.equal(
+    hybrid.qa_retrieval.unavailable_tasks.length,
+    previous.unavailable_tasks.length + 1,
+  );
+  assert.ok(
+    hybrid.qa_retrieval.unavailable_tasks.some(
+      (task) => task.task_id === row.task_id,
+    ),
   );
 });
 

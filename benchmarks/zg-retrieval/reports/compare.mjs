@@ -11,6 +11,7 @@ import {
 import { summarizeMeasurements } from "../metrics/measurements.mjs";
 import { summarizeNdcg } from "../metrics/summary.mjs";
 import { validateZgReport, ZG_MODES } from "./validation.mjs";
+import { loadSuite } from "../core/lib.mjs";
 
 const MODES = ZG_MODES;
 const HITS = ["hit_at_1", "hit_at_5", "hit_at_10"];
@@ -96,9 +97,9 @@ function reportIdentity(report) {
 }
 
 /** Compare validated quality rows; task ordering and cached aggregate summaries are not score inputs. */
-export function compareReports(baseline, candidate) {
-  const before = validateZgReport(baseline, "baseline");
-  const after = validateZgReport(candidate, "candidate");
+export function compareReports(baseline, candidate, { suite } = {}) {
+  const before = validateZgReport(baseline, "baseline", { suite });
+  const after = validateZgReport(candidate, "candidate", { suite });
   return compareValidatedReports(baseline, candidate, before, after);
 }
 
@@ -312,7 +313,11 @@ export function markdownComparison(result) {
 export async function writeComparison(baselinePath, candidatePath, outputPath) {
   const paths = [resolve(baselinePath), resolve(candidatePath)];
   const bytes = await Promise.all(paths.map((path) => readFile(path)));
-  const result = compareReports(...bytes.map((raw) => JSON.parse(raw)));
+  const reports = bytes.map((raw) => JSON.parse(raw));
+  const options = reports.some((report) => report.qa_gold)
+    ? { suite: await loadSuite() }
+    : {};
+  const result = compareReports(...reports, options);
   result.inputs = Object.fromEntries(
     paths.map((path, i) => [
       i === 0 ? "baseline" : "candidate",

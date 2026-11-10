@@ -28,6 +28,12 @@ import {
   summarizeRepeatedQuality,
 } from "../../metrics/repetitions.mjs";
 import { markdownReport } from "../../reports/zg.mjs";
+import {
+  publicQaItems,
+  scoreQaRetrieval,
+  summarizeRepeatedQaRetrieval,
+  summarizeQaRetrieval,
+} from "../../metrics/entities.mjs";
 
 async function findRuns(directory) {
   const runs = [];
@@ -59,6 +65,8 @@ function invalidate(score, reason) {
     file_retrieval: null,
     ndcg: null,
     quality_mean: null,
+    qa_retrieval: null,
+    qa_quality_mean: null,
   };
 }
 
@@ -400,7 +408,16 @@ export async function aggregate(directory, { expectedTasks } = {}) {
     errors.push("mixed mode selections across repository shards");
   if (observations.some((row) => row.status === "harness_invalid"))
     errors.push("one or more observations are experimentally invalid");
-  for (const row of observations) row.file_retrieval = fileRetrievalForRow(row);
+  for (const row of observations) {
+    row.file_retrieval = fileRetrievalForRow(row);
+    row.qa_retrieval =
+      row.status === "harness_invalid"
+        ? null
+        : scoreQaRetrieval(row.items, suite.qa_pairs[row.task_id], {
+            executionStatus: row.execution_status,
+            status: row.status,
+          });
+  }
   const quality = observations
     .filter((row) => row.repetition === suite.protocol.quality_repetition)
     .map((row) => {
@@ -441,6 +458,13 @@ export async function aggregate(directory, { expectedTasks } = {}) {
       return {
         ...qualityRow,
         quality_mean: qualityMean,
+        qa_quality_mean:
+          invalidRepeat || repeats.length !== suite.protocol.repetitions
+            ? null
+            : summarizeRepeatedQaRetrieval(
+                repeats,
+                suite.qa_pairs[row.task_id],
+              ),
         ranking_repeatable: valid
           ? (qualityMean?.ranking_repeatable ?? null)
           : null,
@@ -452,6 +476,12 @@ export async function aggregate(directory, { expectedTasks } = {}) {
         quality_observations: repeats.map((item) => ({
           repetition: item.repetition,
           items: rankedLocations(item.items ?? []),
+        })),
+        qa_observations: repeats.map((item) => ({
+          repetition: item.repetition,
+          status: item.status,
+          execution_status: item.execution_status,
+          items: publicQaItems(item.items ?? []),
         })),
         measurement_observations: repeats.map((item) => ({
           repetition: item.repetition,
@@ -504,6 +534,9 @@ export async function aggregate(directory, { expectedTasks } = {}) {
               ? summarizeFileRetrieval(rows)
               : null,
           ndcg: partialScoreable && rows.length ? summarizeNdcg(rows) : null,
+          qa_retrieval: partialScoreable
+            ? summarizeQaRetrieval(quality.filter((row) => row.mode === mode))
+            : null,
           ranking_repeatable_tasks: rows.filter(
             (row) => row.ranking_repeatable === true,
           ).length,
@@ -522,6 +555,7 @@ export async function aggregate(directory, { expectedTasks } = {}) {
     quality_aggregation: "mean_of_five",
     generated_at: new Date().toISOString(),
     suite: suite.identity,
+    qa_gold: suite.qa_gold,
     scope:
       expected.length === 20 ? "full-20-original-queries" : "explicit-subset",
     expected_task_ids: expected,

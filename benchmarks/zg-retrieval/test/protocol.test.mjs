@@ -44,7 +44,7 @@ async function temporary(t) {
 
 async function isolatedSuite(t) {
   const directory = await temporary(t);
-  for (const name of ["core", "data", "configs", "gold"])
+  for (const name of ["core", "data", "configs", "gold", "metrics"])
     await cp(join(suiteDirectory, name), join(directory, name), {
       recursive: true,
     });

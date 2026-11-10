@@ -7,14 +7,62 @@ import {
 } from "../metrics/files.mjs";
 import { validateCallLatency } from "../metrics/measurements.mjs";
 import {
+  rankedLocations,
   rankingSignature,
   summarizeRepeatedQuality,
 } from "../metrics/repetitions.mjs";
+import {
+  publicQaItems,
+  scoreQaRetrieval,
+  summarizeRepeatedQaRetrieval,
+  summarizeQaRetrieval,
+} from "../metrics/entities.mjs";
 
 export const ZG_MODES = Object.freeze(["hybrid", "fts", "vector"]);
 const FILE_METRICS = ["hit_at_1", "hit_at_5", "hit_at_10", "rr_at_10"];
 const CATEGORIES = ["what", "where", "how", "why"];
 const key = (row) => JSON.stringify([row.task_id, row.mode]);
+
+function validateQaQualityRow(row, pair, label) {
+  assert.ok(pair, `${label}: missing frozen QA pair`);
+  assert.ok(
+    Array.isArray(row.qa_observations) && row.qa_observations.length === 5,
+    `${label}: incomplete QA repetition evidence`,
+  );
+  for (const [index, observation] of row.qa_observations.entries()) {
+    const measurement = row.measurement_observations[index];
+    assert.equal(observation.repetition, index + 1);
+    for (const field of ["status", "execution_status"])
+      assert.equal(
+        observation[field],
+        measurement[field],
+        `${label}: QA ${field} differs from captured call`,
+      );
+    assert.deepEqual(
+      rankedLocations(observation.items),
+      row.quality_observations[index].items,
+      `${label}: QA locations differ from public quality evidence`,
+    );
+  }
+  assert.deepEqual(
+    row.qa_observations[4].items,
+    publicQaItems(row.items),
+    `${label}: fifth-call QA evidence differs from representative response`,
+  );
+  assert.deepEqual(
+    row.qa_retrieval,
+    scoreQaRetrieval(row.items, pair, {
+      executionStatus: row.execution_status,
+      status: row.status,
+    }),
+    `${label}: QA scores differ from public evidence or frozen Gold`,
+  );
+  assert.deepEqual(
+    row.qa_quality_mean,
+    summarizeRepeatedQaRetrieval(row.qa_observations, pair),
+    `${label}: QA repeated scores differ from public evidence`,
+  );
+}
 
 function uniqueStrings(values, label) {
   assert.ok(
@@ -245,6 +293,27 @@ export function validateZgReport(
   label = "ZG",
   { suite, allowPartial = false } = {},
 ) {
+  const hasQa =
+    Object.hasOwn(report, "qa_gold") ||
+    report.tasks?.some((row) =>
+      ["qa_retrieval", "qa_quality_mean", "qa_observations"].some((field) =>
+        Object.hasOwn(row, field),
+      ),
+    ) ||
+    Object.values(report.modes ?? {}).some((mode) =>
+      Object.hasOwn(mode, "qa_retrieval"),
+    );
+  if (hasQa) {
+    assert.ok(
+      suite?.qa_pairs && suite?.qa_gold,
+      `${label}: QA validation requires the frozen QA suite`,
+    );
+    assert.deepEqual(
+      report.qa_gold,
+      suite.qa_gold,
+      `${label}: QA Gold identity mismatch`,
+    );
+  }
   assert.equal(
     report.schema_version,
     7,
@@ -399,6 +468,18 @@ export function validateZgReport(
         allowMissingTargets: invalid,
       });
     if (invalid) {
+      if (hasQa) {
+        assert.equal(
+          row.qa_retrieval,
+          null,
+          `${context}: invalid row has QA scores`,
+        );
+        assert.equal(
+          row.qa_quality_mean,
+          null,
+          `${context}: invalid row has repeated QA scores`,
+        );
+      }
       assert.equal(
         row.file_retrieval,
         null,
@@ -416,6 +497,8 @@ export function validateZgReport(
       );
       invalidRows.push(row);
     } else {
+      if (hasQa)
+        validateQaQualityRow(row, suite.qa_pairs[row.task_id], context);
       rows.set(key(row), validateQualityRow(row, context));
     }
   }
@@ -433,5 +516,19 @@ export function validateZgReport(
       .filter((sample) => sample.execution_status === "product_error").length,
     `${label}: product error count differs from measurement evidence`,
   );
+  if (hasQa)
+    for (const mode of ZG_MODES) {
+      const expected =
+        report.quality_score_valid || partial
+          ? summarizeQaRetrieval(
+              report.tasks.filter((row) => row.mode === mode),
+            )
+          : null;
+      assert.deepEqual(
+        report.modes[mode].qa_retrieval,
+        expected,
+        `${label}: ${mode} QA aggregate differs from scored cases`,
+      );
+    }
   return { ids, modes: [...ZG_MODES], rows, invalidRows };
 }

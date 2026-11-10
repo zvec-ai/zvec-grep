@@ -5,7 +5,9 @@ import { summarizeFileRetrieval } from "../metrics/files.mjs";
 import { loadSuite, readJson, writeJson } from "../core/lib.mjs";
 import { summarizeMeasurements } from "../metrics/measurements.mjs";
 import { summarizeNdcg } from "../metrics/summary.mjs";
+import { summarizeQaRetrieval } from "../metrics/entities.mjs";
 import { validateZgReport, ZG_MODES } from "./validation.mjs";
+import { qaRetrievalMarkdown } from "./zg.mjs";
 
 export const QUALITY_METRICS = Object.freeze([
   "file_hit_at_1",
@@ -15,7 +17,13 @@ export const QUALITY_METRICS = Object.freeze([
   "ndcg_at_10",
 ]);
 
-function resultRow(label, rows, expectedQuestions, expectedRepositories) {
+function resultRow(
+  label,
+  rows,
+  expectedQuestions,
+  expectedRepositories,
+  qaRows = rows,
+) {
   const file = summarizeFileRetrieval(rows);
   const ndcg = summarizeNdcg(rows);
   return {
@@ -51,6 +59,9 @@ function resultRow(label, rows, expectedQuestions, expectedRepositories) {
           rows.flatMap((row) => row.measurement_observations),
         )
       : null,
+    qa_retrieval: qaRows.some((row) => row.qa_quality_mean || row.qa_retrieval)
+      ? summarizeQaRetrieval(qaRows)
+      : null,
   };
 }
 
@@ -69,6 +80,7 @@ const unavailableRow = (
   metrics: null,
   ranking_repeatable_cases: 0,
   measurements: null,
+  qa_retrieval: null,
 });
 
 function failedTasks(checked) {
@@ -138,6 +150,9 @@ export async function buildCiSummary({
           [...checked.rows.values()].filter((row) => row.mode === mode),
           suite.lock.tasks.length,
           suite.lock.repositories.length,
+          [...checked.rows.values(), ...checked.invalidRows].filter(
+            (row) => row.mode === mode,
+          ),
         ),
       );
     failures = failedTasks(checked);
@@ -171,6 +186,7 @@ export async function buildCiSummary({
           ranking_repeatable: row.ranking_repeatable,
           hit_at_10_calls: row.quality_mean?.hit_at_10_calls ?? null,
           measurements,
+          qa_quality_mean: row.qa_quality_mean ?? null,
         };
       })
       .sort(
@@ -270,6 +286,10 @@ export function markdownCiSummary(result) {
         (row) =>
           `- ${cell(row.label)}: ${row.measurements.output_sample_count} output samples; ${row.measurements.latency_sample_count} latency samples.`,
       ),
+    ...qaRetrievalMarkdown(
+      result.rows.map((row) => [row.label, row.qa_retrieval]),
+      result.rows[0]?.expected_questions,
+    ),
   );
   if (result.tasks?.length) {
     lines.push(

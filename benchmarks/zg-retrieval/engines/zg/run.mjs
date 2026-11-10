@@ -19,6 +19,7 @@ import {
   run,
   prepareCorpus,
   validateGoldSources,
+  validateQaGoldSources,
   corpusManifest,
   modelArtifactManifest,
   fileHash,
@@ -278,6 +279,7 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
       "artifacts/model cache must be outside the search root",
     );
     await validateGoldSources(root, tasks, gold);
+    await validateQaGoldSources(root, tasks, suite.qa_pairs);
     corpusBefore = await corpusManifest(root);
     manifest.corpus_sha256 = corpusBefore.sha256;
     await writeJson(join(output, "corpus.json"), corpusBefore);

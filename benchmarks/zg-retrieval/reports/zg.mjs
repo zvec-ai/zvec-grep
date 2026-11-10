@@ -2,6 +2,77 @@ import { ZG_MODES } from "./validation.mjs";
 
 const display = (value) => (Number.isFinite(value) ? value.toFixed(4) : "N/A");
 
+function qaMetricCell(level, metric, eligible) {
+  if (eligible == null) return "N/A";
+  if (eligible === 0) return "N/A (n=0/0)";
+  const count = level?.metric_task_counts?.[metric];
+  const value = count > 0 ? display(level?.[metric]) : "N/A";
+  return `${value} (n=${count ?? "?"}/${eligible})`;
+}
+
+/** Keep diagnostic QA results separate from the existing File metrics. */
+export function qaRetrievalMarkdown(entries, expectedQuestions) {
+  if (!entries.some(([, qa]) => qa)) return [];
+  const lines = [
+    "",
+    "## QA File and Entity retrieval",
+    "",
+    "Formal scores require Gold that passed correctness and completeness review. Diagnostic scores are exploratory and do not establish formal Entity performance. No eligible questions means N/A, not zero.",
+    "",
+    "Each cell shows the score and n=scored/eligible questions for that metric. The difference is the number left unscored, including uncertain matches or failed calls. Unknown results never become zeros. Each question needs all five computable calls for a metric; averages then give questions equal weight, including QA nDCG.",
+  ];
+  for (const [level, heading, metrics] of [
+    [
+      "file",
+      "QA File Recall",
+      [1, 5, 10].map((k) => [`Recall@${k}`, `recall_at_${k}`]),
+    ],
+    [
+      "entity",
+      "QA Entity retrieval",
+      [
+        ...[1, 5, 10].map((k) => [`Hit@${k}`, `hit_at_${k}`]),
+        ...[1, 5, 10].map((k) => [`Recall@${k}`, `recall_at_${k}`]),
+        ["MRR@10", "mrr_at_10"],
+        ["nDCG@10", "ndcg_at_10"],
+      ],
+    ],
+  ]) {
+    lines.push(
+      "",
+      `### ${heading}`,
+      "",
+      `| Scope | Arm | Eligible questions | ${metrics.map(([label]) => label).join(" | ")} |`,
+      `| --- | --- | --- | ${metrics.map(() => "---").join(" | ")} |`,
+    );
+    for (const [scope, label] of [
+      ["formal", "Formal"],
+      ["diagnostic", "Diagnostic"],
+    ])
+      for (const [arm, qa] of entries) {
+        const group = qa?.[scope];
+        const eligible = group?.eligible_tasks;
+        const coverage =
+          eligible == null
+            ? "N/A"
+            : `${eligible}/${qa.planned_tasks ?? expectedQuestions}`;
+        lines.push(
+          `| ${label} | ${arm} | ${coverage} | ${metrics.map(([, metric]) => qaMetricCell(group?.[level], metric, eligible)).join(" | ")} |`,
+        );
+      }
+  }
+  lines.push(
+    "",
+    ...entries
+      .filter(([, qa]) => qa)
+      .map(
+        ([arm, qa]) =>
+          `${arm}: QA scoring unavailable for ${qa.unavailable_tasks.length}/${qa.planned_tasks ?? expectedQuestions} questions. Per-question eligibility, reasons and per-call matching evidence are retained in the JSON report.`,
+      ),
+  );
+  return lines;
+}
+
 export function markdownReport(report) {
   const modeEntries = ZG_MODES.map((mode) => [
     `zg-${mode}`,
@@ -30,6 +101,10 @@ export function markdownReport(report) {
     "File Hit@1/5/10 and MRR@10 give every valid question equal weight, including misses and product-error zeros. nDCG@10 first averages valid questions within each represented repository, then weights those repositories equally. Invalid evidence is excluded, never scored as zero; partial scores are diagnostic and cannot be compared directly with complete 20-question scores. All five metrics use the same frozen accepted-file targets and native result ranks; repeated chunks consume ranks without file deduplication. Finding a file does not establish sufficient answer evidence.",
     "",
     "Hybrid, fts and vector use the Rust public MCP default presentation on the same frozen repository index with the original query and Top-10 limit. The benchmark does not send a preview override because the current Rust MCP schema does not expose one. Presentation text and output length do not affect the five file-ranking metrics. Quality thresholds are report-only.",
+    ...qaRetrievalMarkdown(
+      modeEntries.map(([label, entry]) => [label, entry?.qa_retrieval]),
+      queryCount,
+    ),
   ];
   lines.push(
     "",
