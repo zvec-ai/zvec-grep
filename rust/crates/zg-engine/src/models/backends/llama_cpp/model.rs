@@ -94,6 +94,7 @@ struct LoadedLlamaModel {
 
 struct LlamaContextPool {
     model: Arc<LlamaModel>,
+    gpu: bool,
     state: StdMutex<LlamaContextPoolState>,
     changed: Condvar,
 }
@@ -449,7 +450,7 @@ fn cpu_model_params() -> Result<LlamaModelParams, ModelError> {
 fn loaded_llama_model(model: LlamaModel, path: &Path, gpu: bool) -> LoadedLlamaModel {
     let model = Arc::new(model);
     LoadedLlamaModel {
-        contexts: LlamaContextPool::new(Arc::clone(&model)),
+        contexts: LlamaContextPool::new(Arc::clone(&model), gpu),
         model,
         model_path: path.to_path_buf(),
         gpu,
@@ -572,9 +573,10 @@ fn physical_context_worker_limit(_gpu: bool, requested: usize) -> usize {
 }
 
 impl LlamaContextPool {
-    fn new(model: Arc<LlamaModel>) -> Self {
+    fn new(model: Arc<LlamaModel>, gpu: bool) -> Self {
         Self {
             model,
+            gpu,
             state: StdMutex::new(LlamaContextPoolState::default()),
             changed: Condvar::new(),
         }
@@ -733,10 +735,11 @@ impl LlamaContextPool {
         let worker_id = state.next_worker_id;
         state.next_worker_id = state.next_worker_id.saturating_add(1);
         let model = Arc::clone(&self.model);
+        let gpu = self.gpu;
         let (sender, receiver) = mpsc::channel();
         let join = thread::Builder::new()
             .name(format!("zg-llama-context-{worker_id}"))
-            .spawn(move || llama_context_worker(&model, &receiver))
+            .spawn(move || llama_context_worker(&model, &receiver, gpu))
             .map_err(|error| {
                 ModelError::internal("Unable to create llama.cpp context worker").with_cause(error)
             })?;
@@ -772,7 +775,11 @@ impl Drop for LlamaWorkerLease<'_> {
     }
 }
 
-fn llama_context_worker(model: &LlamaModel, receiver: &mpsc::Receiver<LlamaWorkerMessage>) {
+fn llama_context_worker(
+    model: &LlamaModel,
+    receiver: &mpsc::Receiver<LlamaWorkerMessage>,
+    gpu: bool,
+) {
     let mut context = None;
     let mut profile = None;
     while let Ok(message) = receiver.recv() {
@@ -792,7 +799,7 @@ fn llama_context_worker(model: &LlamaModel, receiver: &mpsc::Receiver<LlamaWorke
         if !reusable {
             context = None;
             profile = None;
-            match create_llama_context(model, desired) {
+            match create_llama_context(model, desired, gpu) {
                 Ok(created) => {
                     context = Some(created);
                     profile = Some(desired);
@@ -816,6 +823,7 @@ fn llama_context_worker(model: &LlamaModel, receiver: &mpsc::Receiver<LlamaWorke
 fn create_llama_context(
     model: &LlamaModel,
     profile: LlamaContextProfile,
+    gpu: bool,
 ) -> Result<LlamaContext<'_>, ModelError> {
     let registry = lock_backend_registry();
     let architecture = model
@@ -832,6 +840,8 @@ fn create_llama_context(
         ))
         .with_n_threads(profile.threads)
         .with_n_threads_batch(profile.threads)
+        .with_op_offload(gpu)
+        .with_offload_kqv(gpu)
         .with_embeddings(true);
     model
         .new_context(initialize_llama_backend(false, &registry)?, params)
@@ -895,6 +905,12 @@ fn format_text(text: &str, purpose: EmbeddingPurpose, format: &str) -> String {
                 format!("Instruct: Retrieve relevant documents for the given query\nQuery: {text}")
             }
             EmbeddingPurpose::Document => text.to_owned(),
+        };
+    }
+    if format == "embeddinggemma2" {
+        return match purpose {
+            EmbeddingPurpose::Query => format!("task: code retrieval | query: {text}"),
+            EmbeddingPurpose::Document => format!("title: none | text: {text}"),
         };
     }
     match purpose {

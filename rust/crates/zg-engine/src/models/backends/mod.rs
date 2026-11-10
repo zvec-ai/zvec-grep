@@ -7,3 +7,5 @@ mod qwen;
 mod transformers;
 
 pub(super) use factory::create_embedding_model;
+#[cfg(test)]
+pub(super) use llama_cpp::LlamaCppEmbeddingModel;
