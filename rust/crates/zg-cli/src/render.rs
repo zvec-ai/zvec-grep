@@ -566,6 +566,7 @@ Index embedding concurrency:
   llama.cpp: context limit capped at 8, with serialized batches; defaults to 1.
   Transformers/ORT: in-flight batch limit capped at 8; defaults to 1. Native
     sessions honor that budget; CoreML uses one physical session.
+  Bekko: CPU batch tasks; defaults to 1, capped at 8.
   Potion/model2vec: concurrent batch tasks; defaults to 2, with an independent
     CPU worker-pool capacity. No cap of 8 is applied.
   Remote: concurrent requests; adaptive scheduling may reduce the limit after
@@ -807,6 +808,7 @@ Supported text embedding models (one per workspace):
   MODEL                               RUNTIME  INPUT       DIMS  TOKENS  BACKEND
   ----------------------------------  -------  ----------  ----  ------  ---------------
   local/all-minilm-l6-v2              local    text         384     256  transformers
+  local/bekko-256-int8                local    text         256   32768  bekko
   local/bge-small-en-v1.5             local    text         384     512  transformers
   local/embeddinggemma-300m           local    text         768    2048  llama-cpp
   local/gte-modernbert-base           local    text         768    8192  transformers

@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use super::{
-    llama_cpp::LlamaCppEmbeddingModel, model2vec::Model2VecEmbeddingModel,
-    qwen::QwenEmbeddingModel, transformers::TransformersEmbeddingModel,
+    bekko::BekkoEmbeddingModel, llama_cpp::LlamaCppEmbeddingModel,
+    model2vec::Model2VecEmbeddingModel, qwen::QwenEmbeddingModel,
+    transformers::TransformersEmbeddingModel,
 };
 use crate::domain::model::ModelConfig;
 use crate::models::{
@@ -33,6 +34,11 @@ pub fn create_embedding_model(
     })?;
     let options = options.unwrap_or_default();
     match entry {
+        EmbeddingCatalogEntry::Bekko(config) => Ok(Arc::new(BekkoEmbeddingModel::new(
+            config,
+            options,
+            compute_runtime,
+        ))),
         EmbeddingCatalogEntry::Model2Vec(config) => Ok(Arc::new(Model2VecEmbeddingModel::new(
             config,
             options,

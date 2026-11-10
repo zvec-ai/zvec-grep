@@ -91,6 +91,11 @@ fn native_limits_cap_at_eight_and_llama_batches_are_serial() {
     assert_eq!(local_runtime_limit(transformers, None), Some(1));
     assert_eq!(batch_concurrency(llama, Some(24)), Some(1));
     assert_eq!(batch_concurrency(transformers, Some(24)), Some(8));
+    let bekko = "local/bekko-256-int8";
+    assert_eq!(local_runtime_limit(bekko, None), Some(1));
+    assert_eq!(local_runtime_limit(bekko, Some(24)), Some(8));
+    assert_eq!(batch_concurrency(bekko, None), Some(1));
+    assert_eq!(batch_concurrency(bekko, Some(24)), Some(8));
     for reference in ["local/potion-code-16m-v2", "qwen/text-embedding-v4"] {
         assert_eq!(local_runtime_limit(reference, Some(24)), None);
         assert_eq!(batch_concurrency(reference, Some(24)), Some(24));

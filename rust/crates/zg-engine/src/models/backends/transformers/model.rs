@@ -179,7 +179,7 @@ impl TransformersEmbeddingModel {
         on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
         signal: Option<&CancellationToken>,
     ) -> Result<LoadedTransformersModel, ModelError> {
-        let model_artifact = onnx_artifact(self.entry.dtype)?;
+        let model_artifact = onnx_artifact(self.entry)?;
         let reporter = ModelDownloadProgressReporter::new(
             self.entry.reference,
             on_progress,
@@ -194,22 +194,21 @@ impl TransformersEmbeddingModel {
             .model_cache_dir
             .join(self.entry.download.hugging_face.repo)
             .join(self.entry.download.hugging_face.revision);
-        let model_scope = self
-            .model_cache_dir
-            .join("modelscope")
-            // Keep main's cache namespace so Node and Rust reuse the same
-            // verified fallback snapshot; the Rust backend itself is ORT.
-            .join("transformers-js")
-            .join(self.entry.download.model_scope.repo.replace('/', "--"))
-            .join(self.entry.download.model_scope.revision);
+        let sources = std::iter::once(ArtifactSource::hugging_face(
+            self.entry.download.hugging_face,
+            hugging_face,
+        ))
+        .chain(
+            self.entry
+                .download
+                .fallback_source(&self.model_cache_dir, "transformers-js"),
+        )
+        .collect();
         let resolved = resolve_model_artifacts(
             &self.client,
             ResolveArtifacts {
                 model: self.entry.reference,
-                sources: [
-                    ArtifactSource::hugging_face(self.entry.download.hugging_face, hugging_face),
-                    ArtifactSource::model_scope(self.entry.download.model_scope, model_scope),
-                ],
+                sources,
                 artifacts: self.entry.download.artifacts,
                 reporter: &reporter,
                 signal,
@@ -1084,7 +1083,7 @@ fn prepare_batch(
 ) -> Result<PreparedBatch, ModelError> {
     let probe = tokenizers
         .probe
-        .encode_batch(texts.to_vec(), true)
+        .encode_batch(texts.to_vec(), entry.add_special_tokens)
         .map_err(|error| tokenization_error(entry, error))?;
     let truncated = probe
         .iter()
@@ -1103,28 +1102,38 @@ fn prepare_batch(
     let padding_input_id = i64::from(PaddingParams::default().pad_id);
     let encodings = tokenizers
         .inputs
-        .encode_batch(texts.to_vec(), true)
+        .encode_batch(texts.to_vec(), entry.add_special_tokens)
         .map_err(|error| tokenization_error(entry, error))?;
-    let sequence_length = encodings
+    let encoded_length = encodings
         .first()
         .map(tokenizers::Encoding::len)
         .unwrap_or_default();
-    if sequence_length == 0
+    if encodings.is_empty()
         || encodings
             .iter()
-            .any(|encoding| encoding.len() != sequence_length)
+            .any(|encoding| encoding.len() != encoded_length)
     {
         return Err(tokenization_error(
             entry,
             "tokenizer returned an unexpected batch shape",
         ));
     }
+    // Static tokenizers can produce an all-empty batch. ONNX still needs one
+    // padding position with a zero attention mask, matching the upstream loader.
+    let sequence_length = encoded_length.max(1);
     let batch_size = encodings.len();
     let mut input_ids = Vec::with_capacity(batch_size * sequence_length);
     let mut attention_mask = Vec::with_capacity(batch_size * sequence_length);
     let mut token_type_ids = Vec::with_capacity(batch_size * sequence_length);
     let mut position_ids = Vec::with_capacity(batch_size * sequence_length);
     for encoding in &encodings {
+        if encoding.is_empty() {
+            input_ids.push(padding_input_id);
+            attention_mask.push(0);
+            token_type_ids.push(0);
+            position_ids.push(0);
+            continue;
+        }
         input_ids.extend(encoding.get_ids().iter().map(|&value| i64::from(value)));
         attention_mask.extend(
             encoding
@@ -1292,14 +1301,17 @@ fn lock_std_mutex<T>(mutex: &StdMutex<T>) -> StdMutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn onnx_artifact(dtype: &str) -> Result<&'static str, ModelError> {
-    match dtype {
-        "fp32" => Ok("onnx/model.onnx"),
-        "q8" => Ok("onnx/model_quantized.onnx"),
-        "q4" => Ok("onnx/model_q4.onnx"),
-        value => Err(ModelError::internal(format!(
-            "Unsupported Transformers dtype: {value}"
-        ))),
+fn onnx_artifact(entry: TransformersConfig) -> Result<&'static str, ModelError> {
+    let mut models = entry.download.artifacts.iter().filter(|artifact| {
+        Path::new(artifact.path)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("onnx"))
+    });
+    match (models.next(), models.next()) {
+        (Some(artifact), None) => Ok(artifact.path),
+        _ => Err(ModelError::storage_failure(
+            "Expected exactly one ONNX model artifact",
+        )),
     }
 }
 
