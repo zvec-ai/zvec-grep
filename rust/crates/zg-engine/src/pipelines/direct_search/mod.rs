@@ -1,5 +1,8 @@
 //! Direct file search, request normalization, and context-result assembly.
 
+mod pdf;
+#[cfg(test)]
+mod pdf_tests;
 mod structure;
 
 use std::{
@@ -30,9 +33,18 @@ use self::structure::{
 
 const DEFAULT_MAX_CONCURRENT_SEARCHES: usize = 2;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct DirectSearchService {
     lexical: LexicalSearchService,
+    writers: crate::pipelines::indexed_search::writer::WriterContexts,
+}
+
+impl std::fmt::Debug for DirectSearchService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DirectSearchService")
+            .field("lexical", &self.lexical)
+            .finish_non_exhaustive()
+    }
 }
 
 impl DirectSearchService {
@@ -40,7 +52,16 @@ impl DirectSearchService {
         Self {
             lexical: LexicalSearchService::default()
                 .with_max_searches(DEFAULT_MAX_CONCURRENT_SEARCHES),
+            writers: crate::pipelines::indexed_search::writer::WriterContexts::default(),
         }
+    }
+
+    pub(crate) fn with_writers(
+        mut self,
+        writers: crate::pipelines::indexed_search::writer::WriterContexts,
+    ) -> Self {
+        self.writers = writers;
+        self
     }
 
     pub(crate) async fn context(&self, options: ContextOptions) -> EngineResult<ContextResult> {
@@ -106,6 +127,13 @@ impl DirectSearchService {
             },
         };
         let mut reply = self.lexical.search(&root, &request).await?;
+        let (pdf_items, pdf_truncated) = pdf::search(
+            std::mem::take(&mut reply.pdf_paths),
+            &request,
+            options.lock_timeout_ms,
+            &self.writers,
+        )
+        .await?;
         let structure_started = Instant::now();
         let enrichment = structure_file_limit.map(|file_limit| {
             enrich_lexical_matches_with_structure(
@@ -122,6 +150,7 @@ impl DirectSearchService {
             enrichment,
             use_entity_ranges,
         );
+        merge_pdf_items(&mut result, pdf_items, pdf_truncated, request.limit);
         if let Some(duration) = structure_duration {
             result.diagnostics.timings.push(TimingEntry {
                 name: "structure_enrichment".to_owned(),
@@ -130,6 +159,44 @@ impl DirectSearchService {
             });
         }
         Ok(result)
+    }
+}
+
+fn merge_pdf_items(
+    result: &mut ContextResult,
+    pdf_items: Vec<ContextItem>,
+    pdf_truncated: bool,
+    limit: Option<usize>,
+) {
+    if !pdf_items.is_empty() || pdf_truncated {
+        result.items.extend(pdf_items);
+        result.items.sort_by(|left, right| {
+            left.relative_path.cmp(&right.relative_path).then(
+                left.range
+                    .start_byte_offset()
+                    .cmp(&right.range.start_byte_offset()),
+            )
+        });
+        let truncated = pdf_truncated
+            || result.coverage == ContextCoverage::RgTruncated
+            || limit.is_some_and(|limit| result.items.len() > limit);
+        if let Some(limit) = limit {
+            result.items.truncate(limit);
+        }
+        for (i, item) in result.items.iter_mut().enumerate() {
+            item.rank = i + 1;
+        }
+        result.coverage = if truncated {
+            ContextCoverage::RgTruncated
+        } else {
+            ContextCoverage::RgExhaustive
+        };
+        if let Some(rg) = &mut result.diagnostics.rg {
+            rg.truncated = truncated;
+        }
+        if !result.items.is_empty() {
+            result.diagnostics.empty_reason = None;
+        }
     }
 }
 
@@ -280,6 +347,7 @@ fn context_item(enriched: EnrichedLexicalMatch, use_entity_ranges: bool) -> Cont
         match_ranges,
         content,
         outline: None,
+        content_windows: Vec::new(),
         content_role: Some(ContextContentRole::Source),
         status: ContextItemStatus::Fresh,
         score: None,

@@ -38,7 +38,7 @@ fn sessions_can_reload_and_process_exits_cleanly() {
     let output = std::process::Command::new(env::current_exe().expect("test binary"))
         .args([
             "--exact",
-            "models::backends::transformers::native_runtime::tests::sessions_can_reload_and_process_exits_cleanly",
+            "models::runtime::onnx::tests::sessions_can_reload_and_process_exits_cleanly",
             "--nocapture",
         ])
         .env(CHILD, "1")

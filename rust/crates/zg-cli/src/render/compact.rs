@@ -26,11 +26,16 @@ pub(super) fn write_items(
         if index > 0 {
             writeln!(writer)?;
         }
+        let suffix = if matches!(item.range, ContentRange::Pdf { .. }) {
+            String::new()
+        } else {
+            format!(":{}", range_label(&item.range))
+        };
         let header = format!(
-            "#{} {}:{}",
+            "#{} {}{}",
             item.rank,
             output_path(&item.relative_path).display(),
-            range_label(&item.range)
+            suffix
         );
         if theme.color {
             writeln!(writer, "\x1b[1;36m{header}\x1b[0m")?;
@@ -65,6 +70,19 @@ pub(super) fn write_item_preview(
     if item.status == ContextItemStatus::PossiblyStale {
         writeln!(writer, "{} possibly_stale", theme.metadata_label("status:"))?;
     }
+    if let ContentRange::Pdf { pages, .. } = &item.range {
+        writeln!(
+            writer,
+            "{} {}",
+            theme.metadata_label("pages:"),
+            pages
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        )?;
+        writeln!(writer, "{} text/native", theme.metadata_label("kind:"))?;
+    }
     match &item.metadata {
         Some(EntityMetadata::Code(code)) => {
             if let Some(name) = &code.symbol_name {
@@ -80,7 +98,9 @@ pub(super) fn write_item_preview(
                 writeln!(writer)?;
             }
         }
-        Some(EntityMetadata::Markdown(markdown)) => {
+        Some(EntityMetadata::Markdown(markdown))
+            if !matches!(item.range, ContentRange::Pdf { .. }) =>
+        {
             if let Some(heading) = &markdown.heading {
                 writeln!(writer, "{} {heading}", theme.metadata_label("heading:"))?;
             }
@@ -91,22 +111,43 @@ pub(super) fn write_item_preview(
                 writeln!(writer, "{} {scope}", theme.metadata_label("scope:"))?;
             }
         }
-        None => {}
+        Some(EntityMetadata::Markdown(_)) | None => {}
     }
     let short = options.preview == PreviewMode::Short;
     let max_lines = if short { 10 } else { usize::MAX };
     let first = item.content_range.start_line();
     let lines: Vec<_> = item.content.lines().collect();
-    let anchor = item
-        .excerpt_range
-        .as_ref()
-        .unwrap_or(&item.range)
-        .start_line()
-        .zip(first)
-        .map_or(0, |(matched, first)| matched.saturating_sub(first))
+    let anchor = crate::preview::pdf_excerpt_position(item)
+        .map_or_else(
+            || {
+                item.excerpt_range
+                    .as_ref()
+                    .unwrap_or(&item.range)
+                    .start_line()
+                    .zip(first)
+                    .map_or(0, |(matched, first)| matched.saturating_sub(first))
+            },
+            |(line, _)| line,
+        )
         .min(lines.len().saturating_sub(1));
-    let from = if short { anchor.saturating_sub(3) } else { 0 };
-    for (offset, line) in lines.iter().enumerate().skip(from).take(max_lines) {
+    let available = if short {
+        crate::preview::pdf_excerpt_lines(item).unwrap_or(0..lines.len())
+    } else {
+        0..lines.len()
+    };
+    let from = if short {
+        anchor.saturating_sub(3).max(available.start)
+    } else {
+        0
+    };
+    let end = available.end.min(lines.len());
+    for (offset, line) in lines
+        .iter()
+        .enumerate()
+        .take(end)
+        .skip(from)
+        .take(max_lines)
+    {
         let line = if short {
             short_source_line(item, offset, line)
         } else {
@@ -119,13 +160,23 @@ pub(super) fn write_item_preview(
             writeln!(writer, "  {line}")?;
         }
     }
-    if short && lines.len() > from + max_lines {
+    if short && end > from + max_lines {
         writeln!(writer, "  …")?;
     }
     Ok(())
 }
 
 fn range_label(range: &ContentRange) -> String {
+    if let ContentRange::Pdf { pages, .. } = range {
+        return format!(
+            "pages:{}",
+            pages
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+    }
     if let (Some(first), Some(last)) = (range.start_line(), range.last_line()) {
         return format!("{first}-{last}");
     }

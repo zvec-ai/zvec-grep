@@ -1056,12 +1056,15 @@ async fn execute_index(
             if output.debug {
                 eprintln!("Index diagnostics: {}", serde_json::to_string(&result)?);
             }
+            for warning in &result.warnings {
+                report_warning(warning);
+            }
             if result.files_failed > 0 {
                 if zg_cli::stdout_supports_ansi() && !output.debug {
                     return Ok(ExitCode::FAILURE);
                 }
                 return Err(io::Error::other(format!(
-                    "indexing completed with {} failed {}; workspace index is not ready",
+                    "indexing completed with {} failed {}; successful files remain searchable",
                     result.files_failed,
                     if result.files_failed == 1 {
                         "file"
@@ -1376,7 +1379,9 @@ fn init_tracing(debug: bool) {
         EnvFilter::new(if debug {
             "zg=debug,zg_engine=debug,zg_daemon=debug"
         } else {
-            "warn"
+            // Native font fallbacks can log entire PDF dictionaries repeatedly.
+            // Preserve errors; detailed dependency logs remain opt-in via RUST_LOG.
+            "warn,lopdf=error"
         })
     });
     if animated_progress(options) {

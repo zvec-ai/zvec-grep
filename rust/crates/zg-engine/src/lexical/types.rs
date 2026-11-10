@@ -54,6 +54,8 @@ pub(crate) struct LexicalSearchReply {
     pub root: PathBuf,
     pub coverage: LexicalCoverage,
     pub matches: Vec<LexicalMatch>,
+    /// Selected PDFs are searched against extracted entities by the direct-search pipeline.
+    pub pdf_paths: Vec<PathBuf>,
     pub diagnostics: LexicalDiagnostics,
 }
 

@@ -31,9 +31,10 @@ pub(crate) struct EngineService {
 impl EngineService {
     #[must_use]
     pub(crate) fn new() -> Self {
+        let indexing = WorkspaceIndexService::new();
         Self {
-            direct_search: DirectSearchService::new(),
-            indexing: WorkspaceIndexService::new(),
+            direct_search: DirectSearchService::new().with_writers(indexing.writers.clone()),
+            indexing,
             models: ModelRuntimeManager::new(),
             read_sessions: Arc::new(Mutex::new(None)),
             closed: Arc::new(AtomicBool::new(false)),

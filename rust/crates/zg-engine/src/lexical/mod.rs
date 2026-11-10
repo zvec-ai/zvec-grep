@@ -1,5 +1,6 @@
 //! File scanning and matching backed by ripgrep's embedded `grep` crates.
 
+pub(crate) mod extracted;
 pub(crate) mod files;
 mod matches;
 pub(crate) mod types;
@@ -200,10 +201,25 @@ fn search_sync(
         "running embedded grep"
     );
     let count_truncated = AtomicBool::new(false);
+    let pdf_paths = Mutex::new(Vec::new());
     let mut lexical_matches = if worker_threads == 1 {
-        search_paths_serial(root, request, &matcher, &walker, &count_truncated)?
+        search_paths_serial(
+            root,
+            request,
+            &matcher,
+            &walker,
+            &count_truncated,
+            &pdf_paths,
+        )?
     } else {
-        search_paths_parallel(root, request, &matcher, &walker, &count_truncated)?
+        search_paths_parallel(
+            root,
+            request,
+            &matcher,
+            &walker,
+            &count_truncated,
+            &pdf_paths,
+        )?
     };
 
     check_cancelled(request)?;
@@ -240,6 +256,9 @@ fn search_sync(
         } else {
             LexicalCoverage::Exhaustive
         },
+        pdf_paths: pdf_paths
+            .into_inner()
+            .map_err(|_| EngineError::internal("PDF path collector was poisoned"))?,
         matches: lexical_matches,
         diagnostics: diagnostics(request, checked_paths, truncated),
     })
@@ -251,6 +270,7 @@ fn search_paths_serial(
     matcher: &RegexMatcher,
     walker: &WalkBuilder,
     count_truncated: &AtomicBool,
+    pdf_paths: &Mutex<Vec<PathBuf>>,
 ) -> Result<Vec<LexicalMatch>, EngineError> {
     let mut lexical_matches = Vec::new();
     let mut searcher = build_searcher(request);
@@ -267,6 +287,9 @@ fn search_paths_serial(
         }
         let path = entry.into_path();
         if !matches_modified_time(&path, request) {
+            continue;
+        }
+        if collect_pdf(&path, request, pdf_paths)? {
             continue;
         }
         search_file(
@@ -288,6 +311,7 @@ fn search_paths_parallel(
     matcher: &RegexMatcher,
     walker: &WalkBuilder,
     count_truncated: &AtomicBool,
+    pdf_paths: &Mutex<Vec<PathBuf>>,
 ) -> Result<Vec<LexicalMatch>, EngineError> {
     let lexical_matches = Mutex::new(Vec::new());
     let first_error = Mutex::new(None);
@@ -329,6 +353,11 @@ fn search_paths_parallel(
                 return WalkState::Continue;
             }
 
+            match collect_pdf(&path, request, pdf_paths) {
+                Ok(true) => return WalkState::Continue,
+                Ok(false) => {}
+                Err(error) => return stop_parallel_search(first_error, stopped, error),
+            }
             let mut file_matches = Vec::new();
             if let Err(error) = search_file(
                 root,
@@ -590,6 +619,26 @@ impl<R: io::Read> io::Read for CancellableReader<'_, R> {
         }
         self.reader.read(buffer)
     }
+}
+
+fn collect_pdf(
+    path: &Path,
+    request: &LexicalSearchRequest,
+    paths: &Mutex<Vec<PathBuf>>,
+) -> Result<bool, EngineError> {
+    if !path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+    {
+        return Ok(false);
+    }
+    if request.options.max_file_size_bytes != Some(0) {
+        paths
+            .lock()
+            .map_err(|_| EngineError::internal("PDF path collector was poisoned"))?
+            .push(path.to_path_buf());
+    }
+    Ok(true)
 }
 
 fn search_file(
@@ -941,6 +990,7 @@ fn empty_reply(
         root: root.to_path_buf(),
         coverage: LexicalCoverage::Exhaustive,
         matches: Vec::new(),
+        pdf_paths: Vec::new(),
         diagnostics: diagnostics(request, checked_paths, false),
     }
 }

@@ -15,6 +15,36 @@ pub(super) fn for_index(reporter: IndexProgressReporter) -> ModelProgressReporte
     })
 }
 
+pub(super) fn for_layout(
+    reporter: IndexProgressReporter,
+) -> std::sync::Arc<dyn Fn(ModelProgress) + Send + Sync> {
+    std::sync::Arc::new(move |progress| {
+        let detail = match progress {
+            ModelProgress::Preparing { model_ref } => format!("preparing {model_ref}"),
+            ModelProgress::Downloading {
+                model_ref,
+                downloaded_bytes,
+                total_bytes,
+            } => match (downloaded_bytes, total_bytes) {
+                (Some(done), Some(total)) => {
+                    format!("downloading {model_ref}: {done}/{total} bytes")
+                }
+                _ => format!("downloading {model_ref}"),
+            },
+            ModelProgress::Warning { model_ref, message } => format!("{model_ref}: {message}"),
+            ModelProgress::Ready { model_ref } => format!("ready {model_ref}"),
+        };
+        reporter.report(IndexProgress {
+            phase: IndexProgressPhase::Indexing,
+            files_total: None,
+            files_indexed: None,
+            files_failed: None,
+            detail: Some(detail),
+            embedding: None,
+        });
+    })
+}
+
 fn index_progress(progress: ModelProgress, concurrency: usize) -> IndexProgress {
     let (stage, model, downloaded_bytes, total_bytes, message) = match progress {
         ModelProgress::Preparing { model_ref: model } => {

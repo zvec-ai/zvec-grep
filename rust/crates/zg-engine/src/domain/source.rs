@@ -4,6 +4,7 @@ mod directory;
 mod file;
 mod format;
 mod path;
+mod pdf;
 mod range;
 
 pub(crate) use directory::DirectoryId;
@@ -16,6 +17,7 @@ pub use format::FileCategory;
 pub use format::FileFormat;
 pub(crate) use format::formats_for_path;
 pub(crate) use path::SourcePath;
+pub(crate) use pdf::{PdfBlock, PdfSourceMap, PdfSourcePart};
 pub(crate) use range::ByteRange;
 pub(crate) use range::Range;
 pub(crate) use range::TextRange;

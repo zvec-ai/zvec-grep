@@ -303,8 +303,8 @@ export async function stageZvecRuntime(sourceDir, libDir, platform) {
   // Reject, rather than silently filter, an ambiguous directory: the binary
   // might still require those libraries. Validate before copying any payload.
   const cpuRuntimePattern = {
-    linux: /^lib(?:zvec_c_api|onnxruntime)\.so(?:\.\d+)*$/,
-    win32: /^(?:zvec_c_api|onnxruntime|DirectML)\.dll$/i,
+    linux: /^lib(?:zvec_c_api|onnxruntime|pdfium)\.so(?:\.\d+)*$/,
+    win32: /^(?:zvec_c_api|onnxruntime|DirectML|pdfium)\.dll$/i,
   }[platform];
   for (const name of (await readdir(sourceDir)).sort()) {
     if (
@@ -334,7 +334,7 @@ export async function stageZvecRuntime(sourceDir, libDir, platform) {
     if (error.code !== "ENOENT") throw error;
   }))?.isDirectory()) {
     for (const name of (await readdir(notices)).sort()) {
-      if (!/^(?:onnxruntime|directml)-(?:LICENSE(?:-CODE)?|ThirdPartyNotices\.txt)$/.test(name)) continue;
+      if (!/^(?:onnxruntime|directml|pdfium)-(?:LICENSE(?:-CODE)?|ThirdPartyNotices\.txt)$/.test(name)) continue;
       if (!(await stat(join(notices, name))).isFile()) continue;
       await mkdir(join(libDir, "licenses"), { recursive: true });
       await copyFile(join(notices, name), join(libDir, "licenses", name));

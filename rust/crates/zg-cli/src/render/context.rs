@@ -134,12 +134,17 @@ fn write_items(
             .container
             .as_ref()
             .map_or(&item.range, |container| &container.range);
+        let suffix = if matches!(range, ContentRange::Pdf { .. }) {
+            String::new()
+        } else {
+            format!(":{}", range_label(range))
+        };
         writeln!(
             writer,
-            "#{}{score} {}:{}",
+            "#{}{score} {}{}",
             item.rank,
             output_path(&item.relative_path).display(),
-            range_label(range)
+            suffix
         )?;
         write_item_preview(writer, item, options, &highlighter, theme)?;
         if options.trace
@@ -163,6 +168,19 @@ pub(super) fn write_item_preview(
     }
     let outline = outline_lines(item, options.preview);
     let source = source_lines(item, options.preview, highlighter);
+    if let ContentRange::Pdf { pages, .. } = &item.range {
+        writeln!(
+            writer,
+            "{} {}",
+            theme.metadata_label("pages:"),
+            pages
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        )?;
+        writeln!(writer, "{} text/native", theme.metadata_label("kind:"))?;
+    }
     match &item.metadata {
         Some(EntityMetadata::Code(code)) => {
             if let Some(name) = &code.symbol_name
@@ -184,7 +202,9 @@ pub(super) fn write_item_preview(
                 )?;
             }
         }
-        Some(EntityMetadata::Markdown(markdown)) => {
+        Some(EntityMetadata::Markdown(markdown))
+            if !matches!(item.range, ContentRange::Pdf { .. }) =>
+        {
             if let Some(heading) = &markdown.heading {
                 writeln!(writer, "{} {heading}", theme.metadata_label("heading:"))?;
             }
@@ -195,7 +215,7 @@ pub(super) fn write_item_preview(
                 writeln!(writer, "{} {scope}", theme.metadata_label("scope:"))?;
             }
         }
-        None => {}
+        Some(EntityMetadata::Markdown(_)) | None => {}
     }
     if !outline.is_empty() {
         writeln!(writer, "{}", theme.metadata_label("outline:"))?;
@@ -347,13 +367,27 @@ fn write_detail_items(
                 ContextItemStatus::Fresh => "fresh",
                 ContextItemStatus::PossiblyStale => "possibly_stale",
             };
-            writeln!(
-                writer,
-                "  {} {}  {} {status}",
-                theme.metadata_label("Range:"),
-                range_label(&item.range),
-                theme.metadata_label("Status:")
-            )?;
+            if let ContentRange::Pdf { pages, .. } = &item.range {
+                writeln!(
+                    writer,
+                    "  {} {}",
+                    theme.metadata_label("Pages:"),
+                    pages
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )?;
+                writeln!(writer, "  {} {status}", theme.metadata_label("Status:"))?;
+            } else {
+                writeln!(
+                    writer,
+                    "  {} {}  {} {status}",
+                    theme.metadata_label("Range:"),
+                    range_label(&item.range),
+                    theme.metadata_label("Status:")
+                )?;
+            }
             if let Some(range) = matched_range(item) {
                 writeln!(
                     writer,
@@ -390,6 +424,9 @@ fn write_detail_items(
 }
 
 fn metadata_lines(item: &ContextItem, theme: StatusTheme) -> Vec<String> {
+    if matches!(item.range, ContentRange::Pdf { .. }) {
+        return vec![format!("{} text/native", theme.metadata_label("Kind:"))];
+    }
     let mut lines = Vec::new();
     match &item.metadata {
         Some(EntityMetadata::Code(code)) => {
@@ -528,6 +565,14 @@ fn range_label(range: &ContentRange) -> String {
                 start_offset,
                 end_offset,
             } => format!("bytes:{start_offset}-{end_offset}"),
+            ContentRange::Pdf { pages, .. } => format!(
+                "pages:{}",
+                pages
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
             _ => "file".into(),
         },
     }

@@ -163,6 +163,10 @@ fn write_rg_context_result(
             )?;
             previous_path = Some(item.relative_path.as_path());
         }
+        if matches!(item.range, ContentRange::Pdf { .. }) {
+            write_pdf_rg_preview(&mut writer, item, color)?;
+            continue;
+        }
         let content = item.content.trim_end();
         let content = if color {
             highlight_ranges(content, lexical_content_ranges(item))
@@ -171,6 +175,10 @@ fn write_rg_context_result(
         };
         if let Some(first) = item.content_range.start_line() {
             writeln!(writer, "  {first}: {content}")?;
+        } else if matches!(item.range, ContentRange::Pdf { .. }) {
+            for line in content.lines() {
+                writeln!(writer, "    {line}")?;
+            }
         } else {
             writeln!(writer, "  {content}")?;
         }
@@ -178,26 +186,82 @@ fn write_rg_context_result(
     Ok(())
 }
 
+/// Writes one PDF lexical entity's fields and selected context windows.
+///
+/// # Errors
+/// Returns the underlying writer error.
+pub fn write_pdf_rg_preview(
+    writer: &mut impl Write,
+    item: &ContextItem,
+    color: bool,
+) -> io::Result<()> {
+    let ContentRange::Pdf { pages, .. } = &item.range else {
+        return Ok(());
+    };
+    writeln!(
+        writer,
+        "  pages: {}",
+        pages
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    )?;
+    writeln!(writer, "  kind: text/native")?;
+    if item.status == zg_engine::api::context::result::ContextItemStatus::PossiblyStale {
+        writeln!(writer, "  status: possibly_stale")?;
+    }
+    let origin = item.content_range.start_byte_offset().unwrap_or(0);
+    let windows = if item.content_windows.is_empty() {
+        std::slice::from_ref(&item.content_range)
+    } else {
+        &item.content_windows
+    };
+    for (index, window) in windows.iter().enumerate() {
+        let Some(start) = window
+            .start_byte_offset()
+            .and_then(|offset| offset.checked_sub(origin))
+        else {
+            continue;
+        };
+        let Some(end) = window
+            .end_byte_offset()
+            .and_then(|offset| offset.checked_sub(origin))
+        else {
+            continue;
+        };
+        let Some(content) = item.content.get(start..end) else {
+            continue;
+        };
+        if index > 0 {
+            writeln!(writer, "    …")?;
+        }
+        let content = content.trim_end();
+        let content = if color {
+            highlight_ranges(
+                content,
+                lexical_content_ranges(item).filter_map(|(a, b)| {
+                    let a = a.max(start);
+                    let b = b.min(end);
+                    (a < b).then_some((a.saturating_sub(start), b.saturating_sub(start)))
+                }),
+            )
+        } else {
+            content.into()
+        };
+        for line in content.lines() {
+            writeln!(writer, "    {line}")?;
+        }
+    }
+    Ok(())
+}
+
 fn lexical_content_ranges(item: &ContextItem) -> impl Iterator<Item = (usize, usize)> + '_ {
     item.match_ranges.iter().filter_map(|range| {
-        let ContentRange::Text {
-            start_byte_offset: content_start,
-            ..
-        } = item.content_range
-        else {
-            return None;
-        };
-        let ContentRange::Text {
-            start_byte_offset,
-            end_byte_offset,
-            ..
-        } = range
-        else {
-            return None;
-        };
+        let content_start = item.content_range.start_byte_offset()?;
         Some((
-            start_byte_offset.checked_sub(content_start)?,
-            end_byte_offset.checked_sub(content_start)?,
+            range.start_byte_offset()?.checked_sub(content_start)?,
+            range.end_byte_offset()?.checked_sub(content_start)?,
         ))
     })
 }
@@ -875,12 +939,14 @@ Documents and data:
   html      .html, .htm
   json      .json, .jsonc
   markdown  .md, .mdx
+  pdf       .pdf (native text + layout; no OCR)
   rst       .rst
   text      .txt
   toml      .toml
   xml       .xml
   yaml      .yaml, .yml
-  Markdown preserves heading structure; other formats use text chunks.
+  Markdown and PDF preserve heading structure; other formats use text chunks.
+  PDF results include physical page numbers. Scanned pages require a text layer.
 
 Images and other non-text content are not indexed in this version.
 
@@ -892,7 +958,7 @@ Skipped binary types:
   ---------  ----------------------------------------------------------
   Archives   .zip, .tar, .gz, .bz2, .xz, .7z, .rar
   Compiled   .exe, .dll, .dylib, .so, .a, .o, .obj, .wasm, .class, .jar
-  Documents  .pdf, .doc, .docx, .ppt, .pptx, .xls, .xlsx
+  Documents  .doc, .docx, .ppt, .pptx, .xls, .xlsx
   Media      .mp3, .mp4, .mov, .avi, .mkv
   Databases  .db, .sqlite
   Files detected as binary by content are also skipped.
@@ -1041,6 +1107,7 @@ mod output_tests {
                 .map(|n| format!("line{n}"))
                 .collect::<Vec<_>>()
                 .join("\n"),
+            content_windows: Vec::new(),
             content_role: Some(ContextContentRole::Source),
             status: ContextItemStatus::Fresh,
             score: Some(0.75),
@@ -1068,6 +1135,154 @@ mod output_tests {
             group_results: vec![],
             diagnostics: ContextDiagnostics::default(),
             items: vec![indexed_item()],
+        }
+    }
+
+    #[test]
+    fn pdf_preview_uses_physical_pages_and_keeps_full_entity_available() {
+        let mut result = indexed_result();
+        let item = &mut result.items[0];
+        item.relative_path = "manual.pdf".into();
+        item.absolute_path = std::env::temp_dir().join("manual.pdf");
+        item.range = ContentRange::Pdf {
+            pages: vec![2, 4],
+            start_byte_offset: 100,
+            end_byte_offset: 100 + item.content.len(),
+        };
+        item.content_range = item.range.clone();
+        item.excerpt_range = Some(ContentRange::Pdf {
+            pages: vec![4],
+            start_byte_offset: 100 + item.content.find("line15").expect("anchor"),
+            end_byte_offset: 100 + item.content.len(),
+        });
+        item.metadata = Some(EntityMetadata::Markdown(MarkdownMetadata {
+            heading: Some("Generated title".into()),
+            level: Some(1),
+            scope: None,
+        }));
+        for preview in [
+            PreviewMode::None,
+            PreviewMode::Short,
+            PreviewMode::Full,
+            PreviewMode::Detail,
+        ] {
+            let mut output = Vec::new();
+            write_context_with_options(
+                &mut output,
+                &result,
+                OutputOptions {
+                    preview,
+                    color: crate::ColorMode::Never,
+                    ..OutputOptions::default()
+                },
+                false,
+            )
+            .expect("render");
+            let output = String::from_utf8(output).expect("UTF-8");
+            assert!(output.contains("manual.pdf"));
+            assert!(!output.contains("manual.pdf:pages:"));
+            if preview == PreviewMode::Detail {
+                assert!(output.contains("Pages: 2,4\n"));
+                assert!(output.contains("Kind: text/native\n"));
+                assert!(output.contains("  Source:\n"));
+                assert!(!output.contains("Source: pdf_text"));
+                assert!(!output.contains("Content:"));
+                assert!(!output.contains("Range:"));
+            } else {
+                assert!(output.contains("pages: 2,4"));
+                assert!(output.contains("kind: text/native\n"));
+                assert!(!output.contains("source:"));
+            }
+            assert!(output.contains("line15"));
+            assert!(!output.contains("heading:"));
+            assert!(!output.contains("15: line15"));
+            if matches!(preview, PreviewMode::Full | PreviewMode::Detail) {
+                assert!(output.lines().any(|line| line.trim() == "line1"));
+                assert!(output.contains("line20"));
+            } else {
+                assert!(!output.lines().any(|line| line.trim() == "line1"));
+            }
+        }
+    }
+
+    #[test]
+    fn pdf_short_matches_markdown_fragment_preview() {
+        for newline in ["\n", "\r\n"] {
+            let prefix = format!("# Heading{newline}outside before{newline}{newline}");
+            let evidence_line = format!("{}needle{}", "前文😀 ".repeat(30), " text".repeat(45));
+            let body = format!(
+                "{evidence_line}{newline}{newline}caption{newline}{newline}last selected line{newline}"
+            );
+            let source = format!("{prefix}{body}outside after");
+            let start = source.find("needle").expect("evidence start");
+            let boundary = prefix.len() + body.len();
+            // A partial last line and an exclusive line boundary include the same text.
+            for end in [source.find("selected").expect("last line") + 3, boundary] {
+                let mut pdf = indexed_item();
+                pdf.content.clone_from(&source);
+                pdf.range = ContentRange::Pdf {
+                    pages: vec![2, 3],
+                    start_byte_offset: 100,
+                    end_byte_offset: 100 + source.len(),
+                };
+                pdf.content_range = pdf.range.clone();
+                pdf.excerpt_range = Some(ContentRange::Pdf {
+                    pages: vec![2, 3],
+                    start_byte_offset: 100 + start,
+                    end_byte_offset: 100 + end,
+                });
+                let mut markdown = indexed_item();
+                markdown.content.clone_from(&body);
+                markdown.content_range = ContentRange::Text {
+                    start_line: 4,
+                    end_line: 9,
+                    start_byte_offset: 100 + prefix.len(),
+                    end_byte_offset: 100 + boundary,
+                    start_byte_column: 0,
+                    end_byte_column: 0,
+                };
+                markdown.excerpt_range = Some(ContentRange::Text {
+                    start_line: 4,
+                    end_line: if end == boundary { 9 } else { 8 },
+                    start_byte_offset: 100 + start,
+                    end_byte_offset: 100 + end,
+                    start_byte_column: start - prefix.len(),
+                    end_byte_column: if end == boundary { 0 } else { 8 },
+                });
+                let render = |item: &ContextItem| {
+                    let mut output = Vec::new();
+                    write_item_preview(
+                        &mut output,
+                        item,
+                        OutputOptions {
+                            preview: PreviewMode::Short,
+                            ..OutputOptions::default()
+                        },
+                        &QueryHighlighter::default(),
+                        crate::theme::StatusTheme::new(crate::ColorMode::Never, false),
+                    )
+                    .expect("render short preview");
+                    String::from_utf8(output)
+                        .expect("UTF-8")
+                        .lines()
+                        .filter_map(|line| line.strip_prefix("  "))
+                        .map(|line| {
+                            if matches!(item.content_range, ContentRange::Text { .. }) {
+                                line.split_once(": ").map_or(line, |(_, text)| text)
+                            } else {
+                                line
+                            }
+                            .to_owned()
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let actual = render(&pdf);
+                assert_eq!(actual, render(&markdown), "{newline:?}, end={end}");
+                assert!(!actual.iter().any(|line| line.contains("outside")));
+                assert_eq!(actual.len(), 5);
+                assert!(actual[0].contains("needle"));
+                assert_eq!(actual[4], "last selected line");
+            }
         }
     }
 

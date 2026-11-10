@@ -221,7 +221,7 @@ pub(super) fn write_symbols(
                 TextRange::from_coordinates(offset, offset + text.len(), line, line, 0, text.len())
                     .expect("source coordinates"),
             );
-            let id = EntityId::new(file_id, &content, source_range).expect("entity identity");
+            let id = EntityId::new(file_id, &content, &source_range).expect("entity identity");
             let fragments = (0..2)
                 .map(|ordinal| EntityFragment {
                     id: FragmentId::new(&id, ordinal),
@@ -291,7 +291,7 @@ fn write_graph(path: &std::path::Path, local: &[Entity], remote: &Entity) {
     let missing = EntityId::new(
         source.file_id(),
         &Content::Text("missing".into()),
-        Range::Full,
+        &Range::Full,
     )
     .expect("missing endpoint");
     for (target, lines, kind) in [

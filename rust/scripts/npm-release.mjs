@@ -246,7 +246,7 @@ async function packPlatform(options) {
         // Preserve the upstream ORT notices in each redistributed provider or
         // fragment, independently of optional supplemental license/SBOM inputs.
         const notices = join(temporary, "lib", "licenses");
-        if (component.file.includes("onnxruntime") && (await stat(notices).catch((error) => {
+        if ((component.file.includes("onnxruntime") || component.file.includes("pdfium")) && (await stat(notices).catch((error) => {
           if (error.code === "ENOENT") return undefined;
           throw error;
         }))) await cp(notices, join(staged, "UPSTREAM_NOTICES"), { recursive: true });

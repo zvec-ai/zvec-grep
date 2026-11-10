@@ -74,8 +74,8 @@ pub(crate) fn enrich_lexical_matches_with_structure(
             enriched_items += 1;
             enriched_files.insert(item.absolute_path().to_path_buf());
             Some(LexicalContainer {
-                range: container.range,
-                entity_range: container.entity_range,
+                range: container.range.clone(),
+                entity_range: container.entity_range.clone(),
                 metadata: source.metadata.get(&container.entity_index).cloned(),
             })
         } else {
@@ -196,8 +196,8 @@ fn collect_structural_fragments(entities: Vec<ExtractedEntity>) -> StructuralSou
         // several retrieval ranges. It does not create a retrieval fragment.
         fragments.push(StructuralFragment {
             entity_index: entity.index,
-            entity_range: entity.source_range,
-            range: entity.source_range,
+            entity_range: entity.source_range.clone(),
+            range: entity.source_range.clone(),
         });
         let (crate::domain::Content::Text(content) | crate::domain::Content::Code(content)) =
             &entity.content
@@ -207,7 +207,7 @@ fn collect_structural_fragments(entities: Vec<ExtractedEntity>) -> StructuralSou
         let line_offsets = line_byte_offsets(content);
         for fragment in entity.fragments {
             let (Range::Text(source_range), Range::Byte(local_range)) =
-                (entity.source_range, fragment.range)
+                (entity.source_range.clone(), fragment.range)
             else {
                 continue;
             };
@@ -225,7 +225,7 @@ fn collect_structural_fragments(entities: Vec<ExtractedEntity>) -> StructuralSou
             };
             fragments.push(StructuralFragment {
                 entity_index: entity.index,
-                entity_range: entity.source_range,
+                entity_range: entity.source_range.clone(),
                 range: Range::Text(range),
             });
         }
@@ -419,11 +419,11 @@ mod tests {
                 result.items[0]
                     .container
                     .as_ref()
-                    .map(|container| (container.range, &container.metadata)),
+                    .map(|container| (container.range.clone(), &container.metadata)),
                 structured
                     .container
                     .as_ref()
-                    .map(|container| (container.range, &container.metadata)),
+                    .map(|container| (container.range.clone(), &container.metadata)),
             );
         }
     }

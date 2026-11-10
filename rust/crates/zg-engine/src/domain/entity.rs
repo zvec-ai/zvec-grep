@@ -29,7 +29,15 @@ impl Entity {
             ));
         }
         for fragment in &fragments {
-            validate_fragment_range(&content, fragment.range)?;
+            validate_fragment_range(&content, fragment.range.clone())?;
+        }
+        if let Range::Pdf(source) = &source_range {
+            let Content::Text(text) = &content else {
+                return Err(EngineError::invalid_argument(
+                    "PDF entities require text content",
+                ));
+            };
+            source.validate(text)?;
         }
         Ok(Self {
             id,
@@ -50,7 +58,7 @@ impl Entity {
     }
 
     pub(crate) fn source_range(&self) -> Range {
-        self.source_range
+        self.source_range.clone()
     }
 
     pub(crate) fn content(&self) -> &Content {
@@ -82,10 +90,10 @@ impl EntityId {
     pub(crate) fn new(
         file_id: FileId,
         content: &Content,
-        source_range: Range,
+        source_range: &Range,
     ) -> EngineResult<Self> {
         let fingerprint = content.fingerprint();
-        let range = serde_json::to_vec(&source_range).map_err(|error| {
+        let range = serde_json::to_vec(source_range).map_err(|error| {
             EngineError::internal(format!("serialize entity source range: {error}"))
         })?;
         let hash = crate::utils::sha256_hex_parts([fingerprint.as_slice(), range.as_slice()]);

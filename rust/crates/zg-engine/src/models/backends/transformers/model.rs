@@ -340,7 +340,7 @@ impl SessionPool {
         device: Option<Device>,
         reporter: &ModelDownloadProgressReporter,
     ) -> Result<Self, ModelError> {
-        super::native_runtime::initialize()?;
+        crate::models::runtime::onnx::initialize()?;
         let prepacked_weights = PrepackedWeights::new();
         let requested = resolve_execution_provider(device);
         if cfg!(target_os = "macos")
@@ -668,7 +668,7 @@ fn load_session(
     provider: TransformersExecutionProvider,
     prepacked_weights: &PrepackedWeights,
 ) -> Result<Session, ModelError> {
-    let builder = Session::builder(&super::native_runtime::initialize()?)
+    let builder = Session::builder(&crate::models::runtime::onnx::initialize()?)
         .map_err(|error| {
             ModelError::internal("Unable to configure ONNX embedding model").with_cause(error)
         })?

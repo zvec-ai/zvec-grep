@@ -75,6 +75,9 @@ if [[ ! -f "${profile_dir}/libzvec_c_api.so" ]]; then
   exit 1
 fi
 cp -L --preserve=mode,timestamps -- "${profile_dir}/libzvec_c_api.so" "${staging_dir}/lib/"
+cp -L --preserve=mode,timestamps -- "${profile_dir}/libpdfium.so" "${staging_dir}/lib/"
+install -d "${staging_dir}/lib/licenses"
+cp -- "${profile_dir}/licenses/pdfium-ThirdPartyNotices.txt" "${staging_dir}/lib/licenses/"
 
 patchelf --set-rpath '$ORIGIN/../lib' "${staging_dir}/bin/zg"
 while IFS= read -r -d '' file; do

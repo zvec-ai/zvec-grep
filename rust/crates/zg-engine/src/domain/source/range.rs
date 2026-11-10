@@ -1,17 +1,22 @@
 use crate::{EngineError, EngineResult};
 
 /// Locates an entity in its source or a fragment within its entity's content.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Range {
     Full,
     Byte(ByteRange),
     Text(TextRange),
+    Pdf(std::sync::Arc<super::PdfSourceMap>),
 }
 
 impl Range {
     pub(crate) fn contains(&self, other: &Self) -> EngineResult<bool> {
         match (self, other) {
+            (Self::Pdf(outer), Self::Pdf(inner)) => Ok(outer.markdown_start
+                <= inner.markdown_start
+                && outer.markdown_start.saturating_add(outer.text_len)
+                    >= inner.markdown_start.saturating_add(inner.text_len)),
             (Self::Full, Self::Full) => Ok(true),
             (Self::Byte(outer), Self::Byte(inner)) => Ok(
                 outer.start_offset <= inner.start_offset && outer.end_offset >= inner.end_offset

@@ -39,6 +39,12 @@ llama-cpp-2.workspace = true
 # Use the same pinned official runtime in Cargo tests and every native package.
 # API selection does not select the download version; build.rs owns that pin.
 ort.workspace = true
+pdf-inspector = { version = "=1.25.2", default-features = false }
+pdfium-render = { version = "=0.9.5", default-features = false, features = ["pdfium_7881", "thread_safe"] }
+regex = "1.12"
+unicode-normalization = "0.1.24"
+unicode_categories = "0.1.1"
+unicode-width.workspace = true
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 rayon = "1.11.0"
@@ -81,10 +87,18 @@ dunce = "1.0.5"
 ort = { workspace = true, features = ["directml"] }
 
 [dev-dependencies]
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 # Count SQLite VM instructions in graph query performance regression tests.
 rusqlite = { version = "0.37", features = ["hooks"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing-subscriber.workspace = true
+
+[build-dependencies]
+flate2 = "1.1"
+tar = "0.4"
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

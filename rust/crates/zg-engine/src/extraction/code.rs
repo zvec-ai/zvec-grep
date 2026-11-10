@@ -623,7 +623,9 @@ mod tests {
                     usize::try_from(local.start_offset()).expect("fragment start"),
                     usize::try_from(local.end_offset()).expect("fragment end"),
                 ),
-                Range::Text(_) => panic!("fragments store byte offsets without text coordinates"),
+                Range::Text(_) | Range::Pdf(_) => {
+                    panic!("fragments store byte offsets without text coordinates")
+                }
             };
             assert!(start < end && end <= content.len());
             let selected = source

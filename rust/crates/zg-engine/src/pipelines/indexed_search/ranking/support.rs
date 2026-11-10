@@ -84,6 +84,10 @@ fn interval(range: Range) -> Option<(u64, u64)> {
             u64::try_from(range.end_byte_offset()).ok()?,
         )),
         Range::Full => None,
+        Range::Pdf(source) => Some((
+            u64::try_from(source.markdown_start).ok()?,
+            u64::try_from(source.markdown_start.checked_add(source.text_len)?).ok()?,
+        )),
     }
     .filter(|(start, end)| start < end)
 }

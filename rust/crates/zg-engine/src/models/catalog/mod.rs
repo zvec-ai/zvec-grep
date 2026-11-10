@@ -1,6 +1,7 @@
 //! Supported embedding model definitions and reference resolution.
 
 mod entries;
+pub(crate) mod layout;
 mod resolution;
 mod types;
 

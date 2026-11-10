@@ -41,6 +41,121 @@ fn metadata_store(path: &Path) -> IndexStore {
     .expect("metadata storage")
 }
 
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Real storage close/reopen and search verify provenance across persistence"
+)]
+fn pdf_markdown_search_round_trip_keeps_pages_and_blocks() {
+    use crate::domain::{PdfBlock, PdfSourceMap, PdfSourcePart};
+    use crate::extraction::{
+        ChunkOptions, TextSource, extract_without_graph, pdf::PdfMarkdownSource,
+    };
+    let temporary = tempfile::tempdir().expect("storage");
+    let store = metadata_store(temporary.path());
+    let text = "# Recovery\n\nThe process waits\ncontinuation across physical pages.\n";
+    let split = text.find("continuation").expect("split");
+    let extracted = extract_without_graph(
+        &PdfMarkdownSource {
+            text: TextSource {
+                relative_path: SourcePath::new("manual.pdf").expect("path"),
+                formats: vec![crate::domain::FileFormat::Pdf],
+                text: text.into(),
+            },
+            source_map: PdfSourceMap {
+                markdown_start: 0,
+                text_len: text.len(),
+                parts: vec![
+                    PdfSourcePart {
+                        range: 0..split,
+                        block: PdfBlock {
+                            page: 2,
+                            id: 1,
+                            bounds: None,
+                        },
+                    },
+                    PdfSourcePart {
+                        range: split..text.len(),
+                        block: PdfBlock {
+                            page: 4,
+                            id: 2,
+                            bounds: None,
+                        },
+                    },
+                ],
+            },
+        },
+        ChunkOptions::default(),
+    )
+    .expect("extract");
+    let source = file(0, "manual.pdf");
+    let mut entities = Vec::new();
+    let mut entries = Vec::new();
+    for draft in extracted.fragments {
+        let id = EntityId::new(source.id(), &draft.content, &draft.source_range).expect("ID");
+        let fragments = draft
+            .fragments
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, fragment)| EntityFragment {
+                id: FragmentId::new(&id, u32::try_from(ordinal).expect("ordinal")),
+                range: fragment.range,
+            })
+            .collect::<Vec<_>>();
+        for fragment in &fragments {
+            let Content::Text(text) = &draft.content else {
+                panic!("PDF text");
+            };
+            let fts_text = match &fragment.range {
+                Range::Full => text.clone(),
+                Range::Byte(range) => text[usize::try_from(range.start_offset()).expect("start")
+                    ..usize::try_from(range.end_offset()).expect("end")]
+                    .into(),
+                _ => panic!("text fragment"),
+            };
+            entries.push(IndexedFragment {
+                entity_id: id.clone(),
+                fragment_id: fragment.id.clone(),
+                model: "fixture/fixture".into(),
+                vector: vec![1.0, 0.0, 0.0],
+                fts_text,
+            });
+        }
+        entities.push(
+            Entity::new(
+                id,
+                source.id(),
+                draft.source_range,
+                draft.content,
+                draft.metadata,
+                fragments,
+            )
+            .expect("entity"),
+        );
+    }
+    store
+        .apply_fixture_records(&source, &entities, &entries)
+        .expect("persist PDF");
+    store.write(|state| super::flush(state)).expect("flush");
+    drop(store);
+    let store = metadata_store(temporary.path());
+    let hits = store.search_fts("continuation", 10, None).expect("FTS");
+    assert!(!hits.is_empty());
+    let loaded = store.load_search_hits(&hits).expect("load");
+    let stored = &loaded.entities[entities[0].id()];
+    assert_eq!(
+        stored.file.relative_path().as_ref(),
+        Path::new("manual.pdf")
+    );
+    assert_eq!(stored.entity, entities[0]);
+    let Range::Pdf(map) = stored.entity.source_range() else {
+        panic!("PDF map");
+    };
+    assert_eq!(map.pages(0..map.text_len), [2, 4]);
+    assert_eq!(map.parts[1].block.id, 2);
+    assert_eq!(map.pages(split..map.text_len), [4]);
+}
+
 impl IndexStore {
     fn apply_fixture_records(
         &self,
@@ -113,7 +228,7 @@ fn metadata_fragments(
     let content = Content::Text(text);
     let source_range =
         Range::Text(TextRange::from_coordinates(0, 100, 1, 1, 0, 100).expect("owner range"));
-    let id = EntityId::new(source.id(), &content, source_range).expect("entity id");
+    let id = EntityId::new(source.id(), &content, &source_range).expect("entity id");
     let owner = Entity::new(
         id.clone(),
         source.id(),
@@ -511,7 +626,7 @@ fn fragment_ids_cannot_be_reused_by_another_file_in_a_different_model_table() {
     )
     .expect("file record");
     let owner = &entities[0];
-    let foreign_id = EntityId::new(foreign_source.id(), owner.content(), owner.source_range())
+    let foreign_id = EntityId::new(foreign_source.id(), owner.content(), &owner.source_range())
         .expect("entity id");
     let foreign_entities = vec![
         Entity::new(

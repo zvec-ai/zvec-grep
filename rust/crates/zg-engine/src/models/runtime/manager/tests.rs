@@ -11,6 +11,51 @@ use crate::domain::model::EmbeddingMetric;
 use super::*;
 use crate::domain::model::EmbeddingPurpose;
 
+#[test]
+fn layout_leases_share_sessions_without_evicting_the_embedding_slot() {
+    let cache = tempfile::tempdir().expect("isolated cache");
+    let manager =
+        ModelRuntimeManager::with_factory(|_, _, _| Ok(Arc::new(ConcurrentFixtureModel::new())));
+    let embedding = manager
+        .acquire(ModelRuntimeRequest::new(
+            "local/fixture",
+            ModelConfig::default(),
+            None,
+        ))
+        .expect("embedding");
+    let config = LayoutModelConfig {
+        cache_dir: Some(cache.path().to_owned()),
+    };
+    let first = manager.acquire_layout(config.clone()).expect("layout");
+    let second = manager.acquire_layout(config.clone()).expect("same layout");
+    assert!(Arc::ptr_eq(&first.inner.entry, &second.inner.entry));
+    assert!(!Arc::ptr_eq(&embedding.entry, &first.inner.entry));
+    let weak = Arc::downgrade(&first.inner.entry);
+    drop(first);
+    drop(second);
+    drop(embedding);
+    assert!(
+        weak.upgrade().is_some(),
+        "one idle model per task is retained"
+    );
+    assert_eq!(manager.snapshot().cached_runtimes, 2);
+    let lease = manager.acquire_layout(config).expect("reuse");
+    assert!(Arc::ptr_eq(
+        &weak.upgrade().expect("cached"),
+        &lease.inner.entry
+    ));
+    manager.close();
+    drop(lease);
+    assert!(weak.upgrade().is_none());
+    assert!(
+        std::fs::read_dir(cache.path())
+            .expect("cache")
+            .next()
+            .is_none(),
+        "acquisition does not download or load models"
+    );
+}
+
 struct ConcurrentFixtureModel {
     info: EmbeddingModelInfo,
     barrier: Barrier,
@@ -213,7 +258,7 @@ fn idle_since(manager: &ModelRuntimeManager, reference: &str) -> Instant {
 fn idle_ttl_starts_at_final_release_and_reacquisition_resets_it() {
     let (manager, creations) = fixture_cache(CachePolicy::default());
     let first = acquire_fixture(&manager, "first");
-    let model = Arc::downgrade(&first.entry.runtime.model);
+    let model = Arc::downgrade(first.entry.runtime.model.embedding());
     let second = acquire_fixture(&manager, "first");
     let ttl = manager.inner.policy.idle_timeout;
     reap_at(&manager, Instant::now() + ttl);
@@ -256,9 +301,9 @@ fn idle_ttl_starts_at_final_release_and_reacquisition_resets_it() {
 fn capacity_is_soft_for_active_models_and_trims_on_acquisition_and_release() {
     let (manager, creations) = fixture_cache(CachePolicy::default());
     let first = acquire_fixture(&manager, "first");
-    let first_model = Arc::downgrade(&first.entry.runtime.model);
+    let first_model = Arc::downgrade(first.entry.runtime.model.embedding());
     let second = acquire_fixture(&manager, "second");
-    let second_model = Arc::downgrade(&second.entry.runtime.model);
+    let second_model = Arc::downgrade(second.entry.runtime.model.embedding());
     assert_eq!(manager.snapshot().cached_runtimes, 2);
     assert_eq!(manager.snapshot().active_leases, 2);
     drop(first);
@@ -286,10 +331,10 @@ fn capacity_retires_the_least_recently_used_idle_model() {
         ..CachePolicy::default()
     });
     let first = acquire_fixture(&manager, "first");
-    let first_model = Arc::downgrade(&first.entry.runtime.model);
+    let first_model = Arc::downgrade(first.entry.runtime.model.embedding());
     drop(first);
     let second = acquire_fixture(&manager, "second");
-    let second_model = Arc::downgrade(&second.entry.runtime.model);
+    let second_model = Arc::downgrade(second.entry.runtime.model.embedding());
     drop(second);
     let hit = acquire_fixture(&manager, "first");
     drop(hit);
@@ -317,7 +362,7 @@ fn shared_lease_owners_remain_protected_until_the_last_owner_releases() {
         // Writer sessions share their owning Arc with borrowed queries.
         let writer = Arc::new(acquire_fixture(&manager, "shared"));
         let borrower = Arc::clone(&writer);
-        let model = Arc::downgrade(&writer.entry.runtime.model);
+        let model = Arc::downgrade(writer.entry.runtime.model.embedding());
         drop(writer);
         reap_at(&manager, Instant::now() + Duration::from_secs(3600));
         assert!(model.upgrade().is_some());
@@ -374,7 +419,7 @@ fn maintenance_expires_idle_models_without_another_request_or_tokio_runtime() {
         },
     );
     let lease = acquire_fixture(&manager, "first");
-    let model = Arc::downgrade(&lease.entry.runtime.model);
+    let model = Arc::downgrade(lease.entry.runtime.model.embedding());
     assert!(
         observed.recv_timeout(Duration::from_millis(50)).is_err(),
         "active model survives its TTL"
@@ -773,7 +818,7 @@ fn local_variants_reuse_equivalent_limits_and_release_idle_resources() {
         .expect("equivalent override");
     assert!(Arc::ptr_eq(&first.entry, &same.entry));
     assert_eq!(first.operation.limit, 8);
-    let previous = Arc::downgrade(&first.entry.runtime.model);
+    let previous = Arc::downgrade(first.entry.runtime.model.embedding());
     let query = manager.acquire(request(None)).expect("query default");
     assert!(!Arc::ptr_eq(&first.entry, &query.entry));
     assert_eq!(query.operation.limit, 1);
