@@ -120,7 +120,7 @@ async fn resolve_proxy_failures(client: &ArtifactHttpClient) -> ModelError {
         client,
         ResolveArtifacts {
             model: "local/test-model",
-            sources: [
+            sources: vec![
                 ArtifactSource::hugging_face(HF, root.path().join("huggingface"))
                     .with_base_url("https://artifact.test"),
                 ArtifactSource::model_scope(MS, root.path().join("modelscope"))

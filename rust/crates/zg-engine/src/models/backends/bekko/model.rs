@@ -12,8 +12,8 @@ use crate::{
     },
     models::{
         artifacts::{
-            ArtifactSource, LocalModelBackend, ModelDownloadProgressReporter, ResolveArtifacts,
-            default_model_cache, resolve_model_artifacts,
+            ArtifactHttpClient, ArtifactSource, LocalModelBackend, ModelDownloadProgressReporter,
+            ResolveArtifacts, default_model_cache, resolve_model_artifacts,
         },
         catalog::BekkoConfig,
         runtime::ModelComputeRuntime,
@@ -34,7 +34,7 @@ pub(crate) struct BekkoEmbeddingModel {
     info: EmbeddingModelInfo,
     cache: PathBuf,
     compute: ModelComputeRuntime,
-    client: reqwest::Client,
+    client: ArtifactHttpClient,
     state: Mutex<Option<Arc<Loaded>>>,
 }
 
@@ -73,7 +73,7 @@ impl BekkoEmbeddingModel {
                 .or_else(|| env::var_os("ZVEC_GREP_MODEL_CACHE").map(PathBuf::from))
                 .unwrap_or_else(|| default_model_cache(LocalModelBackend::Bekko)),
             compute,
-            client: reqwest::Client::new(),
+            client: ArtifactHttpClient::new(),
             state: Mutex::new(None),
         }
     }
