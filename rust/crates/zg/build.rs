@@ -42,16 +42,16 @@ fn main() {
             .compile("zg_windows_runtime");
         println!("cargo:rerun-if-changed=windows_runtime.c");
         println!("cargo:rustc-link-lib=delayimp");
-        println!("cargo:rustc-link-arg=/INCLUDE:__pfnDliNotifyHook2");
-        println!("cargo:rustc-link-arg=/INCLUDE:zg_runtime_initializer");
-        println!("cargo:rustc-link-arg=/DELAYLOAD:zvec_c_api.dll");
+        println!("cargo:rustc-link-arg-bin=zg=/INCLUDE:__pfnDliNotifyHook2");
+        println!("cargo:rustc-link-arg-bin=zg=/INCLUDE:zg_runtime_initializer");
+        println!("cargo:rustc-link-arg-bin=zg=/DELAYLOAD:zvec_c_api.dll");
         let libraries: &[&str] = if std::env::var_os("CARGO_FEATURE_CUDA").is_some() {
             &["llama.dll", "ggml.dll", "ggml-base.dll"]
         } else {
             &[]
         };
         for library in libraries {
-            println!("cargo:rustc-link-arg=/DELAYLOAD:{library}");
+            println!("cargo:rustc-link-arg-bin=zg=/DELAYLOAD:{library}");
         }
     }
 }

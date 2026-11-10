@@ -23,8 +23,9 @@ use crate::{
 
 mod upgrade;
 pub use upgrade::{
-    IntegrationUpgradeEntryKind, IntegrationUpgradeSummary, execute_upgrade_installed,
-    write_integration_upgrade_entry, write_integration_upgrade_summary,
+    IntegrationLaunch, IntegrationUpgradeEntry, IntegrationUpgradeEntryKind,
+    IntegrationUpgradeReport, IntegrationUpgradeSummary, execute_upgrade_installed,
+    upgrade_installed, write_integration_upgrade_entry, write_integration_upgrade_summary,
 };
 
 const CONFIG_START: &str = "# ZVEC_GREP_START";
@@ -133,11 +134,30 @@ impl Agent {
 
 #[derive(Clone, Debug)]
 struct AgentOptions {
+    launcher: Option<PathBuf>,
     force: bool,
     transport: McpInstallTransport,
     toolset: Option<McpToolset>,
     timeout_seconds: u64,
     token_env: Option<String>,
+}
+
+impl AgentOptions {
+    fn command(&self) -> std::borrow::Cow<'_, str> {
+        self.launcher.as_ref().map_or_else(
+            || std::borrow::Cow::Borrowed("zg"),
+            |path| path.to_string_lossy(),
+        )
+    }
+
+    fn command_array(&self) -> Vec<String> {
+        let mut command: Vec<_> = stdio_command(self.toolset)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        command[0] = self.command().into_owned();
+        command
+    }
 }
 
 /// Installs the selected agent integrations and returns daemon startup choices.
@@ -164,6 +184,7 @@ pub fn execute_install(args: &InstallArgs) -> Result<InstallOutcome, InstallErro
     }
     let transport = resolve_transport(args.transport, args.yes)?;
     let options = AgentOptions {
+        launcher: args.launcher.clone(),
         force: args.force,
         transport,
         toolset: args.mcp_toolset,
@@ -841,7 +862,7 @@ fn pi_server(
                 server.shift_remove(key);
             }
             server.insert("type".to_owned(), json!("stdio"));
-            server.insert("command".to_owned(), json!("zg"));
+            server.insert("command".to_owned(), json!(options.command()));
             server.insert("args".to_owned(), json!(stdio_args(options.toolset)));
         }
         McpInstallTransport::Http => {
@@ -1117,7 +1138,7 @@ fn install_claude(options: &AgentOptions) -> Result<(), InstallError> {
     match options.transport {
         McpInstallTransport::Stdio => {
             server.insert("type".to_owned(), json!("stdio"));
-            server.insert("command".to_owned(), json!("zg"));
+            server.insert("command".to_owned(), json!(options.command()));
             server.insert("args".to_owned(), json!(stdio_args(options.toolset)));
         }
         McpInstallTransport::Http => {
@@ -1198,7 +1219,7 @@ fn install_opencode(options: &AgentOptions) -> Result<AgentInstallResult, Instal
     let path = config.path;
     let server = match options.transport {
         McpInstallTransport::Stdio => json!({
-            "type": "local", "command": stdio_command(options.toolset), "enabled": true,
+            "type": "local", "command": options.command_array(), "enabled": true,
             "timeout": options.timeout_seconds.saturating_mul(1000)
         }),
         McpInstallTransport::Http => {
@@ -1267,7 +1288,9 @@ fn install_cursor(options: &AgentOptions) -> Result<(), InstallError> {
         .unwrap_or_else(|| home_dir().join(".cursor"))
         .join("mcp.json");
     let server = match options.transport {
-        McpInstallTransport::Stdio => json!({"command": "zg", "args": stdio_args(options.toolset)}),
+        McpInstallTransport::Stdio => {
+            json!({"command": options.command(), "args": stdio_args(options.toolset)})
+        }
         McpInstallTransport::Http => {
             let mut server = json!({"url": resolve_server_url()?});
             if let Some(token) = &options.token_env {
@@ -1385,7 +1408,7 @@ fn copilot_server(options: &AgentOptions) -> Result<Value, InstallError> {
     let timeout = options.timeout_seconds.saturating_mul(1000);
     let mut server = match options.transport {
         McpInstallTransport::Stdio => json!({
-            "type": "local", "command": "zg", "args": stdio_args(options.toolset),
+            "type": "local", "command": options.command(), "args": stdio_args(options.toolset),
             "tools": ["*"], "timeout": timeout
         }),
         McpInstallTransport::Http => json!({
@@ -1473,7 +1496,7 @@ fn vscode_config_paths() -> Vec<PathBuf> {
 fn vscode_server(options: &AgentOptions) -> Result<Value, InstallError> {
     Ok(match options.transport {
         McpInstallTransport::Stdio => json!({
-            "type": "stdio", "command": "zg", "args": stdio_args(options.toolset)
+            "type": "stdio", "command": options.command(), "args": stdio_args(options.toolset)
         }),
         McpInstallTransport::Http => {
             let mut server = json!({"type": "http", "url": resolve_server_url()?});
@@ -1635,7 +1658,7 @@ fn qwen_server(options: &AgentOptions) -> Result<Value, InstallError> {
     let timeout = options.timeout_seconds.saturating_mul(1000);
     Ok(match options.transport {
         McpInstallTransport::Stdio => json!({
-            "command": "zg", "args": stdio_args(options.toolset), "timeout": timeout,
+            "command": options.command(), "args": stdio_args(options.toolset), "timeout": timeout,
             "alwaysLoadTools": true, "trust": true
         }),
         McpInstallTransport::Http => {
@@ -1655,7 +1678,7 @@ fn qoder_ide_server(options: &AgentOptions) -> Result<Value, InstallError> {
     let timeout = options.timeout_seconds.saturating_mul(1000);
     Ok(match options.transport {
         McpInstallTransport::Stdio => json!({
-            "command": env::current_exe()?.to_string_lossy(),
+            "command": options.launcher.clone().map_or_else(env::current_exe, Ok)?.to_string_lossy(),
             "args": stdio_args(options.toolset),
             "timeout": timeout,
             "description": QODER_DESCRIPTION
@@ -1696,7 +1719,8 @@ fn stdio_command(toolset: Option<McpToolset>) -> Vec<&'static str> {
 fn codex_block(options: &AgentOptions) -> Result<String, InstallError> {
     let connection = match options.transport {
         McpInstallTransport::Stdio => format!(
-            "command = \"zg\"\nargs = {}",
+            "command = {}\nargs = {}",
+            toml::Value::String(options.command().into_owned()),
             toml_string_array(&stdio_args(options.toolset))
         ),
         McpInstallTransport::Http => format!("url = \"{}\"", resolve_server_url()?),
@@ -1734,7 +1758,8 @@ fn grok_config_block(
 ) -> Result<String, InstallError> {
     let connection = match options.transport {
         McpInstallTransport::Stdio => format!(
-            "command = \"zg\"\nargs = {}\n# First-run daemon and local-model warmup can exceed Grok's 30s startup default.\nstartup_timeout_sec = 120",
+            "command = {}\nargs = {}\n# First-run daemon and local-model warmup can exceed Grok's 30s startup default.\nstartup_timeout_sec = 120",
+            toml::Value::String(options.command().into_owned()),
             toml_string_array(&stdio_args(options.toolset))
         ),
         McpInstallTransport::Http => {
@@ -1960,6 +1985,14 @@ fn update_claude_permission(path: &Path, grant: bool) -> Result<(), InstallError
     write_json_object(path, &root)
 }
 
+fn is_managed_command(command: &str) -> bool {
+    command == "zg"
+        || (Path::new(command).is_absolute()
+            && Path::new(command)
+                .file_name()
+                .is_some_and(|name| name == "zg" || name == "zg.exe"))
+}
+
 fn is_managed_json_server(value: &Value) -> bool {
     let Some(server) = value.as_object() else {
         return false;
@@ -1971,7 +2004,10 @@ fn is_managed_json_server(value: &Value) -> bool {
     {
         return true;
     }
-    if server.get("command").and_then(Value::as_str) == Some("zg")
+    if server
+        .get("command")
+        .and_then(Value::as_str)
+        .is_some_and(is_managed_command)
         && server.get("args").is_some_and(is_stdio_args)
     {
         return true;
@@ -1982,7 +2018,10 @@ fn is_managed_json_server(value: &Value) -> bool {
             .and_then(Value::as_array)
             .is_some_and(|command| {
                 (command.len() == 3 || command.len() == 5)
-                    && command.first().and_then(Value::as_str) == Some("zg")
+                    && command
+                        .first()
+                        .and_then(Value::as_str)
+                        .is_some_and(is_managed_command)
                     && is_stdio_args(&Value::Array(command[1..].to_vec()))
             })
 }
@@ -1995,7 +2034,10 @@ fn is_managed_qwen(value: &Value) -> bool {
         .get("httpUrl")
         .and_then(Value::as_str)
         .is_some_and(|url| resolve_server_url().is_ok_and(|managed| url == managed))
-        || (server.get("command").and_then(Value::as_str) == Some("zg")
+        || (server
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(is_managed_command)
             && server.get("args").is_some_and(is_stdio_args))
 }
 
@@ -2860,7 +2902,7 @@ fn update_qoder_cli(path: &Path, options: &AgentOptions) -> Result<(), InstallEr
     let description = qoder_description(&owned);
     let mut server = match options.transport {
         McpInstallTransport::Stdio => {
-            json!({"command":"zg", "args":stdio_args(options.toolset), "timeout":timeout, "trust":true, "description":description, "alwaysAllow":always})
+            json!({"command":options.command(), "args":stdio_args(options.toolset), "timeout":timeout, "trust":true, "description":description, "alwaysAllow":always})
         }
         McpInstallTransport::Http => {
             json!({"type":"http", "url":resolve_server_url()?, "timeout":timeout, "trust":true, "description":description, "alwaysAllow":always})
@@ -2992,6 +3034,33 @@ fn qoder_description(owned: &BTreeSet<String>) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn fixed_launchers_are_escaped_in_generated_toml() {
+        let temporary = tempfile::tempdir().expect("fixture");
+        let launcher = temporary
+            .path()
+            .join("安装 with spaces")
+            .join(if cfg!(windows) { "zg.exe" } else { "zg" });
+        let options = AgentOptions {
+            launcher: Some(launcher.clone()),
+            force: false,
+            transport: McpInstallTransport::Stdio,
+            toolset: None,
+            timeout_seconds: 600,
+            token_env: None,
+        };
+        for source in [
+            codex_block(&options).expect("configuration"),
+            grok_config_block(&options, || unreachable!()).expect("configuration"),
+        ] {
+            let parsed: toml::Value = toml::from_str(&source).expect("valid TOML");
+            assert_eq!(
+                parsed["mcp_servers"]["zvec_grep"]["command"].as_str(),
+                launcher.to_str()
+            );
+        }
+    }
+
+    #[test]
     fn grok_aliases_and_numeric_target_resolve() {
         let agents =
             agents_from_tokens(&["grok-build".to_owned()], &BTreeSet::new()).expect("targets");
@@ -3006,6 +3075,7 @@ mod tests {
         let resolve = || Ok("http://127.0.0.1:7999/mcp".to_owned());
         let stdio = grok_config_block(
             &AgentOptions {
+                launcher: None,
                 force: false,
                 transport: McpInstallTransport::Stdio,
                 toolset: None,
@@ -3021,6 +3091,7 @@ mod tests {
         assert!(!stdio.contains("tool_timeout_sec"));
         let http = grok_config_block(
             &AgentOptions {
+                launcher: None,
                 force: false,
                 transport: McpInstallTransport::Http,
                 toolset: None,
@@ -3041,6 +3112,7 @@ mod tests {
     fn grok_config_block_propagates_url_resolution_errors() {
         let result = grok_config_block(
             &AgentOptions {
+                launcher: None,
                 force: false,
                 transport: McpInstallTransport::Http,
                 toolset: None,
@@ -3061,6 +3133,7 @@ mod tests {
         std::fs::write(&config, "user_key = 1\n").expect("write config");
         std::fs::write(&guidance, "user note\n").expect("write guidance");
         let options = AgentOptions {
+            launcher: None,
             force: false,
             transport: McpInstallTransport::Http,
             toolset: None,
@@ -3131,6 +3204,7 @@ mod tests {
             std::fs::create_dir_all(guidance.parent().expect("parent")).expect("rules dir");
             std::fs::write(&config, existing).expect("write config");
             let options = AgentOptions {
+                launcher: None,
                 force: false,
                 transport: McpInstallTransport::Stdio,
                 toolset: None,
@@ -3157,6 +3231,7 @@ mod tests {
         let guidance = dir.path().join("rules").join("zvec-grep.md");
         std::fs::create_dir_all(guidance.parent().expect("parent")).expect("rules dir");
         let options = AgentOptions {
+            launcher: None,
             force: false,
             transport: McpInstallTransport::Stdio,
             toolset: None,
@@ -3320,6 +3395,7 @@ mod tests {
         let guidance = dir.path().join("rules").join("zvec-grep.md");
         std::fs::create_dir_all(guidance.parent().expect("parent")).expect("rules dir");
         let options = AgentOptions {
+            launcher: None,
             force: false,
             transport: McpInstallTransport::Stdio,
             toolset: None,
@@ -3581,6 +3657,28 @@ mod tests {
                 home.join("AppData/Local/Programs/Qoder/Qoder.exe"),
             ]
         );
+    }
+
+    #[test]
+    fn absolute_command_entries_remain_owned_after_installation() {
+        let temporary = tempfile::tempdir().expect("fixture");
+        let launcher = temporary
+            .path()
+            .join(if cfg!(windows) { "zg.exe" } else { "zg" });
+        let command = launcher.to_string_lossy();
+        assert!(is_managed_json_server(
+            &json!({"command": command, "args": ["--server", "--stdio"]})
+        ));
+        assert!(is_managed_json_server(
+            &json!({"type": "local", "command": [command, "--server", "--stdio"]})
+        ));
+        assert!(is_managed_qwen(
+            &json!({"command": command, "args": ["--server", "--stdio"]})
+        ));
+        assert!(!is_managed_json_server(
+            &json!({"command": command, "args": ["--version"]})
+        ));
+        assert!(!is_managed_command("relative/zg"));
     }
 
     #[test]

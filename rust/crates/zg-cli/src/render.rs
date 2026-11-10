@@ -743,6 +743,7 @@ Options:
   --yes                             Install detected agents without prompting
   --force                           Replace conflicting unmanaged configuration
   --upgrade-installed              Migrate existing integrations without installing new ones
+  --launcher PATH                  Use a stable absolute executable with --upgrade-installed
   --dry-run                        Preview migration without writing files
 
 Upgrade scans existing entries in known user configuration files.

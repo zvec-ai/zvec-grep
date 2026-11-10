@@ -1274,6 +1274,44 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn stdio_bridge_exits_when_daemon_stops_with_client_input_open() -> Result<(), Box<dyn Error>> {
+    let _permit = server_test_permit();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
+    let home = TempDir::new()?;
+    let (mut guard, _) = start_server(&binary, &home, "full", None, |_| {})?;
+    let mut bridge = StdioBridge::spawn(&binary, home.path(), &guard.listen)?;
+    let response = bridge.request(&json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": { "name": "stdio-shutdown-test", "version": "1" } }
+    }))?;
+    assert!(response.get("result").is_some(), "{response}");
+    bridge.notify(
+        &json!({ "jsonrpc": "2.0", "method": "notifications/initialized", "params": {} }),
+    )?;
+    assert_command_success(&guard.stop()?);
+
+    // The client cannot observe EOF if runtime shutdown waits for its still-open stdin.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = bridge.child.try_wait()? {
+            assert!(
+                !status.success(),
+                "daemon loss must be reported as an error"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "stdio bridge did not exit after daemon stopped with client input open"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(bridge.stdin.is_some(), "client input remains open");
+    Ok(())
+}
+
+#[test]
 fn concurrent_stdio_bootstraps_share_one_resident_daemon() -> Result<(), Box<dyn Error>> {
     let _permit = server_test_permit();
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));

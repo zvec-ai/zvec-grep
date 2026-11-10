@@ -12,4 +12,4 @@ done
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo metadata --no-deps --format-version 1 >/dev/null
-node --test scripts/npm-local.test.mjs npm/meta/install.test.cjs
+node --test scripts/npm-local.test.mjs scripts/standalone-*.test.mjs npm/meta/install.test.cjs

@@ -1,5 +1,6 @@
 [package]
 name = "zg"
+default-run = "zg"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,8 +17,10 @@ cuda = ["zg-engine/cuda", "dep:llama-cpp-sys-2"]
 # (source) to zg's build script; the engine owns runtime behavior/native features.
 llama-cpp-sys-2 = { workspace = true, optional = true }
 serde_json.workspace = true
+serde = { workspace = true, features = ["derive"] }
+sha2.workspace = true
 clap.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "signal", "process"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 zg-cli = { path = "../zg-cli" }
