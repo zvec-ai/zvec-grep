@@ -43,6 +43,8 @@ pub(crate) fn is_call_node(node: Node<'_>) -> bool {
 ///   define, not a callee. Calls inside that code are still collected.
 /// - `new static`, `new self` and `new parent` name the class only relative
 ///   to the caller, which no symbol is called.
+/// - PHP `make()()` calls the result of another call, which names no symbol.
+///   The inner call is reported on its own.
 pub(crate) fn is_unreported_call(node: Node<'_>, source: &[u8]) -> bool {
     let creates_callable = node
         .child_by_field_name("arguments")
@@ -64,7 +66,10 @@ pub(crate) fn is_unreported_call(node: Node<'_>, source: &[u8]) -> bool {
             target
         }
     });
+    let calls_a_result =
+        node.kind() == "function_call_expression" && target.is_some_and(is_call_node);
     creates_callable
+        || calls_a_result
         || target.is_some_and(|target| {
             matches!(
                 target.kind(),
@@ -85,9 +90,6 @@ fn callee_text_of(node: Node<'_>, source: &[u8]) -> Option<String> {
     // shared field walk below would return the bare method name and drop
     // the receiver the resolver needs.
     if let Some(member) = java_member_callee(node, source) {
-        return Some(member);
-    }
-    if let Some(member) = php_member_callee(node, source) {
         return Some(member);
     }
     for field in CALLEE_FIELDS {
@@ -118,12 +120,29 @@ fn java_member_callee(node: Node<'_>, source: &[u8]) -> Option<String> {
     Some(format!("{object_text}.{}", node_text(name, source)))
 }
 
-/// Joins a PHP member or static call's receiver and method name
-/// (`$this->repo->find`, `Audit::record`). The shared field walk would find
-/// only the method name and drop the receiver. A receiver that is not a plain
-/// identifier chain, such as `$this->factory()` or `\App\Audit`, keeps the
-/// bare method name so the edge still resolves by name.
-fn php_member_callee(node: Node<'_>, source: &[u8]) -> Option<String> {
+/// A PHP member, nullsafe or static call, split into the parts an edge stores.
+struct PhpMemberCall {
+    name: String,
+    receiver: String,
+    raw_text: String,
+}
+
+fn is_php_member_call(node: Node<'_>) -> bool {
+    matches!(
+        node.kind(),
+        "member_call_expression" | "nullsafe_member_call_expression" | "scoped_call_expression"
+    )
+}
+
+/// Splits a PHP member or static call into its method name and receiver
+/// (`$this->repo->find` gives `find` on `$this.repo`, `Audit::record` gives
+/// `record` on `Audit`). The receiver is always kept: a call with a receiver
+/// stays pending, while a bare name would bind to a same-named function in
+/// the file. A receiver the resolver cannot read, such as `\Audit` or
+/// `$this->factory()`, keeps its source spelling so the edge stays
+/// unresolved. A dynamic method name, such as `$this->{'dyn'}()`, names no
+/// symbol, so the call yields no edge.
+fn php_member_call(node: Node<'_>, source: &[u8]) -> Option<PhpMemberCall> {
     let (receiver, separator) = match node.kind() {
         "member_call_expression" => (node.child_by_field_name("object")?, "->"),
         "nullsafe_member_call_expression" => (node.child_by_field_name("object")?, "?->"),
@@ -131,12 +150,21 @@ fn php_member_callee(node: Node<'_>, source: &[u8]) -> Option<String> {
         _ => return None,
     };
     let name = node_text(node.child_by_field_name("name")?, source);
-    let receiver = node_text(receiver, source);
-    if is_identifier_like(&normalize_member_access(receiver)) {
-        Some(format!("{receiver}{separator}{name}"))
-    } else {
-        Some(name.to_owned())
+    if !is_identifier_like(name) || name.starts_with('$') {
+        return None;
     }
+    let spelled = collapse_whitespace(node_text(receiver, source));
+    let normalized = normalize_member_access(&spelled);
+    let receiver = if is_identifier_like(&normalized) {
+        normalized
+    } else {
+        spelled.chars().take(MAX_CALLEE_TEXT_CHARS).collect()
+    };
+    Some(PhpMemberCall {
+        name: name.to_owned(),
+        raw_text: format!("{spelled}{separator}{name}"),
+        receiver,
+    })
 }
 
 /// Rewrites C/C++ and PHP arrow member access to the dot spelling the
@@ -245,7 +273,19 @@ fn visit_for_calls(
     // A call node still descends below: `outer(inner())` and `factory().run()`
     // reach their inner calls only through its subtree, and the declaration
     // walk never comes back for them.
-    if is_call_node(node)
+    if is_call_node(node) && !is_unreported_call(node, source) && is_php_member_call(node) {
+        if let Some(call) = php_member_call(node, source) {
+            context.add_call_edge(
+                owner_index,
+                &call.name,
+                Some(&call.receiver),
+                Some(&call.raw_text),
+                call_arity_of(node),
+                node.start_position().row + 1,
+                node.start_position().column,
+            );
+        }
+    } else if is_call_node(node)
         && !is_unreported_call(node, source)
         && let Some(callee) = callee_text_of(node, source)
     {

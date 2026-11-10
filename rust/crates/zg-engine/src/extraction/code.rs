@@ -1539,8 +1539,8 @@ mod tests {
                 (run, "find", Some("$this.repo")),
                 (run, "flush", Some("$this.log")),
                 (run, "record", Some("Audit")),
-                (run, "trace", None),
-                (run, "make", None),
+                (run, "trace", Some("\\App\\Audit")),
+                (run, "make", Some("$this->factory()")),
                 (run, "factory", Some("$this")),
                 (run, "iife", None),
                 (run, "boot", Some("self")),
@@ -1548,6 +1548,56 @@ mod tests {
                 (run, "__construct", Some("parent")),
                 (owner("A"), "Foo", None),
                 (owner("B"), "Bar", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn php_member_calls_never_bind_to_same_named_functions() {
+        // A method call keeps its receiver even when the resolver cannot read
+        // it, so it stays pending instead of binding to the global `record()`.
+        let source = test_source(
+            FileFormat::Php,
+            "audit.php",
+            concat!(
+                "<?php\n",
+                "function record() {}\n",
+                "class Audit { public static function record() {} }\n",
+                "function run() {\n",
+                "    \\Audit::record();\n",
+                "    $this->factory()->record();\n",
+                "    $this->{'record'}();\n",
+                "    record();\n",
+                "}\n",
+            ),
+        );
+        let graph = extract_for_indexing(&source, ChunkOptions::default())
+            .expect("extraction")
+            .graph
+            .expect("code sources carry a graph");
+        let resolved: Vec<(usize, Option<&str>)> = graph
+            .resolved
+            .iter()
+            .filter(|edge| edge.ref_kind == crate::domain::GraphEdgeKind::Calls)
+            .map(|edge| (edge.line, edge.raw_text.as_deref()))
+            .collect();
+        assert_eq!(
+            resolved,
+            vec![(8, Some("record"))],
+            "only the plain call binds"
+        );
+        let pending: Vec<(&str, Option<&str>)> = graph
+            .pending
+            .iter()
+            .filter(|edge| edge.ref_kind == crate::domain::GraphEdgeKind::Calls)
+            .map(|edge| (edge.ref_name.as_str(), edge.receiver_name.as_deref()))
+            .collect();
+        assert_eq!(
+            pending,
+            vec![
+                ("record", Some("\\Audit")),
+                ("record", Some("$this->factory()")),
+                ("factory", Some("$this")),
             ]
         );
     }

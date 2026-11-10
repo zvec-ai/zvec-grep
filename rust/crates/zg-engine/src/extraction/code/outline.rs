@@ -326,32 +326,38 @@ fn call_target_text(
     let end = call
         .child_by_field_name("arguments")
         .map_or(target.end_byte(), |arguments| arguments.start_byte());
-    let qualified = token_text(call, receiver.start_byte(), end, source)?;
-    // A long receiver, such as a chained call with closure arguments, would
-    // push the target past the line limit, so the bare method name stands in.
-    Ok(if qualified.chars().count() <= MAX_LINE_CHARS {
-        qualified
-    } else {
-        name.to_owned()
-    })
+    // A receiver that is too long, such as a chained call with closure
+    // arguments, or that defines a class or closure inline, would put code
+    // into the name, so the bare method name stands in.
+    Ok(token_text(call, receiver.start_byte(), end, source)?
+        .filter(|qualified| qualified.chars().count() <= MAX_LINE_CHARS)
+        .unwrap_or_else(|| name.to_owned()))
 }
 
 // Joins the tokens in `start..end` without comments or layout, so the same
 // call reads the same however it is formatted. A space stays only where the
 // source separates two word tokens that would otherwise merge, as in
-// `new Ledger`. Adjacent tokens such as `$` and `this` stay joined.
+// `new Ledger`. Adjacent tokens such as `$` and `this` stay joined. Returns
+// `None` when the range defines a class or closure inline, or grows past any
+// usable name.
 fn token_text(
     root: Node<'_>,
     start: usize,
     end: usize,
     source: &[u8],
-) -> Result<String, std::str::Utf8Error> {
+) -> Result<Option<String>, std::str::Utf8Error> {
     let mut text = String::new();
     let mut previous_end = start;
     let mut pending = vec![root];
     while let Some(node) = pending.pop() {
         if node.end_byte() <= start || node.start_byte() >= end || node.kind() == "comment" {
             continue;
+        }
+        if matches!(
+            node.kind(),
+            "anonymous_class" | "anonymous_function" | "arrow_function"
+        ) {
+            return Ok(None);
         }
         if node.child_count() > 0 {
             let mut cursor = node.walk();
@@ -362,7 +368,7 @@ fn token_text(
         // The caller drops names past the line limit, so a long chain stops
         // here instead of joining every token of every earlier link.
         if text.len() > MAX_LINE_CHARS * 4 {
-            break;
+            return Ok(None);
         }
         let token = node.utf8_text(source)?;
         let joins_words = node.start_byte() > previous_end
@@ -374,7 +380,7 @@ fn token_text(
         text.push_str(token);
         previous_end = node.end_byte();
     }
-    Ok(text)
+    Ok(Some(text))
 }
 
 fn is_word_char(character: char) -> bool {
@@ -827,7 +833,7 @@ mod tests {
         let shapes = code_outline(
             Path::new("shapes.php"),
             &Content::Code(
-                "#[Assert(new Length(5))]\nfunction shapes() {\n  $this->repo\n      ->find();\n  $this /* note */ -> go();\n  $this->{'dyn'}();\n  $handler = new class { public function run() { inner(); } };\n  (function () { iife(); })();\n  static::create();\n  parent::__construct();\n  $made = [new static(), new self()];\n  return (new Ledger)->post();\n}"
+                "#[Assert(new Length(5))]\nfunction shapes() {\n  $this->repo\n      ->find();\n  $this /* note */ -> go();\n  $this->{'dyn'}();\n  $handler = new class { public function run() { inner(); } };\n  (function () { iife(); })();\n  static::create();\n  parent::__construct();\n  $made = [new static(), new self()];\n  (new class { public function go() { goInside(); } })->go();\n  make()();\n  return (new Ledger)->post();\n}"
                     .into(),
             ),
             Some(&metadata(SymbolType::Function, "shapes")),
@@ -835,7 +841,7 @@ mod tests {
         .expect("php shapes outline");
         assert!(
             shapes.ends_with(
-                "calls: $this->repo->find, $this->go, $this->{'dyn'}, inner, iife, static::create, parent::__construct, (new Ledger)->post, Ledger"
+                "calls: $this->repo->find, $this->go, $this->{'dyn'}, inner, iife, static::create, parent::__construct, go, goInside, make, (new Ledger)->post, Ledger"
             ),
             "{shapes}"
         );
