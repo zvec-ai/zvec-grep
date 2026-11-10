@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { loadSuite } from "../core/lib.mjs";
 import { buildCombined } from "./combined.mjs";
 import { PILOT_NAMES, PILOT_SUITES } from "./config.mjs";
 import { compareReports } from "../reports/compare.mjs";
@@ -109,7 +110,9 @@ export async function compareRuns(baseline, candidate, metadata) {
   const after = await rebuild(candidate, "candidate");
   // Validate equal source, protocol, file targets, task sets and scoring eligibility.
   // This also recomputes the SWE-QA scores from every saved repetition.
-  compareReports(baseline.reports.zg, candidate.reports.zg);
+  compareReports(baseline.reports.zg, candidate.reports.zg, {
+    suite: await loadSuite(),
+  });
   return compareCombinedResults(before, after, metadata);
 }
 
