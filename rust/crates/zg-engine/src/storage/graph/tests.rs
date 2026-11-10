@@ -106,6 +106,22 @@ fn hierarchy_reference(owner: &str, base: &str) -> PendingRef {
     inheritance_reference(owner, owner, base)
 }
 
+/// One import statement as extraction leaves it: the specifier the file spells,
+/// owned by the file node so a rewrite can compare it across writes.
+fn import_reference(owner: &str, specifier: &str) -> PendingRef {
+    PendingRef {
+        owner_id: owner.into(),
+        ref_name: specifier.into(),
+        receiver_name: None,
+        ref_kind: GraphEdgeKind::Imports,
+        arity: None,
+        line: 1,
+        column: 0,
+        status: PendingRefStatus::Pending,
+        metadata: Metadata::default(),
+    }
+}
+
 /// Resolves everything the queue holds so the next write starts clean: the
 /// inheriting file's own clause binds as an import, the replayed member call as
 /// the hierarchy rule writes it.
@@ -650,6 +666,53 @@ fn a_renamed_base_stales_the_bindings_the_chain_fed() {
         1,
         "a changed base stales the chain"
     );
+}
+
+#[test]
+fn a_moved_import_stales_the_bindings_the_base_chain_fed() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    db.write_file_graph(
+        1,
+        None,
+        &graph(&["a"], vec![], vec![reference("a", "target")]),
+        &[],
+        false,
+    )
+    .expect("write");
+    let resolution = hierarchy_proposal(&db, "b");
+    db.apply_resolutions(&[resolution]).expect("resolve");
+
+    // The header joins its base through `left`.
+    let header = |specifier: &str| {
+        graph(
+            &["Mid"],
+            vec![],
+            vec![
+                inheritance_reference("Mid", "Mid", "Base"),
+                import_reference("f2", specifier),
+            ],
+        )
+    };
+    db.write_file_graph(2, None, &header("./left.hpp"), &[], false)
+        .expect("joining write");
+    assert_eq!(db.requeue_stale_resolutions().expect("requeue"), 1);
+    settle_queue(&mut db);
+
+    // The clause still spells (extends, Mid, Base); only the include moved, so
+    // the base name now reads a different declaration.
+    db.write_file_graph(2, None, &header("./right.hpp"), &[], false)
+        .expect("moving write");
+    assert_eq!(
+        db.requeue_stale_resolutions().expect("requeue"),
+        1,
+        "a moved import stales the chain"
+    );
+    settle_queue(&mut db);
+
+    // Restating the same output is not a change.
+    db.write_file_graph(2, None, &header("./right.hpp"), &[], false)
+        .expect("repeated write");
+    assert_eq!(db.requeue_stale_resolutions().expect("requeue"), 0);
 }
 
 #[test]

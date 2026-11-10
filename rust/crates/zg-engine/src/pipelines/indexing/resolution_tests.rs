@@ -1845,3 +1845,63 @@ fn sweep_binds_a_python_member_only_one_base_declares() {
         "the one declaring base wins without an ordering decision"
     );
 }
+
+#[test]
+fn sweep_rebinds_a_hierarchy_call_after_the_base_import_moves() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    let left = index_source(
+        &store,
+        "left.hpp",
+        "namespace left {\nstruct Base {\n    void work() {}\n};\n}\n",
+    );
+    let right = index_source(
+        &store,
+        "right.hpp",
+        "namespace right {\nstruct Base {\n    void work() {}\n};\n}\n",
+    );
+    index_source(
+        &store,
+        "mid.hpp",
+        "#include \"./left.hpp\"\nusing left::Base;\nstruct Mid : Base {};\n",
+    );
+    let caller = index_source(
+        &store,
+        "caller.cpp",
+        "#include \"./mid.hpp\"\nvoid run(Mid &m) {\n    m.work();\n}\n",
+    );
+    let owner = pending_receiver_call_owner(&store, caller, "m");
+    for _ in 0..3 {
+        store.requeue_stale_resolutions().expect("requeue");
+        resolve_pending(&store, None).expect("sweep");
+    }
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![left],
+        "the first pass reaches left::Base::work"
+    );
+
+    // Only the include and the using declaration move: the clause still spells
+    // `(extends, Mid, Base)`, and neither the call nor its obsolete target
+    // belongs to the rewritten file.
+    index_source(
+        &store,
+        "mid.hpp",
+        "#include \"./right.hpp\"\nusing right::Base;\nstruct Mid : Base {};\n",
+    );
+    let requeued = store
+        .requeue_stale_resolutions()
+        .expect("requeue after the import move");
+    assert!(
+        requeued >= 1,
+        "the moved import returns the member call: {requeued}"
+    );
+    for _ in 0..2 {
+        resolve_pending(&store, None).expect("sweep after the import move");
+    }
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![right],
+        "the call follows the rebound base"
+    );
+}

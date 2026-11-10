@@ -28,7 +28,8 @@ impl SqliteGraphStorage {
     /// disappear, which can reorder the preferred path variant of every import.
     /// A file whose extends/implements clauses change also stales every
     /// member call that resolved through that chain, which no symbol it owns
-    /// names; the write records that evidence as well.
+    /// names; so does a file that keeps its clauses while moving the import
+    /// binding a base name reads. The write records both as the same evidence.
     /// `language` labels pending references for the resolver's language gate;
     /// `None` records `unknown`, so the gate only keeps candidates that carry
     /// the same absent evidence.
@@ -81,7 +82,7 @@ impl SqliteGraphStorage {
         // change stales the workspace's hierarchy-bound calls; merely owning an
         // extends clause, as most class files do, must not requeue them on
         // every save.
-        let hierarchy_changed = inheritance_edges(&tx, file_id)? != inheritance_evidence(graph);
+        let hierarchy_changed = inheritance_changed(&tx, file_id, graph)?;
         tx.execute("DELETE FROM edges WHERE file_id = ?", [file_id])?;
         {
             let mut insert = tx.prepare(
@@ -258,6 +259,62 @@ fn inheritance_edges(
             spelled.to_owned(),
         ));
     }
+    evidence.sort();
+    evidence.dedup();
+    Ok(evidence)
+}
+
+/// Whether this write moves the inheritance a caller's bindings rest on.
+///
+/// The clause identity `(kind, owner, base)` covers a base that is renamed or
+/// dropped, but not one that keeps its spelling while binding elsewhere: a
+/// header rewritten from `using left::Base` to `using right::Base` still spells
+/// `(extends, Mid, Base)`, while the base edge now names a different
+/// declaration and every member call bound through the chain must follow it.
+/// Only a file that owns an inheritance clause pays for the import comparison,
+/// so editing an import in an ordinary file still changes nothing here.
+fn inheritance_changed(
+    tx: &rusqlite::Transaction<'_>,
+    file_id: u32,
+    graph: &FileGraphResult,
+) -> Result<bool> {
+    let previous = inheritance_edges(tx, file_id)?;
+    let current = inheritance_evidence(graph);
+    if previous != current {
+        return Ok(true);
+    }
+    if current.is_empty() {
+        return Ok(false);
+    }
+    Ok(import_bindings(tx, file_id)? != import_evidence(graph))
+}
+
+/// The import specifiers a file's new output spells: what a base name reads
+/// when the clause resolves outside the file. Sorted and deduplicated, so two
+/// writes of the same imports compare equal.
+fn import_evidence(graph: &FileGraphResult) -> Vec<String> {
+    let mut evidence: Vec<String> = graph
+        .pending_refs
+        .iter()
+        .filter(|reference| reference.ref_kind.spells_import())
+        .map(|reference| reference.ref_name.clone())
+        .collect();
+    evidence.sort();
+    evidence.dedup();
+    evidence
+}
+
+/// The import specifiers this file's stored rows spell now. A resolved row
+/// keeps the reference name it queued with, so the comparison reads the same
+/// half on both sides. Rows without one are `file_local` imports resolved
+/// during the walk, which never bound a name from another module.
+fn import_bindings(tx: &rusqlite::Transaction<'_>, file_id: u32) -> Result<Vec<String>> {
+    let mut statement = tx.prepare(
+        "SELECT reference_name FROM edges
+         WHERE file_id = ?1 AND kind = 'imports' AND reference_name IS NOT NULL",
+    )?;
+    let rows = statement.query_map([file_id], |row| row.get::<_, String>(0))?;
+    let mut evidence = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     evidence.sort();
     evidence.dedup();
     Ok(evidence)

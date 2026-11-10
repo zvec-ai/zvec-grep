@@ -149,6 +149,12 @@ impl GraphEdgeKind {
     pub(crate) const fn spells_inheritance(self) -> bool {
         matches!(self, Self::Extends | Self::Implements)
     }
+
+    /// Whether this kind names a module a file binds names from.
+    #[must_use]
+    pub(crate) const fn spells_import(self) -> bool {
+        matches!(self, Self::Imports)
+    }
 }
 
 impl EdgeProvenance {
