@@ -1,6 +1,13 @@
 use super::*;
+use zg_daemon_protocol::{DaemonCommand, DaemonReply, ExecutionResult};
+use zg_engine::api::context::{
+    ContextOptions,
+    options::{ContextRoute, ContextRouteMode, RefreshPolicy},
+};
 
 fn fixtures() -> Vec<(&'static str, String, String, String)> {
+    // Each side exceeds the model's ~15K-character budget, placing the matching
+    // fragment strictly inside the entity. Verify that precondition after indexing.
     let paragraph = "The indexed entity keeps its original context even when retrieval splits it into overlapping fragments.\n\n";
     let statement = "    observe('The indexed function keeps its context across overlapping retrieval fragments.');\n";
     vec![
@@ -9,8 +16,8 @@ fn fixtures() -> Vec<(&'static str, String, String, String)> {
             "# Neighbor before\n\nexcludedbefore\n\n".into(),
             format!(
                 "# Complete entity\n\nentitybegin\n\n{}quasarneedle\n\n{}entityend\n\n",
-                paragraph.repeat(40),
-                paragraph.repeat(40),
+                paragraph.repeat(200),
+                paragraph.repeat(200),
             ),
             "# Neighbor after\n\nexcludedafter\n".into(),
         ),
@@ -19,8 +26,8 @@ fn fixtures() -> Vec<(&'static str, String, String, String)> {
             "function before() { return 'excludedbefore'; }\n\n".into(),
             format!(
                 "function entitybegin() {{\n{}    const needle = 'quasarneedle';\n{}    return 'entityend';\n}}",
-                statement.repeat(40),
-                statement.repeat(40),
+                statement.repeat(200),
+                statement.repeat(200),
             ),
             "\n\nfunction after() { return 'excludedafter'; }\n".into(),
         ),
@@ -28,7 +35,7 @@ fn fixtures() -> Vec<(&'static str, String, String, String)> {
 }
 
 #[test]
-fn full_preview_returns_complete_markdown_and_code_entities_in_direct_and_server_modes()
+fn full_preview_returns_complete_markdown_and_code_entities_across_transports()
 -> Result<(), Box<dyn Error>> {
     let _permit = server_test_permit();
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
@@ -77,13 +84,80 @@ fn full_preview_returns_complete_markdown_and_code_entities_in_direct_and_server
     for (path, _, _, _) in fixtures() {
         std::fs::write(workspace.path().join(path), "changedondisk\n")?;
     }
-    let (_guard, _) = start_server(&binary, &home, "agent", None, configure)?;
-    verify_previews(&run, home.path())
+    let (guard, _) = start_server(&binary, &home, "agent", None, configure)?;
+    verify_fragmented_entities(&guard.listen, workspace.path())?;
+    let mut bridge = StdioBridge::spawn_with_toolset(&binary, home.path(), &guard.listen, None)?;
+    bridge.request(&json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": { "name": "full-entity-preview-test", "version": "1" } }
+    }))?;
+    bridge.notify(
+        &json!({ "jsonrpc": "2.0", "method": "notifications/initialized", "params": {} }),
+    )?;
+    verify_previews(&run, home.path(), workspace.path(), &mut bridge)?;
+    bridge.close()?;
+    Ok(())
+}
+
+fn verify_fragmented_entities(listen: &str, root: &Path) -> Result<(), Box<dyn Error>> {
+    let command = DaemonCommand::Context(ContextOptions {
+        root: Some(root.to_owned()),
+        routes: vec![ContextRoute {
+            mode: ContextRouteMode::Fts,
+            query: "quasarneedle".into(),
+        }],
+        limit: Some(2),
+        auto_update: false,
+        refresh: Some(RefreshPolicy::Off),
+        ..ContextOptions::default()
+    });
+    let body = serde_json::to_string(&command)?;
+    let mut stream = TcpStream::connect(listen)?;
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    write!(
+        stream,
+        "POST /admin/execute HTTP/1.1\r\nHost: {listen}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )?;
+    let response = read_http_response(&mut stream)?;
+    let (headers, body) = response.split_once("\r\n\r\n").ok_or("missing body")?;
+    assert!(headers.starts_with("HTTP/1.1 200"), "{response}");
+    let ExecutionResult::Success(DaemonReply::Context(result)) = serde_json::from_str(body)? else {
+        return Err(format!("unexpected context reply: {body}").into());
+    };
+    assert_eq!(result.items.len(), 2);
+    for (path, prefix, entity, _) in fixtures() {
+        let item = result
+            .items
+            .iter()
+            .find(|item| item.relative_path == Path::new(path))
+            .ok_or("missing fixture result")?;
+        let excerpt = item
+            .excerpt_range
+            .as_ref()
+            .ok_or("fixture was not chunked")?;
+        assert!(excerpt.start_line() > item.range.start_line(), "{path}");
+        assert!(excerpt.last_line() < item.range.last_line(), "{path}");
+        assert_eq!(item.content.trim_end(), entity.trim_end(), "{path}");
+        assert_eq!(
+            item.content_range.start_line(),
+            Some(prefix.lines().count() + 1)
+        );
+        assert_eq!(
+            item.content_range.line_count(),
+            Some(item.content.lines().count())
+        );
+    }
+    Ok(())
 }
 
 fn verify_previews(
     run: &impl Fn(&[&str]) -> std::io::Result<Output>,
     home: &Path,
+    root: &Path,
+    bridge: &mut StdioBridge,
 ) -> Result<(), Box<dyn Error>> {
     for (path, prefix, entity, _) in fixtures() {
         for preview in ["none", "short", "full", "detail"] {
@@ -136,6 +210,23 @@ fn verify_previews(
                 outputs.push(text);
             }
             assert_eq!(outputs[0], outputs[1], "{path}/{preview}");
+            if matches!(preview, "short" | "full") {
+                let reply = bridge.request(&json!({
+                    "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": { "name": "zvec_grep_search", "arguments": {
+                        "root": root, "fts": "quasarneedle", "globs": [path],
+                        "limit": 1, "autoUpdate": false, "preview": preview
+                    } }
+                }))?;
+                assert_eq!(reply["result"]["isError"], false, "{reply}");
+                let text = reply["result"]["content"][0]["text"]
+                    .as_str()
+                    .ok_or("missing MCP preview")?;
+                // Runtime refresh counters may differ; the stored source preview must not.
+                assert!(text.starts_with("freshness: possibly_stale\n"), "{text}");
+                let (_, body) = text.split_once("\n\n").ok_or("missing diagnostics")?;
+                assert_eq!(body, outputs[0], "direct/server/MCP {path}/{preview}");
+            }
         }
     }
     Ok(())

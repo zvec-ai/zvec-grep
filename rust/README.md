@@ -392,6 +392,9 @@ Query echoes, group headings, hit counts and `matchedBy` labels are omitted from
 the CLI result display. Full previews use the complete stored entity (such as a
 Markdown section or code symbol), even when only one fragment matched. They do
 not expand to the entire file. Bounded previews remain anchored to the matched fragment.
+Short previews prioritize fragment lines within the ten-line limit, using any
+remaining space for surrounding entity context. Their displayed lines can differ
+from the former fragment-only previews.
 In server mode, the daemon returns complete entity content and the CLI applies
 the selected preview. Short preview limits displayed text, not the internal
 response payload. The daemon protocol and request/reply schema are unchanged.
