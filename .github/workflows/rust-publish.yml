@@ -270,7 +270,7 @@ jobs:
           name: rust-verification-${{ needs.source.outputs.version }}
           path: rust/dist/npm/release/tarballs
       - name: Restore the real model cache
-        if: matrix.cuda_package
+        if: matrix.cuda_package || matrix.target == 'linux-arm64-gnu'
         uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/zvec-grep-model-cache
@@ -295,11 +295,15 @@ jobs:
               ln -s /usr/bin/python3.12 /usr/local/bin/python3
               test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.28"
               npm run release:artifact-smoke -- --expect-cpu
+              bundle=dist/npm/release/artifact-smoke/prefix/lib/node_modules/@zvec/zvec-grep
+              python3 scripts/check-onnxruntime.py "$bundle/lib/libonnxruntime.so.1" 2>&1 | tee /work/cpu-logs/onnxruntime-load.log
               if [[ "$RELEASE_TARGET" == linux-x64-gnu ]]; then
-                python3 scripts/cuda/e2e.py --cpu-only \
-                  --bundle dist/npm/release/artifact-smoke/prefix/lib/node_modules/@zvec/zvec-grep \
-                  --model-cache /model-cache --logs /work/cpu-logs
+                cpu_mode=--cpu-only
+              else
+                cpu_mode=--explicit-cpu
               fi
+              python3 scripts/cuda/e2e.py "$cpu_mode" --bundle "$bundle" \
+                --model-cache /model-cache --logs /work/cpu-logs
             '
       - name: Install and exercise the downloaded artifacts without Windows CUDA libraries
         if: matrix.target == 'win32-x64-msvc'

@@ -170,9 +170,11 @@ package-level validation. It runs only through manual dispatch. Runs with both
 without allocating GPUs or publishing
 to npm. Compilation always stays on CPU runners, including when `cuda=true` or
 `publish=true`; Linux/Windows x64 still build the default CUDA-capable bundles.
-Linux x64 and ARM64 release builds use Ubuntu 20.04 containers on native runners
-and audit the executable and bundled libraries against glibc 2.31. The host
-runner's Ubuntu version does not set the release package's compatibility baseline.
+Linux x64 and ARM64 release builds use digest-pinned `manylinux_2_28`
+`2026.03.01-1` containers on native runners and audit the executable and bundled
+libraries against the `GLIBC_2.28` ceiling. Clean runtime checks use AlmaLinux
+8.10 (glibc 2.28); the host runner's Ubuntu version does not set the release
+package's compatibility baseline.
 Set `cuda=true,publish=false` to add GPU validation without publishing.
 Separate GPU jobs download the exact native npm artifacts from the same run and
 invoke `.github/actions/cuda-cli-e2e`, without recompiling native code or repacking. Publication
@@ -182,7 +184,17 @@ Failures retain candidates and do not skip the other validation path, but every
 required check must pass before publication. Collection alone is not approval.
 
 The manual `platform` input selects `all` (the default) or one of `darwin-arm64`,
-`darwin-x64`, `linux-x64-gnu`, `linux-arm64-gnu`, and `win32-x64-msvc`.
+`darwin-x64`, `linux-x64-gnu`, `linux-arm64-gnu`, `win32-x64-msvc`, and
+`win32-arm64-msvc`.
+To validate Linux ARM64 without publishing or allocating GPUs, run in the chosen
+repository (or add `--repo OWNER/REPO`):
+
+```sh
+gh workflow run rust-publish.yml -f publish=false -f cuda=false -f platform=linux-arm64-gnu
+```
+
+For Linux x64, replace the platform with `linux-x64-gnu`. Add `--ref BRANCH`
+to validate a specific branch; otherwise GitHub uses the default branch.
 Selected platforms compile in parallel; Intel macOS does not gate the others.
 All-platform runs collect `rust-release-<version>`; a single-platform run collects
 `rust-candidate-<version>` with `partial: true` in `release.json`. The latter is
@@ -198,13 +210,16 @@ behavior on the real CPU host. An isolated loopback registry serves only this
 run's CUDA archives: any CUDA metadata/tarball request (even a failed optional
 attempt), installed plugin or populated plugin cache fails CPU validation.
 `cpu-downloads.json` retains the request evidence; no public registry is used.
-They verify CLI and daemon IPC. Linux x64 and ARM64 install and exercise the
-artifacts in plain Ubuntu 20.04 containers. Linux/Windows x64 then
-run `scripts/cuda/e2e.py --cpu-only` against the installed meta
-package. This checks both explicit `--device cpu` and default automatic CPU
-fallback for real GGUF/ONNX indexing and vector queries. Windows excludes toolkit
-paths. Both x64 model checks require CUDA host libraries to be unavailable and
-retain `cpu-artifact-evidence-*` logs on failure.
+The `artifact-cpu-smoke` jobs verify CLI and daemon IPC. Linux x64 and ARM64
+install and exercise the artifacts in clean AlmaLinux 8.10 (glibc 2.28)
+containers; both load the installed `libonnxruntime.so.1` and verify ORT 1.21.0
+and API 21. Linux/Windows x64 run `scripts/cuda/e2e.py --cpu-only` against the
+installed meta package, checking both explicit `--device cpu` and default
+automatic CPU fallback for real GGUF/ONNX indexing and vector queries. Linux
+ARM64 runs the same real-model index/query checks with `--explicit-cpu` only.
+macOS and Windows ARM64 retain CLI/daemon-only artifact smoke coverage.
+Windows x64 excludes toolkit paths. Both x64 model checks require CUDA host
+libraries to be unavailable. Failures retain `cpu-artifact-evidence-*` logs.
 CPU artifact validation runs even when `publish=false`; failure blocks npm
 publication, while the downloaded candidate remains available for diagnosis.
 
@@ -324,15 +339,42 @@ macOS model routing continues to select CPU.
 
 Run `python3 scripts/test-prepare-onnxruntime.py` for offline deployment checks
 and `python3 scripts/test-check-glibc.py` for the compatibility checker tests.
-The ORT CI gate loads Linux x64/ARM64 CPU cores on glibc 2.31 and audits their
-ELF imports, including the x64 CUDA provider. `scripts/check-glibc.py <payload>`
-can also audit a complete ELF package. The release workflow builds Linux x64/ARM64
-packages on Ubuntu 20.04, applies this audit to the executable and bundled native
-libraries, and verifies the installed artifacts on that baseline.
+`scripts/check-glibc.py <payload>` audits a complete ELF package. Linux
+x64/ARM64 release builds use digest-pinned `manylinux_2_28` `2026.03.01-1`
+builders and audit the executable and bundled native libraries, including the
+x64 CUDA provider, against `GLIBC_2.28`. The release workflow's
+`artifact-cpu-smoke` jobs load the installed ORT 1.21.0 core, verify API 21 and
+run real GGUF/ONNX index/query checks in clean AlmaLinux 8.10 (glibc 2.28), as
+described above. Ordinary PR CI has no separate ORT validation gate.
 
-Dispatch Rust CI with `ort_validation=true` to validate all six catalog ONNX
-graphs on Linux x64/ARM64 and compare official ORT 1.21/1.28 q4 CPU throughput.
-The comparison uses one release binary, fixed CPU/batch/concurrency settings,
-warmup and alternating runtime order. It measures the native runtime change;
-it is not a comparison of different Rust bindings or the former Pyke static
-build. Raw rounds and machine details are retained in the job artifacts.
+Linux release builds also cache the official CPU ORT archive, then execute the
+real `zg-engine/build.rs` in a network-disabled builder with
+`CARGO_FEATURE_VULKAN=1` and `CARGO_NET_OFFLINE=true`, without `ORT_DYLIB_PATH`
+or CUDA enabled. This checks offline CPU ORT preparation with the Vulkan feature
+in a separate output directory, without modifying release artifacts; it is not
+a full Vulkan backend compilation.
+
+Local full-catalog/performance validation has no workflow entry point. On Linux
+x64/ARM64, first collect Cargo JSON messages:
+
+```sh
+cargo test --release --locked -p zg-engine --lib --no-run --message-format=json > cargo-messages.json
+```
+
+Parse the `compiler-artifact` record whose target name is `zg_engine` and
+`profile.test` is `true`; use its non-null `executable` as `--test-binary`:
+
+```sh
+python3 scripts/validate-onnxruntime-models.py \
+  --test-binary /absolute/path/to/zg_engine-test \
+  --cargo-messages cargo-messages.json --target x86_64-unknown-linux-gnu \
+  --model-cache /absolute/path/to/models --output /absolute/path/to/results
+```
+
+Use `aarch64-unknown-linux-gnu` for a native Linux ARM64 build. The script checks
+all six catalog ONNX graphs and compares official ORT 1.21/1.28 q4 CPU throughput;
+`--catalog-only` skips the comparison and `--cache-dir` overrides the runtime
+archive cache. The comparison uses one release binary, fixed CPU/batch/concurrency
+settings, warmup and alternating runtime order. It measures the native runtime
+change, not different Rust bindings or the former Pyke static build. Logs, raw
+rounds and machine details are written under `--output`, not CI job artifacts.

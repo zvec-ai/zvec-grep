@@ -775,7 +775,7 @@ so neither a second CMake build nor the fallback toolchain is needed.
 Publish CI requires prebuilt llama SDKs on all six targets, including the
 Windows ARM64 static CPU SDK. CUDA Rust CI also requires
 prebuilt mode instead of recompiling only for its T4 GPU. Linux publish builds
-run in Ubuntu 20.04 containers without a CUDA compiler. Runtime libraries,
+run in digest-pinned `manylinux_2_28` containers without a CUDA compiler. Runtime libraries,
 driver checks, link audits and real CPU/GPU inference gates remain required. Runtime staging
 reads the current Cargo invocation's `GGML_BACKENDS_DIR`, not the newest directory
 under `target/build`; only runtime libraries, not SDK import archives or bindings,
@@ -1023,13 +1023,14 @@ GGUF plugin and its dependencies before inference; this CI setup does not change
 the package's host CUDA runtime requirements.
 Publishing always requires GPU validation regardless of `cuda`. Candidate
 collection happens first, followed by parallel CPU and requested GPU validation.
-All selected platforms get the installed CLI/daemon checks; Linux/Windows x64
-also get the CPU model/fallback checks. A GPU failure does not block CPU checks
+All selected platforms get the installed CLI/daemon checks; Linux x64/ARM64
+and Windows x64 also get real GGUF/ONNX CPU model checks, with automatic CPU
+fallback checks on the CUDA-capable x64 packages. A GPU failure does not block CPU checks
 or candidate retention, but all required CPU/GPU checks must pass before npm
 publication. A downloadable candidate is not proof of runtime validation.
 CPU runners compile Rust and assemble the default CUDA-capable bundles using
-the pinned native SDK. Linux x64 and ARM64 use Ubuntu 20.04 containers on native
-runners, without nvcc. Windows needs the Rust/MSVC linker but
+the pinned native SDK. Linux x64 and ARM64 use digest-pinned `manylinux_2_28`
+containers on native runners, without nvcc. Windows needs the Rust/MSVC linker but
 does not install CUDA compilers for packaging. Ordinary PR CI
 does not compile CUDA packages. `rust-ci.yml` is the single entry point for
 workspace and real-model verification. Push/PR runs use ordinary runners on
@@ -1041,7 +1042,7 @@ For manual runs, `cuda_verify=true` enables `zg/cuda` from the first compilation
 requiring the matching prebuilt SDK, but compilation, workspace tests, all three
 CPU model checks and build-cache uploads still run on ordinary CPU runners.
 These Linux workspace tests use an Ubuntu 24.04 builder without GPU access or
-CUDA runtime libraries; the npm release build uses Ubuntu 20.04 as described above.
+CUDA runtime libraries; the npm release build uses `manylinux_2_28` as described above.
 Windows uses `windows-2022`, matching the GPU image's OS generation.
 Before the test harness copies any libraries, CUDA jobs run `cargo build --features cuda`
 and exercise the original `target/debug/zg` with GGUF/ONNX CPU index and query.
@@ -1067,14 +1068,19 @@ unchanged. Quality, default tests and CUDA builds have separate build caches.
 select `linux` or `windows` to limit test platforms. Optional `ref` selects the
 reviewed source; otherwise the workflow's selected commit is used. All jobs
 check out the same resolved SHA. This workflow does no npm packaging or publishing.
-Linux x64/ARM64 npm releases compile the CLI in Ubuntu 20.04 containers,
-reuse the pinned native SDKs, and audit the executable and bundled libraries
-against glibc 2.31. Downloaded npm artifacts are installed and exercised on
-Ubuntu 20.04, including CPU GGUF/ONNX inference for the x64 bundle without
-CUDA installed. Host runners may use newer Ubuntu images; they do not set the
-release binary's glibc baseline. CUDA acceleration still requires compatible
-NVIDIA drivers and CUDA/cuDNN host libraries. The separate ORT CI gate also
-audits official ORT 1.21 x64/ARM64 runtimes and loads them on Ubuntu 20.04.
+Linux x64/ARM64 npm releases compile the CLI in digest-pinned `manylinux_2_28`
+`2026.03.01-1` containers, reuse the pinned native SDKs, and audit the executable
+and bundled libraries against glibc 2.28. Downloaded npm artifacts are installed
+and exercised in clean AlmaLinux 8.10 (glibc 2.28) containers without CUDA.
+Both architectures load the installed ORT 1.21.0 library and verify API 21,
+then run real GGUF/ONNX CPU indexing and queries. ARM64 uses explicit CPU;
+x64 also verifies default automatic CPU fallback. Host runners may use newer
+Ubuntu images; they do not set the release binary's glibc baseline. CUDA
+acceleration still requires compatible NVIDIA drivers and CUDA/cuDNN host libraries.
+Linux release builds also execute the engine's ORT preparation build script with
+Vulkan enabled and Cargo offline in a network-disabled builder, using a verified
+CPU runtime cache and separate output. This is not a full Vulkan build. These
+checks live in the release workflow, not a separate ORT job in ordinary PR CI.
 Packaging selects Cargo/CMake parallelism from available CPUs and total memory
 with a conservative 3 GiB per-job budget, a minimum of 1 and a maximum of 8.
 The same limits are passed into the Linux builder. This is a resource

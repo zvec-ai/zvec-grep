@@ -392,6 +392,53 @@ test("Linux package CPU validation uses a clean glibc 2.28 image rather than the
   }
 });
 
+test("Linux artifact smoke loads packaged ORT and runs inference on both architectures", async (t) => {
+  const workflow = await readFile(new URL("../../.github/workflows/rust-publish.yml", import.meta.url), "utf8");
+  const step = workflow.split("      - name: Install and exercise Linux artifacts on glibc 2.28 without CUDA libraries\n")[1]
+    .split("      - name:")[0];
+  const script = step.slice(step.indexOf("              npm run release:artifact-smoke"), step.lastIndexOf("            '"));
+  const logs = await mkdtemp(join(tmpdir(), "zg-linux-cpu-smoke-"));
+  t.after(() => rm(logs, { recursive: true, force: true }));
+  for (const [target, mode] of [["linux-arm64-gnu", "--explicit-cpu"], ["linux-x64-gnu", "--cpu-only"]]) {
+    const result = spawnSync("bash", ["-euo", "pipefail", "-c", `
+      npm() { printf 'npm %s\\n' "$*"; }
+      python3() { printf 'python3 %s\\n' "$*"; }
+      ${script.replaceAll("/work/cpu-logs", logs)}
+    `], { env: { ...process.env, RELEASE_TARGET: target }, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /npm run release:artifact-smoke -- --expect-cpu/);
+    assert.match(result.stdout, /python3 scripts\/check-onnxruntime\.py .*\/lib\/libonnxruntime\.so\.1/);
+    assert.ok(result.stdout.includes(`python3 scripts/cuda/e2e.py ${mode} --bundle dist/npm/release/artifact-smoke/prefix/lib/node_modules/@zvec/zvec-grep`), result.stdout);
+    assert.doesNotMatch(result.stdout, /--backend|--cargo-binary/);
+    const failedLoad = spawnSync("bash", ["-euo", "pipefail", "-c", `
+      npm() { return 0; }
+      python3() {
+        if [[ "$1" == scripts/check-onnxruntime.py ]]; then return 73; fi
+        printf 'unexpected inference after failed ORT load\\n'
+      }
+      ${script.replaceAll("/work/cpu-logs", logs)}
+    `], { env: { ...process.env, RELEASE_TARGET: target }, encoding: "utf8" });
+    assert.equal(failedLoad.status, 73, failedLoad.stderr);
+    assert.doesNotMatch(failedLoad.stdout, /unexpected inference/);
+  }
+  assert.match(workflow, /name: Restore the real model cache\n\s+if:.*matrix\.target == 'linux-arm64-gnu'/);
+});
+
+test("Linux Vulkan ORT build-script validation uses a network-disabled container and separate outputs", async () => {
+  const workflow = await readFile(new URL("../../.github/workflows/rust-package-build.yml", import.meta.url), "utf8");
+  assert.match(workflow, /prepare-onnxruntime\.py --target "\$ORT_TARGET"/);
+  const step = workflow.split("      - name: Verify Linux Vulkan ORT preparation without network access\n")[1];
+  assert.ok(step, "the release build must retain Vulkan/offline validation");
+  const script = step.split("      - name:")[0];
+  assert.match(script, /if: runner\.os == 'Linux'/);
+  assert.match(script, /--network none/);
+  assert.match(script, /CARGO_MANIFEST_DIR="\$PWD\/crates\/zg-engine" rustc --edition=2024 crates\/zg-engine\/build\.rs/);
+  assert.match(script, /env -u ORT_DYLIB_PATH -u CARGO_FEATURE_CUDA CARGO_FEATURE_VULKAN=1 CARGO_NET_OFFLINE=true/);
+  assert.match(script, /OUT_DIR=\/work-target\/ort-vulkan\/debug\/build\/zg-engine\/out/);
+  assert.match(script, /ZG_ORT_CACHE_DIR=\/work-target\/ort-prebuilt/);
+  assert.match(script, /cmp \/work-target\/ort-cpu\/libonnxruntime\.so\.1 \/work-target\/ort-vulkan\/debug\/libonnxruntime\.so\.1/);
+});
+
 test("macOS ARM64 release validation uses a supported runner", async () => {
   const workflow = await readFile(new URL("../../.github/workflows/rust-publish.yml", import.meta.url), "utf8");
   assert.match(workflow, /target: 'darwin-arm64', runner: 'macos-15'/);

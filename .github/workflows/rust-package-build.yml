@@ -150,6 +150,7 @@ jobs:
             --env CARGO_BUILD_JOBS --env CMAKE_BUILD_PARALLEL_LEVEL \
             --env LLAMA_CPP_BUILD_MODE=prebuilt --env LLAMA_CPP_RUNTIME_CACHE=/work-target/llama-runtimes \
             --env RELEASE_TARGET=${{ inputs.target }} \
+            --env ORT_TARGET=${{ inputs.target == 'linux-arm64-gnu' && 'aarch64-unknown-linux-gnu' || 'x86_64-unknown-linux-gnu' }} \
             zvec-grep-release-builder bash -euo pipefail -c '
               test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.28"
               if [[ "$RELEASE_TARGET" == linux-x64-gnu ]]; then
@@ -157,6 +158,23 @@ jobs:
               else
                 cargo build --locked --release --package zg
               fi
+              python3 scripts/prepare-onnxruntime.py --target "$ORT_TARGET" \
+                --cache-dir /work-target/ort-prebuilt --destination /work-target/ort-cpu
+            '
+      - name: Verify Linux Vulkan ORT preparation without network access
+        if: runner.os == 'Linux'
+        working-directory: ${{ github.workspace }}
+        run: |
+          docker run --rm --network none --platform ${{ inputs.target == 'linux-arm64-gnu' && 'linux/arm64' || 'linux/amd64' }} \
+            --volume "${GITHUB_WORKSPACE}:/work:ro" \
+            --volume "${GITHUB_WORKSPACE}/rust/target:/work-target" \
+            --env ORT_TARGET=${{ inputs.target == 'linux-arm64-gnu' && 'aarch64-unknown-linux-gnu' || 'x86_64-unknown-linux-gnu' }} \
+            zvec-grep-release-builder bash -euo pipefail -c '
+              CARGO_MANIFEST_DIR="$PWD/crates/zg-engine" rustc --edition=2024 crates/zg-engine/build.rs -o /work-target/ort-build-script
+              env -u ORT_DYLIB_PATH -u CARGO_FEATURE_CUDA CARGO_FEATURE_VULKAN=1 CARGO_NET_OFFLINE=true \
+                TARGET="$ORT_TARGET" OUT_DIR=/work-target/ort-vulkan/debug/build/zg-engine/out \
+                ZG_ORT_CACHE_DIR=/work-target/ort-prebuilt /work-target/ort-build-script
+              cmp /work-target/ort-cpu/libonnxruntime.so.1 /work-target/ort-vulkan/debug/libonnxruntime.so.1
             '
       - name: Audit the Linux prebuilt CUDA 13 and CUDA 12 bundle
         if: inputs.target == 'linux-x64-gnu'
