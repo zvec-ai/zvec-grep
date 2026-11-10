@@ -24,9 +24,7 @@ use std::{
     time::Duration,
 };
 
-pub use controller::{
-    DaemonInstanceRecord, DaemonStatus, start_server, stop_server, stop_server_with_token,
-};
+pub use controller::{DaemonStatus, server_status, start_server, stop_server_with_token};
 pub use stdio::run_stdio_bridge;
 use thiserror::Error;
 use zg_engine::ErrorReport;
@@ -39,7 +37,6 @@ const MAX_TIMER_DELAY_SECONDS: u64 = 2_147_483_647 / 1_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ListenAddress {
-    value: String,
     socket: SocketAddr,
 }
 
@@ -63,7 +60,7 @@ impl Default for ListenAddress {
 
 impl fmt::Display for ListenAddress {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.value)
+        write!(formatter, "{}", self.socket)
     }
 }
 
@@ -82,10 +79,7 @@ impl FromStr for ListenAddress {
         if !socket.ip().is_loopback() || socket.port() == 0 {
             return Err(DaemonError::InvalidListen(value.to_owned()));
         }
-        Ok(Self {
-            value: socket.to_string(),
-            socket,
-        })
+        Ok(Self { socket })
     }
 }
 
@@ -121,6 +115,20 @@ pub enum DaemonError {
     #[error("zvec-grep server is already running with PID {pid}")]
     AlreadyRunning { pid: u32 },
     #[error(
+        "legacy zvec-grep daemon (PID {pid}) has no daemonProtocolVersion and cannot serve this client; run `zg --server on` with the same --home to replace it"
+    )]
+    LegacyDaemon { pid: u32 },
+    #[error(
+        "zvec-grep daemon (PID {pid}) uses daemonProtocolVersion {actual}, but this client requires {expected}; use a compatible client or explicitly stop the daemon before restarting"
+    )]
+    ProtocolMismatch {
+        pid: u32,
+        actual: u32,
+        expected: u32,
+    },
+    #[error("server shutdown request failed with HTTP {status}; daemon was not terminated")]
+    ShutdownRejected { status: u16 },
+    #[error(
         "zvec-grep server is already running with MCP toolset {active:?}; run `zg --server off` before changing toolsets"
     )]
     ToolsetMismatch { active: String },
@@ -134,6 +142,12 @@ pub enum DaemonError {
     RefuseCurrentProcess,
     #[error("zvec-grep server instance changed while stopping; refusing to signal PID {pid}")]
     InstanceChanged { pid: u32 },
+    #[error(
+        "cannot verify daemon process identity for PID {pid}: the OS start time does not match the instance record; refusing to stop the process"
+    )]
+    ProcessIdentityMismatch { pid: u32 },
+    #[error("cannot identify a unique healthy daemon at {address}; no shutdown request was sent")]
+    UnverifiedEndpoint { address: String },
     #[error("invalid daemon instance record at {0}")]
     InvalidRecord(PathBuf),
     #[error(
@@ -144,8 +158,6 @@ pub enum DaemonError {
     Io(#[from] std::io::Error),
     #[error("daemon state serialization failed: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("daemon HTTP server failed: {0}")]
-    Http(#[from] axum::Error),
     #[error("daemon MCP stdio bridge failed: {0}")]
     McpBridge(String),
     #[error("resident daemon is not ready")]
@@ -176,16 +188,6 @@ pub fn resolve_home(explicit: Option<PathBuf>) -> Result<PathBuf, DaemonError> {
         .ok_or(DaemonError::MissingHome)
 }
 
-/// Returns current daemon status for a home directory.
-///
-/// # Errors
-///
-/// Returns an I/O error when the instance record or health endpoint cannot be
-/// inspected safely.
-pub async fn server_status(home: &std::path::Path) -> Result<DaemonStatus, DaemonError> {
-    controller::server_status(home).await
-}
-
 /// Executes one typed engine command through the resident daemon's local
 /// administration endpoint. The command and reply are the same DTOs used by
 /// direct mode, which keeps CLI behavior independent of the MCP tool profile.
@@ -198,18 +200,7 @@ pub async fn execute_command(
     home: &std::path::Path,
     command: zg_daemon_protocol::DaemonCommand,
 ) -> Result<zg_daemon_protocol::DaemonReply, DaemonError> {
-    let status = server_status(home).await?;
-    if !status.ready {
-        return Err(DaemonError::NotReady);
-    }
-    let mut url = status.server_url.ok_or(DaemonError::NotReady)?;
-    if let Some(prefix) = url.strip_suffix("/mcp") {
-        url = format!("{prefix}/admin/execute");
-    } else {
-        return Err(DaemonError::McpBridge(
-            "daemon published an invalid server URL".to_owned(),
-        ));
-    }
+    let url = admin_url(home, "execute").await?;
     let body = serde_json::to_vec(&command)?;
     let reply = http_client::post_json(&url, body).await?;
     match serde_json::from_slice::<zg_daemon_protocol::ExecutionResult>(&reply)? {
@@ -229,18 +220,12 @@ pub async fn index_with_progress(
     request: zg_engine::api::index::IndexOptions,
     reporter: &zg_engine::api::index::progress::IndexProgressReporter,
 ) -> Result<zg_engine::api::index::IndexResult, DaemonError> {
-    let status = server_status(home).await?;
-    if !status.ready {
-        return Err(DaemonError::NotReady);
-    }
-    let url = status.server_url.ok_or(DaemonError::NotReady)?;
-    let prefix = url
-        .strip_suffix("/mcp")
-        .ok_or_else(|| DaemonError::McpBridge("daemon published an invalid server URL".into()))?;
+    let url = admin_url(home, "index").await?;
     let result = http_client::post_index_stream(
-        &format!("{prefix}/admin/index"),
+        &url,
         serde_json::to_vec(&request)?,
         reporter,
+        request.signal.as_ref(),
     )
     .await?;
     match result {
@@ -255,6 +240,18 @@ pub async fn index_with_progress(
             retryable: error.retryable,
         }),
     }
+}
+
+async fn admin_url(home: &Path, endpoint: &str) -> Result<String, DaemonError> {
+    let status = server_status(home).await?;
+    if !status.ready {
+        return Err(DaemonError::NotReady);
+    }
+    let url = status.server_url.ok_or(DaemonError::NotReady)?;
+    let prefix = url
+        .strip_suffix("/mcp")
+        .ok_or_else(|| DaemonError::McpBridge("daemon published an invalid server URL".into()))?;
+    Ok(format!("{prefix}/admin/{endpoint}"))
 }
 
 fn configured_watcher_idle_timeout() -> Result<Option<Duration>, DaemonError> {
@@ -290,17 +287,9 @@ fn configured_watcher_idle_timeout_value(
     Ok((seconds != 0).then(|| Duration::from_secs(seconds)))
 }
 
-/// Runs the resident HTTP daemon until local shutdown or an OS termination
-/// signal, then releases its instance record.
-///
-/// # Errors
-///
-/// Returns lifecycle, bind, state-file, or HTTP server errors.
-pub async fn run_server(config: ServerConfig, engine: Arc<ZvecGrep>) -> Result<(), DaemonError> {
-    runtime::run_server(config, engine, |_| Ok(())).await
-}
-
 /// Runs the daemon and initializes its logging after acquiring the instance record.
+/// The daemon runs until local shutdown or an OS termination signal, then
+/// releases its instance record.
 ///
 /// # Errors
 ///

@@ -140,6 +140,40 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         self.assertIn("python -m zg_bench.ci.secret_scan", workflow_text)
         self.assertNotIn("python - <<'PY'", workflow_text)
 
+    def test_reruns_validate_and_select_task_reports_before_aggregation(self) -> None:
+        pair = self.workflow["jobs"]["run-pair"]["steps"]
+        stamp = next(
+            step for step in pair if "task_reports stamp" in step.get("run", "")
+        )
+        aggregate = self.workflow["jobs"]["aggregate-report"]["steps"]
+        download = next(
+            step for step in aggregate if step.get("with", {}).get("pattern")
+        )
+        self.assertEqual(
+            download["with"]["pattern"], "swe-qa-task-report-*-${{ github.run_id }}-*"
+        )
+        self.assertNotEqual(download["with"].get("merge-multiple"), "true")
+        combine = next(
+            step
+            for step in aggregate
+            if step.get("name") == "Combine reports without re-judging"
+        )
+        self.assertEqual(stamp["env"], combine["env"])
+        self.assertIn("github.workflow_sha", stamp["env"]["BENCH_HARNESS_COMMIT"])
+        self.assertIn(
+            "needs.package-candidate.outputs.candidate-commit",
+            stamp["env"]["BENCH_CANDIDATE_COMMIT"],
+        )
+        self.assertIn("hashFiles(", stamp["env"]["BENCH_PROTOCOL_HASH"])
+        self.assertLess(
+            combine["run"].index("task_reports select"),
+            combine["run"].index("swe_qa aggregate"),
+        )
+        self.assertIn(
+            '--reports-root "$RUNNER_TEMP/selected-task-reports"', combine["run"]
+        )
+        self.assertIn("task-report-selection.json", combine["run"])
+
 
 class OfflineWorkflowTests(unittest.TestCase):
     @classmethod

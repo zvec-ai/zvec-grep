@@ -1,8 +1,8 @@
-//! Search projections: one zvec collection per embedding model, with FTS and vectors.
+//! Search projections: one zvec collection per embedding model, with FTS and FP16 vectors.
 
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::Path,
 };
 
@@ -18,8 +18,8 @@ use super::{
         StorageSearchPath,
     },
     zvec::{
-        corrupt, doc_key, fetch_map, native, open_collection, scalar, string_field, u32_field,
-        write_docs,
+        collect_entity_ids, corrupt, doc_key, fetch_map, native, open_collection, quote, scalar,
+        string_field, u32_field, write_docs,
     },
 };
 use crate::{
@@ -27,7 +27,7 @@ use crate::{
     domain::{
         CodeMetadata, DirectoryId, Entity, EntityFragment, EntityId, EntityMetadata, FTS_CONFIG,
         FileId, FileRecord, FragmentId, IndexField, SourcePath,
-        model::{EmbeddingModelInfo, Metric},
+        model::{EmbeddingMetric, EmbeddingModelInfo},
     },
     utils::sha256_hex_parts,
 };
@@ -46,7 +46,7 @@ impl Fragments {
     ) -> EngineResult<Self> {
         let mut indexes = BTreeMap::new();
         for embedding in embeddings {
-            let dimension = u32::try_from(embedding.dimension)
+            let dimension = u32::try_from(embedding.dimension())
                 .ok()
                 .filter(|value| (1..=20_000).contains(value))
                 .ok_or_else(|| {
@@ -54,10 +54,10 @@ impl Fragments {
                         "storage embedding dimension must be between 1 and 20,000",
                     )
                 })?;
-            let metric = match embedding.metric {
-                Metric::Cosine => MetricType::Cosine,
-                Metric::DotProduct => MetricType::Ip,
-                Metric::Euclidean => MetricType::L2,
+            let metric = match embedding.metric() {
+                EmbeddingMetric::Cosine => MetricType::Cosine,
+                EmbeddingMetric::DotProduct => MetricType::Ip,
+                EmbeddingMetric::Euclidean => MetricType::L2,
             };
             let name = fragment_collection_name(embedding);
             let collection = open_collection(
@@ -66,7 +66,7 @@ impl Fragments {
                 read_only,
             )?;
             if indexes
-                .insert(embedding.model.reference(), collection)
+                .insert(embedding.model().reference(), collection)
                 .is_some()
             {
                 return Err(EngineError::invalid_argument("duplicate embedding model"));
@@ -86,8 +86,7 @@ impl Fragments {
             .iter()
             .map(|entity| {
                 let fields = entity
-                    .metadata
-                    .as_ref()
+                    .metadata()
                     .map(|metadata| {
                         let value = serde_json::to_value(metadata)
                             .map_err(|error| corrupt(format!("encode entity metadata: {error}")))?;
@@ -95,12 +94,12 @@ impl Fragments {
                     })
                     .transpose()?
                     .unwrap_or_default();
-                Ok((&entity.id, (entity, fields)))
+                Ok((entity.id(), (entity, fields)))
             })
             .collect::<EngineResult<HashMap<_, _>>>()?;
         let fragments = entities
             .iter()
-            .flat_map(|entity| &entity.fragments)
+            .flat_map(Entity::fragments)
             .map(|fragment| (&fragment.id, fragment))
             .collect::<HashMap<_, _>>();
         let mut projections: BTreeMap<String, Vec<Doc>> = BTreeMap::new();
@@ -117,7 +116,7 @@ impl Fragments {
                 "encode searchable text",
             )?;
             native(
-                doc.add_vector_f32("embedding", &entry.vector),
+                zg_zvec_fp16::add_embedding(&mut doc, "embedding", &entry.vector),
                 "encode embedding vector",
             )?;
             projections
@@ -161,6 +160,23 @@ impl Fragments {
     pub(super) fn flush(&self) -> EngineResult<()> {
         for index in self.indexes.values() {
             native(index.flush(), "flush fragment collection")?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn needs_optimize(&self) -> EngineResult<bool> {
+        for index in self.indexes.values() {
+            let stats = native(index.stats(), "inspect fragment indexes")?;
+            if stats.indexes.iter().any(|stat| stat.completeness < 1.0) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub(super) fn optimize(&self) -> EngineResult<()> {
+        for index in self.indexes.values() {
+            native(index.optimize(), "optimize fragment collection")?;
         }
         Ok(())
     }
@@ -213,6 +229,26 @@ impl Fragments {
         Ok(hits)
     }
 
+    /// Collect all matching entities across model tables, independent of fragment count.
+    /// The existing hashed symbol-name projection preserves exact case and literals.
+    pub(super) fn find_symbol_entity_ids(
+        &self,
+        name: &str,
+        path_filter: Option<&str>,
+    ) -> EngineResult<Vec<EntityId>> {
+        let mut filter = metadata_in_filter(CodeMetadata::SYMBOL_NAME, std::iter::once(name));
+        if let Some(path_filter) = path_filter {
+            filter.push_str(" AND (");
+            filter.push_str(path_filter);
+            filter.push(')');
+        }
+        let mut ids = BTreeSet::new();
+        for index in self.indexes.values() {
+            ids.extend(collect_entity_ids(index, &filter, |_| Ok(()))?);
+        }
+        Ok(ids.into_iter().map(EntityId::from_string).collect())
+    }
+
     pub(super) fn search_vector(
         &self,
         model: &str,
@@ -225,7 +261,7 @@ impl Fragments {
             return Ok(Vec::new());
         }
         let mut request = native(
-            SearchQuery::new("embedding", vector, top_k(limit)?),
+            zg_zvec_fp16::embedding_query("embedding", vector, top_k(limit)?),
             "create vector query",
         )?;
         configure_query(
@@ -257,15 +293,15 @@ fn primary_key(namespace: &str, value: &str) -> String {
 
 pub(super) fn fragment_collection_name(embedding: &EmbeddingModelInfo) -> String {
     format!(
-        "fragments_{}",
+        "fragments_{:.4}",
         primary_key(
             "space",
             &format!(
                 "{}\0{}\0{}\0{:?}",
-                embedding.model.provider,
-                embedding.model.name,
-                embedding.dimension,
-                embedding.metric
+                embedding.model().provider(),
+                embedding.model().name(),
+                embedding.dimension(),
+                embedding.metric()
             )
         )
     )
@@ -308,12 +344,12 @@ fn fragments_schema(dimension: u32, metric: MetricType) -> EngineResult<Collecti
     native(schema.add_field(&text), "add full-text field")?;
 
     let mut vector = native(
-        FieldSchema::new("embedding", DataType::VectorFp32, false, dimension),
+        FieldSchema::new("embedding", DataType::VectorFp16, false, dimension),
         "define vector field",
     )?;
     native(
         vector.set_index_params(&native(
-            IndexParams::hnsw(metric, 16, 200),
+            IndexParams::hnsw(metric, 50, 500),
             "define vector index",
         )?),
         "attach vector index",
@@ -326,11 +362,11 @@ fn identity_doc(entity: &Entity, fragment: &EntityFragment) -> EngineResult<Doc>
     let mut doc = native(Doc::new(), "create fragment record")?;
     doc.set_pk(fragment.id.as_str());
     native(
-        doc.add_u32("file_id", entity.file_id.get()),
+        doc.add_u32("file_id", entity.file_id().get()),
         "encode source identity",
     )?;
     native(
-        doc.add_string("entity_id", entity.id.as_str()),
+        doc.add_string("entity_id", entity.id().as_str()),
         "encode entity identity",
     )?;
     native(
@@ -578,10 +614,6 @@ pub(super) fn empty_filter(filter: Option<&StorageSearchFilter>) -> bool {
     })
 }
 
-fn quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "\\'"))
-}
-
 fn top_k(limit: usize) -> EngineResult<i32> {
     if limit > MAX_TOP_K {
         return Err(EngineError::invalid_argument(format!(
@@ -625,9 +657,9 @@ pub(super) fn validate_projections(
         .iter()
         .flat_map(|entity| {
             entity
-                .fragments
+                .fragments()
                 .iter()
-                .map(move |fragment| (&fragment.id, &entity.id))
+                .map(move |fragment| (&fragment.id, entity.id()))
         })
         .collect::<HashMap<_, _>>();
     let mut seen = HashSet::new();

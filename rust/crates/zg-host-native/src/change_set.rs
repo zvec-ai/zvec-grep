@@ -74,31 +74,29 @@ impl ChangeSet {
     }
 
     pub fn take_batch(&mut self) -> WorkspaceChangeBatch {
-        self.collapse();
-        let batch = if self.full_rescan {
+        let pending = std::mem::replace(self, Self::new(self.max_changed_paths));
+        if pending.full_rescan {
             WorkspaceChangeBatch {
                 changes: vec![WorkspaceChange::Rescan],
             }
         } else {
-            let mut changes = Vec::with_capacity(self.len());
+            let mut changes = Vec::with_capacity(pending.len());
             changes.extend(
-                self.deleted_prefixes
-                    .iter()
-                    .cloned()
+                pending
+                    .deleted_prefixes
+                    .into_iter()
                     .map(WorkspaceChange::DeletePrefix),
             );
             changes.extend(
-                self.rescan_directories
-                    .iter()
-                    .cloned()
+                pending
+                    .rescan_directories
+                    .into_iter()
                     .map(WorkspaceChange::RescanDirectory),
             );
-            changes.extend(self.deletes.iter().cloned().map(WorkspaceChange::Delete));
-            changes.extend(self.upserts.iter().cloned().map(WorkspaceChange::Upsert));
+            changes.extend(pending.deletes.into_iter().map(WorkspaceChange::Delete));
+            changes.extend(pending.upserts.into_iter().map(WorkspaceChange::Upsert));
             WorkspaceChangeBatch { changes }
-        };
-        *self = Self::new(self.max_changed_paths);
-        batch
+        }
     }
 
     fn len(&self) -> usize {
@@ -130,26 +128,7 @@ impl ChangeSet {
             .retain(|candidate| !candidate.starts_with(path));
     }
 
-    fn collapse(&mut self) {
-        collapse_set(&mut self.rescan_directories);
-        collapse_set(&mut self.deleted_prefixes);
-        self.upserts.retain(|path| {
-            !has_ancestor(&self.rescan_directories, path)
-                && !has_ancestor(&self.deleted_prefixes, path)
-        });
-        self.deletes.retain(|path| {
-            !has_ancestor(&self.rescan_directories, path)
-                && !has_ancestor(&self.deleted_prefixes, path)
-        });
-        self.rescan_directories
-            .retain(|path| !has_ancestor(&self.deleted_prefixes, path));
-    }
-
     fn enforce_path_budget(&mut self) {
-        self.collapse();
-        if self.len() < self.max_changed_paths {
-            return;
-        }
         let leaf_scopes: Vec<_> = self
             .upserts
             .iter()
@@ -163,7 +142,7 @@ impl ChangeSet {
             self.deleted_prefixes.clear();
             self.rescan_directories
                 .extend(leaf_scopes.iter().map(|path| parent_scope(path)));
-            self.collapse();
+            collapse_set(&mut self.rescan_directories);
         }
         while self.len() >= self.max_changed_paths {
             let previous_size = self.len();
@@ -172,7 +151,7 @@ impl ChangeSet {
                 .iter()
                 .map(|path| parent_scope(path))
                 .collect();
-            self.collapse();
+            collapse_set(&mut self.rescan_directories);
             if self.len() >= previous_size {
                 break;
             }

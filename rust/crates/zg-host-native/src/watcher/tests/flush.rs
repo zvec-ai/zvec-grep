@@ -50,6 +50,7 @@ impl Fixture {
                 ..NativeWatcherConfig::default()
             },
             watcher,
+            registration_error: (!healthy).then(|| "watcher unavailable".to_owned()),
             raw_sender: raw.clone(),
             raw_receiver,
             overflowed: overflowed.clone(),
@@ -70,6 +71,12 @@ impl Fixture {
     }
 
     async fn flush(&self, reconcile: bool) {
+        self.request_flush(reconcile)
+            .await
+            .expect("successful flush");
+    }
+
+    async fn request_flush(&self, reconcile: bool) -> Result<(), HostError> {
         let (acknowledge, acknowledged) = oneshot::channel();
         self.flush
             .send(FlushRequest {
@@ -81,7 +88,7 @@ impl Fixture {
         tokio::time::timeout(Duration::from_secs(2), acknowledged)
             .await
             .expect("flush completes")
-            .expect("acknowledged");
+            .expect("acknowledged")
     }
 
     async fn close(self) {
@@ -164,7 +171,10 @@ async fn pending_flush_preserves_overflow_and_backend_failure_reconciliation() {
     );
     fixture.close().await;
     let mut fixture = Fixture::new(false);
-    fixture.flush(false).await;
+    fixture
+        .request_flush(false)
+        .await
+        .expect_err("missing backend must fail the barrier");
     assert_eq!(
         fixture
             .batches
@@ -173,5 +183,28 @@ async fn pending_flush_preserves_overflow_and_backend_failure_reconciliation() {
             .changes,
         [WorkspaceChange::Rescan]
     );
+    fixture.close().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reconciliation_barrier_reports_registration_failure_until_recovery() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new(true);
+    let child = fixture.root.join("restricted");
+    fs::create_dir(&child).expect("directory");
+    let permissions = fs::metadata(&child).expect("metadata").permissions();
+    fs::set_permissions(&child, fs::Permissions::from_mode(0o111)).expect("restrict access");
+    if fs::read_dir(&child).is_ok() {
+        fs::set_permissions(&child, permissions).expect("restore permissions");
+        fixture.close().await;
+        return;
+    }
+    let result = fixture.request_flush(true).await;
+    fs::set_permissions(&child, permissions).expect("restore permissions");
+    let error = result.expect_err("failed reconciliation must not acknowledge success");
+    assert!(error.to_string().contains("restricted"));
+    fixture.flush(true).await;
     fixture.close().await;
 }

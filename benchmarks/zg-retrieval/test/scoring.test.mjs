@@ -80,6 +80,129 @@ const routeItems = (routes) =>
     ),
   ).items;
 
+const compactResponse = (body, freshness = "fresh") => ({
+  content: [{ type: "text", text: `freshness: ${freshness}\n${body}` }],
+});
+
+test("compact MCP output preserves ranks and visible source without inventing route evidence", () => {
+  const reply = compactResponse(
+    [
+      "#1 pkg/main.py:20-40",
+      "symbol: [function] wanted scope: Source",
+      "  20: def wanted():",
+      "  21:     return True",
+      "",
+      "#2 notes/design.md:file",
+      "heading: Design",
+      "heading_level: 1",
+      "scope: Search / Design",
+      "  # Design",
+      "  ",
+      "  Retain local evidence.",
+      "",
+    ].join("\n"),
+  );
+  const parsed = parseVisibleResponse(reply);
+  assert.equal(parsed.freshness, "fresh");
+  assert.deepEqual(
+    parsed.items.map((item) => item.rank),
+    [1, 2],
+  );
+  assert.deepEqual(
+    parsed.items.map((item) => item.matched_by),
+    [null, null],
+  );
+  assert.deepEqual(parsed.items[0].source_lines, [
+    { line: 20, text: "def wanted():" },
+    { line: 21, text: "    return True" },
+  ]);
+  assert.deepEqual(parsed.items[1].unnumbered_source, [
+    "# Design",
+    "",
+    "Retain local evidence.",
+  ]);
+  assert.deepEqual(parsed.items[0].outline, []);
+  for (const mode of ["hybrid", "fts", "vector"])
+    assert.doesNotThrow(() => validateSearchRoute(parsed.items, mode));
+  const score = scoreResponse(reply, gold());
+  assert.equal(score.status, "scored");
+  assert.equal(
+    scoreFileRetrieval(score.items, [{ path: "pkg/main.py" }]).hit_at_1,
+    1,
+  );
+});
+
+test("compact empty results and global CLI diagnostics remain explicit public evidence", () => {
+  for (const label of ["No matches.", "No searchable files."])
+    for (const diagnostics of [
+      "",
+      "status: possibly_stale\n",
+      "status: possibly_stale\nresults: served_from_current_index\nbackground_refresh: running (2/3)\n",
+    ]) {
+      const parsed = parseVisibleResponse(
+        compactResponse(
+          `${label}\n${diagnostics}`,
+          diagnostics ? "possibly_stale" : "fresh",
+        ),
+      );
+      assert.deepEqual(parsed.items, []);
+      assert.equal(parsed.freshness, diagnostics ? "possibly_stale" : "fresh");
+      assert.equal(
+        parsed.empty_reason,
+        label === "No matches." ? "no_matches" : "no_searchable_files",
+      );
+    }
+  const parsed = parseVisibleResponse(
+    compactResponse(
+      "#1 pkg/main.py:20-40\nstatus: possibly_stale\n  20: def wanted():\n  …\nstatus: possibly_stale\nresults: served_from_current_index\nbackground_refresh: idle\n",
+      "possibly_stale",
+    ),
+  );
+  assert.equal(parsed.freshness, "possibly_stale");
+  assert.equal(parsed.items[0].metadata[0], "status: possibly_stale");
+  assert.deepEqual(parsed.items[0].source_lines, [
+    { line: 20, text: "def wanted():" },
+  ]);
+});
+
+test("compact output keeps the required freshness header and accepts leading global diagnostics", () => {
+  for (const body of [
+    "No matches.\n",
+    "#1 pkg/main.py:20-40\n  20: def wanted():\n",
+  ]) {
+    assert.throws(
+      () => parseVisibleResponse({ content: [{ type: "text", text: body }] }),
+      /Missing public MCP freshness header/,
+    );
+    const parsed = parseVisibleResponse(
+      compactResponse(
+        `status: possibly_stale\nresults: served_from_current_index\nbackground_refresh: running (2/3)\n\n${body}`,
+        "possibly_stale",
+      ),
+    );
+    assert.equal(parsed.freshness, "possibly_stale");
+    assert.equal(parsed.items.length, body.startsWith("#1") ? 1 : 0);
+  }
+});
+
+test("compact framing rejects malformed ranks, source coordinates and diagnostics", () => {
+  for (const body of [
+    "",
+    "#2 pkg/main.py:20-40\n  20: def wanted():\n",
+    "#1 ../main.py:20-40\n  20: def wanted():\n",
+    "#1 pkg/main.py:20-40\n  19: def wanted():\n",
+    "#1 pkg/main.py:20-40\n  20: def wanted():\n  20: duplicate\n",
+    "#1 pkg/main.py:20-40\nunknown renderer line\n",
+    "No matches.\nstatus: possibly_stale\nresults: served_from_current_index\n",
+    "No matches.\nbackground_refresh: running\n",
+    "status: possibly_stale\nresults: served_from_current_index\n\nNo matches.\n",
+  ])
+    assert.throws(
+      () => parseVisibleResponse(compactResponse(body)),
+      VisibleFormatError,
+    );
+});
+
 for (const [mode, routes] of [
   ["hybrid", ["fts", "vector", "fts+vector"]],
   ["fts", ["fts", "fts"]],

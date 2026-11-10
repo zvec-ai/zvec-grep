@@ -19,8 +19,8 @@ use crate::domain::{
 
 const DEFAULT_MODEL_REFERENCE: &str = "local/potion-code-16m-v2";
 
-/// Manual, release-mode comparison harness shared with
-/// `benchmarks/model-layer/main.mjs`.
+/// Manual, release-mode throughput and RSS harness used by
+/// `scripts/validate-onnxruntime-models.py`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "manual model-layer throughput and RSS benchmark"]
 async fn model_layer_throughput() {
@@ -59,7 +59,7 @@ async fn model_layer_throughput() {
     let manager = ModelRuntimeManager::new();
     let model = create_benchmark_model(&manager, &model_reference, cache, device, concurrency);
     assert!(
-        batch_size <= model.info().max_batch_size,
+        batch_size <= model.info().model().max_batch_size(),
         "batch size exceeds model limit"
     );
     let batch = benchmark_batch(batch_size);

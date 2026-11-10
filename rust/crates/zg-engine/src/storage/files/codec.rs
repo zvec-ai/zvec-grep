@@ -2,18 +2,14 @@ use std::borrow::Cow;
 
 use serde::{Deserialize, Serialize};
 
-use super::super::{
-    path::PathRecord,
-    record::{decode, encode, invalid_record},
-};
+use super::super::record::{decode, encode, invalid_record};
 use crate::{
     EngineResult,
     domain::{FileId, FileIndexStatus, FileRecord, FileSnapshot, SourcePath},
 };
 
 pub(super) fn encode_file(file: &FileRecord) -> EngineResult<String> {
-    file.validate()?;
-    encode(FilePayload::from_file(file)?, "source file")
+    encode(FilePayload::from_file(file), "source file")
 }
 
 pub(super) fn decode_file(json: &str) -> EngineResult<FileRecord> {
@@ -26,7 +22,7 @@ pub(super) fn decode_file(json: &str) -> EngineResult<FileRecord> {
 #[derive(Serialize, Deserialize)]
 struct FilePayload<'a> {
     id: u32,
-    relative_path: PathRecord,
+    relative_path: Cow<'a, SourcePath>,
     snapshot: SnapshotRecord<'a>,
     index_status: IndexStatusRecord<'a>,
 }
@@ -91,32 +87,30 @@ impl From<IndexStatusRecord<'_>> for FileIndexStatus {
 }
 
 impl<'a> FilePayload<'a> {
-    fn from_file(file: &'a FileRecord) -> EngineResult<Self> {
-        Ok(Self {
-            index_status: (&file.index_status).into(),
-            id: file.id.get(),
-            relative_path: PathRecord::from_path(&file.relative_path)?,
+    fn from_file(file: &'a FileRecord) -> Self {
+        Self {
+            index_status: file.index_status().into(),
+            id: file.id().get(),
+            relative_path: Cow::Borrowed(file.relative_path()),
             snapshot: SnapshotRecord {
-                size_bytes: file.snapshot.size_bytes,
-                modified_epoch_ms: file.snapshot.modified_epoch_ms,
-                content_hash: file.snapshot.content_hash.as_deref().map(Cow::Borrowed),
+                size_bytes: file.snapshot().size_bytes,
+                modified_epoch_ms: file.snapshot().modified_epoch_ms,
+                content_hash: file.snapshot().content_hash.as_deref().map(Cow::Borrowed),
             },
-        })
+        }
     }
 
     fn into_file(self) -> EngineResult<FileRecord> {
-        let file = FileRecord {
-            index_status: self.index_status.into(),
-            id: FileId::new(self.id),
-            relative_path: SourcePath::new(self.relative_path.into_path()?)?,
-            snapshot: FileSnapshot {
+        FileRecord::new(
+            FileId::new(self.id),
+            self.relative_path.into_owned(),
+            FileSnapshot {
                 size_bytes: self.snapshot.size_bytes,
                 modified_epoch_ms: self.snapshot.modified_epoch_ms,
                 content_hash: self.snapshot.content_hash.map(Cow::into_owned),
             },
-        };
-        file.validate()?;
-        Ok(file)
+            self.index_status.into(),
+        )
     }
 }
 
@@ -126,16 +120,17 @@ mod tests {
     use serde_json::{Value, json};
 
     fn file() -> FileRecord {
-        FileRecord {
-            index_status: FileIndexStatus::NotIndexed,
-            id: FileId::new(1),
-            relative_path: SourcePath::new("nested/tsconfig.json").expect("source path"),
-            snapshot: FileSnapshot {
+        FileRecord::new(
+            FileId::new(1),
+            SourcePath::new("nested/tsconfig.json").expect("source path"),
+            FileSnapshot {
                 size_bytes: 123,
                 modified_epoch_ms: Some(456),
                 content_hash: Some("content-hash".into()),
             },
-        }
+            FileIndexStatus::NotIndexed,
+        )
+        .expect("file record")
     }
 
     #[test]
@@ -147,7 +142,7 @@ mod tests {
             record,
             json!({
                 "id": 1, "index_status": {"kind": "not_indexed"},
-                "relative_path": {"encoding": "utf8", "value": "nested/tsconfig.json"},
+                "relative_path": {"components": ["nested", "tsconfig.json"]},
                 "snapshot": {"size_bytes": 123, "modified_epoch_ms": 456, "content_hash": "content-hash"},
             })
         );
@@ -155,17 +150,28 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStringExt;
-            source.relative_path =
+            source = FileRecord::new(
+                source.id(),
                 SourcePath::new(std::ffi::OsString::from_vec(b"file-\xff.rs".to_vec()))
-                    .expect("source path");
+                    .expect("source path"),
+                source.snapshot().clone(),
+                source.index_status().clone(),
+            )
+            .expect("file record");
         }
         #[cfg(windows)]
         {
             use std::os::windows::ffi::OsStringExt;
-            source.relative_path = SourcePath::new(std::ffi::OsString::from_wide(&[
-                0x0066, 0xd800, 0x002e, 0x0072, 0x0073,
-            ]))
-            .expect("source path");
+            source = FileRecord::new(
+                source.id(),
+                SourcePath::new(std::ffi::OsString::from_wide(&[
+                    0x0066, 0xd800, 0x002e, 0x0072, 0x0073,
+                ]))
+                .expect("source path"),
+                source.snapshot().clone(),
+                source.index_status().clone(),
+            )
+            .expect("file record");
         }
         assert_eq!(
             decode_file(&encode_file(&source).expect("encode native path"))
@@ -177,8 +183,14 @@ mod tests {
     #[test]
     fn source_identities_round_trip_the_full_u32_range() {
         for id in [0, u32::MAX] {
-            let mut source = file();
-            source.id = FileId::new(id);
+            let source = file();
+            let source = FileRecord::new(
+                FileId::new(id),
+                source.relative_path().clone(),
+                source.snapshot().clone(),
+                source.index_status().clone(),
+            )
+            .expect("file record");
             assert_eq!(
                 decode_file(&encode_file(&source).expect("encode source")).expect("decode source"),
                 source
@@ -214,7 +226,7 @@ mod tests {
                 error: "extraction failed".into(),
             },
         ] {
-            file.index_status = status;
+            file.set_index_status(status).expect("file status");
             assert_eq!(
                 decode_file(&encode_file(&file).expect("encode status")).expect("decode status"),
                 file

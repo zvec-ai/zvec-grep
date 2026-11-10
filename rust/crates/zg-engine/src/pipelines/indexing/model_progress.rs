@@ -17,11 +17,11 @@ pub(super) fn for_index(reporter: IndexProgressReporter) -> ModelProgressReporte
 
 fn index_progress(progress: ModelProgress, concurrency: usize) -> IndexProgress {
     let (stage, model, downloaded_bytes, total_bytes, message) = match progress {
-        ModelProgress::Preparing { model } => {
+        ModelProgress::Preparing { model_ref: model } => {
             (IndexEmbeddingStage::Preparing, model, None, None, None)
         }
         ModelProgress::Downloading {
-            model,
+            model_ref: model,
             downloaded_bytes,
             total_bytes,
         } => (
@@ -31,14 +31,19 @@ fn index_progress(progress: ModelProgress, concurrency: usize) -> IndexProgress 
             total_bytes,
             None,
         ),
-        ModelProgress::Warning { model, message } => (
+        ModelProgress::Warning {
+            model_ref: model,
+            message,
+        } => (
             IndexEmbeddingStage::Warning,
             model,
             None,
             None,
             Some(message),
         ),
-        ModelProgress::Ready { model } => (IndexEmbeddingStage::Ready, model, None, None, None),
+        ModelProgress::Ready { model_ref: model } => {
+            (IndexEmbeddingStage::Ready, model, None, None, None)
+        }
     };
     IndexProgress {
         phase: IndexProgressPhase::Indexing,
@@ -68,19 +73,19 @@ mod tests {
         let model = "local/fixture";
         let events = [
             ModelProgress::Preparing {
-                model: model.into(),
+                model_ref: model.into(),
             },
             ModelProgress::Downloading {
-                model: model.into(),
+                model_ref: model.into(),
                 downloaded_bytes: Some(4),
                 total_bytes: Some(8),
             },
             ModelProgress::Warning {
-                model: model.into(),
+                model_ref: model.into(),
                 message: "fixture warning".into(),
             },
             ModelProgress::Ready {
-                model: model.into(),
+                model_ref: model.into(),
             },
         ]
         .map(|event| index_progress(event, 3));

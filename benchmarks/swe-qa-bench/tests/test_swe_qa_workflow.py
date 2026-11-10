@@ -29,6 +29,7 @@ class ManualBenchmarkAuthorizationTests(unittest.TestCase):
         triggering_actor: str = "rerunner",
         event: str = "workflow_dispatch",
         api_errors: tuple[str, ...] = (),
+        pr_comment: str = "false",
     ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
         """Run the workflow's real Bash guard against a local permission API stub."""
         with tempfile.TemporaryDirectory() as directory:
@@ -55,11 +56,21 @@ class ManualBenchmarkAuthorizationTests(unittest.TestCase):
             )
             fake_gh.chmod(0o755)
             result = subprocess.run(
-                ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", self.guard["run"]],
+                [
+                    "bash",
+                    "--noprofile",
+                    "--norc",
+                    "-e",
+                    "-o",
+                    "pipefail",
+                    "-c",
+                    self.guard["run"],
+                ],
                 cwd=fixture,
                 env={
                     "PATH": str(fixture) + os.pathsep + "/usr/bin:/bin",
                     "BENCH_EVENT_NAME": event,
+                    "BENCH_IS_PR_COMMENT": pr_comment,
                     "BENCH_REPOSITORY": "fixture/benchmark",
                     "BENCH_ACTOR": actor,
                     "BENCH_TRIGGERING_ACTOR": triggering_actor,
@@ -80,7 +91,9 @@ class ManualBenchmarkAuthorizationTests(unittest.TestCase):
             return result, lookups
 
     def test_only_manual_trigger_and_existing_model_choices(self) -> None:
-        self.assertEqual(set(self.workflow["on"]), {"workflow_dispatch"})
+        self.assertEqual(
+            set(self.workflow["on"]), {"workflow_dispatch", "workflow_call"}
+        )
         model = self.workflow["on"]["workflow_dispatch"]["inputs"]["model"]
         self.assertEqual(model["default"], "glm-5.2")
         self.assertEqual(set(model["options"]), {"glm-5.2", "qwen3.8-max"})
@@ -88,12 +101,16 @@ class ManualBenchmarkAuthorizationTests(unittest.TestCase):
         self.assertEqual(embedding["default"], "local")
         self.assertEqual(set(embedding["options"]), {"local", "remote"})
         self.assertEqual(
-            self.workflow["on"]["workflow_dispatch"]["inputs"]["candidate_ref"]["default"],
+            self.workflow["on"]["workflow_dispatch"]["inputs"]["candidate_ref"][
+                "default"
+            ],
             "main",
         )
 
-    def test_every_job_checks_current_permissions_before_checkout_or_model_secrets(self) -> None:
-        self.assertEqual(self.guard["name"], "Authorize manual benchmark run")
+    def test_every_job_checks_current_permissions_before_checkout_or_model_secrets(
+        self,
+    ) -> None:
+        self.assertEqual(self.guard["name"], "Authorize benchmark run")
         self.assertNotIn("if", self.guard)
         self.assertNotEqual(self.guard.get("continue-on-error"), "true")
         self.assertEqual(
@@ -101,6 +118,7 @@ class ManualBenchmarkAuthorizationTests(unittest.TestCase):
             {
                 "GH_TOKEN": "${{ github.token }}",
                 "BENCH_EVENT_NAME": "${{ github.event_name }}",
+                "BENCH_IS_PR_COMMENT": "${{ github.event_name == 'issue_comment' && github.event.action == 'created' && github.event.issue.pull_request != null }}",
                 "BENCH_REPOSITORY": "${{ github.repository }}",
                 "BENCH_ACTOR": "${{ github.actor }}",
                 "BENCH_TRIGGERING_ACTOR": "${{ github.triggering_actor }}",
@@ -123,10 +141,17 @@ class ManualBenchmarkAuthorizationTests(unittest.TestCase):
                     condition = step.get("if", "")
                     if "always()" in condition:
                         guard_id = self.guard["id"]
-                        self.assertIn(f"steps.{guard_id}.outcome == 'success'", condition)
+                        self.assertIn(
+                            f"steps.{guard_id}.outcome == 'success'", condition
+                        )
 
-    def test_admin_and_maintain_are_allowed_for_both_original_actor_and_rerunner(self) -> None:
-        for original_role, rerunner_role in (("admin", "maintain"), ("maintain", "admin")):
+    def test_admin_and_maintain_are_allowed_for_both_original_actor_and_rerunner(
+        self,
+    ) -> None:
+        for original_role, rerunner_role in (
+            ("admin", "maintain"),
+            ("maintain", "admin"),
+        ):
             with self.subTest(original_role=original_role, rerunner_role=rerunner_role):
                 result, lookups = self.run_guard(
                     {"original": original_role, "rerunner": rerunner_role}
@@ -137,7 +162,9 @@ class ManualBenchmarkAuthorizationTests(unittest.TestCase):
     def test_non_core_and_custom_roles_are_denied(self) -> None:
         for role in ("write", "triage", "read", "none", "custom-maintainer"):
             with self.subTest(role=role):
-                result, lookups = self.run_guard({"original": role, "rerunner": "admin"})
+                result, lookups = self.run_guard(
+                    {"original": role, "rerunner": "admin"}
+                )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("original", lookups)
 
@@ -150,7 +177,9 @@ class ManualBenchmarkAuthorizationTests(unittest.TestCase):
                 result, _ = self.run_guard(roles)
                 self.assertNotEqual(result.returncode, 0)
 
-    def test_non_manual_events_and_missing_actors_fail_before_permission_lookup(self) -> None:
+    def test_non_manual_events_and_missing_actors_fail_before_permission_lookup(
+        self,
+    ) -> None:
         cases = (
             {"event": "pull_request"},
             {"event": "pull_request_target"},
@@ -166,6 +195,19 @@ class ManualBenchmarkAuthorizationTests(unittest.TestCase):
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(lookups, [])
+
+    def test_reusable_workflow_accepts_only_created_pr_comment_callers(self) -> None:
+        result, _ = self.run_guard(
+            {"original": "maintain", "rerunner": "admin"},
+            event="issue_comment",
+            pr_comment="true",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result, lookups = self.run_guard(
+            {"original": "maintain", "rerunner": "admin"}, event="issue_comment"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(lookups, [])
 
     def test_permission_api_failure_denies_execution(self) -> None:
         for actor in ("original", "rerunner"):

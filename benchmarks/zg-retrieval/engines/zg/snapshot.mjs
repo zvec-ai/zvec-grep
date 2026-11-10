@@ -1,7 +1,9 @@
 // Passive audit through the native candidate's public status command.
 import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { fileHash, objectHash, run, writeJson } from "../../core/lib.mjs";
 
 function required(pattern, text, label) {
@@ -26,7 +28,7 @@ async function writeStatusEvidence(output, result) {
   });
 }
 
-export function parseNativeStatus(stdout) {
+function parseLegacyStatus(stdout) {
   const state = required(
     /^Workspace index: (ready|missing)$/m,
     stdout,
@@ -46,7 +48,7 @@ export function parseNativeStatus(stdout) {
     stdout,
     "indexed source size",
   )[1];
-  const status = {
+  return {
     state,
     root,
     index_path: indexPath,
@@ -58,6 +60,200 @@ export function parseNativeStatus(stdout) {
     entities_indexed: Number(entities),
     indexed_source_bytes: Number(bytes),
   };
+}
+
+function groupedCount(value, label) {
+  assert.match(value, /^(?:\d+|[1-9]\d{0,2}(?:,\d{3})+)$/, `invalid ${label}`);
+  const count = Number(value.replaceAll(",", ""));
+  assert.ok(Number.isSafeInteger(count) && count >= 0, `invalid ${label}`);
+  return count;
+}
+
+function expandHome(path, home) {
+  if (path === "~") return home;
+  if (path.startsWith("~/") || path.startsWith("~\\"))
+    return join(home, path.slice(2));
+  return path;
+}
+
+function parseGroupedStatus(stdout, home) {
+  const heading = required(
+    /^(✓ Workspace index is ready|! Workspace index needs an update|✗ Workspace index failed|○ Workspace indexing is disabled|○ Workspace index is not created|\? Workspace index is not configured|\? Workspace index status is unknown|! Workspace index requires a rebuild)\n {2}(.+)$/m,
+    stdout,
+    "state",
+  );
+  requireSearchable(
+    heading[1] === "✓ Workspace index is ready",
+    "native index is not ready",
+  );
+  const root = expandHome(heading[2], home);
+  assert.ok(isAbsolute(root), "native status root is not absolute");
+  const storage = required(/^ {2}Storage +(.+)$/m, stdout, "index path")[1];
+  const embedding = required(/^ {2}Embedding +(\S+)$/m, stdout, "embedding")[1];
+  const coverage = required(
+    /^ {2}Coverage +\S+ +(\d+)% +([\d,]+) \/ ([\d,]+) files$/m,
+    stdout,
+    "file counts",
+  );
+  const completed = groupedCount(coverage[2], "completed files");
+  const scanned = groupedCount(coverage[3], "scanned files");
+  const queue = required(
+    /^ {2}Queue +([\d,]+) pending · ([\d,]+) failed$/m,
+    stdout,
+    "queue counts",
+  );
+  // Coverage counts unchanged files, not stored/indexed files. They coincide
+  // only for a fully ready scan: no pending, failed, added, modified or deleted
+  // files (InfoResult::index_status and get_workspace_index_status).
+  requireSearchable(
+    completed === scanned && (scanned === 0 || coverage[1] === "100"),
+    "native index coverage is incomplete",
+  );
+  if (/^ {2}Changes /m.test(stdout)) {
+    const changes = required(
+      /^ {2}Changes +([\d,]+) added · ([\d,]+) modified · ([\d,]+) deleted$/m,
+      stdout,
+      "change counts",
+    );
+    requireSearchable(
+      changes
+        .slice(1)
+        .every((value) => groupedCount(value, "changed files") === 0),
+      "native index still has changed files",
+    );
+  }
+  return {
+    state: "ready",
+    root,
+    index_path: resolve(root, expandHome(storage, home)),
+    embedding,
+    files_scanned: scanned,
+    files_indexed: completed,
+    files_pending: groupedCount(queue[1], "pending files"),
+    files_failed: groupedCount(queue[2], "failed files"),
+    entities_indexed: groupedCount(
+      required(/^ {2}Entities +([\d,]+)$/m, stdout, "entity count")[1],
+      "entity count",
+    ),
+    indexed_source_bytes: groupedCount(
+      required(
+        /^ {2}Source size +([\d,]+) bytes$/m,
+        stdout,
+        "indexed source size",
+      )[1],
+      "indexed source size",
+    ),
+  };
+}
+
+function parseStatusDiagnostics(stderr) {
+  const diagnostics = stripVTControlCharacters(stderr)
+    .replaceAll("\r\n", "\n")
+    .split("\n")
+    .filter((line) => line.startsWith("Status diagnostics: "))
+    .map((line) => line.slice("Status diagnostics: ".length))
+    // Historical candidates only reported indexed=true/false here.
+    .filter((line) => !/^indexed=(true|false)$/.test(line));
+  if (diagnostics.length === 0) return null;
+  assert.equal(diagnostics.length, 1, "ambiguous native status diagnostics");
+  const { state, info } = JSON.parse(diagnostics[0]);
+  assert.ok(
+    [
+      "ready",
+      "stale",
+      "failed",
+      "unknown",
+      "uninitialized",
+      "disabled",
+      "missing",
+      "rebuild_required",
+    ].includes(state),
+    "native diagnostics omitted a valid state",
+  );
+  requireSearchable(state === "ready", "native index is not ready");
+  assert.equal(
+    info?.indexed,
+    true,
+    "ready native diagnostics must have an index",
+  );
+  assert.equal(
+    info.index_policy,
+    "enabled",
+    "ready native index must be enabled",
+  );
+  assert.equal(
+    info.compatibility?.status,
+    "compatible",
+    "ready native index must be compatible",
+  );
+  assert.ok(
+    typeof info.root === "string" && isAbsolute(info.root),
+    "native status root is not absolute",
+  );
+  assert.ok(
+    typeof info.index_path === "string" && isAbsolute(info.index_path),
+    "native status index path is not absolute",
+  );
+  const embedding = info.workspace_index?.embedding;
+  assert.ok(
+    typeof embedding?.provider === "string" &&
+      embedding.provider.length > 0 &&
+      typeof embedding?.model === "string" &&
+      embedding.model.length > 0,
+    "native diagnostics omitted embedding",
+  );
+  const stats = info.status;
+  for (const name of [
+    "files_scanned",
+    "files_indexed",
+    "files_pending",
+    "files_failed",
+    "files_added",
+    "files_modified",
+    "files_deleted",
+    "files_unchanged",
+    "entities_indexed",
+    "indexed_size_bytes",
+  ]) {
+    assert.ok(
+      Number.isSafeInteger(stats?.[name]) && stats[name] >= 0,
+      `invalid ${name}`,
+    );
+  }
+  requireSearchable(
+    stats.files_added === 0 &&
+      stats.files_modified === 0 &&
+      stats.files_deleted === 0,
+    "native index still has changed files",
+  );
+  requireSearchable(
+    stats.files_unchanged === stats.files_scanned,
+    "native index coverage is incomplete",
+  );
+  return {
+    state,
+    root: info.root,
+    index_path: info.index_path,
+    embedding: `${embedding.provider}/${embedding.model}`,
+    files_scanned: stats.files_scanned,
+    files_indexed: stats.files_indexed,
+    files_pending: stats.files_pending,
+    files_failed: stats.files_failed,
+    entities_indexed: stats.entities_indexed,
+    indexed_source_bytes: stats.indexed_size_bytes,
+  };
+}
+
+export function parseNativeStatus(
+  stdout,
+  { home = homedir(), stderr = "" } = {},
+) {
+  const text = stripVTControlCharacters(stdout).replaceAll("\r\n", "\n");
+  const status =
+    parseStatusDiagnostics(stderr) ??
+    (/^Workspace index: /m.test(text)
+      ? parseLegacyStatus(text)
+      : parseGroupedStatus(text, home));
   for (const [name, value] of Object.entries(status))
     if (typeof value === "number")
       assert.ok(Number.isSafeInteger(value) && value >= 0, `invalid ${name}`);
@@ -101,7 +297,10 @@ export async function snapshotIndex({
     throw error;
   }
   await writeStatusEvidence(output, result);
-  const status = parseNativeStatus(result.stdout);
+  const status = parseNativeStatus(result.stdout, {
+    home: env?.HOME,
+    stderr: result.stderr,
+  });
   assert.equal(
     status.root,
     root,
@@ -141,7 +340,7 @@ export async function snapshotIndex({
   };
   summary.artifacts = Object.fromEntries(
     await Promise.all(
-      ["status.txt", "status.json"].map(async (path) => [
+      ["status.txt", "status.stderr.txt", "status.json"].map(async (path) => [
         path,
         await fileHash(join(output, path)),
       ]),

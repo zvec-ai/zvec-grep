@@ -1,0 +1,30 @@
+[package]
+name = "zg-zvec-fp16"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "FP16 vector encoding for zvec collections"
+
+[dependencies]
+half = "2.7.1"
+zvec-rust.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+# Copied from the workspace so this crate can allow the zvec C calls below.
+# zvec-rust 0.8.0 exposes `DataType::VectorFp16` but no safe writer or query
+# constructor. Every other crate keeps the workspace `unsafe_code = "forbid"`.
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"

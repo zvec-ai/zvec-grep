@@ -3,6 +3,23 @@ name: Retrieval-only
 run-name: Retrieval-only · ${{ inputs.embedding }} embedding · harness ${{ github.ref_name }} · candidate ${{ inputs.candidate_ref }}
 
 on:
+  workflow_call:
+    inputs:
+      candidate_ref:
+        required: true
+        type: string
+      candidate_repository:
+        required: true
+        type: string
+      embedding:
+        default: local
+        type: string
+      artifact_prefix:
+        default: retrieval
+        type: string
+    secrets:
+      QWEN_EMBEDDING_API_KEY:
+        required: false
   workflow_dispatch:
     inputs:
       candidate_ref:
@@ -22,13 +39,16 @@ on:
 permissions:
   contents: read
 
+env:
+  RETRIEVAL_EMBEDDING: ${{ inputs.embedding }}
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.candidate_ref }}-${{ inputs.embedding }}
+  group: retrieval-only-${{ github.ref }}-${{ inputs.candidate_ref }}-${{ inputs.embedding }}-${{ inputs.artifact_prefix || 'retrieval' }}
   cancel-in-progress: true
 
 jobs:
   authorize:
-    name: Check maintainer permission
+    name: Check benchmark access
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -87,12 +107,12 @@ jobs:
         id: rust-candidate
         uses: ./.github/actions/rust-candidate-package
         with:
-          candidate_repository: ${{ inputs.candidate_ref == 'main' && 'zvec-ai/zvec-grep' || github.repository }}
+          candidate_repository: ${{ inputs.candidate_repository || (inputs.candidate_ref == 'main' && 'zvec-ai/zvec-grep' || github.repository) }}
           candidate_ref: ${{ inputs.candidate_ref }}
           cache_namespace: retrieval-rust
       - uses: actions/upload-artifact@v7
         with:
-          name: package-retrieval-candidate
+          name: package-${{ inputs.artifact_prefix || 'retrieval' }}-candidate
           path: ${{ runner.temp }}/rust-package-cache/
           if-no-files-found: error
           overwrite: true
@@ -114,7 +134,7 @@ jobs:
         id: access
       - uses: actions/download-artifact@v8
         with:
-          name: package-retrieval-candidate
+          name: package-${{ inputs.artifact_prefix || 'retrieval' }}-candidate
           path: ${{ runner.temp }}/package
       - name: Verify the candidate package identity
         run: |
@@ -156,7 +176,7 @@ jobs:
         if: ${{ always() && steps.access.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
-          name: retrieval-zg-report
+          name: ${{ inputs.artifact_prefix || 'retrieval' }}-zg-report
           path: |
             ${{ runner.temp }}/sweqa/report.json
             ${{ runner.temp }}/sweqa/report.md
@@ -169,7 +189,7 @@ jobs:
         if: ${{ always() && steps.access.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
-          name: retrieval-zg-evidence
+          name: ${{ inputs.artifact_prefix || 'retrieval' }}-zg-evidence
           path: |
             ${{ runner.temp }}/sweqa/
             !${{ runner.temp }}/sweqa/consumer/**
@@ -193,7 +213,7 @@ jobs:
         id: access
       - uses: actions/download-artifact@v8
         with:
-          name: package-retrieval-candidate
+          name: package-${{ inputs.artifact_prefix || 'retrieval' }}-candidate
           path: ${{ runner.temp }}/package
       - name: Verify the candidate package identity
         run: |
@@ -236,7 +256,7 @@ jobs:
         if: ${{ always() && steps.access.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
-          name: retrieval-beir-report
+          name: ${{ inputs.artifact_prefix || 'retrieval' }}-beir-report
           path: |
             ${{ runner.temp }}/beir/report.json
             ${{ runner.temp }}/beir/report.md
@@ -246,7 +266,7 @@ jobs:
         if: ${{ always() && steps.access.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
-          name: retrieval-beir-evidence
+          name: ${{ inputs.artifact_prefix || 'retrieval' }}-beir-evidence
           path: |
             ${{ runner.temp }}/beir/evidence/
             !${{ runner.temp }}/beir/evidence/**/runtime-home/**
@@ -269,7 +289,7 @@ jobs:
         id: access
       - uses: actions/download-artifact@v8
         with:
-          name: package-retrieval-candidate
+          name: package-${{ inputs.artifact_prefix || 'retrieval' }}-candidate
           path: ${{ runner.temp }}/package
       - name: Verify the candidate package identity
         run: |
@@ -312,7 +332,7 @@ jobs:
         if: ${{ always() && steps.access.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
-          name: retrieval-duretrieval-report
+          name: ${{ inputs.artifact_prefix || 'retrieval' }}-duretrieval-report
           path: |
             ${{ runner.temp }}/duretrieval/report.json
             ${{ runner.temp }}/duretrieval/report.md
@@ -322,7 +342,7 @@ jobs:
         if: ${{ always() && steps.access.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
-          name: retrieval-duretrieval-evidence
+          name: ${{ inputs.artifact_prefix || 'retrieval' }}-duretrieval-evidence
           path: |
             ${{ runner.temp }}/duretrieval/evidence/
             !${{ runner.temp }}/duretrieval/evidence/**/runtime-home/**
@@ -345,7 +365,7 @@ jobs:
         id: access
       - uses: actions/download-artifact@v8
         with:
-          name: package-retrieval-candidate
+          name: package-${{ inputs.artifact_prefix || 'retrieval' }}-candidate
           path: ${{ runner.temp }}/package
       - name: Verify the candidate package identity
         run: |
@@ -381,7 +401,7 @@ jobs:
         if: ${{ always() && steps.access.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
-          name: retrieval-quarry-report
+          name: ${{ inputs.artifact_prefix || 'retrieval' }}-quarry-report
           path: |
             ${{ runner.temp }}/quarry/report.json
             ${{ runner.temp }}/quarry/report.md
@@ -391,7 +411,7 @@ jobs:
         if: ${{ always() && steps.access.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
-          name: retrieval-quarry-evidence
+          name: ${{ inputs.artifact_prefix || 'retrieval' }}-quarry-evidence
           path: |
             ${{ runner.temp }}/quarry/evidence/
             !${{ runner.temp }}/quarry/evidence/**/runtime-home/**
@@ -427,28 +447,28 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
-          name: retrieval-zg-report
+          name: ${{ inputs.artifact_prefix || 'retrieval' }}-zg-report
           path: ${{ runner.temp }}/results-input/zg
       - name: Download BEIR report
         if: ${{ always() && steps.access.outcome == 'success' }}
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
-          name: retrieval-beir-report
+          name: ${{ inputs.artifact_prefix || 'retrieval' }}-beir-report
           path: ${{ runner.temp }}/results-input/beir
       - name: Download DuRetrieval report
         if: ${{ always() && steps.access.outcome == 'success' }}
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
-          name: retrieval-duretrieval-report
+          name: ${{ inputs.artifact_prefix || 'retrieval' }}-duretrieval-report
           path: ${{ runner.temp }}/results-input/duretrieval
       - name: Download Quarry report
         if: ${{ always() && steps.access.outcome == 'success' }}
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
-          name: retrieval-quarry-report
+          name: ${{ inputs.artifact_prefix || 'retrieval' }}-quarry-report
           path: ${{ runner.temp }}/results-input/quarry
       - name: Build the unified results page
         if: ${{ always() && steps.access.outcome == 'success' }}
@@ -477,10 +497,11 @@ jobs:
         if: ${{ always() && steps.access.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
-          name: retrieval-results
+          name: ${{ inputs.artifact_prefix || 'retrieval' }}-results
           path: |
             ${{ runner.temp }}/retrieval-results/summary.md
             ${{ runner.temp }}/retrieval-results/summary.json
+            ${{ runner.temp }}/retrieval-results/reports/
           if-no-files-found: error
           overwrite: true
           retention-days: 14

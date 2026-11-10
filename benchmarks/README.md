@@ -4,115 +4,128 @@
 
 # Benchmarks
 
-Each evaluation measures how zvec-grep affects agent answer quality and
-retrieval efficiency across different workloads. Every benchmark keeps its
-inputs and dependencies pinned, provides a local runner, separates generated
-artifacts from source, and documents its protocol in a dedicated README.
+Use Retrieval-only to measure search quality across product versions. Use e2e
+benchmarks to measure how access to zvec-grep affects an agent's answers and
+resource use. Setup, frozen inputs and scoring details live with each suite.
 
-See benchmark-specific README for setup and execution instructions.
+## Contributors: run a benchmark
 
-## Benchmark suites
-
-| Benchmark | Description | Agent | Study scope |
-| --- | --- | --- | --- |
-| [BrowseComp-Plus](browse-comp-plus/README.md) | Evaluates multi-document evidence retrieval and answer accuracy over a large, fixed corpus | Codex | 100 cases |
-| [SWE-QA-Bench](swe-qa-bench/README.md) | Evaluates repository-level, cross-file, and multi-hop software-engineering question answering | Claude Code · Claude Opus 5 (high) | 20 tasks |
-
-## Evaluation protocol
-
-All benchmarks use controlled, paired A/B evaluations. For each case, the
-baseline and treatment profiles keep the task inputs, agent, model, environment,
-and limits fixed.
-
-- **Baseline:** the agent uses its standard tools and instructions.
-- **Treatment (zvec-grep):** the same agent additionally receives a prepared
-  index, zvec-grep tools, and standard usage guidance.
-
-The **only intended difference** between paired runs is access to zvec-grep.
-To keep the comparison focused on agent behavior, index preparation is measured
-and reported separately.
-
-## Evaluation metrics
-
-Where applicable, benchmarks measure:
-
-| Metric | What it measures | Better |
+| Benchmark | Scope | Local instructions |
 | --- | --- | --- |
-| Answer quality | Task-specific judge score or accuracy | Higher |
-| Input tokens | Model input consumed during agent execution | Lower |
-| Tool calls | Recorded tool invocations during agent execution | Lower |
-| Agent wall time | Agent execution time (excluding separately reported zvec-grep index preparation time) | Lower |
+| Retrieval-only | SWE-QA20, BEIR, DuRetrieval and Quarry; hybrid, fts and vector | [SWE-QA20 runner](zg-retrieval/README.md#run-locally), [expansion runners](zg-retrieval/expansion/README.md) |
+| SWE-QA e2e | 20 software-engineering questions; baseline vs zvec-grep agent profiles | [Setup and smoke runs](swe-qa-bench/README.md#local-setup) |
+| BrowseComp-Plus e2e | 100 questions over a fixed document corpus | [Setup and execution](browse-comp-plus/README.md) |
 
-Additional metrics may be reported when relevant. Completion status and raw
-trajectories may also be retained for auditing and diagnosis.
+For development CI, use your own fork. In **Actions → Retrieval-only → Run
+workflow**, select the harness revision, set `candidate_ref` to the Rust source
+branch/tag/commit, and leave `embedding=local` for a run without model API keys.
+See the [Retrieval guide](zg-retrieval/README.md#run-ci-and-read-the-result) for
+single-version results and artifacts. The separate **Retrieval-only PR** manual
+dispatch compares two full commit SHAs under one harness.
 
-## Evaluation considerations
+For optional SWE-QA e2e, follow the [fork run guide](swe-qa-bench/docs/run-in-fork.md)
+to configure model credentials and dispatch a small `repro-3` or `smoke` run
+before choosing `all-full`. Execution and judging both consume model quota.
+Remote embedding also requires its own key and endpoint; see
+[corpus size and embedding load](zg-retrieval/README.md#corpus-size-and-remote-embedding-load).
 
-Each benchmark's README provides its complete reproduction instructions. While
-building and running these evaluations, we encountered several easy-to-miss
-pitfalls; we share the most important ones below:
+## Maintainers: defaults and additional runs
 
-- **Keep comparisons like for like.** To isolate the effect of zvec-grep,
-  Baseline and Treatment should use the same model and version, reasoning
-  settings, agent framework, base prompt, shared tools, task set, environment,
-  and limits. The only Treatment-specific additions should be a prepared index,
-  zvec-grep tools, and standard usage instructions.
+### Triggers and results
 
-  For example, a stronger model under Baseline may outperform a weaker model
-  with zvec-grep because its reasoning ability and prior knowledge can
-  compensate for less effective retrieval. Conversely, pairing zvec-grep with
-  the stronger model gives Treatment an inherent model advantage over a weaker
-  Baseline. Neither comparison isolates the effect of zvec-grep.
-- **Preserve general-purpose behavior.** Use general-purpose prompts and tool
-  instructions that apply across tasks, rather than wording tailored to a
-  particular benchmark, dataset, or expected answer. Guidance optimized for
-  one scenario may not generalize to another.
+| Trigger | Runs | Results |
+| --- | --- | --- |
+| PR opened, reopened or updated, including fork PRs | Retrieval-only on the exact PR base and head; local embedding | Updated PR bot comment, Actions summaries and `retrieval-comparison` artifact |
+| New PR Conversation comment with `@zg-bench` on its own line | The same Retrieval version comparison | One bot comment, updated from queued status to results |
+| Manual **ZG Bench** dispatch with `pr_number` | Retrieval comparison; e2e only with explicit `run_e2e: true` | The same bot comment and run artifacts |
+| Manual **SWE-QA Bench** dispatch | Selected e2e scope, model and embedding runtime | Task evidence and aggregate report |
+| Relevant benchmark source/workflow changes | Offline benchmark regression checks | CI logs; no model calls |
 
-  For example, instructing the agent to always use zvec-grep instead of grep on
-  tasks well suited to semantic retrieval can overstate its apparent benefit,
-  while the same rule may hurt tasks where an exact identifier or known keyword
-  is better handled by native grep. Rules that force or forbid either tool bias
-  the evaluation toward particular scenarios. Give the agent access to the
-  available tools and let it decide how and when to use them.
-- **Account for stochasticity.** Even with identical configurations, model
-  behavior is inherently stochastic: at the same decision point, an agent may
-  choose a different tool, query, or next action, and those choices can compound
-  into a different trajectory and outcome. This variation affects answer
-  quality, token use, tool calls, and time.
+Automatic PR checks require no maintainer role or model secrets. A new push
+cancels the previous automatic run for that PR. All version comparisons show
+**base / head / delta** for File Hit@1/5/10, MRR@10 and nDCG@10, with links to both
+commits. `retrieval-base-*` and `retrieval-head-*` retain per-version evidence.
 
-  We observed that the impact was not uniform across metrics. Answer quality
-  tended to remain at a similar level across runs, while token use and tool
-  calls often varied more as trajectories diverged. One possible explanation is
-  that different exploration paths can add or remove entire sequences of search
-  and inspection, substantially changing resource use, while model capability
-  helps the agent judge whether it has enough evidence and complete the task
-  despite taking a different path. Wall time was also affected by model-provider
-  latency and other external conditions, making it harder to control.
+[Retrieval PR comment](../.github/workflows/retrieval-pr-comment.yml) publishes
+the completed automatic run through a separate `workflow_run` job. It creates
+one English result comment per PR and updates it on later runs and reruns,
+including for fork contributions. It links both commits and the source run,
+shows all twelve suite/mode rows with base / head / delta, and marks missing or
+invalid results as incomplete. Cancelled runs and results for outdated base/head
+commits are skipped. Manual comparison dispatches do not post this automatic
+comment; `@zg-bench` retains its own per-request comment.
 
-  To reduce uncertainty, run the same number of independent trials for Baseline
-  and Treatment. With more trials, unusually favorable or unfavorable runs have
-  less influence, producing a more precise estimate of the mean.
-- **Validate tool access.** A successful installation does not guarantee that
-  zvec-grep is visible or callable in the agent's environment. Before
-  evaluation, use a separate smoke test to verify that an actual call returns
-  valid results instead of failing immediately. In our experience, when an
-  agent's first call to an external tool fails, it often stops trying that tool
-  and falls back to other methods for the rest of the run. A setup or invocation
-  error can therefore affect the entire trajectory. During evaluation, however,
-  whether and when to use zvec-grep should remain the agent's decision; choosing
-  not to use it is not itself a setup failure.
-- **Prevent evaluation leakage.** Keep reference answers, previous outputs,
-  reports, and other evaluation artifacts outside the agent-visible workspace.
-  For example, if a reference answer or earlier report is left in the workspace
-  or indexed corpus, the agent may retrieve it directly and appear to solve the
-  task. Likewise, a judge that sees profile labels or tool traces may score
-  according to expectations rather than the answer itself. Keep the judge blind
-  to whether an answer came from Baseline or Treatment and which tools were
-  used, and apply the same rubric to both.
+Comment and model-backed manual runs require the exact repository `admin` or
+`maintain` role. Jobs recheck the current roles of both the original actor and
+rerunner. Comment commands never enable e2e. Quoted or fenced commands, edited
+comments, ordinary Issues and inline review comments do not trigger a run.
+Both SHAs stay pinned if the PR changes during execution; submit a new command
+to test the current versions.
 
-  Leakage can also predate the evaluation: widely used benchmark items may have
-  appeared in model training data, with the relevant knowledge absorbed into
-  the model's parameters. In such cases, performance may partly reflect prior
-  exposure, leaving less room for retrieval to provide an incremental benefit.
-  Where possible, prefer fresh or held-out tasks and disclose the risk of
-  benchmark contamination.
+### Deployment and retries
+
+Merge the comment entry point and reusable workflows into the default branch,
+and allow its comment jobs to use `issues: write` and `pull-requests: write`.
+Only those jobs have write tokens. Benchmark execution uses read-only tokens,
+a trusted harness checkout and a separately built candidate. Local Retrieval
+receives no model credentials. Optional e2e needs `GLM_API_KEY`; review candidate
+code before authorizing it to run with those credentials.
+
+The automatic result publisher also needs the default-branch workflow and
+Issues/Pull requests write permissions. Its trusted default-branch code checks
+the source workflow, run, PR and commit identities through GitHub's API before
+publishing. It reads only JSON artifacts, validates the expected metric table,
+and renders its own Markdown. PR code and artifact scripts are never executed
+by this job; the read-only benchmark jobs receive no write token.
+
+`@zg-bench` is a command keyword, so it needs no registered account. Replies use
+`github-actions[bot]`. A dedicated bot identity requires a GitHub App and changes
+to the comment jobs' token and login configuration.
+
+Use **Re-run failed jobs** to retry a failed run and update its original bot
+comment. For e2e, aggregation validates task reports from all attempts of that
+run against the candidate, harness, evaluation configuration and report checksum,
+then selects the latest valid result per task. Earlier successes are retained;
+missing tasks remain incomplete. The aggregate's `task-report-selection.json`
+records chosen attempts and rejected inputs. Reports without the identity
+manifest cannot be reused; runs started before that manifest was introduced
+need a new full run. Expired artifacts also require rerunning the missing tasks.
+
+## Benchmark developers: protocol and validation
+
+### Protocol and implementation
+
+Retrieval compares two product versions using the same frozen harness, inputs
+and local model configuration, with a fresh index for each version. e2e instead
+compares two agent profiles: standard tools, and the same setup with a prepared
+zvec-grep index, tools and usage guidance. Keep task inputs, agent/model settings,
+shared tools, limits and trial counts fixed between profiles. Report index
+preparation separately from agent execution.
+
+Keep reference answers, reports and prior outputs outside the searchable
+workspace. Use general-purpose tool guidance, blind judging and repeated trials;
+do not tailor prompts to reference answers or force tool use. Missing or invalid
+evidence must not become zero scores or successful results.
+
+Start with the [Retrieval code map](zg-retrieval/README.md#code-structure) or
+[SWE-QA code map](swe-qa-bench/README.md#code-structure). Runners capture evidence;
+validators check identities, protocol and coverage; metric functions score
+validated records; aggregators and comment rendering publish the results.
+The [comment workflow](../.github/workflows/zg-bench.yml) delegates execution to
+reusable workflows and updates status through [bench-comment.mjs](../.github/scripts/bench-comment.mjs).
+
+### Validate changes
+
+From the repository root, run offline checks before a model-backed experiment:
+
+```sh
+node --test benchmarks/zg-retrieval/test/*.test.mjs .github/scripts/*comment.test.mjs
+uv sync --project benchmarks/swe-qa-bench --frozen
+uv run --project benchmarks/swe-qa-bench python -m unittest discover -s benchmarks/swe-qa-bench/tests -v
+```
+
+Lint changed workflows with `actionlint`. Use [offline replay](zg-retrieval/README.md#offline-replay-and-comparisons)
+to check scoring/report changes against saved evidence, and use a fork run to
+check workflow integration. Add a focused regression for changed failure,
+identity or retry behavior. Record run-specific validation evidence in the PR;
+keep these READMEs focused on current behavior and reproduction instructions.

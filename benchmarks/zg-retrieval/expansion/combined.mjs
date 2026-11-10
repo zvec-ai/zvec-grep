@@ -238,13 +238,16 @@ export async function main(args = process.argv.slice(2)) {
       return null;
     }
   };
-  const result = await buildCombined({
+  const reports = {
     zg: await maybeRead(values.zg),
     ...Object.fromEntries(
       await Promise.all(
         PILOT_NAMES.map(async (name) => [name, await maybeRead(values[name])]),
       ),
     ),
+  };
+  const result = await buildCombined({
+    ...reports,
     jobResults: JSON.parse(process.env.RETRIEVAL_JOB_RESULTS ?? "{}"),
     candidateCommit: process.env.RETRIEVAL_CANDIDATE_COMMIT ?? null,
     candidateRef: process.env.RETRIEVAL_CANDIDATE_REF ?? null,
@@ -255,6 +258,9 @@ export async function main(args = process.argv.slice(2)) {
   });
   const output = resolve(values.output);
   await mkdir(output, { recursive: true });
+  await mkdir(join(output, "reports"), { recursive: true });
+  for (const [name, report] of Object.entries(reports))
+    await writeJson(join(output, "reports", `${name}.json`), report);
   await writeJson(join(output, "summary.json"), result);
   await writeFile(join(output, "summary.md"), markdownCombined(result));
   if (result.status !== "success") process.exitCode = 1;

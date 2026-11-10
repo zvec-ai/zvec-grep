@@ -1,0 +1,86 @@
+name: Retrieval version comparison
+
+on:
+  workflow_call:
+    inputs:
+      baseline_ref:
+        required: true
+        type: string
+      baseline_repository:
+        required: true
+        type: string
+      candidate_ref:
+        required: true
+        type: string
+      candidate_repository:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    uses: ./.github/workflows/retrieval-only.yml
+    with:
+      candidate_ref: ${{ inputs.baseline_ref }}
+      candidate_repository: ${{ inputs.baseline_repository }}
+      embedding: local
+      artifact_prefix: retrieval-base
+
+  candidate:
+    uses: ./.github/workflows/retrieval-only.yml
+    with:
+      candidate_ref: ${{ inputs.candidate_ref }}
+      candidate_repository: ${{ inputs.candidate_repository }}
+      embedding: local
+      artifact_prefix: retrieval-head
+
+  compare:
+    needs: [baseline, candidate]
+    if: always() && !cancelled()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Download base results
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: retrieval-base-results
+          path: ${{ runner.temp }}/retrieval-comparison-input/base
+      - name: Download head results
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: retrieval-head-results
+          path: ${{ runner.temp }}/retrieval-comparison-input/head
+      - name: Compare validated base and head reports
+        env:
+          RETRIEVAL_BASELINE_COMMIT: ${{ inputs.baseline_ref }}
+          RETRIEVAL_BASELINE_REPOSITORY: ${{ inputs.baseline_repository }}
+          RETRIEVAL_CANDIDATE_COMMIT: ${{ inputs.candidate_ref }}
+          RETRIEVAL_CANDIDATE_REPOSITORY: ${{ inputs.candidate_repository }}
+          RETRIEVAL_COMPARISON_JOBS: ${{ toJSON(needs) }}
+        run: |
+          node benchmarks/zg-retrieval/expansion/compare.mjs \
+            --baseline "$RUNNER_TEMP/retrieval-comparison-input/base" \
+            --candidate "$RUNNER_TEMP/retrieval-comparison-input/head" \
+            --output "$RUNNER_TEMP/retrieval-comparison"
+      - name: Publish comparison
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/retrieval-comparison/summary.md" ]; then
+            cat "$RUNNER_TEMP/retrieval-comparison/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Preserve comparison
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: retrieval-comparison
+          path: ${{ runner.temp }}/retrieval-comparison/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14

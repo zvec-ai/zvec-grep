@@ -57,20 +57,25 @@ async fn watcher_debounces_changes_and_obeys_injected_selection_policy() -> Test
         "module.exports = 2;\n",
     )?;
 
-    let batch =
-        tokio::time::timeout(Duration::from_secs(5), session.next_changes(&control)).await??;
-    assert!(
-        batch
-            .changes
-            .contains(&WorkspaceChange::Upsert(PathBuf::from("tracked.ts")))
-    );
-    assert!(!batch.changes.iter().any(|change| match change {
-        WorkspaceChange::Upsert(path)
-        | WorkspaceChange::Delete(path)
-        | WorkspaceChange::RescanDirectory(path)
-        | WorkspaceChange::DeletePrefix(path) => path.starts_with("node_modules"),
-        WorkspaceChange::Rescan => false,
-    }));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let batch = session.next_changes(&control).await?;
+            assert!(!batch.changes.iter().any(|change| match change {
+                WorkspaceChange::Upsert(path)
+                | WorkspaceChange::Delete(path)
+                | WorkspaceChange::RescanDirectory(path)
+                | WorkspaceChange::DeletePrefix(path) => path.starts_with("node_modules"),
+                WorkspaceChange::Rescan => false,
+            }));
+            if batch
+                .changes
+                .contains(&WorkspaceChange::Upsert(PathBuf::from("tracked.ts")))
+            {
+                return Ok::<(), HostError>(());
+            }
+        }
+    })
+    .await??;
     session.close().await?;
     Ok(())
 }
@@ -264,20 +269,24 @@ async fn wait_for_change(
     control: &TaskControl,
     expected: WorkspaceChange,
 ) -> TestResult {
+    let mut observed = Vec::new();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let batch = session.next_changes(control).await?;
-            if batch
+            let matched = batch
                 .changes
                 .iter()
-                .any(|actual| covers_change(actual, &expected))
-            {
+                .any(|actual| covers_change(actual, &expected));
+            observed.extend(batch.changes);
+            if matched {
                 return Ok::<_, HostError>(());
             }
         }
     })
     .await
-    .map_err(|error| format!("waiting for {expected:?}: {error}"))??;
+    .map_err(|error| {
+        format!("waiting for {expected:?}: {error}; observed changes: {observed:?}")
+    })??;
     Ok(())
 }
 
@@ -324,6 +333,159 @@ async fn native_watcher_tracks_external_file_symlinks_at_the_depth_limit() -> Te
         WorkspaceChange::Upsert(PathBuf::from("linked.rs")),
     )
     .await?;
+    session.close().await?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn polling_ignores_excluded_symlink_loops_and_keeps_selected_aliases_live() -> TestResult {
+    let temporary = tempdir_in(std::env::current_dir()?)?;
+    let root = temporary.path().join("workspace");
+    let outside = temporary.path().join("external");
+    fs::create_dir(&root)?;
+    fs::create_dir(&outside)?;
+    let directory_file = outside.join("source.rs");
+    let file_target = temporary.path().join("target.rs");
+    let retargeted_file = temporary.path().join("retargeted.rs");
+    fs::write(&directory_file, "directory before")?;
+    fs::write(&file_target, "file before")?;
+    fs::write(&retargeted_file, "retargeted before")?;
+    std::os::unix::fs::symlink(&outside, root.join("linked"))?;
+    std::os::unix::fs::symlink(&file_target, root.join("linked.rs"))?;
+    std::os::unix::fs::symlink("blocked", root.join("blocked"))?;
+    let factory = NativeWatcherFactory::default().with_config(NativeWatcherConfig {
+        debounce: Duration::from_millis(20),
+        max_wait: Duration::from_millis(80),
+        reconcile_interval: None,
+        resume_check_interval: None,
+        poll_interval: Some(Duration::from_millis(20)),
+        ..NativeWatcherConfig::default()
+    });
+    let mut spec = RootSpec::new(root.clone(), Arc::new(BlockSubtree(root.join("blocked"))));
+    spec.follow = true;
+    let control = TaskControl::default();
+    let session = factory
+        .watch(&WatchRequest { root: spec }, &control)
+        .await?;
+    // Registration and subsequent backend polls must both ignore the broken link.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::timeout(Duration::from_secs(2), session.flush()).await??;
+    wait_for_change(&session, &control, WorkspaceChange::Rescan).await?;
+
+    for (target, alias) in [
+        (&directory_file, Path::new("linked/source.rs")),
+        (&file_target, Path::new("linked.rs")),
+    ] {
+        fs::write(target, "changed target contents")?;
+        wait_for_change(
+            &session,
+            &control,
+            WorkspaceChange::Upsert(alias.to_path_buf()),
+        )
+        .await?;
+        fs::remove_file(target)?;
+        wait_for_change(
+            &session,
+            &control,
+            WorkspaceChange::Delete(alias.to_path_buf()),
+        )
+        .await?;
+        fs::write(target, "recreated target")?;
+        wait_for_change(
+            &session,
+            &control,
+            WorkspaceChange::Upsert(alias.to_path_buf()),
+        )
+        .await?;
+        tokio::time::timeout(Duration::from_secs(2), session.flush_pending()).await??;
+    }
+    // Retarget without waiting for notify's second-resolution symlink mtime.
+    fs::remove_file(root.join("linked.rs"))?;
+    std::os::unix::fs::symlink(&retargeted_file, root.join("linked.rs"))?;
+    wait_for_change(
+        &session,
+        &control,
+        WorkspaceChange::Upsert("linked.rs".into()),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    fs::write(&retargeted_file, "changed after same-second retarget")?;
+    wait_for_change(
+        &session,
+        &control,
+        WorkspaceChange::Upsert("linked.rs".into()),
+    )
+    .await?;
+    tokio::time::timeout(Duration::from_secs(2), session.flush_pending()).await??;
+    session.close().await?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn polling_tracks_control_symlink_targets_without_following_source_links() -> TestResult {
+    let temporary = tempdir_in(std::env::current_dir()?)?;
+    let root = temporary.path().join("workspace");
+    let config = temporary.path().join("config");
+    let targets = temporary.path().join("targets");
+    fs::create_dir(&root)?;
+    fs::create_dir(&config)?;
+    fs::create_dir(&targets)?;
+    let first = targets.join("first.rules");
+    let second = targets.join("second.rules");
+    let control_path = config.join("rules");
+    fs::write(&first, "disabled")?;
+    fs::write(&second, "disabled")?;
+    std::os::unix::fs::symlink(&first, &control_path)?;
+    let policy = Arc::new(MutablePolicy {
+        blocked: root.join("blocked"),
+        control: control_path.clone(),
+        enabled: std::sync::atomic::AtomicBool::new(false),
+    });
+    let factory = NativeWatcherFactory::default().with_config(NativeWatcherConfig {
+        debounce: Duration::from_millis(20),
+        max_wait: Duration::from_millis(80),
+        reconcile_interval: None,
+        resume_check_interval: None,
+        poll_interval: Some(Duration::from_millis(20)),
+        ..NativeWatcherConfig::default()
+    });
+    let control = TaskControl::default();
+    let session = factory
+        .watch(
+            &WatchRequest {
+                root: RootSpec::new(root, policy.clone()),
+            },
+            &control,
+        )
+        .await?;
+    fs::write(&first, "enabled")?;
+    wait_for_change(
+        &session,
+        &control,
+        WorkspaceChange::RescanDirectory(PathBuf::new()),
+    )
+    .await?;
+    assert!(policy.enabled.load(std::sync::atomic::Ordering::Acquire));
+    fs::remove_file(&control_path)?;
+    std::os::unix::fs::symlink(&second, &control_path)?;
+    wait_for_change(
+        &session,
+        &control,
+        WorkspaceChange::RescanDirectory(PathBuf::new()),
+    )
+    .await?;
+    assert!(!policy.enabled.load(std::sync::atomic::Ordering::Acquire));
+    fs::write(&second, "enabled")?;
+    wait_for_change(
+        &session,
+        &control,
+        WorkspaceChange::RescanDirectory(PathBuf::new()),
+    )
+    .await?;
+    assert!(policy.enabled.load(std::sync::atomic::Ordering::Acquire));
+    tokio::time::timeout(Duration::from_secs(2), session.flush_pending()).await??;
     session.close().await?;
     Ok(())
 }
@@ -378,15 +540,21 @@ async fn wait_for_change_matching(
     control: &TaskControl,
     matches: impl Fn(&WorkspaceChange) -> bool,
 ) -> TestResult {
+    let mut observed = Vec::new();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let batch = session.next_changes(control).await?;
-            if batch.changes.iter().any(&matches) {
+            let found = batch.changes.iter().any(&matches);
+            observed.extend(batch.changes);
+            if found {
                 return Ok::<_, HostError>(());
             }
         }
     })
-    .await??;
+    .await
+    .map_err(|error| {
+        format!("waiting for matching change: {error}; observed changes: {observed:?}")
+    })??;
     Ok(())
 }
 
@@ -396,7 +564,14 @@ fn covers_change(actual: &WorkspaceChange, expected: &WorkspaceChange) -> bool {
             (WorkspaceChange::Rescan, _) => true,
             (
                 WorkspaceChange::RescanDirectory(parent),
-                WorkspaceChange::Upsert(path) | WorkspaceChange::RescanDirectory(path),
+                WorkspaceChange::Upsert(path)
+                | WorkspaceChange::Delete(path)
+                | WorkspaceChange::RescanDirectory(path)
+                | WorkspaceChange::DeletePrefix(path),
+            )
+            | (
+                WorkspaceChange::DeletePrefix(parent),
+                WorkspaceChange::Delete(path) | WorkspaceChange::DeletePrefix(path),
             ) => path.starts_with(parent),
             _ => false,
         }
@@ -439,7 +614,12 @@ async fn watcher_observes_markers_in_rejected_subtrees_and_updates_the_watch_sco
     let marker = directory.join(".git");
     fs::create_dir_all(&marker)?;
     fs::create_dir_all(directory.join("src/deep"))?;
-    fs::write(directory.join("src/deep/source.rs"), "before")?;
+    for directory_marker in [true, false] {
+        fs::write(
+            directory.join(format!("src/deep/source-{directory_marker}.rs")),
+            "before",
+        )?;
+    }
     let policy = Arc::new(MarkerPolicy {
         directory: directory.clone(),
         marker: marker.clone(),
@@ -474,13 +654,31 @@ async fn watcher_observes_markers_in_rejected_subtrees_and_updates_the_watch_sco
             WorkspaceChange::RescanDirectory("nested".into()),
         )
         .await?;
-        tokio::time::sleep(Duration::from_millis(60)).await;
-        fs::write(
-            directory.join("src/deep/source.rs"),
-            format!("reopened after directory marker: {directory_marker}"),
-        )?;
-        wait_for_change_matching(&session, &control, |change|
-            matches!(change, WorkspaceChange::Upsert(path) if path == Path::new("nested/src/deep/source.rs"))).await?;
+        let relative = PathBuf::from(format!("nested/src/deep/source-{directory_marker}.rs"));
+        let expected = WorkspaceChange::Upsert(relative);
+        let observed = wait_for_change_matching(&session, &control, |change| change == &expected);
+        tokio::pin!(observed);
+        let mut writes = tokio::time::interval(Duration::from_millis(100));
+        writes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut revision = 0;
+        // Marker removal can overlap a poll or backend recovery. A broad rescan
+        // can cover a single edit, so keep probing until the new file watch
+        // emits an exact upsert. Each phase has its own file to reject stale events.
+        loop {
+            tokio::select! {
+                result = &mut observed => {
+                    result?;
+                    break;
+                }
+                _ = writes.tick() => {
+                    revision += 1;
+                    fs::write(
+                        directory.join(format!("src/deep/source-{directory_marker}.rs")),
+                        format!("reopened revision {revision}"),
+                    )?;
+                }
+            }
+        }
         fs::write(&marker, "marker file")?;
         wait_for_change(
             &session,

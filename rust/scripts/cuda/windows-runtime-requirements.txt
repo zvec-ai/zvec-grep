@@ -1,0 +1,3 @@
+# cuBLAS, cuRAND, cuFFT, cudart and NVRTC come from the pinned CUDA 12.8 installer.
+# cuDNN's Windows wheel; --no-deps avoids replacing them with unpinned libraries.
+nvidia-cudnn-cu12==9.17.1.4 --hash=sha256:0760c843fb109631edf5bd4234f2a260a13a05c18ee2a20783fbb4eb04d56645

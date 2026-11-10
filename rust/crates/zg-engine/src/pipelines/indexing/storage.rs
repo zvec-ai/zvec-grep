@@ -4,11 +4,13 @@ use std::path::PathBuf;
 
 use crate::{
     EngineResult,
-    domain::{Entity, FileId, FileRecord},
+    domain::{Entity, FileGraphResult, FileId, FileRecord},
     storage::{IndexStore, types::IndexedFragment},
 };
 
 pub(crate) trait IndexStorage: Send + Sync {
+    /// Whether writes may carry a walk-time graph.
+    fn graph_enabled(&self) -> bool;
     fn is_read_only(&self) -> bool;
     fn list_files(&self) -> EngineResult<Vec<FileRecord>>;
     fn resolve_file_ids(&self, paths: &[PathBuf]) -> EngineResult<Vec<FileId>>;
@@ -17,13 +19,19 @@ pub(crate) trait IndexStorage: Send + Sync {
         file: &FileRecord,
         entities: &[Entity],
         entries: &[IndexedFragment],
+        graph: &FileGraphResult,
     ) -> EngineResult<()>;
+    fn update_file_snapshot(&self, file: &FileRecord) -> EngineResult<()>;
     fn mark_file_failed(&self, file: &FileRecord, error: &str) -> EngineResult<()>;
     fn delete_file(&self, file_id: FileId) -> EngineResult<()>;
-    fn checkpoint(&self) -> EngineResult<()>;
+    fn finalize_writes(&self) -> EngineResult<()>;
 }
 
 impl IndexStorage for IndexStore {
+    fn graph_enabled(&self) -> bool {
+        self.graph_enabled()
+    }
+
     fn is_read_only(&self) -> bool {
         self.is_read_only()
     }
@@ -41,8 +49,13 @@ impl IndexStorage for IndexStore {
         file: &FileRecord,
         entities: &[Entity],
         entries: &[IndexedFragment],
+        graph: &FileGraphResult,
     ) -> EngineResult<()> {
-        self.replace_file(file, entities, entries)
+        self.replace_file_with_graph(file, entities, entries, graph)
+    }
+
+    fn update_file_snapshot(&self, file: &FileRecord) -> EngineResult<()> {
+        self.update_file_snapshot(file)
     }
 
     fn mark_file_failed(&self, file: &FileRecord, error: &str) -> EngineResult<()> {
@@ -53,7 +66,7 @@ impl IndexStorage for IndexStore {
         self.delete_file(file_id)
     }
 
-    fn checkpoint(&self) -> EngineResult<()> {
-        self.checkpoint()
+    fn finalize_writes(&self) -> EngineResult<()> {
+        self.finalize_writes()
     }
 }

@@ -1,7 +1,6 @@
 import { EngineError } from "../errors.js";
 
-export const INDEX_EMBEDDING_CONCURRENCY_ENV =
-  "ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY";
+export const EMBEDDING_CONCURRENCY_ENV = "ZVEC_GREP_EMBEDDING_CONCURRENCY";
 
 const LEGACY_LLAMA_PARALLELISM_ENV = "ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM";
 const DEFAULT_PARALLELISM_CAP = 8;
@@ -26,7 +25,7 @@ export function resolveIndexEmbeddingConcurrencyOverride(
   if (options.embeddingConcurrency !== undefined) {
     return validateEmbeddingConcurrency(options.embeddingConcurrency);
   }
-  let name = INDEX_EMBEDDING_CONCURRENCY_ENV;
+  let name = EMBEDDING_CONCURRENCY_ENV;
   let value = process.env[name]?.trim() ?? "";
   if (!value && options.legacyLlama) {
     name = LEGACY_LLAMA_PARALLELISM_ENV;

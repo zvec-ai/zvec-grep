@@ -1,5 +1,5 @@
 name: Authorize Retrieval-only
-description: Require maintainer permission for each job, including partial re-runs.
+description: Authorize local PR CI or maintainer manual/comment runs, including partial re-runs.
 runs:
   using: composite
   steps:
@@ -10,8 +10,22 @@ runs:
       with:
         script: |
           try {
-            if (context.eventName !== 'workflow_dispatch') {
-              throw new Error('Retrieval-only permits manual workflow_dispatch only.');
+            // Reusable workflows retain the caller's event and original actor.
+            if (context.eventName === 'pull_request') {
+              if (!context.payload?.pull_request ||
+                  !['opened', 'synchronize', 'reopened'].includes(context.payload.action)) {
+                throw new Error('Unsupported pull_request event for Retrieval-only.');
+              }
+              if (process.env.RETRIEVAL_EMBEDDING !== 'local') {
+                throw new Error('Automatic PR retrieval requires local embedding.');
+              }
+              core.info('Authorized automatic PR retrieval with local embedding.');
+              return;
+            }
+            const prComment = context.eventName === 'issue_comment' &&
+              context.payload?.action === 'created' && context.payload?.issue?.pull_request;
+            if (context.eventName !== 'workflow_dispatch' && !prComment) {
+              throw new Error('Retrieval-only requires pull_request, workflow_dispatch or a PR comment caller.');
             }
             const actors = new Set([process.env.DISPATCH_ACTOR, process.env.RERUN_ACTOR]);
             for (const username of actors) {
@@ -28,7 +42,7 @@ runs:
           } catch (error) {
             await core.summary
               .addHeading('Retrieval-only: access denied')
-              .addRaw('Only maintainers and administrators may start or re-run this benchmark. No results were produced by this job.')
+              .addRaw('Automatic PR runs require local embedding. Manual and comment runs require maintainer or administrator permission. No results were produced by this job.')
               .write();
             throw error;
           }

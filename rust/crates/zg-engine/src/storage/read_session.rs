@@ -7,12 +7,14 @@ use std::{
         Arc, Mutex, MutexGuard, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
+    thread::JoinHandle,
     time::{Duration, Instant},
 };
 
 use crate::{
     EngineError, EngineResult,
-    workspace::lock::{FileLock, LockMode, acquire_read_write_lock, home_allows_cached_reads},
+    domain::WorkspaceLayout,
+    workspace::lock::{LockGuard, LockMode, can_retain_read_cache, try_acquire_file_lock},
 };
 
 use super::{IndexStore, types::WorkspaceIndexStorageOptions};
@@ -22,7 +24,14 @@ static CACHES: OnceLock<Mutex<Vec<Weak<CacheInner>>>> = OnceLock::new();
 
 #[derive(Clone)]
 pub(crate) struct ReadSessionCache {
+    owner: Arc<CacheOwner>,
+}
+
+// The worker and registry only reference CacheInner, never CacheOwner. The last
+// cache handle can therefore stop and join maintenance without self-joining.
+struct CacheOwner {
     inner: Arc<CacheInner>,
+    worker: Mutex<Option<JoinHandle<()>>>,
 }
 
 struct CacheInner {
@@ -42,6 +51,7 @@ struct SessionSlot {
 }
 
 struct CachedSession {
+    layout: WorkspaceLayout,
     session: Arc<ReadSession>,
     last_used: Instant,
 }
@@ -50,7 +60,8 @@ struct ReadSession {
     // Native handles must close before releasing the residency lock.
     storage: IndexStore,
     storage_home: PathBuf,
-    _residency: Option<FileLock>,
+    generation: String,
+    _residency: Option<LockGuard>,
 }
 
 pub(crate) struct ReadSessionLease {
@@ -61,6 +72,13 @@ pub(crate) struct ReadSessionLease {
 
 impl ReadSessionCache {
     pub(crate) fn new(idle_timeout: Duration) -> std::io::Result<Self> {
+        Self::spawn(idle_timeout, maintain)
+    }
+
+    fn spawn(
+        idle_timeout: Duration,
+        maintenance: impl FnOnce(&Weak<CacheInner>) + Send + 'static,
+    ) -> std::io::Result<Self> {
         let inner = Arc::new(CacheInner {
             state: Mutex::new(CacheState::default()),
             idle_timeout,
@@ -69,31 +87,33 @@ impl ReadSessionCache {
         let weak = Arc::downgrade(&inner);
         // A native thread can release idle handles even when a synchronous writer
         // is waiting for another process's cache on a single-threaded executor.
-        std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("index-read-cache".into())
-            .spawn(move || {
-                while let Some(inner) = weak.upgrade() {
-                    if !inner.reap(Instant::now()) {
-                        break;
-                    }
-                    drop(inner);
-                    std::thread::sleep(REAP_INTERVAL);
-                }
-            })?;
+            .spawn(move || maintenance(&weak))?;
         let mut caches = lock(CACHES.get_or_init(Mutex::default));
         caches.retain(|cache| cache.strong_count() > 0);
         caches.push(Arc::downgrade(&inner));
-        Ok(Self { inner })
+        Ok(Self {
+            owner: Arc::new(CacheOwner {
+                inner,
+                worker: Mutex::new(Some(worker)),
+            }),
+        })
     }
 
-    /// The caller holds the workspace home read lock throughout the lease.
+    /// The caller holds the workspace read lock throughout the lease.
+    /// `graph_enabled` comes from the published descriptor; changing it requires
+    /// a rebuild, so the generation also identifies the graph configuration.
     pub(crate) fn acquire(
         &self,
-        home: &Path,
+        layout: &WorkspaceLayout,
         storage_home: &Path,
+        generation: &str,
+        graph_enabled: bool,
     ) -> EngineResult<ReadSessionLease> {
-        self.acquire_with(home, storage_home, || {
+        self.acquire_with(layout, storage_home, generation, || {
             IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
+                graph_enabled,
                 storage_path: storage_home.to_path_buf(),
             })
         })
@@ -101,44 +121,51 @@ impl ReadSessionCache {
 
     fn acquire_with(
         &self,
-        home: &Path,
+        layout: &WorkspaceLayout,
         storage_home: &Path,
+        generation: &str,
         open: impl FnOnce() -> EngineResult<IndexStore>,
     ) -> EngineResult<ReadSessionLease> {
         let slot = {
-            let mut state = lock(&self.inner.state);
-            if self.inner.closed.load(Ordering::Acquire) {
+            let mut state = lock(&self.owner.inner.state);
+            if self.owner.inner.closed.load(Ordering::Acquire) {
                 return Err(EngineError::resource_closed(
                     "index read cache has been closed",
                 ));
             }
-            Arc::clone(state.entries.entry(home.to_path_buf()).or_default())
+            Arc::clone(
+                state
+                    .entries
+                    .entry(layout.storage_dir().to_path_buf())
+                    .or_default(),
+            )
         };
         // Only this workspace waits for native open/close; the map owns entries,
         // never native I/O. Concurrent misses for one workspace share this slot.
         let mut entry = lock(&slot.entry);
-        if self.inner.closed.load(Ordering::Acquire) {
+        if self.owner.inner.closed.load(Ordering::Acquire) {
             return Err(EngineError::resource_closed(
                 "index read cache has been closed",
             ));
         }
-        if entry
-            .as_ref()
-            .is_some_and(|entry| entry.session.storage_home != storage_home)
-        {
+        if entry.as_ref().is_some_and(|entry| {
+            entry.session.storage_home != storage_home || entry.session.generation != generation
+        }) {
             entry.take();
         }
         if entry.is_none() {
-            let residency = acquire_read_write_lock(
-                &home.join("locks/read-cache"),
-                LockMode::Read,
+            let residency = try_acquire_file_lock(
+                layout.read_cache_lock_path(),
+                LockMode::Shared,
                 "context.cache",
             )?;
             let storage = open()?;
             *entry = Some(CachedSession {
+                layout: layout.clone(),
                 session: Arc::new(ReadSession {
                     storage,
                     storage_home: storage_home.to_path_buf(),
+                    generation: generation.to_owned(),
                     _residency: Some(residency),
                 }),
                 last_used: Instant::now(),
@@ -153,7 +180,20 @@ impl ReadSessionCache {
     }
 
     pub(crate) fn close(&self) {
+        self.owner.close();
+    }
+}
+
+impl CacheOwner {
+    fn close(&self) {
         self.inner.closed.store(true, Ordering::Release);
+        // Serialize the whole shutdown so every concurrent close waits for both
+        // maintenance and native retirement. No cache or slot lock is held at join.
+        let mut worker = lock(&self.worker);
+        if let Some(worker) = worker.take() {
+            worker.thread().unpark();
+            let _ = worker.join();
+        }
         let entries = std::mem::take(&mut lock(&self.inner.state).entries);
         // In-flight queries retain their own Arc until they finish. Native close
         // runs after releasing the map lock, under the workspace's own slot lock.
@@ -163,11 +203,27 @@ impl ReadSessionCache {
     }
 }
 
+impl Drop for CacheOwner {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+fn maintain(weak: &Weak<CacheInner>) {
+    while let Some(inner) = weak.upgrade() {
+        if !inner.reap(Instant::now()) {
+            break;
+        }
+        drop(inner);
+        std::thread::park_timeout(REAP_INTERVAL);
+    }
+}
+
 impl std::fmt::Debug for ReadSessionCache {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ReadSessionCache")
-            .field("entries", &lock(&self.inner.state).entries.len())
+            .field("entries", &lock(&self.owner.inner.state).entries.len())
             .finish_non_exhaustive()
     }
 }
@@ -192,10 +248,10 @@ impl CacheInner {
                 if Arc::strong_count(&cached.session) > 1 {
                     continue;
                 }
-                // A writer first owns the home lock, then waits for residency locks.
+                // A writer first owns the workspace lock, then waits for residency locks.
                 // Releasing on any probe failure is conservative and never serves old data.
                 if now.saturating_duration_since(cached.last_used) < self.idle_timeout
-                    && home_allows_cached_reads(&home)
+                    && can_retain_read_cache(&cached.layout)
                 {
                     continue;
                 }
@@ -217,13 +273,15 @@ impl CacheInner {
 }
 
 impl ReadSessionLease {
-    pub(crate) fn open(storage_home: &Path) -> EngineResult<Self> {
+    pub(crate) fn open(storage_home: &Path, graph_enabled: bool) -> EngineResult<Self> {
         Ok(Self {
             session: Arc::new(ReadSession {
                 storage: IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
+                    graph_enabled,
                     storage_path: storage_home.to_path_buf(),
                 })?,
                 storage_home: storage_home.to_path_buf(),
+                generation: String::new(),
                 _residency: None,
             }),
             cache: Weak::new(),
@@ -257,7 +315,7 @@ impl Drop for ReadSessionLease {
     }
 }
 
-/// Called after acquiring the exclusive home lock, before waiting for remote caches.
+/// Called after acquiring the exclusive workspace lock, before waiting for remote caches.
 pub(crate) fn release_for_write(home: &Path) {
     let Some(caches) = CACHES.get() else {
         return;

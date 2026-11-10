@@ -1,6 +1,36 @@
 use super::*;
 use crate::models::catalog::{EmbeddingCatalogEntry, get_embedding_model_catalog_entry};
 
+#[test]
+fn cpu_model_parameters_exclude_gpu_devices_and_layers() {
+    let _registry = lock_backend_registry();
+    let params = cpu_model_params().expect("CPU model parameters");
+    assert_eq!(params.n_gpu_layers(), 0);
+    assert!(params.devices().is_empty());
+}
+
+#[test]
+fn cancelled_model_preparation_is_rejected() {
+    let signal = CancellationToken::new();
+    signal.cancel();
+    assert!(check_cancelled(Some(&signal)).is_err());
+}
+
+#[test]
+fn cuda_release_defaults_to_automatic_device_selection() {
+    let expected = if cfg!(all(
+        feature = "cuda",
+        any(target_os = "linux", target_os = "windows"),
+        target_arch = "x86_64"
+    )) {
+        Some(Device::Auto)
+    } else {
+        None
+    };
+    assert_eq!(resolve_device(None), expected);
+    assert_eq!(resolve_device(Some(Device::Cpu)), Some(Device::Cpu));
+}
+
 fn entry(reference: &str) -> LlamaCppConfig {
     get_embedding_model_catalog_entry(reference)
         .and_then(EmbeddingCatalogEntry::llama_cpp_config)
@@ -36,17 +66,6 @@ fn formats_embeddinggemma_and_qwen_inputs_like_main() {
 }
 
 #[test]
-fn rejects_embedded_nul_in_llama_tokenizer_input() {
-    let error = llama_tokenization_input("code\0query")
-        .expect_err("CString-based llama tokenization rejects embedded NUL bytes");
-    assert!(
-        error
-            .to_string()
-            .contains("Unable to tokenize llama.cpp embedding input")
-    );
-}
-
-#[test]
 fn pins_main_compatible_sources_and_cache_name() {
     let entry = entry("local/embeddinggemma-300m");
     assert_eq!(
@@ -71,11 +90,13 @@ fn user_concurrency_controls_cpu_threads_per_context() {
 }
 
 #[test]
-fn metal_context_pool_caps_physical_workers_without_ignoring_user_limit() {
+fn context_pool_honors_user_limit_and_caps_at_eight() {
     assert_eq!(physical_context_worker_limit(true, 1), 1);
     assert_eq!(physical_context_worker_limit(true, 2), 2);
-    assert_eq!(physical_context_worker_limit(true, 4), 2);
+    assert_eq!(physical_context_worker_limit(true, 4), 4);
     assert_eq!(physical_context_worker_limit(false, 4), 4);
+    assert_eq!(physical_context_worker_limit(true, 24), 8);
+    assert_eq!(physical_context_worker_limit(false, 24), 8);
 }
 
 #[test]
@@ -83,6 +104,102 @@ fn context_batch_capacity_tracks_tokens_instead_of_full_context() {
     assert_eq!(llama_batch_capacity(7, 2_048).expect("capacity"), 32);
     assert_eq!(llama_batch_capacity(65, 2_048).expect("capacity"), 128);
     assert_eq!(llama_batch_capacity(2_048, 2_048).expect("capacity"), 2_048);
+}
+
+#[test]
+fn embeddinggemma_micro_batch_covers_long_inputs_without_changing_qwen() {
+    for tokens in [1, 32, 255, 256, 257, 1_024, 2_048] {
+        let batch = llama_batch_capacity(tokens, 2_048).expect("batch capacity");
+        let gemma = llama_micro_batch_capacity("gemma-embedding", batch);
+        assert_eq!(gemma, batch);
+        assert!(usize::try_from(gemma).expect("micro batch") >= tokens);
+        assert_eq!(llama_micro_batch_capacity("qwen3", batch), batch.min(256));
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires ZVEC_GREP_TEST_MODEL_CACHE with the embeddinggemma GGUF; exercises up to 2048 tokens"]
+async fn cached_embeddinggemma_cpu_handles_long_inputs_and_reuse() {
+    embeddinggemma_handles_long_inputs_and_reuse(Device::Cpu).await;
+}
+
+#[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "cuda"))]
+#[tokio::test]
+#[ignore = "requires cached embeddinggemma GGUF and a working NVIDIA GPU; run in a fresh process"]
+async fn cached_embeddinggemma_cuda_handles_long_inputs_and_reuse() {
+    tracing_subscriber::fmt()
+        .with_env_filter("warn,zg_engine=debug,llama-cpp-2=info")
+        .with_ansi(false)
+        .with_writer(std::io::stderr)
+        .try_init()
+        .expect("CUDA long-input regression must retain native execution evidence");
+    embeddinggemma_handles_long_inputs_and_reuse(Device::Cuda).await;
+}
+
+async fn embeddinggemma_handles_long_inputs_and_reuse(device: Device) {
+    let cache = env::var_os("ZVEC_GREP_TEST_MODEL_CACHE")
+        .map(PathBuf::from)
+        .expect("ZVEC_GREP_TEST_MODEL_CACHE must point at the model cache");
+    let model = LlamaCppEmbeddingModel::new(
+        entry("local/embeddinggemma-300m"),
+        ModelConfig {
+            cache_dir: Some(cache),
+            device: Some(device),
+            ..ModelConfig::default()
+        },
+        ModelComputeRuntime::shared(),
+    );
+    let loaded = model.ensure_loaded(None, None).await.expect("cached model");
+    assert_eq!(loaded.gpu, device != Device::Cpu);
+    let tokens = loaded
+        .model
+        .str_to_token(&"authentication middleware ".repeat(2_048), AddBos::Always)
+        .expect("long input tokens");
+    assert!(tokens.len() >= 2_048);
+    let prepared = |length| PreparedLlamaBatch {
+        inputs: vec![PreparedLlamaInput {
+            index: 0,
+            tokens: tokens[..length].to_vec(),
+        }],
+        truncated: Vec::new(),
+    };
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert!(
+        loaded
+            .contexts
+            .run(prepared(257), 2_048, 1, 4, Some(&cancelled))
+            .is_err()
+    );
+    let mut first: Option<Vec<f32>> = None;
+    // Cross the former 256-token limit, grow the same worker's context, and
+    // finally reuse its larger context for the original short input.
+    for length in [32, 256, 257, 1_024, 2_048, 32] {
+        let result = loaded
+            .contexts
+            .run(prepared(length), 2_048, 1, 4, None)
+            .expect("full-sequence encoder inference");
+        assert!(result.truncated.is_empty());
+        assert_eq!(result.vectors.len(), 1);
+        let vector = &result.vectors[0];
+        assert_eq!(vector.len(), 768);
+        assert!(vector.iter().all(|value| value.is_finite()));
+        let norm = vector.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>();
+        assert!(norm > 0.0);
+        if length == 32 {
+            if let Some(previous) = first.as_ref() {
+                let dot = previous
+                    .iter()
+                    .zip(vector)
+                    .map(|(&a, &b)| f64::from(a) * f64::from(b))
+                    .sum::<f64>();
+                let previous_norm = previous.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>();
+                assert!(dot / (previous_norm * norm).sqrt() > 0.999);
+            } else {
+                first = Some(vector.clone());
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -180,6 +297,65 @@ async fn cached_embeddinggemma_runs_real_llama_cpp_inference() {
         }
     }
     assert!(result.truncated.is_empty());
+}
+
+#[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "cuda"))]
+#[tokio::test]
+#[ignore = "requires installed CUDA plugins, a working NVIDIA GPU and cached embeddinggemma GGUF; run in a fresh process"]
+async fn cached_embeddinggemma_uses_cuda() {
+    let cache = env::var_os("ZVEC_GREP_TEST_MODEL_CACHE")
+        .map(PathBuf::from)
+        .expect("ZVEC_GREP_TEST_MODEL_CACHE must point at the model cache");
+    // CPU initialization must not consume the one-time optional GPU registration.
+    // Keep the CPU model alive while loading the GPU model: no plugin unloading.
+    let cpu = LlamaCppEmbeddingModel::new(
+        entry("local/embeddinggemma-300m"),
+        ModelConfig {
+            cache_dir: Some(cache.clone()),
+            device: Some(Device::Cpu),
+            ..ModelConfig::default()
+        },
+        crate::models::runtime::ModelComputeRuntime::shared(),
+    );
+    let result = cpu
+        .embed(
+            &[vec![Content::Text("find relevant code".to_owned())]],
+            EmbeddingOptions::default(),
+        )
+        .await
+        .expect("CPU inference before CUDA registration");
+    assert_eq!(result.vectors[0].len(), 768);
+    assert!(
+        cpu.state
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|loaded| !loaded.gpu)
+    );
+    let model = LlamaCppEmbeddingModel::new(
+        entry("local/embeddinggemma-300m"),
+        ModelConfig {
+            cache_dir: Some(cache),
+            device: Some(Device::Cuda),
+            ..ModelConfig::default()
+        },
+        crate::models::runtime::ModelComputeRuntime::shared(),
+    );
+    let result = model
+        .embed(
+            &[vec![Content::Text("find relevant code".to_owned())]],
+            EmbeddingOptions::default(),
+        )
+        .await
+        .expect("CUDA llama.cpp inference");
+
+    assert_eq!(result.vectors[0].len(), 768);
+    assert!(result.vectors[0].iter().all(|value| value.is_finite()));
+    let loaded = model.state.lock().await;
+    assert!(
+        loaded.as_ref().is_some_and(|loaded| loaded.gpu),
+        "CUDA request unexpectedly fell back to CPU"
+    );
 }
 
 #[cfg(target_os = "macos")]

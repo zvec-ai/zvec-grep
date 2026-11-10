@@ -1,5 +1,16 @@
 #[path = "server_lifecycle/mcp_parity.rs"]
 mod mcp_parity;
+#[path = "server_lifecycle/relationships.rs"]
+mod relationships;
+#[path = "server_lifecycle/workspaces.rs"]
+mod workspaces;
+
+#[path = "server_lifecycle/outline_context.rs"]
+mod outline_context;
+#[path = "server_lifecycle/positional_queries.rs"]
+mod positional_queries;
+#[path = "server_lifecycle/protocol_upgrade.rs"]
+mod protocol_upgrade;
 
 use std::{
     error::Error,
@@ -572,7 +583,12 @@ fn duplicate_server_run_preserves_active_daemon_logs() -> Result<(), Box<dyn Err
 }
 
 #[test]
-fn server_on_exposes_only_agent_search_and_off_stops_it() -> Result<(), Box<dyn Error>> {
+#[expect(
+    clippy::too_many_lines,
+    reason = "Verify MCP and CLI read routes within one server lifecycle"
+)]
+fn server_on_exposes_agent_search_and_relationships_and_off_stops_it() -> Result<(), Box<dyn Error>>
+{
     let _permit = server_test_permit();
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
     let home = TempDir::new()?;
@@ -617,6 +633,8 @@ fn server_on_exposes_only_agent_search_and_off_stops_it() -> Result<(), Box<dyn 
     });
     let response = post_json(port, Some(&session), &list.to_string())?;
     assert!(response.contains("zvec_grep_search"));
+    assert!(response.contains("\"name\":\"zvec_grep_callers\""));
+    assert!(response.contains("\"name\":\"zvec_grep_callees\""));
     assert!(!response.contains("zvec_grep_index"));
     assert!(!response.contains("zvec_grep_rg"));
     assert!(response.contains("\"maximum\":50"));
@@ -635,14 +653,44 @@ fn server_on_exposes_only_agent_search_and_off_stops_it() -> Result<(), Box<dyn 
     });
     let response = post_json(port, Some(&session), &call.to_string())?;
     assert!(response.contains("error[ZG.ENGINE.NOT_FOUND]"));
-    assert!(response.contains("workspace index at"));
-    assert!(response.contains("no workspace manifest was found"));
+    assert!(response.contains("No index found"));
+    assert!(
+        response.contains("zg --index --embedding &lt;model&gt;")
+            || response.contains("zg --index --embedding <model>")
+    );
     assert!(response.contains("\"isError\":true"));
+
+    for (id, name) in [(10, "callers"), (11, "callees")] {
+        let call = json!({
+            "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": format!("zvec_grep_{name}"), "arguments": {"root": home.path(), "symbol": "run"}}
+        });
+        let response = post_json(port, Some(&session), &call.to_string())?;
+        assert!(
+            response.contains("error[ZG.ENGINE.NOT_FOUND]"),
+            "{name}: {response}"
+        );
+        assert!(response.contains("\"isError\":true"), "{name}: {response}");
+        for mode in ["direct", "server"] {
+            let output = Command::new(&guard.binary)
+                .arg(format!("--{name}"))
+                .arg("run")
+                .arg(home.path())
+                .args(["--mode", mode, "--home"])
+                .arg(&guard.home)
+                .output()?;
+            assert!(
+                !output.status.success(),
+                "{name} {mode} must require an index"
+            );
+            assert!(String::from_utf8_lossy(&output.stderr).contains("ZG.ENGINE.NOT_FOUND"));
+        }
+        assert!(!home.path().join(".zvec-grep").exists());
+    }
 
     // CLI administration uses the typed daemon protocol rather than the
     // public MCP toolset, so status remains available with the agent profile.
-    // Pin the display home so temporary paths are rendered consistently even
-    // when the runner's temporary directory is inside its real user home.
+    // Use an isolated home so the query cannot pick up real workspace state.
     let cli_status = Command::new(&guard.binary)
         .env("HOME", home.path())
         .env("USERPROFILE", home.path())
@@ -653,7 +701,7 @@ fn server_on_exposes_only_agent_search_and_off_stops_it() -> Result<(), Box<dyn 
     assert_command_success(&cli_status);
     let cli_stdout = String::from_utf8_lossy(&cli_status.stdout);
     assert!(
-        cli_stdout.starts_with("? Workspace index is not configured\n  ~\n"),
+        cli_stdout.starts_with("  Coverage    Unavailable (index not configured)\n"),
         "{cli_stdout}"
     );
 
@@ -676,9 +724,7 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
         "resident workspace manager\n",
     )?;
     // The mock provider requires the same explicit workspace consent as real providers.
-    let signing_key = home.path().join("authorization.key");
     let consent = Command::new(&binary)
-        .env("ZVEC_GREP_AUTHORIZATION_KEY_FILE", &signing_key)
         .args([
             "--auth",
             "grant",
@@ -695,9 +741,7 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
         .output()?;
     assert_command_success(&consent);
     let (mut guard, output) = start_server(&binary, &home, "full", None, |command| {
-        command
-            .env("ZVEC_GREP_API_KEY", "local-test-key")
-            .env("ZVEC_GREP_AUTHORIZATION_KEY_FILE", &signing_key);
+        command.env("ZVEC_GREP_API_KEY", "local-test-key");
     })?;
     let port = guard.listen.parse::<SocketAddr>()?.port();
     assert!(String::from_utf8_lossy(&output.stdout).contains("MCP toolset: full"));
@@ -736,6 +780,8 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
     });
     let response = post_json(port, Some(&session), &list.to_string())?;
     for name in [
+        "zvec_grep_callers",
+        "zvec_grep_callees",
         "zvec_grep_search",
         "zvec_grep_index",
         "zvec_grep_index_drop",
@@ -869,12 +915,12 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
         "{response}"
     );
     assert!(response.contains("\"isError\":false"), "{response}");
-    assert!(response.contains("freshness: possibly_stale"), "{response}");
+    assert!(response.contains("freshness: fresh"), "{response}");
     assert!(
-        response.contains("results: served_from_current_index"),
+        !response.contains("results: served_from_current_index"),
         "{response}"
     );
-    assert!(response.contains("background_refresh: off"), "{response}");
+    assert!(!response.contains("background_refresh:"), "{response}");
 
     std::fs::write(
         workspace.path().join("fresh.txt"),
@@ -918,22 +964,25 @@ fn full_toolset_exposes_lifecycle_tools_and_runs_managed_rg() -> Result<(), Box<
     });
     let response = post_json(port, Some(&session), &background_search.to_string())?;
     assert!(response.contains("fresh.txt"), "{response}");
-    assert!(response.contains("freshness: possibly_stale"), "{response}");
-    assert!(
-        response.contains("results: served_from_current_index"),
-        "{response}"
-    );
-    assert!(
-        !response.contains("freshness: served_from_current_index"),
-        "{response}"
-    );
     // A native watcher can deliver delayed or duplicate notifications after the
-    // preceding fresh query. Controlled runtime tests cover the quiet idle case.
+    // preceding fresh query. Global drift uses the same diagnostics as the CLI.
     assert!(
-        response.contains("background_refresh: idle")
-            || response.contains("background_refresh: scheduled"),
+        response.contains("freshness: fresh") || response.contains("freshness: possibly_stale"),
         "{response}"
     );
+    if response.contains("status: possibly_stale") {
+        assert!(
+            response.contains("results: served_from_current_index"),
+            "{response}"
+        );
+        assert!(response.contains("background_refresh:"), "{response}");
+    } else {
+        assert!(
+            !response.contains("results: served_from_current_index"),
+            "{response}"
+        );
+        assert!(!response.contains("background_refresh:"), "{response}");
+    }
     assert!(response.contains("\"isError\":false"), "{response}");
 
     let output = guard.stop()?;
@@ -1041,7 +1090,7 @@ fn default_connections_reuse_either_toolset_and_explicit_conflicts_fail()
                 .as_array()
                 .ok_or("tool list")?
                 .len(),
-            if profile == "agent" { 1 } else { 6 }
+            if profile == "agent" { 3 } else { 8 }
         );
         bridge.close()?;
         let current: serde_json::Value =
@@ -1082,10 +1131,6 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
     let indexed = Command::new(&binary)
         .current_dir(workspace.path())
         .env("ZVEC_GREP_HOME", home.path())
-        .env(
-            "ZVEC_GREP_WORKSPACE_REGISTRY",
-            home.path().join("workspaces.json"),
-        )
         .env("ZVEC_GREP_API_KEY", "local-test-key")
         .args([
             "--index",
@@ -1099,9 +1144,7 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
         ])
         .output()?;
     assert_command_success(&indexed);
-    let signing_key = home.path().join("authorization.key");
     let consent = Command::new(&binary)
-        .env("ZVEC_GREP_AUTHORIZATION_KEY_FILE", &signing_key)
         .args([
             "--auth",
             "grant",
@@ -1118,13 +1161,7 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
         .output()?;
     assert_command_success(&consent);
     let (mut guard, _) = start_server(&binary, &home, toolset, None, |command| {
-        command
-            .env("ZVEC_GREP_AUTHORIZATION_KEY_FILE", &signing_key)
-            .env("ZVEC_GREP_API_KEY", "local-test-key")
-            .env(
-                "ZVEC_GREP_WORKSPACE_REGISTRY",
-                home.path().join("workspaces.json"),
-            );
+        command.env("ZVEC_GREP_API_KEY", "local-test-key");
     })?;
     let port = guard.listen.parse::<SocketAddr>()?.port();
     let response = post_json(
@@ -1175,13 +1212,13 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
     std::fs::write(&source, "vineyard documentation")?;
     let response = search(workspace.path(), "orchard", "eventual", false)?;
     assert!(response.contains("source.txt"), "{response}");
-    assert!(response.contains("background_refresh: off"), "{response}");
+    assert!(response.contains("orchard documentation"), "{response}");
+    assert!(response.contains("status: possibly_stale"), "{response}");
+    assert!(response.contains("background_refresh: idle"), "{response}");
     let response = search(workspace.path(), "orchard", "eventual", true)?;
     assert!(response.contains("source.txt"), "{response}");
-    assert!(
-        response.contains("background_refresh: scheduled"),
-        "{response}"
-    );
+    assert!(response.contains("status: possibly_stale"), "{response}");
+    assert!(response.contains("background_refresh:"), "{response}");
     // Poll without requesting more refreshes: the first eventual search must do the work.
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
@@ -1201,6 +1238,7 @@ fn search_uses_workspace_runtime(toolset: &str) -> Result<(), Box<dyn Error>> {
     embedding.wait_for_request_after(before_edit, "harvest", home.path());
     let response = search(workspace.path(), "harvest", "wait_for_fresh", false)?;
     assert!(response.contains("source.txt"), "{response}");
+    assert!(response.contains("harvest documentation"), "{response}");
     assert!(response.contains("freshness: fresh"), "{response}");
     assert!(response.contains("\"isError\":false"), "{response}");
     // Once activated, the watcher must refresh later edits even with autoUpdate off.
@@ -1276,7 +1314,7 @@ fn concurrent_stdio_bootstraps_share_one_resident_daemon() -> Result<(), Box<dyn
     let tools = list["result"]["tools"]
         .as_array()
         .ok_or("tools/list did not return an array")?;
-    assert_eq!(tools.len(), 6);
+    assert_eq!(tools.len(), 8);
 
     for bridge in bridges {
         bridge.close()?;
@@ -1297,10 +1335,7 @@ fn concurrent_stdio_bootstraps_share_one_resident_daemon() -> Result<(), Box<dyn
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Exercise update, rebuild and drop in one resident daemon lifecycle"
-)]
+// Exercise update, rebuild and drop in one resident daemon lifecycle.
 fn direct_writes_retire_daemon_read_sessions() -> Result<(), Box<dyn Error>> {
     let _permit = server_test_permit();
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
@@ -1313,10 +1348,6 @@ fn direct_writes_retire_daemon_read_sessions() -> Result<(), Box<dyn Error>> {
         command
             .current_dir(workspace.path())
             .env("ZVEC_GREP_HOME", home.path())
-            .env(
-                "ZVEC_GREP_WORKSPACE_REGISTRY",
-                home.path().join("workspaces.json"),
-            )
             .env("ZVEC_GREP_API_KEY", "local-test-key")
             .args(["--index", "--mode", "direct"])
             .args(extra);
@@ -1334,12 +1365,7 @@ fn direct_writes_retire_daemon_read_sessions() -> Result<(), Box<dyn Error>> {
     ])?);
     // CLI writers are separate processes, not children of the native cache owner.
     // This also avoids inheriting the native library's open lock descriptors.
-    let (mut guard, _) = start_server(&binary, &home, "full", None, |command| {
-        command.env(
-            "ZVEC_GREP_WORKSPACE_REGISTRY",
-            home.path().join("workspaces.json"),
-        );
-    })?;
+    let (mut guard, _) = start_server(&binary, &home, "full", None, |_| {})?;
     let port = guard.listen.parse::<SocketAddr>()?.port();
     let initialize = json!({
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -1405,12 +1431,39 @@ fn direct_writes_retire_daemon_read_sessions() -> Result<(), Box<dyn Error>> {
         response.contains("source.txt") && response.contains("\"isError\":false"),
         "{response}"
     );
-    assert_command_success(&direct(&["--drop", "--yes"])?);
+    assert_command_success(&direct(&["--drop"])?);
     let response = search("vineyard")?;
     assert!(
         response.contains("\"isError\":true"),
         "dropped index remained cached: {response}"
     );
+    assert_command_success(&guard.stop()?);
+    Ok(())
+}
+
+#[test]
+fn index_drop_runs_without_confirmation_through_the_daemon() -> Result<(), Box<dyn Error>> {
+    let _permit = server_test_permit();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
+    let home = TempDir::new()?;
+    let (mut guard, _) = start_server(&binary, &home, "full", None, |_| {})?;
+    for mode in ["server", "auto"] {
+        let workspace = TempDir::new()?;
+        let index = workspace.path().join(".zvec-grep/index");
+        std::fs::create_dir_all(&index)?;
+        let source = workspace.path().join("source.txt");
+        std::fs::write(&source, "keep source")?;
+
+        let output = Command::new(&binary)
+            .args(["--index", "--drop", "--mode", mode, "--home"])
+            .arg(home.path())
+            .arg(workspace.path())
+            .output()?;
+        assert_command_success(&output);
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Dropped index"));
+        assert!(!index.exists());
+        assert_eq!(std::fs::read_to_string(source)?, "keep source");
+    }
     assert_command_success(&guard.stop()?);
     Ok(())
 }
@@ -1425,11 +1478,9 @@ fn indexed_fragment_coordinates_survive_direct_server_and_mcp() -> Result<(), Bo
     // Exceed the configured model's input budget while keeping only two source lines.
     let source = format!("# Heading\n{} linenumberprobe\n", "x".repeat(20_000));
     std::fs::write(workspace.path().join("sample.md"), source)?;
-    let registry = home.path().join("workspaces.json");
     let index = Command::new(&binary)
         .current_dir(workspace.path())
         .env("ZVEC_GREP_HOME", home.path())
-        .env("ZVEC_GREP_WORKSPACE_REGISTRY", &registry)
         .env("ZVEC_GREP_API_KEY", "local-test-key")
         .args([
             "--index",
@@ -1443,9 +1494,7 @@ fn indexed_fragment_coordinates_survive_direct_server_and_mcp() -> Result<(), Bo
         .arg(format!("http://{}/embeddings", embedding.address))
         .output()?;
     assert_command_success(&index);
-    let (mut guard, _) = start_server(&binary, &home, "full", None, |command| {
-        command.env("ZVEC_GREP_WORKSPACE_REGISTRY", &registry);
-    })?;
+    let (mut guard, _) = start_server(&binary, &home, "full", None, |_| {})?;
     let mut bridge = StdioBridge::spawn(&binary, home.path(), &guard.listen)?;
     bridge.request(&json!({
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -1455,13 +1504,12 @@ fn indexed_fragment_coordinates_survive_direct_server_and_mcp() -> Result<(), Bo
     bridge.notify(
         &json!({ "jsonrpc": "2.0", "method": "notifications/initialized", "params": {} }),
     )?;
-    for preview in ["short", "full"] {
+    for preview in ["none", "short", "full"] {
         let mut outputs = Vec::new();
         for mode in ["direct", "server"] {
             let reply = Command::new(&binary)
                 .current_dir(workspace.path())
                 .env("ZVEC_GREP_HOME", home.path())
-                .env("ZVEC_GREP_WORKSPACE_REGISTRY", &registry)
                 .args([
                     "--mode",
                     mode,
@@ -1475,11 +1523,20 @@ fn indexed_fragment_coordinates_survive_direct_server_and_mcp() -> Result<(), Bo
                 .output()?;
             assert_command_success(&reply);
             let text = String::from_utf8(reply.stdout)?;
-            assert!(text.contains("\n  2: xxx"), "{mode} {preview}: {text}");
+            let line_prefix = match preview {
+                "none" => "\n2\t...xxx",
+                "short" => "\n  2: ...xxx",
+                _ => "\n  2: xxx",
+            };
+            assert!(text.contains(line_prefix), "{mode} {preview}: {text}");
             assert!(!text.contains("\n  1: xxx"), "{mode} {preview}: {text}");
-            outputs.push(text);
+            assert!(!text.contains("\n1\txxx"), "{mode} {preview}: {text}");
+            outputs.push((text, String::from_utf8(reply.stderr)?));
         }
         assert_eq!(outputs[0], outputs[1], "direct/server {preview}");
+        if preview == "none" {
+            continue; // MCP exposes only short and full previews.
+        }
         let reply = bridge.request(&json!({
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": { "name": "zvec_grep_search", "arguments": {
@@ -1490,11 +1547,13 @@ fn indexed_fragment_coordinates_survive_direct_server_and_mcp() -> Result<(), Bo
         let text = reply["result"]["content"][0]["text"]
             .as_str()
             .ok_or("missing source preview")?;
-        assert!(
-            text.contains("matched: 2\nsource:\n2\txxx"),
-            "{preview}: {text}"
-        );
-        assert!(text.ends_with("\n3\t"), "{preview}: {text}");
+        let (body, diagnostics) = &outputs[0];
+        let expected = if diagnostics.is_empty() {
+            format!("freshness: fresh\n{body}")
+        } else {
+            format!("freshness: possibly_stale\n{diagnostics}\n{body}")
+        };
+        assert_eq!(text, expected, "direct/server/MCP {preview}");
     }
     bridge.close()?;
     assert_command_success(&guard.stop()?);
@@ -1523,10 +1582,14 @@ fn stdio_remote_consent(protocol: &str) -> Result<(), Box<dyn Error>> {
         workspace.path().join("sample.md"),
         "# Consent\nremote consent fixture\n",
     )?;
-    let signing_key = home.path().join("authorization.key");
+    let authorization = workspace.path().join(".zvec-grep/authorization.json");
     let (mut guard, _) = start_server(&binary, &home, "full", None, |command| {
         command
-            .env("ZVEC_GREP_AUTHORIZATION_KEY_FILE", &signing_key)
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env("ZVEC_GREP_HOME", home.path())
+            .env("USER", "consent-user")
+            .env("USERNAME", "consent-user")
             .env("ZVEC_GREP_API_KEY", "test-key");
     })?;
     let mut bridge = StdioBridge::spawn(&binary, home.path(), &guard.listen)?;
@@ -1555,7 +1618,7 @@ fn stdio_remote_consent(protocol: &str) -> Result<(), Box<dyn Error>> {
     assert_eq!(prompts, 1);
     assert_eq!(declined["result"]["isError"], true);
     assert_eq!(embedding.requests.load(Ordering::SeqCst), 0);
-    assert!(!signing_key.exists());
+    assert!(!authorization.exists());
     let (indexed, prompts) = bridge.request_with_consent(&index(3), "once")?;
     assert_eq!(prompts, 1);
     assert_eq!(indexed["result"]["isError"], false, "{indexed}");
@@ -1567,8 +1630,8 @@ fn stdio_remote_consent(protocol: &str) -> Result<(), Box<dyn Error>> {
     let indexed_requests = embedding.requests.load(Ordering::SeqCst);
     assert!(indexed_requests > 0);
     assert!(
-        !signing_key.exists(),
-        "one-operation consent must not create a signing key"
+        !authorization.exists(),
+        "one-operation consent must not persist a workspace grant"
     );
     let search = |id| {
         json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {
@@ -1582,7 +1645,12 @@ fn stdio_remote_consent(protocol: &str) -> Result<(), Box<dyn Error>> {
     let (persisted, prompts) = bridge.request_with_consent(&index(5), "workspace")?;
     assert_eq!(prompts, 1);
     assert_eq!(persisted["result"]["isError"], false, "{persisted}");
-    assert!(signing_key.exists());
+    let grants: serde_json::Value = serde_json::from_slice(&std::fs::read(&authorization)?)?;
+    assert_eq!(grants.as_array().map(Vec::len), Some(1));
+    assert_eq!(grants[0]["root"], json!(workspace.path().canonicalize()?));
+    assert_eq!(grants[0]["username"], "consent-user");
+    assert!(!home.path().join("authorization.key").exists());
+    assert!(!home.path().join(".zvec-grep").exists());
     let (queried, prompts) = bridge.request_with_consent(&search(6), "cancel")?;
     assert_eq!(prompts, 0, "valid workspace grants must skip elicitation");
     assert_eq!(queried["result"]["isError"], false, "{queried}");
@@ -1590,6 +1658,142 @@ fn stdio_remote_consent(protocol: &str) -> Result<(), Box<dyn Error>> {
     bridge.close()?;
     assert_command_success(&guard.stop()?);
     Ok(())
+}
+
+#[test]
+fn direct_index_failures_match_readiness_and_recover() -> Result<(), Box<dyn Error>> {
+    index_failures_match_readiness_and_recover("direct")
+}
+
+#[test]
+fn server_index_failures_match_readiness_and_recover() -> Result<(), Box<dyn Error>> {
+    let _permit = server_test_permit();
+    index_failures_match_readiness_and_recover("server")
+}
+
+fn assert_status_coverage(output: &str, expected: &str) {
+    let coverage = output.lines().next().expect("coverage field");
+    assert!(coverage.starts_with("  Coverage    "), "{output}");
+    assert!(coverage.ends_with(expected), "{output}");
+}
+
+fn index_failures_match_readiness_and_recover(mode: &str) -> Result<(), Box<dyn Error>> {
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
+    let home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+    let embedding = EmbeddingServer::start_with_failure_status(400)?;
+    let endpoint = format!("http://{}/embeddings", embedding.address);
+    let configure = |command: &mut Command| {
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("ZVEC_GREP_") {
+                command.env_remove(key);
+            }
+        }
+        command
+            .current_dir(workspace.path())
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env("ZVEC_GREP_HOME", home.path())
+            .env_remove("DASHSCOPE_API_KEY")
+            .env_remove("QWEN_API_KEY");
+    };
+    let run = |args: &[&str]| {
+        let mut command = Command::new(&binary);
+        configure(&mut command);
+        command
+            .args(args)
+            .args(["--mode", mode, "--color", "never"])
+            .output()
+    };
+    let mut guard = if mode == "server" {
+        Some(start_server(&binary, &home, "full", None, configure)?.0)
+    } else {
+        None
+    };
+    let good = workspace.path().join("good.txt");
+    let broken = workspace.path().join("broken.txt");
+    std::fs::write(&good, "Stable orchard baseline.\n")?;
+    // An incomplete BOM-marked UTF-16 code unit must fail extraction.
+    std::fs::write(&broken, [255_u8, 254, 255])?;
+    let index_args = [
+        "--index",
+        "--embedding",
+        "qwen/text-embedding-v4",
+        "--endpoint",
+        &endpoint,
+        "--api-key",
+        "local-test-key",
+        "--allow-remote",
+    ];
+    for failed_path in ["broken.txt", "good.txt"] {
+        let failed = run(&index_args)?;
+        let stdout = String::from_utf8_lossy(&failed.stdout);
+        let stderr = String::from_utf8_lossy(&failed.stderr);
+        assert_eq!(failed.status.code(), Some(1), "{mode}: {stdout}\n{stderr}");
+        assert!(
+            stdout.starts_with("Workspace index\nfiles\t"),
+            "{mode}: {stdout}\n{stderr}"
+        );
+        assert!(!stdout.contains("Workspace index: ready"), "{stdout}");
+        assert!(stdout.contains("1 failed"), "{stdout}");
+        assert!(
+            stderr.contains("indexing completed with 1 failed file"),
+            "{stderr}"
+        );
+        assert!(
+            stdout.contains(&format!("failed\t{failed_path}:")),
+            "{stdout}"
+        );
+        let status = status_after_index(&run, mode)?;
+        assert_eq!(status.status.code(), Some(1));
+        let stdout = String::from_utf8_lossy(&status.stdout);
+        assert_status_coverage(&stdout, "50%  1 / 2 files (failed files)");
+        std::fs::write(&broken, "Recovered readable nebula documentation.\n")?;
+        embedding.fail.store(false, Ordering::Release);
+        let recovered = run(&index_args)?;
+        assert_command_success(&recovered);
+        let stdout = String::from_utf8_lossy(&recovered.stdout);
+        assert!(stdout.starts_with("Workspace index\nfiles\t"), "{stdout}");
+        assert!(stdout.contains("0 failed"), "{stdout}");
+        let recovered_status = status_after_index(&run, mode)?;
+        assert_command_success(&recovered_status);
+        let stdout = String::from_utf8_lossy(&recovered_status.stdout);
+        assert_status_coverage(&stdout, "100%  2 / 2 files");
+        if failed_path == "broken.txt" {
+            std::fs::write(&good, "Modified orchard baseline.\n")?;
+            embedding.fail.store(true, Ordering::Release);
+        }
+    }
+    assert!(embedding.requests.load(Ordering::Acquire) > 0);
+    if let Some(guard) = &mut guard {
+        assert_command_success(&guard.stop()?);
+    }
+    Ok(())
+}
+
+fn status_after_index(
+    run: &impl Fn(&[&str]) -> std::io::Result<Output>,
+    mode: &str,
+) -> Result<Output, Box<dyn Error>> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let status = run(&["--status", "--check-ready"])?;
+        let stdout = String::from_utf8_lossy(&status.stdout);
+        // Watcher jobs can invalidate a server status scan after a manual job.
+        // Retry only that transient state; callers still check exit codes and counts.
+        let unknown = stdout.lines().next().is_some_and(|coverage| {
+            coverage.starts_with("  Coverage    ") && coverage.ends_with("(status unknown)")
+        });
+        if mode != "server" || !unknown {
+            return Ok(status);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "unexpected post-index status\nstdout:\n{stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 struct EmbeddingServer {
@@ -1614,6 +1818,10 @@ impl EmbeddingServer {
     }
 
     fn start() -> std::io::Result<Self> {
+        Self::start_with_failure_status(401)
+    }
+
+    fn start_with_failure_status(failure_status: u16) -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -1632,6 +1840,7 @@ impl EmbeddingServer {
                     respond_embedding(
                         stream.expect("mock embedding connection"),
                         fail.load(Ordering::Acquire),
+                        failure_status,
                     )
                     .expect("mock embedding response");
                 }
@@ -1660,7 +1869,11 @@ impl Drop for EmbeddingServer {
     }
 }
 
-fn respond_embedding(mut stream: TcpStream, fail: bool) -> std::io::Result<()> {
+fn respond_embedding(
+    mut stream: TcpStream,
+    fail: bool,
+    failure_status: u16,
+) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -1680,8 +1893,14 @@ fn respond_embedding(mut stream: TcpStream, fail: bool) -> std::io::Result<()> {
     let mut body = vec![0; content_length.expect("request body length")];
     reader.read_exact(&mut body)?;
     if fail {
-        return stream.write_all(
-            b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        return write!(
+            stream,
+            "HTTP/1.1 {failure_status} {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            if failure_status == 401 {
+                "Unauthorized"
+            } else {
+                "Bad Request"
+            }
         );
     }
     let request: serde_json::Value = serde_json::from_slice(&body)?;
@@ -1721,15 +1940,55 @@ fn post_json(port: u16, session: Option<&str>, body: &str) -> Result<String, Box
     let session_header = session.map_or_else(String::new, |value| {
         format!("Mcp-Session-Id: {value}\r\nMCP-Protocol-Version: 2025-11-25\r\n")
     });
-    write!(
-        stream,
+    let request = format!(
         "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\n{session_header}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
-    )?;
+    );
+    stream.write_all(request.as_bytes())?;
     stream.flush()?;
+    Ok(read_http_response(&mut stream)?)
+}
+
+fn read_http_response(reader: &mut impl Read) -> std::io::Result<String> {
     let mut response = String::new();
-    stream.read_to_string(&mut response)?;
+    if let Err(error) = reader.read_to_string(&mut response) {
+        // Early HTTP rejection can reset a connection with an unread request body.
+        // Accept the response only when its declared body has already arrived in full.
+        let complete = response
+            .split_once("\r\n\r\n")
+            .is_some_and(|(headers, body)| {
+                headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                    == Some(body.len())
+            });
+        if error.kind() != std::io::ErrorKind::ConnectionReset || !complete {
+            return Err(error);
+        }
+    }
     Ok(response)
+}
+
+#[test]
+fn http_test_reader_accepts_reset_only_after_a_complete_response() {
+    struct ResetAfterBytes(std::io::Cursor<Vec<u8>>);
+    impl Read for ResetAfterBytes {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            if self.0.position() == self.0.get_ref().len() as u64 {
+                Err(std::io::ErrorKind::ConnectionReset.into())
+            } else {
+                self.0.read(bytes)
+            }
+        }
+    }
+    for (body, complete) in [("okay", true), ("ok", false)] {
+        let bytes =
+            format!("HTTP/1.1 403 Forbidden\r\nContent-Length: 4\r\n\r\n{body}").into_bytes();
+        let mut reader = ResetAfterBytes(std::io::Cursor::new(bytes));
+        assert_eq!(read_http_response(&mut reader).is_ok(), complete);
+    }
 }
 
 fn path_text(path: &Path) -> Result<&str, Box<dyn Error>> {

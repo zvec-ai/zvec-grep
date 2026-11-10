@@ -6,7 +6,7 @@ use std::{
 };
 
 use crossterm::{
-    cursor::{MoveToColumn, MoveUp},
+    cursor::{Hide, MoveToColumn, MoveUp, Show},
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     queue,
     terminal::{self, Clear, ClearType},
@@ -15,20 +15,43 @@ use serde_json::{Map, Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{InstallArgs, McpInstallTransport, McpToolset, UninstallArgs};
+use crate::{
+    ColorMode, InstallArgs, McpInstallTransport, McpToolset, MessageKind, UninstallArgs,
+    theme::{StatusTheme, clean, display_path},
+    write_message,
+};
+
+mod upgrade;
+pub use upgrade::{
+    IntegrationUpgradeEntryKind, IntegrationUpgradeSummary, execute_upgrade_installed,
+    write_integration_upgrade_entry, write_integration_upgrade_summary,
+};
 
 const CONFIG_START: &str = "# ZVEC_GREP_START";
 const CONFIG_END: &str = "# ZVEC_GREP_END";
+const GROK_PERMISSION_START: &str = "# ZVEC_GREP_PERMISSION_START";
+const GROK_PERMISSION_END: &str = "# ZVEC_GREP_PERMISSION_END";
 const GUIDANCE_START: &str = "<!-- ZVEC_GREP_START -->";
 const GUIDANCE_END: &str = "<!-- ZVEC_GREP_END -->";
 const CLAUDE_PERMISSION: &str = "mcp__zvec_grep__*";
 const SEARCH_PERMISSION: &str = "mcp__zvec_grep__zvec_grep_search";
 const RG_PERMISSION: &str = "mcp__zvec_grep__zvec_grep_rg";
+const CALLERS_PERMISSION: &str = "mcp__zvec_grep__zvec_grep_callers";
+const CALLEES_PERMISSION: &str = "mcp__zvec_grep__zvec_grep_callees";
 // Persisted ownership markers stay stable across CLI grammar migrations.
 const QODER_DESCRIPTION: &str = "Managed by zg install";
 const QODER_OWNERSHIP_PREFIX: &str = "Managed by zg install; managed permissions=";
 const VSCODE_INSTRUCTIONS_FILE: &str = "zvec-grep.instructions.md";
 const VSCODE_FRONTMATTER: &str = "---\napplyTo: '**'\n---\n";
+const PI_DESCRIPTION: &str =
+    "Workspace semantic search and exact text lookup. Managed by zg install.";
+const PI_CONTEXT_FILES: [&str; 5] = [
+    "AGENTS.override.md",
+    "AGENTS.md",
+    "AGENTS.MD",
+    "CLAUDE.md",
+    "CLAUDE.MD",
+];
 
 #[derive(Debug, Error)]
 pub enum InstallError {
@@ -59,10 +82,12 @@ enum Agent {
     Qoder,
     Copilot,
     VsCode,
+    Grok,
+    Pi,
 }
 
 impl Agent {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 10] = [
         Self::Claude,
         Self::Codex,
         Self::OpenCode,
@@ -71,6 +96,8 @@ impl Agent {
         Self::Qoder,
         Self::Copilot,
         Self::VsCode,
+        Self::Grok,
+        Self::Pi,
     ];
 
     const fn label(self) -> &'static str {
@@ -83,6 +110,8 @@ impl Agent {
             Self::Qoder => "Qoder",
             Self::Copilot => "GitHub Copilot",
             Self::VsCode => "VS Code",
+            Self::Grok => "Grok Build",
+            Self::Pi => "Pi",
         }
     }
 
@@ -96,6 +125,8 @@ impl Agent {
             Self::Qoder => "qoder",
             Self::Copilot => "copilot",
             Self::VsCode => "vscode",
+            Self::Grok => "grok",
+            Self::Pi => "pi",
         }
     }
 }
@@ -116,7 +147,6 @@ struct AgentOptions {
 /// Returns an error when target selection, configuration validation, or an
 /// atomic file update fails.
 pub fn execute_install(args: &InstallArgs) -> Result<InstallOutcome, InstallError> {
-    print_header();
     let detected = detect_agents();
     let agents = resolve_agents(
         args.targets.iter().chain(&args.positional_targets),
@@ -125,7 +155,7 @@ pub fn execute_install(args: &InstallArgs) -> Result<InstallOutcome, InstallErro
         "install",
     )?;
     if agents.is_empty() {
-        println!("\nNo agent integrations selected.");
+        writeln!(crate::stdout(), "No agent integrations selected.")?;
         return Ok(InstallOutcome {
             agent_labels: Vec::new(),
             transport: args.transport.unwrap_or_default(),
@@ -141,18 +171,17 @@ pub fn execute_install(args: &InstallArgs) -> Result<InstallOutcome, InstallErro
         token_env: args.mcp_token_env.clone(),
     };
 
-    println!("\nInstalling integrations\n");
+    writeln!(crate::stdout(), "Installing integrations\n")?;
     for agent in &agents {
         let result = install_agent(*agent, &options)?;
-        println!("  ✓ {}", agent.label());
-        println!("    MCP       configured");
-        if let Some(path) = result.config_path {
-            println!("    Config    {}", path.display());
-        }
-        if let Some(note) = result.config_note {
-            println!("    Note      {note}");
-        }
-        println!();
+        write_installed(
+            &mut crate::stdout(),
+            agent.label(),
+            result.config_path.as_deref(),
+            result.config_note.as_deref(),
+            crate::stdout_supports_ansi(),
+            ColorMode::Auto,
+        )?;
     }
 
     Ok(InstallOutcome {
@@ -169,7 +198,6 @@ pub fn execute_install(args: &InstallArgs) -> Result<InstallOutcome, InstallErro
 /// Returns an error when an existing configuration is invalid or a file update
 /// fails.
 pub fn execute_uninstall(args: &UninstallArgs) -> Result<(), InstallError> {
-    print_header();
     let detected = detect_agents();
     let agents = resolve_agents(
         args.targets.iter().chain(&args.positional_targets),
@@ -178,23 +206,78 @@ pub fn execute_uninstall(args: &UninstallArgs) -> Result<(), InstallError> {
         "uninstall",
     )?;
     if agents.is_empty() {
-        println!("\nNo agent integrations selected.");
+        writeln!(crate::stdout(), "No agent integrations selected.")?;
         return Ok(());
     }
 
-    println!("\nRemoving integrations\n");
+    writeln!(crate::stdout(), "Removing integrations\n")?;
+    let theme = install_theme();
     for agent in agents {
         uninstall_agent(agent)?;
-        println!("  ✓ {}", agent.label());
-        println!("    integration removed");
+        writeln!(
+            crate::stdout(),
+            "{} {} removed",
+            theme.success("✓"),
+            agent.label()
+        )?;
     }
-    println!("\nRestart the selected agents or start a new session to apply the change.");
+    writeln!(
+        crate::stdout(),
+        "\n  {}",
+        theme.muted("Restart the selected agents or start a new session to apply the change.")
+    )?;
     Ok(())
 }
 
-fn print_header() {
-    println!("zvec-grep setup");
-    println!("{}", "─".repeat(40));
+fn install_theme() -> StatusTheme {
+    StatusTheme::new(ColorMode::Auto, crate::stdout_supports_ansi())
+}
+
+fn write_installed(
+    output: &mut impl Write,
+    agent: &str,
+    path: Option<&Path>,
+    note: Option<&str>,
+    terminal: bool,
+    color: ColorMode,
+) -> io::Result<()> {
+    if terminal {
+        let path = path.map(display_path);
+        let details = path.as_deref().into_iter().chain(note).collect::<Vec<_>>();
+        write_message(
+            &mut *output,
+            MessageKind::Success,
+            &format!("{agent} configured"),
+            &details,
+            color,
+            terminal,
+        )?;
+    } else {
+        writeln!(output, "  ✓ {}", clean(agent))?;
+        writeln!(output, "    MCP       configured")?;
+        if let Some(path) = path {
+            writeln!(
+                output,
+                "    Config    {}",
+                clean(&path.display().to_string())
+            )?;
+        }
+        if let Some(note) = note {
+            writeln!(output, "    Note      {}", clean(note))?;
+        }
+    }
+    writeln!(output)
+}
+
+fn install_warning(message: &str) {
+    let _ = write_message(
+        io::stderr().lock(),
+        MessageKind::Warning,
+        message,
+        &[],
+        ColorMode::Auto,
+        crate::stderr_supports_ansi(),
+    );
 }
 
 fn resolve_transport(
@@ -207,8 +290,8 @@ fn resolve_transport(
     if yes || !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Ok(McpInstallTransport::Stdio);
     }
-    print!("MCP transport [stdio] (stdio/http): ");
-    io::stdout().flush()?;
+    write!(crate::stdout(), "MCP transport [stdio] (stdio/http): ")?;
+    crate::stdout().flush()?;
     let mut answer = String::new();
     io::stdin().read_line(&mut answer)?;
     match answer.trim().to_ascii_lowercase().as_str() {
@@ -243,14 +326,15 @@ fn resolve_agents<'a>(
             .collect());
     }
 
-    println!(
+    writeln!(
+        crate::stdout(),
         "\n{}\n",
         if action == "install" {
             "Choose agent integrations"
         } else {
             "Choose integrations to remove"
         }
-    );
+    )?;
     prompt_agent_selection(detected)
 }
 
@@ -262,12 +346,15 @@ impl SelectionRawMode {
     fn enable() -> io::Result<Self> {
         let was_raw = terminal::is_raw_mode_enabled()?;
         terminal::enable_raw_mode()?;
-        Ok(Self { was_raw })
+        let session = Self { was_raw };
+        crossterm::execute!(crate::stdout(), Hide)?;
+        Ok(session)
     }
 }
 
 impl Drop for SelectionRawMode {
     fn drop(&mut self) {
+        let _ = crossterm::execute!(crate::stdout(), Show);
         if !self.was_raw {
             let _ = terminal::disable_raw_mode();
         }
@@ -285,18 +372,27 @@ fn prompt_agent_selection(detected: &BTreeSet<Agent>) -> Result<Vec<Agent>, Inst
         .iter()
         .position(|agent| detected.contains(agent))
         .unwrap_or(0);
-    let mut output = io::stdout().lock();
-    render_agent_selection(&mut output, active_index, detected, false)?;
+    let mut output = crate::stdout();
+    let theme = install_theme();
+    render_agent_selection(&mut output, active_index, detected, false, theme)?;
     loop {
-        let Event::Key(key) = event::read()? else {
+        let input = event::read()?;
+        if matches!(input, Event::Resize(_, _)) {
+            render_agent_selection(&mut output, active_index, detected, true, theme)?;
+            continue;
+        }
+        let Event::Key(key) = input else {
             continue;
         };
+        let previous = active_index;
         if let Some(selected) = select_agent_key(&mut active_index, key) {
             write!(output, "\r\n")?;
             output.flush()?;
             return Ok(selected);
         }
-        render_agent_selection(&mut output, active_index, detected, true)?;
+        if previous != active_index {
+            render_agent_selection(&mut output, active_index, detected, true, theme)?;
+        }
     }
 }
 
@@ -325,10 +421,13 @@ fn render_agent_selection(
     active_index: usize,
     detected: &BTreeSet<Agent>,
     redraw: bool,
+    theme: StatusTheme,
 ) -> io::Result<()> {
+    let mut frame = Vec::with_capacity(1024);
+    let columns = crate::theme::columns();
     if redraw {
         queue!(
-            output,
+            frame,
             MoveUp(u16::try_from(Agent::ALL.len() + 2).expect("small agent list"))
         )?;
     }
@@ -338,29 +437,48 @@ fn render_agent_selection(
         .max()
         .unwrap_or(0);
     for (index, agent) in Agent::ALL.iter().enumerate() {
-        queue!(output, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
-        let marker = if index == active_index { "●" } else { "○" };
+        queue!(frame, MoveToColumn(0))?;
+        let marker = if index == active_index { "✓" } else { " " };
         let status = if detected.contains(agent) {
             "detected"
         } else {
             "not found"
         };
-        write!(
-            output,
-            "  {marker} {:label_width$}  {status}\r\n",
-            agent.label()
-        )?;
+        let plain = crate::theme::truncate(
+            &format!("  {marker} {:label_width$}  {status}", agent.label()),
+            columns,
+        );
+        let mut row = if let Some(remainder) = plain.strip_prefix("  ✓") {
+            format!("  {}{remainder}", theme.success("✓"))
+        } else {
+            plain
+        };
+        if let Some(prefix) = row.strip_suffix(status) {
+            row = format!("{prefix}{}", theme.muted(status));
+        }
+        write!(frame, "{row}")?;
+        queue!(frame, Clear(ClearType::UntilNewLine))?;
+        write!(frame, "\r\n")?;
     }
-    queue!(output, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
-    write!(output, "\r\n")?;
-    queue!(output, Clear(ClearType::CurrentLine))?;
-    write!(output, "  Use ↑↓ to move · Enter to select\r\n")?;
+    queue!(frame, MoveToColumn(0), Clear(ClearType::UntilNewLine))?;
+    write!(
+        frame,
+        "\r\n{}",
+        theme.muted(&crate::theme::truncate(
+            "  ↑/↓ Select · Enter Confirm · Esc Cancel",
+            columns
+        ))
+    )?;
+    queue!(frame, Clear(ClearType::UntilNewLine))?;
+    write!(frame, "\r\n")?;
+    output.write_all(&frame)?;
     output.flush()
 }
 
 fn prompt_agent_line_selection(detected: &BTreeSet<Agent>) -> Result<Vec<Agent>, InstallError> {
     for (index, agent) in Agent::ALL.iter().enumerate() {
-        println!(
+        writeln!(
+            crate::stdout(),
             "  {}. {} ({})",
             index + 1,
             agent.label(),
@@ -369,7 +487,7 @@ fn prompt_agent_line_selection(detected: &BTreeSet<Agent>) -> Result<Vec<Agent>,
             } else {
                 "not found"
             }
-        );
+        )?;
     }
     let defaults = if detected.is_empty() {
         "none".to_owned()
@@ -380,8 +498,12 @@ fn prompt_agent_line_selection(detected: &BTreeSet<Agent>) -> Result<Vec<Agent>,
             .collect::<Vec<_>>()
             .join(",")
     };
-    print!("Agents [{defaults}]: ");
-    io::stdout().flush()?;
+    writeln!(
+        crate::stdout(),
+        "  Enter agent names or numbers; type none to cancel."
+    )?;
+    write!(crate::stdout(), "Agents [{defaults}]: ")?;
+    crate::stdout().flush()?;
     let mut answer = String::new();
     io::stdin().read_line(&mut answer)?;
     let answer = if answer.trim().is_empty() {
@@ -432,6 +554,12 @@ fn agents_from_tokens(
             "8" | "vscode" | "vs-code" | "code" => {
                 selected.insert(Agent::VsCode);
             }
+            "9" | "grok" | "grok-build" | "grok-cli" => {
+                selected.insert(Agent::Grok);
+            }
+            "10" | "pi" => {
+                selected.insert(Agent::Pi);
+            }
             _ => {
                 return Err(InstallError::Message(format!(
                     "Unknown install target: {token}"
@@ -465,6 +593,10 @@ fn detect_agents() -> BTreeSet<Agent> {
                 executable_available("code")
                     || executable_available("code-insiders")
                     || vscode_user_directories().iter().any(|path| path.exists())
+            }
+            Agent::Grok => executable_available("grok") || grok_home().exists(),
+            Agent::Pi => {
+                executable_available("pi") || resolve_pi_home().is_ok_and(|home| home.is_dir())
             }
         })
         .collect()
@@ -587,6 +719,8 @@ fn install_agent(agent: Agent, options: &AgentOptions) -> Result<AgentInstallRes
             });
         }
         Agent::VsCode => return install_vscode(options),
+        Agent::Grok => return install_grok(options),
+        Agent::Pi => return install_pi(options),
     }?;
     Ok(AgentInstallResult::default())
 }
@@ -601,7 +735,231 @@ fn uninstall_agent(agent: Agent) -> Result<(), InstallError> {
         Agent::Qoder => uninstall_qoder(),
         Agent::Copilot => uninstall_copilot(),
         Agent::VsCode => uninstall_vscode(),
+        Agent::Grok => uninstall_grok(),
+        Agent::Pi => uninstall_pi(),
     }
+}
+
+fn resolve_pi_home() -> Result<PathBuf, InstallError> {
+    let Some(value) = env::var_os("PI_CODING_AGENT_DIR").filter(|value| !value.is_empty()) else {
+        return Ok(home_dir().join(".pi").join("agent"));
+    };
+    let Some(value) = value.to_str() else {
+        return Ok(absolute_path(PathBuf::from(value)));
+    };
+    if value.to_ascii_lowercase().starts_with("file://") {
+        return Err(InstallError::Message(
+            "PI_CODING_AGENT_DIR must use a native filesystem path, not a file:// URI".to_owned(),
+        ));
+    }
+    #[cfg(windows)]
+    if is_windows_shell_path(value) {
+        return Err(InstallError::Message(
+            "PI_CODING_AGENT_DIR must use a native Windows path, not a shell drive path".to_owned(),
+        ));
+    }
+    Ok(expand_home(value))
+}
+
+#[cfg(any(windows, test))]
+fn is_windows_shell_path(value: &str) -> bool {
+    let drive = value
+        .strip_prefix("/mnt/")
+        .or_else(|| value.strip_prefix("/cygdrive/"))
+        .or_else(|| value.strip_prefix('/'));
+    drive.is_some_and(|drive| {
+        let bytes = drive.as_bytes();
+        bytes.first().is_some_and(u8::is_ascii_alphabetic)
+            && (bytes.len() == 1 || bytes.get(1) == Some(&b'/'))
+    })
+}
+
+fn read_pi_file(path: &Path) -> Result<String, InstallError> {
+    read_if_exists(path)
+        .map_err(|error| InstallError::Message(format!("Cannot read {}: {error}", path.display())))
+}
+
+fn pi_context_file(home: &Path) -> Result<PathBuf, InstallError> {
+    for name in PI_CONTEXT_FILES {
+        let path = home.join(name);
+        if !path.is_file() {
+            continue;
+        }
+        match fs::read_to_string(&path) {
+            Ok(_) => return Ok(path),
+            // Refuse to rewrite an active file that cannot be decoded losslessly.
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                return Err(InstallError::Message(format!(
+                    "Cannot read {}: {error}",
+                    path.display()
+                )));
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(home.join("AGENTS.md"))
+}
+
+fn remove_pi_context_file(path: &Path) -> Result<(), InstallError> {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(InstallError::Message(format!(
+                "Cannot inspect {}: {error}",
+                path.display()
+            )));
+        }
+    }
+    let source = read_pi_file(path)?;
+    if source
+        .lines()
+        .any(|line| matches!(line.trim(), GUIDANCE_START | GUIDANCE_END))
+    {
+        remove_marked_file(path, GUIDANCE_START, GUIDANCE_END)?;
+    }
+    Ok(())
+}
+
+fn is_managed_pi_server(server: &Value) -> bool {
+    server.is_object() && server.get("description").and_then(Value::as_str) == Some(PI_DESCRIPTION)
+}
+
+fn pi_server(
+    existing: Option<&Value>,
+    options: &AgentOptions,
+    path: &Path,
+) -> Result<Value, InstallError> {
+    let existing = existing
+        .filter(|server| is_managed_pi_server(server))
+        .and_then(Value::as_object);
+    let mut server = existing.cloned().unwrap_or_default();
+    match options.transport {
+        McpInstallTransport::Stdio => {
+            for key in ["url", "headers", "oauth", "auth"] {
+                server.shift_remove(key);
+            }
+            server.insert("type".to_owned(), json!("stdio"));
+            server.insert("command".to_owned(), json!("zg"));
+            server.insert("args".to_owned(), json!(stdio_args(options.toolset)));
+        }
+        McpInstallTransport::Http => {
+            let url = resolve_server_url()?;
+            for key in ["command", "args", "env", "cwd"] {
+                server.shift_remove(key);
+            }
+            server.insert("type".to_owned(), json!("http"));
+            server.insert("url".to_owned(), json!(url));
+            if let Some(token) = &options.token_env {
+                let headers = object_field_mut(&mut server, "headers", false, path)?;
+                headers.retain(|key, _| !key.eq_ignore_ascii_case("Authorization"));
+                headers.insert(
+                    "Authorization".to_owned(),
+                    json!(format!("Bearer ${{{token}}}")),
+                );
+                // Explicit bearer authentication takes precedence over saved login providers.
+                server.shift_remove("oauth");
+                server.shift_remove("auth");
+            }
+        }
+    }
+    server.insert("timeout".to_owned(), json!(options.timeout_seconds));
+    // A missing exposure field on an existing entry selects the host's default mode.
+    if existing.is_none() {
+        server.insert("exposure".to_owned(), json!("direct"));
+    }
+    server.insert("description".to_owned(), json!(PI_DESCRIPTION));
+    Ok(Value::Object(server))
+}
+
+fn install_pi(options: &AgentOptions) -> Result<AgentInstallResult, InstallError> {
+    let home = resolve_pi_home()?;
+    let config = home.join("mcp.json");
+    let mut root = read_json_object(&config).map_err(|error| {
+        InstallError::Message(format!("Cannot read {}: {error}", config.display()))
+    })?;
+    let servers = object_field_mut(&mut root, "mcpServers", false, &config)?;
+    if servers.contains_key("zvec-grep") {
+        return Err(InstallError::Message(format!(
+            "Conflicting zvec-grep MCP server found in {}; remove or rename it before installing zvec_grep for Pi",
+            config.display()
+        )));
+    }
+    let existing = servers.get("zvec_grep");
+    if existing.is_some_and(|server| !is_managed_pi_server(server)) && !options.force {
+        return Err(InstallError::Message(format!(
+            "Existing unmanaged zvec_grep MCP server found in {}. Re-run with --force to replace it for Pi.",
+            config.display()
+        )));
+    }
+    let server = pi_server(existing, options, &config)?;
+    let guidance = pi_context_file(&home)?;
+    // Validate the default destination too when no readable context file exists.
+    read_pi_file(&guidance)?;
+    resolve_atomic_target(&config, &mut HashSet::new())?;
+    resolve_atomic_target(&guidance, &mut HashSet::new())?;
+    servers.insert("zvec_grep".to_owned(), server);
+    write_json_object(&config, &root)?;
+    write_marked_file(
+        &guidance,
+        GUIDANCE_START,
+        GUIDANCE_END,
+        &guidance_block("mcp__zvec_grep__", false, pi_host_notes()),
+        true,
+        None,
+        None,
+    )?;
+    Ok(AgentInstallResult {
+        config_path: Some(config),
+        config_note: Some(format!(
+            "Guidance: {}. Use built-in MCP and /reload or a new session. Remote Embedding may require manual `zg --auth grant` authorization.",
+            guidance.display()
+        )),
+    })
+}
+
+fn uninstall_pi() -> Result<(), InstallError> {
+    let home = resolve_pi_home()?;
+    let config = home.join("mcp.json");
+    let source = read_pi_file(&config)?;
+    let mut root = if source.trim().is_empty() {
+        Map::new()
+    } else {
+        parse_json_object(&config, &source)?
+    };
+    if root
+        .get("mcpServers")
+        .is_some_and(|value| !value.is_object())
+    {
+        return Err(InstallError::Message(format!(
+            "Expected mcpServers in {} to be a JSON object",
+            config.display()
+        )));
+    }
+    if let Some(servers) = root.get_mut("mcpServers").and_then(Value::as_object_mut)
+        && servers.get("zvec_grep").is_some_and(is_managed_pi_server)
+    {
+        servers.shift_remove("zvec_grep");
+        if servers.is_empty() {
+            root.shift_remove("mcpServers");
+        }
+        write_json_object(&config, &root)?;
+    }
+    for name in PI_CONTEXT_FILES {
+        let path = home.join(name);
+        if let Err(error) = remove_pi_context_file(&path) {
+            install_warning(&format!(
+                "Could not clean guidance {}: {error}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn pi_host_notes() -> &'static str {
+    "\n### Pi host notes\n- MCP tools use their complete `mcp__zvec_grep__*` names. With direct exposure, call them directly; with codemode or deferred exposure, discover them using the host's available codemode or tool-search tools.\n- The default agent toolset offers search only. When the managed rg tool is unavailable, use the host's available shell tool for exact lookup.\n- Built-in MCP currently lacks form elicitation and the newer authorization continuation protocol. If remote embedding reports that form elicitation is unsupported, explain the workspace, provider/endpoint and transmitted data, and ask the user to run `zg --auth grant \"<absolute-root>\" --capability embedding --scope workspace` in their terminal. Use the same root as the failed call; retry the original call once after the user confirms the grant. Do not grant silently, do not substitute `--allow-remote`, and do not request credentials to resolve a data-authorization error.\n- If the user explicitly chooses local FTS, retry search once with the original text in `fts`, omit `query`, `queries`, and `vector`, set `autoUpdate` to `false` and `freshness` to `eventual`, and preserve root, filters and limits. If the user cancels or a decision is unavailable, stop without granting access.\n"
 }
 
 fn install_codex(options: &AgentOptions) -> Result<(), InstallError> {
@@ -621,7 +979,7 @@ fn install_codex(options: &AgentOptions) -> Result<(), InstallError> {
         &guidance,
         GUIDANCE_START,
         GUIDANCE_END,
-        &guidance_block("zvec_grep_search", "zvec_grep_rg", false),
+        &guidance_block("", false, ""),
         true,
         None,
         None,
@@ -630,8 +988,98 @@ fn install_codex(options: &AgentOptions) -> Result<(), InstallError> {
 
 fn uninstall_codex() -> Result<(), InstallError> {
     let home = env_path("CODEX_HOME").unwrap_or_else(|| home_dir().join(".codex"));
-    remove_marked_file(&home.join("config.toml"), CONFIG_START, CONFIG_END)?;
-    remove_marked_file(&home.join("AGENTS.md"), GUIDANCE_START, GUIDANCE_END)
+    uninstall_codex_from(&home.join("config.toml"), &home.join("AGENTS.md"))
+}
+
+fn uninstall_codex_from(config: &Path, guidance: &Path) -> Result<(), InstallError> {
+    // The managed entry is removed whole: retaining the table header for
+    // user-added fields would leave an MCP entry without a transport.
+    remove_marked_file(config, CONFIG_START, CONFIG_END)?;
+    remove_marked_file(guidance, GUIDANCE_START, GUIDANCE_END)
+}
+
+fn install_grok(options: &AgentOptions) -> Result<AgentInstallResult, InstallError> {
+    let home = grok_home();
+    install_grok_into(
+        &home.join("config.toml"),
+        &home.join("rules").join("zvec-grep.md"),
+        options,
+        resolve_server_url,
+    )
+}
+
+fn install_grok_into(
+    config: &Path,
+    guidance: &Path,
+    options: &AgentOptions,
+    resolve_url: impl Fn() -> Result<String, InstallError>,
+) -> Result<AgentInstallResult, InstallError> {
+    // Resolve the server URL before any write: a broken global configuration
+    // must fail the install instead of persisting a fallback URL.
+    let block = grok_config_block(options, resolve_url)?;
+    write_marked_file(
+        config,
+        CONFIG_START,
+        CONFIG_END,
+        &block,
+        options.force,
+        Some(codex_conflict),
+        Some(remove_codex_conflict),
+    )?;
+    let existing = read_if_exists(config)?;
+    let note = if !existing.contains(GROK_PERMISSION_START) && has_grok_permission_table(&existing)
+    {
+        // TOML allows only one [permission] table and forbids extending an
+        // inline rules array, so user-owned permission config is never spliced.
+        Some(format!(
+            "{} already defines [permission]; add \"MCPTool(zvec_grep__*)\" to permission.allow to skip tool approval prompts.",
+            config.display()
+        ))
+    } else {
+        write_marked_file(
+            config,
+            GROK_PERMISSION_START,
+            GROK_PERMISSION_END,
+            &grok_permission_block(),
+            true,
+            None,
+            None,
+        )?;
+        None
+    };
+    write_marked_file(
+        guidance,
+        GUIDANCE_START,
+        GUIDANCE_END,
+        &guidance_block("zvec_grep__", false, grok_host_notes()),
+        true,
+        None,
+        None,
+    )?;
+    Ok(AgentInstallResult {
+        config_path: Some(config.to_path_buf()),
+        config_note: note,
+    })
+}
+
+fn uninstall_grok() -> Result<(), InstallError> {
+    let home = grok_home();
+    uninstall_grok_from(
+        &home.join("config.toml"),
+        &home.join("rules").join("zvec-grep.md"),
+    )
+}
+
+fn uninstall_grok_from(config: &Path, guidance: &Path) -> Result<(), InstallError> {
+    remove_marked_toml_block(config, GROK_PERMISSION_START, GROK_PERMISSION_END)?;
+    // The managed entry is removed whole: retaining the table header for
+    // user-added fields would leave an MCP entry without a transport.
+    remove_marked_file(config, CONFIG_START, CONFIG_END)?;
+    remove_marked_file(guidance, GUIDANCE_START, GUIDANCE_END)?;
+    if guidance.exists() && read_if_exists(guidance)?.trim().is_empty() {
+        fs::remove_file(guidance)?;
+    }
+    Ok(())
 }
 
 fn install_claude(options: &AgentOptions) -> Result<(), InstallError> {
@@ -692,7 +1140,7 @@ fn install_claude(options: &AgentOptions) -> Result<(), InstallError> {
         &directory.join("CLAUDE.md"),
         GUIDANCE_START,
         GUIDANCE_END,
-        &guidance_block("zvec_grep_search", "zvec_grep_rg", false),
+        &guidance_block("", false, ""),
         true,
         None,
         None,
@@ -780,11 +1228,7 @@ fn install_opencode(options: &AgentOptions) -> Result<AgentInstallResult, Instal
             .join("AGENTS.md"),
         GUIDANCE_START,
         GUIDANCE_END,
-        &guidance_block(
-            "zvec_grep_zvec_grep_search",
-            "zvec_grep_zvec_grep_rg",
-            false,
-        ),
+        &guidance_block("zvec_grep_", false, ""),
         true,
         None,
         None,
@@ -848,13 +1292,13 @@ fn install_qwen(options: &AgentOptions) -> Result<(), InstallError> {
     let server = qwen_server(options)?;
     update_jsonc_server(&path, &server, options.force, "Qwen Code", is_managed_qwen)?;
     if let Some(warning) = context_warning(&path, "QWEN.md")? {
-        eprintln!("    warning   {warning}");
+        install_warning(&warning);
     }
     write_marked_file(
         &home.join("QWEN.md"),
         GUIDANCE_START,
         GUIDANCE_END,
-        &guidance_block(SEARCH_PERMISSION, RG_PERMISSION, false),
+        &guidance_block("mcp__zvec_grep__", false, ""),
         true,
         None,
         None,
@@ -889,13 +1333,13 @@ fn install_qoder(options: &AgentOptions) -> Result<(), InstallError> {
         is_managed_qoder_ide,
     )?;
     if let Some(warning) = context_warning(&settings, "AGENTS.md")? {
-        eprintln!("    warning   {warning}");
+        install_warning(&warning);
     }
     write_marked_file(
         &home.join("AGENTS.md"),
         GUIDANCE_START,
         GUIDANCE_END,
-        &guidance_block(SEARCH_PERMISSION, RG_PERMISSION, true),
+        &guidance_block("mcp__zvec_grep__", true, ""),
         true,
         None,
         None,
@@ -963,7 +1407,7 @@ fn install_copilot(options: &AgentOptions) -> Result<(), InstallError> {
         &copilot_cli_guidance_path(),
         GUIDANCE_START,
         GUIDANCE_END,
-        &guidance_block("zvec_grep_search", "zvec_grep_rg", false),
+        &guidance_block("", false, ""),
         true,
         None,
         None,
@@ -1081,7 +1525,7 @@ fn install_vscode(options: &AgentOptions) -> Result<AgentInstallResult, InstallE
         &guidance_path,
         GUIDANCE_START,
         GUIDANCE_END,
-        &guidance_block("zvec_grep_search", "zvec_grep_rg", false),
+        &guidance_block("", false, ""),
         true,
         None,
         None,
@@ -1274,7 +1718,83 @@ fn toml_string_array(values: &[&str]) -> String {
     )
 }
 
-fn guidance_block(search: &str, rg: &str, qoder_recovery: bool) -> String {
+fn grok_home() -> PathBuf {
+    env_path("GROK_HOME").unwrap_or_else(|| home_dir().join(".grok"))
+}
+
+fn grok_config_block(
+    options: &AgentOptions,
+    resolve_url: impl Fn() -> Result<String, InstallError>,
+) -> Result<String, InstallError> {
+    let connection = match options.transport {
+        McpInstallTransport::Stdio => format!(
+            "command = \"zg\"\nargs = {}\n# First-run daemon and local-model warmup can exceed Grok's 30s startup default.\nstartup_timeout_sec = 120",
+            toml_string_array(&stdio_args(options.toolset))
+        ),
+        McpInstallTransport::Http => {
+            let token = options
+                .token_env
+                .as_ref()
+                .map_or_else(String::new, |token| {
+                    format!("\nheaders = {{ Authorization = \"Bearer ${{{token}}}\" }}")
+                });
+            format!("url = \"{}\"{token}", resolve_url()?)
+        }
+    };
+    Ok(format!(
+        "{CONFIG_START}\n[mcp_servers.zvec_grep]\n{connection}\n{CONFIG_END}"
+    ))
+}
+
+fn grok_permission_block() -> String {
+    format!(
+        "{GROK_PERMISSION_START}\n[permission]\nallow = [\"MCPTool(zvec_grep__*)\"]\n{GROK_PERMISSION_END}"
+    )
+}
+
+fn has_grok_permission_table(existing: &str) -> bool {
+    existing.lines().any(|line| {
+        let line = line.trim_start();
+        if let Some(rest) = line.strip_prefix('[') {
+            let rest = rest.strip_prefix('[').unwrap_or(rest);
+            let Some(table) = rest.split(']').next() else {
+                return false;
+            };
+            let table = table.trim().trim_matches(|c| c == '"' || c == '\'');
+            return table == "permission" || table.starts_with("permission.");
+        }
+        // TOML permits quoting key segments. A quoted `permission` segment
+        // followed by `=` or `.` defines the same root key as the bare
+        // spelling and equally forbids a later [permission] table.
+        if let Some(quote) = line.chars().next().filter(|c| *c == '"' || *c == '\'') {
+            let Some(offset) = line[1..].find(quote) else {
+                return false;
+            };
+            let key = &line[1..=offset];
+            let rest = &line[offset + 2..];
+            return key == "permission"
+                && (rest.starts_with('.')
+                    || rest.starts_with(|c: char| c == '=' || c.is_whitespace()));
+        }
+        // TOML forbids redefining a key as a table, so any root-level
+        // `permission` definition (dotted key, inline table, or scalar)
+        // makes a later [permission] table invalid; match it and skip.
+        let Some(rest) = line.strip_prefix("permission") else {
+            return false;
+        };
+        rest.starts_with('.') || rest.starts_with(|c: char| c == '=' || c.is_whitespace())
+    })
+}
+
+fn grok_host_notes() -> &'static str {
+    "\n### Grok Build host notes\n- MCP tools are reached through `use_tool` with the catalog names `zvec_grep__zvec_grep_search`, `zvec_grep__zvec_grep_rg`, `zvec_grep__zvec_grep_callers`, and `zvec_grep__zvec_grep_callees`.\n- When `zvec_grep__zvec_grep_search` needs `remote_embedding_authorization`, respond to the elicitation card this host renders natively instead of looking for another approval mechanism.\n- In non-interactive sessions (`grok -p`, pipelines) the card cannot appear: stop and ask the user to run `zg --auth grant \"<absolute-root>\" --capability embedding --scope workspace` with the same absolute root used by the failed search, then retry the original search once. Never grant silently and never request credentials for this.\n"
+}
+
+fn guidance_block(prefix: &str, qoder_recovery: bool, host_notes: &str) -> String {
+    let search = format!("{prefix}zvec_grep_search");
+    let rg = format!("{prefix}zvec_grep_rg");
+    let incoming_calls = format!("{prefix}zvec_grep_callers");
+    let outgoing_calls = format!("{prefix}zvec_grep_callees");
     let exact =
         format!("`{rg}` when it is listed by the current host; otherwise native Grep or `rg`");
     let recovery = if qoder_recovery {
@@ -1285,7 +1805,7 @@ fn guidance_block(search: &str, rg: &str, qoder_recovery: bool) -> String {
         String::new()
     };
     format!(
-        "{GUIDANCE_START}\n## zvec-grep\n\nChoose the evidence source before the retrieval mode.\n\n### Workspace evidence\n- Use the current workspace as the evidence source when the user asks about local material, prior context establishes it as relevant, or the question concerns how the current project works—even if the workspace is not mentioned explicitly.\n- A workspace may contain any mix of code, documents, configuration, and data.\n- Do not use workspace retrieval for unrelated open-world questions, current external facts, or web content that does not depend on local evidence.\n\n### Retrieval routing\n- When an exact word, phrase, name, date, identifier, filename, path, configuration key, error message, source fragment, literal, or regex is known and locating its occurrences is sufficient, use {exact}.\n- Use `{search}` when wording or location is unknown, or when the answer requires semantic, conceptual, fuzzy, or paraphrase discovery; relationships, chronology, causality, architecture, or data or control flow; or comparison or synthesis across files, sections, or documents.\n- For a mixed task with exact anchors that still requires relationships or cross-file synthesis, call `{search}` with the concept and anchors, then use {exact} for focused follow-up.\n- When no sufficient exact anchor is available and the user asks whether conceptually related material exists locally, make at most one focused `{search}` probe using the question plus distinctive names, dates, or terms. This probe does not apply to exact quotations, configuration keys, filenames, regexes, or exhaustive occurrence requests. Continue only when results are relevant; otherwise stop and report that the indexed workspace did not establish the answer.\n- Before broad file reads or delegating workspace discovery, use the appropriate search route. Do not delegate solely to locate material, and stop when the evidence is sufficient.\n\n### Search evidence\n- Search results include bounded source snippets. Treat a sufficient snippet as already-read evidence, and read a cited file only when a required detail falls outside the snippet.\n\n### Freshness and index lifecycle\n- Pass a daemon-visible absolute `root` on every zvec-grep workspace call.\n- Read `freshness` and `background_refresh` from search results without a status preflight.\n- When results are `served_from_current_index`, use them when sufficient instead of waiting for the background refresh.\n- If the index is missing but exact or regex lookup can answer the task, use {exact}.\n- Creating, rebuilding, or dropping a persistent index requires an explicit user request or authorization; never do so silently.{recovery}\n{GUIDANCE_END}"
+        "{GUIDANCE_START}\n## zvec-grep\n{host_notes}\nChoose the evidence source before the retrieval mode.\n\n### Workspace evidence\n- Use the current workspace as the evidence source when the user asks about local material, prior context establishes it as relevant, or the question concerns how the current project works—even if the workspace is not mentioned explicitly.\n- A workspace may contain any mix of code, documents, configuration, and data.\n- Do not use workspace retrieval for unrelated open-world questions, current external facts, or web content that does not depend on local evidence.\n\n### Retrieval routing\n- When an exact word, phrase, name, date, identifier, filename, path, configuration key, error message, source fragment, literal, or regex is known and locating its occurrences is sufficient, use {exact}.\n- For workspaces indexed with graph support, use `{incoming_calls}` or `{outgoing_calls}` for known symbols. Empty results do not prove absence. Enable graph indexing only with user authorization: `zg --index --graph` (add `--rebuild` for an existing index).\n- Use `{search}` when wording or location is unknown, or when the answer requires semantic, conceptual, fuzzy, or paraphrase discovery; relationships, chronology, causality, architecture, or data or control flow; or comparison or synthesis across files, sections, or documents.\n- For a mixed task with exact anchors that still requires relationships or cross-file synthesis, call `{search}` with the concept and anchors, then use {exact} for focused follow-up.\n- When no sufficient exact anchor is available and the user asks whether conceptually related material exists locally, make at most one focused `{search}` probe using the question plus distinctive names, dates, or terms. This probe does not apply to exact quotations, configuration keys, filenames, regexes, or exhaustive occurrence requests. Continue only when results are relevant; otherwise stop and report that the indexed workspace did not establish the answer.\n- Before broad file reads or delegating workspace discovery, use the appropriate search route. Do not delegate solely to locate material, and stop when the evidence is sufficient.\n\n### Search evidence\n- Search results include bounded source snippets. Treat a sufficient snippet as already-read evidence, and read a cited file only when a required detail falls outside the snippet.\n\n### Freshness and index lifecycle\n- Pass a daemon-visible absolute `root` on every zvec-grep workspace call.\n- Read `freshness` and `background_refresh` from search results without a status preflight.\n- When results are `served_from_current_index`, use them when sufficient instead of waiting for the background refresh.\n- If the index is missing but exact or regex lookup can answer the task, use {exact}.\n- Creating, rebuilding, or dropping a persistent index requires an explicit user request or authorization; never do so silently.{recovery}\n{GUIDANCE_END}"
     )
 }
 
@@ -1344,9 +1864,9 @@ fn remove_strict_json_server(path: &Path, container_key: &str) -> Result<(), Ins
     {
         return Ok(());
     }
-    container.remove("zvec_grep");
+    container.shift_remove("zvec_grep");
     if container.is_empty() {
-        root.remove(container_key);
+        root.shift_remove(container_key);
     }
     write_json_object(path, &root)
 }
@@ -1379,7 +1899,7 @@ fn object_field_mut<'a>(
                 path.display()
             )));
         }
-        root.remove(key);
+        root.shift_remove(key);
     }
     root.entry(key.to_owned())
         .or_insert_with(|| json!({}))
@@ -1425,10 +1945,10 @@ fn update_claude_permission(path: &Path, grant: bool) -> Result<(), InstallError
     } else {
         allow.retain(|rule| rule != CLAUDE_PERMISSION);
         if allow.is_empty() {
-            permissions.remove("allow");
+            permissions.shift_remove("allow");
         }
         if permissions.is_empty() {
-            root.remove("permissions");
+            root.shift_remove("permissions");
         }
     }
     write_json_object(path, &root)
@@ -1661,6 +2181,92 @@ fn remove_marked_file(path: &Path, start: &str, end: &str) -> Result<(), Install
         atomic_write(path, &next)?;
     }
     Ok(())
+}
+
+/// Removes a marked TOML block whose span carries a table header, retaining
+/// that header when lines after the end marker still define fields of the
+/// table; dropping it would orphan those user fields at the document root.
+/// Ranges are paired like `replace_marked_block`, so an orphaned start
+/// marker never widens the removal onto surrounding user configuration.
+/// This retention only suits the Grok permission table, whose user fields
+/// stay valid under the retained header; managed MCP entries are removed
+/// whole because a table without its transport is not loadable.
+fn remove_marked_toml_block(path: &Path, start: &str, end: &str) -> Result<(), InstallError> {
+    let existing = read_if_exists(path)?;
+    if existing.is_empty() {
+        return Ok(());
+    }
+    let lines: Vec<&str> = existing.lines().collect();
+    let mut marker_lines = HashSet::new();
+    let mut ranges = Vec::new();
+    let mut pending = None;
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed == start {
+            marker_lines.insert(index);
+            pending = Some(index);
+        } else if trimmed == end {
+            marker_lines.insert(index);
+            if let Some(begin) = pending.take() {
+                ranges.push((begin, index));
+            }
+        }
+    }
+    let Some((begin, finish)) = ranges.last().copied() else {
+        return remove_marked_file(path, start, end);
+    };
+    let Some(header) = lines[begin..=finish]
+        .iter()
+        .map(|line| line.trim())
+        .find(|line| line.starts_with('['))
+    else {
+        return remove_marked_file(path, start, end);
+    };
+    let tail = &lines[finish + 1..];
+    let dependent_length = tail
+        .iter()
+        .position(|line| line.trim().starts_with('['))
+        .unwrap_or(tail.len());
+    let has_dependents = tail[..dependent_length].iter().any(|line| {
+        let line = line.trim();
+        !line.is_empty() && !line.starts_with('#')
+    });
+    if !has_dependents {
+        return remove_marked_file(path, start, end);
+    }
+    let in_removed_range = |index: usize| {
+        ranges
+            .iter()
+            .any(|(begin, finish)| index >= *begin && index <= *finish)
+    };
+    let before = lines[..begin]
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !marker_lines.contains(index) && !in_removed_range(*index))
+        .map(|(_, line)| *line)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_owned();
+    let remainder = tail[dependent_length..]
+        .iter()
+        .enumerate()
+        .filter(|(offset, _)| !marker_lines.contains(&(finish + 1 + dependent_length + offset)))
+        .map(|(_, line)| *line)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned();
+    let mut parts: Vec<String> = Vec::new();
+    if !before.is_empty() {
+        parts.push(before);
+    }
+    parts.push(header.to_owned());
+    parts.push(tail[..dependent_length].join("\n").trim().to_owned());
+    if !remainder.is_empty() {
+        parts.push(remainder);
+    }
+    atomic_write(path, &(parts.join("\n\n") + "\n"))
 }
 
 fn replace_marked_block(existing: &str, start: &str, end: &str, block: &str) -> Option<String> {
@@ -2204,7 +2810,12 @@ fn update_qoder_cli(path: &Path, options: &AgentOptions) -> Result<(), InstallEr
     if current_managed {
         owned.extend(qoder_owned_permissions(current.unwrap_or(&Value::Null)));
     }
-    for permission in [SEARCH_PERMISSION, RG_PERMISSION] {
+    for permission in [
+        SEARCH_PERMISSION,
+        RG_PERMISSION,
+        CALLERS_PERMISSION,
+        CALLEES_PERMISSION,
+    ] {
         if !allow.iter().any(|value| value == permission) {
             owned.insert(permission.to_owned());
         }
@@ -2224,7 +2835,12 @@ fn update_qoder_cli(path: &Path, options: &AgentOptions) -> Result<(), InstallEr
     } else {
         Vec::new()
     };
-    for tool in ["zvec_grep_search", "zvec_grep_rg"] {
+    for tool in [
+        "zvec_grep_search",
+        "zvec_grep_rg",
+        "zvec_grep_callers",
+        "zvec_grep_callees",
+    ] {
         if !always.iter().any(|value| value == tool) {
             always.push(tool.to_owned());
         }
@@ -2245,10 +2861,15 @@ fn update_qoder_cli(path: &Path, options: &AgentOptions) -> Result<(), InstallEr
         server["headers"] = json!({"Authorization":format!("Bearer ${{{token}}}")});
     }
     let mut next = jsonc_set_path(&source, &["mcpServers", "zvec_grep"], &server)?;
-    let missing = [SEARCH_PERMISSION, RG_PERMISSION]
-        .into_iter()
-        .filter(|permission| !allow.iter().any(|value| value == permission))
-        .collect::<Vec<_>>();
+    let missing = [
+        SEARCH_PERMISSION,
+        RG_PERMISSION,
+        CALLERS_PERMISSION,
+        CALLEES_PERMISSION,
+    ]
+    .into_iter()
+    .filter(|permission| !allow.iter().any(|value| value == permission))
+    .collect::<Vec<_>>();
     let has_allow_array = root
         .get("permissions")
         .and_then(Value::as_object)
@@ -2332,6 +2953,8 @@ fn qoder_owned_permissions(server: &Value) -> BTreeSet<String> {
         .filter_map(|tool| match tool {
             "zvec_grep_search" => Some(SEARCH_PERMISSION.to_owned()),
             "zvec_grep_rg" => Some(RG_PERMISSION.to_owned()),
+            "zvec_grep_callers" => Some(CALLERS_PERMISSION.to_owned()),
+            "zvec_grep_callees" => Some(CALLEES_PERMISSION.to_owned()),
             _ => None,
         })
         .collect()
@@ -2341,6 +2964,8 @@ fn qoder_description(owned: &BTreeSet<String>) -> String {
     let tools = [
         (SEARCH_PERMISSION, "zvec_grep_search"),
         (RG_PERMISSION, "zvec_grep_rg"),
+        (CALLERS_PERMISSION, "zvec_grep_callers"),
+        (CALLEES_PERMISSION, "zvec_grep_callees"),
     ]
     .into_iter()
     .filter(|(permission, _)| owned.contains(*permission))
@@ -2355,6 +2980,386 @@ fn qoder_description(owned: &BTreeSet<String>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn grok_aliases_and_numeric_target_resolve() {
+        let agents =
+            agents_from_tokens(&["grok-build".to_owned()], &BTreeSet::new()).expect("targets");
+        assert_eq!(agents, vec![Agent::Grok]);
+        let agents =
+            agents_from_tokens(&["9,grok-cli".to_owned()], &BTreeSet::new()).expect("targets");
+        assert_eq!(agents, vec![Agent::Grok]);
+    }
+
+    #[test]
+    fn grok_config_block_varies_by_transport() {
+        let resolve = || Ok("http://127.0.0.1:7999/mcp".to_owned());
+        let stdio = grok_config_block(
+            &AgentOptions {
+                force: false,
+                transport: McpInstallTransport::Stdio,
+                toolset: None,
+                timeout_seconds: 600,
+                token_env: None,
+            },
+            resolve,
+        )
+        .expect("stdio block");
+        assert!(stdio.contains("[mcp_servers.zvec_grep]"));
+        assert!(stdio.contains("args = [\"--server\", \"--stdio\"]"));
+        assert!(stdio.contains("startup_timeout_sec = 120"));
+        assert!(!stdio.contains("tool_timeout_sec"));
+        let http = grok_config_block(
+            &AgentOptions {
+                force: false,
+                transport: McpInstallTransport::Http,
+                toolset: None,
+                timeout_seconds: 600,
+                token_env: Some("ZVEC_GREP_SERVER_TOKEN".to_owned()),
+            },
+            resolve,
+        )
+        .expect("http block");
+        assert!(http.starts_with("# ZVEC_GREP_START\n[mcp_servers.zvec_grep]\nurl = \""));
+        assert!(
+            http.contains("headers = { Authorization = \"Bearer ${ZVEC_GREP_SERVER_TOKEN}\" }")
+        );
+        assert!(!http.contains("startup_timeout_sec"));
+    }
+
+    #[test]
+    fn grok_config_block_propagates_url_resolution_errors() {
+        let result = grok_config_block(
+            &AgentOptions {
+                force: false,
+                transport: McpInstallTransport::Http,
+                toolset: None,
+                timeout_seconds: 600,
+                token_env: None,
+            },
+            || Err(InstallError::Message("broken config".to_owned())),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn grok_install_failure_leaves_existing_files_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = dir.path().join("config.toml");
+        let guidance = dir.path().join("rules").join("zvec-grep.md");
+        std::fs::create_dir_all(guidance.parent().expect("parent")).expect("rules dir");
+        std::fs::write(&config, "user_key = 1\n").expect("write config");
+        std::fs::write(&guidance, "user note\n").expect("write guidance");
+        let options = AgentOptions {
+            force: false,
+            transport: McpInstallTransport::Http,
+            toolset: None,
+            timeout_seconds: 600,
+            token_env: None,
+        };
+        let result = install_grok_into(&config, &guidance, &options, || {
+            Err(InstallError::Message("broken config".to_owned()))
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read_to_string(&config).expect("config"),
+            "user_key = 1\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&guidance).expect("guidance"),
+            "user note\n"
+        );
+    }
+
+    #[test]
+    fn grok_permission_table_detection_matches_owned_and_user_tables() {
+        assert!(has_grok_permission_table("[permission]\nallow = []"));
+        assert!(has_grok_permission_table(
+            "x = 1\n\n[[permission.rules]]\naction = \"allow\"\n"
+        ));
+        assert!(has_grok_permission_table("[permission.allow]"));
+        assert!(has_grok_permission_table("[\"permission\"]"));
+        assert!(has_grok_permission_table("['permission']"));
+        assert!(!has_grok_permission_table(
+            "[mcp_servers.zvec_grep]\ncommand = \"zg\""
+        ));
+        assert!(!has_grok_permission_table("[permissions]\nallow = []"));
+        // TOML forbids redefining a key as a table: a root-level
+        // `permission` definition makes a later [permission] table
+        // invalid, so every root-level spelling must match.
+        assert!(has_grok_permission_table(
+            "permission.allow = [\"Bash(git *)\"]"
+        ));
+        assert!(has_grok_permission_table(
+            "permission = { allow = [\"Bash(git *)\"] }"
+        ));
+        assert!(has_grok_permission_table("permission = true"));
+        assert!(!has_grok_permission_table("permissionx = true"));
+        // Quoted root-key spellings name the same TOML key as the bare ones.
+        assert!(has_grok_permission_table(
+            "'permission' = { allow = [\"Bash(git *)\"] }"
+        ));
+        assert!(has_grok_permission_table(
+            "\"permission\".allow = [\"Bash(git *)\"]"
+        ));
+        assert!(has_grok_permission_table("'permission' = true"));
+        // The closing quote bounds the key: longer quoted names are
+        // unrelated keys and must keep matching the bare prefix guard.
+        assert!(!has_grok_permission_table("\"permission level\" = 3"));
+        assert!(!has_grok_permission_table("'permissionx' = true"));
+    }
+
+    #[test]
+    fn grok_install_skips_permission_block_for_quoted_root_keys() {
+        for existing in [
+            "'permission' = { allow = [\"Bash(git *)\"] }\n",
+            "\"permission\".allow = [\"Bash(git *)\"]\n",
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let config = dir.path().join("config.toml");
+            let guidance = dir.path().join("rules").join("zvec-grep.md");
+            std::fs::create_dir_all(guidance.parent().expect("parent")).expect("rules dir");
+            std::fs::write(&config, existing).expect("write config");
+            let options = AgentOptions {
+                force: false,
+                transport: McpInstallTransport::Stdio,
+                toolset: None,
+                timeout_seconds: 600,
+                token_env: None,
+            };
+            let result = install_grok_into(&config, &guidance, &options, || {
+                Ok("http://127.0.0.1:7999/mcp".to_owned())
+            })
+            .expect("install");
+            let note = result.config_note.expect("skip note");
+            assert!(note.contains("already defines [permission]"));
+            let after = std::fs::read_to_string(&config).expect("read config");
+            assert!(!after.contains(GROK_PERMISSION_START));
+            assert_eq!(after.matches("[permission]").count(), 0);
+            assert!(after.contains("[mcp_servers.zvec_grep]"));
+        }
+    }
+
+    #[test]
+    fn grok_uninstall_removes_managed_mcp_table_despite_trailing_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = dir.path().join("config.toml");
+        let guidance = dir.path().join("rules").join("zvec-grep.md");
+        std::fs::create_dir_all(guidance.parent().expect("parent")).expect("rules dir");
+        let options = AgentOptions {
+            force: false,
+            transport: McpInstallTransport::Stdio,
+            toolset: None,
+            timeout_seconds: 600,
+            token_env: None,
+        };
+        install_grok_into(&config, &guidance, &options, || {
+            Ok("http://127.0.0.1:7999/mcp".to_owned())
+        })
+        .expect("install");
+        let text = std::fs::read_to_string(&config).expect("read installed config");
+        let edited = text.replacen(
+            CONFIG_END,
+            &format!("{CONFIG_END}\nenv = {{ FOO = \"bar\" }}"),
+            1,
+        );
+        assert_ne!(edited, text, "config end marker must be present");
+        std::fs::write(&config, edited).expect("append user env field");
+        let root: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&config).expect("read")).expect("valid toml");
+        assert_eq!(
+            root.get("mcp_servers")
+                .and_then(|value| value.get("zvec_grep"))
+                .and_then(|value| value.get("env"))
+                .and_then(|value| value.get("FOO")),
+            Some(&toml::Value::String("bar".to_owned()))
+        );
+        uninstall_grok_from(&config, &guidance).expect("uninstall");
+        let text = std::fs::read_to_string(&config).expect("read after uninstall");
+        let root: toml::Value = toml::from_str(&text).expect("valid toml after uninstall");
+        assert!(root.get("mcp_servers").is_none());
+        assert!(root.get("permission").is_none());
+        assert_eq!(
+            root.get("env").and_then(|value| value.get("FOO")),
+            Some(&toml::Value::String("bar".to_owned()))
+        );
+        install_grok_into(&config, &guidance, &options, || {
+            Ok("http://127.0.0.1:7999/mcp".to_owned())
+        })
+        .expect("reinstall without --force");
+        let text = std::fs::read_to_string(&config).expect("read after reinstall");
+        assert!(text.contains(CONFIG_START));
+        assert!(text.contains("command = \"zg\""));
+        assert!(text.contains("env = { FOO = \"bar\" }"));
+    }
+
+    #[test]
+    fn codex_uninstall_preserves_user_config_after_orphaned_start() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = dir.path().join("config.toml");
+        let guidance = dir.path().join("AGENTS.md");
+        std::fs::write(
+            &config,
+            "# ZVEC_GREP_START\n[mcp_servers.other]\ncommand = \"other\"\n\n# ZVEC_GREP_START\n[mcp_servers.zvec_grep]\ncommand = \"zg\"\n# ZVEC_GREP_END\n",
+        )
+        .expect("write config");
+        std::fs::write(
+            &guidance,
+            "prefix\n\n<!-- ZVEC_GREP_START -->\nguidance\n<!-- ZVEC_GREP_END -->\n",
+        )
+        .expect("write guidance");
+        uninstall_codex_from(&config, &guidance).expect("uninstall");
+        let text = std::fs::read_to_string(&config).expect("read");
+        let root: toml::Value = toml::from_str(&text).expect("valid toml after uninstall");
+        assert_eq!(
+            root.get("mcp_servers")
+                .and_then(|value| value.get("other"))
+                .and_then(|value| value.get("command")),
+            Some(&toml::Value::String("other".to_owned()))
+        );
+        assert!(
+            root.get("mcp_servers")
+                .and_then(|value| value.get("zvec_grep"))
+                .is_none()
+        );
+        assert!(!text.contains("ZVEC_GREP"));
+        assert!(
+            !std::fs::read_to_string(&guidance)
+                .expect("read guidance")
+                .contains("ZVEC_GREP")
+        );
+    }
+
+    #[test]
+    fn remove_marked_toml_block_drops_header_without_trailing_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# ZVEC_GREP_PERMISSION_START\n[permission]\nallow = [\"MCPTool(zvec_grep__*)\"]\n# ZVEC_GREP_PERMISSION_END\n\n# only comments follow\n",
+        )
+        .expect("write config");
+        remove_marked_toml_block(&path, GROK_PERMISSION_START, GROK_PERMISSION_END)
+            .expect("remove");
+        let text = std::fs::read_to_string(&path).expect("read");
+        let root: toml::Value = toml::from_str(&text).expect("valid toml after removal");
+        assert!(root.get("permission").is_none());
+        assert!(text.contains("# only comments follow"));
+    }
+
+    #[test]
+    fn remove_marked_toml_block_skips_orphaned_start_before_managed_block() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# ZVEC_GREP_PERMISSION_START\n[other]\nkey = 1\n\n# ZVEC_GREP_PERMISSION_START\n[permission]\nallow = [\"MCPTool(zvec_grep__*)\"]\n# ZVEC_GREP_PERMISSION_END\ndeny = [\"Bash(rm *)\"]\n",
+        )
+        .expect("write config");
+        remove_marked_toml_block(&path, GROK_PERMISSION_START, GROK_PERMISSION_END)
+            .expect("remove");
+        let text = std::fs::read_to_string(&path).expect("read");
+        let root: toml::Value = toml::from_str(&text).expect("valid toml after removal");
+        assert_eq!(
+            root.get("other").and_then(|value| value.get("key")),
+            Some(&toml::Value::Integer(1))
+        );
+        let permission = root.get("permission").expect("permission table retained");
+        assert_eq!(
+            permission.get("deny"),
+            Some(&toml::Value::Array(vec![toml::Value::String(
+                "Bash(rm *)".to_owned()
+            )]))
+        );
+        assert!(permission.get("allow").is_none());
+        assert!(!text.contains("ZVEC_GREP_PERMISSION"));
+    }
+
+    #[test]
+    fn remove_marked_toml_block_ignores_orphaned_end_before_managed_block() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# ZVEC_GREP_PERMISSION_END\n[other]\nkey = 1\n\n# ZVEC_GREP_PERMISSION_START\n[permission]\nallow = [\"MCPTool(zvec_grep__*)\"]\n# ZVEC_GREP_PERMISSION_END\ndeny = [\"Bash(rm *)\"]\n",
+        )
+        .expect("write config");
+        remove_marked_toml_block(&path, GROK_PERMISSION_START, GROK_PERMISSION_END)
+            .expect("remove");
+        let text = std::fs::read_to_string(&path).expect("read");
+        let root: toml::Value = toml::from_str(&text).expect("valid toml after removal");
+        assert_eq!(
+            root.get("other").and_then(|value| value.get("key")),
+            Some(&toml::Value::Integer(1))
+        );
+        let permission = root.get("permission").expect("permission table retained");
+        assert_eq!(
+            permission.get("deny"),
+            Some(&toml::Value::Array(vec![toml::Value::String(
+                "Bash(rm *)".to_owned()
+            )]))
+        );
+        assert!(permission.get("allow").is_none());
+        assert!(!text.contains("ZVEC_GREP_PERMISSION"));
+    }
+
+    #[test]
+    fn grok_uninstall_keeps_user_permission_fields_defined_after_markers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = dir.path().join("config.toml");
+        let guidance = dir.path().join("rules").join("zvec-grep.md");
+        std::fs::create_dir_all(guidance.parent().expect("parent")).expect("rules dir");
+        let options = AgentOptions {
+            force: false,
+            transport: McpInstallTransport::Stdio,
+            toolset: None,
+            timeout_seconds: 600,
+            token_env: None,
+        };
+        install_grok_into(&config, &guidance, &options, || {
+            Ok("http://127.0.0.1:7999/mcp".to_owned())
+        })
+        .expect("install");
+        let text = std::fs::read_to_string(&config).expect("read installed config");
+        let edited = text.replacen(
+            GROK_PERMISSION_END,
+            &format!("{GROK_PERMISSION_END}\ndeny = [\"Bash(rm *)\"]"),
+            1,
+        );
+        assert_ne!(edited, text, "permission end marker must be present");
+        std::fs::write(&config, edited).expect("append user deny rule");
+        uninstall_grok_from(&config, &guidance).expect("uninstall");
+        let root: toml::Value = toml::from_str(&std::fs::read_to_string(&config).expect("read"))
+            .expect("valid toml after uninstall");
+        let permission = root.get("permission").expect("permission table retained");
+        assert_eq!(
+            permission.get("deny"),
+            Some(&toml::Value::Array(vec![toml::Value::String(
+                "Bash(rm *)".to_owned()
+            )]))
+        );
+        assert!(permission.get("allow").is_none());
+        assert!(root.get("mcp_servers").is_none());
+    }
+
+    #[test]
+    fn grok_guidance_includes_host_notes_preamble() {
+        let block = guidance_block("zvec_grep__", false, grok_host_notes());
+        assert!(block.contains("### Grok Build host notes"));
+        assert!(block.contains("zvec_grep__zvec_grep_search"));
+        assert!(
+            block.contains("use `zvec_grep__zvec_grep_callers` or `zvec_grep__zvec_grep_callees`")
+        );
+        assert!(block.contains("zg --auth grant"));
+        assert!(block.contains("Choose the evidence source before the retrieval mode."));
+        let plain = guidance_block("", false, "");
+        assert!(!plain.contains("Grok Build host notes"));
+        assert!(
+            plain.starts_with(
+                "<!-- ZVEC_GREP_START -->\n## zvec-grep\n\nChoose the evidence source"
+            )
+        );
+    }
+
     #[test]
     fn trailing_commas_are_enabled_for_opencode_and_vscode() {
         let path = std::path::Path::new("settings.json");
@@ -2404,15 +3409,96 @@ mod tests {
     fn keyboard_menu_shows_selection_and_detection_status() {
         let detected = BTreeSet::from([Agent::Qwen]);
         let mut output = Vec::new();
-        render_agent_selection(&mut output, 4, &detected, false).expect("render menu");
+        render_agent_selection(
+            &mut output,
+            4,
+            &detected,
+            false,
+            StatusTheme::new(ColorMode::Never, true),
+        )
+        .expect("render menu");
         let output = String::from_utf8(output).expect("utf8 menu");
-        assert_eq!(output.matches('●').count(), 1);
-        assert_eq!(output.matches('○').count(), Agent::ALL.len() - 1);
-        assert!(output.lines().any(|line| {
-            line.contains("● Qwen Code") && line.trim_end().ends_with("detected")
-        }));
+        assert_eq!(output.matches('✓').count(), 1);
+        assert!(
+            output
+                .lines()
+                .any(|line| { line.contains("✓ Qwen Code") && line.contains("detected") })
+        );
         assert_eq!(output.matches("not found").count(), Agent::ALL.len() - 1);
-        assert!(output.contains("Use ↑↓ to move · Enter to select"));
+        assert!(output.contains("↑/↓ Select · Enter Confirm · Esc Cancel"));
+    }
+
+    #[test]
+    fn keyboard_menu_redraw_is_one_write() {
+        #[derive(Default)]
+        struct Capture {
+            writes: usize,
+            flushes: usize,
+            bytes: Vec<u8>,
+        }
+        impl Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.writes += 1;
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.flushes += 1;
+                Ok(())
+            }
+        }
+        let mut output = Capture::default();
+        render_agent_selection(
+            &mut output,
+            0,
+            &BTreeSet::new(),
+            true,
+            StatusTheme::new(ColorMode::Never, true),
+        )
+        .expect("render menu");
+        assert_eq!(output.writes, 1);
+        assert_eq!(output.flushes, 1);
+        assert!(!output.bytes.windows(4).any(|bytes| bytes == b"\x1b[2K"));
+    }
+
+    #[test]
+    fn install_result_is_compact_on_terminal_and_preserves_plain_fields() {
+        let path = Path::new("/config/agent.json");
+        let mut terminal = Vec::new();
+        write_installed(
+            &mut terminal,
+            "Agent",
+            Some(path),
+            Some("note\x1b[2J\nfake"),
+            true,
+            ColorMode::Never,
+        )
+        .expect("terminal result");
+        let terminal = String::from_utf8(terminal).expect("UTF-8 result");
+        let marker = if crate::theme::unicode_supported() {
+            "✓"
+        } else {
+            "+"
+        };
+        assert!(terminal.starts_with(&format!("{marker} Agent configured\n  ")));
+        assert!(!terminal.contains('\x1b'));
+        assert!(!terminal.contains("\nfake"));
+        assert!(!terminal.contains("MCP"));
+        let mut plain = Vec::new();
+        write_installed(
+            &mut plain,
+            "Agent",
+            Some(path),
+            None,
+            false,
+            ColorMode::Always,
+        )
+        .expect("plain result");
+        let plain = String::from_utf8(plain).expect("UTF-8 result");
+        assert!(plain.starts_with("  ✓ Agent\n"));
+        assert!(!plain.contains('\x1b'));
+        assert!(plain.contains("MCP       configured"));
+        assert!(plain.contains(&format!("Config    {}", path.display())));
     }
 
     #[test]
@@ -2425,6 +3511,38 @@ mod tests {
                 .expect("targets"),
             vec![Agent::Copilot, Agent::VsCode]
         );
+    }
+
+    #[test]
+    fn pi_targets_preserve_existing_numbers_and_participate_in_selection() {
+        let detected = BTreeSet::from([Agent::Pi]);
+        assert_eq!(
+            agents_from_tokens(&["PI,10,9,1".to_owned()], &detected).expect("targets"),
+            vec![Agent::Claude, Agent::Grok, Agent::Pi]
+        );
+        assert_eq!(
+            agents_from_tokens(&["auto".to_owned()], &detected).expect("auto"),
+            vec![Agent::Pi]
+        );
+        assert_eq!(
+            agents_from_tokens(&["all".to_owned()], &detected).expect("all"),
+            Agent::ALL
+        );
+    }
+
+    #[test]
+    fn windows_shell_paths_are_distinguished_from_native_paths() {
+        for value in ["/c", "/C/project", "/mnt/c/project", "/cygdrive/d/project"] {
+            assert!(is_windows_shell_path(value), "{value}");
+        }
+        for value in [
+            "C:\\project",
+            "agent directory",
+            "/config/agent",
+            "/mnt/cache",
+        ] {
+            assert!(!is_windows_shell_path(value), "{value}");
+        }
     }
 
     #[test]

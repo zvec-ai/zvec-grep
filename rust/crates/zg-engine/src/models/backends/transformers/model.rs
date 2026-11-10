@@ -32,7 +32,8 @@ use crate::domain::model::{
 };
 use crate::models::{
     artifacts::{
-        ArtifactSource, ModelDownloadProgressReporter, ResolveArtifacts, resolve_model_artifacts,
+        ArtifactHttpClient, ArtifactSource, LocalModelBackend, ModelDownloadProgressReporter,
+        ResolveArtifacts, default_model_cache, resolve_model_artifacts,
     },
     catalog::TransformersConfig,
     runtime::ModelComputeRuntime,
@@ -48,13 +49,18 @@ pub(crate) struct TransformersEmbeddingModel {
     model_cache_dir: PathBuf,
     device: Option<Device>,
     compute_runtime: ModelComputeRuntime,
-    client: reqwest::Client,
+    client: ArtifactHttpClient,
     state: Mutex<Option<Arc<LoadedTransformersModel>>>,
 }
 
 struct LoadedTransformersModel {
-    tokenizer: Tokenizer,
+    tokenizers: PreparedTokenizers,
     sessions: SessionPool,
+}
+
+struct PreparedTokenizers {
+    probe: Tokenizer,
+    inputs: Tokenizer,
 }
 
 struct SessionPool {
@@ -126,25 +132,30 @@ impl TransformersEmbeddingModel {
         let model_cache_dir = options
             .cache_dir
             .or_else(|| env::var_os("ZVEC_GREP_MODEL_CACHE").map(PathBuf::from))
-            .unwrap_or_else(default_model_cache_dir);
+            .unwrap_or_else(|| default_model_cache(LocalModelBackend::Transformers));
         Self {
             entry,
-            info: EmbeddingModelInfo {
-                model: ModelInfo {
-                    provider: entry.provider.to_owned(),
-                    name: entry.model.to_owned(),
-                    endpoint: None,
-                },
-                dimension: entry.dimension,
-                metric: entry.metric,
-                max_batch_size: entry.max_batch_size,
-                max_input_tokens: Some(entry.max_input_tokens),
-                max_image_bytes: None,
-            },
+            info: EmbeddingModelInfo::new(
+                ModelInfo::new(
+                    entry.provider.to_owned(),
+                    entry.model.to_owned(),
+                    [
+                        crate::domain::ContentKind::Text,
+                        crate::domain::ContentKind::Code,
+                    ],
+                    entry.max_batch_size,
+                )
+                .expect("valid model metadata"),
+                entry.dimension,
+                entry.metric,
+                Some(entry.max_input_tokens),
+                None,
+            )
+            .expect("valid embedding metadata"),
             model_cache_dir,
             device: options.device,
             compute_runtime,
-            client: reqwest::Client::new(),
+            client: ArtifactHttpClient::new(),
             state: Mutex::new(None),
         }
     }
@@ -230,6 +241,7 @@ impl TransformersEmbeddingModel {
             )
             .with_cause(error)
         })?;
+        let tokenizers = prepare_tokenizers(tokenizer, self.entry)?;
         let device = self.device;
         let reporter_for_session = reporter.clone();
         let sessions = self
@@ -238,16 +250,9 @@ impl TransformersEmbeddingModel {
             .await??;
         reporter.finish();
         Ok(LoadedTransformersModel {
-            tokenizer,
+            tokenizers,
             sessions,
         })
-    }
-
-    #[cfg(test)]
-    fn model_directory(&self) -> PathBuf {
-        self.model_cache_dir
-            .join(self.entry.download.hugging_face.repo)
-            .join(self.entry.download.hugging_face.revision)
     }
 }
 
@@ -279,9 +284,7 @@ impl EmbeddingModel for TransformersEmbeddingModel {
         inputs: &[Vec<Content>],
         options: EmbeddingOptions,
     ) -> Result<EmbeddingResult, ModelError> {
-        validate_inputs(&self.info, inputs, |content| {
-            matches!(content, Content::Text(_))
-        })?;
+        validate_inputs(&self.info, inputs)?;
         let loaded = self
             .ensure_loaded(options.on_progress.clone(), options.signal.as_ref())
             .await
@@ -309,7 +312,6 @@ impl EmbeddingModel for TransformersEmbeddingModel {
                 })
             })
             .collect::<Result<Vec<_>, ModelError>>()?;
-        let tokenizer = loaded.tokenizer.clone();
         let entry = self.entry;
         let signal = options.signal;
         let on_progress = options.on_progress;
@@ -319,7 +321,6 @@ impl EmbeddingModel for TransformersEmbeddingModel {
             .run(move || {
                 embed_batch(
                     &loaded,
-                    tokenizer,
                     &texts,
                     entry,
                     execution_concurrency,
@@ -339,6 +340,7 @@ impl SessionPool {
         device: Option<Device>,
         reporter: &ModelDownloadProgressReporter,
     ) -> Result<Self, ModelError> {
+        super::native_runtime::initialize()?;
         let prepacked_weights = PrepackedWeights::new();
         let requested = resolve_execution_provider(device);
         if cfg!(target_os = "macos")
@@ -378,6 +380,10 @@ impl SessionPool {
                 }
             }
         };
+        tracing::debug!(
+            "Transformers ONNX {} embedding execution provider selected",
+            provider.name()
+        );
         Ok(Self {
             model_path,
             prepacked_weights,
@@ -401,7 +407,7 @@ impl SessionPool {
         max_sessions: usize,
         inference: impl Fn(&mut Session) -> Result<T, ModelError>,
     ) -> Result<T, ModelError> {
-        let max_sessions = max_sessions.max(1);
+        let max_sessions = max_sessions.clamp(1, crate::models::runtime::LOCAL_CONCURRENCY_CAP);
         loop {
             let mut state = lock_std_mutex(&self.state);
             if let Some(slot) = state.sessions.iter().find_map(|slot| {
@@ -634,7 +640,7 @@ impl TransformersExecutionProvider {
 }
 
 fn resolve_execution_provider(device: Option<Device>) -> TransformersExecutionProvider {
-    match device {
+    match device.or_else(crate::config::default_runtime_device) {
         None | Some(Device::Cpu) => TransformersExecutionProvider::Cpu,
         Some(Device::Metal | Device::Auto) if cfg!(target_os = "macos") => {
             TransformersExecutionProvider::Cpu
@@ -643,6 +649,10 @@ fn resolve_execution_provider(device: Option<Device>) -> TransformersExecutionPr
         Some(Device::Cuda) => TransformersExecutionProvider::Cuda,
         // ORT's CPU/MLAS path is both faster and substantially smaller than
         // CoreML for the catalog's quantized ONNX model on Apple Silicon.
+        Some(Device::Auto) if cfg!(all(target_os = "windows", feature = "cuda")) => {
+            // The official CUDA 12 runtime contains CPU and CUDA, not DirectML.
+            TransformersExecutionProvider::Cuda
+        }
         Some(Device::Auto) if cfg!(target_os = "windows") => {
             TransformersExecutionProvider::DirectMl
         }
@@ -658,7 +668,7 @@ fn load_session(
     provider: TransformersExecutionProvider,
     prepacked_weights: &PrepackedWeights,
 ) -> Result<Session, ModelError> {
-    let builder = Session::builder()
+    let builder = Session::builder(&super::native_runtime::initialize()?)
         .map_err(|error| {
             ModelError::internal("Unable to configure ONNX embedding model").with_cause(error)
         })?
@@ -779,7 +789,6 @@ fn configure_directml(
 
 fn embed_batch(
     loaded: &LoadedTransformersModel,
-    tokenizer: Tokenizer,
     texts: &[String],
     entry: TransformersConfig,
     execution_concurrency: usize,
@@ -787,7 +796,7 @@ fn embed_batch(
     on_progress: Option<&Arc<dyn Fn(ModelProgress) + Send + Sync>>,
 ) -> Result<EmbeddingResult, ModelError> {
     check_cancelled(signal)?;
-    let prepared = prepare_batch(tokenizer, texts, entry)?;
+    let prepared = prepare_batch(&loaded.tokenizers, texts, entry)?;
     check_cancelled(signal)?;
     let provider = loaded.sessions.provider();
     let first = if provider == TransformersExecutionProvider::CoreMl {
@@ -809,7 +818,7 @@ fn embed_batch(
             );
             if let Some(on_progress) = on_progress {
                 on_progress(ModelProgress::Warning {
-                    model: entry.reference.to_owned(),
+                    model_ref: entry.reference.to_owned(),
                     message: warning,
                 });
             } else {
@@ -1035,11 +1044,12 @@ fn run_session(
     })
 }
 
-fn prepare_batch(
+fn prepare_tokenizers(
     mut tokenizer: Tokenizer,
-    texts: &[String],
     entry: TransformersConfig,
-) -> Result<PreparedBatch, ModelError> {
+) -> Result<PreparedTokenizers, ModelError> {
+    // WordPiece cloning copies its vocabulary. Configure both immutable variants
+    // once per loaded model so requests can share them without cloning or locks.
     tokenizer.with_padding(None);
     tokenizer
         .with_truncation(Some(TruncationParams {
@@ -1048,7 +1058,32 @@ fn prepare_batch(
             ..TruncationParams::default()
         }))
         .map_err(|error| tokenization_error(entry, error))?;
-    let probe = tokenizer
+    let probe = tokenizer.clone();
+    tokenizer
+        .with_truncation(Some(TruncationParams {
+            max_length: entry.max_input_tokens,
+            direction: TruncationDirection::Right,
+            ..TruncationParams::default()
+        }))
+        .map_err(|error| tokenization_error(entry, error))?;
+    tokenizer.with_padding(Some(PaddingParams {
+        strategy: PaddingStrategy::BatchLongest,
+        direction: PaddingDirection::Right,
+        ..PaddingParams::default()
+    }));
+    Ok(PreparedTokenizers {
+        probe,
+        inputs: tokenizer,
+    })
+}
+
+fn prepare_batch(
+    tokenizers: &PreparedTokenizers,
+    texts: &[String],
+    entry: TransformersConfig,
+) -> Result<PreparedBatch, ModelError> {
+    let probe = tokenizers
+        .probe
         .encode_batch(texts.to_vec(), true)
         .map_err(|error| tokenization_error(entry, error))?;
     let truncated = probe
@@ -1065,21 +1100,9 @@ fn prepare_batch(
         })
         .collect::<Vec<_>>();
 
-    tokenizer
-        .with_truncation(Some(TruncationParams {
-            max_length: entry.max_input_tokens,
-            direction: TruncationDirection::Right,
-            ..TruncationParams::default()
-        }))
-        .map_err(|error| tokenization_error(entry, error))?;
-    let padding = PaddingParams {
-        strategy: PaddingStrategy::BatchLongest,
-        direction: PaddingDirection::Right,
-        ..PaddingParams::default()
-    };
-    let padding_input_id = i64::from(padding.pad_id);
-    tokenizer.with_padding(Some(padding));
-    let encodings = tokenizer
+    let padding_input_id = i64::from(PaddingParams::default().pad_id);
+    let encodings = tokenizers
+        .inputs
         .encode_batch(texts.to_vec(), true)
         .map_err(|error| tokenization_error(entry, error))?;
     let sequence_length = encodings
@@ -1278,26 +1301,6 @@ fn onnx_artifact(dtype: &str) -> Result<&'static str, ModelError> {
             "Unsupported Transformers dtype: {value}"
         ))),
     }
-}
-
-fn default_model_cache_dir() -> PathBuf {
-    env::var_os("ZVEC_GREP_HOME")
-        .map(PathBuf::from)
-        .or_else(user_home_dir)
-        .unwrap_or_else(|| PathBuf::from(".zvec-grep"))
-        .join("models")
-}
-
-#[cfg(windows)]
-fn user_home_dir() -> Option<PathBuf> {
-    env::var_os("USERPROFILE").map(PathBuf::from)
-}
-
-#[cfg(not(windows))]
-fn user_home_dir() -> Option<PathBuf> {
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(".zvec-grep"))
 }
 
 #[cfg(test)]

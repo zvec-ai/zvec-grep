@@ -24,6 +24,64 @@ Entities: ${entities}
 Indexed source size: 8192 bytes
 `;
 
+// Layout emitted by the main CLI since #222, including grouped counts and a
+// workspace-relative storage path. Coverage is unchanged / scanned files.
+const groupedReadyStatus = `✓ Workspace index is ready
+  /tmp/corpus
+
+  Coverage    ████████████████████ 100%  381 / 381 files
+  Entities    4,269
+  Source size 3,060,923 bytes
+  Queue       0 pending · 0 failed
+
+  Embedding   local/potion-code-16m-v2
+              256 dimensions · cosine
+  FTS         tokenizer=jieba filters=lowercase
+
+  Storage     .zvec-grep/generations/current/storage
+  Version     2
+  Nested Git  included
+`;
+
+const compactReadyStatus = `  Coverage    ████████████████████ 100%  381 / 381 files
+  Embedding   local/potion-code-16m-v2
+              256 dimensions · cosine
+  FTS         tokenizer=jieba filters=lowercase
+  Storage     .zvec-grep/generations/current/storage
+`;
+
+function readyDiagnostics() {
+  return {
+    state: "ready",
+    info: {
+      root: "/tmp/corpus",
+      indexed: true,
+      compatibility: { status: "compatible", version: 2 },
+      index_policy: "enabled",
+      index_path: "/tmp/corpus/.zvec-grep/generations/current/storage",
+      workspace_index: {
+        embedding: { provider: "local", model: "potion-code-16m-v2" },
+      },
+      status: {
+        files_scanned: 381,
+        files_indexed: 381,
+        files_unchanged: 381,
+        files_pending: 0,
+        files_failed: 0,
+        files_added: 0,
+        files_modified: 0,
+        files_deleted: 0,
+        entities_indexed: 4269,
+        indexed_size_bytes: 3060923,
+      },
+    },
+  };
+}
+
+function diagnosticsLine(value) {
+  return `Status diagnostics: ${JSON.stringify(value)}\n`;
+}
+
 test("the packed Rust npm metadata resolves to a native zg binary", () => {
   const root = "/tmp/candidate/node_modules/@zvec/zvec-grep";
   assert.deepEqual(
@@ -101,6 +159,258 @@ test("parsed zero-entity indexes are product failures, while unknown output rema
     isProductPreparationFailure("snapshot", new Error("unknown status output")),
     false,
   );
+});
+
+test("grouped Rust status preserves legacy audit fields for local and remote models", () => {
+  for (const embedding of [
+    "local/potion-code-16m-v2",
+    "qwen/qwen3.7-text-embedding",
+  ]) {
+    const stdout = groupedReadyStatus.replace(
+      "local/potion-code-16m-v2",
+      embedding,
+    );
+    const legacy = `Workspace index: ready
+Root: /tmp/corpus
+Index path: /tmp/corpus/.zvec-grep/generations/current/storage
+Embedding: ${embedding}
+Files: scanned=381 indexed=381 pending=0 failed=0
+Entities: 4269
+Indexed source size: 3060923 bytes
+`;
+    assert.deepEqual(parseNativeStatus(stdout), parseNativeStatus(legacy));
+  }
+});
+
+test("structured status preserves exact audit fields independently of human output", () => {
+  const expected = parseNativeStatus(groupedReadyStatus);
+  for (const stdout of [
+    compactReadyStatus,
+    "human presentation can change\n",
+  ]) {
+    assert.deepEqual(
+      parseNativeStatus(stdout, {
+        stderr: `other debug output\n${diagnosticsLine(readyDiagnostics())}`,
+      }),
+      expected,
+    );
+  }
+  assert.deepEqual(
+    parseNativeStatus(groupedReadyStatus, {
+      stderr: "Status diagnostics: indexed=true\n",
+    }),
+    expected,
+  );
+  assert.throws(() => parseNativeStatus(compactReadyStatus), /omitted state/);
+});
+
+test("structured non-ready or incomplete indexes remain product failures", () => {
+  for (const change of [
+    (value) => {
+      value.state = "stale";
+    },
+    (value) => {
+      value.state = "failed";
+      value.info.status = null;
+    },
+    (value) => {
+      value.info.status.files_pending = 1;
+    },
+    (value) => {
+      value.info.status.files_failed = 1;
+    },
+    (value) => {
+      value.info.status.files_added = 1;
+    },
+    (value) => {
+      value.info.status.files_modified = 1;
+    },
+    (value) => {
+      value.info.status.files_deleted = 1;
+    },
+    (value) => {
+      value.info.status.files_unchanged = 380;
+    },
+    (value) => {
+      value.info.status.entities_indexed = 0;
+    },
+  ]) {
+    const value = readyDiagnostics();
+    change(value);
+    assert.throws(
+      () =>
+        parseNativeStatus(groupedReadyStatus, {
+          stderr: diagnosticsLine(value),
+        }),
+      NativeIndexProductError,
+    );
+  }
+});
+
+test("malformed structured diagnostics never fall back to a ready human heading", () => {
+  for (const change of [
+    (value) => {
+      delete value.state;
+    },
+    (value) => {
+      value.info.indexed = false;
+    },
+    (value) => {
+      value.info.index_policy = "disabled";
+    },
+    (value) => {
+      value.info.compatibility.status = "rebuild_required";
+    },
+    (value) => {
+      value.info.root = "relative/corpus";
+    },
+    (value) => {
+      value.info.index_path = "relative/storage";
+    },
+    (value) => {
+      delete value.info.workspace_index.embedding;
+    },
+    (value) => {
+      delete value.info.status.indexed_size_bytes;
+    },
+    (value) => {
+      value.info.status.indexed_size_bytes = Number.MAX_SAFE_INTEGER + 1;
+    },
+    (value) => {
+      value.info.status.files_pending = "0";
+    },
+  ]) {
+    const value = readyDiagnostics();
+    change(value);
+    assert.throws(
+      () =>
+        parseNativeStatus(groupedReadyStatus, {
+          stderr: diagnosticsLine(value),
+        }),
+      { name: "AssertionError" },
+    );
+  }
+  assert.throws(
+    () =>
+      parseNativeStatus(groupedReadyStatus, {
+        stderr: "Status diagnostics: {invalid\n",
+      }),
+    { name: "SyntaxError" },
+  );
+  assert.throws(
+    () =>
+      parseNativeStatus(groupedReadyStatus, {
+        stderr: diagnosticsLine(readyDiagnostics()).repeat(2),
+      }),
+    /ambiguous/,
+  );
+});
+
+test("grouped status accepts ANSI, CRLF, ASCII coverage and candidate HOME paths", () => {
+  const plain = parseNativeStatus(groupedReadyStatus);
+  for (const storage of [
+    ".zvec-grep/generations/current/storage",
+    "~/corpus/.zvec-grep/generations/current/storage",
+    "/tmp/corpus/.zvec-grep/generations/current/storage",
+  ]) {
+    const stdout = groupedReadyStatus
+      .replace("  /tmp/corpus", "  ~/corpus")
+      .replace(".zvec-grep/generations/current/storage", storage)
+      .replace("████████████████████", "####################")
+      .replaceAll("\n", "\r\n")
+      .replace(
+        "✓ Workspace index is ready",
+        "\x1b[32m✓ Workspace index is ready\x1b[0m",
+      )
+      .replace("4,269", "\x1b[1m4,269\x1b[0m");
+    assert.deepEqual(parseNativeStatus(stdout, { home: "/tmp" }), plain);
+  }
+  assert.equal(
+    parseNativeStatus(groupedReadyStatus.replace("  /tmp/corpus", "  ~"), {
+      home: "/tmp/corpus",
+    }).root,
+    "/tmp/corpus",
+  );
+});
+
+test("grouped non-ready headings remain product failures", () => {
+  for (const heading of [
+    "! Workspace index needs an update",
+    "✗ Workspace index failed",
+    "○ Workspace indexing is disabled",
+    "○ Workspace index is not created",
+    "? Workspace index is not configured",
+    "? Workspace index status is unknown",
+    "! Workspace index requires a rebuild",
+  ]) {
+    assert.throws(
+      () =>
+        parseNativeStatus(
+          groupedReadyStatus.replace("✓ Workspace index is ready", heading),
+        ),
+      NativeIndexProductError,
+    );
+  }
+});
+
+test("grouped coverage is indexed-file evidence only for a fully ready scan", () => {
+  for (const [from, to, error] of [
+    ["0 pending", "1 pending", /pending/],
+    ["0 failed", "1 failed", /failed/],
+    ["381 / 381", "380 / 381", /coverage/],
+    ["100%", "99%", /coverage/],
+    [
+      "  Version",
+      "  Changes     0 added · 1 modified · 0 deleted\n  Version",
+      /changed/,
+    ],
+    [
+      "  Version",
+      "  Changes     1 added · 0 modified · 0 deleted\n  Version",
+      /changed/,
+    ],
+    [
+      "  Version",
+      "  Changes     0 added · 0 modified · 20 deleted\n  Version",
+      /changed/,
+    ],
+    ["4,269", "0", /no entities/],
+  ]) {
+    assert.throws(
+      () => parseNativeStatus(groupedReadyStatus.replace(from, to)),
+      error,
+    );
+  }
+  assert.throws(
+    () =>
+      parseNativeStatus(
+        groupedReadyStatus.replace("381 / 381", "0 / 0").replace("100%", "0%"),
+      ),
+    /no indexed files/,
+  );
+});
+
+test("malformed grouped status is invalid evidence, not a zero retrieval score", () => {
+  for (const [from, to] of [
+    ["4,269", "4,26"],
+    ["4,269", "9,007,199,254,740,992"],
+    ["381 / 381", "38,1 / 381"],
+    ["  /tmp/corpus", "  relative/corpus"],
+    ["  Embedding", "  Missing embedding"],
+    ["  Coverage", "  Missing coverage"],
+    ["  Entities", "  Missing entities"],
+    ["  Source size", "  Missing source size"],
+    ["  Queue", "  Missing queue"],
+    ["  Storage", "  Missing storage"],
+    ["  Version", "  Changes     invalid change counts\n  Version"],
+  ]) {
+    assert.throws(
+      () => parseNativeStatus(groupedReadyStatus.replace(from, to)),
+      {
+        name: "AssertionError",
+      },
+    );
+  }
 });
 
 test("failed readiness checks and malformed status keep original command evidence", async (t) => {
@@ -203,9 +513,72 @@ test("successful status retains its existing snapshot identity", async (t) => {
   assert.equal(summary.fragments, 42);
   assert.deepEqual(Object.keys(summary.artifacts).sort(), [
     "status.json",
+    "status.stderr.txt",
     "status.txt",
   ]);
   assert.equal(await readFile(join(output, "status.txt"), "utf8"), stdout);
+});
+
+test("legacy, grouped and structured snapshots share identity and retain raw evidence", async (t) => {
+  const output = await mkdtemp(join(tmpdir(), "zg-retrieval-grouped-"));
+  t.after(() => rm(output, { recursive: true, force: true }));
+  const outputs = [
+    `Workspace index: ready
+Root: /tmp/corpus
+Index path: /tmp/corpus/.zvec-grep/generations/current/storage
+Embedding: local/potion-code-16m-v2
+Files: scanned=381 indexed=381 pending=0 failed=0
+Entities: 4269
+Indexed source size: 3060923 bytes
+`,
+    groupedReadyStatus.replace("  /tmp/corpus", "  ~/corpus"),
+    compactReadyStatus,
+  ];
+  const snapshots = [];
+  for (const [index, stdout] of outputs.entries()) {
+    const directory = join(output, String(index));
+    snapshots.push(
+      await snapshotIndex({
+        cli: "zg",
+        root: "/tmp/corpus",
+        output: directory,
+        env: { HOME: "/tmp" },
+        runStatus: async (_cli, args, options) => {
+          assert.deepEqual(args, [
+            "--status",
+            "/tmp/corpus",
+            "--mode",
+            "direct",
+            "--check-ready",
+            "--debug",
+          ]);
+          assert.equal(options.env.HOME, "/tmp");
+          return {
+            stdout,
+            stderr: index === 2 ? diagnosticsLine(readyDiagnostics()) : "",
+            code: 0,
+            signal: null,
+            timed_out: false,
+          };
+        },
+      }),
+    );
+    assert.equal(await readFile(join(directory, "status.txt"), "utf8"), stdout);
+  }
+  assert.equal(
+    snapshots[0].logical_content_sha256,
+    snapshots[1].logical_content_sha256,
+  );
+  assert.equal(
+    snapshots[0].logical_content_sha256,
+    snapshots[2].logical_content_sha256,
+  );
+  assert.equal(snapshots[1].files, 381);
+  assert.equal(snapshots[1].fragments, 4269);
+  assert.equal(
+    await readFile(join(output, "2", "status.stderr.txt"), "utf8"),
+    diagnosticsLine(readyDiagnostics()),
+  );
 });
 
 test("Rust-generated optional and referenced JSON Schema variants are resolved", () => {

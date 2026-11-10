@@ -11,9 +11,7 @@ use std::{
 use tokio::sync::Notify;
 
 use crate::{
-    models::ModelRuntimeLease,
-    storage::IndexStore,
-    workspace::{lock::FileLock, manifest::WorkspaceManifest},
+    domain::Workspace, models::ModelRuntimeLease, storage::IndexStore, workspace::lock::LockGuard,
 };
 
 #[derive(Clone, Default)]
@@ -25,10 +23,10 @@ pub(crate) struct WriterSession {
     // Borrowers retain all resources, including the home lock, if indexing is aborted.
     pub(crate) storage: IndexStore,
     pub(crate) models: Vec<ModelRuntimeLease>,
-    pub(crate) manifest: WorkspaceManifest,
+    pub(crate) workspace: Workspace,
     active: AtomicUsize,
     drained: Notify,
-    _home_lock: Arc<FileLock>,
+    _home_lock: Arc<LockGuard>,
 }
 
 pub(crate) struct WriterRegistration {
@@ -44,13 +42,13 @@ impl WriterSession {
     pub(crate) fn new(
         storage: IndexStore,
         models: Vec<ModelRuntimeLease>,
-        manifest: WorkspaceManifest,
-        home_lock: Arc<FileLock>,
+        workspace: Workspace,
+        home_lock: Arc<LockGuard>,
     ) -> Self {
         Self {
             storage,
             models,
-            manifest,
+            workspace,
             active: AtomicUsize::new(0),
             drained: Notify::new(),
             _home_lock: home_lock,
@@ -65,7 +63,10 @@ impl WriterContexts {
             self.entries
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(session.manifest.path.clone(), Arc::downgrade(&session));
+                .insert(
+                    session.workspace.layout().storage_dir().to_path_buf(),
+                    Arc::downgrade(&session),
+                );
         }
         WriterRegistration {
             contexts: self.clone(),
@@ -73,16 +74,12 @@ impl WriterContexts {
         }
     }
 
-    pub(crate) fn borrow(&self, home: &Path, storage_home: &Path) -> Option<WriterLease> {
+    pub(crate) fn borrow(&self, home: &Path) -> Option<WriterLease> {
         let entries = self
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let session = entries.get(home)?.upgrade()?;
-        // Never expose a rebuild's unpublished generation or a different index.
-        if session.manifest.storage_home() != storage_home {
-            return None;
-        }
         session.active.fetch_add(1, Ordering::AcqRel);
         Some(WriterLease { session })
     }
@@ -96,10 +93,10 @@ impl WriterRegistration {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if entries
-            .get(&self.session.manifest.path)
+            .get(self.session.workspace.layout().storage_dir())
             .is_some_and(|entry| Weak::ptr_eq(entry, &Arc::downgrade(&self.session)))
         {
-            entries.remove(&self.session.manifest.path);
+            entries.remove(self.session.workspace.layout().storage_dir());
         }
     }
 

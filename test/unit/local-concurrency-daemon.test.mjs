@@ -142,7 +142,7 @@ for (const name of ["bge-small-en-v1.5", "qwen3-embedding-0.6b"]) {
   for (const source of ["explicit", "environment"]) {
     test(`daemon releases cached query model before ${source} indexing (${name})`, async (t) => {
       setEnvironment(t, {
-        ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY:
+        ZVEC_GREP_EMBEDDING_CONCURRENCY:
           source === "environment" ? "3" : undefined,
         ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM: undefined,
       });
@@ -192,7 +192,7 @@ for (const name of ["bge-small-en-v1.5", "qwen3-embedding-0.6b"]) {
 }
 
 test("daemon waits for an active query before loading the indexing model", async (t) => {
-  setEnvironment(t, { ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY: "3" });
+  setEnvironment(t, { ZVEC_GREP_EMBEDDING_CONCURRENCY: "3" });
   const queryStarted = deferred();
   const releaseQuery = deferred();
   t.after(() => releaseQuery.resolve());
@@ -216,7 +216,7 @@ test("daemon waits for an active query before loading the indexing model", async
 });
 
 test("daemon keeps cached queries available during index service preparation", async (t) => {
-  setEnvironment(t, { ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY: "3" });
+  setEnvironment(t, { ZVEC_GREP_EMBEDDING_CONCURRENCY: "3" });
   const preparing = deferred();
   const releasePreparation = deferred();
   t.after(() => releasePreparation.resolve());
@@ -237,7 +237,7 @@ test("daemon keeps cached queries available during index service preparation", a
 });
 
 test("daemon releases the index model lease before a queued query can load", async (t) => {
-  setEnvironment(t, { ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY: "3" });
+  setEnvironment(t, { ZVEC_GREP_EMBEDDING_CONCURRENCY: "3" });
   const closing = deferred();
   const releaseClose = deferred();
   t.after(() => releaseClose.resolve());
@@ -272,7 +272,7 @@ for (const failingStage of [
   "serviceClose",
 ]) {
   test(`daemon releases its writer and model lease after ${failingStage} fails`, async (t) => {
-    setEnvironment(t, { ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY: "3" });
+    setEnvironment(t, { ZVEC_GREP_EMBEDDING_CONCURRENCY: "3" });
     let fail = false;
     const fixture = daemonLifecycle(t, {
       [failingStage]: () => {
@@ -299,7 +299,7 @@ for (const failingStage of [
 
 test("daemon index limits never enter query models or persisted runtime", async (t) => {
   setEnvironment(t, {
-    ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY: "7",
+    ZVEC_GREP_EMBEDDING_CONCURRENCY: "7",
     ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM: "8",
   });
   const backend = new DaemonBackend({ version: "test" });
@@ -359,7 +359,7 @@ test("daemon index limits never enter query models or persisted runtime", async 
 
 test("daemon resolves index defaults for local and remote models before loading or scheduling", async (t) => {
   setEnvironment(t, {
-    ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY: "12",
+    ZVEC_GREP_EMBEDDING_CONCURRENCY: "12",
     ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM: "8",
   });
   const backend = new DaemonBackend({ version: "test" });
@@ -451,7 +451,7 @@ test("fresh search reconciliation forwards the request concurrency", async (t) =
 });
 
 test("daemon uses one resolved index limit for the model and batch scheduler", async (t) => {
-  setEnvironment(t, { ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY: "12" });
+  setEnvironment(t, { ZVEC_GREP_EMBEDDING_CONCURRENCY: "12" });
   let createdOptions;
   let indexedOptions;
   const backend = new DaemonBackend({
@@ -485,7 +485,7 @@ test("daemon uses one resolved index limit for the model and batch scheduler", a
   let loadedRequest;
   t.mock.method(backend.modelPool, "acquire", async (request) => {
     loadedRequest = request;
-    process.env.ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY = "3";
+    process.env.ZVEC_GREP_EMBEDDING_CONCURRENCY = "3";
     return { model: {}, key: "test-key", release() {} };
   });
   const requests = [];
@@ -508,7 +508,7 @@ test("daemon uses one resolved index limit for the model and batch scheduler", a
 
 test("model pool isolates query defaults from index settings and model instances", async (t) => {
   setEnvironment(t, {
-    ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY: "7",
+    ZVEC_GREP_EMBEDDING_CONCURRENCY: "7",
     ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM: "8",
   });
   const pool = new EmbeddingModelPool({

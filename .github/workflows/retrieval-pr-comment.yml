@@ -1,0 +1,56 @@
+name: Retrieval PR comment
+
+on:
+  workflow_run:
+    workflows: [Retrieval-only PR]
+    types: [completed]
+
+permissions: {}
+
+# Serialize replies for successive pushes to the same source branch.
+# Preserve pending publications when older or cancelled runs finish later.
+concurrency:
+  group: retrieval-pr-comment-${{ github.event.workflow_run.head_repository.id }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  comment:
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+      issues: write
+    steps:
+      # workflow_run uses the default branch. Never check out or execute PR code.
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Download PR identity
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: retrieval-pr-context
+          path: ${{ runner.temp }}/retrieval-pr-comment/context
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+      - name: Download version comparison
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: retrieval-comparison
+          path: ${{ runner.temp }}/retrieval-pr-comment/comparison
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+      - name: Publish or update the PR result comment
+        uses: actions/github-script@v8
+        env:
+          RETRIEVAL_COMMENT_REPORTS: ${{ runner.temp }}/retrieval-pr-comment
+        with:
+          script: |
+            const { pathToFileURL } = require('node:url');
+            const { publish } = await import(pathToFileURL(`${process.env.GITHUB_WORKSPACE}/.github/scripts/retrieval-pr-comment.mjs`));
+            await publish({ github, context, core, directory: process.env.RETRIEVAL_COMMENT_REPORTS });

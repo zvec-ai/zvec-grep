@@ -2,12 +2,14 @@
 
 #[cfg(test)]
 use super::TextSource;
-use super::{ChunkOptions, ExtractedEntity, Source, SourceKind, code, image, markdown, text};
+use super::{
+    ChunkOptions, ExtractedEntity, ExtractionOutput, Source, SourceKind, code, image, markdown,
+    text,
+};
 use crate::{
     EngineError,
     domain::{
         CodeMetadata, Content, EntityMetadata, FileCategory, FileFormat, MarkdownMetadata, Range,
-        TableCellRole,
     },
     utils::{collapse_whitespace, take_utf16, utf16_len},
 };
@@ -16,30 +18,50 @@ pub(super) fn extract<'source>(
     source: impl Into<Source<'source>>,
     options: ChunkOptions,
 ) -> Result<Vec<ExtractedEntity>, EngineError> {
+    // Search reads the same content but never stores a graph, so the walk-time
+    // collection would only burn cycles.
+    Ok(extract_for_indexing(source, options, false)?.fragments)
+}
+
+pub(super) fn extract_for_indexing<'source>(
+    source: impl Into<Source<'source>>,
+    options: ChunkOptions,
+    collect_graph: bool,
+) -> Result<ExtractionOutput, EngineError> {
     let source = source.into();
     let source_text = match &source {
         Source::Text(source) => Some(source.text.as_str()),
         Source::Image(_) => None,
     };
-    let entities = match source {
+    let output = match source {
         Source::Text(source) if is_code_source(&source.formats) => {
-            code::extract_for_indexing(source, options)
+            code::extract_for_indexing(source, options, collect_graph)
         }
-        Source::Image(source) => Ok(image::extract(source)),
+        Source::Image(source) => Ok(ExtractionOutput {
+            fragments: image::extract(source),
+            graph: None,
+        }),
         Source::Text(source) if source.formats.contains(&FileFormat::Markdown) => {
-            markdown::extract(source, options)
+            Ok(ExtractionOutput {
+                fragments: markdown::extract(source, options)?,
+                graph: None,
+            })
         }
-        Source::Text(source) => text::extract(source, options),
+        Source::Text(source) => Ok(ExtractionOutput {
+            fragments: text::extract(source, options)?,
+            graph: None,
+        }),
     }?;
     if let Some(source_text) = source_text {
-        for entity in &entities {
+        for entity in &output.fragments {
             if let Range::Text(range) = &entity.source_range {
                 let original = crate::utils::slice_text(
                     source_text,
                     range.start_byte_offset(),
                     range.end_byte_offset(),
                 )?;
-                if !matches!(&entity.content, Content::Text(content) if content == original) {
+                if !matches!(&entity.content, Content::Text(content) | Content::Code(content) if content == original)
+                {
                     return Err(EngineError::internal(
                         "entity content differs from its source range",
                     ));
@@ -47,14 +69,7 @@ pub(super) fn extract<'source>(
             }
         }
     }
-    Ok(entities)
-}
-
-pub(super) fn extract_for_indexing<'source>(
-    source: impl Into<Source<'source>>,
-    options: ChunkOptions,
-) -> Result<Vec<ExtractedEntity>, EngineError> {
-    extract(source, options)
+    Ok(output)
 }
 
 pub(super) fn source_kind(formats: &[FileFormat]) -> Option<SourceKind> {
@@ -104,46 +119,15 @@ pub(super) fn vector_content_for_fragment(
     max_chars: Option<usize>,
 ) -> Vec<Content> {
     let mut contents = vec![content.clone()];
-    if contents
-        .iter()
-        .any(|content| matches!(content, Content::Table(_)))
-    {
-        let mut projected = Vec::with_capacity(contents.len());
-        for content in contents {
-            project_content(content, &mut projected);
-        }
-        contents = projected;
-    }
     let metadata = vector_metadata_text(metadata, metadata_budget(max_chars));
     if !metadata.is_empty() {
-        if let Some(Content::Text(text)) = contents.first_mut() {
+        if let Some(Content::Text(text) | Content::Code(text)) = contents.first_mut() {
             *text = format!("{metadata}\n{text}");
         } else {
             contents.insert(0, Content::Text(metadata));
         }
     }
     contents
-}
-
-fn project_content(content: Content, output: &mut Vec<Content>) {
-    match content {
-        Content::Table(table) => {
-            for cell in table.cells {
-                let role = match cell.kind {
-                    TableCellRole::Header => "header",
-                    TableCellRole::Data | TableCellRole::Unknown => "cell",
-                };
-                output.push(Content::Text(format!(
-                    "{role} {},{} ({}x{}):",
-                    cell.row, cell.column, cell.row_span, cell.column_span,
-                )));
-                for content in cell.contents {
-                    project_content(content, output);
-                }
-            }
-        }
-        content => output.push(content),
-    }
 }
 
 pub(super) fn validate_formats(formats: &[FileFormat]) -> Result<(), EngineError> {
@@ -198,6 +182,7 @@ fn vector_metadata_text(metadata: Option<&EntityMetadata>, max_chars: Option<usi
             scope,
             signature,
             documentation,
+            ..
         }) => vec![
             match (symbol_type, symbol_name) {
                 (Some(kind), Some(name)) => Some(format!("symbol: {} {name}", kind.as_str())),
@@ -254,7 +239,6 @@ pub(super) fn test_content(entity: &ExtractedEntity) -> Content {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{TableCell, TableCellRole, TableContent};
 
     #[test]
     fn routes_supported_sources_without_confusing_formats_and_reader_capabilities() {
@@ -282,33 +266,6 @@ mod tests {
         assert_eq!(fragments.len(), 1);
         assert_eq!(test_content(&fragments[0]), Content::Text(source.text));
         assert!(test_metadata(&fragments[0]).is_none());
-    }
-
-    #[test]
-    fn projects_table_cells_in_order_and_preserves_embedded_images() {
-        let image = Content::Image(
-            crate::domain::ImageContent::new(vec![1], FileFormat::Png).expect("image"),
-        );
-        let content = Content::Table(TableContent {
-            row_count: 1,
-            column_count: 1,
-            cells: vec![TableCell {
-                row: 0,
-                column: 0,
-                row_span: 1,
-                column_span: 1,
-                contents: vec![Content::Text("cell".to_owned()), image.clone()],
-                kind: TableCellRole::Data,
-            }],
-        });
-        assert_eq!(
-            vector_content_for_fragment(&content, None, None),
-            vec![
-                Content::Text("cell 0,0 (1x1):".to_owned()),
-                Content::Text("cell".to_owned()),
-                image,
-            ]
-        );
     }
 
     #[test]

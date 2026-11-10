@@ -79,8 +79,7 @@ fn valid_mcp_origin(request: &axum::extract::Request) -> bool {
     let Some(authority) = uri.authority() else {
         return false;
     };
-    uri.scheme_str() == Some("http")
-        && value == format!("http://{authority}")
+    value == format!("http://{authority}")
         && !authority.as_str().contains('@')
         && matches!(
             authority.host(),

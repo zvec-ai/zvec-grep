@@ -21,8 +21,11 @@ mod workspace;
 
 use api::{
     context::{ContextOptions, ContextResult},
+    files::{FilesOptions, FilesResult},
     index::{IndexOptions, IndexResult},
     info::{InfoOptions, InfoResult},
+    paths::{PathLookupResult, PathsOptions, PathsResult},
+    relationships::{Direction, GraphEdgeKind, RelationshipOptions, RelationshipResult},
 };
 
 pub use error::{EngineError, EngineResult, ErrorReport, ErrorSite};
@@ -56,6 +59,29 @@ impl ZvecGrep {
             .map_err(|error| error.report_here())
     }
 
+    /// Enumerates current files without reading source contents or opening an index.
+    pub async fn files(&self, options: FilesOptions) -> EngineResult<FilesResult> {
+        lexical::files::list(options)
+            .await
+            .map_err(|error| error.report_here())
+    }
+
+    /// Looks up current file paths without reading their contents or opening an index.
+    pub async fn paths(&self, options: PathsOptions) -> EngineResult<PathsResult> {
+        self.service
+            .paths(options)
+            .await
+            .map_err(|error| error.report_here())
+    }
+
+    /// Resolves path-shaped queries against current file names, then literal source text.
+    pub async fn lookup_path(&self, options: PathsOptions) -> EngineResult<PathLookupResult> {
+        self.service
+            .lookup_path(options)
+            .await
+            .map_err(|error| error.report_here())
+    }
+
     /// Queries an index after a resident coordinator has completed its refresh.
     /// The caller must drain delivered watcher events and wait for indexing
     /// before each call. OS notifications still in flight are outside that
@@ -78,9 +104,50 @@ impl ZvecGrep {
             .map_err(|error| error.report_here())
     }
 
+    /// Finds incoming calls for matching symbol definitions in an existing index.
+    pub async fn callers(
+        &self,
+        mut options: RelationshipOptions,
+    ) -> EngineResult<RelationshipResult> {
+        options.kinds = Some(vec![GraphEdgeKind::Calls]);
+        self.relationships(Direction::In, options).await
+    }
+
+    /// Finds outgoing calls for matching symbol definitions in an existing index.
+    pub async fn callees(
+        &self,
+        mut options: RelationshipOptions,
+    ) -> EngineResult<RelationshipResult> {
+        options.kinds = Some(vec![GraphEdgeKind::Calls]);
+        self.relationships(Direction::Out, options).await
+    }
+
+    /// Finds persisted relationships in the requested direction and edge types.
+    pub async fn relationships(
+        &self,
+        direction: Direction,
+        options: RelationshipOptions,
+    ) -> EngineResult<RelationshipResult> {
+        self.service
+            .relationships(direction, options)
+            .await
+            .map_err(|error| error.report_here())
+    }
+
     pub async fn info(&self, options: InfoOptions) -> EngineResult<InfoResult> {
         self.service
             .info(options)
+            .await
+            .map_err(|error| error.report_here())
+    }
+
+    /// Lists index model choices without loading models, downloading or writing state.
+    pub async fn index_setup(
+        &self,
+        options: api::index::setup::IndexSetupOptions,
+    ) -> EngineResult<api::index::setup::IndexSetup> {
+        self.service
+            .index_setup(options)
             .await
             .map_err(|error| error.report_here())
     }
@@ -100,7 +167,9 @@ impl ZvecGrep {
                 include_status: false,
             })
             .await?;
-        info.compatibility.ensure_compatible()?;
+        info.compatibility
+            .ensure_compatible()
+            .map_err(|error| error.with_workspace_root(&info.root))?;
         if !info.indexed {
             return Err(EngineError::invalid_argument(
                 "workspace must have an index before it can be watched",

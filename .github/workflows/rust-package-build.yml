@@ -1,0 +1,238 @@
+name: Build a native Rust package
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        type: string
+        required: true
+      runner:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Every release target has a pinned SDK. Drift must fail, not rebuild llama.cpp.
+  LLAMA_CPP_BUILD_MODE: prebuilt
+
+jobs:
+  native:
+    name: Build ${{ inputs.target }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ (inputs.target == 'darwin-x64' || inputs.target == 'linux-x64-gnu' || inputs.target == 'win32-x64-msvc' || inputs.target == 'win32-arm64-msvc') && 180 || 90 }}
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+      - name: Configure native build parallelism
+        shell: node {0}
+        run: |
+          const os = require("node:os");
+          const fs = require("node:fs");
+          const cores = os.availableParallelism();
+          const memoryGiB = os.totalmem() / (1024 ** 3);
+          // A conservative per-job memory budget, not a guarantee against OOM.
+          const jobs = Math.max(1, Math.min(cores, Math.floor(memoryGiB / 3), 8));
+          fs.appendFileSync(process.env.GITHUB_ENV,
+            `CARGO_BUILD_JOBS=${jobs}\nCMAKE_BUILD_PARALLEL_LEVEL=${jobs}\n`);
+          console.log(`Native build resources: cores=${cores}, RAM=${memoryGiB.toFixed(1)} GiB, jobs=${jobs} (3 GiB/job, cap 8)`);
+      - uses: actions/setup-python@v6
+        if: runner.os == 'Windows'
+        with:
+          python-version: "3.12"
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+      - name: Use a short Windows Cargo home
+        if: runner.os == 'Windows'
+        shell: python
+        run: |
+          import os, pathlib
+          # Keep dependency/cache paths short, including on-demand source builds.
+          cargo_home = pathlib.Path(pathlib.Path(os.environ["GITHUB_WORKSPACE"]).anchor) / "zg-cargo"
+          (cargo_home / "bin").mkdir(parents=True, exist_ok=True)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
+              environment.write(f"CARGO_HOME={cargo_home}\n")
+          with open(os.environ["GITHUB_PATH"], "a", encoding="utf-8") as path:
+              path.write(f"{cargo_home / 'bin'}\n")
+          print(f"CARGO_HOME={cargo_home}")
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ inputs.target == 'win32-arm64-msvc' && 'arm64' || 'x64' }}
+          # ARM64 follows the runner image's installed Visual Studio version.
+          vsversion: ${{ inputs.target == 'win32-x64-msvc' && '2022' || '' }}
+      - name: Read the pinned Rust toolchain
+        id: rust-version
+        shell: bash
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - name: Select the native Windows ARM64 Rust host
+        if: inputs.target == 'win32-arm64-msvc'
+        run: rustup set default-host aarch64-pc-windows-msvc
+      - name: Install the pinned Rust toolchain, including rustup if missing
+        # Linux compiles in Docker, but host packaging still uses cargo metadata.
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: ${{ steps.rust-version.outputs.channel }}
+      - name: Verify native Windows toolchains
+        if: runner.os == 'Windows'
+        env:
+          EXPECTED_ARCH: ${{ inputs.target == 'win32-arm64-msvc' && 'arm64' || 'x64' }}
+          EXPECTED_HOST: ${{ inputs.target == 'win32-arm64-msvc' && 'aarch64-pc-windows-msvc' || 'x86_64-pc-windows-msvc' }}
+        run: |
+          node -e "if (process.arch !== process.env.EXPECTED_ARCH) throw new Error('unexpected Node architecture: ' + process.arch)"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $hostLine = rustc -vV | Select-String '^host: '
+          if ($hostLine.ToString() -ne "host: $env:EXPECTED_HOST") { throw "Unexpected Rust host: $hostLine" }
+      - name: Restore Cargo build state
+        id: cargo-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/registry/index/
+            ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/registry/cache/
+            ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/registry/src/
+            ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/git/db/
+            rust/target/release/
+          # Per-commit keys would exhaust the 10 GB repository cache quota and evict Rust CI caches.
+          # Isolate Ubuntu 20.04 output from older host/container build caches.
+          key: rust-release-${{ runner.os == 'Linux' && 'v5-ubuntu20.04' || 'v3' }}-${{ inputs.target }}-${{ inputs.runner }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}
+      - name: Cache the pinned llama native SDK
+        uses: actions/cache@v5
+        with:
+          path: rust/target/llama-runtimes/
+          key: llama-sdk-v1-${{ inputs.target }}-${{ hashFiles('rust/Cargo.lock') }}
+      - name: Configure the native SDK cache
+        shell: python
+        run: |
+          import os, pathlib
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
+              environment.write(f"LLAMA_CPP_RUNTIME_CACHE={pathlib.Path('target/llama-runtimes').resolve()}\n")
+      - name: Cache official ONNX Runtime archives
+        uses: actions/cache@v5
+        with:
+          path: rust/target/ort-prebuilt/
+          key: rust-ort-1.21-${{ inputs.target }}-${{ hashFiles('rust/scripts/onnxruntime-distributions.json') }}
+      - name: Preserve the Intel macOS deployment target
+        if: inputs.target == 'darwin-x64'
+        run: echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
+      - name: Build the Ubuntu 20.04 Rust builder without a CUDA compiler
+        if: runner.os == 'Linux'
+        working-directory: ${{ github.workspace }}
+        run: >-
+          docker build --platform ${{ inputs.target == 'linux-arm64-gnu' && 'linux/arm64' || 'linux/amd64' }}
+          --file rust/scripts/cuda/cuda-builder.Dockerfile
+          --build-arg CUDA_IMAGE=ubuntu:20.04
+          --build-arg RUST_VERSION=${{ steps.rust-version.outputs.channel }}
+          --tag zvec-grep-cuda-builder .
+      - name: Build the Linux release on glibc 2.31
+        if: runner.os == 'Linux'
+        working-directory: ${{ github.workspace }}
+        run: |
+          mkdir -p "$HOME/.cargo/registry" "$HOME/.cargo/git"
+          docker run --rm --platform ${{ inputs.target == 'linux-arm64-gnu' && 'linux/arm64' || 'linux/amd64' }} \
+            --volume "${GITHUB_WORKSPACE}:/work:ro" \
+            --volume "${GITHUB_WORKSPACE}/rust/target:/work-target" \
+            --volume "$HOME/.cargo/registry:/root/.cargo/registry" \
+            --volume "$HOME/.cargo/git:/root/.cargo/git" \
+            --env CARGO_TARGET_DIR=/work-target \
+            --env CARGO_BUILD_JOBS --env CMAKE_BUILD_PARALLEL_LEVEL \
+            --env LLAMA_CPP_BUILD_MODE=prebuilt --env LLAMA_CPP_RUNTIME_CACHE=/work-target/llama-runtimes \
+            --env RELEASE_TARGET=${{ inputs.target }} \
+            zvec-grep-cuda-builder bash -euo pipefail -c '
+              test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.31"
+              if [[ "$RELEASE_TARGET" == linux-x64-gnu ]]; then
+                bash scripts/cuda/build.sh --primary-only
+              else
+                cargo build --locked --release --package zg
+              fi
+            '
+      - name: Audit the Linux prebuilt CUDA 13 and CUDA 12 bundle
+        if: inputs.target == 'linux-x64-gnu'
+        working-directory: ${{ github.workspace }}
+        run: |
+          docker run --rm --platform linux/amd64 \
+            --volume "${GITHUB_WORKSPACE}:/work:ro" \
+            --volume "${GITHUB_WORKSPACE}/rust/target:/work-target" \
+            zvec-grep-cuda-builder bash -euo pipefail -c '
+              bash scripts/cuda/check.sh /work-target/release/zg-cuda-staging
+              python3 scripts/check-glibc.py /work-target/release/zg-cuda-staging --max 2.31
+            '
+      - name: Restore ownership of Linux build output
+        if: ${{ always() && runner.os == 'Linux' }}
+        run: |
+          # Docker writes as root. Host packaging/cache save must retain access.
+          for directory in target "$HOME/.cargo/registry" "$HOME/.cargo/git"; do
+            if [[ -d "$directory" ]]; then
+              sudo chown -R "$(id -u):$(id -g)" "$directory"
+            fi
+          done
+      - name: Run the Linux bundle without any CUDA runtime installed
+        if: inputs.target == 'linux-x64-gnu'
+        working-directory: ${{ github.workspace }}
+        run: |
+          docker run --rm --platform linux/amd64 \
+            --volume "${GITHUB_WORKSPACE}:/workspace:ro" \
+            --volume "${GITHUB_WORKSPACE}/rust/target/release/zg-cuda-staging:/opt/zg:ro" \
+            ubuntu:20.04 bash -euo pipefail -c '
+              apt-get update >/dev/null
+              apt-get install --yes --no-install-recommends libstdc++6 >/dev/null
+              ldd /opt/zg/lib/libggml-cuda.so | grep -Eq "lib(cuda|cudart|cublas).*not found"
+              /opt/zg/bin/zg --help >/dev/null
+              /opt/zg/bin/zg --rg -F "zvec-grep Rust workspace" /workspace/rust/README.md >/dev/null
+            '
+      - name: Build the Windows CPU/CUDA bundle
+        if: inputs.target == 'win32-x64-msvc'
+        run: >-
+          powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass
+          -File scripts/cuda/build.ps1 -PrimaryOnly
+      - name: Build the native target
+        if: runner.os != 'Linux' && inputs.target != 'win32-x64-msvc'
+        run: npm run build
+      - name: Save Cargo build state
+        if: ${{ always() && steps.cargo-cache.outputs.cache-primary-key != '' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/registry/index/
+            ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/registry/cache/
+            ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/registry/src/
+            ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/git/db/
+            rust/target/release/
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      - name: Audit the Windows CPU/CUDA bundle
+        if: inputs.target == 'win32-x64-msvc'
+        run: >-
+          powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass
+          -File scripts/cuda/check.ps1
+          -Bundle target/release/zg-cuda-staging
+      - name: Apply local macOS signatures after building
+        if: runner.os == 'macOS'
+        run: |
+          for binary in target/release/*.dylib target/release/zg; do
+            if [[ -f "$binary" ]]; then
+              codesign --force --sign - "$binary"
+              codesign --verify "$binary"
+            fi
+          done
+      - name: Package the native target
+        run: npm run release:platform -- --no-build --target ${{ inputs.target }} ${{ (inputs.target == 'linux-x64-gnu' || inputs.target == 'win32-x64-msvc') && '--bundle-dir target/release/zg-cuda-staging' || '' }}
+      - name: Audit the Linux ARM64 package against glibc 2.31
+        if: inputs.target == 'linux-arm64-gnu'
+        run: python3 scripts/check-glibc.py dist/npm/release/staging/${{ inputs.target }} --max 2.31
+      - name: Upload the platform package
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-native-${{ inputs.target }}
+          path: rust/dist/npm/release/tarballs/*.tgz
+          if-no-files-found: error
+          retention-days: 14

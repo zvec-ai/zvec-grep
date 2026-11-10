@@ -557,6 +557,8 @@ def prepare_setup_cache(
         "services": {
             "main": {
                 "platform": "linux/amd64",
+                # Forward stop signals to Harbor's keepalive and reap children.
+                "init": True,
                 "volumes": service_volumes,
             }
         },

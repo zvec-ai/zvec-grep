@@ -1,171 +1,30 @@
-//! Versioned wire envelopes shared by the resident daemon and thin clients.
+//! HTTP wire commands, replies, and index progress shared by the daemon and its clients.
 //!
 //! These transport-only DTOs are intentionally separate from the in-process
 //! `ZvecGrep` API.
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 use zg_engine::ErrorReport;
 use zg_engine::api::{
     context::{ContextOptions, ContextResult},
     index::{IndexOptions, IndexResult, progress::IndexProgress},
     info::{InfoOptions, InfoResult},
+    relationships::{RelationshipOptions, RelationshipResult},
 };
-
-pub const CURRENT_DAEMON_PROTOCOL_VERSION: u32 = 15;
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct DaemonRequest {
-    pub message_id: u64,
-    pub kind: DaemonRequestKind,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
-pub enum DaemonRequestKind {
-    Hello(HelloRequest),
-    Execute(Box<ExecuteRequest>),
-    Cancel(CancelRequest),
-    Shutdown(ShutdownRequest),
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct HelloRequest {
-    pub protocol_version: u32,
-    pub client_version: String,
-}
-
-impl HelloRequest {
-    #[must_use]
-    pub fn current(client_version: impl Into<String>) -> Self {
-        Self {
-            protocol_version: CURRENT_DAEMON_PROTOCOL_VERSION,
-            client_version: client_version.into(),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-#[serde(transparent)]
-pub struct RequestId(Uuid);
-
-impl RequestId {
-    #[must_use]
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-}
-
-impl Default for RequestId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ExecuteRequest {
-    pub request_id: RequestId,
-    pub command: DaemonCommand,
-    /// Remaining duration at the client, avoiding cross-process clock skew.
-    pub timeout_millis: Option<u64>,
-    pub principal: Principal,
-    pub trace: TraceContext,
-}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "request")]
 pub enum DaemonCommand {
+    IndexSetup(zg_engine::api::index::setup::IndexSetupOptions),
     Context(ContextOptions),
+    Callers(RelationshipOptions),
+    Callees(RelationshipOptions),
     Index(IndexOptions),
     IndexAuthorization(IndexOptions),
     QueryAuthorization(ContextOptions),
     GrantIndexAuthorization(zg_engine::authorization::IndexAuthorization),
     DropIndex(InfoOptions),
     Info(InfoOptions),
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct Principal {
-    pub subject: String,
-}
-
-impl Principal {
-    #[must_use]
-    pub fn local() -> Self {
-        Self {
-            subject: "local-user".to_owned(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct TraceContext {
-    pub trace_id: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct CancelRequest {
-    pub request_id: RequestId,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ShutdownRequest {
-    pub grace_period_millis: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct DaemonResponse {
-    pub message_id: u64,
-    pub kind: DaemonResponseKind,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
-pub enum DaemonResponseKind {
-    Hello(HelloReply),
-    Event(RequestEvent),
-    Result(ExecuteResult),
-    Acknowledged(DaemonAction),
-    Error(ErrorReply),
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct HelloReply {
-    pub protocol_version: u32,
-    pub daemon_version: String,
-    pub daemon_instance_id: String,
-    pub capabilities: Vec<String>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DaemonAction {
-    Cancel,
-    Shutdown,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct RequestEvent {
-    pub request_id: RequestId,
-    pub sequence: u64,
-    pub kind: RequestEventKind,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum RequestEventKind {
-    Started,
-    Progress { completed: u64, total: Option<u64> },
-    IndexProgress { progress: IndexProgress },
-    Warning { code: String, message: String },
-    Completed { result_count: usize },
-    Failed { report: ErrorReport },
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct ExecuteResult {
-    pub request_id: RequestId,
-    pub result: ExecutionResult,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -186,7 +45,10 @@ pub enum IndexStreamEvent {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "reply")]
 pub enum DaemonReply {
+    IndexSetup(zg_engine::api::index::setup::IndexSetup),
     Context(Box<ContextResult>),
+    Callers(RelationshipResult),
+    Callees(RelationshipResult),
     Index(Box<IndexResult>),
     IndexAuthorization(Vec<zg_engine::authorization::IndexAuthorization>),
     QueryAuthorization(Vec<zg_engine::authorization::QueryAuthorization>),
@@ -212,66 +74,167 @@ mod tests {
         },
     };
 
-    use super::{
-        CURRENT_DAEMON_PROTOCOL_VERSION, DaemonCommand, DaemonRequest, DaemonRequestKind,
-        DaemonResponse, DaemonResponseKind, ErrorReply, ExecuteRequest, ExecutionResult,
-        HelloRequest, Principal, RequestEvent, RequestEventKind, RequestId, TraceContext,
-    };
+    use super::{DaemonCommand, ErrorReply, ExecutionResult, IndexStreamEvent};
 
     #[test]
-    fn hello_uses_current_protocol_version() {
-        let hello = HelloRequest::current("fixture-client");
-        assert_eq!(hello.protocol_version, CURRENT_DAEMON_PROTOCOL_VERSION);
+    fn relationship_commands_and_replies_preserve_compact_payloads() {
+        use zg_engine::api::relationships::{
+            RelationshipEdge, RelationshipOptions, SymbolDefinition, SymbolRelationships,
+        };
+        let options = RelationshipOptions {
+            root: Some("/workspace".into()),
+            symbol: "Module::run".into(),
+            kinds: Some(vec![
+                zg_engine::api::relationships::GraphEdgeKind::Calls,
+                zg_engine::api::relationships::GraphEdgeKind::Imports,
+            ]),
+            globs: vec!["src/main.rs".into()],
+            limit: Some(2),
+            ..RelationshipOptions::default()
+        };
+        for command in [
+            DaemonCommand::Callers(options.clone()),
+            DaemonCommand::Callees(options),
+        ] {
+            let encoded = serde_json::to_value(&command).expect("relationship command");
+            assert!(encoded["request"].get("signal").is_none());
+            assert_eq!(encoded["request"]["symbol"], "Module::run");
+            assert_eq!(
+                encoded["request"]["kinds"],
+                serde_json::json!(["calls", "imports"])
+            );
+            assert_eq!(encoded["request"]["globs"][0]["pattern"], "src/main.rs");
+            assert_eq!(
+                serde_json::from_value::<DaemonCommand>(encoded).expect("decode command"),
+                command
+            );
+        }
+        let matches = vec![SymbolRelationships {
+            symbol: SymbolDefinition {
+                name: "Module::run".into(),
+                file_path: "src/main.rs".into(),
+                start_line: 3,
+                end_line: 8,
+            },
+            truncated: true,
+            edges: vec![RelationshipEdge {
+                kind: zg_engine::api::relationships::GraphEdgeKind::Calls,
+                direction: zg_engine::api::relationships::Direction::Out,
+                file_path: "src/caller.rs".into(),
+                symbol: None,
+                line: Some(5),
+                column: Some(0),
+            }],
+        }];
+        let result = zg_engine::api::relationships::RelationshipResult {
+            matches,
+            suggestions: Vec::new(),
+        };
+        for reply in [
+            super::DaemonReply::Callers(result.clone()),
+            super::DaemonReply::Callees(result),
+        ] {
+            let encoded = serde_json::to_value(&reply).expect("relationship reply");
+            assert_eq!(encoded["reply"]["matches"][0]["name"], "Module::run");
+            assert_eq!(encoded["reply"]["matches"][0]["filePath"], "src/main.rs");
+            assert_eq!(encoded["reply"]["matches"][0]["truncated"], true);
+            assert_eq!(encoded["reply"]["matches"][0]["edges"][0]["kind"], "calls");
+            assert_eq!(
+                encoded["reply"]["matches"][0]["edges"][0]["direction"],
+                "out"
+            );
+            assert!(encoded["reply"]["matches"][0]["edges"][0]["symbol"].is_null());
+            assert_eq!(
+                encoded["reply"]["matches"][0]["edges"][0]["filePath"],
+                "src/caller.rs"
+            );
+            assert_eq!(
+                serde_json::from_value::<super::DaemonReply>(encoded).expect("decode reply"),
+                reply
+            );
+        }
     }
 
     #[test]
-    fn index_name_round_trips_and_remains_optional() {
-        use zg_engine::api::index::IndexOptions;
+    fn relationship_replies_preserve_non_unicode_paths() {
+        use std::{ffi::OsString, path::PathBuf};
+        use zg_engine::api::relationships::{
+            RelationshipEdge, RelationshipResult, SymbolDefinition, SymbolRelationships,
+        };
+        #[cfg(unix)]
+        let path = {
+            use std::os::unix::ffi::OsStringExt;
+            PathBuf::from(OsString::from_vec(b"src/calls-\xff.rs".to_vec()))
+        };
+        #[cfg(windows)]
+        let path = {
+            use std::os::windows::ffi::OsStringExt;
+            PathBuf::from(OsString::from_wide(&[0xd800, 0x2e, 0x72, 0x73]))
+        };
+        let symbol = SymbolDefinition {
+            name: "run".into(),
+            file_path: path.clone(),
+            start_line: 1,
+            end_line: 3,
+        };
+        let result = RelationshipResult {
+            matches: vec![SymbolRelationships {
+                symbol: symbol.clone(),
+                truncated: false,
+                edges: vec![RelationshipEdge {
+                    kind: zg_engine::api::relationships::GraphEdgeKind::Calls,
+                    direction: zg_engine::api::relationships::Direction::Out,
+                    file_path: path,
+                    symbol: Some(symbol.clone()),
+                    line: Some(2),
+                    column: Some(0),
+                }],
+            }],
+            suggestions: vec![symbol],
+        };
+        for reply in [
+            super::DaemonReply::Callers(result.clone()),
+            super::DaemonReply::Callees(result),
+        ] {
+            let bytes = serde_json::to_vec(&reply).expect("encode native paths");
+            assert_eq!(
+                serde_json::from_slice::<super::DaemonReply>(&bytes).expect("decode native paths"),
+                reply
+            );
+        }
+    }
 
+    #[test]
+    fn index_round_trips_by_root_without_a_name() {
+        use zg_engine::api::index::IndexOptions;
         let command = DaemonCommand::Index(IndexOptions {
-            name: Some("search-engine".to_owned()),
             root: Some("/workspace".into()),
+            runtime_api_key: Some("temporary-key".into()),
             ..IndexOptions::default()
         });
-        let mut encoded = serde_json::to_value(&command).expect("index command should serialize");
-        assert_eq!(encoded["request"]["name"], "search-engine");
+        let mut encoded = serde_json::to_value(&command).expect("serialize command");
+        assert!(encoded["request"].get("name").is_none());
+        assert_eq!(encoded["request"]["root"], "/workspace");
+        assert_eq!(encoded["request"]["runtime_api_key"], "temporary-key");
         let decoded: DaemonCommand =
-            serde_json::from_value(encoded.clone()).expect("index command should deserialize");
+            serde_json::from_value(encoded.clone()).expect("deserialize command");
         assert_eq!(decoded, command);
-
-        encoded["request"]
-            .as_object_mut()
-            .expect("index request object")
-            .remove("name");
-        let DaemonCommand::Index(options) =
-            serde_json::from_value(encoded).expect("index name may be omitted")
-        else {
-            panic!("index command");
-        };
-        assert!(options.name.is_none());
+        encoded["request"]["name"] = serde_json::json!("obsolete");
+        assert!(serde_json::from_value::<DaemonCommand>(encoded).is_err());
     }
 
     #[test]
-    fn execute_request_round_trips() {
-        let request = DaemonRequest {
-            message_id: 7,
-            kind: DaemonRequestKind::Execute(Box::new(ExecuteRequest {
-                request_id: RequestId::new(),
-                command: DaemonCommand::Context(ContextOptions {
-                    root: Some("/workspace".into()),
-                    ..ContextOptions::default()
-                }),
-                timeout_millis: Some(5_000),
-                principal: Principal::local(),
-                trace: TraceContext {
-                    trace_id: Some("trace-1".to_owned()),
-                },
-            })),
-        };
-        let encoded = serde_json::to_string(&request).expect("daemon request should serialize");
-        let decoded: DaemonRequest =
-            serde_json::from_str(&encoded).expect("daemon request should deserialize");
-        assert_eq!(decoded, request);
+    fn context_command_round_trips() {
+        let command = DaemonCommand::Context(ContextOptions {
+            root: Some("/workspace".into()),
+            ..ContextOptions::default()
+        });
+        let encoded = serde_json::to_value(&command).expect("daemon command should serialize");
+        assert_eq!(encoded["kind"], "context");
+        assert_eq!(encoded["request"]["root"], "/workspace");
+        let decoded: DaemonCommand =
+            serde_json::from_value(encoded).expect("daemon command should deserialize");
+        assert_eq!(decoded, command);
     }
 
     #[test]
@@ -292,10 +255,9 @@ mod tests {
             compatibility: IndexCompatibility::Compatible { version: 2 },
             index_policy: WorkspaceIndexPolicy::Enabled,
             home: "/workspace/.zvec-grep".into(),
-            index_path: "/workspace/.zvec-grep/storage".into(),
+            index_path: "/workspace/.zvec-grep/index".into(),
             source: InfoSource::Index,
             workspace_index: Some(WorkspaceIndexInfo {
-                name: "search-engine".to_owned(),
                 path: "/workspace/.zvec-grep".into(),
                 root: "/workspace".into(),
                 scan: ScanRules::default(),
@@ -323,7 +285,8 @@ mod tests {
             encoded["reply"]["compatibility"],
             serde_json::json!({"status": "compatible", "version": 2})
         );
-        assert_eq!(encoded["reply"]["workspace_index"]["name"], "search-engine");
+        assert!(encoded["reply"]["workspace_index"].get("name").is_none());
+        assert_eq!(encoded["reply"]["workspace_index"]["root"], "/workspace");
         assert!(encoded["reply"]["workspace_index"].get("id").is_none());
         assert_eq!(
             encoded["reply"]["workspace_index"]["fts"]["tokenizer"],
@@ -344,34 +307,27 @@ mod tests {
 
     #[test]
     fn detailed_index_progress_round_trips() {
-        let response = DaemonResponse {
-            message_id: 8,
-            kind: DaemonResponseKind::Event(RequestEvent {
-                request_id: RequestId::new(),
-                sequence: 2,
-                kind: RequestEventKind::IndexProgress {
-                    progress: IndexProgress {
-                        phase: IndexProgressPhase::Indexing,
-                        files_total: Some(10),
-                        files_indexed: Some(3),
-                        files_failed: Some(1),
-                        detail: Some("downloading local/fixture".to_owned()),
-                        embedding: Some(IndexEmbeddingProgress {
-                            stage: Some(IndexEmbeddingStage::Downloading),
-                            model: Some("local/fixture".to_owned()),
-                            downloaded_bytes: Some(4),
-                            total_bytes: Some(8),
-                            ..IndexEmbeddingProgress::default()
-                        }),
-                    },
-                },
+        let event = IndexStreamEvent::Progress(IndexProgress {
+            phase: IndexProgressPhase::Indexing,
+            files_total: Some(10),
+            files_indexed: Some(3),
+            files_failed: Some(1),
+            detail: Some("downloading local/fixture".to_owned()),
+            embedding: Some(IndexEmbeddingProgress {
+                stage: Some(IndexEmbeddingStage::Downloading),
+                model: Some("local/fixture".to_owned()),
+                downloaded_bytes: Some(4),
+                total_bytes: Some(8),
+                ..IndexEmbeddingProgress::default()
             }),
-        };
+        });
 
-        let encoded = serde_json::to_string(&response).expect("progress should serialize");
-        let decoded: DaemonResponse =
-            serde_json::from_str(&encoded).expect("progress should deserialize");
-        assert_eq!(decoded, response);
+        let encoded = serde_json::to_value(&event).expect("progress should serialize");
+        assert_eq!(encoded["kind"], "progress");
+        assert_eq!(encoded["value"]["files_indexed"], 3);
+        let decoded: IndexStreamEvent =
+            serde_json::from_value(encoded).expect("progress should deserialize");
+        assert_eq!(decoded, event);
     }
 
     #[test]

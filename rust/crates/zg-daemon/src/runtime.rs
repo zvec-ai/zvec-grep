@@ -15,7 +15,10 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use zg_daemon_protocol::{DaemonCommand, DaemonReply, ErrorReply, ExecutionResult};
-use zg_engine::ZvecGrep;
+use zg_engine::{
+    ZvecGrep,
+    api::relationships::{Direction, GraphEdgeKind, RelationshipOptions, RelationshipResult},
+};
 use zg_transport_mcp::{
     IndexOperationProvider, McpToolset, ServerStatusProvider, ServerStatusSnapshot,
     ZvecGrepMcpServer,
@@ -221,7 +224,10 @@ async fn stream_index(
             let _ = progress_sender.try_send(IndexStreamEvent::Progress(progress));
         },
     ));
+    let signal = state.shutdown.child_token();
+    options.signal = Some(signal.clone());
     tokio::spawn(async move {
+        let _guard = signal.clone().drop_guard();
         let initial = zg_engine::api::index::progress::IndexProgress {
             phase: zg_engine::api::index::progress::IndexProgressPhase::Indexing,
             files_total: None,
@@ -231,8 +237,16 @@ async fn stream_index(
             embedding: None,
         };
         let _ = sender.send(IndexStreamEvent::Progress(initial)).await;
-        let (_, Json(result)) =
-            execute_command(State(state), headers, Json(DaemonCommand::Index(options))).await;
+        let operation = execute_command(State(state), headers, Json(DaemonCommand::Index(options)));
+        tokio::pin!(operation);
+        let (_, Json(result)) = tokio::select! {
+            result = &mut operation => result,
+            () = sender.closed() => {
+                // Cancelling an exclusive foreground request must reach its engine job.
+                signal.cancel();
+                operation.await
+            }
+        };
         let _ = sender.send(IndexStreamEvent::Finished(result)).await;
     });
     let stream = futures::stream::unfold(receiver, |mut receiver| async {
@@ -269,6 +283,13 @@ async fn execute_command(
         );
     }
     let result = match command {
+        DaemonCommand::IndexSetup(options) => engine_execution(
+            state
+                .engine
+                .index_setup(options)
+                .await
+                .map(DaemonReply::IndexSetup),
+        ),
         DaemonCommand::QueryAuthorization(request) => engine_execution(
             zg_engine::authorization::query_authorizations(&request)
                 .map(DaemonReply::QueryAuthorization),
@@ -295,6 +316,12 @@ async fn execute_command(
                     .map(|reply| DaemonReply::Context(Box::new(reply))),
             )
         }
+        DaemonCommand::Callers(request) => {
+            execute_relationships(&state, Direction::In, request, DaemonReply::Callers).await
+        }
+        DaemonCommand::Callees(request) => {
+            execute_relationships(&state, Direction::Out, request, DaemonReply::Callees).await
+        }
         DaemonCommand::Index(request) => match state.runtimes.submit_index(request, true).await {
             Ok(submitted) if submitted.job.state == JobState::Succeeded => {
                 submitted.result.map_or_else(
@@ -313,7 +340,7 @@ async fn execute_command(
                     retryable: error.retryable,
                 },
             )),
-            Err(error) => engine_execution::<DaemonReply>(Err(error.into_engine_error())),
+            Err(error) => engine_execution(Err(error.into_engine_error())),
         },
         DaemonCommand::DropIndex(request) => engine_execution(
             state
@@ -334,18 +361,10 @@ async fn execute_command(
     (StatusCode::OK, Json(result))
 }
 
-fn engine_execution<T>(result: Result<T, zg_engine::EngineError>) -> ExecutionResult
-where
-    T: Into<DaemonReply>,
-{
+fn engine_execution(result: Result<DaemonReply, zg_engine::EngineError>) -> ExecutionResult {
     result.map_or_else(
-        |error| {
-            ExecutionResult::Failure(ErrorReply {
-                retryable: error.is_retryable(),
-                report: error.report(),
-            })
-        },
-        |reply| ExecutionResult::Success(reply.into()),
+        |error| ExecutionResult::Failure(error_reply(error)),
+        ExecutionResult::Success,
     )
 }
 
@@ -456,6 +475,25 @@ async fn wait_for_shutdown_signal() {
 #[cfg(not(unix))]
 async fn wait_for_shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+async fn execute_relationships(
+    state: &ControlState,
+    direction: Direction,
+    mut request: RelationshipOptions,
+    reply: fn(RelationshipResult) -> DaemonReply,
+) -> ExecutionResult {
+    let signal = state.shutdown.child_token();
+    let _guard = signal.clone().drop_guard();
+    request.signal = Some(signal);
+    request.kinds = Some(vec![GraphEdgeKind::Calls]);
+    engine_execution(
+        state
+            .runtimes
+            .relationships(&state.engine, direction, request)
+            .await
+            .map(reply),
+    )
 }
 
 #[cfg(test)]

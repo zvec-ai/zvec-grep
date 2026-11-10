@@ -38,7 +38,7 @@ const SHORT_SOURCE_MAX_LINES = 10;
 const SHORT_SOURCE_CONTEXT_BEFORE = 2;
 const SHORT_OUTLINE_MAX_LINES = 7;
 const AGENT_PREVIEW_MAX_LINE_LENGTH = 160;
-const HUMAN_PREVIEW_MAX_LINE_LENGTH = 120;
+const DETAIL_PREVIEW_MAX_LINE_LENGTH = 120;
 
 export function printAgentContextResult(
   result: ZvecGrepContextResult,
@@ -54,11 +54,7 @@ export function printCliContextResult(
   result: ZvecGrepContextResult,
   options: CliOptions,
 ): void {
-  if (options.human) {
-    printCliHumanContextResult(result, options);
-    return;
-  }
-  for (const line of cliAgentContextLines(result, options)) {
+  for (const line of formatCliContextResult(result, options).split("\n")) {
     console.log(line);
   }
 }
@@ -67,7 +63,11 @@ export function formatCliContextResult(
   result: ZvecGrepContextResult,
   options: CliOptions,
 ): string {
-  return cliAgentContextLines(result, options).join("\n");
+  return (
+    options.preview === "detail"
+      ? cliDetailContextLines(result, options)
+      : cliAgentContextLines(result, options)
+  ).join("\n");
 }
 
 export function formatAgentContextResult(
@@ -464,32 +464,38 @@ function plainText(value: string): string {
   return value;
 }
 
-function printCliHumanContextResult(
+function cliDetailContextLines(
   result: ZvecGrepContextResult,
   options: CliOptions,
-): void {
+): string[] {
+  const lines: string[] = [];
   if (result.source === "rg" || result.groupResults === undefined) {
-    printHumanContextResult(result, options);
-    return;
+    return detailContextLines(result, options);
   }
 
-  const theme = createHumanTheme(options);
+  const theme = createDetailTheme(options);
   const allItems = result.groupResults.flatMap((group) => group.items);
-  printHumanField(theme, "Context", contextLabel(result));
-  printHumanField(theme, "Query", result.query);
+  appendDetailField(lines, theme, "Context", contextLabel(result));
+  appendDetailField(lines, theme, "Query", result.query);
   const routes = routeLabel(result);
   if (routes) {
-    printHumanField(theme, "Routes", theme.accent(routes));
+    appendDetailField(lines, theme, "Routes", theme.accent(routes));
   }
-  printHumanField(theme, "Coverage", theme.status(result.coverage));
-  printHumanField(theme, "Groups", String(result.groupResults.length));
-  printHumanField(theme, "Files", String(groupContextItems(allItems).length));
-  printHumanField(theme, "Hits", String(allItems.length));
+  appendDetailField(lines, theme, "Coverage", theme.status(result.coverage));
+  appendDetailField(lines, theme, "Groups", String(result.groupResults.length));
+  appendDetailField(
+    lines,
+    theme,
+    "Files",
+    String(groupContextItems(allItems).length),
+  );
+  appendDetailField(lines, theme, "Hits", String(allItems.length));
 
   for (const group of result.groupResults) {
-    console.log("");
-    printHumanField(theme, "Group", `${group.id} [${group.role}]`);
-    printHumanField(
+    lines.push("");
+    appendDetailField(lines, theme, "Group", `${group.id} [${group.role}]`);
+    appendDetailField(
+      lines,
       theme,
       "Query",
       createHighlighter(
@@ -497,67 +503,81 @@ function printCliHumanContextResult(
         shouldUseColor(options),
       )(oneLine(group.query)),
     );
-    printHumanField(theme, "Hits", String(group.items.length));
+    appendDetailField(lines, theme, "Hits", String(group.items.length));
     if (group.items.length === 0) {
-      printHumanField(theme, "Reason", "No matches");
+      appendDetailField(lines, theme, "Reason", "No matches");
       continue;
     }
-    printHumanItemGroups(
-      groupContextItems(group.items),
-      createHighlighter(group.query, shouldUseColor(options)),
-      theme,
-      previewMode(result, options),
-      options,
+    lines.push(
+      ...detailItemGroupsLines(
+        groupContextItems(group.items),
+        createHighlighter(group.query, shouldUseColor(options)),
+        theme,
+        previewMode(result, options),
+        options,
+      ),
     );
   }
+  return lines;
 }
 
-export function printHumanContextResult(
+function detailContextLines(
   result: ZvecGrepContextResult,
   options: CliOptions,
-): void {
+): string[] {
+  const lines: string[] = [];
   const highlighter = createHighlighter(result.query, shouldUseColor(options));
-  const theme = createHumanTheme(options);
+  const theme = createDetailTheme(options);
   const groups = groupContextItems(result.items);
   const preview = previewMode(result, options);
 
-  printHumanField(theme, "Context", contextLabel(result));
-  printHumanField(theme, "Query", highlighter(result.query));
+  appendDetailField(lines, theme, "Context", contextLabel(result));
+  appendDetailField(lines, theme, "Query", highlighter(result.query));
   const routes = routeLabel(result);
   if (routes) {
-    printHumanField(theme, "Routes", theme.accent(routes));
+    appendDetailField(lines, theme, "Routes", theme.accent(routes));
   }
-  printHumanField(theme, "Coverage", theme.status(result.coverage));
-  printHumanField(theme, "Files", String(groups.length));
-  printHumanField(theme, "Hits", String(result.items.length));
+  appendDetailField(lines, theme, "Coverage", theme.status(result.coverage));
+  appendDetailField(lines, theme, "Files", String(groups.length));
+  appendDetailField(lines, theme, "Hits", String(result.items.length));
 
   if (groups.length === 0) {
-    printHumanField(
+    appendDetailField(
+      lines,
       theme,
       "Reason",
       emptyContextLabel(result).replace(/\.$/, ""),
     );
     const missingPaths = result.diagnostics.rg?.missingPaths ?? [];
     if (missingPaths.length > 0) {
-      printHumanField(theme, "Missing", missingPaths.join(", "));
+      appendDetailField(lines, theme, "Missing", missingPaths.join(", "));
     }
-    return;
+    return lines;
   }
 
-  printHumanItemGroups(groups, highlighter, theme, preview, options);
+  lines.push(
+    ...detailItemGroupsLines(groups, highlighter, theme, preview, options),
+  );
+  return lines;
 }
 
-function printHumanItemGroups(
+function detailItemGroupsLines(
   groups: readonly ContextItemGroup[],
   highlighter: (value: string) => string,
-  theme: ReturnType<typeof createHumanTheme>,
+  theme: ReturnType<typeof createDetailTheme>,
   preview: PreviewMode,
   options: CliOptions,
-): void {
+): string[] {
+  const lines: string[] = [];
   for (const group of groups) {
-    console.log("");
-    printHumanField(theme, "File", theme.path(group.file.relativePath));
-    printHumanField(theme, "Hits", String(group.items.length));
+    lines.push("");
+    appendDetailField(
+      lines,
+      theme,
+      "File",
+      theme.path(group.file.relativePath),
+    );
+    appendDetailField(lines, theme, "Hits", String(group.items.length));
 
     for (const item of group.items.sort(compareContextItems)) {
       const score =
@@ -566,45 +586,53 @@ function printHumanItemGroups(
           : "";
       const matched = matchedRangeLine(item);
 
-      console.log("");
-      console.log(
+      lines.push("");
+      lines.push(
         `  ${theme.accent(`#${item.rank}`)} ${entitySummary(item)} matchedBy=${theme.accent(item.matchedBy)}${score}`,
       );
-      console.log(
+      lines.push(
         `  ${theme.label("Range")}: ${rangeLabel(item.range)}  ${theme.label("Status")}: ${theme.status(item.status)}`,
       );
       if (matched && preview !== "none") {
-        console.log(
+        lines.push(
           `  ${theme.label("Matched")}: ${theme.accent(rangeLabel(item.excerptRange ?? item.range))}`,
         );
       }
-      for (const line of humanMetadataLines(item.metadata)) {
-        console.log(`  ${line}`);
+      for (const line of detailMetadataLines(item.metadata)) {
+        lines.push(`  ${line}`);
       }
       const outlineLines = outlineLinesForPreview(item, preview);
       if (outlineLines.length > 0) {
-        console.log(`  ${theme.label("Outline")}:`);
+        lines.push(`  ${theme.label("Outline")}:`);
         for (const line of outlineLines) {
-          console.log(`    ${line}`);
+          lines.push(`    ${line}`);
         }
       }
       const sourceLines = sourceLinesForPreview(item, preview, highlighter, {
-        maxLineLength: HUMAN_PREVIEW_MAX_LINE_LENGTH,
+        maxLineLength: DETAIL_PREVIEW_MAX_LINE_LENGTH,
       });
       if (sourceLines.length > 0) {
-        console.log(`  ${theme.label("Source")}:`);
+        lines.push(`  ${theme.label("Source")}:`);
         for (const line of sourceLines) {
-          console.log(`    ${line}`);
+          lines.push(`    ${line}`);
         }
       }
       if (options.trace) {
         const trace = traceDetailLine(item);
         if (trace) {
-          console.log(`  ${theme.label("Trace")}: ${trace}`);
+          lines.push(`  ${theme.label("Trace")}: ${trace}`);
         }
       }
     }
   }
+  return lines;
+}
+
+export function printDetailContextResult(
+  result: ZvecGrepContextResult,
+  options: CliOptions,
+): void {
+  for (const line of detailContextLines(result, options)) console.log(line);
 }
 
 export function contextWarningLines(result: ZvecGrepContextResult): string[] {
@@ -629,7 +657,7 @@ function previewMode(
     return "full";
   }
 
-  return options.preview ?? (options.human ? "full" : "none");
+  return options.preview ?? "short";
 }
 
 function emptyContextLabel(result: ZvecGrepContextResult): string {
@@ -809,7 +837,7 @@ function matchedRangeLine(item: ZvecGrepContextItem): string | undefined {
   return `matched: ${rangeLabel(item.excerptRange)}`;
 }
 
-function humanMetadataLines(metadata: EntityMetadata | undefined): string[] {
+function detailMetadataLines(metadata: EntityMetadata | undefined): string[] {
   if (!metadata) {
     return [];
   }
@@ -824,7 +852,7 @@ function humanMetadataLines(metadata: EntityMetadata | undefined): string[] {
     }
     if (metadata.signature) {
       lines.push(
-        `Signature: ${truncate(oneLine(metadata.signature), HUMAN_PREVIEW_MAX_LINE_LENGTH)}`,
+        `Signature: ${truncate(oneLine(metadata.signature), DETAIL_PREVIEW_MAX_LINE_LENGTH)}`,
       );
     }
     if (metadata.modifiers.length > 0) {
@@ -875,7 +903,7 @@ function sourceLinesForPreview(
     return [];
   }
 
-  if (preview === "full") {
+  if (preview === "full" || preview === "detail") {
     return numberedSourceLines(item, highlighter);
   }
 
@@ -1138,22 +1166,23 @@ function truncate(value: string, maxLength: number): string {
   return `${value.slice(0, Math.max(0, maxLength - 1))}...`;
 }
 
-type HumanTheme = {
+type DetailTheme = {
   label(value: string): string;
   accent(value: string): string;
   path(value: string): string;
   status(value: string): string;
 };
 
-function printHumanField(
-  theme: HumanTheme,
+function appendDetailField(
+  lines: string[],
+  theme: DetailTheme,
   label: string,
   value: string,
 ): void {
-  console.log(`${theme.label(label)}: ${value}`);
+  lines.push(`${theme.label(label)}: ${value}`);
 }
 
-function createHumanTheme(options: CliOptions): HumanTheme {
+function createDetailTheme(options: CliOptions): DetailTheme {
   if (!shouldUseColor(options)) {
     return {
       label: identity,
@@ -1167,11 +1196,11 @@ function createHumanTheme(options: CliOptions): HumanTheme {
     label: (value) => `\x1b[2m${value}\x1b[0m`,
     accent: (value) => `\x1b[1m${value}\x1b[0m`,
     path: (value) => `\x1b[36m${value}\x1b[0m`,
-    status: colorHumanStatus,
+    status: colorDetailStatus,
   };
 }
 
-function colorHumanStatus(value: string): string {
+function colorDetailStatus(value: string): string {
   if (value === "fresh" || value === "rg_exhaustive") {
     return `\x1b[32m${value}\x1b[0m`;
   }

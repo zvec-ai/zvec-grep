@@ -45,6 +45,26 @@ def _install_external_suite_fixture(test_case: unittest.TestCase) -> str:
 
 
 class LocalPackageTests(unittest.TestCase):
+    def test_cached_agents_forward_stop_signals_without_shortening_grace(self) -> None:
+        inspected = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch.object(runner, "SETUP_CACHE_DIR", Path(temp_dir)),
+            patch.object(runner.subprocess, "run", return_value=inspected),
+        ):
+            for agent in ("opencode", "codex", "claude-code"):
+                for profile in runner.PROFILES:
+                    with self.subTest(agent=agent, profile=profile):
+                        prepared = runner.prepare_setup_cache(agent, profile)
+                        service = json.loads(prepared.compose_path.read_text())[
+                            "services"
+                        ]["main"]
+                        self.assertIs(service["init"], True)
+                        for key in (
+                            "command", "entrypoint", "stop_signal", "stop_grace_period"
+                        ):
+                            self.assertNotIn(key, service)
+
     def test_packs_current_checkout_and_names_artifact_by_digest(self) -> None:
         package_contents = b"local zvec-grep package"
 

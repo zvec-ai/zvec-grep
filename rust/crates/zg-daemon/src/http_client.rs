@@ -22,7 +22,6 @@ use crate::DaemonError;
 
 const SESSION_ID: &str = "Mcp-Session-Id";
 const LAST_EVENT_ID: &str = "Last-Event-Id";
-const PROTOCOL_VERSION: &str = "MCP-Protocol-Version";
 const EVENT_STREAM: &str = "text/event-stream";
 const JSON: &str = "application/json";
 
@@ -63,11 +62,23 @@ pub(crate) async fn post_index_stream(
     uri: &str,
     body: Vec<u8>,
     reporter: &zg_engine::api::index::progress::IndexProgressReporter,
+    signal: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<zg_daemon_protocol::ExecutionResult, DaemonError> {
     use zg_daemon_protocol::IndexStreamEvent;
-    let mut response = post_response(uri, body).await?.into_body();
+    let mut response = tokio::select! {
+        biased;
+        () = index_cancelled(signal) => return Err(zg_engine::EngineError::cancelled("Indexing cancelled").into()),
+        response = post_response(uri, body) => response?.into_body(),
+    };
     let mut pending = Vec::new();
-    while let Some(frame) = response.frame().await {
+    loop {
+        let frame = tokio::select! {
+            frame = response.frame() => frame,
+            () = index_cancelled(signal) => return Err(zg_engine::EngineError::cancelled("Indexing cancelled").into()),
+        };
+        let Some(frame) = frame else {
+            break;
+        };
         let frame = frame.map_err(|error| DaemonError::McpBridge(error.to_string()))?;
         if let Ok(data) = frame.into_data() {
             for byte in data {
@@ -91,6 +102,13 @@ pub(crate) async fn post_index_stream(
     Err(DaemonError::McpBridge(
         "Index progress stream ended without a result".into(),
     ))
+}
+
+async fn index_cancelled(signal: Option<&tokio_util::sync::CancellationToken>) {
+    match signal {
+        Some(signal) => signal.cancelled().await,
+        None => std::future::pending().await,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -126,26 +144,6 @@ impl StreamableHttpClient for LoopbackHttpClient {
         session_id: Option<Arc<str>>,
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
-    ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
-        self.post_message_with_max_sse_event_size(
-            uri,
-            message,
-            session_id,
-            auth_token,
-            custom_headers,
-            usize::MAX,
-        )
-        .await
-    }
-
-    async fn post_message_with_max_sse_event_size(
-        &self,
-        uri: Arc<str>,
-        message: ClientJsonRpcMessage,
-        session_id: Option<Arc<str>>,
-        auth_token: Option<String>,
-        custom_headers: HashMap<HeaderName, HeaderValue>,
-        _max_sse_event_size: usize,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
         let body = serde_json::to_vec(&message).map_err(LoopbackHttpError::from)?;
         let mut builder = request_builder(Method::POST, &uri)?
@@ -245,27 +243,6 @@ impl StreamableHttpClient for LoopbackHttpClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<BoxStream<'static, Result<Sse, sse_stream::Error>>, StreamableHttpError<Self::Error>>
     {
-        self.get_stream_with_max_sse_event_size(
-            uri,
-            session_id,
-            last_event_id,
-            auth_token,
-            custom_headers,
-            usize::MAX,
-        )
-        .await
-    }
-
-    async fn get_stream_with_max_sse_event_size(
-        &self,
-        uri: Arc<str>,
-        session_id: Option<Arc<str>>,
-        last_event_id: Option<String>,
-        auth_token: Option<String>,
-        custom_headers: HashMap<HeaderName, HeaderValue>,
-        _max_sse_event_size: usize,
-    ) -> Result<BoxStream<'static, Result<Sse, sse_stream::Error>>, StreamableHttpError<Self::Error>>
-    {
         let mut builder =
             request_builder(Method::GET, &uri)?.header(ACCEPT, format!("{EVENT_STREAM}, {JSON}"));
         builder = apply_optional_headers(builder, session_id.as_deref(), auth_token.as_deref());
@@ -335,7 +312,6 @@ fn apply_custom_headers(
         if reserved
             .iter()
             .any(|candidate| name.as_str().eq_ignore_ascii_case(candidate))
-            && !name.as_str().eq_ignore_ascii_case(PROTOCOL_VERSION)
         {
             return Err(StreamableHttpError::ReservedHeaderConflict(
                 name.to_string(),
@@ -423,7 +399,7 @@ mod tests {
     use http::{HeaderName, HeaderValue, Request};
     use rmcp::transport::streamable_http_client::StreamableHttpError;
 
-    use super::{PROTOCOL_VERSION, apply_custom_headers, is_loopback_host};
+    use super::{apply_custom_headers, is_loopback_host};
 
     #[tokio::test]
     async fn index_stream_delivers_fragmented_progress_before_the_result() {
@@ -482,6 +458,7 @@ mod tests {
                 &format!("http://{address}/admin/index"),
                 b"{}".to_vec(),
                 &reporter,
+                None,
             )
             .await
         });
@@ -524,11 +501,46 @@ mod tests {
             &format!("http://{address}/admin/index"),
             b"{}".to_vec(),
             &reporter,
+            None,
         )
         .await
         .expect_err("missing final result");
         assert!(error.to_string().contains("without a result"));
         server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn index_stream_cancellation_interrupts_an_unfinished_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("listener");
+            let address = listener.local_addr().expect("address");
+            let (ready, received) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") {
+                    headers.push(stream.read_u8().await.expect("request header"));
+                }
+                let mut body = [0; 2];
+                stream.read_exact(&mut body).await.expect("request body");
+                stream.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await.expect("response headers");
+                ready.send(()).expect("ready");
+                let mut discarded = Vec::new();
+                let _ = stream.read_to_end(&mut discarded).await;
+            });
+            let signal = tokio_util::sync::CancellationToken::new();
+            let client_signal = signal.clone();
+            let client = tokio::spawn(async move {
+                let reporter = zg_engine::api::index::progress::IndexProgressReporter::new(|_| {});
+                super::post_index_stream(&format!("http://{address}/admin/index"), b"{}".to_vec(), &reporter, Some(&client_signal)).await
+            });
+            received.await.expect("response started");
+            signal.cancel();
+            let error = client.await.expect("client").expect_err("cancelled stream");
+            assert!(matches!(error, crate::DaemonError::Engine(error) if error.code() == zg_engine::EngineError::CANCELLED));
+            server.await.expect("server");
+        }).await.expect("cancelled connection must close");
     }
 
     #[test]
@@ -548,7 +560,7 @@ mod tests {
     fn protocol_version_header_is_forwarded() {
         let mut headers = HashMap::new();
         headers.insert(
-            HeaderName::from_bytes(PROTOCOL_VERSION.as_bytes()).expect("valid header"),
+            HeaderName::from_static("mcp-protocol-version"),
             HeaderValue::from_static("2025-11-25"),
         );
         assert!(apply_custom_headers(Request::builder(), headers).is_ok());

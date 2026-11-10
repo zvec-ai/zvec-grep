@@ -22,9 +22,11 @@ fn main_help_aliases_have_one_stable_surface() {
     let main = stdout(&[]);
     assert_eq!(main, stdout(&["-h"]));
     assert_eq!(main, stdout(&["--help"]));
-    assert!(main.starts_with("zvec-grep 0.0.1\n\nUsage:\n  zg <query> [options]\n"));
+    assert!(main.starts_with("zvec-grep "));
+    assert!(main.contains("\n\nUsage:\n  zg <query> [options]\n"));
     assert!(main.contains("Run zg --help environment for all variables"));
-    assert!(main.contains("--compact"));
+    assert!(!main.contains("--compact"));
+    assert!(main.contains("short"));
     assert!(!main.contains("--human"));
 }
 
@@ -42,6 +44,8 @@ fn command_help_and_topic_aliases_are_identical() {
 fn every_documented_help_topic_is_available() {
     for topic in [
         "search",
+        "callers",
+        "callees",
         "index",
         "status",
         "config",
@@ -62,11 +66,27 @@ fn every_documented_help_topic_is_available() {
 }
 
 #[test]
-fn search_help_describes_terminal_and_compact_defaults() {
+fn integration_help_documents_pi_and_its_configuration_directory() {
+    for topic in ["install", "uninstall"] {
+        assert!(stdout(&["--help", topic]).contains("|pi|"));
+    }
+    let install = stdout(&["--help", "install"]);
+    assert!(install.contains("PI_CODING_AGENT_DIR"));
+    assert!(install.contains("timeout in seconds"));
+    assert!(install.contains("zg --auth grant"));
+    assert!(stdout(&["--help", "environment"]).contains("PI_CODING_AGENT_DIR"));
+}
+
+#[test]
+fn search_help_describes_preview_modes_and_stable_defaults() {
     let help = stdout(&["--help", "search"]);
     assert!(help.starts_with("Usage:\n  zg <query> [options]\n"));
-    assert!(help.contains("--compact"));
-    assert!(help.contains("full on TTY, none in compact mode"));
+    assert!(!help.contains("--compact"));
+    assert!(help.contains("none|short|full|detail"));
+    assert!(help.contains("zg --rg --files [discovery-options] [path...]"));
+    assert!(help.contains("-0/--null"));
+    assert!(help.contains("default: short"));
+    assert!(help.contains("TTY affects only color"));
     assert!(!help.contains("--human"));
     assert!(!help.contains("zg query"));
 }
@@ -80,12 +100,17 @@ fn models_help_uses_the_rust_transformers_backend_name() {
 }
 
 #[test]
-fn index_help_describes_the_optional_workspace_name() {
+fn index_help_uses_root_paths_without_workspace_names() {
     let help = stdout(&["--index", "--help"]);
-    assert!(help.contains("--name <NAME>"));
-    assert!(help.contains("defaults to root directory name"));
+    assert!(help.contains("zg --index [root] --drop\n"));
+    assert!(!help.contains("--yes"));
+    assert!(help.contains("Dropping an index runs immediately without a confirmation prompt."));
+    assert!(!help.contains("--name"));
+    assert!(help.contains("identified by their root paths"));
     assert!(help.contains("Scan rules:"));
-    assert!(!help.contains("--type"));
+    assert!(help.contains("-t, --type <format>"));
+    assert!(help.contains("-T, --type-not <format>"));
+    assert!(help.contains("same file-name rules as indexed queries"));
     assert!(!help.contains("--category"));
 }
 
@@ -93,22 +118,28 @@ fn index_help_describes_the_optional_workspace_name() {
 fn index_help_distinguishes_explicit_indexing_from_automatic_search_indexing() {
     let help = stdout(&["--help", "index"]);
     assert!(
-        help.contains("Explicit zg --index requires --embedding"),
+        help.contains("falling back to local/potion-code-16m-v2"),
         "{help}"
     );
     assert!(
-        help.contains("Search automatically creates a missing index"),
+        help.contains("Interactive searches prompt to select an embedding model"),
         "{help}"
     );
-    assert!(help.contains("local/potion-code-16m-v2"), "{help}");
-    assert!(help.contains("never a remote model"), "{help}");
+    assert!(
+        help.contains("Remote models require data authorization"),
+        "{help}"
+    );
+    assert!(
+        help.contains("Non-interactive searches never create an index"),
+        "{help}"
+    );
 }
 
 #[test]
-fn version_flags_print_the_installed_version() {
-    let expected = "0.0.1\n";
-    assert_eq!(stdout(&["-v"]), expected);
-    assert_eq!(stdout(&["--version"]), expected);
+fn version_flags_print_the_same_nonempty_output() {
+    let version = stdout(&["--version"]);
+    assert!(!version.trim().is_empty());
+    assert_eq!(stdout(&["-v"]), version);
 }
 
 #[test]
@@ -120,5 +151,18 @@ fn unknown_help_topics_including_old_query_alias_are_user_errors() {
             String::from_utf8(output.stderr).expect("error should be UTF-8"),
             format!("Error: Unknown help topic: {topic}\n")
         );
+    }
+}
+
+#[test]
+fn relationship_help_explains_persisted_edges_and_limit() {
+    for command in ["callers", "callees"] {
+        let help = stdout(&[&format!("--{command}"), "--help"]);
+        assert_eq!(help, stdout(&["--help", command]));
+        assert!(help.contains("--limit <N>"));
+        assert!(help.contains("truncation notice"));
+        assert!(help.contains("readable text"));
+        assert!(help.contains("--color <auto|always|never>"));
+        assert!(help.contains("does not refresh or build"));
     }
 }

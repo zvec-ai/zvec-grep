@@ -362,23 +362,6 @@ pub(crate) fn string(value: &Value, path: &[&str]) -> Option<String> {
     current.as_str().map(str::to_owned)
 }
 
-/// Selects a local model for CLI-only implicit indexing, never a remote default.
-/// # Errors
-/// Returns configuration I/O, validation, and invalid environment model errors.
-pub fn implicit_embedding_reference() -> Result<String, EngineError> {
-    let config = read()?;
-    let configured = crate::models::resolve_embedding_reference(
-        crate::models::ResolveEmbeddingReferenceOptions {
-            global_default: string(&config, &["defaults", "embedding"]),
-            ..crate::models::ResolveEmbeddingReferenceOptions::default()
-        },
-    )
-    .map_err(crate::models::ModelError::into_engine_error)?;
-    Ok(configured
-        .filter(|reference| reference.starts_with("local/"))
-        .unwrap_or_else(|| "local/potion-code-16m-v2".to_owned()))
-}
-
 pub(crate) fn device(value: &Value, reference: &str) -> Option<Device> {
     serde_json::from_value(value["models"][reference]["device"].clone()).ok()
 }
@@ -389,18 +372,32 @@ pub(crate) fn runtime_device(
     explicit: Option<Device>,
     workspace: Option<Device>,
 ) -> Result<Option<Device>, EngineError> {
-    if let Some(device) = explicit.or(workspace).or_else(|| device(config, reference)) {
+    if let Some(device) = explicit {
         return Ok(Some(device));
     }
     let Some(value) = std::env::var("ZVEC_GREP_DEVICE")
         .ok()
         .filter(|value| !value.trim().is_empty())
     else {
-        return Ok(None);
+        return Ok(workspace
+            .or_else(|| device(config, reference))
+            .or_else(default_runtime_device));
     };
     serde_json::from_value(json!(value.trim().to_lowercase()))
         .map(Some)
         .map_err(|_| EngineError::invalid_argument("Invalid ZVEC_GREP_DEVICE"))
+}
+
+pub(crate) const fn default_runtime_device() -> Option<Device> {
+    if cfg!(all(
+        feature = "cuda",
+        any(target_os = "linux", target_os = "windows"),
+        target_arch = "x86_64"
+    )) {
+        Some(Device::Auto)
+    } else {
+        None
+    }
 }
 
 pub(crate) fn model_cache(
@@ -409,8 +406,8 @@ pub(crate) fn model_cache(
     workspace: Option<PathBuf>,
 ) -> Option<PathBuf> {
     explicit
-        .or(workspace)
         .or_else(|| std::env::var_os("ZVEC_GREP_MODEL_CACHE").map(PathBuf::from))
+        .or_else(|| workspace.filter(|path| path.is_absolute() && path.is_dir()))
         .or_else(|| string(config, &["defaults", "modelCacheDir"]).map(PathBuf::from))
 }
 
@@ -503,9 +500,9 @@ fn update_at(path: &Path, changes: Value) -> Result<(), EngineError> {
             &error,
         ));
     }
-    let _lock = crate::workspace::lock::acquire_read_write_lock(
+    let _lock = crate::workspace::lock::try_acquire_file_lock(
         &parent.join("locks/config"),
-        crate::workspace::lock::LockMode::Write,
+        crate::workspace::lock::LockMode::Exclusive,
         "global-config.update",
     )?;
     let mut value = read_at(path)?;
@@ -537,6 +534,86 @@ fn merge(target: &mut Value, patch: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_cache_skips_unusable_workspace_preferences() {
+        const CHILD: &str = "ZG_TEST_MODEL_CACHE_RESOLUTION";
+        if std::env::var_os(CHILD).is_none() {
+            for environment in [None, Some("environment-models")] {
+                let mut command =
+                    std::process::Command::new(std::env::current_exe().expect("test executable"));
+                command
+                    .args([
+                        "--exact",
+                        "config::tests::model_cache_skips_unusable_workspace_preferences",
+                    ])
+                    .env(CHILD, "1")
+                    .env_remove("ZVEC_GREP_MODEL_CACHE");
+                if let Some(environment) = environment {
+                    command.env("ZVEC_GREP_MODEL_CACHE", environment);
+                }
+                let output = command.output().expect("isolated cache resolution test");
+                assert!(
+                    output.status.success(),
+                    "{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+                assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            }
+            return;
+        }
+
+        let directory = tempfile::tempdir().expect("cache preferences");
+        let existing = directory.path().join("existing");
+        fs::create_dir(&existing).expect("empty saved cache");
+        let file = directory.path().join("file");
+        fs::write(&file, b"not a directory").expect("invalid saved cache");
+        let missing = directory.path().join("missing");
+        let global = directory.path().join("global");
+        let explicit = directory.path().join("explicit");
+        let config = json!({"defaults": {"modelCacheDir": global}});
+        let environment = std::env::var_os("ZVEC_GREP_MODEL_CACHE").map(PathBuf::from);
+
+        assert_eq!(
+            model_cache(&config, Some(explicit.clone()), Some(existing.clone())),
+            Some(explicit.clone())
+        );
+        assert_eq!(
+            model_cache(&config, None, Some(existing.clone())),
+            environment.clone().or(Some(existing.clone()))
+        );
+        for saved in [
+            missing.clone(),
+            file.clone(),
+            PathBuf::from("relative-models"),
+        ] {
+            assert_eq!(
+                model_cache(&config, None, Some(saved.clone())),
+                environment.clone().or(Some(global.clone()))
+            );
+            assert_eq!(model_cache(&json!({}), None, Some(saved)), environment);
+        }
+        assert!(!explicit.exists());
+        assert!(!global.exists());
+        assert!(!missing.exists());
+        assert_eq!(fs::read(&file).expect("saved file"), b"not a directory");
+        assert_eq!(fs::read_dir(existing).expect("saved cache").count(), 0);
+    }
+
+    #[test]
+    fn cuda_release_defaults_to_automatic_device_selection() {
+        let expected = if cfg!(all(
+            feature = "cuda",
+            any(target_os = "linux", target_os = "windows"),
+            target_arch = "x86_64"
+        )) {
+            Some(Device::Auto)
+        } else {
+            None
+        };
+        assert_eq!(default_runtime_device(), expected);
+    }
 
     #[test]
     fn defaults_accept_only_current_single_model_settings() {

@@ -1,0 +1,75 @@
+name: Retrieval-only PR
+run-name: "Retrieval-only · ${{ github.event.pull_request.number && format('PR #{0}', github.event.pull_request.number) || 'manual comparison' }} · ${{ inputs.candidate_sha || github.event.pull_request.head.sha }}"
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      baseline_sha:
+        description: Full baseline commit SHA
+        required: true
+        type: string
+      baseline_repository:
+        description: Baseline repository (owner/name)
+        required: true
+        type: string
+      candidate_sha:
+        description: Full candidate commit SHA
+        required: true
+        type: string
+      candidate_repository:
+        description: Candidate repository (owner/name)
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: retrieval-pr-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  comment-context:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Save the event's pinned PR identity for the result publisher
+        shell: bash
+        run: |
+          node --input-type=module <<'JS'
+          import { mkdir, readFile, writeFile } from 'node:fs/promises';
+          import { join } from 'node:path';
+          const { pull_request: pr } = JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, 'utf8'));
+          const directory = join(process.env.RUNNER_TEMP, 'retrieval-pr-context');
+          await mkdir(directory, { recursive: true });
+          await writeFile(join(directory, 'request.json'), JSON.stringify({
+            schema_version: 1,
+            run_id: Number(process.env.GITHUB_RUN_ID),
+            run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+            pr_number: pr.number,
+            baseline: { repository: pr.base.repo.full_name, commit: pr.base.sha, ref: pr.base.ref },
+            candidate: { repository: pr.head.repo.full_name, commit: pr.head.sha, ref: pr.head.ref },
+          }));
+          JS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: retrieval-pr-context
+          path: ${{ runner.temp }}/retrieval-pr-context/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+
+  retrieval:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/retrieval-comparison.yml
+    with:
+      baseline_ref: ${{ inputs.baseline_sha || github.event.pull_request.base.sha }}
+      baseline_repository: ${{ inputs.baseline_repository || github.event.pull_request.base.repo.full_name }}
+      candidate_ref: ${{ inputs.candidate_sha || github.event.pull_request.head.sha }}
+      candidate_repository: ${{ inputs.candidate_repository || github.event.pull_request.head.repo.full_name }}
+    # Model secrets are intentionally not forwarded to automatic PR runs.

@@ -137,6 +137,11 @@ impl Directories {
         native(self.collection.flush(), "flush directories")
     }
 
+    pub(super) fn optimize(&self) -> EngineResult<()> {
+        self.assert_writable()?;
+        native(self.collection.optimize(), "optimize directories")
+    }
+
     fn assert_writable(&self) -> EngineResult<()> {
         if self.read_only {
             Err(EngineError::invalid_argument(

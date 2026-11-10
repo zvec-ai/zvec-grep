@@ -1,20 +1,23 @@
-//! Workspace status in the same grouped layout as the Node.js CLI.
+//! Compact workspace status: coverage, embedding, full-text search, and storage.
 
-use std::io::{self, Write};
+use std::{
+    borrow::Cow,
+    io::{self, Write},
+};
 
 use zg_engine::{
-    api::index::options::ScanRules,
+    api::index::options::{FileFormat, ScanRules},
     api::info::{
         InfoResult,
-        result::{
-            IndexCompatibility, IndexStats, IndexStatus, WorkspaceIndexInfo, WorkspaceIndexPolicy,
-        },
+        result::{IndexStats, IndexStatus, WorkspaceIndexInfo},
     },
 };
 
 use crate::{
-    ColorMode, OutputOptions,
-    theme::{StatusTheme, display_path, format_count, storage_path, write_status_field},
+    ColorMode, OutputOptions, output_path,
+    theme::{
+        StatusTheme, clean, format_count, storage_path, unicode_supported, write_status_field,
+    },
 };
 
 /// Writes workspace status with the requested color policy.
@@ -27,78 +30,29 @@ pub fn write_info_with_options(
     terminal: bool,
 ) -> io::Result<()> {
     let theme = StatusTheme::new(options.color, terminal);
-    writeln!(writer, "{}", heading(theme, result.index_status()))?;
-    writeln!(writer, "  {}", theme.path(&display_path(&result.root)))?;
-
-    if let Some(stats) = &result.status {
-        writeln!(writer)?;
-        write_statistics(&mut writer, theme, stats)?;
-    }
-    if let Some(index) = &result.workspace_index {
-        writeln!(writer)?;
-        write_embedding(&mut writer, theme, index)?;
-    }
-
+    write_coverage(
+        &mut writer,
+        theme,
+        result.status.as_ref(),
+        result.index_status(),
+    )?;
+    writeln!(writer)?;
+    write_embedding(
+        &mut writer,
+        theme,
+        result.workspace_index.as_ref(),
+        terminal,
+    )?;
     writeln!(writer)?;
     write_status_field(
         &mut writer,
         theme,
         "Storage",
-        &[theme.path(&storage_path(&result.index_path, &result.root))],
-    )?;
-    match &result.compatibility {
-        IndexCompatibility::Unbuilt => {}
-        IndexCompatibility::Compatible { version } => {
-            write_status_field(&mut writer, theme, "Version", &[version.to_string()])?;
-        }
-        IndexCompatibility::RebuildRequired {
-            actual_version,
-            expected_version,
-            ..
-        } => {
-            let actual =
-                actual_version.map_or_else(|| "unknown".to_owned(), |version| version.to_string());
-            write_status_field(
-                &mut writer,
-                theme,
-                "Version",
-                &[theme.warning(&format!("{actual} (expected {expected_version})"))],
-            )?;
-        }
-    }
-    if let Some(index) = &result.workspace_index {
-        write_status_field(
-            &mut writer,
-            theme,
-            "Nested Git",
-            &[if index.scan.nested_git {
-                "included"
-            } else {
-                "excluded"
-            }
-            .into()],
-        )?;
-        let filters = scan_filters(&index.scan);
-        if index.root != result.root || !filters.is_empty() {
-            let root = display_path(&index.root);
-            let root = if filters.is_empty() {
-                root
-            } else {
-                format!("{root} ({filters})")
-            };
-            write_status_field(&mut writer, theme, "Roots", &[theme.path(&root)])?;
-        }
-    }
-    match result.index_policy {
-        WorkspaceIndexPolicy::Enabled => {}
-        WorkspaceIndexPolicy::Disabled => {
-            write_status_field(&mut writer, theme, "Policy", &[theme.warning("disabled")])?;
-        }
-        WorkspaceIndexPolicy::Uninitialized => {
-            write_status_field(&mut writer, theme, "Policy", &[theme.muted("undecided")])?;
-        }
-    }
-    write_diagnostics(&mut writer, theme, result)
+        &[theme.path(&human_text(
+            &storage_path(&result.index_path, &result.root),
+            terminal,
+        ))],
+    )
 }
 
 /// Writes workspace index status without ANSI colors.
@@ -116,202 +70,115 @@ pub fn write_info_result(writer: impl Write, result: &InfoResult) -> io::Result<
     )
 }
 
-fn heading(theme: StatusTheme, state: IndexStatus) -> String {
-    match state {
-        IndexStatus::Ready => theme.success("✓ Workspace index is ready"),
-        IndexStatus::Stale => theme.warning("! Workspace index needs an update"),
-        IndexStatus::Failed => theme.danger("✗ Workspace index failed"),
-        IndexStatus::Disabled => theme.warning("○ Workspace indexing is disabled"),
-        IndexStatus::Missing => theme.warning("○ Workspace index is not created"),
-        IndexStatus::Uninitialized => theme.warning("? Workspace index is not configured"),
-        IndexStatus::Unknown => theme.warning("? Workspace index status is unknown"),
-        IndexStatus::RebuildRequired => theme.warning("! Workspace index requires a rebuild"),
+fn human_text(value: &str, terminal: bool) -> Cow<'_, str> {
+    if terminal {
+        Cow::Owned(clean(value))
+    } else {
+        Cow::Borrowed(value)
     }
 }
 
-fn write_statistics(
+fn write_coverage(
     writer: &mut impl Write,
     theme: StatusTheme,
-    stats: &IndexStats,
+    stats: Option<&IndexStats>,
+    readiness: IndexStatus,
 ) -> io::Result<()> {
-    // Stored/indexed counts include changed and deleted snapshots. Coverage is
-    // the current scan's unchanged files, matching Node's indexCompletionFromStatus.
-    let completed = stats.files_unchanged;
-    let total = stats.files_scanned;
-    let ratio = |scale: u128| -> u128 {
-        if total == 0 {
-            0
-        } else {
-            let rounded =
-                (completed.min(total) as u128 * scale + total as u128 / 2) / total as u128;
-            // Rounding must not make an unfinished scan look complete.
-            if completed == total {
-                rounded
+    let mut value = if let Some(stats) = stats {
+        // Coverage counts unchanged files in the current scan, not stored
+        // snapshots that may have been modified or deleted since indexing.
+        let completed = stats.files_unchanged;
+        let total = stats.files_scanned;
+        let ratio = |scale: u128| -> u128 {
+            if total == 0 {
+                0
             } else {
-                rounded.min(scale - 1)
+                let rounded =
+                    (completed.min(total) as u128 * scale + total as u128 / 2) / total as u128;
+                if completed == total {
+                    rounded
+                } else {
+                    rounded.min(scale - 1)
+                }
             }
-        }
-    };
-    let percent = ratio(100);
-    let filled = usize::try_from(ratio(20)).unwrap_or(20);
-    let unicode = !cfg!(windows) && std::env::var("TERM").as_deref() != Ok("linux");
-    let bar = crate::progress::gradient_bar(filled, 20, theme.color, unicode);
-    write_status_field(
-        writer,
-        theme,
-        "Coverage",
-        &[format!(
+        };
+        let percent = ratio(100);
+        let filled = usize::try_from(ratio(20)).unwrap_or(20);
+        let bar = crate::progress::gradient_bar(filled, 20, theme.color, unicode_supported());
+        format!(
             "{bar} {percent:>3}%  {} / {} files",
             format_count(completed),
             format_count(total)
-        )],
-    )?;
-    write_status_field(
-        writer,
-        theme,
-        "Entities",
-        &[format_count(stats.entities_indexed)],
-    )?;
-    // Rust indexes whole source snapshots and has no fragment truncation counter.
-    write_status_field(
-        writer,
-        theme,
-        "Source size",
-        &[format!("{} bytes", format_count(stats.indexed_size_bytes))],
-    )?;
-    let pending = format!("{} pending", format_count(stats.files_pending));
-    let failed = format!("{} failed", format_count(stats.files_failed));
-    write_status_field(
-        writer,
-        theme,
-        "Queue",
-        &[format!(
-            "{} {} {}",
-            if stats.files_pending > 0 {
-                theme.warning(&pending)
-            } else {
-                theme.muted(&pending)
-            },
-            theme.muted("·"),
-            if stats.files_failed > 0 {
-                theme.danger(&failed)
-            } else {
-                theme.muted(&failed)
-            }
-        )],
-    )?;
-    if stats.files_added > 0 || stats.files_modified > 0 || stats.files_deleted > 0 {
-        write_status_field(
-            writer,
-            theme,
-            "Changes",
-            &[format!(
-                "{} {} {} {} {}",
-                theme.warning(&format!("{} added", format_count(stats.files_added))),
-                theme.muted("·"),
-                theme.warning(&format!("{} modified", format_count(stats.files_modified))),
-                theme.muted("·"),
-                theme.warning(&format!("{} deleted", format_count(stats.files_deleted)))
-            )],
-        )?;
+        )
+    } else {
+        "Unavailable".into()
+    };
+    let note = match readiness {
+        IndexStatus::Ready => None,
+        IndexStatus::Stale => Some("needs update"),
+        IndexStatus::Failed => Some("failed files"),
+        IndexStatus::Disabled => Some("indexing disabled"),
+        IndexStatus::Missing => Some("index not created"),
+        IndexStatus::Uninitialized => Some("index not configured"),
+        IndexStatus::Unknown => Some("status unknown"),
+        IndexStatus::RebuildRequired => Some("rebuild required"),
+    };
+    if let Some(note) = note {
+        let note = if readiness == IndexStatus::Failed {
+            theme.danger(note)
+        } else {
+            theme.warning(note)
+        };
+        value.push_str(" (");
+        value.push_str(&note);
+        value.push(')');
     }
-    Ok(())
+    write_status_field(writer, theme, "Coverage", &[value])
 }
 
 fn write_embedding(
     writer: &mut impl Write,
     theme: StatusTheme,
-    index: &WorkspaceIndexInfo,
+    index: Option<&WorkspaceIndexInfo>,
+    terminal: bool,
 ) -> io::Result<()> {
-    let values = index.embedding.as_ref().map_or_else(
-        || vec![theme.warning("Not configured")],
-        |embedding| {
-            vec![
-                format!("{}/{}", embedding.provider, embedding.model),
-                format!(
-                    "{} dimensions {} {}",
-                    format_count(embedding.dimension),
-                    theme.muted("·"),
-                    embedding.metric
-                ),
-            ]
+    let values = index
+        .and_then(|index| index.embedding.as_ref())
+        .map_or_else(
+            || vec!["Not configured".into()],
+            |embedding| {
+                vec![
+                    format!(
+                        "{}/{}",
+                        human_text(&embedding.provider, terminal),
+                        human_text(&embedding.model, terminal)
+                    ),
+                    format!(
+                        "{} dimensions {} {}",
+                        format_count(embedding.dimension),
+                        theme.muted("·"),
+                        human_text(&embedding.metric, terminal)
+                    ),
+                ]
+            },
+        );
+    write_status_field(writer, theme, "Embedding", &values)?;
+    let fts = index.and_then(|index| index.fts.as_ref()).map_or_else(
+        || "Not configured".into(),
+        |fts| {
+            format!(
+                "tokenizer={} filters={}",
+                human_text(&fts.tokenizer, terminal),
+                human_text(&fts.filters.join(", "), terminal)
+            )
         },
     );
-    write_status_field(writer, theme, "Embedding", &values)?;
-    if let Some(fts) = &index.fts {
-        write_status_field(
-            writer,
-            theme,
-            "FTS",
-            &[format!(
-                "tokenizer={} filters={}",
-                fts.tokenizer,
-                fts.filters.join(", ")
-            )],
-        )?;
-    }
-    Ok(())
-}
-
-fn write_diagnostics(
-    writer: &mut impl Write,
-    theme: StatusTheme,
-    result: &InfoResult,
-) -> io::Result<()> {
-    let reason = match &result.compatibility {
-        IndexCompatibility::RebuildRequired { reason, .. } => Some(reason.as_str()),
-        _ => None,
-    };
-    let failed = result
-        .status
-        .as_ref()
-        .map(|stats| &stats.failed_files)
-        .filter(|files| !files.is_empty());
-    let suggestion = match result.index_status() {
-        IndexStatus::RebuildRequired => Some("zg --index --rebuild"),
-        IndexStatus::Stale | IndexStatus::Failed => Some("zg --index"),
-        _ => result.suggestion.as_deref(),
-    };
-    if reason.is_some() || failed.is_some() || suggestion.is_some() {
-        writeln!(writer)?;
-    }
-    if let Some(reason) = reason {
-        write_status_field(writer, theme, "Problem", &[theme.danger(reason)])?;
-    }
-    if let Some(files) = failed {
-        let mut messages: Vec<_> = files
-            .iter()
-            .take(3)
-            .map(|file| {
-                let path = file.path.strip_prefix(&result.root).unwrap_or(&file.path);
-                let compact = file.reason.split_whitespace().collect::<Vec<_>>().join(" ");
-                let compact = if compact.chars().count() > 240 {
-                    format!("{}...", compact.chars().take(237).collect::<String>())
-                } else {
-                    compact
-                };
-                format!("{}: {compact}", path.display())
-            })
-            .collect();
-        if files.len() > 3 {
-            messages.push(format!("and {} more", files.len() - 3));
-        }
-        write_status_field(
-            writer,
-            theme,
-            "Problem",
-            &[theme.danger(&messages.join("; "))],
-        )?;
-    }
-    if let Some(suggestion) = suggestion {
-        write_status_field(writer, theme, "Next", &[theme.accent(suggestion)])?;
-    }
-    Ok(())
+    write_status_field(writer, theme, "FTS", &[fts])
 }
 
 pub(crate) fn scan_filters(scan: &ScanRules) -> String {
     let mut filters: Vec<_> = scan
-        .globs
+        .globs()
         .iter()
         .map(|glob| {
             format!(
@@ -325,38 +192,45 @@ pub(crate) fn scan_filters(scan: &ScanRules) -> String {
             )
         })
         .collect();
-    if !scan.file_types.is_empty() {
-        filters.push(format!("type={}", scan.file_types.join("|")));
+    for (name, formats) in [
+        ("type", scan.included_formats()),
+        ("type-not", scan.excluded_formats()),
+    ] {
+        if !formats.is_empty() {
+            filters.push(format!(
+                "{name}={}",
+                formats
+                    .iter()
+                    .copied()
+                    .map(FileFormat::as_str)
+                    .collect::<Vec<_>>()
+                    .join("|")
+            ));
+        }
     }
-    if !scan.excluded_file_types.is_empty() {
-        filters.push(format!("type-not={}", scan.excluded_file_types.join("|")));
-    }
-    if scan.hidden {
+    if scan.include_hidden() {
         filters.push("hidden".into());
     }
-    if scan.no_ignore {
+    if !scan.use_default_ignores() {
         filters.push("no-ignore".into());
     }
-    if !scan.ignore_files.is_empty() {
-        filters.push(format!(
-            "ignore-file={}",
-            scan.ignore_files
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join("|")
-        ));
+    let ignore_files = scan
+        .ignore_files()
+        .map(|path| output_path(path).display().to_string())
+        .collect::<Vec<_>>();
+    if !ignore_files.is_empty() {
+        filters.push(format!("ignore-file={}", ignore_files.join("|")));
     }
-    if let Some(depth) = scan.max_depth {
+    if let Some(depth) = scan.max_depth() {
         filters.push(format!("max-depth={depth}"));
     }
-    if let Some(size) = scan.max_file_size_bytes {
+    if let Some(size) = scan.max_file_size_bytes() {
         filters.push(format!("max-filesize={size}"));
     }
-    if scan.follow_symlinks {
+    if scan.follow_symlinks() {
         filters.push("follow".into());
     }
-    if !scan.nested_git {
+    if !scan.nested_git() {
         filters.push("nested-git=false".into());
     }
     filters.join(" ")
@@ -366,7 +240,8 @@ pub(crate) fn scan_filters(scan: &ScanRules) -> String {
 mod tests {
     use super::*;
     use zg_engine::api::info::result::{
-        FailedFile, InfoSource, WorkspaceIndexEmbedding, WorkspaceIndexFts,
+        FailedFile, IndexCompatibility, InfoSource, WorkspaceIndexEmbedding, WorkspaceIndexFts,
+        WorkspaceIndexPolicy,
     };
 
     fn ready() -> InfoResult {
@@ -376,10 +251,9 @@ mod tests {
             compatibility: IndexCompatibility::Compatible { version: 2 },
             index_policy: WorkspaceIndexPolicy::Enabled,
             home: "/workspace/.zvec-grep".into(),
-            index_path: "/workspace/.zvec-grep/storage".into(),
+            index_path: "/workspace/.zvec-grep/index".into(),
             source: InfoSource::Index,
             workspace_index: Some(WorkspaceIndexInfo {
-                name: "workspace".into(),
                 path: "/workspace/.zvec-grep".into(),
                 root: "/workspace".into(),
                 scan: ScanRules::default(),
@@ -427,19 +301,83 @@ mod tests {
     }
 
     #[test]
-    fn ready_status_matches_node_layout_with_rust_metadata() {
-        let bar = crate::progress::gradient_bar(
-            20,
-            20,
-            false,
-            !cfg!(windows) && std::env::var("TERM").as_deref() != Ok("linux"),
+    fn ready_status_contains_only_the_four_requested_fields() {
+        let bar = crate::progress::gradient_bar(20, 20, false, unicode_supported());
+        let expected = format!(
+            "  Coverage    {bar} 100%  1,132 / 1,132 files\n\n  Embedding   qwen/text-embedding-v4\n              1,024 dimensions · cosine\n  FTS         tokenizer=jieba filters=lowercase\n\n  Storage     .zvec-grep/index\n"
         );
-        assert_eq!(
-            render(&ready(), ColorMode::Never),
-            format!(
-                "✓ Workspace index is ready\n  /workspace\n\n  Coverage    {bar} 100%  1,132 / 1,132 files\n  Entities    22,037\n  Source size 4,177,103 bytes\n  Queue       0 pending · 0 failed\n\n  Embedding   qwen/text-embedding-v4\n              1,024 dimensions · cosine\n  FTS         tokenizer=jieba filters=lowercase\n\n  Storage     .zvec-grep/storage\n  Version     2\n  Nested Git  included\n"
-            )
-        );
+        assert_eq!(render(&ready(), ColorMode::Never), expected);
+        let mut bytes = Vec::new();
+        write_info_with_options(
+            &mut bytes,
+            &ready(),
+            OutputOptions {
+                color: ColorMode::Never,
+                ..OutputOptions::default()
+            },
+            true,
+        )
+        .expect("terminal output");
+        assert_eq!(String::from_utf8(bytes).expect("UTF-8"), expected);
+    }
+
+    #[test]
+    fn terminal_status_keeps_failure_state_inside_coverage() {
+        let mut info = ready();
+        let stats = info.status.as_mut().expect("stats");
+        stats.files_unchanged -= 1;
+        stats.files_modified = 1;
+        stats.files_failed = 1;
+        stats.failed_files = vec![FailedFile {
+            path: "/workspace/failure.rs".into(),
+            reason: "cannot read file".into(),
+        }];
+        let mut bytes = Vec::new();
+        write_info_with_options(
+            &mut bytes,
+            &info,
+            OutputOptions {
+                color: ColorMode::Never,
+                ..OutputOptions::default()
+            },
+            true,
+        )
+        .expect("failed output");
+        let output = String::from_utf8(bytes).expect("UTF-8");
+        assert!(output.contains("99%  1,131 / 1,132 files (failed files)"));
+        for removed in ["Queue", "Changes", "failure.rs", "Next", "Index ready"] {
+            assert!(!output.contains(removed), "{output}");
+        }
+    }
+
+    #[test]
+    fn terminal_status_sanitizes_dynamic_fields_without_rewriting_redirected_output() {
+        let mut info = ready();
+        info.index_path = "/storage/\x1b[2J\nindex".into();
+        let embedding = info
+            .workspace_index
+            .as_mut()
+            .expect("index")
+            .embedding
+            .as_mut()
+            .expect("embedding");
+        embedding.model = "model\x1b[2J\nname".into();
+        let mut bytes = Vec::new();
+        write_info_with_options(
+            &mut bytes,
+            &info,
+            OutputOptions {
+                color: ColorMode::Never,
+                ..OutputOptions::default()
+            },
+            true,
+        )
+        .expect("terminal status");
+        let terminal = String::from_utf8(bytes).expect("UTF-8");
+        assert!(!terminal.contains('\x1b'));
+        assert!(terminal.contains("model [2J name"));
+        assert!(terminal.contains("/storage/ [2J index"));
+        assert!(render(&info, ColorMode::Never).contains("\x1b[2J\nindex"));
     }
 
     #[test]
@@ -452,19 +390,19 @@ mod tests {
             files_unchanged: 172,
             files_modified: 1,
             files_deleted: 20,
+            indexed_size_bytes: 1_747_503,
             ..IndexStats::default()
         });
         let output = render(&info, ColorMode::Never);
-        assert!(output.starts_with("! Workspace index needs an update\n"));
-        assert!(output.contains(" 99%  172 / 173 files"));
-        assert!(output.contains("Changes     0 added · 1 modified · 20 deleted"));
-        assert!(output.contains("Next        zg --index"));
+        assert!(output.contains("99%  172 / 173 files (needs update)"));
         assert!(!output.contains("100%"));
+        assert!(!output.contains("Source size"));
+        assert!(!output.contains("Changes"));
     }
 
     #[test]
     fn incomplete_coverage_never_rounds_to_a_full_percentage_or_bar() {
-        let unicode = !cfg!(windows) && std::env::var("TERM").as_deref() != Ok("linux");
+        let unicode = unicode_supported();
         for (completed, total, percent, filled) in [
             (199, 200, 99, 19),
             (999, 1000, 99, 19),
@@ -492,60 +430,50 @@ mod tests {
                     "{output}"
                 );
                 if completed < total {
-                    assert!(output.contains("! Workspace index needs an update"));
+                    assert!(output.contains("needs update"));
                 }
             }
         }
     }
 
     #[test]
-    fn failures_are_red_pending_is_yellow_and_reasons_are_bounded() {
+    fn failed_status_uses_red_without_expanding_the_field_list() {
         let mut info = ready();
         info.status = Some(IndexStats {
             files_scanned: 4,
             files_unchanged: 2,
             files_pending: 1,
             files_failed: 1,
-            failed_files: (0..4)
-                .map(|index| FailedFile {
-                    path: format!("/workspace/file{index}.rs").into(),
-                    reason: format!("failed\n{}", "界".repeat(260)),
-                })
-                .collect(),
             ..IndexStats::default()
         });
         let output = render(&info, ColorMode::Always);
-        assert!(output.starts_with("\x1b[31m✗ Workspace index failed\x1b[0m\n"));
-        assert!(output.contains("\x1b[33m1 pending\x1b[0m"));
-        assert!(output.contains("\x1b[31m1 failed\x1b[0m"));
+        assert!(output.contains("\x1b[31mfailed files\x1b[0m"));
         assert!(output.contains("\x1b[38;2;22;163;74m"));
-        assert!(output.contains("file0.rs: failed "));
-        assert!(output.contains("...; and 1 more"));
-        assert!(!output.contains("file3.rs:"));
-        assert!(!output.contains("failed\n界"));
+        assert!(!output.contains("Queue"));
+        assert!(!output.contains("Problem"));
     }
 
     #[test]
     fn unbuilt_disabled_and_unknown_do_not_claim_readiness() {
         let mut info = ready();
         info.status = None;
-        assert!(
-            render(&info, ColorMode::Never).starts_with("? Workspace index status is unknown\n")
-        );
+        assert!(render(&info, ColorMode::Never).contains("Unavailable (status unknown)"));
         info.indexed = false;
-        assert!(render(&info, ColorMode::Never).starts_with("○ Workspace index is not created\n"));
+        assert!(render(&info, ColorMode::Never).contains("Unavailable (index not created)"));
         info.index_policy = WorkspaceIndexPolicy::Disabled;
-        assert!(render(&info, ColorMode::Never).starts_with("○ Workspace indexing is disabled\n"));
+        assert!(render(&info, ColorMode::Never).contains("Unavailable (indexing disabled)"));
         info.index_policy = WorkspaceIndexPolicy::Uninitialized;
+        info.workspace_index = None;
         let output = render(&info, ColorMode::Never);
-        assert!(output.starts_with("? Workspace index is not configured\n"));
-        assert!(output.contains("Policy      undecided"));
-        assert!(!output.contains("Coverage"));
+        assert_eq!(
+            output,
+            "  Coverage    Unavailable (index not configured)\n\n  Embedding   Not configured\n  FTS         Not configured\n\n  Storage     .zvec-grep/index\n"
+        );
     }
 
     #[test]
-    fn incompatible_status_retains_versions_reason_and_rebuild_guidance() {
-        for (actual_version, actual_label) in [(Some(1), "1"), (None, "unknown")] {
+    fn incompatible_status_keeps_rebuild_state_inside_coverage() {
+        for actual_version in [Some(1), None] {
             let mut info = ready();
             info.index_policy = WorkspaceIndexPolicy::Disabled;
             info.compatibility = IndexCompatibility::RebuildRequired {
@@ -555,26 +483,30 @@ mod tests {
             };
             info.suggestion = Some("zg --index".into());
             let output = render(&info, ColorMode::Never);
-            assert!(output.starts_with("! Workspace index requires a rebuild\n"));
-            assert!(output.contains(&format!("Version     {actual_label} (expected 2)")));
-            assert!(output.contains("Problem     unsupported persisted index"));
-            assert!(output.contains("Next        zg --index --rebuild"));
+            assert!(output.contains("(rebuild required)"));
+            for removed in ["Version", "Problem", "Next", "Policy"] {
+                assert!(!output.contains(removed), "{output}");
+            }
         }
     }
 
     #[test]
-    fn scan_scope_and_missing_embedding_remain_visible() {
+    fn missing_configuration_is_explicit_and_scan_scope_is_hidden() {
         let mut info = ready();
         let index = info.workspace_index.as_mut().expect("workspace");
         index.embedding = None;
-        index.scan.globs = vec!["*.rs".into(), "!vendor/**".into()];
-        index.scan.hidden = true;
-        index.scan.max_depth = Some(0);
+        index.fts = None;
+        index.scan = zg_engine::api::index::options::ScanRulesUpdate {
+            included_formats: Some(vec![FileFormat::Rust, FileFormat::TypeScript]),
+            max_depth: Some(Some(0)),
+            ..Default::default()
+        }
+        .apply(&index.scan)
+        .expect("updated scan rules");
         let output = render(&info, ColorMode::Never);
         assert!(output.contains("Embedding   Not configured"));
-        assert!(
-            output
-                .contains("Roots       /workspace (glob=*.rs glob=!vendor/** hidden max-depth=0)")
-        );
+        assert!(output.contains("FTS         Not configured"));
+        assert!(!output.contains("Roots"));
+        assert!(!output.contains("max-depth"));
     }
 }

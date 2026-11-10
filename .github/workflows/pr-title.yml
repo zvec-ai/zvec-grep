@@ -1,0 +1,24 @@
+name: PR title
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions: {}
+
+jobs:
+  title:
+    name: pr title
+    # Description-only edits leave the title unchanged and need no check.
+    if: github.event.action != 'edited' || github.event.changes.title != null
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate pull request title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: >-
+          node --input-type=module --eval
+          "const title = process.env.PR_TITLE ?? '';
+          const valid = /^(feat|fix|perf|refactor|docs|test|build|ci|chore|revert)(\([^)]+\))?!?: .+/.test(title);
+          if (!valid) { console.error('PR title must use Conventional Commits syntax'); process.exit(1); }"

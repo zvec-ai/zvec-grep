@@ -6,7 +6,7 @@ use std::sync::{
 use async_trait::async_trait;
 use tokio::sync::{Barrier, Semaphore as TokioSemaphore};
 
-use crate::domain::model::Metric;
+use crate::domain::model::EmbeddingMetric;
 
 use super::*;
 use crate::domain::model::EmbeddingPurpose;
@@ -21,18 +21,24 @@ struct ConcurrentFixtureModel {
 impl ConcurrentFixtureModel {
     fn new() -> Self {
         Self {
-            info: EmbeddingModelInfo {
-                model: crate::domain::model::ModelInfo {
-                    provider: "local".to_owned(),
-                    name: "fixture".to_owned(),
-                    endpoint: None,
-                },
-                dimension: 1,
-                metric: Metric::Cosine,
-                max_batch_size: 8,
-                max_input_tokens: Some(32),
-                max_image_bytes: None,
-            },
+            info: EmbeddingModelInfo::new(
+                crate::domain::model::ModelInfo::new(
+                    "local".to_owned(),
+                    "fixture".to_owned(),
+                    [
+                        crate::domain::ContentKind::Text,
+                        crate::domain::ContentKind::Code,
+                        crate::domain::ContentKind::Image,
+                    ],
+                    8,
+                )
+                .expect("valid model metadata"),
+                1,
+                EmbeddingMetric::Cosine,
+                Some(32),
+                None,
+            )
+            .expect("valid embedding metadata"),
             barrier: Barrier::new(2),
             active: AtomicUsize::new(0),
             maximum_active: AtomicUsize::new(0),
@@ -138,19 +144,19 @@ impl EmbeddingModel for ProgressFixtureModel {
     async fn prepare(&self, options: EmbeddingPrepareOptions) -> Result<(), ModelError> {
         if let Some(on_progress) = options.on_progress {
             on_progress(crate::domain::model::ModelProgress::Preparing {
-                model: self.info.model.reference(),
+                model_ref: self.info.model().reference(),
             });
             on_progress(crate::domain::model::ModelProgress::Downloading {
-                model: self.info.model.reference(),
+                model_ref: self.info.model().reference(),
                 downloaded_bytes: Some(4),
                 total_bytes: Some(8),
             });
             on_progress(crate::domain::model::ModelProgress::Warning {
-                model: self.info.model.reference(),
+                model_ref: self.info.model().reference(),
                 message: "fixture warning".to_owned(),
             });
             on_progress(crate::domain::model::ModelProgress::Ready {
-                model: self.info.model.reference(),
+                model_ref: self.info.model().reference(),
             });
         }
         Ok(())
@@ -489,19 +495,20 @@ fn invalid_model_info_is_rejected_before_caching_or_leasing() {
         let manager = ModelRuntimeManager::with_factory(move |_, _, _| {
             let mut model = ConcurrentFixtureModel::new();
             if observed_creations.fetch_add(1, Ordering::AcqRel) == 0 {
+                let mut data = serde_json::to_value(&model.info).expect("metadata");
                 match field {
-                    "provider" => model.info.model.provider = " ".to_owned(),
-                    "name" => model.info.model.name.clear(),
-                    "dimension" => model.info.dimension = 0,
-                    "max_batch_size" => model.info.max_batch_size = 0,
-                    "max_input_tokens" => model.info.max_input_tokens = Some(0),
-                    "max_image_bytes" => model.info.max_image_bytes = Some(0),
+                    "provider" => data["model"]["provider"] = serde_json::json!(" "),
+                    "name" => data["model"]["name"] = serde_json::json!(""),
+                    "dimension" => data["dimension"] = serde_json::json!(0),
+                    "max_batch_size" => data["model"]["maxBatchSize"] = serde_json::json!(0),
+                    "max_input_tokens" => data["maxInputTokens"] = serde_json::json!(0),
+                    "max_image_bytes" => data["maxImageBytes"] = serde_json::json!(0),
                     _ => unreachable!(),
                 }
-            } else {
-                // Optional limits may be absent; this does not invalidate the model.
-                model.info.max_input_tokens = None;
-                model.info.max_image_bytes = None;
+                model.info = serde_json::from_value(data).map_err(|error| {
+                    ModelError::internal("Embedding model returned invalid metadata")
+                        .with_cause(error)
+                })?;
             }
             Ok(Arc::new(model))
         });
@@ -515,7 +522,7 @@ fn invalid_model_info_is_rejected_before_caching_or_leasing() {
             .expect("retry constructs a valid model");
         assert_eq!(creations.load(Ordering::Acquire), 2);
         assert_eq!(manager.snapshot().active_leases, 1);
-        assert_eq!(lease.info().model.reference(), "local/fixture");
+        assert_eq!(lease.info().model().reference(), "local/fixture");
     }
 }
 
@@ -559,7 +566,7 @@ async fn reuses_one_runtime_and_allows_shared_concurrent_embeddings() {
 
     assert_eq!(creations.load(Ordering::Acquire), 1);
     assert!(Arc::ptr_eq(&first.entry.runtime, &second.entry.runtime));
-    assert_eq!(first.info().model.reference(), "local/fixture");
+    assert_eq!(first.info().model().reference(), "local/fixture");
     assert_eq!(
         manager.snapshot(),
         ModelRuntimeSnapshot {
@@ -664,19 +671,19 @@ async fn forwards_preparation_progress_to_both_callbacks_with_effective_concurre
         *model_events,
         [
             ModelProgress::Preparing {
-                model: "local/fixture".to_owned(),
+                model_ref: "local/fixture".to_owned(),
             },
             ModelProgress::Downloading {
-                model: "local/fixture".to_owned(),
+                model_ref: "local/fixture".to_owned(),
                 downloaded_bytes: Some(4),
                 total_bytes: Some(8),
             },
             ModelProgress::Warning {
-                model: "local/fixture".to_owned(),
+                model_ref: "local/fixture".to_owned(),
                 message: "fixture warning".to_owned(),
             },
             ModelProgress::Ready {
-                model: "local/fixture".to_owned(),
+                model_ref: "local/fixture".to_owned(),
             },
         ]
     );
@@ -691,6 +698,110 @@ async fn forwards_preparation_progress_to_both_callbacks_with_effective_concurre
             .map(|event| (event, 1))
             .collect::<Vec<_>>()
     );
+}
+
+#[tokio::test]
+async fn native_batches_share_admission_across_independent_leases() {
+    for (reference, requested, allowed) in [
+        ("local/all-minilm-l6-v2", 2, 2),
+        ("local/embeddinggemma-300m", 8, 1),
+    ] {
+        let fixture = Arc::new(GatedFixtureModel::new());
+        let manager = ModelRuntimeManager::with_factory({
+            let fixture = Arc::clone(&fixture);
+            move |_, _, _| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
+        });
+        let request =
+            || ModelRuntimeRequest::new(reference, ModelConfig::default(), Some(requested));
+        let first = manager.acquire(request()).expect("first operation");
+        let second = manager.acquire(request()).expect("second operation");
+        assert!(Arc::ptr_eq(&first.entry, &second.entry));
+        let inputs = [vec![Content::Text("fixture".into())]];
+        let embeddings = async {
+            tokio::join!(
+                first.embed(&inputs, EmbeddingOptions::default(), None),
+                first.embed(&inputs, EmbeddingOptions::default(), None),
+                second.embed(&inputs, EmbeddingOptions::default(), None),
+                second.embed(&inputs, EmbeddingOptions::default(), None),
+            )
+        };
+        let observe = async {
+            while fixture.started.load(Ordering::Acquire) < allowed {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(fixture.started.load(Ordering::Acquire), allowed);
+            assert_eq!(first.operation.permits.available_permits(), 0);
+            assert!(Arc::ptr_eq(
+                &first.operation.permits,
+                &second.operation.permits
+            ));
+            let cancelled = CancellationToken::new();
+            cancelled.cancel();
+            assert_eq!(
+                second
+                    .embed(
+                        &inputs,
+                        EmbeddingOptions {
+                            signal: Some(cancelled),
+                            ..EmbeddingOptions::default()
+                        },
+                        None
+                    )
+                    .await
+                    .expect_err("cancelled waiting batch")
+                    .code(),
+                crate::EngineError::CANCELLED
+            );
+            fixture.release.add_permits(4);
+        };
+        let ((a, b, c, d), ()) = tokio::join!(embeddings, observe);
+        for result in [a, b, c, d] {
+            result.expect("embedding batch");
+        }
+        assert_eq!(fixture.maximum_active.load(Ordering::Acquire), allowed);
+    }
+}
+
+#[test]
+fn local_variants_reuse_equivalent_limits_and_release_idle_resources() {
+    let (manager, creations) = fixture_cache(CachePolicy::default());
+    let request =
+        |limit| ModelRuntimeRequest::new("local/all-minilm-l6-v2", ModelConfig::default(), limit);
+    let first = manager.acquire(request(Some(24))).expect("capped override");
+    let same = manager
+        .acquire(request(Some(99)))
+        .expect("equivalent override");
+    assert!(Arc::ptr_eq(&first.entry, &same.entry));
+    assert_eq!(first.operation.limit, 8);
+    let previous = Arc::downgrade(&first.entry.runtime.model);
+    let query = manager.acquire(request(None)).expect("query default");
+    assert!(!Arc::ptr_eq(&first.entry, &query.entry));
+    assert_eq!(query.operation.limit, 1);
+    assert!(
+        previous.upgrade().is_some(),
+        "active index resources are retained"
+    );
+    drop(first);
+    drop(same);
+    assert!(
+        previous.upgrade().is_none(),
+        "idle index variant is retired before replacement use"
+    );
+    let explicit_one = manager
+        .acquire(request(Some(1)))
+        .expect("equivalent query limit");
+    assert!(Arc::ptr_eq(&query.entry, &explicit_one.entry));
+    assert_eq!(creations.load(Ordering::Acquire), 2);
+    drop(explicit_one);
+    drop(query);
+    let replacement = manager
+        .acquire(request(Some(4)))
+        .expect("sequential index limit");
+    assert_eq!(manager.snapshot().cached_runtimes, 1);
+    assert_eq!(creations.load(Ordering::Acquire), 3);
+    drop(replacement);
+    manager.close();
+    assert_eq!(manager.snapshot().cached_runtimes, 0);
 }
 
 #[tokio::test]
@@ -832,8 +943,16 @@ fn concurrency_policy_prefers_user_and_preserves_catalog_backend_defaults() {
         let explicit = manager
             .acquire(ModelRuntimeRequest::new(reference, config, Some(24)))
             .expect("explicit concurrency");
-        assert_eq!(explicit.operation.limit, 24, "{reference}");
-        assert!(Arc::ptr_eq(&lease.entry, &explicit.entry));
+        let local_native = matches!(
+            reference,
+            "local/embeddinggemma-300m" | "local/all-minilm-l6-v2"
+        );
+        assert_eq!(
+            explicit.operation.limit,
+            if local_native { 8 } else { 24 },
+            "{reference}"
+        );
+        assert_eq!(Arc::ptr_eq(&lease.entry, &explicit.entry), !local_native);
     }
 }
 
@@ -857,6 +976,32 @@ fn rejects_zero_user_concurrency_before_constructing_a_runtime() {
 
     assert_eq!(error.code(), crate::EngineError::INVALID_ARGUMENT);
     assert_eq!(creations.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test]
+async fn large_remote_overrides_do_not_overflow_runtime_admission() {
+    let manager = ModelRuntimeManager::with_factory(|_reference, _options, _compute| {
+        Ok(Arc::new(ProgressFixtureModel::new()) as Arc<dyn EmbeddingModel>)
+    });
+    let lease = manager
+        .acquire(ModelRuntimeRequest::new(
+            "qwen/text-embedding-v4",
+            ModelConfig::default(),
+            Some(usize::MAX),
+        ))
+        .expect("positive remote limit");
+    lease
+        .embed(
+            &[vec![Content::Text("fixture".into())]],
+            EmbeddingOptions::default(),
+            None,
+        )
+        .await
+        .expect("admitted request");
+    assert_eq!(lease.operation.limit, usize::MAX);
+    assert_eq!(manager.snapshot().active_embeddings, 0);
+    drop(lease);
+    manager.close();
 }
 
 #[test]

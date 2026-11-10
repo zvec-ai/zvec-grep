@@ -63,6 +63,7 @@ fn progress_message(progress: &IndexProgress) -> String {
     let phase = match progress.phase {
         zg_engine::api::index::progress::IndexProgressPhase::Scanning => "scanning",
         zg_engine::api::index::progress::IndexProgressPhase::Indexing => "indexing",
+        zg_engine::api::index::progress::IndexProgressPhase::Finalizing => "finalizing",
         zg_engine::api::index::progress::IndexProgressPhase::Done => "done",
     };
     let counts = match (progress.files_indexed, progress.files_total) {

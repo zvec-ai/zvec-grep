@@ -1,0 +1,124 @@
+name: ZG Bench
+run-name: "ZG Bench · PR #${{ github.event.issue.number || inputs.pr_number }}"
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Open PR number in this repository
+        required: true
+        type: string
+      run_e2e:
+        description: Also run e2e (disabled by default)
+        default: false
+        type: boolean
+
+permissions: {}
+
+jobs:
+  request:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.issue.pull_request &&
+       github.event.comment.user.type != 'Bot' &&
+       contains(github.event.comment.body, '@zg-bench'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    outputs:
+      accepted: ${{ steps.request.outputs.accepted }}
+      candidate_sha: ${{ steps.request.outputs.candidate_sha }}
+      candidate_repository: ${{ steps.request.outputs.candidate_repository }}
+      baseline_sha: ${{ steps.request.outputs.baseline_sha }}
+      baseline_repository: ${{ steps.request.outputs.baseline_repository }}
+      run_e2e: ${{ steps.request.outputs.run_e2e }}
+      pr_number: ${{ steps.request.outputs.pr_number }}
+      comment_id: ${{ steps.request.outputs.comment_id }}
+    steps:
+      # issue_comment checks out the default branch, never the PR's harness.
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/github-script@v8
+        id: request
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          BENCH_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          RUN_E2E: ${{ inputs.run_e2e }}
+        with:
+          script: |
+            const { pathToFileURL } = require('node:url');
+            const { prepare } = await import(pathToFileURL(`${process.env.GITHUB_WORKSPACE}/.github/scripts/bench-comment.mjs`));
+            await prepare({ github, context, core, env: process.env });
+
+  retrieval:
+    needs: request
+    if: needs.request.outputs.accepted == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/retrieval-comparison.yml
+    with:
+      baseline_ref: ${{ needs.request.outputs.baseline_sha }}
+      baseline_repository: ${{ needs.request.outputs.baseline_repository }}
+      candidate_ref: ${{ needs.request.outputs.candidate_sha }}
+      candidate_repository: ${{ needs.request.outputs.candidate_repository }}
+
+  e2e:
+    needs: request
+    if: needs.request.outputs.accepted == 'true' && needs.request.outputs.run_e2e == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/swe-qa-bench.yml
+    with:
+      candidate_ref: ${{ needs.request.outputs.candidate_sha }}
+      candidate_repository: ${{ needs.request.outputs.candidate_repository }}
+      scope: all-full
+      model: glm-5.2
+      embedding: local
+    secrets:
+      GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+
+  reply:
+    needs: [request, retrieval, e2e]
+    if: always() && needs.request.outputs.accepted == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+      issues: write
+    steps:
+      # This job only reads report data. Candidate code never gets a write token.
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Download Retrieval results
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: retrieval-comparison
+          path: ${{ runner.temp }}/bench-reports/retrieval
+      - name: Download e2e results, including successful jobs from earlier attempts
+        if: needs.request.outputs.run_e2e == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          pattern: swe-qa-aggregate-report-${{ github.run_id }}-*
+          path: ${{ runner.temp }}/bench-reports/e2e
+      - name: Update the Benchmark comment
+        uses: actions/github-script@v8
+        env:
+          BENCH_NEEDS: ${{ toJSON(needs) }}
+          BENCH_REPORTS: ${{ runner.temp }}/bench-reports
+          BENCH_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        with:
+          script: |
+            const { pathToFileURL } = require('node:url');
+            const { finish } = await import(pathToFileURL(`${process.env.GITHUB_WORKSPACE}/.github/scripts/bench-comment.mjs`));
+            await finish({ github, context, core, env: process.env });

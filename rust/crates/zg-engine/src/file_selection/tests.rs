@@ -6,7 +6,10 @@ use std::{
 use zg_host_native::{NativeScanner, PathPolicy, ScanRequest, TaskControl, WorkspaceScannerPort};
 
 use super::{GlobMatcher, ScanPolicy};
-use crate::domain::{GlobRule, ScanRules};
+use crate::{
+    api::index::options::ScanRulesUpdate,
+    domain::{FileFormat, GlobRule, ScanRules},
+};
 
 fn make_policy(
     root: &Path,
@@ -15,10 +18,11 @@ fn make_policy(
 ) -> crate::EngineResult<ScanPolicy> {
     ScanPolicy::new(
         root,
-        &ScanRules {
-            globs: globs.to_vec(),
-            ..options.clone()
-        },
+        &ScanRulesUpdate {
+            globs: Some(globs.to_vec()),
+            ..ScanRulesUpdate::default()
+        }
+        .apply(options)?,
     )
 }
 
@@ -40,10 +44,12 @@ async fn scan(
                 roots: vec![
                     ScanPolicy::root_spec(
                         root,
-                        &ScanRules {
-                            globs: globs.to_vec(),
-                            ..options.clone()
-                        },
+                        &ScanRulesUpdate {
+                            globs: Some(globs.to_vec()),
+                            ..ScanRulesUpdate::default()
+                        }
+                        .apply(options)
+                        .expect("scan rules"),
                     )
                     .expect("policy"),
                 ],
@@ -63,6 +69,73 @@ async fn scan(
 }
 
 #[tokio::test]
+async fn filename_formats_intersect_globs_and_preserve_scan_boundaries() {
+    let temporary = tempfile::tempdir().expect("workspace");
+    let root = temporary.path();
+    for path in [
+        "src/main.rs",
+        "src/other.py",
+        "src/header.h",
+        "src/header.hpp",
+        "src/ignored.rs",
+        "src/.hidden.rs",
+        "outside.rs",
+        ".hidden/directory.rs",
+        "nested.py/main.rs",
+    ] {
+        write(root, path, "example");
+    }
+    write(root, ".gitignore", "src/ignored.rs\n");
+    let rules = ScanRulesUpdate {
+        included_formats: Some(vec![FileFormat::Rust, FileFormat::Cpp]),
+        excluded_formats: Some(vec![FileFormat::C]),
+        ..Default::default()
+    }
+    .apply(&ScanRules::default())
+    .expect("format rules");
+    assert_eq!(
+        scan(root, &[], &rules, vec![]).await,
+        [
+            "nested.py/main.rs",
+            "outside.rs",
+            "src/header.hpp",
+            "src/main.rs"
+        ]
+        .map(PathBuf::from)
+    );
+    let globs = vec![GlobRule::from("src/**")];
+    let expected = [
+        "src/.hidden.rs",
+        "src/header.hpp",
+        "src/ignored.rs",
+        "src/main.rs",
+    ]
+    .map(PathBuf::from);
+    assert_eq!(scan(root, &globs, &rules, vec![]).await, expected);
+    assert_eq!(
+        scan(root, &globs, &rules, vec![root.join("src")]).await,
+        expected
+    );
+    let policy = make_policy(root, &globs, &rules).expect("watch policy");
+    assert!(policy.can_descend(&root.join("src")).expect("directory"));
+    assert!(
+        policy
+            .includes_file(&root.join("src/new.rs"))
+            .expect("Rust file")
+    );
+    assert!(
+        !policy
+            .includes_file(&root.join("src/new.py"))
+            .expect("Python file")
+    );
+    assert!(
+        !policy
+            .includes_file(&root.join("src/new.h"))
+            .expect("ambiguous header")
+    );
+}
+
+#[tokio::test]
 async fn scan_and_query_use_identical_ordered_path_rules() {
     let temporary = tempfile::tempdir().expect("workspace");
     let root = temporary.path();
@@ -76,10 +149,12 @@ async fn scan_and_query_use_identical_ordered_path_rules() {
     for path in paths {
         write(root, path, "example");
     }
-    let options = ScanRules {
-        no_ignore: true,
-        ..ScanRules::default()
-    };
+    let options = ScanRulesUpdate {
+        use_default_ignores: Some(false),
+        ..ScanRulesUpdate::default()
+    }
+    .apply(&ScanRules::default())
+    .expect("scan rules");
     let cases = [
         vec!["*.rs".into()],
         vec!["!blocked".into(), "blocked/keep.rs".into()],
@@ -123,16 +198,18 @@ async fn nested_repositories_are_selected_and_metadata_is_never_scanned() {
     write(root, "nested/code.rs", "fn main() {}");
     write(root, "nested/.zvec-grep/state.rs", "index metadata");
     let globs = vec!["nested/**".into()];
-    for no_ignore in [false, true] {
+    for use_default_ignores in [false, true] {
         assert_eq!(
             scan(
                 root,
                 &globs,
-                &ScanRules {
-                    no_ignore,
-                    hidden: true,
-                    ..ScanRules::default()
-                },
+                &ScanRulesUpdate {
+                    use_default_ignores: Some(use_default_ignores),
+                    include_hidden: Some(true),
+                    ..ScanRulesUpdate::default()
+                }
+                .apply(&ScanRules::default())
+                .expect("scan rules"),
                 vec![]
             )
             .await,
@@ -182,12 +259,14 @@ async fn nested_git_switch_prunes_directory_and_file_markers_including_increment
     write(root, "module/.git", "gitdir: ../.git/modules/module\n");
     write(root, "module/code.rs", "submodule source");
     let globs = vec!["**".into()];
-    let mut options = ScanRules {
-        nested_git: false,
-        no_ignore: true,
-        hidden: true,
-        ..ScanRules::default()
-    };
+    let mut options = ScanRulesUpdate {
+        nested_git: Some(false),
+        use_default_ignores: Some(false),
+        include_hidden: Some(true),
+        ..ScanRulesUpdate::default()
+    }
+    .apply(&ScanRules::default())
+    .expect("scan rules");
     assert_eq!(
         scan(root, &globs, &options, vec![]).await,
         vec![PathBuf::from("main.rs")]
@@ -197,7 +276,12 @@ async fn nested_git_switch_prunes_directory_and_file_markers_including_increment
             .await
             .is_empty()
     );
-    options.nested_git = true;
+    options = ScanRulesUpdate {
+        nested_git: Some(true),
+        ..ScanRulesUpdate::default()
+    }
+    .apply(&options)
+    .expect("updated scan rules");
     assert_eq!(
         scan(root, &globs, &options, vec![]).await,
         vec![
@@ -217,10 +301,12 @@ fn repository_marker_changes_reconcile_membership_without_affecting_workspace_ro
     let policy = make_policy(
         root,
         &[],
-        &ScanRules {
-            nested_git: false,
-            ..ScanRules::default()
-        },
+        &ScanRulesUpdate {
+            nested_git: Some(false),
+            ..ScanRulesUpdate::default()
+        }
+        .apply(&ScanRules::default())
+        .expect("scan rules"),
     )
     .expect("policy");
     assert!(policy.can_descend(root).expect("root remains included"));
@@ -275,10 +361,12 @@ fn repository_marker_changes_reconcile_membership_without_affecting_workspace_ro
     let excluded = make_policy(
         root,
         &["!module".into()],
-        &ScanRules {
-            nested_git: false,
-            ..ScanRules::default()
-        },
+        &ScanRulesUpdate {
+            nested_git: Some(false),
+            ..ScanRulesUpdate::default()
+        }
+        .apply(&ScanRules::default())
+        .expect("scan rules"),
     )
     .expect("excluded policy");
     assert!(
@@ -309,10 +397,12 @@ fn ignore_control_changes_invalidate_rules_even_when_not_selected() {
     let policy = make_policy(
         root,
         &[],
-        &ScanRules {
-            ignore_files: vec![external.path().to_path_buf()],
-            ..ScanRules::default()
-        },
+        &ScanRulesUpdate {
+            ignore_files: Some(vec![external.path().to_path_buf()]),
+            ..ScanRulesUpdate::default()
+        }
+        .apply(&ScanRules::default())
+        .expect("scan rules"),
     )
     .expect("policy");
     assert!(!policy.can_descend(&root.join("blocked")).expect("excluded"));
@@ -329,6 +419,56 @@ fn ignore_control_changes_invalidate_rules_even_when_not_selected() {
         Some(PathBuf::new())
     );
     assert!(policy.can_descend(&root.join("blocked")).expect("included"));
+}
+
+#[test]
+fn saved_ignore_files_preserve_internal_external_precedence() {
+    let temporary = tempfile::tempdir().expect("fixture");
+    let base = fs::canonicalize(temporary.path()).expect("canonical fixture");
+    let root = base.join("workspace");
+    for path in ["one.rs", "two.rs", "three.rs"] {
+        write(&root, path, "source");
+    }
+    write(&root, "first.ignore", "one.rs\ntwo.rs\nthree.rs\n");
+    write(&base, "shared.ignore", "!one.rs\n!two.rs\n");
+    write(&root, "last.ignore", "one.rs\n");
+    let mut ignore_files = vec![
+        PathBuf::from("first.ignore"),
+        base.join("shared.ignore"),
+        PathBuf::from("last.ignore"),
+    ];
+
+    for includes_one in [false, true] {
+        let rules = ScanRulesUpdate {
+            use_default_ignores: Some(false),
+            ignore_files: Some(ignore_files.clone()),
+            ..ScanRulesUpdate::default()
+        }
+        .apply(&ScanRules::default())
+        .expect("scan rules");
+        let saved = serde_json::to_vec(&rules).expect("save scan rules");
+        let restored: ScanRules = serde_json::from_slice(&saved).expect("restore scan rules");
+        assert_eq!(
+            restored.ignore_files().collect::<Vec<_>>(),
+            ignore_files
+                .iter()
+                .map(PathBuf::as_path)
+                .collect::<Vec<_>>()
+        );
+        let policy = make_policy(&root, &[], &restored).expect("restored policy");
+        assert_eq!(
+            policy.includes_file(&root.join("one.rs")).expect("one.rs"),
+            includes_one,
+            "the last matching ignore file must win: {ignore_files:?}"
+        );
+        assert!(policy.includes_file(&root.join("two.rs")).expect("two.rs"));
+        assert!(
+            !policy
+                .includes_file(&root.join("three.rs"))
+                .expect("three.rs")
+        );
+        ignore_files.swap(1, 2);
+    }
 }
 
 #[test]
@@ -388,20 +528,131 @@ fn large_ignore_files_fail_explicitly_instead_of_unbounded_compilation() {
 }
 
 #[test]
+fn missing_explicit_ignore_files_are_skipped_and_reloaded() {
+    let temporary = tempfile::tempdir().expect("fixture");
+    let base = fs::canonicalize(temporary.path()).expect("canonical fixture");
+    let root = base.join("source");
+    fs::create_dir(&root).expect("empty source root");
+    for path in [
+        PathBuf::from("local.ignore"),
+        PathBuf::from("missing/nested/local.ignore"),
+        base.join("external.ignore"),
+        base.join("missing/nested/external.ignore"),
+    ] {
+        let absolute = root.join(&path);
+        let rules = ScanRulesUpdate {
+            ignore_files: Some(vec![path.clone()]),
+            ..ScanRulesUpdate::default()
+        }
+        .apply(&ScanRules::default())
+        .expect("scan rules");
+        let policy = make_policy(&root, &[], &rules).expect("missing rules are skipped");
+        assert_eq!(rules.ignore_files().collect::<Vec<_>>(), [path.as_path()]);
+        assert!(policy.control_paths().contains(&absolute));
+        assert!(
+            policy
+                .includes_file(&root.join("main.rs"))
+                .expect("included")
+        );
+        fs::create_dir_all(absolute.parent().expect("ignore parent")).expect("ignore directories");
+        fs::write(&absolute, "main.rs\n").expect("create rules");
+        assert_eq!(
+            policy
+                .control_file_changed(&absolute)
+                .expect("created rules"),
+            Some(PathBuf::new())
+        );
+        assert!(
+            !policy
+                .includes_file(&root.join("main.rs"))
+                .expect("excluded")
+        );
+        fs::remove_file(&absolute).expect("delete rules");
+        policy
+            .control_file_changed(&absolute)
+            .expect("deleted rules");
+        assert!(
+            policy
+                .includes_file(&root.join("main.rs"))
+                .expect("included")
+        );
+        assert!(policy.control_paths().contains(&absolute));
+        fs::write(&absolute, "main.rs\n").expect("restore rules");
+        policy
+            .control_file_changed(&absolute)
+            .expect("restored rules");
+        assert!(
+            !policy
+                .includes_file(&root.join("main.rs"))
+                .expect("excluded")
+        );
+    }
+}
+
+#[test]
+fn invalid_explicit_ignore_files_are_rejected_even_with_whitelist_globs() {
+    let temporary = tempfile::tempdir().expect("fixture");
+    let root = temporary.path();
+    let path = root.join("invalid.ignore");
+    let rules = ScanRulesUpdate {
+        ignore_files: Some(vec![path.clone()]),
+        ..ScanRulesUpdate::default()
+    }
+    .apply(&ScanRules::default())
+    .expect("scan rules");
+    for (contents, message) in [
+        (&b"\xff"[..], "could not read ignore file"),
+        (&b"[z-a]\n"[..], "invalid ignore rule"),
+    ] {
+        fs::write(&path, contents).expect("invalid rules");
+        for globs in [vec![], vec!["*.rs".into()]] {
+            let error = make_policy(root, &globs, &rules).expect_err("invalid rules");
+            assert!(error.message().contains(message));
+            assert!(error.message().contains("invalid.ignore"));
+        }
+    }
+}
+
+#[test]
+fn explicit_ignore_files_below_regular_files_are_rejected() {
+    let temporary = tempfile::tempdir().expect("workspace");
+    let root = temporary.path();
+    write(root, "source.rs", "source");
+    for path in [
+        "source.rs/required.ignore",
+        "source.rs/missing/nested/required.ignore",
+    ] {
+        let rules = ScanRulesUpdate {
+            ignore_files: Some(vec![root.join(path)]),
+            ..ScanRulesUpdate::default()
+        }
+        .apply(&ScanRules::default())
+        .expect("scan rules");
+        let error = make_policy(root, &[], &rules)
+            .expect_err("an explicit ignore file must not be treated as absent directory rules");
+        assert!(error.message().contains("required.ignore"));
+    }
+}
+
+#[test]
 fn external_ignore_aliases_match_canonical_change_events() {
     let temporary = tempfile::tempdir().expect("fixture");
     let base = fs::canonicalize(temporary.path()).expect("canonical fixture");
     let root = base.join("workspace");
     fs::create_dir(&root).expect("workspace");
     write(&base, "rules.ignore", "blocked/\n");
+    let mut update = ScanRulesUpdate {
+        use_default_ignores: Some(false),
+        ignore_files: Some(vec![PathBuf::from("../rules.ignore")]),
+        ..ScanRulesUpdate::default()
+    };
+    update
+        .normalize_ignore_paths(&root)
+        .expect("normalize external ignore path");
     let policy = make_policy(
         &root,
         &[],
-        &ScanRules {
-            no_ignore: true,
-            ignore_files: vec![PathBuf::from("../rules.ignore")],
-            ..ScanRules::default()
-        },
+        &update.apply(&ScanRules::default()).expect("scan rules"),
     )
     .expect("policy");
     let rules = base.join("rules.ignore");
@@ -409,12 +660,16 @@ fn external_ignore_aliases_match_canonical_change_events() {
     assert!(!policy.can_descend(&root.join("blocked")).expect("excluded"));
     fs::remove_file(&rules).expect("delete rules");
     assert_eq!(
-        policy
-            .control_file_changed(&rules)
-            .expect("canonical event"),
+        policy.control_file_changed(&rules).expect("deleted rules"),
         Some(PathBuf::new())
     );
     assert!(policy.can_descend(&root.join("blocked")).expect("included"));
+    assert!(policy.control_paths().contains(&rules));
+    fs::write(&rules, "blocked/\n").expect("restore explicit ignore file");
+    policy
+        .control_file_changed(&rules)
+        .expect("restored rules event");
+    assert!(!policy.can_descend(&root.join("blocked")).expect("excluded"));
 }
 
 #[cfg(unix)]
@@ -433,10 +688,12 @@ fn ignore_symlinks_watch_alias_and_target_and_refresh_after_retargeting() {
     let policy = make_policy(
         &root,
         &[],
-        &ScanRules {
-            ignore_files: vec![alias.clone()],
-            ..ScanRules::default()
-        },
+        &ScanRulesUpdate {
+            ignore_files: Some(vec![alias.clone()]),
+            ..ScanRulesUpdate::default()
+        }
+        .apply(&ScanRules::default())
+        .expect("scan rules"),
     )
     .expect("policy");
     assert!(policy.control_paths().contains(&alias));
@@ -490,38 +747,65 @@ fn nested_ignore_symlinks_are_controls_without_following_source_symlinks() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
-async fn ripgrep_type_names_filter_scans_and_explicit_globs() {
+async fn format_filtered_file_symlinks_do_not_fail_directory_policy_checks() {
+    let temporary = tempfile::tempdir().expect("workspace");
+    let root = temporary.path().join("workspace");
+    let linked = temporary.path().join("linked");
+    write(&root, "source.rs", "source");
+    write(&linked, "child.rs", "linked source");
+    write(&linked, "ignored.rs", "ignored source");
+    write(&linked, ".gitignore", "ignored.rs\n");
+    write(&linked, "nested/.git/config", "nested repository");
+    write(&linked, "nested/hidden.rs", "nested source");
+    std::os::unix::fs::symlink("source.rs", root.join("alias.txt")).expect("excluded file alias");
+    std::os::unix::fs::symlink("source.rs", root.join("included.rs")).expect("included file alias");
+    std::os::unix::fs::symlink(&linked, root.join("linked.txt")).expect("directory alias");
+    let rules = ScanRulesUpdate {
+        included_formats: Some(vec![FileFormat::Rust]),
+        follow_symlinks: Some(true),
+        nested_git: Some(false),
+        ..ScanRulesUpdate::default()
+    }
+    .apply(&ScanRules::default())
+    .expect("scan rules");
+    assert_eq!(
+        scan(&root, &[], &rules, vec![]).await,
+        ["included.rs", "linked.txt/child.rs", "source.rs"].map(PathBuf::from)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fixed_index_and_its_symlink_aliases_are_never_source_files() {
     let temporary = tempfile::tempdir().expect("workspace");
     let root = temporary.path();
-    for path in ["src/a.h", "src/b.hpp", "src/c.cpp", "src/d.ts", "src/e.py"] {
-        write(root, path, "fixture");
+    write(root, "source.txt", "source");
+    write(root, ".zvec-grep/index/stored.txt", "index data");
+    write(root, ".zvec-grep/temp/new/staged.txt", "staged data");
+    std::os::unix::fs::symlink(root.join(".zvec-grep"), root.join("data-alias"))
+        .expect("index alias");
+    std::os::unix::fs::symlink(
+        root.join(".zvec-grep/index/stored.txt"),
+        root.join("file-alias.txt"),
+    )
+    .expect("index file alias");
+    let rules = ScanRulesUpdate {
+        include_hidden: Some(true),
+        follow_symlinks: Some(true),
+        use_default_ignores: Some(false),
+        ..ScanRulesUpdate::default()
     }
-    let rules = ScanRules {
-        file_types: vec!["h".into()],
-        ..ScanRules::default()
-    };
-    let result = scan(root, &[], &rules, vec![]).await;
-    assert!(result.contains(&PathBuf::from("src/a.h")));
-    assert!(result.contains(&PathBuf::from("src/b.hpp")));
-    assert!(!result.contains(&PathBuf::from("src/c.cpp")));
-    let excluded = ScanRules {
-        excluded_file_types: vec!["h".into()],
-        ..rules
-    };
-    assert!(
-        scan(root, &["src/**".into()], &excluded, vec![])
-            .await
-            .is_empty()
+    .apply(&ScanRules::default())
+    .expect("scan rules");
+    assert_eq!(
+        scan(root, &[], &rules, vec![]).await,
+        [PathBuf::from("source.txt")]
     );
     assert!(
-        ScanPolicy::new(
-            root,
-            &ScanRules {
-                file_types: vec!["not-a-real-type".into()],
-                ..ScanRules::default()
-            }
-        )
-        .is_err()
+        scan(root, &[], &rules, vec![root.join("data-alias")])
+            .await
+            .is_empty()
     );
 }

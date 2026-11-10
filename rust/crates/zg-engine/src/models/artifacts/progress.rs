@@ -52,7 +52,7 @@ impl ModelDownloadProgressReporter {
 
     pub(crate) fn start(&self) {
         self.emit(ModelProgress::Preparing {
-            model: self.inner.model.clone(),
+            model_ref: self.inner.model.clone(),
         });
     }
 
@@ -87,7 +87,7 @@ impl ModelDownloadProgressReporter {
             (downloaded_bytes, total_bytes)
         };
         self.emit(ModelProgress::Downloading {
-            model: self.inner.model.clone(),
+            model_ref: self.inner.model.clone(),
             downloaded_bytes: Some(downloaded_bytes),
             total_bytes,
         });
@@ -98,7 +98,7 @@ impl ModelDownloadProgressReporter {
             return false;
         }
         self.emit(ModelProgress::Warning {
-            model: self.inner.model.clone(),
+            model_ref: self.inner.model.clone(),
             message: message.into(),
         });
         true
@@ -106,7 +106,7 @@ impl ModelDownloadProgressReporter {
 
     pub(crate) fn finish(&self) {
         self.emit(ModelProgress::Ready {
-            model: self.inner.model.clone(),
+            model_ref: self.inner.model.clone(),
         });
     }
 
@@ -163,20 +163,20 @@ mod tests {
             *events.lock().expect("event lock"),
             [
                 ModelProgress::Preparing {
-                    model: "local/test".to_owned(),
+                    model_ref: "local/test".to_owned(),
                 },
                 ModelProgress::Downloading {
-                    model: "local/test".to_owned(),
+                    model_ref: "local/test".to_owned(),
                     downloaded_bytes: Some(4),
                     total_bytes: Some(16),
                 },
                 ModelProgress::Downloading {
-                    model: "local/test".to_owned(),
+                    model_ref: "local/test".to_owned(),
                     downloaded_bytes: Some(8),
                     total_bytes: Some(16),
                 },
                 ModelProgress::Ready {
-                    model: "local/test".to_owned(),
+                    model_ref: "local/test".to_owned(),
                 },
             ]
         );

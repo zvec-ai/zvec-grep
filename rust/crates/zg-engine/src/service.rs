@@ -9,11 +9,12 @@ use crate::{
         context::{ContextOptions, ContextResult},
         index::{IndexOptions, IndexResult},
         info::{InfoOptions, InfoResult},
+        relationships::{Direction, RelationshipOptions, RelationshipResult},
     },
     models::ModelRuntimeManager,
     pipelines::{
         direct_search::DirectSearchService, indexed_search,
-        indexing::service::WorkspaceIndexService,
+        indexing::service::WorkspaceIndexService, relationships,
     },
     storage::read_session::ReadSessionCache,
 };
@@ -69,11 +70,7 @@ impl EngineService {
         if options.rg {
             self.direct_search.context(options).await
         } else {
-            let cache = self
-                .read_sessions
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
+            let cache = self.read_session_cache();
             indexed_search::service::context(
                 &self.indexing,
                 &self.models,
@@ -83,6 +80,28 @@ impl EngineService {
             )
             .await
         }
+    }
+
+    pub(crate) async fn relationships(
+        &self,
+        direction: Direction,
+        options: RelationshipOptions,
+    ) -> Result<RelationshipResult, EngineError> {
+        self.ensure_open()?;
+        relationships::service::query(
+            &self.indexing,
+            &options,
+            self.read_session_cache().as_ref(),
+            direction,
+        )
+        .await
+    }
+
+    fn read_session_cache(&self) -> Option<ReadSessionCache> {
+        self.read_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Creates or refreshes the workspace index.
@@ -95,6 +114,22 @@ impl EngineService {
         self.indexing.index(&self.models, options).await
     }
 
+    pub(crate) async fn paths(
+        &self,
+        options: crate::api::paths::PathsOptions,
+    ) -> crate::EngineResult<crate::api::paths::PathsResult> {
+        self.ensure_open()?;
+        crate::pipelines::path_search::search(options).await
+    }
+
+    pub(crate) async fn lookup_path(
+        &self,
+        options: crate::api::paths::PathsOptions,
+    ) -> crate::EngineResult<crate::api::paths::PathLookupResult> {
+        self.ensure_open()?;
+        crate::pipelines::path_search::lookup(&self.direct_search, options).await
+    }
+
     /// Returns workspace index metadata and status.
     ///
     /// # Errors
@@ -103,6 +138,14 @@ impl EngineService {
     pub(crate) async fn info(&self, options: InfoOptions) -> Result<InfoResult, EngineError> {
         self.ensure_open()?;
         self.indexing.info(options).await
+    }
+
+    pub(crate) async fn index_setup(
+        &self,
+        options: crate::api::index::setup::IndexSetupOptions,
+    ) -> Result<crate::api::index::setup::IndexSetup, EngineError> {
+        self.ensure_open()?;
+        crate::pipelines::indexing::setup::index_setup(options).await
     }
 
     /// Drops the persisted workspace index.

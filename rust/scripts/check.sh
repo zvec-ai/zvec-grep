@@ -6,7 +6,7 @@ workspace_dir="$(cd -- "${script_dir}/.." && pwd)"
 cd "${workspace_dir}"
 
 cargo fmt --all --check
-for package in zg-engine zg-daemon-protocol zg-cli zg-host-native zg-testkit zg-transport-mcp zg-daemon zg; do
+for package in zg-engine zg-daemon-protocol zg-cli zg-host-native zg-testkit zg-transport-mcp zg-daemon zg zg-zvec-fp16; do
   cargo check --package "${package}" --all-targets
 done
 cargo clippy --workspace --all-targets -- -D warnings

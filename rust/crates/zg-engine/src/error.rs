@@ -1,6 +1,10 @@
 //! Engine-wide error contract.
 
-use std::{fmt, io, panic::Location};
+use std::{
+    fmt, io,
+    panic::Location,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +46,9 @@ pub struct ErrorReport {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub help: Option<String>,
+    /// Actual workspace associated with the failure, including across daemon transport.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root: Option<PathBuf>,
     pub origin: ErrorSite,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reported_at: Option<ErrorSite>,
@@ -58,6 +65,7 @@ impl ErrorReport {
             code: code.to_owned(),
             message: message.into(),
             help: None,
+            workspace_root: None,
             origin,
             reported_at: None,
         }
@@ -100,6 +108,7 @@ impl EngineError {
     pub const PERMISSION_DENIED: &str = "ZG.ENGINE.PERMISSION_DENIED";
     pub const RESOURCE_BUSY: &str = "ZG.ENGINE.RESOURCE_BUSY";
     pub const RESOURCE_CLOSED: &str = "ZG.ENGINE.RESOURCE_CLOSED";
+    pub const INDEX_INCOMPATIBLE: &str = "ZG.ENGINE.INDEX_INCOMPATIBLE";
     pub const STORAGE_FAILURE: &str = "ZG.ENGINE.STORAGE_FAILURE";
     pub const CANCELLED: &str = "ZG.ENGINE.CANCELLED";
     pub const DEADLINE_EXCEEDED: &str = "ZG.ENGINE.DEADLINE_EXCEEDED";
@@ -141,6 +150,19 @@ impl EngineError {
     #[must_use]
     pub fn resource_closed(message: impl Into<String>) -> Self {
         Self::new(Self::RESOURCE_CLOSED, message)
+    }
+
+    #[track_caller]
+    #[must_use]
+    pub fn index_incompatible(reason: impl Into<String>) -> Self {
+        Self::new(
+            Self::INDEX_INCOMPATIBLE,
+            "This index is incompatible with the current version of zg.",
+        )
+        .with_help(format!(
+            "{}; rebuild the index with `zg --index --rebuild`",
+            reason.into()
+        ))
     }
 
     #[track_caller]
@@ -222,6 +244,12 @@ impl EngineError {
     #[must_use]
     pub fn with_help(mut self, help: impl Into<String>) -> Self {
         self.report.help = Some(help.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_workspace_root(mut self, root: &Path) -> Self {
+        self.report.workspace_root = Some(root.to_path_buf());
         self
     }
 
@@ -321,9 +349,23 @@ mod tests {
         assert_eq!(value["message"], "workspace index does not exist");
         assert_eq!(value["help"], "Run `zg --index` to build it.");
         assert!(value.get("reported_at").is_none());
+        assert!(value.get("workspace_root").is_none());
 
         let decoded = serde_json::from_value(value).expect("error report should deserialize");
         assert_eq!(report, decoded);
+    }
+
+    #[test]
+    fn incompatible_index_report_preserves_the_workspace_across_transport() {
+        let root = std::env::temp_dir().join("project's workspace");
+        let report = EngineError::index_incompatible("unsupported manifest")
+            .with_workspace_root(&root)
+            .into_report();
+        let bytes = serde_json::to_vec(&report).expect("serialize error");
+        let decoded = serde_json::from_slice(&bytes).expect("deserialize error");
+        let restored = EngineError::from_report(decoded).into_report();
+        assert_eq!(restored.workspace_root.as_deref(), Some(root.as_path()));
+        assert_eq!(restored, report);
     }
 
     #[test]

@@ -99,7 +99,7 @@ async fn idle_retirement_closes_watcher_forgets_history_and_rejects_stale_callba
         .await
         .expect("watch");
     manager
-        .on_index_succeeded(old, submitted.job, 99, options, true)
+        .on_index_succeeded(old, submitted.job.id, 99, options, true)
         .await
         .expect("stale completion");
     assert_eq!(replacement.indexed_revision.load(Ordering::Acquire), 0);

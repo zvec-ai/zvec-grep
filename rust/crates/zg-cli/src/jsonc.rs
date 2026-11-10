@@ -382,6 +382,26 @@ pub(crate) fn remove_first_array_string(
     Ok((next, true))
 }
 
+pub(crate) fn replace_array_string(
+    source: &str,
+    path: &[&str],
+    index: usize,
+    value: &str,
+) -> Result<String, JsoncEditError> {
+    let root = Parser::parse(source)?;
+    let array = find_path(&root, path).ok_or(JsoncEditError::Invalid)?;
+    let Kind::Array(elements) = &array.kind else {
+        return Err(JsoncEditError::Invalid);
+    };
+    let element = elements.get(index).ok_or(JsoncEditError::Invalid)?;
+    Ok(splice(
+        source,
+        element.value.start,
+        element.value.end,
+        &serde_json::to_string(value)?,
+    ))
+}
+
 fn find_path<'a>(root: &'a Node, path: &[&str]) -> Option<&'a Node> {
     let mut current = root;
     for segment in path {

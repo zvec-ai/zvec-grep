@@ -2,6 +2,42 @@
 # reason and removal condition.
 
 [[difference]]
+id = "cli-index-drop-without-confirmation"
+owner = "CLI"
+reason = "Rust treats --index --drop as the explicit instruction to delete the workspace index, without a confirmation prompt or TTY check. The --yes option is no longer accepted for indexing; install and uninstall retain it. TypeScript keeps its existing deletion confirmation behavior. Validation: index_drop_runs_without_confirmation_and_rejects_the_removed_yes_flag and index_drop_runs_without_confirmation_through_the_daemon."
+removal_condition = "TypeScript adopts the same deletion contract or its compatibility surface is retired."
+
+[[difference]]
+id = "managed-rg-plain-text"
+owner = "CLI/engine/MCP"
+reason = "Rust CLI, API and MCP rg searches return plain source matches without code or Markdown extraction, structural containers or symbol headings. This removes parsing work from exhaustive text search. File grouping, source coordinates, matching/context markers, output bounds and Direct/Server semantics remain shared. Current-file path lookup retains structural entity grouping. Validation: direct_search, lexical_modes and rg_format regression tests."
+removal_condition = "TypeScript adopts plain rg results or its compatibility surface is retired."
+
+[[difference]]
+id = "cli-server-options-before-action"
+owner = "CLI"
+reason = "Rust already accepts server options before the action. TypeScript requires the action first. For --home and --token-file, Rust keeps an explicit value after the action ahead of one before the action, then uses the environment value or default. The server-option-precedence fixture records the TypeScript parse errors and the expected Rust values for those options."
+removal_condition = "TypeScript accepts the same server argument forms and precedence, or the TypeScript compatibility layer is retired."
+
+[[difference]]
+id = "cli-managed-rg-files"
+owner = "CLI/engine"
+reason = "Rust supports explicit metadata-only file discovery with zg --rg --files and the MCP rg tool, native input-path semantics, glob/type/ignore filters, plain paths and NUL delimiters. TypeScript retains its content-search contract. Direct, Server and Auto CLI modes all run discovery locally; MCP uses the same file-discovery engine and supports explicit trailing head bounds. MCP rejects -L/--follow for content searches and file listings, while CLI retains symlink following. CLI reports discovery exit codes; MCP retains partial paths with isError on traversal failures and returns successful empty text for no files. Recursive walks skip internal directories like managed content search. Validation: rg_files integration tests, CLI parsing tests, public_rg_tool_returns_plain_code_and_markdown_matches and modern_http_rg_files_matches_direct_listing_without_an_index."
+removal_condition = "TypeScript gains equivalent CLI and MCP file discovery or its compatibility surface is retired."
+
+[[difference]]
+id = "cli-positional-words-form-one-query"
+owner = "CLI"
+reason = "Rust adopts the positional-query behavior proposed in PR #134: nonempty positional arguments form one hybrid query, while repeated --hybrid/--fts/--vector options retain explicit groups. Ambiguous phrase arguments warn on stderr. Direct and Server modes share this parsing; managed --rg keeps pattern/path semantics."
+removal_condition = "The TypeScript CLI adopts the same positional-query and warning behavior, or the TypeScript compatibility layer is retired."
+
+[[difference]]
+id = "rust-pi-agent-integration"
+owner = "CLI/installer"
+reason = "Rust adds the pi install/uninstall target for native user-level MCP, stable ownership and active global context. The TypeScript installer does not support this target. Both transports retain shared daemon behavior; native client limitations require manual Remote Embedding authorization. Validation: pi_install and CLI help integration tests."
+removal_condition = "The TypeScript installer gains equivalent support or its compatibility surface is retired."
+
+[[difference]]
 id = "watcher-same-path-last-event-wins"
 owner = "watcher/scanner"
 reason = "修复 TypeScript ChangeSet 在 delete 后同路径 recreate 被旧删除事件吞掉的问题；同一路径按事件到达顺序以后到事件为准。"
@@ -14,10 +50,10 @@ reason = "Rust 使用路径组件判断包含关系，修复 TypeScript 对文�
 removal_condition = "TypeScript 兼容层退役，或 TypeScript 实现改用路径组件判断。"
 
 [[difference]]
-id = "mcp-unverified-current-index-freshness"
+id = "mcp-observed-file-change-freshness"
 owner = "MCP/workspace-runtime"
-reason = "现有 Rust provider 用 served_from_current_index 表达读取来源，没有确认整个索引的新鲜度。公共 MCP 将其保守映射为 possibly_stale，并单独输出 results 来源；不能仅凭返回片段未过期就宣称整个索引 fresh。已确认的 fresh/possibly_stale 与 Node.js 保持一致。"
-removal_condition = "MCP-02 的 runtime 对齐完成，provider 能提供独立、可靠的索引 freshness 时，移除旧来源字符串的兼容映射。"
+reason = "Rust 仅在已观察到文件变更、磁盘差异或返回源文件与索引快照不一致时报告 possibly_stale；读取当前索引、恢复检查和后台任务状态本身不作为证据。Node.js 仍把 watcherPending 和非后台检查的排队/运行任务视为 stale。验证：freshness_never_uses_provenance_as_a_status 及 workspace_runtime freshness 回归。"
+removal_condition = "Node.js 同样只依据文件变更证据报告 freshness 后移除此差异。"
 
 [[difference]]
 id = "engine-content-source-coordinates"
@@ -34,13 +70,13 @@ removal_condition = "The TypeScript CLI also skips option values during action a
 [[difference]]
 id = "mcp-indexed-scan-options-explicit-rejection"
 owner = "MCP/file-selection"
-reason = "Node.js contextFromOpenWorkspaceIndex 不向 searchPlan 传递 hidden/noIgnore/ignoreFiles/maxDepth/maxFileSizeBytes/follow；Rust 不复制接受后静默忽略的行为，而返回 invalid params 并指向 index 工具。查询不修改持久扫描配置。客户端应在 index 请求设置这些参数。验证：search_accepts_ordered_globs_and_engine_formats_and_rejects_scan_options、公用 handler 参数校验。"
+reason = "Node.js contextFromOpenWorkspaceIndex 不向 searchPlan 传递扫描选项；Rust 对搜索请求中的扫描选项返回 invalid params 并指向 index 工具。Rust index 使用 includeHidden/useDefaultIgnores/ignoreFiles/maxDepth/maxFileSizeBytes/follow；useDefaultIgnores 控制默认与自动发现的忽略规则，显式 ignoreFiles 不受该开关影响，缺失文件或当前平台无法作为绝对路径使用的外部路径会跳过并保留配置，其他读取及规则错误仍报错，maxFileSizeBytes 允许为零，表示排除所有文件。查询不修改持久扫描配置。验证：search_accepts_ordered_globs_and_engine_formats_and_rejects_scan_options、公用 handler 参数校验及 file_selection 测试。"
 removal_condition = "Node.js 为这些 indexed-search 参数提供实际语义后重新对照；不得仅为 schema 相同而忽略参数。"
 
 [[difference]]
 id = "mcp-typed-filter-and-index-extensions"
 owner = "MCP/engine"
-reason = "保留 typed glob、formats/excludedFormats/categories/excludedCategories、enum 符号、索引 name/nestedGit、maxDepth/maxFileSizeBytes 的 null 清除以及额外诊断。它们分别保留顺序混合大小写规则、引擎格式分类、枚举检索、工作区命名、嵌套仓库控制和配置清除能力；均为可选扩展，不代替 Node 的 fileTypes、follow、scan_diagnostics 和 status 字段。status 的 glob_rules 保留完整混合规则顺序。验证：MCP schema/mapping 测试、file_selection 和 job_scheduler 测试。"
+reason = "保留 typed glob、includedFormats/excludedFormats/categories/excludedCategories、enum 符号、索引 name/nestedGit、maxDepth/maxFileSizeBytes 的 null 清除以及额外诊断。它们分别保留顺序混合大小写规则、引擎格式分类、枚举检索、工作区命名、嵌套仓库控制和配置清除能力。Rust fileTypes/excludedFileTypes 仅用于查询；index 与普通索引查询通过 includedFormats/excludedFormats 使用同一文件名格式目录，持久扫描规则保存格式限制和 globs。follow、scan_diagnostics 和 status 保留，status 的 glob_rules 保留完整混合规则顺序。验证：MCP schema/mapping 测试、file_selection 和 job_scheduler 测试。"
 removal_condition = "Node.js 提供同等能力或这些扩展不再有客户端时，按字段评估统一；不能删除引擎能力来简化协议。"
 
 [[difference]]
@@ -64,5 +100,17 @@ removal_condition = "rmcp 提供 SessionManager 错误到 HTTP 状态的稳定�
 [[difference]]
 id = "mcp-workspace-status-storage-metadata"
 owner = "MCP/storage"
-reason = "Rust workspace_index.id 使用持久工作区名称而非 Node 的内部标识格式；调用方应将其视为不透明标识。Rust 尚未持久化 embedding 输入截断统计，因此不虚构 truncated_fragments=0，保留现有真实 status 统计。验证：status 序列化和引擎 info 回归；scan_diagnostics 的完整计数独立于有界样本。"
-removal_condition = "底层存储支持截断统计或统一工作区标识后补齐字段，并添加真实索引回归。"
+reason = "Rust 通过规范化源码 root 和工作区本地元数据定位索引，不使用工作区名称或全局注册表；status 提供 root 而非 Node 的内部标识。Rust 尚未持久化 embedding 输入截断统计，因此不虚构 truncated_fragments=0，保留现有真实 status 统计。验证：status 序列化和引擎 info 回归；scan_diagnostics 的完整计数独立于有界样本。"
+removal_condition = "Node.js 采用相同工作区定位方式或底层存储支持截断统计时重新评估，并添加真实索引回归。"
+
+[[difference]]
+id = "cli-path-lookup-local-admission"
+owner = "CLI/current-source"
+reason = "路径查找在 direct/server/auto 均先读取本地当前文件，显式 server 不跳过。文本覆盖被结果或候选上限截断时输出不完整警告，保持本地检索，不启动索引或补入无关向量近邻。验证：path_lookup_reports_file_and_text_truncation_without_indexing_in_all_modes、warm_index_path_lookups_return_current_text_or_no_matches_without_vector_neighbors。"
+removal_condition = "Node.js 采用相同本地查找边界，或产品明确要求不完整路径文本查找继续使用索引后重新评估。"
+
+[[difference]]
+id = "cli-path-lookup-native-selection"
+owner = "CLI/file-selection"
+reason = "文件命中同级排序保留跨运行确定的原生路径顺序，不依赖系统 locale；保留 Rust 已有混合 glob 输入顺序、引擎格式别名、非 Git 目录中的 ignore 处理，以及重复 ./、目录别名、Windows 扩展路径规范化。输出路径统一为正斜杠。结构预览使用引擎实际提供的元数据字段和明确内容坐标。"
+removal_condition = "两端统一文件选择、结构元数据和排序契约后更新对照；不得为复制旧行为而破坏 Rust 已有扫描规则。"

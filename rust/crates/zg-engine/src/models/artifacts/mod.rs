@@ -1,16 +1,26 @@
 //! Model artifact download, validation, locking, and publication.
 
 mod cache_lock;
+mod cache_paths;
 mod downloader;
 mod error;
+mod http_client;
 mod identity;
+mod inspection;
 mod manifest;
 mod progress;
 mod publish;
 mod source;
 mod spec;
+#[cfg(test)]
+mod test_support;
 
+pub(super) use cache_paths::{LocalModelBackend, default_model_cache};
 pub(super) use downloader::{ResolveArtifacts, resolve_model_artifacts};
+pub(super) use http_client::ArtifactHttpClient;
+#[cfg(test)]
+pub(super) use inspection::cached_source;
+pub(crate) use inspection::model_is_cached;
 #[cfg(test)]
 pub(super) use progress::ArtifactDownloadProgress;
 pub(super) use progress::ModelDownloadProgressReporter;

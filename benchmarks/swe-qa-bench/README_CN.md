@@ -76,7 +76,7 @@ Aggregate 汇总放在最前面，先于任务明细。每轮 workflow 独立筛
 
 开发者可参考 [fork 运行说明](docs/run-in-fork_CN.md) 配置 API Key、百炼 endpoint、Rust 候选 ref，并手动触发测试。
 
-[SWE-QA Bench 工作流](../../.github/workflows/swe-qa-bench.yml) 仅支持通过 `workflow_dispatch` 手动运行，push 和 PR 均不触发。核心维护成员限定为仓库角色明确为 `admin` 或 `maintain` 的用户。每个 job 的第一步都会实时检查 `github.actor` 和 `github.triggering_actor` 两人的当前角色，通过后才 checkout 和使用模型密钥；单独重跑某个 job 也会重新检查。权限不足或权限查询失败时停止执行。GitHub 的 write 用户可能仍能点击手动运行或重跑按钮，但工作流会拒绝未授权的 benchmark 执行。
+[SWE-QA Bench 工作流](../../.github/workflows/swe-qa-bench.yml) 支持通过 `workflow_dispatch` 手动运行，或在手动启动 [ZG Bench](../../.github/workflows/zg-bench.yml) 时明确设置 `run_e2e: true`。push、PR 自动检查和 `@zg-bench` 评论均不会开启 e2e。核心维护成员限定为仓库角色明确为 `admin` 或 `maintain` 的用户。每个 job 的第一步都会实时检查 `github.actor` 和 `github.triggering_actor` 两人的当前角色，通过后才 checkout 和使用模型密钥；单独重跑某个 job 也会重新检查。权限不足或权限查询失败时停止执行。GitHub 的 write 用户可能仍能点击手动运行或重跑按钮，但工作流会拒绝未授权的 benchmark 执行。
 
 独立的 [SWE-QA Offline 工作流](../../.github/workflows/swe-qa-offline.yml) 会在相关路径的 PR 和 `main` push 上运行 Python 与共享 Node 回归测试。它不读取模型密钥、不构建 candidate，也不运行 Harbor 或模型 trial。
 
@@ -129,7 +129,9 @@ OpenCode 配置同时声明模型支持 temperature，并为所有内置 agent�
 
 CI 还会使用锁定版本的 OpenCode 连接本地模拟服务，验证连续工具调用请求中的采样参数、开启 Qwen3.8 Max / GLM thinking、实际 HTTP 字段 `reasoning_effort = "high"`、网页工具限制，以及 Qwen 历史 `reasoning_content` 字段的回传，不需要模型凭证。
 
-每个任务在同一个 runner 上运行 Baseline 和 zvec-grep，对配对结果进行评审，并将 Harbor 运行证据和独立任务报告上传为 artifacts。全部任务完成后生成聚合报告；部分任务失败时，Summary 仍展示已完成任务的报告，不将不完整结果作为完整 benchmark 聚合。不同 GitHub run attempt 的报告保持隔离，自动 trial 重试发生在同一 attempt 内。
+每个任务在同一个 runner 上运行 Baseline 和 zvec-grep，对配对结果进行评审，并将 Harbor 运行证据和独立任务报告上传为 artifacts。全部任务完成后生成聚合报告；部分任务失败时，Summary 仍展示已完成任务的报告，不将不完整结果作为完整 benchmark 聚合。
+
+使用 **Re-run failed jobs** 时，可以复用同一个 GitHub run 之前 attempt 已成功的任务报告。每题的 `task-report-manifest.json` 将报告摘要绑定到候选 commit/仓库、harness 版本、协议哈希、任务范围、模型、endpoint 摘要和 trial 配置。聚合器先校验身份和报告证据，再按题目选择最新有效结果，离线重新计算聚合指标，不调用模型，也不跨 attempt 拼接单个 trial。聚合产物中的 `task-report-selection.json` 记录选中的 attempt 和被排除输入。缺少兼容 manifest 的旧报告和已过期 artifact 无法复用，需要重新完整启动或重跑缺失题目。自动 trial 重试仍发生在同一 attempt 内。
 
 ## 代码结构
 

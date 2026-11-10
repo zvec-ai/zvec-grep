@@ -6,31 +6,41 @@ use crate::domain::{
 use std::path::PathBuf;
 
 fn file(id: u32, path: impl Into<PathBuf>) -> FileRecord {
-    FileRecord {
-        id: FileId::new(id),
-        relative_path: crate::domain::SourcePath::new(path).expect("source path"),
-        snapshot: FileSnapshot {
-            size_bytes: 0,
+    FileRecord::new(
+        FileId::new(id),
+        crate::domain::SourcePath::new(path).expect("source path"),
+        FileSnapshot {
+            size_bytes: 100,
             modified_epoch_ms: None,
-            content_hash: None,
+            content_hash: Some("fixture-hash".into()),
         },
-        index_status: FileIndexStatus::NotIndexed,
-    }
+        FileIndexStatus::Indexed {
+            indexed_epoch_ms: 1,
+            entity_count: 1,
+        },
+    )
+    .expect("file record")
 }
 
 fn model() -> EmbeddingModelInfo {
-    EmbeddingModelInfo {
-        model: crate::domain::model::ModelInfo {
-            provider: "fixture".into(),
-            name: "fixture".into(),
-            endpoint: None,
-        },
-        dimension: 3,
-        metric: Metric::Cosine,
-        max_batch_size: 32,
-        max_input_tokens: None,
-        max_image_bytes: None,
-    }
+    EmbeddingModelInfo::new(
+        crate::domain::model::ModelInfo::new(
+            "fixture",
+            "fixture",
+            [
+                crate::domain::ContentKind::Text,
+                crate::domain::ContentKind::Code,
+                crate::domain::ContentKind::Image,
+            ],
+            32,
+        )
+        .expect("valid model metadata"),
+        3,
+        EmbeddingMetric::Cosine,
+        None,
+        None,
+    )
+    .expect("valid embedding metadata")
 }
 
 fn metadata_store(path: &Path) -> Fragments {
@@ -47,7 +57,7 @@ fn write_fixture(
     entities: &[Entity],
     entries: &[IndexedFragment],
 ) {
-    let directories = if file.relative_path.as_path().starts_with("src") {
+    let directories = if file.relative_path().as_path().starts_with("src") {
         vec![DirectoryId::new(u32::MAX)]
     } else {
         Vec::new()
@@ -61,13 +71,7 @@ fn metadata_fragments(
     file_id: u32,
     label: &str,
 ) -> (FileRecord, Vec<Entity>, Vec<IndexedFragment>) {
-    let mut source = file(file_id, "harvest.rs");
-    source.snapshot.size_bytes = 100;
-    source.snapshot.content_hash = Some("fixture-hash".into());
-    source.index_status = FileIndexStatus::Indexed {
-        indexed_epoch_ms: 1,
-        entity_count: 1,
-    };
+    let source = file(file_id, "harvest.rs");
     let mut text = "Harvest outline".to_owned();
     text.push_str(&" ".repeat(20 - text.len()));
     text.push_str("orchard fruit");
@@ -77,20 +81,25 @@ fn metadata_fragments(
     let content = Content::Text(text);
     let source_range =
         Range::Text(TextRange::from_coordinates(0, 100, 1, 1, 0, 100).expect("owner range"));
-    let id = EntityId::new(source.id, &content, source_range).expect("entity id");
-    let owner = Entity {
-        id: id.clone(),
-        file_id: source.id,
+    let id = EntityId::new(source.id(), &content, source_range).expect("entity id");
+    let owner = Entity::new(
+        id.clone(),
+        source.id(),
         source_range,
         content,
-        metadata: Some(EntityMetadata::Code(CodeMetadata {
+        Some(EntityMetadata::Code(CodeMetadata {
             symbol_type: Some(SymbolType::Function),
             symbol_name: Some("harvest 春'\\crop".into()),
             scope: Some("Garden".into()),
             signature: Some("pub async fn harvest() -> Crop".into()),
+            visibility: None,
+            language: None,
             documentation: Some("Produces the seasonal crop.".into()),
+            arity: None,
+            is_exported: false,
+            is_declaration: false,
         })),
-        fragments: vec![
+        vec![
             EntityFragment {
                 id: FragmentId::new(&id, 0),
                 range: Range::Byte(ByteRange::new(0, 15).expect("ordered byte offsets")),
@@ -100,9 +109,10 @@ fn metadata_fragments(
                 range: Range::Byte(ByteRange::new(20, 40).expect("ordered byte offsets")),
             },
         ],
-    };
+    )
+    .expect("valid entity");
     let entries = owner
-        .fragments
+        .fragments()
         .iter()
         .zip([
             (vec![0.0, 1.0, 0.0], "Harvest outline\n"),
@@ -111,7 +121,7 @@ fn metadata_fragments(
         .map(|(fragment, (vector, text))| IndexedFragment {
             fts_text: format!("harvest 春'\\crop\nGarden\npub async fn harvest() -> Crop\nProduces the seasonal crop.\n{text}"),
             model: "fixture/fixture".into(),
-            entity_id: owner.id.clone(),
+            entity_id: owner.id().clone(),
             fragment_id: fragment.id.clone(),
             vector,
         })
@@ -200,9 +210,17 @@ fn metadata_fields_are_indexed_and_allow_entities_without_filter_values() {
         })),
     ] {
         let (source, mut entities, entries) = metadata_fragments(0, "owner");
-        entities[0].metadata = metadata.clone();
+        entities[0] = Entity::new(
+            entities[0].id().clone(),
+            entities[0].file_id(),
+            entities[0].source_range(),
+            entities[0].content().clone(),
+            metadata,
+            entities[0].fragments().to_vec(),
+        )
+        .expect("valid entity with replacement metadata");
         store
-            .delete_file(source.id)
+            .delete_file(source.id())
             .expect("remove prior projection");
         write_fixture(&store, &source, &entities, &entries);
         store.flush().expect("flush fragments");
@@ -236,19 +254,33 @@ fn symbol_filters_distinguish_classes_enums_and_unclassified_entities() {
             .iter_mut()
             .zip([Some(SymbolType::Class), Some(SymbolType::Enum), None])
     {
-        let Some(EntityMetadata::Code(metadata)) = &mut owner.metadata else {
+        let Some(EntityMetadata::Code(mut metadata)) = owner.metadata().cloned() else {
             panic!("code metadata");
         };
         metadata.symbol_type = symbol_type;
+        *owner = Entity::new(
+            owner.id().clone(),
+            owner.file_id(),
+            owner.source_range(),
+            owner.content().clone(),
+            Some(EntityMetadata::Code(metadata)),
+            owner.fragments().to_vec(),
+        )
+        .expect("valid entity with replacement symbol type");
     }
-    source.index_status = FileIndexStatus::Indexed {
-        indexed_epoch_ms: 1,
-        entity_count: 3,
-    };
+    source
+        .set_index_status(FileIndexStatus::Indexed {
+            indexed_epoch_ms: 1,
+            entity_count: 3,
+        })
+        .expect("file status");
     write_fixture(&store, &source, &entities, &entries);
     store.flush().expect("flush storage");
 
-    for symbol_type in [SymbolType::Class, SymbolType::Enum] {
+    for (index, symbol_type) in [SymbolType::Class, SymbolType::Enum]
+        .into_iter()
+        .enumerate()
+    {
         let filter = StorageSearchFilter {
             symbol_types: Some(vec![symbol_type]),
             ..StorageSearchFilter::default()
@@ -263,15 +295,10 @@ fn symbol_filters_distinguish_classes_enums_and_unclassified_entities() {
         ] {
             let hits = hits.expect("filtered results");
             assert_eq!(hits.len(), count);
-            assert!(hits.iter().all(|hit| {
-                hit.entity_id
-                    == entities[match symbol_type {
-                        SymbolType::Class => 0,
-                        SymbolType::Enum => 1,
-                        _ => unreachable!(),
-                    }]
-                    .id
-            }));
+            assert!(
+                hits.iter()
+                    .all(|hit| &hit.entity_id == entities[index].id())
+            );
         }
     }
 
@@ -305,14 +332,14 @@ fn symbol_filters_distinguish_classes_enums_and_unclassified_entities() {
     ] {
         let all = all.expect("unfiltered results");
         assert!(
-            all.iter().any(|hit| hit.entity_id == entities[2].id),
+            all.iter().any(|hit| hit.entity_id == *entities[2].id()),
             "unclassified entity remains searchable"
         );
         assert!(
             filtered
                 .expect("classified results")
                 .iter()
-                .all(|hit| { hit.entity_id != entities[2].id })
+                .all(|hit| { hit.entity_id != *entities[2].id() })
         );
     }
 }
@@ -425,12 +452,14 @@ fn filename_like_negation_propagates_native_query_errors() {
 fn index_named_filter_sources(store: &Fragments, paths: &[&str]) {
     for (index, path) in paths.iter().enumerate() {
         let id = u32::try_from(index + 1).expect("file ID");
-        let (mut source, mut entities, entries) = metadata_fragments(id, &format!("owner-{id}"));
-        source.id = FileId::new(id);
-        source.relative_path = SourcePath::new(*path).expect("source path");
-        for entity in &mut entities {
-            entity.file_id = source.id;
-        }
+        let (source, entities, entries) = metadata_fragments(id, &format!("owner-{id}"));
+        let source = FileRecord::new(
+            source.id(),
+            SourcePath::new(*path).expect("source path"),
+            source.snapshot().clone(),
+            source.index_status().clone(),
+        )
+        .expect("file record");
         write_fixture(store, &source, &entities, &entries);
     }
 }
@@ -603,12 +632,16 @@ fn fragment_ownership_is_checked_across_model_collections() {
     super::super::zvec::initialize().expect("initialize zvec");
     let home = tempfile::tempdir().expect("storage");
     let mut other = model();
-    other.model.name = "other".into();
+    {
+        let mut metadata = serde_json::to_value(&other).expect("model metadata");
+        metadata["model"]["name"] = serde_json::json!("other");
+        other = serde_json::from_value(metadata).expect("valid model metadata");
+    }
     let store = Fragments::open(home.path(), &[model(), other], false).expect("two models");
     let (source, entities, entries) = metadata_fragments(u32::MAX, "owner");
     write_fixture(&store, &source, &entities, &entries);
     store
-        .validate_ownership(&entries, source.id)
+        .validate_ownership(&entries, source.id())
         .expect("same file");
     let mut foreign = entries.clone();
     for entry in &mut foreign {
@@ -617,17 +650,54 @@ fn fragment_ownership_is_checked_across_model_collections() {
     assert!(store.validate_ownership(&foreign, FileId::new(0)).is_err());
     let hits = store.search_fts("orchard", 10, None).expect("search");
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].file_id, source.id);
+    assert_eq!(hits[0].file_id, source.id());
     assert_eq!(hits[0].document_id, entries[1].fragment_id.as_str());
-    assert_eq!(hits[0].entity_id, entities[0].id);
-    store.delete_file(source.id).expect("delete projections");
-    store.delete_file(source.id).expect("idempotent delete");
+    assert_eq!(hits[0].entity_id, *entities[0].id());
+    store.delete_file(source.id()).expect("delete projections");
+    store.delete_file(source.id()).expect("idempotent delete");
     assert!(
         store
             .search_fts("orchard", 10, None)
             .expect("search deleted")
             .is_empty()
     );
+}
+
+#[test]
+fn embeddings_round_trip_as_fp16_and_remain_searchable() {
+    let home = tempfile::tempdir().expect("storage");
+    let store = metadata_store(home.path());
+    let (source, entities, entries) = metadata_fragments(1, "fp16");
+    let mut entries = entries;
+    entries[1].vector = vec![0.1, -0.2, 1.25];
+    write_fixture(&store, &source, &entities, &entries);
+    store.flush().expect("flush storage");
+
+    let collection = store
+        .collection("fixture/fixture")
+        .expect("model collection");
+    let stored = collection
+        .fetch(&[entries[1].fragment_id.as_str()])
+        .expect("fetch fragment");
+    assert_eq!(stored.len(), 1);
+    let decoded = zg_zvec_fp16::decode_embedding(&stored[0], "embedding")
+        .expect("decode embedding")
+        .expect("stored vector");
+    assert_eq!(decoded.len(), entries[1].vector.len());
+    for (decoded, original) in decoded.iter().zip(&entries[1].vector) {
+        assert_eq!(
+            decoded.to_bits(),
+            half::f16::from_f32(*original).to_f32().to_bits()
+        );
+    }
+    assert_ne!(decoded[0].to_bits(), entries[1].vector[0].to_bits());
+
+    let hits = store
+        .search_vector("fixture/fixture", &entries[1].vector, 1, None)
+        .expect("vector search");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].document_id, entries[1].fragment_id.as_str());
+    assert_eq!(hits[0].path, StorageSearchPath::Vector);
 }
 
 #[test]
@@ -663,4 +733,82 @@ fn query_limits_and_nul_text_preserve_native_boundaries() {
     assert!(top_k(MAX_TOP_K + 1).is_err());
     assert_eq!(index_text("before\0after"), "before after");
     assert!(matches!(index_text("plain"), Cow::Borrowed(_)));
+}
+
+#[test]
+fn exact_symbol_lookup_collects_all_models_and_deduplicates_large_fragment_sets() {
+    super::super::zvec::initialize().expect("initialize zvec");
+    let root = tempfile::tempdir().expect("storage");
+    let first = model();
+    let second = EmbeddingModelInfo::new(
+        crate::domain::model::ModelInfo::new(
+            first.model().provider(),
+            "second",
+            first.model().content_kinds().iter().copied(),
+            first.model().max_batch_size(),
+        )
+        .expect("second model metadata"),
+        first.dimension(),
+        first.metric(),
+        first.max_input_tokens(),
+        first.max_image_bytes(),
+    )
+    .expect("second model");
+    let store = Fragments::open(root.path(), &[first.clone(), second.clone()], false)
+        .expect("model tables");
+    let mut entities = Vec::new();
+    let mut entries = Vec::new();
+    for i in 0..125 {
+        let (_, mut owners, mut projections) = metadata_fragments(1, &format!("body-{i}"));
+        let mut owner = owners.remove(0);
+        if i == 0 {
+            // One entity alone fills a query batch; splitting must skip its
+            // remaining fragments without hiding other matching entities.
+            let fragments = (0..1100)
+                .map(|ordinal| EntityFragment {
+                    id: FragmentId::new(owner.id(), ordinal),
+                    range: Range::Full,
+                })
+                .collect();
+            owner = Entity::new(
+                owner.id().clone(),
+                owner.file_id(),
+                owner.source_range(),
+                owner.content().clone(),
+                owner.metadata().cloned(),
+                fragments,
+            )
+            .expect("fragmented entity");
+            projections = owner
+                .fragments()
+                .iter()
+                .map(|fragment| IndexedFragment {
+                    entity_id: owner.id().clone(),
+                    fragment_id: fragment.id.clone(),
+                    model: first.model().reference(),
+                    vector: vec![1.0, 0.0, 0.0],
+                    fts_text: "harvest".into(),
+                })
+                .collect();
+        }
+        if i == 124 {
+            for projection in &mut projections {
+                projection.model = second.model().reference();
+            }
+        }
+        entities.push(owner);
+        entries.extend(projections);
+    }
+    write_fixture(&store, &file(1, "harvest.rs"), &entities, &entries);
+    let expected: BTreeSet<_> = entities.iter().map(|entity| entity.id().clone()).collect();
+    let found = store
+        .find_symbol_entity_ids("harvest 春'\\crop", None)
+        .expect("all exact definitions");
+    assert_eq!(found, expected.into_iter().collect::<Vec<_>>());
+    assert!(
+        store
+            .find_symbol_entity_ids("Harvest 春'\\crop", None)
+            .expect("case-sensitive lookup")
+            .is_empty()
+    );
 }

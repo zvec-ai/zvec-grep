@@ -132,16 +132,4 @@ impl HostError {
             origin: HostErrorSite::capture(),
         }
     }
-
-    #[must_use]
-    pub const fn origin(&self) -> HostErrorSite {
-        match self {
-            Self::InvalidArgument { origin, .. }
-            | Self::StorageFailure { origin, .. }
-            | Self::Cancelled { origin, .. }
-            | Self::DeadlineExceeded { origin, .. }
-            | Self::ResourceClosed { origin, .. }
-            | Self::Internal { origin, .. } => *origin,
-        }
-    }
 }

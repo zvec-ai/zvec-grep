@@ -2,6 +2,28 @@ name: SWE-QA Bench
 run-name: SWE-QA Bench / Rust ${{ inputs.candidate_ref || 'main' }} / ${{ inputs.model || 'glm-5.2' }} / ${{ inputs.embedding || 'local' }} embedding / ${{ inputs.scope || 'repro-3' }}
 
 on:
+  workflow_call:
+    inputs:
+      candidate_ref:
+        required: true
+        type: string
+      candidate_repository:
+        required: true
+        type: string
+      scope:
+        default: all-full
+        type: string
+      model:
+        default: glm-5.2
+        type: string
+      embedding:
+        default: local
+        type: string
+    secrets:
+      GLM_API_KEY:
+        required: true
+      QWEN_EMBEDDING_API_KEY:
+        required: false
   workflow_dispatch:
     inputs:
       candidate_ref:
@@ -61,19 +83,20 @@ jobs:
     steps:
       # Repeat authorization in every job so individual job re-runs cannot bypass it.
       - &authorize-benchmark
-        name: Authorize manual benchmark run
+        name: Authorize benchmark run
         id: authorize
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           BENCH_REPOSITORY: ${{ github.repository }}
           BENCH_EVENT_NAME: ${{ github.event_name }}
+          BENCH_IS_PR_COMMENT: ${{ github.event_name == 'issue_comment' && github.event.action == 'created' && github.event.issue.pull_request != null }}
           BENCH_ACTOR: ${{ github.actor }}
           BENCH_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
         run: |
           set -euo pipefail
-          if [[ "$BENCH_EVENT_NAME" != "workflow_dispatch" ]]; then
-            echo "::error::SWE-QA Bench only accepts manual workflow_dispatch runs."
+          if [[ "$BENCH_EVENT_NAME" != "workflow_dispatch" && "$BENCH_IS_PR_COMMENT" != "true" ]]; then
+            echo "::error::SWE-QA Bench requires workflow_dispatch or a PR comment caller."
             exit 1
           fi
           if [[ -z "$BENCH_ACTOR" || -z "$BENCH_TRIGGERING_ACTOR" ]]; then
@@ -198,7 +221,7 @@ jobs:
         id: rust-candidate
         uses: ./.github/actions/rust-candidate-package
         with:
-          candidate_repository: ${{ github.repository }}
+          candidate_repository: ${{ inputs.candidate_repository || github.repository }}
           candidate_ref: ${{ inputs.candidate_ref }}
           cache_namespace: swe-qa-rust
       - uses: actions/upload-artifact@v7
@@ -309,6 +332,20 @@ jobs:
             --model "$SWE_QA_MODEL" \
             --output-dir "$RUNNER_TEMP/swe-qa-task-report/${TASK_NAME}" \
             --expected "$TASK_NAME"
+      - name: Bind the task report to this candidate and evaluation configuration
+        env: &task-report-identity
+          BENCH_CANDIDATE_COMMIT: ${{ needs.package-candidate.outputs.candidate-commit }}
+          BENCH_CANDIDATE_REPOSITORY: ${{ inputs.candidate_repository || github.repository }}
+          BENCH_HARNESS_COMMIT: ${{ github.workflow_sha }}
+          BENCH_PROTOCOL_HASH: ${{ hashFiles('.github/workflows/swe-qa-bench.yml', 'benchmarks/swe-qa-bench/ci-config.json', 'benchmarks/swe-qa-bench/pyproject.toml', 'benchmarks/swe-qa-bench/uv.lock', 'benchmarks/swe-qa-bench/zg_bench/**/*.py', 'benchmarks/swe-qa-bench/zg_bench/swe_qa/data/*', 'benchmarks/swe-qa-bench/suites/*', 'benchmarks/swe-qa-bench/datasets/**') }}
+          BENCH_SCOPE: ${{ inputs.scope }}
+          BENCH_EMBEDDING_RUNTIME: ${{ inputs.embedding }}
+          BENCH_EMBEDDING_MODEL: ${{ needs.validate.outputs.embedding-model }}
+          BENCH_EMBEDDING_ENDPOINT: ${{ inputs.embedding == 'remote' && vars.QWEN_EMBEDDING_ENDPOINT || '' }}
+          EXPECTED_TASKS_JSON: ${{ needs.validate.outputs.task_ids_json }}
+        run: >-
+          uv run --project benchmarks/swe-qa-bench python -m zg_bench.ci.task_reports stamp
+          --report-dir "$RUNNER_TEMP/swe-qa-task-report/${{ matrix.task }}"
       - name: Summarize trial retries
         if: always() && steps.authorize.outcome == 'success'
         env:
@@ -401,39 +438,13 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check uv==0.9.17
           uv sync --project benchmarks/swe-qa-bench --frozen
-      - name: Download this attempt's independent task reports
+      - name: Download independent task reports from all attempts of this run
         uses: actions/download-artifact@v8
         with:
-          pattern: swe-qa-task-report-*-${{ github.run_id }}-${{ github.run_attempt }}
+          pattern: swe-qa-task-report-*-${{ github.run_id }}-*
           path: ${{ runner.temp }}/task-reports
-      - name: Validate completed report scope
-        env:
-          EXPECTED_COUNT: ${{ needs.validate.outputs.task-count }}
-        run: |
-          set -euo pipefail
-          expected_count="$EXPECTED_COUNT"
-          if [[ ! "$expected_count" =~ ^[1-9][0-9]*$ ]]; then
-            echo "::error::Invalid expected report count: $expected_count"
-            exit 1
-          fi
-
-          report_root="$RUNNER_TEMP/task-reports"
-          mapfile -d '' -t json_reports < <(
-            find "$report_root" -type f -name report.json -print0 | LC_ALL=C sort -z
-          )
-          actual_count="${#json_reports[@]}"
-          if (( actual_count == 0 )); then
-            echo "::error::No independent task reports were downloaded for this attempt."
-            exit 1
-          fi
-
-          if [[ "$actual_count" == "$expected_count" ]]; then
-            exit 0
-          fi
-          echo "::warning::Aggregating ${actual_count} of ${expected_count} task reports; failed tasks will be listed but excluded from all Aggregate metrics."
       - name: Combine reports without re-judging
-        env:
-          EXPECTED_TASKS_JSON: ${{ needs.validate.outputs.task_ids_json }}
+        env: *task-report-identity
         run: |
           set -euo pipefail
           mapfile -t expected_tasks < <(
@@ -443,11 +454,17 @@ jobs:
             echo "::error::Locked selection produced no expected task IDs."
             exit 1
           fi
-          uv run --project benchmarks/swe-qa-bench python -m zg_bench.swe_qa aggregate \
+          uv run --project benchmarks/swe-qa-bench python -m zg_bench.ci.task_reports select \
             --reports-root "$RUNNER_TEMP/task-reports" \
+            --output-dir "$RUNNER_TEMP/selected-task-reports" \
+            --expected "${expected_tasks[@]}"
+          uv run --project benchmarks/swe-qa-bench python -m zg_bench.swe_qa aggregate \
+            --reports-root "$RUNNER_TEMP/selected-task-reports" \
             --output-dir "$RUNNER_TEMP/swe-qa-aggregate-report" \
             --allow-missing \
             --expected "${expected_tasks[@]}"
+          cp "$RUNNER_TEMP/selected-task-reports/selection.json" \
+            "$RUNNER_TEMP/swe-qa-aggregate-report/task-report-selection.json"
       - name: Keep the Rust package manifest with the aggregate report
         uses: actions/download-artifact@v8
         with:

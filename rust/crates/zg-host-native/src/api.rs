@@ -133,10 +133,6 @@ impl fmt::Debug for TaskControl {
     }
 }
 
-pub trait ClockPort: Send + Sync {
-    fn now_epoch_ms(&self) -> u64;
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct ScanRequest {
     pub roots: Vec<RootSpec>,

@@ -3,16 +3,17 @@ use super::*;
 use crate::domain::FileSnapshot;
 
 fn file(id: u32, path: impl Into<PathBuf>) -> FileRecord {
-    FileRecord {
-        id: FileId::new(id),
-        relative_path: crate::domain::SourcePath::new(path).expect("source path"),
-        snapshot: FileSnapshot {
+    FileRecord::new(
+        FileId::new(id),
+        crate::domain::SourcePath::new(path).expect("source path"),
+        FileSnapshot {
             size_bytes: 0,
             modified_epoch_ms: None,
             content_hash: None,
         },
-        index_status: FileIndexStatus::NotIndexed,
-    }
+        FileIndexStatus::NotIndexed,
+    )
+    .expect("file record")
 }
 
 #[test]
@@ -21,7 +22,12 @@ fn source_file_projection_preserves_paths_and_directory_membership_for_all_statu
     assert!(!files_schema().expect("file schema").has_field("formats"));
     let directories = [DirectoryId::new(0), DirectoryId::new(1)];
     let mut source = file(12, Path::new("src").join("nested").join("name.rs"));
-    source.snapshot.content_hash = Some("fixture-hash".into());
+    source
+        .set_snapshot(FileSnapshot {
+            content_hash: Some("fixture-hash".into()),
+            ..source.snapshot().clone()
+        })
+        .expect("file snapshot");
     for status in [
         FileIndexStatus::NotIndexed,
         FileIndexStatus::Deleting,
@@ -33,7 +39,7 @@ fn source_file_projection_preserves_paths_and_directory_membership_for_all_statu
             entity_count: 0,
         },
     ] {
-        source.index_status = status;
+        source.set_index_status(status).expect("file status");
         let doc = encode_file_doc(&source, &directories).expect("encode source");
         assert_eq!(doc.get_pk(), Some("f12"));
         assert!(!doc.has_field("formats"));
@@ -72,17 +78,23 @@ fn query_projections_read_all_paths_and_optional_times_without_decoding_payloads
             u32::try_from(index).expect("ID"),
             format!("file-{index}.rs"),
         );
-        source.snapshot.modified_epoch_ms = match index % 3 {
+        let modified_epoch_ms = match index % 3 {
             0 => None,
             1 => Some(0),
             _ => Some(u64::try_from(index).expect("modification time")),
         };
+        source
+            .set_snapshot(FileSnapshot {
+                modified_epoch_ms,
+                ..source.snapshot().clone()
+            })
+            .expect("file snapshot");
         let mut doc = encode_file_doc(&source, &[]).expect("encode source");
         doc.add_string("payload", "invalid full file payload")
             .expect("replace payload");
         docs.push(doc);
         expected_attributes.push(StoredFileAttributes::from(&source));
-        expected.push((source.id, source.relative_path.into_path_buf()));
+        expected.push((source.id(), source.relative_path().to_path_buf()));
     }
     write_docs(&store.collection, &docs, "write source").expect("write projections");
     let mut actual = store.list_paths().expect("read lightweight paths");
@@ -118,7 +130,7 @@ fn non_unicode_file_projection_keeps_native_path_without_a_lossy_query_value() {
     );
     assert_eq!(
         decode_file_path_doc(&doc).expect("native path"),
-        (source.id, path)
+        (source.id(), path)
     );
     assert_eq!(decode_file_doc(&doc).expect("full source"), source);
 }
@@ -161,8 +173,8 @@ fn full_range_ids_support_native_queries_membership_and_deletion() {
     collection.optimize().expect("optimize full-range IDs");
     for source in &sources {
         for filter in [
-            format!("file_id = {}", source.id),
-            format!("file_id IN ({})", source.id),
+            format!("file_id = {}", source.id()),
+            format!("file_id IN ({})", source.id()),
         ] {
             let mut query = SearchQuery::scalar(10).expect("ID query");
             query.set_filter(&filter).expect("ID filter");
@@ -182,7 +194,7 @@ fn full_range_ids_support_native_queries_membership_and_deletion() {
         .map(|doc| {
             decode_file_doc(doc)
                 .expect("decode remaining source")
-                .id
+                .id()
                 .get()
         })
         .collect();
@@ -209,18 +221,27 @@ fn deleting_preserves_file_projections_until_record_removal() {
         .resolve_ids(std::slice::from_ref(&path))
         .expect("identity")[0];
     let mut source = file(id.get(), path.clone());
-    source.snapshot.modified_epoch_ms = Some(123);
-    source.snapshot.content_hash = Some("content-hash".into());
-    source.index_status = FileIndexStatus::Indexed {
-        indexed_epoch_ms: 456,
-        entity_count: 2,
-    };
+    source
+        .set_snapshot(FileSnapshot {
+            modified_epoch_ms: Some(123),
+            content_hash: Some("content-hash".into()),
+            ..source.snapshot().clone()
+        })
+        .expect("file snapshot");
+    source
+        .set_index_status(FileIndexStatus::Indexed {
+            indexed_epoch_ms: 456,
+            entity_count: 2,
+        })
+        .expect("file status");
     files
         .put(&source, &[DirectoryId::new(3), DirectoryId::new(8)])
         .expect("source");
     files.mark_deleting(id).expect("mark deleting");
     let mut deleting = source.clone();
-    deleting.index_status = FileIndexStatus::Deleting;
+    deleting
+        .set_index_status(FileIndexStatus::Deleting)
+        .expect("file status");
     assert_eq!(files.fetch(&[id]).expect("file").get(&id), Some(&deleting));
     let doc = fetch_map(&files.collection, &[file_key(id)])
         .expect("document")

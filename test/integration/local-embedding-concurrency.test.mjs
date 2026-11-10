@@ -23,7 +23,7 @@ test("Direct automatic indexing applies the index environment to Potion batches"
   const previousCwd = process.cwd();
   const previousHome = process.env.ZVEC_GREP_HOME;
   const previousEmbedding = process.env.ZVEC_GREP_EMBEDDING;
-  const previousConcurrency = process.env.ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY;
+  const previousConcurrency = process.env.ZVEC_GREP_EMBEDDING_CONCURRENCY;
   const service = await createZvecGrep({ root });
   const calls = [];
   const progress = [];
@@ -62,7 +62,7 @@ test("Direct automatic indexing applies the index environment to Potion batches"
   t.mock.method(console, "log", () => {});
   try {
     process.env.ZVEC_GREP_HOME = join(directory, "home");
-    process.env.ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY = "12";
+    process.env.ZVEC_GREP_EMBEDDING_CONCURRENCY = "12";
     delete process.env.ZVEC_GREP_EMBEDDING;
     await writeFile(join(root, "answer.ts"), "export const answer = 42;\n");
     process.chdir(root);
@@ -78,20 +78,19 @@ test("Direct automatic indexing applies the index environment to Potion batches"
     if (previousEmbedding === undefined) delete process.env.ZVEC_GREP_EMBEDDING;
     else process.env.ZVEC_GREP_EMBEDDING = previousEmbedding;
     if (previousConcurrency === undefined)
-      delete process.env.ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY;
-    else
-      process.env.ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY = previousConcurrency;
+      delete process.env.ZVEC_GREP_EMBEDDING_CONCURRENCY;
+    else process.env.ZVEC_GREP_EMBEDDING_CONCURRENCY = previousConcurrency;
     await service.close();
   }
 });
 
 test("index concurrency controls indexing and refresh without changing query embeddings", async (t) => {
-  const previous = process.env.ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY;
-  process.env.ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY = "8";
+  const previous = process.env.ZVEC_GREP_EMBEDDING_CONCURRENCY;
+  process.env.ZVEC_GREP_EMBEDDING_CONCURRENCY = "8";
   t.after(() => {
     if (previous === undefined)
-      delete process.env.ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY;
-    else process.env.ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY = previous;
+      delete process.env.ZVEC_GREP_EMBEDDING_CONCURRENCY;
+    else process.env.ZVEC_GREP_EMBEDDING_CONCURRENCY = previous;
   });
   // Keep the real CLI, factory, model configuration, scheduler and index. Only
   // replace native inference so the test needs neither a GPU nor a model download.
@@ -122,7 +121,7 @@ test("index concurrency controls indexing and refresh without changing query emb
     "local/all-minilm-l6-v2",
     "--device",
     "cpu",
-    "--index-embedding-concurrency",
+    "--embedding-concurrency",
     "2",
   ]);
   const service = await createZvecGrep(

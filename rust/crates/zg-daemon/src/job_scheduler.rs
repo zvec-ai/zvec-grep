@@ -115,7 +115,7 @@ pub(crate) struct IndexJobScheduler {
 
 struct SchedulerInner {
     executor: Arc<dyn IndexExecutor>,
-    permits: Arc<Semaphore>,
+    permits: Semaphore,
     state: Mutex<SchedulerState>,
     outstanding: AtomicUsize,
     closed: AtomicBool,
@@ -164,7 +164,7 @@ impl IndexJobScheduler {
         Self {
             inner: Arc::new(SchedulerInner {
                 executor,
-                permits: Arc::new(Semaphore::new(concurrency)),
+                permits: Semaphore::new(concurrency),
                 state: Mutex::new(SchedulerState::default()),
                 outstanding: AtomicUsize::new(0),
                 closed: AtomicBool::new(false),
@@ -183,10 +183,6 @@ impl IndexJobScheduler {
         mut options: IndexOptions,
         reason: JobReason,
     ) -> Result<SubmitIndexJobResult, SchedulerError> {
-        // Naming is an explicit caller mutation, never a background refresh setting.
-        if reason == JobReason::Watch {
-            options.name = None;
-        }
         // Changing the saved corpus can affect paths outside a narrow watcher batch.
         if has_selection_update(&options) {
             options.changes.clear();
@@ -202,11 +198,18 @@ impl IndexJobScheduler {
             // Once another caller relies on a job, request cancellation must not stop it.
             active.shared.store(true, Ordering::Release);
             let active_snapshot = lock(&active.snapshot).clone();
+            // A graph switch is a saved configuration change: a job that already
+            // started under the other value cannot apply it, so the request needs
+            // its own job instead of being absorbed by the active one.
+            let graph_setting_request = {
+                let current = lock(&active.options);
+                changes_graph_setting(current.as_ref(), &options)
+            };
             let needs_followup = reason == JobReason::Watch
                 || active_snapshot.reason == JobReason::Watch
                 || options.rebuild
-                || options.name.is_some()
-                || has_selection_update(&options);
+                || has_selection_update(&options)
+                || graph_setting_request;
             if needs_followup && active_snapshot.state == JobState::Queued {
                 let queued_full_manual = active_snapshot.reason == JobReason::Manual
                     && reason == JobReason::Watch
@@ -489,7 +492,7 @@ fn spawn_job(inner: Arc<SchedulerInner>, job: Arc<ScheduledJob>) {
                 finish_job(&inner, &job);
                 return;
             }
-            permit = Arc::clone(&inner.permits).acquire_owned() => permit,
+            permit = inner.permits.acquire() => permit,
         };
         let Ok(_permit) = permit else {
             finish_cancelled(&job, "the daemon job scheduler closed");
@@ -510,6 +513,8 @@ fn spawn_job(inner: Arc<SchedulerInner>, job: Arc<ScheduledJob>) {
                 .take()
                 .expect("a queued daemon job must retain its index options")
         };
+        // Decide after coalescing so explicit manual jobs retain creation permission.
+        options.require_existing_index = lock(&job.snapshot).reason == JobReason::Watch;
         options.signal = Some(job.cancellation.clone());
         let weak_job = Arc::downgrade(&job);
         options.on_progress = Some(
@@ -593,6 +598,17 @@ fn merge_options(current: &mut Option<IndexOptions>, mut incoming: IndexOptions)
     }
     current.reset_paths |= incoming.reset_paths;
     current.rebuild |= incoming.rebuild;
+    // A saved configuration switch follows the same rule as scan updates: an
+    // explicit value wins, including false, and omission keeps the earlier one.
+    merge_update(&mut current.graph_indexing, incoming.graph_indexing.take());
+    merge_update(
+        &mut current.scan.included_formats,
+        incoming.scan.included_formats.take(),
+    );
+    merge_update(
+        &mut current.scan.excluded_formats,
+        incoming.scan.excluded_formats.take(),
+    );
     if incoming.scan.globs.is_some() {
         current.scan.sensitive_globs = None;
         current.scan.insensitive_globs = None;
@@ -607,15 +623,13 @@ fn merge_options(current: &mut Option<IndexOptions>, mut incoming: IndexOptions)
         incoming.scan.insensitive_globs.take(),
     );
     merge_update(
-        &mut current.scan.file_types,
-        incoming.scan.file_types.take(),
+        &mut current.scan.include_hidden,
+        incoming.scan.include_hidden.take(),
     );
     merge_update(
-        &mut current.scan.excluded_file_types,
-        incoming.scan.excluded_file_types.take(),
+        &mut current.scan.use_default_ignores,
+        incoming.scan.use_default_ignores.take(),
     );
-    merge_update(&mut current.scan.hidden, incoming.scan.hidden.take());
-    merge_update(&mut current.scan.no_ignore, incoming.scan.no_ignore.take());
     merge_update(
         &mut current.scan.follow_symlinks,
         incoming.scan.follow_symlinks.take(),
@@ -634,12 +648,6 @@ fn merge_options(current: &mut Option<IndexOptions>, mut incoming: IndexOptions)
         incoming.scan.max_file_size_bytes.take(),
     );
     merge_runtime_options(current, &mut incoming);
-    // An omitted name leaves a pending explicit rename intact.
-    merge_update(&mut current.name, incoming.name.take());
-    if incoming.changes.is_empty() {
-        current.changes.clear();
-        return;
-    }
     if full_scan {
         current.changes.clear();
         return;
@@ -684,17 +692,49 @@ fn merge_runtime_options(current: &mut IndexOptions, incoming: &mut IndexOptions
         current.allow_remote = incoming.allow_remote;
         current.authorized_remote.clear();
         current.api_key = None;
+        current.runtime_api_key = None;
         current.endpoint = None;
+    }
+    // A later saved setting replaces an earlier operation's temporary override.
+    // Incoming temporary values are merged below and still win within that request.
+    if incoming.api_key.is_some() {
+        current.runtime_api_key = None;
+    }
+    if incoming.device.is_some()
+        || (current.device.is_none()
+            && incoming
+                .embedding
+                .as_ref()
+                .is_some_and(|model| model.device != zg_engine::api::index::options::Device::Auto))
+    {
+        current.runtime_device = None;
+    }
+    if incoming.model_cache.is_some()
+        || (current.model_cache.is_none()
+            && incoming
+                .embedding
+                .as_ref()
+                .is_some_and(|model| model.cache_dir.is_some()))
+    {
+        current.runtime_model_cache = None;
     }
     // Runtime/model settings are explicit updates too. A filter-only request
     // must not erase the model or credentials of an already queued manual job.
     merge_update(&mut current.root, incoming.root.take());
     merge_update(&mut current.embedding, incoming.embedding.take());
     merge_update(&mut current.api_key, incoming.api_key.take());
+    merge_update(
+        &mut current.runtime_api_key,
+        incoming.runtime_api_key.take(),
+    );
     merge_update(&mut current.endpoint, incoming.endpoint.take());
     merge_update(&mut current.device, incoming.device.take());
     merge_update(&mut current.runtime_device, incoming.runtime_device.take());
     merge_update(&mut current.model_cache, incoming.model_cache.take());
+    merge_update(
+        &mut current.runtime_model_cache,
+        incoming.runtime_model_cache.take(),
+    );
     merge_update(
         &mut current.lock_timeout_ms,
         incoming.lock_timeout_ms.take(),
@@ -712,6 +752,14 @@ fn merge_runtime_options(current: &mut IndexOptions, incoming: &mut IndexOptions
             current.authorized_remote.push(target);
         }
     }
+}
+
+/// A request changes the saved graph switch when it names a value that differs
+/// from the one the queued job would apply; an omitted value never changes it.
+fn changes_graph_setting(current: Option<&IndexOptions>, incoming: &IndexOptions) -> bool {
+    incoming.graph_indexing.is_some_and(|requested| {
+        current.and_then(|current| current.graph_indexing) != Some(requested)
+    })
 }
 
 fn merge_update<T>(current: &mut Option<T>, incoming: Option<T>) {
@@ -778,11 +826,12 @@ fn redact_job_error_text(message: &str) -> String {
         redacted = redact_assigned_value(&redacted, name, false);
     }
     redacted = redact_openai_keys(&redacted);
-    let mut truncated = redacted
-        .chars()
+    let mut characters = redacted.chars();
+    let mut truncated = characters
+        .by_ref()
         .take(MAX_PERSISTED_ERROR_CHARS)
         .collect::<String>();
-    if redacted.chars().count() > MAX_PERSISTED_ERROR_CHARS {
+    if characters.next().is_some() {
         truncated.push('…');
     }
     truncated
@@ -803,13 +852,8 @@ fn redact_url_userinfo(message: &str) -> String {
         {
             scheme_start -= 1;
         }
-        let valid_scheme = scheme_start < marker
-            && output.as_bytes()[scheme_start].is_ascii_alphabetic()
-            && (scheme_start == 0
-                || !matches!(
-                    output.as_bytes()[scheme_start - 1],
-                    b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'+' | b'.' | b'-'
-                ));
+        let valid_scheme =
+            scheme_start < marker && output.as_bytes()[scheme_start].is_ascii_alphabetic();
         let authority_start = marker + 3;
         let authority_end = output.as_bytes()[authority_start..]
             .iter()
@@ -1075,9 +1119,12 @@ mod tests {
     use tokio::sync::Notify;
     use zg_engine::{
         EngineError,
-        api::index::{
-            IndexOptions, IndexResult,
-            options::{ScanRulesUpdate, WorkspaceChange},
+        api::{
+            context::options::FileFormat,
+            index::{
+                IndexOptions, IndexResult,
+                options::{ScanRulesUpdate, WorkspaceChange},
+            },
         },
     };
 
@@ -1119,9 +1166,7 @@ mod tests {
         async fn index(&self, _options: IndexOptions) -> Result<IndexResult, EngineError> {
             self.started.notify_one();
             self.release.notified().await;
-            Ok(IndexResult {
-                ..IndexResult::default()
-            })
+            Ok(IndexResult::default())
         }
     }
 
@@ -1130,7 +1175,12 @@ mod tests {
     #[async_trait]
     impl IndexExecutor for ImmediateExecutor {
         async fn index(&self, options: IndexOptions) -> Result<IndexResult, EngineError> {
-            match options.name.as_deref() {
+            match options
+                .root
+                .as_deref()
+                .and_then(|path| path.file_name())
+                .and_then(|name| name.to_str())
+            {
                 Some("failed") => Err(EngineError::internal("fixture failure")),
                 Some("cancelled") => Err(EngineError::cancelled("fixture cancellation")),
                 _ => Ok(IndexResult::default()),
@@ -1146,8 +1196,7 @@ mod tests {
         let permits = scheduler
             .inner
             .permits
-            .clone()
-            .acquire_many_owned(2)
+            .acquire_many(2)
             .await
             .expect("permits");
         let submitted = scheduler
@@ -1174,17 +1223,17 @@ mod tests {
             IndexJobScheduler::new(Arc::new(ImmediateExecutor), SchedulerConfig::default());
         let mut completed = Vec::new();
         for index in 0..300 {
-            let root = PathBuf::from(format!("/workspace-{index}"));
             let (name, expected) = match index % 3 {
                 0 => ("succeeded", JobState::Succeeded),
                 1 => ("failed", JobState::Failed),
                 _ => ("cancelled", JobState::Cancelled),
             };
+            let root = PathBuf::from(format!("/workspace-{index}/{name}"));
             let job = scheduler
                 .submit(
                     root.clone(),
                     IndexOptions {
-                        name: Some(name.into()),
+                        root: Some(root.clone()),
                         ..IndexOptions::default()
                     },
                     JobReason::Manual,
@@ -1630,7 +1679,6 @@ mod tests {
                 root.clone(),
                 IndexOptions {
                     root: Some(root.clone()),
-                    name: Some("stale-workspace-name".into()),
                     changes: vec![zg_engine::api::index::options::WorkspaceChange::Upsert(
                         PathBuf::from("src/lib.rs"),
                     )],
@@ -1644,7 +1692,6 @@ mod tests {
                 root.clone(),
                 IndexOptions {
                     root: Some(root.clone()),
-                    name: Some("another-stale-name".into()),
                     changes: vec![zg_engine::api::index::options::WorkspaceChange::Delete(
                         PathBuf::from("src/lib.rs"),
                     )],
@@ -1667,7 +1714,8 @@ mod tests {
         assert_eq!(completed.job.state, JobState::Succeeded);
         let calls = executor.calls.lock().expect("calls should be readable");
         assert_eq!(calls.len(), 2);
-        assert!(calls[1].name.is_none());
+        assert!(!calls[0].require_existing_index);
+        assert!(calls[1].require_existing_index);
         assert_eq!(
             calls[1].changes,
             [zg_engine::api::index::options::WorkspaceChange::Delete(
@@ -1713,8 +1761,11 @@ mod tests {
                     root.clone(),
                     IndexOptions {
                         scan: ScanRulesUpdate {
+                            included_formats: Some(vec![FileFormat::Rust]),
+                            excluded_formats: Some(vec![FileFormat::Json]),
                             globs: Some(vec!["*.rs".into()]),
-                            hidden: Some(true),
+                            include_hidden: Some(true),
+                            use_default_ignores: Some(true),
                             follow_symlinks: Some(true),
                             max_depth: Some(Some(3)),
                             ..Default::default()
@@ -1731,8 +1782,11 @@ mod tests {
                     root.clone(),
                     IndexOptions {
                         scan: ScanRulesUpdate {
+                            included_formats: Some(vec![FileFormat::Python]),
+                            excluded_formats: Some(Vec::new()),
                             globs: Some(Vec::new()),
-                            hidden: Some(false),
+                            include_hidden: Some(false),
+                            use_default_ignores: Some(false),
                             max_depth: Some(None),
                             ..Default::default()
                         },
@@ -1773,9 +1827,195 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn graph_setting_requests_are_merged_and_never_absorbed() {
+        for queued in [false, true] {
+            let executor = Arc::new(RecordingExecutor {
+                calls: Mutex::new(Vec::new()),
+                started: Notify::new(),
+                releases: tokio::sync::Semaphore::new(0),
+            });
+            let scheduler = IndexJobScheduler::new(
+                executor.clone(),
+                SchedulerConfig {
+                    concurrency: 1,
+                    queue_capacity: 8,
+                },
+            );
+            if queued {
+                scheduler
+                    .submit(
+                        PathBuf::from("/blocker"),
+                        IndexOptions::default(),
+                        JobReason::Manual,
+                    )
+                    .expect("occupy worker");
+                executor.started.notified().await;
+            }
+            let root = PathBuf::from("/workspace");
+            let first = scheduler
+                .submit(root.clone(), IndexOptions::default(), JobReason::Manual)
+                .expect("initial index");
+            if !queued {
+                executor.started.notified().await;
+            }
+            // A running job cannot apply a switch it did not start with, so the
+            // request needs its own job instead of being absorbed by that one.
+            let enable = scheduler
+                .submit(
+                    root.clone(),
+                    IndexOptions {
+                        graph_indexing: Some(true),
+                        ..IndexOptions::default()
+                    },
+                    JobReason::Manual,
+                )
+                .expect("enable graph");
+            assert_eq!(
+                enable.job.id == first.job.id,
+                queued,
+                "a running job must not swallow the graph switch"
+            );
+            // A later explicit false replaces the queued true.
+            let disable = scheduler
+                .submit(
+                    root.clone(),
+                    IndexOptions {
+                        graph_indexing: Some(false),
+                        rebuild: true,
+                        ..IndexOptions::default()
+                    },
+                    JobReason::Manual,
+                )
+                .expect("disable graph");
+            assert_eq!(disable.job.id, enable.job.id);
+            // An omission keeps the value the earlier request asked for.
+            scheduler
+                .submit(
+                    root,
+                    IndexOptions {
+                        changes: vec![WorkspaceChange::Rescan],
+                        ..IndexOptions::default()
+                    },
+                    JobReason::Watch,
+                )
+                .expect("watch refresh");
+            executor.releases.add_permits(1);
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                executor.started.notified(),
+            )
+            .await
+            .expect("graph switch reaches executor");
+            executor.releases.add_permits(1);
+            scheduler
+                .wait(enable.job.id)
+                .await
+                .expect("graph switch completes");
+            {
+                let calls = executor.calls.lock().expect("recorded calls");
+                let applied = calls.last().expect("graph switch execution");
+                assert_eq!(
+                    applied.graph_indexing,
+                    Some(false),
+                    "an explicit false survives merging and omission keeps it"
+                );
+                assert!(applied.rebuild, "the switch is applied by a rebuild");
+            }
+            scheduler.shutdown().await;
+        }
+    }
+
+    #[test]
+    fn graph_setting_merge_keeps_explicit_values_and_omissions() {
+        let mut pending = Some(IndexOptions::default());
+        super::merge_options(
+            &mut pending,
+            IndexOptions {
+                graph_indexing: Some(true),
+                ..IndexOptions::default()
+            },
+        );
+        assert_eq!(
+            pending.as_ref().expect("pending").graph_indexing,
+            Some(true)
+        );
+        // An omitted value never clears an earlier explicit one.
+        super::merge_options(&mut pending, IndexOptions::default());
+        assert_eq!(
+            pending.as_ref().expect("pending").graph_indexing,
+            Some(true)
+        );
+        // A later explicit false wins over the earlier true.
+        super::merge_options(
+            &mut pending,
+            IndexOptions {
+                graph_indexing: Some(false),
+                ..IndexOptions::default()
+            },
+        );
+        assert_eq!(
+            pending.as_ref().expect("pending").graph_indexing,
+            Some(false)
+        );
+        // An explicit value replaces an omitted one.
+        let mut pending = Some(IndexOptions::default());
+        super::merge_options(
+            &mut pending,
+            IndexOptions {
+                graph_indexing: Some(true),
+                ..IndexOptions::default()
+            },
+        );
+        assert_eq!(
+            pending.as_ref().expect("pending").graph_indexing,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn omitted_graph_setting_is_not_a_configuration_change() {
+        let current = IndexOptions {
+            graph_indexing: Some(true),
+            ..IndexOptions::default()
+        };
+        assert!(!super::changes_graph_setting(
+            Some(&current),
+            &IndexOptions::default()
+        ));
+        assert!(!super::changes_graph_setting(
+            Some(&current),
+            &IndexOptions {
+                graph_indexing: Some(true),
+                ..IndexOptions::default()
+            }
+        ));
+        assert!(super::changes_graph_setting(
+            Some(&current),
+            &IndexOptions {
+                graph_indexing: Some(false),
+                ..IndexOptions::default()
+            }
+        ));
+        // A claimed job keeps no options to compare against; treat it as a change.
+        assert!(super::changes_graph_setting(
+            None,
+            &IndexOptions {
+                graph_indexing: Some(true),
+                ..IndexOptions::default()
+            }
+        ));
+    }
+
     fn assert_merged_selection(applied: &IndexOptions) {
+        assert_eq!(
+            applied.scan.included_formats,
+            Some(vec![FileFormat::Python])
+        );
+        assert_eq!(applied.scan.excluded_formats, Some(Vec::new()));
         assert_eq!(applied.scan.globs, Some(Vec::new()));
-        assert_eq!(applied.scan.hidden, Some(false));
+        assert_eq!(applied.scan.include_hidden, Some(false));
+        assert_eq!(applied.scan.use_default_ignores, Some(false));
         assert_eq!(applied.scan.follow_symlinks, Some(true));
         assert_eq!(applied.scan.max_depth, Some(None));
         assert!(
@@ -1820,6 +2060,107 @@ mod tests {
     }
 
     #[test]
+    fn later_saved_settings_replace_pending_runtime_overrides() {
+        use zg_engine::api::index::options::{Device, EmbeddingModelSpec};
+
+        for embedding_settings in [false, true] {
+            for replacement_runtime in [false, true] {
+                let mut pending = Some(IndexOptions {
+                    runtime_api_key: Some("old-temporary-key".into()),
+                    runtime_device: Some(Device::Cpu),
+                    runtime_model_cache: Some("old-temporary-cache".into()),
+                    ..IndexOptions::default()
+                });
+                let mut incoming = IndexOptions {
+                    api_key: Some("new-saved-key".into()),
+                    ..IndexOptions::default()
+                };
+                if embedding_settings {
+                    incoming.embedding = Some(EmbeddingModelSpec {
+                        reference: "local/potion-code-16m-v2".into(),
+                        revision: None,
+                        cache_dir: Some("new-saved-cache".into()),
+                        endpoint: None,
+                        device: Device::Cuda,
+                    });
+                } else {
+                    incoming.device = Some(Device::Cuda);
+                    incoming.model_cache = Some("new-saved-cache".into());
+                }
+                if replacement_runtime {
+                    incoming.runtime_api_key = Some("new-temporary-key".into());
+                    incoming.runtime_device = Some(Device::Auto);
+                    incoming.runtime_model_cache = Some("new-temporary-cache".into());
+                }
+                super::merge_options(&mut pending, incoming);
+                let merged = pending.expect("merged settings");
+                assert_eq!(merged.api_key.as_deref(), Some("new-saved-key"));
+                assert_eq!(
+                    merged.runtime_api_key.as_deref(),
+                    replacement_runtime.then_some("new-temporary-key")
+                );
+                assert_eq!(
+                    merged.runtime_device,
+                    replacement_runtime.then_some(Device::Auto)
+                );
+                assert_eq!(
+                    merged.runtime_model_cache.as_deref(),
+                    replacement_runtime.then_some(std::path::Path::new("new-temporary-cache"))
+                );
+                let saved_device = merged
+                    .device
+                    .or_else(|| merged.embedding.as_ref().map(|model| model.device));
+                let saved_cache = merged.model_cache.as_deref().or_else(|| {
+                    merged
+                        .embedding
+                        .as_ref()
+                        .and_then(|model| model.cache_dir.as_deref())
+                });
+                assert_eq!(saved_device, Some(Device::Cuda));
+                assert_eq!(saved_cache, Some(std::path::Path::new("new-saved-cache")));
+            }
+        }
+    }
+
+    #[test]
+    fn model_defaults_do_not_discard_pending_runtime_overrides() {
+        use zg_engine::api::index::options::{Device, EmbeddingModelSpec};
+
+        for saved_settings in [false, true] {
+            let mut pending = Some(IndexOptions {
+                device: saved_settings.then_some(Device::Cuda),
+                model_cache: saved_settings.then(|| "saved-cache".into()),
+                runtime_device: Some(Device::Cpu),
+                runtime_model_cache: Some("temporary-cache".into()),
+                ..IndexOptions::default()
+            });
+            super::merge_options(
+                &mut pending,
+                IndexOptions {
+                    embedding: Some(EmbeddingModelSpec {
+                        reference: "local/potion-code-16m-v2".into(),
+                        revision: None,
+                        cache_dir: saved_settings.then(|| "lower-priority-cache".into()),
+                        endpoint: None,
+                        device: if saved_settings {
+                            Device::Metal
+                        } else {
+                            Device::Auto
+                        },
+                    }),
+                    ..IndexOptions::default()
+                },
+            );
+            let merged = pending.expect("merged defaults");
+            assert_eq!(merged.runtime_device, Some(Device::Cpu));
+            assert_eq!(
+                merged.runtime_model_cache.as_deref(),
+                Some(std::path::Path::new("temporary-cache"))
+            );
+        }
+    }
+
+    #[test]
     fn merged_refresh_preserves_target_scoped_once_consent() {
         let target = zg_engine::authorization::IndexAuthorization {
             root: std::env::temp_dir(),
@@ -1840,14 +2181,23 @@ mod tests {
             &mut pending,
             IndexOptions {
                 authorized_remote: vec![target.clone()],
+                runtime_api_key: Some("temporary-key".into()),
                 runtime_device: Some(zg_engine::api::index::options::Device::Cpu),
+                runtime_model_cache: Some("temporary-cache".into()),
                 ..IndexOptions::default()
             },
         );
         let merged = pending.as_ref().expect("merged");
         assert_eq!(merged.authorized_remote, [target]);
         assert!(!merged.allow_remote);
+        assert!(merged.api_key.is_none());
+        assert_eq!(merged.runtime_api_key.as_deref(), Some("temporary-key"));
         assert!(merged.device.is_none());
+        assert!(merged.model_cache.is_none());
+        assert_eq!(
+            merged.runtime_model_cache.as_deref(),
+            Some(std::path::Path::new("temporary-cache"))
+        );
         assert_eq!(
             merged.runtime_device,
             Some(zg_engine::api::index::options::Device::Cpu)
@@ -1873,6 +2223,7 @@ mod tests {
         for model_changed in [false, true] {
             let mut pending = Some(IndexOptions {
                 api_key: Some("provider-a-key".into()),
+                runtime_api_key: Some("provider-a-temporary-key".into()),
                 endpoint: Some("https://a.test".into()),
                 allow_remote: true,
                 ..IndexOptions::default()
@@ -1898,6 +2249,7 @@ mod tests {
             let merged = pending.expect("merged destination");
             assert!(!merged.allow_remote);
             assert!(merged.api_key.is_none());
+            assert!(merged.runtime_api_key.is_none());
             assert_eq!(
                 merged.endpoint.as_deref(),
                 if model_changed {
@@ -1916,6 +2268,9 @@ mod tests {
             rebuild: true,
             allow_remote: true,
             api_key: Some("test-key".into()),
+            runtime_api_key: Some("temporary-key".into()),
+            runtime_device: Some(Device::Auto),
+            runtime_model_cache: Some("temporary-cache".into()),
             endpoint: Some("https://example.test/embeddings".into()),
             device: Some(Device::Cpu),
             model_cache: Some("/models".into()),
@@ -1949,6 +2304,12 @@ mod tests {
             "qwen/new-model"
         );
         assert_eq!(merged.api_key.as_deref(), Some("test-key"));
+        assert_eq!(merged.runtime_api_key.as_deref(), Some("temporary-key"));
+        assert_eq!(merged.runtime_device, Some(Device::Auto));
+        assert_eq!(
+            merged.runtime_model_cache.as_deref(),
+            Some(std::path::Path::new("temporary-cache"))
+        );
         assert_eq!(
             merged.endpoint.as_deref(),
             Some("https://example.test/embeddings")
@@ -1982,12 +2343,15 @@ mod tests {
                 ..Default::default()
             },
         );
-        let mut scan = zg_engine::api::index::options::ScanRules::default();
-        pending.expect("merged request").scan.apply(&mut scan);
-        assert_eq!(scan.globs.len(), 2);
-        assert_eq!(scan.globs[0].pattern, "*.rs");
-        assert_eq!(scan.globs[1].pattern, "*.MD");
-        assert!(scan.globs[1].case_insensitive);
+        let scan = pending
+            .expect("merged request")
+            .scan
+            .apply(&zg_engine::api::index::options::ScanRules::default())
+            .expect("updated scan rules");
+        assert_eq!(scan.globs().len(), 2);
+        assert_eq!(scan.globs()[0].pattern, "*.rs");
+        assert_eq!(scan.globs()[1].pattern, "*.MD");
+        assert!(scan.globs()[1].case_insensitive);
     }
 
     #[test]
@@ -2013,10 +2377,13 @@ mod tests {
                 ..Default::default()
             },
         );
-        let mut scan = zg_engine::api::index::options::ScanRules::default();
-        pending.expect("merged request").scan.apply(&mut scan);
+        let scan = pending
+            .expect("merged request")
+            .scan
+            .apply(&zg_engine::api::index::options::ScanRules::default())
+            .expect("updated scan rules");
         assert_eq!(
-            scan.globs,
+            scan.globs(),
             vec![zg_engine::api::index::options::GlobRule::from("secret/**")]
         );
     }
@@ -2027,8 +2394,10 @@ mod tests {
 
         let mut pending = Some(IndexOptions {
             scan: ScanRulesUpdate {
+                included_formats: Some(vec![FileFormat::Rust]),
+                excluded_formats: Some(vec![FileFormat::Json]),
                 globs: Some(vec!["old/**".into()]),
-                hidden: Some(true),
+                include_hidden: Some(true),
                 max_depth: Some(Some(3)),
                 ..Default::default()
             },
@@ -2047,8 +2416,10 @@ mod tests {
         );
         let reset = pending.as_ref().expect("pending reset");
         assert!(reset.reset_paths);
+        assert_eq!(reset.scan.included_formats, None);
+        assert_eq!(reset.scan.excluded_formats, None);
         assert_eq!(reset.scan.globs, None);
-        assert_eq!(reset.scan.hidden, None);
+        assert_eq!(reset.scan.include_hidden, None);
         assert_eq!(reset.scan.max_depth, None);
         super::merge_options(
             &mut pending,
@@ -2069,89 +2440,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_names_reach_the_executor_after_queued_or_running_manual_jobs() {
-        for (queued, narrow) in [(false, false), (false, true), (true, false), (true, true)] {
-            let executor = Arc::new(RecordingExecutor {
-                calls: Mutex::new(Vec::new()),
-                started: Notify::new(),
-                releases: tokio::sync::Semaphore::new(0),
-            });
-            let scheduler = IndexJobScheduler::new(
-                executor.clone(),
-                SchedulerConfig {
-                    concurrency: 1,
-                    queue_capacity: 8,
-                },
-            );
-            if queued {
-                scheduler
-                    .submit(
-                        PathBuf::from("/blocker"),
-                        IndexOptions::default(),
-                        JobReason::Manual,
-                    )
-                    .expect("occupy the worker");
-                executor.started.notified().await;
-            }
-            let root = PathBuf::from("/workspace");
-            let first = scheduler
-                .submit(root.clone(), IndexOptions::default(), JobReason::Manual)
-                .expect("initial manual index");
-            if !queued {
-                executor.started.notified().await;
-            }
-            let renamed = scheduler
-                .submit(
-                    root.clone(),
-                    IndexOptions {
-                        root: Some(root.clone()),
-                        name: Some("renamed-workspace".into()),
-                        changes: if narrow {
-                            vec![WorkspaceChange::Upsert("file.rs".into())]
-                        } else {
-                            Vec::new()
-                        },
-                        ..IndexOptions::default()
-                    },
-                    JobReason::Manual,
-                )
-                .expect("explicit rename");
-            assert_eq!(renamed.job.id == first.job.id, queued);
-            let refresh = scheduler
-                .submit(root, IndexOptions::default(), JobReason::Watch)
-                .expect("full background refresh merges with the pending rename");
-            assert_eq!(refresh.job.id, renamed.job.id);
-
-            executor.releases.add_permits(1);
-            tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                executor.started.notified(),
-            )
-            .await
-            .expect("explicit rename must reach the executor");
-            executor.releases.add_permits(1);
-            let completed = scheduler
-                .wait(renamed.job.id)
-                .await
-                .expect("rename completes");
-            assert_eq!(completed.job.state, JobState::Succeeded);
-            assert_eq!(
-                executor
-                    .calls
-                    .lock()
-                    .expect("recorded requests")
-                    .last()
-                    .expect("rename was executed")
-                    .name
-                    .as_deref(),
-                Some("renamed-workspace")
-            );
-            scheduler.shutdown().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn global_budget_queues_other_roots_and_reports_real_counts() {
+    async fn global_budget_queues_roots_reports_counts_and_rejects_excess_jobs() {
         let executor = Arc::new(RecordingExecutor {
             calls: Mutex::new(Vec::new()),
             started: Notify::new(),
@@ -2161,7 +2450,7 @@ mod tests {
             executor.clone(),
             SchedulerConfig {
                 concurrency: 1,
-                queue_capacity: 8,
+                queue_capacity: 1,
             },
         );
         let first = scheduler
@@ -2183,6 +2472,14 @@ mod tests {
         let snapshot = scheduler.snapshot();
         assert_eq!(snapshot.running, 1);
         assert_eq!(snapshot.queued, 1);
+        assert!(matches!(
+            scheduler.submit(
+                PathBuf::from("/third"),
+                IndexOptions::default(),
+                JobReason::Manual,
+            ),
+            Err(SchedulerError::QueueFull)
+        ));
         executor.releases.add_permits(1);
         executor.started.notified().await;
         executor.releases.add_permits(1);
@@ -2204,57 +2501,6 @@ mod tests {
                 .state,
             JobState::Succeeded
         );
-    }
-
-    #[tokio::test]
-    async fn queue_capacity_rejects_excess_jobs_without_unbounding_waiters() {
-        let executor = Arc::new(RecordingExecutor {
-            calls: Mutex::new(Vec::new()),
-            started: Notify::new(),
-            releases: tokio::sync::Semaphore::new(0),
-        });
-        let scheduler = IndexJobScheduler::new(
-            executor.clone(),
-            SchedulerConfig {
-                concurrency: 1,
-                queue_capacity: 1,
-            },
-        );
-        let first = scheduler
-            .submit(
-                PathBuf::from("/first"),
-                IndexOptions::default(),
-                JobReason::Manual,
-            )
-            .expect("running job should be accepted");
-        executor.started.notified().await;
-        let second = scheduler
-            .submit(
-                PathBuf::from("/second"),
-                IndexOptions::default(),
-                JobReason::Manual,
-            )
-            .expect("one queued job should be accepted");
-        assert!(matches!(
-            scheduler.submit(
-                PathBuf::from("/third"),
-                IndexOptions::default(),
-                JobReason::Manual,
-            ),
-            Err(SchedulerError::QueueFull)
-        ));
-
-        executor.releases.add_permits(1);
-        executor.started.notified().await;
-        executor.releases.add_permits(1);
-        scheduler
-            .wait(first.job.id)
-            .await
-            .expect("first should finish");
-        scheduler
-            .wait(second.job.id)
-            .await
-            .expect("second should finish");
     }
 
     struct CancellationAwareExecutor {

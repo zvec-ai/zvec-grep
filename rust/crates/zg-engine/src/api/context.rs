@@ -33,9 +33,10 @@ pub mod options {
         pub excluded_file_types: Vec<String>,
         /// Ordered path rules relative to the workspace root.
         pub globs: Vec<GlobRule>,
-        /// Formats matched by the catalog's explicit, case-sensitive filename rules.
-        pub formats: Vec<FileFormat>,
-        /// Excluded file-name formats; any match takes precedence over included formats.
+        /// Included formats matched by the catalog's case-sensitive filename rules;
+        /// empty means no inclusion restriction.
+        pub included_formats: Vec<FileFormat>,
+        /// Excluded filename formats; exclusions take precedence.
         pub excluded_formats: Vec<FileFormat>,
         /// Categories selected through the catalog's filename rules.
         pub categories: Vec<FileCategory>,
@@ -81,6 +82,7 @@ pub mod options {
         pub max_depth: Option<usize>,
         pub max_file_size_bytes: Option<u64>,
         pub follow: bool,
+        /// Index-only override for refreshes; query-vector inference uses its own defaults.
         pub embedding_concurrency: Option<usize>,
         /// Maximum time to wait for workspace admission, in milliseconds (default: 30 seconds).
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -281,10 +283,11 @@ pub mod options {
 
         #[test]
         fn query_filter_accepts_partial_fields_and_rejects_nested_or_scan_fields() {
-            let filter: QueryFilter =
-                serde_json::from_str(r#"{"formats":["rust"],"modified_after_epoch_ms":0}"#)
-                    .expect("partial query filter");
-            assert_eq!(filter.formats, vec![FileFormat::Rust]);
+            let filter: QueryFilter = serde_json::from_str(
+                r#"{"included_formats":["rust"],"modified_after_epoch_ms":0}"#,
+            )
+            .expect("partial query filter");
+            assert_eq!(filter.included_formats, vec![FileFormat::Rust]);
             assert_eq!(filter.modified_after_epoch_ms, Some(0));
             assert!(filter.globs.is_empty());
             for value in [r#"{"files":{}}"#, r#"{"hidden":true}"#] {
@@ -316,7 +319,35 @@ pub mod result {
     pub struct SearchHitTrace {
         pub recall: Vec<SearchRecallTrace>,
         pub fusion: SearchFusionTrace,
+        /// Rule scores are not calibrated relevance probabilities.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub ranking: Option<SearchRankingTrace>,
         pub final_selection: SearchFinalTrace,
+    }
+
+    /// Explains rule scoring and the state when an entity was selected.
+    #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+    pub struct SearchRankingTrace {
+        pub policy: String,
+        pub query_features: Vec<String>,
+        pub normalized_base: f64,
+        pub symbol_match: String,
+        pub symbol_bonus: f64,
+        pub definition_bonus: f64,
+        #[serde(default)]
+        pub path_bonus: f64,
+        #[serde(default)]
+        pub file_support_bonus: f64,
+        #[serde(default)]
+        pub file_support_count: u32,
+        pub path_roles: Vec<String>,
+        pub path_overrides: Vec<String>,
+        pub path_factor: f64,
+        pub static_score: f64,
+        pub file_count_at_selection: u32,
+        pub diversity_factor: f64,
+        pub score: f64,
+        pub rank: usize,
     }
 
     #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -376,6 +407,9 @@ pub mod result {
         pub freshness: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub background_refresh: Option<String>,
+        /// Observed indexing activity for CLI status, independent of file-change freshness.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub indexing: Option<ContextIndexingStatus>,
         pub root: PathBuf,
         pub source: ContextSource,
         pub coverage: ContextCoverage,
@@ -383,6 +417,40 @@ pub mod result {
         pub items: Vec<ContextItem>,
         pub group_results: Vec<ContextGroupResult>,
         pub diagnostics: ContextDiagnostics,
+    }
+
+    impl ContextResult {
+        /// Returns whether any retrieved item is marked as possibly stale.
+        #[must_use]
+        pub fn has_stale_items(&self) -> bool {
+            self.items
+                .iter()
+                .any(|item| item.status == ContextItemStatus::PossiblyStale)
+        }
+    }
+
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct ContextIndexingStatus {
+        pub state: String,
+        pub completed: Option<usize>,
+        pub total: Option<usize>,
+    }
+
+    impl ContextIndexingStatus {
+        /// Returns a status only when an inspection found unfinished or changed files.
+        #[must_use]
+        pub fn from_stats(stats: &crate::api::info::result::IndexStats) -> Option<Self> {
+            (stats.files_added > 0
+                || stats.files_modified > 0
+                || stats.files_deleted > 0
+                || stats.files_pending > 0
+                || stats.files_failed > 0)
+                .then(|| Self {
+                    state: "idle".to_owned(),
+                    completed: Some(stats.files_unchanged),
+                    total: Some(stats.files_scanned),
+                })
+        }
     }
 
     #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -410,7 +478,7 @@ pub mod result {
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     pub struct ContextWorkspaceIndex {
-        pub name: String,
+        pub root: PathBuf,
         pub path: PathBuf,
     }
 
@@ -424,6 +492,9 @@ pub mod result {
         pub excerpt_range: Option<ContentRange>,
         /// Exact source coordinates of `content`, independent of the entity and matched ranges.
         pub content_range: ContentRange,
+        /// Individual lexical matches in decoded source coordinates, independent of context lines.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub match_ranges: Vec<ContentRange>,
         pub content: String,
         /// Optional structural context supplied with the retrieved source.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -646,6 +717,19 @@ mod tests {
     use crate::domain::{ByteRange, Range, TextRange};
 
     use super::result;
+
+    #[test]
+    fn search_traces_allow_omitted_ranking() {
+        let value = json!({
+            "recall": [],
+            "fusion": {"rank": 1, "score": 0.01, "forced": false},
+            "final_selection": {"returned_by_limit": true, "cutoff_rank": 10}
+        });
+        let trace: result::SearchHitTrace =
+            serde_json::from_value(value.clone()).expect("trace without ranking");
+        assert!(trace.ranking.is_none());
+        assert_eq!(serde_json::to_value(trace).expect("trace"), value);
+    }
 
     #[test]
     fn source_line_bounds_respect_half_open_and_empty_ranges() {

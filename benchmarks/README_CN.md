@@ -4,55 +4,66 @@
 
 # 基准评测
 
-每项评测用于衡量 zvec-grep 在不同工作负载下对 Agent 回答质量和检索效率的影响。每个 benchmark 都会锁定输入与依赖，提供本地 runner，将运行产物与源码分开存放，并在各自的 README 中说明测试协议。
+Retrieval-only 衡量不同产品版本的检索质量；e2e 衡量 Agent 接入 zvec-grep 后的回答质量和资源消耗。各套评测的配置、固定输入和评分细节由对应 README 说明。
 
-配置方法和运行命令参见各 benchmark 的 README。
+## 贡献者：自行运行评测
 
-## 评测项目
-
-| Benchmark | 说明 | Agent | 评测规模 |
-| --- | --- | --- | --- |
-| [BrowseComp-Plus](browse-comp-plus/README_CN.md) | 在固定的大规模语料库上评测多文档证据检索和回答准确率 | Codex | 100 个样例 |
-| [SWE-QA-Bench](swe-qa-bench/README_CN.md) | 评测代码仓库级、跨文件、多跳的软件工程问答 | Claude Code · Claude Opus 5（high） | 20 个任务 |
-
-## 评测协议
-
-所有 benchmark 均采用受控的配对 A/B 评测。针对每个评测样例，Baseline 和 Treatment 使用完全相同的任务输入、Agent、模型、环境和资源限制。
-
-- **Baseline：** Agent 使用其标准工具和指令。
-- **Treatment (zvec-grep)：** 在 Baseline 基础上，向同一个 Agent 额外提供预先构建的索引、zvec-grep 工具及其使用说明。
-
-两组之间**唯一的预期差异**是能否使用 zvec-grep。zvec-grep 的索引准备时间单独统计，不计入 Agent 执行耗时，避免将一次性的准备成本混入 Agent 的实际运行表现。
-
-## 评测指标
-
-各 benchmark 会根据实际情况统计以下指标：
-
-| 指标 | 衡量内容 | 趋势 |
+| Benchmark | 范围 | 本地运行说明 |
 | --- | --- | --- |
-| 回答质量 | 任务的评审得分或准确率 | 越高越好 |
-| 输入 Token | Agent 执行期间模型消耗的输入 Token | 越低越好 |
-| 工具调用 | Agent 执行期间记录的工具调用次数 | 越低越好 |
-| Agent 执行耗时 | Agent 的实际执行耗时（不包括另行统计的 zvec-grep 索引准备时间） | 越低越好 |
+| Retrieval-only | SWE-QA20、BEIR、DuRetrieval、Quarry；hybrid、fts、vector 三种模式 | [SWE-QA20 runner](zg-retrieval/README.md#run-locally)、[扩展套件 runner](zg-retrieval/expansion/README.md) |
+| SWE-QA e2e | 20 道软件工程问答；baseline 与 zvec-grep 两组 Agent | [配置与小规模运行](swe-qa-bench/README_CN.md#本地配置) |
+| BrowseComp-Plus e2e | 固定文档库上的 100 道问答 | [配置与运行](browse-comp-plus/README_CN.md) |
 
-根据需要，还可能报告其他指标。为便于审计和排查问题，也可能保留任务完成状态和原始执行轨迹。
+开发阶段 CI 使用自己的 fork。在 **Actions → Retrieval-only → Run workflow** 选择 harness 版本，将 `candidate_ref` 设为要编译的 Rust 源码分支、tag 或 commit；保持 `embedding=local` 即可不配置模型 API Key。单版本报告和 artifacts 见 [Retrieval 指南](zg-retrieval/README.md#run-ci-and-read-the-result)。独立的 **Retrieval-only PR** 手动入口支持用同一份 harness 对比两个完整 commit SHA。
 
-## 评测注意事项
+可选的 SWE-QA e2e 参见 [fork 运行指南](swe-qa-bench/docs/run-in-fork_CN.md)：配置模型凭证后，先运行 `repro-3` 或 `smoke`，再按需选择 `all-full`。Agent 执行和评审都会消耗模型额度；远端 Embedding 还需要单独的 key 和 endpoint，参见[语料规模与 Embedding 负载](zg-retrieval/README.md#corpus-size-and-remote-embedding-load)。
 
-每个 benchmark 的 README 都提供完整的复现步骤。在设计和运行这些评测的过程中，我们遇到了一些容易忽视的问题，这里整理了其中较为重要的几点，供复现和比较结果时参考：
+## 维护者：默认评测与额外触发
 
-- **确保比较条件一致。** 为了单独衡量 zvec-grep 的作用，Baseline 和 Treatment 应使用相同的模型及其版本、推理参数、Agent 框架、基础 Prompt、两组共用的工具、任务集、运行环境和资源限制。Treatment 只应额外获得预先构建的索引、zvec-grep 工具及其标准使用说明。
+### 触发方式与结果
 
-  例如，使用较强模型的 Baseline 可能优于使用较弱模型的 Treatment（使用 zvec-grep），因为更强的推理能力和先验知识可能弥补检索效果上的差距。反过来，如果使用 zvec-grep 的 Treatment 配备了更强的模型，它相对于使用较弱模型的 Baseline 也会天然占优。这两种比较都无法单独衡量 zvec-grep 的作用。
-- **保持 Agent 行为的通用性。** Prompt 和工具说明应具有通用性，能够适用于不同任务，而不应针对某个 benchmark、数据集或预期答案专门设计措辞。针对某一场景优化的指引，未必适用于其他场景。
+| 触发方式 | 执行内容 | 结果位置 |
+| --- | --- | --- |
+| PR 创建、重新打开或推送新提交，包含 fork PR | 固定 PR base/head 的 Retrieval-only；本地 Embedding | 自动更新的 PR 机器人评论、Actions summary 与 `retrieval-comparison` artifact |
+| PR Conversation 新评论，单独一行 `@zg-bench` | 相同的 Retrieval 版本对比 | 同一条机器人评论，从排队状态更新为结果 |
+| 手动启动 **ZG Bench**，指定 `pr_number` | Retrieval 对比；只有明确设置 `run_e2e: true` 才额外运行 e2e | 同一条机器人评论及运行 artifacts |
+| 手动启动 **SWE-QA Bench** | 指定任务范围、模型与 Embedding runtime 的 e2e | 单题证据与聚合报告 |
+| 修改相关 benchmark 源码或工作流 | 离线回归检查 | CI 日志，不调用模型 |
 
-  例如，对于适合语义检索的任务，如果要求 Agent 始终使用 zvec-grep 而不是 grep，可能会夸大 zvec-grep 在这类场景中的表面收益；但当查询包含已知关键词或精确标识符时，同样的规则反而可能不如直接使用原生 grep。无论强制还是禁止使用某个工具，都会使评测偏向特定场景。具体使用哪个工具、何时使用，应由 Agent 自行判断。
-- **考虑随机波动。** 即使配置完全相同，模型行为本身仍具有随机性：面对同一个决策点，Agent 可能选择不同的工具、查询或下一步操作，而这些选择会逐步累积，最终形成不同的执行轨迹和结果。这种波动会影响回答质量、Token 消耗、工具调用次数和运行时间。
+PR 自动评测无需维护者角色和模型密钥；同一个 PR 的新提交会取消上一次自动评测。版本对比展示 File Hit@1/5/10、MRR@10、nDCG@10 的 **base / head / delta**，并链接到两个固定 commit。`retrieval-base-*`、`retrieval-head-*` 保留各版本证据。
 
-  在目前的评测中，我们观察到随机性对不同指标的影响并不相同：回答质量在多次运行之间往往维持在相近水平，而随着执行轨迹发生变化，Token 消耗和工具调用次数通常会有更明显的波动。一种可能的解释是，不同的探索路径会带来不同的搜索和阅读步骤，从而显著改变资源消耗；而模型能力可以帮助 Agent 判断已有证据是否充分，并在采用不同路径时仍然完成任务。运行时间还会受到模型服务商的响应延迟和其他外部因素的影响，因此更难控制。
+[Retrieval PR comment](../.github/workflows/retrieval-pr-comment.yml) 通过独立的 `workflow_run` 任务发布已完成的自动评测：每个 PR 创建一条英文结果评论，后续运行和重跑更新同一条，支持 fork PR。评论包含两个 commit、原运行链接，以及 12 行套件/模式的 base / head / delta；缺失或无效结果明确显示 incomplete。已取消的运行、base/head 已过期的结果会跳过。手动 comparison 不发布这条自动评论；`@zg-bench` 继续使用各次请求自己的评论。
 
-  为了降低不确定性，Baseline 和 Treatment 应分别进行数量相同的独立试验。增加试验次数可以减弱偶然偏高或偏低的单次结果对均值的影响，使均值估计更加精确。
-- **验证工具是否可用。** 工具安装完成后，还需要确认 Agent 能够发现并正常调用 zvec-grep。正式评测前，建议先单独做一次冒烟测试，确保工具调用能够正常返回结果。根据我们的观察，Agent 首次调用外部工具失败后，往往会改用其他方法，不再继续尝试，因此一次调用失败就可能改变后续的执行轨迹。不过，在确认工具可用后，正式评测中是否以及何时使用 zvec-grep，仍应由 Agent 自行判断；没有使用并不代表配置有误。
-- **避免评测信息泄漏。** 评测过程中，参考答案、历史输出、报告等材料应与 Agent 可访问的工作区和索引语料严格隔离。例如，如果参考答案或历史报告被放入工作区或纳入索引，Agent 可能直接检索这些现成材料，造成独立完成任务的假象。Judge 也需要保持盲评：如果事先知道回答来自 Baseline 还是 Treatment，或看到工具调用轨迹，评分就可能受到先入为主的影响。因此，两组回答应在隐藏组别和工具使用情况的前提下，采用同一标准进行评审。
+评论触发和调用模型的手动评测要求仓库角色明确为 `admin` 或 `maintain`；执行任务会重新检查原触发者和重跑者当前的权限。评论命令不会开启 e2e。引用或代码块中的命令、编辑旧评论、普通 Issue 和代码行 review 评论不会启动任务。运行中 PR 发生变化时，两个固定 SHA 保持不变；需要新建命令评论才能测试当前版本。
 
-  还需注意，信息泄漏可能早在正式评测前就已发生。一些公开且常用的 benchmark 题目可能已经进入模型的训练数据，相关知识也可能被模型记忆在参数中。此时，模型可能依靠已有记忆作答，检索工具的价值也更难体现。条件允许时，应优先选择较新或严格隔离的评测任务，并说明可能存在的数据污染风险。
+### 部署与失败重跑
+
+将评论入口与可复用工作流合入默认分支，并允许评论任务使用 `issues: write` 和 `pull-requests: write`。只有评论任务持有写权限 token。评测执行使用只读 token、受信任的 harness checkout 和单独构建的候选版本。本地 Retrieval 不接收模型凭证；可选 e2e 需要 `GLM_API_KEY`，授权使用这些凭证运行前应检查候选代码。
+
+`@zg-bench` 是命令关键字，无需注册同名账号；回复者使用 `github-actions[bot]`。专属机器人身份需要配置 GitHub App，并调整评论任务使用的 token 和 bot login。
+
+自动结果发布工作流同样需要合入默认分支，并允许 Issues/Pull requests 写权限。该任务只使用默认分支受信任的代码，先通过 GitHub API 校验来源工作流、run、PR 和 commit 身份，再读取 JSON 产物、验证指标表并自行渲染 Markdown。发布任务不会执行 PR 代码或 artifact 脚本，评测任务继续使用只读 token。
+
+失败后使用 **Re-run failed jobs**，会更新原机器人评论。e2e 聚合会检查同一 run 各 attempt 的候选 commit、harness、评测配置和报告摘要，按题目选择最新有效结果并保留之前的成功题目；缺失题目仍显示 incomplete。聚合产物中的 `task-report-selection.json` 记录选中的 attempt 和被排除输入。缺少身份 manifest 的旧报告无法复用，因此引入该 manifest 之前启动的运行需要重新完整启动；artifact 过期时也需要重新运行缺失题目。
+
+## Benchmark 开发者：原理与验证
+
+### 协议与实现
+
+Retrieval 使用同一份固定 harness、输入和本地模型配置比较两个产品版本，各版本分别新建索引。e2e 比较的是两组 Agent：使用标准工具，以及在相同配置上额外获得准备好的 zvec-grep 索引、工具和使用说明。两组应固定任务、Agent/模型参数、共享工具、资源限制和 trial 次数；索引准备耗时单独统计。
+
+参考答案、报告和历史输出必须放在可搜索工作区之外。使用通用工具说明、盲评和重复 trial，不针对参考答案调整 prompt 或强制使用工具。缺失和无效证据不能当作零分或成功结果。
+
+代码入口见 [Retrieval 结构](zg-retrieval/README.md#code-structure)与 [SWE-QA 结构](swe-qa-bench/README_CN.md#代码结构)：runner 采集证据，validator 检查身份、协议和覆盖范围，指标函数对有效记录评分，聚合器与评论渲染器输出结果。[评论工作流](../.github/workflows/zg-bench.yml) 调用可复用工作流执行评测，由 [bench-comment.mjs](../.github/scripts/bench-comment.mjs) 更新状态。
+
+### 验证改动
+
+从仓库根目录执行离线检查，再按需进行调用模型的实验：
+
+```sh
+node --test benchmarks/zg-retrieval/test/*.test.mjs .github/scripts/*comment.test.mjs
+uv sync --project benchmarks/swe-qa-bench --frozen
+uv run --project benchmarks/swe-qa-bench python -m unittest discover -s benchmarks/swe-qa-bench/tests -v
+```
+
+改动工作流后运行 `actionlint`；评分与报告改动可先用保存的证据[离线重放](zg-retrieval/README.md#offline-replay-and-comparisons)，工作流集成在 fork 上验证。失败处理、身份或重跑逻辑的变更应补充对应回归用例。具体某次运行的验证记录写在 PR 中，README 保留当前行为和复现步骤。

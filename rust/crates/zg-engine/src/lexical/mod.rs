@@ -1,5 +1,7 @@
 //! File scanning and matching backed by ripgrep's embedded `grep` crates.
 
+pub(crate) mod files;
+mod matches;
 pub(crate) mod types;
 
 use std::{
@@ -27,6 +29,7 @@ use ignore::{WalkBuilder, WalkState, overrides::OverrideBuilder, types::TypesBui
 use tokio::sync::Semaphore;
 use tracing::debug;
 
+use self::matches::LexicalMatchBuilder;
 use self::types::{
     LexicalCoverage, LexicalDiagnostics, LexicalMatch, LexicalSearchReply, LexicalSearchRequest,
 };
@@ -97,7 +100,9 @@ impl LexicalSearchService {
             permit = Arc::clone(&self.search_slots).acquire_owned() => permit.map_err(|_| EngineError::internal("lexical search concurrency limiter closed unexpectedly"))?,
         };
         let checked_paths = check_paths(root, &request.paths);
-        if !request.paths.is_empty() && checked_paths.existing.is_empty() {
+        if (request.paths_selected || !request.paths.is_empty())
+            && checked_paths.existing.is_empty()
+        {
             return Ok(empty_reply(root, request, &checked_paths));
         }
 
@@ -209,7 +214,7 @@ fn search_sync(
             .expect("text ranges have the same kind")
     }));
     lexical_matches.sort_by(|left, right| {
-        left.relative_path.cmp(&right.relative_path).then(
+        left.relative_path().cmp(right.relative_path()).then(
             left.range
                 .start_byte_offset()
                 .cmp(&right.range.start_byte_offset()),
@@ -455,7 +460,7 @@ fn build_walker(
         checked_paths
             .existing
             .iter()
-            .map(|path| resolve_path(root, path))
+            .map(|path| resolve_match_path(root, path))
             .collect()
     };
     let mut walker = WalkBuilder::from_iter(paths);
@@ -596,10 +601,14 @@ fn search_file(
     results: &mut Vec<LexicalMatch>,
     count_truncated: &AtomicBool,
 ) -> Result<(), EngineError> {
+    if request.options.max_file_size_bytes == Some(0) {
+        return Ok(());
+    }
     let absolute_path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     let relative_path = absolute_path
         .strip_prefix(root)
         .map_or_else(|_| absolute_path.clone(), Path::to_path_buf);
+    let mut collected = LexicalMatchBuilder::default();
     let search_result = (|| {
         let mut reader = io::BufReader::new(CancellableReader {
             reader: std::fs::File::open(&absolute_path)?,
@@ -623,9 +632,7 @@ fn search_file(
         let sink = MatchSink {
             matcher,
             signal: request.signal.as_ref(),
-            absolute_path: &absolute_path,
-            relative_path: &relative_path,
-            results,
+            results: &mut collected,
             options: &request.options.matching,
             count: 0,
             count_truncated,
@@ -642,15 +649,14 @@ fn search_file(
             &error,
         ));
     }
+    collected.append_to(absolute_path, relative_path, results);
     Ok(())
 }
 
 struct MatchSink<'a> {
     signal: Option<&'a tokio_util::sync::CancellationToken>,
     matcher: &'a RegexMatcher,
-    absolute_path: &'a Path,
-    relative_path: &'a Path,
-    results: &'a mut Vec<LexicalMatch>,
+    results: &'a mut LexicalMatchBuilder,
     options: &'a crate::api::context::options::RgOptions,
     count: usize,
     count_truncated: &'a AtomicBool,
@@ -794,17 +800,54 @@ impl MatchSink<'_> {
             crate::utils::text_range_from_offsets(text, line_starts, content_start, content_end)
                 .map_err(io::Error::other)?,
         )?;
+        let match_ranges = self
+            .match_ranges(text, line_starts, content_start, content_end)?
+            .into_iter()
+            .map(map_range)
+            .collect::<io::Result<Vec<_>>>()?;
         self.count += 1;
-        self.results.push(LexicalMatch {
-            rank: 0,
-            absolute_path: self.absolute_path.to_path_buf(),
-            relative_path: self.relative_path.to_path_buf(),
+        self.results.push(
             range,
-            excerpt_range: None,
             content_range,
-            content: text[content_start..content_end].to_owned(),
-        });
+            match_ranges,
+            &text[content_start..content_end],
+        );
         Ok(true)
+    }
+
+    fn match_ranges(
+        &self,
+        text: &str,
+        line_starts: &[usize],
+        start: usize,
+        end: usize,
+    ) -> io::Result<Vec<TextRange>> {
+        if self.options.invert_match {
+            return Ok(Vec::new());
+        }
+        let mut matches = Vec::new();
+        // Keep the original haystack so anchors and word boundaries retain their search meaning.
+        self.matcher
+            .find_iter_at(text.as_bytes(), start, |found| {
+                if found.start() >= end {
+                    return false;
+                }
+                if found.start() < found.end()
+                    && text.is_char_boundary(found.start())
+                    && text.is_char_boundary(found.end())
+                {
+                    matches.push(found);
+                }
+                found.end() <= end
+            })
+            .map_err(io::Error::other)?;
+        matches
+            .into_iter()
+            .map(|found| {
+                crate::utils::text_range_from_offsets(text, line_starts, found.start(), found.end())
+                    .map_err(io::Error::other)
+            })
+            .collect()
     }
 }
 
@@ -830,6 +873,52 @@ fn resolve_path(root: &Path, path: &Path) -> PathBuf {
     } else {
         root.join(path)
     }
+}
+
+/// Resolves a search path whose descendants are matched against globs and ignore files.
+///
+/// The `ignore` crate strips the workspace root from candidates as a byte
+/// prefix, so `<root>/./src/a.rs` would be matched as `./src/a.rs` and miss
+/// `src/**`. Absolute paths are kept as given, as ripgrep keeps them. A
+/// trailing `/` or `/.` is kept, so a file named as a directory still fails
+/// to walk.
+fn resolve_match_path(root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    // Only the relative input is normalized: the root must keep its exact
+    // spelling (for example a `//` prefix) to match the override root.
+    let relative: PathBuf = path
+        .components()
+        .filter(|component| !matches!(component, Component::CurDir))
+        .collect();
+    // `.`, `./` and `./.` name the root itself, which needs no trailing marker.
+    if relative.as_os_str().is_empty() {
+        return root.to_path_buf();
+    }
+    let mut resolved = root.join(relative);
+    if !path
+        .components()
+        .any(|component| matches!(component, Component::Normal(_)))
+    {
+        return resolved;
+    }
+    let bytes = path.as_os_str().as_encoded_bytes();
+    let separator_at = |index: usize| {
+        bytes
+            .get(index)
+            .is_some_and(|&byte| std::path::is_separator(byte.into()))
+    };
+    let last = bytes.len() - 1;
+    let marker = if separator_at(last) {
+        std::path::MAIN_SEPARATOR_STR
+    } else if bytes[last] == b'.' && last > 0 && separator_at(last - 1) {
+        if cfg!(windows) { "\\." } else { "/." }
+    } else {
+        ""
+    };
+    resolved.as_mut_os_string().push(marker);
+    resolved
 }
 
 fn is_hard_ignored_path(path: &Path) -> bool {
@@ -1008,7 +1097,7 @@ fn matches_modified_time(path: &Path, request: &LexicalSearchRequest) -> bool {
 }
 
 struct ContextSource {
-    text: String,
+    text: Arc<String>,
     line_starts: Vec<usize>,
 }
 
@@ -1017,7 +1106,10 @@ impl ContextSource {
         let bytes = std::fs::read(path).ok()?;
         let text = decode_text(&bytes, true)?.into_owned();
         let line_starts = line_byte_offsets(&text);
-        Some(Self { text, line_starts })
+        Some(Self {
+            text: Arc::new(text),
+            line_starts,
+        })
     }
 
     fn line_end(&self, line: usize) -> usize {
@@ -1037,9 +1129,13 @@ fn expand_context(matches: &mut [LexicalMatch], request: &LexicalSearchRequest) 
 
     let mut cache: HashMap<PathBuf, Option<ContextSource>> = HashMap::new();
     for item in matches {
-        let source = cache
-            .entry(item.absolute_path.clone())
-            .or_insert_with(|| ContextSource::read(&item.absolute_path));
+        if !cache.contains_key(item.absolute_path()) {
+            cache.insert(
+                item.absolute_path().to_path_buf(),
+                ContextSource::read(item.absolute_path()),
+            );
+        }
+        let source = &cache[item.absolute_path()];
         let Some(source) = source else {
             continue;
         };
@@ -1065,7 +1161,7 @@ fn expand_context(matches: &mut [LexicalMatch], request: &LexicalSearchRequest) 
         let matched_start = source.line_starts[excerpt.start_line() - 1];
         let matched_end = source.line_end(last_matched_line);
         let matched_lines = &source.text[matched_start..matched_end];
-        if trim_line_terminator(matched_lines.as_bytes()) != item.content.as_bytes() {
+        if trim_line_terminator(matched_lines.as_bytes()) != item.content().as_bytes() {
             continue;
         }
 
@@ -1087,11 +1183,10 @@ fn expand_context(matches: &mut [LexicalMatch], request: &LexicalSearchRequest) 
         ) else {
             continue;
         };
-        let content = source.text[start_byte_offset..end_byte_offset].to_owned();
         item.excerpt_range = Some(excerpt);
         item.range = range;
         item.content_range = range;
-        item.content = content;
+        item.set_content(Arc::clone(&source.text), start_byte_offset..end_byte_offset);
     }
 }
 
@@ -1176,6 +1271,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn zero_size_limit_skips_explicit_search_paths() {
+        let root = TempDir::new().expect("workspace");
+        fs::write(root.path().join("source.txt"), "needle\n").expect("source file");
+        fs::write(root.path().join("empty.txt"), "").expect("empty file");
+        for threads in [1, 2] {
+            let service = LexicalSearchService::new().with_worker_threads(threads);
+            for paths in [
+                Vec::new(),
+                vec![PathBuf::from("source.txt"), PathBuf::from("empty.txt")],
+            ] {
+                let mut request = request("needle");
+                request.paths = paths;
+                request.options.max_file_size_bytes = Some(0);
+                let reply = search(&service, root.path(), &request).await;
+                assert!(reply.matches.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn searches_in_process_and_reports_utf8_byte_columns() {
         let root = TempDir::new().expect("temp dir");
         std::fs::write(
@@ -1187,7 +1302,7 @@ mod tests {
 
         assert_eq!(reply.diagnostics.backend, "grep");
         assert_eq!(reply.matches.len(), 1);
-        assert_eq!(reply.matches[0].relative_path, Path::new("a.txt"));
+        assert_eq!(reply.matches[0].relative_path(), Path::new("a.txt"));
         let range = reply.matches[0].range;
         assert_eq!(range.start_line(), 2);
         assert_eq!(range.start_byte_column(), 13);
@@ -1211,13 +1326,13 @@ mod tests {
             reply.matches[0].range,
             TextRange::from_coordinates(start, end, 2, 3, 0, 0).expect("half-open range")
         );
-        assert_eq!(reply.matches[0].content, "中😀");
+        assert_eq!(reply.matches[0].content(), "中😀");
         assert_eq!(
             reply.matches[1].range,
             TextRange::from_coordinates(end, end + '尾'.len_utf8(), 3, 3, 0, 3)
                 .expect("next line range")
         );
-        assert_eq!(reply.matches[1].content, "尾");
+        assert_eq!(reply.matches[1].content(), "尾");
     }
 
     #[tokio::test]
@@ -1234,7 +1349,7 @@ mod tests {
             reply.matches[0].range,
             TextRange::from_coordinates(start, start + 6, 2, 2, 0, 6).expect("complete range")
         );
-        assert_eq!(reply.matches[0].content, "needle");
+        assert_eq!(reply.matches[0].content(), "needle");
     }
 
     #[tokio::test]
@@ -1261,12 +1376,12 @@ mod tests {
                 TextRange::from_coordinates(start, end, line, line, 0, content.len())
                     .expect("valid line range")
             );
-            assert_eq!(item.content, content);
+            assert_eq!(item.content(), content);
         }
         request.options.matching.max_count = Some(1);
         let limited = search(&service, root.path(), &request).await;
         assert_eq!(limited.matches.len(), 1);
-        assert_eq!(limited.matches[0].content, "first");
+        assert_eq!(limited.matches[0].content(), "first");
         assert!(limited.diagnostics.truncated);
     }
 
@@ -1324,7 +1439,7 @@ mod tests {
         assert_eq!(reply.matches.len(), fixtures.len());
         for item in reply.matches {
             assert_eq!(
-                item.content,
+                item.content(),
                 text.strip_suffix("\r\n").expect("final newline")
             );
             assert_eq!(item.range.start_line(), 1);
@@ -1338,7 +1453,7 @@ mod tests {
                     item.range.end_byte_offset()
                 )
                 .expect("context range"),
-                item.content
+                item.content()
             );
             let excerpt = item.excerpt_range.expect("matched span");
             assert_eq!(excerpt.start_line(), 2);
@@ -1372,24 +1487,23 @@ mod tests {
         let end = text.find("尾巴").expect("following line");
         let range =
             TextRange::from_coordinates(start, end, 2, 3, 0, 0).expect("span including newline");
-        let mut items = [LexicalMatch {
-            rank: 1,
-            absolute_path: root.path().join("source-0.txt"),
-            relative_path: "source-0.txt".into(),
+        let mut items = [LexicalMatch::new(
+            root.path().join("source-0.txt"),
+            "source-0.txt".into(),
             range,
-            excerpt_range: None,
-            content_range: crate::utils::text_range_from_offsets(
+            crate::utils::text_range_from_offsets(
                 text,
                 &crate::utils::line_byte_offsets(text),
                 start,
                 start + text[start..end].trim_end_matches("\r\n").len(),
             )
             .expect("visible source range"),
-            content: text[start..end].trim_end_matches("\r\n").to_owned(),
-        }];
+            text[start..end].trim_end_matches("\r\n").to_owned(),
+        )];
+        items[0].rank = 1;
         request.options.matching.after_context = 0;
         expand_context(&mut items, &request);
-        assert_eq!(items[0].content, &text[..end]);
+        assert_eq!(items[0].content(), &text[..end]);
         assert_eq!(items[0].content_range, items[0].range);
         assert_eq!(items[0].excerpt_range, Some(range));
         assert_eq!(items[0].range.end_line(), 3);
@@ -1401,7 +1515,7 @@ mod tests {
                 items[0].range.end_byte_offset(),
             )
             .expect("context range"),
-            items[0].content
+            items[0].content()
         );
     }
 
@@ -1427,14 +1541,17 @@ mod tests {
         let paths = reply
             .matches
             .iter()
-            .map(|item| item.relative_path.as_path())
+            .map(LexicalMatch::relative_path)
             .collect::<Vec<_>>();
         assert_eq!(paths, [Path::new(".hidden/keep.rs"), Path::new("keep.rs")]);
 
         typed.options.globs = vec!["!/keep.rs".to_owned()];
         let reply = search(&LexicalSearchService::new(), root.path(), &typed).await;
         assert_eq!(reply.matches.len(), 1);
-        assert_eq!(reply.matches[0].relative_path, Path::new(".hidden/keep.rs"));
+        assert_eq!(
+            reply.matches[0].relative_path(),
+            Path::new(".hidden/keep.rs")
+        );
     }
 
     #[tokio::test]
@@ -1476,7 +1593,7 @@ mod tests {
             2
         );
         assert_eq!(
-            reply.matches[0].content,
+            reply.matches[0].content(),
             "before\nNeedle.+ exact\nneedle.+ suffix"
         );
     }
@@ -1495,7 +1612,7 @@ mod tests {
         let reply = search(&LexicalSearchService::new(), root.path(), &request).await;
         assert_eq!(reply.matches.len(), 1);
         assert_eq!(reply.matches[0].range.start_line(), 2);
-        assert_eq!(reply.matches[0].content, "foo");
+        assert_eq!(reply.matches[0].content(), "foo");
     }
 
     #[tokio::test]
@@ -1516,7 +1633,7 @@ mod tests {
         let actual = reply
             .matches
             .iter()
-            .map(|item| item.relative_path.clone())
+            .map(|item| item.relative_path().to_path_buf())
             .collect::<Vec<_>>();
         let expected = (0..32)
             .map(|index| PathBuf::from(format!("dir-{index:02}/match.txt")))
@@ -1547,6 +1664,46 @@ mod tests {
         unfiltered.options.no_ignore = true;
         let reply = search(&LexicalSearchService::new(), root.path(), &unfiltered).await;
         assert_eq!(reply.matches.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn path_rules_match_search_paths_with_a_current_directory_prefix() {
+        let root = TempDir::new().expect("temp dir");
+        fs::create_dir(root.path().join("src")).expect("src dir");
+        fs::create_dir(root.path().join("docs")).expect("docs dir");
+        fs::write(root.path().join("src/keep.rs"), "needle\n").expect("src fixture");
+        fs::write(root.path().join("docs/drop.rs"), "needle\n").expect("docs fixture");
+        fs::write(root.path().join("custom.ignore"), "docs/*.rs\n").expect("ignore fixture");
+
+        let mut failures = Vec::new();
+        for (paths, rule) in [
+            (&[][..], "src/**"),
+            (&["."][..], "src/**"),
+            (&["./"][..], "src/**"),
+            (&["./."][..], "src/**"),
+            (&["./src"][..], "src/*.rs"),
+            (&["."][..], "!docs/**"),
+            (&["./docs", "./src"][..], "!docs/**"),
+            (&[][..], "--ignore-file custom.ignore"),
+            (&["."][..], "--ignore-file custom.ignore"),
+        ] {
+            let mut filtered = request("needle");
+            filtered.paths = paths.iter().map(PathBuf::from).collect();
+            match rule.strip_prefix("--ignore-file ") {
+                Some(file) => filtered.options.ignore_files = vec![PathBuf::from(file)],
+                None => filtered.options.globs = vec![rule.to_owned()],
+            }
+            let reply = search(&LexicalSearchService::new(), root.path(), &filtered).await;
+            let found = reply
+                .matches
+                .iter()
+                .map(|item| item.relative_path().to_path_buf())
+                .collect::<Vec<_>>();
+            if found != [Path::new("src/keep.rs")] {
+                failures.push(format!("paths {paths:?} {rule}: {found:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 }
 

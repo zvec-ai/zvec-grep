@@ -44,13 +44,29 @@ impl IndexField {
 
 // --- Code ---
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CodeMetadata {
     pub symbol_type: Option<SymbolType>,
     pub symbol_name: Option<String>,
     pub scope: Option<String>,
+    /// Declaration syntax without comments, attributes, decorators or implementation bodies.
+    /// Literal types and parameter defaults remain part of the declaration.
     pub signature: Option<String>,
     pub documentation: Option<String>,
+    pub visibility: Option<Visibility>,
+    pub language: Option<Language>,
+    /// Declared parameter count of function-shaped symbols, with the
+    /// implicit receiver excluded.
+    pub arity: Option<usize>,
+    /// Whether the symbol is importable from outside its module.
+    #[serde(default)]
+    pub is_exported: bool,
+    /// True for pure declarations (C/C++ prototypes, in-class member
+    /// declarations) that never carry a body. Name-based binding prefers the
+    /// definition when both exist for the same symbol; a lone declaration is
+    /// the only known location and stays bindable.
+    #[serde(default)]
+    pub is_declaration: bool,
 }
 
 impl CodeMetadata {
@@ -85,6 +101,58 @@ impl SymbolType {
             Self::Interface => "interface",
             Self::Module => "module",
             Self::Value => "value",
+        }
+    }
+}
+
+// Keep variants in alphabetical order.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Language {
+    C,
+    Cpp,
+    Go,
+    Java,
+    JavaScript,
+    Python,
+    Rust,
+    TypeScript,
+}
+
+#[allow(dead_code)]
+impl Language {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::C => "c",
+            Self::Cpp => "cpp",
+            Self::Go => "go",
+            Self::Java => "java",
+            Self::JavaScript => "javascript",
+            Self::Python => "python",
+            Self::Rust => "rust",
+            Self::TypeScript => "typescript",
+        }
+    }
+}
+
+// Keep variants in alphabetical order.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Visibility {
+    Internal,
+    Private,
+    Protected,
+    Public,
+}
+
+#[allow(dead_code)]
+impl Visibility {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Internal => "internal",
+            Self::Private => "private",
+            Self::Protected => "protected",
+            Self::Public => "public",
         }
     }
 }

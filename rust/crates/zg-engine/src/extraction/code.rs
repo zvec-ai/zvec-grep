@@ -1,4 +1,7 @@
 mod adapter;
+mod outline;
+
+pub(crate) use outline::code_outline;
 
 use tree_sitter::{Language, Node, Parser};
 
@@ -9,9 +12,14 @@ use crate::{
 };
 
 use self::adapter::{LanguageAdapter, named_children, resolve_adapter};
+use super::graph::{
+    WalkContext, collect_import_edge, collect_inheritance_edges, is_import_node, partition_walk,
+    scan_binding_declarations, scan_call_edges, scan_return_types,
+};
 use super::{
-    ChunkOptions, ExtractedEntity, TextRange, TextSource, chunk_options_for_metadata,
-    chunking::text_fragments, text::extract_plain_text_entities, validate_formats,
+    ChunkOptions, ExtractedEntity, ExtractionOutput, TextRange, TextSource,
+    chunk_options_for_metadata, chunking::text_fragments, text::extract_plain_text_entities,
+    validate_formats,
 };
 
 const DEFAULT_CODE_CHUNK_CHARS: usize = 3_600;
@@ -21,21 +29,33 @@ const COMPONENT_CODE_FORMATS: [FileFormat; 2] = [FileFormat::Vue, FileFormat::Sv
 pub(super) fn extract_for_indexing(
     source: &TextSource,
     options: ChunkOptions,
-) -> Result<Vec<ExtractedEntity>, EngineError> {
+    collect_graph: bool,
+) -> Result<ExtractionOutput, EngineError> {
     let jsx = source
         .relative_path
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("tsx"));
-    extract_code(source, options, jsx)
+    extract_code(source, options, jsx, collect_graph).map(|mut output| {
+        for entity in &mut output.fragments {
+            if let Content::Text(text) = &mut entity.content {
+                entity.content = Content::Code(std::mem::take(text));
+            }
+        }
+        output
+    })
 }
 
 fn extract_code(
     source: &TextSource,
     options: ChunkOptions,
     jsx: bool,
-) -> Result<Vec<ExtractedEntity>, EngineError> {
+    collect_graph: bool,
+) -> Result<ExtractionOutput, EngineError> {
     if !super::service::is_code_source(&source.formats) {
-        return Ok(Vec::new());
+        return Ok(ExtractionOutput {
+            fragments: Vec::new(),
+            graph: None,
+        });
     }
     validate_formats(&source.formats)?;
     let (max_chars, overlap_chars) = resolve_options(options)?;
@@ -47,9 +67,15 @@ fn extract_code(
     {
         let fragments = extract_script_blocks(source, max_chars, overlap_chars)?;
         return if fragments.is_empty() {
-            Ok(fallback(source, max_chars, overlap_chars))
+            Ok(ExtractionOutput {
+                fragments: fallback(source, max_chars, overlap_chars),
+                graph: None,
+            })
         } else {
-            Ok(fragments)
+            Ok(ExtractionOutput {
+                fragments,
+                graph: None,
+            })
         };
     }
 
@@ -62,31 +88,76 @@ fn extract_code(
             .copied()
             .find(|format| resolve_adapter(*format).is_some())
     };
-    let Some((adapter, language)) =
-        format.and_then(|format| Some((resolve_adapter(format)?, grammar(format, jsx)?)))
+    let Some((adapter, language, code_format)) =
+        format.and_then(|format| Some((resolve_adapter(format)?, grammar(format, jsx)?, format)))
     else {
-        return Ok(fallback(source, max_chars, overlap_chars));
+        return Ok(ExtractionOutput {
+            fragments: fallback(source, max_chars, overlap_chars),
+            graph: None,
+        });
     };
 
     let mut parser = Parser::new();
     if parser.set_language(&language).is_err() {
-        return Ok(fallback(source, max_chars, overlap_chars));
+        return Ok(ExtractionOutput {
+            fragments: fallback(source, max_chars, overlap_chars),
+            graph: None,
+        });
     }
     let Some(tree) = parser.parse(&source.text, None) else {
-        return Ok(fallback(source, max_chars, overlap_chars));
+        return Ok(ExtractionOutput {
+            fragments: fallback(source, max_chars, overlap_chars),
+            graph: None,
+        });
     };
     let bytes = source.text.as_bytes();
     let mut entities = Vec::new();
-    walk_code_node(tree.root_node(), adapter, bytes, &[], &mut entities);
+    // The walk buffers containment edges and name references; the post-walk
+    // partition splits them into in-file resolved edges and pending refs.
+    // A workspace without graph storage gets a context that records nothing.
+    let mut graph_context = if collect_graph {
+        WalkContext::new()
+    } else {
+        WalkContext::disabled()
+    };
+    // Factory return types register before the entity walk so a bare-call
+    // initializer binds its factory even when the factory is spelled after
+    // the caller in this file.
+    scan_return_types(tree.root_node(), bytes, code_format, &mut graph_context);
+    walk_code_node(
+        tree.root_node(),
+        adapter,
+        bytes,
+        &[],
+        &mut entities,
+        &mut graph_context,
+        code_format,
+    );
 
     let mut output = Vec::new();
+    let mut entity_heads = Vec::with_capacity(entities.len());
     for entity in entities {
+        // Fragments are appended contiguously in walk order, so the output
+        // length before each append is that entity's head fragment index.
+        entity_heads.push(output.len());
         append_entity(source, &entity, max_chars, overlap_chars, &mut output);
     }
     if output.is_empty() {
-        Ok(fallback(source, max_chars, overlap_chars))
+        Ok(ExtractionOutput {
+            fragments: fallback(source, max_chars, overlap_chars),
+            graph: None,
+        })
     } else {
-        Ok(output)
+        // The symbol table is complete now, so partitioning resolves forward
+        // references as readily as backward ones. A walk that recorded nothing
+        // produces no graph at all, so assembly skips it.
+        let partitioned = graph_context
+            .is_collecting()
+            .then(|| partition_walk(graph_context, entity_heads));
+        Ok(ExtractionOutput {
+            fragments: output,
+            graph: partitioned,
+        })
     }
 }
 
@@ -130,35 +201,112 @@ fn fallback(source: &TextSource, max_chars: usize, overlap_chars: usize) -> Vec<
 #[derive(Debug)]
 struct CodeEntity<'tree> {
     node: Node<'tree>,
+    language: crate::domain::Language,
     name: Option<String>,
     symbol_type: Option<SymbolType>,
     breadcrumb: Vec<String>,
     signature: Option<String>,
     documentation: Option<String>,
+    arity: Option<usize>,
+    is_exported: bool,
+    /// Drives the language-specific scope separator; queries spell Java
+    /// scopes with dots (`CallHierarchy.Base::bar`) and the rest with `::`.
+    format: FileFormat,
+    /// Pure declaration without a body (C/C++ prototypes); definitions
+    /// shadow them in name-based binding.
+    is_declaration: bool,
 }
 
+// The entity branch shares first/scope entity indices and the scope boundary
+// with the call, binding and inheritance scans below it; extracting it would
+// force an eight-argument helper, trading one lint for another.
+#[allow(clippy::too_many_lines)]
 fn walk_code_node<'tree>(
     node: Node<'tree>,
     adapter: &LanguageAdapter,
     source: &[u8],
     breadcrumb: &[String],
     out: &mut Vec<CodeEntity<'tree>>,
+    graph_context: &mut WalkContext,
+    format: FileFormat,
 ) {
     for child in named_children(node) {
         let is_scope = adapter.is_scope(child);
         let is_entity = adapter.is_entity(child);
+        let mut first_entity_index = None;
+        let mut scope_entity_index = None;
+
         if is_entity {
+            let start_index = out.len();
             for entity in adapter.resolve_entities(child, source) {
+                let entity_index = graph_context.next_entity_index();
+                first_entity_index.get_or_insert(entity_index);
+                scope_entity_index = Some(entity_index);
                 let name = adapter.extract_name(entity, source);
                 let entity_breadcrumb = adapter.scope_breadcrumb(entity, source, breadcrumb);
+                // Declarations stay out of the in-file symbol table: an
+                // in-file call must not bind to a bodyless prototype when a
+                // definition exists anywhere in the workspace, and the
+                // resolver's name index applies that preference globally.
+                if !adapter.is_declaration(entity) {
+                    graph_context.register_symbol(name.as_deref(), entity_index);
+                    graph_context.register_scoped_symbol(name.as_deref(), entity_index);
+                }
+                graph_context.add_contains_edge(
+                    entity_index,
+                    entity.start_position().row + 1,
+                    entity.start_position().column,
+                );
                 out.push(CodeEntity {
                     node: entity,
+                    language: adapter.language(),
                     name,
                     symbol_type: adapter.classify(entity),
                     breadcrumb: entity_breadcrumb,
                     signature: adapter.extract_signature(entity, source),
-                    documentation: LanguageAdapter::extract_doc(entity, source),
+                    documentation: adapter.extract_doc(entity, source),
+                    arity: adapter.extract_arity(entity, source),
+                    is_exported: adapter.is_exported(entity, !breadcrumb.is_empty()),
+                    format,
+                    is_declaration: adapter.is_declaration(entity),
                 });
+            }
+            // Name-based references are collected from the first resolved
+            // entity's subtree: the walk does not descend into entity bodies,
+            // so this attributes call sites and inheritance clauses to their
+            // owning entity. A container entity (class/namespace) also walks
+            // as a scope, so its scan must skip nested member subtrees —
+            // those claim their own call sites when the scope recursion
+            // reaches them, and claiming them twice duplicates edges.
+            if let (Some(first_entity_index), Some(first_entity)) =
+                (first_entity_index, out.get(start_index))
+            {
+                let member_owned =
+                    |node: Node<'_>| adapter.is_entity(node) || adapter.is_scope(node);
+                let boundary: Option<&dyn Fn(Node<'_>) -> bool> =
+                    is_scope.then_some(&member_owned as &dyn Fn(Node<'_>) -> bool);
+                scan_call_edges(
+                    first_entity.node,
+                    first_entity_index,
+                    source,
+                    graph_context,
+                    boundary,
+                );
+                scan_binding_declarations(
+                    first_entity.node,
+                    first_entity_index,
+                    source,
+                    format,
+                    graph_context,
+                    boundary,
+                );
+                collect_inheritance_edges(
+                    first_entity.node,
+                    source,
+                    format,
+                    first_entity_index,
+                    graph_context,
+                );
             }
         }
 
@@ -168,15 +316,43 @@ fn walk_code_node<'tree>(
             if let Some(name) = name {
                 child_breadcrumb.push(name);
             }
+            let scope_node = adapter.enter_scope_node(child);
+            if let Some(scope_entity_index) = scope_entity_index {
+                graph_context.push_scope(scope_entity_index);
+                walk_code_node(
+                    scope_node,
+                    adapter,
+                    source,
+                    &child_breadcrumb,
+                    out,
+                    graph_context,
+                    format,
+                );
+                graph_context.pop_scope();
+            } else {
+                walk_code_node(
+                    scope_node,
+                    adapter,
+                    source,
+                    &child_breadcrumb,
+                    out,
+                    graph_context,
+                    format,
+                );
+            }
+        } else if !is_entity {
+            if is_import_node(child, format) {
+                collect_import_edge(child, source, format, graph_context);
+            }
             walk_code_node(
-                adapter.enter_scope_node(child),
+                child,
                 adapter,
                 source,
-                &child_breadcrumb,
+                breadcrumb,
                 out,
+                graph_context,
+                format,
             );
-        } else if !is_entity {
-            walk_code_node(child, adapter, source, breadcrumb, out);
         }
     }
 }
@@ -217,12 +393,24 @@ fn append_entity(
 }
 
 fn code_entity_metadata(entity: &CodeEntity<'_>) -> EntityMetadata {
+    // Java scopes join with dots — `CallHierarchy.Base::bar` is the language's
+    // own qualified-member spelling, and relationship queries split the symbol
+    // at the last `::` expecting exactly that scope spelling.
+    let scope_separator = match entity.format {
+        FileFormat::Java => ".",
+        _ => "::",
+    };
     EntityMetadata::Code(CodeMetadata {
         symbol_type: entity.symbol_type,
         symbol_name: entity.name.clone(),
-        scope: (!entity.breadcrumb.is_empty()).then(|| entity.breadcrumb.join("::")),
+        scope: (!entity.breadcrumb.is_empty()).then(|| entity.breadcrumb.join(scope_separator)),
         signature: entity.signature.clone(),
         documentation: entity.documentation.clone(),
+        visibility: None,
+        language: Some(entity.language),
+        arity: entity.arity,
+        is_exported: entity.is_exported,
+        is_declaration: entity.is_declaration,
     })
 }
 
@@ -252,7 +440,11 @@ fn extract_script_blocks(
                 chunk_overlap_chars: Some(overlap_chars),
             },
             block.jsx,
-        )?;
+            // Component scripts are remapped into the wrapper's coordinates
+            // and never contribute a graph, so the walk records nothing.
+            false,
+        )?
+        .fragments;
         let remapped = remap_script_block_entities(
             source,
             block_fragments,
@@ -376,7 +568,8 @@ mod tests {
     use std::collections::HashSet;
 
     use crate::domain::{
-        CodeMetadata, Content, EntityMetadata, FileFormat, Range, SymbolType, TextRange,
+        CodeMetadata, Content, EntityMetadata, FileFormat, Language as CodeLanguage, Range,
+        SymbolType, TextRange,
     };
 
     use super::super::{test_content, test_metadata};
@@ -407,7 +600,7 @@ mod tests {
     }
 
     fn assert_source_backed(source: &super::TextSource, entity: &super::ExtractedEntity) {
-        let Content::Text(content) = &entity.content else {
+        let Content::Code(content) = &entity.content else {
             panic!("text entity expected");
         };
         let Range::Text(range) = entity.source_range else {
@@ -493,7 +686,12 @@ mod tests {
                 symbol_name: Some("add".to_owned()),
                 scope: None,
                 signature: Some("async function add(value: number): Promise<number>".to_owned()),
+                visibility: None,
+                language: Some(CodeLanguage::TypeScript),
                 documentation: Some("Adds one.".to_owned()),
+                arity: Some(1),
+                is_exported: false,
+                is_declaration: false,
             }))
         );
         assert!(matches!(
@@ -507,7 +705,12 @@ mod tests {
                 symbol_name: Some("create".to_owned()),
                 scope: Some("Box".to_owned()),
                 signature: Some("static create()".to_owned()),
+                visibility: None,
+                language: Some(CodeLanguage::TypeScript),
                 documentation: None,
+                arity: Some(0),
+                is_exported: false,
+                is_declaration: false,
             }))
         );
         assert!(matches!(
@@ -549,7 +752,12 @@ mod tests {
                 symbol_name: Some("Widget".to_owned()),
                 scope: None,
                 signature: Some("typedef struct Widget {} Widget".to_owned()),
+                visibility: None,
+                language: Some(CodeLanguage::C),
                 documentation: None,
+                arity: None,
+                is_exported: false,
+                is_declaration: false,
             }))
         );
         assert!(matches!(
@@ -576,7 +784,12 @@ mod tests {
                 symbol_name: Some("Value".to_owned()),
                 scope: Some("Widget".to_owned()),
                 signature: Some("func (w *Widget) Value() int".to_owned()),
+                visibility: None,
+                language: Some(CodeLanguage::Go),
                 documentation: None,
+                arity: Some(0),
+                is_exported: false,
+                is_declaration: false,
             }))
         );
         assert!(matches!(
@@ -603,8 +816,13 @@ mod tests {
                 symbol_type: Some(SymbolType::Function),
                 symbol_name: Some("fetch".to_owned()),
                 scope: Some("Service".to_owned()),
-                signature: Some("@staticmethod\nasync def fetch(value: str) -> str:".to_owned()),
+                signature: Some("async def fetch(value: str) -> str:".to_owned()),
+                visibility: None,
+                language: Some(CodeLanguage::Python),
                 documentation: None,
+                arity: Some(1),
+                is_exported: false,
+                is_declaration: false,
             }))
         );
     }
@@ -652,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn signatures_preserve_python_decorators_and_their_arguments() {
+    fn signatures_exclude_python_decorators_and_their_arguments() {
         let source = test_source(
             FileFormat::Python,
             "signatures.py",
@@ -667,18 +885,26 @@ mod tests {
             .join("\n"),
         );
         let fragments = extract(&source, ChunkOptions::default()).expect("python extraction");
-        assert_eq!(
-            signature(&fragments, "Service"),
-            "@registered(name=\"Service  API\")\nclass Service:"
-        );
+        assert_eq!(signature(&fragments, "Service"), "class Service:");
         assert_eq!(
             signature(&fragments, "fetch"),
-            "@staticmethod\n@route(\"a  b\")\nasync def fetch(value: str) -> str:"
+            "async def fetch(value: str) -> str:"
         );
     }
 
     #[test]
-    fn signatures_preserve_rust_visibility_attributes_and_documentation() {
+    fn signatures_exclude_rust_diagnostic_messages() {
+        let source = test_source(
+            FileFormat::Rust,
+            "signatures.rs",
+            "#[diagnostic::on_unimplemented(note = \"consider adding Serialize to your type\")]\npub trait Serialize {}",
+        );
+        let fragments = extract(&source, ChunkOptions::default()).expect("rust extraction");
+        assert_eq!(signature(&fragments, "Serialize"), "pub trait Serialize");
+    }
+
+    #[test]
+    fn signatures_exclude_rust_attributes_and_preserve_visibility_and_documentation() {
         let source = test_source(
             FileFormat::Rust,
             "signatures.rs",
@@ -695,7 +921,7 @@ mod tests {
         let fragments = extract(&source, ChunkOptions::default()).expect("rust extraction");
         assert_eq!(
             signature(&fragments, "load"),
-            "#[must_use = \"use  the result\"]\n#[inline]\npub(crate) async unsafe fn load(value: usize) -> usize"
+            "pub(crate) async unsafe fn load(value: usize) -> usize"
         );
         assert_eq!(signature(&fragments, "plain"), "pub fn plain()");
         assert!(matches!(
@@ -703,6 +929,554 @@ mod tests {
             Some(EntityMetadata::Code(CodeMetadata { documentation: Some(doc), .. }))
                 if doc == "Load a value.\nKeep the result."
         ));
+    }
+
+    #[test]
+    fn skipping_graph_collection_keeps_every_entity() {
+        let source = test_source(
+            FileFormat::Rust,
+            "skip.rs",
+            "fn caller() { callee(); }\nfn callee() {}\nstruct Api;\nimpl Api { fn run(&self) {} }\n",
+        );
+        let with_graph =
+            extract_for_indexing(&source, ChunkOptions::default()).expect("graph extraction");
+        let without = crate::extraction::extract_without_graph(&source, ChunkOptions::default())
+            .expect("graph-free extraction");
+        assert!(
+            with_graph.graph.is_some(),
+            "indexing a graph workspace collects a graph"
+        );
+        assert!(
+            without.graph.is_none(),
+            "a graph-free workspace must not collect one"
+        );
+        assert_eq!(
+            without.fragments, with_graph.fragments,
+            "the indexed content must not depend on the graph setting"
+        );
+    }
+
+    #[test]
+    fn nested_calls_inside_arguments_reach_the_graph() {
+        // `outer(inner())` must report both calls: the walk descends
+        // declarations only, so the inner call is reachable solely through
+        // the outer call's argument subtree.
+        let source = test_source(
+            FileFormat::Rust,
+            "nested_calls.rs",
+            "fn inner() {}\nfn outer(_: ()) {}\nfn caller() { outer(inner()); }\n",
+        );
+        let graph = extract_for_indexing(&source, ChunkOptions::default())
+            .expect("extraction")
+            .graph
+            .expect("code sources carry a graph");
+        let mut targets: Vec<usize> = graph
+            .resolved
+            .iter()
+            .map(|edge| edge.target_index)
+            .collect();
+        targets.sort_unstable();
+        assert_eq!(
+            targets,
+            vec![0, 1],
+            "caller must reach both inner and outer"
+        );
+        assert!(graph.pending.is_empty());
+    }
+
+    #[test]
+    fn nested_calls_inside_receivers_reach_the_graph() {
+        // `factory().run()` spells its member on a call result: the callee text
+        // is not identifier-like, so no edge names `run`, but the receiver's
+        // own call is only reachable through the call node's subtree.
+        use super::{Parser, WalkContext, grammar, resolve_adapter};
+        use crate::domain::GraphEdgeKind;
+
+        let source = test_source(
+            FileFormat::Rust,
+            "chained_calls.rs",
+            concat!(
+                "struct Api;\n",
+                "fn factory() -> Api { Api }\n",
+                "impl Api { fn run(&self) {} }\n",
+                "fn caller() { factory().run(); }\n",
+            ),
+        );
+        let adapter = resolve_adapter(FileFormat::Rust).expect("rust adapter");
+        let language = grammar(FileFormat::Rust, false).expect("rust grammar");
+        let mut parser = Parser::new();
+        parser.set_language(&language).expect("grammar loads");
+        let tree = parser.parse(&source.text, None).expect("source parses");
+
+        let mut entities = Vec::new();
+        let mut graph_context = WalkContext::new();
+        super::walk_code_node(
+            tree.root_node(),
+            adapter,
+            source.text.as_bytes(),
+            &[],
+            &mut entities,
+            &mut graph_context,
+            FileFormat::Rust,
+        );
+
+        let calls: Vec<&str> = graph_context
+            .name_edges()
+            .iter()
+            .filter(|edge| edge.ref_kind == GraphEdgeKind::Calls)
+            .map(|edge| edge.ref_name.as_str())
+            .collect();
+        assert_eq!(
+            calls,
+            vec!["factory"],
+            "only the receiver's own call is a bindable name"
+        );
+    }
+
+    #[test]
+    fn nested_calls_stay_inside_their_owning_entity() {
+        // The container's scan skips member subtrees, so `outer(inner())`
+        // inside a method is claimed once — by the method — instead of being
+        // duplicated by the class that also encloses the site.
+        let source = test_source(
+            FileFormat::Java,
+            "Boundary.java",
+            "class A { void run() { outer(inner()); } }\n",
+        );
+        let graph = extract_for_indexing(&source, ChunkOptions::default())
+            .expect("extraction")
+            .graph
+            .expect("code sources carry a graph");
+        let mut calls: Vec<&str> = graph
+            .pending
+            .iter()
+            .filter(|edge| edge.ref_kind == crate::domain::GraphEdgeKind::Calls)
+            .map(|edge| edge.ref_name.as_str())
+            .collect();
+        calls.sort_unstable();
+        assert_eq!(
+            calls,
+            vec!["inner", "outer"],
+            "one owner per site: {:?}",
+            graph.pending
+        );
+        assert!(graph.resolved.is_empty(), "resolved: {:?}", graph.resolved);
+    }
+
+    #[test]
+    fn type_scoped_member_names_do_not_bind_from_file_scope() {
+        // `import { run }` plus `class A { run() {} }`: the member is not a
+        // file-level name, so `caller`'s bare `run()` must stay pending rather
+        // than claim `A::run` before the resolver weighs the import.
+        let source = test_source(
+            FileFormat::TypeScript,
+            "shadow.ts",
+            "import { run } from './other';\nclass A { run() {} }\nfunction caller() { run(); }\n",
+        );
+        let graph = extract_for_indexing(&source, ChunkOptions::default())
+            .expect("extraction")
+            .graph
+            .expect("code sources carry a graph");
+        assert!(graph.resolved.is_empty(), "resolved: {:?}", graph.resolved);
+        assert!(
+            graph.pending.iter().any(|edge| {
+                edge.ref_kind == crate::domain::GraphEdgeKind::Calls && edge.ref_name == "run"
+            }),
+            "pending: {:?}",
+            graph.pending
+        );
+    }
+
+    #[test]
+    fn overload_calls_keep_their_arity() {
+        // `x.run()` and `x.run(1)` may name different overloads; partition must
+        // keep both call shapes instead of collapsing to the first one.
+        let source = test_source(
+            FileFormat::Java,
+            "Overload.java",
+            "class A { void caller(Api x) { x.run(); x.run(1); } }\n",
+        );
+        let graph = extract_for_indexing(&source, ChunkOptions::default())
+            .expect("extraction")
+            .graph
+            .expect("code sources carry a graph");
+        let mut arities: Vec<Option<usize>> = graph
+            .pending
+            .iter()
+            .filter(|edge| {
+                edge.ref_kind == crate::domain::GraphEdgeKind::Calls && edge.ref_name == "run"
+            })
+            .map(|edge| edge.arity)
+            .collect();
+        arities.sort_unstable();
+        assert_eq!(
+            arities,
+            vec![Some(0), Some(1)],
+            "pending: {:?}",
+            graph.pending
+        );
+    }
+
+    #[test]
+    fn documentation_preserves_rust_doc_attributes_in_source_order() {
+        let source = test_source(
+            FileFormat::Rust,
+            "docs.rs",
+            r###"/// First paragraph.
+#[doc = "Searchable\n\"quoted\" \x74ext \u{4E2D}\\path"]
+#[diagnostic::on_unimplemented(note = "diagnostic_only")]
+#[doc = r##"Raw // text with "quotes" and #[markers]."##]
+/** Last paragraph. */
+pub trait Documented {}
+#[doc(hidden)]
+#[deprecated(note = "deprecated_only")]
+pub fn undocumented() {}"###,
+        );
+        let entities = extract_for_indexing(&source, ChunkOptions::default())
+            .expect("extraction")
+            .fragments;
+        let entity = named(&entities, "Documented");
+        assert_source_backed(&source, entity);
+        let Some(EntityMetadata::Code(metadata)) = test_metadata(entity) else {
+            panic!("code metadata expected");
+        };
+        assert_eq!(
+            metadata.documentation.as_deref(),
+            Some(
+                "First paragraph.\nSearchable\n\"quoted\" text 中\\path\nRaw // text with \"quotes\" and #[markers].\nLast paragraph."
+            )
+        );
+        assert_eq!(metadata.signature.as_deref(), Some("pub trait Documented"));
+        assert!(matches!(
+            test_metadata(named(&entities, "undocumented")),
+            Some(EntityMetadata::Code(CodeMetadata {
+                documentation: None,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn documentation_follows_declaration_wrappers() {
+        let fixtures = [
+            (
+                FileFormat::JavaScript,
+                "docs.js",
+                "/** Searchable documentation. */\nexport function read() {}",
+                "read",
+            ),
+            (
+                FileFormat::JavaScript,
+                "docs.js",
+                "/** Searchable documentation. */\nexport const read = () => {};",
+                "read",
+            ),
+            (
+                FileFormat::TypeScript,
+                "docs.ts",
+                "/** Searchable documentation. */\nexport declare function read(): void;",
+                "read",
+            ),
+            (
+                FileFormat::TypeScript,
+                "docs.ts",
+                "/** Searchable documentation. */\nexport default class Service {}",
+                "Service",
+            ),
+            (
+                FileFormat::Go,
+                "docs.go",
+                "package demo\n// Searchable documentation.\ntype Service struct {}",
+                "Service",
+            ),
+            (
+                FileFormat::C,
+                "docs.c",
+                "/** Searchable documentation. */\nstruct Service {};",
+                "Service",
+            ),
+            (
+                FileFormat::Cpp,
+                "docs.cpp",
+                "/** Searchable documentation. */\nclass Service {};",
+                "Service",
+            ),
+            (
+                FileFormat::Java,
+                "Docs.java",
+                "/** Searchable documentation. */\n@Deprecated\nclass Service {}",
+                "Service",
+            ),
+            (
+                FileFormat::Python,
+                "docs.py",
+                "# Searchable documentation.\n@registered\nclass Service:\n    pass",
+                "Service",
+            ),
+        ];
+        let mut missing = Vec::new();
+        for (format, path, text, name) in fixtures {
+            let source = test_source(format, path, text);
+            let entities = extract_for_indexing(&source, ChunkOptions::default())
+                .expect("extraction")
+                .fragments;
+            let entity = named(&entities, name);
+            assert_source_backed(&source, entity);
+            let Some(EntityMetadata::Code(metadata)) = test_metadata(entity) else {
+                panic!("code metadata expected");
+            };
+            if metadata.documentation.as_deref() != Some("Searchable documentation.") {
+                missing.push((format, text, metadata.documentation.clone()));
+            }
+            assert!(
+                !metadata
+                    .signature
+                    .as_deref()
+                    .expect("signature")
+                    .contains("Searchable")
+            );
+        }
+        assert!(missing.is_empty(), "missing documentation: {missing:#?}");
+    }
+
+    #[test]
+    fn documentation_keeps_rust_inner_docs_on_their_owner() {
+        let source = test_source(
+            FileFormat::Rust,
+            "docs.rs",
+            "//! Crate documentation.\n#![doc = \"Crate details.\"]\n/// Module summary.\npub mod service {\n    //! Inner module summary.\n    #![doc = \"Additional module details.\"]\n    /*! Final module details. */\n    pub fn undocumented() {}\n}",
+        );
+        let entities = extract_for_indexing(&source, ChunkOptions::default())
+            .expect("extraction")
+            .fragments;
+        assert!(matches!(
+            test_metadata(named(&entities, "service")),
+            Some(EntityMetadata::Code(CodeMetadata { documentation: Some(doc), .. }))
+                if doc == "Crate documentation.\nCrate details.\nModule summary.\nInner module summary.\nAdditional module details.\nFinal module details."
+        ));
+        assert!(matches!(
+            test_metadata(named(&entities, "undocumented")),
+            Some(EntityMetadata::Code(CodeMetadata {
+                documentation: None,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn documentation_decodes_rust_strings_without_interpreting_other_attributes() {
+        let fixtures = [
+            (
+                r#"#[ /* comment */ doc = r"literal \n text"]"#,
+                Some(r"literal \n text"),
+            ),
+            (
+                r#"#[doc = "first\tsecond\r\nthird\0end\'"]"#,
+                Some("first\tsecond\r\nthird\0end'"),
+            ),
+            ("#[doc = \"first\\\n    second\"]", Some("firstsecond")),
+            ("#[doc = \"first\\\r\n    second\"]", Some("firstsecond")),
+            (r#"#[doc = "\u{1F_600}"]"#, Some("😀")),
+            (r#"#[doc = "\xFF"]"#, None),
+            (r#"#[doc = "\u{D800}"]"#, None),
+            (r#"#[doc = "\q"]"#, None),
+            (r#"#[doc = include_str!("external.md")]"#, None),
+            (r#"#[tool::doc = "attribute_only"]"#, None),
+            (r#"#[other(doc = "attribute_only")]"#, None),
+            (r#"#[doc(alias = "attribute_only")]"#, None),
+        ];
+        for (attribute, expected) in fixtures {
+            let source = test_source(
+                FileFormat::Rust,
+                "docs.rs",
+                &format!("{attribute}\npub fn read() {{}}"),
+            );
+            let entities = extract_for_indexing(&source, ChunkOptions::default())
+                .expect("extraction")
+                .fragments;
+            let Some(EntityMetadata::Code(metadata)) = test_metadata(named(&entities, "read"))
+            else {
+                panic!("code metadata expected");
+            };
+            assert_eq!(metadata.documentation.as_deref(), expected, "{attribute}");
+            assert_eq!(metadata.signature.as_deref(), Some("pub fn read()"));
+        }
+    }
+
+    #[test]
+    fn documentation_does_not_cross_symbol_boundaries() {
+        let fixtures = [
+            (
+                FileFormat::TypeScript,
+                "docs.ts",
+                "/** Parent docs. */\nexport class Service { read() {} }\nexport function other() {}",
+                "Service",
+                "Parent docs.",
+                &["read", "other"][..],
+            ),
+            (
+                FileFormat::JavaScript,
+                "docs.js",
+                "/** Wrapper docs. */\nexport /* Local docs. */ function read() {}\nexport function other() {}",
+                "read",
+                "Wrapper docs.\nLocal docs.",
+                &["other"],
+            ),
+            (
+                FileFormat::Go,
+                "docs.go",
+                "package demo\n// Group docs.\ntype (\n// Local docs.\nService struct {}\n)\ntype Other struct {}",
+                "Service",
+                "Group docs.\nLocal docs.",
+                &["Other"],
+            ),
+        ];
+        for (format, path, text, name, expected, undocumented) in fixtures {
+            let source = test_source(format, path, text);
+            let entities = extract_for_indexing(&source, ChunkOptions::default())
+                .expect("extraction")
+                .fragments;
+            let Some(EntityMetadata::Code(metadata)) = test_metadata(named(&entities, name)) else {
+                panic!("code metadata expected");
+            };
+            assert_eq!(
+                metadata.documentation.as_deref(),
+                Some(expected),
+                "{format:?}"
+            );
+            for name in undocumented {
+                assert!(
+                    matches!(
+                        test_metadata(named(&entities, name)),
+                        Some(EntityMetadata::Code(CodeMetadata {
+                            documentation: None,
+                            ..
+                        }))
+                    ),
+                    "{format:?}: {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn signatures_exclude_prose_across_languages() {
+        let fixtures = [
+            (
+                FileFormat::Rust,
+                "fixture.rs",
+                r##"#[cfg_attr(feature = "std", deprecated(note = r#"use another type ] )"#))]
+#[doc = "A human-readable type description."]
+pub trait Serialize<T /* prose */>: Sized
+where T: Send {
+    #[must_use = "remember this type"]
+    fn serialize(#[allow(unused, reason = "unused type")] value: T) -> Result<(), Error>;
+}"##,
+                &[
+                    ("Serialize", "pub trait Serialize<T >: Sized where T: Send"),
+                    ("serialize", "fn serialize( value: T) -> Result<(), Error>"),
+                ][..],
+            ),
+            (
+                FileFormat::TypeScript,
+                "fixture.ts",
+                r#"export /* exported prose */ default class Service {
+    @deprecated("use another type")
+    load: (value: string) => Result;
+}
+export /* export prose */ const read /* binding prose */ = (value: Input /* parameter prose */): Output => value;
+interface Options {
+    /** Top-level prose. */
+    config?: {
+        /** Nested type prose. */
+        mode: "fast" | "safe";
+    };
+}"#,
+                &[
+                    ("Service", "export default class Service"),
+                    ("load", "load: (value: string) => Result"),
+                    ("read", "export const read = (value: Input ): Output =>"),
+                    ("config", "config?: { mode: \"fast\" | \"safe\"; }"),
+                ],
+            ),
+            (
+                FileFormat::JavaScript,
+                "fixture.js",
+                "export /* export prose */ function read(value /* parameter prose */) { return value; }",
+                &[("read", "export function read(value )")],
+            ),
+            (
+                FileFormat::Java,
+                "Fixture.java",
+                r#"@Deprecated(since = "use another type")
+public class Service {
+    @SuppressWarnings("human type description")
+    public String read(@Named("parameter prose") String value /* comment prose */) { return value; }
+}"#,
+                &[
+                    ("Service", "public class Service"),
+                    ("read", "public String read( String value )"),
+                ],
+            ),
+            (
+                FileFormat::Cpp,
+                "fixture.cpp",
+                r#"[[deprecated("use another type")]] int read(int value /* prose */) { return value; }"#,
+                &[("read", "int read(int value )")],
+            ),
+            (
+                FileFormat::C,
+                "fixture.c",
+                "__attribute__((deprecated(\"use another type\"))) int/**/read(int value) { return value; }",
+                &[("read", "int read(int value)")],
+            ),
+            (
+                FileFormat::Go,
+                "fixture.go",
+                "package demo\nfunc read(value /* prose */ string) string { return value }",
+                &[("read", "func read(value string) string")],
+            ),
+            (
+                FileFormat::Python,
+                "fixture.py",
+                "@deprecated(\"use another type\")\ndef read(\n    value: str, # parameter prose\n) -> str:\n    return value",
+                &[("read", "def read( value: str, ) -> str:")],
+            ),
+        ];
+        for (format, path, text, expected) in fixtures {
+            let source = test_source(format, path, text);
+            let entities = extract_for_indexing(&source, ChunkOptions::default())
+                .expect("code extraction for indexing")
+                .fragments;
+            for &(name, expected_signature) in expected {
+                let entity = named(&entities, name);
+                assert_source_backed(&source, entity);
+                assert_eq!(
+                    signature(&entities, name)
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    expected_signature,
+                    "{format:?}: {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn signatures_preserve_literals_that_look_like_comments_or_attributes() {
+        let source = test_source(
+            FileFormat::TypeScript,
+            "literals.ts",
+            r##"export function read(value: "/*type*/" | "//type" = "//type", marker = "#[type]  @type") { return value; }"##,
+        );
+        let entities = extract_for_indexing(&source, ChunkOptions::default())
+            .expect("typescript extraction")
+            .fragments;
+        assert_eq!(
+            signature(&entities, "read"),
+            r##"export function read(value: "/*type*/" | "//type" = "//type", marker = "#[type]  @type")"##
+        );
     }
 
     #[test]
@@ -1051,7 +1825,7 @@ mod tests {
             }))
         ));
         assert_source_backed(&source, owner);
-        assert_eq!(owner.content, Content::Text(source.text.clone()));
+        assert_eq!(owner.content, Content::Code(source.text.clone()));
         assert!(matches!(
             test_metadata(named(&fragments, "name")),
             Some(EntityMetadata::Code(CodeMetadata {
@@ -1161,11 +1935,12 @@ mod tests {
                     chunk_overlap_chars: Some(18),
                 },
             )
-            .expect("structured source");
+            .expect("structured source")
+            .fragments;
             let entity = &entities[0];
             assert_source_backed(&source, entity);
             for fragment in &entity.fragments {
-                let Content::Text(text) = &entity.content else {
+                let Content::Code(text) = &entity.content else {
                     panic!("text entity expected");
                 };
                 let Range::Byte(range) = fragment.range else {
@@ -1173,10 +1948,10 @@ mod tests {
                 };
                 let start = usize::try_from(range.start_offset()).expect("fragment start");
                 let end = usize::try_from(range.end_offset()).expect("fragment end");
-                let content = Content::Text(text[start..end].to_owned());
+                let content = Content::Code(text[start..end].to_owned());
                 let vector =
                     vector_content_for_fragment(&content, entity.metadata.as_ref(), Some(120));
-                let [Content::Text(vector)] = vector.as_slice() else {
+                let [Content::Code(vector)] = vector.as_slice() else {
                     panic!("text embedding");
                 };
                 assert!(crate::utils::utf16_len(vector) <= 120);
@@ -1244,7 +2019,7 @@ mod tests {
         assert_source_backed(&plain_script, &fallback[0]);
         assert_eq!(
             test_content(&fallback[0]),
-            Content::Text("\r\n// 没有声明\r\n".to_owned())
+            Content::Code("\r\n// 没有声明\r\n".to_owned())
         );
         assert!(test_metadata(&fallback[0]).is_none());
         assert!(matches!(
@@ -1257,7 +2032,7 @@ mod tests {
         assert_eq!(fallback.len(), 1);
         assert_eq!(
             test_content(&fallback[0]),
-            Content::Text(no_script.text.clone())
+            Content::Code(no_script.text.clone())
         );
         assert!(test_metadata(&fallback[0]).is_none());
     }
@@ -1320,7 +2095,7 @@ mod tests {
             assert!(entity.fragments.len() > 2);
             assert_source_backed(&source, entity);
             for fragment in &entity.fragments {
-                let Content::Text(text) = &entity.content else {
+                let Content::Code(text) = &entity.content else {
                     panic!("text entity expected");
                 };
                 let Range::Byte(range) = fragment.range else {
@@ -1370,9 +2145,419 @@ mod tests {
             assert_eq!(fragments.len(), 1);
             assert_eq!(
                 test_content(&fragments[0]),
-                Content::Text(source.text.clone())
+                Content::Code(source.text.clone())
             );
             assert!(test_metadata(&fragments[0]).is_none());
         }
+    }
+
+    #[test]
+    fn walk_collects_contains_edges_and_pending_references() {
+        use super::super::graph::FILE_SCOPE_INDEX;
+        use super::{Parser, WalkContext, grammar, resolve_adapter};
+        use crate::domain::GraphEdgeKind;
+
+        let source = test_source(
+            FileFormat::TypeScript,
+            "fixture.ts",
+            concat!(
+                "import { helper } from \"./utils.js\";\n",
+                "\n",
+                "class Widget extends Base {\n",
+                "  constructor() {\n",
+                "    this.init(1, 2);\n",
+                "    this.init(3);\n",
+                "  }\n",
+                "}\n",
+                "\n",
+                "function main() {\n",
+                "  helper();\n",
+                "}\n",
+            ),
+        );
+        let adapter = resolve_adapter(FileFormat::TypeScript).expect("typescript adapter");
+        let language = grammar(FileFormat::TypeScript, false).expect("typescript grammar");
+        let mut parser = Parser::new();
+        parser.set_language(&language).expect("grammar loads");
+        let tree = parser.parse(&source.text, None).expect("source parses");
+
+        let mut entities = Vec::new();
+        let mut graph_context = WalkContext::new();
+        super::walk_code_node(
+            tree.root_node(),
+            adapter,
+            source.text.as_bytes(),
+            &[],
+            &mut entities,
+            &mut graph_context,
+            FileFormat::TypeScript,
+        );
+
+        // Walk order allocates entity ordinals: Widget = 0, constructor = 1,
+        // main = 2. `helper` is imported, never declared, so it has no entry.
+        assert_eq!(graph_context.lookup_symbol("Widget"), Some(&[0][..]));
+        assert!(graph_context.is_unique_symbol("Widget"));
+        assert_eq!(graph_context.lookup_symbol("helper"), None);
+
+        // The constructor is contained by the class; top-level entities are
+        // linked to the file node during assembly, not at walk time.
+        let contains = graph_context.resolved_edges();
+        assert_eq!(contains.len(), 1);
+        assert_eq!(
+            (
+                contains[0].source_index,
+                contains[0].target_index,
+                contains[0].line,
+                contains[0].column,
+            ),
+            (0, 1, 4, 2)
+        );
+
+        let names = graph_context.name_edges();
+        assert_eq!(names.len(), 5);
+        // Imports belong to the file scope.
+        assert_eq!(names[0].ref_kind, GraphEdgeKind::Imports);
+        assert_eq!(names[0].owner_index, FILE_SCOPE_INDEX);
+        assert_eq!(names[0].ref_name, "./utils.js");
+        assert_eq!((names[0].line, names[0].column), (1, 0));
+        // The extends clause is collected from the class node; positions
+        // point at the clause itself, not the inherited expression.
+        assert_eq!(names[1].ref_kind, GraphEdgeKind::Extends);
+        assert_eq!(
+            (names[1].owner_index, names[1].ref_name.as_str()),
+            (0, "Base")
+        );
+        assert_eq!(names[1].raw_text.as_deref(), Some("extends Base"));
+        assert_eq!((names[1].line, names[1].column), (3, 13));
+        // The constructor's own scan attributes both method-body calls to
+        // itself; the sites differ, so each `this.init` spelling stays.
+        // The class-level scan skips member subtrees, so the class no
+        // longer duplicates the same call sites.
+        assert_eq!(names[2].ref_kind, GraphEdgeKind::Calls);
+        assert_eq!(
+            (names[2].owner_index, names[2].ref_name.as_str()),
+            (1, "init")
+        );
+        assert_eq!(names[2].arity, Some(2));
+        assert_eq!((names[2].line, names[2].column), (5, 4));
+        assert_eq!(names[3].ref_kind, GraphEdgeKind::Calls);
+        assert_eq!(
+            (names[3].owner_index, names[3].ref_name.as_str()),
+            (1, "init")
+        );
+        assert_eq!(names[3].arity, Some(1));
+        assert_eq!((names[3].line, names[3].column), (6, 4));
+        // Top-level function scan.
+        assert_eq!(names[4].ref_kind, GraphEdgeKind::Calls);
+        assert_eq!(
+            (names[4].owner_index, names[4].ref_name.as_str()),
+            (2, "helper")
+        );
+        assert_eq!(names[4].arity, Some(0));
+    }
+
+    #[test]
+    fn walk_collects_rust_imports_and_calls() {
+        use super::super::graph::FILE_SCOPE_INDEX;
+        use super::{Parser, WalkContext, grammar, resolve_adapter};
+        use crate::domain::GraphEdgeKind;
+
+        let source = test_source(
+            FileFormat::Rust,
+            "fixture.rs",
+            concat!(
+                "use std::collections::HashMap;\n",
+                "\n",
+                "pub fn main() {\n",
+                "    let map = HashMap::new();\n",
+                "}\n",
+            ),
+        );
+        let adapter = resolve_adapter(FileFormat::Rust).expect("rust adapter");
+        let language = grammar(FileFormat::Rust, false).expect("rust grammar");
+        let mut parser = Parser::new();
+        parser.set_language(&language).expect("grammar loads");
+        let tree = parser.parse(&source.text, None).expect("source parses");
+
+        let mut entities = Vec::new();
+        let mut graph_context = WalkContext::new();
+        super::walk_code_node(
+            tree.root_node(),
+            adapter,
+            source.text.as_bytes(),
+            &[],
+            &mut entities,
+            &mut graph_context,
+            FileFormat::Rust,
+        );
+
+        // `use` declarations are not entities, so they take the import branch;
+        // `use a::b;` module paths come from the text fallback.
+        let names = graph_context.name_edges();
+        assert_eq!(names.len(), 2);
+        assert_eq!(names[0].ref_kind, GraphEdgeKind::Imports);
+        assert_eq!(names[0].owner_index, FILE_SCOPE_INDEX);
+        assert_eq!(names[0].ref_name, "std::collections::HashMap");
+        // Qualified callees split into receiver and member name.
+        assert_eq!(names[1].ref_kind, GraphEdgeKind::Calls);
+        assert_eq!(names[1].owner_index, 0);
+        assert_eq!(names[1].ref_name, "new");
+        assert_eq!(names[1].receiver_name.as_deref(), Some("HashMap"));
+    }
+
+    #[test]
+    fn partitions_in_file_references_after_the_walk() {
+        use super::super::graph::FILE_SCOPE_INDEX;
+        use crate::domain::{EdgeProvenance, GraphEdgeKind};
+
+        let source = test_source(
+            FileFormat::TypeScript,
+            "fixture.ts",
+            concat!(
+                "import { helper } from \"./utils.js\";\n",
+                "\n",
+                "class Widget extends Base {\n",
+                "  constructor() {\n",
+                "    this.init(1, 2);\n",
+                "  }\n",
+                "}\n",
+                "\n",
+                "function main() {\n",
+                "  helper();\n",
+                "  main();\n",
+                "}\n",
+            ),
+        );
+        let extracted = extract_for_indexing(&source, ChunkOptions::default()).expect("extracts");
+        let graph = extracted.graph.expect("code walk produces a graph");
+
+        // Entities in walk order: Widget = 0, constructor = 1, main = 2. Head
+        // fragment indices strictly increase because every entity appends at
+        // least one fragment.
+        let heads = &graph.head_fragment_indices;
+        assert_eq!(heads.len(), 3);
+        assert!(heads.windows(2).all(|pair| pair[0] < pair[1]));
+
+        // The constructor's containment under the class passes through.
+        assert_eq!(graph.contains.len(), 1);
+        assert_eq!(
+            (
+                graph.contains[0].source_index,
+                graph.contains[0].target_index
+            ),
+            (0, 1)
+        );
+
+        // `main` calls itself: the file declares `main` exactly once, so the
+        // post-walk partition resolves the reference as a file-local edge —
+        // even though the call site sits inside the declaration's own body.
+        assert_eq!(graph.resolved.len(), 1);
+        let resolved = &graph.resolved[0];
+        assert_eq!(resolved.ref_kind, GraphEdgeKind::Calls);
+        assert_eq!((resolved.source_index, resolved.target_index), (2, 2));
+        assert_eq!(resolved.provenance, EdgeProvenance::FileLocal);
+        assert_eq!(resolved.raw_text.as_deref(), Some("main"));
+        assert_eq!(resolved.arity, Some(0));
+
+        // Everything else stays pending in walk order: the import (file-owned),
+        // the undeclared extends target, the receiver-qualified call attributed
+        // to the constructor, and the imported-but-undeclared `helper`.
+        let pending = &graph.pending;
+        assert_eq!(pending.len(), 4);
+        assert_eq!(pending[0].ref_kind, GraphEdgeKind::Imports);
+        assert_eq!(pending[0].owner_index, FILE_SCOPE_INDEX);
+        assert_eq!(pending[0].ref_name, "./utils.js");
+        assert_eq!(
+            (pending[1].ref_kind, pending[1].ref_name.as_str()),
+            (GraphEdgeKind::Extends, "Base")
+        );
+        assert_eq!(
+            (pending[2].owner_index, pending[2].ref_name.as_str()),
+            (1, "init")
+        );
+        assert_eq!(
+            (pending[3].owner_index, pending[3].ref_name.as_str()),
+            (2, "helper")
+        );
+    }
+
+    #[test]
+    fn c_include_forms_specialize_import_references() {
+        use crate::domain::GraphEdgeKind;
+
+        let source = test_source(
+            FileFormat::Cpp,
+            "fixture.cpp",
+            concat!(
+                "#include <string>\n",
+                "#include \"Foo.h\"\n",
+                "#include \"./sub/x.h\"\n",
+                "#include \"../peer.h\"\n",
+                "\n",
+                "int main() {\n",
+                "  return 0;\n",
+                "}\n",
+            ),
+        );
+        let extracted = extract_for_indexing(&source, ChunkOptions::default()).expect("extracts");
+        let graph = extracted.graph.expect("code walk produces a graph");
+
+        let imports: Vec<&str> = graph
+            .pending
+            .iter()
+            .filter(|edge| edge.ref_kind == GraphEdgeKind::Imports)
+            .map(|edge| edge.ref_name.as_str())
+            .collect();
+        // Angle-bracket includes keep their form (the resolver terminates
+        // them as external); quoted includes normalize to includer-relative
+        // paths per the C search rule.
+        assert_eq!(
+            imports,
+            vec!["<string>", "./Foo.h", "./sub/x.h", "../peer.h"]
+        );
+    }
+
+    // Manual inspection harness, not part of CI: run with
+    // `cargo test -p zg-engine --lib dump_walk_graph -- --ignored --nocapture`
+    // to eyeball everything the walk collects over this crate's own graph.rs.
+    #[test]
+    #[ignore = "manual inspection dump"]
+    fn dump_walk_graph_over_graph_rs() {
+        use super::super::graph::FILE_SCOPE_INDEX;
+        use super::{Parser, WalkContext, grammar, resolve_adapter};
+        use crate::domain::GraphEdgeKind;
+
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/extraction/graph.rs");
+        let text = std::fs::read_to_string(&path).expect("graph.rs is readable");
+        let adapter = resolve_adapter(FileFormat::Rust).expect("rust adapter");
+        let language = grammar(FileFormat::Rust, false).expect("rust grammar");
+        let mut parser = Parser::new();
+        parser.set_language(&language).expect("grammar loads");
+        let tree = parser.parse(&text, None).expect("graph.rs parses");
+
+        let mut entities = Vec::new();
+        let mut context = WalkContext::new();
+        super::walk_code_node(
+            tree.root_node(),
+            adapter,
+            text.as_bytes(),
+            &[],
+            &mut entities,
+            &mut context,
+            FileFormat::Rust,
+        );
+
+        println!("=== {} entities ===", entities.len());
+        for (index, entity) in entities.iter().enumerate() {
+            println!(
+                "[{index}] {:?} {} L{}",
+                entity.symbol_type,
+                entity.name.as_deref().unwrap_or("<anon>"),
+                entity.node.start_position().row + 1,
+            );
+        }
+
+        let contains = context.resolved_edges();
+        println!("=== {} contains edges ===", contains.len());
+        for edge in contains {
+            println!(
+                "{} -> {} (L{})",
+                edge.source_index, edge.target_index, edge.line
+            );
+        }
+
+        let names = context.name_edges();
+        println!("=== {} name references ===", names.len());
+        for edge in names {
+            let owner = if edge.owner_index == FILE_SCOPE_INDEX {
+                "FILE".to_owned()
+            } else {
+                edge.owner_index.to_string()
+            };
+            println!(
+                "{:?} owner={} name={:?} recv={:?} arity={:?} L{}:{}",
+                edge.ref_kind,
+                owner,
+                edge.ref_name,
+                edge.receiver_name,
+                edge.arity,
+                edge.line,
+                edge.column
+            );
+        }
+
+        assert!(!entities.is_empty());
+        assert!(contains.len() >= 10);
+        assert!(
+            names
+                .iter()
+                .any(|edge| edge.ref_kind == GraphEdgeKind::Imports)
+        );
+    }
+
+    fn code_fields(entity: &super::ExtractedEntity) -> (Option<usize>, bool) {
+        let Some(EntityMetadata::Code(metadata)) = test_metadata(entity) else {
+            panic!("code metadata expected");
+        };
+        (metadata.arity, metadata.is_exported)
+    }
+
+    #[test]
+    fn arity_and_export_flags_follow_declaration_shapes() {
+        let typescript = test_source(
+            FileFormat::TypeScript,
+            "fixture.ts",
+            &[
+                "export function visible(count: number): void {}",
+                "function hidden() {}",
+                "export const bag = { grab(item: string) { return item; } };",
+            ]
+            .join("\n"),
+        );
+        let fragments = extract(&typescript, ChunkOptions::default()).expect("ts extraction");
+        assert_eq!(code_fields(named(&fragments, "visible")), (Some(1), true));
+        assert_eq!(code_fields(named(&fragments, "hidden")), (Some(0), false));
+        // The bag owns the export; its members stay module-internal.
+        assert_eq!(code_fields(named(&fragments, "grab")), (Some(1), false));
+
+        let rust = test_source(
+            FileFormat::Rust,
+            "lib.rs",
+            &[
+                "pub struct Gauge;",
+                "impl Gauge {",
+                "    pub fn add(&mut self, delta: u32) -> u32 { delta }",
+                "    fn reset(&self) {}",
+                "}",
+            ]
+            .join("\n"),
+        );
+        let fragments = extract(&rust, ChunkOptions::default()).expect("rust extraction");
+        assert_eq!(code_fields(named(&fragments, "Gauge")), (None, true));
+        assert_eq!(code_fields(named(&fragments, "add")), (Some(1), true));
+        assert_eq!(code_fields(named(&fragments, "reset")), (Some(0), false));
+
+        let python = test_source(
+            FileFormat::Python,
+            "mod.py",
+            &["def top(level):", "    return level", ""].join("\n"),
+        );
+        let fragments = extract(&python, ChunkOptions::default()).expect("py extraction");
+        assert_eq!(code_fields(named(&fragments, "top")), (Some(1), true));
+
+        let member = test_source(
+            FileFormat::Python,
+            "svc.py",
+            &[
+                "class Service:",
+                "    def fetch(self, value):",
+                "        return value",
+            ]
+            .join("\n"),
+        );
+        let fragments = extract(&member, ChunkOptions::default()).expect("py member extraction");
+        // The leading receiver is excluded; class members are not importable.
+        assert_eq!(code_fields(named(&fragments, "fetch")), (Some(1), false));
     }
 }

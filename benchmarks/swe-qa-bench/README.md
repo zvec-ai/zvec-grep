@@ -131,8 +131,10 @@ otherwise complete run with no tasks left after filtering may still succeed.
 Developers can follow the [fork run guide](docs/run-in-fork.md) to configure
 their API key, Bailian endpoint, Rust candidate ref, and manual dispatch.
 
-The [SWE-QA Bench workflow](../../.github/workflows/swe-qa-bench.yml) runs only
-through manual `workflow_dispatch`; pushes and pull requests do not trigger it.
+The [SWE-QA Bench workflow](../../.github/workflows/swe-qa-bench.yml) runs through
+manual `workflow_dispatch` or an explicit `run_e2e: true` dispatch of
+[ZG Bench](../../.github/workflows/zg-bench.yml). Pushes, automatic PR checks and
+`@zg-bench` comments do not enable e2e.
 Core maintainers are users with the repository's exact `admin` or `maintain`
 role. The first step of every job checks both `github.actor` and
 `github.triggering_actor` against their current roles, before checkout or
@@ -275,8 +277,18 @@ results, and uploads Harbor evidence and an independent task report as
 artifacts. The final Aggregate is also generated when some tasks fail. It uses
 only completed task reports: failed tasks do not enter any mean, total, filter,
 or sample count, and are listed separately as missing. The workflow remains
-failed so the missing coverage stays visible. Reports from separate GitHub run
-attempts are kept separate; automatic trial retries happen within one attempt.
+failed so the missing coverage stays visible. **Re-run failed jobs** can reuse
+successful task reports from earlier attempts of the same GitHub run. Each task
+artifact includes a `task-report-manifest.json` binding its checksum to the
+candidate commit/repository, harness revision, protocol hash, scope, models,
+endpoint hashes and trial configuration. Aggregation validates those identities
+and report evidence before selecting the newest valid report per task, then
+recomputes the aggregate without new model calls. It never merges individual
+trials from different attempts. The aggregate includes
+`task-report-selection.json` with selected attempts and rejected inputs. Reports
+without a compatible manifest or expired artifacts cannot be reused; start a
+new full run or rerun missing tasks. Automatic trial retries remain within one
+attempt.
 
 ## Code structure
 

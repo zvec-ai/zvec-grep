@@ -5,18 +5,34 @@ on:
     paths:
       - .github/workflows/swe-qa-bench.yml
       - .github/workflows/swe-qa-offline.yml
+      - .github/workflows/zg-bench.yml
+      - .github/workflows/retrieval-only.yml
+      - .github/workflows/retrieval-pr.yml
+      - .github/workflows/retrieval-pr-comment.yml
+      - .github/actions/retrieval-authorize/**
+      - .github/scripts/bench-comment*.mjs
+      - .github/scripts/retrieval-pr-comment*.mjs
       - benchmarks/swe-qa-bench/**
       - benchmarks/shared/rust-package-cache.mjs
       - benchmarks/zg-retrieval/test/rust-package-cache.test.mjs
+      - benchmarks/zg-retrieval/test/workflow.test.mjs
   push:
     branches:
       - main
     paths:
       - .github/workflows/swe-qa-bench.yml
       - .github/workflows/swe-qa-offline.yml
+      - .github/workflows/zg-bench.yml
+      - .github/workflows/retrieval-only.yml
+      - .github/workflows/retrieval-pr.yml
+      - .github/workflows/retrieval-pr-comment.yml
+      - .github/actions/retrieval-authorize/**
+      - .github/scripts/bench-comment*.mjs
+      - .github/scripts/retrieval-pr-comment*.mjs
       - benchmarks/swe-qa-bench/**
       - benchmarks/shared/rust-package-cache.mjs
       - benchmarks/zg-retrieval/test/rust-package-cache.test.mjs
+      - benchmarks/zg-retrieval/test/workflow.test.mjs
   workflow_dispatch:
 
 permissions: {}
@@ -50,5 +66,13 @@ jobs:
         run: >-
           uv run --project benchmarks/swe-qa-bench python -m unittest discover
           -s benchmarks/swe-qa-bench/tests -v
+      - name: Verify Harbor container shutdown without model calls
+        env:
+          ZG_BENCH_RUN_DOCKER_TESTS: "1"
+        run: >-
+          uv run --project benchmarks/swe-qa-bench python -m unittest discover
+          -s benchmarks/swe-qa-bench/tests -p test_container_shutdown.py -v
       - name: Test shared Rust package identity helper
         run: node --test benchmarks/zg-retrieval/test/rust-package-cache.test.mjs
+      - name: Test Benchmark comments and reusable Retrieval authorization
+        run: node --test .github/scripts/bench-comment.test.mjs .github/scripts/retrieval-pr-comment.test.mjs benchmarks/zg-retrieval/test/workflow.test.mjs
