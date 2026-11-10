@@ -32,15 +32,15 @@ const MS: ArtifactSourceConfig = ArtifactSourceConfig {
     revision: "ms-revision",
 };
 
-fn sources(root: &Path, base_url: Option<&str>) -> [ArtifactSource; 2] {
+fn sources(root: &Path, base_url: Option<&str>) -> Vec<ArtifactSource> {
     let hugging_face = ArtifactSource::hugging_face(HF, root.join("huggingface"));
     let model_scope = ArtifactSource::model_scope(MS, root.join("modelscope"));
     match base_url {
-        Some(base_url) => [
+        Some(base_url) => vec![
             hugging_face.with_base_url(base_url),
             model_scope.with_base_url(base_url),
         ],
-        None => [hugging_face, model_scope],
+        None => vec![hugging_face, model_scope],
     }
 }
 
@@ -187,6 +187,76 @@ fn encodes_source_urls_like_node() {
         artifact_url(&source, "onnx/model q4.onnx"),
         "https://huggingface.co/owner/model's%20name/resolve/release%2F(one)!/onnx/model%20q4.onnx"
     );
+}
+
+#[tokio::test]
+async fn single_source_download_is_verified_and_can_recover_after_failure() {
+    let root = tempfile::tempdir().expect("cache");
+    let server = TestServer::spawn(2, |index, _request, stream| {
+        if index == 0 {
+            respond(stream, 404, b"missing");
+        } else {
+            respond(stream, 200, BYTES);
+        }
+    });
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let progress = reporter(&events);
+    for succeeds in [false, true] {
+        let mut source = sources(root.path(), Some(&server.base_url));
+        source.truncate(1);
+        let result = resolve_model_artifacts(
+            &ArtifactHttpClient::new(),
+            ResolveArtifacts {
+                model: "local/test-model",
+                sources: source,
+                artifacts: ARTIFACTS,
+                reporter: &progress,
+                signal: None,
+            },
+        )
+        .await;
+        assert_eq!(result.is_ok(), succeeds);
+        if let Ok(result) = result {
+            assert_eq!(
+                std::fs::read(&result.paths[ARTIFACTS[0].path]).expect("artifact"),
+                BYTES
+            );
+        }
+    }
+    assert_eq!(server.finish(), 2);
+    assert!(partial_files(root.path()).is_empty());
+    assert!(
+        !events
+            .lock()
+            .expect("events")
+            .iter()
+            .any(|event| matches!(event, ModelProgress::Warning { .. }))
+    );
+}
+
+#[tokio::test]
+async fn cancelled_single_source_does_not_publish_or_download() {
+    let root = tempfile::tempdir().expect("cache");
+    let signal = CancellationToken::new();
+    signal.cancel();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let progress = reporter(&events);
+    let mut source = sources(root.path(), None);
+    source.truncate(1);
+    let error = resolve_model_artifacts(
+        &ArtifactHttpClient::new(),
+        ResolveArtifacts {
+            model: "local/test-model",
+            sources: source,
+            artifacts: ARTIFACTS,
+            reporter: &progress,
+            signal: Some(&signal),
+        },
+    )
+    .await
+    .expect_err("cancelled");
+    assert_eq!(error.code(), crate::EngineError::CANCELLED);
+    assert_eq!(std::fs::read_dir(root.path()).expect("cache").count(), 0);
 }
 
 #[test]
@@ -490,7 +560,9 @@ async fn response_header_timeout_falls_back_without_total_download_deadline() {
     });
     let short = Duration::from_millis(20);
     let sources = sources(root.path(), Some(&server.base_url))
-        .map(|source| source.with_timeouts(short, Duration::from_millis(50)));
+        .into_iter()
+        .map(|source| source.with_timeouts(short, Duration::from_millis(50)))
+        .collect();
     let events = Arc::new(Mutex::new(Vec::new()));
     let resolved = resolve_model_artifacts(
         &ArtifactHttpClient::new(),
@@ -528,7 +600,9 @@ async fn read_idle_timeout_falls_back_and_preserves_both_source_errors() {
     });
     let short = Duration::from_millis(20);
     let sources = sources(root.path(), Some(&server.base_url))
-        .map(|source| source.with_timeouts(Duration::from_millis(50), short));
+        .into_iter()
+        .map(|source| source.with_timeouts(Duration::from_millis(50), short))
+        .collect();
     let events = Arc::new(Mutex::new(Vec::new()));
     let error = resolve_model_artifacts(
         &ArtifactHttpClient::new(),

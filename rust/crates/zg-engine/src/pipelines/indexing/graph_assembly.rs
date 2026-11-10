@@ -45,17 +45,22 @@ pub(super) fn assemble_file_graph(
                 .map(|entity| entity_node(entity, language))
         })
         .collect::<Vec<_>>();
+    FileGraphResult {
+        nodes: entity_nodes,
+        edges: file_edges(graph, entities, &file_scope),
+        pending_refs: file_pending_refs(graph, entities, &file_scope),
+    }
+}
 
+/// The resolved edges of one file: walk-time containment plus name references
+/// the partition already bound inside it.
+fn file_edges(graph: &PartitionedGraph, entities: &[Entity], file_scope: &str) -> Vec<FileEdge> {
     let mut edges = Vec::with_capacity(graph.contains.len() + graph.resolved.len());
-    let node_ids = |ordinal: usize| -> Option<String> {
-        entities
-            .get(ordinal)
-            .map(|entity| entity.id().as_str().to_owned())
-    };
     for edge in &graph.contains {
-        if let (Some(source), Some(target)) =
-            (node_ids(edge.source_index), node_ids(edge.target_index))
-        {
+        if let (Some(source), Some(target)) = (
+            node_id(entities, edge.source_index),
+            node_id(entities, edge.target_index),
+        ) {
             edges.push(FileEdge {
                 kind: GraphEdgeKind::Contains,
                 source,
@@ -68,9 +73,10 @@ pub(super) fn assemble_file_graph(
         }
     }
     for edge in &graph.resolved {
-        if let (Some(source), Some(target)) =
-            (node_ids(edge.source_index), node_ids(edge.target_index))
-        {
+        if let (Some(source), Some(target)) = (
+            node_id(entities, edge.source_index),
+            node_id(entities, edge.target_index),
+        ) {
             let mut metadata = BTreeMap::new();
             insert_ref_metadata(
                 &mut metadata,
@@ -78,6 +84,13 @@ pub(super) fn assemble_file_graph(
                 edge.arity,
                 edge.receiver_name.as_deref(),
             );
+            if edge.ref_kind.spells_inheritance() {
+                insert_inheritance_metadata(
+                    &mut metadata,
+                    &owner_identity(edge.source_index, entities, file_scope),
+                    Some(&edge.ref_name),
+                );
+            }
             edges.push(FileEdge {
                 kind: edge.ref_kind,
                 source,
@@ -89,14 +102,22 @@ pub(super) fn assemble_file_graph(
             });
         }
     }
+    edges
+}
 
-    let pending = graph
+/// The references one file leaves for the cross-file resolver.
+fn file_pending_refs(
+    graph: &PartitionedGraph,
+    entities: &[Entity],
+    file_scope: &str,
+) -> Vec<PendingRef> {
+    graph
         .pending
         .iter()
         .map(|reference| {
             let owner_id = match reference.owner_index {
-                FILE_SCOPE_INDEX => file_scope.clone(),
-                ordinal => node_ids(ordinal).unwrap_or_else(|| file_scope.clone()),
+                FILE_SCOPE_INDEX => file_scope.to_owned(),
+                ordinal => node_id(entities, ordinal).unwrap_or_else(|| file_scope.to_owned()),
             };
             let mut metadata = BTreeMap::new();
             insert_ref_metadata(
@@ -107,6 +128,13 @@ pub(super) fn assemble_file_graph(
             );
             if let Some(bound_type) = &reference.bound_type {
                 metadata.insert("type".to_owned(), serde_json::json!(bound_type));
+            }
+            if reference.ref_kind.spells_inheritance() {
+                insert_inheritance_metadata(
+                    &mut metadata,
+                    &owner_identity(reference.owner_index, entities, file_scope),
+                    None,
+                );
             }
             PendingRef {
                 owner_id,
@@ -120,13 +148,13 @@ pub(super) fn assemble_file_graph(
                 metadata,
             }
         })
-        .collect();
+        .collect()
+}
 
-    FileGraphResult {
-        nodes: entity_nodes,
-        edges,
-        pending_refs: pending,
-    }
+fn node_id(entities: &[Entity], ordinal: usize) -> Option<String> {
+    entities
+        .get(ordinal)
+        .map(|entity| entity.id().as_str().to_owned())
 }
 
 /// Builds a graph node from a bound entity. Node identity is the entity ID
@@ -194,6 +222,53 @@ fn entity_node(entity: &Entity, language: FileFormat) -> FileGraphNode {
     }
 }
 
+/// Metadata keys an inheritance clause carries for the write-time comparison.
+/// Entity IDs hash the entity's text, so a method-body edit mints a new ID
+/// while the clause itself, its owner's name and its base stay put. The store
+/// therefore compares the clause's declaration identity, not its endpoints.
+const INHERITANCE_OWNER_KEY: &str = "owner";
+const INHERITANCE_BASE_KEY: &str = "base";
+
+fn insert_inheritance_metadata(
+    metadata: &mut BTreeMap<String, serde_json::Value>,
+    owner: &str,
+    base: Option<&str>,
+) {
+    metadata.insert(
+        INHERITANCE_OWNER_KEY.to_owned(),
+        serde_json::Value::String(owner.to_owned()),
+    );
+    if let Some(base) = base {
+        metadata.insert(
+            INHERITANCE_BASE_KEY.to_owned(),
+            serde_json::Value::String(base.to_owned()),
+        );
+    }
+}
+
+/// Qualified name of the entity owning a name reference; the file scope owns
+/// nothing inheritable, so it keeps its synthetic file-node ID.
+fn owner_identity(ordinal: usize, entities: &[Entity], file_scope: &str) -> String {
+    if ordinal == FILE_SCOPE_INDEX {
+        return file_scope.to_owned();
+    }
+    entities
+        .get(ordinal)
+        .and_then(qualified_name)
+        .unwrap_or_else(|| file_scope.to_owned())
+}
+
+fn qualified_name(entity: &Entity) -> Option<String> {
+    let Some(EntityMetadata::Code(code)) = entity.metadata() else {
+        return None;
+    };
+    let name = code.symbol_name.as_ref()?;
+    Some(match &code.scope {
+        Some(scope) => format!("{scope}::{name}"),
+        None => name.clone(),
+    })
+}
+
 fn insert_ref_metadata(
     metadata: &mut BTreeMap<String, serde_json::Value>,
     raw_text: Option<&str>,
@@ -220,6 +295,87 @@ fn insert_ref_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{
+        CodeMetadata, Content, Entity, EntityFragment, EntityId, EntityMetadata, FileId,
+        FragmentId, Range, SymbolType,
+    };
+    use crate::extraction::{PendingNameRef, ResolvedNameEdge};
+
+    fn code_entity(id: &str, name: &str, scope: Option<&str>) -> Entity {
+        let file_id = FileId::new(7);
+        let entity_id = EntityId::from_string(id.to_owned());
+        Entity::new(
+            entity_id.clone(),
+            file_id,
+            Range::Full,
+            Content::Text(format!("class {name}")),
+            Some(EntityMetadata::Code(CodeMetadata {
+                symbol_type: Some(SymbolType::Class),
+                symbol_name: Some(name.to_owned()),
+                scope: scope.map(str::to_owned),
+                ..CodeMetadata::default()
+            })),
+            vec![EntityFragment {
+                id: FragmentId::new(&entity_id, 0),
+                range: Range::Full,
+            }],
+        )
+        .expect("entity")
+    }
+
+    #[test]
+    fn inheritance_clauses_record_their_declaration_identity() {
+        let entities = vec![
+            code_entity("e1", "Mid", Some("ns")),
+            code_entity("e2", "Base", Some("ns")),
+        ];
+        let mut graph = PartitionedGraph {
+            head_fragment_indices: vec![0, 1],
+            ..PartitionedGraph::default()
+        };
+        graph.resolved.push(ResolvedNameEdge {
+            ref_kind: GraphEdgeKind::Extends,
+            source_index: 0,
+            target_index: 1,
+            ref_name: "Base".into(),
+            raw_text: Some("ns::Base".into()),
+            arity: None,
+            receiver_name: None,
+            line: 1,
+            column: 12,
+            provenance: EdgeProvenance::FileLocal,
+        });
+        graph.pending.push(PendingNameRef {
+            ref_kind: GraphEdgeKind::Implements,
+            owner_index: 0,
+            ref_name: "Remote".into(),
+            receiver_name: None,
+            raw_text: Some("Remote".into()),
+            bound_type: None,
+            arity: None,
+            line: 1,
+            column: 20,
+        });
+
+        let assembled = assemble_file_graph("7", FileFormat::Rust, &graph, &entities);
+        let inheritance = assembled
+            .edges
+            .iter()
+            .find(|edge| edge.kind.spells_inheritance())
+            .expect("in-file inheritance edge");
+        assert_eq!(
+            inheritance.metadata[INHERITANCE_OWNER_KEY],
+            serde_json::json!("ns::Mid")
+        );
+        assert_eq!(
+            inheritance.metadata[INHERITANCE_BASE_KEY],
+            serde_json::json!("Base")
+        );
+        assert_eq!(
+            assembled.pending_refs[0].metadata[INHERITANCE_OWNER_KEY],
+            serde_json::json!("ns::Mid")
+        );
+    }
 
     // Tests exercise the file-node ID mint and metadata assembly; full graph
     // assembly needs a prepared file, covered by the pipeline integration

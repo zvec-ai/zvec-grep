@@ -155,7 +155,7 @@ impl TransformersEmbeddingModel {
         execution_lease: Option<Arc<dyn Send + Sync>>,
         gate: tokio::sync::OwnedMutexGuard<()>,
     ) -> Result<Arc<LoadedTransformersModel>, ModelError> {
-        let model_artifact = onnx_artifact(self.entry.dtype)?;
+        let model_artifact = onnx_artifact(self.entry)?;
         let reporter = ModelDownloadProgressReporter::new(
             self.entry.reference,
             on_progress,
@@ -170,22 +170,21 @@ impl TransformersEmbeddingModel {
             .model_cache_dir
             .join(self.entry.download.hugging_face.repo)
             .join(self.entry.download.hugging_face.revision);
-        let model_scope = self
-            .model_cache_dir
-            .join("modelscope")
-            // Keep main's cache namespace so Node and Rust reuse the same
-            // verified fallback snapshot; the Rust backend itself is ORT.
-            .join("transformers-js")
-            .join(self.entry.download.model_scope.repo.replace('/', "--"))
-            .join(self.entry.download.model_scope.revision);
+        let sources = std::iter::once(ArtifactSource::hugging_face(
+            self.entry.download.hugging_face,
+            hugging_face,
+        ))
+        .chain(
+            self.entry
+                .download
+                .fallback_source(&self.model_cache_dir, "transformers-js"),
+        )
+        .collect();
         let resolved = resolve_model_artifacts(
             &self.client,
             ResolveArtifacts {
                 model: self.entry.reference,
-                sources: [
-                    ArtifactSource::hugging_face(self.entry.download.hugging_face, hugging_face),
-                    ArtifactSource::model_scope(self.entry.download.model_scope, model_scope),
-                ],
+                sources,
                 artifacts: self.entry.download.artifacts,
                 reporter: &reporter,
                 signal,
@@ -651,7 +650,11 @@ fn prepare_batch(
 ) -> Result<PreparedBatch, ModelError> {
     let probe = texts
         .iter()
-        .map(|text| tokenizers.probe.encode(text.as_str(), true))
+        .map(|text| {
+            tokenizers
+                .probe
+                .encode(text.as_str(), entry.add_special_tokens)
+        })
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| tokenization_error(entry, error))?;
     let truncated = probe
@@ -670,14 +673,21 @@ fn prepare_batch(
 
     let mut encodings = texts
         .iter()
-        .map(|text| tokenizers.inputs.encode(text.as_str(), true))
+        .map(|text| {
+            tokenizers
+                .inputs
+                .encode(text.as_str(), entry.add_special_tokens)
+        })
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| tokenization_error(entry, error))?;
+    // Static tokenizers can produce an all-empty batch. ONNX still needs one
+    // padding position with a zero attention mask, matching the upstream loader.
     let sequence_length = encodings
         .iter()
         .map(tokenizers::Encoding::len)
         .max()
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .max(1);
     let padding = PaddingParams::default();
     for encoding in &mut encodings {
         encoding.pad(
@@ -688,7 +698,7 @@ fn prepare_batch(
             PaddingDirection::Right,
         );
     }
-    if sequence_length == 0
+    if encodings.is_empty()
         || encodings
             .iter()
             .any(|encoding| encoding.len() != sequence_length)
@@ -866,14 +876,17 @@ fn lock_std_mutex<T>(mutex: &StdMutex<T>) -> StdMutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn onnx_artifact(dtype: &str) -> Result<&'static str, ModelError> {
-    match dtype {
-        "fp32" => Ok("onnx/model.onnx"),
-        "q8" => Ok("onnx/model_quantized.onnx"),
-        "q4" => Ok("onnx/model_q4.onnx"),
-        value => Err(ModelError::internal(format!(
-            "Unsupported Transformers dtype: {value}"
-        ))),
+fn onnx_artifact(entry: TransformersConfig) -> Result<&'static str, ModelError> {
+    let mut models = entry.download.artifacts.iter().filter(|artifact| {
+        Path::new(artifact.path)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("onnx"))
+    });
+    match (models.next(), models.next()) {
+        (Some(artifact), None) => Ok(artifact.path),
+        _ => Err(ModelError::storage_failure(
+            "Expected exactly one ONNX model artifact",
+        )),
     }
 }
 

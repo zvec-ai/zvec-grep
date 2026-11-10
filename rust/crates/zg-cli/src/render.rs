@@ -573,6 +573,7 @@ Index embedding concurrency:
     Client C never resizes Server pools or changes their thread configuration.
     Batch and prefetch limits are independent of the client's C.
     Values must be positive; requests above server pool capacity are capped.
+  Bekko: CPU batch tasks; defaults to 1, capped at 8.
   Potion/model2vec: concurrent batch tasks; defaults to 2, with an independent
     CPU worker-pool capacity. No cap of 8 is applied.
   Remote: concurrent requests; adaptive scheduling may reduce the limit after
@@ -814,6 +815,7 @@ Supported text embedding models (one per workspace):
   MODEL                               RUNTIME  INPUT       DIMS  TOKENS  BACKEND
   ----------------------------------  -------  ----------  ----  ------  ---------------
   local/all-minilm-l6-v2              local    text         384     256  transformers
+  local/bekko-256-int8                local    text         256   32768  bekko
   local/bge-small-en-v1.5             local    text         384     512  transformers
   local/embeddinggemma-300m           local    text         768    2048  llama-cpp
   local/gte-modernbert-base           local    text         768    8192  transformers
@@ -1101,6 +1103,7 @@ mod output_tests {
             arity: None,
             is_exported: false,
             is_declaration: false,
+            package: None,
         }));
         for source in [ContextSource::Index, ContextSource::Rg] {
             result.source = source;
@@ -1461,6 +1464,7 @@ mod output_tests {
                 arity: None,
                 is_exported: false,
                 is_declaration: false,
+                package: None,
             }));
             let mut buffer = Vec::new();
             write_item_preview(

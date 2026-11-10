@@ -7,6 +7,7 @@ pub(crate) enum EmbeddingCatalogEntry {
     Qwen(QwenConfig),
     Transformers(TransformersConfig),
     Model2Vec(Model2VecConfig),
+    Bekko(BekkoConfig),
 }
 
 impl EmbeddingCatalogEntry {
@@ -17,6 +18,7 @@ impl EmbeddingCatalogEntry {
             Self::Qwen(_) => "qwen",
             Self::Transformers(_) => "transformers",
             Self::Model2Vec(_) => "model2vec",
+            Self::Bekko(_) => "bekko",
         }
     }
 
@@ -26,6 +28,7 @@ impl EmbeddingCatalogEntry {
             Self::Qwen(entry) => entry.reference,
             Self::Transformers(entry) => entry.reference,
             Self::Model2Vec(entry) => entry.reference,
+            Self::Bekko(entry) => entry.reference,
         }
     }
 
@@ -36,6 +39,7 @@ impl EmbeddingCatalogEntry {
             Self::Qwen(entry) => entry.dimension,
             Self::Transformers(entry) => entry.dimension,
             Self::Model2Vec(entry) => entry.dimension,
+            Self::Bekko(entry) => entry.dimension,
         }
     }
 
@@ -65,6 +69,21 @@ impl EmbeddingCatalogEntry {
             None
         }
     }
+}
+
+/// Pinned Bekko row-wise INT8 lookup + FP32 mean graph, evaluated directly on CPU.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BekkoConfig {
+    pub(crate) reference: &'static str,
+    pub(crate) provider: &'static str,
+    pub(crate) model: &'static str,
+    pub(crate) download: &'static ArtifactDownloadConfig,
+    pub(crate) model_file: &'static str,
+    pub(crate) vocabulary_size: usize,
+    pub(crate) dimension: usize,
+    pub(crate) metric: EmbeddingMetric,
+    pub(crate) max_input_tokens: usize,
+    pub(crate) max_batch_size: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -105,6 +124,7 @@ pub(crate) struct TransformersConfig {
     pub(crate) revision: &'static str,
     pub(crate) download: &'static ArtifactDownloadConfig,
     pub(crate) dtype: &'static str,
+    pub(crate) add_special_tokens: bool,
     pub(crate) dimension: usize,
     pub(crate) metric: EmbeddingMetric,
     pub(crate) pooling: &'static str,

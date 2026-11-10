@@ -1,5 +1,5 @@
 //! Explicit public-network checks for every catalog model with local artifacts.
-//! Each source downloads ~2.48 GB into fresh per-model temporary caches. Normal
+//! Each configured source downloads into fresh per-model temporary caches. Normal
 //! HTTP/proxy configuration applies; no existing cache or model runtime is needed.
 
 use std::{collections::HashSet, panic::AssertUnwindSafe, path::Path, time::Duration};
@@ -19,13 +19,13 @@ use crate::models::{
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_mins(10);
 
 #[tokio::test]
-#[ignore = "requires Hugging Face/CDN access; downloads all local models (~2.48 GB)"]
+#[ignore = "requires Hugging Face/CDN access; downloads every local model configured for this source"]
 async fn downloads_all_local_models_from_hugging_face() {
     download_all_local_models_from(ArtifactSourceKind::HuggingFace).await;
 }
 
 #[tokio::test]
-#[ignore = "requires ModelScope/CDN access; downloads all local models (~2.48 GB)"]
+#[ignore = "requires ModelScope/CDN access; downloads every local model configured for this source"]
 async fn downloads_all_local_models_from_model_scope() {
     download_all_local_models_from(ArtifactSourceKind::ModelScope).await;
 }
@@ -38,6 +38,7 @@ fn local_models() -> Vec<(&'static str, &'static ArtifactDownloadConfig)> {
                 EmbeddingCatalogEntry::LlamaCpp(config) => config.download,
                 EmbeddingCatalogEntry::Transformers(config) => config.download,
                 EmbeddingCatalogEntry::Model2Vec(config) => config.download,
+                EmbeddingCatalogEntry::Bekko(config) => config.download,
                 // Qwen API entries have no downloadable local artifacts.
                 EmbeddingCatalogEntry::Qwen(_) => return None,
             };
@@ -46,8 +47,19 @@ fn local_models() -> Vec<(&'static str, &'static ArtifactDownloadConfig)> {
         .collect()
 }
 
+fn local_models_for(
+    kind: ArtifactSourceKind,
+) -> Vec<(&'static str, &'static ArtifactDownloadConfig)> {
+    local_models()
+        .into_iter()
+        .filter(|(_, download)| {
+            kind == ArtifactSourceKind::HuggingFace || download.model_scope.is_some()
+        })
+        .collect()
+}
+
 async fn download_all_local_models_from(kind: ArtifactSourceKind) {
-    let models = local_models();
+    let models = local_models_for(kind);
     assert!(!models.is_empty(), "catalog must contain local models");
     // Allow an explicit local recheck without downloading already-passing models.
     // Keep the emitted catalog complete so CI's coverage check rejects partial runs.
@@ -116,10 +128,16 @@ fn request<'a>(
 ) -> ResolveArtifacts<'a> {
     ResolveArtifacts {
         model,
-        sources: [
-            ArtifactSource::hugging_face(download.hugging_face, root.join("huggingface")),
-            ArtifactSource::model_scope(download.model_scope, root.join("modelscope")),
-        ],
+        sources: std::iter::once(ArtifactSource::hugging_face(
+            download.hugging_face,
+            root.join("huggingface"),
+        ))
+        .chain(
+            download
+                .model_scope
+                .map(|source| ArtifactSource::model_scope(source, root.join("modelscope"))),
+        )
+        .collect(),
         artifacts: download.artifacts,
         reporter,
         signal: None,
@@ -140,12 +158,11 @@ async fn download_local_model_from(
     );
     let request = request(model, download, root.path(), &reporter);
     validate_request(&request).map_err(|error| error.to_string())?;
-    let source_index = match kind {
-        ArtifactSourceKind::HuggingFace => 0,
-        ArtifactSourceKind::ModelScope => 1,
-    };
-    let source = &request.sources[source_index];
-    let unused_source = &request.sources[1 - source_index];
+    let source = request
+        .sources
+        .iter()
+        .find(|source| source.kind == kind)
+        .ok_or_else(|| format!("{} is not configured for {model}", kind.label()))?;
     if source.kind != kind || source.base_url.is_some() || source.cache_directory.exists() {
         return Err("live source must use its real endpoint and an empty cache".to_owned());
     }
@@ -157,7 +174,11 @@ async fn download_local_model_from(
     let downloaded = download_source_snapshot(&client, &request, source, &manifest)
         .await
         .map_err(|error| error.to_string());
-    if unused_source.cache_directory.exists() {
+    if request
+        .sources
+        .iter()
+        .any(|other| other.kind != kind && other.cache_directory.exists())
+    {
         return Err("the other source was downloaded as fallback".to_owned());
     }
     if !partial_files(root.path()).is_empty() {
@@ -185,6 +206,34 @@ async fn download_local_model_from(
         }
     }
     Ok(())
+}
+
+#[test]
+fn live_source_catalog_includes_exactly_the_models_with_that_source() {
+    let hugging_face = local_models_for(ArtifactSourceKind::HuggingFace);
+    let model_scope = local_models_for(ArtifactSourceKind::ModelScope);
+    for (model, download) in local_models() {
+        assert!(
+            hugging_face
+                .iter()
+                .any(|(reference, _)| *reference == model)
+        );
+        assert_eq!(
+            model_scope.iter().any(|(reference, _)| *reference == model),
+            download.model_scope.is_some(),
+            "{model} source availability"
+        );
+    }
+    assert!(
+        hugging_face
+            .iter()
+            .any(|(model, _)| *model == "local/bekko-256-int8")
+    );
+    assert!(
+        !model_scope
+            .iter()
+            .any(|(model, _)| *model == "local/bekko-256-int8")
+    );
 }
 
 #[test]
@@ -230,7 +279,7 @@ fn live_source_catalog_covers_every_local_model_and_pinned_weights() {
                 .filter(|artifact| has_extension(artifact.path, "gguf"))
                 .map(|artifact| artifact.size)
                 .sum::<u64>(),
-            EmbeddingCatalogEntry::Transformers(_) => {
+            EmbeddingCatalogEntry::Transformers(_) | EmbeddingCatalogEntry::Bekko(_) => {
                 assert!(
                     download
                         .artifacts

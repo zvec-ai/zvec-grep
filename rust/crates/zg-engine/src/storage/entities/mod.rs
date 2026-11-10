@@ -1,6 +1,7 @@
 //! Canonical entities, content, metadata, and fragment selectors.
 use std::{collections::HashMap, path::Path};
 
+use tokio_util::sync::CancellationToken;
 use zvec_rust::{Collection, CollectionSchema, DataType, Doc};
 
 use crate::{
@@ -111,6 +112,38 @@ impl Entities {
             }
         }
         Ok(owners)
+    }
+
+    /// Every entity that carries code metadata, projected as `(entity_id,
+    /// file_id, metadata)` for the resolver's workspace snapshot. Canonical
+    /// bodies and fragments stay unread. The scan is long on a large
+    /// workspace, so `signal` interrupts it between documents: the caller
+    /// discards the partial projection instead of scanning past a cancelled
+    /// pass.
+    pub(super) fn list_symbol_projection(
+        &self,
+        signal: Option<&CancellationToken>,
+    ) -> EngineResult<Vec<(String, FileId, CodeMetadata)>> {
+        let iterator = native(
+            self.collection
+                .iter_with_options(Some(&["entity_id", "file_id", "metadata"]), false),
+            "iterate symbol metadata",
+        )?;
+        let mut projection = Vec::new();
+        for doc in iterator {
+            if signal.is_some_and(CancellationToken::is_cancelled) {
+                return Err(EngineError::cancelled("graph resolution was cancelled"));
+            }
+            let doc = native(doc, "read symbol metadata")?;
+            let id = string_field(&doc, "entity_id")?;
+            if doc_key(&doc)? != id {
+                return Err(corrupt("entity identity differs from its index fields"));
+            }
+            if let Some(EntityMetadata::Code(metadata)) = decode_metadata(&doc)? {
+                projection.push((id, FileId::new(u32_field(&doc, "file_id")?), metadata));
+            }
+        }
+        Ok(projection)
     }
 
     /// Read every canonical ID before replacing or deleting a file's entities.

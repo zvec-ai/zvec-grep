@@ -8,11 +8,12 @@ use crate::{
     models::{
         backends::create_embedding_model,
         runtime::ModelComputeRuntime,
-        spi::{EmbeddingOptions, EmbeddingPrepareOptions},
+        spi::{EmbeddingModel, EmbeddingOptions, EmbeddingPrepareOptions},
     },
 };
 
-const CI_MODELS: [&str; 8] = [
+const CI_MODELS: [&str; 9] = [
+    "local/bekko-256-int8",
     "local/potion-code-16m-v2",
     "local/all-minilm-l6-v2",
     "local/embeddinggemma-300m",
@@ -122,4 +123,88 @@ async fn download_load_and_embed(reference: &str, cache_dir: PathBuf, device: De
         "MODEL_SMOKE_OK model={reference} dimension={}",
         model.info().dimension()
     );
+    if reference == "local/bekko-256-int8" {
+        assert_bekko_reference(model.as_ref()).await;
+        super::bekko_parity::assert_onnx_parity(model.as_ref()).await;
+    }
+}
+
+async fn assert_bekko_reference(model: &dyn EmbeddingModel) {
+    // Pinned c18167b8 graph/tokenizer, Python onnxruntime 1.21.0 + tokenizers
+    // 0.23.1: encode_batch(add_special_tokens=False), zero/right padding and
+    // attention mask, sentence_embedding output, then numpy L2 normalization.
+    let texts = [
+        "find authentication middleware",
+        "长春光华学院在哪",
+        "日本で一番高い山は？",
+    ];
+    let expected: [[f64; 8]; 3] = [
+        [
+            0.020_006_887_6,
+            0.083_093_427_1,
+            -0.021_326_243_9,
+            -0.138_030_707_8,
+            0.034_431_058_9,
+            0.042_632_363_7,
+            -0.065_024_748_4,
+            0.115_143_723_8,
+        ],
+        [
+            -0.051_363_248_4,
+            -0.112_774_357_2,
+            -0.076_780_267_1,
+            -0.040_918_748_8,
+            -0.090_762_600_3,
+            0.105_193_056_2,
+            0.092_324_987_1,
+            -0.107_521_846_9,
+        ],
+        [
+            0.080_806_985_5,
+            -0.093_681_342_9,
+            0.081_718_646_0,
+            0.011_472_640_6,
+            -0.080_582_708_1,
+            0.007_296_192_9,
+            -0.175_629_288_0,
+            -0.047_684_241_1,
+        ],
+    ];
+    let inputs = texts.map(|text| vec![Content::Text(text.to_owned())]);
+    let signal = tokio_util::sync::CancellationToken::new();
+    signal.cancel();
+    let error = model
+        .embed(
+            &inputs,
+            EmbeddingOptions {
+                signal: Some(signal),
+                ..EmbeddingOptions::default()
+            },
+        )
+        .await
+        .expect_err("cancelled prepared model");
+    assert_eq!(error.code(), crate::EngineError::CANCELLED);
+    for purpose in [EmbeddingPurpose::Query, EmbeddingPurpose::Document] {
+        let result = model
+            .embed(
+                &inputs,
+                EmbeddingOptions {
+                    purpose,
+                    ..EmbeddingOptions::default()
+                },
+            )
+            .await
+            .expect("model remains usable after cancellation");
+        for (vector, reference) in result.vectors.iter().zip(expected) {
+            assert_eq!(vector.len(), 256);
+            for (actual, expected) in vector.iter().zip(reference) {
+                assert!(
+                    (f64::from(*actual) - expected).abs() < 1e-6,
+                    "Bekko differs from Python ONNX: {actual} vs {expected}"
+                );
+            }
+            let norm = vector.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>();
+            assert!((norm - 1.0).abs() < 1e-6);
+        }
+    }
 }

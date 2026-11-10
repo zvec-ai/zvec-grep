@@ -301,19 +301,22 @@ impl Model2VecDependencies for DefaultModel2VecDependencies {
             .join("model2vec")
             .join(entry.download.hugging_face.repo.replace('/', "--"))
             .join(entry.download.hugging_face.revision);
-        let model_scope = model_cache_dir
-            .join("modelscope")
-            .join("model2vec")
-            .join(entry.download.model_scope.repo.replace('/', "--"))
-            .join(entry.download.model_scope.revision);
-        let sources = [
+        let sources = std::iter::once(
             ArtifactSource::hugging_face(entry.download.hugging_face, hugging_face)
                 .with_local_path(entry.model_file, local_model)
                 .with_local_path(entry.tokenizer_file, "tokenizer/tokenizer.json"),
-            ArtifactSource::model_scope(entry.download.model_scope, model_scope)
-                .with_local_path(entry.model_file, local_model)
-                .with_local_path(entry.tokenizer_file, "tokenizer/tokenizer.json"),
-        ];
+        )
+        .chain(
+            entry
+                .download
+                .fallback_source(model_cache_dir, "model2vec")
+                .map(|source| {
+                    source
+                        .with_local_path(entry.model_file, local_model)
+                        .with_local_path(entry.tokenizer_file, "tokenizer/tokenizer.json")
+                }),
+        )
+        .collect();
         let resolved = resolve_model_artifacts(
             &self.client,
             ResolveArtifacts {

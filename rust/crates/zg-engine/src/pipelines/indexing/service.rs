@@ -188,6 +188,10 @@ impl WorkspaceIndexService {
         Ok(indexed)
     }
 
+    /// Opens the pass storage, runs the pipeline, sweeps cross-file references,
+    /// and publishes. The steps are order-dependent — storage closes before the
+    /// manifest selects the new generation — so they stay visible in one place.
+    #[allow(clippy::too_many_lines)]
     async fn run_index(
         &self,
         workspace: &Workspace,
@@ -249,6 +253,41 @@ impl WorkspaceIndexService {
             changes: &options.changes,
         })
         .await;
+        // Cross-file resolution runs once per pass, after every file snapshot is
+        // durable. A failed sweep degrades to "still pending": unresolved
+        // references stay queued for the next pass instead of failing an index
+        // whose zvec side has already been published. The sweep honors the
+        // pass's signal, so a cancelled pass stops resolving, keeps the
+        // remaining references queued, and releases this writer below.
+        let result = result.inspect(|_indexed| {
+            // An incremental pass patches the previous graph: rows it resolved
+            // in an earlier pass are invisible to the sweep, so a changed name
+            // candidate set or import path would never reach them. Requeue
+            // them first. A rebuild writes a fresh graph and has none.
+            if !rebuilding {
+                match writer.session.storage.requeue_stale_resolutions() {
+                    Ok(0) => {}
+                    Ok(requeued) => tracing::debug!(requeued, "requeued stale references"),
+                    Err(error) => {
+                        tracing::warn!(%error, "reference requeue failed; resolutions stay stale");
+                    }
+                }
+            }
+            match super::graph_resolver::resolve_pending(
+                &writer.session.storage,
+                options.signal.as_ref(),
+            ) {
+                Ok(sweep) => tracing::debug!(sweep = ?sweep, "graph resolution sweep"),
+                Err(error) if error.code() == EngineError::CANCELLED => {
+                    // The cancellation itself is reported after storage closes;
+                    // degrading here would double-report a failed sweep.
+                    tracing::debug!(%error, "graph resolution sweep stopped for cancellation");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "graph resolution sweep failed; references stay pending");
+                }
+            }
+        });
         #[cfg(test)]
         let result = result.and_then(|indexed| {
             // Exercise service cleanup when the indexing pipeline fails to finalize storage.

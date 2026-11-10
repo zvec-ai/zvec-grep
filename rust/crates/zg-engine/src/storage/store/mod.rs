@@ -37,6 +37,7 @@ use crate::domain::model::EmbeddingModelInfo;
 mod read_view;
 mod resolution;
 pub(crate) use read_view::ReadView;
+pub(crate) use resolution::ResolutionSnapshot;
 
 type StoreRegistry = Mutex<HashMap<PathBuf, Weak<SharedStore>>>;
 static STORES: OnceLock<StoreRegistry> = OnceLock::new();
@@ -430,6 +431,30 @@ impl IndexStore {
         })
     }
 
+    /// Requeues references whose evidence changed during this pass.
+    ///
+    /// The resolution sweep only reads `pending` rows, so a resolved reference
+    /// never sees a changed candidate set or module path again unless a pass
+    /// explicitly requeues it. Endpoint invalidation covers references that
+    /// pointed at a replaced file; this covers the workspace-wide sets that
+    /// endpoint identity cannot express. The evidence lives in the graph
+    /// database, recorded with the file writes that produced it, so a pass that
+    /// fails or is cancelled before this call requeues on the next one. A pass
+    /// without graph storage has nothing to requeue.
+    ///
+    /// # Errors
+    /// Rejects SQLite failures. The caller degrades like a failed sweep: the
+    /// canonical index stays published, the stale resolutions survive, and the
+    /// evidence stays recorded.
+    pub(crate) fn requeue_stale_resolutions(&self) -> EngineResult<usize> {
+        self.write(|state| {
+            let Ok(graph) = state.graph.as_mut() else {
+                return Ok(0);
+            };
+            graph.requeue_stale_resolutions().map_err(graph_error)
+        })
+    }
+
     /// Build indexes and compact accepted writes when needed.
     pub(crate) fn finalize_writes(&self) -> EngineResult<()> {
         self.finalize_writes_with(|state| {
@@ -527,6 +552,23 @@ fn replace_file(
     state.files.validate(file)?;
     state.entities.validate_ownership(entities, file.id())?;
     state.fragments.validate_ownership(entries, file.id())?;
+    // Endpoint invalidation below only revisits references that pointed at this
+    // file's old entities. A file that enters or leaves the indexed set, or one
+    // that introduces a name another entity already uses, changes the
+    // workspace-wide sets resolution reads without touching those endpoints, so
+    // the graph records that evidence with the rows it can stale and the pass
+    // requeues them once before its sweep.
+    //
+    // Membership is what an import specifier reads, not record existence: the
+    // snapshot's path lookup skips `Failed` and `NotIndexed` records, so a path
+    // that failed one pass and succeeded the next enters the set while its
+    // record already exists — and one that breaks leaves it the same way.
+    let previous_indexed = state
+        .files
+        .fetch(&[file.id()])?
+        .remove(&file.id())
+        .is_some_and(|previous| previous.index_status().is_indexed());
+    let paths_changed = previous_indexed != file.index_status().is_indexed();
     state.needs_optimize = true;
     let directories = state.directories.ensure(file.relative_path())?;
     // Encode every projection before removing any of the previous file's data.
@@ -536,10 +578,26 @@ fn replace_file(
     let mut unfinished = file.clone();
     unfinished.set_index_status(FileIndexStatus::NotIndexed)?;
     state.files.put(&unfinished, &directories)?;
+    // The language labels this file's pending references for the resolver's
+    // language gate; the path itself stays canonical in zvec.
+    let relative_path = file
+        .relative_path()
+        .as_path()
+        .to_string_lossy()
+        .replace('\\', "/");
+    let language = crate::domain::formats_for_path(std::path::Path::new(&relative_path))
+        .first()
+        .map_or("unknown", |format| format.as_str());
     // zvec writes are durable on success: record retry intent before advancing SQLite.
     if let Ok(storage) = state.graph.as_mut() {
         storage
-            .write_file_graph(file.id().get(), graph, &old_ids)
+            .write_file_graph(
+                file.id().get(),
+                Some(language),
+                graph,
+                &old_ids,
+                paths_changed,
+            )
             .map_err(graph_error)?;
     }
     state.fragments.delete_file(file.id())?;

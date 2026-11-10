@@ -130,6 +130,7 @@ fn metadata_fragments(
             arity: None,
             is_exported: false,
             is_declaration: false,
+            package: None,
         })),
         vec![
             EntityFragment {

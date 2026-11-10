@@ -41,7 +41,7 @@ use sysinfo::System;
 
 pub(crate) struct ResolveArtifacts<'a> {
     pub(crate) model: &'static str,
-    pub(crate) sources: [ArtifactSource; 2],
+    pub(crate) sources: Vec<ArtifactSource>,
     pub(crate) artifacts: &'static [ArtifactConfig],
     pub(crate) reporter: &'a ModelDownloadProgressReporter,
     pub(crate) signal: Option<&'a CancellationToken>,
@@ -89,7 +89,7 @@ pub(crate) async fn resolve_model_artifacts(
                 if error.is_cancelled() {
                     return Err(error.into_model_error());
                 }
-                if index == 0 {
+                if index == 0 && request.sources.len() > 1 {
                     if !error.fallback_allowed() {
                         return Err(error.into_model_error());
                     }
@@ -116,10 +116,11 @@ pub(crate) async fn resolve_model_artifacts(
 }
 
 fn validate_request(request: &ResolveArtifacts<'_>) -> Result<(), ArtifactDownloadError> {
-    if request.model.trim().is_empty() || request.artifacts.is_empty() {
+    if request.model.trim().is_empty() || request.artifacts.is_empty() || request.sources.is_empty()
+    {
         return Err(ArtifactDownloadError::new(
             FailureKind::InvalidInput,
-            "model and artifacts must not be empty",
+            "model, artifacts and sources must not be empty",
         ));
     }
     let mut paths = std::collections::HashSet::new();
@@ -135,7 +136,9 @@ fn validate_request(request: &ResolveArtifacts<'_>) -> Result<(), ArtifactDownlo
             ));
         }
     }
-    if request.sources[0].kind == request.sources[1].kind {
+    if request.sources.len() > 2
+        || (request.sources.len() == 2 && request.sources[0].kind == request.sources[1].kind)
+    {
         return Err(ArtifactDownloadError::new(
             FailureKind::InvalidInput,
             format!(
