@@ -2544,6 +2544,7 @@ fn update_jsonc_container(
         return Ok(());
     }
     let next = jsonc_set_path(&source, &[container, "zvec_grep"], server)?;
+    parse_jsonc_object_options(path, &next, label, allow_trailing_comma)?;
     atomic_write(path, &ensure_newline(next))
 }
 
@@ -2586,6 +2587,7 @@ fn remove_jsonc_container(
     };
     let next = jsonc_remove_path(&source, path_to_remove)?;
     if next != source {
+        parse_jsonc_object_options(path, &next, label, allow_trailing_comma)?;
         atomic_write(path, &ensure_newline(next))?;
     }
     Ok(())
