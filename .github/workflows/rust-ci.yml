@@ -145,6 +145,27 @@ jobs:
       - name: Test npm packaging
         run: node --test scripts/npm-*.test.mjs npm/meta/install.test.cjs
 
+  package-glibc:
+    name: Linux package glibc 2.28 (${{ matrix.target }})
+    if: github.event_name == 'pull_request'
+    needs: source
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64-gnu
+            runner: ubuntu-24.04
+          - target: linux-arm64-gnu
+            runner: ubuntu-24.04-arm
+    # Reuse the release build and its full ELF audit, including both x64 CUDA
+    # plugins. This workflow only builds/uploads artifacts; it cannot publish.
+    uses: ./.github/workflows/rust-package-build.yml
+    with:
+      target: ${{ matrix.target }}
+      runner: ${{ matrix.runner }}
+
   ort-glibc:
     name: ORT on glibc 2.28 (${{ matrix.target }})
     needs: source

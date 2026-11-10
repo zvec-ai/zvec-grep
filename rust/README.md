@@ -679,12 +679,17 @@ bash scripts/check.sh
 ## Native and CUDA builds
 
 The safe llama API and the C5 FFI boundary share the same pinned
-`zvec-ai/llama-cpp-rs` revision (`b55399ac6c2035f2301120547c4c967e741d25d3`),
-from branch `prebuilt/0.1.154-cpu-r2-glibc-2.31`.
+`zvec-ai/llama-cpp-rs` revision (`79305567e63ee551eb1798c0537eab87d9595a23`),
+from branch `prebuilt/0.1.154-cpu-r2-glibc-2.28`.
 Its sys crate automatically selects a SHA256-pinned SDK when target, features
 and native options match. Linux x64 CPU, Linux ARM64 CPU and Linux x64 CUDA use
-`zvec-0.1.154-glibc-2.31-r1`, built on Ubuntu 20.04 and verified against a glibc
-2.31 baseline. Windows x64/ARM64 CPU use `zvec-0.1.154-cpu-r2`; macOS and
+`zvec-0.1.154-glibc-2.28-r1`, built on manylinux 2.28 and verified with real
+CPU/CUDA inference in clean AlmaLinux 8.10 (glibc 2.28) containers. These Linux
+SDKs disable the optional upstream subprocess helper (`LLAMA_SUBPROCESS=OFF`);
+zg's inference and MCP server remain unchanged. SDK verification used EL8 GCC
+Toolset 13 for final static linkage; deployment machines do not need that
+compiler toolset.
+Windows x64/ARM64 CPU use `zvec-0.1.154-cpu-r2`; macOS and
 CUDA-enabled Windows x64 use `zvec-0.1.154-r1`. CUDA architecture coverage is
 unchanged. Matching builds reuse native
 libraries and bindings without executing bindgen, CMake, C++ or CUDA compilation;
@@ -693,6 +698,12 @@ the static CPU SDK, not the CUDA SDK; CUDA builds retain the shared core, CPU
 backends and both CUDA plugins. Custom native configurations use source builds
 in default `auto` mode. A download or integrity failure is an error, not a silent
 source fallback.
+
+Pull requests that trigger Rust CI also build the Linux x64 CPU/CUDA and ARM64
+CPU release packages and audit the executable and bundled shared libraries
+against glibc 2.28. The x64 audit includes both CUDA 13 and CUDA 12 plugins;
+it runs on a CPU runner and does not exercise GPU inference. These jobs reuse
+the release build workflow and upload artifacts without publishing packages.
 
 The fork no longer registers llama.cpp as a Git submodule. Cargo fetches only
 the Rust bindings; matching SDK builds never fetch native source. Only explicit
