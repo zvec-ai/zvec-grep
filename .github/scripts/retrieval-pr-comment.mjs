@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { markdownVersionComparison } from "../../benchmarks/zg-retrieval/expansion/compare.mjs";
+import {
+  QA_DIAGNOSTICS,
+  markdownVersionComparison,
+} from "../../benchmarks/zg-retrieval/expansion/compare.mjs";
 import { QUALITY_METRICS } from "../../benchmarks/zg-retrieval/reports/ci.mjs";
-import { QA_ENTITY_METRICS } from "../../benchmarks/zg-retrieval/reports/zg.mjs";
 import { PILOT_SUITES } from "../../benchmarks/zg-retrieval/expansion/config.mjs";
 
 const marker = "<!-- zg-retrieval-pr -->";
@@ -82,31 +84,31 @@ function currentRequest(pr, request) {
   );
 }
 
-function validateEntityDiagnostic(group) {
+function validateDiagnostic(group, level, { title, metrics }) {
   if (group === null) return null;
   const eligible = group?.eligible_tasks;
   assert.ok(
     Number.isSafeInteger(eligible) && eligible >= 0 && eligible <= 20,
-    "Invalid Entity diagnostic eligible count",
+    `Invalid ${title} diagnostic eligible count`,
   );
-  const entity = { metric_task_counts: {} };
-  for (const [, metric] of QA_ENTITY_METRICS) {
-    const count = group.entity?.metric_task_counts?.[metric];
-    const score = group.entity?.[metric];
+  const scores = { metric_task_counts: {} };
+  for (const [, metric] of metrics) {
+    const count = group[level]?.metric_task_counts?.[metric];
+    const score = group[level]?.[metric];
     assert.ok(
       Number.isSafeInteger(count) && count >= 0 && count <= eligible,
-      "Invalid Entity diagnostic scored count",
+      `Invalid ${title} diagnostic scored count`,
     );
     assert.ok(
       count === 0
         ? score === null
         : Number.isFinite(score) && score >= 0 && score <= 1,
-      "Invalid Entity diagnostic score",
+      `Invalid ${title} diagnostic score`,
     );
-    entity[metric] = score;
-    entity.metric_task_counts[metric] = count;
+    scores[metric] = score;
+    scores.metric_task_counts[metric] = count;
   }
-  return { eligible_tasks: eligible, entity };
+  return { eligible_tasks: eligible, [level]: scores };
 }
 
 export function validateComparison(report, request) {
@@ -172,12 +174,15 @@ export function validateComparison(report, request) {
         };
       }
       const validated = { suite, mode, model, metrics };
-      if (suite === "sweqa" && row.entity_diagnostic !== undefined) {
-        validated.entity_diagnostic = {
-          baseline: validateEntityDiagnostic(row.entity_diagnostic?.baseline),
-          candidate: validateEntityDiagnostic(row.entity_diagnostic?.candidate),
-        };
-      }
+      if (suite === "sweqa")
+        for (const [level, config] of Object.entries(QA_DIAGNOSTICS)) {
+          const field = `${level}_diagnostic`;
+          if (row[field] === undefined) continue;
+          validated[field] = {
+            baseline: validateDiagnostic(row[field]?.baseline, level, config),
+            candidate: validateDiagnostic(row[field]?.candidate, level, config),
+          };
+        }
       rows.push(validated);
     }
   }

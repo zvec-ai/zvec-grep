@@ -2,9 +2,14 @@ import { ZG_MODES } from "./validation.mjs";
 
 const display = (value) => (Number.isFinite(value) ? value.toFixed(4) : "N/A");
 
+export const QA_RECALL_METRICS = [1, 5, 10].map((k) => [
+  `Recall@${k}`,
+  `recall_at_${k}`,
+]);
+
 export const QA_ENTITY_METRICS = [
   ...[1, 5, 10].map((k) => [`Hit@${k}`, `hit_at_${k}`]),
-  ...[1, 5, 10].map((k) => [`Recall@${k}`, `recall_at_${k}`]),
+  ...QA_RECALL_METRICS,
   ["MRR@10", "mrr_at_10"],
   ["nDCG@10", "ndcg_at_10"],
 ];
@@ -29,11 +34,7 @@ export function qaRetrievalMarkdown(entries, expectedQuestions) {
     "Each cell shows the score and n=scored/eligible questions for that metric. The difference is the number left unscored, including uncertain matches or failed calls. Unknown results never become zeros. Each question needs all five computable calls for a metric; averages then give questions equal weight, including QA nDCG.",
   ];
   for (const [level, heading, metrics] of [
-    [
-      "file",
-      "QA File Recall",
-      [1, 5, 10].map((k) => [`Recall@${k}`, `recall_at_${k}`]),
-    ],
+    ["file", "QA File Recall", QA_RECALL_METRICS],
     ["entity", "QA Entity retrieval", QA_ENTITY_METRICS],
   ]) {
     lines.push(

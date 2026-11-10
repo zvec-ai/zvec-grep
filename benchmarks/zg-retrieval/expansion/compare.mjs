@@ -8,10 +8,26 @@ import { buildCombined } from "./combined.mjs";
 import { PILOT_NAMES, PILOT_SUITES } from "./config.mjs";
 import { compareReports } from "../reports/compare.mjs";
 import { QUALITY_METRICS } from "../reports/ci.mjs";
-import { QA_ENTITY_METRICS, qaMetricCell } from "../reports/zg.mjs";
+import {
+  QA_ENTITY_METRICS,
+  QA_RECALL_METRICS,
+  qaMetricCell,
+} from "../reports/zg.mjs";
 
 const MODES = ["hybrid", "fts", "vector"];
 const identity = (repository, commit) => ({ repository, commit });
+
+export const QA_DIAGNOSTICS = {
+  file: { title: "File Recall", metrics: QA_RECALL_METRICS },
+  entity: { title: "Entity retrieval", metrics: QA_ENTITY_METRICS },
+};
+
+function diagnosticFor(row, level) {
+  const group = row.qa_retrieval?.diagnostic;
+  return group?.[level]
+    ? { eligible_tasks: group.eligible_tasks, [level]: group[level] }
+    : null;
+}
 
 function checkIdentity(value) {
   assert.match(value.repository ?? "", /^[\w.-]+\/[\w.-]+$/);
@@ -69,17 +85,11 @@ export function compareCombinedResults(baseline, candidate, metadata) {
       }
       const row = { suite: name, mode, model: before.model, metrics };
       if (name === "sweqa") {
-        const base = oldRow.qa_retrieval?.diagnostic;
-        const head = newRow.qa_retrieval?.diagnostic;
-        if (base || head) {
-          row.entity_diagnostic = {
-            baseline: base
-              ? { eligible_tasks: base.eligible_tasks, entity: base.entity }
-              : null,
-            candidate: head
-              ? { eligible_tasks: head.eligible_tasks, entity: head.entity }
-              : null,
-          };
+        for (const level of Object.keys(QA_DIAGNOSTICS)) {
+          const baseline = diagnosticFor(oldRow, level);
+          const candidate = diagnosticFor(newRow, level);
+          if (baseline || candidate)
+            row[`${level}_diagnostic`] = { baseline, candidate };
         }
       }
       rows.push(row);
@@ -143,11 +153,11 @@ export function markdownVersionComparison(result) {
     "",
     `**${result.status === "success" ? "✅ Complete" : "❌ Failed / incomplete"}**`,
     "",
-    `Base: ${version("baseline")}`,
+    `Baseline: ${version("baseline")}`,
     "",
-    `Head: ${version("candidate")}`,
+    `Candidate: ${version("candidate")}`,
     "",
-    "Each cell is **base / head / Δ**. Δ = head − base; all five metrics use the 0–1 scale and higher is better. Both versions use the same frozen harness, queries, gold labels and local embedding models, with fresh indexes and five calls per query/mode. Quality is report-only; no regression threshold is applied.",
+    "For a PR, the baseline is the pinned target-branch commit and the candidate is the pinned PR commit. In the File ranking table, each cell shows baseline / candidate / Δ (candidate minus baseline) on a 0–1 scale. Both versions use the same frozen harness, queries, Gold and local embedding models, with fresh indexes and five calls per question and mode. Quality scores are report-only.",
     "",
     "| Suite | Mode | File Hit@1 | File Hit@5 | File Hit@10 | MRR@10 | nDCG@10 |",
     "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
@@ -163,25 +173,30 @@ export function markdownVersionComparison(result) {
       `| ${label} | ${row.mode} | ${QUALITY_METRICS.map((metric) => cell(row.metrics[metric])).join(" | ")} |`,
     );
   }
-  const entityRows = result.rows.filter((row) => row.entity_diagnostic);
-  if (entityRows.length) {
+  if (result.rows.some((row) => row.file_diagnostic || row.entity_diagnostic))
     lines.push(
       "",
-      "### SWE-QA20 Entity retrieval · Diagnostic",
-      "",
-      "These are diagnostic results. Each cell gives the score and n=scored/eligible questions for that metric. Scores weight each scored question equally after averaging its five calls. Baseline and candidate can have different scored questions, so the table reports each side separately.",
-      "",
-      `| Mode | Version | ${QA_ENTITY_METRICS.map(([label]) => label).join(" | ")} |`,
-      `| --- | --- | ${QA_ENTITY_METRICS.map(() => "---:").join(" | ")} |`,
+      "The SWE-QA20 diagnostic tables score File paths and code entities separately. Each cell shows the score and n=scored/eligible questions for that metric. Scores weight each scored question equally after averaging its five calls. Baseline and candidate can have different scored questions.",
     );
-    for (const row of entityRows)
+  for (const [level, { title, metrics }] of Object.entries(QA_DIAGNOSTICS)) {
+    const field = `${level}_diagnostic`;
+    const rows = result.rows.filter((row) => row[field]);
+    if (!rows.length) continue;
+    lines.push(
+      "",
+      `### SWE-QA20 ${title} · Diagnostic`,
+      "",
+      `| Mode | Version | ${metrics.map(([label]) => label).join(" | ")} |`,
+      `| --- | --- | ${metrics.map(() => "---:").join(" | ")} |`,
+    );
+    for (const row of rows)
       for (const [side, label] of [
         ["baseline", "Baseline"],
         ["candidate", "Candidate"],
       ]) {
-        const group = row.entity_diagnostic[side];
-        const scores = QA_ENTITY_METRICS.map(([, metric]) =>
-          qaMetricCell(group?.entity, metric, group?.eligible_tasks),
+        const group = row[field][side];
+        const scores = metrics.map(([, metric]) =>
+          qaMetricCell(group?.[level], metric, group?.eligible_tasks),
         );
         lines.push(`| ${row.mode} | ${label} | ${scores.join(" | ")} |`);
       }

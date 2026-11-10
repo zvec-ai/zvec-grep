@@ -105,7 +105,7 @@ test("incomplete, mixed-harness, wrong-commit and mixed-model results are reject
   }
 });
 
-test("Entity diagnostics retain each version's scored question counts", () => {
+test("File and Entity diagnostics retain their own scores and question counts", () => {
   const before = result(baseSha);
   const after = result(headSha);
   for (const [run, recall, count] of [
@@ -122,8 +122,18 @@ test("Entity diagnostics retain each version's scored question counts", () => {
     entity.metric_task_counts.recall_at_5 = 0;
     entity.recall_at_10 = recall;
     entity.metric_task_counts.recall_at_10 = count;
+    const file = {
+      recall_at_1: 0.25,
+      recall_at_5: 0.5,
+      recall_at_10: recall + 0.5,
+      metric_task_counts: {
+        recall_at_1: 17,
+        recall_at_5: 17,
+        recall_at_10: 17,
+      },
+    };
     run.sweqa.rows[0].qa_retrieval = {
-      diagnostic: { eligible_tasks: 17, entity },
+      diagnostic: { eligible_tasks: 17, file, entity },
     };
   }
   const comparison = compareCombinedResults(before, after, metadata);
@@ -132,8 +142,17 @@ test("Entity diagnostics retain each version's scored question counts", () => {
     1,
   );
   const markdown = markdownVersionComparison(comparison);
+  assert.match(markdown, /SWE-QA20 File Recall · Diagnostic/);
   assert.match(markdown, /SWE-QA20 Entity retrieval · Diagnostic/);
   assert.match(markdown, /Recall@1 \| Recall@5 \| Recall@10/);
+  assert.match(
+    markdown,
+    /\| hybrid \| Baseline \| 0\.2500 \(n=17\/17\) \| 0\.5000 \(n=17\/17\) \| 0\.6250 \(n=17\/17\)/,
+  );
+  assert.match(
+    markdown,
+    /\| hybrid \| Candidate \| 0\.2500 \(n=17\/17\) \| 0\.5000 \(n=17\/17\) \| 0\.7500 \(n=17\/17\)/,
+  );
   assert.match(
     markdown,
     /\| hybrid \| Baseline \|.*0\.0000 \(n=17\/17\) \| N\/A \(n=0\/17\) \| 0\.1250 \(n=13\/17\)/,

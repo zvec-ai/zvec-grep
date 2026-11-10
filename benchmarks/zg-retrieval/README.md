@@ -87,8 +87,9 @@ Entity score or a claim that all answer evidence was found.
 Reports bind the QA dataset through `qa_gold`, retain per-call `qa_observations`,
 and expose `qa_retrieval` and `qa_quality_mean` beside the legacy fields.
 Validation recomputes these values from the saved public evidence and frozen QA
-labels. The final PR comparison shows Entity diagnostics for baseline and
-candidate, with the scored question count next to each score.
+labels. The final PR comparison shows separate File Recall and Entity diagnostic
+tables for baseline and candidate, with the scored question count next to each
+score.
 
 ## Reports and artifacts
 
