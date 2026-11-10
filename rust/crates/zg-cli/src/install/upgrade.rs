@@ -276,7 +276,7 @@ fn configuration_files() -> Vec<Result<ConfigFile, InstallError>> {
                 .unwrap_or_else(|| home.join(".cursor"))
                 .join("mcp.json"),
             "mcpServers",
-            Format::Json,
+            Format::Jsonc,
         ),
         resolve_qwen_home().map(|path| ConfigFile {
             path: path.join("settings.json"),
