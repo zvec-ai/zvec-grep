@@ -343,63 +343,42 @@ fn normalize_parameter(parameter: &str) -> String {
 }
 
 /// One parameter's type, with the declarator name it establishes removed:
-/// `int value` reads `int` and `const char* path` reads `const char*`.
+/// `int value` reads `int`, `const char* path` reads `const char*`, and
+/// `Token value` reads `Token`.
 ///
-/// The trailing identifier comes off only when the text before it completes a
-/// type. `unsigned long` and `struct Foo` keep every word, because reading
-/// `long` or `Foo` as a name would merge two different parameters. `const Foo`
-/// keeps its own too: a qualifier leaves the type open, so `Foo` is the type of
-/// an unnamed parameter, and reading it as a name would merge `const Foo` with
-/// `const Bar`.
+/// The trailing identifier comes off only when the prefix before it leaves no
+/// room for the type. `unsigned long` and `struct Foo` keep every word, because
+/// reading `long` or `Foo` as a name would merge two different parameters.
+/// `const Foo` keeps its own too: a qualifier leaves the type open, so `Foo` is
+/// the type of an unnamed parameter, and reading it as a name would merge
+/// `const Foo` with `const Bar`.
 fn strip_parameter_name(parameter: String) -> String {
     let Some((head, tail)) = parameter.rsplit_once(' ') else {
         return parameter;
     };
-    if !is_parameter_name(tail) || !completes_type(head) {
+    if !is_parameter_name(tail) || leaves_type_open(head) {
         return parameter;
     }
     head.to_owned()
 }
 
-/// Whether the text before a trailing identifier completes a type, which makes
-/// that identifier the parameter's declarator name.
+/// Whether the token before a trailing identifier leaves the type open, which
+/// makes that identifier part of the type rather than the parameter's name.
 ///
-/// A cv qualifier or an elaborated type specifier leaves the type open —
-/// `const Foo` is one unnamed type — and so does a bare identifier, which can
-/// be either a type awaiting its name (`Foo bar`) or a type already declared
-/// without one. Pointers, references, template arguments, array bounds,
-/// qualified names and built-in type words all end a type, so an identifier
-/// after one is a name.
-fn completes_type(prefix: &str) -> bool {
+/// A cv qualifier or an elaborated type specifier cannot be followed by a name
+/// without a type in between, so `const Foo` and `struct Foo` are complete
+/// unnamed types and `const Bar` beside them names a different one. A language
+/// that spells `name: Type` puts its name first, so the trailing word there is
+/// the type. Every other prefix establishes a name, including a bare type:
+/// `int count`, `const char* path`, `Token value` and `uint32_t input` all name
+/// their parameter, and the unnamed `Token` keeps its single word so the two
+/// spellings still pair.
+fn leaves_type_open(prefix: &str) -> bool {
     let last = prefix.rsplit(' ').next().unwrap_or(prefix);
-    if matches!(
-        last,
-        "const" | "volatile" | "struct" | "class" | "enum" | "union" | "typename"
-    ) {
-        return false;
-    }
-    last.ends_with(['*', '&', '>', ']'])
-        || last.contains("::")
+    last.ends_with(':')
         || matches!(
             last,
-            "auto"
-                | "bool"
-                | "char"
-                | "char8_t"
-                | "char16_t"
-                | "char32_t"
-                | "double"
-                | "float"
-                | "int"
-                | "long"
-                | "register"
-                | "restrict"
-                | "short"
-                | "signed"
-                | "size_t"
-                | "unsigned"
-                | "void"
-                | "wchar_t"
+            "const" | "volatile" | "struct" | "class" | "enum" | "union" | "typename"
         )
 }
 
@@ -801,6 +780,22 @@ mod parameter_evidence_tests {
             "unsigned",
             "no trailing name to strip"
         );
+    }
+
+    #[test]
+    fn a_user_defined_type_still_yields_its_name() {
+        // Two identifiers in a row make the last one the name, so an unnamed
+        // `Token` pairs with the `Token value` a definition spells, and a
+        // typedef name pairs two renamed parameters.
+        assert_eq!(evidence("void consume(Token);"), "Token");
+        assert_eq!(evidence("void consume(Token value) {}"), "Token");
+        assert_eq!(evidence("void f(uint32_t input);"), "uint32_t");
+        assert_eq!(evidence("void f(uint32_t value) {}"), "uint32_t");
+        // The type stays whole where the prefix opens it, and a `name: Type`
+        // spelling keeps its type at the end.
+        assert_eq!(evidence("void f(const Foo);"), "const Foo");
+        assert_eq!(evidence("void f(struct Foo);"), "struct Foo");
+        assert_eq!(evidence("void f(a: i32);"), "a: i32");
     }
 
     #[test]

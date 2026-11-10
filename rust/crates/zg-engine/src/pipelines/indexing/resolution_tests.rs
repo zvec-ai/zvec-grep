@@ -779,6 +779,29 @@ fn sweep_keeps_an_unnamed_user_defined_parameter_distinct() {
 }
 
 #[test]
+fn sweep_pairs_an_unnamed_typedef_parameter_with_the_definition_that_names_it() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    // `Token` and `Token value` state one parameter type: only the definition
+    // spells its name, so the declaration still gives way to the definition.
+    index_source(&store, "include/api.hpp", "void consume(Token);\n");
+    let implementation = index_source(&store, "src/impl.cpp", "void consume(Token value) {\n}\n");
+    let caller = index_source(
+        &store,
+        "src/app.cpp",
+        "void run() {\n    Token token;\n    consume(token);\n}\n",
+    );
+    let owner = pending_call_owner(&store, caller, "consume");
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![implementation],
+        "the declaration pairs with the definition: {sweep:?}"
+    );
+}
+
+#[test]
 fn sweep_binds_an_overload_by_the_scope_the_receiver_spells() {
     let home = tempfile::tempdir().expect("workspace");
     let store = open(home.path());
