@@ -84,19 +84,48 @@ fn hierarchy_proposal(storage: &SqliteGraphStorage, target: &str) -> Resolution 
     }
 }
 
-/// One inheritance clause as extraction leaves it for the resolver.
-fn hierarchy_reference(owner: &str, name: &str) -> PendingRef {
+/// One inheritance clause as extraction leaves it for the resolver: the
+/// owner's entity ID, the qualified name assembly records beside it, and the
+/// base the clause spells.
+fn inheritance_reference(owner_id: &str, owner: &str, base: &str) -> PendingRef {
     PendingRef {
-        owner_id: owner.into(),
-        ref_name: name.into(),
+        owner_id: owner_id.into(),
+        ref_name: base.into(),
         receiver_name: None,
         ref_kind: GraphEdgeKind::Extends,
         arity: None,
         line: 2,
         column: 0,
         status: PendingRefStatus::Pending,
-        metadata: Metadata::default(),
+        metadata: Metadata::from_iter([("owner".into(), json!(owner))]),
     }
+}
+
+/// The same clause for a file whose entity IDs still match their spellings.
+fn hierarchy_reference(owner: &str, base: &str) -> PendingRef {
+    inheritance_reference(owner, owner, base)
+}
+
+/// Resolves everything the queue holds so the next write starts clean: the
+/// inheriting file's own clause binds as an import, the replayed member call as
+/// the hierarchy rule writes it.
+fn settle_queue(db: &mut SqliteGraphStorage) {
+    let pending = db.list_pending_refs(100, 0).expect("refs");
+    let resolutions: Vec<Resolution> = pending
+        .refs
+        .iter()
+        .map(|stored| Resolution {
+            ref_id: stored.id,
+            target_id: "b".into(),
+            provenance: if stored.reference.ref_kind == GraphEdgeKind::Extends {
+                EdgeProvenance::ImportScoped
+            } else {
+                EdgeProvenance::FileScoped
+            },
+        })
+        .collect();
+    db.apply_resolutions(&resolutions).expect("resolve");
+    assert_eq!(db.list_pending_refs(100, 0).expect("queue").refs.len(), 0);
 }
 
 fn open(path: &Path) -> SqliteGraphStorage {
@@ -538,45 +567,24 @@ fn a_rewrite_that_restates_the_same_inheritance_keeps_hierarchy_bindings() {
     db.apply_resolutions(&[resolution]).expect("resolve");
 
     // Joining a base stales every call bound through the chain.
-    let clause = hierarchy_reference("Mid", "B");
-    db.write_file_graph(
-        2,
-        None,
-        &graph(&["Mid"], vec![], vec![clause.clone()]),
-        &[],
-        false,
-    )
-    .expect("first inheritance write");
+    let clause = inheritance_reference("Mid", "Mid", "B");
+    db.write_file_graph(2, None, &graph(&["Mid"], vec![], vec![clause]), &[], false)
+        .expect("first inheritance write");
     assert_eq!(db.requeue_stale_resolutions().expect("requeue"), 1);
+    settle_queue(&mut db);
 
-    // Settle everything the write and the requeue left queued, so the second
-    // write starts from a clean queue: the inheriting file's own clause binds
-    // as an import, the replayed member call as the hierarchy rule writes it.
-    let pending = db.list_pending_refs(100, 0).expect("refs");
-    let resolutions: Vec<Resolution> = pending
-        .refs
-        .iter()
-        .map(|stored| Resolution {
-            ref_id: stored.id,
-            target_id: "b".into(),
-            provenance: if stored.reference.ref_kind == GraphEdgeKind::Extends {
-                EdgeProvenance::ImportScoped
-            } else {
-                EdgeProvenance::FileScoped
-            },
-        })
-        .collect();
-    db.apply_resolutions(&resolutions).expect("resolve");
-    assert_eq!(db.list_pending_refs(100, 0).expect("queue").refs.len(), 0);
-
-    // Editing a method body of a class file restates its base unchanged.
-    // Owning an extends clause is not a change to it: only the clauses
-    // themselves can stale a hierarchy-bound call.
+    // Editing a method body re-mints the class ID: extraction keeps the class's
+    // full text and hashes it into the ID. The clause's owner spelling and base
+    // are what the rewrite repeats, so the bindings survive the new ID.
     let entities = ["Mid".to_owned()];
     db.write_file_graph(
         2,
         None,
-        &graph(&["Mid"], vec![], vec![clause]),
+        &graph(
+            &["Mid@rewritten"],
+            vec![],
+            vec![inheritance_reference("Mid@rewritten", "Mid", "B")],
+        ),
         &entities,
         false,
     )
@@ -593,6 +601,55 @@ fn a_rewrite_that_restates_the_same_inheritance_keeps_hierarchy_bindings() {
         "only the rewritten file's own clause is queued: {pending:?}"
     );
     assert_eq!(pending.refs[0].reference.ref_name, "B");
+}
+
+#[test]
+fn a_renamed_base_stales_the_bindings_the_chain_fed() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    db.write_file_graph(
+        1,
+        None,
+        &graph(&["a"], vec![], vec![reference("a", "target")]),
+        &[],
+        false,
+    )
+    .expect("write");
+    let resolution = hierarchy_proposal(&db, "b");
+    db.apply_resolutions(&[resolution]).expect("resolve");
+    db.write_file_graph(
+        2,
+        None,
+        &graph(
+            &["Mid"],
+            vec![],
+            vec![inheritance_reference("Mid", "Mid", "B")],
+        ),
+        &[],
+        false,
+    )
+    .expect("first inheritance write");
+    assert_eq!(db.requeue_stale_resolutions().expect("requeue"), 1);
+    settle_queue(&mut db);
+
+    // The method body moved again, but this rewrite also swaps the base: the
+    // spelling is the evidence, so the new one still stales the chain.
+    db.write_file_graph(
+        2,
+        None,
+        &graph(
+            &["Mid@rewritten"],
+            vec![],
+            vec![inheritance_reference("Mid@rewritten", "Mid", "C")],
+        ),
+        &["Mid".to_owned()],
+        false,
+    )
+    .expect("second write");
+    assert_eq!(
+        db.requeue_stale_resolutions().expect("requeue"),
+        1,
+        "a changed base stales the chain"
+    );
 }
 
 #[test]

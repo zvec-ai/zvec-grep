@@ -37,6 +37,8 @@ pub(crate) use collector::{
     scan_call_edges, scan_return_types,
 };
 pub(crate) use partition::{PartitionedGraph, partition_walk};
+#[cfg(test)]
+pub(crate) use partition::{PendingNameRef, ResolvedNameEdge};
 
 use std::collections::{HashMap, HashSet};
 

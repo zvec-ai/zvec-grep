@@ -1,11 +1,17 @@
-use crate::domain::{EdgeProvenance, FileGraphResult, GraphEdgeKind, PendingRefStatus};
+use crate::domain::{EdgeProvenance, FileGraphResult, PendingRefStatus};
 use rusqlite::{TransactionBehavior, params, params_from_iter};
 use std::collections::HashSet;
 
-use super::{Error, Result, SqliteGraphStorage, nonempty};
+use super::{Error, Metadata, Result, SqliteGraphStorage, nonempty};
 
 // Bound IN-clause parameters; invalidation also binds the owning file ID.
 const TARGET_ID_BATCH_SIZE: usize = 512;
+
+/// Metadata keys an inheritance clause carries from assembly. Entity IDs hash
+/// the entity's text, so a method-body edit mints a new one; the owner's
+/// qualified name and the base's spelling are the halves a rewrite repeats.
+const INHERITANCE_OWNER_KEY: &str = "owner";
+const INHERITANCE_BASE_KEY: &str = "base";
 
 impl SqliteGraphStorage {
     /// Atomically replaces one file's local graph rows and invalidates inbound
@@ -158,25 +164,31 @@ fn name_tail(name: &str) -> &str {
         .unwrap_or(name)
 }
 
-/// Whether a relationship kind spells a base this file inherits from.
-fn spells_inheritance(kind: GraphEdgeKind) -> bool {
-    matches!(kind, GraphEdgeKind::Extends | GraphEdgeKind::Implements)
+/// Evidence text a clause carries, falling back to the endpoint for rows
+/// written before the clause recorded its spelling.
+fn clause_text<'a>(metadata: &'a Metadata, key: &str, fallback: &'a str) -> &'a str {
+    metadata
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(fallback)
 }
 
-/// The inheritance evidence a file's new output carries, one `(kind, source,
-/// base)` triple per clause: a resolved edge names its target, a pending one
-/// the reference it spells. Sorted and deduplicated so two writes of the same
-/// clauses compare equal.
+/// The inheritance evidence a file's new output carries, one `(kind, owner,
+/// base)` triple per clause and by declaration identity: the owning entity's
+/// qualified name stands in for its ID, which hashes the entity's text and
+/// moves whenever only a method body is edited, and the base's spelling stands
+/// in for a resolved target, which is such an ID. Sorted and deduplicated so
+/// two writes of the same clauses compare equal.
 fn inheritance_evidence(graph: &FileGraphResult) -> Vec<(String, String, String)> {
     let mut evidence: Vec<(String, String, String)> = graph
         .edges
         .iter()
-        .filter(|edge| spells_inheritance(edge.kind))
+        .filter(|edge| edge.kind.spells_inheritance())
         .map(|edge| {
             (
                 edge.kind.as_str().to_owned(),
-                edge.source.clone(),
-                edge.target.clone(),
+                clause_text(&edge.metadata, INHERITANCE_OWNER_KEY, &edge.source).to_owned(),
+                clause_text(&edge.metadata, INHERITANCE_BASE_KEY, &edge.target).to_owned(),
             )
         })
         .collect();
@@ -184,11 +196,16 @@ fn inheritance_evidence(graph: &FileGraphResult) -> Vec<(String, String, String)
         graph
             .pending_refs
             .iter()
-            .filter(|reference| spells_inheritance(reference.ref_kind))
+            .filter(|reference| reference.ref_kind.spells_inheritance())
             .map(|reference| {
                 (
                     reference.ref_kind.as_str().to_owned(),
-                    reference.owner_id.clone(),
+                    clause_text(
+                        &reference.metadata,
+                        INHERITANCE_OWNER_KEY,
+                        &reference.owner_id,
+                    )
+                    .to_owned(),
                     reference.ref_name.clone(),
                 )
             }),
@@ -199,19 +216,48 @@ fn inheritance_evidence(graph: &FileGraphResult) -> Vec<(String, String, String)
 }
 
 /// The inheritance evidence this file's stored rows carry now, read the same
-/// way as `inheritance_evidence` and therefore by spelling: a reference keeps
-/// the name it spells after it resolves, and a directly written edge names its
-/// target. Runs before the rows are replaced.
+/// way as `inheritance_evidence` and therefore by declaration identity: a
+/// reference keeps the name it spells after it resolves, a directly written
+/// edge keeps the base assembly recorded beside it, and rows from before that
+/// evidence existed fall back to their endpoints. Runs before the rows are
+/// replaced.
 fn inheritance_edges(
     tx: &rusqlite::Transaction<'_>,
     file_id: u32,
 ) -> Result<Vec<(String, String, String)>> {
     let mut statement = tx.prepare(
-        "SELECT kind, source, COALESCE(reference_name, target) FROM edges
+        "SELECT kind, source, COALESCE(reference_name, target), metadata FROM edges
          WHERE file_id = ?1 AND kind IN ('extends', 'implements')",
     )?;
-    let rows = statement.query_map([file_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
-    let mut evidence = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows = statement.query_map([file_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let mut evidence = Vec::new();
+    for row in rows {
+        let (kind, source, base, metadata) = row?;
+        let metadata: Metadata = metadata
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?
+            .unwrap_or_default();
+        // A resolved clause rewrites its target to an entity ID, so the stored
+        // spelling is the only half that survives the resolution.
+        let spelled = clause_text(
+            &metadata,
+            INHERITANCE_BASE_KEY,
+            base.as_deref().unwrap_or_default(),
+        );
+        evidence.push((
+            kind,
+            clause_text(&metadata, INHERITANCE_OWNER_KEY, &source).to_owned(),
+            spelled.to_owned(),
+        ));
+    }
     evidence.sort();
     evidence.dedup();
     Ok(evidence)

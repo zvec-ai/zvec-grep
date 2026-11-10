@@ -143,6 +143,12 @@ impl GraphEdgeKind {
             Self::Declares => "declares",
         }
     }
+
+    /// Whether this kind spells a base the owner inherits from.
+    #[must_use]
+    pub(crate) const fn spells_inheritance(self) -> bool {
+        matches!(self, Self::Extends | Self::Implements)
+    }
 }
 
 impl EdgeProvenance {
