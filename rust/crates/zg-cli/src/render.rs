@@ -1088,6 +1088,7 @@ mod output_tests {
             arity: None,
             is_exported: false,
             is_declaration: false,
+            package: None,
         }));
         for source in [ContextSource::Index, ContextSource::Rg] {
             result.source = source;
@@ -1448,6 +1449,7 @@ mod output_tests {
                 arity: None,
                 is_exported: false,
                 is_declaration: false,
+                package: None,
             }));
             let mut buffer = Vec::new();
             write_item_preview(

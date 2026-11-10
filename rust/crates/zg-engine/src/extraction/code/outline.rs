@@ -303,6 +303,7 @@ mod tests {
             arity: None,
             is_exported: false,
             is_declaration: false,
+            package: None,
         })
     }
 

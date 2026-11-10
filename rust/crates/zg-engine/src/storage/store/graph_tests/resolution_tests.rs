@@ -13,6 +13,7 @@ fn target_metadata(index: usize) -> CodeMetadata {
         arity: None,
         is_exported: false,
         is_declaration: false,
+        package: None,
     }
 }
 

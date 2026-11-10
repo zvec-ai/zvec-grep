@@ -25,6 +25,9 @@ pub(crate) struct ResolvedNameEdge {
     pub ref_kind: GraphEdgeKind,
     pub source_index: usize,
     pub target_index: usize,
+    /// Name the reference spells. Inheritance keeps it as evidence because the
+    /// resolved target is an entity ID, not the spelling a rewrite repeats.
+    pub ref_name: String,
     /// Original reference text as written in the source, for edge metadata.
     pub raw_text: Option<String>,
     pub arity: Option<usize>,
@@ -177,6 +180,7 @@ pub(crate) fn partition_walk(
                 ref_kind: edge.ref_kind,
                 source_index: edge.owner_index,
                 target_index,
+                ref_name: edge.ref_name,
                 raw_text: edge.raw_text,
                 arity: edge.arity,
                 receiver_name: edge.receiver_name,
@@ -225,6 +229,7 @@ mod tests {
                 ref_kind: GraphEdgeKind::Calls,
                 source_index: 0,
                 target_index: 1,
+                ref_name: "helper".into(),
                 raw_text: None,
                 arity: Some(0),
                 receiver_name: None,
