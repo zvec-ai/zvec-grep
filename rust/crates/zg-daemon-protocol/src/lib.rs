@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use zg_engine::ErrorReport;
 use zg_engine::api::{
-    context::{ContextOptions, ContextResult},
+    context::{ContextOptions, ContextResult, options::ContextPreviewMode},
     index::{IndexOptions, IndexResult, progress::IndexProgress},
     info::{InfoOptions, InfoResult},
     relationships::{RelationshipOptions, RelationshipResult},
@@ -17,6 +17,11 @@ use zg_engine::api::{
 pub enum DaemonCommand {
     IndexSetup(zg_engine::api::index::setup::IndexSetupOptions),
     Context(ContextOptions),
+    /// Prepare display content before transport without changing the engine query.
+    ContextPreview {
+        request: ContextOptions,
+        preview: ContextPreviewMode,
+    },
     Callers(RelationshipOptions),
     Callees(RelationshipOptions),
     Index(IndexOptions),
@@ -75,6 +80,30 @@ mod tests {
     };
 
     use super::{DaemonCommand, ErrorReply, ExecutionResult, IndexStreamEvent};
+
+    #[test]
+    fn preview_is_a_response_option_outside_the_engine_query() {
+        use zg_engine::api::context::options::ContextPreviewMode;
+
+        let request = ContextOptions {
+            query: Some("needle".into()),
+            ..ContextOptions::default()
+        };
+        let query = serde_json::to_value(&request).expect("query");
+        for preview in [ContextPreviewMode::Short, ContextPreviewMode::Full] {
+            let command = DaemonCommand::ContextPreview {
+                request: request.clone(),
+                preview,
+            };
+            let encoded = serde_json::to_value(&command).expect("command");
+            assert_eq!(encoded["request"]["request"], query);
+            assert!(encoded["request"]["request"].get("preview").is_none());
+            assert_eq!(
+                serde_json::from_value::<DaemonCommand>(encoded).expect("round trip"),
+                command
+            );
+        }
+    }
 
     #[test]
     fn relationship_commands_and_replies_preserve_compact_payloads() {

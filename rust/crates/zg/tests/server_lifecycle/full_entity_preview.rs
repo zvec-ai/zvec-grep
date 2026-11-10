@@ -1,5 +1,12 @@
 use super::*;
 
+use zg_daemon_protocol::{DaemonCommand, DaemonReply, ExecutionResult};
+use zg_engine::api::context::{
+    ContextOptions, ContextResult,
+    options::{ContextPreviewMode, ContextRoute, ContextRouteMode, RefreshPolicy},
+    result::{ContentRange, ContextItem},
+};
+
 fn fixtures() -> Vec<(&'static str, String, String, String)> {
     let paragraph = "The indexed entity keeps its original context even when retrieval splits it into overlapping fragments.\n\n";
     let statement = "    observe('The indexed function keeps its context across overlapping retrieval fragments.');\n";
@@ -77,8 +84,159 @@ fn full_preview_returns_complete_markdown_and_code_entities_in_direct_and_server
     for (path, _, _, _) in fixtures() {
         std::fs::write(workspace.path().join(path), "changedondisk\n")?;
     }
-    let (_guard, _) = start_server(&binary, &home, "agent", None, configure)?;
-    verify_previews(&run, home.path())
+    let (guard, _) = start_server(&binary, &home, "agent", None, configure)?;
+    verify_previews(&run, home.path())?;
+    verify_server_previews(&guard.listen, workspace.path())
+}
+
+fn verify_server_previews(listen: &str, root: &Path) -> Result<(), Box<dyn Error>> {
+    let request = ContextOptions {
+        root: Some(root.to_owned()),
+        routes: vec![ContextRoute {
+            mode: ContextRouteMode::Fts,
+            query: "quasarneedle".to_owned(),
+        }],
+        limit: Some(2),
+        auto_update: false,
+        refresh: Some(RefreshPolicy::Off),
+        ..ContextOptions::default()
+    };
+    let query = |preview| {
+        read_preview_response(
+            listen,
+            &DaemonCommand::ContextPreview {
+                request: request.clone(),
+                preview,
+            },
+        )
+    };
+    let (full_body, full) = query(ContextPreviewMode::Full)?;
+    assert_eq!(full.items.len(), 2);
+    assert_eq!(full.group_results.len(), 1);
+    assert_eq!(full.group_results[0].items.len(), 2);
+    for item in response_items(&full) {
+        let (_, prefix, entity, _) = fixtures()
+            .into_iter()
+            .find(|(path, ..)| item.relative_path == Path::new(path))
+            .expect("indexed fixture");
+        assert_eq!(item.content.trim_end(), entity.trim_end());
+        assert_eq!(
+            item.content_range.start_line(),
+            Some(prefix.lines().count() + 1)
+        );
+        assert!(item.source_preview.is_none());
+    }
+    for preview in [ContextPreviewMode::None, ContextPreviewMode::Short] {
+        let (body, result) = query(preview)?;
+        assert!(
+            body.len() < full_body.len(),
+            "{preview:?} response is bounded"
+        );
+        for excluded in [
+            "entityend",
+            "excludedbefore",
+            "excludedafter",
+            "changedondisk",
+        ] {
+            assert!(!body.contains(excluded), "{preview:?}: {body}");
+        }
+        assert_eq!(result.items.len(), full.items.len());
+        assert_eq!(result.group_results.len(), full.group_results.len());
+        assert_eq!(
+            result.group_results[0].items.len(),
+            full.group_results[0].items.len()
+        );
+        for (item, original) in response_items(&result).zip(response_items(&full)) {
+            assert_same_retrieval(item, original);
+            assert!(
+                item.content.is_empty(),
+                "raw entity body must not cross HTTP"
+            );
+            let ContentRange::Text {
+                start_byte_offset,
+                end_byte_offset,
+                ..
+            } = &item.content_range
+            else {
+                panic!("source preview retains an exact empty content range");
+            };
+            assert_eq!(start_byte_offset, end_byte_offset);
+            let source = item
+                .source_preview
+                .as_ref()
+                .expect("prepared source preview");
+            let max_lines = if preview == ContextPreviewMode::None {
+                1
+            } else {
+                10
+            };
+            assert!(!source.lines.is_empty() && source.lines.len() <= max_lines);
+            for line in &source.lines {
+                assert!(line.line_number.is_some());
+                assert!(line.text.chars().count() <= 198, "bounded source line");
+            }
+        }
+    }
+    let (_, detail) = query(ContextPreviewMode::Detail)?;
+    assert_eq!(
+        response_items(&detail).count(),
+        response_items(&full).count()
+    );
+    for (item, original) in response_items(&detail).zip(response_items(&full)) {
+        assert_same_retrieval(item, original);
+        assert_eq!(item.content, original.content);
+        assert_eq!(item.content_range, original.content_range);
+        assert!(item.source_preview.is_none());
+    }
+    Ok(())
+}
+
+fn response_items(result: &ContextResult) -> impl Iterator<Item = &ContextItem> {
+    result
+        .items
+        .iter()
+        .chain(result.group_results.iter().flat_map(|group| &group.items))
+}
+
+fn assert_same_retrieval(item: &ContextItem, original: &ContextItem) {
+    let identity = |item| {
+        let mut value = serde_json::to_value(item).expect("context item");
+        let fields = value.as_object_mut().expect("context item object");
+        for field in ["content", "content_range", "source_preview", "outline"] {
+            fields.remove(field);
+        }
+        value
+    };
+    assert_eq!(
+        identity(item),
+        identity(original),
+        "preview preserves retrieval metadata"
+    );
+}
+
+fn read_preview_response(
+    listen: &str,
+    command: &DaemonCommand,
+) -> Result<(String, ContextResult), Box<dyn Error>> {
+    let body = serde_json::to_string(command)?;
+    let mut stream = TcpStream::connect(listen)?;
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    write!(
+        stream,
+        "POST /admin/execute HTTP/1.1\r\nHost: {listen}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )?;
+    stream.flush()?;
+    let response = read_http_response(&mut stream)?;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    let (_, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or("HTTP response body")?;
+    let ExecutionResult::Success(DaemonReply::Context(result)) = serde_json::from_str(body)? else {
+        return Err(format!("unexpected preview response: {body}").into());
+    };
+    Ok((body.to_owned(), *result))
 }
 
 fn verify_previews(

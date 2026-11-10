@@ -1039,6 +1039,7 @@ mod output_tests {
             excerpt_range: None,
             match_ranges: Vec::new(),
             outline: None,
+            source_preview: None,
             content: (1..=20)
                 .map(|n| format!("line{n}"))
                 .collect::<Vec<_>>()

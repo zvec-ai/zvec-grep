@@ -8,7 +8,7 @@ use zg_engine::api::context::result::{
 
 use crate::{
     OutputOptions, PreviewMode, highlight::QueryHighlighter, output_path,
-    preview::short_source_line, theme::StatusTheme,
+    preview::bounded_source_preview, theme::StatusTheme,
 };
 
 pub(super) fn write_items(
@@ -93,34 +93,29 @@ pub(super) fn write_item_preview(
         }
         None => {}
     }
-    let short = options.preview == PreviewMode::Short;
-    let max_lines = if short { 10 } else { usize::MAX };
+    if options.preview == PreviewMode::Short || item.source_preview.is_some() {
+        let source = bounded_source_preview(item, options.preview);
+        for line in &source.lines {
+            let text = highlighter.highlight(&line.text);
+            if let Some(number) = line.line_number {
+                writeln!(writer, "  {number}: {text}")?;
+            } else {
+                writeln!(writer, "  {text}")?;
+            }
+        }
+        if source.trailing_omission {
+            writeln!(writer, "  …")?;
+        }
+        return Ok(());
+    }
     let first = item.content_range.start_line();
-    let lines: Vec<_> = item.content.lines().collect();
-    let anchor = item
-        .excerpt_range
-        .as_ref()
-        .unwrap_or(&item.range)
-        .start_line()
-        .zip(first)
-        .map_or(0, |(matched, first)| matched.saturating_sub(first))
-        .min(lines.len().saturating_sub(1));
-    let from = if short { anchor.saturating_sub(3) } else { 0 };
-    for (offset, line) in lines.iter().enumerate().skip(from).take(max_lines) {
-        let line = if short {
-            short_source_line(item, offset, line)
-        } else {
-            (*line).to_owned()
-        };
-        let line = highlighter.highlight(&line);
+    for (offset, line) in item.content.lines().enumerate() {
+        let line = highlighter.highlight(line);
         if let Some(first) = first {
             writeln!(writer, "  {}: {line}", first + offset)?;
         } else {
             writeln!(writer, "  {line}")?;
         }
-    }
-    if short && lines.len() > from + max_lines {
-        writeln!(writer, "  …")?;
     }
     Ok(())
 }

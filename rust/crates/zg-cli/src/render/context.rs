@@ -19,7 +19,7 @@ use crate::{
     OutputOptions, PreviewMode,
     highlight::QueryHighlighter,
     output_path,
-    preview::{minimal_source_line, source_preview, split_lines, truncate_utf16 as truncate},
+    preview::{bounded_source_preview, source_preview, split_lines, truncate_utf16 as truncate},
     theme::StatusTheme,
 };
 
@@ -467,19 +467,27 @@ fn source_lines(
     preview: PreviewMode,
     highlighter: &QueryHighlighter,
 ) -> Vec<String> {
-    let source = source_preview(item, (preview == PreviewMode::None).then_some(1));
+    if preview == PreviewMode::None || item.source_preview.is_some() {
+        let source = bounded_source_preview(item, preview);
+        return source
+            .lines
+            .iter()
+            .map(|line| {
+                let prefix = line
+                    .line_number
+                    .map_or(String::new(), |line| line.to_string());
+                format!("{prefix}\t{}", highlighter.highlight(&line.text))
+            })
+            .collect();
+    }
+    let source = source_preview(item, None);
     let first = item.content_range.start_line();
     source
         .window
         .map(|offset| {
             let prefix = first.map_or(String::new(), |first| (first + offset).to_string());
             let line = source.lines[offset];
-            let text = if preview == PreviewMode::None {
-                minimal_source_line(item, offset, line)
-            } else {
-                line.to_owned()
-            };
-            format!("{prefix}\t{}", highlighter.highlight(&text))
+            format!("{prefix}\t{}", highlighter.highlight(line))
         })
         .collect()
 }

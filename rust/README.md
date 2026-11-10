@@ -327,7 +327,7 @@ It rotates at 10 MiB and keeps five numbered backups by default. The global
 are written to `<home>/daemon/bootstrap.log`.
 
 The instance record at `<home>/daemon/instance.lock` carries
-`daemonProtocolVersion: 1`. Status checks and daemon-backed CLI requests reject
+`daemonProtocolVersion: 3`. Status checks and daemon-backed CLI requests reject
 live legacy daemons without this field, including Node.js daemons; `auto` mode
 does not silently fall back to direct execution. Run `zg --server on` with the
 same home and any required token file to stop the legacy daemon and start Rust.
@@ -352,6 +352,10 @@ Query echoes, group headings, hit counts and `matchedBy` labels are omitted from
 the CLI result display. Full previews use the complete stored entity (such as a
 Markdown section or code symbol), even when only one fragment matched. They do
 not expand to the entire file. Bounded previews remain anchored to the matched fragment.
+Preview is a response option, separate from retrieval and ranking. Server mode
+selects and bounds source lines before serializing the response; direct mode and
+MCP use the same response assembly. The CLI only styles and numbers the prepared
+lines. Short responses do not carry the complete entity body or generated outline.
 Metadata labels use purple, file locations use cyan, and query matches use yellow.
 Automatic colors are disabled for redirected output, `TERM=dumb`, or `NO_COLOR`;
 `--color always` explicitly enables colors, including through pipes, and
@@ -613,11 +617,17 @@ The engine provides `content_range` for the exact source coordinates of returned
 content, independently of the entity `range` and matched `excerpt_range`. CLI and
 MCP use these coordinates for source numbering; preview never infers a range from
 the number of content lines. The engine also interprets half-open line bounds.
+Bounded daemon responses replace source content with `source_preview`: selected
+display lines with explicit source line numbers and an omission marker. Their raw
+`content` is empty with a zero-length `content_range`; rendered ellipses are never
+represented as a contiguous source slice. Full/detail responses keep the exact
+stored entity and its source coordinates. The in-process engine query API still
+returns complete entities and accepts no preview parameter.
 The required field changes the internal daemon reply contract. Native ripgrep
 type filters apply to queries; persisted scan rules support path globs and file
 formats using the same filename rules as indexed queries. The daemon wire
 distinguishes complete ordered glob replacement from case-category updates.
-The instance record uses `daemonProtocolVersion: 1`; see the daemon migration
+The instance record uses `daemonProtocolVersion: 3`; see the daemon migration
 notes above when replacing older resident processes. Replies without
 `content_range` are rejected during deserialization. Direct and server rendering
 consume the same engine contract.
