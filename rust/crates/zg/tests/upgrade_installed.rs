@@ -709,3 +709,29 @@ fn already_native_launchers_keep_custom_argument_spelling() {
     assert_eq!(fs::read_to_string(&path).expect("unchanged"), source);
     assert!(backups(&path).is_empty());
 }
+
+#[test]
+fn directory_dotenv_candidates_do_not_block_qwen_migration() {
+    let fixture = Fixture::new();
+    for path in [".env", ".qwen/.env"] {
+        fs::create_dir_all(fixture.path(path)).expect("dotenv directory");
+        fs::write(fixture.path(path).join("keep"), "user data").expect("directory content");
+    }
+    let original = r#"{"mcpServers":{"zvec_grep":{"command":"zg","args":["server","--stdio"],"env":{"CUSTOM":"keep"}}}}"#;
+    let config = fixture.write(".qwen/settings.json", original);
+    assert!(success(&fixture.run(true)).contains("Would upgrade: 1"));
+    assert_eq!(fs::read_to_string(&config).expect("preview"), original);
+    success(&fixture.run(false));
+    let updated: Value = serde_json::from_slice(&fs::read(config).expect("config")).expect("JSON");
+    assert_eq!(
+        updated["mcpServers"]["zvec_grep"]["args"],
+        json!(["--server", "--stdio"])
+    );
+    assert_eq!(updated["mcpServers"]["zvec_grep"]["env"]["CUSTOM"], "keep");
+    for path in [".env", ".qwen/.env"] {
+        assert_eq!(
+            fs::read_to_string(fixture.path(path).join("keep")).expect("preserved data"),
+            "user data"
+        );
+    }
+}
