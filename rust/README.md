@@ -699,11 +699,10 @@ backends and both CUDA plugins. Custom native configurations use source builds
 in default `auto` mode. A download or integrity failure is an error, not a silent
 source fallback.
 
-Pull requests that trigger Rust CI also build the Linux x64 CPU/CUDA and ARM64
-CPU release packages and audit the executable and bundled shared libraries
-against glibc 2.28. The x64 audit includes both CUDA 13 and CUDA 12 plugins;
-it runs on a CPU runner and does not exercise GPU inference. These jobs reuse
-the release build workflow and upload artifacts without publishing packages.
+The Linux release workflow audits the executable and all bundled shared
+libraries against glibc 2.28, including both x64 CUDA plugins. This gate also
+runs for validation-only candidates (`publish=false`); it is not part of
+ordinary PR CI.
 
 The fork no longer registers llama.cpp as a Git submodule. Cargo fetches only
 the Rust bindings; matching SDK builds never fetch native source. Only explicit

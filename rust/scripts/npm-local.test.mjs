@@ -384,8 +384,8 @@ test("Linux packaging pins manylinux 2.28 and audits the complete native payload
   assert.match(builder, /glibc 2\.28/);
 });
 
-test("Linux CPU validation uses a clean glibc 2.28 image rather than the builder", async () => {
-  for (const name of ["rust-package-build", "rust-publish", "rust-ci"]) {
+test("Linux package CPU validation uses a clean glibc 2.28 image rather than the builder", async () => {
+  for (const name of ["rust-package-build", "rust-publish"]) {
     const workflow = await readFile(new URL(`../../.github/workflows/${name}.yml`, import.meta.url), "utf8");
     assert.match(workflow, /almalinux:8\.10@sha256:2d0f2eb2a83cc09dbc2eb92fade4dbe8f709628149e81aa00aec70630406603b/);
     assert.match(workflow, /test "\$\(getconf GNU_LIBC_VERSION\)" = "glibc 2\.28"/);
