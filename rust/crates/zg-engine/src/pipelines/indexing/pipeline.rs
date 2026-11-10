@@ -1653,12 +1653,7 @@ fn resolve_index_batch_policy(
     requested: Option<usize>,
     model: &dyn IndexEmbeddingRuntime,
 ) -> Result<EmbeddingConcurrencyPolicy, EngineError> {
-    if requested == Some(0)
-        && !matches!(
-            crate::models::get_embedding_model_catalog_entry(&model.info().model().reference()),
-            Some(crate::models::EmbeddingCatalogEntry::Transformers(_))
-        )
-    {
+    if requested == Some(0) {
         return resolve_embedding_policy(requested, model.concurrency_defaults());
     }
     resolve_embedding_policy(

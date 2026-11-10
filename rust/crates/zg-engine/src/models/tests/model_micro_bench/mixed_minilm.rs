@@ -133,7 +133,6 @@ async fn fixtures(document: &ModelRuntimeLease, query: &ModelRuntimeLease) -> Fi
             &documents,
             EmbeddingOptions {
                 purpose: EmbeddingPurpose::Document,
-                fixed_batch: true,
                 ..Default::default()
             },
             None,

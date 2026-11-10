@@ -19,9 +19,10 @@ POLICY = dict(schema_version=5, cpu_window_seconds=1.0, maximum_sample_gap_secon
               corpus_schedule="deterministic inputs with L whitespace-separated words; closed-loop shared work queue")
 
 
-def profile(smoke, fixed_batch=False):
+def profile(smoke):
+    # Evidence metadata, not a runtime switch: production preserves request batches.
     return dict(name="smoke" if smoke else "baseline", duration_seconds=1 if smoke else 15,
-                fixed_batch=fixed_batch,
+                fixed_batch=True,
                 maximum_duration_seconds=10 if smoke else 120,
                 minimum_batches=3 if smoke else POLICY["minimum_batches"])
 
@@ -58,7 +59,7 @@ def fingerprint(value):
 
 
 def experiment_config(args, info, models):
-    return dict(policy=POLICY, profile=profile(args.smoke,args.fixed_batch), rounds=args.rounds, seed=args.seed,
+    return dict(policy=POLICY, profile=profile(args.smoke), rounds=args.rounds, seed=args.seed,
                 benchmark_controls=dict(clients=getattr(args,"clients",None),
                                         server_concurrency=getattr(args,"server_concurrency",None),
                                         ort_thread_budget=getattr(args,"ort_thread_budget",None)),

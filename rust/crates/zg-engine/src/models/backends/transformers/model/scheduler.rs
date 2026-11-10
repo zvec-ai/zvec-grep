@@ -1,5 +1,4 @@
 //! Bounded input storage, parallel CPU preparation, and prioritized native work.
-//! Coalescing depends on shape and age, never on the execution-lane budget.
 use std::{
     collections::VecDeque,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -10,14 +9,11 @@ use tokio::{
     task::JoinSet,
 };
 
-use super::policy::{self, BatchPolicy};
 use super::{
     Arc, CancellationToken, Content, EmbeddingOptions, EmbeddingPurpose, EmbeddingResult,
     LoadedTransformersModel, ModelComputeRuntime, ModelError, PreparedBatch, StdMutex,
-    TransformersConfig, TransformersExecutionProvider, check_cancelled, finish_output,
-    lock_std_mutex, merge_prepared_batches, prepare_batch,
+    TransformersConfig, check_cancelled, finish_output, lock_std_mutex, prepare_batch,
 };
-use crate::models::spi::same_execution_scope;
 
 const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 const DOCUMENT_BYTES: usize = 32 * 1024 * 1024;
@@ -51,21 +47,19 @@ struct Request {
     options: EmbeddingOptions,
     reply: oneshot::Sender<Result<EmbeddingResult, ModelError>>,
     enqueued: Instant,
-    ready: Instant,
     _admission: Admission,
 }
 
 enum Work {
-    Infer(Vec<Request>),
-    Wait(Instant),
+    Infer(Box<Request>),
     Empty,
     Blocked,
 }
 
 /// Retained both by the async continuation and by its native job. Cancellation
-/// or runtime shutdown cannot release any merged member's lease/storage early.
-struct BatchResources {
-    requests: StdMutex<Vec<Request>>,
+/// or runtime shutdown cannot release the request's lease/storage early.
+struct RequestResources {
+    request: StdMutex<Option<Request>>,
 }
 
 /// A stopped Tokio runtime must fail queued work and allow later recovery.
@@ -159,7 +153,6 @@ impl InferenceQueue {
             options,
             reply,
             enqueued: Instant::now(),
-            ready: Instant::now(),
             _admission: admission,
         };
         // CPU preparation has an independent shared compute budget. It can run
@@ -288,119 +281,21 @@ impl QueueState {
         }
     }
 
-    #[cfg(test)]
-    fn next(
-        &mut self,
-        entry: TransformersConfig,
-        provider: TransformersExecutionProvider,
-        now: Instant,
-    ) -> Work {
-        self.next_eligible(entry, provider, now, |_| true)
-    }
-
-    fn next_eligible(
-        &mut self,
-        entry: TransformersConfig,
-        provider: TransformersExecutionProvider,
-        now: Instant,
-        mut reserve: impl FnMut(&EmbeddingOptions) -> bool,
-    ) -> Work {
+    fn next_eligible(&mut self, mut reserve: impl FnMut(&EmbeddingOptions) -> bool) -> Work {
         discard_cancelled(&mut self.queries);
         discard_cancelled(&mut self.documents);
-        // Skip operations at their own C limit so other clients can use idle
-        // sessions. Reserve during selection to preserve query priority.
-        if let Some(index) = self
-            .queries
-            .iter()
-            .position(|request| reserve(&request.options))
-        {
-            return Work::Infer(vec![self.queries.remove(index).expect("query exists")]);
-        }
-        let mut deadline = None;
-        let mut selected = None;
-        for (index, request) in self.documents.iter().enumerate() {
-            let until = request.ready + policy::BATCH_WAIT;
-            if provider == TransformersExecutionProvider::Cuda
-                && !request.options.fixed_batch
-                && now < until
-                && !self.has_full_batch(entry, index)
-            {
-                deadline = Some(deadline.map_or(until, |old: Instant| old.min(until)));
-            } else if reserve(&request.options) {
-                selected = Some(index);
-                break;
+        // Queries take priority. Skip operations at their execution limit so
+        // other clients can use idle sessions within the shared pool capacity.
+        for queue in [&mut self.queries, &mut self.documents] {
+            if let Some(index) = queue.iter().position(|request| reserve(&request.options)) {
+                return Work::Infer(Box::new(queue.remove(index).expect("selected request")));
             }
         }
-        let Some(index) = selected else {
-            return if let Some(until) = deadline {
-                Work::Wait(until)
-            } else if self.queries.is_empty() && self.documents.is_empty() {
-                Work::Empty
-            } else {
-                Work::Blocked
-            };
-        };
-        let first = self.documents.remove(index).expect("selected document");
-        if provider != TransformersExecutionProvider::Cuda || first.options.fixed_batch {
-            return Work::Infer(vec![first]);
+        if self.queries.is_empty() && self.documents.is_empty() {
+            Work::Empty
+        } else {
+            Work::Blocked
         }
-        let batch = first.prepared.as_ref().expect("prepared");
-        let mut rows = batch.batch_size;
-        let mut width = batch.sequence_length;
-        let bucket = BatchPolicy::length_bucket(width);
-        let budget = first.options.execution_concurrency;
-        let scope = first.options.execution_scope.clone();
-        let mut requests = vec![first];
-        let mut index = 0;
-        while index < self.documents.len() && requests.len() < BatchPolicy::max_requests(entry) {
-            let next = &self.documents[index];
-            let batch = next.prepared.as_ref().expect("prepared");
-            let next_width = width.max(batch.sequence_length);
-            if !next.options.fixed_batch
-                && next.options.execution_concurrency == budget
-                && same_execution_scope(next.options.execution_scope.as_ref(), scope.as_ref())
-                && BatchPolicy::length_bucket(batch.sequence_length) == bucket
-                && BatchPolicy::fits(entry, rows + batch.batch_size, next_width)
-            {
-                rows += batch.batch_size;
-                width = next_width;
-                requests.push(self.documents.remove(index).expect("index exists"));
-            } else {
-                index += 1;
-            }
-        }
-        Work::Infer(requests)
-    }
-
-    fn has_full_batch(&self, entry: TransformersConfig, first_index: usize) -> bool {
-        let first = &self.documents[first_index];
-        let prepared = first.prepared.as_ref().expect("prepared");
-        let mut count = 1;
-        let mut rows = prepared.batch_size;
-        let mut width = prepared.sequence_length;
-        let bucket = BatchPolicy::length_bucket(width);
-        for (index, request) in self.documents.iter().enumerate() {
-            if count >= BatchPolicy::max_requests(entry) || rows >= BatchPolicy::max_rows(entry) {
-                return true;
-            }
-            let prepared = request.prepared.as_ref().expect("prepared");
-            let next_width = width.max(prepared.sequence_length);
-            if index != first_index
-                && !request.options.fixed_batch
-                && request.options.execution_concurrency == first.options.execution_concurrency
-                && same_execution_scope(
-                    request.options.execution_scope.as_ref(),
-                    first.options.execution_scope.as_ref(),
-                )
-                && BatchPolicy::length_bucket(prepared.sequence_length) == bucket
-                && BatchPolicy::fits(entry, rows + prepared.batch_size, next_width)
-            {
-                count += 1;
-                rows += prepared.batch_size;
-                width = next_width;
-            }
-        }
-        count >= BatchPolicy::max_requests(entry) || rows >= BatchPolicy::max_rows(entry)
     }
 }
 
@@ -434,7 +329,6 @@ fn prepare(
             loaded.sessions.record_preparation(started.elapsed());
             request.prepared = Some(prepared);
             request.texts.clear();
-            request.ready = Instant::now();
             Some(request)
         }
         Err(error) => {
@@ -466,24 +360,19 @@ async fn drive(
         let mut reservation = None;
         let work = {
             let mut state = lock_std_mutex(&queue.state);
-            let work = state.next_eligible(
-                entry,
-                loaded.sessions.provider(),
-                Instant::now(),
-                |options| {
-                    reservation = loaded.sessions.try_reserve(options);
-                    reservation.is_some()
-                },
-            );
+            let work = state.next_eligible(|options| {
+                reservation = loaded.sessions.try_reserve(options);
+                reservation.is_some()
+            });
             if matches!(work, Work::Empty) && active.is_empty() {
                 state.running = false;
             }
             work
         };
-        let deadline = match work {
-            Work::Infer(requests) => {
+        match work {
+            Work::Infer(request) => {
                 active.spawn(infer(
-                    requests,
+                    *request,
                     loaded,
                     entry,
                     compute.clone(),
@@ -491,65 +380,37 @@ async fn drive(
                 ));
                 continue;
             }
-            Work::Wait(until) => Some(until),
             Work::Empty if active.is_empty() => return,
-            Work::Empty | Work::Blocked => None,
-        };
+            Work::Empty | Work::Blocked => {}
+        }
         // An idle driver must not keep Sessions alive after the final caller
         // drops its model. In-flight tasks and requests retain their own leases.
         drop(loaded);
-        let wait = async {
-            if let Some(until) = deadline {
-                tokio::time::sleep_until(until.into()).await;
-            } else {
-                std::future::pending::<()>().await;
-            }
-        };
         tokio::select! {
             _ = active.join_next(), if !active.is_empty() => {},
             () = &mut changed => {},
             () = &mut available => {},
-            () = wait => {},
         }
     }
 }
 
 async fn infer(
-    requests: Vec<Request>,
+    mut request: Request,
     loaded: Arc<LoadedTransformersModel>,
     entry: TransformersConfig,
     compute: ModelComputeRuntime,
     reservation: super::session::Reservation,
 ) {
-    let mut active = Vec::new();
-    for request in requests {
-        if request.cancelled() {
-            request.complete(Err(cancelled()));
-        } else {
-            active.push(request);
-        }
-    }
-    if active.is_empty() {
+    if request.cancelled() {
+        request.complete(Err(cancelled()));
         return;
     }
-    let batches = active
-        .iter()
-        .map(|request| request.prepared.as_ref().expect("prepared inference"))
-        .collect::<Vec<_>>();
-    let prepared = match merge_prepared_batches(&batches) {
-        Ok(prepared) => Arc::new(prepared),
-        Err(error) => {
-            finish(active, Err(error));
-            return;
-        }
-    };
-    let enqueued = active.iter().map(|request| request.enqueued).collect();
-    let mut options = active[0].options.clone();
-    if active.len() > 1 {
-        options.signal = None;
-    }
-    let resources = Arc::new(BatchResources {
-        requests: StdMutex::new(active),
+    // Preserve the caller's batch exactly; no cross-request merging or copies.
+    let prepared = Arc::new(request.prepared.take().expect("prepared inference"));
+    let enqueued = Some(request.enqueued);
+    let mut options = request.options.clone();
+    let resources = Arc::new(RequestResources {
+        request: StdMutex::new(Some(request)),
     });
     options.execution_lease = Some(resources.clone());
     let result = loaded
@@ -578,49 +439,16 @@ async fn infer(
                     })
                 });
                 loaded.sessions.record_postprocessing(started.elapsed());
-                let requests = std::mem::take(&mut *lock_std_mutex(&resources.requests));
+                let request = lock_std_mutex(&resources.request)
+                    .take()
+                    .expect("pending request");
                 drop(prepared);
                 drop(resources);
                 drop(loaded);
-                finish(requests, result);
+                request.complete(result);
             })
             .await;
     });
-}
-
-fn finish(requests: Vec<Request>, result: Result<EmbeddingResult, ModelError>) {
-    match result {
-        Ok(result) => {
-            let count = requests
-                .iter()
-                .map(|request| request.prepared.as_ref().expect("prepared").batch_size)
-                .sum::<usize>();
-            if result.vectors.len() != count {
-                finish(
-                    requests,
-                    Err(
-                        ModelError::internal("ONNX batch returned an unexpected vector count")
-                            .shared(),
-                    ),
-                );
-                return;
-            }
-            let mut vectors = result.vectors.into_iter();
-            for request in requests {
-                let prepared = request.prepared.as_ref().expect("prepared");
-                let result = EmbeddingResult {
-                    vectors: vectors.by_ref().take(prepared.batch_size).collect(),
-                    truncated: prepared.truncated.clone(),
-                };
-                request.complete(Ok(result));
-            }
-        }
-        Err(error) => {
-            for request in requests {
-                request.complete(Err(error.clone()));
-            }
-        }
-    }
 }
 
 fn cancelled() -> ModelError {

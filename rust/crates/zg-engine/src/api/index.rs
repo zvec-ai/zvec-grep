@@ -48,8 +48,8 @@ pub mod options {
         /// The single model used to embed text content in this workspace.
         pub embedding: Option<EmbeddingModelSpec>,
         /// Index-only embedding concurrency: llama.cpp contexts (up to eight),
-        /// ORT CPU/CUDA sessions, or remote requests. ORT clamps zero to one
-        /// and caps direct-mode sessions to available hardware concurrency.
+        /// ORT CPU/CUDA sessions, or remote requests. Values must be positive.
+        /// ORT caps direct-mode sessions to available hardware concurrency.
         /// Server requests only limit execution within the startup-configured
         /// model pool; they never resize it or change the global ORT thread pool.
         /// Omitted values use `ZVEC_GREP_EMBEDDING_CONCURRENCY`, the legacy

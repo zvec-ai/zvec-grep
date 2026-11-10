@@ -87,7 +87,7 @@ struct Job {
     prepared: Arc<PreparedBatch>,
     entry: TransformersConfig,
     options: EmbeddingOptions,
-    enqueued: Vec<Instant>,
+    enqueued: Option<Instant>,
     reply: oneshot::Sender<NativeCompletion>,
     _permit: LanePermit,
     force_cpu: bool,
@@ -301,7 +301,7 @@ impl SessionOwner {
         if cpu_fallback && pool.busy.iter().any(Option::is_some) {
             return None;
         }
-        // Each document operation has its own C within the shared pool. Query
+        // Each document operation has its own execution limit within the shared pool. Query
         // work retains one pool-wide lane budget and may use any idle session.
         let active = pool
             .busy
@@ -373,7 +373,7 @@ impl SessionOwner {
         prepared: Arc<PreparedBatch>,
         entry: TransformersConfig,
         options: EmbeddingOptions,
-        enqueued: Vec<Instant>,
+        enqueued: Option<Instant>,
         reservation: Option<Reservation>,
     ) -> Result<NativeOutput, ModelError> {
         let completed = self
@@ -381,7 +381,7 @@ impl SessionOwner {
                 Arc::clone(&prepared),
                 entry,
                 options.clone(),
-                enqueued.clone(),
+                enqueued,
                 reservation,
             )
             .await?;
@@ -409,11 +409,7 @@ impl SessionOwner {
                     }
                 }
                 self.shared.available.notify_waiters();
-                let enqueued = if completed.started {
-                    Vec::new()
-                } else {
-                    enqueued
-                };
+                let enqueued = if completed.started { None } else { enqueued };
                 self.dispatch(prepared, entry, options, enqueued, None)
                     .await?
                     .result
@@ -428,7 +424,7 @@ impl SessionOwner {
         prepared: Arc<PreparedBatch>,
         entry: TransformersConfig,
         options: EmbeddingOptions,
-        enqueued: Vec<Instant>,
+        enqueued: Option<Instant>,
         reservation: Option<Reservation>,
     ) -> Result<NativeCompletion, ModelError> {
         let Reservation {
@@ -605,7 +601,7 @@ impl Worker {
                             runner.configure(force_cpu)?;
                             check_cancelled(options.signal.as_ref())?;
                             let _measurement =
-                                NativeMeasurement::start(&shared, &prepared, &enqueued);
+                                NativeMeasurement::start(&shared, &prepared, enqueued);
                             native_started = true;
                             runner.run(&prepared, entry, &options, force_cpu)
                         }));
@@ -730,11 +726,11 @@ struct NativeMeasurement<'a> {
 }
 
 impl<'a> NativeMeasurement<'a> {
-    fn start(shared: &'a Shared, prepared: &PreparedBatch, enqueued: &[Instant]) -> Self {
+    fn start(shared: &'a Shared, prepared: &PreparedBatch, enqueued: Option<Instant>) -> Self {
         let inflight = shared.inflight.fetch_add(1, Ordering::AcqRel) + 1;
         let mut stats = lock_std_mutex(&shared.stats);
         stats.native_inflight_peak = stats.native_inflight_peak.max(inflight);
-        for queued in enqueued {
+        if let Some(queued) = enqueued {
             stats.backend_to_native_ns = stats
                 .backend_to_native_ns
                 .saturating_add(nanoseconds(queued.elapsed()));

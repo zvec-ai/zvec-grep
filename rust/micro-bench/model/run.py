@@ -237,12 +237,11 @@ def run(args, budget, env, info):
     # Default means the actual backend default, not the interactive shell's index override.
     for key in ("ZVEC_GREP_EMBEDDING_CONCURRENCY", "ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM"):
         env.pop(key, None)
-    workload = profile(args.smoke, args.fixed_batch)
+    workload = profile(args.smoke)
     env.update(ZG_MODEL_BENCH_TOKENS=str(args.input_tokens), ZG_MODEL_BENCH_BATCH_SIZE=str(args.batch_size),
                ZG_MODEL_BENCH_SECONDS=str(workload["duration_seconds"]),
                ZG_MODEL_BENCH_MAX_SECONDS=str(workload["maximum_duration_seconds"]),
                ZG_MODEL_BENCH_MIN_BATCHES=str(workload["minimum_batches"]))
-    env["ZG_MODEL_BENCH_FIXED_BATCH"] = "1" if args.fixed_batch else "0"
     clients = getattr(args, "clients", None)
     server_concurrency = getattr(args, "server_concurrency", None)
     ort_thread_budget = getattr(args, "ort_thread_budget", None)
@@ -367,7 +366,7 @@ def run(args, budget, env, info):
     result = state["result"]
     accounting_errors = checked_accounting(result,requests,args.input_tokens,args.batch_size)
     accounting_errors.extend(validate_controls(result, clients, server_concurrency, ort_thread_budget))
-    if result and result.get("fixed_batch", False) != args.fixed_batch:
+    if result and result.get("fixed_batch", False) is not True:
         accounting_errors.append("recorded batching policy differs from requested profile")
     passed = bool(child.returncode == 0 and not timed_out and not read_errors and not accounting_errors
                   and result and result["protocol_pass"])
@@ -407,7 +406,7 @@ def run(args, budget, env, info):
                   configuration=dict(embedding_concurrency=budget,
                   model=args.model, device=args.device, input_length_semantics="nominal",
                   input_tokens=args.input_tokens,batch_size=args.batch_size,
-                  fixed_batch=args.fixed_batch,
+                  fixed_batch=True,
                   clients=clients, server_concurrency=server_concurrency, ort_thread_budget=ort_thread_budget,
                   profile=workload["name"], cache=str(args.cache.resolve())),
                   exit_code=child.returncode, hard_timeout=timed_out, protocol_pass=passed, reader_errors=read_errors, accounting_errors=accounting_errors,

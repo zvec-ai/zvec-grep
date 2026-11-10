@@ -78,9 +78,9 @@ Index embedding concurrency is configured with
 `zg --index --embedding-concurrency <n>`.
 The option is rejected outside `--index`. For automatic indexing and
 refreshes as well, set `ZVEC_GREP_EMBEDDING_CONCURRENCY=<n>`. Transformers/ORT clamps
-unsigned integers to its supported range, including zero to one; other backends
-require positive integers. Explicit CLI/API index settings take precedence over this
-environment variable, followed by the legacy
+positive integers to its supported range. Explicit zero is rejected for every
+backend. Explicit CLI/API index settings take precedence over this environment
+variable, followed by the legacy
 `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` for llama.cpp indexing, then backend defaults.
 Invalid environment values warn and select the automatic default. These overrides
 do not configure a separate query worker and are not persisted in workspace settings.
@@ -96,7 +96,7 @@ indexing and queries for the same model, cache and device:
   CLI/API value, then `ZVEC_GREP_EMBEDDING_CONCURRENCY`, then the default.
 - Server startup captures `ZVEC_GREP_EMBEDDING_CONCURRENCY` as each model/device
   pool's capacity. Sessions are created lazily on first preparation. A client's
-  C only limits its own operation within that pool: requests above capacity warn
+  concurrency only limits its own operation within that pool: requests above capacity warn
   and are capped, omitted values use server capacity. Requests never resize the
   resident pool or change its thread configuration. Independent operations may
   execute concurrently up to the shared pool capacity. Different models/devices
@@ -104,27 +104,26 @@ indexing and queries for the same model, cache and device:
 - `ZVEC_GREP_ORT_THREAD_BUDGET=T` configures the single process-global ORT
   intra-op pool shared by all Sessions. It defaults to half the available logical
   threads, rounded up, and is capped to available hardware concurrency. Invalid
-  environment values warn and use defaults. Changing C or T requires a Server
-  restart. T controls CPU operator parallelism, not GPU threads or all process
+  environment values warn and use defaults. Changing the server pool capacity or
+  global thread budget requires a Server restart; changing a client operation's
+  concurrency does not. T controls CPU operator parallelism, not GPU threads or all process
   threads; native Run callers, tokenizers and other libraries have their own
   threads. Sessions no longer divide T by C or rebuild to change thread budgets.
 - Each Session owns one fixed native worker; no Session receives concurrent Run
   calls. A query can use an idle Session, with at most one query batch alongside
   document work. CPU, CUDA, DirectML and WebGPU use the same fixed-pool execution
   limits; CoreML retains its single-session limit.
-- CUDA MiniLM coalescing stays within four inputs and 1,024 padded tokens,
-  waiting at most 1 ms for similar-length requests from the same operation. Full
-  batches run immediately.
-  Other ONNX models retain their catalog batch and token ceilings. Queries run
-  first without waiting to fill a batch; running inference is not preempted.
-  CPU preparation and postprocessing overlap native execution.
+- Each request retains its input batch; the scheduler does not merge requests.
+  Upstream indexing still batches inputs using each model's catalog limits
+  (four texts per request for MiniLM). Queries run first; running inference is
+  not preempted. CPU preparation and postprocessing overlap native execution.
 - Pending inputs have separate document/query limits: document admission is capacity+2
   requests on CPU and 4*(capacity+1) on CUDA; queries have four slots. Copied text remains
   bounded by 32/8 MiB respectively, with at most 8 MiB per request. Full queues apply
-  cancellable backpressure. A cancelled member of a merged batch does not cancel
-  other members. Native work retains runtime ownership until it settles.
+  cancellable backpressure. Native work retains runtime ownership until it settles.
 
-The effective backend budget is reported when it differs from the request.
+Explicit concurrency values must be positive. The effective backend budget is
+reported when it differs from the request.
 Admission includes bounded prefetch based on pool capacity, independent of a Server request's C, so a single
 executing Session can prepare its next batch in advance. Extra Sessions allocate
 their own weights and workspaces; batch activations also contribute to memory.

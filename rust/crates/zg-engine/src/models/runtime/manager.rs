@@ -224,7 +224,7 @@ impl ModelRuntimeManager {
             options,
             embedding_concurrency,
         } = request;
-        validate_embedding_concurrency(&reference, embedding_concurrency)?;
+        validate_embedding_concurrency(embedding_concurrency)?;
         let mut key = ModelRuntimeKey::for_request(&reference, &options, embedding_concurrency);
         // Declare retired handles before the guard so even an error releases the
         // manager lock before running native model destructors.
@@ -705,11 +705,8 @@ fn secret_fingerprint(secret: &str) -> u64 {
     hasher.finish()
 }
 
-fn validate_embedding_concurrency(
-    reference: &str,
-    concurrency: Option<usize>,
-) -> Result<(), ModelError> {
-    if concurrency == Some(0) && !is_transformers(reference) {
+fn validate_embedding_concurrency(concurrency: Option<usize>) -> Result<(), ModelError> {
+    if concurrency == Some(0) {
         return Err(ModelError::new(
             crate::EngineError::INVALID_ARGUMENT,
             "Embedding concurrency must be greater than zero",

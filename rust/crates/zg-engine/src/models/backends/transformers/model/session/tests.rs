@@ -134,7 +134,6 @@ fn batch() -> Arc<PreparedBatch> {
         attention_mask: vec![1],
         token_type_ids: vec![0],
         position_ids: vec![0],
-        padding_input_id: 0,
         batch_size: 1,
         sequence_length: 1,
         truncated: vec![],
@@ -148,7 +147,7 @@ fn start(
     let owner = Arc::clone(owner);
     tokio::spawn(async move {
         owner
-            .run(batch(), entry(), options, vec![Instant::now()], None)
+            .run(batch(), entry(), options, Some(Instant::now()), None)
             .await
     })
 }
@@ -422,7 +421,7 @@ async fn final_owner_released_on_native_thread_destroys_session_before_reply_wit
             prepared: batch(),
             entry: entry(),
             options,
-            enqueued: vec![],
+            enqueued: None,
             reply,
             _permit: permit,
             force_cpu,
@@ -467,7 +466,7 @@ async fn cpu_reuses_one_lane_after_errors_and_pre_cancel_does_not_execute() {
                 signal: Some(signal),
                 ..EmbeddingOptions::default()
             },
-            vec![],
+            None,
             None,
         )
         .await;

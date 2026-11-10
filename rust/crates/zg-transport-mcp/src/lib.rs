@@ -896,8 +896,8 @@ pub struct SearchInput {
     /// Exclude matching file-name categories, taking precedence over categories.
     pub excluded_categories: Option<PathListInput>,
     /// Index-only refresh concurrency. ORT direct mode sets the session count. In server mode, limits this operation's session use within the startup-configured pool; omitted uses pool capacity. Queries share the pool with their own limit.
-    /// ORT clamps zero to one and requests above pool capacity to capacity; it never resizes server pools or changes their shared CPU thread budget. Other backends require a positive value.
-    #[schemars(range(min = 0), extend("type" = "integer"))]
+    /// Must be positive. ORT caps requests above pool capacity; it never resizes server pools or changes their shared CPU thread budget.
+    #[schemars(range(min = 1), extend("type" = "integer"))]
     pub embedding_concurrency: Option<usize>,
     /// Collapse all query groups into one ranked plan.
     #[schemars(extend("type" = "boolean"))]
@@ -982,8 +982,8 @@ pub struct IndexInput {
     #[schemars(extend("type" = "boolean"))]
     pub follow_symlinks: Option<bool>,
     /// Index-only concurrency: ORT sessions, llama.cpp contexts, or remote requests. ORT direct mode sets the session count. In server mode, limits this operation's session use within the startup-configured pool; omitted uses pool capacity.
-    /// ORT clamps zero to one and requests above pool capacity to capacity; it never resizes server pools or changes their shared CPU thread budget. Other backends require a positive value. llama.cpp is capped at eight.
-    #[schemars(range(min = 0), extend("type" = "integer"))]
+    /// Must be positive. ORT caps requests above pool capacity; it never resizes server pools or changes their shared CPU thread budget. llama.cpp is capped at eight.
+    #[schemars(range(min = 1), extend("type" = "integer"))]
     pub embedding_concurrency: Option<usize>,
     /// Include bounded skipped-file diagnostics after completion.
     #[schemars(extend("type" = "boolean"))]
@@ -1661,6 +1661,9 @@ impl RelationshipInput {
 impl SearchInput {
     fn into_request(self) -> Result<ContextOptions, String> {
         let root = absolute_root(&self.root)?;
+        if self.embedding_concurrency == Some(0) {
+            return Err("embeddingConcurrency must be greater than zero".to_owned());
+        }
         if self
             .limit
             .is_some_and(|limit| limit == 0 || limit > MAX_SEARCH_LIMIT)
@@ -1765,6 +1768,9 @@ impl From<DeviceInput> for Device {
 impl IndexInput {
     fn into_request(self) -> Result<IndexToolRequest, String> {
         let root = absolute_root(&self.root)?;
+        if self.embedding_concurrency == Some(0) {
+            return Err("embeddingConcurrency must be greater than zero".to_owned());
+        }
         if self.drop.unwrap_or(false) {
             if self.has_index_options() {
                 return Err(
@@ -3297,7 +3303,7 @@ mod tests {
                     assert!(property.get("anyOf").is_none());
                     assert!(property.get("oneOf").is_none());
                 }
-                assert_eq!(schema["properties"]["embeddingConcurrency"]["minimum"], 0);
+                assert_eq!(schema["properties"]["embeddingConcurrency"]["minimum"], 1);
                 if tool.name == AGENT_TOOL_NAME {
                     assert_eq!(schema["properties"]["limit"]["minimum"], 1);
                     assert_eq!(schema["properties"]["limit"]["maximum"], 50);
@@ -3361,29 +3367,23 @@ mod tests {
     }
 
     #[test]
-    fn zero_embedding_concurrency_is_forwarded_for_model_specific_validation() {
-        let search = serde_json::from_value::<SearchInput>(serde_json::json!({
-            "root": test_root(),
-            "query": "needle",
-            "embeddingConcurrency": 0,
+    fn zero_embedding_concurrency_is_rejected_at_the_transport_boundary() {
+        let error = serde_json::from_value::<SearchInput>(serde_json::json!({
+            "root": test_root(), "query": "needle", "embeddingConcurrency": 0,
         }))
-        .expect("nonnegative concurrency")
+        .expect("integer input")
         .into_request()
-        .expect("saved model is resolved by the engine");
-        assert_eq!(search.embedding_concurrency, Some(0));
+        .expect_err("positive concurrency");
+        assert_eq!(error, "embeddingConcurrency must be greater than zero");
         for reference in ["local/all-minilm-l6-v2", "local/potion-code-16m-v2"] {
-            let request = serde_json::from_value::<IndexInput>(serde_json::json!({
-                "root": test_root(),
-                "embedding": reference,
-                "embeddingConcurrency": 0,
+            let error = serde_json::from_value::<IndexInput>(serde_json::json!({
+                "root": test_root(), "embedding": reference, "embeddingConcurrency": 0,
             }))
-            .expect("nonnegative concurrency")
+            .expect("integer input")
             .into_request()
-            .expect("model-specific validation belongs to the engine");
-            let IndexToolRequest::Index { options, .. } = request else {
-                panic!("index request");
-            };
-            assert_eq!(options.embedding_concurrency, Some(0));
+            .err()
+            .expect("positive concurrency");
+            assert_eq!(error, "embeddingConcurrency must be greater than zero");
         }
     }
 

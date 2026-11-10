@@ -300,7 +300,7 @@ fn cli_concurrency_controls_batch_workers() {
 
 #[test]
 fn transformer_workers_use_effective_runtime_admission() {
-    for requested in [None, Some(0), Some(1), Some(2), Some(usize::MAX)] {
+    for requested in [None, Some(1), Some(2), Some(usize::MAX)] {
         let reference = "local/all-minilm-l6-v2";
         let cache = tempfile::tempdir().expect("isolated cache");
         let config = Config {

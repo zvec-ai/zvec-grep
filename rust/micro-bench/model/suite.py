@@ -95,8 +95,6 @@ def main():
                         help="Inputs per batch; capped to each model limit, then deduplicated")
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--smoke", action="store_true")
-    parser.add_argument("--fixed-batch", action="store_true",
-                        help="Disable backend coalescing for a separate fixed-native-batch concurrency comparison")
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--clients", type=int, help="Fixed client count independent of runtime admission")
     parser.add_argument("--server-concurrency", type=int,

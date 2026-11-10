@@ -78,16 +78,12 @@ records without diagnostics retain their requested-device label without inventin
 an actual provider. External GPU utilization is device-wide, including activity
 from other applications even for a CPU-fallback case.
 
-The default matrix retains production dynamic batching. Batch rows, padded-token
-budget, length bucketing and the coalescing window are independent of execution C.
-Coalesced batches share the catalog's per-model batch limit (4 rows for MiniLM).
-Full batches execute immediately; smaller requests can merge within that limit.
-Run a **separate** output directory with `--fixed-batch` to disable cross-request
-coalescing and compare CUDA C=1 versus C=2 at the same actual native batch shape.
-This flag applies to warmup and measured calls, is fingerprinted in the profile,
-and is labeled in the report title. Verify observed native batch rows before
-attributing throughput differences to execution parallelism. Production and
-fixed-batch profiles measure different workloads and must not be merged.
+The matrix uses production batching: every request keeps its input batch, with
+no cross-request merging or batching delay. MiniLM's catalog limit remains four
+texts per request. Native row diagnostics verify the observed batch shape.
+The `fixed_batch: true` result/profile field records this behavior; it is not a
+runtime control. Historical records with dynamic batching retain their original
+metadata and must use separate output directories.
 
 `--server-concurrency C` selects resident runtime behavior and fixes the pool
 capacity with the production `ZVEC_GREP_EMBEDDING_CONCURRENCY` variable. Omit it
@@ -153,7 +149,7 @@ storage-cold timing.
   counters to exclude warmup. Native shape and in-flight peaks are explicitly
   scoped to the entire runtime, including warmup. Phase timers are summed work,
   not elapsed phase time; concurrent work can exceed wall time. Queue wait is
-  submission-to-native-start and includes preparation/coalescing, so these timers
+  submission-to-native-start and includes preparation, so these timers
   are not additive. Session count is the live end-of-phase gauge; before/after
   snapshots retain session initialization counts. `global_intra_threads` is the
   shared ORT intra-op configuration, not a per-session or total process thread count.
@@ -263,9 +259,8 @@ python3 micro-bench/model/suite.py --build-json build-v5.jsonl --cache /absolute
 python3 micro-bench/model/verify.py /absolute/results-v5
 ```
 
-For a fixed-batch CUDA execution comparison, use a separate output directory and
-append `--models local/all-minilm-l6-v2 --devices cuda --embedding-concurrency 1 2
---fixed-batch`. The ordinary MiniLM production matrix omits `--fixed-batch`.
+For a MiniLM CUDA execution comparison, append
+`--models local/all-minilm-l6-v2 --devices cuda --embedding-concurrency 1 2`.
 
 Use `--models` for a subset, `--devices cpu` for CPU-only execution and `--smoke`
 for bounded runner validation. Build and runner tests precede performance runs;

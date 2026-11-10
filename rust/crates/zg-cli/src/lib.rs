@@ -618,7 +618,7 @@ pub struct IndexArgs {
     pub api_key: Option<String>,
     #[arg(long)]
     pub endpoint: Option<String>,
-    #[arg(long = "embedding-concurrency")]
+    #[arg(long = "embedding-concurrency", value_parser = parse_positive_usize)]
     pub embedding_concurrency: Option<usize>,
     #[arg(long = "allow-remote")]
     pub allow_remote: bool,
@@ -3219,7 +3219,7 @@ mod tests {
     #[test]
     fn embedding_concurrency_is_forwarded_in_all_index_modes() {
         for mode in ["direct", "server", "auto"] {
-            for value in [0, 4, usize::MAX] {
+            for value in [1, 4, usize::MAX] {
                 let number = value.to_string();
                 let inline = format!("--embedding-concurrency={value}");
                 for options in [
@@ -3286,7 +3286,7 @@ mod tests {
 
     #[test]
     fn embedding_concurrency_rejects_invalid_index_values() {
-        for value in ["-1", "1.5", "invalid", "999999999999999999999999999"] {
+        for value in ["0", "-1", "1.5", "invalid", "999999999999999999999999999"] {
             for option in [
                 vec!["--embedding-concurrency".to_owned(), value.to_owned()],
                 vec![format!("--embedding-concurrency={value}")],

@@ -58,9 +58,6 @@ pub struct EmbeddingOptions {
     /// Identifies one runtime operation so shared pools limit its native work
     /// independently of other clients. Cloned batch options retain this scope.
     pub(crate) execution_scope: Option<Arc<()>>,
-    /// Preserve this request's native batch shape for controlled comparisons.
-    /// Production requests retain bounded dynamic batching by default.
-    pub(crate) fixed_batch: bool,
     /// Keeps runtime admission and native resources alive until queued/native
     /// work has settled, even if the caller drops its future.
     pub(crate) execution_lease: Option<Arc<dyn Send + Sync>>,
@@ -99,7 +96,6 @@ impl fmt::Debug for EmbeddingOptions {
             .field("has_progress_callback", &self.on_progress.is_some())
             .field("execution_concurrency", &self.execution_concurrency)
             .field("has_execution_scope", &self.execution_scope.is_some())
-            .field("fixed_batch", &self.fixed_batch)
             .field("has_execution_lease", &self.execution_lease.is_some())
             .field("has_trace_headers", &self.trace_headers.is_some())
             .finish()
@@ -145,7 +141,7 @@ pub(crate) struct ModelExecutionStats {
     pub(crate) inference_ns: u64,
     pub(crate) postprocessing_ns: u64,
     /// Per request: backend submission through native start, including CPU
-    /// preparation, compute scheduling, coalescing and native-slot waiting.
+    /// preparation, compute scheduling and native-slot waiting.
     /// Excludes runtime/backend admission and overlaps `preparation_ns`.
     pub(crate) backend_to_native_ns: u64,
     pub(crate) native_inflight_peak: usize,

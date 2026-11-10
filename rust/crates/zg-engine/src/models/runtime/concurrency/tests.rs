@@ -104,8 +104,16 @@ fn transformer_limits_are_resolved_by_the_backend_and_llama_policy_is_preserved(
 }
 
 #[test]
-fn transformer_zero_override_reaches_backend_normalization() {
-    let reference = "local/all-minilm-l6-v2";
-    assert_eq!(resolve(reference, Some(0), "8", "4"), (Some(0), vec![]));
-    assert_eq!(resolve(reference, None, "0", "4"), (Some(0), vec![]));
+fn explicit_zero_is_rejected_and_zero_environment_warns_for_every_backend() {
+    for reference in [
+        "local/all-minilm-l6-v2",
+        "local/embeddinggemma-300m",
+        "local/potion-code-16m-v2",
+        "qwen/text-embedding-v4",
+    ] {
+        assert!(resolve_override(reference, Some(0), |_| None, |_| {}).is_err());
+        let (limit, warnings) = resolve(reference, None, "0", "4");
+        assert_eq!(limit, None);
+        assert_eq!(warnings.len(), 1);
+    }
 }

@@ -286,7 +286,7 @@ class WorkflowTests(unittest.TestCase):
                     (dest / name).touch()
                 save(dest / "gpu-phases.json", [])
                 record = dict(schema_version=5, protocol_pass=False, exit_code=1, provenance=info,
-                              configuration=dict(**case, embedding_concurrency=budget, profile="smoke",
+                              configuration=dict(**case, embedding_concurrency=budget, profile="smoke", fixed_batch=True,
                                                  clients=args.clients, server_concurrency=args.server_concurrency, ort_thread_budget=args.ort_thread_budget),
                               experiment_fingerprint=args.experiment_fingerprint, case_fingerprint=args.case_fingerprint)
                 publish_round(dest, record, [], [], {})
@@ -309,7 +309,7 @@ class WorkflowTests(unittest.TestCase):
 
                 changed_length = list(base)
                 changed_length[changed_length.index("--lengths")+1] = "16"
-                for command in (base,changed_length+["--smoke"],base+["--smoke","--fixed-batch"]):
+                for command in (base,changed_length+["--smoke"],base+["--smoke","--ort-thread-budget","2"]):
                     with patch.object(sys,"argv",command),self.assertRaisesRegex(RuntimeError,"configuration changed"):
                         suite.main()
                 info["source_sha256"]["source"] = "changed"

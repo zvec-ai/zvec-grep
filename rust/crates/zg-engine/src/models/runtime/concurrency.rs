@@ -43,7 +43,7 @@ fn resolve_override(
     mut environment: impl FnMut(&str) -> Option<String>,
     mut warn: impl FnMut(String),
 ) -> Result<Option<usize>, ModelError> {
-    if requested == Some(0) && !is_transformers(reference) {
+    if requested == Some(0) {
         return Err(ModelError::invalid_argument(
             "Embedding concurrency must be greater than zero",
         ));
@@ -63,7 +63,7 @@ fn resolve_override(
     }
     if value.bytes().all(|byte| byte.is_ascii_digit())
         && let Ok(parsed) = value.parse::<usize>()
-        && (parsed > 0 || is_transformers(reference))
+        && parsed > 0
     {
         return Ok(Some(parsed));
     }

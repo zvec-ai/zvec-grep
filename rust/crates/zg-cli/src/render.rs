@@ -572,7 +572,7 @@ Index embedding concurrency:
     all ORT models; defaults to half the available logical threads, rounded up.
     Client C never resizes Server pools or changes their thread configuration.
     Batch and prefetch limits are independent of the client's C.
-    Zero is normalized to 1; other backends require positive values.
+    Values must be positive; requests above server pool capacity are capped.
   Potion/model2vec: concurrent batch tasks; defaults to 2, with an independent
     CPU worker-pool capacity. No cap of 8 is applied.
   Remote: concurrent requests; adaptive scheduling may reduce the limit after

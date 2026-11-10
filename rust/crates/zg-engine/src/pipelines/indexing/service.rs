@@ -2623,7 +2623,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zero_index_concurrency_is_normalized_only_for_transformers() {
+    async fn zero_index_concurrency_is_rejected_for_every_backend() {
         let service = WorkspaceIndexService::new();
         for reference in [
             "local/all-minilm-l6-v2",
@@ -2639,27 +2639,12 @@ mod tests {
             model.cache_dir = Some(directory.path().join("model-cache"));
             options.embedding_concurrency = Some(0);
             let result = service.index(&models, options).await;
-            if reference == "local/all-minilm-l6-v2" {
-                result.expect("Transformer zero normalizes to one before indexing");
-                let refresh = crate::pipelines::indexed_search::service::refresh_options(
-                    &crate::api::context::ContextOptions {
-                        embedding_concurrency: Some(0),
-                        ..Default::default()
-                    },
-                    directory.path().to_path_buf(),
-                );
-                service
-                    .index(&models, refresh)
-                    .await
-                    .expect("refresh resolves the saved Transformer model before normalization");
-            } else {
-                assert_eq!(
-                    result.expect_err("other backends still reject zero").code(),
-                    crate::EngineError::INVALID_ARGUMENT,
-                    "{reference}"
-                );
-                assert_eq!(models.snapshot().cached_runtimes, 0);
-            }
+            assert_eq!(
+                result.expect_err("zero concurrency").code(),
+                crate::EngineError::INVALID_ARGUMENT,
+                "{reference}"
+            );
+            assert_eq!(models.snapshot().cached_runtimes, 0);
             assert!(!directory.path().join("model-cache").exists());
             models.close();
         }

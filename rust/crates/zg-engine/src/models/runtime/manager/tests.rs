@@ -443,12 +443,9 @@ async fn prefetch_cancellation_and_failure_release_admission_for_recovery() {
 #[test]
 fn transformer_default_and_explicit_limits_are_resolved_by_the_backend() {
     let (manager, _) = prefetch_fixture();
-    for (requested, execution, admission) in [
-        (None, 2, 4),
-        (Some(0), 1, 3),
-        (Some(3), 3, 5),
-        (Some(usize::MAX), 4, 6),
-    ] {
+    for (requested, execution, admission) in
+        [(None, 2, 4), (Some(3), 3, 5), (Some(usize::MAX), 4, 6)]
+    {
         let lease = manager
             .acquire(ModelRuntimeRequest::new(
                 "local/all-minilm-l6-v2",
@@ -1423,7 +1420,7 @@ fn transformer_server_pool_caps_requests_and_is_reused_without_loading_assets() 
         .expect("acquire configured pool");
     let capacity = super::super::ort_config::session_count(4);
     assert_eq!(first.execution_concurrency(), capacity);
-    for (requested, expected) in [(0, 1), (1, 1), (2, 2), (8, 4), (usize::MAX, 4)] {
+    for (requested, expected) in [(1, 1), (2, 2), (8, 4), (usize::MAX, 4)] {
         let lease = manager
             .acquire(ModelRuntimeRequest::new(
                 "local/all-minilm-l6-v2",
@@ -1452,17 +1449,18 @@ fn rejects_zero_user_concurrency_before_constructing_a_runtime() {
             Ok(Arc::new(ProgressFixtureModel::new()) as Arc<dyn EmbeddingModel>)
         });
 
-    let error = manager
-        .acquire(ModelRuntimeRequest::new(
-            "local/fixture",
-            ModelConfig::default(),
-            Some(0),
-        ))
-        .err()
-        .expect("zero concurrency should be rejected");
-
-    assert_eq!(error.code(), crate::EngineError::INVALID_ARGUMENT);
-    assert_eq!(creations.load(Ordering::Acquire), 0);
+    for reference in ["local/fixture", "local/all-minilm-l6-v2"] {
+        let error = manager
+            .acquire(ModelRuntimeRequest::new(
+                reference,
+                ModelConfig::default(),
+                Some(0),
+            ))
+            .err()
+            .expect("zero concurrency should be rejected");
+        assert_eq!(error.code(), crate::EngineError::INVALID_ARGUMENT);
+        assert_eq!(creations.load(Ordering::Acquire), 0);
+    }
 }
 
 #[tokio::test]

@@ -51,35 +51,6 @@ fn maps_devices_to_native_rust_execution_providers() {
     );
 }
 
-#[test]
-fn batch_merge_repads_rows_and_preserves_indexes() {
-    let first = PreparedBatch {
-        input_ids: vec![101, 102],
-        attention_mask: vec![1, 1],
-        token_type_ids: vec![0, 0],
-        position_ids: vec![0, 1],
-        padding_input_id: 0,
-        batch_size: 1,
-        sequence_length: 2,
-        truncated: vec![0],
-    };
-    let second = PreparedBatch {
-        input_ids: vec![201, 202, 203, 301, 302, 0],
-        attention_mask: vec![1, 1, 1, 1, 1, 0],
-        token_type_ids: vec![0; 6],
-        position_ids: vec![0, 1, 2, 0, 1, 2],
-        padding_input_id: 0,
-        batch_size: 2,
-        sequence_length: 3,
-        truncated: vec![1],
-    };
-    let merged = merge_prepared_batches(&[&first, &second]).expect("merged batch");
-    assert_eq!(merged.batch_size, 3);
-    assert_eq!(merged.sequence_length, 3);
-    assert_eq!(merged.input_ids, [101, 102, 0, 201, 202, 203, 301, 302, 0]);
-    assert_eq!(merged.attention_mask, [1, 1, 0, 1, 1, 1, 1, 1, 0]);
-    assert_eq!(merged.truncated, [0, 2]);
-}
 use crate::domain::model::EmbeddingMetric;
 
 fn entry(pooling: &'static str, normalize: bool) -> TransformersConfig {
@@ -165,7 +136,6 @@ fn shared_tokenizers_preserve_truncation_boundaries_and_batch_padding() {
     );
     assert_eq!(prepared.token_type_ids, vec![0; 20]);
     assert_eq!(prepared.position_ids, [0, 1, 2, 3].repeat(5));
-    assert_eq!(prepared.padding_input_id, 0);
     assert_eq!(prepared.truncated, [3]);
 
     let next = prepare_batch(&tokenizers, &["hello".to_owned()], entry)
@@ -527,6 +497,48 @@ fn pool_fixture_model(
     )
 }
 
+async fn assert_request_batches_are_preserved(
+    model: &TransformersEmbeddingModel,
+    inputs: &[Vec<Content>],
+    reference: &EmbeddingResult,
+    entry: TransformersConfig,
+) {
+    let loaded = Arc::clone(lock_std_mutex(&model.state).as_ref().expect("prepared"));
+    let sessions = loaded.sessions.stats().session_count;
+    for rows in [1, 2, 4] {
+        let before = loaded.sessions.stats();
+        let expected = EmbeddingResult {
+            vectors: reference.vectors[..rows].to_vec(),
+            truncated: reference
+                .truncated
+                .iter()
+                .copied()
+                .filter(|&i| i < rows)
+                .collect(),
+        };
+        let results = futures_util::future::join_all((0..8).map(|_| {
+            model.embed(
+                &inputs[..rows],
+                EmbeddingOptions {
+                    execution_concurrency: sessions,
+                    ..EmbeddingOptions::default()
+                },
+            )
+        }))
+        .await;
+        for result in results {
+            assert_pool_vectors(
+                &result.expect("unchanged request batch"),
+                &expected,
+                entry.dimension,
+            );
+        }
+        let after = loaded.sessions.stats();
+        assert_eq!(after.native_runs - before.native_runs, 8);
+        assert_eq!(after.native_rows - before.native_rows, 8 * rows as u64);
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires pinned MiniLM cache; set ZG_MODEL_BENCH_DEVICE=cuda for a CUDA build/device"]
 async fn cached_minilm_fixed_session_pool_matches_single_session() {
@@ -554,7 +566,6 @@ async fn cached_minilm_fixed_session_pool_matches_single_session() {
             &inputs,
             EmbeddingOptions {
                 execution_concurrency: 1,
-                fixed_batch: true,
                 ..EmbeddingOptions::default()
             },
         )
@@ -581,7 +592,6 @@ async fn cached_minilm_fixed_session_pool_matches_single_session() {
                     &inputs,
                     EmbeddingOptions {
                         execution_concurrency: budget,
-                        fixed_batch: true,
                         ..EmbeddingOptions::default()
                     },
                 )
@@ -603,6 +613,7 @@ async fn cached_minilm_fixed_session_pool_matches_single_session() {
             assert_eq!(stats.session_initializations, sessions as u64);
             assert_eq!(stats.pool_fallbacks, 0);
         }
+        assert_request_batches_are_preserved(&model, &inputs, &reference, entry).await;
         let signal = CancellationToken::new();
         signal.cancel();
         assert_eq!(
@@ -676,7 +687,6 @@ async fn cached_minilm_uses_cuda() {
                 &inputs,
                 EmbeddingOptions {
                     execution_concurrency: 2,
-                    fixed_batch: true,
                     ..EmbeddingOptions::default()
                 },
             )

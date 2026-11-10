@@ -74,7 +74,6 @@ struct PreparedBatch {
     attention_mask: Vec<i64>,
     token_type_ids: Vec<i64>,
     position_ids: Vec<i64>,
-    padding_input_id: i64,
     batch_size: usize,
     sequence_length: usize,
     truncated: Vec<usize>,
@@ -536,94 +535,6 @@ fn configure_directml(
     ))
 }
 
-fn merge_prepared_batches(batches: &[&PreparedBatch]) -> Result<PreparedBatch, ModelError> {
-    let sequence_length = batches
-        .iter()
-        .map(|batch| batch.sequence_length)
-        .max()
-        .unwrap_or_default();
-    let batch_size = batches.iter().map(|batch| batch.batch_size).sum::<usize>();
-    if sequence_length == 0 || batch_size == 0 {
-        return Err(ModelError::internal(
-            "Unable to merge an empty ONNX embedding batch",
-        ));
-    }
-
-    let capacity = batch_size.saturating_mul(sequence_length);
-    let mut input_ids = Vec::with_capacity(capacity);
-    let mut attention_mask = Vec::with_capacity(capacity);
-    let mut token_type_ids = Vec::with_capacity(capacity);
-    let mut position_ids = Vec::with_capacity(capacity);
-    let mut truncated = Vec::new();
-    let mut batch_offset = 0_usize;
-    for batch in batches {
-        for row in 0..batch.batch_size {
-            append_padded_row(
-                &mut input_ids,
-                &batch.input_ids,
-                row,
-                batch.sequence_length,
-                sequence_length,
-                batch.padding_input_id,
-            );
-            append_padded_row(
-                &mut attention_mask,
-                &batch.attention_mask,
-                row,
-                batch.sequence_length,
-                sequence_length,
-                0,
-            );
-            append_padded_row(
-                &mut token_type_ids,
-                &batch.token_type_ids,
-                row,
-                batch.sequence_length,
-                sequence_length,
-                0,
-            );
-            append_padded_row(
-                &mut position_ids,
-                &batch.position_ids,
-                row,
-                batch.sequence_length,
-                sequence_length,
-                0,
-            );
-        }
-        truncated.extend(batch.truncated.iter().map(|index| batch_offset + index));
-        batch_offset += batch.batch_size;
-    }
-
-    Ok(PreparedBatch {
-        input_ids,
-        attention_mask,
-        token_type_ids,
-        position_ids,
-        padding_input_id: batches[0].padding_input_id,
-        batch_size,
-        sequence_length,
-        truncated,
-    })
-}
-
-fn append_padded_row(
-    destination: &mut Vec<i64>,
-    source: &[i64],
-    row: usize,
-    source_width: usize,
-    destination_width: usize,
-    padding: i64,
-) {
-    let start = row.saturating_mul(source_width);
-    let end = start.saturating_add(source_width);
-    destination.extend_from_slice(&source[start..end]);
-    destination.resize(
-        destination.len() + destination_width - source_width,
-        padding,
-    );
-}
-
 #[derive(Debug)]
 struct NativeOutput {
     shape: Vec<i64>,
@@ -757,7 +668,6 @@ fn prepare_batch(
         })
         .collect::<Vec<_>>();
 
-    let padding_input_id = i64::from(PaddingParams::default().pad_id);
     let mut encodings = texts
         .iter()
         .map(|text| tokenizers.inputs.encode(text.as_str(), true))
@@ -815,7 +725,6 @@ fn prepare_batch(
         attention_mask,
         token_type_ids,
         position_ids,
-        padding_input_id,
         batch_size,
         sequence_length,
         truncated,
