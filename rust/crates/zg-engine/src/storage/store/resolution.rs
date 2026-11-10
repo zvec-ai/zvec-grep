@@ -295,11 +295,11 @@ fn declares_parameters(preceding: &str, body: &str) -> bool {
     !body.trim().is_empty() || word != "operator"
 }
 
-/// One parameter without its default argument and without its name, whitespace
-/// collapsed, and pointer/reference spacing made uniform: `const char * value`,
-/// `const char* value` and `const char*` all read `const char*`, and
-/// `int count = 0` reads `int`, because a header may state a default or omit
-/// the name the definition carries.
+/// One parameter without its default argument, without the name it
+/// establishes, whitespace collapsed, and pointer/reference spacing made
+/// uniform: `const char * value`, `const char* value` and `const char*` all
+/// read `const char*`, and `int count = 0` reads `int`, because a header may
+/// state a default or omit the name the definition carries.
 fn normalize_parameter(parameter: &str) -> String {
     let parameter = parameter.split('=').next().unwrap_or(parameter);
     let collapsed = parameter.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -342,27 +342,65 @@ fn normalize_parameter(parameter: &str) -> String {
     strip_parameter_name(normalized)
 }
 
-/// One parameter's type, with the name it declares removed: `int value` reads
-/// `int` and `const char* path` reads `const char*`.
+/// One parameter's type, with the declarator name it establishes removed:
+/// `int value` reads `int` and `const char* path` reads `const char*`.
 ///
-/// A trailing identifier is a name only when a type precedes it; `unsigned
-/// long` and `struct Foo` keep every word, because reading `long` or `Foo` as
-/// a name would merge two different parameters.
+/// The trailing identifier comes off only when the text before it completes a
+/// type. `unsigned long` and `struct Foo` keep every word, because reading
+/// `long` or `Foo` as a name would merge two different parameters. `const Foo`
+/// keeps its own too: a qualifier leaves the type open, so `Foo` is the type of
+/// an unnamed parameter, and reading it as a name would merge `const Foo` with
+/// `const Bar`.
 fn strip_parameter_name(parameter: String) -> String {
     let Some((head, tail)) = parameter.rsplit_once(' ') else {
         return parameter;
     };
-    if !is_parameter_name(tail) {
-        return parameter;
-    }
-    let preceding = head.rsplit(' ').next().unwrap_or(head);
-    if matches!(
-        preceding,
-        "struct" | "class" | "enum" | "union" | "typename"
-    ) {
+    if !is_parameter_name(tail) || !completes_type(head) {
         return parameter;
     }
     head.to_owned()
+}
+
+/// Whether the text before a trailing identifier completes a type, which makes
+/// that identifier the parameter's declarator name.
+///
+/// A cv qualifier or an elaborated type specifier leaves the type open —
+/// `const Foo` is one unnamed type — and so does a bare identifier, which can
+/// be either a type awaiting its name (`Foo bar`) or a type already declared
+/// without one. Pointers, references, template arguments, array bounds,
+/// qualified names and built-in type words all end a type, so an identifier
+/// after one is a name.
+fn completes_type(prefix: &str) -> bool {
+    let last = prefix.rsplit(' ').next().unwrap_or(prefix);
+    if matches!(
+        last,
+        "const" | "volatile" | "struct" | "class" | "enum" | "union" | "typename"
+    ) {
+        return false;
+    }
+    last.ends_with(['*', '&', '>', ']'])
+        || last.contains("::")
+        || matches!(
+            last,
+            "auto"
+                | "bool"
+                | "char"
+                | "char8_t"
+                | "char16_t"
+                | "char32_t"
+                | "double"
+                | "float"
+                | "int"
+                | "long"
+                | "register"
+                | "restrict"
+                | "short"
+                | "signed"
+                | "size_t"
+                | "unsigned"
+                | "void"
+                | "wchar_t"
+        )
 }
 
 /// Whether a token can be a parameter's name rather than part of its type.
@@ -763,5 +801,24 @@ mod parameter_evidence_tests {
             "unsigned",
             "no trailing name to strip"
         );
+    }
+
+    #[test]
+    fn a_qualifier_leaves_the_type_open() {
+        // `const Foo` and `const Bar` are two complete types, not one type
+        // followed by two parameter names: nothing before `Foo` completes a
+        // type, so the qualifier's operand stays part of the parameter.
+        assert_eq!(evidence("void f(const Foo);"), "const Foo");
+        assert_eq!(evidence("void f(const Bar) {}"), "const Bar");
+        assert_ne!(
+            evidence("void f(const Foo);"),
+            evidence("void f(const Bar) {}")
+        );
+        assert_eq!(evidence("void f(volatile Foo);"), "volatile Foo");
+        // A completed type still yields its name: the pointer, the qualifier
+        // after it, and the qualified name all end the type.
+        assert_eq!(evidence("void f(const Foo* bar);"), "const Foo*");
+        assert_eq!(evidence("void f(std::string s);"), "std::string");
+        assert_eq!(evidence("void f(Foo<Bar> baz);"), "Foo<Bar>");
     }
 }

@@ -746,6 +746,39 @@ fn sweep_pairs_an_unnamed_declaration_with_the_definition_that_names_its_paramet
 }
 
 #[test]
+fn sweep_keeps_an_unnamed_user_defined_parameter_distinct() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    // `const Foo` and `const Bar` are two complete types with no parameter
+    // name, not one type named twice: reading the type word as a name would
+    // pair the overloads by an equal count and hand the call to the one
+    // definition present.
+    index_source(&store, "include/api.hpp", "void compute(const Foo);\n");
+    index_source(&store, "src/impl.cpp", "void compute(const Bar) {\n}\n");
+    let caller = index_source(
+        &store,
+        "src/app.cpp",
+        "void run() {\n  compute(Foo{});\n}\n",
+    );
+    let owner = pending_call_owner(&store, caller, "compute");
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
+    assert!(
+        call_target_files(&store, &owner).is_empty(),
+        "the two unnamed types name different overloads: {sweep:?}"
+    );
+    assert!(
+        store
+            .list_pending_refs(10, 0)
+            .expect("queue")
+            .refs
+            .iter()
+            .any(|queued| queued.file_id == caller.get() && queued.reference.ref_name == "compute"),
+        "the call stays queued for the declaration: {sweep:?}"
+    );
+}
+
+#[test]
 fn sweep_binds_an_overload_by_the_scope_the_receiver_spells() {
     let home = tempfile::tempdir().expect("workspace");
     let store = open(home.path());
