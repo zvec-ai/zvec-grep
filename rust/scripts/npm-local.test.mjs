@@ -392,7 +392,7 @@ test("Linux package CPU validation uses a clean glibc 2.28 image rather than the
   }
 });
 
-test("Linux artifact smoke loads packaged ORT and runs inference on both architectures", async (t) => {
+test("Linux artifact smoke loads packaged ORT and runs inference on both architectures", { skip: process.platform !== "linux" }, async (t) => {
   const workflow = await readFile(new URL("../../.github/workflows/rust-publish.yml", import.meta.url), "utf8");
   const step = workflow.split("      - name: Install and exercise Linux artifacts on glibc 2.28 without CUDA libraries\n")[1]
     .split("      - name:")[0];
@@ -424,7 +424,7 @@ test("Linux artifact smoke loads packaged ORT and runs inference on both archite
   assert.match(workflow, /name: Restore the real model cache\n\s+if:.*matrix\.target == 'linux-arm64-gnu'/);
 });
 
-test("Linux Vulkan ORT build-script validation uses a network-disabled container and separate outputs", async (t) => {
+test("Linux Vulkan ORT build-script validation uses a network-disabled container and separate outputs", { skip: process.platform !== "linux" }, async (t) => {
   const workflow = await readFile(new URL("../../.github/workflows/rust-package-build.yml", import.meta.url), "utf8");
   assert.match(workflow, /prepare-onnxruntime\.py --target "\$ORT_TARGET"/);
   const step = workflow.split("      - name: Verify Linux Vulkan ORT preparation without network access\n")[1];
