@@ -6,7 +6,7 @@ The workflow measures **zg-hybrid, zg-fts and zg-vector** on four independent su
 
 The [Retrieval-only workflow](../../.github/workflows/retrieval-only.yml) supports manual runs and reuse by the [PR version comparison](../../.github/workflows/retrieval-comparison.yml). For a manual single-version run, select **Retrieval-only → Run workflow**. Use GitHub's workflow-ref selector to choose the benchmark harness (`main` for the latest merged harness), then set `candidate_ref` to the branch, tag or commit containing the `rust/` workspace to compile. It defaults to `main`. The `embedding` choice defaults to `local`, which preserves each suite's configured local model. Select `remote` to run every suite with `qwen/qwen3.7-text-embedding`; this requires the repository secret `QWEN_EMBEDDING_API_KEY` and variable `QWEN_EMBEDDING_ENDPOINT`. Every run includes all three modes.
 
-PR creation, reopening and new commits automatically compare the frozen PR base and head through all four suites. An authorized `@zg-bench` PR comment requests the same comparison and posts its table. Both versions use the same harness and local models, with separate fresh indexes; neither receives remote embedding credentials. e2e is skipped by default. The File comparison cells show base / head / delta (head minus base), on a 0–1 scale. Missing or invalid results make the comparison incomplete rather than zero. The default-branch [result publisher](../../.github/workflows/retrieval-pr-comment.yml) creates or updates one English PR comment with the table and run link, including for fork PRs. It skips cancelled or outdated runs, keeps benchmark execution read-only, and becomes active after its workflow is merged into the default branch. The `retrieval-comparison` artifact and Actions summary also retain the result; `retrieval-base-*` and `retrieval-head-*` retain the underlying reports. See [benchmark setup](../README.md).
+PR creation, reopening and new commits automatically compare the frozen PR base and head through all four suites. An authorized `@zg-bench` PR comment requests the same comparison and posts its table. Both versions use the same harness and local models, with separate fresh indexes; neither receives remote embedding credentials. e2e is skipped by default. Comparison cells show percentages: identical baseline/candidate values appear once; differences use baseline → candidate. The JSON retains exact scores and deltas. Missing or invalid results make the comparison incomplete rather than zero. The default-branch [result publisher](../../.github/workflows/retrieval-pr-comment.yml) creates or updates one English PR comment with the table and run link, including for fork PRs. It skips cancelled or outdated runs, keeps benchmark execution read-only, and becomes active after its workflow is merged into the default branch. The `retrieval-comparison` artifact and Actions summary also retain the result; `retrieval-base-*` and `retrieval-head-*` retain the underlying reports. See [benchmark setup](../README.md).
 
 For a manual paired comparison without a PR comment, select **Retrieval-only PR → Run workflow** and supply full `baseline_sha` / `candidate_sha` commit identities and their `baseline_repository` / `candidate_repository` (`owner/name`). This uses the same local-only comparison and does not run e2e. Manual runs require maintain/admin access.
 
@@ -81,16 +81,18 @@ case count for each metric. Unknown matches and failed calls do not become
 zeros. A repeated-run metric is withheld if any of its five observations is
 unknown. Both levels use equal question weights after averaging repeats.
 
-The existing File table, its labels and its aggregation remain unchanged.
+The existing File labels and aggregation remain unchanged.
 Its denominator differs from the new QA table. A QA diagnostic is not a formal
 Entity score or a claim that all answer evidence was found.
 
 Reports bind the QA dataset through `qa_gold`, retain per-call `qa_observations`,
 and expose `qa_retrieval` and `qa_quality_mean` beside the legacy fields.
 Validation recomputes these values from the saved public evidence and frozen QA
-labels. The final PR comparison shows separate File Recall and Entity diagnostic
-tables for baseline and candidate, with the scored question count next to each
-score.
+labels. The final PR comparison combines File and Entity Recall@1/5/10 in one
+diagnostic table, with scored/eligible question counts beside each percentage.
+A shared cell means both versions have equal scores and counts; it does not
+guarantee the same scored questions. All QA metrics and the original File
+ranking across all four suites remain available in separate expandable sections.
 
 ## Reports and artifacts
 

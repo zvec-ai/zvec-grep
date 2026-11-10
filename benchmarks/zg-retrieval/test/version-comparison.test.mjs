@@ -46,7 +46,7 @@ function result(commit, value = 0.5) {
   };
 }
 
-test("all suites and modes report signed head-minus-base deltas with pinned commit links", () => {
+test("all suites and modes retain exact deltas and render compact baseline-to-candidate percentages", () => {
   const before = result(baseSha, 0.75),
     after = result(headSha, 0.5);
   after.pilots.beir.report.summary[0].metrics.file_hit_at_1 = 1;
@@ -57,8 +57,8 @@ test("all suites and modes report signed head-minus-base deltas with pinned comm
   assert.equal(comparison.rows[3].metrics.file_hit_at_1.delta, 0.25);
   const markdown = markdownVersionComparison(comparison);
   assert.match(markdown, /Both versions explicitly request `preview: "full"`/);
-  assert.match(markdown, /0\.7500 \/ 0\.5000 \/ -0\.2500/);
-  assert.match(markdown, /0\.7500 \/ 1\.0000 \/ \+0\.2500/);
+  assert.match(markdown, /75\.00% → 50\.00%/);
+  assert.match(markdown, /75\.00% → 100\.00%/);
   assert.ok(
     markdown.includes(`https://github.com/upstream/zg/commit/${baseSha}`),
   );
@@ -150,25 +150,58 @@ test("File and Entity diagnostics retain their own scores and question counts", 
     1,
   );
   const markdown = markdownVersionComparison(comparison);
-  assert.match(markdown, /SWE-QA20 File Recall · Diagnostic/);
-  assert.match(markdown, /SWE-QA20 Entity retrieval · Diagnostic/);
-  assert.match(markdown, /Recall@1 \| Recall@5 \| Recall@10/);
+  assert.match(markdown, /SWE-QA20 File \/ Entity recall · Diagnostic/);
+  assert.match(markdown, /All QA metrics — File and Entity/);
   assert.match(
     markdown,
-    /\| hybrid \| Baseline \| 0\.2500 \(n=17\/17\) \| 0\.5000 \(n=17\/17\) \| 0\.6250 \(n=17\/17\)/,
+    /\| Mode \| Level \| Recall@1 \| Recall@5 \| Recall@10/,
   );
   assert.match(
     markdown,
-    /\| hybrid \| Candidate \| 0\.2500 \(n=17\/17\) \| 0\.5000 \(n=17\/17\) \| 0\.7500 \(n=17\/17\)/,
+    /\| hybrid \| File \| 25\.00% \(17\/17\) \| 50\.00% \(17\/17\) \| 62\.50% \(17\/17\) → 75\.00% \(17\/17\)/,
   );
   assert.match(
     markdown,
-    /\| hybrid \| Baseline \|.*0\.0000 \(n=17\/17\) \| N\/A \(n=0\/17\) \| 0\.1250 \(n=13\/17\)/,
+    /\| hybrid \| Entity \| 0\.00% \(17\/17\) \| N\/A \(0\/17\) \| 12\.50% \(13\/17\) → 25\.00% \(14\/17\)/,
   );
-  assert.match(
-    markdown,
-    /\| hybrid \| Candidate \|.*0\.0000 \(n=17\/17\) \| N\/A \(n=0\/17\) \| 0\.2500 \(n=14\/17\)/,
+  assert.doesNotMatch(markdown, /\| hybrid \| (Baseline|Candidate) \|/);
+});
+
+test("compact cells retain changed counts, rounded differences and missing versions", () => {
+  const before = result(baseSha),
+    after = result(headSha);
+  const make = (value, count, eligible = 17) => ({
+    eligible_tasks: eligible,
+    entity: {
+      recall_at_1: value,
+      recall_at_5: null,
+      recall_at_10: 0,
+      metric_task_counts: {
+        recall_at_1: count,
+        recall_at_5: 0,
+        recall_at_10: 17,
+      },
+    },
+  });
+  for (const [baseline, candidate, expected] of [
+    [make(0.5, 13), make(0.5, 13), "50.00% (13/17)"],
+    [make(0.5, 13), make(0.5, 14), "50.00% (13/17) → 50.00% (14/17)"],
+    [make(0.5, 13), make(0.5, 13, 18), "50.00% (13/17) → 50.00% (13/18)"],
+    [make(0.5, 13), make(0.500001, 13), "50.00% (13/17) → 50.00% (13/17)"],
+    [null, make(0.5, 13), "N/A → 50.00% (13/17)"],
+  ]) {
+    const comparison = compareCombinedResults(before, after, metadata);
+    comparison.rows[0].entity_diagnostic = { baseline, candidate };
+    const saved = structuredClone(comparison);
+    const markdown = markdownVersionComparison(comparison);
+    assert.ok(markdown.includes(`| hybrid | Entity | ${expected} |`));
+    assert.deepEqual(comparison, saved);
+    if (baseline && candidate) assert.ok(markdown.includes("N/A (0/17)"));
+  }
+  const same = markdownVersionComparison(
+    compareCombinedResults(before, after, metadata),
   );
+  assert.ok(same.includes("| SWE-QA20 | hybrid | 50.00% | 50.00% |"));
 });
 
 test("raw-report comparison rejects missing evidence and substituted SWE-QA versions", async () => {

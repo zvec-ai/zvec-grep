@@ -84,7 +84,11 @@ function currentRequest(pr, request) {
   );
 }
 
-function validateDiagnostic(group, level, { title, metrics }) {
+function validateDiagnostic(
+  group,
+  level,
+  { title, metrics, optionalMetrics = [] },
+) {
   if (group === null) return null;
   const eligible = group?.eligible_tasks;
   assert.ok(
@@ -92,9 +96,17 @@ function validateDiagnostic(group, level, { title, metrics }) {
     `Invalid ${title} diagnostic eligible count`,
   );
   const scores = { metric_task_counts: {} };
-  for (const [, metric] of metrics) {
+  for (const [, metric] of [...metrics, ...optionalMetrics]) {
     const count = group[level]?.metric_task_counts?.[metric];
     const score = group[level]?.[metric];
+    // Older comparisons carried only File Recall. Never fill extra QA metrics
+    // from the original File table, which uses different Gold and aggregation.
+    if (
+      optionalMetrics.some(([, name]) => name === metric) &&
+      score === undefined &&
+      count === undefined
+    )
+      continue;
     assert.ok(
       Number.isSafeInteger(count) && count >= 0 && count <= eligible,
       `Invalid ${title} diagnostic scored count`,

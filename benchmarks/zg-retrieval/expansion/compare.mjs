@@ -5,20 +5,26 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { loadSuite } from "../core/lib.mjs";
 import { buildCombined } from "./combined.mjs";
-import { PILOT_NAMES, PILOT_SUITES } from "./config.mjs";
+import { PILOT_NAMES } from "./config.mjs";
 import { compareReports } from "../reports/compare.mjs";
 import { QUALITY_METRICS } from "../reports/ci.mjs";
 import {
   QA_ENTITY_METRICS,
   QA_RECALL_METRICS,
-  qaMetricCell,
+  qaPercentCell,
 } from "../reports/zg.mjs";
 
 const MODES = ["hybrid", "fts", "vector"];
 const identity = (repository, commit) => ({ repository, commit });
 
 export const QA_DIAGNOSTICS = {
-  file: { title: "File Recall", metrics: QA_RECALL_METRICS },
+  file: {
+    title: "File retrieval",
+    metrics: QA_RECALL_METRICS,
+    optionalMetrics: QA_ENTITY_METRICS.filter(
+      ([, metric]) => !metric.startsWith("recall_"),
+    ),
+  },
   entity: { title: "Entity retrieval", metrics: QA_ENTITY_METRICS },
 };
 
@@ -149,71 +155,111 @@ export async function compareRuns(baseline, candidate, metadata) {
   return compareCombinedResults(before, after, metadata);
 }
 
+const percentage = (value) => `${(value * 100).toFixed(2)}%`;
+
+function comparisonCell({ baseline, candidate }) {
+  return baseline === candidate
+    ? percentage(baseline)
+    : `${percentage(baseline)} → ${percentage(candidate)}`;
+}
+
+function qaComparisonCell(pair, level, metric) {
+  const before = pair?.baseline;
+  const after = pair?.candidate;
+  const cell = (group) =>
+    qaPercentCell(group?.[level], metric, group?.eligible_tasks);
+  // Equal displayed text is insufficient: preserve changes hidden by rounding,
+  // and equal scores with different scored or eligible question counts.
+  const same =
+    before?.eligible_tasks === after?.eligible_tasks &&
+    before?.[level]?.[metric] === after?.[level]?.[metric] &&
+    before?.[level]?.metric_task_counts?.[metric] ===
+      after?.[level]?.metric_task_counts?.[metric];
+  return same ? cell(before) : `${cell(before)} → ${cell(after)}`;
+}
+
+function qaComparisonTable(rows, metrics) {
+  return [
+    `| Mode | Level | ${metrics.map(([label]) => label).join(" | ")} |`,
+    `| --- | --- | ${metrics.map(() => "---:").join(" | ")} |`,
+    ...rows.flatMap((row) =>
+      ["file", "entity"].flatMap((level) => {
+        const pair = row[`${level}_diagnostic`];
+        if (!pair) return [];
+        return [
+          `| ${row.mode} | ${level === "file" ? "File" : "Entity"} | ${metrics.map(([, metric]) => qaComparisonCell(pair, level, metric)).join(" | ")} |`,
+        ];
+      }),
+    ),
+  ];
+}
+
 export function markdownVersionComparison(result) {
   const server = result.server_url ?? "https://github.com";
   const version = (side) => {
     const value = result[side];
-    return `[${value.repository}@${value.commit}](${server}/${value.repository}/commit/${value.commit})`;
+    return `[${value.commit.slice(0, 8)}](${server}/${value.repository}/commit/${value.commit})`;
   };
+  const qaRows = result.rows.filter(
+    (row) => row.file_diagnostic || row.entity_diagnostic,
+  );
   const lines = [
-    "## Retrieval-only · PR base vs head",
+    "## Retrieval-only",
     "",
-    `**${result.status === "success" ? "✅ Complete" : "❌ Failed / incomplete"}**`,
+    `**${result.status === "success" ? "✅ Complete" : "❌ Failed / incomplete"}** · Baseline ${version("baseline")} · Candidate ${version("candidate")}`,
     "",
-    `Baseline: ${version("baseline")}`,
-    "",
-    `Candidate: ${version("candidate")}`,
-    "",
-    "For a PR, the baseline is the pinned target-branch commit and the candidate is the pinned PR commit. In the File ranking table, each cell shows baseline / candidate / Δ (candidate minus baseline) on a 0–1 scale. Both versions use the same frozen harness, queries, Gold and local embedding models, with fresh indexes and five calls per question and mode. Quality scores are report-only.",
-    "",
-    "| Suite | Mode | File Hit@1 | File Hit@5 | File Hit@10 | MRR@10 | nDCG@10 |",
-    "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+    "Scores are percentages. Different values show **baseline → candidate**; identical values are shown once. Both versions use the same queries, Gold and local embedding models, with five calls per question and mode.",
   ];
   if (result.preview === "full")
-    lines.splice(
-      8,
-      0,
-      'Both versions explicitly request `preview: "full"`. Full shows all available content of each retrieved item without changing retrieval or ranking.',
-      "",
-    );
-  const cell = ({ baseline, candidate, delta }) =>
-    `${baseline.toFixed(4)} / ${candidate.toFixed(4)} / ${delta > 0 ? "+" : ""}${delta.toFixed(4)}`;
-  for (const row of result.rows) {
-    const label =
-      row.suite === "sweqa"
-        ? "SWE-QA20"
-        : PILOT_SUITES[row.suite].report.overview;
+    lines.push("", 'Both versions explicitly request `preview: "full"`.');
+  if (qaRows.length) {
     lines.push(
-      `| ${label} | ${row.mode} | ${QUALITY_METRICS.map((metric) => cell(row.metrics[metric])).join(" | ")} |`,
+      "",
+      "### SWE-QA20 File / Entity recall · Diagnostic",
+      "",
+      "Cells show score (scored/eligible questions) for each metric. A shared cell means both versions have the same score and counts, not necessarily the same scored questions. N/A means unscored. These are diagnostic results, not formal QA scores.",
+      "",
+      ...qaComparisonTable(qaRows, QA_RECALL_METRICS),
+      "",
+      "<details>",
+      "<summary>All QA metrics — File and Entity</summary>",
+      "",
+      ...qaComparisonTable(qaRows, QA_ENTITY_METRICS),
+      "",
+      "QA metrics use the new QA Gold and equal question weights after averaging repeated calls. Missing metrics in older artifacts remain N/A.",
+      "",
+      "</details>",
     );
   }
-  if (result.rows.some((row) => row.file_diagnostic || row.entity_diagnostic))
+  if (result.rows.length) {
     lines.push(
       "",
-      "The SWE-QA20 diagnostic tables score File paths and code entities separately. Each cell shows the score and n=scored/eligible questions for that metric. Scores weight each scored question equally after averaging its five calls. Baseline and candidate can have different scored questions.",
+      ...(qaRows.length
+        ? ["<details>", "<summary>File ranking — all four suites</summary>"]
+        : ["### File ranking"]),
+      "",
+      qaRows.length
+        ? "This table preserves the original File labels and scores; its SWE-QA20 Gold differs from the QA table above."
+        : "This table preserves the original File labels and scores.",
+      "",
+      "| Suite | Mode | Hit@1 | Hit@5 | Hit@10 | MRR@10 | nDCG@10 |",
+      "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
     );
-  for (const [level, { title, metrics }] of Object.entries(QA_DIAGNOSTICS)) {
-    const field = `${level}_diagnostic`;
-    const rows = result.rows.filter((row) => row[field]);
-    if (!rows.length) continue;
+    const labels = {
+      sweqa: "SWE-QA20",
+      beir: "BEIR",
+      duretrieval: "DuRetrieval",
+      quarry: "Quarry",
+    };
+    for (const row of result.rows)
+      lines.push(
+        `| ${labels[row.suite]} | ${row.mode} | ${QUALITY_METRICS.map((metric) => comparisonCell(row.metrics[metric])).join(" | ")} |`,
+      );
     lines.push(
       "",
-      `### SWE-QA20 ${title} · Diagnostic`,
-      "",
-      `| Mode | Version | ${metrics.map(([label]) => label).join(" | ")} |`,
-      `| --- | --- | ${metrics.map(() => "---:").join(" | ")} |`,
+      "SWE-QA20 File nDCG uses repository macro averaging; the other suites use query means. Quality scores are report-only.",
+      ...(qaRows.length ? ["", "</details>"] : []),
     );
-    for (const row of rows)
-      for (const [side, label] of [
-        ["baseline", "Baseline"],
-        ["candidate", "Candidate"],
-      ]) {
-        const group = row[field][side];
-        const scores = metrics.map(([, metric]) =>
-          qaMetricCell(group?.[level], metric, group?.eligible_tasks),
-        );
-        lines.push(`| ${row.mode} | ${label} | ${scores.join(" | ")} |`);
-      }
   }
   if (result.errors.length)
     lines.push(
@@ -227,12 +273,8 @@ export function markdownVersionComparison(result) {
             .replace(/[\r\n]+/g, " ")}`,
       ),
     );
-  lines.push(
-    "",
-    "SWE-QA20 File nDCG uses repository macro averaging; the other suites use query means. Full base/head reports and per-call evidence are available in the run artifacts.",
-  );
   if (result.run_url)
-    lines.push("", `[View run and artifacts](${result.run_url})`);
+    lines.push("", `[Full reports and per-call evidence](${result.run_url})`);
   return `${lines.join("\n")}\n`;
 }
 

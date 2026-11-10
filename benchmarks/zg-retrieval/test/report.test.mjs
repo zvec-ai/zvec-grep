@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { markdownReport, qaRetrievalMarkdown } from "../reports/zg.mjs";
+import {
+  markdownReport,
+  qaPercentCell,
+  qaRetrievalMarkdown,
+} from "../reports/zg.mjs";
 
 test("report has one three-arm table with Rust MCP output, fixed averages and per-query evidence", () => {
   const mode = {
@@ -111,23 +115,32 @@ test("QA tables show diagnostic denominators and withhold unapproved formal scor
     integrity_errors: [],
   };
   const text = markdownReport(report);
-  assert.match(text, /### QA File Recall/);
-  assert.match(text, /### QA Entity retrieval/);
-  assert.match(text, /Recall@1 \| Recall@5 \| Recall@10/);
-  assert.match(text, /\| Formal \| zg-hybrid \| 0\/4 \| N\/A \(n=0\/0\)/);
-  const formal = text
-    .split("\n")
-    .filter((line) => line.startsWith("| Formal |"));
-  assert.ok(formal.every((line) => !line.includes("0.5000")));
   assert.match(
     text,
-    /\| Diagnostic \| zg-hybrid \| 3\/4 \| 0\.5000 \(n=2\/3\)/,
+    /Scope \| Arm \| Level \| Recall@1 \| Recall@5 \| Recall@10/,
   );
-  assert.match(text, /0\.0000 \(n=2\/3\)/);
-  assert.match(text, /N\/A \(n=0\/3\)/);
+  assert.doesNotMatch(text, /\| Formal \|/);
+  assert.match(text, /Formal QA scores are unavailable/);
+  assert.match(text, /\| Diagnostic \| zg-hybrid \| File \| 50\.00% \(2\/3\)/);
+  assert.match(text, /\| Diagnostic \| zg-hybrid \| Entity \|/);
+  assert.match(text, /0\.00% \(2\/3\)/);
+  assert.match(text, /N\/A \(0\/3\)/);
   assert.match(text, /do not establish formal Entity performance/);
-  assert.match(text, /Unknown results never become zeros/);
+  assert.match(text, /Unknown results remain N\/A/);
   assert.match(text, /QA scoring unavailable for 1\/4 questions/);
+  const [main, details] = text.split(
+    "<summary>All File and Entity metrics</summary>",
+  );
+  assert.ok(
+    main.indexOf("| Diagnostic | zg-hybrid | File |") <
+      main.indexOf("| Diagnostic | zg-hybrid | Entity |"),
+  );
+  assert.match(
+    details,
+    /Scope \| Arm \| Level \| Hit@1 \| Hit@5 \| Hit@10 \| Recall@1 \| Recall@5 \| Recall@10 \| MRR@10 \| nDCG@10/,
+  );
+  assert.match(details, /\| Diagnostic \| zg-hybrid \| File \|/);
+  assert.match(details, /\| Diagnostic \| zg-hybrid \| Entity \|/);
 });
 
 test("QA table renders approved metrics without turning an unscored metric into zero", () => {
@@ -152,7 +165,25 @@ test("QA table renders approved metrics without turning an unscored metric into 
     ],
     1,
   ).join("\n");
-  assert.match(text, /\| Formal \| zg-hybrid \| 1\/1 \| 0\.5000 \(n=1\/1\)/);
-  assert.match(text, /N\/A \(n=0\/1\)/);
-  assert.doesNotMatch(text, /0\.0000/);
+  assert.match(text, /\| Formal \| zg-hybrid \| File \| 50\.00% \(1\/1\)/);
+  assert.match(text, /\| Formal \| zg-hybrid \| Entity \| 50\.00% \(1\/1\)/);
+  assert.match(text, /N\/A \(0\/1\)/);
+  assert.doesNotMatch(
+    text,
+    /\| 0\.00%|\| Diagnostic \||Formal QA scores are unavailable/,
+  );
+});
+
+test("compact QA cells retain zero scores, missing counts, and metric-specific coverage", () => {
+  const level = qaLevel(2);
+  level.recall_at_1 = 0;
+  level.recall_at_5 = 0.0710955710955711;
+  level.recall_at_10 = null;
+  level.metric_task_counts.recall_at_10 = 0;
+  assert.equal(qaPercentCell(level, "recall_at_1", 3), "0.00% (2/3)");
+  assert.equal(qaPercentCell(level, "recall_at_5", 3), "7.11% (2/3)");
+  assert.equal(qaPercentCell(level, "recall_at_10", 3), "N/A (0/3)");
+  assert.equal(qaPercentCell(level, "recall_at_5", 0), "N/A (0/0)");
+  assert.equal(qaPercentCell(null, "recall_at_5", 3), "N/A (?/3)");
+  assert.equal(qaPercentCell(null, "recall_at_5", null), "N/A");
 });

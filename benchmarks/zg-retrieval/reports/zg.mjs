@@ -22,51 +22,78 @@ export function qaMetricCell(level, metric, eligible) {
   return `${value} (n=${count ?? "?"}/${eligible})`;
 }
 
+export function qaPercentCell(level, metric, eligible) {
+  if (eligible == null) return "N/A";
+  if (eligible === 0) return "N/A (0/0)";
+  const count = level?.metric_task_counts?.[metric];
+  const value =
+    count > 0 && Number.isFinite(level?.[metric])
+      ? `${(level[metric] * 100).toFixed(2)}%`
+      : "N/A";
+  return `${value} (${count ?? "?"}/${eligible})`;
+}
+
 /** Keep diagnostic QA results separate from the existing File metrics. */
 export function qaRetrievalMarkdown(entries, expectedQuestions) {
   if (!entries.some(([, qa]) => qa)) return [];
+  const scopes = [
+    ["formal", "Formal"],
+    ["diagnostic", "Diagnostic"],
+  ].filter(([scope]) =>
+    entries.some(([, qa]) => qa?.[scope]?.eligible_tasks > 0),
+  );
   const lines = [
     "",
     "## QA File and Entity retrieval",
     "",
-    "Formal scores require Gold that passed correctness and completeness review. Diagnostic scores are exploratory and do not establish formal Entity performance. No eligible questions means N/A, not zero.",
+    "Cells show percentage (scored/eligible questions). Unknown results remain N/A. Diagnostic scores do not establish formal Entity performance.",
     "",
-    "Each cell shows the score and n=scored/eligible questions for that metric. The difference is the number left unscored, including uncertain matches or failed calls. Unknown results never become zeros. Each question needs all five computable calls for a metric; averages then give questions equal weight, including QA nDCG.",
+    ...(scopes.some(([scope]) => scope === "formal")
+      ? []
+      : [
+          "Formal QA scores are unavailable: Gold must pass correctness and completeness review.",
+          "",
+        ]),
   ];
-  for (const [level, heading, metrics] of [
-    ["file", "QA File Recall", QA_RECALL_METRICS],
-    ["entity", "QA Entity retrieval", QA_ENTITY_METRICS],
-  ]) {
-    lines.push(
-      "",
-      `### ${heading}`,
-      "",
-      `| Scope | Arm | Eligible questions | ${metrics.map(([label]) => label).join(" | ")} |`,
-      `| --- | --- | --- | ${metrics.map(() => "---").join(" | ")} |`,
-    );
-    for (const [scope, label] of [
-      ["formal", "Formal"],
-      ["diagnostic", "Diagnostic"],
-    ])
+  const table = (metrics) => {
+    const rows = [
+      `| Scope | Arm | Level | ${metrics.map(([label]) => label).join(" | ")} |`,
+      `| --- | --- | --- | ${metrics.map(() => "---:").join(" | ")} |`,
+    ];
+    for (const [scope, label] of scopes)
       for (const [arm, qa] of entries) {
         const group = qa?.[scope];
         const eligible = group?.eligible_tasks;
-        const coverage =
-          eligible == null
-            ? "N/A"
-            : `${eligible}/${qa.planned_tasks ?? expectedQuestions}`;
-        lines.push(
-          `| ${label} | ${arm} | ${coverage} | ${metrics.map(([, metric]) => qaMetricCell(group?.[level], metric, eligible)).join(" | ")} |`,
-        );
+        for (const [level, name] of [
+          ["file", "File"],
+          ["entity", "Entity"],
+        ])
+          rows.push(
+            `| ${label} | ${arm} | ${name} | ${metrics.map(([, metric]) => qaPercentCell(group?.[level], metric, eligible)).join(" | ")} |`,
+          );
       }
-  }
+    return rows;
+  };
+  if (scopes.length)
+    lines.push(
+      ...table(QA_RECALL_METRICS),
+      "",
+      "<details>",
+      "<summary>All File and Entity metrics</summary>",
+      "",
+      ...table(QA_ENTITY_METRICS),
+      "",
+      "Each question needs five computable calls for a metric. Scores average those calls, then weight questions equally, including QA nDCG.",
+      "",
+      "</details>",
+    );
   lines.push(
     "",
     ...entries
       .filter(([, qa]) => qa)
       .map(
         ([arm, qa]) =>
-          `${arm}: QA scoring unavailable for ${qa.unavailable_tasks.length}/${qa.planned_tasks ?? expectedQuestions} questions. Per-question eligibility, reasons and per-call matching evidence are retained in the JSON report.`,
+          `${arm}: QA scoring unavailable for ${qa.unavailable_tasks.length}/${qa.planned_tasks ?? expectedQuestions} questions. Reasons and matching evidence are retained in the JSON report.`,
       ),
   );
   return lines;

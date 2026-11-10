@@ -172,7 +172,7 @@ test("a fork PR gets all twelve comparison rows, commit links and a source run l
   assert.equal(action, "create");
   assert.equal(input.issue_number, 7);
   assert.match(input.body, /✅ Complete/);
-  assert.match(input.body, /0\.5000 \/ 0\.6000 \/ \+0\.1000/);
+  assert.match(input.body, /50\.00% → 60\.00%/);
   assert.equal(
     input.body
       .split("\n")
@@ -238,12 +238,16 @@ test("the publisher renders validated File and Entity diagnostic scores and coun
   await x.write("comparison/summary.json", withDiagnostics);
   await publish(x);
   const body = x.messages()[0][1].body;
-  assert.match(body, /SWE-QA20 File Recall · Diagnostic/);
-  assert.match(body, /\| hybrid \| Baseline \| 0\.6000 \(n=17\/17\)/);
-  assert.match(body, /\| hybrid \| Candidate \| 0\.7000 \(n=17\/17\)/);
-  assert.match(body, /SWE-QA20 Entity retrieval · Diagnostic/);
-  assert.match(body, /\| hybrid \| Baseline \| 0\.5000 \(n=13\/17\)/);
-  assert.match(body, /\| hybrid \| Candidate \| 0\.5000 \(n=14\/17\)/);
+  assert.match(body, /SWE-QA20 File \/ Entity recall · Diagnostic/);
+  assert.match(
+    body,
+    /\| hybrid \| File \| 60\.00% \(17\/17\) → 70\.00% \(17\/17\)/,
+  );
+  assert.match(
+    body,
+    /\| hybrid \| Entity \| 50\.00% \(13\/17\) → 50\.00% \(14\/17\)/,
+  );
+  assert.match(body, /All QA metrics — File and Entity/);
 
   for (const level of ["file", "entity"]) {
     const invalid = structuredClone(withDiagnostics);
@@ -253,6 +257,60 @@ test("the publisher renders validated File and Entity diagnostic scores and coun
     assert.throws(
       () => validateComparison(invalid, request),
       /Invalid .* diagnostic scored count/,
+    );
+  }
+});
+
+test("extra QA File metrics are validated without substituting original File scores", () => {
+  const value = structuredClone(report);
+  const group = {
+    eligible_tasks: 17,
+    file: {
+      ...Object.fromEntries(
+        QA_RECALL_METRICS.map(([, metric]) => [metric, 0.25]),
+      ),
+      metric_task_counts: Object.fromEntries(
+        QA_RECALL_METRICS.map(([, metric]) => [metric, 17]),
+      ),
+    },
+  };
+  value.rows[0].file_diagnostic = {
+    baseline: structuredClone(group),
+    candidate: structuredClone(group),
+  };
+  assert.equal(
+    validateComparison(value, request).rows[0].file_diagnostic.baseline.file
+      .hit_at_1,
+    undefined,
+  );
+  for (const side of ["baseline", "candidate"]) {
+    const file = value.rows[0].file_diagnostic[side].file;
+    for (const [, metric] of QA_ENTITY_METRICS.filter(
+      ([, name]) => !name.startsWith("recall_"),
+    )) {
+      file[metric] = 0;
+      file.metric_task_counts[metric] = 17;
+    }
+  }
+  const validated = validateComparison(value, request);
+  assert.equal(validated.rows[0].file_diagnostic.baseline.file.hit_at_1, 0);
+  assert.equal(validated.rows[0].metrics.file_hit_at_1.baseline, 0.5);
+  for (const mutate of [
+    (file) => {
+      file.hit_at_1 = 2;
+    },
+    (file) => {
+      file.metric_task_counts.hit_at_1 = 18;
+    },
+    (file) => {
+      delete file.metric_task_counts.hit_at_1;
+    },
+  ]) {
+    const invalid = structuredClone(value);
+    mutate(invalid.rows[0].file_diagnostic.baseline.file);
+    assert.throws(
+      () => validateComparison(invalid, request),
+      /Invalid File retrieval diagnostic/,
     );
   }
 });
