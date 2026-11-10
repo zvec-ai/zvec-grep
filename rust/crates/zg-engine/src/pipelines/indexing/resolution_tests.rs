@@ -196,6 +196,30 @@ fn pending_call_owner(store: &IndexStore, file: FileId, name: &str) -> String {
         .clone()
 }
 
+/// Line and owner of every queued call to `name` in `file`, in call-site
+/// order, captured before a sweep resolves the rows.
+fn pending_call_owners(store: &IndexStore, file: FileId, name: &str) -> Vec<(usize, String)> {
+    let mut calls: Vec<(usize, String)> = store
+        .list_pending_refs(1000, 0)
+        .expect("queue")
+        .refs
+        .iter()
+        .filter(|reference| {
+            reference.file_id == file.get()
+                && reference.reference.ref_kind == GraphEdgeKind::Calls
+                && reference.reference.ref_name == name
+        })
+        .map(|reference| {
+            (
+                reference.reference.line,
+                reference.reference.owner_id.clone(),
+            )
+        })
+        .collect();
+    calls.sort();
+    calls
+}
+
 /// Owner entity of a file's queued call spelled with `receiver`, captured
 /// before a sweep resolves the row.
 fn pending_receiver_call_owner(store: &IndexStore, file: FileId, receiver: &str) -> String {
@@ -1428,6 +1452,96 @@ fn sweep_keeps_an_argument_count_from_handing_a_shadowed_call_to_the_import() {
         import_target_ids(&store, caller),
         vec![format!("f{}", module.get())],
         "the import itself still names the module: {sweep:?}"
+    );
+}
+
+#[test]
+fn sweep_does_not_hand_a_sibling_scope_to_the_nested_binding() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    let module = index_source(&store, "util.py", "def work(x):\n    return x\n");
+    let caller = index_source(
+        &store,
+        "caller.py",
+        concat!(
+            "from util import work\n\n\n",
+            "def unrelated():\n",
+            "    def work(x, y=0):\n",
+            "        return 2\n",
+            "    return work(0)\n\n\n",
+            "def run():\n",
+            "    return work(0)\n",
+        ),
+    );
+
+    // The nested call inside `unrelated` binds during partitioning, where the
+    // enclosing scope is still known; only `run`'s call is left to the sweep.
+    let calls = pending_call_owners(&store, caller, "work");
+    assert_eq!(
+        calls.len(),
+        1,
+        "only the sibling call stays queued: {calls:?}"
+    );
+    let sibling = &calls[0].1;
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    // `unrelated`'s nested definition is a local of `unrelated`; `run` never
+    // sees it, so its own call reads the imported name.
+    assert_eq!(
+        call_target_files(&store, sibling),
+        vec![module],
+        "a sibling scope does not shadow the import: {sweep:?}"
+    );
+    assert_eq!(
+        sweep.import_bound, 1,
+        "the import decides the call: {sweep:?}"
+    );
+}
+
+#[test]
+fn sweep_keeps_a_call_pending_when_the_only_candidate_is_out_of_scope() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    let caller = index_source(
+        &store,
+        "caller.py",
+        concat!(
+            "def unrelated():\n",
+            "    def work(x, y=0):\n",
+            "        return 2\n",
+            "    return work(0)\n\n\n",
+            "def run():\n",
+            "    return work(0)\n",
+        ),
+    );
+
+    let calls = pending_call_owners(&store, caller, "work");
+    assert_eq!(
+        calls.len(),
+        1,
+        "only the sibling call stays queued: {calls:?}"
+    );
+    let sibling = &calls[0].1;
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    // Nothing in the workspace is named `work` outside `unrelated`, and `run`
+    // cannot see that local: the call waits instead of taking the sole hit.
+    assert!(
+        call_target_files(&store, sibling).is_empty(),
+        "an out-of-scope candidate is no binding: {sweep:?}"
+    );
+    assert_eq!(
+        sweep.arity_bound, 0,
+        "the count decides nothing either: {sweep:?}"
+    );
+    assert!(
+        store
+            .list_pending_refs(100, 0)
+            .expect("queue")
+            .refs
+            .iter()
+            .any(|queued| queued.file_id == caller.get()
+                && queued.reference.ref_name == "work"
+                && queued.reference.receiver_name.is_none()),
+        "the call stays queued"
     );
 }
 

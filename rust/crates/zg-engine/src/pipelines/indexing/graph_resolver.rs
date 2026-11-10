@@ -397,6 +397,7 @@ fn classify_names(
         // as a second class declares it. Defer to a later sweep instead.
         return Ok(Outcome::Deferred);
     }
+    let visible = visible_scopes(snapshot, &stored.reference.owner_id);
     if let [hit] = hits.as_slice() {
         if hit.file_id != stored.file_id {
             return Ok(Outcome::Resolved {
@@ -410,18 +411,22 @@ fn classify_names(
         }
         // Bare name, same file, single hit: the in-file symbol table skips
         // declaration entities, so a pending bare call can only mean this
-        // one indexed location.
-        return Ok(Outcome::Resolved {
-            resolution: Resolution {
-                ref_id: stored.id,
-                target_id: hit.entity_id.clone(),
-                provenance: EdgeProvenance::FileScoped,
-            },
-            rule: Rule::Unique,
-        });
+        // one indexed location — provided the caller can see it. A definition
+        // nested in another scope is a local there, and file membership alone
+        // never makes it the caller's binding.
+        if declares_in(hit, &visible) {
+            return Ok(Outcome::Resolved {
+                resolution: Resolution {
+                    ref_id: stored.id,
+                    target_id: hit.entity_id.clone(),
+                    provenance: EdgeProvenance::FileScoped,
+                },
+                rule: Rule::Unique,
+            });
+        }
     }
     if hits.len() > 1 {
-        if let Some(outcome) = resolve_lexical_binding(snapshot, stored, &hits) {
+        if let Some(outcome) = resolve_lexical_binding(snapshot, stored, &hits, &visible) {
             return Ok(outcome);
         }
         if let Some(resolution) =
@@ -641,6 +646,7 @@ fn resolve_lexical_binding(
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
     hits: &[NameIndexEntry],
+    visible: &HashSet<&str>,
 ) -> Option<Outcome> {
     if stored.reference.receiver_name.is_some()
         || !matches!(
@@ -650,9 +656,13 @@ fn resolve_lexical_binding(
     {
         return None;
     }
+    // File membership is not visibility: a definition nested in another
+    // function is a local there, and a call outside it reads its module or
+    // import binding instead. Only the caller's own scope chain decides.
     let lexical: Vec<&NameIndexEntry> = hits
         .iter()
         .filter(|hit| hit.file_id == stored.file_id && shadows_import(snapshot, hit))
+        .filter(|hit| declares_in(hit, visible))
         .collect();
     match lexical.as_slice() {
         [] => None,
@@ -764,6 +774,35 @@ fn resolve_import_bound(
         });
     }
     None
+}
+
+/// The scopes a bare name inside `owner` can read: the module scope (the empty
+/// prefix) plus every enclosing scope of the caller, its own included. A
+/// reference the file node owns sees the module alone.
+fn visible_scopes<'a>(snapshot: &'a ResolutionSnapshot, owner_id: &str) -> HashSet<&'a str> {
+    let mut scopes = HashSet::from([""]);
+    let Some(record) = snapshot.entity_record(owner_id) else {
+        return scopes;
+    };
+    let mut scope = record.qualified_name.as_str();
+    loop {
+        scopes.insert(scope);
+        match scope.rsplit_once("::") {
+            Some((parent, _)) => scope = parent,
+            None => break,
+        }
+    }
+    scopes
+}
+
+/// Whether a candidate's declaring scope is one the caller can see. A
+/// qualified name without an owner is a module binding, which every caller
+/// in that module reads.
+fn declares_in(hit: &NameIndexEntry, visible: &HashSet<&str>) -> bool {
+    match hit.qualified_name.rsplit_once("::") {
+        Some((owner, _)) => visible.contains(owner),
+        None => true,
+    }
 }
 
 /// Whether a same-file candidate is a lexical binding of the referenced
