@@ -11,6 +11,7 @@ import {
   markdownVersionComparison,
 } from "../expansion/compare.mjs";
 import { QUALITY_METRICS } from "../reports/ci.mjs";
+import { QA_ENTITY_METRICS } from "../reports/zg.mjs";
 
 const baseSha = "a".repeat(40),
   headSha = "b".repeat(40),
@@ -102,6 +103,45 @@ test("incomplete, mixed-harness, wrong-commit and mixed-model results are reject
       compareCombinedResults(before, result(headSha), metadata),
     );
   }
+});
+
+test("Entity diagnostics retain each version's scored question counts", () => {
+  const before = result(baseSha);
+  const after = result(headSha);
+  for (const [run, recall, count] of [
+    [before, 0.125, 13],
+    [after, 0.25, 14],
+  ]) {
+    const entity = Object.fromEntries(
+      QA_ENTITY_METRICS.map(([, metric]) => [metric, 0]),
+    );
+    entity.metric_task_counts = Object.fromEntries(
+      QA_ENTITY_METRICS.map(([, metric]) => [metric, 17]),
+    );
+    entity.recall_at_5 = null;
+    entity.metric_task_counts.recall_at_5 = 0;
+    entity.recall_at_10 = recall;
+    entity.metric_task_counts.recall_at_10 = count;
+    run.sweqa.rows[0].qa_retrieval = {
+      diagnostic: { eligible_tasks: 17, entity },
+    };
+  }
+  const comparison = compareCombinedResults(before, after, metadata);
+  assert.equal(
+    comparison.rows.filter((row) => row.entity_diagnostic).length,
+    1,
+  );
+  const markdown = markdownVersionComparison(comparison);
+  assert.match(markdown, /SWE-QA20 Entity retrieval · Diagnostic/);
+  assert.match(markdown, /Recall@1 \| Recall@5 \| Recall@10/);
+  assert.match(
+    markdown,
+    /\| hybrid \| Baseline \|.*0\.0000 \(n=17\/17\) \| N\/A \(n=0\/17\) \| 0\.1250 \(n=13\/17\)/,
+  );
+  assert.match(
+    markdown,
+    /\| hybrid \| Candidate \|.*0\.0000 \(n=17\/17\) \| N\/A \(n=0\/17\) \| 0\.2500 \(n=14\/17\)/,
+  );
 });
 
 test("raw-report comparison rejects missing evidence and substituted SWE-QA versions", async () => {

@@ -3,6 +3,7 @@ import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { markdownVersionComparison } from "../../benchmarks/zg-retrieval/expansion/compare.mjs";
 import { QUALITY_METRICS } from "../../benchmarks/zg-retrieval/reports/ci.mjs";
+import { QA_ENTITY_METRICS } from "../../benchmarks/zg-retrieval/reports/zg.mjs";
 import { PILOT_SUITES } from "../../benchmarks/zg-retrieval/expansion/config.mjs";
 
 const marker = "<!-- zg-retrieval-pr -->";
@@ -81,6 +82,33 @@ function currentRequest(pr, request) {
   );
 }
 
+function validateEntityDiagnostic(group) {
+  if (group === null) return null;
+  const eligible = group?.eligible_tasks;
+  assert.ok(
+    Number.isSafeInteger(eligible) && eligible >= 0 && eligible <= 20,
+    "Invalid Entity diagnostic eligible count",
+  );
+  const entity = { metric_task_counts: {} };
+  for (const [, metric] of QA_ENTITY_METRICS) {
+    const count = group.entity?.metric_task_counts?.[metric];
+    const score = group.entity?.[metric];
+    assert.ok(
+      Number.isSafeInteger(count) && count >= 0 && count <= eligible,
+      "Invalid Entity diagnostic scored count",
+    );
+    assert.ok(
+      count === 0
+        ? score === null
+        : Number.isFinite(score) && score >= 0 && score <= 1,
+      "Invalid Entity diagnostic score",
+    );
+    entity[metric] = score;
+    entity.metric_task_counts[metric] = count;
+  }
+  return { eligible_tasks: eligible, entity };
+}
+
 export function validateComparison(report, request) {
   assert.equal(report.schema_version, 1, "Unsupported comparison schema");
   assert.equal(
@@ -143,7 +171,14 @@ export function validateComparison(report, request) {
           delta,
         };
       }
-      rows.push({ suite, mode, model, metrics });
+      const validated = { suite, mode, model, metrics };
+      if (suite === "sweqa" && row.entity_diagnostic !== undefined) {
+        validated.entity_diagnostic = {
+          baseline: validateEntityDiagnostic(row.entity_diagnostic?.baseline),
+          candidate: validateEntityDiagnostic(row.entity_diagnostic?.candidate),
+        };
+      }
+      rows.push(validated);
     }
   }
   // Whitelist data passed to the trusted renderer; artifact Markdown and URLs

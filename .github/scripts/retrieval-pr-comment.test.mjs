@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { publish, validateComparison } from "./retrieval-pr-comment.mjs";
+import { QA_ENTITY_METRICS } from "../../benchmarks/zg-retrieval/reports/zg.mjs";
 
 const base = "a".repeat(40),
   head = "b".repeat(40);
@@ -193,6 +194,39 @@ test("later results and failed-job reruns update one bot comment", async (t) => 
     ["create", "update"],
   );
   assert.match(x.messages()[1][1].body, /zg-retrieval-run:123:2/);
+});
+
+test("the publisher renders validated Entity diagnostics with separate counts", async (t) => {
+  const x = await fixture(t);
+  const withDiagnostics = structuredClone(report);
+  const group = (count) => ({
+    eligible_tasks: 17,
+    entity: {
+      ...Object.fromEntries(
+        QA_ENTITY_METRICS.map(([, metric]) => [metric, 0.5]),
+      ),
+      metric_task_counts: Object.fromEntries(
+        QA_ENTITY_METRICS.map(([, metric]) => [metric, count]),
+      ),
+    },
+  });
+  withDiagnostics.rows[0].entity_diagnostic = {
+    baseline: group(13),
+    candidate: group(14),
+  };
+  await x.write("comparison/summary.json", withDiagnostics);
+  await publish(x);
+  const body = x.messages()[0][1].body;
+  assert.match(body, /SWE-QA20 Entity retrieval · Diagnostic/);
+  assert.match(body, /\| hybrid \| Baseline \| 0\.5000 \(n=13\/17\)/);
+  assert.match(body, /\| hybrid \| Candidate \| 0\.5000 \(n=14\/17\)/);
+
+  const { entity } = withDiagnostics.rows[0].entity_diagnostic.candidate;
+  entity.metric_task_counts.recall_at_10 = 18;
+  assert.throws(
+    () => validateComparison(withDiagnostics, request),
+    /Invalid Entity diagnostic scored count/,
+  );
 });
 
 test("user-copied and @zg-bench comment markers are never edited", async (t) => {

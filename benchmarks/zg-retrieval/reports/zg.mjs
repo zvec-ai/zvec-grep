@@ -2,7 +2,14 @@ import { ZG_MODES } from "./validation.mjs";
 
 const display = (value) => (Number.isFinite(value) ? value.toFixed(4) : "N/A");
 
-function qaMetricCell(level, metric, eligible) {
+export const QA_ENTITY_METRICS = [
+  ...[1, 5, 10].map((k) => [`Hit@${k}`, `hit_at_${k}`]),
+  ...[1, 5, 10].map((k) => [`Recall@${k}`, `recall_at_${k}`]),
+  ["MRR@10", "mrr_at_10"],
+  ["nDCG@10", "ndcg_at_10"],
+];
+
+export function qaMetricCell(level, metric, eligible) {
   if (eligible == null) return "N/A";
   if (eligible === 0) return "N/A (n=0/0)";
   const count = level?.metric_task_counts?.[metric];
@@ -27,16 +34,7 @@ export function qaRetrievalMarkdown(entries, expectedQuestions) {
       "QA File Recall",
       [1, 5, 10].map((k) => [`Recall@${k}`, `recall_at_${k}`]),
     ],
-    [
-      "entity",
-      "QA Entity retrieval",
-      [
-        ...[1, 5, 10].map((k) => [`Hit@${k}`, `hit_at_${k}`]),
-        ...[1, 5, 10].map((k) => [`Recall@${k}`, `recall_at_${k}`]),
-        ["MRR@10", "mrr_at_10"],
-        ["nDCG@10", "ndcg_at_10"],
-      ],
-    ],
+    ["entity", "QA Entity retrieval", QA_ENTITY_METRICS],
   ]) {
     lines.push(
       "",

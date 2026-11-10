@@ -8,6 +8,7 @@ import { buildCombined } from "./combined.mjs";
 import { PILOT_NAMES, PILOT_SUITES } from "./config.mjs";
 import { compareReports } from "../reports/compare.mjs";
 import { QUALITY_METRICS } from "../reports/ci.mjs";
+import { QA_ENTITY_METRICS, qaMetricCell } from "../reports/zg.mjs";
 
 const MODES = ["hybrid", "fts", "vector"];
 const identity = (repository, commit) => ({ repository, commit });
@@ -66,7 +67,22 @@ export function compareCombinedResults(baseline, candidate, metadata) {
         );
         metrics[metric] = { baseline: a, candidate: b, delta: b - a };
       }
-      rows.push({ suite: name, mode, model: before.model, metrics });
+      const row = { suite: name, mode, model: before.model, metrics };
+      if (name === "sweqa") {
+        const base = oldRow.qa_retrieval?.diagnostic;
+        const head = newRow.qa_retrieval?.diagnostic;
+        if (base || head) {
+          row.entity_diagnostic = {
+            baseline: base
+              ? { eligible_tasks: base.eligible_tasks, entity: base.entity }
+              : null,
+            candidate: head
+              ? { eligible_tasks: head.eligible_tasks, entity: head.entity }
+              : null,
+          };
+        }
+      }
+      rows.push(row);
     }
   }
   return {
@@ -147,6 +163,29 @@ export function markdownVersionComparison(result) {
       `| ${label} | ${row.mode} | ${QUALITY_METRICS.map((metric) => cell(row.metrics[metric])).join(" | ")} |`,
     );
   }
+  const entityRows = result.rows.filter((row) => row.entity_diagnostic);
+  if (entityRows.length) {
+    lines.push(
+      "",
+      "### SWE-QA20 Entity retrieval · Diagnostic",
+      "",
+      "These are diagnostic results. Each cell gives the score and n=scored/eligible questions for that metric. Scores weight each scored question equally after averaging its five calls. Baseline and candidate can have different scored questions, so the table reports each side separately.",
+      "",
+      `| Mode | Version | ${QA_ENTITY_METRICS.map(([label]) => label).join(" | ")} |`,
+      `| --- | --- | ${QA_ENTITY_METRICS.map(() => "---:").join(" | ")} |`,
+    );
+    for (const row of entityRows)
+      for (const [side, label] of [
+        ["baseline", "Baseline"],
+        ["candidate", "Candidate"],
+      ]) {
+        const group = row.entity_diagnostic[side];
+        const scores = QA_ENTITY_METRICS.map(([, metric]) =>
+          qaMetricCell(group?.entity, metric, group?.eligible_tasks),
+        );
+        lines.push(`| ${row.mode} | ${label} | ${scores.join(" | ")} |`);
+      }
+  }
   if (result.errors.length)
     lines.push(
       "",
@@ -161,7 +200,7 @@ export function markdownVersionComparison(result) {
     );
   lines.push(
     "",
-    "SWE-QA nDCG uses repository macro averaging; the other suites use query means. Suites are reported separately. Full base/head reports and per-call evidence are available in the run artifacts.",
+    "SWE-QA20 File nDCG uses repository macro averaging; the other suites use query means. Full base/head reports and per-call evidence are available in the run artifacts.",
   );
   if (result.run_url)
     lines.push("", `[View run and artifacts](${result.run_url})`);
