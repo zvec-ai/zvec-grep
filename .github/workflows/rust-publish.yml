@@ -72,7 +72,7 @@ jobs:
           import { appendFileSync } from 'node:fs';
           const platform = process.env.BUILD_PLATFORM;
           const platforms = [
-            { target: 'darwin-arm64', runner: 'macos-14', gpu_runner: '' },
+            { target: 'darwin-arm64', runner: 'macos-15', gpu_runner: '' },
             { target: 'darwin-x64', runner: 'macos-15-intel', gpu_runner: '' },
             { target: 'linux-x64-gnu', runner: 'ubuntu-24.04', gpu_runner: 'gpu-linux-t4' },
             { target: 'linux-arm64-gnu', runner: 'ubuntu-24.04-arm', gpu_runner: '' },
@@ -389,7 +389,7 @@ jobs:
           - target: darwin-x64
             runner: macos-15-intel
           - target: darwin-arm64
-            runner: macos-14
+            runner: macos-15
           - target: linux-x64-gnu
             runner: ubuntu-24.04
           - target: linux-arm64-gnu

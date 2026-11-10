@@ -392,6 +392,13 @@ test("Linux package CPU validation uses a clean glibc 2.28 image rather than the
   }
 });
 
+test("macOS ARM64 release validation uses a supported runner", async () => {
+  const workflow = await readFile(new URL("../../.github/workflows/rust-publish.yml", import.meta.url), "utf8");
+  assert.match(workflow, /target: 'darwin-arm64', runner: 'macos-15'/);
+  assert.match(workflow, /target: darwin-arm64\s+runner: macos-15\s/);
+  assert.doesNotMatch(workflow, /macos-14/);
+});
+
 test("Windows ARM64 publishing requires its CPU SDK without source compiler overrides", async () => {
   const entry = selectPlatform(manifest, "win32", "arm64");
   assert.equal(resolveBuildVariant(entry, false,
