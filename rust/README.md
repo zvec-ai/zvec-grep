@@ -220,16 +220,16 @@ cargo test --locked -p zg-engine --lib models::artifacts::downloader::tests::liv
 ```
 
 Each suite dynamically enumerates every local catalog model and fully downloads
-its pinned artifacts from the selected source (Hugging Face or ModelScope), using
-a fresh temporary cache for every model/source pair and verifying artifact
-integrity. Remote API models are excluded. The current catalog has 11 local
-models and 34 artifacts, requiring about 2.48 GB per source (4.96 GB combined).
+its pinned artifacts when configured for the selected source (Hugging Face or
+ModelScope), using a fresh temporary cache for every model/source pair and
+verifying artifact integrity. Remote API models are excluded. Bekko is checked
+only from Hugging Face because it has no configured ModelScope mirror.
 The suites require live network access, never fall back to the other source, and
 do not run inference. They emit a catalog manifest and a JSON result for every
-model/source pair. The normal Linux CPU CI job runs both suites using its existing
-test binary, allows up to one hour, and requires passing results for every
-model/source pair in both catalog manifests; CUDA and Windows-only manual runs
-skip this gate.
+configured model/source pair. The normal Linux CPU CI job runs both suites using
+its existing test binary, allows up to one hour, and requires passing results for
+every configured model/source pair in both catalog manifests; CUDA and
+Windows-only manual runs skip this gate.
 
 To recheck one model from one source after a failure, set
 `ZVEC_GREP_TEST_DOWNLOAD_MODEL` to its local catalog reference and select the exact
