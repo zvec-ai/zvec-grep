@@ -531,15 +531,15 @@ jobs:
           assert len(binaries) == 1, f"Expected one zg-engine test executable: {binaries}"
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"path={binaries[0]}\n")
-      - name: Verify every configured local model source independently
+      - name: Verify every local model from its configured live sources independently
         if: ${{ !matrix.cuda && matrix.platform == 'linux' }}
         shell: python
         env:
           MODEL_TEST_BINARY: ${{ steps.model-test.outputs.path }}
         run: |
           import json, os, pathlib, re, subprocess
-          # Each suite downloads every local model configured for that source
-          # into its own fresh temporary cache, without using a fallback.
+          # Each suite downloads every model configured for its selected source
+          # into its own fresh temporary cache, retaining the full local catalog.
           # Reuse the CPU test executable; no inference or extra build is needed.
           logs = pathlib.Path("model-logs")
           logs.mkdir(exist_ok=True)
@@ -553,7 +553,7 @@ jobs:
               output = log_path.read_text(encoding="utf-8", errors="replace")
               if not re.search(r"test result: ok\. 2 passed; 0 failed; 0 ignored;", output):
                   raise RuntimeError("Expected exactly two passing live-source suites, with none skipped")
-              catalogs, results = {}, {}
+              catalogs, supported, results = {}, {}, {}
               for kind, payload in re.findall(r"LIVE_SOURCE_(CATALOG|RESULT)=(\{[^\n]+\})", output):
                   record = json.loads(payload)
                   source = record["source"]
@@ -564,6 +564,11 @@ jobs:
                       if not models or len(models) != len(set(models)):
                           raise RuntimeError(f"Empty or duplicate local model catalog: {source}")
                       catalogs[source] = set(models)
+                      configured = record["supported_models"]
+                      if (not configured or len(configured) != len(set(configured))
+                              or not set(configured) <= catalogs[source]):
+                          raise RuntimeError(f"Invalid configured model catalog: {source}")
+                      supported[source] = set(configured)
                   else:
                       case = (source, record["model"])
                       if case in results or record["status"] != "passed":
@@ -571,9 +576,11 @@ jobs:
                       results[case] = record
               if set(catalogs) != {"huggingface", "modelscope"}:
                   raise RuntimeError(f"Missing or unexpected live-source catalogs: {catalogs}")
-              if not catalogs["modelscope"].issubset(catalogs["huggingface"]):
-                  raise RuntimeError("ModelScope catalog contains an unknown local model")
-              expected = {(source, model) for source, models in catalogs.items() for model in models}
+              if catalogs["huggingface"] != catalogs["modelscope"]:
+                  raise RuntimeError("Live-source suites must cover the same complete local catalog")
+              if supported["huggingface"] != catalogs["huggingface"]:
+                  raise RuntimeError("Every local model must be checked from Hugging Face")
+              expected = {(source, model) for source, models in supported.items() for model in models}
               if set(results) != expected:
                   raise RuntimeError(f"Live-source coverage mismatch: missing={expected - set(results)}, "
                                      f"unexpected={set(results) - expected}")
