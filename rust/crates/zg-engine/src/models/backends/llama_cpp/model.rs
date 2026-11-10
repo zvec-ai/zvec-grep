@@ -218,24 +218,24 @@ impl LlamaCppEmbeddingModel {
             [artifact.path.to_owned()],
         );
         reporter.start();
-        let model_scope = self
-            .model_cache_dir
-            .join("modelscope")
-            .join("llama-cpp")
-            .join(self.entry.download.model_scope.repo.replace('/', "--"))
-            .join(self.entry.download.model_scope.revision);
+        let sources = std::iter::once(
+            ArtifactSource::hugging_face(
+                self.entry.download.hugging_face,
+                self.model_cache_dir.clone(),
+            )
+            .with_local_path(artifact.path, self.entry.cache_file),
+        )
+        .chain(
+            self.entry
+                .download
+                .fallback_source(&self.model_cache_dir, "llama-cpp"),
+        )
+        .collect();
         let resolved = resolve_model_artifacts(
             &self.client,
             ResolveArtifacts {
                 model: self.entry.reference,
-                sources: [
-                    ArtifactSource::hugging_face(
-                        self.entry.download.hugging_face,
-                        self.model_cache_dir.clone(),
-                    )
-                    .with_local_path(artifact.path, self.entry.cache_file),
-                    ArtifactSource::model_scope(self.entry.download.model_scope, model_scope),
-                ],
+                sources,
                 artifacts: self.entry.download.artifacts,
                 reporter: &reporter,
                 signal,

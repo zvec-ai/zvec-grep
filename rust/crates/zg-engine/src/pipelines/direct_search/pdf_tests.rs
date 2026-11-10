@@ -161,6 +161,11 @@ async fn pdf_rg_searches_canonical_entities_and_merges_cross_page_matches() {
     assert_eq!(result.items.len(), 1);
     let item = &result.items[0];
     assert_eq!(item.relative_path, Path::new("manual.pdf"));
+    assert_eq!(item.pdf_boxes.len(), 3);
+    let wire = serde_json::to_string(item).expect("serialize context");
+    let restored: crate::api::context::result::ContextItem =
+        serde_json::from_str(&wire).expect("deserialize context");
+    assert_eq!(restored.pdf_boxes, item.pdf_boxes);
     assert!(matches!(&item.range, ContentRange::Pdf { pages, .. } if pages == &[2,3]));
     assert_eq!(item.match_ranges.len(), 2);
     assert!(item.content.contains("中😀 Recovery wait is 10 minutes."));

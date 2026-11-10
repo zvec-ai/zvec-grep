@@ -75,6 +75,10 @@ pub(crate) trait IndexEmbeddingRuntime: Send + Sync {
 
     fn concurrency_defaults(&self) -> EmbeddingConcurrencyDefaults;
 
+    fn batch_concurrency(&self, requested: Option<usize>) -> Option<usize> {
+        crate::models::batch_concurrency(&self.info().model().reference(), requested)
+    }
+
     async fn prepare(
         &self,
         options: EmbeddingPrepareOptions,
@@ -91,6 +95,9 @@ pub(crate) trait IndexEmbeddingRuntime: Send + Sync {
 
 #[async_trait]
 impl IndexEmbeddingRuntime for ModelRuntimeLease {
+    fn batch_concurrency(&self, requested: Option<usize>) -> Option<usize> {
+        self.index_batch_concurrency(requested)
+    }
     fn info(&self) -> &EmbeddingModelInfo {
         self.info()
     }
@@ -1260,7 +1267,7 @@ fn append_contents(output: &mut String, contents: &[Content]) {
     }
 }
 
-fn bind_entities(
+pub(super) fn bind_entities(
     file_id: FileId,
     extracted: Vec<ExtractedEntity>,
 ) -> Result<Vec<Entity>, EngineError> {
@@ -1712,7 +1719,7 @@ fn resolve_index_batch_policy(
         return resolve_embedding_policy(requested, model.concurrency_defaults());
     }
     resolve_embedding_policy(
-        crate::models::batch_concurrency(&model.info().model().reference(), requested),
+        model.batch_concurrency(requested),
         model.concurrency_defaults(),
     )
 }
@@ -2318,7 +2325,10 @@ fn task_control(signal: Option<CancellationToken>) -> TaskControl {
     TaskControl::new(signal.unwrap_or_default())
 }
 
-fn throw_if_cancelled(signal: Option<&CancellationToken>) -> Result<(), EngineError> {
+/// Reports the pass's cancellation as the engine's cancellation error. Every
+/// phase that can run for a while — extraction batches, embedding queues, and
+/// the cross-file resolution sweep — calls this at its own boundaries.
+pub(crate) fn throw_if_cancelled(signal: Option<&CancellationToken>) -> Result<(), EngineError> {
     if signal.is_some_and(CancellationToken::is_cancelled) {
         Err(EngineError::cancelled("indexing was cancelled"))
     } else {

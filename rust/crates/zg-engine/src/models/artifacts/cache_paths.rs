@@ -8,6 +8,7 @@ pub(crate) enum LocalModelBackend {
     LlamaCpp,
     Model2Vec,
     Transformers,
+    Bekko,
 }
 
 pub(crate) fn default_model_cache(backend: LocalModelBackend) -> PathBuf {
@@ -30,13 +31,18 @@ pub(super) fn default_model_cache_from_env(
                         home.push(variable("HOMEPATH")?);
                         Some(home)
                     }
-                    LocalModelBackend::Transformers => None,
+                    LocalModelBackend::Transformers | LocalModelBackend::Bekko => None,
                 })
             } else {
                 variable("HOME")
             };
             home.map(PathBuf::from).map(|home| {
-                if windows && backend == LocalModelBackend::Transformers {
+                if windows
+                    && matches!(
+                        backend,
+                        LocalModelBackend::Transformers | LocalModelBackend::Bekko
+                    )
+                {
                     // Preserve the existing Windows Transformers download location.
                     home
                 } else {
@@ -52,10 +58,11 @@ pub(super) fn default_model_cache_from_env(
 mod tests {
     use super::*;
 
-    const BACKENDS: [LocalModelBackend; 3] = [
+    const BACKENDS: [LocalModelBackend; 4] = [
         LocalModelBackend::LlamaCpp,
         LocalModelBackend::Model2Vec,
         LocalModelBackend::Transformers,
+        LocalModelBackend::Bekko,
     ];
 
     #[test]
@@ -67,7 +74,12 @@ mod tests {
                 });
                 assert_eq!(
                     default,
-                    if windows && backend == LocalModelBackend::Transformers {
+                    if windows
+                        && matches!(
+                            backend,
+                            LocalModelBackend::Transformers | LocalModelBackend::Bekko
+                        )
+                    {
                         PathBuf::from("/profile/models")
                     } else {
                         PathBuf::from("/profile/.zvec-grep/models")

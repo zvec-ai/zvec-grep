@@ -4,6 +4,7 @@ mod compute;
 mod concurrency;
 mod manager;
 pub(crate) mod onnx;
+pub(crate) mod ort_config;
 
 pub(super) use compute::ModelComputeRuntime;
 pub(super) use concurrency::LOCAL_CONCURRENCY_CAP;

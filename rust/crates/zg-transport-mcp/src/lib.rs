@@ -93,7 +93,7 @@ macro_rules! search_routing_rules {
         "- Preserve the question's concepts, relationships, and constraints from the user request and established context in semantic queries. Treat inferred names as supplemental hypotheses, not replacements for or constraints on the stated intent.\n",
         "- `query` creates one primary hybrid FTS-plus-vector group; `queries` creates one or more primary hybrid groups; `fts` and `vector` add supplemental lexical-only or semantic-only route groups. These are retrieval routes, not hard constraints. Without `fuse`, each query group keeps its ranked results; set `fuse: true` to collapse every group into one ranked search plan.\n",
         "- For a fused mixed search, use arguments such as {\"root\":\"/absolute/workspace\",\"query\":\"how are results ranked and fused\",\"fts\":[\"RRF\",\"score\"],\"fuse\":true}.\n",
-        "- Search results include bounded source snippets by default. Set preview: \"full\" for all available content of each retrieved item; this does not retrieve the entire file or change ranking. Treat sufficient returned content as already-read evidence, and open only the cited file or range when a required detail falls outside it.\n",
+        "- Search results include bounded source snippets by default. Set preview: \"full\" for each complete stored entity; this does not expand to the entire file or change ranking. Treat sufficient returned content as already-read evidence, and open only the cited file or range when a required detail falls outside it.\n",
         "- If semantic retrieval remains irrelevant, fall back to ", $exact, ".\n",
         "- Stop searching once the available evidence is sufficient for the requested task. Continue only to resolve a material gap or ambiguity; do not repeat similar searches or broaden the investigation merely to reconfirm what is already established.\n",
         "- Do not launch a sub-agent solely to locate workspace material.\n",
@@ -440,7 +440,7 @@ impl ZvecGrepMcpServer {
 
     #[tool(
         name = "zvec_grep_search",
-        description = "Search a workspace index for semantic, relational, cross-file, or multi-hop evidence such as architecture, call chains, dependencies, lifecycle, data or control flow, design rationale, and comparisons. Use it when exact lookup alone cannot answer a workspace-grounded question. Results start with freshness and any global index diagnostics, followed by CLI-formatted bounded source snippets; set preview: \"full\" to return all available source content of each retrieved item without changing retrieval or ranking. Treat sufficient returned content as already-read evidence without a status preflight. Use native Grep or rg instead when exact lookup alone is sufficient. A missing index can request user model selection and authorization; accepted setup starts a background build and returns indexing status. Retry after completion.",
+        description = "Search a workspace index for semantic, relational, cross-file, or multi-hop evidence such as architecture, call chains, dependencies, lifecycle, data or control flow, design rationale, and comparisons. Use it when exact lookup alone cannot answer a workspace-grounded question. Results start with freshness and any global index diagnostics, followed by CLI-formatted bounded source snippets; set preview: \"full\" to return each complete stored entity without changing retrieval or ranking. Treat sufficient returned content as already-read evidence without a status preflight. Use native Grep or rg instead when exact lookup alone is sufficient. A missing index can request user model selection and authorization; accepted setup starts a background build and returns indexing status. Retry after completion.",
         annotations(
             title = "Search with zvec-grep",
             read_only_hint = false,
@@ -876,7 +876,7 @@ pub struct SearchInput {
     /// Maximum returned items per query group or fused plan.
     #[schemars(range(min = 1, max = 50), extend("type" = "integer"))]
     pub limit: Option<usize>,
-    /// CLI source display: short bounds snippets; full preserves all available retrieved source content without changing retrieval or ranking. Freshness precedes results.
+    /// CLI source display: short bounds snippets; full returns each complete stored entity without changing retrieval or ranking. Freshness precedes results.
     #[serde(default)]
     pub preview: SearchPreview,
     /// Ordered path glob rules; later matching rules take precedence.
@@ -895,8 +895,8 @@ pub struct SearchInput {
     pub categories: Option<PathListInput>,
     /// Exclude matching file-name categories, taking precedence over categories.
     pub excluded_categories: Option<PathListInput>,
-    /// Index-only refresh budget; query-vector inference keeps its own defaults.
-    /// Controls llama.cpp contexts or concurrent batches/requests for other backends.
+    /// Index-only refresh concurrency. ORT direct mode sets the session count. In server mode, limits this operation's session use within the startup-configured pool; omitted uses pool capacity. Queries share the pool with their own limit.
+    /// Must be positive. ORT caps requests above pool capacity; it never resizes server pools or changes their shared CPU thread budget.
     #[schemars(range(min = 1), extend("type" = "integer"))]
     pub embedding_concurrency: Option<usize>,
     /// Collapse all query groups into one ranked plan.
@@ -981,8 +981,8 @@ pub struct IndexInput {
     #[serde(rename = "follow", alias = "followSymlinks")]
     #[schemars(extend("type" = "boolean"))]
     pub follow_symlinks: Option<bool>,
-    /// Index-only execution budget: llama.cpp contexts, local batches, or remote requests.
-    /// llama.cpp and Transformers limits are capped at eight.
+    /// Index-only concurrency: ORT sessions, llama.cpp contexts, or remote requests. ORT direct mode sets the session count. In server mode, limits this operation's session use within the startup-configured pool; omitted uses pool capacity.
+    /// Must be positive. ORT caps requests above pool capacity; it never resizes server pools or changes their shared CPU thread budget. llama.cpp is capped at eight.
     #[schemars(range(min = 1), extend("type" = "integer"))]
     pub embedding_concurrency: Option<usize>,
     /// Include bounded skipped-file diagnostics after completion.
@@ -1661,14 +1661,14 @@ impl RelationshipInput {
 impl SearchInput {
     fn into_request(self) -> Result<ContextOptions, String> {
         let root = absolute_root(&self.root)?;
+        if self.embedding_concurrency == Some(0) {
+            return Err("embeddingConcurrency must be greater than zero".to_owned());
+        }
         if self
             .limit
             .is_some_and(|limit| limit == 0 || limit > MAX_SEARCH_LIMIT)
         {
             return Err(format!("limit must be between 1 and {MAX_SEARCH_LIMIT}"));
-        }
-        if self.embedding_concurrency == Some(0) {
-            return Err("embeddingConcurrency must be greater than zero".to_owned());
         }
         if self.symbol_types.len() > 7 {
             return Err("symbolTypes accepts at most 7 values".to_owned());
@@ -1768,6 +1768,9 @@ impl From<DeviceInput> for Device {
 impl IndexInput {
     fn into_request(self) -> Result<IndexToolRequest, String> {
         let root = absolute_root(&self.root)?;
+        if self.embedding_concurrency == Some(0) {
+            return Err("embeddingConcurrency must be greater than zero".to_owned());
+        }
         if self.drop.unwrap_or(false) {
             if self.has_index_options() {
                 return Err(
@@ -1782,9 +1785,6 @@ impl IndexInput {
         }
         if let Some(api_key) = &self.api_key {
             validate_text("apiKey", api_key, 1, 8_192)?;
-        }
-        if self.embedding_concurrency == Some(0) {
-            return Err("embeddingConcurrency must be greater than zero".to_owned());
         }
         if let Some(endpoint) = &self.endpoint {
             validate_text("endpoint", endpoint, 1, 2_048)?;
@@ -3364,6 +3364,27 @@ mod tests {
         let typed: SearchInput = serde_json::from_value(arguments).expect("typed arguments");
         assert_eq!(typed.limit, Some(15));
         assert_eq!(typed.fuse, Some(true));
+    }
+
+    #[test]
+    fn zero_embedding_concurrency_is_rejected_at_the_transport_boundary() {
+        let error = serde_json::from_value::<SearchInput>(serde_json::json!({
+            "root": test_root(), "query": "needle", "embeddingConcurrency": 0,
+        }))
+        .expect("integer input")
+        .into_request()
+        .expect_err("positive concurrency");
+        assert_eq!(error, "embeddingConcurrency must be greater than zero");
+        for reference in ["local/all-minilm-l6-v2", "local/potion-code-16m-v2"] {
+            let error = serde_json::from_value::<IndexInput>(serde_json::json!({
+                "root": test_root(), "embedding": reference, "embeddingConcurrency": 0,
+            }))
+            .expect("integer input")
+            .into_request()
+            .err()
+            .expect("positive concurrency");
+            assert_eq!(error, "embeddingConcurrency must be greater than zero");
+        }
     }
 
     #[test]

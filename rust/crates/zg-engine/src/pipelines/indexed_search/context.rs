@@ -294,6 +294,10 @@ fn search_plan_to_context_items(
                     hit.entity.metadata(),
                 ),
                 content_windows: Vec::new(),
+                pdf_boxes: match hit.entity.source_range() {
+                    Range::Pdf(source) => crate::api::context::result::PdfBox::from_source(&source),
+                    _ => Vec::new(),
+                },
                 content_role: Some(target.content_role),
                 status: file_freshness_status(workspace_root, &hit.file),
                 score: Some(hit.score),
@@ -565,29 +569,14 @@ fn context_item_target(hit: &SearchHit) -> Result<ContextItemTarget, EngineError
                 )),
             };
             let source = to_source(local).map_err(invalid_fragment)?;
-            // Overlap may put fragment boundaries inside a token. Present complete
-            // boundary lines from the indexed entity, retaining the exact evidence
-            // coordinates separately. Empty spans must stay empty.
-            let (display_start, display_end) = if start == end {
-                (start, end)
-            } else {
-                (
-                    lines[local.start_line() - 1],
-                    if local.end_byte_column() == 0 {
-                        end
-                    } else {
-                        lines.get(local.end_line()).copied().unwrap_or(text.len())
-                    },
-                )
-            };
-            let display =
-                crate::utils::text_range_from_offsets(text, &lines, display_start, display_end)
-                    .map_err(invalid_fragment)?;
-            let content_range = to_source(display).map_err(invalid_fragment)?;
-            let content = crate::utils::slice_text(text, display_start, display_end)
+            // Fragments locate search evidence, not the returned content boundary.
+            // Keep the indexed entity intact so full previews can display it and
+            // bounded previews can select context around the exact evidence range.
+            let whole = crate::utils::text_range_from_offsets(text, &lines, 0, text.len())
                 .map_err(invalid_fragment)?;
+            let content_range = to_source(whole).map_err(invalid_fragment)?;
             (
-                content.to_owned(),
+                text.clone(),
                 Range::Text(content_range).into(),
                 Some(Range::Text(source).into()),
             )
@@ -791,7 +780,7 @@ mod tests {
         clippy::too_many_lines,
         reason = "End-to-end assertions for fragment and entity boundaries"
     )]
-    fn best_fragment_preserves_evidence_and_expands_display_within_entity() {
+    fn best_fragment_preserves_evidence_and_returns_the_complete_entity() {
         use crate::{
             domain::{
                 ByteRange, Content, Entity, EntityFragment, EntityId, FileId, FileIndexStatus,
@@ -807,9 +796,6 @@ mod tests {
         let fragment_range = Range::Byte(ByteRange::new(1, 12).expect("ordered byte offsets"));
         let fragment_source_range = Range::Text(
             TextRange::from_coordinates(10, 21, 2, 3, 3, 2).expect("fragment source range"),
-        );
-        let display_range = Range::Text(
-            TextRange::from_coordinates(9, 25, 2, 4, 2, 0).expect("display source range"),
         );
         let content = Content::Text(source.into());
         let entity_id = EntityId::new(file_id, &content, &source_range).expect("entity id");
@@ -853,12 +839,12 @@ mod tests {
         };
         let target = super::context_item_target(&hit).expect("fragment content");
         assert_eq!(target.content_role, ContextContentRole::Source);
-        assert_eq!(target.content, "A中😀\r\nβeta\n");
+        assert_eq!(target.content, source);
         assert_eq!(
             target.excerpt_range,
             Some(fragment_source_range.clone().into())
         );
-        assert_eq!(target.content_range, display_range.clone().into());
+        assert_eq!(target.content_range, source_range.clone().into());
         assert_eq!(hit.entity.content(), &Content::Text(source.into()));
         let search = SearchPlanResult {
             routes: Vec::new(),
@@ -881,8 +867,8 @@ mod tests {
             items[0].excerpt_range,
             Some(fragment_source_range.clone().into())
         );
-        assert_eq!(items[0].content_range, display_range.clone().into());
-        assert_eq!(items[0].content, "A中😀\r\nβeta\n");
+        assert_eq!(items[0].content_range, source_range.clone().into());
+        assert_eq!(items[0].content, source);
         hit.evidence.reverse();
         let target = super::context_item_target(&hit).expect("full content");
         assert_eq!(target.content, source);
@@ -966,8 +952,8 @@ mod tests {
             let start = usize::try_from(bytes.start_offset()).expect("start");
             let end = usize::try_from(bytes.end_offset()).expect("end");
             assert!(start > "# Heading\nprefix ".len());
-            assert_eq!(target.content, source["# Heading\n".len()..end]);
-            assert_eq!(target.content_range.start_line(), Some(2));
+            assert_eq!(target.content, source);
+            assert_eq!(target.content_range.start_line(), Some(1));
             assert_eq!(target.content_range.last_line(), Some(2));
             let matched = crate::utils::text_range_from_offsets(
                 &source,
@@ -1269,6 +1255,7 @@ mod tests {
             content: id.to_owned(),
             outline: None,
             content_windows: Vec::new(),
+            pdf_boxes: Vec::new(),
             content_role: Some(ContextContentRole::Source),
             status: ContextItemStatus::Fresh,
             score: Some(1.0),

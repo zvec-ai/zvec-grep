@@ -538,8 +538,8 @@ Result options:
   --mode <direct|server|auto>       Select indexed query transport (default: auto)
 
 Preview modes: none keeps one source line; short uses compact bounded source;
-full uses compact full source; detail adds metadata, outlines, and file grouping.
-Full previews do not retrieve an entire function or file. TTY affects only color.
+full shows each complete indexed entity; detail adds metadata, outlines, and file grouping.
+Full previews do not expand beyond the matched entity. TTY affects only color.
 Multi-query results start each nonempty group with its original query and position.
 Plain output uses -- query i/n: text --; colored output adds a dim separator rule.
 Auto colors terminal output and leaves pipes plain; NO_COLOR disables auto color.
@@ -616,7 +616,7 @@ Embedding options:
   --endpoint <url>                  Embedding provider endpoint
   --model-cache <path>              Local model cache directory
   --device <device>                 auto, cpu, metal, vulkan, cuda
-  --embedding-concurrency <n>        Positive embedding concurrency (index only)
+  --embedding-concurrency <n>        Embedding execution budget (index only)
   --allow-remote                    Allow Remote Embedding for this command only
 
 Explicit --device and --model-cache values are saved after successful indexing;
@@ -628,8 +628,16 @@ Index embedding concurrency:
   and refresh; query-vector inference keeps its own defaults. The CLI option
   is accepted only with --index and is never saved in workspace settings.
   llama.cpp: context limit capped at 8, with serialized batches; defaults to 1.
-  Transformers/ORT: in-flight batch limit capped at 8; defaults to 1. Native
-    sessions honor that budget; CoreML uses one physical session.
+  Transformers/ORT: C controls CPU/CUDA session count in direct mode (default 1),
+    capped by available hardware concurrency. Server pools use the startup
+    ZVEC_GREP_EMBEDDING_CONCURRENCY value; client C only limits execution within
+    the pool. Requests above capacity warn and are capped; omitted C uses capacity.
+    ZVEC_GREP_ORT_THREAD_BUDGET configures one global CPU intra-op pool shared by
+    all ORT models; defaults to half the available logical threads, rounded up.
+    Client C never resizes Server pools or changes their thread configuration.
+    Batch and prefetch limits are independent of the client's C.
+    Values must be positive; requests above server pool capacity are capped.
+  Bekko: CPU batch tasks; defaults to 1, capped at 8.
   Potion/model2vec: concurrent batch tasks; defaults to 2, with an independent
     CPU worker-pool capacity. No cap of 8 is applied.
   Remote: concurrent requests; adaptive scheduling may reduce the limit after
@@ -684,7 +692,7 @@ Environment:
   ZVEC_GREP_DEVICE       Local embedding device: auto, cpu, metal, vulkan, or cuda
 
 Index-only embedding concurrency:
-  ZVEC_GREP_EMBEDDING_CONCURRENCY  Positive index/update concurrency override
+  ZVEC_GREP_EMBEDDING_CONCURRENCY  Index/update execution concurrency override
   Applies to automatic indexing and refresh, never query-vector inference.
   Explicit CLI/API index settings take precedence. Invalid values warn and use
   automatic selection. Server mode reads the Server process environment;
@@ -871,6 +879,7 @@ Supported text embedding models (one per workspace):
   MODEL                               RUNTIME  INPUT       DIMS  TOKENS  BACKEND
   ----------------------------------  -------  ----------  ----  ------  ---------------
   local/all-minilm-l6-v2              local    text         384     256  transformers
+  local/bekko-256-int8                local    text         256   32768  bekko
   local/bge-small-en-v1.5             local    text         384     512  transformers
   local/embeddinggemma-300m           local    text         768    2048  llama-cpp
   local/gte-modernbert-base           local    text         768    8192  transformers
@@ -992,14 +1001,20 @@ Embedding:
   ZVEC_GREP_ENDPOINT     Remote Embedding endpoint fallback
   ZVEC_GREP_MODEL_CACHE  Local embedding model cache directory
   ZVEC_GREP_DEVICE       Local embedding device: auto, cpu, metal, vulkan, or cuda
+  ZVEC_GREP_ORT_THREAD_BUDGET  Global ORT CPU intra-op thread configuration
+    Default: half the available logical threads, rounded up; capped by hardware.
+    All model/device pools share it. It is not a total process thread limit.
+    Restart the Server after changing it.
 
-Index-only embedding concurrency:
-  ZVEC_GREP_EMBEDDING_CONCURRENCY  Positive index/update concurrency override
-  Applies to automatic indexing and refresh, never query-vector inference.
-  Precedence: explicit CLI/API index setting, this variable, legacy llama.cpp
-  index setting, then backend defaults. Invalid values warn and use defaults.
-  Server mode reads the Server process environment; restart it after changes.
-  These overrides are not persisted in workspace settings.
+Embedding concurrency:
+  ZVEC_GREP_EMBEDDING_CONCURRENCY  Index/update concurrency default
+    ORT: direct-mode session count, or fixed per-model/device Server pool capacity.
+    CPU/CUDA default to 1. Client index overrides only limit pool execution;
+    they cannot expand Server capacity. Queries share the same model pool.
+    Other backends retain their index-only defaults and override precedence.
+  CLI/API index setting, this variable, legacy llama.cpp index setting, then defaults.
+  Invalid values warn and use defaults. Restart the Server after environment changes.
+  These settings are not persisted in workspace configuration.
 
 Qwen credential aliases:
   DASHSCOPE_API_KEY  Qwen credential fallback after ZVEC_GREP_API_KEY
@@ -1108,6 +1123,7 @@ mod output_tests {
                 .collect::<Vec<_>>()
                 .join("\n"),
             content_windows: Vec::new(),
+            pdf_boxes: Vec::new(),
             content_role: Some(ContextContentRole::Source),
             status: ContextItemStatus::Fresh,
             score: Some(0.75),
@@ -1150,6 +1166,23 @@ mod output_tests {
             end_byte_offset: 100 + item.content.len(),
         };
         item.content_range = item.range.clone();
+        item.pdf_boxes = vec![
+            zg_engine::api::context::result::PdfBox {
+                page: 2,
+                block: 1,
+                bounds: [100_000, 200_000, 400_000, 250_000],
+            },
+            zg_engine::api::context::result::PdfBox {
+                page: 2,
+                block: 2,
+                bounds: [500_000, 100_000, 900_000, 150_000],
+            },
+            zg_engine::api::context::result::PdfBox {
+                page: 4,
+                block: 1,
+                bounds: [100_000, 100_000, 900_000, 200_000],
+            },
+        ];
         item.excerpt_range = Some(ContentRange::Pdf {
             pages: vec![4],
             start_byte_offset: 100 + item.content.find("line15").expect("anchor"),
@@ -1182,6 +1215,14 @@ mod output_tests {
             assert!(output.contains("manual.pdf"));
             assert!(!output.contains("manual.pdf:pages:"));
             if preview == PreviewMode::Detail {
+                assert!(output.contains("Boxes: [x0, y0, x1, y1]; top-left; normalized 0..1"));
+                assert!(
+                    output.contains(
+                        "page: 2  block: 1  box: [0.100000, 0.200000, 0.400000, 0.250000]"
+                    )
+                );
+                assert!(output.contains("page: 2  block: 2  box:"));
+                assert!(output.contains("page: 4  block: 1  box:"));
                 assert!(output.contains("Pages: 2,4\n"));
                 assert!(output.contains("Kind: text/native\n"));
                 assert!(output.contains("  Source:\n"));
@@ -1189,6 +1230,8 @@ mod output_tests {
                 assert!(!output.contains("Content:"));
                 assert!(!output.contains("Range:"));
             } else {
+                assert!(!output.contains("Boxes:"));
+                assert!(!output.contains("box:"));
                 assert!(output.contains("pages: 2,4"));
                 assert!(output.contains("kind: text/native\n"));
                 assert!(!output.contains("source:"));
@@ -1206,7 +1249,7 @@ mod output_tests {
     }
 
     #[test]
-    fn pdf_short_matches_markdown_fragment_preview() {
+    fn pdf_short_matches_markdown_context_around_evidence() {
         for newline in ["\n", "\r\n"] {
             let prefix = format!("# Heading{newline}outside before{newline}{newline}");
             let evidence_line = format!("{}needle{}", "前文😀 ".repeat(30), " text".repeat(45));
@@ -1232,14 +1275,14 @@ mod output_tests {
                     end_byte_offset: 100 + end,
                 });
                 let mut markdown = indexed_item();
-                markdown.content.clone_from(&body);
+                markdown.content.clone_from(&source);
                 markdown.content_range = ContentRange::Text {
-                    start_line: 4,
+                    start_line: 1,
                     end_line: 9,
-                    start_byte_offset: 100 + prefix.len(),
-                    end_byte_offset: 100 + boundary,
+                    start_byte_offset: 100,
+                    end_byte_offset: 100 + source.len(),
                     start_byte_column: 0,
-                    end_byte_column: 0,
+                    end_byte_column: "outside after".len(),
                 };
                 markdown.excerpt_range = Some(ContentRange::Text {
                     start_line: 4,
@@ -1278,10 +1321,11 @@ mod output_tests {
                 };
                 let actual = render(&pdf);
                 assert_eq!(actual, render(&markdown), "{newline:?}, end={end}");
-                assert!(!actual.iter().any(|line| line.contains("outside")));
-                assert_eq!(actual.len(), 5);
-                assert!(actual[0].contains("needle"));
-                assert_eq!(actual[4], "last selected line");
+                assert_eq!(actual.len(), 9);
+                assert_eq!(actual[0], "# Heading");
+                assert!(actual[3].contains("needle"));
+                assert_eq!(actual[7], "last selected line");
+                assert_eq!(actual[8], "outside after");
             }
         }
     }
@@ -1303,6 +1347,7 @@ mod output_tests {
             arity: None,
             is_exported: false,
             is_declaration: false,
+            package: None,
         }));
         for source in [ContextSource::Index, ContextSource::Rg] {
             result.source = source;
@@ -1663,6 +1708,7 @@ mod output_tests {
                 arity: None,
                 is_exported: false,
                 is_declaration: false,
+                package: None,
             }));
             let mut buffer = Vec::new();
             write_item_preview(

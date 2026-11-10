@@ -130,24 +130,22 @@ pub(super) fn write_item_preview(
             |(line, _)| line,
         )
         .min(lines.len().saturating_sub(1));
-    let available = if short {
-        crate::preview::pdf_excerpt_lines(item).unwrap_or(0..lines.len())
-    } else {
-        0..lines.len()
-    };
     let from = if short {
-        anchor.saturating_sub(3).max(available.start)
+        let matched_lines = crate::preview::pdf_excerpt_lines(item)
+            .map(|range| range.len())
+            .or_else(|| {
+                item.excerpt_range
+                    .as_ref()
+                    .and_then(ContentRange::line_count)
+            })
+            .unwrap_or(1);
+        // Surrounding context must not displace fragment lines within the limit.
+        let before = 3.min(max_lines.saturating_sub(matched_lines));
+        anchor.saturating_sub(before)
     } else {
         0
     };
-    let end = available.end.min(lines.len());
-    for (offset, line) in lines
-        .iter()
-        .enumerate()
-        .take(end)
-        .skip(from)
-        .take(max_lines)
-    {
+    for (offset, line) in lines.iter().enumerate().skip(from).take(max_lines) {
         let line = if short {
             short_source_line(item, offset, line)
         } else {
@@ -160,7 +158,7 @@ pub(super) fn write_item_preview(
             writeln!(writer, "  {line}")?;
         }
     }
-    if short && end > from + max_lines {
+    if short && lines.len() > from + max_lines {
         writeln!(writer, "  …")?;
     }
     Ok(())

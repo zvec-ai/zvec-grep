@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use super::{
-    llama_cpp::LlamaCppEmbeddingModel, model2vec::Model2VecEmbeddingModel,
-    qwen::QwenEmbeddingModel, transformers::TransformersEmbeddingModel,
+    bekko::BekkoEmbeddingModel, llama_cpp::LlamaCppEmbeddingModel,
+    model2vec::Model2VecEmbeddingModel, qwen::QwenEmbeddingModel,
+    transformers::TransformersEmbeddingModel,
 };
 use crate::domain::model::ModelConfig;
 use crate::models::{
@@ -40,6 +41,7 @@ pub fn create_embedding_model(
     reference: &str,
     options: Option<ModelConfig>,
     compute_runtime: ModelComputeRuntime,
+    session_count: usize,
 ) -> Result<Arc<dyn EmbeddingModel>, ModelError> {
     let entry = get_embedding_model_catalog_entry(reference).ok_or_else(|| {
         ModelError::new(
@@ -50,6 +52,11 @@ pub fn create_embedding_model(
     })?;
     let options = options.unwrap_or_default();
     match entry {
+        EmbeddingCatalogEntry::Bekko(config) => Ok(Arc::new(BekkoEmbeddingModel::new(
+            config,
+            options,
+            compute_runtime,
+        ))),
         EmbeddingCatalogEntry::Model2Vec(config) => Ok(Arc::new(Model2VecEmbeddingModel::new(
             config,
             options,
@@ -59,7 +66,7 @@ pub fn create_embedding_model(
             Ok(Arc::new(QwenEmbeddingModel::new(config, options)?))
         }
         EmbeddingCatalogEntry::Transformers(config) => Ok(Arc::new(
-            TransformersEmbeddingModel::new(config, options, compute_runtime),
+            TransformersEmbeddingModel::new(config, options, compute_runtime, session_count),
         )),
         EmbeddingCatalogEntry::LlamaCpp(config) => Ok(Arc::new(LlamaCppEmbeddingModel::new(
             config,
@@ -87,6 +94,7 @@ mod tests {
                 entry.reference(),
                 options,
                 crate::models::runtime::ModelComputeRuntime::shared(),
+                1,
             )
             .expect("catalog backend should construct without loading model assets");
             assert_eq!(model.info().model().reference(), entry.reference());
@@ -97,6 +105,7 @@ mod tests {
             "missing",
             None,
             crate::models::runtime::ModelComputeRuntime::shared(),
+            1,
         )
         .err()
         .expect("unknown model should fail catalog lookup");

@@ -16,6 +16,7 @@ pub(crate) use file::FileSnapshot;
 pub use format::FileCategory;
 pub use format::FileFormat;
 pub(crate) use format::formats_for_path;
+pub(crate) use format::reference_compatible_with;
 pub(crate) use path::SourcePath;
 pub(crate) use pdf::{PdfBlock, PdfSourceMap, PdfSourcePart};
 pub(crate) use range::ByteRange;

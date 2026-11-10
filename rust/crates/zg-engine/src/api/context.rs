@@ -482,6 +482,15 @@ pub mod result {
         pub path: PathBuf,
     }
 
+    /// A source content block, in top-left page coordinates normalized to millionths.
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct PdfBox {
+        pub page: u32,
+        pub block: u32,
+        /// `[left, top, right, bottom]`, each between 0 and `1_000_000`.
+        pub bounds: [u32; 4],
+    }
+
     #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
     pub struct ContextItem {
         pub kind: ContextItemKind,
@@ -489,6 +498,7 @@ pub mod result {
         pub absolute_path: PathBuf,
         pub relative_path: PathBuf,
         pub range: ContentRange,
+        /// Exact matched evidence within the source; does not limit returned content.
         pub excerpt_range: Option<ContentRange>,
         /// Exact source coordinates of `content`, independent of the entity and matched ranges.
         pub content_range: ContentRange,
@@ -499,6 +509,10 @@ pub mod result {
         /// without changing the source coordinates. Empty means all content.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub content_windows: Vec<ContentRange>,
+        /// Entity block geometry for detailed PDF presentation.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub pdf_boxes: Vec<PdfBox>,
+        /// Complete stored entity for indexed hits; context window for lexical matches.
         pub content: String,
         /// Optional structural context supplied with the retrieved source.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -714,6 +728,25 @@ pub mod result {
     }
 }
 
+impl result::PdfBox {
+    pub(crate) fn from_source(source: &crate::domain::PdfSourceMap) -> Vec<Self> {
+        let mut seen = std::collections::BTreeSet::new();
+        source
+            .parts
+            .iter()
+            .filter_map(|part| {
+                let bounds = part.block.bounds?;
+                seen.insert((part.block.page, part.block.id, bounds))
+                    .then_some(Self {
+                        page: part.block.page,
+                        block: part.block.id,
+                        bounds,
+                    })
+            })
+            .collect()
+    }
+}
+
 impl From<crate::domain::Range> for result::ContentRange {
     fn from(range: crate::domain::Range) -> Self {
         use crate::domain::Range;
@@ -765,6 +798,40 @@ mod tests {
     use crate::domain::{ByteRange, Range, TextRange};
 
     use super::result;
+
+    #[test]
+    fn pdf_boxes_preserve_blocks_and_pages_without_duplicate_or_missing_bounds() {
+        use crate::domain::{PdfBlock, PdfSourceMap, PdfSourcePart};
+        let bounds = [100_000, 200_000, 400_000, 250_000];
+        let parts = [
+            (1, 1, Some(bounds)),
+            (1, 1, Some(bounds)),
+            (1, 2, Some(bounds)),
+            (2, 1, Some(bounds)),
+            (2, 2, None),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(offset, (page, id, bounds))| PdfSourcePart {
+            range: offset..offset + 1,
+            block: PdfBlock { page, id, bounds },
+        })
+        .collect();
+        let source = PdfSourceMap {
+            markdown_start: 100,
+            text_len: 5,
+            parts,
+        };
+        let boxes = result::PdfBox::from_source(&source);
+        assert_eq!(
+            boxes
+                .iter()
+                .map(|region| (region.page, region.block))
+                .collect::<Vec<_>>(),
+            vec![(1, 1), (1, 2), (2, 1)]
+        );
+        assert!(boxes.iter().all(|region| region.bounds == bounds));
+    }
 
     #[test]
     fn search_traces_allow_omitted_ranking() {

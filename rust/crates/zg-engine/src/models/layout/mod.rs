@@ -80,6 +80,8 @@ pub(crate) struct LayoutRegion {
 pub(crate) struct LayoutOptions {
     pub signal: Option<CancellationToken>,
     pub on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
+    /// Keeps runtime ownership and admission until native work completes.
+    pub execution_lease: Option<Arc<dyn Send + Sync>>,
 }
 
 #[async_trait]

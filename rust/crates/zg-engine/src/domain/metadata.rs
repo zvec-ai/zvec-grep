@@ -67,6 +67,13 @@ pub struct CodeMetadata {
     /// the only known location and stays bindable.
     #[serde(default)]
     pub is_declaration: bool,
+    /// The `package` a Java source declares, empty for the default package.
+    /// `None` for languages without the declaration and for indexes written
+    /// before the field existed. Import binding needs it because a Java
+    /// symbol's name carries no package, so the name alone cannot tell
+    /// `my.List` from `java.util.List`.
+    #[serde(default)]
+    pub package: Option<String>,
 }
 
 impl CodeMetadata {

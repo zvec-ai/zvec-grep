@@ -399,6 +399,7 @@ fn write_detail_items(
             for line in metadata_lines(item, theme) {
                 writeln!(writer, "  {line}")?;
             }
+            write_pdf_boxes(writer, item, theme)?;
             for (label, lines) in [
                 ("Outline", outline_lines(item, PreviewMode::Detail)),
                 (
@@ -418,6 +419,31 @@ fn write_detail_items(
             {
                 writeln!(writer, "  {} {trace}", theme.metadata_label("Trace:"))?;
             }
+        }
+    }
+    Ok(())
+}
+
+fn write_pdf_boxes(
+    writer: &mut impl Write,
+    item: &ContextItem,
+    theme: StatusTheme,
+) -> io::Result<()> {
+    if !item.pdf_boxes.is_empty() {
+        writeln!(
+            writer,
+            "  {} [x0, y0, x1, y1]; top-left; normalized 0..1",
+            theme.metadata_label("Boxes:")
+        )?;
+        for region in &item.pdf_boxes {
+            let [x0, y0, x1, y1] = region
+                .bounds
+                .map(|coordinate| f64::from(coordinate) / 1_000_000.0);
+            writeln!(
+                writer,
+                "    page: {}  block: {}  box: [{x0:.6}, {y0:.6}, {x1:.6}, {y1:.6}]",
+                region.page, region.block
+            )?;
         }
     }
     Ok(())

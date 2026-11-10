@@ -73,7 +73,10 @@ impl<'a> Parser<'a> {
             }
             Some(_) => {
                 while let Some(byte) = self.byte() {
-                    if byte.is_ascii_whitespace() || matches!(byte, b',' | b']' | b'}') {
+                    if byte.is_ascii_whitespace()
+                        || matches!(byte, b',' | b']' | b'}')
+                        || (byte == b'/' && matches!(self.byte_at(1), Some(b'/' | b'*')))
+                    {
                         break;
                     }
                     self.position += 1;
@@ -561,6 +564,43 @@ mod tests {
         let removed = remove_path(&installed, &["mcpServers", "zvec_grep"]).expect("remove");
         assert!(removed.contains("\"other\""));
         assert!(!removed.contains("\"zvec_grep\""));
+    }
+
+    #[test]
+    fn edits_scalars_without_consuming_adjacent_comments() {
+        for scalar in ["true", "false", "null", "42", "-1.25e2"] {
+            for comment in ["//keep\n", "/* keep */"] {
+                let source = format!("{{\"custom\":{scalar}{comment}}}");
+                let original: Value =
+                    serde_json::from_str(&source.replace(comment, "")).expect("original JSON");
+                let installed = set_path(&source, &["added"], &json!(7)).expect("insert");
+                assert!(installed.contains(comment), "{installed}");
+                let mut expected = original.clone();
+                expected["added"] = json!(7);
+                assert_eq!(
+                    serde_json::from_str::<Value>(&installed.replace(comment, ""))
+                        .expect("inserted JSON"),
+                    expected
+                );
+
+                let replaced = set_path(&source, &["custom"], &json!(0)).expect("replace");
+                assert_eq!(replaced, source.replacen(scalar, "0", 1));
+                let removed = remove_path(&installed, &["added"]).expect("remove added");
+                assert!(removed.contains(comment), "{removed}");
+                assert_eq!(
+                    serde_json::from_str::<Value>(&removed.replace(comment, ""))
+                        .expect("removed JSON"),
+                    original
+                );
+                let removed = remove_path(&source, &["custom"]).expect("remove scalar");
+                assert!(removed.contains(comment), "{removed}");
+                assert_eq!(
+                    serde_json::from_str::<Value>(&removed.replace(comment, ""))
+                        .expect("empty JSON"),
+                    json!({})
+                );
+            }
+        }
     }
 
     #[test]

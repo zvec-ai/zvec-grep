@@ -39,9 +39,9 @@ use crate::models::error::ModelError;
 #[cfg(test)]
 use sysinfo::System;
 
-pub(crate) struct ResolveArtifacts<'a, const N: usize = 2> {
+pub(crate) struct ResolveArtifacts<'a> {
     pub(crate) model: &'static str,
-    pub(crate) sources: [ArtifactSource; N],
+    pub(crate) sources: Vec<ArtifactSource>,
     pub(crate) artifacts: &'static [ArtifactConfig],
     pub(crate) reporter: &'a ModelDownloadProgressReporter,
     pub(crate) signal: Option<&'a CancellationToken>,
@@ -52,9 +52,9 @@ pub(crate) struct ResolvedArtifacts {
     pub(crate) paths: HashMap<&'static str, PathBuf>,
 }
 
-pub(crate) async fn resolve_model_artifacts<const N: usize>(
+pub(crate) async fn resolve_model_artifacts(
     client: &ArtifactHttpClient,
-    mut request: ResolveArtifacts<'_, N>,
+    mut request: ResolveArtifacts<'_>,
 ) -> Result<ResolvedArtifacts, ModelError> {
     validate_request(&request).map_err(ArtifactDownloadError::into_model_error)?;
     request.sources.sort_by_key(|source| match source.kind {
@@ -89,8 +89,8 @@ pub(crate) async fn resolve_model_artifacts<const N: usize>(
                 if error.is_cancelled() {
                     return Err(error.into_model_error());
                 }
-                if index == 0 {
-                    if N == 1 || !error.fallback_allowed() {
+                if index == 0 && request.sources.len() > 1 {
+                    if !error.fallback_allowed() {
                         return Err(error.into_model_error());
                     }
                     primary_error = Some(error);
@@ -115,13 +115,12 @@ pub(crate) async fn resolve_model_artifacts<const N: usize>(
     )))
 }
 
-fn validate_request<const N: usize>(
-    request: &ResolveArtifacts<'_, N>,
-) -> Result<(), ArtifactDownloadError> {
-    if N == 0 || request.model.trim().is_empty() || request.artifacts.is_empty() {
+fn validate_request(request: &ResolveArtifacts<'_>) -> Result<(), ArtifactDownloadError> {
+    if request.model.trim().is_empty() || request.artifacts.is_empty() || request.sources.is_empty()
+    {
         return Err(ArtifactDownloadError::new(
             FailureKind::InvalidInput,
-            "model and artifacts must not be empty",
+            "model, artifacts and sources must not be empty",
         ));
     }
     let mut paths = std::collections::HashSet::new();
@@ -137,15 +136,15 @@ fn validate_request<const N: usize>(
             ));
         }
     }
-    if let Some(source) = request.sources.iter().enumerate().find_map(|(i, source)| {
-        request.sources[..i]
-            .iter()
-            .any(|other| other.kind == source.kind)
-            .then_some(source)
-    }) {
+    if request.sources.len() > 2
+        || (request.sources.len() == 2 && request.sources[0].kind == request.sources[1].kind)
+    {
         return Err(ArtifactDownloadError::new(
             FailureKind::InvalidInput,
-            format!("duplicate artifact source '{}'", source.kind.label()),
+            format!(
+                "duplicate artifact source '{}'",
+                request.sources[0].kind.label()
+            ),
         ));
     }
     for source in &request.sources {
@@ -201,9 +200,9 @@ fn resolved_result(
     Ok(ResolvedArtifacts { paths })
 }
 
-async fn download_source_snapshot<const N: usize>(
+async fn download_source_snapshot(
     client: &ArtifactHttpClient,
-    request: &ResolveArtifacts<'_, N>,
+    request: &ResolveArtifacts<'_>,
     source: &ArtifactSource,
     manifest: &Manifest,
 ) -> Result<(), ArtifactDownloadError> {
@@ -229,9 +228,9 @@ async fn download_source_snapshot<const N: usize>(
     write_complete_marker(source, request.artifacts, manifest).await
 }
 
-async fn download_artifact<const N: usize>(
+async fn download_artifact(
     client: &ArtifactHttpClient,
-    request: &ResolveArtifacts<'_, N>,
+    request: &ResolveArtifacts<'_>,
     source: &ArtifactSource,
     artifact: &ArtifactConfig,
     lock: &CacheLock,
@@ -255,9 +254,9 @@ async fn download_artifact<const N: usize>(
     clippy::too_many_lines,
     reason = "the network stream, integrity check, and fenced publication form one transaction"
 )]
-async fn download_artifact_attempt<const N: usize>(
+async fn download_artifact_attempt(
     client: &reqwest::Client,
-    request: &ResolveArtifacts<'_, N>,
+    request: &ResolveArtifacts<'_>,
     source: &ArtifactSource,
     artifact: &ArtifactConfig,
     lock: &CacheLock,

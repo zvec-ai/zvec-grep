@@ -76,7 +76,7 @@ impl PpDocLayoutModel {
             &self.client,
             ResolveArtifacts {
                 model: PP_S_REFERENCE,
-                sources: [ArtifactSource::hugging_face(
+                sources: vec![ArtifactSource::hugging_face(
                     PP_S_SOURCE,
                     self.cache_dir.clone(),
                 )],
@@ -87,15 +87,13 @@ impl PpDocLayoutModel {
         )
         .await?;
         let path = artifacts.paths[PP_S_ARTIFACTS[0].path].clone();
+        let lease = options.execution_lease.clone();
         let loaded = self
             .compute
             .run(move || {
+                let _lease = lease;
                 let environment = onnx::initialize()?;
                 let session = Session::builder(&environment)
-                    .map_err(inference_error)?
-                    .with_intra_threads(1)
-                    .map_err(inference_error)?
-                    .with_inter_threads(1)
                     .map_err(inference_error)?
                     .with_parallel_execution(false)
                     .map_err(inference_error)?
@@ -134,6 +132,7 @@ impl LayoutModel for PpDocLayoutModel {
             .map_err(ModelError::shared)?;
         self.compute
             .run(move || {
+                let _lease = options.execution_lease;
                 check_cancelled(options.signal.as_ref())?;
                 let values = preprocess(&image)?;
                 let tensor =

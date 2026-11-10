@@ -1,5 +1,6 @@
 use super::types::{
-    EmbeddingCatalogEntry, LlamaCppConfig, Model2VecConfig, QwenConfig, TransformersConfig,
+    BekkoConfig, EmbeddingCatalogEntry, LlamaCppConfig, Model2VecConfig, QwenConfig,
+    TransformersConfig,
 };
 use crate::domain::model::EmbeddingMetric;
 use crate::models::artifacts::{ArtifactConfig, ArtifactDownloadConfig, ArtifactSourceConfig};
@@ -99,6 +100,20 @@ const POTION_MULTILINGUAL_ARTIFACTS: &[ArtifactConfig] = &[
         path: "tokenizer.json",
         size: 18_616_131,
         sha256: "19f1909063da3cfe3bd83a782381f040dccea475f4816de11116444a73e1b6a1",
+    },
+];
+
+// https://huggingface.co/hotchpotch/bekko-static-embedding-v1/blob/c18167b8f244c1bc6de21ce9b710bac8a29c4615/backend_manifest.json
+const BEKKO_256_INT8_ARTIFACTS: &[ArtifactConfig] = &[
+    ArtifactConfig {
+        path: "onnx/model_int8_dim256.onnx",
+        size: 52_000_965,
+        sha256: "b79091ffcc23d499ea0dcc52d6d08e4aecccd1ca8b866d5c02e1f5c082d23158",
+    },
+    ArtifactConfig {
+        path: "tokenizer.json",
+        size: 5_104_874,
+        sha256: "308823060352e35bf9fff6b42ef343f31cc68fa800e284568cc44e9cc0f70a73",
     },
 ];
 
@@ -207,7 +222,7 @@ const NOMIC_ARTIFACTS: &[ArtifactConfig] = &[
     },
 ];
 
-const CATALOG: [EmbeddingCatalogEntry; 14] = [
+const CATALOG: [EmbeddingCatalogEntry; 15] = [
     EmbeddingCatalogEntry::LlamaCpp(LlamaCppConfig {
         reference: "local/embeddinggemma-300m",
         provider: "local",
@@ -219,10 +234,10 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
                 repo: "ggml-org/embeddinggemma-300M-GGUF",
                 revision: "0f741b5a6585bd53aeb15cd1372c56f2a0f65e12",
             },
-            model_scope: ArtifactSourceConfig {
+            model_scope: Some(ArtifactSourceConfig {
                 repo: "ggml-org/embeddinggemma-300M-GGUF",
                 revision: "e2fab2963ac0943b1dc320cf0e267bd0e06e2e97",
-            },
+            }),
             artifacts: EMBEDDINGGEMMA_ARTIFACTS,
         },
         dimension: 768,
@@ -242,10 +257,10 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
                 repo: "Qwen/Qwen3-Embedding-0.6B-GGUF",
                 revision: "370f27d7550e0def9b39c1f16d3fbaa13aa67728",
             },
-            model_scope: ArtifactSourceConfig {
+            model_scope: Some(ArtifactSourceConfig {
                 repo: "Qwen/Qwen3-Embedding-0.6B-GGUF",
                 revision: "61ae123505fc6fa7f36d372fae1a30bc384241ea",
-            },
+            }),
             artifacts: QWEN3_GGUF_ARTIFACTS,
         },
         dimension: 1_024,
@@ -301,13 +316,14 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
                 repo: "onnx-community/bge-small-en-v1.5-ONNX",
                 revision: "4a9a46c7b88fa408e650a571a1800243f26309bd",
             },
-            model_scope: ArtifactSourceConfig {
+            model_scope: Some(ArtifactSourceConfig {
                 repo: "onnx-community/bge-small-en-v1.5-ONNX",
                 revision: "f246b360b061b613fe0b449f2e14de12f875dad7",
-            },
+            }),
             artifacts: BGE_SMALL_ARTIFACTS,
         },
         dtype: "q4",
+        add_special_tokens: true,
         dimension: 384,
         metric: EmbeddingMetric::Cosine,
         pooling: "cls",
@@ -328,13 +344,14 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
                 repo: "onnx-community/all-MiniLM-L6-v2-ONNX",
                 revision: "aff7a1dc4e8a1ea593e6ea21e95c22ef0a25966f",
             },
-            model_scope: ArtifactSourceConfig {
+            model_scope: Some(ArtifactSourceConfig {
                 repo: "onnx-community/all-MiniLM-L6-v2-ONNX",
                 revision: "e1da369847063d70f2fd772226551865bcab1c2d",
-            },
+            }),
             artifacts: MINILM_ARTIFACTS,
         },
         dtype: "q4",
+        add_special_tokens: true,
         dimension: 384,
         metric: EmbeddingMetric::Cosine,
         pooling: "mean",
@@ -355,10 +372,10 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
                 repo: "minishlab/potion-retrieval-32M",
                 revision: "6fc8051fab2a1e0ee76689cf08c853792ac285e7",
             },
-            model_scope: ArtifactSourceConfig {
+            model_scope: Some(ArtifactSourceConfig {
                 repo: "minishlab/potion-retrieval-32M",
                 revision: "33da23fc75cb732b5370bf25adde3db74b0d65b3",
-            },
+            }),
             artifacts: POTION_RETRIEVAL_ARTIFACTS,
         },
         model_file: "model.safetensors",
@@ -384,10 +401,10 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
                 repo: "minishlab/potion-multilingual-128M",
                 revision: "73908c3438cf03b6a01bcb9611d62b23d0726f08",
             },
-            model_scope: ArtifactSourceConfig {
+            model_scope: Some(ArtifactSourceConfig {
                 repo: "minishlab/potion-multilingual-128M",
                 revision: "e8524678123f281add99f9745ac33d6604434dd7",
-            },
+            }),
             artifacts: POTION_MULTILINGUAL_ARTIFACTS,
         },
         model_file: "model.safetensors",
@@ -413,10 +430,10 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
                 repo: "minishlab/potion-code-16M-v2",
                 revision: "e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b",
             },
-            model_scope: ArtifactSourceConfig {
+            model_scope: Some(ArtifactSourceConfig {
                 repo: "minishlab/potion-code-16M-v2",
                 revision: "3e922fde18f43b8db69f3381b6d468738d3dd2d7",
-            },
+            }),
             artifacts: POTION_CODE_ARTIFACTS,
         },
         model_file: "model.safetensors",
@@ -442,13 +459,14 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
                 repo: "Xenova/multilingual-e5-small",
                 revision: "761b726dd34fb83930e26aab4e9ac3899aa1fa78",
             },
-            model_scope: ArtifactSourceConfig {
+            model_scope: Some(ArtifactSourceConfig {
                 repo: "Xenova/multilingual-e5-small",
                 revision: "252d0dcb679dda2c7b6fd5bbfed15df3c7feaebf",
-            },
+            }),
             artifacts: MULTILINGUAL_E5_ARTIFACTS,
         },
         dtype: "q8",
+        add_special_tokens: true,
         dimension: 384,
         metric: EmbeddingMetric::Cosine,
         pooling: "mean",
@@ -469,13 +487,14 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
                 repo: "jinaai/jina-embeddings-v2-base-code",
                 revision: "516f4baf13dec4ddddda8631e019b5737c8bc250",
             },
-            model_scope: ArtifactSourceConfig {
+            model_scope: Some(ArtifactSourceConfig {
                 repo: "jinaai/jina-embeddings-v2-base-code",
                 revision: "91aa0a6aa801c408149324e32e8cd43f8502da8f",
-            },
+            }),
             artifacts: JINA_CODE_ARTIFACTS,
         },
         dtype: "q8",
+        add_special_tokens: true,
         dimension: 768,
         metric: EmbeddingMetric::Cosine,
         pooling: "mean",
@@ -496,13 +515,14 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
                 repo: "Alibaba-NLP/gte-modernbert-base",
                 revision: "e7f32e3c00f91d699e8c43b53106206bcc72bb22",
             },
-            model_scope: ArtifactSourceConfig {
+            model_scope: Some(ArtifactSourceConfig {
                 repo: "iic/gte-modernbert-base",
                 revision: "678f4ed93760af288132f4f9dc5b6daebdc48777",
-            },
+            }),
             artifacts: GTE_ARTIFACTS,
         },
         dtype: "q4",
+        add_special_tokens: true,
         dimension: 768,
         metric: EmbeddingMetric::Cosine,
         pooling: "cls",
@@ -523,13 +543,14 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
                 repo: "nomic-ai/nomic-embed-text-v1.5",
                 revision: "e9b6763023c676ca8431644204f50c2b100d9aab",
             },
-            model_scope: ArtifactSourceConfig {
+            model_scope: Some(ArtifactSourceConfig {
                 repo: "nomic-ai/nomic-embed-text-v1.5",
                 revision: "c6fb77fdf73531ee8319b34e46f7e749b59e74e8",
-            },
+            }),
             artifacts: NOMIC_ARTIFACTS,
         },
         dtype: "q4",
+        add_special_tokens: true,
         dimension: 768,
         metric: EmbeddingMetric::Cosine,
         pooling: "mean",
@@ -538,6 +559,25 @@ const CATALOG: [EmbeddingCatalogEntry; 14] = [
         document_prefix: Some("search_document: "),
         max_input_tokens: 8_192,
         max_batch_size: 2,
+    }),
+    EmbeddingCatalogEntry::Bekko(BekkoConfig {
+        reference: "local/bekko-256-int8",
+        provider: "local",
+        model: "bekko-256-int8",
+        download: &ArtifactDownloadConfig {
+            hugging_face: ArtifactSourceConfig {
+                repo: "hotchpotch/bekko-static-embedding-v1",
+                revision: "c18167b8f244c1bc6de21ce9b710bac8a29c4615",
+            },
+            model_scope: None,
+            artifacts: BEKKO_256_INT8_ARTIFACTS,
+        },
+        model_file: "onnx/model_int8_dim256.onnx",
+        vocabulary_size: 200_000,
+        dimension: 256,
+        metric: EmbeddingMetric::Cosine,
+        max_input_tokens: 32_768,
+        max_batch_size: 32,
     }),
 ];
 
@@ -581,6 +621,7 @@ mod tests {
                 "local/jina-embeddings-v2-base-code",
                 "local/gte-modernbert-base",
                 "local/nomic-embed-text-v1.5",
+                "local/bekko-256-int8",
             ]
         );
         let code = get_embedding_model_catalog_entry("local/potion-code-16m-v2")

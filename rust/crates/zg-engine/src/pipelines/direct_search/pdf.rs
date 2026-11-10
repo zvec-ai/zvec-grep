@@ -190,6 +190,7 @@ fn search_entity(
             .into_iter()
             .map(|window| pdf_range(&source, window))
             .collect(),
+        pdf_boxes: crate::api::context::result::PdfBox::from_source(&source),
         content: text[start..end].to_owned(),
         outline: None,
         content_role: Some(ContextContentRole::Source),

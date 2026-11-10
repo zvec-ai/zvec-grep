@@ -97,12 +97,12 @@ impl PdfExtractionPort for PdfExtractionService {
                 let regions=if let Some(image)=page.image {
                     if layout.is_none(){
                         let model=self.models.acquire_layout(self.config.clone())?;
-                        model.prepare(LayoutOptions{signal:Some(signal.clone()),on_progress:on_progress.clone()}).await?;
+                        model.prepare(LayoutOptions{signal:Some(signal.clone()),on_progress:on_progress.clone(),..LayoutOptions::default()}).await?;
                         layout=Some(model);
                     }
                     let width=f64::from(u32::try_from(image.width).map_err(|_|EngineError::internal("PDF raster width overflow"))?);
                     let height=f64::from(u32::try_from(image.height).map_err(|_|EngineError::internal("PDF raster height overflow"))?);
-                    layout.as_ref().expect("prepared layout").detect(image,LayoutOptions{signal:Some(signal.clone()),on_progress:None}).await?.into_iter().map(|r|assembly::Region{
+                    layout.as_ref().expect("prepared layout").detect(image,LayoutOptions{signal:Some(signal.clone()),..LayoutOptions::default()}).await?.into_iter().map(|r|assembly::Region{
                         kind:r.kind,bounds:std::array::from_fn(|i|f64::from(r.bounds[i])*if i%2==0{page.width/width}else{page.height/height})
                     }).collect()
                 }else{Vec::new()};

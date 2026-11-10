@@ -367,6 +367,108 @@ test("explicit prebuilt mode selects CUDA without probing nvcc and still honors 
   }
 });
 
+test("Linux packaging pins manylinux 2.28 and audits the complete native payload", async () => {
+  const workflow = await readFile(new URL("../../.github/workflows/rust-package-build.yml", import.meta.url), "utf8");
+  for (const [architecture, digest] of [
+    ["x86_64", "d5f19b5957cf25df7ac15465924cafe2358754a187e510af386bf9596598a372"],
+    ["aarch64", "34368babc008d6405b4b74c77868d6a5d15b6010cb953574d1f2bb9184392a9b"],
+  ]) {
+    assert.ok(workflow.includes(`quay.io/pypa/manylinux_2_28_${architecture}:2026.03.01-1@sha256:${digest}`));
+  }
+  assert.match(workflow, /--file rust\/scripts\/release-builder\.Dockerfile/);
+  assert.match(workflow, /v6-manylinux2\.28/);
+  assert.match(workflow, /check-glibc\.py \/work-target\/release\/zg-cuda-staging --max 2\.28/);
+  assert.match(workflow, /check-glibc\.py dist\/npm\/release\/staging\/\$\{\{ inputs\.target \}\} --max 2\.28/);
+  assert.doesNotMatch(workflow, /ubuntu:20\.04|glibc 2\.31|--max 2\.31/);
+  const builder = await readFile(new URL("./release-builder.Dockerfile", import.meta.url), "utf8");
+  assert.match(builder, /clang-devel/);
+  assert.match(builder, /cp312-cp312/);
+  assert.match(builder, /glibc 2\.28/);
+});
+
+test("Linux package CPU validation uses a clean glibc 2.28 image rather than the builder", async () => {
+  for (const name of ["rust-package-build", "rust-publish"]) {
+    const workflow = await readFile(new URL(`../../.github/workflows/${name}.yml`, import.meta.url), "utf8");
+    assert.match(workflow, /almalinux:8\.10@sha256:2d0f2eb2a83cc09dbc2eb92fade4dbe8f709628149e81aa00aec70630406603b/);
+    assert.match(workflow, /test "\$\(getconf GNU_LIBC_VERSION\)" = "glibc 2\.28"/);
+  }
+});
+
+test("Linux artifact smoke loads packaged ORT and runs inference on both architectures", { skip: process.platform !== "linux" }, async (t) => {
+  const workflow = await readFile(new URL("../../.github/workflows/rust-publish.yml", import.meta.url), "utf8");
+  const step = workflow.split("      - name: Install and exercise Linux artifacts on glibc 2.28 without CUDA libraries\n")[1]
+    .split("      - name:")[0];
+  const script = step.slice(step.indexOf("              npm run release:artifact-smoke"), step.lastIndexOf("            '"));
+  const logs = await mkdtemp(join(tmpdir(), "zg-linux-cpu-smoke-"));
+  t.after(() => rm(logs, { recursive: true, force: true }));
+  for (const [target, mode] of [["linux-arm64-gnu", "--explicit-cpu"], ["linux-x64-gnu", "--cpu-only"]]) {
+    const result = spawnSync("bash", ["-euo", "pipefail", "-c", `
+      npm() { printf 'npm %s\\n' "$*"; }
+      python3() { printf 'python3 %s\\n' "$*"; }
+      ${script.replaceAll("/work/cpu-logs", logs)}
+    `], { env: { ...process.env, RELEASE_TARGET: target }, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /npm run release:artifact-smoke -- --expect-cpu/);
+    assert.match(result.stdout, /python3 scripts\/check-onnxruntime\.py .*\/lib\/libonnxruntime\.so\.1/);
+    assert.ok(result.stdout.includes(`python3 scripts/cuda/e2e.py ${mode} --bundle dist/npm/release/artifact-smoke/prefix/lib/node_modules/@zvec/zvec-grep`), result.stdout);
+    assert.doesNotMatch(result.stdout, /--backend|--cargo-binary/);
+    const failedLoad = spawnSync("bash", ["-euo", "pipefail", "-c", `
+      npm() { return 0; }
+      python3() {
+        if [[ "$1" == scripts/check-onnxruntime.py ]]; then return 73; fi
+        printf 'unexpected inference after failed ORT load\\n'
+      }
+      ${script.replaceAll("/work/cpu-logs", logs)}
+    `], { env: { ...process.env, RELEASE_TARGET: target }, encoding: "utf8" });
+    assert.equal(failedLoad.status, 73, failedLoad.stderr);
+    assert.doesNotMatch(failedLoad.stdout, /unexpected inference/);
+  }
+  assert.match(workflow, /name: Restore the real model cache\n\s+if:.*matrix\.target == 'linux-arm64-gnu'/);
+});
+
+test("Linux Vulkan ORT build-script validation uses a network-disabled container and separate outputs", { skip: process.platform !== "linux" }, async (t) => {
+  const workflow = await readFile(new URL("../../.github/workflows/rust-package-build.yml", import.meta.url), "utf8");
+  assert.match(workflow, /prepare-onnxruntime\.py --target "\$ORT_TARGET"/);
+  const step = workflow.split("      - name: Verify Linux Vulkan ORT preparation without network access\n")[1];
+  assert.ok(step, "the release build must retain Vulkan/offline validation");
+  const script = step.split("      - name:")[0];
+  assert.match(script, /if: runner\.os == 'Linux'/);
+  assert.match(script, /--network none/);
+  const target = await mkdtemp(join(tmpdir(), "zg-offline-ort-"));
+  t.after(() => rm(target, { recursive: true, force: true }));
+  for (const directory of ["ort-cpu", "ort-vulkan/debug"]) {
+    await mkdir(join(target, directory), { recursive: true });
+    await writeFile(join(target, directory, "libonnxruntime.so.1"), "verified CPU runtime");
+  }
+  await writeFile(join(target, "ort-build-script"), `#!/bin/sh
+    test "$CARGO_FEATURE_VULKAN" = 1 && test "$CARGO_NET_OFFLINE" = true || exit 1
+    test -z "\${ORT_DYLIB_PATH+x}" && test -z "\${CARGO_FEATURE_CUDA+x}" || exit 1
+    printf 'offline ORT preparation executed\\n'
+  `, { mode: 0o755 });
+  const command = script.split("zvec-grep-release-builder bash -euo pipefail -c '\n")[1]
+    .split("            '")[0].replaceAll("/work-target", target);
+  const result = spawnSync("bash", ["-euo", "pipefail", "-c", `
+    rustc() { printf 'rustup: cannot sync toolchain metadata without network\\n' >&2; return 73; }
+    ${command}
+  `], { env: { ...process.env, ORT_TARGET: "aarch64-unknown-linux-gnu", ORT_DYLIB_PATH: "untrusted-override", CARGO_FEATURE_CUDA: "1" }, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /offline ORT preparation executed/);
+  const build = workflow.split("      - name: Build the Linux release on glibc 2.28\n")[1].split("      - name:")[0];
+  assert.match(build, /CARGO_MANIFEST_DIR="\$PWD\/crates\/zg-engine" rustc --edition=2024 crates\/zg-engine\/build\.rs -o \/work-target\/ort-build-script/);
+  assert.doesNotMatch(script, /\brustc\b|\brustup\b/);
+  assert.match(script, /env -u ORT_DYLIB_PATH -u CARGO_FEATURE_CUDA CARGO_FEATURE_VULKAN=1 CARGO_NET_OFFLINE=true/);
+  assert.match(script, /OUT_DIR=\/work-target\/ort-vulkan\/debug\/build\/zg-engine\/out/);
+  assert.match(script, /ZG_ORT_CACHE_DIR=\/work-target\/ort-prebuilt/);
+  assert.match(script, /cmp \/work-target\/ort-cpu\/libonnxruntime\.so\.1 \/work-target\/ort-vulkan\/debug\/libonnxruntime\.so\.1/);
+});
+
+test("macOS ARM64 release validation uses a supported runner", async () => {
+  const workflow = await readFile(new URL("../../.github/workflows/rust-publish.yml", import.meta.url), "utf8");
+  assert.match(workflow, /target: 'darwin-arm64', runner: 'macos-15'/);
+  assert.match(workflow, /target: darwin-arm64\s+runner: macos-15\s/);
+  assert.doesNotMatch(workflow, /macos-14/);
+});
+
 test("Windows ARM64 publishing requires its CPU SDK without source compiler overrides", async () => {
   const entry = selectPlatform(manifest, "win32", "arm64");
   assert.equal(resolveBuildVariant(entry, false,

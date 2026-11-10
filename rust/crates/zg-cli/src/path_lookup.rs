@@ -462,6 +462,7 @@ mod tests {
                 content: content.into(),
                 outline: None,
                 content_windows: Vec::new(),
+                pdf_boxes: Vec::new(),
                 content_role: Some(ContextContentRole::Source),
                 status: ContextItemStatus::Fresh,
                 score: None,

@@ -1,26 +1,18 @@
 use crate::domain::Content;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     env,
     path::{Path, PathBuf},
-    sync::{
-        Arc, Condvar, Mutex as StdMutex, MutexGuard as StdMutexGuard, PoisonError,
-        atomic::{AtomicBool, Ordering},
-    },
-    thread,
-    time::Duration,
+    sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard, PoisonError},
 };
 
 use async_trait::async_trait;
 use ort::{
-    session::{
-        Session,
-        builder::{GraphOptimizationLevel, PrepackedWeights},
-    },
+    session::{Session, builder::GraphOptimizationLevel},
     value::{DynTensor, Tensor},
 };
 use tokenizers::{
-    PaddingParams, PaddingStrategy, Tokenizer, TruncationParams,
+    PaddingParams, Tokenizer, TruncationParams,
     utils::{padding::PaddingDirection, truncation::TruncationDirection},
 };
 use tokio::{fs, sync::Mutex};
@@ -38,8 +30,8 @@ use crate::models::{
     catalog::TransformersConfig,
     runtime::ModelComputeRuntime,
     spi::{
-        EmbeddingModel, EmbeddingOptions, EmbeddingPrepareOptions, ModelError, input_text,
-        validate_inputs, validate_result,
+        EmbeddingConcurrencyDefaults, EmbeddingModel, EmbeddingOptions, EmbeddingPrepareOptions,
+        ModelError, ModelExecutionStats, input_text, validate_inputs, validate_result,
     },
 };
 
@@ -50,56 +42,21 @@ pub(crate) struct TransformersEmbeddingModel {
     device: Option<Device>,
     compute_runtime: ModelComputeRuntime,
     client: ArtifactHttpClient,
-    state: Mutex<Option<Arc<LoadedTransformersModel>>>,
+    state: Arc<StdMutex<Option<Arc<LoadedTransformersModel>>>>,
+    loading: Arc<Mutex<()>>,
+    session_count: usize,
+    last_execution_budget: StdMutex<Option<usize>>,
 }
 
 struct LoadedTransformersModel {
     tokenizers: PreparedTokenizers,
-    sessions: SessionPool,
+    sessions: session::SessionOwner,
+    queue: Arc<scheduler::InferenceQueue>,
 }
 
 struct PreparedTokenizers {
     probe: Tokenizer,
     inputs: Tokenizer,
-}
-
-struct SessionPool {
-    model_path: PathBuf,
-    prepacked_weights: PrepackedWeights,
-    state: StdMutex<SessionPoolState>,
-    changed: Condvar,
-    fallback: StdMutex<()>,
-    coreml_batcher: CoreMlBatcher,
-}
-
-struct SessionPoolState {
-    provider: TransformersExecutionProvider,
-    generation: u64,
-    creating: usize,
-    sessions: Vec<Arc<SessionSlot>>,
-}
-
-struct SessionSlot {
-    busy: AtomicBool,
-    session: StdMutex<Session>,
-}
-
-#[derive(Default)]
-struct CoreMlBatcher {
-    state: StdMutex<CoreMlBatcherState>,
-}
-
-#[derive(Default)]
-struct CoreMlBatcherState {
-    running: bool,
-    pending: VecDeque<Arc<CoreMlBatchRequest>>,
-}
-
-struct CoreMlBatchRequest {
-    prepared: PreparedBatch,
-    signal: Option<CancellationToken>,
-    result: StdMutex<Option<Result<EmbeddingResult, String>>>,
-    changed: Condvar,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -117,7 +74,6 @@ struct PreparedBatch {
     attention_mask: Vec<i64>,
     token_type_ids: Vec<i64>,
     position_ids: Vec<i64>,
-    padding_input_id: i64,
     batch_size: usize,
     sequence_length: usize,
     truncated: Vec<usize>,
@@ -128,6 +84,7 @@ impl TransformersEmbeddingModel {
         entry: TransformersConfig,
         options: ModelConfig,
         compute_runtime: ModelComputeRuntime,
+        session_count: usize,
     ) -> Self {
         let model_cache_dir = options
             .cache_dir
@@ -156,7 +113,13 @@ impl TransformersEmbeddingModel {
             device: options.device,
             compute_runtime,
             client: ArtifactHttpClient::new(),
-            state: Mutex::new(None),
+            state: Arc::new(StdMutex::new(None)),
+            loading: Arc::new(Mutex::new(())),
+            session_count: policy::pool_size(
+                resolve_execution_provider(options.device),
+                session_count.max(1),
+            ),
+            last_execution_budget: StdMutex::new(None),
         }
     }
 
@@ -164,22 +127,35 @@ impl TransformersEmbeddingModel {
         &self,
         on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
         signal: Option<&CancellationToken>,
+        execution_lease: Option<Arc<dyn Send + Sync>>,
     ) -> Result<Arc<LoadedTransformersModel>, ModelError> {
-        let mut state = self.state.lock().await;
-        if let Some(loaded) = &*state {
+        check_cancelled(signal)?;
+        if let Some(loaded) = &*lock_std_mutex(&self.state) {
             return Ok(Arc::clone(loaded));
         }
-        let loaded = Arc::new(self.load(on_progress, signal).await?);
-        *state = Some(Arc::clone(&loaded));
-        Ok(loaded)
+        let acquire = Arc::clone(&self.loading).lock_owned();
+        let gate = if let Some(signal) = signal {
+            tokio::select! { biased;
+                () = signal.cancelled() => return Err(ModelError::cancelled("Transformers preparation was cancelled")),
+                gate = acquire => gate,
+            }
+        } else {
+            acquire.await
+        };
+        if let Some(loaded) = &*lock_std_mutex(&self.state) {
+            return Ok(Arc::clone(loaded));
+        }
+        self.load(on_progress, signal, execution_lease, gate).await
     }
 
     async fn load(
         &self,
         on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
         signal: Option<&CancellationToken>,
-    ) -> Result<LoadedTransformersModel, ModelError> {
-        let model_artifact = onnx_artifact(self.entry.dtype)?;
+        execution_lease: Option<Arc<dyn Send + Sync>>,
+        gate: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<Arc<LoadedTransformersModel>, ModelError> {
+        let model_artifact = onnx_artifact(self.entry)?;
         let reporter = ModelDownloadProgressReporter::new(
             self.entry.reference,
             on_progress,
@@ -194,22 +170,21 @@ impl TransformersEmbeddingModel {
             .model_cache_dir
             .join(self.entry.download.hugging_face.repo)
             .join(self.entry.download.hugging_face.revision);
-        let model_scope = self
-            .model_cache_dir
-            .join("modelscope")
-            // Keep main's cache namespace so Node and Rust reuse the same
-            // verified fallback snapshot; the Rust backend itself is ORT.
-            .join("transformers-js")
-            .join(self.entry.download.model_scope.repo.replace('/', "--"))
-            .join(self.entry.download.model_scope.revision);
+        let sources = std::iter::once(ArtifactSource::hugging_face(
+            self.entry.download.hugging_face,
+            hugging_face,
+        ))
+        .chain(
+            self.entry
+                .download
+                .fallback_source(&self.model_cache_dir, "transformers-js"),
+        )
+        .collect();
         let resolved = resolve_model_artifacts(
             &self.client,
             ResolveArtifacts {
                 model: self.entry.reference,
-                sources: [
-                    ArtifactSource::hugging_face(self.entry.download.hugging_face, hugging_face),
-                    ArtifactSource::model_scope(self.entry.download.model_scope, model_scope),
-                ],
+                sources,
                 artifacts: self.entry.download.artifacts,
                 reporter: &reporter,
                 signal,
@@ -243,16 +218,37 @@ impl TransformersEmbeddingModel {
         })?;
         let tokenizers = prepare_tokenizers(tokenizer, self.entry)?;
         let device = self.device;
-        let reporter_for_session = reporter.clone();
-        let sessions = self
-            .compute_runtime
-            .run(move || SessionPool::load(model_path, device, &reporter_for_session))
-            .await??;
-        reporter.finish();
-        Ok(LoadedTransformersModel {
-            tokenizers,
-            sessions,
-        })
+        let session_count = self.session_count;
+        let state = Arc::clone(&self.state);
+        let signal = signal.cloned();
+        self.compute_runtime
+            .run(move || {
+                // Keep initialization serialized and owned even if its awaiting
+                // future is dropped while native loading is in progress.
+                let _execution_lease = execution_lease;
+                let _gate = gate;
+                check_cancelled(signal.as_ref())?;
+                let sessions = session::SessionOwner::load(
+                    model_path,
+                    device,
+                    session_count,
+                    &reporter,
+                    signal.as_ref(),
+                )?;
+                check_cancelled(signal.as_ref())?;
+                let loaded = Arc::new(LoadedTransformersModel {
+                    tokenizers,
+                    sessions,
+                    queue: Arc::new(scheduler::InferenceQueue::new(policy::admission(
+                        resolve_execution_provider(device),
+                        session_count,
+                    ))),
+                });
+                *lock_std_mutex(&state) = Some(Arc::clone(&loaded));
+                reporter.finish();
+                Ok(loaded)
+            })
+            .await?
     }
 }
 
@@ -262,21 +258,61 @@ impl EmbeddingModel for TransformersEmbeddingModel {
         &self.info
     }
 
+    fn concurrency_defaults(&self) -> EmbeddingConcurrencyDefaults {
+        EmbeddingConcurrencyDefaults {
+            initial: self.session_count,
+            maximum: self.session_count,
+        }
+    }
+
+    fn admission_concurrency(&self, _execution: usize) -> usize {
+        policy::admission(resolve_execution_provider(self.device), self.session_count)
+    }
+
+    fn execution_stats(&self) -> Option<ModelExecutionStats> {
+        lock_std_mutex(&self.state)
+            .as_ref()
+            .map(|loaded| loaded.sessions.stats())
+    }
+
+    fn execution_concurrency(&self, requested: usize) -> usize {
+        let provider = resolve_execution_provider(self.device);
+        let effective = policy::execution_limit(provider, requested, self.session_count);
+        let mut last = lock_std_mutex(&self.last_execution_budget);
+        if *last != Some(requested) {
+            if requested > effective {
+                tracing::warn!(
+                    model = self.entry.reference,
+                    requested,
+                    effective,
+                    sessions = self.session_count,
+                    "ORT concurrency exceeds the session pool; using the pool capacity"
+                );
+            }
+            *last = Some(requested);
+        }
+        effective
+    }
+
     async fn prepare(&self, options: EmbeddingPrepareOptions) -> Result<(), ModelError> {
-        self.ensure_loaded(options.on_progress, options.signal.as_ref())
-            .await
-            .map(|_| ())
-            .map_err(|error| {
-                error
-                    .wrap(
-                        "Transformers model preparation failed",
-                        Some(format!(
-                            "model={} repo={}",
-                            self.entry.reference, self.entry.repo
-                        )),
-                    )
-                    .shared()
-            })
+        self.ensure_loaded(
+            options.on_progress,
+            options.signal.as_ref(),
+            options.execution_lease,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            error
+                .wrap(
+                    "Transformers model preparation failed",
+                    Some(format!(
+                        "model={} repo={}",
+                        self.entry.reference, self.entry.repo
+                    )),
+                )
+                .shared()
+        })
     }
 
     async fn embed(
@@ -285,8 +321,13 @@ impl EmbeddingModel for TransformersEmbeddingModel {
         options: EmbeddingOptions,
     ) -> Result<EmbeddingResult, ModelError> {
         validate_inputs(&self.info, inputs)?;
+        check_cancelled(options.signal.as_ref())?;
         let loaded = self
-            .ensure_loaded(options.on_progress.clone(), options.signal.as_ref())
+            .ensure_loaded(
+                options.on_progress.clone(),
+                options.signal.as_ref(),
+                options.execution_lease.clone(),
+            )
             .await
             .map_err(|error| {
                 error.wrap(
@@ -302,6 +343,12 @@ impl EmbeddingModel for TransformersEmbeddingModel {
             EmbeddingPurpose::Document => self.entry.document_prefix,
             EmbeddingPurpose::Query => self.entry.query_prefix,
         };
+        let bytes = scheduler::input_bytes(inputs, prefix)?;
+        // Reserve bounded storage before copying caller-owned text.
+        let admission = loaded
+            .queue
+            .admit(bytes, purpose, options.signal.as_ref())
+            .await?;
         let texts = inputs
             .iter()
             .map(|input| {
@@ -312,318 +359,19 @@ impl EmbeddingModel for TransformersEmbeddingModel {
                 })
             })
             .collect::<Result<Vec<_>, ModelError>>()?;
-        let entry = self.entry;
-        let signal = options.signal;
-        let on_progress = options.on_progress;
-        let execution_concurrency = options.execution_concurrency.max(1);
-        let result = self
-            .compute_runtime
-            .run(move || {
-                embed_batch(
-                    &loaded,
-                    &texts,
-                    entry,
-                    execution_concurrency,
-                    signal.as_ref(),
-                    on_progress.as_ref(),
-                )
-            })
-            .await??;
+        let result = loaded
+            .queue
+            .submit(
+                Arc::clone(&loaded),
+                self.entry,
+                self.compute_runtime.clone(),
+                texts,
+                options,
+                admission,
+            )
+            .await?;
         validate_result(&self.info, inputs.len(), &result)?;
         Ok(result)
-    }
-}
-
-impl SessionPool {
-    fn load(
-        model_path: PathBuf,
-        device: Option<Device>,
-        reporter: &ModelDownloadProgressReporter,
-    ) -> Result<Self, ModelError> {
-        crate::models::runtime::onnx::initialize()?;
-        let prepacked_weights = PrepackedWeights::new();
-        let requested = resolve_execution_provider(device);
-        if cfg!(target_os = "macos")
-            && matches!(device, Some(Device::Metal))
-            && requested == TransformersExecutionProvider::Cpu
-        {
-            let warning = "Metal was requested for the Transformers ONNX model, but the available CoreML path regresses throughput and memory; using ORT CPU instead.";
-            if !reporter.warning(warning) {
-                tracing::warn!("{warning}");
-            }
-        }
-        let (session, provider) = if requested == TransformersExecutionProvider::Cpu {
-            (
-                load_session(&model_path, requested, &prepacked_weights)?,
-                TransformersExecutionProvider::Cpu,
-            )
-        } else {
-            match load_session(&model_path, requested, &prepacked_weights) {
-                Ok(session) => (session, requested),
-                Err(error) => {
-                    let warning = format!(
-                        "Transformers {} embedding initialization failed ({}), falling back to CPU.",
-                        requested.name(),
-                        error
-                    );
-                    if !reporter.warning(warning.clone()) {
-                        tracing::warn!("{warning}");
-                    }
-                    (
-                        load_session(
-                            &model_path,
-                            TransformersExecutionProvider::Cpu,
-                            &prepacked_weights,
-                        )?,
-                        TransformersExecutionProvider::Cpu,
-                    )
-                }
-            }
-        };
-        tracing::debug!(
-            "Transformers ONNX {} embedding execution provider selected",
-            provider.name()
-        );
-        Ok(Self {
-            model_path,
-            prepacked_weights,
-            state: StdMutex::new(SessionPoolState {
-                provider,
-                generation: 0,
-                creating: 0,
-                sessions: vec![Arc::new(SessionSlot {
-                    busy: AtomicBool::new(false),
-                    session: StdMutex::new(session),
-                })],
-            }),
-            changed: Condvar::new(),
-            fallback: StdMutex::new(()),
-            coreml_batcher: CoreMlBatcher::default(),
-        })
-    }
-
-    fn run<T>(
-        &self,
-        max_sessions: usize,
-        inference: impl Fn(&mut Session) -> Result<T, ModelError>,
-    ) -> Result<T, ModelError> {
-        let max_sessions = max_sessions.clamp(1, crate::models::runtime::LOCAL_CONCURRENCY_CAP);
-        loop {
-            let mut state = lock_std_mutex(&self.state);
-            if let Some(slot) = state.sessions.iter().find_map(|slot| {
-                slot.busy
-                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-                    .then(|| Arc::clone(slot))
-            }) {
-                drop(state);
-                let mut session = lock_session(&slot.session);
-                let result = inference(&mut session);
-                drop(session);
-                slot.busy.store(false, Ordering::Release);
-                self.changed.notify_one();
-                return result;
-            }
-
-            let max_sessions = physical_session_limit(state.provider, max_sessions);
-            if state.sessions.len() + state.creating < max_sessions {
-                let provider = state.provider;
-                let generation = state.generation;
-                state.creating += 1;
-                drop(state);
-                let created = load_session(&self.model_path, provider, &self.prepacked_weights);
-                let mut state = lock_std_mutex(&self.state);
-                state.creating = state.creating.saturating_sub(1);
-                match created {
-                    Ok(session) if state.generation == generation && state.provider == provider => {
-                        state.sessions.push(Arc::new(SessionSlot {
-                            busy: AtomicBool::new(false),
-                            session: StdMutex::new(session),
-                        }));
-                        self.changed.notify_all();
-                        continue;
-                    }
-                    Ok(_) => {
-                        self.changed.notify_all();
-                        continue;
-                    }
-                    Err(error) => {
-                        self.changed.notify_all();
-                        return Err(error);
-                    }
-                }
-            }
-
-            state = self
-                .changed
-                .wait(state)
-                .unwrap_or_else(PoisonError::into_inner);
-            drop(state);
-        }
-    }
-
-    fn run_coreml_batched(
-        &self,
-        prepared: PreparedBatch,
-        entry: TransformersConfig,
-        execution_concurrency: usize,
-        signal: Option<&CancellationToken>,
-    ) -> Result<EmbeddingResult, ModelError> {
-        check_cancelled(signal)?;
-        let request = Arc::new(CoreMlBatchRequest {
-            prepared,
-            signal: signal.cloned(),
-            result: StdMutex::new(None),
-            changed: Condvar::new(),
-        });
-        let is_leader = {
-            let mut state = lock_std_mutex(&self.coreml_batcher.state);
-            state.pending.push_back(Arc::clone(&request));
-            if state.running {
-                false
-            } else {
-                state.running = true;
-                true
-            }
-        };
-
-        if is_leader {
-            // Give callers admitted by the same runtime wave a small window to
-            // join one CoreML invocation. This keeps one compiled CoreML graph
-            // while still turning user concurrency into useful device work.
-            if execution_concurrency > 1 && request.prepared.batch_size < entry.max_batch_size {
-                thread::sleep(Duration::from_millis(1));
-            }
-            self.drain_coreml_batches(entry, entry.max_batch_size);
-        }
-
-        let mut result = lock_std_mutex(&request.result);
-        while result.is_none() {
-            result = request
-                .changed
-                .wait(result)
-                .unwrap_or_else(PoisonError::into_inner);
-        }
-        result
-            .take()
-            .expect("CoreML batch request result was checked")
-            .map_err(ModelError::internal)
-    }
-
-    fn drain_coreml_batches(&self, entry: TransformersConfig, max_batch_size: usize) {
-        loop {
-            let requests = {
-                let mut state = lock_std_mutex(&self.coreml_batcher.state);
-                let mut requests = Vec::new();
-                let mut vector_count = 0_usize;
-                while let Some(request) = state.pending.front() {
-                    let request_size = request.prepared.batch_size;
-                    if !requests.is_empty()
-                        && vector_count.saturating_add(request_size) > max_batch_size
-                    {
-                        break;
-                    }
-                    vector_count = vector_count.saturating_add(request_size);
-                    requests.push(
-                        state
-                            .pending
-                            .pop_front()
-                            .expect("CoreML pending request disappeared"),
-                    );
-                }
-                if requests.is_empty() {
-                    state.running = false;
-                    return;
-                }
-                requests
-            };
-
-            let active = requests
-                .iter()
-                .filter(|request| {
-                    !request
-                        .signal
-                        .as_ref()
-                        .is_some_and(CancellationToken::is_cancelled)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            if active.is_empty() {
-                for request in requests {
-                    complete_coreml_request(
-                        &request,
-                        Err("Transformers embedding was cancelled".to_owned()),
-                    );
-                }
-                continue;
-            }
-
-            let merged = merge_prepared_batches(
-                &active
-                    .iter()
-                    .map(|request| &request.prepared)
-                    .collect::<Vec<_>>(),
-            );
-            let result = merged.and_then(|prepared| {
-                self.run(1, |session| run_session(session, &prepared, entry, None))
-            });
-            match result {
-                Ok(result) => complete_coreml_batch(&requests, &active, &result),
-                Err(error) => {
-                    let message = error.to_string();
-                    for request in requests {
-                        let result = if request
-                            .signal
-                            .as_ref()
-                            .is_some_and(CancellationToken::is_cancelled)
-                        {
-                            Err("Transformers embedding was cancelled".to_owned())
-                        } else {
-                            Err(message.clone())
-                        };
-                        complete_coreml_request(&request, result);
-                    }
-                }
-            }
-        }
-    }
-
-    fn provider(&self) -> TransformersExecutionProvider {
-        lock_std_mutex(&self.state).provider
-    }
-
-    fn fallback_to_cpu(&self) -> Result<bool, ModelError> {
-        let _fallback = lock_std_mutex(&self.fallback);
-        if self.provider() == TransformersExecutionProvider::Cpu {
-            return Ok(false);
-        }
-        let session = load_session(
-            &self.model_path,
-            TransformersExecutionProvider::Cpu,
-            &self.prepacked_weights,
-        )?;
-        let mut state = lock_std_mutex(&self.state);
-        state.provider = TransformersExecutionProvider::Cpu;
-        state.generation = state.generation.wrapping_add(1);
-        state.sessions = vec![Arc::new(SessionSlot {
-            busy: AtomicBool::new(false),
-            session: StdMutex::new(session),
-        })];
-        self.changed.notify_all();
-        Ok(true)
-    }
-}
-
-const fn physical_session_limit(
-    provider: TransformersExecutionProvider,
-    requested: usize,
-) -> usize {
-    match provider {
-        TransformersExecutionProvider::CoreMl => 1,
-        TransformersExecutionProvider::Cpu
-        | TransformersExecutionProvider::WebGpu
-        | TransformersExecutionProvider::Cuda
-        | TransformersExecutionProvider::DirectMl => requested,
     }
 }
 
@@ -666,15 +414,14 @@ fn resolve_execution_provider(device: Option<Device>) -> TransformersExecutionPr
 fn load_session(
     path: &Path,
     provider: TransformersExecutionProvider,
-    prepacked_weights: &PrepackedWeights,
 ) -> Result<Session, ModelError> {
     let builder = Session::builder(&crate::models::runtime::onnx::initialize()?)
         .map_err(|error| {
             ModelError::internal("Unable to configure ONNX embedding model").with_cause(error)
         })?
-        .with_prepacked_weights(prepacked_weights)
+        .with_parallel_execution(false)
         .map_err(|error| {
-            ModelError::internal("Unable to share ONNX prepacked weights").with_cause(error)
+            ModelError::internal("Unable to configure ONNX inference threads").with_cause(error)
         })?;
     let builder = configure_execution_provider(builder, provider)?;
     let mut builder = builder
@@ -787,201 +534,17 @@ fn configure_directml(
     ))
 }
 
-fn embed_batch(
-    loaded: &LoadedTransformersModel,
-    texts: &[String],
-    entry: TransformersConfig,
-    execution_concurrency: usize,
-    signal: Option<&CancellationToken>,
-    on_progress: Option<&Arc<dyn Fn(ModelProgress) + Send + Sync>>,
-) -> Result<EmbeddingResult, ModelError> {
-    check_cancelled(signal)?;
-    let prepared = prepare_batch(&loaded.tokenizers, texts, entry)?;
-    check_cancelled(signal)?;
-    let provider = loaded.sessions.provider();
-    let first = if provider == TransformersExecutionProvider::CoreMl {
-        loaded
-            .sessions
-            .run_coreml_batched(prepared.clone(), entry, execution_concurrency, signal)
-    } else {
-        loaded.sessions.run(execution_concurrency, |session| {
-            run_session(session, &prepared, entry, signal)
-        })
-    };
-    match first {
-        Ok(result) => Ok(result),
-        Err(error) if provider != TransformersExecutionProvider::Cpu => {
-            let warning = format!(
-                "Transformers {} embedding inference failed ({}), falling back to CPU.",
-                provider.name(),
-                error
-            );
-            if let Some(on_progress) = on_progress {
-                on_progress(ModelProgress::Warning {
-                    model_ref: entry.reference.to_owned(),
-                    message: warning,
-                });
-            } else {
-                tracing::warn!("{warning}");
-            }
-            loaded.sessions.fallback_to_cpu()?;
-            loaded.sessions.run(execution_concurrency, |session| {
-                run_session(session, &prepared, entry, signal)
-            })
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn merge_prepared_batches(batches: &[&PreparedBatch]) -> Result<PreparedBatch, ModelError> {
-    let sequence_length = batches
-        .iter()
-        .map(|batch| batch.sequence_length)
-        .max()
-        .unwrap_or_default();
-    let batch_size = batches.iter().map(|batch| batch.batch_size).sum::<usize>();
-    if sequence_length == 0 || batch_size == 0 {
-        return Err(ModelError::internal(
-            "Unable to merge an empty CoreML embedding batch",
-        ));
-    }
-
-    let capacity = batch_size.saturating_mul(sequence_length);
-    let mut input_ids = Vec::with_capacity(capacity);
-    let mut attention_mask = Vec::with_capacity(capacity);
-    let mut token_type_ids = Vec::with_capacity(capacity);
-    let mut position_ids = Vec::with_capacity(capacity);
-    let mut truncated = Vec::new();
-    let mut batch_offset = 0_usize;
-    for batch in batches {
-        for row in 0..batch.batch_size {
-            append_padded_row(
-                &mut input_ids,
-                &batch.input_ids,
-                row,
-                batch.sequence_length,
-                sequence_length,
-                batch.padding_input_id,
-            );
-            append_padded_row(
-                &mut attention_mask,
-                &batch.attention_mask,
-                row,
-                batch.sequence_length,
-                sequence_length,
-                0,
-            );
-            append_padded_row(
-                &mut token_type_ids,
-                &batch.token_type_ids,
-                row,
-                batch.sequence_length,
-                sequence_length,
-                0,
-            );
-            append_padded_row(
-                &mut position_ids,
-                &batch.position_ids,
-                row,
-                batch.sequence_length,
-                sequence_length,
-                0,
-            );
-        }
-        truncated.extend(batch.truncated.iter().map(|index| batch_offset + index));
-        batch_offset += batch.batch_size;
-    }
-
-    Ok(PreparedBatch {
-        input_ids,
-        attention_mask,
-        token_type_ids,
-        position_ids,
-        padding_input_id: batches[0].padding_input_id,
-        batch_size,
-        sequence_length,
-        truncated,
-    })
-}
-
-fn append_padded_row(
-    destination: &mut Vec<i64>,
-    source: &[i64],
-    row: usize,
-    source_width: usize,
-    destination_width: usize,
-    padding: i64,
-) {
-    let start = row.saturating_mul(source_width);
-    let end = start.saturating_add(source_width);
-    destination.extend_from_slice(&source[start..end]);
-    destination.resize(
-        destination.len() + destination_width - source_width,
-        padding,
-    );
-}
-
-fn complete_coreml_batch(
-    requests: &[Arc<CoreMlBatchRequest>],
-    active: &[Arc<CoreMlBatchRequest>],
-    result: &EmbeddingResult,
-) {
-    let expected = active
-        .iter()
-        .map(|request| request.prepared.batch_size)
-        .sum::<usize>();
-    if result.vectors.len() != expected {
-        let error = format!(
-            "CoreML merged batch returned {} vectors for {expected} inputs",
-            result.vectors.len()
-        );
-        for request in requests {
-            complete_coreml_request(request, Err(error.clone()));
-        }
-        return;
-    }
-
-    let mut offset = 0_usize;
-    for request in requests {
-        let was_active = active
-            .iter()
-            .any(|active_request| Arc::ptr_eq(active_request, request));
-        if !was_active {
-            complete_coreml_request(
-                request,
-                Err("Transformers embedding was cancelled".to_owned()),
-            );
-            continue;
-        }
-        let end = offset + request.prepared.batch_size;
-        let request_result = if request
-            .signal
-            .as_ref()
-            .is_some_and(CancellationToken::is_cancelled)
-        {
-            Err("Transformers embedding was cancelled".to_owned())
-        } else {
-            Ok(EmbeddingResult {
-                vectors: result.vectors[offset..end].to_vec(),
-                truncated: request.prepared.truncated.clone(),
-            })
-        };
-        complete_coreml_request(request, request_result);
-        offset = end;
-    }
-}
-
-fn complete_coreml_request(request: &CoreMlBatchRequest, result: Result<EmbeddingResult, String>) {
-    *lock_std_mutex(&request.result) = Some(result);
-    request.changed.notify_one();
+#[derive(Debug)]
+struct NativeOutput {
+    shape: Vec<i64>,
+    data: Vec<f32>,
 }
 
 fn run_session(
     session: &mut Session,
     prepared: &PreparedBatch,
-    entry: TransformersConfig,
     signal: Option<&CancellationToken>,
-) -> Result<EmbeddingResult, ModelError> {
+) -> Result<NativeOutput, ModelError> {
     check_cancelled(signal)?;
     let mut inputs = HashMap::<String, DynTensor>::new();
     for input in session.inputs() {
@@ -1030,9 +593,17 @@ fn run_session(
     let data = data.to_vec();
     drop(outputs);
     check_cancelled(signal)?;
+    Ok(NativeOutput { shape, data })
+}
+
+fn finish_output(
+    output: &NativeOutput,
+    prepared: &PreparedBatch,
+    entry: TransformersConfig,
+) -> Result<EmbeddingResult, ModelError> {
     let vectors = pool_output(
-        &shape,
-        &data,
+        &output.shape,
+        &output.data,
         &prepared.attention_mask,
         prepared.batch_size,
         prepared.sequence_length,
@@ -1066,11 +637,6 @@ fn prepare_tokenizers(
             ..TruncationParams::default()
         }))
         .map_err(|error| tokenization_error(entry, error))?;
-    tokenizer.with_padding(Some(PaddingParams {
-        strategy: PaddingStrategy::BatchLongest,
-        direction: PaddingDirection::Right,
-        ..PaddingParams::default()
-    }));
     Ok(PreparedTokenizers {
         probe,
         inputs: tokenizer,
@@ -1082,9 +648,14 @@ fn prepare_batch(
     texts: &[String],
     entry: TransformersConfig,
 ) -> Result<PreparedBatch, ModelError> {
-    let probe = tokenizers
-        .probe
-        .encode_batch(texts.to_vec(), true)
+    let probe = texts
+        .iter()
+        .map(|text| {
+            tokenizers
+                .probe
+                .encode(text.as_str(), entry.add_special_tokens)
+        })
+        .collect::<Result<Vec<_>, _>>()
         .map_err(|error| tokenization_error(entry, error))?;
     let truncated = probe
         .iter()
@@ -1100,16 +671,34 @@ fn prepare_batch(
         })
         .collect::<Vec<_>>();
 
-    let padding_input_id = i64::from(PaddingParams::default().pad_id);
-    let encodings = tokenizers
-        .inputs
-        .encode_batch(texts.to_vec(), true)
+    let mut encodings = texts
+        .iter()
+        .map(|text| {
+            tokenizers
+                .inputs
+                .encode(text.as_str(), entry.add_special_tokens)
+        })
+        .collect::<Result<Vec<_>, _>>()
         .map_err(|error| tokenization_error(entry, error))?;
+    // Static tokenizers can produce an all-empty batch. ONNX still needs one
+    // padding position with a zero attention mask, matching the upstream loader.
     let sequence_length = encodings
-        .first()
+        .iter()
         .map(tokenizers::Encoding::len)
-        .unwrap_or_default();
-    if sequence_length == 0
+        .max()
+        .unwrap_or_default()
+        .max(1);
+    let padding = PaddingParams::default();
+    for encoding in &mut encodings {
+        encoding.pad(
+            sequence_length,
+            padding.pad_id,
+            padding.pad_type_id,
+            &padding.pad_token,
+            PaddingDirection::Right,
+        );
+    }
+    if encodings.is_empty()
         || encodings
             .iter()
             .any(|encoding| encoding.len() != sequence_length)
@@ -1146,7 +735,6 @@ fn prepare_batch(
         attention_mask,
         token_type_ids,
         position_ids,
-        padding_input_id,
         batch_size,
         sequence_length,
         truncated,
@@ -1284,24 +872,27 @@ fn check_cancelled(signal: Option<&CancellationToken>) -> Result<(), ModelError>
     Ok(())
 }
 
-fn lock_session(session: &StdMutex<Session>) -> StdMutexGuard<'_, Session> {
-    lock_std_mutex(session)
-}
-
 fn lock_std_mutex<T>(mutex: &StdMutex<T>) -> StdMutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn onnx_artifact(dtype: &str) -> Result<&'static str, ModelError> {
-    match dtype {
-        "fp32" => Ok("onnx/model.onnx"),
-        "q8" => Ok("onnx/model_quantized.onnx"),
-        "q4" => Ok("onnx/model_q4.onnx"),
-        value => Err(ModelError::internal(format!(
-            "Unsupported Transformers dtype: {value}"
-        ))),
+fn onnx_artifact(entry: TransformersConfig) -> Result<&'static str, ModelError> {
+    let mut models = entry.download.artifacts.iter().filter(|artifact| {
+        Path::new(artifact.path)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("onnx"))
+    });
+    match (models.next(), models.next()) {
+        (Some(artifact), None) => Ok(artifact.path),
+        _ => Err(ModelError::storage_failure(
+            "Expected exactly one ONNX model artifact",
+        )),
     }
 }
+
+mod policy;
+mod scheduler;
+mod session;
 
 #[cfg(test)]
 mod tests;

@@ -1276,14 +1276,20 @@ fn install_cursor(options: &AgentOptions) -> Result<(), InstallError> {
             server
         }
     };
-    install_strict_json_server(&path, "mcpServers", server, options.force, "Cursor")
+    update_jsonc_server(
+        &path,
+        &server,
+        options.force,
+        "Cursor",
+        is_managed_json_server,
+    )
 }
 
 fn uninstall_cursor() -> Result<(), InstallError> {
     let path = env_path("CURSOR_CONFIG_DIR")
         .unwrap_or_else(|| home_dir().join(".cursor"))
         .join("mcp.json");
-    remove_strict_json_server(&path, "mcpServers")
+    remove_jsonc_server(&path, "Cursor", is_managed_json_server)
 }
 
 fn install_qwen(options: &AgentOptions) -> Result<(), InstallError> {
@@ -2416,6 +2422,9 @@ fn resolve_qwen_home() -> Result<PathBuf, InstallError> {
         });
     }
     for path in [default.join(".env"), home_dir().join(".env")] {
+        if path.is_dir() {
+            continue;
+        }
         let source = read_if_exists(&path)?;
         if let Some(value) = parse_dotenv_value(&source, "QWEN_HOME") {
             return Ok(expand_home(&value));
@@ -2538,6 +2547,7 @@ fn update_jsonc_container(
         return Ok(());
     }
     let next = jsonc_set_path(&source, &[container, "zvec_grep"], server)?;
+    parse_jsonc_object_options(path, &next, label, allow_trailing_comma)?;
     atomic_write(path, &ensure_newline(next))
 }
 
@@ -2580,6 +2590,7 @@ fn remove_jsonc_container(
     };
     let next = jsonc_remove_path(&source, path_to_remove)?;
     if next != source {
+        parse_jsonc_object_options(path, &next, label, allow_trailing_comma)?;
         atomic_write(path, &ensure_newline(next))?;
     }
     Ok(())
