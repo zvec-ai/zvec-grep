@@ -15,10 +15,17 @@ pub(crate) fn is_llama(reference: &str) -> bool {
     )
 }
 
-fn uses_bounded_batches(reference: &str) -> bool {
+pub(super) fn is_transformers(reference: &str) -> bool {
     matches!(
         get_embedding_model_catalog_entry(reference),
-        Some(EmbeddingCatalogEntry::Transformers(_) | EmbeddingCatalogEntry::Bekko(_))
+        Some(EmbeddingCatalogEntry::Transformers(_))
+    )
+}
+
+fn is_bekko(reference: &str) -> bool {
+    matches!(
+        get_embedding_model_catalog_entry(reference),
+        Some(EmbeddingCatalogEntry::Bekko(_))
     )
 }
 
@@ -73,9 +80,12 @@ fn resolve_override(
     Ok(None)
 }
 
-/// Local native resources must not be shared across different fixed budgets.
+/// Budget normalization before backend-specific limits are known. Transformers
+/// resolve their default and hardware limit on the model, including its provider.
 pub(crate) fn local_runtime_limit(reference: &str, requested: Option<usize>) -> Option<usize> {
-    if uses_bounded_batches(reference) || is_llama(reference) {
+    if is_transformers(reference) {
+        requested.map(|value| value.max(1))
+    } else if is_llama(reference) || is_bekko(reference) {
         Some(requested.unwrap_or(1).clamp(1, LOCAL_CONCURRENCY_CAP))
     } else {
         None
@@ -87,7 +97,9 @@ pub(crate) fn local_runtime_limit(reference: &str, requested: Option<usize>) -> 
 pub(crate) fn batch_concurrency(reference: &str, requested: Option<usize>) -> Option<usize> {
     if is_llama(reference) {
         Some(1)
-    } else if uses_bounded_batches(reference) {
+    } else if is_transformers(reference) {
+        requested.map(|value| value.max(1))
+    } else if is_bekko(reference) {
         Some(requested.unwrap_or(1).clamp(1, LOCAL_CONCURRENCY_CAP))
     } else {
         requested

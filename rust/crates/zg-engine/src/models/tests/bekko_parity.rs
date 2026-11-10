@@ -58,6 +58,7 @@ fn reference_model() -> TransformersEmbeddingModel {
             ..ModelConfig::default()
         },
         ModelComputeRuntime::shared(),
+        1,
     )
 }
 

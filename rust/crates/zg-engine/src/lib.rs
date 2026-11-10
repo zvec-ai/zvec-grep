@@ -196,6 +196,19 @@ impl ZvecGrep {
         self.service.close();
     }
 
+    /// Freezes resident model pool capacities from the server's environment.
+    /// Call before serving requests; client concurrency cannot resize these pools.
+    /// Native models and libraries are still loaded only when first used.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the engine is closed or has already acquired models.
+    pub fn enable_server_model_pools(&self) -> EngineResult<()> {
+        self.service
+            .enable_server_model_pools()
+            .map_err(|error| error.report_here())
+    }
+
     /// Reuses index read handles between requests, closing them after 60 idle seconds.
     /// Workspace writes retire cached handles before opening writable storage.
     /// Repeated calls are idempotent; ordinary engine instances remain uncached.
