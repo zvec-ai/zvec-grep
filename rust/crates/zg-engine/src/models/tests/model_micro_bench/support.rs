@@ -6,8 +6,8 @@ use crate::{
         catalog::{
             EmbeddingCatalogEntry, get_embedding_model_catalog_entry, list_embedding_models,
         },
-        runtime::{batch_concurrency, resolve_index_concurrency},
-        spi::EmbeddingPrepareOptions,
+        runtime::resolve_index_concurrency,
+        spi::{EmbeddingPrepareOptions, ModelExecutionStats},
     },
 };
 use serde_json::{Value, json};
@@ -79,10 +79,63 @@ impl Config {
     }
 
     pub fn workers(&self, model: &ModelRuntimeLease) -> usize {
+        if let Ok(value) = env::var("ZG_MODEL_BENCH_CLIENTS") {
+            let clients = value
+                .parse::<usize>()
+                .expect("positive benchmark client count");
+            assert!(clients > 0, "positive benchmark client count");
+            return clients;
+        }
         // Same successful-work admission as indexing's resolve_index_batch_policy.
-        batch_concurrency(&self.reference, self.index_limit)
+        model
+            .index_batch_concurrency(self.index_limit)
             .unwrap_or(model.concurrency_defaults().initial)
     }
+
+    pub fn client_mode() -> &'static str {
+        if env::var_os("ZG_MODEL_BENCH_CLIENTS").is_some() {
+            "fixed"
+        } else {
+            "production"
+        }
+    }
+}
+
+pub(super) fn execution_measurement(
+    before: Option<ModelExecutionStats>,
+    after: Option<ModelExecutionStats>,
+) -> Value {
+    let (Some(before), Some(after)) = (before, after) else {
+        return Value::Null;
+    };
+    let mut measured = after.clone();
+    macro_rules! difference {
+        ($($field:ident),+ $(,)?) => {$(
+            measured.$field = after.$field.checked_sub(before.$field)
+                .expect("execution counters must be monotonic");
+        )+};
+    }
+    difference!(
+        prepared_batches,
+        session_initializations,
+        pool_fallbacks,
+        native_runs,
+        native_rows,
+        padded_tokens,
+        preparation_ns,
+        inference_ns,
+        postprocessing_ns,
+        backend_to_native_ns,
+    );
+    json!({
+        "before": before, "after": after, "measured": measured,
+        "counter_scope": "measured_embedding_phase",
+        "peak_scope": "runtime_including_warmup",
+        "timing_scope": {
+            "backend_to_native_ns": "per request: backend submission to native start; includes preparation and scheduling; excludes runtime/backend admission; overlaps preparation_ns",
+            "work_ns": "preparation/inference/postprocessing are summed work durations, not disjoint end-to-end latency components",
+        },
+    })
 }
 
 fn download(entry: EmbeddingCatalogEntry) -> &'static ArtifactDownloadConfig {
@@ -232,7 +285,6 @@ async fn verifies_gguf_in_modelscope_cache() {
 fn cli_concurrency_controls_batch_workers() {
     for (reference, requested, expected) in [
         ("local/embeddinggemma-300m", Some(4), 1),
-        ("local/all-minilm-l6-v2", Some(24), 8),
         ("local/potion-code-16m-v2", Some(24), 24),
         ("local/potion-code-16m-v2", None, 2),
     ] {
@@ -250,4 +302,85 @@ fn cli_concurrency_controls_batch_workers() {
         drop(model);
         manager.close();
     }
+}
+
+#[test]
+fn transformer_workers_use_effective_runtime_admission() {
+    for requested in [None, Some(1), Some(2), Some(usize::MAX)] {
+        let reference = "local/all-minilm-l6-v2";
+        let cache = tempfile::tempdir().expect("isolated cache");
+        let config = Config {
+            reference: reference.into(),
+            cache: cache.path().into(),
+            device: Device::Cpu,
+            requested,
+            index_limit: resolve_index_concurrency(reference, requested).expect("budget"),
+            entry: get_embedding_model_catalog_entry(reference).expect("model"),
+        };
+        let manager = ModelRuntimeManager::new();
+        let model = config.acquire(&manager);
+        assert_eq!(config.workers(&model), model.admission_concurrency());
+        assert!(model.execution_concurrency() >= 1);
+        assert!(
+            model.execution_concurrency()
+                <= std::thread::available_parallelism()
+                    .expect("available hardware threads")
+                    .get()
+        );
+        drop(model);
+        manager.close();
+    }
+}
+
+#[test]
+fn execution_measurement_excludes_warmup_and_labels_runtime_peaks() {
+    let before = ModelExecutionStats {
+        actual_provider: "cpu",
+        session_count: 1,
+        global_intra_threads: 2,
+        session_initializations: 1,
+        prepared_batches: 3,
+        pool_fallbacks: 1,
+        native_runs: 3,
+        native_rows: 12,
+        padded_tokens: 384,
+        preparation_ns: 30,
+        inference_ns: 300,
+        postprocessing_ns: 15,
+        backend_to_native_ns: 9,
+        max_native_batch_rows: 4,
+        max_padded_tokens: 128,
+        native_inflight_peak: 1,
+    };
+    let after = ModelExecutionStats {
+        prepared_batches: 5,
+        pool_fallbacks: 2,
+        native_runs: 5,
+        native_rows: 20,
+        padded_tokens: 640,
+        preparation_ns: 50,
+        inference_ns: 500,
+        postprocessing_ns: 25,
+        backend_to_native_ns: 15,
+        ..before.clone()
+    };
+    let measured = execution_measurement(Some(before), Some(after));
+    assert_eq!(measured["measured"]["native_runs"], 2);
+    assert_eq!(measured["measured"]["native_rows"], 8);
+    assert_eq!(measured["measured"]["padded_tokens"], 256);
+    assert_eq!(measured["measured"]["preparation_ns"], 20);
+    assert_eq!(measured["measured"]["inference_ns"], 200);
+    assert_eq!(measured["measured"]["postprocessing_ns"], 10);
+    assert_eq!(measured["measured"]["backend_to_native_ns"], 6);
+    assert_eq!(measured["measured"]["pool_fallbacks"], 1);
+    assert!(measured["measured"].get("queue_wait_ns").is_none());
+    assert!(
+        measured["timing_scope"]["backend_to_native_ns"]
+            .as_str()
+            .expect("timing scope")
+            .contains("overlaps preparation_ns")
+    );
+    assert_eq!(measured["measured"]["actual_provider"], "cpu");
+    assert_eq!(measured["peak_scope"], "runtime_including_warmup");
+    assert!(execution_measurement(None, None).is_null());
 }

@@ -24,6 +24,7 @@ pub fn create_embedding_model(
     reference: &str,
     options: Option<ModelConfig>,
     compute_runtime: ModelComputeRuntime,
+    session_count: usize,
 ) -> Result<Arc<dyn EmbeddingModel>, ModelError> {
     let entry = get_embedding_model_catalog_entry(reference).ok_or_else(|| {
         ModelError::new(
@@ -48,7 +49,7 @@ pub fn create_embedding_model(
             Ok(Arc::new(QwenEmbeddingModel::new(config, options)?))
         }
         EmbeddingCatalogEntry::Transformers(config) => Ok(Arc::new(
-            TransformersEmbeddingModel::new(config, options, compute_runtime),
+            TransformersEmbeddingModel::new(config, options, compute_runtime, session_count),
         )),
         EmbeddingCatalogEntry::LlamaCpp(config) => Ok(Arc::new(LlamaCppEmbeddingModel::new(
             config,
@@ -76,6 +77,7 @@ mod tests {
                 entry.reference(),
                 options,
                 crate::models::runtime::ModelComputeRuntime::shared(),
+                1,
             )
             .expect("catalog backend should construct without loading model assets");
             assert_eq!(model.info().model().reference(), entry.reference());
@@ -86,6 +88,7 @@ mod tests {
             "missing",
             None,
             crate::models::runtime::ModelComputeRuntime::shared(),
+            1,
         )
         .err()
         .expect("unknown model should fail catalog lookup");

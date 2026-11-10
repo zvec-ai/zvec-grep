@@ -552,7 +552,7 @@ Embedding options:
   --endpoint <url>                  Embedding provider endpoint
   --model-cache <path>              Local model cache directory
   --device <device>                 auto, cpu, metal, vulkan, cuda
-  --embedding-concurrency <n>        Positive embedding concurrency (index only)
+  --embedding-concurrency <n>        Embedding execution budget (index only)
   --allow-remote                    Allow Remote Embedding for this command only
 
 Explicit --device and --model-cache values are saved after successful indexing;
@@ -564,8 +564,15 @@ Index embedding concurrency:
   and refresh; query-vector inference keeps its own defaults. The CLI option
   is accepted only with --index and is never saved in workspace settings.
   llama.cpp: context limit capped at 8, with serialized batches; defaults to 1.
-  Transformers/ORT: in-flight batch limit capped at 8; defaults to 1. Native
-    sessions honor that budget; CoreML uses one physical session.
+  Transformers/ORT: C controls CPU/CUDA session count in direct mode (default 1),
+    capped by available hardware concurrency. Server pools use the startup
+    ZVEC_GREP_EMBEDDING_CONCURRENCY value; client C only limits execution within
+    the pool. Requests above capacity warn and are capped; omitted C uses capacity.
+    ZVEC_GREP_ORT_THREAD_BUDGET configures one global CPU intra-op pool shared by
+    all ORT models; defaults to half the available logical threads, rounded up.
+    Client C never resizes Server pools or changes their thread configuration.
+    Batch and prefetch limits are independent of the client's C.
+    Values must be positive; requests above server pool capacity are capped.
   Bekko: CPU batch tasks; defaults to 1, capped at 8.
   Potion/model2vec: concurrent batch tasks; defaults to 2, with an independent
     CPU worker-pool capacity. No cap of 8 is applied.
@@ -621,7 +628,7 @@ Environment:
   ZVEC_GREP_DEVICE       Local embedding device: auto, cpu, metal, vulkan, or cuda
 
 Index-only embedding concurrency:
-  ZVEC_GREP_EMBEDDING_CONCURRENCY  Positive index/update concurrency override
+  ZVEC_GREP_EMBEDDING_CONCURRENCY  Index/update execution concurrency override
   Applies to automatic indexing and refresh, never query-vector inference.
   Explicit CLI/API index settings take precedence. Invalid values warn and use
   automatic selection. Server mode reads the Server process environment;
@@ -928,14 +935,20 @@ Embedding:
   ZVEC_GREP_ENDPOINT     Remote Embedding endpoint fallback
   ZVEC_GREP_MODEL_CACHE  Local embedding model cache directory
   ZVEC_GREP_DEVICE       Local embedding device: auto, cpu, metal, vulkan, or cuda
+  ZVEC_GREP_ORT_THREAD_BUDGET  Global ORT CPU intra-op thread configuration
+    Default: half the available logical threads, rounded up; capped by hardware.
+    All model/device pools share it. It is not a total process thread limit.
+    Restart the Server after changing it.
 
-Index-only embedding concurrency:
-  ZVEC_GREP_EMBEDDING_CONCURRENCY  Positive index/update concurrency override
-  Applies to automatic indexing and refresh, never query-vector inference.
-  Precedence: explicit CLI/API index setting, this variable, legacy llama.cpp
-  index setting, then backend defaults. Invalid values warn and use defaults.
-  Server mode reads the Server process environment; restart it after changes.
-  These overrides are not persisted in workspace settings.
+Embedding concurrency:
+  ZVEC_GREP_EMBEDDING_CONCURRENCY  Index/update concurrency default
+    ORT: direct-mode session count, or fixed per-model/device Server pool capacity.
+    CPU/CUDA default to 1. Client index overrides only limit pool execution;
+    they cannot expand Server capacity. Queries share the same model pool.
+    Other backends retain their index-only defaults and override precedence.
+  CLI/API index setting, this variable, legacy llama.cpp index setting, then defaults.
+  Invalid values warn and use defaults. Restart the Server after environment changes.
+  These settings are not persisted in workspace configuration.
 
 Qwen credential aliases:
   DASHSCOPE_API_KEY  Qwen credential fallback after ZVEC_GREP_API_KEY

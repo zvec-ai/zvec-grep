@@ -100,25 +100,65 @@ remains line-oriented.
 Index embedding concurrency is configured with
 `zg --index --embedding-concurrency <n>`.
 The option is rejected outside `--index`. For automatic indexing and
-refreshes as well, set `ZVEC_GREP_EMBEDDING_CONCURRENCY=<n>`. Values must be
-positive integers. Explicit CLI/API index settings take precedence over this
-environment variable, followed by the legacy
+refreshes as well, set `ZVEC_GREP_EMBEDDING_CONCURRENCY=<n>`. Transformers/ORT clamps
+positive integers to its supported range. Explicit zero is rejected for every
+backend. Explicit CLI/API index settings take precedence over this environment
+variable, followed by the legacy
 `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` for llama.cpp indexing, then backend defaults.
 Invalid environment values warn and select the automatic default. These overrides
-do not configure query-vector inference and are not persisted in workspace settings.
+do not configure a separate query worker and are not persisted in workspace settings.
 Direct and Server indexing use the same engine boundary; restart the Server after
 changing its inherited environment, while explicit CLI overrides need no restart.
 
 For llama.cpp, the limit controls contexts within a serialized batch and is capped
-at eight, defaulting to one. Transformers/ORT limits in-flight batches to at most
-eight, defaulting to one. ORT may create sessions within this budget;
-CoreML retains one physical session. Potion/model2vec defaults to two batch tasks
-and retains an independent CPU worker capacity; remote models retain adaptive
-request scheduling. Model2vec and remote overrides are not capped at eight.
+at eight, defaulting to one. Transformers/ORT shares a bounded runtime between
+indexing and queries for the same model, cache and device:
 
-Matching local concurrency configurations share runtime admission. Different
-configurations use separate cached native resources; active leases keep their
-models alive, while unused variants are released when switching configurations.
+- C controls the session count on both CPU and CUDA, defaulting to one and
+  capped to available hardware concurrency. Direct indexing uses the explicit
+  CLI/API value, then `ZVEC_GREP_EMBEDDING_CONCURRENCY`, then the default.
+- Server startup captures `ZVEC_GREP_EMBEDDING_CONCURRENCY` as each model/device
+  pool's capacity. Sessions are created lazily on first preparation. A client's
+  concurrency only limits its own operation within that pool: requests above capacity warn
+  and are capped, omitted values use server capacity. Requests never resize the
+  resident pool or change its thread configuration. Independent operations may
+  execute concurrently up to the shared pool capacity. Different models/devices
+  have separate pools; C is not a process-wide session count.
+- `ZVEC_GREP_ORT_THREAD_BUDGET=T` configures the single process-global ORT
+  intra-op pool shared by all Sessions. It defaults to half the available logical
+  threads, rounded up, and is capped to available hardware concurrency. Invalid
+  environment values warn and use defaults. Changing the server pool capacity or
+  global thread budget requires a Server restart; changing a client operation's
+  concurrency does not. T controls CPU operator parallelism, not GPU threads or all process
+  threads; native Run callers, tokenizers and other libraries have their own
+  threads. Sessions no longer divide T by C or rebuild to change thread budgets.
+- Each Session owns one fixed native worker; no Session receives concurrent Run
+  calls. A query can use an idle Session, with at most one query batch alongside
+  document work. CPU, CUDA, DirectML and WebGPU use the same fixed-pool execution
+  limits; CoreML retains its single-session limit.
+- Each request retains its input batch; the scheduler does not merge requests.
+  Upstream indexing still batches inputs using each model's catalog limits
+  (four texts per request for MiniLM). Queries run first; running inference is
+  not preempted. CPU preparation and postprocessing overlap native execution.
+- Pending inputs have separate document/query limits: document admission is capacity+2
+  requests on CPU and 4*(capacity+1) on CUDA; queries have four slots. Copied text remains
+  bounded by 32/8 MiB respectively, with at most 8 MiB per request. Full queues apply
+  cancellable backpressure. Native work retains runtime ownership until it settles.
+
+Explicit concurrency values must be positive. The effective backend budget is
+reported when it differs from the request.
+Admission includes bounded prefetch based on pool capacity, independent of a Server request's C, so a single
+executing Session can prepare its next batch in advance. Extra Sessions allocate
+their own weights and workspaces; batch activations also contribute to memory.
+Initialization failure releases the partial pool before CPU fallback; inference
+fallback drains GPU work and converts the entire pool to CPU. Batch limits remain
+independent of C and T. Diagnostics report actual Sessions, the global intra-op
+configuration, session initialization count, fallback count and native batch sizes.
+
+Potion/model2vec defaults to two batch tasks and retains an independent CPU worker
+capacity; remote models retain adaptive request scheduling. Their overrides are
+not capped at eight. llama.cpp continues to cache separate native resources for
+different fixed context budgets, retiring unused variants when switching.
 
 `zg --install --upgrade-installed` migrates existing user-level MCP launchers
 from 0.2.x without selecting agents or installing new integrations. It changes
