@@ -40,36 +40,6 @@
 [`rust/`](./rust/README.md)。用户文档统一维护在
 [Zvec 官网](https://zvec.org/zh/docs/zvec-grep/)。
 
-Rust 和 TypeScript 引擎均通过 zvec 的 SDK 使用其内置 DiskANN，保存 FP16 向量，
-启用内置 PQ（最多 64 段）。向量索引、全文检索、元数据过滤和增删更新统一交给 zvec。
-旧 HNSW 及 Microsoft DiskANN/SQLite 索引需要用 `zg --index --rebuild` 显式重建。
-TypeScript 包直接使用 zvec Node.js SDK，无需再编译独立的 Rust 向量绑定。
-
-[Cohere 测试报告](rust/benchmarks/diskann/REPORT_BRIEF_CN.md) 对比本地 zvec
-源码 `960ecbc2` 编译的 DiskANN 与 HNSW，覆盖 20 万至 100 万向量。
-测量范围为向量查询，不代表完整应用或已发布 SDK 二进制的性能；
-标注为历史测试的旧报告对应此前的 Microsoft DiskANN/SQLite 实现。
-
-另有[与此前微软 Rust/SQLite 方案的交替对测](rust/benchmarks/diskann/REPORT_MICROSOFT_CN.md)，
-采用同一 Cohere 样本和预热流程，并列出图参数、实际召回率和缓存策略的差异。
-
-[有容量上限的节点页缓存测试](rust/benchmarks/diskann/REPORT_CACHE_CN.md) 对比本地 macOS
-zvec 源码修改前后，在相同索引和搜索参数下列出吞吐量收益与 RSS 代价。
-已发布的 SDK 二进制尚未包含此本地源码改动。
-
-后续[并行读取测试报告](rust/benchmarks/diskann/REPORT_READ_CN.md) 定位 macOS 剩余的读取等待，
-固定 64 MiB 缓存和搜索结果，通过有限的 I/O 工作线程并行读取节点页，
-重新对比 20 万至 100 万 Cohere 向量下的 QPS、RSS 和召回率，并列明与微软方案的差异。
-
-最新[独立预热、单遍查询报告](rust/benchmarks/diskann/REPORT_NODE_CN.md) 使用本地 zvec `f8a36342`，
-覆盖 60 万至 100 万向量。600 条预热、400 条验证和 3,500 条回归查询互不重叠，每条测试查询
-在每个实现、每个规模下只执行一次。采用 8 MiB 节点缓存、32 个 I/O 线程后，RSS 为
-110.23／128.55／146.86 MiB，汇总 QPS 比微软 Rust/SQLite 适配层高 9.56%–21.22%，各分组召回均超过 92%。
-同轮验证对照中，RSS 比上一版配置降低 33.92%–38.02%；双方实际召回不同，zvec 仍多用约 21–33 MiB RSS。
-已发布 SDK 二进制尚未包含此改动；此前的[64 MiB 配置](rust/benchmarks/diskann/REPORT_UNSEEN_SPEED_CN.md)、
-[未知查询基线](rust/benchmarks/diskann/REPORT_UNSEEN_BASELINE_CN.md)
-和[重复热查询结果](rust/benchmarks/diskann/REPORT_NODE_WARM_CN.md)单独保留。
-
 **安装**：`npm install -g @zvec/zvec-grep`，或通过 Homebrew（macOS/Linux）：
 `brew install zvec-grep`
 

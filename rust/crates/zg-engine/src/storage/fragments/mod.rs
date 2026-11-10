@@ -39,10 +39,6 @@ pub(super) struct Fragments {
     metrics: BTreeMap<String, EmbeddingMetric>,
 }
 
-pub(super) struct PreparedModel {
-    docs: Vec<Doc>,
-}
-
 impl Fragments {
     pub(super) fn open(
         root: &Path,
@@ -84,7 +80,7 @@ impl Fragments {
         entities: &[Entity],
         entries: &[IndexedFragment],
         directories: &[DirectoryId],
-    ) -> EngineResult<BTreeMap<String, PreparedModel>> {
+    ) -> EngineResult<BTreeMap<String, Vec<Doc>>> {
         let owners = entities
             .iter()
             .map(|entity| {
@@ -105,7 +101,7 @@ impl Fragments {
             .flat_map(Entity::fragments)
             .map(|fragment| (&fragment.id, fragment))
             .collect::<HashMap<_, _>>();
-        let mut projections: BTreeMap<String, PreparedModel> = BTreeMap::new();
+        let mut projections: BTreeMap<String, Vec<Doc>> = BTreeMap::new();
         for entry in entries {
             let (owner, fields) = owners.get(&entry.entity_id).ok_or_else(|| {
                 EngineError::invalid_argument("search projection references a missing entity")
@@ -122,21 +118,17 @@ impl Fragments {
                 zg_zvec_fp16::add_embedding(&mut doc, "embedding", &entry.vector),
                 "encode FP16 embedding",
             )?;
-            let projection = projections
+            projections
                 .entry(entry.model.clone())
-                .or_insert_with(|| PreparedModel { docs: Vec::new() });
-            projection.docs.push(doc);
+                .or_default()
+                .push(doc);
         }
         Ok(projections)
     }
 
-    pub(super) fn write(&self, projections: &BTreeMap<String, PreparedModel>) -> EngineResult<()> {
-        for (model, projection) in projections {
-            write_docs(
-                self.index(model)?,
-                &projection.docs,
-                "write model fragments",
-            )?;
+    pub(super) fn write(&self, projections: &BTreeMap<String, Vec<Doc>>) -> EngineResult<()> {
+        for (model, docs) in projections {
+            write_docs(self.index(model)?, docs, "write model fragments")?;
         }
         Ok(())
     }

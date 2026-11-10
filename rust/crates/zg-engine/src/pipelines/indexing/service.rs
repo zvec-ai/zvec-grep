@@ -1053,7 +1053,7 @@ mod tests {
             Some(0),
             Some(1),
             Some(2),
-            Some(4),
+            Some(3),
             Some(5),
             Some(u32::MAX),
         ] {

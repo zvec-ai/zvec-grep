@@ -62,11 +62,11 @@ test("npm package contains and exposes the supported public surface", async (t) 
     [...paths.keys()].some((path) => path.startsWith("native/")),
     false,
   );
-  assert.equal(paths.has("scripts/build-diskann.mjs"), false);
   assert.equal(
     [...paths].some(
       ([path]) =>
         path.startsWith("src/") ||
+        path.startsWith("scripts/") ||
         path.startsWith("test/") ||
         path.startsWith("docs/"),
     ),

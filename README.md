@@ -41,47 +41,6 @@ This README describes the TypeScript / Node.js implementation. For the Rust
 implementation, see [`rust/`](./rust/README.md). User documentation is maintained
 on the [Zvec website](https://zvec.org/en/docs/zvec-grep/).
 
-Both engines use [zvec's DiskANN](https://github.com/alibaba/zvec) for vector
-search, with FP16 vectors and built-in product quantization (up to 64 PQ chunks).
-zvec manages the vector index, full-text search, metadata filtering, and updates.
-Existing HNSW and Microsoft DiskANN/SQLite indexes require an explicit rebuild
-with `zg --index --rebuild` after upgrading. The TypeScript package uses the
-zvec Node.js SDK and no longer builds a separate Rust vector binding.
-
-The [Cohere benchmark report](rust/benchmarks/diskann/REPORT_BRIEF_CN.md) compares
-native zvec DiskANN and HNSW on 200k–1M vectors using a local source build at
-`960ecbc2`. It measures vector queries, not the complete application or the
-published SDK binaries. Older reports explicitly marked as historical describe
-the previous Microsoft DiskANN/SQLite implementation.
-
-A [paired comparison with the previous Microsoft Rust/SQLite adapter](rust/benchmarks/diskann/REPORT_MICROSOFT_CN.md)
-uses the same Cohere samples and warmup protocol, with graph, recall, and cache-policy
-differences documented alongside QPS and process RSS.
-
-The [bounded node-page cache experiment](rust/benchmarks/diskann/REPORT_CACHE_CN.md)
-compares local macOS zvec builds with the same indexes and search parameters.
-It reports the throughput gain and RSS cost separately; released SDK binaries
-do not yet contain this local source change.
-
-The subsequent [bounded parallel-read experiment](rust/benchmarks/diskann/REPORT_READ_CN.md)
-profiles the remaining macOS read wait, keeps the same 64 MiB cache and search
-results, and retests zvec against the Microsoft Rust/SQLite adapter on 200k–1M
-Cohere vectors. It reports I/O worker counts alongside QPS, RSS, and recall.
-
-The latest [disjoint warmup, single-pass query report](rust/benchmarks/diskann/REPORT_NODE_CN.md)
-tests local zvec `f8a36342` on 600k–1M vectors. It separates 600 warmup,
-400 validation, and 3,500 regression queries; each test query runs once per
-backend and scale. With an 8 MiB node cache and 32 I/O workers, zvec uses
-110.23/128.55/146.86 MiB peak RSS and is 9.56%–21.22% faster in aggregate than
-the Microsoft Rust/SQLite adapter, with every shard above 92% recall.
-Same-round validation controls show 33.92%–38.02% lower RSS than the previous
-native configuration. Actual recall differs between backends, and zvec still
-uses 21–33 MiB more RSS. Released SDK binaries do not yet contain these changes.
-The previous [64 MiB configuration](rust/benchmarks/diskann/REPORT_UNSEEN_SPEED_CN.md),
-[unknown-query baseline](rust/benchmarks/diskann/REPORT_UNSEEN_BASELINE_CN.md),
-and [repeated warm-query results](rust/benchmarks/diskann/REPORT_NODE_WARM_CN.md)
-remain available separately.
-
 **Install**: `npm install -g @zvec/zvec-grep`, or via Homebrew (macOS/Linux):
 `brew install zvec-grep`
 

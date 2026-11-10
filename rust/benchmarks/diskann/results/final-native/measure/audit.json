@@ -1,9 +1,0 @@
-{
-  "finished": "2026-11-10T04:01:14.136552+00:00",
-  "invocations": 70,
-  "unique_test_queries_per_backend_scale": 3500,
-  "all_shards_above_90": true,
-  "indexes_unchanged": true,
-  "binary_library_unchanged": true,
-  "selection_sha256": "7182a0594172918775436ad02d2156bdbf9e0bd925478aa3bde35a7fbf3f1f82"
-}

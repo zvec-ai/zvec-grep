@@ -6,7 +6,6 @@ node_modules/
 
 # Build and test outputs
 dist/
-/native/
 build/
 coverage/
 *.log
