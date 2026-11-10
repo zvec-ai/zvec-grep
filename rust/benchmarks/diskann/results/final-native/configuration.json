@@ -1,0 +1,59 @@
+{
+  "source_commit": "3b1a3aa62e8d5078960a013877ddc4b14a174093",
+  "source_branch": "perf/diskann-bounded-read-cache",
+  "library": {
+    "path": "/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/.benchmarks/20261110-hnsw-diskann/build/lib/libzvec_c_api.dylib",
+    "sha256": "24ac07dfba8c15e45b5bf5a229a8ef43b41af1af52a8db6096f473ce32e27238"
+  },
+  "binary": {
+    "path": "/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/.benchmarks/20261110-hnsw-diskann/native-target/release/native-compare",
+    "sha256": "6e04c9b74c3cb63046e47fd61ea572bda8ff3be139d6c6ceb0e21fd0c30048c4"
+  },
+  "builder": {
+    "path": "/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/.benchmarks/20261110-hnsw-diskann/native-target/release/graph-build",
+    "sha256": "a40ddc6963cf5b1a3fa4b25c8251febb42cf31d0b7f0c7f58e51ecbaf7db2938"
+  },
+  "runner_sha256": "81a2c0692465227881162104ab33657f33e558608a67ced9b8dc1f732969e865",
+  "manifest_sha256": "1ec87c30eda4b2c91c1218a691a3eeb63763bf19ac9ac8c00fa0bb9a9d7f24a8",
+  "env": {
+    "ZVEC_BENCH_EXPECT_LIBRARY": "/Users/xingrui/Documents/workspace/zvec/zvec_grep_diskann/.benchmarks/20261110-hnsw-diskann/build/lib/libzvec_c_api.dylib",
+    "ZVEC_DISKANN_READ_CACHE_MIB": "8",
+    "ZVEC_DISKANN_SCALAR_CACHE_MIB": "1",
+    "ZVEC_DISKANN_READ_WORKERS": "24",
+    "ZVEC_BENCH_BUILD_DEGREE": "64",
+    "ZVEC_BENCH_BUILD_LIST": "200"
+  },
+  "counts": [
+    200000,
+    400000,
+    600000,
+    800000,
+    1000000
+  ],
+  "precision": "FP16",
+  "metric": "cosine",
+  "top_k": 10,
+  "diskann_build": {
+    "degree": 64,
+    "construction_list": 200,
+    "pq_bytes": 64
+  },
+  "hnsw_build": {
+    "m": 50,
+    "ef_construction": 500
+  },
+  "build_workers": 8,
+  "query_workers": 1,
+  "concurrent_queries": 1,
+  "validation_recall_target": 0.92,
+  "formal_recall_floor": 0.9,
+  "warmup_queries": 600,
+  "validation_queries": 400,
+  "test_shards": 7,
+  "test_queries_per_shard": 500,
+  "test_passes": 1,
+  "test_warmup_passes": 0,
+  "cpu": "Apple M3 Pro",
+  "physical_memory_bytes": 38654705664,
+  "os": "ProductName:\t\tmacOS\nProductVersion:\t\t26.6.2\nBuildVersion:\t\t25G83\n"
+}

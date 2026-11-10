@@ -1,0 +1,25 @@
+{
+  "verified_at": "2026-11-10T04:03:18.407964+00:00",
+  "source_commit": "3b1a3aa62e8d5078960a013877ddc4b14a174093",
+  "source_files_rechecked": 1392,
+  "formal_processes": 70,
+  "validation_processes": 39,
+  "raw_ids_and_exact_gt_recomputed": true,
+  "qps_recomputed_from_total_queries_and_seconds": true,
+  "rss_reparsed_from_time_l": true,
+  "query_groups_disjoint_by_source_fp32_fp16": true,
+  "unique_query_rows": 4500,
+  "test_queries_per_backend_scale": 3500,
+  "all_formal_shards_above_90": true,
+  "min_formal_shard_recall": 0.9166,
+  "indexed_files_hashed_after_timing": true,
+  "chart_inspected": true,
+  "chart_palette": {
+    "HNSW": "#163B65",
+    "DiskANN": "#E87722"
+  },
+  "plot_labels_readable_no_clipping": true,
+  "no_error_bars": true,
+  "unrelated_provider_change_preserved": true,
+  "chart_sha256": "d14434d6cdbaa1f493998963259044fa068db5cb4feea6742a7d2575eefeef27"
+}
