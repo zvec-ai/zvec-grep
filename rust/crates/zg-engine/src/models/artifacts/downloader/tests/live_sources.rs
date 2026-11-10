@@ -1,6 +1,7 @@
 //! Explicit public-network checks for every catalog model with local artifacts.
-//! Each source downloads ~2.48 GB into fresh per-model temporary caches. Normal
-//! HTTP/proxy configuration applies; no existing cache or model runtime is needed.
+//! Each suite downloads the models configured for its source into fresh per-model
+//! temporary caches. Normal HTTP/proxy configuration applies; no existing cache
+//! or model runtime is needed.
 
 use std::{collections::HashSet, panic::AssertUnwindSafe, path::Path, time::Duration};
 
@@ -19,13 +20,13 @@ use crate::models::{
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_mins(10);
 
 #[tokio::test]
-#[ignore = "requires Hugging Face/CDN access; downloads all local models (~2.48 GB)"]
+#[ignore = "requires Hugging Face/CDN access; downloads all local model artifacts"]
 async fn downloads_all_local_models_from_hugging_face() {
     download_all_local_models_from(ArtifactSourceKind::HuggingFace).await;
 }
 
 #[tokio::test]
-#[ignore = "requires ModelScope/CDN access; downloads all local models (~2.48 GB)"]
+#[ignore = "requires ModelScope/CDN access; downloads all configured model artifacts"]
 async fn downloads_all_local_models_from_model_scope() {
     download_all_local_models_from(ArtifactSourceKind::ModelScope).await;
 }
@@ -38,12 +39,20 @@ fn local_models() -> Vec<(&'static str, &'static ArtifactDownloadConfig)> {
                 EmbeddingCatalogEntry::LlamaCpp(config) => config.download,
                 EmbeddingCatalogEntry::Transformers(config) => config.download,
                 EmbeddingCatalogEntry::Model2Vec(config) => config.download,
+                EmbeddingCatalogEntry::Bekko(config) => config.download,
                 // Qwen API entries have no downloadable local artifacts.
                 EmbeddingCatalogEntry::Qwen(_) => return None,
             };
             Some((entry.reference(), download))
         })
         .collect()
+}
+
+fn supports_source(download: &ArtifactDownloadConfig, kind: ArtifactSourceKind) -> bool {
+    match kind {
+        ArtifactSourceKind::HuggingFace => true,
+        ArtifactSourceKind::ModelScope => download.model_scope.is_some(),
+    }
 }
 
 async fn download_all_local_models_from(kind: ArtifactSourceKind) {
@@ -54,8 +63,11 @@ async fn download_all_local_models_from(kind: ArtifactSourceKind) {
     let selected_model = std::env::var("ZVEC_GREP_TEST_DOWNLOAD_MODEL").ok();
     if let Some(selected) = &selected_model {
         assert!(
-            models.iter().any(|(model, _)| model == selected),
-            "unknown local model: {selected}"
+            models
+                .iter()
+                .any(|(model, download)| { model == selected && supports_source(download, kind) }),
+            "unknown or unsupported local model for {}: {selected}",
+            kind.label()
         );
     }
     println!(
@@ -63,10 +75,17 @@ async fn download_all_local_models_from(kind: ArtifactSourceKind) {
         serde_json::json!({
             "source": kind.label(),
             "models": models.iter().map(|(model, _)| *model).collect::<Vec<_>>(),
+            "supported_models": models.iter()
+                .filter(|(_, download)| supports_source(download, kind))
+                .map(|(model, _)| *model)
+                .collect::<Vec<_>>(),
         })
     );
     let mut failures = Vec::new();
     for (model, download) in models {
+        if !supports_source(download, kind) {
+            continue;
+        }
         if selected_model
             .as_ref()
             .is_some_and(|selected| selected != model)
@@ -116,10 +135,16 @@ fn request<'a>(
 ) -> ResolveArtifacts<'a> {
     ResolveArtifacts {
         model,
-        sources: [
-            ArtifactSource::hugging_face(download.hugging_face, root.join("huggingface")),
-            ArtifactSource::model_scope(download.model_scope, root.join("modelscope")),
-        ],
+        sources: std::iter::once(ArtifactSource::hugging_face(
+            download.hugging_face,
+            root.join("huggingface"),
+        ))
+        .chain(
+            download
+                .model_scope
+                .map(|source| ArtifactSource::model_scope(source, root.join("modelscope"))),
+        )
+        .collect(),
         artifacts: download.artifacts,
         reporter,
         signal: None,
@@ -140,13 +165,12 @@ async fn download_local_model_from(
     );
     let request = request(model, download, root.path(), &reporter);
     validate_request(&request).map_err(|error| error.to_string())?;
-    let source_index = match kind {
-        ArtifactSourceKind::HuggingFace => 0,
-        ArtifactSourceKind::ModelScope => 1,
-    };
-    let source = &request.sources[source_index];
-    let unused_source = &request.sources[1 - source_index];
-    if source.kind != kind || source.base_url.is_some() || source.cache_directory.exists() {
+    let source = request
+        .sources
+        .iter()
+        .find(|source| source.kind == kind)
+        .ok_or_else(|| format!("{} is not configured for {model}", kind.label()))?;
+    if source.base_url.is_some() || source.cache_directory.exists() {
         return Err("live source must use its real endpoint and an empty cache".to_owned());
     }
     let manifest = Manifest::new(model, source, artifacts).map_err(|error| error.to_string())?;
@@ -157,7 +181,11 @@ async fn download_local_model_from(
     let downloaded = download_source_snapshot(&client, &request, source, &manifest)
         .await
         .map_err(|error| error.to_string());
-    if unused_source.cache_directory.exists() {
+    if request
+        .sources
+        .iter()
+        .any(|other| other.kind != kind && other.cache_directory.exists())
+    {
         return Err("the other source was downloaded as fallback".to_owned());
     }
     if !partial_files(root.path()).is_empty() {
@@ -261,6 +289,20 @@ fn live_source_catalog_covers_every_local_model_and_pinned_weights() {
                     .expect("Model2Vec weights are included")
                     .size
             }
+            EmbeddingCatalogEntry::Bekko(config) => {
+                assert!(
+                    download
+                        .artifacts
+                        .iter()
+                        .any(|artifact| artifact.path == "tokenizer.json")
+                );
+                download
+                    .artifacts
+                    .iter()
+                    .find(|artifact| artifact.path == config.model_file)
+                    .expect("Bekko weights are included")
+                    .size
+            }
             EmbeddingCatalogEntry::Qwen(_) => unreachable!("API models were excluded"),
         };
         assert!(
@@ -268,6 +310,52 @@ fn live_source_catalog_covers_every_local_model_and_pinned_weights() {
             "{reference} must include full model weights"
         );
     }
+}
+
+#[test]
+fn live_sources_follow_each_models_configured_sources() {
+    for (model, download) in local_models() {
+        let root = tempfile::tempdir().expect("isolated source validation cache");
+        let reporter = ModelDownloadProgressReporter::new(model, None, []);
+        let request = request(model, download, root.path(), &reporter);
+        assert!(supports_source(download, ArtifactSourceKind::HuggingFace));
+        assert_eq!(request.sources[0].kind, ArtifactSourceKind::HuggingFace);
+        assert_eq!(
+            request.sources.len(),
+            1 + usize::from(download.model_scope.is_some())
+        );
+        assert_eq!(
+            supports_source(download, ArtifactSourceKind::ModelScope),
+            request
+                .sources
+                .iter()
+                .any(|source| source.kind == ArtifactSourceKind::ModelScope)
+        );
+        if model == "local/bekko-256-int8" {
+            assert_eq!(
+                request.sources.len(),
+                1,
+                "Bekko only has a Hugging Face source"
+            );
+            assert!(!supports_source(download, ArtifactSourceKind::ModelScope));
+        }
+        assert_eq!(std::fs::read_dir(root.path()).expect("cache").count(), 0);
+    }
+}
+
+#[tokio::test]
+async fn unconfigured_source_is_rejected_before_downloading() {
+    let (model, download) = local_models()
+        .into_iter()
+        .find(|(model, _)| *model == "local/bekko-256-int8")
+        .expect("Bekko is included in the live-source catalog");
+    let error = download_local_model_from(model, download, ArtifactSourceKind::ModelScope)
+        .await
+        .expect_err("Bekko has no ModelScope mirror");
+    assert_eq!(
+        error,
+        "modelscope is not configured for local/bekko-256-int8"
+    );
 }
 
 fn has_extension(path: &str, extension: &str) -> bool {
