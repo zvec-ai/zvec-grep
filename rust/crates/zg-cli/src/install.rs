@@ -2416,6 +2416,9 @@ fn resolve_qwen_home() -> Result<PathBuf, InstallError> {
         });
     }
     for path in [default.join(".env"), home_dir().join(".env")] {
+        if path.is_dir() {
+            continue;
+        }
         let source = read_if_exists(&path)?;
         if let Some(value) = parse_dotenv_value(&source, "QWEN_HOME") {
             return Ok(expand_home(&value));
