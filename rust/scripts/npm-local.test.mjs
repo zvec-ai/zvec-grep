@@ -424,7 +424,7 @@ test("Linux artifact smoke loads packaged ORT and runs inference on both archite
   assert.match(workflow, /name: Restore the real model cache\n\s+if:.*matrix\.target == 'linux-arm64-gnu'/);
 });
 
-test("Linux Vulkan ORT build-script validation uses a network-disabled container and separate outputs", async () => {
+test("Linux Vulkan ORT build-script validation uses a network-disabled container and separate outputs", async (t) => {
   const workflow = await readFile(new URL("../../.github/workflows/rust-package-build.yml", import.meta.url), "utf8");
   assert.match(workflow, /prepare-onnxruntime\.py --target "\$ORT_TARGET"/);
   const step = workflow.split("      - name: Verify Linux Vulkan ORT preparation without network access\n")[1];
@@ -432,7 +432,28 @@ test("Linux Vulkan ORT build-script validation uses a network-disabled container
   const script = step.split("      - name:")[0];
   assert.match(script, /if: runner\.os == 'Linux'/);
   assert.match(script, /--network none/);
-  assert.match(script, /CARGO_MANIFEST_DIR="\$PWD\/crates\/zg-engine" rustc --edition=2024 crates\/zg-engine\/build\.rs/);
+  const target = await mkdtemp(join(tmpdir(), "zg-offline-ort-"));
+  t.after(() => rm(target, { recursive: true, force: true }));
+  for (const directory of ["ort-cpu", "ort-vulkan/debug"]) {
+    await mkdir(join(target, directory), { recursive: true });
+    await writeFile(join(target, directory, "libonnxruntime.so.1"), "verified CPU runtime");
+  }
+  await writeFile(join(target, "ort-build-script"), `#!/bin/sh
+    test "$CARGO_FEATURE_VULKAN" = 1 && test "$CARGO_NET_OFFLINE" = true || exit 1
+    test -z "\${ORT_DYLIB_PATH+x}" && test -z "\${CARGO_FEATURE_CUDA+x}" || exit 1
+    printf 'offline ORT preparation executed\\n'
+  `, { mode: 0o755 });
+  const command = script.split("zvec-grep-release-builder bash -euo pipefail -c '\n")[1]
+    .split("            '")[0].replaceAll("/work-target", target);
+  const result = spawnSync("bash", ["-euo", "pipefail", "-c", `
+    rustc() { printf 'rustup: cannot sync toolchain metadata without network\\n' >&2; return 73; }
+    ${command}
+  `], { env: { ...process.env, ORT_TARGET: "aarch64-unknown-linux-gnu", ORT_DYLIB_PATH: "untrusted-override", CARGO_FEATURE_CUDA: "1" }, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /offline ORT preparation executed/);
+  const build = workflow.split("      - name: Build the Linux release on glibc 2.28\n")[1].split("      - name:")[0];
+  assert.match(build, /CARGO_MANIFEST_DIR="\$PWD\/crates\/zg-engine" rustc --edition=2024 crates\/zg-engine\/build\.rs -o \/work-target\/ort-build-script/);
+  assert.doesNotMatch(script, /\brustc\b|\brustup\b/);
   assert.match(script, /env -u ORT_DYLIB_PATH -u CARGO_FEATURE_CUDA CARGO_FEATURE_VULKAN=1 CARGO_NET_OFFLINE=true/);
   assert.match(script, /OUT_DIR=\/work-target\/ort-vulkan\/debug\/build\/zg-engine\/out/);
   assert.match(script, /ZG_ORT_CACHE_DIR=\/work-target\/ort-prebuilt/);
