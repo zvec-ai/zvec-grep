@@ -11,18 +11,6 @@ pub mod options {
 
     use serde::{Deserialize, Serialize};
 
-    /// Response projection applied after retrieval and ranking.
-    /// This is deliberately separate from [`ContextOptions`].
-    #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-    #[serde(rename_all = "snake_case")]
-    pub enum ContextPreviewMode {
-        None,
-        Short,
-        #[default]
-        Full,
-        Detail,
-    }
-
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     pub struct ContextRoute {
         pub mode: ContextRouteMode,
@@ -509,12 +497,7 @@ pub mod result {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub match_ranges: Vec<ContentRange>,
         /// Complete stored entity for indexed hits; context window for lexical matches.
-        /// Empty in a bounded response with `source_preview`; the preview is not
-        /// a contiguous source slice and carries its own source line numbers.
         pub content: String,
-        /// Prepared bounded source display, selected before response serialization.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub source_preview: Option<ContextSourcePreview>,
         /// Optional structural context supplied with the retrieved source.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub outline: Option<String>,
@@ -529,19 +512,6 @@ pub mod result {
         pub query_groups: Vec<ContextQueryGroupMatch>,
         pub selection_reason: Option<ContextSelectionReason>,
         pub coverage_group: Option<String>,
-    }
-
-    /// Bounded display text, distinct from exact source content and coordinates.
-    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-    pub struct ContextSourcePreview {
-        pub lines: Vec<ContextSourcePreviewLine>,
-        pub trailing_omission: bool,
-    }
-
-    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-    pub struct ContextSourcePreviewLine {
-        pub line_number: Option<usize>,
-        pub text: String,
     }
 
     #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -317,25 +317,19 @@ async fn execute_command(
             zg_engine::authorization::grant_index(&target)
                 .map(|()| DaemonReply::GrantIndexAuthorization),
         ),
-        DaemonCommand::Context(_) | DaemonCommand::ContextPreview { .. } => {
-            let (mut request, preview) = match command {
-                DaemonCommand::Context(request) => (request, None),
-                DaemonCommand::ContextPreview { request, preview } => (request, Some(preview)),
-                _ => unreachable!(),
-            };
+        DaemonCommand::Context(mut request) => {
             // HTTP bodies cannot carry in-process cancellation tokens. Tie this wait
             // to request disposal and daemon shutdown, as the MCP transport does.
             let signal = state.shutdown.child_token();
             let _guard = signal.clone().drop_guard();
             request.signal = Some(signal);
-            engine_execution(state.runtimes.search(&state.engine, request).await.map(
-                |mut reply| {
-                    if let Some(preview) = preview {
-                        zg_cli::preview::prepare_context_response(&mut reply, preview.into());
-                    }
-                    DaemonReply::Context(Box::new(reply))
-                },
-            ))
+            engine_execution(
+                state
+                    .runtimes
+                    .search(&state.engine, request)
+                    .await
+                    .map(|reply| DaemonReply::Context(Box::new(reply))),
+            )
         }
         DaemonCommand::Callers(request) => {
             execute_relationships(&state, Direction::In, request, DaemonReply::Callers).await

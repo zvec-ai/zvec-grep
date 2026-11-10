@@ -607,14 +607,7 @@ async fn execute_context(
 ) -> Result<(), Box<dyn Error>> {
     if server {
         let home = zg_daemon::resolve_home(home.map(Path::to_owned))?;
-        let reply = zg_daemon::execute_command(
-            &home,
-            DaemonCommand::ContextPreview {
-                request,
-                preview: output.preview.into(),
-            },
-        )
-        .await?;
+        let reply = zg_daemon::execute_command(&home, DaemonCommand::Context(request)).await?;
         let DaemonReply::Context(result) = reply else {
             return Err(protocol_mismatch("context"));
         };
@@ -987,7 +980,6 @@ async fn execute_direct_context(
     }
     engine.close();
     let mut stdout = io::BufWriter::new(zg_cli::stdout());
-    zg_cli::preview::prepare_context_response(&mut result, output.preview);
     zg_cli::write_context_with_options(
         &mut stdout,
         &result,

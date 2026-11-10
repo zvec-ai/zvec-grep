@@ -279,7 +279,6 @@ fn context_item(enriched: EnrichedLexicalMatch, use_entity_ranges: bool) -> Cont
         content_range,
         match_ranges,
         content,
-        source_preview: None,
         outline: None,
         content_role: Some(ContextContentRole::Source),
         status: ContextItemStatus::Fresh,

@@ -271,29 +271,6 @@ pub enum PreviewMode {
     Detail,
 }
 
-impl From<PreviewMode> for zg_engine::api::context::options::ContextPreviewMode {
-    fn from(preview: PreviewMode) -> Self {
-        match preview {
-            PreviewMode::None => Self::None,
-            PreviewMode::Short => Self::Short,
-            PreviewMode::Full => Self::Full,
-            PreviewMode::Detail => Self::Detail,
-        }
-    }
-}
-
-impl From<zg_engine::api::context::options::ContextPreviewMode> for PreviewMode {
-    fn from(preview: zg_engine::api::context::options::ContextPreviewMode) -> Self {
-        use zg_engine::api::context::options::ContextPreviewMode;
-        match preview {
-            ContextPreviewMode::None => Self::None,
-            ContextPreviewMode::Short => Self::Short,
-            ContextPreviewMode::Full => Self::Full,
-            ContextPreviewMode::Detail => Self::Detail,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum RefreshMode {
     Background,

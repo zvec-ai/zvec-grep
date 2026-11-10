@@ -487,19 +487,10 @@ impl ZvecGrepMcpServer {
         .await;
 
         Ok(match result {
-            Ok(mut reply) => {
-                zg_cli::preview::prepare_context_response(
-                    &mut reply,
-                    match preview {
-                        SearchPreview::Short => zg_cli::PreviewMode::Short,
-                        SearchPreview::Full => zg_cli::PreviewMode::Full,
-                    },
-                );
-                CallToolResult::success(vec![ContentBlock::text(
-                    search_format::format_search_result(&reply, preview),
-                )])
-                .into()
-            }
+            Ok(reply) => CallToolResult::success(vec![ContentBlock::text(
+                search_format::format_search_result(&reply, preview),
+            )])
+            .into(),
             Err(error) if error.code() == EngineError::NOT_FOUND => {
                 return self
                     .setup_state

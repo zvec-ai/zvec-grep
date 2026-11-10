@@ -4588,7 +4588,6 @@ dependencies = [
  "tracing",
  "uuid",
  "windows-spawn",
- "zg-cli",
  "zg-daemon-protocol",
  "zg-engine",
  "zg-host-native",

@@ -288,7 +288,6 @@ fn search_plan_to_context_items(
                 content_range: target.content_range,
                 match_ranges: Vec::new(),
                 content: target.content,
-                source_preview: None,
                 outline: crate::extraction::code_outline(
                     hit.file.relative_path().as_ref(),
                     hit.entity.content(),
@@ -1095,7 +1094,6 @@ mod tests {
             excerpt_range: None,
             match_ranges: Vec::new(),
             content: id.to_owned(),
-            source_preview: None,
             outline: None,
             content_role: Some(ContextContentRole::Source),
             status: ContextItemStatus::Fresh,

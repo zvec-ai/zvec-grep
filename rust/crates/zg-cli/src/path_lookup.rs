@@ -452,7 +452,6 @@ mod tests {
                 content_range: range,
                 match_ranges: Vec::new(),
                 content: content.into(),
-                source_preview: None,
                 outline: None,
                 content_role: Some(ContextContentRole::Source),
                 status: ContextItemStatus::Fresh,
