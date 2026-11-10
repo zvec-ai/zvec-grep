@@ -384,12 +384,20 @@ compatibility remains separate and may require `zg --index --rebuild`.
 
 Searches default to `--preview short` in terminals, pipes, and redirected files.
 Use `none` for a one-line source summary, `short` for compact bounded source,
-`full` for compact full source, or `detail` for full previews with metadata,
+`full` for each complete indexed entity, or `detail` for full previews with metadata,
 outlines, and file/hit grouping. Short and full preserve the original Rust compact
 per-hit layout, including indented `line: source` rows. Every preview preserves each
 query group's results, ranks and matched content; only `--fuse` combines groups.
 Query echoes, group headings, hit counts and `matchedBy` labels are omitted from
-the CLI result display. Full previews do not retrieve an entire function or file.
+the CLI result display. Full previews use the complete stored entity (such as a
+Markdown section or code symbol), even when only one fragment matched. They do
+not expand to the entire file. Bounded previews remain anchored to the matched fragment.
+Short previews prioritize fragment lines within the ten-line limit, using any
+remaining space for surrounding entity context. Their displayed lines can differ
+from the former fragment-only previews.
+In server mode, the daemon returns complete entity content and the CLI applies
+the selected preview. Short preview limits displayed text, not the internal
+response payload. The daemon protocol and request/reply schema are unchanged.
 Metadata labels use purple, file locations use cyan, and query matches use yellow.
 Automatic colors are disabled for redirected output, `TERM=dumb`, or `NO_COLOR`;
 `--color always` explicitly enables colors, including through pipes, and
@@ -642,7 +650,8 @@ clients retain reverse form elicitation. Consent is rechecked before execution.
 Search accepts `preview: "short"` (the default) or `preview: "full"` in both
 toolsets. Both modes include a required MCP `freshness:` header and reuse CLI
 result content and diagnostic conditions. Short preview shows up to ten source lines around the matched range;
-full preview preserves all available source content of each retrieved item.
+full preview returns the complete stored entity for each indexed hit, even when
+only one fragment matched.
 Neither mode reads whole files, changes retrieval or ranking, or displays
 generated outlines. CLI `none` and `detail` previews remain CLI-only.
 
