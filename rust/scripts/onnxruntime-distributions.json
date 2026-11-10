@@ -1,6 +1,6 @@
 {
   "version": "1.21.0",
-  "linuxGlibcMax": "2.31",
+  "linuxGlibcMax": "2.28",
   "artifacts": {
     "linux-x64": {
       "archive": "onnxruntime-linux-x64-1.21.0.tgz",

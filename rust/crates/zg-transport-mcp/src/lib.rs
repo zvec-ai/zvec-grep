@@ -904,8 +904,8 @@ pub struct SearchInput {
     pub categories: Option<PathListInput>,
     /// Exclude matching file-name categories, taking precedence over categories.
     pub excluded_categories: Option<PathListInput>,
-    /// Index-only refresh budget; query-vector inference keeps its own defaults.
-    /// Controls llama.cpp contexts or concurrent batches/requests for other backends.
+    /// Index-only refresh concurrency. ORT direct mode sets the session count. In server mode, limits this operation's session use within the startup-configured pool; omitted uses pool capacity. Queries share the pool with their own limit.
+    /// Must be positive. ORT caps requests above pool capacity; it never resizes server pools or changes their shared CPU thread budget.
     #[schemars(range(min = 1), extend("type" = "integer"))]
     pub embedding_concurrency: Option<usize>,
     /// Collapse all query groups into one ranked plan.
@@ -990,8 +990,8 @@ pub struct IndexInput {
     #[serde(rename = "follow", alias = "followSymlinks")]
     #[schemars(extend("type" = "boolean"))]
     pub follow_symlinks: Option<bool>,
-    /// Index-only execution budget: llama.cpp contexts, local batches, or remote requests.
-    /// llama.cpp and Transformers limits are capped at eight.
+    /// Index-only concurrency: ORT sessions, llama.cpp contexts, or remote requests. ORT direct mode sets the session count. In server mode, limits this operation's session use within the startup-configured pool; omitted uses pool capacity.
+    /// Must be positive. ORT caps requests above pool capacity; it never resizes server pools or changes their shared CPU thread budget. llama.cpp is capped at eight.
     #[schemars(range(min = 1), extend("type" = "integer"))]
     pub embedding_concurrency: Option<usize>,
     /// Include bounded skipped-file diagnostics after completion.
@@ -1670,14 +1670,14 @@ impl RelationshipInput {
 impl SearchInput {
     fn into_request(self) -> Result<ContextOptions, String> {
         let root = absolute_root(&self.root)?;
+        if self.embedding_concurrency == Some(0) {
+            return Err("embeddingConcurrency must be greater than zero".to_owned());
+        }
         if self
             .limit
             .is_some_and(|limit| limit == 0 || limit > MAX_SEARCH_LIMIT)
         {
             return Err(format!("limit must be between 1 and {MAX_SEARCH_LIMIT}"));
-        }
-        if self.embedding_concurrency == Some(0) {
-            return Err("embeddingConcurrency must be greater than zero".to_owned());
         }
         if self.symbol_types.len() > 7 {
             return Err("symbolTypes accepts at most 7 values".to_owned());
@@ -1777,6 +1777,9 @@ impl From<DeviceInput> for Device {
 impl IndexInput {
     fn into_request(self) -> Result<IndexToolRequest, String> {
         let root = absolute_root(&self.root)?;
+        if self.embedding_concurrency == Some(0) {
+            return Err("embeddingConcurrency must be greater than zero".to_owned());
+        }
         if self.drop.unwrap_or(false) {
             if self.has_index_options() {
                 return Err(
@@ -1791,9 +1794,6 @@ impl IndexInput {
         }
         if let Some(api_key) = &self.api_key {
             validate_text("apiKey", api_key, 1, 8_192)?;
-        }
-        if self.embedding_concurrency == Some(0) {
-            return Err("embeddingConcurrency must be greater than zero".to_owned());
         }
         if let Some(endpoint) = &self.endpoint {
             validate_text("endpoint", endpoint, 1, 2_048)?;
@@ -3373,6 +3373,27 @@ mod tests {
         let typed: SearchInput = serde_json::from_value(arguments).expect("typed arguments");
         assert_eq!(typed.limit, Some(15));
         assert_eq!(typed.fuse, Some(true));
+    }
+
+    #[test]
+    fn zero_embedding_concurrency_is_rejected_at_the_transport_boundary() {
+        let error = serde_json::from_value::<SearchInput>(serde_json::json!({
+            "root": test_root(), "query": "needle", "embeddingConcurrency": 0,
+        }))
+        .expect("integer input")
+        .into_request()
+        .expect_err("positive concurrency");
+        assert_eq!(error, "embeddingConcurrency must be greater than zero");
+        for reference in ["local/all-minilm-l6-v2", "local/potion-code-16m-v2"] {
+            let error = serde_json::from_value::<IndexInput>(serde_json::json!({
+                "root": test_root(), "embedding": reference, "embeddingConcurrency": 0,
+            }))
+            .expect("integer input")
+            .into_request()
+            .err()
+            .expect("positive concurrency");
+            assert_eq!(error, "embeddingConcurrency must be greater than zero");
+        }
     }
 
     #[test]

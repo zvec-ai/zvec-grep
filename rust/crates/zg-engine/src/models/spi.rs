@@ -53,9 +53,14 @@ pub struct EmbeddingOptions {
     pub signal: Option<CancellationToken>,
     pub on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
     /// Runtime-owned execution budget. Backends use this to size their
-    /// per-request local inference resources without exposing another public
-    /// tuning knob.
+    /// per-request local inference resources within their configured pools.
     pub(crate) execution_concurrency: usize,
+    /// Identifies one runtime operation so shared pools limit its native work
+    /// independently of other clients. Cloned batch options retain this scope.
+    pub(crate) execution_scope: Option<Arc<()>>,
+    /// Keeps runtime admission and native resources alive until queued/native
+    /// work has settled, even if the caller drops its future.
+    pub(crate) execution_lease: Option<Arc<dyn Send + Sync>>,
     /// Standard W3C trace headers propagated by remote embedding backends.
     pub(crate) trace_headers: Option<EmbeddingTraceHeaders>,
 }
@@ -64,6 +69,15 @@ pub struct EmbeddingOptions {
 pub(crate) struct EmbeddingPrepareOptions {
     pub(crate) signal: Option<CancellationToken>,
     pub(crate) on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
+    pub(crate) execution_lease: Option<Arc<dyn Send + Sync>>,
+}
+
+pub(crate) fn same_execution_scope(first: Option<&Arc<()>>, second: Option<&Arc<()>>) -> bool {
+    match (first, second) {
+        (Some(first), Some(second)) => Arc::ptr_eq(first, second),
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -81,6 +95,8 @@ impl fmt::Debug for EmbeddingOptions {
             .field("has_signal", &self.signal.is_some())
             .field("has_progress_callback", &self.on_progress.is_some())
             .field("execution_concurrency", &self.execution_concurrency)
+            .field("has_execution_scope", &self.execution_scope.is_some())
+            .field("has_execution_lease", &self.execution_lease.is_some())
             .field("has_trace_headers", &self.trace_headers.is_some())
             .finish()
     }
@@ -102,12 +118,55 @@ impl Default for EmbeddingConcurrencyDefaults {
     }
 }
 
+/// A cumulative, backend-neutral snapshot of one cached model runtime.
+///
+/// Durations are summed observations, not a disjoint wall-time breakdown.
+/// Counters include warmup; benchmark consumers subtract snapshots.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct ModelExecutionStats {
+    pub(crate) actual_provider: &'static str,
+    pub(crate) session_count: usize,
+    /// Process-global ORT intra-op configuration, shared by all model pools.
+    /// This is not multiplied by `session_count` or a process-wide thread count.
+    pub(crate) global_intra_threads: usize,
+    pub(crate) session_initializations: u64,
+    pub(crate) prepared_batches: u64,
+    pub(crate) pool_fallbacks: u64,
+    pub(crate) native_runs: u64,
+    pub(crate) native_rows: u64,
+    pub(crate) padded_tokens: u64,
+    pub(crate) max_native_batch_rows: usize,
+    pub(crate) max_padded_tokens: usize,
+    pub(crate) preparation_ns: u64,
+    pub(crate) inference_ns: u64,
+    pub(crate) postprocessing_ns: u64,
+    /// Per request: backend submission through native start, including CPU
+    /// preparation, compute scheduling and native-slot waiting.
+    /// Excludes runtime/backend admission and overlaps `preparation_ns`.
+    pub(crate) backend_to_native_ns: u64,
+    pub(crate) native_inflight_peak: usize,
+}
+
 #[async_trait]
 pub trait EmbeddingModel: Send + Sync {
     fn info(&self) -> &EmbeddingModelInfo;
 
     fn concurrency_defaults(&self) -> EmbeddingConcurrencyDefaults {
         EmbeddingConcurrencyDefaults::default()
+    }
+
+    fn execution_concurrency(&self, requested: usize) -> usize {
+        requested.max(1)
+    }
+
+    /// Requests admitted for execution and bounded preparation/prefetch. This
+    /// need not equal the backend's native execution budget.
+    fn admission_concurrency(&self, execution: usize) -> usize {
+        execution.max(1)
+    }
+
+    fn execution_stats(&self) -> Option<ModelExecutionStats> {
+        None
     }
 
     /// Loads shared local resources before an operation dispatches embedding work.

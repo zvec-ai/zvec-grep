@@ -249,6 +249,7 @@ async fn cancellation_before_loading_while_waiting_and_after_loading_is_recovera
                     callback_signal.cancel();
                 }
             })),
+            ..EmbeddingPrepareOptions::default()
         })
         .await;
     assert_eq!(

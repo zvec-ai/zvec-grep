@@ -130,10 +130,20 @@ Published target/backend support is:
 | --- | --- | --- |
 | macOS ARM64 | CPU + Metal | CPU (CoreML deliberately not selected) |
 | macOS x64 (14+) | CPU + Metal where available | CPU (CoreML deliberately not selected) |
-| Linux x64 glibc (Ubuntu 20.04 / glibc 2.31 baseline) | CPU + CUDA 13.1, CUDA 12.4 fallback | CPU + CUDA 12 |
-| Linux ARM64 glibc (Ubuntu 20.04 / glibc 2.31 baseline) | CPU | CPU |
+| Linux x64 glibc (glibc 2.28 baseline) | CPU + CUDA 13.1, CUDA 12.4 fallback | CPU + CUDA 12 |
+| Linux ARM64 glibc (glibc 2.28 baseline) | CPU | CPU |
 | Windows x64 | CPU + CUDA 13.1, CUDA 12.4 fallback | CPU + CUDA 12 |
 | Windows ARM64 | CPU | CPU + DirectML |
+
+Linux x64/ARM64 release builders use digest-pinned `manylinux_2_28`
+`2026.03.01-1` images. The executable and bundled libraries are audited against
+`GLIBC_2.28`; installed artifacts are exercised in clean AlmaLinux 8.10
+(glibc 2.28) containers, independently of the host runner's Ubuntu version.
+The Linux builds also check offline CPU ORT preparation by executing the real
+`zg-engine/build.rs` with `CARGO_FEATURE_VULKAN=1` and `CARGO_NET_OFFLINE=true`
+in a network-disabled builder, using cached official CPU ORT and no
+`ORT_DYLIB_PATH` or CUDA feature. This uses separate output, does not change
+release artifacts and is not a full Vulkan backend compilation.
 
 A deliberate CPU-only Windows build retains DirectML. The published Windows
 CUDA bundle uses the official ONNX Runtime 1.21.0 CUDA 12 provider and does not
@@ -255,7 +265,15 @@ artifact, then checks real installation, CLI startup, managed-rg and daemon IPC.
 The workflow runs only through manual dispatch and does not publish unless
 `publish` is enabled. The manual
 `platform` input defaults to `all`; each of the six target names can be selected
-individually.
+individually. For Linux ARM64 validation, run in the chosen repository (or add
+`--repo OWNER/REPO`):
+
+```sh
+gh workflow run rust-publish.yml -f publish=false -f cuda=false -f platform=linux-arm64-gnu
+```
+
+Replace the platform with `linux-x64-gnu` for Linux x64. Add `--ref BRANCH`
+to validate a specific branch instead of the repository's default branch.
 `publish=true` requires `platform=all`; a subset is a validation-only candidate,
 not a complete release. Manual runs with `publish=false, cuda=false` use ordinary CPU runners;
 they do not allocate GPUs or publish packages. All six package builds require
@@ -312,11 +330,18 @@ or repacking. A loopback registry exposes only this run's CUDA archives and
 records requests. CPU installation must make zero CUDA metadata/tarball requests,
 leave the plugin cache empty and install no CUDA components; optional download
 failure followed by CPU fallback is not a pass. No public registry is used.
-They verify checksums, CLI startup and daemon IPC. Linux/Windows x64 also verify real
-GGUF/ONNX indexing and vector queries with
-explicit CPU selection and default CPU fallback, without CUDA host libraries.
+The `artifact-cpu-smoke` jobs verify checksums, CLI startup and daemon IPC.
+Both Linux targets use clean AlmaLinux 8.10 (glibc 2.28) containers and load the
+installed `libonnxruntime.so.1`, verifying ORT 1.21.0 and API 21. Linux/Windows
+x64 run `scripts/cuda/e2e.py --cpu-only` for real GGUF/ONNX indexing and vector
+queries with explicit CPU selection and default CPU fallback, without CUDA
+host libraries. Linux ARM64 uses `--explicit-cpu` for real GGUF/ONNX index/query
+checks; macOS and Windows ARM64 retain CLI/daemon-only artifact smoke coverage.
 These checks also run for unpublished candidates and must pass before npm
 publication; failures retain the candidate and `cpu-artifact-evidence-*` logs.
+They are release-workflow checks, not a separate ORT gate in ordinary PR CI.
+For local full-catalog ONNX/performance checks without a workflow entry point,
+see [ONNX Runtime distributions](../CONTRIBUTING.md#onnx-runtime-distributions).
 
 The package GPU jobs use the hosted T4 runners with CUDA runtime libraries,
 not Rust/C++/CUDA compiler setup. They verify the downloaded native package's
