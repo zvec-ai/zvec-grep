@@ -104,8 +104,8 @@ jobs:
             ${{ runner.os == 'Windows' && env.CARGO_HOME || '~/.cargo' }}/git/db/
             rust/target/release/
           # Per-commit keys would exhaust the 10 GB repository cache quota and evict Rust CI caches.
-          # Isolate Ubuntu 20.04 output from older host/container build caches.
-          key: rust-release-${{ runner.os == 'Linux' && 'v5-ubuntu20.04' || 'v3' }}-${{ inputs.target }}-${{ inputs.runner }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}
+          # Keep objects linked against newer glibc out of the release cache.
+          key: rust-release-${{ runner.os == 'Linux' && 'v6-manylinux2.28' || 'v3' }}-${{ inputs.target }}-${{ inputs.runner }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml', 'rust/scripts/release-builder.Dockerfile') }}
       - name: Cache the pinned llama native SDK
         uses: actions/cache@v5
         with:
@@ -125,16 +125,18 @@ jobs:
       - name: Preserve the Intel macOS deployment target
         if: inputs.target == 'darwin-x64'
         run: echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
-      - name: Build the Ubuntu 20.04 Rust builder without a CUDA compiler
+      - name: Build the manylinux 2.28 Rust builder without a CUDA compiler
         if: runner.os == 'Linux'
         working-directory: ${{ github.workspace }}
+        env:
+          BUILD_IMAGE: ${{ inputs.target == 'linux-arm64-gnu' && 'quay.io/pypa/manylinux_2_28_aarch64:2026.03.01-1@sha256:34368babc008d6405b4b74c77868d6a5d15b6010cb953574d1f2bb9184392a9b' || 'quay.io/pypa/manylinux_2_28_x86_64:2026.03.01-1@sha256:d5f19b5957cf25df7ac15465924cafe2358754a187e510af386bf9596598a372' }}
         run: >-
           docker build --platform ${{ inputs.target == 'linux-arm64-gnu' && 'linux/arm64' || 'linux/amd64' }}
-          --file rust/scripts/cuda/cuda-builder.Dockerfile
-          --build-arg CUDA_IMAGE=ubuntu:20.04
+          --file rust/scripts/release-builder.Dockerfile
+          --build-arg BUILD_IMAGE="$BUILD_IMAGE"
           --build-arg RUST_VERSION=${{ steps.rust-version.outputs.channel }}
-          --tag zvec-grep-cuda-builder .
-      - name: Build the Linux release on glibc 2.31
+          --tag zvec-grep-release-builder .
+      - name: Build the Linux release on glibc 2.28
         if: runner.os == 'Linux'
         working-directory: ${{ github.workspace }}
         run: |
@@ -148,13 +150,31 @@ jobs:
             --env CARGO_BUILD_JOBS --env CMAKE_BUILD_PARALLEL_LEVEL \
             --env LLAMA_CPP_BUILD_MODE=prebuilt --env LLAMA_CPP_RUNTIME_CACHE=/work-target/llama-runtimes \
             --env RELEASE_TARGET=${{ inputs.target }} \
-            zvec-grep-cuda-builder bash -euo pipefail -c '
-              test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.31"
+            --env ORT_TARGET=${{ inputs.target == 'linux-arm64-gnu' && 'aarch64-unknown-linux-gnu' || 'x86_64-unknown-linux-gnu' }} \
+            zvec-grep-release-builder bash -euo pipefail -c '
+              test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.28"
               if [[ "$RELEASE_TARGET" == linux-x64-gnu ]]; then
                 bash scripts/cuda/build.sh --primary-only
               else
                 cargo build --locked --release --package zg
               fi
+              python3 scripts/prepare-onnxruntime.py --target "$ORT_TARGET" \
+                --cache-dir /work-target/ort-prebuilt --destination /work-target/ort-cpu
+              CARGO_MANIFEST_DIR="$PWD/crates/zg-engine" rustc --edition=2024 crates/zg-engine/build.rs -o /work-target/ort-build-script
+            '
+      - name: Verify Linux Vulkan ORT preparation without network access
+        if: runner.os == 'Linux'
+        working-directory: ${{ github.workspace }}
+        run: |
+          docker run --rm --network none --platform ${{ inputs.target == 'linux-arm64-gnu' && 'linux/arm64' || 'linux/amd64' }} \
+            --volume "${GITHUB_WORKSPACE}:/work:ro" \
+            --volume "${GITHUB_WORKSPACE}/rust/target:/work-target" \
+            --env ORT_TARGET=${{ inputs.target == 'linux-arm64-gnu' && 'aarch64-unknown-linux-gnu' || 'x86_64-unknown-linux-gnu' }} \
+            zvec-grep-release-builder bash -euo pipefail -c '
+              env -u ORT_DYLIB_PATH -u CARGO_FEATURE_CUDA CARGO_FEATURE_VULKAN=1 CARGO_NET_OFFLINE=true \
+                TARGET="$ORT_TARGET" OUT_DIR=/work-target/ort-vulkan/debug/build/zg-engine/out \
+                ZG_ORT_CACHE_DIR=/work-target/ort-prebuilt /work-target/ort-build-script
+              cmp /work-target/ort-cpu/libonnxruntime.so.1 /work-target/ort-vulkan/debug/libonnxruntime.so.1
             '
       - name: Audit the Linux prebuilt CUDA 13 and CUDA 12 bundle
         if: inputs.target == 'linux-x64-gnu'
@@ -163,9 +183,9 @@ jobs:
           docker run --rm --platform linux/amd64 \
             --volume "${GITHUB_WORKSPACE}:/work:ro" \
             --volume "${GITHUB_WORKSPACE}/rust/target:/work-target" \
-            zvec-grep-cuda-builder bash -euo pipefail -c '
+            zvec-grep-release-builder bash -euo pipefail -c '
               bash scripts/cuda/check.sh /work-target/release/zg-cuda-staging
-              python3 scripts/check-glibc.py /work-target/release/zg-cuda-staging --max 2.31
+              python3 scripts/check-glibc.py /work-target/release/zg-cuda-staging --max 2.28
             '
       - name: Restore ownership of Linux build output
         if: ${{ always() && runner.os == 'Linux' }}
@@ -183,9 +203,9 @@ jobs:
           docker run --rm --platform linux/amd64 \
             --volume "${GITHUB_WORKSPACE}:/workspace:ro" \
             --volume "${GITHUB_WORKSPACE}/rust/target/release/zg-cuda-staging:/opt/zg:ro" \
-            ubuntu:20.04 bash -euo pipefail -c '
-              apt-get update >/dev/null
-              apt-get install --yes --no-install-recommends libstdc++6 >/dev/null
+            almalinux:8.10@sha256:2d0f2eb2a83cc09dbc2eb92fade4dbe8f709628149e81aa00aec70630406603b bash -euo pipefail -c '
+              dnf install --assumeyes --setopt=install_weak_deps=False libstdc++ >/dev/null
+              test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.28"
               ldd /opt/zg/lib/libggml-cuda.so | grep -Eq "lib(cuda|cudart|cublas).*not found"
               /opt/zg/bin/zg --help >/dev/null
               /opt/zg/bin/zg --rg -F "zvec-grep Rust workspace" /workspace/rust/README.md >/dev/null
@@ -226,9 +246,9 @@ jobs:
           done
       - name: Package the native target
         run: npm run release:platform -- --no-build --target ${{ inputs.target }} ${{ (inputs.target == 'linux-x64-gnu' || inputs.target == 'win32-x64-msvc') && '--bundle-dir target/release/zg-cuda-staging' || '' }}
-      - name: Audit the Linux ARM64 package against glibc 2.31
+      - name: Audit the Linux ARM64 package against glibc 2.28
         if: inputs.target == 'linux-arm64-gnu'
-        run: python3 scripts/check-glibc.py dist/npm/release/staging/${{ inputs.target }} --max 2.31
+        run: python3 scripts/check-glibc.py dist/npm/release/staging/${{ inputs.target }} --max 2.28
       - name: Upload the platform package
         uses: actions/upload-artifact@v7
         with:
