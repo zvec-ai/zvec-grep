@@ -1,4 +1,5 @@
 import { ZG_MODES } from "./validation.mjs";
+import { markdownPerformance } from "./performance.mjs";
 
 const display = (value) => (Number.isFinite(value) ? value.toFixed(4) : "N/A");
 
@@ -32,6 +33,8 @@ export function markdownReport(report) {
     "Hybrid, fts and vector use the Rust public MCP default presentation on the same frozen repository index with the original query and Top-10 limit. The benchmark does not send a preview override because the current Rust MCP schema does not expose one. Presentation text and output length do not affect the five file-ranking metrics. Quality thresholds are report-only.",
   ];
   lines.push(
+    "",
+    markdownPerformance(report.performance),
     "",
     "<details>",
     "<summary>Per-question results and captured responses</summary>",
@@ -74,5 +77,20 @@ export function markdownReport(report) {
         (reason) => `- ${reason.replaceAll("\n", " ")}`,
       ),
     );
-  return lines.join("\n") + "\n";
+  const text = lines.join("\n") + "\n";
+  return report.runtime === "node-0.2.2"
+    ? text
+        .replaceAll(
+          "Rust MCP default presentation",
+          "Node.js 0.2.2 MCP default presentation",
+        )
+        .replaceAll(
+          "Rust public MCP default presentation",
+          "Node.js 0.2.2 public MCP default presentation",
+        )
+        .replace(
+          "The benchmark does not send a preview override because the current Rust MCP schema does not expose one.",
+          "The benchmark does not send a preview override; the unchanged Node.js 0.2.2 package uses its own public MCP default.",
+        )
+    : text;
 }

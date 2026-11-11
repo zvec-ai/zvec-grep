@@ -76,7 +76,7 @@ function expandHome(path, home) {
   return path;
 }
 
-function parseGroupedStatus(stdout, home) {
+function parseGroupedStatus(stdout, home, runtime) {
   const heading = required(
     /^(✓ Workspace index is ready|! Workspace index needs an update|✗ Workspace index failed|○ Workspace indexing is disabled|○ Workspace index is not created|\? Workspace index is not configured|\? Workspace index status is unknown|! Workspace index requires a rebuild)\n {2}(.+)$/m,
     stdout,
@@ -135,14 +135,17 @@ function parseGroupedStatus(stdout, home) {
       required(/^ {2}Entities +([\d,]+)$/m, stdout, "entity count")[1],
       "entity count",
     ),
-    indexed_source_bytes: groupedCount(
-      required(
-        /^ {2}Source size +([\d,]+) bytes$/m,
-        stdout,
-        "indexed source size",
-      )[1],
-      "indexed source size",
-    ),
+    indexed_source_bytes:
+      runtime === "node-0.2.2"
+        ? null
+        : groupedCount(
+            required(
+              /^ {2}Source size +([\d,]+) bytes$/m,
+              stdout,
+              "indexed source size",
+            )[1],
+            "indexed source size",
+          ),
   };
 }
 
@@ -246,14 +249,14 @@ function parseStatusDiagnostics(stderr) {
 
 export function parseNativeStatus(
   stdout,
-  { home = homedir(), stderr = "" } = {},
+  { home = homedir(), stderr = "", runtime = "rust-native" } = {},
 ) {
   const text = stripVTControlCharacters(stdout).replaceAll("\r\n", "\n");
   const status =
     parseStatusDiagnostics(stderr) ??
     (/^Workspace index: /m.test(text)
       ? parseLegacyStatus(text)
-      : parseGroupedStatus(text, home));
+      : parseGroupedStatus(text, home, runtime));
   for (const [name, value] of Object.entries(status))
     if (typeof value === "number")
       assert.ok(Number.isSafeInteger(value) && value >= 0, `invalid ${name}`);
@@ -282,6 +285,7 @@ export async function snapshotIndex({
   root,
   output,
   env,
+  runtime = "rust-native",
   runStatus = run,
 }) {
   await mkdir(output, { recursive: true });
@@ -300,6 +304,7 @@ export async function snapshotIndex({
   const status = parseNativeStatus(result.stdout, {
     home: env?.HOME,
     stderr: result.stderr,
+    runtime,
   });
   assert.equal(
     status.root,
@@ -318,7 +323,9 @@ export async function snapshotIndex({
   await writeJson(join(output, "status.json"), status);
   const summary = {
     schema_version: 2,
-    kind: "rust-public-status",
+    kind:
+      runtime === "node-0.2.2" ? "node-public-status" : "rust-public-status",
+    runtime,
     logical_content_sha256: objectHash(identity),
     files: status.files_indexed,
     fragments: status.entities_indexed,

@@ -9,6 +9,7 @@ import {
   compareCombinedResults,
   compareRuns,
   markdownVersionComparison,
+  comparisonPackageHash,
 } from "../expansion/compare.mjs";
 import { QUALITY_METRICS } from "../reports/ci.mjs";
 
@@ -70,6 +71,29 @@ test("all suites and modes report signed head-minus-base deltas with pinned comm
       QUALITY_METRICS.every((metric) => row.metrics[metric].delta === 0),
     ),
   );
+});
+
+test("each version uses identical package bytes across all repositories and suites", () => {
+  const hash = "d".repeat(64);
+  const reports = Object.fromEntries(
+    ["beir", "duretrieval", "quarry"].map((suite) => [
+      suite,
+      { package: { tarball_sha256: hash } },
+    ]),
+  );
+  reports.zg = {
+    repositories: Array.from({ length: 11 }, () => ({
+      package: { tarball_sha256: hash },
+    })),
+  };
+  assert.equal(comparisonPackageHash(reports), hash);
+  reports.quarry.package.tarball_sha256 = "e".repeat(64);
+  assert.throws(
+    () => comparisonPackageHash(reports),
+    /different suite packages/,
+  );
+  delete reports.quarry.package;
+  assert.throws(() => comparisonPackageHash(reports), /missing package hash/);
 });
 
 test("incomplete, mixed-harness, wrong-commit and mixed-model results are rejected", () => {
