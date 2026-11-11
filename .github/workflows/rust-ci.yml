@@ -231,6 +231,9 @@ jobs:
           path: rust/target/pdfium-static/**/sdk/
           key: pdfium-static-v1-test-${{ runner.os }}-${{ runner.arch }}-${{ matrix.cuda }}-${{ hashFiles('rust/scripts/pdfium-build.json', 'rust/scripts/prepare-pdfium.py', 'rust/scripts/licenses/gcc-runtime.txt') }}
       # Keep Windows tests on the fast workspace drive, including GPU runners.
+      - name: Prepare PDFium before linking the Windows dependency DLL
+        if: runner.os == 'Windows'
+        run: python scripts/prepare-pdfium.py --target x86_64-pc-windows-msvc --github-env
       - name: Keep test temp files on the workspace drive
         if: runner.os == 'Windows'
         shell: bash

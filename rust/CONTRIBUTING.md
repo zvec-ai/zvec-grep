@@ -34,6 +34,14 @@ are cached under `target/pdfium-static/`, shared by debug and release builds.
 `CARGO_NET_OFFLINE=true` requires a matching, verified SDK already in the cache.
 To prepare it separately: `python3 scripts/prepare-pdfium.py --target aarch64-apple-darwin`.
 
+On Windows, prepare the SDK **before** invoking Cargo and export its absolute
+library path: `python scripts/prepare-pdfium.py --target x86_64-pc-windows-msvc`,
+then `$env:PDFIUM_STATIC_LIB_PATH = (Resolve-Path target/pdfium-static/156.0.8076.0/x86_64-pc-windows-msvc/sdk/lib).Path`.
+Use `aarch64-pc-windows-msvc` for ARM64. Upstream pdfium-render also builds a
+dependency DLL, before the engine can supply its own native linker flags.
+CI performs this preparation automatically. Installed packages need neither
+Python nor a compiler; the model still uses the existing download/cache path.
+
 ## Engine changes
 
 Keep the application surface centered on `ZvecGrep`:

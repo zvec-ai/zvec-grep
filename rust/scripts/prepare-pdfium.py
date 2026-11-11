@@ -430,10 +430,14 @@ def main():
     parser.add_argument("--cache-dir", type=Path)
     parser.add_argument("--cargo-out-dir", type=Path)
     parser.add_argument("--offline", action="store_true")
+    parser.add_argument("--github-env", action="store_true", help="Export the verified SDK for dependency builds in later Actions steps")
     args = parser.parse_args()
     profile = args.cargo_out_dir.resolve().parents[2] if args.cargo_out_dir else None
     cache = args.cache_dir or (profile.parent if profile else Path("target")) / "pdfium-static"
-    prepare(cache, args.target, profile, args.offline or os.environ.get("CARGO_NET_OFFLINE", "").lower() in {"1", "true"})
+    sdk = prepare(cache, args.target, profile, args.offline or os.environ.get("CARGO_NET_OFFLINE", "").lower() in {"1", "true"})
+    if args.github_env:
+        with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+            output.write(f"PDFIUM_STATIC_LIB_PATH={sdk / 'lib'}\n")
 
 
 if __name__ == "__main__":

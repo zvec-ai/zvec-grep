@@ -130,6 +130,9 @@ jobs:
       - name: Preserve the Intel macOS deployment target
         if: inputs.target == 'darwin-x64'
         run: echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
+      - name: Prepare PDFium before linking the Windows dependency DLL
+        if: runner.os == 'Windows'
+        run: python scripts/prepare-pdfium.py --target ${{ inputs.target == 'win32-arm64-msvc' && 'aarch64-pc-windows-msvc' || 'x86_64-pc-windows-msvc' }} --github-env
       - name: Build the manylinux 2.28 Rust builder without a CUDA compiler
         if: runner.os == 'Linux'
         working-directory: ${{ github.workspace }}
