@@ -10,11 +10,11 @@ use tree_sitter::Node;
 use crate::domain::{FileFormat, GraphEdgeKind};
 use crate::utils::collapse_whitespace;
 
-use super::WalkContext;
 use super::vocabulary::{
     CALLEE_FIELDS, COMMON_CALL_TYPES, HeritageVocabulary, heritage_vocabulary_for,
     import_vocabulary_for,
 };
+use super::{Constructs, WalkContext};
 
 const MAX_CALLEE_TEXT_CHARS: usize = 180;
 
@@ -299,7 +299,8 @@ fn visit_for_calls(
             let (ref_name, receiver_name) = split_callee_name(&normalized);
             let line = node.start_position().row + 1;
             let column = node.start_position().column;
-            if constructs_value(node) {
+            let constructs = construction_site(node);
+            if constructs.is_some() {
                 context.add_construction_edge(
                     owner_index,
                     &ref_name,
@@ -308,6 +309,7 @@ fn visit_for_calls(
                     call_arity_of(node),
                     line,
                     column,
+                    constructs,
                 );
             } else {
                 context.add_call_edge(
@@ -330,9 +332,9 @@ fn visit_for_calls(
     }
 }
 
-/// Whether a call node initializes a value rather than producing one for a
-/// surrounding expression: `new X()`, or a call filling a variable's
-/// initializer or an assignment's right-hand side (`auto w = Widget(1)`).
+/// Where a call node stands relative to building a value: a `new X()` site, a
+/// call filling a variable's initializer or an assignment's right-hand side
+/// (`auto w = Widget(1)`), or an ordinary call.
 ///
 /// The distinction decides whether a type name can answer the call. A type is
 /// not callable in general, so a call whose result is itself invoked
@@ -340,24 +342,38 @@ fn visit_for_calls(
 /// (`return helper(x);`) or left alone as a statement (`WithConstructor();`,
 /// the most vexing parse of a declaration) is not a construction: another
 /// entity of that name — a function — is the target whenever one exists.
-fn constructs_value(node: Node<'_>) -> bool {
+fn construction_site(node: Node<'_>) -> Constructs {
     if matches!(node.kind(), "new_expression" | "object_creation_expression") {
-        return true;
+        return Constructs::New;
     }
     let Some(parent) = node.parent() else {
-        return false;
+        return Constructs::None;
     };
     match parent.kind() {
-        "init_declarator" | "variable_declarator" => parent
-            .child_by_field_name("value")
-            .is_some_and(|value| value == node),
-        "assignment_expression" => parent
-            .child_by_field_name("right")
-            .is_some_and(|right| right == node),
+        "init_declarator" | "variable_declarator" => {
+            if parent
+                .child_by_field_name("value")
+                .is_some_and(|value| value == node)
+            {
+                Constructs::Value
+            } else {
+                Constructs::None
+            }
+        }
+        "assignment_expression" => {
+            if parent
+                .child_by_field_name("right")
+                .is_some_and(|right| right == node)
+            {
+                Constructs::Value
+            } else {
+                Constructs::None
+            }
+        }
         // `Widget(1)` wrapped in parentheses is still the same construction
         // site once the wrapper is peeled off.
-        "parenthesized_expression" => constructs_value(parent),
-        _ => false,
+        "parenthesized_expression" => construction_site(parent),
+        _ => Constructs::None,
     }
 }
 

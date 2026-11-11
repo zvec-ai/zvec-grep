@@ -82,12 +82,44 @@ pub(crate) struct NameEdge {
     pub bound_type: Option<String>,
     /// Argument count at the call site, when the reference is a call.
     pub arity: Option<usize>,
-    /// Whether the call stands at a construction site (`new X()`,
-    /// `auto x = X(1)`), where a type is a legitimate target even though a
-    /// type is not callable in general.
-    pub constructs: bool,
+    /// Where the call stands relative to building a value. A type is a
+    /// legitimate call target at a construction site even though a type is not
+    /// callable in general, and the two forms differ: a language with a
+    /// separate constructor entity builds `new X()` through it.
+    pub constructs: Constructs,
     pub line: usize,
     pub column: usize,
+}
+
+/// The construction forms a call site can take.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum Constructs {
+    /// An ordinary call.
+    #[default]
+    None,
+    /// A call whose result initializes a value: `auto w = Widget(1)`,
+    /// `x = Widget(1)`. The named type is the target where the language mints
+    /// no separate constructor entity.
+    Value,
+    /// A `new X()` site. Every language here builds through the constructor,
+    /// so a C/C++ type name is not what the source reaches.
+    New,
+}
+
+impl Constructs {
+    /// Whether the site builds a value at all.
+    pub(crate) fn is_some(self) -> bool {
+        self != Self::None
+    }
+
+    /// The metadata spelling the resolver reads back.
+    pub(crate) fn as_str(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Value => Some("value"),
+            Self::New => Some("new"),
+        }
+    }
 }
 
 /// Mutable state carried through a single AST walk.
@@ -309,13 +341,13 @@ impl WalkContext {
             arity,
             line,
             column,
-            false,
+            Constructs::None,
         );
     }
 
     /// Buffers a call that constructs a value (`new X()`, `auto x = X(1)`).
     /// The construction site is the one place a type name is a correct call
-    /// target, so the flag travels with the reference to the resolver.
+    /// target, so the form travels with the reference to the resolver.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn add_construction_edge(
         &mut self,
@@ -326,6 +358,7 @@ impl WalkContext {
         arity: Option<usize>,
         line: usize,
         column: usize,
+        constructs: Constructs,
     ) {
         self.add_call_site(
             owner_index,
@@ -335,7 +368,7 @@ impl WalkContext {
             arity,
             line,
             column,
-            true,
+            constructs,
         );
     }
 
@@ -349,7 +382,7 @@ impl WalkContext {
         arity: Option<usize>,
         line: usize,
         column: usize,
-        constructs: bool,
+        constructs: Constructs,
     ) {
         self.add_name_edge(NameEdge {
             ref_kind: GraphEdgeKind::Calls,
@@ -393,7 +426,7 @@ impl WalkContext {
             raw_text: None,
             bound_type: Some(bound_type.to_owned()),
             arity: None,
-            constructs: false,
+            constructs: Constructs::None,
             line,
             column,
         });
@@ -438,7 +471,7 @@ impl WalkContext {
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
             arity: None,
-            constructs: false,
+            constructs: Constructs::None,
             line,
             column,
         });
@@ -466,7 +499,7 @@ impl WalkContext {
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
             arity: None,
-            constructs: false,
+            constructs: Constructs::None,
             line,
             column,
         });
@@ -591,7 +624,7 @@ mod tests {
                 raw_text: Some("dog.bark()".to_owned()),
                 bound_type: None,
                 arity: Some(2),
-                constructs: false,
+                constructs: Constructs::None,
                 line: 7,
                 column: 11,
             }

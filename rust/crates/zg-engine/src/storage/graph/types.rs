@@ -49,6 +49,10 @@ pub(crate) struct NameIndexEntry {
     /// field existed. A Java name carries no package, so import binding reads
     /// the package from here rather than from the name.
     pub package: Option<String>,
+    /// Whether the declaring C/C++ entity has internal linkage (unnamed
+    /// namespace or file-scope `static`), so only its own translation unit can
+    /// address it by name.
+    pub has_internal_linkage: bool,
 }
 
 /// Name-index record for one entity. Entities without a symbol name are

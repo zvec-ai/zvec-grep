@@ -483,6 +483,38 @@ impl LanguageAdapter {
         }
     }
 
+    /// Reports whether a C/C++ declaration has internal linkage, so that no
+    /// other translation unit can address it by name: it sits inside an
+    /// unnamed namespace, or it is a file-scope `static` declaration.
+    ///
+    /// A class member's `static` is not internal — it says the member belongs
+    /// to the type, not to the translation unit — so an enclosing class rules
+    /// out the storage-class reading. An unnamed namespace keeps its effect
+    /// inside a class: a class declared there, its members included, belongs
+    /// to the file too.
+    ///
+    /// Other languages report nothing: their visibility is a property of the
+    /// declaration (see [`Self::is_exported`]), not of a storage class.
+    pub(super) fn has_internal_linkage(self, node: Node<'_>, source: &[u8]) -> bool {
+        if !matches!(self.kind, Language::C | Language::Cpp) {
+            return false;
+        }
+        let mut inside_class = false;
+        let mut current = node;
+        while let Some(parent) = current.parent() {
+            match parent.kind() {
+                "class_specifier" | "struct_specifier" | "union_specifier" => inside_class = true,
+                "namespace_definition" if parent.child_by_field_name("name").is_none() => {
+                    return true;
+                }
+                "translation_unit" => break,
+                _ => {}
+            }
+            current = parent;
+        }
+        !inside_class && declares_static_storage(node, source)
+    }
+
     fn should_enter_scope(self, node: Node<'_>) -> bool {
         match self.kind {
             Language::Go if node.kind() == "type_spec" => node
@@ -500,6 +532,16 @@ impl LanguageAdapter {
 pub(super) fn named_children(node: Node<'_>) -> Vec<Node<'_>> {
     let mut cursor = node.walk();
     node.named_children(&mut cursor).collect()
+}
+
+/// Whether the declaration spells the `static` storage class on its own
+/// specifiers. Only the declaration's direct children are read: a `static`
+/// nested deeper belongs to a parameter or a local of the declaration, not to
+/// the declaration itself.
+fn declares_static_storage(node: Node<'_>, source: &[u8]) -> bool {
+    named_children(node).into_iter().any(|child| {
+        child.kind() == "storage_class_specifier" && text(child, source).trim() == "static"
+    })
 }
 
 pub(super) fn text<'source>(node: Node<'_>, source: &'source [u8]) -> &'source str {

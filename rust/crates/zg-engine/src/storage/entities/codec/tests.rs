@@ -121,6 +121,7 @@ fn entity_records_preserve_image_content_ranges_and_external_metadata() {
             is_exported: false,
             is_declaration: false,
             package: None,
+            has_internal_linkage: false,
         }));
         let entity = make_entity(
             FileId::new(1),

@@ -99,6 +99,7 @@ fn metadata_fragments(
             is_exported: false,
             is_declaration: false,
             package: None,
+            has_internal_linkage: false,
         })),
         vec![
             EntityFragment {

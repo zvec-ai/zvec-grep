@@ -241,6 +241,11 @@ struct RuleCaches {
     /// method from a free function when a bare call spells its name. Keyed by
     /// scope, read once per sweep.
     owner_is_type: HashMap<String, bool>,
+    /// Files one file's include/import chain reaches, transitively. A TU-local
+    /// declaration in an included file is still inside the includer's
+    /// translation unit, so the closure answers reachability for the whole
+    /// chain at once instead of per candidate.
+    include_closures: HashMap<u32, HashSet<u32>>,
 }
 
 impl ResolutionSweep {
@@ -352,11 +357,14 @@ fn classify_names(
         // meaningful among candidates that can host this reference.
         let compatible =
             filter_compatible_hits(snapshot, stored, raw, &mut caches.candidate_formats);
-        // A call can only land on a callable symbol, and a bare call cannot
-        // reach a member: both are facts about the candidates, so they narrow
-        // the set before any rule reads it.
-        let callable = callable_targets(snapshot, stored, compatible, &mut caches.owner_is_type);
-        prefer_definitions(callable)
+        // Reachability and callability are facts about the candidates, so they
+        // narrow the set before any rule reads it.
+        let reachable = linkage_reachable(store, snapshot, stored, compatible, caches)?;
+        let callable = callable_targets(snapshot, stored, reachable, &mut caches.owner_is_type);
+        // A name a nearer scope also declares binds to that declaration: the
+        // enclosing namespace is searched before the workspace.
+        let visible = enclosing_scope_hits(snapshot, stored, callable);
+        prefer_definitions(visible)
     };
     if stored.reference.ref_kind == GraphEdgeKind::Imports && stored.language == "java" {
         // A Java import names an entity rather than a module, and only its own
@@ -529,6 +537,150 @@ fn filter_compatible_hits<'s>(
     filtered
 }
 
+/// Drops candidates the reference's own translation unit cannot name.
+///
+/// A C/C++ entity with internal linkage — a member of an unnamed namespace or
+/// a file-scope `static` declaration — has a name in its own translation unit
+/// only. Another file that matches it by name matched a different declaration:
+/// sharing a namespace scope and a spelling is not sharing the entity. The
+/// rule reads the flag extraction records, so it only applies where the
+/// language has the concept.
+///
+/// Textual inclusion joins a translation unit: a TU-local function in an
+/// included header or `.cc` is inside every unit that includes it, directly or
+/// through another header. Reachability therefore follows the include chain,
+/// not file identity alone — which is also what keeps two sibling `static`
+/// definitions of one name from borrowing each other's calls.
+///
+/// # Errors
+/// Propagates graph storage failures of the include-chain read.
+fn linkage_reachable<'s>(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    hits: Vec<&'s NameIndexEntry>,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Vec<&'s NameIndexEntry>> {
+    if !matches!(stored.language.as_str(), "c" | "cpp") {
+        return Ok(hits);
+    }
+    if !hits
+        .iter()
+        .any(|hit| hit.has_internal_linkage && hit.file_id != stored.file_id)
+    {
+        return Ok(hits);
+    }
+    if let Entry::Vacant(entry) = caches.include_closures.entry(stored.file_id) {
+        entry.insert(include_closure(
+            store,
+            snapshot,
+            &stored.language,
+            stored.file_id,
+        )?);
+    }
+    let Some(closure) = caches.include_closures.get(&stored.file_id) else {
+        return Ok(hits);
+    };
+    Ok(hits
+        .into_iter()
+        .filter(|hit| {
+            !hit.has_internal_linkage
+                || hit.file_id == stored.file_id
+                || closure.contains(&hit.file_id)
+        })
+        .collect())
+}
+
+/// Files the include chain of `file_id` reaches, transitively.
+///
+/// Two sources answer, because a sweep resolves references against one
+/// snapshot taken before any of its own writeback: the import edges already
+/// resolved in the graph, and the include statements still queued as pending
+/// references, resolved here through the same path rule the import rule uses.
+/// Without the second source a call and the include that makes it reachable
+/// would resolve in the same sweep, and the call would be judged against a
+/// unit that had not yet absorbed its header.
+///
+/// An include cycle keeps the walk finite: a file enters the set once, and the
+/// file that started the walk is left out so the set answers "what does this
+/// unit pull in" rather than "which units is it part of".
+fn include_closure(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    language: &str,
+    file_id: u32,
+) -> crate::EngineResult<HashSet<u32>> {
+    let mut reachable = HashSet::new();
+    let mut frontier = vec![file_id];
+    while let Some(current) = frontier.pop() {
+        let mut targets = Vec::new();
+        let path = snapshot.file_path(current).map(str::to_owned);
+        for reference in store.import_references(current)? {
+            if let Some(path) = path.as_deref()
+                && let Some(target) =
+                    import_target_file(snapshot, language, path, &reference.specifier)
+            {
+                targets.push(target);
+            }
+        }
+        targets.extend(snapshot.imported_file_ids(current).iter().copied());
+        for target in targets {
+            if target != file_id && reachable.insert(target) {
+                frontier.push(target);
+            }
+        }
+    }
+    Ok(reachable)
+}
+
+/// Narrows the candidates to the ones declared in a scope enclosing the
+/// reference, when any are.
+///
+/// C and C++ search outward from the call: `ui::Paint` spelling `Widget` means
+/// `ui::Widget` as soon as one exists, even when a `legacy::Widget` sits in the
+/// same file and would win a whole-workspace tie-break. The scopes come from
+/// the reference owner's qualified name, innermost first; an unscoped owner (a
+/// file-level function) has only the global namespace and leaves the
+/// candidates whole.
+fn enclosing_scope_hits<'s>(
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    hits: Vec<&'s NameIndexEntry>,
+) -> Vec<&'s NameIndexEntry> {
+    if !matches!(stored.language.as_str(), "c" | "cpp") || hits.len() < 2 {
+        return hits;
+    }
+    let Some(owner) = snapshot.entity_record(&stored.reference.owner_id) else {
+        return hits;
+    };
+    let scopes = enclosing_scopes(&owner.qualified_name);
+    if scopes.is_empty() {
+        return hits;
+    }
+    let narrowed: Vec<&'s NameIndexEntry> = hits
+        .iter()
+        .filter(|hit| {
+            hit.qualified_name
+                .rsplit_once("::")
+                .is_some_and(|(scope, _)| scopes.contains(&scope))
+        })
+        .copied()
+        .collect();
+    if narrowed.is_empty() { hits } else { narrowed }
+}
+
+/// The scopes around a qualified name, innermost first: `a::b::f` yields
+/// `["a::b", "a"]`.
+fn enclosing_scopes(qualified_name: &str) -> Vec<&str> {
+    let mut scopes = Vec::new();
+    let mut current = qualified_name;
+    while let Some((scope, _)) = current.rsplit_once("::") {
+        scopes.push(scope);
+        current = scope;
+    }
+    scopes
+}
+
 /// Keeps only the candidates a call can reach.
 ///
 /// A `Calls` reference names something invocable. A class, interface, enum,
@@ -553,11 +705,12 @@ fn filter_compatible_hits<'s>(
 /// members there would drop exactly the target those forms address, so the
 /// bare-call rule stays off for Java and its class-scoped rules decide.
 ///
-/// A construction site (`new X()`, `auto x = X(1)`) keeps type candidates:
-/// building a value is the one call where naming a type is correct. The index
-/// mints a separate constructor entity only when the source declares one, so
-/// dropping the class here would lose the construction wherever the type is
-/// all the source spells.
+/// A construction site keeps type candidates: building a value is the one call
+/// where naming a type is correct. The two forms differ. A call initializing a
+/// value (`auto x = X(1)`, and every `new X()` in a language whose classes the
+/// index does not mint constructors for) keeps them; C and C++ `new X()`
+/// builds through a constructor entity, so a type candidate there is the class
+/// the source never names.
 ///
 /// Missing type evidence keeps the candidate: the gate never discards on
 /// information the index does not carry.
@@ -570,11 +723,14 @@ fn callable_targets<'s>(
     if stored.reference.ref_kind != GraphEdgeKind::Calls {
         return hits;
     }
-    if constructs_value(stored) {
-        return hits
-            .into_iter()
-            .filter(|hit| is_construction_target(hit))
-            .collect();
+    if let Some(site) = construction_site(stored) {
+        let type_answers = site == "value" || !matches!(stored.language.as_str(), "c" | "cpp");
+        if type_answers {
+            return hits
+                .into_iter()
+                .filter(|hit| is_construction_target(hit))
+                .collect();
+        }
     }
     let bare = stored.reference.receiver_name.is_none() && stored.language != "java";
     hits.into_iter()
@@ -583,15 +739,14 @@ fn callable_targets<'s>(
         .collect()
 }
 
-/// Whether the reference stands at a construction site, the flag extraction
-/// records for `new X()` and for calls initializing a value.
-fn constructs_value(stored: &StoredPendingRef) -> bool {
+/// The construction form extraction recorded for the reference: `"value"` for
+/// a call initializing a value, `"new"` for a `new X()` site.
+fn construction_site(stored: &StoredPendingRef) -> Option<&str> {
     stored
         .reference
         .metadata
         .get("constructs")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
+        .and_then(serde_json::Value::as_str)
 }
 
 /// Whether an entity can be what a construction site builds. A class is the
@@ -868,27 +1023,59 @@ fn resolve_import(
         // A file without a persisted path cannot anchor a relative specifier.
         return None;
     };
-    let base = match (stored.language.as_str(), reference.ref_name.as_str()) {
-        // A dotted Python specifier addresses the workspace root
-        // (`from declare import x` reaches `declare.py`), except for the
-        // leading-dot form, which climbs from the importing module's package.
-        ("python", specifier) if specifier.starts_with('.') => {
-            python_relative_base(importing_dir(&path), specifier)?
-        }
-        ("python", specifier) => join_specifier("", &specifier.replace('.', "/"))?,
-        (_, specifier) if specifier.starts_with("./") || specifier.starts_with("../") => {
-            join_specifier(importing_dir(&path), specifier)?
-        }
-        _ => return None,
-    };
-    let file_id = path_variants(&base, &stored.language)
-        .into_iter()
-        .find_map(|candidate| snapshot.file_id_by_path(&candidate))?;
+    let file_id = import_target_file(
+        snapshot,
+        &stored.language,
+        &path,
+        reference.ref_name.as_str(),
+    )?;
     Some(Resolution {
         ref_id: stored.id,
         target_id: format!("f{file_id}"),
         provenance: EdgeProvenance::ImportScoped,
     })
+}
+
+/// The file one import specifier addresses, relative to the importing file's
+/// path, or `None` when the specifier names nothing the snapshot carries.
+///
+/// Shared by the import rule and the include-chain walk: an include is an
+/// import whose textual effect joins two translation units, so both read a
+/// specifier the same way.
+fn import_target_file(
+    snapshot: &ResolutionSnapshot,
+    language: &str,
+    importing_path: &str,
+    specifier: &str,
+) -> Option<u32> {
+    let bases = match (language, specifier) {
+        // A dotted Python specifier addresses the workspace root
+        // (`from declare import x` reaches `declare.py`), except for the
+        // leading-dot form, which climbs from the importing module's package.
+        ("python", specifier) if specifier.starts_with('.') => {
+            vec![python_relative_base(
+                importing_dir(importing_path),
+                specifier,
+            )?]
+        }
+        ("python", specifier) => vec![join_specifier("", &specifier.replace('.', "/"))?],
+        (_, specifier) if specifier.starts_with("./") || specifier.starts_with("../") => {
+            let relative = join_specifier(importing_dir(importing_path), specifier)?;
+            // A quoted `#include` is searched from the includer's directory
+            // first and then from the build's include roots. Extraction keeps
+            // the spelled form as the specifier, so the workspace root stands
+            // in for those roots and the two searches are both tried.
+            match join_specifier("", specifier) {
+                Some(root) if matches!(language, "c" | "cpp") => vec![relative, root],
+                _ => vec![relative],
+            }
+        }
+        _ => return None,
+    };
+    bases
+        .into_iter()
+        .flat_map(|base| path_variants(&base, language))
+        .find_map(|candidate| snapshot.file_id_by_path(&candidate))
 }
 
 /// Resolves an ambiguous bare-name reference through the file's imports:
@@ -1668,6 +1855,10 @@ fn resolve_receiver_typed(
         // matching against an unfinished snapshot.
         return Ok(None);
     };
+    // The binding spells a bare type name, so it means what that name means
+    // where the call is written: inside `namespace ui`, `Widget` is
+    // `ui::Widget` even when another file's namespace declares a namesake.
+    let candidates = enclosing_scope_hits(snapshot, stored, candidates.iter().collect());
     // Constructors (`X::X`) and impl blocks index under the type's name
     // inside the type's declaring scope, so the binding identifies the type
     // by the one scope its candidates share; candidates spelling several

@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::domain::{EdgeProvenance, GraphEdgeKind};
 
-use super::{NameEdge, WalkContext, WalkEdge};
+use super::{Constructs, NameEdge, WalkContext, WalkEdge};
 
 /// A name reference resolved against this file's own symbol table.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,7 +52,7 @@ pub(crate) struct PendingNameRef {
     pub arity: Option<usize>,
     /// Whether the call stands at a construction site, where a type name is a
     /// legitimate target.
-    pub constructs: bool,
+    pub constructs: Constructs,
     pub line: usize,
     pub column: usize,
 }
@@ -147,6 +147,13 @@ pub(crate) fn partition_walk(
             // may live elsewhere — the cross-file resolver consumes all three.
             GraphEdgeKind::Contains | GraphEdgeKind::Imports | GraphEdgeKind::Declares => None,
             GraphEdgeKind::Calls if edge.receiver_name.is_some() => None,
+            // A construction site (`new X()`) names a type, and which type a
+            // bare name denotes is a namespace question: the file's lone
+            // same-named class in an unrelated namespace must not answer it
+            // (`ui::Paint`'s `new Widget()` is `ui::Widget`, not
+            // `legacy::Widget`). Only the cross-file resolver sees the
+            // enclosing namespaces, so constructions stay pending.
+            GraphEdgeKind::Calls if edge.constructs.is_some() => None,
             // A bare call resolves through, in order: its owner's alias
             // initializers, its owner's local name table (the nested
             // spelling an entity declares in its body shadows any

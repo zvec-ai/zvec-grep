@@ -420,6 +420,7 @@ mod tests {
             is_exported: false,
             is_declaration: false,
             package: None,
+            has_internal_linkage: false,
         })
     }
 

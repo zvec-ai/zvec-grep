@@ -129,10 +129,11 @@ fn file_pending_refs(
             if let Some(bound_type) = &reference.bound_type {
                 metadata.insert("type".to_owned(), serde_json::json!(bound_type));
             }
-            if reference.constructs {
+            if let Some(site) = reference.constructs.as_str() {
                 // Only construction sites carry the flag: the resolver keeps
-                // type candidates for exactly these calls.
-                metadata.insert("constructs".to_owned(), serde_json::json!(true));
+                // type candidates for exactly these calls, and the form says
+                // whether the language builds through a constructor instead.
+                metadata.insert("constructs".to_owned(), serde_json::json!(site));
             }
             if reference.ref_kind.spells_inheritance() {
                 insert_inheritance_metadata(
@@ -304,7 +305,7 @@ mod tests {
         CodeMetadata, Content, Entity, EntityFragment, EntityId, EntityMetadata, FileId,
         FragmentId, Range, SymbolType,
     };
-    use crate::extraction::{PendingNameRef, ResolvedNameEdge};
+    use crate::extraction::{Constructs, PendingNameRef, ResolvedNameEdge};
 
     fn code_entity(id: &str, name: &str, scope: Option<&str>) -> Entity {
         let file_id = FileId::new(7);
@@ -358,7 +359,7 @@ mod tests {
             raw_text: Some("Remote".into()),
             bound_type: None,
             arity: None,
-            constructs: false,
+            constructs: Constructs::None,
             line: 1,
             column: 20,
         });

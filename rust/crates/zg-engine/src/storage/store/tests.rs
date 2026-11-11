@@ -653,6 +653,7 @@ fn fixture(
                 is_exported: false,
                 is_declaration: false,
                 package: None,
+                has_internal_linkage: false,
             })),
         ),
         vector,
@@ -1952,6 +1953,7 @@ fn index_code_file(
             is_exported: true,
             is_declaration: false,
             package: None,
+            has_internal_linkage: false,
         })),
     );
     let graph = FileGraphResult {

@@ -223,6 +223,9 @@ struct CodeEntity<'tree> {
     /// The Java `package` this source declares, empty for the default package;
     /// `None` for every other language.
     package: Option<String>,
+    /// Whether a C/C++ declaration has internal linkage (unnamed namespace or
+    /// file-scope `static`), so only its own file can address it by name.
+    has_internal_linkage: bool,
 }
 
 // The entity branch shares first/scope entity indices and the scope boundary
@@ -280,6 +283,7 @@ fn walk_code_node<'tree>(
                     format,
                     is_declaration: adapter.is_declaration(entity),
                     package: java_package(entity, source, format),
+                    has_internal_linkage: adapter.has_internal_linkage(entity, source),
                 });
             }
             // Name-based references are collected from the first resolved
@@ -496,6 +500,7 @@ fn code_entity_metadata(entity: &CodeEntity<'_>) -> EntityMetadata {
         is_exported: entity.is_exported,
         is_declaration: entity.is_declaration,
         package: entity.package.clone(),
+        has_internal_linkage: entity.has_internal_linkage,
     })
 }
 
@@ -823,6 +828,7 @@ mod tests {
                 is_exported: false,
                 is_declaration: false,
                 package: None,
+                has_internal_linkage: false,
             }))
         );
         assert!(matches!(
@@ -843,6 +849,7 @@ mod tests {
                 is_exported: false,
                 is_declaration: false,
                 package: None,
+                has_internal_linkage: false,
             }))
         );
         assert!(matches!(
@@ -1036,6 +1043,7 @@ mod tests {
                     arity: (kind == SymbolType::Function).then_some(1),
                     is_exported: false,
                     is_declaration: false,
+                    has_internal_linkage: false,
                     package: None,
                 })),
                 "{name}"
@@ -1244,6 +1252,7 @@ mod tests {
                 is_exported: false,
                 is_declaration: false,
                 package: None,
+                has_internal_linkage: false,
             }))
         );
         assert!(matches!(
@@ -1277,6 +1286,7 @@ mod tests {
                 is_exported: false,
                 is_declaration: false,
                 package: None,
+                has_internal_linkage: false,
             }))
         );
         assert!(matches!(
@@ -1311,6 +1321,7 @@ mod tests {
                 is_exported: false,
                 is_declaration: false,
                 package: None,
+                has_internal_linkage: false,
             }))
         );
     }

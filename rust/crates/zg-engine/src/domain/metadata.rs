@@ -74,6 +74,12 @@ pub struct CodeMetadata {
     /// `my.List` from `java.util.List`.
     #[serde(default)]
     pub package: Option<String>,
+    /// True for a C/C++ declaration with internal linkage: a member of an
+    /// unnamed namespace, or a file-scope `static` one. Such an entity has a
+    /// name in its own translation unit only, so a reference from another
+    /// file that matches it by name matched a different declaration.
+    #[serde(default)]
+    pub has_internal_linkage: bool,
 }
 
 impl CodeMetadata {
