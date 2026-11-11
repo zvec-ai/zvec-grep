@@ -2313,13 +2313,13 @@ public class Service {
     }
 
     #[test]
-    fn keeps_unclassified_type_declarations_without_value_fallback() {
+    fn classifies_type_declarations_without_value_fallback() {
         let fixtures = [
             (
                 FileFormat::Go,
                 "package demo\ntype UserID int",
                 "UserID",
-                None,
+                Some(SymbolType::Class),
             ),
             (
                 FileFormat::Rust,

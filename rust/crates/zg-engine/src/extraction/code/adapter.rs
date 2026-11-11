@@ -687,8 +687,8 @@ fn classify_go(node: Node<'_>) -> Option<SymbolType> {
         "type_alias" => Some(SymbolType::Alias),
         "type_spec" => match node.child_by_field_name("type").map(|item| item.kind()) {
             Some("interface_type") => Some(SymbolType::Interface),
-            Some("struct_type") => Some(SymbolType::Class),
-            _ => None,
+            // Every defined Go type can have methods, including named scalars.
+            _ => Some(SymbolType::Class),
         },
         "method_elem" | "method_spec" => Some(SymbolType::Function),
         _ => classify_code_node(node),

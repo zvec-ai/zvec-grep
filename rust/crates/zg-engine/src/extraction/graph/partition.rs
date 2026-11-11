@@ -180,10 +180,15 @@ pub(crate) fn partition_walk(
             // weighs imports.
             GraphEdgeKind::Calls => {
                 if let Some(bound) = alias_at(&aliases, &edge) {
-                    let bound = bound.strip_prefix("typeof ").unwrap_or(bound);
-                    symbols
-                        .get(bound)
-                        .and_then(|indices| (indices.len() == 1).then(|| indices[0]))
+                    // Callable copies require lexical lookup at the assignment
+                    // position; the resolver owns that decision.
+                    if bound.starts_with("typeof ") || bound == "?" {
+                        None
+                    } else {
+                        symbols
+                            .get(bound)
+                            .and_then(|indices| (indices.len() == 1).then(|| indices[0]))
+                    }
                 } else {
                     scoped_symbols
                         .get(&edge.owner_index)

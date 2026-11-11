@@ -423,7 +423,7 @@ fn visit_for_bindings(
     {
         context.add_declare_binding(
             owner_index,
-            "default",
+            "[[export:default]]",
             &format!("typeof {}", node_text(name, source)),
             node.start_position().row + 1,
             node.start_position().column,
@@ -470,13 +470,15 @@ fn visit_for_bindings(
     {
         context.add_declare_binding(
             owner_index,
-            node_text(alias, source),
-            &format!("typeof {}", node_text(name, source)),
+            // Export names are not local bindings; named exports remain live.
+            &format!("[[export:{}]]", node_text(alias, source)),
+            &format!("export typeof {}", node_text(name, source)),
             node.start_position().row + 1,
             node.start_position().column,
         );
     }
     if let Some((name, bound_type)) = declaration_binding_of(node, source, format, context) {
+        collect_uninitialized_binding(node, owner_index, &name, format, context);
         if format == FileFormat::TypeScript
             && node.kind() == "required_parameter"
             && node_text(node, source)
@@ -506,6 +508,36 @@ fn visit_for_bindings(
             continue;
         }
         visit_for_bindings(child, owner_index, source, format, context, boundary);
+    }
+}
+
+fn collect_uninitialized_binding(
+    node: Node<'_>,
+    owner_index: usize,
+    name: &str,
+    format: FileFormat,
+    context: &mut WalkContext,
+) {
+    if matches!(format, FileFormat::TypeScript | FileFormat::JavaScript)
+        && node.kind() == "variable_declarator"
+    {
+        // The local name already shadows outer bindings before its
+        // initializer, but has no callable value yet (TDZ or undefined).
+        let mut scope = node;
+        while !matches!(scope.kind(), "statement_block" | "program") {
+            let Some(parent) = scope.parent() else { break };
+            scope = parent;
+        }
+        context.add_scoped_binding(
+            owner_index,
+            name,
+            "?",
+            (
+                scope.start_position().row + 1,
+                scope.start_position().column,
+            ),
+            (node.start_position().row + 1, node.start_position().column),
+        );
     }
 }
 
@@ -714,6 +746,8 @@ pub(crate) fn scan_return_types(
             matches!(
                 node.kind(),
                 "function_declaration"
+                    | "class"
+                    | "method_definition"
                     | "method_declaration"
                     | "class_declaration"
                     | "abstract_class_declaration"
@@ -1282,7 +1316,11 @@ fn ts_binding_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
             if matches!(
                 value.kind(),
                 "function_expression" | "arrow_function" | "class"
-            ) {
+            ) || (value.kind() == "call_expression"
+                && value
+                    .child_by_field_name("function")
+                    .is_some_and(|function| node_text(function, source) == "require"))
+            {
                 return None;
             }
             let type_name =
@@ -1293,13 +1331,11 @@ fn ts_binding_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
         // orders the bindings by line so calls after it see the new type.
         "assignment_expression" => {
             let left = node.child_by_field_name("left")?;
-            if left.kind() != "identifier" {
-                return None;
-            }
+            let name = member_expression(left, source)?;
             let value = node.child_by_field_name("right")?;
             let type_name =
                 creation_or_factory_type(value, source).unwrap_or_else(|| "?".to_owned());
-            Some((node_text(left, source).to_owned(), type_name))
+            Some((name, type_name))
         }
         // `function m(a: Left, b: Right)`: the parameter binds its type
         // annotation's single type; unions stay unbound (either type may
@@ -1410,7 +1446,11 @@ fn js_binding_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
             if matches!(
                 value.kind(),
                 "function_expression" | "arrow_function" | "class"
-            ) {
+            ) || (value.kind() == "call_expression"
+                && value
+                    .child_by_field_name("function")
+                    .is_some_and(|function| node_text(function, source) == "require"))
+            {
                 return None;
             }
             let type_name =
@@ -1421,17 +1461,7 @@ fn js_binding_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
         // orders the bindings by line so calls after it see the new type.
         "assignment_expression" => {
             let left = node.child_by_field_name("left")?;
-            let name = if left.kind() == "identifier" {
-                node_text(left, source).to_owned()
-            } else if left.kind() == "member_expression"
-                && left
-                    .child_by_field_name("object")
-                    .is_some_and(|object| object.kind() == "this")
-            {
-                member_expression(left, source)?
-            } else {
-                return None;
-            };
+            let name = member_expression(left, source)?;
             let value = node.child_by_field_name("right")?;
             let type_name =
                 creation_or_factory_type(value, source).unwrap_or_else(|| "?".to_owned());
@@ -1639,6 +1669,10 @@ pub(crate) fn collect_import_edge(
     context: &mut WalkContext,
 ) {
     if !context.is_collecting() {
+        return;
+    }
+    if format == FileFormat::Go && node.kind() == "import_declaration" {
+        // Visit each import_spec so grouped imports retain their own alias.
         return;
     }
     let Some(path) = module_path_of(node, source, format) else {
@@ -2005,7 +2039,10 @@ mod tests {
                 &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
                 "function m() { const x = new X(); x.foo(); }",
             ),
-            vec![("x".to_owned(), "X".to_owned(), 1)]
+            vec![
+                ("x".to_owned(), "?".to_owned(), 1),
+                ("x".to_owned(), "X".to_owned(), 1),
+            ]
         );
         assert_eq!(
             bindings(
@@ -2013,7 +2050,10 @@ mod tests {
                 &tree_sitter_javascript::LANGUAGE.into(),
                 "function m() { const x = new X(); x.foo(); }",
             ),
-            vec![("x".to_owned(), "X".to_owned(), 1)]
+            vec![
+                ("x".to_owned(), "?".to_owned(), 1),
+                ("x".to_owned(), "X".to_owned(), 1),
+            ]
         );
 
         // Typed parameters.
@@ -2121,7 +2161,10 @@ mod tests {
                 &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
                 "function makeX(): X {\n    return new X();\n}\nfunction caller() {\n    const x = makeX();\n}\n",
             ),
-            vec![("x".to_owned(), "ReturnType<typeof makeX>".to_owned(), 5)]
+            vec![
+                ("x".to_owned(), "?".to_owned(), 4),
+                ("x".to_owned(), "ReturnType<typeof makeX>".to_owned(), 5),
+            ]
         );
         assert_eq!(
             factory_bindings(
@@ -2157,6 +2200,7 @@ mod tests {
             ),
             vec![
                 ("[[javascript_scope]]".to_owned(), "script".to_owned(), 1),
+                ("x".to_owned(), "?".to_owned(), 4),
                 ("x".to_owned(), "ReturnType<typeof makeX>".to_owned(), 5),
             ]
         );
