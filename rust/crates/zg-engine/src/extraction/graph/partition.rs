@@ -53,6 +53,9 @@ pub(crate) struct PendingNameRef {
     /// Whether the call stands at a construction site, where a type name is a
     /// legitimate target.
     pub constructs: Constructs,
+    /// Whether the owner's body already took the name for a local value or
+    /// parameter, so no file-level symbol answers it.
+    pub shadowed: bool,
     pub line: usize,
     pub column: usize,
 }
@@ -111,6 +114,7 @@ pub(crate) fn partition_walk(
         symbols,
         file_symbols,
         scoped_symbols,
+        shadowed_names,
         ..
     } = context;
     let mut partitioned = PartitionedGraph {
@@ -139,6 +143,15 @@ pub(crate) fn partition_walk(
                 continue;
             }
         }
+        // A bare name the owner's body already took for itself is not the
+        // file's name: `invoke(dispatch: () => void)` reaching `dispatch()`
+        // calls the parameter, never an imported function some alias table
+        // happens to spell. Only the owner's own tables may answer it, and a
+        // name no table can place stays pending instead of falling back.
+        let shadowed = edge.receiver_name.is_none()
+            && shadowed_names
+                .get(&edge.owner_index)
+                .is_some_and(|names| names.contains(&edge.ref_name));
         let resolved_target = match edge.ref_kind {
             // Containment is emitted as a resolved edge during the walk, so it
             // normally never reaches this queue; if one does, it stays pending.
@@ -177,9 +190,13 @@ pub(crate) fn partition_walk(
                         .copied()
                 })
                 .or_else(|| {
-                    file_symbols
-                        .get(&edge.ref_name)
-                        .and_then(|indices| (indices.len() == 1).then(|| indices[0]))
+                    (!shadowed)
+                        .then(|| {
+                            file_symbols
+                                .get(&edge.ref_name)
+                                .and_then(|indices| (indices.len() == 1).then(|| indices[0]))
+                        })
+                        .flatten()
                 }),
             GraphEdgeKind::Extends | GraphEdgeKind::Implements => symbols
                 .get(&edge.ref_name)
@@ -207,6 +224,7 @@ pub(crate) fn partition_walk(
                 bound_type: edge.bound_type,
                 arity: edge.arity,
                 constructs: edge.constructs,
+                shadowed,
                 line: edge.line,
                 column: edge.column,
             }),

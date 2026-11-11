@@ -274,6 +274,19 @@ fn classify(
     stored: &StoredPendingRef,
     caches: &mut RuleCaches,
 ) -> crate::EngineResult<Outcome> {
+    if stored
+        .reference
+        .metadata
+        .get("shadowed")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        // A local value or parameter already took this name inside the
+        // referencing entity. Whatever the workspace declares under it, the
+        // call reaches the local binding, so the reference waits instead of
+        // borrowing a same-named symbol from the file or the workspace.
+        return Ok(Outcome::Deferred);
+    }
     if stored.reference.ref_kind == GraphEdgeKind::Declares {
         // Binding evidence for `resolve_receiver_typed`, not a call site: the
         // bound variable name must never reach the name-index lookup below.

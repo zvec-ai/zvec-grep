@@ -138,6 +138,11 @@ pub(crate) struct WalkContext {
     /// innermost-scope shadow table: a call inside `outer` that names
     /// `work` binds the nested `outer::work` before any file-level name.
     scoped_symbols: HashMap<usize, HashMap<String, usize>>,
+    /// Names each entity takes for itself without necessarily binding them to
+    /// an indexable target: parameters, and locals whose type the index cannot
+    /// spell. A bare call through such a name reaches the local value, never
+    /// the file-level symbol of the same name.
+    shadowed_names: HashMap<usize, HashSet<String>>,
     seen_name_edges: HashSet<(GraphEdgeKind, usize, Option<String>, String, usize, usize)>,
     /// Factory return types this file spells: `Some` answers a bare-call
     /// initializer (`x = makeX()`), `None` marks a name registered with two
@@ -174,6 +179,7 @@ impl WalkContext {
             symbols: HashMap::new(),
             file_symbols: HashMap::new(),
             scoped_symbols: HashMap::new(),
+            shadowed_names: HashMap::new(),
             seen_name_edges: HashSet::new(),
             return_types: HashMap::new(),
             entity_counter: 0,
@@ -247,6 +253,20 @@ impl WalkContext {
             .entry(owner)
             .or_default()
             .insert(name.to_owned(), index);
+    }
+
+    /// Records that `owner`'s body takes `name` for a local value or
+    /// parameter. The name is taken whether or not the local's type is
+    /// known: a parameter annotated `() => void` hides an imported function
+    /// of the same name just as surely as a typed one does.
+    pub(crate) fn register_shadowed_name(&mut self, owner: usize, name: &str) {
+        if !self.collecting || name.is_empty() {
+            return;
+        }
+        self.shadowed_names
+            .entry(owner)
+            .or_default()
+            .insert(name.to_owned());
     }
 
     #[allow(dead_code)]

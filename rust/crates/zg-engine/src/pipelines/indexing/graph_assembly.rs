@@ -129,6 +129,11 @@ fn file_pending_refs(
             if let Some(bound_type) = &reference.bound_type {
                 metadata.insert("type".to_owned(), serde_json::json!(bound_type));
             }
+            if reference.shadowed {
+                // The owner's own body took this name, so no file-level symbol
+                // answers it: the resolver must not bind it either.
+                metadata.insert("shadowed".to_owned(), serde_json::json!(true));
+            }
             if let Some(site) = reference.constructs.as_str() {
                 // Only construction sites carry the flag: the resolver keeps
                 // type candidates for exactly these calls, and the form says
@@ -360,6 +365,7 @@ mod tests {
             bound_type: None,
             arity: None,
             constructs: Constructs::None,
+            shadowed: false,
             line: 1,
             column: 20,
         });

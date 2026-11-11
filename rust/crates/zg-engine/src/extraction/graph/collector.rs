@@ -406,7 +406,16 @@ fn visit_for_bindings(
     context: &mut WalkContext,
     boundary: Option<&dyn Fn(Node<'_>) -> bool>,
 ) {
-    if let Some((name, bound_type)) = declaration_binding_of(node, source, format, context) {
+    let binding = declaration_binding_of(node, source, format, context);
+    let mut shadowed = Vec::new();
+    shadowing_names_of(node, source, format, &mut shadowed);
+    for name in shadowed {
+        // The name is taken by this owner's body even when nothing binds it to
+        // an index: a parameter typed `() => void` still hides the imported
+        // function the body calls by that name.
+        context.register_shadowed_name(owner_index, &name);
+    }
+    if let Some((name, bound_type)) = binding {
         context.add_declare_binding(
             owner_index,
             &name,
@@ -442,6 +451,175 @@ fn declaration_binding_of(
         FileFormat::TypeScript => ts_binding_of(node, source, context),
         FileFormat::JavaScript => js_binding_of(node, source, context),
         _ => None,
+    }
+}
+
+/// Appends the names a declaration node takes for its own scope, whether or
+/// not the index can spell the type they hold.
+///
+/// [`declaration_binding_of`] answers only bindings that name a type, because
+/// a binding is evidence for later receiver calls. A name is occupied even
+/// when its type is not spellable — `function invoke(dispatch: () => void)`
+/// hides an imported `dispatch` from every call the body writes — and a bare
+/// call through an occupied name reaches the local value rather than the
+/// file-level symbol. Keeping occupancy separate from typing lets partition
+/// ask the two questions apart: "which type does this name hold" and "is this
+/// name the file's".
+fn shadowing_names_of(node: Node<'_>, source: &[u8], format: FileFormat, names: &mut Vec<String>) {
+    match format {
+        FileFormat::TypeScript => shadowing_names_in_typescript(node, source, names),
+        FileFormat::JavaScript => shadowing_names_in_javascript(node, source, names),
+        FileFormat::Python => shadowing_names_in_python(node, source, names),
+        FileFormat::Go => shadowing_names_in_go(node, source, names),
+        FileFormat::Rust => shadowing_names_in_rust(node, source, names),
+        FileFormat::Java => shadowing_names_in_java(node, source, names),
+        FileFormat::C | FileFormat::Cpp => shadowing_names_in_c_family(node, source, names),
+        _ => {}
+    }
+}
+
+/// Appends `candidate`'s text when it is a plain identifier. Destructuring
+/// patterns carry several names in one node, so they are read by their
+/// callers instead.
+fn push_shadowing_name(candidate: Option<Node<'_>>, source: &[u8], names: &mut Vec<String>) {
+    if let Some(node) = candidate.filter(|node| node.kind() == "identifier") {
+        names.push(node_text(node, source).to_owned());
+    }
+}
+
+fn shadowing_names_in_typescript(node: Node<'_>, source: &[u8], names: &mut Vec<String>) {
+    match node.kind() {
+        "required_parameter" | "optional_parameter" => {
+            push_shadowing_name(node.child_by_field_name("pattern"), source, names);
+        }
+        "variable_declarator" => {
+            push_shadowing_name(node.child_by_field_name("name"), source, names);
+        }
+        _ => {}
+    }
+}
+
+fn shadowing_names_in_javascript(node: Node<'_>, source: &[u8], names: &mut Vec<String>) {
+    match node.kind() {
+        "formal_parameters" => {
+            for child in named_children(node) {
+                match child.kind() {
+                    "identifier" => names.push(node_text(child, source).to_owned()),
+                    "assignment_pattern" => {
+                        push_shadowing_name(child.child_by_field_name("left"), source, names);
+                    }
+                    "rest_pattern" => {
+                        push_shadowing_name(child.named_child(0), source, names);
+                    }
+                    // Destructuring patterns bind several names; the
+                    // callers below read a name per node.
+                    _ => {}
+                }
+            }
+        }
+        "variable_declarator" => {
+            push_shadowing_name(node.child_by_field_name("name"), source, names);
+        }
+        _ => {}
+    }
+}
+
+fn shadowing_names_in_python(node: Node<'_>, source: &[u8], names: &mut Vec<String>) {
+    match node.kind() {
+        "parameters" => {
+            for child in named_children(node) {
+                let candidate = match child.kind() {
+                    "identifier" => Some(child),
+                    // `a: Left` carries the name as its first child.
+                    "typed_parameter" => child.named_child(0),
+                    "default_parameter" | "typed_default_parameter" => {
+                        child.child_by_field_name("name")
+                    }
+                    _ => None,
+                };
+                push_shadowing_name(candidate, source, names);
+            }
+        }
+        "assignment" => {
+            push_shadowing_name(node.child_by_field_name("left"), source, names);
+        }
+        _ => {}
+    }
+}
+
+fn shadowing_names_in_go(node: Node<'_>, source: &[u8], names: &mut Vec<String>) {
+    match node.kind() {
+        "parameter_declaration" | "variadic_parameter_declaration" => {
+            push_shadowing_name(node.child_by_field_name("name"), source, names);
+        }
+        "short_var_declaration" => {
+            if let Some(left) = node.child_by_field_name("left") {
+                push_shadowing_name(left.named_child(0), source, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn shadowing_names_in_rust(node: Node<'_>, source: &[u8], names: &mut Vec<String>) {
+    match node.kind() {
+        // `fn m(a: Left)`; `mut a` wraps the name in `mut_pattern`.
+        "parameter" => {
+            if let Some(pattern) = node.child_by_field_name("pattern") {
+                let candidate = if pattern.kind() == "identifier" {
+                    Some(pattern)
+                } else {
+                    pattern.named_child(0)
+                };
+                push_shadowing_name(candidate, source, names);
+            }
+        }
+        "let_declaration" => {
+            if let Some(pattern) = node.child_by_field_name("pattern") {
+                push_shadowing_name(Some(pattern), source, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn shadowing_names_in_java(node: Node<'_>, source: &[u8], names: &mut Vec<String>) {
+    match node.kind() {
+        "formal_parameter" | "catch_formal_parameter" => {
+            push_shadowing_name(node.child_by_field_name("name"), source, names);
+        }
+        "local_variable_declaration" => {
+            for child in named_children(node) {
+                if child.kind() == "variable_declarator" {
+                    push_shadowing_name(child.child_by_field_name("name"), source, names);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn shadowing_names_in_c_family(node: Node<'_>, source: &[u8], names: &mut Vec<String>) {
+    match node.kind() {
+        "parameter_declaration" => {
+            if let Some(declarator) = node.child_by_field_name("declarator") {
+                let name = peel_declarator_name(declarator, source);
+                names.extend(name);
+            }
+        }
+        "declaration" => {
+            if let Some(declarator) = node.child_by_field_name("declarator") {
+                // `int x = 1` wraps the name in an `init_declarator`.
+                let declarator = if declarator.kind() == "init_declarator" {
+                    declarator.child_by_field_name("declarator")
+                } else {
+                    Some(declarator)
+                };
+                let name = declarator.and_then(|node| peel_declarator_name(node, source));
+                names.extend(name);
+            }
+        }
+        _ => {}
     }
 }
 
