@@ -22,7 +22,7 @@ The **Retrieval results** job publishes one page with a suite overview and a sep
 | zg-fts | `fts: [originalQuestion]` | `preview: "full"` |
 | zg-vector | `vector: [originalQuestion]` | `preview: "full"` |
 
-Every request explicitly uses `preview: "full"`, `limit: 10`, `autoUpdate: false`, `freshness: eventual` and `preferSymbol: false`. FTS and vector requests omit `query` and the other route. Full preview displays the available source from retrieved results; it does not fetch the entire file. Native chunking, aggregation and ranking remain unchanged.
+Every request explicitly uses `preview: "full"`, `limit: 10`, `autoUpdate: false`, `freshness: eventual` and `preferSymbol: false`. FTS and vector requests omit `query` and the other route. Full preview displays each retrieved Entity's complete content; short preview displays excerpts. This presentation choice does not change Entity Recall, native chunking, aggregation or ranking.
 
 The public response parser requires the MCP `freshness:` header and accepts both the legacy MCP body and the CLI compact body. Compact output does not expose per-hit route labels, so unavailable routes remain `null`; the parser never invents route evidence from the requested mode. Route validation still rejects any reported label that conflicts with the requested mode. Global CLI freshness and indexing diagnostics remain visible evidence before the compact body; legacy trailing diagnostics are also supported.
 

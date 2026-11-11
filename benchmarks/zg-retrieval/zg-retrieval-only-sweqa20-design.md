@@ -24,7 +24,7 @@ Install the packed native candidate outside the corpus and connect through its p
 | zg-fts | `fts: [originalQuestion]` | Native FTS retrieval |
 | zg-vector | `vector: [originalQuestion]` | Native vector retrieval |
 
-FTS/vector requests omit the primary `query` and the other route. All requests explicitly use `preview: "full"`, `limit: 10`, `autoUpdate: false`, `freshness: eventual` and `preferSymbol: false`. Full preview displays available source from retrieved results, not the entire file. It changes presentation, not Gold or scoring rules. Disabling symbol preference prevents vector-only requests from adding a symbol-oriented FTS route. Public `matchedBy` evidence is checked against the requested mode. Native file aggregation, fusion and ranking remain product behavior under test; the harness adds no reranker.
+FTS/vector requests omit the primary `query` and the other route. All requests explicitly use `preview: "full"`, `limit: 10`, `autoUpdate: false`, `freshness: eventual` and `preferSymbol: false`. Full preview displays each retrieved Entity's complete content; short preview displays excerpts. It changes presentation, not Entity Recall, Gold or scoring rules. Disabling symbol preference prevents vector-only requests from adding a symbol-oriented FTS route. Public `matchedBy` evidence is checked against the requested mode. Native file aggregation, fusion and ranking remain product behavior under test; the harness adds no reranker.
 
 The separate QA Entity metrics use the retrieved content's source range, not its
 preview. A Gold target is found when its full range is contained in retrieved

@@ -51,8 +51,8 @@ existing per-query average. SWE-QA20 uses a repository macro average for its
 overall nDCG, while these pilots use a query average. Absolute scores across
 suites do not share a corpus or relevance definition.
 
-Full preview displays the available source from retrieved results, not entire
-files. Gold and file-scoring rules remain unchanged. Preserve earlier
+Full preview displays each retrieved Entity's complete content; short preview
+displays excerpts. Gold and file-scoring rules remain unchanged. Preserve earlier
 default-short artifacts and use their matching scorer for review; they are not
 full-preview runs.
 

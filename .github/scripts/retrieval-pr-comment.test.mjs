@@ -292,6 +292,7 @@ test("the publisher renders validated File and Entity diagnostic scores and coun
 
 test("extra QA File metrics are validated without substituting original File scores", () => {
   const value = structuredClone(report);
+  value.qa_scoring = { ...QA_SCORING };
   const group = {
     eligible_tasks: 17,
     file: {
