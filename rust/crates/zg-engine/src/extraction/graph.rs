@@ -80,6 +80,8 @@ pub(crate) struct NameEdge {
     /// Declared type of the bound name for `Declares` edges
     /// (`var x = new X()` → `Some("X")`).
     pub bound_type: Option<String>,
+    /// Exclusive end of a branch/loop-local binding, in source coordinates.
+    pub scope_end: Option<(usize, usize)>,
     /// Argument count at the call site, when the reference is a call.
     pub arity: Option<usize>,
     pub line: usize,
@@ -304,6 +306,7 @@ impl WalkContext {
             receiver_name: receiver_name.map(str::to_owned),
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
+            scope_end: None,
             arity,
             line,
             column,
@@ -337,10 +340,28 @@ impl WalkContext {
             receiver_name: None,
             raw_text: None,
             bound_type: Some(bound_type.to_owned()),
+            scope_end: None,
             arity: None,
             line,
             column,
         });
+    }
+
+    pub(crate) fn add_scoped_binding(
+        &mut self,
+        owner: usize,
+        name: &str,
+        ty: &str,
+        start: (usize, usize),
+        end: (usize, usize),
+    ) {
+        if !self.collecting {
+            return;
+        }
+        self.add_declare_binding(owner, name, ty, start.0, start.1);
+        if let Some(binding) = self.name_edges.last_mut() {
+            binding.scope_end = Some(end);
+        }
     }
 
     /// Registers one function's factory return type: the signature's
@@ -381,6 +402,7 @@ impl WalkContext {
             receiver_name: None,
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
+            scope_end: None,
             arity: None,
             line,
             column,
@@ -408,6 +430,7 @@ impl WalkContext {
             receiver_name: None,
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
+            scope_end: None,
             arity: None,
             line,
             column,
@@ -532,6 +555,7 @@ mod tests {
                 receiver_name: Some("dog".to_owned()),
                 raw_text: Some("dog.bark()".to_owned()),
                 bound_type: None,
+                scope_end: None,
                 arity: Some(2),
                 line: 7,
                 column: 11,

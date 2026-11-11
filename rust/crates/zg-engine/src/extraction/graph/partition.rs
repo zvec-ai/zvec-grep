@@ -49,6 +49,7 @@ pub(crate) struct PendingNameRef {
     pub raw_text: Option<String>,
     /// Declared type of the bound name for `Declares` edges.
     pub bound_type: Option<String>,
+    pub scope_end: Option<(usize, usize)>,
     pub arity: Option<usize>,
     pub line: usize,
     pub column: usize,
@@ -74,16 +75,40 @@ pub(crate) struct PartitionedGraph {
 /// one name to a same-file function per owner: a call spelled through the
 /// alias reaches that function rather than a same-named declaration the
 /// local hides.
-fn alias_table(name_edges: &[NameEdge]) -> HashMap<(usize, String), String> {
-    name_edges
+fn alias_table(name_edges: &[NameEdge]) -> HashMap<(usize, String), Vec<NameEdge>> {
+    let mut aliases: HashMap<_, Vec<_>> = HashMap::new();
+    for edge in name_edges
         .iter()
         .filter(|edge| edge.ref_kind == GraphEdgeKind::Declares)
-        .filter_map(|edge| {
-            edge.bound_type
-                .clone()
-                .map(|bound| ((edge.owner_index, edge.ref_name.clone()), bound))
+    {
+        aliases
+            .entry((edge.owner_index, edge.ref_name.clone()))
+            .or_default()
+            .push(edge.clone());
+    }
+    aliases
+}
+
+fn alias_at<'a>(
+    aliases: &'a HashMap<(usize, String), Vec<NameEdge>>,
+    edge: &NameEdge,
+) -> Option<&'a str> {
+    let position = (edge.line, edge.column);
+    let local = aliases
+        .get(&(edge.owner_index, edge.ref_name.clone()))
+        .and_then(|bindings| {
+            bindings.iter().rev().find(|binding| {
+                (binding.line, binding.column) <= position
+                    && binding.scope_end.is_none_or(|end| position < end)
+            })
+        });
+    local
+        .or_else(|| {
+            aliases
+                .get(&(super::FILE_SCOPE_INDEX, edge.ref_name.clone()))
+                .and_then(|bindings| bindings.last())
         })
-        .collect()
+        .and_then(|binding| binding.bound_type.as_deref())
 }
 
 /// Shape used to collapse non-call, non-binding references.
@@ -153,24 +178,24 @@ pub(crate) fn partition_walk(
             // because the file declares it once. Without better evidence the
             // reference stays pending for the cross-file resolver, which also
             // weighs imports.
-            GraphEdgeKind::Calls => aliases
-                .get(&(edge.owner_index, edge.ref_name.clone()))
-                .and_then(|bound| {
+            GraphEdgeKind::Calls => {
+                if let Some(bound) = alias_at(&aliases, &edge) {
+                    let bound = bound.strip_prefix("typeof ").unwrap_or(bound);
                     symbols
                         .get(bound)
                         .and_then(|indices| (indices.len() == 1).then(|| indices[0]))
-                })
-                .or_else(|| {
+                } else {
                     scoped_symbols
                         .get(&edge.owner_index)
                         .and_then(|locals| locals.get(&edge.ref_name))
                         .copied()
-                })
-                .or_else(|| {
-                    file_symbols
-                        .get(&edge.ref_name)
-                        .and_then(|indices| (indices.len() == 1).then(|| indices[0]))
-                }),
+                        .or_else(|| {
+                            file_symbols
+                                .get(&edge.ref_name)
+                                .and_then(|indices| (indices.len() == 1).then(|| indices[0]))
+                        })
+                }
+            }
             GraphEdgeKind::Extends | GraphEdgeKind::Implements => symbols
                 .get(&edge.ref_name)
                 .and_then(|indices| (indices.len() == 1).then(|| indices[0])),
@@ -195,6 +220,7 @@ pub(crate) fn partition_walk(
                 receiver_name: edge.receiver_name,
                 raw_text: edge.raw_text,
                 bound_type: edge.bound_type,
+                scope_end: edge.scope_end,
                 arity: edge.arity,
                 line: edge.line,
                 column: edge.column,

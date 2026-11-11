@@ -85,6 +85,8 @@ pub(crate) struct DeclaredBinding {
     /// One-based line of the declaring site; rebindings of the same name
     /// shadow earlier ones at later lines.
     pub line: u32,
+    pub column: u32,
+    pub scope_end: Option<(usize, usize)>,
 }
 
 /// Page over pending references. Restart pagination after file mutations.

@@ -129,6 +129,9 @@ fn file_pending_refs(
             if let Some(bound_type) = &reference.bound_type {
                 metadata.insert("type".to_owned(), serde_json::json!(bound_type));
             }
+            if let Some(end) = reference.scope_end {
+                metadata.insert("scope_end".to_owned(), serde_json::json!(end));
+            }
             if reference.ref_kind.spells_inheritance() {
                 insert_inheritance_metadata(
                     &mut metadata,
@@ -352,6 +355,7 @@ mod tests {
             receiver_name: None,
             raw_text: Some("Remote".into()),
             bound_type: None,
+            scope_end: None,
             arity: None,
             line: 1,
             column: 20,

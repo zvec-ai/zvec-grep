@@ -147,22 +147,17 @@ fn extract_code(
         append_php_gaps(source, &entities, max_chars, overlap_chars, &mut output);
     }
     if output.is_empty() {
-        Ok(ExtractionOutput {
-            fragments: fallback(source, max_chars, overlap_chars),
-            graph: None,
-        })
-    } else {
-        // The symbol table is complete now, so partitioning resolves forward
-        // references as readily as backward ones. A walk that recorded nothing
-        // produces no graph at all, so assembly skips it.
-        let partitioned = graph_context
-            .is_collecting()
-            .then(|| partition_walk(graph_context, entity_heads));
-        Ok(ExtractionOutput {
-            fragments: output,
-            graph: partitioned,
-        })
+        output = fallback(source, max_chars, overlap_chars);
     }
+    // Import-only barrels still own graph references even though they have no
+    // symbol entities. Their references use the implicit file endpoint.
+    let partitioned = graph_context
+        .is_collecting()
+        .then(|| partition_walk(graph_context, entity_heads));
+    Ok(ExtractionOutput {
+        fragments: output,
+        graph: partitioned,
+    })
 }
 
 fn grammar(format: FileFormat, jsx: bool) -> Option<Language> {
@@ -246,11 +241,9 @@ fn walk_code_node<'tree>(
 
         if is_entity {
             let start_index = out.len();
-            let mut entity_indexes = Vec::new();
             for entity in adapter.resolve_entities(child, source) {
                 let entity_index = graph_context.next_entity_index();
                 first_entity_index.get_or_insert(entity_index);
-                entity_indexes.push(entity_index);
                 scope_entity_index = Some(entity_index);
                 let name = adapter.extract_name(entity, source);
                 let entity_breadcrumb = adapter.scope_breadcrumb(entity, source, breadcrumb);
@@ -282,54 +275,60 @@ fn walk_code_node<'tree>(
                     package: java_package(entity, source, format),
                 });
             }
-            // Name-based references are collected from the first resolved
-            // entity's subtree: the walk does not descend into entity bodies,
-            // so this attributes call sites and inheritance clauses to their
-            // owning entity. A container entity (class/namespace) also walks
-            // as a scope, so its scan must skip nested member subtrees —
-            // those claim their own call sites when the scope recursion
-            // reaches them, and claiming them twice duplicates edges.
-            if let (Some(first_entity_index), Some(first_entity)) =
-                (first_entity_index, out.get(start_index))
-            {
+            // A declaration can emit several object members. Each member owns
+            // its calls and nested definitions, independently of its siblings.
+            for (ordinal, entity) in out.iter().enumerate().skip(start_index) {
+                let entity_index =
+                    first_entity_index.expect("entity ordinal") + ordinal - start_index;
+                let entity_scope = adapter.is_scope(entity.node);
                 let member_owned =
                     |node: Node<'_>| adapter.is_entity(node) || adapter.is_scope(node);
                 let boundary: Option<&dyn Fn(Node<'_>) -> bool> =
-                    is_scope.then_some(&member_owned as &dyn Fn(Node<'_>) -> bool);
-                // A split PHP statement resolves to its elements, so the first
-                // element's subtree misses the initializers of the others,
-                // as in `const A = new Foo, B = new Bar;`.
-                let scanned = if format == FileFormat::Php {
-                    entity_indexes.len()
-                } else {
-                    1
-                };
-                for (offset, entity_index) in entity_indexes.iter().take(scanned).enumerate() {
-                    let entity_node = out[start_index + offset].node;
-                    scan_call_edges(entity_node, *entity_index, source, graph_context, boundary);
-                    scan_binding_declarations(
-                        entity_node,
-                        *entity_index,
-                        source,
-                        format,
-                        graph_context,
-                        boundary,
-                    );
-                }
-                collect_inheritance_edges(
-                    first_entity.node,
+                    entity_scope.then_some(&member_owned as &dyn Fn(Node<'_>) -> bool);
+                scan_call_edges(entity.node, entity_index, source, graph_context, boundary);
+                scan_binding_declarations(
+                    entity.node,
+                    entity_index,
                     source,
                     format,
-                    first_entity_index,
                     graph_context,
+                    boundary,
                 );
+                collect_inheritance_edges(entity.node, source, format, entity_index, graph_context);
+            }
+            // Synthetic members have no separate declaration walk. Descend their
+            // scopes here; ordinary scope nodes are handled below.
+            let member_scopes: Vec<_> = out[start_index..]
+                .iter()
+                .enumerate()
+                .filter(|(_, entity)| {
+                    entity.node.id() != child.id() && adapter.is_scope(entity.node)
+                })
+                .map(|(offset, entity)| {
+                    let mut scope = entity.breadcrumb.clone();
+                    scope.extend(entity.name.clone());
+                    (
+                        first_entity_index.expect("entity ordinal") + offset,
+                        entity.node,
+                        scope,
+                    )
+                })
+                .collect();
+            for (owner, member, scope) in member_scopes {
+                graph_context.push_scope(owner);
+                walk_code_node(member, adapter, source, &scope, out, graph_context, format);
+                graph_context.pop_scope();
             }
         }
 
         if is_scope {
             let name = adapter.extract_name(child, source);
             let mut child_breadcrumb = breadcrumb.to_vec();
-            if let Some(name) = name {
+            // Static initializers own their direct calls; nested functions
+            // retain the class-qualified names used by call hierarchy clients.
+            if let Some(name) = name
+                && child.kind() != "class_static_block"
+            {
                 child_breadcrumb.push(name);
             }
             let scope_node = adapter.enter_scope_node(child);
