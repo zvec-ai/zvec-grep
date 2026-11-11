@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -159,10 +160,11 @@ def source_tree(root, manifest, target):
     (root / ".gclient").write_text(
         f"solutions = [{config!r}]\ntarget_os = [{spec['os']!r}]\n")
     synced = root / ".synced"
-    stamp = manifest["revision"] + ":" + json.dumps([spec, config], sort_keys=True)
+    stamp = manifest["revision"] + ":" + json.dumps([spec, config], sort_keys=True) + ":" + digest(Path(__file__))
     if not synced.is_file() or synced.read_text() != stamp:
-        # gclient's Python dependencies are vendored. Calling it directly avoids
-        # bootstrapping unrelated LUCI/vpython tools for this library build.
+        # Parallel GCS downloads otherwise race while bootstrapping depot_tools'
+        # shared CIPD/vpython directory on a clean machine. Initialize once.
+        run([python, depot / "gsutil.py", "version"], root, env)
         # The primary checkout was already verified above. Keep its build-only
         # DEPS patch while gclient checks out the pinned transitive dependencies.
         run([python, depot / "gclient.py", "sync", "--revision", "pdfium@unmanaged",
@@ -192,11 +194,31 @@ def gn_arguments(spec):
         # Build against the release builder's glibc 2.28 headers, not Chromium's
         # newer Debian sysroot. Bundle Chromium's matching C++ static runtimes.
         args["use_sysroot"] = False
+        # HarfBuzz's optional GLib helpers are unnecessary for PDF rendering.
+        args["use_glib"] = False
     if spec["os"] == "mac":
         args["use_system_xcode"] = True
         if os.environ.get("MACOSX_DEPLOYMENT_TARGET"):
             args["mac_deployment_target"] = os.environ["MACOSX_DEPLOYMENT_TARGET"]
     return args
+
+
+def windows_sdk(env, cpu):
+    root = Path(env.get("WINDOWSSDKDIR") or env.get("WindowsSdkDir") or
+                str(Path(env.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Windows Kits/10"))
+    preferred = env.get("WindowsSDKVersion", "").rstrip("\\/")
+    versions = sorted((p.name for p in (root / "Include").glob("10.*") if p.is_dir()),
+                      key=lambda value: tuple(int(n) for n in value.split(".")), reverse=True)
+    for version in dict.fromkeys([preferred, *versions]):
+        if not re.fullmatch(r"10\.\d+\.\d+\.\d+", version):
+            continue
+        required = [root / "Include" / version / "um/Windows.h",
+                    root / "Include" / version / "ucrt/stdio.h",
+                    root / "Lib" / version / "um" / cpu / "kernel32.lib",
+                    root / "Lib" / version / "ucrt" / cpu / "ucrt.lib"]
+        if all(path.is_file() for path in required):
+            return root, version
+    raise RuntimeError(f"No complete Windows SDK for {cpu} under {root}; install the Windows C++ SDK")
 
 
 def platform_toolchain(source, env, host):
@@ -230,6 +252,19 @@ def platform_toolchain(source, env, host):
                 f"{key} = {json.dumps(value)}\n" for key, value in values.items()) + "\n" + pristine[end:]
         config.write_text(pristine)
     if host == "win":
+        # Chromium pins an SDK that is not installed on standard VS runners.
+        # Select a complete installed SDK and keep both build helpers in sync.
+        cpu = "arm64" if "arm64" in env.get("VSCMD_ARG_TGT_ARCH", "").lower() else "x64"
+        sdk_root, sdk_version = windows_sdk(env, cpu)
+        env["WINDOWSSDKDIR"] = str(sdk_root)
+        if env.get("VSINSTALLDIR"):
+            env["GYP_MSVS_OVERRIDE_PATH"] = env["VSINSTALLDIR"].rstrip("\\/")
+        for relative in ["build/vs_toolchain.py", "build/toolchain/win/setup_toolchain.py"]:
+            config = source / relative
+            text, count = re.subn(r"(?m)^SDK_VERSION = ['\"][^'\"]+['\"]", "SDK_VERSION = " + repr(sdk_version), config.read_text())
+            if count != 1:
+                raise RuntimeError(f"Cannot select installed Windows SDK in {config}")
+            config.write_text(text)
         # Chromium defaults to /MT for static libraries. Match Rust's /MD CRT
         # without changing zg, zvec or ORT's existing runtime configuration.
         config = source / "build/config/win/BUILD.gn"
@@ -295,6 +330,8 @@ def build_sdk(root, sdk, manifest, target, expected):
     if host != spec["os"]:
         raise RuntimeError(f"Build PDFium {target} on its native OS; this host is {host}")
     source, env, python = source_tree(root, manifest, target)
+    if host == "win":
+        env["VSCMD_ARG_TGT_ARCH"] = spec["cpu"]
     platform_toolchain(source, env, host)
     build = source / "out" / "zg-static"
     build.mkdir(parents=True, exist_ok=True)

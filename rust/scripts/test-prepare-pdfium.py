@@ -86,6 +86,7 @@ class StaticPdfiumTests(unittest.TestCase):
     def test_platform_build_flags_preserve_native_runtime_contract(self):
         linux = pdfium.gn_arguments({"os": "linux", "cpu": "x64"})
         self.assertFalse(linux["use_sysroot"])
+        self.assertFalse(linux["use_glib"])
         self.assertTrue(linux["use_custom_libcxx"])
         arm = pdfium.gn_arguments(self.manifest["targets"]["aarch64-unknown-linux-gnu"])
         self.assertFalse(arm["is_clang"])
@@ -97,10 +98,31 @@ class StaticPdfiumTests(unittest.TestCase):
         config = source / "build/config/win/BUILD.gn"
         config.parent.mkdir(parents=True)
         config.write_text('configs = [ ":static_crt" ]\n')
-        pdfium.platform_toolchain(source, {}, "win")
+        for relative in ["build/vs_toolchain.py", "build/toolchain/win/setup_toolchain.py"]:
+            script = source / relative
+            script.parent.mkdir(parents=True, exist_ok=True)
+            script.write_text("SDK_VERSION = '10.0.28000.0'\n")
+        with patch.object(pdfium, "windows_sdk", return_value=(self.root, "10.0.26100.0")):
+            pdfium.platform_toolchain(source, {}, "win")
+            pdfium.platform_toolchain(source, {}, "win")
         self.assertEqual(config.read_text(), 'configs = [ ":dynamic_crt" ]\n')
-        pdfium.platform_toolchain(source, {}, "win")
-        self.assertEqual(config.read_text(), 'configs = [ ":dynamic_crt" ]\n')
+        self.assertEqual((source / "build/vs_toolchain.py").read_text(), "SDK_VERSION = '10.0.26100.0'\n")
+
+    def test_windows_sdk_ignores_partial_installations_and_honors_target_architecture(self):
+        def install(version, cpu):
+            for name in [f"Include/{version}/um/Windows.h", f"Include/{version}/ucrt/stdio.h",
+                         f"Lib/{version}/um/{cpu}/kernel32.lib", f"Lib/{version}/ucrt/{cpu}/ucrt.lib"]:
+                path = self.root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+        install("10.0.26100.0", "x64")
+        install("10.0.22621.0", "arm64")
+        (self.root / "Include/10.0.28000.0").mkdir()
+        env = {"WINDOWSSDKDIR": str(self.root), "WindowsSDKVersion": "10.0.28000.0\\"}
+        self.assertEqual(pdfium.windows_sdk(env, "x64")[1], "10.0.26100.0")
+        self.assertEqual(pdfium.windows_sdk(env, "arm64")[1], "10.0.22621.0")
+        with self.assertRaisesRegex(RuntimeError, "No complete Windows SDK"):
+            pdfium.windows_sdk(env, "x86")
 
     @unittest.skipIf(os.name == "nt", "macOS SDK discovery uses Unix symlinks")
     def test_command_line_tools_sdk_does_not_require_xcodebuild(self):

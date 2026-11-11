@@ -3,7 +3,7 @@ FROM ${BUILD_IMAGE}
 
 ARG RUST_VERSION=1.98.0
 
-RUN dnf install --assumeyes --setopt=install_weak_deps=False clang-devel \
+RUN dnf install --assumeyes --setopt=install_weak_deps=False clang-devel libstdc++-static \
     && dnf clean all
 
 RUN curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rustup.rs \
