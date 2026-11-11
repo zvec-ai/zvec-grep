@@ -453,18 +453,6 @@ impl WorkspaceIndexService {
             None
         };
 
-        let mut workspace_index = WorkspaceIndexInfo::from_workspace(&workspace);
-        if options.include_status
-            && options.include_counts
-            && indexed
-            && let (Some(embedding), Some(descriptor)) = (
-                &mut workspace_index.embedding,
-                workspace.index().descriptor(),
-            )
-        {
-            embedding.input_budget =
-                embedding_input_budget(descriptor.default_embedding_model().max_input_tokens());
-        }
         Ok(InfoResult {
             compatibility: if metadata_indexed {
                 IndexCompatibility::Compatible {
@@ -483,7 +471,7 @@ impl WorkspaceIndexService {
             } else {
                 InfoSource::Unindexed
             },
-            workspace_index: Some(workspace_index),
+            workspace_index: Some(workspace_index_info(&workspace, &options, indexed)),
             status,
             suggestion: workspace_suggestion(&workspace, indexed),
         })
@@ -891,6 +879,24 @@ fn saved_embedding_config(
         stored.api_key = Some(encrypt_api_key(layout, &reference, key)?);
     }
     Ok(stored)
+}
+
+fn workspace_index_info(
+    workspace: &Workspace,
+    options: &InfoOptions,
+    indexed: bool,
+) -> WorkspaceIndexInfo {
+    let mut info = WorkspaceIndexInfo::from_workspace(workspace);
+    if options.include_status
+        && options.include_counts
+        && indexed
+        && let (Some(embedding), Some(descriptor)) =
+            (&mut info.embedding, workspace.index().descriptor())
+    {
+        embedding.input_budget =
+            embedding_input_budget(descriptor.default_embedding_model().max_input_tokens());
+    }
+    info
 }
 
 fn unindexed_info(
