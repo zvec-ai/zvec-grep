@@ -31,9 +31,11 @@
     "README.md",
     "README_CN.md",
     "LICENSE",
-    "dist"
+    "dist",
+    "native"
   ],
   "scripts": {
+    "build:native": "python3 scripts/build-zvec.py",
     "build": "tsc -p tsconfig.json",
     "check": "npm run lint && npm run format:check && npm run typecheck && npm run test:coverage && npm run test:package",
     "format:check": "prettier --check .",
@@ -55,6 +57,7 @@
     "test": "npm run build && npm run test:all"
   },
   "devDependencies": {
+    "node-addon-api": "8.8.0",
     "@eslint/js": "^10.0.1",
     "@modelcontextprotocol/conformance": "0.1.16",
     "@types/node": "^22.20.1",

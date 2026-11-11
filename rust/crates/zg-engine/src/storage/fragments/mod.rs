@@ -265,7 +265,7 @@ impl Fragments {
             "create FP16 vector query",
         )?;
         native(
-            request.set_diskann_params(DiskannQueryParams::new(top_k.max(300))),
+            request.set_diskann_params(DiskannQueryParams::new(top_k.max(80))),
             "configure DiskANN search",
         )?;
         configure_query(
@@ -375,8 +375,8 @@ fn fragments_schema(embedding: &EmbeddingModelInfo) -> EngineResult<CollectionSc
     let params = native(
         IndexParams::diskann(
             metric,
-            32,
-            100,
+            64,
+            200,
             i32::try_from(chunks).expect("PQ chunks <= 64"),
         ),
         "define zvec DiskANN index",

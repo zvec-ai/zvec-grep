@@ -8,7 +8,7 @@ import {
   ZVecCreateAndOpen,
   ZVecDataType,
   ZVecIndexType,
-} from "@zvec/zvec";
+} from "../../dist/engine/storage/native.js";
 import { createWorkspaceIndexStorage } from "../../dist/engine/storage/index.js";
 import { queryFileMetadataDocs } from "../../dist/engine/storage/zvec.js";
 

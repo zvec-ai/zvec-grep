@@ -1,0 +1,4 @@
+[env]
+# Produced by `npm run build:native`; do not fall back to the release SDK.
+ZVEC_LIB_DIR = { value = "native", relative = true }
+ZVEC_AUTO_BUILD = "0"

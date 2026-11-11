@@ -11,7 +11,7 @@ import {
   type ZVecDoc,
   type ZVecDocInput,
   type ZVecStatus,
-} from "@zvec/zvec";
+} from "./native.js";
 import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { EngineError } from "../errors.js";
@@ -361,7 +361,7 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
       ...(zvecFilter ? { filter: zvecFilter } : {}),
       params: {
         indexType: ZVecIndexType.DISKANN,
-        listSize: Math.max(300, limit),
+        listSize: Math.max(80, limit),
       },
     });
     return docsToHits(
@@ -976,8 +976,8 @@ function createSchema(
         indexParams: {
           indexType: ZVecIndexType.DISKANN,
           metricType: metricType(embedding.metric),
-          maxDegree: 32,
-          listSize: 100,
+          maxDegree: 64,
+          listSize: 200,
           pqChunkNum: chunks,
         },
       },
