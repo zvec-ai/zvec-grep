@@ -305,6 +305,14 @@ fn classify(
         .get("shadowed")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
+        // A TypeScript or JavaScript binding states the range it lives in, so
+        // the call resolution below reads the scope at the reference itself. A
+        // block-local name is gone by the call that follows its block, and the
+        // owner-wide flag would defer that call instead of letting the file's
+        // name answer it.
+        && !(stored.reference.ref_kind == GraphEdgeKind::Calls
+            && stored.reference.receiver_name.is_none()
+            && matches!(stored.language.as_str(), "typescript" | "javascript"))
     {
         // A local value or parameter already took this name inside the
         // referencing entity. Whatever the workspace declares under it, the

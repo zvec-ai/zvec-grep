@@ -23,14 +23,25 @@ fn declaration_at(
         Entry::Occupied(entry) => entry.into_mut(),
         Entry::Vacant(entry) => entry.insert(store.declared_bindings(owner)?),
     };
-    Ok(bindings
+    let active = |binding: &&super::DeclaredBinding| {
+        usize::try_from(binding.line).is_ok_and(|at| (at, binding.column as usize) <= position)
+            && binding.scope_end.is_none_or(|end| position < end)
+    };
+    let binding = bindings
         .iter()
         .rev()
-        .find(|binding| {
-            binding.name == name
-                && usize::try_from(binding.line)
-                    .is_ok_and(|at| (at, binding.column as usize) <= position)
-                && binding.scope_end.is_none_or(|end| position < end)
+        .filter(active)
+        .find(|binding| binding.name == name);
+    // A newer assignment to any receiver prefix replaces its old properties.
+    // Properties collected from the new object occur after that assignment.
+    Ok(binding
+        .filter(|binding| {
+            !name.contains('.')
+                || !bindings.iter().filter(active).any(|receiver| {
+                    name.strip_prefix(&receiver.name)
+                        .is_some_and(|suffix| suffix.starts_with('.'))
+                        && (receiver.line, receiver.column) > (binding.line, binding.column)
+                })
         })
         .cloned())
 }
