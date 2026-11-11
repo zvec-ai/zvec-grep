@@ -13,8 +13,8 @@ publish = false
 
 [workspace.dependencies]
 # Keep the safe API and the C5 FFI boundary on the same pinned native ABI.
-llama-cpp-2 = { git = "https://github.com/zvec-ai/llama-cpp-rs.git", rev = "b55399ac6c2035f2301120547c4c967e741d25d3", default-features = false }
-llama-cpp-sys-2 = { git = "https://github.com/zvec-ai/llama-cpp-rs.git", rev = "b55399ac6c2035f2301120547c4c967e741d25d3", default-features = false }
+llama-cpp-2 = { git = "https://github.com/zvec-ai/llama-cpp-rs.git", rev = "79305567e63ee551eb1798c0537eab87d9595a23", default-features = false }
+llama-cpp-sys-2 = { git = "https://github.com/zvec-ai/llama-cpp-rs.git", rev = "79305567e63ee551eb1798c0537eab87d9595a23", default-features = false }
 async-trait = "0.1.89"
 axum = "0.8"
 bytes = "1.12.1"
@@ -54,6 +54,7 @@ tree-sitter-c = "0.24.2"
 tree-sitter-cpp = "0.23.4"
 tree-sitter-go = "0.25.0"
 tree-sitter-java = "0.23.5"
+tree-sitter-php = "0.25.1"
 tree-sitter-javascript = "0.25.0"
 tree-sitter-python = "0.25.0"
 tree-sitter-rust = "0.24.2"

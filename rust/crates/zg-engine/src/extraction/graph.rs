@@ -33,8 +33,8 @@ mod partition;
 mod vocabulary;
 
 pub(crate) use collector::{
-    collect_import_edge, collect_inheritance_edges, is_import_node, scan_binding_declarations,
-    scan_call_edges, scan_return_types,
+    collect_import_edge, collect_inheritance_edges, is_call_scan_barrier, is_import_node,
+    is_unreported_call, scan_binding_declarations, scan_call_edges, scan_return_types,
 };
 pub(crate) use partition::{PartitionedGraph, partition_walk};
 #[cfg(test)]

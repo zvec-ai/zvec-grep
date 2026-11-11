@@ -160,6 +160,117 @@ fn qwen_jsonc_install_is_comment_preserving_and_idempotent() {
 }
 
 #[test]
+fn cursor_jsonc_install_and_uninstall_preserve_comments_and_user_settings() {
+    for transport in ["stdio", "http"] {
+        let temporary = TempDir::new().expect("tempdir");
+        let home = temporary.path().join("cursor");
+        fs::create_dir_all(&home).expect("mkdir");
+        let path = home.join("mcp.json");
+        let source = r#"{
+  // Keep user settings.
+  "note": "literal // and /* comments */",
+  "mcpServers": {
+    /* Keep other server. */
+    "other": {"url": "https://example.test/mcp"}
+  }
+}
+"#;
+        fs::write(&path, source).expect("config");
+        let command = |action| {
+            let mut command = zg();
+            command
+                .args([action, "--target", "cursor", "--yes"])
+                .env("CURSOR_CONFIG_DIR", &home)
+                .env("ZVEC_GREP_HOME", temporary.path().join(".zvec-grep"))
+                .env("ZVEC_GREP_SERVER_URL", "http://127.0.0.1:7999/mcp");
+            command
+        };
+        let install = || {
+            let mut command = command("--install");
+            command.args(["--mcp-transport", transport, "--mcp-toolset", "full"]);
+            if transport == "http" {
+                command.args(["--mcp-token-env", "TOKEN"]);
+            }
+            command
+        };
+
+        run_ok(&mut install());
+        let installed = fs::read_to_string(&path).expect("installed");
+        let server = &jsonc(&installed)["mcpServers"]["zvec_grep"];
+        if transport == "stdio" {
+            assert_eq!(server["command"], "zg");
+            assert_eq!(
+                server["args"],
+                serde_json::json!(["--server", "--stdio", "--mcp-toolset", "full"])
+            );
+        } else {
+            assert_eq!(server["url"], "http://127.0.0.1:7999/mcp");
+            assert_eq!(server["headers"]["Authorization"], "Bearer ${TOKEN}");
+        }
+        run_ok(&mut install());
+        assert_eq!(fs::read_to_string(&path).expect("reinstalled"), installed);
+
+        run_ok(&mut command("--uninstall"));
+        let removed = fs::read_to_string(&path).expect("uninstalled");
+        assert_eq!(jsonc(&removed), jsonc(source));
+        for line in source.lines().filter(|line| {
+            line.contains("Keep") || line.contains("\"note\"") || line.contains("\"other\"")
+        }) {
+            assert!(installed.contains(line));
+            assert!(removed.contains(line));
+        }
+    }
+}
+
+#[test]
+fn cursor_jsonc_install_and_uninstall_preserve_adjacent_scalar_comments() {
+    for scalar in ["true", "42"] {
+        for comment in ["//keep\n", "/* keep user setting */"] {
+            for source in [
+                format!("{{\"custom\":{scalar}{comment}}}\n"),
+                format!(
+                    "{{\"mcpServers\":{{\"other\":{{\"command\":\"other\",\"custom\":{scalar}{comment}}}}}}}\n"
+                ),
+            ] {
+                let temporary = TempDir::new().expect("tempdir");
+                let home = temporary.path().join("cursor");
+                fs::create_dir_all(&home).expect("mkdir");
+                let path = home.join("mcp.json");
+                fs::write(&path, &source).expect("config");
+                let original = jsonc(&source);
+                let command = |action| {
+                    let mut command = zg();
+                    command
+                        .args([action, "--target", "cursor", "--yes"])
+                        .env("CURSOR_CONFIG_DIR", &home);
+                    command
+                };
+
+                run_ok(&mut command("--install"));
+                let installed = fs::read_to_string(&path).expect("installed");
+                assert!(installed.contains(comment), "{installed}");
+                let mut expected = original.clone();
+                if expected.get("mcpServers").is_none() {
+                    expected["mcpServers"] = serde_json::json!({});
+                }
+                expected["mcpServers"]["zvec_grep"] =
+                    serde_json::json!({"command": "zg", "args": ["--server", "--stdio"]});
+                assert_eq!(jsonc(&installed), expected);
+
+                run_ok(&mut command("--uninstall"));
+                let removed = fs::read_to_string(&path).expect("uninstalled");
+                assert!(removed.contains(comment), "{removed}");
+                let mut expected = original;
+                if expected.get("mcpServers").is_none() {
+                    expected["mcpServers"] = serde_json::json!({});
+                }
+                assert_eq!(jsonc(&removed), expected);
+            }
+        }
+    }
+}
+
+#[test]
 fn qoder_manages_owned_permissions_and_both_clients() {
     let temporary = TempDir::new().expect("tempdir");
     let home = temporary.path().join(".qoder");

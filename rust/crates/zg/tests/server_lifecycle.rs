@@ -5,6 +5,8 @@ mod relationships;
 #[path = "server_lifecycle/workspaces.rs"]
 mod workspaces;
 
+#[path = "server_lifecycle/full_entity_preview.rs"]
+mod full_entity_preview;
 #[path = "server_lifecycle/outline_context.rs"]
 mod outline_context;
 #[path = "server_lifecycle/positional_queries.rs"]

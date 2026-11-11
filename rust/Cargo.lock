@@ -1842,7 +1842,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 [[package]]
 name = "llama-cpp-2"
 version = "0.1.154"
-source = "git+https://github.com/zvec-ai/llama-cpp-rs.git?rev=b55399ac6c2035f2301120547c4c967e741d25d3#b55399ac6c2035f2301120547c4c967e741d25d3"
+source = "git+https://github.com/zvec-ai/llama-cpp-rs.git?rev=79305567e63ee551eb1798c0537eab87d9595a23#79305567e63ee551eb1798c0537eab87d9595a23"
 dependencies = [
  "encoding_rs",
  "enumflags2",
@@ -1855,7 +1855,7 @@ dependencies = [
 [[package]]
 name = "llama-cpp-sys-2"
 version = "0.1.154"
-source = "git+https://github.com/zvec-ai/llama-cpp-rs.git?rev=b55399ac6c2035f2301120547c4c967e741d25d3#b55399ac6c2035f2301120547c4c967e741d25d3"
+source = "git+https://github.com/zvec-ai/llama-cpp-rs.git?rev=79305567e63ee551eb1798c0537eab87d9595a23#79305567e63ee551eb1798c0537eab87d9595a23"
 dependencies = [
  "bindgen",
  "cc",
@@ -3673,6 +3673,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca0d1bf6fdd806e43ae5198f82f527056d359def39e54e67a0f478ac09dac081"
 
 [[package]]
+name = "tree-sitter-php"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9779e392d38af4254f48be0e57b7eed4d50ec7a6e55a7e5e2e74df8f8f032d3"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-python"
 version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4648,6 +4658,7 @@ dependencies = [
  "tree-sitter-go",
  "tree-sitter-java",
  "tree-sitter-javascript",
+ "tree-sitter-php",
  "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-typescript",

@@ -474,8 +474,8 @@ Result options:
   --mode <direct|server|auto>       Select indexed query transport (default: auto)
 
 Preview modes: none keeps one source line; short uses compact bounded source;
-full uses compact full source; detail adds metadata, outlines, and file grouping.
-Full previews do not retrieve an entire function or file. TTY affects only color.
+full shows each complete indexed entity; detail adds metadata, outlines, and file grouping.
+Full previews do not expand beyond the matched entity. TTY affects only color.
 Multi-query results start each nonempty group with its original query and position.
 Plain output uses -- query i/n: text --; colored output adds a dim separator rule.
 Auto colors terminal output and leaves pipes plain; NO_COLOR disables auto color.
@@ -849,6 +849,7 @@ Structured code (symbols and scopes):
   java        .java
   javascript  .js, .mjs, .cjs
   jsx         .jsx
+  php         .php, .phtml
   python      .py
   rust        .rs
   tsx         .tsx
@@ -870,7 +871,6 @@ Other code (plain-text chunks):
   kotlin      .kt, .kts
   less        .less
   makefile    Makefile
-  php         .php
   ruby        .rb
   scala       .scala
   scss        .scss

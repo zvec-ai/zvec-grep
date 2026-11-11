@@ -34,6 +34,56 @@ pub(crate) fn is_call_node(node: Node<'_>) -> bool {
     COMMON_CALL_TYPES.contains(&node.kind())
 }
 
+/// True for call-shaped nodes that name no callee worth reporting, shared by
+/// the graph and the outline so both report the same calls:
+/// - PHP's first-class callable syntax, `record(...)`, creates a closure
+///   without invoking it (a spread such as `record(...$args)` is an ordinary
+///   argument).
+/// - `new class { ... }` and `(function () { ... })()` name the code they
+///   define, not a callee. Calls inside that code are still collected.
+/// - `new static`, `new self` and `new parent` name the class only relative
+///   to the caller, which no symbol is called.
+/// - PHP `make()()` calls the result of another call, which names no symbol.
+///   The inner call is reported on its own.
+pub(crate) fn is_unreported_call(node: Node<'_>, source: &[u8]) -> bool {
+    let creates_callable = node
+        .child_by_field_name("arguments")
+        .is_some_and(|arguments| {
+            named_children(arguments)
+                .into_iter()
+                .any(|argument| argument.kind() == "variadic_placeholder")
+        });
+    let is_creation = node.kind() == "object_creation_expression";
+    let target = if is_creation {
+        node.named_child(0)
+    } else {
+        node.child_by_field_name("function")
+    };
+    let target = target.map(|target| {
+        if target.kind() == "parenthesized_expression" {
+            target.named_child(0).unwrap_or(target)
+        } else {
+            target
+        }
+    });
+    let calls_a_result =
+        node.kind() == "function_call_expression" && target.is_some_and(is_call_node);
+    creates_callable
+        || calls_a_result
+        || target.is_some_and(|target| {
+            matches!(
+                target.kind(),
+                "anonymous_class" | "anonymous_function" | "arrow_function"
+            ) || (is_creation && matches!(node_text(target, source), "static" | "self" | "parent"))
+        })
+}
+
+/// True for subtrees whose calls never run with the enclosing body. PHP
+/// attribute arguments, `#[Assert(new Length(5))]`, run on reflection.
+pub(crate) fn is_call_scan_barrier(node: Node<'_>) -> bool {
+    node.kind() == "attribute_list"
+}
+
 /// Extracts the callee expression text for a call node, if recoverable.
 fn callee_text_of(node: Node<'_>, source: &[u8]) -> Option<String> {
     // Java spells member calls as separate `object` and `name` fields; the
@@ -68,6 +118,59 @@ fn java_member_callee(node: Node<'_>, source: &[u8]) -> Option<String> {
         return None;
     }
     Some(format!("{object_text}.{}", node_text(name, source)))
+}
+
+/// A PHP member, nullsafe or static call, split into the parts an edge stores.
+struct PhpMemberCall {
+    name: String,
+    receiver: String,
+    raw_text: String,
+}
+
+fn is_php_member_call(node: Node<'_>) -> bool {
+    matches!(
+        node.kind(),
+        "member_call_expression" | "nullsafe_member_call_expression" | "scoped_call_expression"
+    )
+}
+
+/// Splits a PHP member or static call into its method name and receiver
+/// (`$this->repo->find` gives `find` on `$this.repo`, `Audit::record` gives
+/// `record` on `Audit`). The receiver is always kept: a call with a receiver
+/// stays pending, while a bare name would bind to a same-named function in
+/// the file. A receiver the resolver cannot read, such as `\Audit` or
+/// `$this->factory()`, keeps its source spelling so the edge stays
+/// unresolved. A dynamic method name, such as `$this->{'dyn'}()`, names no
+/// symbol, so the call yields no edge.
+fn php_member_call(node: Node<'_>, source: &[u8]) -> Option<PhpMemberCall> {
+    let (receiver, separator) = match node.kind() {
+        "member_call_expression" => (node.child_by_field_name("object")?, "->"),
+        "nullsafe_member_call_expression" => (node.child_by_field_name("object")?, "?->"),
+        "scoped_call_expression" => (node.child_by_field_name("scope")?, "::"),
+        _ => return None,
+    };
+    let name = node_text(node.child_by_field_name("name")?, source);
+    if !is_identifier_like(name) || name.starts_with('$') {
+        return None;
+    }
+    let spelled = collapse_whitespace(node_text(receiver, source));
+    let normalized = normalize_member_access(&spelled);
+    let receiver = if is_identifier_like(&normalized) {
+        normalized
+    } else {
+        spelled.chars().take(MAX_CALLEE_TEXT_CHARS).collect()
+    };
+    Some(PhpMemberCall {
+        name: name.to_owned(),
+        raw_text: format!("{spelled}{separator}{name}"),
+        receiver,
+    })
+}
+
+/// Rewrites C/C++ and PHP arrow member access to the dot spelling the
+/// identifier gate and the receiver split understand.
+fn normalize_member_access(callee: &str) -> String {
+    callee.replace("?->", ".").replace("->", ".")
 }
 
 /// Counts call arguments when the grammar exposes an `arguments` field.
@@ -170,14 +273,27 @@ fn visit_for_calls(
     // A call node still descends below: `outer(inner())` and `factory().run()`
     // reach their inner calls only through its subtree, and the declaration
     // walk never comes back for them.
-    if is_call_node(node)
+    if is_call_node(node) && !is_unreported_call(node, source) && is_php_member_call(node) {
+        if let Some(call) = php_member_call(node, source) {
+            context.add_call_edge(
+                owner_index,
+                &call.name,
+                Some(&call.receiver),
+                Some(&call.raw_text),
+                call_arity_of(node),
+                node.start_position().row + 1,
+                node.start_position().column,
+            );
+        }
+    } else if is_call_node(node)
+        && !is_unreported_call(node, source)
         && let Some(callee) = callee_text_of(node, source)
     {
-        // C/C++ arrow member access joins the identifier gate and the
-        // split under the dot spelling: `ptr->bar()` names the same
+        // C/C++ and PHP arrow member access joins the identifier gate and
+        // the split under the dot spelling: `ptr->bar()` names the same
         // member shape as `ref.bar()`. The buffered raw text keeps the
         // original spelling.
-        let normalized = callee.replace("->", ".");
+        let normalized = normalize_member_access(&callee);
         let normalized = normalize_super_call(&normalized);
         if normalized.len() <= MAX_CALLEE_TEXT_CHARS && is_identifier_like(&normalized) {
             let (ref_name, receiver_name) = split_callee_name(&normalized);
@@ -193,7 +309,7 @@ fn visit_for_calls(
         }
     }
     for child in named_children(node) {
-        if boundary.is_some_and(|owns| owns(child)) {
+        if is_call_scan_barrier(child) || boundary.is_some_and(|owns| owns(child)) {
             continue;
         }
         visit_for_calls(child, owner_index, source, context, boundary);
