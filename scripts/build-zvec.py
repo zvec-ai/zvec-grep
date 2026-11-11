@@ -107,16 +107,18 @@ def main():
     headers = headers or Path(shutil.which("node")).resolve().parents[1] / "include/node"
     if not (headers / "node_api.h").is_file():
         raise SystemExit("Node development headers missing; provide --node-headers")
-    configure = ["cmake", "-S", src, "-B", build, "-DCMAKE_BUILD_TYPE=Release",
+    # CMake re-parses these paths in generated files; Windows backslashes can
+    # become escapes such as \a. CMake accepts forward slashes on every host.
+    configure = ["cmake", "-S", src.as_posix(), "-B", build.as_posix(), "-DCMAKE_BUILD_TYPE=Release",
                  "-DBUILD_C_BINDINGS=ON", "-DBUILD_PYTHON_BINDINGS=OFF", "-DBUILD_TESTING=OFF",
                  "-DBUILD_TOOLS=OFF", "-DBUILD_CPP_EXAMPLES=OFF", "-DBUILD_ZVEC_SHARED=OFF",
                  "-DBUILD_ZVEC_CORE_SHARED=OFF", "-DBUILD_ZVEC_AILEGO_SHARED=OFF",
-                 f"-DCMAKE_PROJECT_zvec_INCLUDE={ROOT / 'scripts/zvec-node.cmake'}",
-                 f"-DZG_NODE_SOURCE={node_src}", f"-DZG_NODE_API={node_api}",
-                 f"-DZG_NODE_HEADERS={headers.resolve()}"]
+                 f"-DCMAKE_PROJECT_zvec_INCLUDE={(ROOT / 'scripts/zvec-node.cmake').as_posix()}",
+                 f"-DZG_NODE_SOURCE={node_src.as_posix()}", f"-DZG_NODE_API={node_api.as_posix()}",
+                 f"-DZG_NODE_HEADERS={headers.resolve().as_posix()}"]
     if sys.platform == "win32":
         configure += ["-G", "Visual Studio 17 2022", "-A", {"x64": "x64", "arm64": "ARM64"}[arch],
-                      f"-DZG_NODE_LIBRARY={node_library.resolve()}", "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded"]
+                      f"-DZG_NODE_LIBRARY={node_library.resolve().as_posix()}", "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded"]
     run(configure)
     run(["cmake", "--build", build, "--config", "Release", "--target", "zvec_c_api", "zvec_node_binding",
          "--parallel", args.jobs])
