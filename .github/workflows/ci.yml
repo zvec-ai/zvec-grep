@@ -53,7 +53,7 @@ jobs:
   coverage:
     name: coverage
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
@@ -65,6 +65,17 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake libaio-dev
+      - name: Build the pinned zvec runtime
+        run: >-
+          npm run build:native --
+          --source "$RUNNER_TEMP/zvec"
+          --node-source "$RUNNER_TEMP/zvec-node"
+          --build-dir "$RUNNER_TEMP/zvec-build"
+          --jobs 2
       - run: npm run test:coverage
 
   package-candidate:

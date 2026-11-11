@@ -44,6 +44,7 @@ if sys.platform not in ("darwin", "linux"):
     raise SystemExit("This source-build entry point currently supports macOS and Linux")
 src, node_src, build = (p.resolve() for p in (args.source, args.node_source, args.build_dir))
 source(src, "https://github.com/richyreachy/zvec.git", ZVEC_COMMIT)
+run(["git", "-C", src, "submodule", "update", "--init", "--recursive", "--depth", "1"])
 source(node_src, "https://github.com/zvec-ai/zvec-node.git", NODE_COMMIT)
 node_api = Path(output(["node", "-p", "require.resolve('node-addon-api/package.json')"], cwd=ROOT)).parent
 if not (args.node_headers / "node_api.h").is_file():
