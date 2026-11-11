@@ -97,7 +97,10 @@ class StaticPdfiumTests(unittest.TestCase):
         source = self.root / "source"
         config = source / "build/config/win/BUILD.gn"
         config.parent.mkdir(parents=True)
-        config.write_text('configs = [ ":static_crt" ]\n')
+        config.write_text('configs = [ ":static_crt" ]\n"NTDDI_VERSION=NTDDI_WIN11_BR"\n')
+        header = self.root / "Include/10.0.26100.0/shared/sdkddkver.h"
+        header.parent.mkdir(parents=True)
+        header.write_text("#define NTDDI_WIN10 0x0A000000\n#define NTDDI_WIN11_GE 0x0A00000C\n")
         for relative in ["build/vs_toolchain.py", "build/toolchain/win/setup_toolchain.py"]:
             script = source / relative
             script.parent.mkdir(parents=True, exist_ok=True)
@@ -105,7 +108,7 @@ class StaticPdfiumTests(unittest.TestCase):
         with patch.object(pdfium, "windows_sdk", return_value=(self.root, "10.0.26100.0")):
             pdfium.platform_toolchain(source, {}, "win")
             pdfium.platform_toolchain(source, {}, "win")
-        self.assertEqual(config.read_text(), 'configs = [ ":dynamic_crt" ]\n')
+        self.assertEqual(config.read_text(), 'configs = [ ":dynamic_crt" ]\n"NTDDI_VERSION=0x0A00000C"\n')
         self.assertEqual((source / "build/vs_toolchain.py").read_text(), "SDK_VERSION = '10.0.26100.0'\n")
 
     def test_windows_sdk_ignores_partial_installations_and_honors_target_architecture(self):

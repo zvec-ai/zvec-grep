@@ -270,6 +270,14 @@ def platform_toolchain(source, env, host):
         config = source / "build/config/win/BUILD.gn"
         text = config.read_text()
         text = text.replace('configs = [ ":static_crt" ]', 'configs = [ ":dynamic_crt" ]')
+        # 8076 names NTDDI_WIN11_BR, absent from older installed SDKs. An
+        # undefined macro becomes zero and hides required Windows declarations.
+        header = (sdk_root / "Include" / sdk_version / "shared/sdkddkver.h").read_text()
+        versions = re.findall(r"(?m)^\s*#define\s+NTDDI_\w+\s+(0x0A[0-9A-Fa-f]{6})\b", header)
+        if not versions:
+            raise RuntimeError(f"Cannot determine Windows 10+ API version from SDK {sdk_version}")
+        ntddi = max(int(value, 16) for value in versions)
+        text = re.sub(r"NTDDI_VERSION=(?:NTDDI_\w+|0x[0-9A-Fa-f]+)", f"NTDDI_VERSION=0x{ntddi:08X}", text)
         config.write_text(text)
     if host == "linux" and platform.machine().lower() in {"aarch64", "arm64"}:
         config = source / "build/toolchain/linux/BUILD.gn"
