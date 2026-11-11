@@ -722,18 +722,26 @@ pub(crate) fn scan_return_types(
         return;
     }
     visit_for_return_types(root, source, format, context);
-    if format == FileFormat::JavaScript {
-        // Persist file-scope evidence alongside other declarations. The reserved
-        // name cannot collide with a JavaScript identifier; absence in an older
-        // graph never authorizes cross-file global lookup.
+    let script_scope = match format {
+        FileFormat::JavaScript => Some(if has_javascript_module_syntax(root, source) {
+            "module"
+        } else {
+            "script"
+        }),
+        FileFormat::TypeScript if !has_javascript_module_syntax(root, source) => Some("script"),
+        _ => None,
+    };
+    if let Some(scope) = script_scope {
+        // Only explicit script evidence authorizes cross-file global types.
+        // A missing marker (including an older index) is not global evidence.
         context.add_declare_binding(
             super::FILE_SCOPE_INDEX,
-            "[[javascript_scope]]",
-            if has_javascript_module_syntax(root, source) {
-                "module"
+            if format == FileFormat::TypeScript {
+                "[[typescript_scope]]"
             } else {
-                "script"
+                "[[javascript_scope]]"
             },
+            scope,
             1,
             0,
         );
@@ -2162,6 +2170,7 @@ mod tests {
                 "function makeX(): X {\n    return new X();\n}\nfunction caller() {\n    const x = makeX();\n}\n",
             ),
             vec![
+                ("[[typescript_scope]]".to_owned(), "script".to_owned(), 1),
                 ("x".to_owned(), "?".to_owned(), 4),
                 ("x".to_owned(), "ReturnType<typeof makeX>".to_owned(), 5),
             ]
