@@ -12,13 +12,13 @@ struct Binding {
     file_id: u32,
 }
 
-fn declared(
+fn declaration_at(
     store: &IndexStore,
     caches: &mut RuleCaches,
     owner: &str,
     name: &str,
     position: (usize, usize),
-) -> crate::EngineResult<Option<String>> {
+) -> crate::EngineResult<Option<super::DeclaredBinding>> {
     let bindings = match caches.declared_bindings.entry(owner.to_owned()) {
         Entry::Occupied(entry) => entry.into_mut(),
         Entry::Vacant(entry) => entry.insert(store.declared_bindings(owner)?),
@@ -32,7 +32,17 @@ fn declared(
                     .is_ok_and(|at| (at, binding.column as usize) <= position)
                 && binding.scope_end.is_none_or(|end| position < end)
         })
-        .map(|binding| binding.bound_type.clone()))
+        .cloned())
+}
+
+fn declared(
+    store: &IndexStore,
+    caches: &mut RuleCaches,
+    owner: &str,
+    name: &str,
+    position: (usize, usize),
+) -> crate::EngineResult<Option<String>> {
+    Ok(declaration_at(store, caches, owner, name, position)?.map(|binding| binding.bound_type))
 }
 
 fn lexical_binding(
@@ -504,6 +514,17 @@ fn named_import(
 }
 
 fn imported_name(raw: &str, name: &str) -> Option<String> {
+    if let Some((local, value)) = raw.split_once('=')
+        && local.trim() == name
+        && value.trim_start().starts_with("require(")
+    {
+        return Some("*".to_owned());
+    }
+    if let Some(rest) = raw.trim_start().strip_prefix("import * as ")
+        && rest.split_whitespace().next() == Some(name)
+    {
+        return Some("*".to_owned());
+    }
     if let Some(rest) = raw.trim_start().strip_prefix("import ") {
         let local = rest.split(|c: char| c.is_whitespace() || c == ',').next()?;
         if local == name && (rest.contains(" from ") || rest.contains("= require(")) {
@@ -648,6 +669,7 @@ fn symbol_at(
         return symbol_at(store, snapshot, stored, caches, file, original, depth - 1);
     }
     if let Some((file, original)) = named_import(store, snapshot, stored, caches, file, name)? {
+        let original = exported_value_name(store, caches, file, &original)?;
         return symbol_at(store, snapshot, stored, caches, file, &original, depth - 1);
     }
     Ok(None)
@@ -728,155 +750,262 @@ fn materialize_type(
     Ok(Some(result))
 }
 
-fn callable_target(
+/// The nearest lexical evidence wins, including an unknown binding. A receiver
+/// root blocks looking up a same-named module, but can still use type resolution.
+enum ValueLookup {
+    Declaration(super::DeclaredBinding, String),
+    Definition(NameIndexEntry),
+    Receiver,
+}
+
+type Position = (usize, usize);
+const END_OF_SCOPE: Position = (usize::MAX, usize::MAX);
+
+// File initializers run in source order. Deferred bodies retain the module
+// binding view; copied values are followed at their declaration position.
+fn file_position(snapshot: &ResolutionSnapshot, stored: &StoredPendingRef) -> Position {
+    let immediate = stored.reference.owner_id == format!("f{}", stored.file_id)
+        || snapshot
+            .entity_record(&stored.reference.owner_id)
+            .is_some_and(|owner| {
+                snapshot
+                    .lookup_candidates(&owner.name)
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|hit| {
+                        hit.entity_id == owner.entity_id
+                            && hit.symbol_type == Some(SymbolType::Value)
+                            && !hit.qualified_name.contains("::")
+                    })
+            });
+    if immediate {
+        (stored.reference.line, stored.reference.column)
+    } else {
+        END_OF_SCOPE
+    }
+}
+
+fn lexical_owners(snapshot: &ResolutionSnapshot, stored: &StoredPendingRef) -> Vec<String> {
+    let mut owners = vec![stored.reference.owner_id.clone()];
+    if let Some(owner) = snapshot.entity_record(&stored.reference.owner_id) {
+        let mut scope = owner.qualified_name.as_str();
+        while let Some((parent, _)) = scope.rsplit_once("::") {
+            let name = parent.rsplit("::").next().unwrap_or(parent);
+            owners.extend(
+                snapshot
+                    .lookup_candidates(name)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|hit| hit.file_id == stored.file_id && hit.qualified_name == parent)
+                    .map(|hit| hit.entity_id.clone()),
+            );
+            scope = parent;
+        }
+    }
+    let file = format!("f{}", stored.file_id);
+    if owners.last() != Some(&file) {
+        owners.push(file);
+    }
+    owners
+}
+
+fn scoped_definition(
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    owner: &str,
+    name: &str,
+) -> Option<NameIndexEntry> {
+    let scope = snapshot
+        .entity_record(owner)
+        .map(|entry| entry.qualified_name.as_str());
+    let qualified = scope.map_or_else(|| name.to_owned(), |scope| format!("{scope}::{name}"));
+    let mut hits = snapshot.lookup_candidates(name)?.iter().filter(|hit| {
+        hit.file_id == stored.file_id
+            && hit.qualified_name == qualified
+            && hit.symbol_type != Some(SymbolType::Value)
+            && shadows_import(snapshot, hit)
+    });
+    let first = hits.next()?;
+    hits.next().is_none().then(|| first.clone())
+}
+
+fn lookup_value(
     store: &IndexStore,
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
     caches: &mut RuleCaches,
-    binding: &Binding,
+    name: &str,
+) -> crate::EngineResult<Option<ValueLookup>> {
+    for owner in lexical_owners(snapshot, stored) {
+        let at = if owner == format!("f{}", stored.file_id) {
+            file_position(snapshot, stored)
+        } else {
+            (stored.reference.line, stored.reference.column)
+        };
+        if let Some(entry) = declaration_at(store, caches, &owner, name, at)? {
+            return Ok(Some(ValueLookup::Declaration(entry, owner)));
+        }
+        if let Some(hit) = scoped_definition(snapshot, stored, &owner, name) {
+            return Ok(Some(ValueLookup::Definition(hit)));
+        }
+        if let Some((root, _)) = name.split_once('.')
+            && (declaration_at(store, caches, &owner, root, at)?.is_some()
+                || scoped_definition(snapshot, stored, &owner, root).is_some())
+        {
+            return Ok(Some(ValueLookup::Receiver));
+        }
+    }
+    Ok(None)
+}
+
+fn before(entry: &super::DeclaredBinding) -> Position {
+    let line = entry.line as usize;
+    let column = entry.column as usize;
+    if column == 0 {
+        (line.saturating_sub(1), usize::MAX)
+    } else {
+        (line, column - 1)
+    }
+}
+
+fn follow_value(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    caches: &mut RuleCaches,
+    value: ValueLookup,
     depth: usize,
 ) -> crate::EngineResult<Option<NameIndexEntry>> {
     if depth == 0 {
         return Ok(None);
     }
-    let Some(name) = binding.ty.strip_prefix("typeof ") else {
+    let ValueLookup::Declaration(entry, owner) = value else {
+        return Ok(match value {
+            ValueLookup::Definition(hit) => Some(hit),
+            _ => None,
+        });
+    };
+    let (live, ty) = entry
+        .bound_type
+        .strip_prefix("export ")
+        .map_or((false, entry.bound_type.as_str()), |ty| (true, ty));
+    let Some(name) = ty.strip_prefix("typeof ") else {
         return Ok(None);
     };
-    let Some(target) = symbol_at(
-        store,
-        snapshot,
-        stored,
-        caches,
-        binding.file_id,
-        name,
-        depth,
-    )?
-    else {
-        return Ok(None);
-    };
-    if target
-        .symbol_type
-        .is_some_and(|kind| kind == SymbolType::Function || is_type_scope(kind))
-    {
-        return Ok(Some(target));
+    let mut context = stored.clone();
+    context.reference.owner_id = owner;
+    if !live {
+        (context.reference.line, context.reference.column) = before(&entry);
     }
-    let name = target.qualified_name.rsplit("::").next().unwrap_or(name);
-    let ty = declared(
-        store,
-        caches,
-        &target.entity_id,
-        name,
-        (usize::MAX, usize::MAX),
-    )?;
-    if let Some(ty) = ty {
-        return callable_target(
+    // Object methods refer to their own emitted definition, not another value
+    // slot. Property overwrites have already selected the applicable entry.
+    if name.contains("::") {
+        return symbol_at(
             store,
             snapshot,
-            stored,
+            &context,
             caches,
-            &Binding {
-                ty,
-                file_id: target.file_id,
-            },
+            context.file_id,
+            name,
             depth - 1,
         );
     }
-    Ok(None)
+    if let Some(value) = lookup_value(store, snapshot, &context, caches, name)? {
+        return follow_value(store, snapshot, &context, caches, value, depth - 1);
+    }
+    imported_value(store, snapshot, &context, caches, name, depth - 1)
 }
 
-/// A value binding is authoritative even when it cannot identify a callable.
-/// In particular a later object property must not fall back to an older method.
+fn exported_target(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    caches: &mut RuleCaches,
+    file: u32,
+    name: &str,
+    depth: usize,
+) -> crate::EngineResult<Option<NameIndexEntry>> {
+    if depth == 0 {
+        return Ok(None);
+    }
+    let mut context = stored.clone();
+    context.file_id = file;
+    context.reference.owner_id = format!("f{file}");
+    (context.reference.line, context.reference.column) = END_OF_SCOPE;
+    let exported = declaration_at(
+        store,
+        caches,
+        &context.reference.owner_id,
+        &format!("[[export:{name}]]"),
+        END_OF_SCOPE,
+    )?;
+    let value = if let Some(entry) = exported {
+        Some(ValueLookup::Declaration(
+            entry,
+            context.reference.owner_id.clone(),
+        ))
+    } else {
+        lookup_value(store, snapshot, &context, caches, name)?
+    };
+    match value {
+        Some(value) => follow_value(store, snapshot, &context, caches, value, depth - 1),
+        None => imported_value(store, snapshot, &context, caches, name, depth - 1),
+    }
+}
+
+fn imported_value(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    caches: &mut RuleCaches,
+    name: &str,
+    depth: usize,
+) -> crate::EngineResult<Option<NameIndexEntry>> {
+    if depth == 0 {
+        return Ok(None);
+    }
+    let (local, member) = name
+        .split_once('.')
+        .map_or((name, None), |(local, member)| (local, Some(member)));
+    let Some((file, original)) =
+        named_import(store, snapshot, stored, caches, stored.file_id, local)?
+    else {
+        return Ok(None);
+    };
+    if let Some(member) = member {
+        let name = if original == "*" {
+            member.to_owned()
+        } else {
+            let container = exported_value_name(store, caches, file, &original)?;
+            format!("{container}.{member}")
+        };
+        return exported_target(store, snapshot, stored, caches, file, &name, depth - 1);
+    }
+    exported_target(store, snapshot, stored, caches, file, &original, depth - 1)
+}
+
+/// Lexical declarations and copied values are resolved before module imports.
 pub(super) fn resolve_call(
     store: &IndexStore,
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
     caches: &mut RuleCaches,
 ) -> crate::EngineResult<Option<Outcome>> {
-    if stored
-        .reference
-        .metadata
-        .get("rawText")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|text| text.starts_with('<'))
-        && stored.reference.receiver_name.is_none()
-    {
-        return resolve_component(store, snapshot, stored, caches);
-    }
     let name = stored.reference.receiver_name.as_ref().map_or_else(
         || stored.name_tail.clone(),
         |receiver| format!("{receiver}.{}", stored.name_tail),
     );
-    let mut imported_only = false;
-    let mut file = stored.file_id;
-    let mut ty = declared(
-        store,
-        caches,
-        &stored.reference.owner_id,
-        &name,
-        (stored.reference.line, stored.reference.column),
-    )?;
-    if let Some(local) = ty.as_mut() {
-        *local = local_alias_type(store, caches, stored, local)?;
+    let value = lookup_value(store, snapshot, stored, caches, &name)?;
+    if matches!(value, Some(ValueLookup::Receiver)) {
+        // Skip namespace-import fallbacks when a lexical receiver shadows them.
+        return super::classify_names(store, snapshot, stored, caches).map(Some);
     }
-    if ty.is_none()
-        && let Some(receiver) = stored.reference.receiver_name.as_deref()
-        && let Some(root) = receiver.split('.').next()
-        && declared(
-            store,
-            caches,
-            &stored.reference.owner_id,
-            root,
-            (stored.reference.line, stored.reference.column),
-        )?
-        .is_some()
-    {
-        return Ok(None);
-    }
-    if ty.is_none() {
-        ty = declared(
-            store,
-            caches,
-            &format!("f{file}"),
-            &name,
-            (usize::MAX, usize::MAX),
-        )?;
-    }
-    if ty.is_none()
-        && let Some((binding, inferred)) = imported_member_binding(store, snapshot, stored, caches)?
-    {
-        file = binding.file_id;
-        ty = Some(binding.ty);
-        imported_only = inferred;
-    }
-
-    if ty.is_none()
-        && stored.reference.receiver_name.is_none()
-        && let Some((origin, original)) =
-            named_import(store, snapshot, stored, caches, file, &name)?
-    {
-        file = origin;
-        ty = declared(
-            store,
-            caches,
-            &format!("f{file}"),
-            &original,
-            (usize::MAX, usize::MAX),
-        )?;
-        if ty.is_none() {
-            ty = Some(format!("typeof {original}"));
-            imported_only = true;
-        }
-    }
-    let Some(ty) = ty else { return Ok(None) };
-    let target = callable_target(
-        store,
-        snapshot,
-        stored,
-        caches,
-        &Binding { ty, file_id: file },
-        8,
-    )?;
-    if target.is_none() && imported_only {
+    let authoritative = value.is_some();
+    let target = match value {
+        Some(value) => follow_value(store, snapshot, stored, caches, value, 16)?,
+        None => imported_value(store, snapshot, stored, caches, &name, 16)?,
+    };
+    if target.is_none() && !authoritative {
         return Ok(None);
     }
     Ok(Some(target.map_or(Outcome::Deferred, |hit| {
@@ -887,70 +1016,6 @@ pub(super) fn resolve_call(
     })))
 }
 
-fn local_alias_type(
-    store: &IndexStore,
-    caches: &mut RuleCaches,
-    stored: &StoredPendingRef,
-    ty: &str,
-) -> crate::EngineResult<String> {
-    let mut ty = ty.to_owned();
-    for _ in 0..8 {
-        let Some(name) = ty
-            .strip_prefix("typeof ")
-            .filter(|name| !name.contains("::"))
-        else {
-            break;
-        };
-        let Some(bound) = declared(
-            store,
-            caches,
-            &stored.reference.owner_id,
-            name,
-            (stored.reference.line, stored.reference.column),
-        )?
-        else {
-            break;
-        };
-        if bound == ty {
-            return Ok("?".to_owned());
-        }
-        ty = bound;
-    }
-    Ok(ty)
-}
-
-fn imported_member_binding(
-    store: &IndexStore,
-    snapshot: &ResolutionSnapshot,
-    stored: &StoredPendingRef,
-    caches: &mut RuleCaches,
-) -> crate::EngineResult<Option<(Binding, bool)>> {
-    let Some(receiver) = stored.reference.receiver_name.as_deref() else {
-        return Ok(None);
-    };
-    let Some((file, original)) =
-        named_import(store, snapshot, stored, caches, stored.file_id, receiver)?
-    else {
-        return Ok(None);
-    };
-    let original = exported_value_name(store, caches, file, &original)?;
-    let ty = declared(
-        store,
-        caches,
-        &format!("f{file}"),
-        &format!("{original}.{}", stored.name_tail),
-        (usize::MAX, usize::MAX),
-    )?;
-    let inferred = ty.is_none();
-    Ok(Some((
-        Binding {
-            file_id: file,
-            ty: ty.unwrap_or_else(|| format!("typeof {original}::{}", stored.name_tail)),
-        },
-        inferred,
-    )))
-}
-
 fn exported_value_name(
     store: &IndexStore,
     caches: &mut RuleCaches,
@@ -958,6 +1023,19 @@ fn exported_value_name(
     name: &str,
 ) -> crate::EngineResult<String> {
     let mut name = name.to_owned();
+    if let Some(ty) = declared(
+        store,
+        caches,
+        &format!("f{file}"),
+        &format!("[[export:{name}]]"),
+        END_OF_SCOPE,
+    )? && let Some(original) = ty
+        .strip_prefix("export ")
+        .unwrap_or(&ty)
+        .strip_prefix("typeof ")
+    {
+        original.clone_into(&mut name);
+    }
     for _ in 0..8 {
         let Some(ty) = declared(
             store,
@@ -978,42 +1056,6 @@ fn exported_value_name(
         original.clone_into(&mut name);
     }
     Ok(name)
-}
-
-fn resolve_component(
-    store: &IndexStore,
-    snapshot: &ResolutionSnapshot,
-    stored: &StoredPendingRef,
-    caches: &mut RuleCaches,
-) -> crate::EngineResult<Option<Outcome>> {
-    if declared(
-        store,
-        caches,
-        &stored.reference.owner_id,
-        &stored.name_tail,
-        (stored.reference.line, stored.reference.column),
-    )?
-    .is_some()
-    {
-        return Ok(Some(Outcome::Deferred));
-    }
-    let target = symbol_at(
-        store,
-        snapshot,
-        stored,
-        caches,
-        stored.file_id,
-        &stored.name_tail,
-        8,
-    )?
-    .filter(|hit| {
-        hit.symbol_type
-            .is_some_and(|kind| kind == SymbolType::Function || is_type_scope(kind))
-    });
-    Ok(target.map(|hit| Outcome::Resolved {
-        resolution: member_resolution(stored, &hit),
-        rule: Rule::ImportBound,
-    }))
 }
 
 /// The workspace module prefix anchors Go imports; external packages stay external.

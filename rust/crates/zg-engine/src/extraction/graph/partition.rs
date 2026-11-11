@@ -278,9 +278,17 @@ fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> 
         // Without better evidence the reference stays pending for the
         // cross-file resolver, which also weighs imports.
         GraphEdgeKind::Calls => match alias_at(aliases, edge) {
-            Some(bound) => symbols
-                .get(bound)
-                .and_then(|indices| (indices.len() == 1).then(|| indices[0])),
+            Some(bound) => {
+                // Callable copies require lexical lookup at the assignment
+                // position; the resolver owns that decision.
+                if bound.starts_with("typeof ") || bound == "?" {
+                    None
+                } else {
+                    symbols
+                        .get(bound)
+                        .and_then(|indices| (indices.len() == 1).then(|| indices[0]))
+                }
+            }
             None => {
                 let value_alias = value_aliases
                     .get(&(edge.owner_index, edge.ref_name.clone()))

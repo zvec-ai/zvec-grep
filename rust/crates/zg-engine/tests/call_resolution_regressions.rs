@@ -1,4 +1,4 @@
-//! Regression checks for receiver bindings across lexical scope boundaries.
+//! Regression checks for call targets across scopes, assignments and imports.
 #[allow(dead_code)]
 mod support;
 
@@ -228,4 +228,143 @@ fn matches_expected(actual: &Value, expected: &Value) -> bool {
         }
         _ => actual == expected,
     }
+}
+
+#[tokio::test]
+async fn export_alias_is_not_local() {
+    check_case(Case { name: "export_alias_is_not_local", files: vec![
+        SourceFile { path: "a.js", source: "function first() {}\nfunction second() {}\nexport { first as second };\nfunction caller() { second(); }\nlet selected = first;\nexport { selected as live };\nexport default selected;\nselected = second;\n" },
+        SourceFile { path: "b.js", source: "import copied, { second, live } from './a';\nfunction imported() { second(); }\nfunction copiedCaller() { copied(); }\nfunction liveCaller() { live(); }\n" },
+    ], queries: vec![
+        Query { operation: "callees", symbol: "caller", expected: json!([{"name": "caller", "edges": [{"symbol": {"name": "second"}}]}]), ..Query::default() },
+        Query { operation: "callees", symbol: "imported", expected: json!([{"name": "imported", "edges": [{"symbol": {"name": "first"}}]}]), ..Query::default() },
+        Query { operation: "callees", symbol: "copiedCaller", expected: json!([{"name": "copiedCaller", "edges": [{"symbol": {"name": "first"}}]}]), ..Query::default() },
+        Query { operation: "callees", symbol: "liveCaller", expected: json!([{"name": "liveCaller", "edges": [{"symbol": {"name": "second"}}]}]), ..Query::default() },
+    ] }).await;
+}
+
+#[tokio::test]
+async fn property_reassignment() {
+    for path in ["a.js", "a.ts"] {
+        check_case(Case { name: "property_reassignment", files: vec![
+        SourceFile { path, source: "function original() {}\nfunction replacement() {}\nconst api = { run: original };\napi.run = replacement;\nfunction invoke() { api.run(); }\n" },
+    ], queries: vec![
+        Query { operation: "callees", symbol: "invoke", expected: json!([{"name": "invoke", "edges": [{"symbol": {"name": "replacement"}}]}]), ..Query::default() },
+    ] }).await;
+    }
+}
+
+#[tokio::test]
+async fn initializer_position() {
+    check_case(Case { name: "initializer_position", files: vec![
+        SourceFile { path: "a.js", source: "function first() {}\nfunction second() {}\nlet cb = first;\nconst result = cb();\ncb = second;\n" },
+    ], queries: vec![
+        Query { operation: "callees", symbol: "result", expected: json!([{"name": "result", "edges": [{"symbol": {"name": "first"}}]}]), ..Query::default() },
+    ] }).await;
+}
+
+#[tokio::test]
+async fn nested_function_shadows_file_alias() {
+    check_case(Case { name: "nested_function_shadows_file_alias", files: vec![
+        SourceFile { path: "a.js", source: "function target() {}\nconst work = target;\nfunction outer() { function work() {} work(); }\n" },
+    ], queries: vec![
+        Query { operation: "callees", symbol: "outer", expected: json!([{"name": "outer", "edges": [{"symbol": {"name": "outer::work"}}]}]), ..Query::default() },
+    ] }).await;
+}
+
+#[tokio::test]
+async fn alias_of_shadowed_parameter() {
+    check_case(Case { name: "alias_of_shadowed_parameter", files: vec![
+        SourceFile { path: "a.ts", source: "function target() {}\nfunction caller(target: () => void) { const alias = target; alias(); }\nfunction later() { const api = { target }; const target = 0; api.target(); }\n" },
+    ], queries: vec![
+        Query { operation: "callees", symbol: "caller", expected: json!([{"name": "caller", "edges": []}]), ..Query::default() },
+        Query { operation: "callees", symbol: "later", expected: json!([{"name": "later", "edges": []}]), ..Query::default() },
+    ] }).await;
+}
+
+#[tokio::test]
+async fn captured_parameters_shadow_imports() {
+    check_case(Case { name: "captured_parameters_shadow_imports", files: vec![
+        SourceFile { path: "lib.js", source: "export default function action() {}\nexport function run() {}\n" },
+        SourceFile { path: "a.js", source: "import action from './lib';\nimport * as facade from './lib';\nfunction outer(action) { function inner() { action(); } }\nfunction other(facade) { function inner() { facade.run(); } }\n" },
+    ], queries: vec![
+        Query { operation: "callees", symbol: "outer::inner", expected: json!([{"name": "outer::inner", "edges": []}]), ..Query::default() },
+        Query { operation: "callees", symbol: "other::inner", expected: json!([{"name": "other::inner", "edges": []}]), ..Query::default() },
+    ] }).await;
+}
+
+#[tokio::test]
+async fn enclosing_function_shadows_import() {
+    check_case(Case { name: "enclosing_function_shadows_import", files: vec![
+        SourceFile { path: "lib.js", source: "export function work() {}\n" },
+        SourceFile { path: "a.js", source: "import { work } from './lib';\nfunction outer() { function work() {} function inner() { work(); } }\n" },
+    ], queries: vec![
+        Query { operation: "callees", symbol: "outer::inner", expected: json!([{"name": "outer::inner", "edges": [{"symbol": {"name": "outer::work"}}]}]), ..Query::default() },
+    ] }).await;
+}
+
+#[tokio::test]
+async fn copied_alias_keeps_value() {
+    check_case(Case { name: "copied_alias_keeps_value", files: vec![
+        SourceFile { path: "a.js", source: "function first() {}\nfunction second() {}\nfunction invoke() { let fn = first; const api = { run: fn }; fn = second; api.run(); }\nlet value = first;\nconst copy = value;\nconst again = copy;\nvalue = second;\nfunction copied() { again(); }\n" },
+    ], queries: vec![
+        Query { operation: "callees", symbol: "invoke", expected: json!([{"name": "invoke", "edges": [{"symbol": {"name": "first"}}]}]), ..Query::default() },
+        Query { operation: "callees", symbol: "copied", expected: json!([{"name": "copied", "edges": [{"symbol": {"name": "first"}}]}]), ..Query::default() },
+    ] }).await;
+}
+
+#[tokio::test]
+async fn class_expression_scope() {
+    check_case(Case { name: "class_expression_scope", files: vec![
+        SourceFile { path: "a.js", source: "function target() {}\nconst C = class { method(target) {} };\nfunction caller() { target(); }\n" },
+    ], queries: vec![
+        Query { operation: "callees", symbol: "caller", expected: json!([{"name": "caller", "edges": [{"symbol": {"name": "target"}}]}]), ..Query::default() },
+    ] }).await;
+}
+
+#[tokio::test]
+async fn go_named_scalar_receivers() {
+    check_case(Case { name: "go_named_scalar_receivers", files: vec![
+        SourceFile { path: "go.mod", source: "module example.com/project\n\ngo 1.23\n" },
+        SourceFile { path: "count/count.go", source: "package count\ntype Count int\nfunc (c Count) Work() {}\nfunc local(c Count) { c.Work() }\n" },
+        SourceFile { path: "app/app.go", source: "package app\nimport \"example.com/project/count\"\nfunc invoke(c count.Count) { c.Work() }\n" },
+    ], queries: vec![
+        Query { operation: "callees", symbol: "local", expected: json!([{"name": "local", "edges": [{"symbol": {"name": "Count::Work"}}]}]), ..Query::default() },
+        Query { operation: "callees", symbol: "invoke", expected: json!([{"name": "invoke", "edges": [{"symbol": {"name": "Count::Work"}}]}]), ..Query::default() },
+    ] }).await;
+}
+
+#[tokio::test]
+async fn require_binding() {
+    check_case(Case {
+        name: "require_binding",
+        files: vec![
+            SourceFile {
+                path: "api.js",
+                source: "export function work() {}\n",
+            },
+            SourceFile {
+                path: "a.js",
+                source: "const api = require('./api');\nfunction invoke() { api.work(); }\n",
+            },
+        ],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "invoke",
+            expected: json!([{"name": "invoke", "edges": [{"symbol": {"name": "work"}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn go_grouped_import() {
+    check_case(Case { name: "go_grouped_import", files: vec![
+        SourceFile { path: "go.mod", source: "module example.com/project\n\ngo 1.23\n" },
+        SourceFile { path: "service/service.go", source: "package service\nfunc Work() {}\ntype Client struct{}\nfunc (c Client) Run() {}\n" },
+        SourceFile { path: "app/app.go", source: "package app\nimport (\n \"example.com/project/service\"\n)\nfunc invoke(c service.Client) { service.Work(); c.Run() }\n" },
+    ], queries: vec![
+        Query { operation: "callees", symbol: "invoke", expected: json!([{"name": "invoke", "edges": [{"symbol": {"name": "Work"}}, {"symbol": {"name": "Client::Run"}}]}]), ..Query::default() },
+    ] }).await;
 }
