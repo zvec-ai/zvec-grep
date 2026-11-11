@@ -223,7 +223,7 @@ test("later results and failed-job reruns update one bot comment", async (t) => 
   assert.match(x.messages()[1][1].body, /zg-retrieval-run:123:2/);
 });
 
-test("the publisher renders validated File and Entity diagnostic scores and counts", async (t) => {
+test("the publisher renders diagnostic scores while preserving validated counts", async (t) => {
   const x = await fixture(t);
   const withDiagnostics = structuredClone(report);
   withDiagnostics.qa_scoring = { ...QA_SCORING };
@@ -265,14 +265,16 @@ test("the publisher renders validated File and Entity diagnostic scores and coun
     );
   }
   assert.match(body, /Diagnostic QA results/);
+  assert.doesNotMatch(body, /(?:%|N\/A) \([^)]*\/[^)]*\)/);
+  const diagnostic = validateComparison(withDiagnostics, request).rows[0]
+    .entity_diagnostic;
+  assert.equal(diagnostic.baseline.entity.metric_task_counts.recall_at_10, 13);
+  assert.equal(diagnostic.candidate.entity.metric_task_counts.recall_at_10, 14);
   assert.match(
     body,
-    /\| hybrid \| File \| N\/A \(\?\/17\) \| N\/A \(\?\/17\) \| N\/A \(\?\/17\) \| 60\.00% \(17\/17\) → 70\.00% \(17\/17\)/,
+    /\| hybrid \| File \| N\/A \| N\/A \| N\/A \| 60\.00% → 70\.00%/,
   );
-  assert.match(
-    body,
-    /\| hybrid \| Entity \| 50\.00% \(13\/17\) → 50\.00% \(14\/17\)/,
-  );
+  assert.match(body, /\| hybrid \| Entity \| 50\.00% \|/);
   assert.match(
     body,
     /Hit@1 \| Hit@5 \| Hit@10 \| Recall@1 \| Recall@5 \| Recall@10 \| MRR@10 \| nDCG@10/,

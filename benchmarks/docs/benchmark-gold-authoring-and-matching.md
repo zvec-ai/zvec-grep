@@ -17,10 +17,10 @@ Gold must include every expected target within the specified source version and 
 
 - Check retrieved results against the specified source version.
 - File matches require the full repository-relative path.
-- An Entity match requires its `content` to contain the Gold target's full source range in the same file. Partial overlap is not enough.
-- One result may cover several Gold targets, including methods inside a returned class. Count each Gold target once, at its first matching rank.
-- `preview` controls displayed content, not Entity matches. Save evidence of the retrieved content's source range independently of the preview.
-- Take the first K results in their original order. Repeated targets count once but still occupy their original positions.
+- An Entity hit requires `Entity.content` to contain the Gold target's full source range in the same file. Partial overlap is not enough.
+- One result may cover several Gold targets. Count each target once, at its first matching rank.
+- `preview` affects display and information density, not Entity matches or Recall.
+- Take the first K results in their original order. Duplicate results still occupy their original positions.
 - If a score cannot be determined, record why instead of assigning zero. Assign zero only to a confirmed miss in valid results.
 
 ## Retrieval-only metrics
@@ -35,12 +35,10 @@ K is the number of original result positions examined. Compute each metric separ
 | RR@K / MRR@K | RR is the reciprocal of the first-hit rank, or 0 for a top-K miss. MRR is the mean RR. |
 | nDCG@K | Measures whether relevant targets appear early; see the [calculation](retrieval-only-qa-reference.md#ndcgk-calculation). |
 
-Evaluate Entity coverage and preview information density separately.
-
 ## Aggregation and comparison
 
 - For Hit, Recall, RR, and nDCG, average repeated runs within each case first, then average across cases with equal case weights.
-- Report the number of scored cases and list unscored cases with reasons.
+- Result tables show scores only. Keep scored/eligible counts and unscored-case reasons in machine-readable reports, without repeating counts beside the tables.
 - Use the same questions, source and search scope, Gold, scoring rules, and return limits on both sides of a comparison.
 
 Follow the [benchmark working rules](../AGENTS.md) for evidence storage, version changes, and Git submissions.

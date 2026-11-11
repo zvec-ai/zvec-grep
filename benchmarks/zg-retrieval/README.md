@@ -85,10 +85,12 @@ ideal score groups Gold targets by file, with larger groups first. See the
 [calculation](../docs/retrieval-only-qa-reference.md#ndcgk-calculation).
 File nDCG is unchanged.
 
-The QA section reports formal and diagnostic results separately, with a scored
-case count for each metric. Unknown matches and failed calls do not become
-zeros. A repeated-run metric is withheld if any of its five observations is
-unknown. Both levels use equal question weights after averaging repeats.
+The QA section reports formal and diagnostic scores separately. Result tables
+show scores only; scored/eligible question counts stay in machine-readable
+reports and are not repeated beside tables. Unknown matches and failed calls do
+not become zeros. A repeated-run metric is withheld if any of its five
+observations is unknown. Both levels use equal question weights after averaging
+repeats.
 
 The existing File labels and aggregation remain unchanged.
 Its denominator differs from the new QA table. A QA diagnostic is not a formal
@@ -105,9 +107,8 @@ The final PR comparison has one table per suite. Each table contains
 File and Entity rows for fts, vector and hybrid, with Hit@1/5/10,
 Recall@1/5/10, MRR@10 and nDCG@10 columns.
 
-SWE-QA20 uses QA diagnostic scores, with scored/eligible question counts beside
-each percentage. A shared cell means both versions have equal scores and counts;
-it does not guarantee the same scored questions. The other suites retain their
+SWE-QA20 uses QA diagnostic scores. A shared cell means both versions have equal
+displayed scores. The other suites retain their
 original File scores; their File Recall and Entity metrics are not yet provided
 and appear as N/A. The original SWE-QA20 File scores remain in the JSON and full
 reports, separate from QA Gold.

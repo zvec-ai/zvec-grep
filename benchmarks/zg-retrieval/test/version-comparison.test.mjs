@@ -189,19 +189,25 @@ test("File and Entity diagnostics retain their own scores and question counts", 
     comparison.rows.filter((row) => row.entity_diagnostic).length,
     1,
   );
+  const diagnostic = comparison.rows[0].entity_diagnostic;
+  assert.equal(diagnostic.baseline.eligible_tasks, 17);
+  assert.equal(diagnostic.candidate.eligible_tasks, 17);
+  assert.equal(diagnostic.baseline.entity.metric_task_counts.recall_at_10, 13);
+  assert.equal(diagnostic.candidate.entity.metric_task_counts.recall_at_10, 14);
   const markdown = markdownVersionComparison(comparison);
   assert.match(markdown, /Diagnostic QA results/);
+  assert.doesNotMatch(markdown, /(?:%|N\/A) \([^)]*\/[^)]*\)/);
   assert.match(
     markdown,
     /Hit@1 \| Hit@5 \| Hit@10 \| Recall@1 \| Recall@5 \| Recall@10 \| MRR@10 \| nDCG@10/,
   );
   assert.deepEqual(
     tableRow(markdown, "SWE-QA20", "hybrid", "File").slice(5, 8),
-    ["25.00% (17/17)", "50.00% (17/17)", "62.50% (17/17) → 75.00% (17/17)"],
+    ["25.00%", "50.00%", "62.50% → 75.00%"],
   );
   assert.deepEqual(
     tableRow(markdown, "SWE-QA20", "hybrid", "Entity").slice(5, 8),
-    ["0.00% (17/17)", "N/A (0/17)", "12.50% (13/17) → 25.00% (14/17)"],
+    ["0.00%", "N/A", "12.50% → 25.00%"],
   );
   // A partially available QA table must never fall back to original File Gold.
   assert.match(tableRow(markdown, "SWE-QA20", "hybrid", "File")[2], /^N\/A/);
@@ -213,7 +219,7 @@ test("File and Entity diagnostics retain their own scores and question counts", 
   assert.doesNotMatch(markdown, /<details>|File ranking — all four suites/);
 });
 
-test("compact cells retain changed counts, rounded differences and missing versions", () => {
+test("compact cells hide counts and retain rounded differences and missing versions", () => {
   const before = result(baseSha),
     after = result(headSha);
   const make = (value, count, eligible = 17) => ({
@@ -230,11 +236,11 @@ test("compact cells retain changed counts, rounded differences and missing versi
     },
   });
   for (const [baseline, candidate, expected] of [
-    [make(0.5, 13), make(0.5, 13), "50.00% (13/17)"],
-    [make(0.5, 13), make(0.5, 14), "50.00% (13/17) → 50.00% (14/17)"],
-    [make(0.5, 13), make(0.5, 13, 18), "50.00% (13/17) → 50.00% (13/18)"],
-    [make(0.5, 13), make(0.500001, 13), "50.00% (13/17) → 50.00% (13/17)"],
-    [null, make(0.5, 13), "N/A → 50.00% (13/17)"],
+    [make(0.5, 13), make(0.5, 13), "50.00%"],
+    [make(0.5, 13), make(0.5, 14), "50.00%"],
+    [make(0.5, 13), make(0.5, 13, 18), "50.00%"],
+    [make(0.5, 13), make(0.500001, 13), "50.00% → 50.00%"],
+    [null, make(0.5, 13), "N/A → 50.00%"],
   ]) {
     const comparison = compareCombinedResults(before, after, metadata);
     comparison.rows[0].entity_diagnostic = { baseline, candidate };
@@ -245,7 +251,11 @@ test("compact cells retain changed counts, rounded differences and missing versi
       expected,
     );
     assert.deepEqual(comparison, saved);
-    if (baseline && candidate) assert.ok(markdown.includes("N/A (0/17)"));
+    if (baseline && candidate)
+      assert.deepEqual(
+        tableRow(markdown, "SWE-QA20", "hybrid", "Entity").slice(6, 8),
+        ["N/A", "0.00%"],
+      );
   }
   const same = markdownVersionComparison(
     compareCombinedResults(before, after, metadata),

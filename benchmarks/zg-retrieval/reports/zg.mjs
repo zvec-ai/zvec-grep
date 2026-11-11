@@ -15,22 +15,17 @@ export const QA_ENTITY_METRICS = [
 ];
 
 export function qaMetricCell(level, metric, eligible) {
-  if (eligible == null) return "N/A";
-  if (eligible === 0) return "N/A (n=0/0)";
+  if (eligible == null || eligible === 0) return "N/A";
   const count = level?.metric_task_counts?.[metric];
-  const value = count > 0 ? display(level?.[metric]) : "N/A";
-  return `${value} (n=${count ?? "?"}/${eligible})`;
+  return count > 0 ? display(level?.[metric]) : "N/A";
 }
 
 export function qaPercentCell(level, metric, eligible) {
-  if (eligible == null) return "N/A";
-  if (eligible === 0) return "N/A (0/0)";
+  if (eligible == null || eligible === 0) return "N/A";
   const count = level?.metric_task_counts?.[metric];
-  const value =
-    count > 0 && Number.isFinite(level?.[metric])
-      ? `${(level[metric] * 100).toFixed(2)}%`
-      : "N/A";
-  return `${value} (${count ?? "?"}/${eligible})`;
+  return count > 0 && Number.isFinite(level?.[metric])
+    ? `${(level[metric] * 100).toFixed(2)}%`
+    : "N/A";
 }
 
 /** Keep diagnostic QA results separate from the existing File metrics. */
@@ -46,7 +41,7 @@ export function qaRetrievalMarkdown(entries, expectedQuestions) {
     "",
     "## QA File and Entity retrieval",
     "",
-    "Cells show percentage (scored/eligible questions). Unknown results remain N/A. Diagnostic scores do not establish formal Entity performance.",
+    "Cells show percentages. Unknown results remain N/A. Diagnostic scores do not establish formal Entity performance.",
     "",
     ...(scopes.some(([scope]) => scope === "formal")
       ? []

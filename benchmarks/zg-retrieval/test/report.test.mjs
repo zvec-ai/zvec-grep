@@ -88,7 +88,7 @@ function qaLevel(count = 2) {
   };
 }
 
-test("QA tables show diagnostic denominators and withhold unapproved formal scores", () => {
+test("QA tables show diagnostic scores without counts and withhold unapproved formal scores", () => {
   const qa = {
     planned_tasks: 4,
     formal: {
@@ -121,11 +121,12 @@ test("QA tables show diagnostic denominators and withhold unapproved formal scor
   );
   assert.doesNotMatch(text, /\| Formal \|/);
   assert.match(text, /Formal QA scores are unavailable/);
-  assert.match(text, /\| Diagnostic \| zg-hybrid \| File \| 50\.00% \(2\/3\)/);
+  assert.match(text, /\| Diagnostic \| zg-hybrid \| File \| 50\.00% \|/);
   assert.match(text, /\| Diagnostic \| zg-hybrid \| Entity \|/);
-  assert.match(text, /0\.00% \(2\/3\)/);
-  assert.match(text, /N\/A \(0\/3\)/);
+  assert.match(text, /\| 0\.00% \|/);
+  assert.match(text, /\| N\/A \|/);
   assert.match(text, /do not establish formal Entity performance/);
+  assert.doesNotMatch(text, /(?:%|N\/A) \([^)]*\/[^)]*\)/);
   assert.match(text, /Unknown results remain N\/A/);
   assert.match(text, /QA scoring unavailable for 1\/4 questions/);
   const [main, details] = text.split(
@@ -165,25 +166,25 @@ test("QA table renders approved metrics without turning an unscored metric into 
     ],
     1,
   ).join("\n");
-  assert.match(text, /\| Formal \| zg-hybrid \| File \| 50\.00% \(1\/1\)/);
-  assert.match(text, /\| Formal \| zg-hybrid \| Entity \| 50\.00% \(1\/1\)/);
-  assert.match(text, /N\/A \(0\/1\)/);
+  assert.match(text, /\| Formal \| zg-hybrid \| File \| 50\.00% \|/);
+  assert.match(text, /\| Formal \| zg-hybrid \| Entity \| 50\.00% \|/);
+  assert.match(text, /\| N\/A \|/);
   assert.doesNotMatch(
     text,
     /\| 0\.00%|\| Diagnostic \||Formal QA scores are unavailable/,
   );
 });
 
-test("compact QA cells retain zero scores, missing counts, and metric-specific coverage", () => {
+test("compact QA cells retain zero scores and missing values without question counts", () => {
   const level = qaLevel(2);
   level.recall_at_1 = 0;
   level.recall_at_5 = 0.0710955710955711;
   level.recall_at_10 = null;
   level.metric_task_counts.recall_at_10 = 0;
-  assert.equal(qaPercentCell(level, "recall_at_1", 3), "0.00% (2/3)");
-  assert.equal(qaPercentCell(level, "recall_at_5", 3), "7.11% (2/3)");
-  assert.equal(qaPercentCell(level, "recall_at_10", 3), "N/A (0/3)");
-  assert.equal(qaPercentCell(level, "recall_at_5", 0), "N/A (0/0)");
-  assert.equal(qaPercentCell(null, "recall_at_5", 3), "N/A (?/3)");
+  assert.equal(qaPercentCell(level, "recall_at_1", 3), "0.00%");
+  assert.equal(qaPercentCell(level, "recall_at_5", 3), "7.11%");
+  assert.equal(qaPercentCell(level, "recall_at_10", 3), "N/A");
+  assert.equal(qaPercentCell(level, "recall_at_5", 0), "N/A");
+  assert.equal(qaPercentCell(null, "recall_at_5", 3), "N/A");
   assert.equal(qaPercentCell(null, "recall_at_5", null), "N/A");
 });

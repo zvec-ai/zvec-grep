@@ -183,14 +183,14 @@ function qaComparisonCell(pair, level, metric) {
   const after = pair?.candidate;
   const cell = (group) =>
     qaPercentCell(group?.[level], metric, group?.eligible_tasks);
-  // Equal displayed text is insufficient: preserve changes hidden by rounding,
-  // and equal scores with different scored or eligible question counts.
+  const beforeCell = cell(before),
+    afterCell = cell(after);
+  // Preserve score changes hidden by rounding. Counts stay in the JSON report.
   const same =
-    before?.eligible_tasks === after?.eligible_tasks &&
-    before?.[level]?.[metric] === after?.[level]?.[metric] &&
-    before?.[level]?.metric_task_counts?.[metric] ===
-      after?.[level]?.metric_task_counts?.[metric];
-  return same ? cell(before) : `${cell(before)} → ${cell(after)}`;
+    beforeCell === afterCell &&
+    (beforeCell === "N/A" ||
+      before?.[level]?.[metric] === after?.[level]?.[metric]);
+  return same ? beforeCell : `${beforeCell} → ${afterCell}`;
 }
 
 export function markdownVersionComparison(result) {
@@ -232,7 +232,7 @@ export function markdownVersionComparison(result) {
         `### ${title}`,
         "",
         qa
-          ? "**Diagnostic QA results.** Entity hits require Gold containment in the returned Entity, independently of preview. Cells show score (scored/eligible questions). A shared cell means equal scores and counts, not necessarily the same scored questions. N/A means unscored or missing QA data."
+          ? "**Diagnostic QA results.** Entity hits require Gold containment in the returned Entity, independently of preview. Cells show percentages. N/A means unscored or missing QA data."
           : "Original File metrics. File Recall and Entity evaluation data are not provided for this run and are shown as N/A.",
         "",
         `| Mode | Level | ${QA_ENTITY_METRICS.map(([label]) => label).join(" | ")} |`,

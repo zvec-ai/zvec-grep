@@ -229,7 +229,8 @@ test("CI exposes diagnostic QA scores and denominators while formal scores remai
   assert.match(text, /All File and Entity metrics/);
   assert.match(text, /Formal QA scores are unavailable/);
   assert.match(text, /\| Diagnostic \| zg-hybrid \|/);
-  assert.match(text, /scored\/eligible questions/);
+  assert.doesNotMatch(text, /scored\/eligible questions/);
+  assert.doesNotMatch(text, /(?:%|N\/A) \([^)]*\/[^)]*\)/);
   assert.match(text, /do not establish formal Entity performance/);
   assert.deepEqual(result.quality_metrics, QUALITY_METRICS);
 });
@@ -325,7 +326,7 @@ test("QA failed calls remain unscored without changing historical File error zer
     0,
   );
   assert.ok(vector.qa_retrieval.diagnostic.eligible_tasks > 0);
-  assert.match(markdownCiSummary(result), /N\/A \(0\/[1-9]\d*\)/);
+  assert.match(markdownCiSummary(result), /\| N\/A \|/);
 });
 
 test("QA coverage keeps invalid questions in the planned denominator", async () => {

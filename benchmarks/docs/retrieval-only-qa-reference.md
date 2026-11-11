@@ -66,7 +66,10 @@ of parser boundaries and the current retrieval results. Both scores stay within
 
 ## Reporting and version changes
 
-Include the following in reports:
+Result tables show scores only. Scored/eligible counts stay in machine-readable
+reports, not in cells or surrounding text.
+
+Keep the following in machine-readable reports:
 
 - The number of scored questions and calls for each metric, and the proportion of questions with usable Gold.
 - Reasons for leaving results unscored, plus counts of failures and missing data.
