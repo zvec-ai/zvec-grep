@@ -329,7 +329,7 @@ jobs:
           pathlib.Path("target").mkdir(exist_ok=True)
           # Keep targets/features/profile identical to nextest; this JSON also
           # identifies the active model tests and plugins for no-build GPU checks.
-          command = ["cargo", "test", "--locked", "--workspace", "--all-targets", "--no-run", "--message-format=json"]
+          command = ["cargo", "test", "--locked", "--workspace", "--all-targets", "--no-run", "--message-format=json-render-diagnostics"]
           if os.environ["CUDA_VERIFY"] == "true":
               command += ["--features", "zg/cuda"]
           # Direct file output also avoids PowerShell 5's UTF-16 redirection.

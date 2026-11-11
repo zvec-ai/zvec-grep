@@ -39,6 +39,7 @@ library path: `python scripts/prepare-pdfium.py --target x86_64-pc-windows-msvc`
 then `$env:PDFIUM_STATIC_LIB_PATH = (Resolve-Path target/pdfium-static/156.0.8076.0/x86_64-pc-windows-msvc/sdk/lib).Path`.
 Use `aarch64-pc-windows-msvc` for ARM64. Upstream pdfium-render also builds a
 dependency DLL, before the engine can supply its own native linker flags.
+The workspace Cargo configuration supplies that DLL's GDI/User32 system libraries.
 CI performs this preparation automatically. Installed packages need neither
 Python nor a compiler; the model still uses the existing download/cache path.
 
