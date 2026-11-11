@@ -314,24 +314,44 @@ async fn copied_alias_keeps_value() {
 }
 
 #[tokio::test]
-async fn class_expression_scope() {
-    check_case(Case { name: "class_expression_scope", files: vec![
-        SourceFile { path: "a.js", source: "function target() {}\nconst C = class { method(target) {} };\nfunction caller() { target(); }\n" },
-    ], queries: vec![
-        Query { operation: "callees", symbol: "caller", expected: json!([{"name": "caller", "edges": [{"symbol": {"name": "target"}}]}]), ..Query::default() },
-    ] }).await;
+async fn class_and_object_method_parameters_stay_in_their_scope() {
+    for source in [
+        "function target() {}\nconst C = class { method(target) {} };\nfunction caller() { target(); }\n",
+        "function target() {}\nconst obj = { method(target) {} };\nfunction caller() { target(); }\n",
+    ] {
+        check_case(Case {
+            name: "method_parameters_stay_in_their_scope",
+            files: vec![SourceFile {
+                path: "a.js",
+                source,
+            }],
+            queries: vec![Query {
+                operation: "callees",
+                symbol: "caller",
+                expected: json!([{"name": "caller", "edges": [{"symbol": {"name": "target"}}]}]),
+                ..Query::default()
+            }],
+        })
+        .await;
+    }
 }
 
 #[tokio::test]
-async fn go_named_scalar_receivers() {
-    check_case(Case { name: "go_named_scalar_receivers", files: vec![
+async fn go_named_non_struct_receivers() {
+    for source in [
+        "package count\ntype Count int\nfunc (c Count) Work() {}\nfunc local(c Count) { c.Work() }\n",
+        "package count\ntype Count []int\nfunc (c Count) Work() {}\nfunc local(c Count) { c.Work() }\n",
+        "package count\ntype Count map[string]int\nfunc (c Count) Work() {}\nfunc local(c Count) { c.Work() }\n",
+    ] {
+        check_case(Case { name: "go_named_non_struct_receivers", files: vec![
         SourceFile { path: "go.mod", source: "module example.com/project\n\ngo 1.23\n" },
-        SourceFile { path: "count/count.go", source: "package count\ntype Count int\nfunc (c Count) Work() {}\nfunc local(c Count) { c.Work() }\n" },
+        SourceFile { path: "count/count.go", source },
         SourceFile { path: "app/app.go", source: "package app\nimport \"example.com/project/count\"\nfunc invoke(c count.Count) { c.Work() }\n" },
     ], queries: vec![
         Query { operation: "callees", symbol: "local", expected: json!([{"name": "local", "edges": [{"symbol": {"name": "Count::Work"}}]}]), ..Query::default() },
         Query { operation: "callees", symbol: "invoke", expected: json!([{"name": "invoke", "edges": [{"symbol": {"name": "Count::Work"}}]}]), ..Query::default() },
     ] }).await;
+    }
 }
 
 #[tokio::test]
