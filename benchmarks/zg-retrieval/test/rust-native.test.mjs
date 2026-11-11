@@ -120,6 +120,7 @@ Indexed source size: 8192 bytes
     root: "/tmp/corpus",
     index_path: "/tmp/corpus/.zvec-grep",
     embedding: "local/potion-code-16m-v2",
+    input_budget: null,
     files_scanned: 12,
     files_indexed: 10,
     files_pending: 0,

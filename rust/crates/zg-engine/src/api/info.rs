@@ -177,6 +177,27 @@ pub mod result {
         pub model: String,
         pub dimension: usize,
         pub metric: String,
+        /// Configured model and chunk limits, included only in explicit diagnostics.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub input_budget: Option<EmbeddingInputBudget>,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct EmbeddingInputBudget {
+        pub max_input_tokens: usize,
+        pub unit: String,
+        pub rounding: String,
+        pub overlap_percent: usize,
+        pub normal: ChunkInputBudget,
+        pub dense: ChunkInputBudget,
+    }
+
+    /// Upper budgets before source boundaries and metadata reduce content length.
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct ChunkInputBudget {
+        pub chars_per_100_tokens: usize,
+        pub max_length: usize,
+        pub overlap: usize,
     }
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -272,6 +293,7 @@ impl From<&crate::domain::EmbeddingModelInfo> for result::WorkspaceIndexEmbeddin
                 crate::domain::EmbeddingMetric::Euclidean => "euclidean",
             }
             .to_owned(),
+            input_budget: None,
         }
     }
 }
@@ -298,6 +320,38 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<InfoOptions>(encoded).expect("decoded counts"),
             explicit
+        );
+    }
+
+    #[test]
+    fn input_budget_is_optional_for_legacy_embedding_metadata() {
+        let value = serde_json::json!({
+            "provider": "local",
+            "model": "potion-code-16m-v2",
+            "dimension": 256,
+            "metric": "cosine"
+        });
+        let mut embedding: WorkspaceIndexEmbedding =
+            serde_json::from_value(value.clone()).expect("legacy embedding metadata");
+        assert_eq!(embedding.input_budget, None);
+        assert_eq!(
+            serde_json::to_value(&embedding).expect("metadata JSON"),
+            value
+        );
+        let budget = serde_json::json!({
+            "max_input_tokens": 1024,
+            "unit": "utf16_code_units",
+            "rounding": "floor",
+            "overlap_percent": 15,
+            "normal": {"chars_per_100_tokens": 185, "max_length": 1894, "overlap": 284},
+            "dense": {"chars_per_100_tokens": 100, "max_length": 1024, "overlap": 153}
+        });
+        embedding.input_budget = Some(serde_json::from_value(budget.clone()).expect("budget"));
+        let encoded = serde_json::to_value(&embedding).expect("diagnostic metadata JSON");
+        assert_eq!(encoded["input_budget"], budget);
+        assert_eq!(
+            serde_json::from_value::<WorkspaceIndexEmbedding>(encoded).expect("metadata roundtrip"),
+            embedding
         );
     }
 

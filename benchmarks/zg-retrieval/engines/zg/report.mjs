@@ -29,6 +29,7 @@ import {
 } from "../../metrics/repetitions.mjs";
 import { markdownReport } from "../../reports/zg.mjs";
 import { summarizeIndexCounts } from "../../core/index-counts.mjs";
+import { summarizeIndexSettings } from "../../core/index-settings.mjs";
 import {
   publicQaItems,
   scoreQaRetrieval,
@@ -86,6 +87,7 @@ export async function aggregate(directory, { expectedTasks } = {}) {
     // Rebuild counts from hashed status evidence, not the historical snapshot's
     // misleading `fragments` alias (schema 2 stored the Entity count there).
     delete manifest.index_counts;
+    delete manifest.index_settings;
     manifests.push(manifest);
     const invalid = [...(manifest.invalid_reasons ?? [])];
     if (objectHash(manifest.suite) !== objectHash(suite.identity))
@@ -116,6 +118,7 @@ export async function aggregate(directory, { expectedTasks } = {}) {
           "post-run integrity not verified",
         );
         let beforeCounts;
+        let beforeSettings;
         for (const phase of ["before", "after"]) {
           const snapshot = await readJson(
             join(runDirectory, `stages/${phase}/summary.json`),
@@ -164,6 +167,32 @@ export async function aggregate(directory, { expectedTasks } = {}) {
               fragments: status.fragments_indexed ?? null,
             },
           ]);
+          const settings = summarizeIndexSettings([
+            {
+              id: `${manifest.repository}@${manifest.repository_commit}`,
+              model: status.embedding ?? null,
+              input_budget: status.input_budget ?? null,
+            },
+          ]);
+          if (settings.model !== null)
+            assert.equal(
+              settings.model,
+              suite.protocol.model,
+              "indexed model differs from the configured suite model",
+            );
+          if (snapshot.index_settings !== undefined)
+            assert.deepEqual(
+              snapshot.index_settings,
+              { model: settings.model, input_budget: settings.input_budget },
+              "snapshot index settings differ from status evidence",
+            );
+          if (phase === "before") beforeSettings = settings;
+          else
+            assert.deepEqual(
+              settings,
+              beforeSettings,
+              "index settings changed during retrieval",
+            );
           if (phase === "before") beforeCounts = counts;
           else
             assert.deepEqual(
@@ -177,6 +206,7 @@ export async function aggregate(directory, { expectedTasks } = {}) {
           }
         }
         manifest.index_counts = beforeCounts;
+        manifest.index_settings = beforeSettings;
         const selection = suite.protocol.index_selection;
         assert.deepEqual(
           manifest.index_selection_audit,

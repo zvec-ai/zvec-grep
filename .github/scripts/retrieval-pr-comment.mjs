@@ -9,6 +9,7 @@ import {
 import { QUALITY_METRICS } from "../../benchmarks/zg-retrieval/reports/ci.mjs";
 import { QA_SCORING } from "../../benchmarks/zg-retrieval/core/suite.mjs";
 import { validateIndexCounts } from "../../benchmarks/zg-retrieval/core/index-counts.mjs";
+import { validateIndexSettings } from "../../benchmarks/zg-retrieval/core/index-settings.mjs";
 import { pilotCorpusIds } from "../../benchmarks/zg-retrieval/expansion/datasets.mjs";
 import {
   PILOT_FILE_RECALL_METRICS,
@@ -255,6 +256,42 @@ export function validateComparison(report, request) {
       }
     }
   }
+  const indexSettings = {};
+  if (report.index_settings !== undefined) {
+    assert.ok(
+      report.index_settings &&
+        typeof report.index_settings === "object" &&
+        !Array.isArray(report.index_settings),
+      "Invalid index settings",
+    );
+    for (const suite of ["sweqa", ...PILOT_NAMES]) {
+      const pair = report.index_settings[suite];
+      assert.ok(
+        pair && typeof pair === "object" && !Array.isArray(pair),
+        "Missing index settings comparison",
+      );
+      indexSettings[suite] = {};
+      for (const side of ["baseline", "candidate"]) {
+        const settings =
+          pair[side] === null ? null : validateIndexSettings(pair[side]);
+        if (settings) {
+          assert.deepEqual(
+            settings.corpora.map(({ id }) => id).sort(),
+            expectedCorpusIds[suite],
+            `${suite}/${side}: index settings coverage differs from the frozen suite`,
+          );
+          const model =
+            suite === "sweqa"
+              ? "local/potion-code-16m-v2"
+              : PILOT_SUITES[suite].model;
+          for (const corpus of settings.corpora)
+            if (corpus.model !== null)
+              assert.equal(corpus.model, model, "Unexpected indexed model");
+        }
+        indexSettings[suite][side] = settings;
+      }
+    }
+  }
   for (const suite of ["sweqa", "beir", "duretrieval", "quarry"]) {
     for (const mode of ["hybrid", "fts", "vector"]) {
       const matches = report.rows.filter(
@@ -345,6 +382,9 @@ export function validateComparison(report, request) {
     },
     harness_commit: report.harness_commit,
     ...(report.index_counts === undefined ? {} : { index_counts: indexCounts }),
+    ...(report.index_settings === undefined
+      ? {}
+      : { index_settings: indexSettings }),
     rows,
     errors: [],
   };

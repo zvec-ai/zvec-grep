@@ -594,6 +594,65 @@ test("successful raw calls with missing or invalid latency invalidate the standa
   assert.equal(verified.integrity_passed, true);
   assert.equal(verified.repositories[0].index_counts.entities, 1);
   assert.equal(verified.repositories[0].index_counts.fragments, null);
+  assert.equal(
+    verified.repositories[0].index_settings.model,
+    suite.protocol.model,
+  );
+  assert.equal(verified.repositories[0].index_settings.input_budget, null);
+  const budget = {
+    max_input_tokens: 1024,
+    unit: "utf16_code_units",
+    rounding: "floor",
+    overlap_percent: 15,
+    normal: { chars_per_100_tokens: 185, max_length: 1894, overlap: 284 },
+    dense: { chars_per_100_tokens: 100, max_length: 1024, overlap: 153 },
+  };
+  const saveSettings = async (phase, model, inputBudget) => {
+    const directory = join(fixture.shard, "stages", phase);
+    const status = await readJson(join(directory, "status.json"));
+    status.embedding = model;
+    status.input_budget = inputBudget;
+    await writeJson(join(directory, "status.json"), status);
+    const snapshot = await readJson(join(directory, "summary.json"));
+    Object.assign(snapshot, {
+      schema_version: 3,
+      entities: 1,
+      fragments: null,
+      index_settings: { model, input_budget: inputBudget },
+    });
+    snapshot.artifacts["status.json"] = await fileHash(
+      join(directory, "status.json"),
+    );
+    await writeJson(join(directory, "summary.json"), snapshot);
+  };
+  for (const phase of ["before", "after"])
+    await saveSettings(phase, suite.protocol.model, budget);
+  const recordedSettings = await fixture.score();
+  assert.equal(recordedSettings.integrity_passed, true);
+  assert.deepEqual(
+    recordedSettings.repositories[0].index_settings.input_budget,
+    budget,
+  );
+  await saveSettings("after", suite.protocol.model, {
+    ...budget,
+    overlap_percent: 10,
+  });
+  const changedSettings = await fixture.score();
+  assertNoHeadline(changedSettings);
+  assert.ok(
+    changedSettings.integrity_errors.some((error) =>
+      /index settings changed/.test(error),
+    ),
+  );
+  await saveSettings("after", "local/wrong-model", budget);
+  const wrongModel = await fixture.score();
+  assertNoHeadline(wrongModel);
+  assert.ok(
+    wrongModel.integrity_errors.some((error) =>
+      /configured suite model/.test(error),
+    ),
+  );
+  await saveSettings("after", suite.protocol.model, budget);
   const diagnosticPath = join(fixture.shard, "stages/before/status.stderr.txt");
   const diagnostics = await readFile(diagnosticPath, "utf8");
   await writeFile(diagnosticPath, "tampered diagnostics\n");

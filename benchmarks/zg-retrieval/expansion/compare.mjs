@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { loadSuite } from "../core/lib.mjs";
 import { validateIndexCounts } from "../core/index-counts.mjs";
+import { validateIndexSettings } from "../core/index-settings.mjs";
+import { indexSettingsComparisonMarkdown } from "../reports/index-settings.mjs";
 import { QA_SCORING } from "../core/suite.mjs";
 import { buildCombined } from "./combined.mjs";
 import {
@@ -77,6 +79,7 @@ export function compareCombinedResults(baseline, candidate, metadata) {
   const rows = [];
   const pilotQaGold = {};
   const indexCounts = {};
+  const indexSettings = {};
   for (const name of ["sweqa", ...PILOT_NAMES]) {
     const before = name === "sweqa" ? baseline.sweqa : baseline.pilots[name];
     const after = name === "sweqa" ? candidate.sweqa : candidate.pilots[name];
@@ -98,6 +101,23 @@ export function compareCombinedResults(baseline, candidate, metadata) {
       return value === undefined ? null : validateIndexCounts(value);
     };
     indexCounts[name] = { baseline: counts(before), candidate: counts(after) };
+    const settings = (suite) => {
+      const value = (name === "sweqa" ? suite : suite.report).index_settings;
+      if (value === undefined) return null;
+      const checked = validateIndexSettings(value);
+      for (const corpus of checked.corpora)
+        if (corpus.model !== null)
+          assert.equal(
+            corpus.model,
+            suite.model,
+            `${name}: indexed model differs from the suite`,
+          );
+      return checked;
+    };
+    indexSettings[name] = {
+      baseline: settings(before),
+      candidate: settings(after),
+    };
     const hasPilotQa =
       name !== "sweqa" && (before.report.qa_gold || after.report.qa_gold);
     if (hasPilotQa) {
@@ -166,6 +186,7 @@ export function compareCombinedResults(baseline, candidate, metadata) {
       : {}),
     harness_commit: baseline.harness_commit,
     index_counts: indexCounts,
+    index_settings: indexSettings,
     rows,
     errors: [],
   };
@@ -265,6 +286,7 @@ export function markdownVersionComparison(result) {
     "",
     "Scores are percentages. Different values show **baseline → candidate**; identical values are shown once. Both versions use the same queries, Gold and local embedding models, with five calls per question and mode.",
     "Indexed corpus totals count each independently built index once; modes and repetitions do not multiply them. N/A means the count was not recorded.",
+    "ZG input limits are per embedding input, not measured token use. Fragment length and overlap budgets use UTF-16 units, before metadata allowance. Missing settings are N/A.",
   ];
   if (result.preview === "full")
     lines.push("", 'Both versions explicitly request `preview: "full"`.');
@@ -291,6 +313,11 @@ export function markdownVersionComparison(result) {
         `### ${title}`,
         "",
         indexCountComparison(result.index_counts?.[suite]),
+        "",
+        indexSettingsComparisonMarkdown(
+          result.index_settings?.[suite],
+          result.rows.find((row) => row.suite === suite)?.model,
+        ),
         "",
         qa
           ? "**Diagnostic QA results.** Entity hits require Gold containment in the returned Entity, independently of preview. Cells show percentages. N/A means unscored or missing QA data."

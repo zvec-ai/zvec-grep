@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { readJson, writeJson } from "../core/io.mjs";
 import { validateIndexCounts } from "../core/index-counts.mjs";
+import { validateIndexSettings } from "../core/index-settings.mjs";
 import { buildCiSummary, markdownCiSummary } from "../reports/ci.mjs";
 import { scoreFileRetrieval } from "../metrics/files.mjs";
 import { scoreNdcg } from "../metrics/ndcg.mjs";
@@ -44,6 +45,24 @@ async function checkPilot(name, report, candidateCommit) {
         pilotCorpusIds(pilot).sort(),
         "indexed corpus coverage differs from the pilot",
       );
+    const indexSettings =
+      report.index_settings === undefined
+        ? undefined
+        : validateIndexSettings(report.index_settings);
+    if (indexSettings) {
+      for (const corpus of indexSettings.corpora)
+        if (corpus.model !== null)
+          assert.equal(
+            corpus.model,
+            pilot.model,
+            "indexed model differs from the pilot",
+          );
+      assert.deepEqual(
+        indexSettings.corpora.map(({ id }) => id).sort(),
+        pilotCorpusIds(pilot).sort(),
+        "index settings coverage differs from the pilot",
+      );
+    }
     assert.ok(
       [2, 3].includes(report.schema_version),
       "Unknown pilot report schema",
@@ -192,6 +211,9 @@ async function checkPilot(name, report, candidateCommit) {
       report: {
         ...report,
         ...(indexCounts === undefined ? {} : { index_counts: indexCounts }),
+        ...(indexSettings === undefined
+          ? {}
+          : { index_settings: indexSettings }),
       },
       model: pilot.model,
       error: null,

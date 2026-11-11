@@ -109,6 +109,15 @@ async fn explicit_counts_are_forwarded_without_entering_runtime_status_cache() {
             info.status.expect("status").fragments_indexed,
             include_counts.then_some(0)
         );
+        assert_eq!(
+            info.workspace_index
+                .expect("workspace")
+                .embedding
+                .expect("embedding")
+                .input_budget
+                .is_some(),
+            include_counts
+        );
         let snapshot = IndexOperationProvider::runtime_snapshot(&manager, &root)
             .expect("runtime")
             .index_status

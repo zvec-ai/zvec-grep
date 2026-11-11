@@ -8,11 +8,16 @@ import { summarizeNdcg } from "../metrics/summary.mjs";
 import { summarizeQaRetrieval } from "../metrics/entities.mjs";
 import { validateZgReport, ZG_MODES } from "./validation.mjs";
 import { qaRetrievalMarkdown } from "./zg.mjs";
+import { indexSettingsMarkdown } from "./index-settings.mjs";
 import {
   summarizeIndexCounts,
   validateIndexCounts,
   indexCountsMarkdown,
 } from "../core/index-counts.mjs";
+import {
+  summarizeIndexSettings,
+  validateIndexSettings,
+} from "../core/index-settings.mjs";
 
 export const QUALITY_METRICS = Object.freeze([
   "file_hit_at_1",
@@ -133,6 +138,7 @@ export async function buildCiSummary({
   let failures = [];
   let tasks = [];
   let indexCounts = summarizeIndexCounts([]);
+  let indexSettings = summarizeIndexSettings([]);
   try {
     assert.ok(zg, "missing ZG report");
     const checked = validateZgReport(zg, "ZG", {
@@ -167,6 +173,34 @@ export async function buildCiSummary({
           id,
           entities: counts?.entities ?? null,
           fragments: counts?.fragments ?? null,
+        };
+      }),
+    );
+    indexSettings = summarizeIndexSettings(
+      suite.lock.repositories.map((repo) => {
+        const id = `${repo.repository}@${repo.commit}`;
+        const manifest = zg.repositories.find(
+          (item) => item.repository === repo.repository,
+        );
+        const settings = manifest?.index_settings
+          ? validateIndexSettings(manifest.index_settings)
+          : null;
+        if (settings) {
+          assert.deepEqual(
+            settings.corpora.map((entry) => entry.id),
+            [id],
+          );
+          if (settings.model !== null)
+            assert.equal(
+              settings.model,
+              suite.protocol.model,
+              "indexed model differs from the configured suite model",
+            );
+        }
+        return {
+          id,
+          model: settings?.model ?? null,
+          input_budget: settings?.input_budget ?? null,
         };
       }),
     );
@@ -257,6 +291,7 @@ export async function buildCiSummary({
     model: suite.protocol.model,
     preview: "full",
     index_counts: indexCounts,
+    index_settings: indexSettings,
     ...(rows.some((row) => row.qa_retrieval)
       ? { qa_gold: suite.qa_gold, qa_scoring: suite.qa_scoring }
       : {}),
@@ -288,6 +323,8 @@ export function markdownCiSummary(result) {
     `**${status}** · 20 original questions · 11 pinned repositories · ZG hybrid / fts / vector · Rust MCP full presentation`,
     "",
     indexCountsMarkdown(result.index_counts),
+    "",
+    indexSettingsMarkdown(result.index_settings, result.model),
     "",
     "| Arm | Status | Coverage | Stable Top 10 | File Hit@1 | File Hit@5 | File Hit@10 | File MRR@10 | nDCG@10 | Mean output (KiB) | Avg RT (ms) | P50 RT (ms) |",
     "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",

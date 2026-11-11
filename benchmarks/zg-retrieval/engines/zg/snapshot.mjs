@@ -5,6 +5,10 @@ import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { fileHash, objectHash, run, writeJson } from "../../core/lib.mjs";
+import {
+  summarizeIndexSettings,
+  validateInputBudget,
+} from "../../core/index-settings.mjs";
 
 function required(pattern, text, label) {
   const match = pattern.exec(text);
@@ -241,6 +245,7 @@ function parseStatusDiagnostics(stderr) {
     root: info.root,
     index_path: info.index_path,
     embedding: `${embedding.provider}/${embedding.model}`,
+    input_budget: validateInputBudget(embedding.input_budget ?? null),
     files_scanned: stats.files_scanned,
     files_indexed: stats.files_indexed,
     files_pending: stats.files_pending,
@@ -263,6 +268,14 @@ export function parseNativeStatus(
     (/^Workspace index: /m.test(text)
       ? parseLegacyStatus(text)
       : parseGroupedStatus(text, home));
+  status.input_budget ??= null;
+  summarizeIndexSettings([
+    {
+      id: status.root,
+      model: status.embedding,
+      input_budget: status.input_budget,
+    },
+  ]);
   for (const [name, value] of Object.entries(status))
     if (typeof value === "number")
       assert.ok(Number.isSafeInteger(value) && value >= 0, `invalid ${name}`);
@@ -317,6 +330,7 @@ export async function snapshotIndex({
   );
   const identity = {
     embedding: status.embedding,
+    input_budget: status.input_budget,
     files_scanned: status.files_scanned,
     files_indexed: status.files_indexed,
     files_pending: status.files_pending,
@@ -335,6 +349,10 @@ export async function snapshotIndex({
     files: status.files_indexed,
     entities: status.entities_indexed,
     fragments: status.fragments_indexed ?? null,
+    index_settings: {
+      model: status.embedding,
+      input_budget: status.input_budget,
+    },
     failed_files: [],
     identity_excludes: [
       "index storage layout",

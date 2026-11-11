@@ -71,6 +71,15 @@ each index's retrieval batch. Each invocation reads the counts once, outside
 search timing. Ordinary status, MCP status, and search freshness checks do not
 scan Fragments. Counts do not affect scoring.
 
+The same debug status records the indexed embedding model's configured input-token
+limit and normal/dense Fragment length and overlap budgets. Reports show these
+beside each dataset's counts. Budgets use UTF-16 units, before the metadata
+allowance; they are not actual fragment sizes or measured token consumption.
+The current rule uses 1.85 units/token for normal content, 1 for dense content,
+and 15% overlap, rounding down. Values come from the public status response;
+older versions without these fields display N/A. No extra retrieval or status
+call is made. Settings must remain unchanged across the run.
+
 Rust candidates are built through the [shared package Action](../../.github/actions/rust-candidate-package/action.yml); its [manifest utility](../shared/rust-package-cache.mjs) binds each tarball to the exact source commit and package bytes. SWE-QA uses the same packaging path while retaining its own evaluation protocol.
 
 ### QA pairs and File / Entity diagnostics

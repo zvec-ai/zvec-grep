@@ -1463,6 +1463,7 @@ mod status_diagnostics_tests {
                     model: "potion-code-16m-v2".into(),
                     dimension: 128,
                     metric: "cosine".into(),
+                    input_budget: None,
                 }),
                 fts: None,
                 index_version: Some(1),
@@ -1482,6 +1483,39 @@ mod status_diagnostics_tests {
         assert_eq!(
             actual,
             serde_json::json!({ "state": "ready", "info": &info })
+        );
+    }
+
+    #[test]
+    fn native_diagnostics_preserve_explicit_input_budgets_and_omit_absent_ones() {
+        let mut info = info();
+        let plain: serde_json::Value =
+            serde_json::from_str(&status_diagnostics(&info).expect("diagnostics")).expect("JSON");
+        assert!(
+            plain
+                .pointer("/info/workspace_index/embedding/input_budget")
+                .is_none()
+        );
+        let expected = serde_json::json!({
+            "max_input_tokens": 1024,
+            "unit": "utf16_code_units",
+            "rounding": "floor",
+            "overlap_percent": 15,
+            "normal": {"chars_per_100_tokens": 185, "max_length": 1894, "overlap": 284},
+            "dense": {"chars_per_100_tokens": 100, "max_length": 1024, "overlap": 153}
+        });
+        info.workspace_index
+            .as_mut()
+            .expect("workspace")
+            .embedding
+            .as_mut()
+            .expect("embedding")
+            .input_budget = Some(serde_json::from_value(expected.clone()).expect("input budget"));
+        let explicit: serde_json::Value =
+            serde_json::from_str(&status_diagnostics(&info).expect("diagnostics")).expect("JSON");
+        assert_eq!(
+            explicit["info"]["workspace_index"]["embedding"]["input_budget"],
+            expected
         );
     }
 

@@ -49,8 +49,11 @@ use crate::{
     },
 };
 
-use super::pipeline::{
-    IndexEmbeddingRuntime, IndexingContext, get_workspace_index_status, index_workspace,
+use super::{
+    input_budget::embedding_input_budget,
+    pipeline::{
+        IndexEmbeddingRuntime, IndexingContext, get_workspace_index_status, index_workspace,
+    },
 };
 
 const DEFAULT_LOCAL_EMBEDDING: &str = "local/potion-code-16m-v2";
@@ -450,6 +453,18 @@ impl WorkspaceIndexService {
             None
         };
 
+        let mut workspace_index = WorkspaceIndexInfo::from_workspace(&workspace);
+        if options.include_status
+            && options.include_counts
+            && indexed
+            && let (Some(embedding), Some(descriptor)) = (
+                &mut workspace_index.embedding,
+                workspace.index().descriptor(),
+            )
+        {
+            embedding.input_budget =
+                embedding_input_budget(descriptor.default_embedding_model().max_input_tokens());
+        }
         Ok(InfoResult {
             compatibility: if metadata_indexed {
                 IndexCompatibility::Compatible {
@@ -468,7 +483,7 @@ impl WorkspaceIndexService {
             } else {
                 InfoSource::Unindexed
             },
-            workspace_index: Some(WorkspaceIndexInfo::from_workspace(&workspace)),
+            workspace_index: Some(workspace_index),
             status,
             suggestion: workspace_suggestion(&workspace, indexed),
         })
@@ -2779,6 +2794,90 @@ mod tests {
         drop(first);
         drop(second);
         models.close();
+    }
+
+    #[tokio::test]
+    async fn input_budget_diagnostics_use_saved_limits_without_loading_models_or_changing_metadata()
+    {
+        let directory = tempdir().expect("workspace");
+        let root = directory.path();
+        let cache = root.join("model-cache");
+        let service = WorkspaceIndexService::new();
+        let models = ModelRuntimeManager::new();
+        let mut options = empty_index_options(root);
+        options.embedding.as_mut().expect("model").cache_dir = Some(cache.clone());
+        service.index(&models, options).await.expect("empty index");
+        models.close();
+        assert!(!cache.exists(), "empty indexing must not prepare a model");
+        let layout = WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout");
+        let original = std::fs::read(layout.manifest_path()).expect("saved manifest");
+
+        // A saved limit that differs from the catalog proves that diagnostics
+        // describe this index rather than constructing a new model runtime.
+        for saved_limit in [Some(17), None] {
+            let mut manifest: serde_json::Value =
+                serde_json::from_slice(&original).expect("manifest JSON");
+            manifest["index"]["descriptor"]["defaultEmbeddingModel"]["maxInputTokens"] =
+                serde_json::json!(saved_limit);
+            let bytes = serde_json::to_vec(&manifest).expect("updated metadata");
+            std::fs::write(layout.manifest_path(), &bytes).expect("save test limit");
+            for (include_status, include_counts) in
+                [(true, false), (false, true), (true, true), (true, false)]
+            {
+                let info = service
+                    .info(InfoOptions {
+                        root: Some(root.to_path_buf()),
+                        include_status,
+                        include_counts,
+                    })
+                    .await
+                    .expect("read-only inspection");
+                let budget = info
+                    .workspace_index
+                    .expect("workspace")
+                    .embedding
+                    .expect("embedding")
+                    .input_budget;
+                assert_eq!(
+                    budget,
+                    if include_status && include_counts {
+                        super::embedding_input_budget(saved_limit)
+                    } else {
+                        None
+                    }
+                );
+                if let Some(budget) = budget {
+                    assert_eq!(budget.max_input_tokens, 17);
+                    assert_eq!(budget.normal.max_length, 31);
+                    assert_eq!(budget.normal.overlap, 4);
+                }
+                assert_eq!(
+                    std::fs::read(layout.manifest_path()).expect("manifest"),
+                    bytes
+                );
+                assert!(!cache.exists(), "inspection must not prepare a model");
+            }
+        }
+        std::fs::write(layout.manifest_path(), &original).expect("restore model metadata");
+        std::fs::remove_dir_all(layout.index_dir()).expect("remove test index");
+        let missing = service
+            .info(InfoOptions {
+                root: Some(root.to_path_buf()),
+                include_status: true,
+                include_counts: true,
+            })
+            .await
+            .expect("missing index inspection");
+        assert!(!missing.indexed);
+        assert_eq!(
+            missing
+                .workspace_index
+                .expect("workspace")
+                .embedding
+                .expect("model")
+                .input_budget,
+            None
+        );
     }
 
     #[tokio::test]

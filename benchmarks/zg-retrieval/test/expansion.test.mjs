@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { loadPilot } from "../expansion/datasets.mjs";
+import { loadPilot, pilotCorpusIds } from "../expansion/datasets.mjs";
+import { summarizeIndexSettings } from "../core/index-settings.mjs";
 import { locateFullEntity } from "../engines/zg/parse.mjs";
 import { summarizePilotEntity } from "../expansion/gold.mjs";
 import { PILOT_PREVIEW, PILOT_PROTOCOL } from "../expansion/config.mjs";
@@ -318,6 +319,30 @@ test("a failed pilot query keeps partial aggregate and all per-query conclusions
   assert.match(markdown, /\| scifact \| zg-hybrid \| 1\/10 \|/);
   assert.match(markdown, /\| nfcorpus \| zg-hybrid \| 0\/4 \|/);
   assert.match(markdown, /index failed/);
+  const corpora = pilotCorpusIds(pilot).map((id) => ({
+    id,
+    model: null,
+    input_budget: null,
+  }));
+  for (const model of [null, pilot.model, "local/wrong"]) {
+    corpora[0].model = model;
+    const changed = await buildCombined({
+      zg: null,
+      beir: { ...report, index_settings: summarizeIndexSettings(corpora) },
+      candidateCommit: "a".repeat(40),
+    });
+    if (model === "local/wrong") {
+      assert.equal(changed.pilots.beir.report, null);
+      assert.match(changed.pilots.beir.error, /indexed model differs/);
+    } else {
+      assert.equal(changed.pilots.beir.report.index_settings.model, null);
+      assert.equal(
+        changed.pilots.beir.report.index_settings.input_budget,
+        null,
+      );
+      assert.equal(changed.pilots.beir.report.summary[0].completed, 1);
+    }
+  }
   for (const change of [
     { preview: "short" },
     { preview: undefined },

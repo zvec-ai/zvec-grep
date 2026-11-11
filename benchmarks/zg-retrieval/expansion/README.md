@@ -60,6 +60,10 @@ N/A, including Fragment counts from older candidates that did not expose them.
 Counts come from explicit `zg --status --debug` calls before and after each
 index's retrieval batch, outside search timing. Each call reads the counts once;
 ordinary status, MCP status, and search freshness checks do not scan Fragments.
+The same response supplies the indexed model's input-token limit and normal/dense
+Fragment budgets. These are configured budgets in UTF-16 units before metadata
+allowance, not measured token use. Missing fields in older versions are N/A;
+see the [reporting rules](../README.md) for details.
 
 Full preview displays each retrieved Entity's complete content; short preview
 displays excerpts. Preserve earlier default-short artifacts and use their

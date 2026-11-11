@@ -48,6 +48,8 @@ import {
   summarizeIndexCounts,
   indexCountsMarkdown,
 } from "../core/index-counts.mjs";
+import { summarizeIndexSettings } from "../core/index-settings.mjs";
+import { indexSettingsMarkdown } from "../reports/index-settings.mjs";
 
 const REPETITIONS = 5;
 const LIMIT = 10;
@@ -209,6 +211,8 @@ export function markdownPilotReport(report) {
     `${planned} original queries · model \`${report.model}\` · Rust MCP full preview · five calls/query`,
     "",
     indexCountsMarkdown(report.index_counts),
+    "",
+    indexSettingsMarkdown(report.index_settings, report.model),
     "",
     "| Mode | Completed | Stable Top 10 | File Hit@1 | File Hit@5 | File Hit@10 | File MRR@10 | nDCG@10 | Mean output (KiB) | Avg RT (ms) | P50 RT (ms) |",
     "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -434,6 +438,11 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
       env,
     });
     assert.equal(before.failed_files.length, 0);
+    assert.equal(
+      before.index_settings.model,
+      pilot.model,
+      "indexed model differs from the suite",
+    );
     assert.ok(before.files > 0);
     if (group.expectedIndexedFiles)
       assert.equal(
@@ -561,6 +570,11 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
       before.logical_content_sha256,
       "index changed during retrieval",
     );
+    assert.deepEqual(
+      after.index_settings,
+      before.index_settings,
+      "index settings changed during retrieval",
+    );
     const counts = {
       id: group.id,
       entities: after.entities,
@@ -573,6 +587,13 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
     report.index_counts = summarizeIndexCounts(
       report.index_counts.corpora.map((entry) =>
         entry.id === group.id ? counts : entry,
+      ),
+    );
+    report.index_settings = summarizeIndexSettings(
+      report.index_settings.corpora.map((entry) =>
+        entry.id === group.id
+          ? { id: group.id, ...after.index_settings }
+          : entry,
       ),
     );
     for (const row of groupRows) row.group_integrity = "verified";
@@ -638,6 +659,13 @@ export async function main(args = process.argv.slice(2)) {
         id,
         entities: null,
         fragments: null,
+      })),
+    ),
+    index_settings: summarizeIndexSettings(
+      pilotCorpusIds(pilot).map((id) => ({
+        id,
+        model: pilot.model,
+        input_budget: null,
       })),
     ),
   };

@@ -13,6 +13,7 @@ import {
 import { QUALITY_METRICS } from "../reports/ci.mjs";
 import { QA_ENTITY_METRICS } from "../reports/zg.mjs";
 import { QA_SCORING } from "../core/suite.mjs";
+import { summarizeIndexSettings } from "../core/index-settings.mjs";
 import {
   PILOT_FILE_RECALL_METRICS,
   PILOT_QA_SCORING,
@@ -175,6 +176,77 @@ test("indexed corpus counts compare once per suite and preserve unknown totals",
   assert.deepEqual(comparison.index_counts.sweqa.baseline, counts);
   before.sweqa.index_counts = { ...counts, fragments: 2012 };
   assert.throws(() => compareCombinedResults(before, after, metadata));
+});
+
+test("model budgets propagate to each dataset without changing retrieval metrics", () => {
+  const before = result(baseSha),
+    after = result(headSha);
+  const original = compareCombinedResults(before, after, metadata);
+  const budget = {
+    max_input_tokens: 1024,
+    unit: "utf16_code_units",
+    rounding: "floor",
+    overlap_percent: 15,
+    normal: { chars_per_100_tokens: 185, max_length: 1894, overlap: 284 },
+    dense: { chars_per_100_tokens: 100, max_length: 1024, overlap: 153 },
+  };
+  for (const suite of [after.sweqa, ...Object.values(after.pilots)]) {
+    (suite.report ?? suite).index_settings = summarizeIndexSettings([
+      { id: "corpus", model: suite.model, input_budget: budget },
+    ]);
+  }
+  const comparison = compareCombinedResults(before, after, metadata);
+  assert.deepEqual(comparison.rows, original.rows);
+  assert.equal(comparison.index_settings.sweqa.baseline, null);
+  assert.deepEqual(
+    comparison.index_settings.beir.candidate.input_budget,
+    budget,
+  );
+  const markdown = markdownVersionComparison(comparison);
+  assert.equal((markdown.match(/^Embedding:/gm) ?? []).length, 4);
+  assert.match(markdown, /N\/A → 1,024 tokens/);
+  assert.match(markdown, /before metadata allowance/);
+  after.sweqa.index_settings = summarizeIndexSettings([
+    { id: "corpus", model: "local/wrong", input_budget: budget },
+  ]);
+  assert.throws(() => compareCombinedResults(before, after, metadata), /model/);
+});
+
+test("historical unknown index models remain comparable without hiding a wrong known model", () => {
+  const before = result(baseSha),
+    after = result(headSha);
+  const unknown = [
+    { id: "a", model: null, input_budget: null },
+    { id: "b", model: null, input_budget: null },
+  ];
+  for (const suite of [before.sweqa, ...Object.values(before.pilots)])
+    (suite.report ?? suite).index_settings = summarizeIndexSettings(unknown);
+  const comparison = compareCombinedResults(before, after, metadata);
+  assert.equal(comparison.index_settings.sweqa.baseline.model, null);
+  assert.equal(comparison.index_settings.beir.baseline.input_budget, null);
+  assert.match(
+    markdownVersionComparison(comparison),
+    /ZG input limit: \*\*N\/A\*\*/,
+  );
+  for (const suite of [before.sweqa, ...Object.values(before.pilots)]) {
+    const target = suite.report ?? suite;
+    const original = target.index_settings;
+    target.index_settings = summarizeIndexSettings([
+      unknown[0],
+      { ...unknown[1], model: suite.model },
+    ]);
+    assert.doesNotThrow(() => compareCombinedResults(before, after, metadata));
+    target.index_settings = summarizeIndexSettings([
+      unknown[0],
+      { ...unknown[1], model: "local/wrong" },
+    ]);
+    assert.equal(target.index_settings.model, null);
+    assert.throws(
+      () => compareCombinedResults(before, after, metadata),
+      /model/,
+    );
+    target.index_settings = original;
+  }
 });
 
 test("incomplete, mixed-harness, wrong-commit and mixed-model results are rejected", () => {

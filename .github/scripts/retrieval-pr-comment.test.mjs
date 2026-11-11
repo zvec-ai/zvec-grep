@@ -7,6 +7,7 @@ import test from "node:test";
 import { publish, validateComparison } from "./retrieval-pr-comment.mjs";
 import { QA_SCORING } from "../../benchmarks/zg-retrieval/core/suite.mjs";
 import { summarizeIndexCounts } from "../../benchmarks/zg-retrieval/core/index-counts.mjs";
+import { summarizeIndexSettings } from "../../benchmarks/zg-retrieval/core/index-settings.mjs";
 import { pilotCorpusIds } from "../../benchmarks/zg-retrieval/expansion/datasets.mjs";
 import {
   PILOT_FILE_RECALL_METRICS,
@@ -362,6 +363,117 @@ test("the publisher requires every frozen corpus ID while retaining unknown coun
       assert.equal(checked.fragments, null);
       assert.equal(checked.corpora.length, corpusIds[suite].length);
     }
+  }
+});
+
+test("the publisher validates and displays collected model budgets for all four suites", async (t) => {
+  const budget = {
+    max_input_tokens: 1024,
+    unit: "utf16_code_units",
+    rounding: "floor",
+    overlap_percent: 15,
+    normal: { chars_per_100_tokens: 185, max_length: 1894, overlap: 284 },
+    dense: { chars_per_100_tokens: 100, max_length: 1024, overlap: 153 },
+  };
+  const settingsFor = (suite, input_budget) =>
+    summarizeIndexSettings(
+      corpusIds[suite].map((id) => ({
+        id,
+        model: models[suite],
+        input_budget,
+      })),
+    );
+  const payload = {
+    ...structuredClone(report),
+    index_settings: Object.fromEntries(
+      Object.keys(models).map((suite) => [
+        suite,
+        {
+          baseline: settingsFor(suite, null),
+          candidate: settingsFor(suite, budget),
+        },
+      ]),
+    ),
+  };
+  payload.index_settings.beir.candidate.markdown = "@everyone forged settings";
+  payload.index_settings.beir.candidate.corpora[0].url = "https://evil.invalid";
+  const validated = validateComparison(payload, request);
+  assert.deepEqual(
+    validated.index_settings.beir.candidate,
+    settingsFor("beir", budget),
+  );
+  assert.equal(validateComparison(report, request).index_settings, undefined);
+  const x = await fixture(t);
+  await x.write("comparison/summary.json", payload);
+  await publish(x);
+  const body = x.messages()[0][1].body;
+  assert.equal((body.match(/^Embedding:.*ZG input limit:/gm) ?? []).length, 4);
+  assert.equal((body.match(/^\| Mode \| Level \|/gm) ?? []).length, 4);
+  assert.match(body, /ZG input limit: \*\*N\/A → 1,024 tokens\*\*/);
+  assert.match(body, /normal \*\*N\/A → 1,894 \/ 284\*\*/);
+  assert.doesNotMatch(body, /everyone|forged|evil/);
+  for (const change of [
+    (entry) => {
+      entry.input_budget.max_input_tokens = -1;
+    },
+    (entry) => {
+      entry.input_budget.unit = "tokens";
+    },
+    (entry) => {
+      entry.input_budget.rounding = "<script>";
+    },
+    (entry) => {
+      entry.input_budget.normal.overlap = 9999;
+    },
+    (entry) => {
+      entry.model = "local/wrong";
+    },
+    (entry) => {
+      entry.corpora.pop();
+    },
+    (entry) => {
+      entry.corpora[0].id = "wrong";
+    },
+  ]) {
+    const invalid = structuredClone(payload);
+    change(invalid.index_settings.beir.candidate);
+    assert.throws(() => validateComparison(invalid, request));
+  }
+  for (const index_settings of [
+    null,
+    [],
+    { sweqa: payload.index_settings.sweqa },
+  ])
+    assert.throws(() =>
+      validateComparison({ ...payload, index_settings }, request),
+    );
+  const absent = structuredClone(payload);
+  absent.index_settings.beir = { baseline: null, candidate: null };
+  assert.deepEqual(validateComparison(absent, request).index_settings.beir, {
+    baseline: null,
+    candidate: null,
+  });
+  for (const suite of Object.keys(models)) {
+    const legacy = structuredClone(payload);
+    const corpora = corpusIds[suite].map((id) => ({
+      id,
+      model: null,
+      input_budget: null,
+    }));
+    legacy.index_settings[suite].baseline = summarizeIndexSettings(corpora);
+    assert.equal(
+      validateComparison(legacy, request).index_settings[suite].baseline.model,
+      null,
+    );
+    corpora[0].model = models[suite];
+    legacy.index_settings[suite].baseline = summarizeIndexSettings(corpora);
+    assert.doesNotThrow(() => validateComparison(legacy, request));
+    corpora[0].model = "local/wrong";
+    legacy.index_settings[suite].baseline = summarizeIndexSettings(corpora);
+    assert.throws(
+      () => validateComparison(legacy, request),
+      /Unexpected indexed model/,
+    );
   }
 });
 

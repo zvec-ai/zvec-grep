@@ -29,6 +29,7 @@ import {
 } from "../metrics/entities.mjs";
 import { validateZgReport, ZG_MODES } from "../reports/validation.mjs";
 import { summarizeIndexCounts } from "../core/index-counts.mjs";
+import { summarizeIndexSettings } from "../core/index-settings.mjs";
 
 const suite = await loadSuite();
 const clone = (value) => structuredClone(value);
@@ -177,6 +178,50 @@ test("SWE-QA inventory sums each pinned repository once across all calls", async
   assert.equal(missing.status, "success");
   assert.equal(missing.index_counts.entities, null);
   assert.equal(missing.index_counts.fragments, null);
+});
+
+test("SWE-QA index settings require every repository and the configured model", async () => {
+  const report = zgReport();
+  const budget = {
+    max_input_tokens: 1024,
+    unit: "utf16_code_units",
+    rounding: "floor",
+    overlap_percent: 15,
+    normal: { chars_per_100_tokens: 185, max_length: 1894, overlap: 284 },
+    dense: { chars_per_100_tokens: 100, max_length: 1024, overlap: 153 },
+  };
+  for (const [index, manifest] of report.repositories.entries()) {
+    const repo = suite.lock.repositories[index];
+    manifest.index_settings = summarizeIndexSettings([
+      {
+        id: `${repo.repository}@${repo.commit}`,
+        model: suite.protocol.model,
+        input_budget: budget,
+      },
+    ]);
+  }
+  const summary = await buildCiSummary({ zg: report });
+  assert.equal(summary.status, "success");
+  assert.equal(summary.index_settings.model, suite.protocol.model);
+  assert.deepEqual(summary.index_settings.input_budget, budget);
+  assert.equal(summary.index_settings.corpora.length, 11);
+  delete report.repositories[0].index_settings;
+  const missing = await buildCiSummary({ zg: report });
+  assert.equal(missing.status, "success");
+  assert.equal(missing.index_settings.model, null);
+  assert.equal(missing.index_settings.input_budget, null);
+  assert.deepEqual(missing.index_settings.corpora[1].input_budget, budget);
+  report.repositories[1].index_settings = summarizeIndexSettings([
+    {
+      ...report.repositories[1].index_settings.corpora[0],
+      model: "local/wrong-model",
+    },
+  ]);
+  const mismatch = await buildCiSummary({ zg: report });
+  assertUnavailable(mismatch);
+  assert.ok(
+    mismatch.errors.some((error) => /configured suite model/.test(error)),
+  );
 });
 function assertUnavailable(result) {
   assert.equal(result.status, "failed");
