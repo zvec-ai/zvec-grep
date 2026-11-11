@@ -167,9 +167,9 @@ impl Fragments {
             )?;
             for doc in iterator {
                 native(doc, "read fragment identity")?;
-                count = count.checked_add(1).ok_or_else(|| {
-                    EngineError::storage_failure("fragment count exceeds u64")
-                })?;
+                count = count
+                    .checked_add(1)
+                    .ok_or_else(|| EngineError::storage_failure("fragment count exceeds u64"))?;
             }
         }
         Ok(count)

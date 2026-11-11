@@ -195,7 +195,10 @@ fn counts_live_fragments_across_models_and_read_only_reopens() {
     let temporary = tempfile::tempdir().expect("temporary storage");
     let mut other = serde_json::to_value(model()).expect("model metadata");
     other["model"]["name"] = serde_json::json!("other");
-    let embeddings = vec![model(), serde_json::from_value(other).expect("second model")];
+    let embeddings = vec![
+        model(),
+        serde_json::from_value(other).expect("second model"),
+    ];
     let store = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         graph_enabled: false,
         storage_path: temporary.path().to_owned(),
@@ -246,9 +249,13 @@ fn counts_live_fragments_across_models_and_read_only_reopens() {
         embeddings,
     })
     .expect("reopen writer");
-    store.delete_file(FileId::new(0)).expect("delete first file");
+    store
+        .delete_file(FileId::new(0))
+        .expect("delete first file");
     assert_eq!(store.count_fragments().expect("remaining count"), 2);
-    store.delete_file(FileId::new(1)).expect("delete second file");
+    store
+        .delete_file(FileId::new(1))
+        .expect("delete second file");
     assert_eq!(store.count_fragments().expect("empty count"), 0);
 }
 
