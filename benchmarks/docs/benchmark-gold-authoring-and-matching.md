@@ -2,14 +2,14 @@
 
 Each case contains its original question and the files (File) and source targets, such as functions, classes, or evidence passages (Entity), that retrieval should find. These expected targets are the **Gold**.
 
-Gold must include every expected target within the specified source version and search scope.
+Gold must preserve all known relevant targets from the declared annotation sources. State the annotation scope and method, and record known omissions and unresolved items. Recall measures coverage of this Gold; it does not establish that every relevant target in the entire corpus is known.
 
 ## Authoring Gold
 
-1. Preserve the original question. Specify the source version and searchable files.
+1. Preserve the original question. Specify the source version, searchable files, annotation sources, and annotation method.
 2. Annotate File and Entity targets separately, with source locations and relevance explanations.
-3. Have an independent reviewer check that targets are correct and none are missing. Record the conclusions.
-4. Cases that have not passed correctness and completeness review must not enter formal evaluation.
+3. Check each target against its source evidence. Reconcile the Gold with the declared annotation sources, including all known alternatives; record omissions and unresolved items separately.
+4. Evaluation does not require proof that the entire corpus has no other relevant targets. Report the annotation scope and limitations with the results.
 5. Resolve the question's meaning and scoring rules before evaluation.
 6. Changes to parser IDs or chunk boundaries do not change the Gold.
 7. Preserve original document and passage judgments. For Entity Gold, identify the specific evidence in the pinned source. Record a reason when the judgment cannot be narrowed to a verified span.
@@ -42,6 +42,7 @@ K is the number of original result positions examined. Compute each metric separ
 - For Hit, Recall, RR, and nDCG, average repeated runs within each case first, then average across cases with equal case weights.
 - Result tables show scores only. Keep scored/eligible counts and unscored-case reasons in machine-readable reports, without repeating counts beside the tables.
 - Use the same questions, source and search scope, Gold, scoring rules, and return limits on both sides of a comparison.
+- When adding or correcting targets, publish a new Gold version and recalculate both sides with that version. Preserve the previous results.
 
 Follow the [benchmark working rules](../AGENTS.md) for evidence storage, version changes, and Git submissions.
 

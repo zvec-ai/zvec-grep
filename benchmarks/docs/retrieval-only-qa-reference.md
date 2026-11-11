@@ -5,8 +5,8 @@ Use this reference when preparing data or writing scoring code. For the core rul
 ## Authoring and review
 
 - The annotator and reviewer each read the question and source first, then use reference answers to check for gaps.
-- Review must check both whether the targets are correct and whether any are missing. Record the conclusions.
-- Questions must pass both correctness and completeness review before entering formal evaluation.
+- Record the annotation sources, their versions, the scope covered, and the generation method, including LLM use.
+- Check target relevance and reconcile the Gold with all known labels in those sources. Record known omissions and unresolved items; exhaustive whole-corpus judgment is not an evaluation prerequisite.
 - Do not inspect the evaluated tool's name, retrieval ranks, or scores while authoring or reviewing.
 - Reference answers, Gold, and reports must not be searchable. The original source code that Gold points to remains searchable.
 - Record the File containing each Entity. Verify File and Entity targets separately.
@@ -52,7 +52,7 @@ when several groups are found.
 
 - Specify which result group to use and how to read its order in advance. Do not adjust these choices based on Gold.
 - Duplicate results keep their original positions. Do not remove them and pull later results into the top K.
-- Formal scoring at either level requires a correctness and completeness review. Identify diagnostic scores based on verified targets separately.
+- Score against the declared Gold version and annotation scope. Recall measures the fraction of those targets retrieved, not coverage of every possible answer in the corpus. Identify diagnostic results and annotation limitations explicitly.
 - The first K results must be complete, or there must be evidence that the tool returned all available results.
 - If uncertainty could change a metric, leave that metric unscored rather than assigning zero.
 - Record failures, missing data, parsing errors, limit violations, and valid misses separately.
@@ -98,7 +98,7 @@ these rules. Rescoring historical responses is not a new retrieval run.
 
 When source targets move, are renamed, split, merged, or deleted, review them again and publish a new Gold version.
 
-When missing correct targets are found, review them independently before publishing a new Gold version.
+When missing correct targets are found, verify their source evidence, publish a new Gold version, and rescore both sides. Keep the previous version and results.
 
 The suite README must list the metrics and K values actually supported, and the scoring code version.
 
@@ -115,8 +115,8 @@ Checksums help detect changes to saved content.
 | File Gold | Repository-relative path, evidence location, relevance rationale, and checksums for the file and evidence content. |
 | Entity Gold | Containing file, type, full name, source range, key code, and its checksum. |
 | Non-unique names | Containing class, enclosing function, or other information that distinguishes targets with the same name. |
-| Review process | Annotator and reviewer, initial drafts, reference material already seen, disagreements, and final conclusions. |
-| Verification status | Separate File and Entity statuses: verified, needs evidence, disputed, or not applicable. |
+| Annotation record | Sources and versions, covered scope, generation method, rules, and supporting evidence. |
+| Unresolved items | Known omissions, disputed interpretations, and targets without enough evidence; record reasons separately for File and Entity. |
 | Run configuration | Invocation entry point, model and retrieval settings, output format, K values, and result count and length limits. |
 | Returned content | Raw responses, retrieved content's source ranges, preview settings, and display truncation. |
 

@@ -23,6 +23,7 @@ Keeping evidence does not require committing every record to Git.
 
 - Follow the [QA pair authoring and matching rules](docs/benchmark-gold-authoring-and-matching.md). Preserve the original query and annotate File and Entity Gold separately.
 - Keep the same Gold when changing the parser. Do not regenerate answers from new internal IDs or chunk boundaries. Review source or Gold changes individually and keep a change record.
+- Preserve all known relevant targets from the declared annotation sources. State the scope and method, record known omissions and unresolved items, and version corrections. Recall is measured against that Gold; exhaustive whole-corpus judgment is not required.
 - Preserve native result ranks in comparisons. Use the same result-count and length limits, and record the Gold, scoring rules, and scorer versions actually used.
 
 ## Maintaining these rules

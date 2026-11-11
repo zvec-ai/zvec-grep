@@ -111,8 +111,9 @@ Gold and reports stay outside the searchable corpus.
 
 File Recall uses all original positive paths with the same ranking and
 aggregation rules as the existing File scores. Entity metrics are diagnostic.
-The scored targets cover the verified evidence within the published positives.
-A separate completeness review against the full corpus is still pending. Some
+The scored targets cover the established evidence within the published positives.
+Recall uses these recorded targets as its denominator; no exhaustive review of
+the full corpus is required. Known gaps remain in `unresolved`. Some
 Quarry questions ask for declarations or parts of a code path beyond the
 published functions. The Entity scores measure coverage of those published
 functions.

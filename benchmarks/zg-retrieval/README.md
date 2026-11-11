@@ -79,8 +79,10 @@ The [QA dataset](gold/qa-pairs.md) adds the same 20 original questions with
 65 reviewed File targets and 114 Entity targets. Its source locations and
 declarations are tied to the pinned repositories, independently of ZG's parser.
 Seventeen cases permit diagnostic scoring; three have unresolved question
-interpretations. **No case is eligible for formal QA scoring yet:** the Gold
-completeness review is a separate requirement.
+interpretations. This dataset version reports diagnostic scores against the
+recorded targets. Recall does not imply exhaustive coverage of all relevant
+code in the repositories. Gold updates must state their annotation scope and
+be applied to both sides of a comparison.
 
 The normal runner and report commands also compute these metrics from the same
 five public responses per question and mode:

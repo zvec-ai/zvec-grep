@@ -67,13 +67,13 @@ test("Pilot labels score without claiming review and never produce formal totals
 
   const shouldNotRead = {
     get review() {
-      assert.fail("Pilot scoring must not read a QA review");
+      return assert.fail("Pilot scoring must not read a QA review");
     },
     get scoring_eligible() {
-      assert.fail("Pilot scoring must not read formal eligibility");
+      return assert.fail("Pilot scoring must not read formal eligibility");
     },
     get diagnostic_eligible() {
-      assert.fail("Pilot scoring must not read diagnostic eligibility");
+      return assert.fail("Pilot scoring must not read diagnostic eligibility");
     },
   };
   Object.defineProperties(

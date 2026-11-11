@@ -8,15 +8,17 @@ entity targets from the historical S2 review.
 
 | Use | Cases | Meaning |
 | --- | ---: | --- |
-| Diagnostic scoring | 17 | Previously reviewed positive targets; completeness has not been reviewed. |
+| Diagnostic scoring | 17 | Known positive targets recorded in the historical S2 annotation bundle. |
 | Excluded from diagnostic scoring | 3 | `streamlink:14`, `django:32`, and `streamlink:43` have unresolved question interpretations. |
-| Formal scoring | 0 | Every case still requires the completeness review required by the [QA rules](../../docs/benchmark-gold-authoring-and-matching.md). |
+| Formal scoring | 0 | This frozen version is published for diagnostic use. |
 
 `diagnostic_eligible` permits a diagnostic score only. It does not override
 `scoring_eligible`, which remains false for every case. Do not present a score
 against these labels as formal Entity Recall or as complete answer coverage.
-The three disputed cases retain their alternative interpretations and targets;
-they are not silently dropped or assigned zero.
+Recall uses the recorded targets as its denominator. The three disputed cases
+retain their alternative interpretations and targets; they are not silently
+dropped or assigned zero. Historical review fields remain in the frozen export
+for reproducibility; they do not prove full-corpus coverage.
 
 The existing `files-v1.json` and its historical File scores are unchanged. The
 reviewed QA targets have a different denominator and must be reported separately.
@@ -56,6 +58,7 @@ The archive directory contains `<full-commit>.tar.gz` files. Without
 bundle's input lock. These machine paths never enter the exported dataset.
 
 The importer verifies archive commits and checksums, exact source spans, and
-Python/C declaration identity. These checks prove source consistency, not that
-all relevant targets have been labeled. A separate correctness and completeness
-review is required before changing formal eligibility.
+Python/C declaration identity. These checks establish source consistency.
+For a new Gold version, reconcile all known targets from the declared annotation
+sources, record omissions and unresolved items, and rescore both sides using
+that version. Exhaustive whole-corpus judgment is not required.
