@@ -428,7 +428,7 @@ test("Linux artifact smoke loads packaged ORT and runs inference on both archite
     assert.equal(failedLoad.status, 73, failedLoad.stderr);
     assert.doesNotMatch(failedLoad.stdout, /unexpected inference/);
   }
-  assert.match(workflow, /name: Restore the real model cache\n\s+if:.*matrix\.target == 'linux-arm64-gnu'/);
+  assert.match(workflow, /name: Restore the real model cache\n\s+uses: actions\/cache@/);
 });
 
 test("Linux Vulkan ORT build-script validation uses a network-disabled container and separate outputs", { skip: process.platform !== "linux" }, async (t) => {

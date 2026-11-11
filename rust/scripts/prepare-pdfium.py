@@ -160,7 +160,7 @@ def source_tree(root, manifest, target):
     (root / ".gclient").write_text(
         f"solutions = [{config!r}]\ntarget_os = [{spec['os']!r}]\n")
     synced = root / ".synced"
-    stamp = manifest["revision"] + ":" + json.dumps([spec, config], sort_keys=True) + ":" + digest(Path(__file__))
+    stamp = manifest["revision"] + ":" + json.dumps([spec, config], sort_keys=True)
     if not synced.is_file() or synced.read_text() != stamp:
         # Parallel GCS downloads otherwise race while bootstrapping depot_tools'
         # shared CIPD/vpython directory on a clean machine. Initialize once.
