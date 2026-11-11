@@ -19,7 +19,8 @@ use self::adapter::{
 };
 use super::graph::{
     WalkContext, alias_target_of, collect_import_edge, collect_inheritance_edges, is_import_node,
-    partition_walk, scan_binding_declarations, scan_call_edges, scan_return_types,
+    partition_walk, scan_binding_declarations, scan_call_edges, scan_preprocessor,
+    scan_return_types,
 };
 use super::{
     ChunkOptions, ExtractedEntity, ExtractionOutput, TextRange, TextSource,
@@ -129,6 +130,10 @@ fn extract_code(
     // initializer binds its factory even when the factory is spelled after
     // the caller in this file.
     scan_return_types(tree.root_node(), bytes, code_format, &mut graph_context);
+    // Directives describe the file rather than any entity, so they are read
+    // once from the root: the resolver replays them to decide whether a call
+    // site's name was already a macro in that translation unit.
+    graph_context.register_preprocessor(scan_preprocessor(tree.root_node(), bytes, code_format));
     walk_code_node(
         tree.root_node(),
         adapter,
@@ -155,9 +160,18 @@ fn extract_code(
         append_php_gaps(source, &entities, max_chars, overlap_chars, &mut output);
     }
     if output.is_empty() {
+        // A file that declares no entity the walk could bound still describes
+        // its translation units when it carries preprocessor directives — a
+        // header of nothing but `#define`s and `#include`s is exactly that, and
+        // the resolver needs those directives to read the includer's macro
+        // state. The graph is therefore kept when the scan recorded one.
+        let partitioned = graph_context
+            .is_collecting()
+            .then(|| partition_walk(graph_context, entity_heads))
+            .filter(|graph| !graph.directives.is_empty());
         Ok(ExtractionOutput {
             fragments: fallback(source, max_chars, overlap_chars),
-            graph: None,
+            graph: partitioned,
         })
     } else {
         // The symbol table is complete now, so partitioning resolves forward

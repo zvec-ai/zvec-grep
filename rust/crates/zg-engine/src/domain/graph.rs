@@ -128,6 +128,49 @@ pub(crate) struct FileGraphResult {
     pub nodes: Vec<FileGraphNode>,
     pub edges: Vec<FileEdge>,
     pub pending_refs: Vec<PendingRef>,
+    /// C/C++ preprocessor directives in source order, empty for every other
+    /// language. The resolver replays them to learn which names a translation
+    /// unit had already spelled as macros at a given line.
+    pub directives: Vec<PreprocessorDirective>,
+}
+
+/// One directive of a C/C++ translation unit, in the order the preprocessor
+/// reads it: the file's own directives with each conditional's branches and
+/// closing marker spelled out.
+///
+/// `#endif` is a token in the grammar rather than a node, so extraction
+/// synthesises the [`PreprocessorKind::Endif`] marker at the conditional's end:
+/// the replay needs the block boundaries, not just the openings.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct PreprocessorDirective {
+    pub kind: PreprocessorKind,
+    /// Macro the directive reads or writes: `#define`, `#undef`, `#ifdef`,
+    /// `#ifndef`, and the guard an `#elifdef` tests.
+    pub name: Option<String>,
+    /// Operand text: the include specifier (`./x.h`, `<string>`), a macro body,
+    /// or the whole `#if` condition.
+    pub value: Option<String>,
+    pub line: usize,
+}
+
+/// The directives a replay distinguishes.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PreprocessorKind {
+    Include,
+    Define,
+    Undef,
+    PragmaOnce,
+    /// `#if` with a condition expression in `value`.
+    If,
+    Ifdef,
+    Ifndef,
+    /// `#elif` with a condition expression in `value`.
+    Elif,
+    /// `#elifdef`/`#elifndef` guarded by `name`.
+    Elifdef,
+    Else,
+    Endif,
 }
 
 impl GraphEdgeKind {

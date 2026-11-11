@@ -25,7 +25,7 @@ fn named_children(node: Node<'_>) -> Vec<Node<'_>> {
     node.named_children(&mut cursor).collect()
 }
 
-fn node_text<'source>(node: Node<'_>, source: &'source [u8]) -> &'source str {
+pub(crate) fn node_text<'source>(node: Node<'_>, source: &'source [u8]) -> &'source str {
     node.utf8_text(source).unwrap_or_default()
 }
 
@@ -1352,7 +1352,7 @@ fn strip_trailing_semicolons(value: &str) -> &str {
 }
 
 /// Extracts the module path from an import node via grammar fields or text.
-fn module_path_of(node: Node<'_>, source: &[u8], format: FileFormat) -> Option<String> {
+pub(crate) fn module_path_of(node: Node<'_>, source: &[u8], format: FileFormat) -> Option<String> {
     if let Some(vocabulary) = import_vocabulary_for(format) {
         for field in vocabulary.module_fields {
             if let Some(target) = node.child_by_field_name(field) {

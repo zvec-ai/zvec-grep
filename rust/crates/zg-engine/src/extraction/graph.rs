@@ -30,6 +30,7 @@
 
 mod collector;
 mod partition;
+mod preprocessor;
 mod vocabulary;
 
 pub(crate) use collector::{
@@ -40,10 +41,11 @@ pub(crate) use collector::{
 pub(crate) use partition::{PartitionedGraph, partition_walk};
 #[cfg(test)]
 pub(crate) use partition::{PendingNameRef, ResolvedNameEdge};
+pub(crate) use preprocessor::scan_preprocessor;
 
 use std::collections::{HashMap, HashSet};
 
-use crate::domain::GraphEdgeKind;
+use crate::domain::{GraphEdgeKind, PreprocessorDirective};
 
 /// Owner index standing in for file scope. Import references belong to the
 /// file, not to any entity; the TypeScript original passes the file ID here.
@@ -155,6 +157,9 @@ pub(crate) struct WalkContext {
     /// initializer (`x = makeX()`), `None` marks a name registered with two
     /// different types whose factory answer is ambiguous.
     return_types: HashMap<String, Option<String>>,
+    /// C/C++ preprocessor directives in source order. The resolver replays
+    /// them to decide whether a call site's name was already a macro.
+    preprocessor: Vec<PreprocessorDirective>,
     entity_counter: usize,
     /// False when the workspace does not keep a graph: every collector
     /// returns immediately and no buffer is ever filled.
@@ -190,6 +195,7 @@ impl WalkContext {
             value_aliases: HashMap::new(),
             seen_name_edges: HashSet::new(),
             return_types: HashMap::new(),
+            preprocessor: Vec::new(),
             entity_counter: 0,
             collecting,
         }
@@ -198,6 +204,13 @@ impl WalkContext {
     /// False when this walk records no graph state.
     pub(crate) fn is_collecting(&self) -> bool {
         self.collecting
+    }
+
+    /// Records the file's preprocessor directives, in source order.
+    pub(crate) fn register_preprocessor(&mut self, directives: Vec<PreprocessorDirective>) {
+        if self.collecting {
+            self.preprocessor = directives;
+        }
     }
 
     /// Allocates the next per-file entity ordinal. Ordinals follow walk order,

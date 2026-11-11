@@ -49,6 +49,7 @@ pub(super) fn assemble_file_graph(
         nodes: entity_nodes,
         edges: file_edges(graph, entities, &file_scope),
         pending_refs: file_pending_refs(graph, entities, &file_scope),
+        directives: graph.directives.clone(),
     }
 }
 

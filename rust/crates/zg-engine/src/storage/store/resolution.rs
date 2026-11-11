@@ -629,6 +629,34 @@ impl IndexStore {
         })
     }
 
+    /// The preprocessor directives of one Indexed file, in source order.
+    pub(crate) fn preprocessor_directives(
+        &self,
+        file_id: u32,
+    ) -> EngineResult<Vec<crate::domain::PreprocessorDirective>> {
+        self.read(|state| {
+            if !is_indexed(state, file_id)? {
+                return Ok(Vec::new());
+            }
+            graph(state)?
+                .preprocessor_directives(file_id)
+                .map_err(graph_error)
+        })
+    }
+
+    /// Names of the bare calls one file still leaves pending, the watch set of
+    /// the macro replay.
+    pub(crate) fn pending_call_names(&self, file_id: u32) -> EngineResult<Vec<String>> {
+        self.read(|state| {
+            if !is_indexed(state, file_id)? {
+                return Ok(Vec::new());
+            }
+            graph(state)?
+                .pending_call_names(file_id)
+                .map_err(graph_error)
+        })
+    }
+
     /// Type bindings one entity declares, the resolver's receiver evidence.
     pub(crate) fn declared_bindings(&self, owner_id: &str) -> EngineResult<Vec<DeclaredBinding>> {
         self.read(|state| {

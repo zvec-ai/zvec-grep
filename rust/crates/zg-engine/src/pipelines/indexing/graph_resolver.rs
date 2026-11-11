@@ -10,9 +10,11 @@
 //! calls bind the nearest declaration along the extends/implements
 //! hierarchy, qualified `Class::method` receivers bind to the entity whose
 //! `qualified_name` spells the same path, Java imports bind to the type or
-//! static member their specifier spells, export/arity evidence narrows the
-//! remaining ambiguities, external import specifiers terminate as failed,
-//! and [`IndexStore::apply_resolutions`] writes each batch atomically.
+//! static member their specifier spells, a bare call the translation unit
+//! defines as a macro at its own line stays pending (the preprocessor replaced
+//! it before any call existed), export/arity evidence narrows the remaining
+//! ambiguities, external import specifiers terminate as failed, and
+//! [`IndexStore::apply_resolutions`] writes each batch atomically.
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
@@ -23,6 +25,7 @@ use std::path::Path;
 use tokio_util::sync::CancellationToken;
 
 use super::pipeline::throw_if_cancelled;
+use super::preprocessor::MacroTimeline;
 use crate::domain::{
     EdgeProvenance, FileFormat, GraphEdgeKind, SymbolType, formats_for_path,
     reference_compatible_with,
@@ -248,6 +251,11 @@ struct RuleCaches {
     /// translation unit, so the closure answers reachability for the whole
     /// chain at once instead of per candidate.
     include_closures: HashMap<u32, HashSet<u32>>,
+    /// One file's replayed macro timeline, the evidence a bare call is a macro
+    /// expansion rather than a call. Every reference of a file asks the same
+    /// question, and the replay walks that file's whole include chain, so it
+    /// runs once per file per sweep.
+    tu_macros: HashMap<u32, MacroTimeline>,
 }
 
 impl ResolutionSweep {
@@ -293,6 +301,13 @@ fn classify(
         // Binding evidence for `resolve_receiver_typed`, not a call site: the
         // bound variable name must never reach the name-index lookup below.
         // Declares edges stay pending in the table for every later sweep.
+        return Ok(Outcome::Deferred);
+    }
+    if expands_as_macro(store, snapshot, stored, caches)? {
+        // The name is a macro at this line, so the call never happens: the
+        // preprocessor replaces it with the macro's body before the compiler
+        // sees a call. Whatever function the name also spells elsewhere — the
+        // decoy, a header's prototype — is not what this site reaches.
         return Ok(Outcome::Deferred);
     }
     if is_unresolvable_import(snapshot, stored, &mut caches.module_paths) {
@@ -352,6 +367,41 @@ fn classify(
         });
     }
     classify_names(store, snapshot, stored, caches)
+}
+
+/// Whether the call site spells a macro the translation unit defines there.
+///
+/// Only a bare call can stand for a macro: `object.member` and `Scope::member`
+/// are resolved after expansion, and a receiver-qualified spelling never names
+/// a macro. Only C and C++ have a preprocessor at all.
+///
+/// # Errors
+/// Propagates graph storage failures of the directive and pending-name reads.
+fn expands_as_macro(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<bool> {
+    let reference = &stored.reference;
+    if reference.ref_kind != GraphEdgeKind::Calls
+        || reference.receiver_name.is_some()
+        || !matches!(stored.language.as_str(), "c" | "cpp")
+    {
+        return Ok(false);
+    }
+    if let Entry::Vacant(entry) = caches.tu_macros.entry(stored.file_id) {
+        entry.insert(MacroTimeline::build(
+            store,
+            snapshot,
+            &stored.language,
+            stored.file_id,
+        )?);
+    }
+    Ok(caches
+        .tu_macros
+        .get(&stored.file_id)
+        .is_some_and(|timeline| timeline.defined_at(&stored.name_tail, reference.line)))
 }
 
 /// The candidates a name reference may bind to, narrowed by language,
@@ -1081,10 +1131,10 @@ fn resolve_import(
 /// The file one import specifier addresses, relative to the importing file's
 /// path, or `None` when the specifier names nothing the snapshot carries.
 ///
-/// Shared by the import rule and the include-chain walk: an include is an
-/// import whose textual effect joins two translation units, so both read a
-/// specifier the same way.
-fn import_target_file(
+/// Shared by the import rule, the include-chain walk and the preprocessor
+/// replay: an include is an import whose textual effect joins two translation
+/// units, so both read a specifier the same way.
+pub(super) fn import_target_file(
     snapshot: &ResolutionSnapshot,
     language: &str,
     importing_path: &str,

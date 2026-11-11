@@ -51,6 +51,8 @@ pub(crate) use graph::FileGraphResult;
 pub use graph::GraphEdgeKind;
 pub(crate) use graph::PendingRef;
 pub(crate) use graph::PendingRefStatus;
+pub(crate) use graph::PreprocessorDirective;
+pub(crate) use graph::PreprocessorKind;
 
 // Models.
 pub(crate) use model::EmbeddingMetric;

@@ -2018,3 +2018,113 @@ fn sweep_rebinds_a_hierarchy_call_after_the_base_import_moves() {
         "the call follows the rebound base"
     );
 }
+
+#[test]
+fn sweep_suppresses_a_bare_call_the_unit_defines_as_a_macro() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    index_source(
+        &store,
+        "marker.h",
+        "#define TRACE_POINT(value) ((void)(value))\n",
+    );
+    index_source(&store, "decoy.c", "void TRACE_POINT(int value) {\n}\n");
+    // The header is not in the caller's directory, so only the include root
+    // answers it: the replay has to search the same way an import does.
+    let caller = index_source(
+        &store,
+        "src/app.c",
+        "#include \"marker.h\"\nvoid exercise(void) {\n  TRACE_POINT(1);\n}\n",
+    );
+    let owner = pending_call_owner(&store, caller, "TRACE_POINT");
+
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
+    assert!(
+        call_target_files(&store, &owner).is_empty(),
+        "the name is a macro at this line, so the site reaches nothing"
+    );
+    assert_eq!(
+        store.list_pending_refs(100, 0).expect("queue").refs.len(),
+        1,
+        "the expanded site stays out of the graph instead of binding the decoy"
+    );
+}
+
+#[test]
+fn sweep_reads_macro_state_through_nested_includes_and_undef() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    index_source(
+        &store,
+        "inner.h",
+        "#define TRACE_POINT(value) ((void)(value))\n",
+    );
+    index_source(&store, "outer.h", "#include \"inner.h\"\n");
+    let decoy = index_source(&store, "decoy.c", "void TRACE_POINT(int value) {\n}\n");
+    // Both calls share a file and a name; only their lines tell them apart, so
+    // the timeline has to place the header's define and the later `#undef`.
+    let caller = index_source(
+        &store,
+        "app.c",
+        concat!(
+            "#include \"outer.h\"\n",
+            "void before_undef(void) {\n  TRACE_POINT(1);\n}\n",
+            "#undef TRACE_POINT\n",
+            "void after_undef(void) {\n  TRACE_POINT(1);\n}\n",
+        ),
+    );
+    let calls = pending_call_owners(&store, caller, "TRACE_POINT");
+    assert_eq!(calls.len(), 2, "two call sites queue: {calls:?}");
+
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
+    assert!(
+        call_target_files(&store, &calls[0].1).is_empty(),
+        "the include brought the macro in, so the first site reaches nothing"
+    );
+    assert_eq!(
+        call_target_files(&store, &calls[1].1),
+        vec![decoy],
+        "`#undef` ends the macro, so the later site is a real call"
+    );
+}
+
+#[test]
+fn sweep_keeps_an_unsettled_conditional_from_defining_a_macro() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    index_source(
+        &store,
+        "config.h",
+        "#if FREE_THREADED == 0\n#undef FREE_THREADED\n#endif\n",
+    );
+    let definition = index_source(
+        &store,
+        "impl.c",
+        "int world_stopped(void) {\n  return 0;\n}\n",
+    );
+    // The flag is never spelled, so the build may define it either way: both
+    // branches stay live and the `#define` in them is only possibly reached.
+    let caller = index_source(
+        &store,
+        "app.c",
+        concat!(
+            "#include \"config.h\"\n",
+            "#ifdef FREE_THREADED\n",
+            "#else\n",
+            "#define world_stopped() 1\n",
+            "#endif\n",
+            "int check(void) { return world_stopped(); }\n",
+        ),
+    );
+    let owner = pending_call_owner(&store, caller, "world_stopped");
+
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![definition],
+        "a macro that is only possibly defined cannot suppress the call"
+    );
+}

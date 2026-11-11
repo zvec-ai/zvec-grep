@@ -59,6 +59,7 @@ fn graph(ids: &[&str], edges: Vec<FileEdge>, refs: Vec<PendingRef>) -> FileGraph
         nodes: ids.iter().map(|id| node(id)).collect(),
         edges,
         pending_refs: refs,
+        directives: Vec::new(),
     }
 }
 
@@ -1207,8 +1208,17 @@ fn schema_keeps_edges_and_the_stale_evidence_and_enforces_json_objects() {
         .collect::<rusqlite::Result<_>>()
         .expect("rows");
     // Names, ownership and paths stay canonical in zvec; the graph holds the
-    // edges plus the evidence a pass recorded but has not requeued yet.
-    assert_eq!(names, ["edges", "sqlite_sequence", "zg_stale_names"]);
+    // edges, the evidence a pass recorded but has not requeued yet, and the
+    // preprocessor timeline the resolver replays.
+    assert_eq!(
+        names,
+        [
+            "edges",
+            "sqlite_sequence",
+            "zg_file_preprocessor",
+            "zg_stale_names"
+        ]
+    );
     assert!(raw.execute("INSERT INTO edges (file_id, kind, source, target, provenance, status, metadata) VALUES (1, 'calls', 'a', 'b', 'file_local', 'resolved', '[]')", []).is_err());
     assert!(raw.execute("INSERT INTO edges (file_id, kind, source, target, provenance, status, line) VALUES (1, 'calls', 'a', 'b', 'file_local', 'resolved', 0)", []).is_err());
 }
@@ -1777,5 +1787,65 @@ fn contains_references_use_the_same_kinds_as_resolved_edges() {
     assert_eq!(
         db.list_pending_refs(100, 0).expect("requeued").refs[0].reference,
         pending
+    );
+}
+
+/// The timeline follows the file it describes: a rewrite that no longer spells
+/// directives drops the previous ones, so the resolver never replays a shape
+/// the file has left behind.
+#[test]
+fn preprocessor_directives_follow_the_file_and_clear_on_rewrite() {
+    use crate::domain::PreprocessorKind;
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    let directives = vec![
+        crate::domain::PreprocessorDirective {
+            kind: PreprocessorKind::Define,
+            name: Some("TRACE".into()),
+            value: Some("1".into()),
+            line: 1,
+        },
+        crate::domain::PreprocessorDirective {
+            kind: PreprocessorKind::Endif,
+            name: None,
+            value: None,
+            line: 3,
+        },
+    ];
+    let mut written = graph(&["a"], vec![], vec![]);
+    written.directives = directives.clone();
+    db.write_file_graph(4, None, &written, &[], false)
+        .expect("write");
+    assert_eq!(
+        db.preprocessor_directives(4).expect("read"),
+        directives,
+        "a file keeps the timeline it was indexed with"
+    );
+    db.write_file_graph(4, None, &graph(&["a"], vec![], vec![]), &[], false)
+        .expect("rewrite");
+    assert!(
+        db.preprocessor_directives(4).expect("read").is_empty(),
+        "a rewrite without directives clears the old timeline"
+    );
+}
+
+/// Only a bare call still pending is a macro candidate: a receiver call is
+/// always a member access, and a name the file itself declares never queued.
+#[test]
+fn pending_call_names_lists_only_bare_pending_calls() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    let mut bare = reference("a", "TRACE");
+    bare.receiver_name = None;
+    let qualified = reference("a", "member");
+    db.write_file_graph(
+        3,
+        None,
+        &graph(&["a"], vec![], vec![bare, qualified]),
+        &[],
+        false,
+    )
+    .expect("write");
+    assert_eq!(
+        db.pending_call_names(3).expect("names"),
+        vec!["TRACE".to_owned()]
     );
 }

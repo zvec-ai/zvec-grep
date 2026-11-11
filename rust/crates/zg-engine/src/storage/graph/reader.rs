@@ -206,3 +206,44 @@ fn edge_from_row(row: &Row<'_>) -> rusqlite::Result<FileEdge> {
         metadata: decode_metadata(&row.get::<_, String>(6)?)?,
     })
 }
+
+impl SqliteGraphStorage {
+    /// The preprocessor directives one file spells, in source order. The
+    /// resolver replays them against the include a call site sees, so this is
+    /// the file's own list rather than anything the include chain contributes.
+    ///
+    /// # Errors
+    /// Propagates SQLite errors and invalid stored metadata.
+    pub(crate) fn preprocessor_directives(
+        &self,
+        file_id: u32,
+    ) -> Result<Vec<crate::domain::PreprocessorDirective>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT directives FROM zg_file_preprocessor WHERE file_id = ?1")?;
+        let rows = statement.query_map([file_id], |row| row.get::<_, String>(0))?;
+        let mut directives = Vec::new();
+        for row in rows {
+            directives = serde_json::from_str(&row?)?;
+        }
+        Ok(directives)
+    }
+
+    /// Names of the bare calls one file still leaves pending.
+    ///
+    /// These are the names the macro replay has to answer for: a call the
+    /// resolver already bound is not re-examined until a write requeues it, and
+    /// only a bare call can spell a macro — `x.TRACE()` names a member.
+    ///
+    /// # Errors
+    /// Propagates SQLite errors.
+    pub(crate) fn pending_call_names(&self, file_id: u32) -> Result<Vec<String>> {
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT name_tail FROM edges
+             WHERE file_id = ?1 AND kind = 'calls' AND reference_name IS NOT NULL
+               AND receiver_name IS NULL AND status = 'pending'",
+        )?;
+        let rows = statement.query_map([file_id], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+}

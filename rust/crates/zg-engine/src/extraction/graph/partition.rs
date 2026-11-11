@@ -15,7 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::domain::{EdgeProvenance, GraphEdgeKind};
+use crate::domain::{EdgeProvenance, GraphEdgeKind, PreprocessorDirective};
 
 use super::{Constructs, NameEdge, WalkContext, WalkEdge};
 
@@ -74,6 +74,11 @@ pub(crate) struct PartitionedGraph {
     /// an ordinal onto the entity's representative fragment — whose index the
     /// pipeline turns into the minted `EntityId`.
     pub head_fragment_indices: Vec<usize>,
+    /// C/C++ preprocessor directives in source order; empty for every other
+    /// language. Partition does not read them — they describe the file, not a
+    /// reference — but the pipeline persists them beside the graph so the
+    /// resolver can replay the unit a call site belongs to.
+    pub directives: Vec<PreprocessorDirective>,
 }
 
 /// Names bound to another name per owner: a function-pointer initializer
@@ -122,6 +127,7 @@ pub(crate) fn partition_walk(
         scoped_symbols,
         shadowed_names,
         value_aliases,
+        preprocessor,
         ..
     } = context;
     let mut partitioned = PartitionedGraph {
@@ -129,6 +135,7 @@ pub(crate) fn partition_walk(
         resolved: Vec::new(),
         pending: Vec::new(),
         head_fragment_indices,
+        directives: preprocessor,
     };
     let aliases = alias_table(&name_edges, &value_aliases);
     let mut collapsed: HashSet<RefSite> = HashSet::new();
