@@ -164,7 +164,7 @@ async function fixture(t) {
   return x;
 }
 
-test("a fork PR gets all twelve comparison rows, commit links and a source run link", async (t) => {
+test("a fork PR gets four File/Entity tables, commit links and a source run link", async (t) => {
   const x = await fixture(t);
   await publish(x);
   assert.equal(x.messages().length, 1);
@@ -176,9 +176,16 @@ test("a fork PR gets all twelve comparison rows, commit links and a source run l
   assert.equal(
     input.body
       .split("\n")
-      .filter((line) => /^\| (SWE-QA20|BEIR|DuRetrieval|Quarry)/.test(line))
-      .length,
-    12,
+      .filter((line) =>
+        /^\| (fts|vector|hybrid) \| (File|Entity) \|/.test(line),
+      ).length,
+    24,
+  );
+  assert.deepEqual(
+    [...input.body.matchAll(/^### (SWE-QA20|BEIR|DuRetrieval|Quarry)$/gm)].map(
+      (match) => match[1],
+    ),
+    ["SWE-QA20", "BEIR", "DuRetrieval", "Quarry"],
   );
   assert.ok(input.body.includes(`/commit/${base}`));
   assert.ok(input.body.includes(`/commit/${head}`));
@@ -238,16 +245,19 @@ test("the publisher renders validated File and Entity diagnostic scores and coun
   await x.write("comparison/summary.json", withDiagnostics);
   await publish(x);
   const body = x.messages()[0][1].body;
-  assert.match(body, /SWE-QA20 File \/ Entity recall · Diagnostic/);
+  assert.match(body, /Diagnostic QA results/);
   assert.match(
     body,
-    /\| hybrid \| File \| 60\.00% \(17\/17\) → 70\.00% \(17\/17\)/,
+    /\| hybrid \| File \| N\/A \(\?\/17\) \| N\/A \(\?\/17\) \| N\/A \(\?\/17\) \| 60\.00% \(17\/17\) → 70\.00% \(17\/17\)/,
   );
   assert.match(
     body,
     /\| hybrid \| Entity \| 50\.00% \(13\/17\) → 50\.00% \(14\/17\)/,
   );
-  assert.match(body, /All QA metrics — File and Entity/);
+  assert.match(
+    body,
+    /Hit@1 \| Hit@5 \| Hit@10 \| Recall@1 \| Recall@5 \| Recall@10 \| MRR@10 \| nDCG@10/,
+  );
 
   for (const level of ["file", "entity"]) {
     const invalid = structuredClone(withDiagnostics);

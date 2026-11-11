@@ -20,6 +20,17 @@ const metadata = {
   baseline: { repository: "upstream/zg", commit: baseSha },
   candidate: { repository: "fork/zg", commit: headSha },
 };
+function tableRow(markdown, suite, mode, level) {
+  const section = markdown.split(`### ${suite}\n`)[1]?.split("\n### ")[0];
+  const row = section
+    ?.split("\n")
+    .find((line) => line.startsWith(`| ${mode} | ${level} |`));
+  assert.ok(row, `${suite}/${mode}/${level}: missing row`);
+  return row
+    .split("|")
+    .slice(1, -1)
+    .map((cell) => cell.trim());
+}
 function result(commit, value = 0.5) {
   const rows = ["hybrid", "fts", "vector"].map((mode) => ({
     mode,
@@ -56,6 +67,21 @@ test("all suites and modes retain exact deltas and render compact baseline-to-ca
   assert.equal(comparison.rows[0].metrics.file_hit_at_1.delta, -0.25);
   assert.equal(comparison.rows[3].metrics.file_hit_at_1.delta, 0.25);
   const markdown = markdownVersionComparison(comparison);
+  assert.deepEqual(
+    [...markdown.matchAll(/^### (.+)$/gm)].map((match) => match[1]),
+    ["SWE-QA20", "BEIR", "DuRetrieval", "Quarry"],
+  );
+  assert.equal((markdown.match(/^\| Mode \| Level \|/gm) ?? []).length, 4);
+  for (const suite of ["SWE-QA20", "BEIR", "DuRetrieval", "Quarry"])
+    for (const mode of ["fts", "vector", "hybrid"]) {
+      const file = tableRow(markdown, suite, mode, "File");
+      assert.equal(file.length, 10);
+      assert.deepEqual(file.slice(5, 8), ["N/A", "N/A", "N/A"]);
+      assert.deepEqual(
+        tableRow(markdown, suite, mode, "Entity").slice(2),
+        Array(8).fill("N/A"),
+      );
+    }
   assert.match(markdown, /Both versions explicitly request `preview: "full"`/);
   assert.match(markdown, /75\.00% → 50\.00%/);
   assert.match(markdown, /75\.00% → 100\.00%/);
@@ -150,21 +176,27 @@ test("File and Entity diagnostics retain their own scores and question counts", 
     1,
   );
   const markdown = markdownVersionComparison(comparison);
-  assert.match(markdown, /SWE-QA20 File \/ Entity recall · Diagnostic/);
-  assert.match(markdown, /All QA metrics — File and Entity/);
+  assert.match(markdown, /Diagnostic QA results/);
   assert.match(
     markdown,
-    /\| Mode \| Level \| Recall@1 \| Recall@5 \| Recall@10/,
+    /Hit@1 \| Hit@5 \| Hit@10 \| Recall@1 \| Recall@5 \| Recall@10 \| MRR@10 \| nDCG@10/,
   );
-  assert.match(
-    markdown,
-    /\| hybrid \| File \| 25\.00% \(17\/17\) \| 50\.00% \(17\/17\) \| 62\.50% \(17\/17\) → 75\.00% \(17\/17\)/,
+  assert.deepEqual(
+    tableRow(markdown, "SWE-QA20", "hybrid", "File").slice(5, 8),
+    ["25.00% (17/17)", "50.00% (17/17)", "62.50% (17/17) → 75.00% (17/17)"],
   );
-  assert.match(
-    markdown,
-    /\| hybrid \| Entity \| 0\.00% \(17\/17\) \| N\/A \(0\/17\) \| 12\.50% \(13\/17\) → 25\.00% \(14\/17\)/,
+  assert.deepEqual(
+    tableRow(markdown, "SWE-QA20", "hybrid", "Entity").slice(5, 8),
+    ["0.00% (17/17)", "N/A (0/17)", "12.50% (13/17) → 25.00% (14/17)"],
+  );
+  // A partially available QA table must never fall back to original File Gold.
+  assert.match(tableRow(markdown, "SWE-QA20", "hybrid", "File")[2], /^N\/A/);
+  assert.deepEqual(
+    tableRow(markdown, "SWE-QA20", "fts", "File").slice(2),
+    Array(8).fill("N/A"),
   );
   assert.doesNotMatch(markdown, /\| hybrid \| (Baseline|Candidate) \|/);
+  assert.doesNotMatch(markdown, /<details>|File ranking — all four suites/);
 });
 
 test("compact cells retain changed counts, rounded differences and missing versions", () => {
@@ -194,14 +226,20 @@ test("compact cells retain changed counts, rounded differences and missing versi
     comparison.rows[0].entity_diagnostic = { baseline, candidate };
     const saved = structuredClone(comparison);
     const markdown = markdownVersionComparison(comparison);
-    assert.ok(markdown.includes(`| hybrid | Entity | ${expected} |`));
+    assert.equal(
+      tableRow(markdown, "SWE-QA20", "hybrid", "Entity")[5],
+      expected,
+    );
     assert.deepEqual(comparison, saved);
     if (baseline && candidate) assert.ok(markdown.includes("N/A (0/17)"));
   }
   const same = markdownVersionComparison(
     compareCombinedResults(before, after, metadata),
   );
-  assert.ok(same.includes("| SWE-QA20 | hybrid | 50.00% | 50.00% |"));
+  assert.deepEqual(
+    tableRow(same, "SWE-QA20", "hybrid", "File").slice(2, 5),
+    Array(3).fill("50.00%"),
+  );
 });
 
 test("raw-report comparison rejects missing evidence and substituted SWE-QA versions", async () => {

@@ -157,10 +157,13 @@ export async function compareRuns(baseline, candidate, metadata) {
 
 const percentage = (value) => `${(value * 100).toFixed(2)}%`;
 
-function comparisonCell({ baseline, candidate }) {
+function comparisonCell(values) {
+  const baseline = values?.baseline;
+  const candidate = values?.candidate;
+  const cell = (value) => (Number.isFinite(value) ? percentage(value) : "N/A");
   return baseline === candidate
-    ? percentage(baseline)
-    : `${percentage(baseline)} → ${percentage(candidate)}`;
+    ? cell(baseline)
+    : `${cell(baseline)} → ${cell(candidate)}`;
 }
 
 function qaComparisonCell(pair, level, metric) {
@@ -178,30 +181,15 @@ function qaComparisonCell(pair, level, metric) {
   return same ? cell(before) : `${cell(before)} → ${cell(after)}`;
 }
 
-function qaComparisonTable(rows, metrics) {
-  return [
-    `| Mode | Level | ${metrics.map(([label]) => label).join(" | ")} |`,
-    `| --- | --- | ${metrics.map(() => "---:").join(" | ")} |`,
-    ...rows.flatMap((row) =>
-      ["file", "entity"].flatMap((level) => {
-        const pair = row[`${level}_diagnostic`];
-        if (!pair) return [];
-        return [
-          `| ${row.mode} | ${level === "file" ? "File" : "Entity"} | ${metrics.map(([, metric]) => qaComparisonCell(pair, level, metric)).join(" | ")} |`,
-        ];
-      }),
-    ),
-  ];
-}
-
 export function markdownVersionComparison(result) {
   const server = result.server_url ?? "https://github.com";
   const version = (side) => {
     const value = result[side];
     return `[${value.commit.slice(0, 8)}](${server}/${value.repository}/commit/${value.commit})`;
   };
-  const qaRows = result.rows.filter(
-    (row) => row.file_diagnostic || row.entity_diagnostic,
+  const hasQa = result.rows.some(
+    (row) =>
+      row.suite === "sweqa" && (row.file_diagnostic || row.entity_diagnostic),
   );
   const lines = [
     "## Retrieval-only",
@@ -212,53 +200,54 @@ export function markdownVersionComparison(result) {
   ];
   if (result.preview === "full")
     lines.push("", 'Both versions explicitly request `preview: "full"`.');
-  if (qaRows.length) {
-    lines.push(
-      "",
-      "### SWE-QA20 File / Entity recall · Diagnostic",
-      "",
-      "Cells show score (scored/eligible questions) for each metric. A shared cell means both versions have the same score and counts, not necessarily the same scored questions. N/A means unscored. These are diagnostic results, not formal QA scores.",
-      "",
-      ...qaComparisonTable(qaRows, QA_RECALL_METRICS),
-      "",
-      "<details>",
-      "<summary>All QA metrics — File and Entity</summary>",
-      "",
-      ...qaComparisonTable(qaRows, QA_ENTITY_METRICS),
-      "",
-      "QA metrics use the new QA Gold and equal question weights after averaging repeated calls. Missing metrics in older artifacts remain N/A.",
-      "",
-      "</details>",
-    );
-  }
   if (result.rows.length) {
-    lines.push(
-      "",
-      ...(qaRows.length
-        ? ["<details>", "<summary>File ranking — all four suites</summary>"]
-        : ["### File ranking"]),
-      "",
-      qaRows.length
-        ? "This table preserves the original File labels and scores; its SWE-QA20 Gold differs from the QA table above."
-        : "This table preserves the original File labels and scores.",
-      "",
-      "| Suite | Mode | Hit@1 | Hit@5 | Hit@10 | MRR@10 | nDCG@10 |",
-      "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
-    );
-    const labels = {
-      sweqa: "SWE-QA20",
-      beir: "BEIR",
-      duretrieval: "DuRetrieval",
-      quarry: "Quarry",
+    const fileMetrics = {
+      hit_at_1: "file_hit_at_1",
+      hit_at_5: "file_hit_at_5",
+      hit_at_10: "file_hit_at_10",
+      mrr_at_10: "file_mrr_at_10",
+      ndcg_at_10: "ndcg_at_10",
     };
-    for (const row of result.rows)
+    for (const [suite, title] of [
+      ["sweqa", "SWE-QA20"],
+      ["beir", "BEIR"],
+      ["duretrieval", "DuRetrieval"],
+      ["quarry", "Quarry"],
+    ]) {
+      const qa = suite === "sweqa" && hasQa;
       lines.push(
-        `| ${labels[row.suite]} | ${row.mode} | ${QUALITY_METRICS.map((metric) => comparisonCell(row.metrics[metric])).join(" | ")} |`,
+        "",
+        `### ${title}`,
+        "",
+        qa
+          ? "**Diagnostic QA results.** Cells show score (scored/eligible questions) for each metric. A shared cell means equal scores and counts, not necessarily the same scored questions. N/A means unscored or missing QA data; original File scores are not substituted."
+          : "Original File metrics. File Recall and Entity evaluation data are not provided for this run and are shown as N/A.",
+        "",
+        `| Mode | Level | ${QA_ENTITY_METRICS.map(([label]) => label).join(" | ")} |`,
+        `| --- | --- | ${QA_ENTITY_METRICS.map(() => "---:").join(" | ")} |`,
       );
+      for (const mode of ["fts", "vector", "hybrid"]) {
+        const row = result.rows.find(
+          (item) => item.suite === suite && item.mode === mode,
+        );
+        for (const [level, label] of [
+          ["file", "File"],
+          ["entity", "Entity"],
+        ]) {
+          const scores = QA_ENTITY_METRICS.map(([, metric]) =>
+            qa
+              ? qaComparisonCell(row?.[`${level}_diagnostic`], level, metric)
+              : level === "file" && fileMetrics[metric]
+                ? comparisonCell(row?.metrics?.[fileMetrics[metric]])
+                : "N/A",
+          );
+          lines.push(`| ${mode} | ${label} | ${scores.join(" | ")} |`);
+        }
+      }
+    }
     lines.push(
       "",
-      "SWE-QA20 File nDCG uses repository macro averaging; the other suites use query means. Quality scores are report-only.",
-      ...(qaRows.length ? ["", "</details>"] : []),
+      "Original File metrics remain unchanged in the JSON and full reports. QA metrics average questions equally; original SWE-QA20 File nDCG averages repositories, while the other suites average queries. Quality scores are report-only.",
     );
   }
   if (result.errors.length)

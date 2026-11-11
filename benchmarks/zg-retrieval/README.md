@@ -88,11 +88,16 @@ Entity score or a claim that all answer evidence was found.
 Reports bind the QA dataset through `qa_gold`, retain per-call `qa_observations`,
 and expose `qa_retrieval` and `qa_quality_mean` beside the legacy fields.
 Validation recomputes these values from the saved public evidence and frozen QA
-labels. The final PR comparison combines File and Entity Recall@1/5/10 in one
-diagnostic table, with scored/eligible question counts beside each percentage.
-A shared cell means both versions have equal scores and counts; it does not
-guarantee the same scored questions. All QA metrics and the original File
-ranking across all four suites remain available in separate expandable sections.
+labels. The final PR comparison has one table per suite. Each table contains
+File and Entity rows for fts, vector and hybrid, with Hit@1/5/10,
+Recall@1/5/10, MRR@10 and nDCG@10 columns.
+
+SWE-QA20 uses QA diagnostic scores, with scored/eligible question counts beside
+each percentage. A shared cell means both versions have equal scores and counts;
+it does not guarantee the same scored questions. The other suites retain their
+original File scores; their File Recall and Entity metrics are not yet provided
+and appear as N/A. The original SWE-QA20 File scores remain in the JSON and full
+reports, separate from QA Gold.
 
 ## Reports and artifacts
 
