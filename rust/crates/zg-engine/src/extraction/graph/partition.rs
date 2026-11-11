@@ -76,12 +76,16 @@ pub(crate) struct PartitionedGraph {
     pub head_fragment_indices: Vec<usize>,
 }
 
-/// Function-pointer initializers (`void (*work)(void) = target;`) alias
-/// one name to a same-file function per owner: a call spelled through the
-/// alias reaches that function rather than a same-named declaration the
-/// local hides.
-fn alias_table(name_edges: &[NameEdge]) -> HashMap<(usize, String), String> {
-    name_edges
+/// Names bound to another name per owner: a function-pointer initializer
+/// (`void (*work)(void) = target;` records `target` as the bound *type*) and a
+/// bare-name initializer (`const dispatch = send` records `send` as the
+/// alias). Both make a call spelled through the bound name reach the named
+/// function rather than a same-named declaration the local hides.
+fn alias_table(
+    name_edges: &[NameEdge],
+    value_aliases: &HashMap<(usize, String), String>,
+) -> HashMap<(usize, String), String> {
+    let mut aliases: HashMap<(usize, String), String> = name_edges
         .iter()
         .filter(|edge| edge.ref_kind == GraphEdgeKind::Declares)
         .filter_map(|edge| {
@@ -89,7 +93,9 @@ fn alias_table(name_edges: &[NameEdge]) -> HashMap<(usize, String), String> {
                 .clone()
                 .map(|bound| ((edge.owner_index, edge.ref_name.clone()), bound))
         })
-        .collect()
+        .collect();
+    aliases.extend(value_aliases.clone());
+    aliases
 }
 
 /// Shape used to collapse non-call, non-binding references.
@@ -115,6 +121,7 @@ pub(crate) fn partition_walk(
         file_symbols,
         scoped_symbols,
         shadowed_names,
+        value_aliases,
         ..
     } = context;
     let mut partitioned = PartitionedGraph {
@@ -123,7 +130,7 @@ pub(crate) fn partition_walk(
         pending: Vec::new(),
         head_fragment_indices,
     };
-    let aliases = alias_table(&name_edges);
+    let aliases = alias_table(&name_edges, &value_aliases);
     let mut collapsed: HashSet<RefSite> = HashSet::new();
     for edge in name_edges {
         if !matches!(
@@ -152,56 +159,16 @@ pub(crate) fn partition_walk(
             && shadowed_names
                 .get(&edge.owner_index)
                 .is_some_and(|names| names.contains(&edge.ref_name));
-        let resolved_target = match edge.ref_kind {
-            // Containment is emitted as a resolved edge during the walk, so it
-            // normally never reaches this queue; if one does, it stays pending.
-            // Imports stay pending because their target is another file by
-            // definition, and Declares edges bind a variable to a type name that
-            // may live elsewhere — the cross-file resolver consumes all three.
-            GraphEdgeKind::Contains | GraphEdgeKind::Imports | GraphEdgeKind::Declares => None,
-            GraphEdgeKind::Calls if edge.receiver_name.is_some() => None,
-            // A construction site (`new X()`) names a type, and which type a
-            // bare name denotes is a namespace question: the file's lone
-            // same-named class in an unrelated namespace must not answer it
-            // (`ui::Paint`'s `new Widget()` is `ui::Widget`, not
-            // `legacy::Widget`). Only the cross-file resolver sees the
-            // enclosing namespaces, so constructions stay pending.
-            GraphEdgeKind::Calls if edge.constructs.is_some() => None,
-            // A bare call resolves through, in order: its owner's alias
-            // initializers, its owner's local name table (the nested
-            // spelling an entity declares in its body shadows any
-            // file-level name inside it), then the file-level table.
-            // Members and nested definitions stay out of that last table: a
-            // top-level `caller()` naming `run` does not see `A::run` just
-            // because the file declares it once. Without better evidence the
-            // reference stays pending for the cross-file resolver, which also
-            // weighs imports.
-            GraphEdgeKind::Calls => aliases
-                .get(&(edge.owner_index, edge.ref_name.clone()))
-                .and_then(|bound| {
-                    symbols
-                        .get(bound)
-                        .and_then(|indices| (indices.len() == 1).then(|| indices[0]))
-                })
-                .or_else(|| {
-                    scoped_symbols
-                        .get(&edge.owner_index)
-                        .and_then(|locals| locals.get(&edge.ref_name))
-                        .copied()
-                })
-                .or_else(|| {
-                    (!shadowed)
-                        .then(|| {
-                            file_symbols
-                                .get(&edge.ref_name)
-                                .and_then(|indices| (indices.len() == 1).then(|| indices[0]))
-                        })
-                        .flatten()
-                }),
-            GraphEdgeKind::Extends | GraphEdgeKind::Implements => symbols
-                .get(&edge.ref_name)
-                .and_then(|indices| (indices.len() == 1).then(|| indices[0])),
-        };
+        let resolved_target = in_file_target(
+            &edge,
+            shadowed,
+            InFileTables {
+                symbols: &symbols,
+                scoped_symbols: &scoped_symbols,
+                file_symbols: &file_symbols,
+                aliases: &aliases,
+            },
+        );
         match resolved_target {
             Some(target_index) => partitioned.resolved.push(ResolvedNameEdge {
                 ref_kind: edge.ref_kind,
@@ -231,6 +198,82 @@ pub(crate) fn partition_walk(
         }
     }
     partitioned
+}
+
+/// The file's own name tables, as one reference reads them.
+#[derive(Clone, Copy)]
+struct InFileTables<'a> {
+    symbols: &'a HashMap<String, Vec<usize>>,
+    scoped_symbols: &'a HashMap<usize, HashMap<String, usize>>,
+    file_symbols: &'a HashMap<String, Vec<usize>>,
+    aliases: &'a HashMap<(usize, String), String>,
+}
+
+/// The entity one name reference binds to inside its own file, or `None` when
+/// the file holds no single answer and the reference stays pending for the
+/// cross-file resolver.
+fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> Option<usize> {
+    let InFileTables {
+        symbols,
+        scoped_symbols,
+        file_symbols,
+        aliases,
+    } = tables;
+    match edge.ref_kind {
+        // Containment is emitted as a resolved edge during the walk, so it
+        // normally never reaches this queue; if one does, it stays pending.
+        // Imports stay pending because their target is another file by
+        // definition, and Declares edges bind a variable to a type name that
+        // may live elsewhere — the cross-file resolver consumes all three.
+        GraphEdgeKind::Contains | GraphEdgeKind::Imports | GraphEdgeKind::Declares => None,
+        GraphEdgeKind::Calls if edge.receiver_name.is_some() => None,
+        // A construction site (`new X()`) names a type, and which type a
+        // bare name denotes is a namespace question: the file's lone
+        // same-named class in an unrelated namespace must not answer it
+        // (`ui::Paint`'s `new Widget()` is `ui::Widget`, not
+        // `legacy::Widget`). Only the cross-file resolver sees the
+        // enclosing namespaces, so constructions stay pending.
+        GraphEdgeKind::Calls if edge.constructs.is_some() => None,
+        // A bare call resolves through, in order: its owner's alias
+        // initializers, the file-level aliases (a module-level
+        // `const dispatch = send` is visible to every body in the file),
+        // its owner's local name table (the nested spelling an entity
+        // declares in its body shadows any file-level name inside it),
+        // then the file-level table. Members and nested definitions stay
+        // out of that last table: a top-level `caller()` naming `run`
+        // does not see `A::run` just because the file declares it once.
+        // Without better evidence the reference stays pending for the
+        // cross-file resolver, which also weighs imports.
+        GraphEdgeKind::Calls => {
+            let bound_alias = aliases
+                .get(&(edge.owner_index, edge.ref_name.clone()))
+                .or_else(|| aliases.get(&(super::FILE_SCOPE_INDEX, edge.ref_name.clone())));
+            bound_alias
+                .and_then(|bound| {
+                    symbols
+                        .get(bound)
+                        .and_then(|indices| (indices.len() == 1).then(|| indices[0]))
+                })
+                .or_else(|| {
+                    scoped_symbols
+                        .get(&edge.owner_index)
+                        .and_then(|locals| locals.get(&edge.ref_name))
+                        .copied()
+                })
+                .or_else(|| {
+                    (!shadowed)
+                        .then(|| {
+                            file_symbols
+                                .get(&edge.ref_name)
+                                .and_then(|indices| (indices.len() == 1).then(|| indices[0]))
+                        })
+                        .flatten()
+                })
+        }
+        GraphEdgeKind::Extends | GraphEdgeKind::Implements => symbols
+            .get(&edge.ref_name)
+            .and_then(|indices| (indices.len() == 1).then(|| indices[0])),
+    }
 }
 
 #[cfg(test)]

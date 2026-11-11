@@ -187,23 +187,37 @@ impl SymbolIndex {
                 None => name.clone(),
             };
             let arity = metadata.arity.and_then(|arity| u32::try_from(arity).ok());
-            index
-                .names
-                .entry(name.clone())
-                .or_default()
-                .push(NameIndexEntry {
-                    entity_id: entity_id.clone(),
-                    file_id: file_id.get(),
-                    qualified_name: qualified_name.clone(),
-                    symbol_type: metadata.symbol_type,
-                    is_exported: metadata.is_exported,
-                    arity,
-                    is_declaration: metadata.is_declaration,
-                    parameters: parameter_evidence(metadata.signature.as_deref()),
-                    package: metadata.package.clone(),
-                    has_internal_linkage: metadata.has_internal_linkage,
-                    declares_type: metadata.declares_type,
-                });
+            let entry = NameIndexEntry {
+                entity_id: entity_id.clone(),
+                file_id: file_id.get(),
+                qualified_name: qualified_name.clone(),
+                symbol_type: metadata.symbol_type,
+                is_exported: metadata.is_exported,
+                arity,
+                is_declaration: metadata.is_declaration,
+                parameters: parameter_evidence(metadata.signature.as_deref()),
+                package: metadata.package.clone(),
+                has_internal_linkage: metadata.has_internal_linkage,
+                declares_type: metadata.declares_type,
+                alias_of: metadata.alias_of.clone(),
+                object_members: metadata.object_members.clone(),
+                overwritten_by: metadata.overwritten_by.clone(),
+            };
+            // An `export { local as exported }` clause publishes this
+            // declaration under another name without the declaration spelling
+            // it, so the index answers that name too: a call or import written
+            // through it reaches this one entity.
+            for exported in &metadata.exported_as {
+                index
+                    .names
+                    .entry(exported.clone())
+                    .or_default()
+                    .push(NameIndexEntry {
+                        is_exported: true,
+                        ..entry.clone()
+                    });
+            }
+            index.names.entry(name.clone()).or_default().push(entry);
             index.records.insert(
                 entity_id.clone(),
                 EntityRecord {

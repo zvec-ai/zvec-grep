@@ -209,6 +209,8 @@ enum Rule {
     ImportBound,
     /// A receiver pinned to its enclosing instance, superclass, or declared type.
     Receiver,
+    /// A member call answered by the receiver's object-literal property table.
+    ObjectMember,
     /// A qualified `Class::method` matched by `qualified_name`.
     QualifiedName,
     /// A workspace-unique name, or the one same-file declaration of a bare call.
@@ -253,7 +255,7 @@ impl ResolutionSweep {
         match rule {
             Rule::Import | Rule::Unique => {}
             Rule::ImportBound => self.import_bound += 1,
-            Rule::Receiver => self.file_scoped += 1,
+            Rule::Receiver | Rule::ObjectMember => self.file_scoped += 1,
             Rule::QualifiedName => self.qualified_name_match += 1,
             Rule::ExportBound => self.export_bound += 1,
             Rule::ArityBound => self.arity_bound += 1,
@@ -352,6 +354,35 @@ fn classify(
     classify_names(store, snapshot, stored, caches)
 }
 
+/// The candidates a name reference may bind to, narrowed by language,
+/// reachability, callability and the enclosing scopes; `None` while the
+/// snapshot still hides one of the name's candidates.
+///
+/// # Errors
+/// Propagates graph storage failures.
+fn name_hits<'s>(
+    store: &IndexStore,
+    snapshot: &'s ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Option<Vec<&'s NameIndexEntry>>> {
+    let Some(raw) = snapshot.lookup_candidates(&stored.name_tail) else {
+        return Ok(None);
+    };
+    // The language gate runs first: preference for definitions is only
+    // meaningful among candidates that can host this reference.
+    let compatible =
+        filter_compatible_hits(snapshot, stored, raw, &mut caches.candidate_formats);
+    // Reachability and callability are facts about the candidates, so they
+    // narrow the set before any rule reads it.
+    let reachable = linkage_reachable(store, snapshot, stored, compatible, caches)?;
+    let callable = callable_targets(snapshot, stored, reachable, &mut caches.owner_is_type);
+    // A name a nearer scope also declares binds to that declaration: the
+    // enclosing namespace is searched before the workspace.
+    let visible = enclosing_scope_hits(snapshot, stored, callable);
+    Ok(Some(prefer_definitions(visible)))
+}
+
 /// Runs the name-index rules: receivers, qualified names, uniqueness, and the
 /// import/export/arity bounds that narrow an ambiguous set.
 fn classify_names(
@@ -360,24 +391,12 @@ fn classify_names(
     stored: &StoredPendingRef,
     caches: &mut RuleCaches,
 ) -> crate::EngineResult<Outcome> {
-    let hits = {
-        let Some(raw) = snapshot.lookup_candidates(&stored.name_tail) else {
-            // Hidden candidates must not turn an ambiguous name into
-            // a seemingly unique match against an unfinished snapshot.
-            return Ok(Outcome::Deferred);
-        };
-        // The language gate runs first: preference for definitions is only
-        // meaningful among candidates that can host this reference.
-        let compatible =
-            filter_compatible_hits(snapshot, stored, raw, &mut caches.candidate_formats);
-        // Reachability and callability are facts about the candidates, so they
-        // narrow the set before any rule reads it.
-        let reachable = linkage_reachable(store, snapshot, stored, compatible, caches)?;
-        let callable = callable_targets(snapshot, stored, reachable, &mut caches.owner_is_type);
-        // A name a nearer scope also declares binds to that declaration: the
-        // enclosing namespace is searched before the workspace.
-        let visible = enclosing_scope_hits(snapshot, stored, callable);
-        prefer_definitions(visible)
+    let Some(hits) = name_hits(store, snapshot, stored, caches)? else {
+        // Hidden candidates must not turn an ambiguous name into a seemingly
+        // unique match against an unfinished snapshot. The object member rule
+        // needs no candidate of its own — the literal's property table names
+        // the value — so it still applies.
+        return object_member_outcome(store, snapshot, stored, caches);
     };
     if stored.reference.ref_kind == GraphEdgeKind::Imports && stored.language == "java" {
         // A Java import names an entity rather than a module, and only its own
@@ -412,7 +431,17 @@ fn classify_names(
             rule: Rule::Receiver,
         });
     }
-    if let Some(resolution) = resolve_qualified_name(stored, &hits) {
+    if let Some(resolution) = resolve_object_member(store, snapshot, stored, caches)? {
+        // The receiver is an object literal whose own property table says
+        // which value this key holds; the method of that name was replaced by
+        // a later property of the same key, so the general member rules would
+        // bind the overwritten spelling.
+        return Ok(Outcome::Resolved {
+            resolution,
+            rule: Rule::ObjectMember,
+        });
+    }
+    if let Some(resolution) = resolve_qualified_name(snapshot, stored, &hits) {
         return Ok(Outcome::Resolved {
             resolution,
             rule: Rule::QualifiedName,
@@ -442,7 +471,7 @@ fn classify_names(
             return Ok(Outcome::Resolved {
                 resolution: Resolution {
                     ref_id: stored.id,
-                    target_id: hit.entity_id.clone(),
+                    target_id: called_target_id(snapshot, stored, hit),
                     provenance: EdgeProvenance::WorkspaceUnique,
                 },
                 rule: Rule::Unique,
@@ -457,7 +486,7 @@ fn classify_names(
             return Ok(Outcome::Resolved {
                 resolution: Resolution {
                     ref_id: stored.id,
-                    target_id: hit.entity_id.clone(),
+                    target_id: called_target_id(snapshot, stored, hit),
                     provenance: EdgeProvenance::FileScoped,
                 },
                 rule: Rule::Unique,
@@ -1306,9 +1335,24 @@ fn load_bindings(
     stored: &StoredPendingRef,
     bindings: &mut HashMap<u32, Vec<AliasBinding>>,
 ) -> crate::EngineResult<Vec<AliasBinding>> {
-    Ok(match bindings.entry(stored.file_id) {
+    load_bindings_in(store, stored.language.as_str(), stored.file_id, bindings)
+}
+
+/// [`load_bindings`] for one file, cached the same way.
+///
+/// # Errors
+/// Propagates graph storage failures.
+fn load_bindings_in(
+    store: &IndexStore,
+    language: &str,
+    file_id: u32,
+    bindings: &mut HashMap<u32, Vec<AliasBinding>>,
+) -> crate::EngineResult<Vec<AliasBinding>> {
+    Ok(match bindings.entry(file_id) {
         Entry::Occupied(entry) => entry.get().clone(),
-        Entry::Vacant(entry) => entry.insert(load_alias_bindings(store, stored)?).clone(),
+        Entry::Vacant(entry) => entry
+            .insert(load_alias_bindings_in(store, language, file_id)?)
+            .clone(),
     })
 }
 
@@ -1341,11 +1385,87 @@ fn bind_in_module(
     if let [hit] = scoped.as_slice() {
         return Some(Resolution {
             ref_id: stored.id,
-            target_id: hit.entity_id.clone(),
+            target_id: called_target_id(snapshot, stored, hit),
             provenance: EdgeProvenance::ImportBound,
         });
     }
     None
+}
+
+/// The entity a call reaches once a rule has picked the declaration to bind.
+/// A declaration that is another spelling of a value
+/// (`const dispatch = send`, `export const dispatch = send`) forwards to the
+/// value it names, so the edge lands on the function the alias stands for
+/// instead of on the alias itself.
+///
+/// A member whose key a later property of the same object literal replaces
+/// (`{ run() {}, run: right }`) forwards to the replacement: the method the
+/// index recorded is not what the source's last word on that key reaches.
+///
+/// Non-call references keep the declaration they matched: an inheritance edge
+/// names the class, which neither an alias nor an overwritten property speaks
+/// for.
+fn called_target_id(
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    hit: &NameIndexEntry,
+) -> String {
+    let is_call = stored.reference.ref_kind == GraphEdgeKind::Calls;
+    let bare_call = is_call && stored.reference.receiver_name.is_none();
+    if bare_call && let Some(target) = follow_alias(snapshot, hit) {
+        return target.entity_id.clone();
+    }
+    if is_call && let Some(target) = follow_overwrite(snapshot, hit) {
+        return target.entity_id.clone();
+    }
+    hit.entity_id.clone()
+}
+
+/// Follows the replacement a later property of the same key names inside the
+/// object literal: `{ run() {}, run: right }` indexes the method as `api::run`,
+/// yet the literal's last `run` holds `right`, so a call written through the
+/// key reaches `right`.
+///
+/// Only a unique same-module declaration of the replacement name is followed;
+/// when the module declares that name ambiguously, the indexed member is kept
+/// rather than guessing which value the literal meant.
+fn follow_overwrite<'a>(
+    snapshot: &'a ResolutionSnapshot,
+    hit: &NameIndexEntry,
+) -> Option<&'a NameIndexEntry> {
+    let replacement = hit.overwritten_by.as_deref()?;
+    let raw_hits = snapshot.lookup_candidates(replacement)?;
+    let scoped: Vec<&NameIndexEntry> = raw_hits
+        .iter()
+        .filter(|candidate| candidate.file_id == hit.file_id)
+        .collect();
+    match prefer_definitions(scoped).as_slice() {
+        [target] => Some(*target),
+        _ => None,
+    }
+}
+
+/// Follows one link of a value alias inside the module that declares it: a
+/// module exporting `const dispatch = send` makes `dispatch` another spelling
+/// of `send`, so a call written through `dispatch` reaches `send`.
+///
+/// Only a unique same-module declaration of the aliased name is followed; when
+/// the module declares that name ambiguously, the alias's own declaration is
+/// kept rather than guessing which one the source meant.
+fn follow_alias<'a>(
+    snapshot: &'a ResolutionSnapshot,
+    hit: &NameIndexEntry,
+) -> Option<&'a NameIndexEntry> {
+    let aliased = hit.alias_of.as_deref()?;
+    let raw_hits = snapshot.lookup_candidates(aliased)?;
+    let scoped: Vec<&NameIndexEntry> = raw_hits
+        .iter()
+        .filter(|candidate| candidate.file_id == hit.file_id)
+        .collect();
+    match prefer_definitions(scoped).as_slice() {
+        [target] => Some(*target),
+        _ => None,
+    }
 }
 
 /// Extracts `(local, imported)` pairs from one stored import statement;
@@ -1372,25 +1492,29 @@ fn without_line_comments<'a>(statement: &'a str, marker: &str) -> std::borrow::C
     )
 }
 
-/// Loads the file's import edges and parses their statement text into `as`
-/// alias bindings. Only statements spelling an explicit `as` produce
-/// bindings: unaliased imports keep flowing through the bare-name and
-/// import-bound rules, which already resolve them.
+/// Loads a file's import edges and parses their statement text into `as` alias
+/// bindings. Only statements spelling an explicit `as` produce bindings:
+/// unaliased imports keep flowing through the bare-name and import-bound
+/// rules, which already resolve them.
+///
+/// The file need not be the reference's own: a property value is spelled in the
+/// module that declares the object literal holding it.
 ///
 /// # Errors
 /// Propagates graph storage failures.
-fn load_alias_bindings(
+fn load_alias_bindings_in(
     store: &IndexStore,
-    stored: &StoredPendingRef,
+    language: &str,
+    file_id: u32,
 ) -> crate::EngineResult<Vec<AliasBinding>> {
-    let pairs: AliasPairs = match stored.language.as_str() {
+    let pairs: AliasPairs = match language {
         "typescript" | "javascript" => ts_alias_pairs,
         "python" => python_alias_pairs,
         "rust" => rust_alias_pairs,
         _ => return Ok(Vec::new()),
     };
     let mut bindings = Vec::new();
-    for reference in store.import_references(stored.file_id)? {
+    for reference in store.import_references(file_id)? {
         let Some(raw_text) = reference.raw_text.as_deref() else {
             continue;
         };
@@ -1562,8 +1686,28 @@ fn alias_target_file(
     importing_paths: &mut HashMap<u32, Option<String>>,
     targets: &mut HashMap<(String, String), Option<u32>>,
 ) -> Option<u32> {
-    let language = stored.language.as_str();
-    let base = alias_target_base(snapshot, stored, binding, importing_paths)?;
+    alias_target_file_in(
+        snapshot,
+        stored.language.as_str(),
+        stored.file_id,
+        binding,
+        importing_paths,
+        targets,
+    )
+}
+
+/// [`alias_target_file`] for a binding read from `file_id`, which need not be
+/// the reference's own file: an object literal names its property values in
+/// the module that declares it, not in the module that calls through it.
+fn alias_target_file_in(
+    snapshot: &ResolutionSnapshot,
+    language: &str,
+    file_id: u32,
+    binding: &AliasBinding,
+    importing_paths: &mut HashMap<u32, Option<String>>,
+    targets: &mut HashMap<(String, String), Option<u32>>,
+) -> Option<u32> {
+    let base = alias_target_base_in(snapshot, language, file_id, binding, importing_paths)?;
     match targets.entry((language.to_owned(), base.clone())) {
         Entry::Occupied(entry) => *entry.get(),
         Entry::Vacant(entry) => *entry.insert(alias_target_at(snapshot, language, &base)),
@@ -1574,13 +1718,13 @@ fn alias_target_file(
 /// probing: TS/JS specifiers join the importing file's directory, while
 /// Python's dotted paths and Rust's leading module segment address the
 /// workspace root. `None` for specifiers no rule can place.
-fn alias_target_base(
+fn alias_target_base_in(
     snapshot: &ResolutionSnapshot,
-    stored: &StoredPendingRef,
+    language: &str,
+    file_id: u32,
     binding: &AliasBinding,
     importing_paths: &mut HashMap<u32, Option<String>>,
 ) -> Option<String> {
-    let language = stored.language.as_str();
     let module: String = match language {
         "typescript" | "javascript" => {
             if !binding.specifier.starts_with("./") && !binding.specifier.starts_with("../") {
@@ -1608,10 +1752,10 @@ fn alias_target_base(
     };
     match language {
         "typescript" | "javascript" => {
-            let path = match importing_paths.entry(stored.file_id) {
+            let path = match importing_paths.entry(file_id) {
                 Entry::Occupied(entry) => entry.get().clone(),
                 Entry::Vacant(entry) => entry
-                    .insert(snapshot.file_path(stored.file_id).map(str::to_owned))
+                    .insert(snapshot.file_path(file_id).map(str::to_owned))
                     .clone(),
             };
             join_specifier(importing_dir(&path?), &module)
@@ -1986,6 +2130,186 @@ fn resolve_receiver_typed(
     ))
 }
 
+/// Binds a member call whose receiver names an object literal: the literal's
+/// own property table states which value each key holds, so `api.run()` reaches
+/// the function `run` was last bound to rather than the method of the same
+/// name an earlier property described (`{ run() {}, run: right }`).
+///
+/// The receiver must name exactly one declaration in the workspace, and that
+/// declaration must state the key. A receiver the workspace declares more than
+/// once keeps the general rules: two unrelated `api` objects state different
+/// property tables, and picking either would be a guess.
+fn resolve_object_member(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Option<Resolution>> {
+    let reference = &stored.reference;
+    if reference.ref_kind != GraphEdgeKind::Calls {
+        return Ok(None);
+    }
+    let Some(receiver) = reference.receiver_name.as_deref() else {
+        return Ok(None);
+    };
+    if receiver == "super" || is_self_receiver(&stored.language, receiver) {
+        return Ok(None);
+    }
+    let holder = match unique_receiver(snapshot, receiver) {
+        Some(holder) => holder,
+        // The receiver spells an `as` import: the object whose table this
+        // call reads is the one that module exports, not a same-named
+        // declaration in this file.
+        None => match imported_binding_target(
+            store,
+            snapshot,
+            stored,
+            stored.file_id,
+            receiver,
+            caches,
+        )? {
+            Some(holder) => holder,
+            None => return Ok(None),
+        },
+    };
+    // The last property of a key wins, mirroring the language's own object
+    // literal semantics.
+    let Some(member) = holder
+        .object_members
+        .iter()
+        .rev()
+        .find(|member| member.name == stored.name_tail)
+    else {
+        return Ok(None);
+    };
+    // A property value that is itself an `as` import names the exporting
+    // module's declaration: `{ run: renamed }` holds `renamed`'s module
+    // binding, not a nested declaration that happens to spell the name. The
+    // value is spelled in the module that declares the literal.
+    if let Some(target) = imported_binding_target(
+        store,
+        snapshot,
+        stored,
+        holder.file_id,
+        &member.target,
+        caches,
+    )? {
+        return Ok(Some(Resolution {
+            ref_id: stored.id,
+            target_id: target.entity_id.clone(),
+            provenance: EdgeProvenance::ImportBound,
+        }));
+    }
+    let Some(targets) = snapshot.lookup_candidates(&member.target) else {
+        return Ok(None);
+    };
+    let scoped: Vec<&NameIndexEntry> = targets
+        .iter()
+        .filter(|candidate| candidate.file_id == holder.file_id)
+        .collect();
+    Ok(match prefer_definitions(scoped).as_slice() {
+        [target] => Some(Resolution {
+            ref_id: stored.id,
+            target_id: target.entity_id.clone(),
+            provenance: EdgeProvenance::FileScoped,
+        }),
+        _ => None,
+    })
+}
+
+/// The object member rule's outcome, or `Deferred` when the object literal's
+/// property table says nothing about the called key.
+///
+/// # Errors
+/// Propagates graph storage failures.
+fn object_member_outcome(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Outcome> {
+    Ok(
+        match resolve_object_member(store, snapshot, stored, caches)? {
+            Some(resolution) => Outcome::Resolved {
+                resolution,
+                rule: Rule::ObjectMember,
+            },
+            None => Outcome::Deferred,
+        },
+    )
+}
+
+/// The one entity a receiver name places across the workspace: a same-name
+/// declaration in another file is a different object, so an ambiguous or
+/// missing set leaves the caller no table to read.
+fn unique_receiver<'a>(
+    snapshot: &'a ResolutionSnapshot,
+    receiver: &str,
+) -> Option<&'a NameIndexEntry> {
+    let receivers = snapshot.lookup_candidates(receiver)?;
+    let preferred = prefer_definitions(receivers.iter().collect());
+    match preferred.as_slice() {
+        [holder] => Some(*holder),
+        _ => None,
+    }
+}
+
+/// The declaration an `as` import binds one local name to inside its module.
+///
+/// `import { actual as renamed } from './target'` makes `renamed` this file's
+/// spelling of `target.ts`'s `actual`; every other spelling of that name is a
+/// different declaration, however near it is written. Only a unique same-module
+/// declaration is followed, and a name no `as` clause binds is `None`.
+///
+/// # Errors
+/// Propagates graph storage failures.
+fn imported_binding_target<'a>(
+    store: &IndexStore,
+    snapshot: &'a ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    file_id: u32,
+    local: &str,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Option<&'a NameIndexEntry>> {
+    let file_bindings = load_bindings_in(
+        store,
+        stored.language.as_str(),
+        file_id,
+        &mut caches.alias_bindings,
+    )?;
+    let matched: Vec<&AliasBinding> = file_bindings
+        .iter()
+        .filter(|binding| binding.imported.is_some() && binding.local == local)
+        .collect();
+    let [binding] = matched.as_slice() else {
+        return Ok(None);
+    };
+    let Some(target_file) = alias_target_file_in(
+        snapshot,
+        stored.language.as_str(),
+        file_id,
+        binding,
+        &mut caches.importing_paths,
+        &mut caches.alias_targets,
+    ) else {
+        return Ok(None);
+    };
+    let Some(imported) = binding.imported.as_deref() else {
+        return Ok(None);
+    };
+    let Some(raw_hits) = snapshot.lookup_candidates(imported) else {
+        return Ok(None);
+    };
+    let scoped: Vec<&NameIndexEntry> = raw_hits
+        .iter()
+        .filter(|hit| hit.file_id == target_file)
+        .collect();
+    Ok(match prefer_definitions(scoped).as_slice() {
+        [hit] => Some(*hit),
+        _ => None,
+    })
+}
+
 /// Appends every base class reachable from `root` through extends/implements
 /// edges, nearest first: the direct bases before their own bases, so reading
 /// `scopes` in order walks the hierarchy by distance from `root` — the order
@@ -2162,6 +2486,7 @@ fn class_declaration_file(
 /// instance-style dotted receivers, which never spell a `::`-scoped path,
 /// stay pending.
 fn resolve_qualified_name(
+    snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
     hits: &[&NameIndexEntry],
 ) -> Option<Resolution> {
@@ -2184,7 +2509,7 @@ fn resolve_qualified_name(
     if let [hit] = matches.as_slice() {
         return Some(Resolution {
             ref_id: stored.id,
-            target_id: hit.entity_id.clone(),
+            target_id: called_target_id(snapshot, stored, hit),
             provenance: EdgeProvenance::QualifiedNameMatch,
         });
     }

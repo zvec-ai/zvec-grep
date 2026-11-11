@@ -566,6 +566,129 @@ pub(super) fn named_children(node: Node<'_>) -> Vec<Node<'_>> {
     node.named_children(&mut cursor).collect()
 }
 
+/// Property names an object literal binds to another value, in the order the
+/// literal states them.
+///
+/// `export const api = { run() {}, run: right }` answers `[("run", "right")]`:
+/// the later property overwrites the earlier one, so a call through `api.run`
+/// reaches `right` and never the method the same key described first. A
+/// property whose value is not a bare name — a method, a shorthand, a nested
+/// literal — states no value the index can follow, but it still overwrites the
+/// earlier binding of its key.
+///
+/// Only a literal the initializer spells directly counts. A wrapper that hands
+/// the literal back unchanged (`({...})`, `Object.freeze({...})`) is peeled;
+/// anything else is left alone, because the properties of a value some call
+/// built are that call's business.
+pub(super) fn object_member_aliases(node: Node<'_>, source: &[u8]) -> Vec<(String, String)> {
+    let Some(literal) = initialized_object_literal(node, source) else {
+        return Vec::new();
+    };
+    let mut members: Vec<(String, String)> = Vec::new();
+    for property in named_children(literal) {
+        let key = match property.kind() {
+            "pair" => property.child_by_field_name("key"),
+            "method_definition" => property.child_by_field_name("name"),
+            // `{ run }` states the name alone; it holds the function of that
+            // name, which the name index already answers.
+            "shorthand_property_identifier" => Some(property),
+            // A spread contributes keys this literal cannot enumerate.
+            _ => None,
+        };
+        let Some(name) = key.and_then(|key| property_key(key, source)) else {
+            continue;
+        };
+        members.retain(|(existing, _)| *existing != name);
+        let value = property.child_by_field_name("value");
+        if property.kind() == "pair"
+            && let Some(value) = value.filter(|value| value.kind() == "identifier")
+        {
+            members.push((name, text(value, source).to_owned()));
+        }
+    }
+    members
+}
+
+/// The object literal a declaration's initializer spells, after peeling the
+/// wrappers that hand it back unchanged. `Object.freeze`/`Object.seal` are the
+/// two calls that do so; any other call names a value this index cannot open.
+fn initialized_object_literal<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Node<'tree>> {
+    if node.kind() != "variable_declarator" {
+        return None;
+    }
+    let mut value = node.child_by_field_name("value")?;
+    loop {
+        match value.kind() {
+            "parenthesized_expression" => value = value.named_child(0)?,
+            "object" => return Some(value),
+            "call_expression" => {
+                let function = value.child_by_field_name("function")?;
+                if !matches!(text(function, source), "Object.freeze" | "Object.seal") {
+                    return None;
+                }
+                let arguments = named_children(value.child_by_field_name("arguments")?);
+                let [argument] = arguments.as_slice() else {
+                    return None;
+                };
+                value = *argument;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// The value a later property of the same key replaces this declaration with.
+///
+/// `{ run() {}, run: right }` indexes the method as `api::run`, yet the
+/// literal's own last property of `run` is `right`: a call through `api.run`
+/// reaches `right`, and the method the key described first is unreachable
+/// through it. Only a later property whose value is a bare name answers;
+/// a later method or literal is a declaration of its own, not a value this
+/// key forwards to.
+pub(super) fn overwritten_by(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let literal = node
+        .parent()
+        .filter(|parent| matches!(parent.kind(), "object" | "object_expression"))?;
+    let name = match node.kind() {
+        "method_definition" => field_text(node, "name", source)?,
+        "pair" => property_key(node.child_by_field_name("key")?, source)?,
+        _ => return None,
+    };
+    let mut replacement = None;
+    for property in named_children(literal) {
+        if property.start_byte() <= node.start_byte() || property.kind() != "pair" {
+            continue;
+        }
+        let Some(key) = property.child_by_field_name("key") else {
+            continue;
+        };
+        if property_key(key, source).as_deref() != Some(name.as_str()) {
+            continue;
+        }
+        replacement = property
+            .child_by_field_name("value")
+            .filter(|value| value.kind() == "identifier")
+            .map(|value| text(value, source).to_owned());
+    }
+    replacement
+}
+
+/// The name a property key spells. Computed keys and keys that are not written
+/// as a name or a string state nothing a call can spell.
+fn property_key(key: Node<'_>, source: &[u8]) -> Option<String> {
+    match key.kind() {
+        "property_identifier"
+        | "shorthand_property_identifier"
+        | "shorthand_property_identifier_pattern" => Some(text(key, source).to_owned()),
+        "string" => Some(
+            text(key, source)
+                .trim_matches(|character| matches!(character, '"' | '\'' | '`'))
+                .to_owned(),
+        ),
+        _ => None,
+    }
+}
+
 /// Whether the declaration spells the `static` storage class on its own
 /// specifiers. Only the declaration's direct children are read: a `static`
 /// nested deeper belongs to a parameter or a local of the declaration, not to

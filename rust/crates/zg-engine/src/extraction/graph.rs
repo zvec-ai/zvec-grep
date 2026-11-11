@@ -33,8 +33,9 @@ mod partition;
 mod vocabulary;
 
 pub(crate) use collector::{
-    collect_import_edge, collect_inheritance_edges, is_call_scan_barrier, is_import_node,
-    is_unreported_call, scan_binding_declarations, scan_call_edges, scan_return_types,
+    alias_target_of, collect_import_edge, collect_inheritance_edges, is_call_scan_barrier,
+    is_import_node, is_unreported_call, scan_binding_declarations, scan_call_edges,
+    scan_return_types,
 };
 pub(crate) use partition::{PartitionedGraph, partition_walk};
 #[cfg(test)]
@@ -143,6 +144,12 @@ pub(crate) struct WalkContext {
     /// spell. A bare call through such a name reaches the local value, never
     /// the file-level symbol of the same name.
     shadowed_names: HashMap<usize, HashSet<String>>,
+    /// Names a declaration makes another spelling of an existing value
+    /// (`const dispatch = send`): a bare call through the bound name reaches
+    /// the aliased one. Grouped by owner like the shadow table, and keyed
+    /// [`FILE_SCOPE_INDEX`] for a declaration written at the file's top level,
+    /// which every body of the file can see.
+    value_aliases: HashMap<(usize, String), String>,
     seen_name_edges: HashSet<(GraphEdgeKind, usize, Option<String>, String, usize, usize)>,
     /// Factory return types this file spells: `Some` answers a bare-call
     /// initializer (`x = makeX()`), `None` marks a name registered with two
@@ -180,6 +187,7 @@ impl WalkContext {
             file_symbols: HashMap::new(),
             scoped_symbols: HashMap::new(),
             shadowed_names: HashMap::new(),
+            value_aliases: HashMap::new(),
             seen_name_edges: HashSet::new(),
             return_types: HashMap::new(),
             entity_counter: 0,
@@ -267,6 +275,19 @@ impl WalkContext {
             .entry(owner)
             .or_default()
             .insert(name.to_owned());
+    }
+
+    /// Records that `owner` declares `name` as another spelling of `target`
+    /// (`const dispatch = send`). Kept apart from the type bindings: a value
+    /// alias answers "which function does this call reach", while a bound type
+    /// answers "which class does this receiver hold", and one rule must never
+    /// read the other's evidence as its own.
+    pub(crate) fn register_value_alias(&mut self, owner: usize, name: &str, target: &str) {
+        if !self.collecting || name.is_empty() || target.is_empty() {
+            return;
+        }
+        self.value_aliases
+            .insert((owner, name.to_owned()), target.to_owned());
     }
 
     #[allow(dead_code)]

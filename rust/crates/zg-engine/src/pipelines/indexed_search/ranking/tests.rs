@@ -28,6 +28,10 @@ fn code(kind: SymbolType, name: &str, scope: Option<&str>) -> CodeMetadata {
         package: None,
         has_internal_linkage: false,
         declares_type: false,
+        alias_of: None,
+        object_members: Vec::new(),
+        overwritten_by: None,
+        exported_as: Vec::new(),
     }
 }
 

@@ -5,18 +5,21 @@ pub(crate) use outline::code_outline;
 
 use tree_sitter::{Language, Node, Parser};
 
+use std::collections::HashMap;
+
 use crate::{
     EngineError,
-    domain::{CodeMetadata, Content, EntityMetadata, FileFormat, Range, SymbolType},
+    domain::{CodeMetadata, Content, EntityMetadata, FileFormat, MemberAlias, Range, SymbolType},
     utils::line_byte_offsets,
 };
 
 use self::adapter::{
-    LanguageAdapter, declares_type, named_children, php_declaration, resolve_adapter,
+    LanguageAdapter, declares_type, named_children, object_member_aliases, overwritten_by,
+    php_declaration, resolve_adapter, text,
 };
 use super::graph::{
-    WalkContext, collect_import_edge, collect_inheritance_edges, is_import_node, partition_walk,
-    scan_binding_declarations, scan_call_edges, scan_return_types,
+    WalkContext, alias_target_of, collect_import_edge, collect_inheritance_edges, is_import_node,
+    partition_walk, scan_binding_declarations, scan_call_edges, scan_return_types,
 };
 use super::{
     ChunkOptions, ExtractedEntity, ExtractionOutput, TextRange, TextSource,
@@ -135,6 +138,9 @@ fn extract_code(
         &mut graph_context,
         code_format,
     );
+    // `export { realImpl as aliasName }` renames a declaration from a
+    // statement of its own, so the walk cannot see it from the declaration.
+    attach_export_aliases(tree.root_node(), bytes, code_format, &mut entities);
 
     let mut output = Vec::new();
     let mut entity_heads = Vec::with_capacity(entities.len());
@@ -237,6 +243,22 @@ struct CodeEntity<'tree> {
     /// Whether this entity introduces a type's name, as opposed to carrying it
     /// (`impl Target`, which is a scope named after the type it implements).
     declares_type: bool,
+    /// Name this entity is another spelling of, when its initializer is a bare
+    /// name (`const dispatch = send`). Bare calls through the alias reach the
+    /// aliased function, and an import of the alias follows the same link.
+    alias_of: Option<String>,
+    /// Properties an object literal initializer binds (`{ run: right }`), in
+    /// the literal's order, a later property replacing an earlier one of its
+    /// key. A member call on this entity reaches the value its key last named.
+    object_members: Vec<MemberAlias>,
+    /// Value a later property of the same key replaces this declaration with.
+    overwritten_by: Option<String>,
+    /// Names an `export { local as exported }` clause republishes this
+    /// declaration under. The clause is a statement of its own, so the
+    /// declared node never spells these names; they are attached after the
+    /// walk from a scan of the file's export clauses, and an import of one
+    /// binds to the declaration it renames.
+    exported_as: Vec<String>,
 }
 
 // The entity branch shares first/scope entity indices and the scope boundary
@@ -281,6 +303,15 @@ fn walk_code_node<'tree>(
                     entity.start_position().row + 1,
                     entity.start_position().column,
                 );
+                // The alias belongs to this entity's own name, so it is read
+                // before the name moves into the record.
+                let alias_of = alias_target_of(entity, source, format)
+                    .filter(|(aliased, _)| name.as_deref() == Some(aliased.as_str()))
+                    .map(|(_, target)| target);
+                let object_members = object_member_aliases(entity, source)
+                    .into_iter()
+                    .map(|(name, target)| MemberAlias { name, target })
+                    .collect();
                 out.push(CodeEntity {
                     node: entity,
                     language: adapter.language(),
@@ -296,6 +327,10 @@ fn walk_code_node<'tree>(
                     package: java_package(entity, source, format),
                     has_internal_linkage: adapter.has_internal_linkage(entity, source),
                     declares_type: declares_type(entity),
+                    alias_of,
+                    object_members,
+                    overwritten_by: overwritten_by(entity, source),
+                    exported_as: Vec::new(),
                 });
             }
             // Name-based references are collected from the first resolved
@@ -514,7 +549,74 @@ fn code_entity_metadata(entity: &CodeEntity<'_>) -> EntityMetadata {
         package: entity.package.clone(),
         has_internal_linkage: entity.has_internal_linkage,
         declares_type: entity.declares_type,
+        alias_of: entity.alias_of.clone(),
+        object_members: entity.object_members.clone(),
+        overwritten_by: entity.overwritten_by.clone(),
+        exported_as: entity.exported_as.clone(),
     })
+}
+
+/// Attaches the names the file's export clauses republish each declaration
+/// under, so an import of one of them binds to the declaration it renames.
+fn attach_export_aliases(
+    root: Node<'_>,
+    source: &[u8],
+    format: FileFormat,
+    entities: &mut [CodeEntity<'_>],
+) {
+    let aliases = scan_export_aliases(root, source, format);
+    for entity in entities {
+        let Some(names) = entity.name.as_deref().and_then(|local| aliases.get(local)) else {
+            continue;
+        };
+        entity.exported_as.clone_from(names);
+        entity.is_exported = true;
+    }
+}
+
+/// Exported names an `export { local as exported }` clause republishes, keyed
+/// by the local name it re-exports.
+///
+/// Only TypeScript and JavaScript spell the rename in a statement of its own;
+/// the other languages rename at the declaration, which the walk already reads.
+fn scan_export_aliases(
+    root: Node<'_>,
+    source: &[u8],
+    format: FileFormat,
+) -> HashMap<String, Vec<String>> {
+    let mut aliases: HashMap<String, Vec<String>> = HashMap::new();
+    if !matches!(format, FileFormat::TypeScript | FileFormat::JavaScript) {
+        return aliases;
+    }
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "export_statement" {
+            for clause in named_children(node) {
+                if clause.kind() != "export_clause" {
+                    continue;
+                }
+                for specifier in named_children(clause) {
+                    if specifier.kind() != "export_specifier" {
+                        continue;
+                    }
+                    let (Some(local), Some(alias)) = (
+                        specifier.child_by_field_name("name"),
+                        specifier.child_by_field_name("alias"),
+                    ) else {
+                        // An unrenamed specifier exports the name it already
+                        // has, which the name index answers on its own.
+                        continue;
+                    };
+                    aliases
+                        .entry(text(local, source).to_owned())
+                        .or_default()
+                        .push(text(alias, source).to_owned());
+                }
+            }
+        }
+        pending.extend(named_children(node));
+    }
+    aliases
 }
 
 /// The `package` a Java source declares, read from the declaration at the root
@@ -843,6 +945,10 @@ mod tests {
                 package: None,
                 has_internal_linkage: false,
                 declares_type: false,
+                alias_of: None,
+                object_members: Vec::new(),
+                overwritten_by: None,
+                exported_as: Vec::new(),
             }))
         );
         assert!(matches!(
@@ -865,6 +971,10 @@ mod tests {
                 package: None,
                 has_internal_linkage: false,
                 declares_type: false,
+                alias_of: None,
+                object_members: Vec::new(),
+                overwritten_by: None,
+                exported_as: Vec::new(),
             }))
         );
         assert!(matches!(
@@ -1061,6 +1171,10 @@ mod tests {
                     has_internal_linkage: false,
                     declares_type: false,
                     package: None,
+                    alias_of: None,
+                    object_members: Vec::new(),
+                    overwritten_by: None,
+                    exported_as: Vec::new(),
                 })),
                 "{name}"
             );
@@ -1247,6 +1361,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "each language's whole metadata is asserted in one fixture"
+    )]
     fn preserves_c_go_and_python_language_specific_metadata() {
         let c_source = test_source(
             FileFormat::C,
@@ -1270,6 +1388,10 @@ mod tests {
                 package: None,
                 has_internal_linkage: false,
                 declares_type: false,
+                alias_of: None,
+                object_members: Vec::new(),
+                overwritten_by: None,
+                exported_as: Vec::new(),
             }))
         );
         assert!(matches!(
@@ -1305,6 +1427,10 @@ mod tests {
                 package: None,
                 has_internal_linkage: false,
                 declares_type: false,
+                alias_of: None,
+                object_members: Vec::new(),
+                overwritten_by: None,
+                exported_as: Vec::new(),
             }))
         );
         assert!(matches!(
@@ -1341,6 +1467,10 @@ mod tests {
                 package: None,
                 has_internal_linkage: false,
                 declares_type: false,
+                alias_of: None,
+                object_members: Vec::new(),
+                overwritten_by: None,
+                exported_as: Vec::new(),
             }))
         );
     }

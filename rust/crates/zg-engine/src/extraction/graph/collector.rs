@@ -14,7 +14,7 @@ use super::vocabulary::{
     CALLEE_FIELDS, COMMON_CALL_TYPES, HeritageVocabulary, heritage_vocabulary_for,
     import_vocabulary_for,
 };
-use super::{Constructs, WalkContext};
+use super::{Constructs, FILE_SCOPE_INDEX, WalkContext};
 
 const MAX_CALLEE_TEXT_CHARS: usize = 180;
 
@@ -407,6 +407,7 @@ fn visit_for_bindings(
     boundary: Option<&dyn Fn(Node<'_>) -> bool>,
 ) {
     let binding = declaration_binding_of(node, source, format, context);
+    let alias = alias_target_of(node, source, format);
     let mut shadowed = Vec::new();
     shadowing_names_of(node, source, format, &mut shadowed);
     for name in shadowed {
@@ -415,14 +416,20 @@ fn visit_for_bindings(
         // function the body calls by that name.
         context.register_shadowed_name(owner_index, &name);
     }
+    let line = node.start_position().row + 1;
+    let column = node.start_position().column;
+    if let Some((name, target)) = alias {
+        // A top-level declaration belongs to the file, not to the entity the
+        // declarator itself became: every body of the file can see the alias.
+        let alias_owner = if at_file_level(node) {
+            FILE_SCOPE_INDEX
+        } else {
+            owner_index
+        };
+        context.register_value_alias(alias_owner, &name, &target);
+    }
     if let Some((name, bound_type)) = binding {
-        context.add_declare_binding(
-            owner_index,
-            &name,
-            &bound_type,
-            node.start_position().row + 1,
-            node.start_position().column,
-        );
+        context.add_declare_binding(owner_index, &name, &bound_type, line, column);
         return;
     }
     for child in named_children(node) {
@@ -431,6 +438,103 @@ fn visit_for_bindings(
         }
         visit_for_bindings(child, owner_index, source, format, context, boundary);
     }
+}
+
+/// Whether a declaration sits at the file's top level: nothing that owns a
+/// body stands between it and the root, so the name it introduces is visible
+/// to every entity of the file rather than to one body.
+fn at_file_level(node: Node<'_>) -> bool {
+    let mut current = node;
+    while let Some(parent) = current.parent() {
+        match parent.kind() {
+            "compilation_unit" | "module" | "program" | "source_file" | "translation_unit" => {
+                return true;
+            }
+            // Any body or container between the declaration and the root
+            // makes the name local to it: a function body, a class body, an
+            // object literal, a loop body.
+            "block"
+            | "class_body"
+            | "compound_statement"
+            | "declaration_list"
+            | "enum_body"
+            | "field_declaration_list"
+            | "interface_body"
+            | "object"
+            | "object_pattern"
+            | "statement_block" => return false,
+            _ => current = parent,
+        }
+    }
+    false
+}
+
+/// Extracts `(bound name, aliased name)` from a declaration whose initializer
+/// is a bare name: `const dispatch = send` makes `dispatch` another spelling of
+/// `send`, so a call written through either reaches the same function.
+///
+/// Only a single name on each side qualifies. Destructuring (`const [a, b] =
+/// pair`) and calls (`const x = makeX()`) bind something other than one named
+/// value, and an initializer that names a variable aliases that variable —
+/// the resolver follows the chain one link at a time, so a wrong guess here
+/// would bend a later call.
+pub(crate) fn alias_target_of(
+    node: Node<'_>,
+    source: &[u8],
+    format: FileFormat,
+) -> Option<(String, String)> {
+    let (name, value) = match format {
+        FileFormat::TypeScript | FileFormat::JavaScript | FileFormat::Java => {
+            if node.kind() != "variable_declarator" {
+                return None;
+            }
+            (
+                node.child_by_field_name("name")?,
+                node.child_by_field_name("value")?,
+            )
+        }
+        FileFormat::Python => {
+            if node.kind() != "assignment" {
+                return None;
+            }
+            (
+                node.child_by_field_name("left")?,
+                node.child_by_field_name("right")?,
+            )
+        }
+        FileFormat::Go => {
+            if node.kind() != "short_var_declaration" {
+                return None;
+            }
+            // `a, b := f()` binds several names to one call; only a
+            // single-to-single assignment says "this name is that name".
+            let left = node.child_by_field_name("left")?;
+            let right = node.child_by_field_name("right")?;
+            if left.named_child_count() != 1 || right.named_child_count() != 1 {
+                return None;
+            }
+            (left.named_child(0)?, right.named_child(0)?)
+        }
+        FileFormat::Rust => {
+            if node.kind() != "let_declaration" {
+                return None;
+            }
+            (
+                node.child_by_field_name("pattern")?,
+                node.child_by_field_name("value")?,
+            )
+        }
+        // C/C++ function-pointer aliases already travel as the bound type
+        // (`c_binding_of`), which partition has consulted since they were
+        // the only alias form; a second table would split that evidence.
+        _ => return None,
+    };
+    if name.kind() != "identifier" || value.kind() != "identifier" {
+        return None;
+    }
+    let name = node_text(name, source);
+    let target = node_text(value, source);
+    (name != target).then(|| (name.to_owned(), target.to_owned()))
 }
 
 /// Extracts `(bound name, declared type)` from a declaration node whose

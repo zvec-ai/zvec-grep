@@ -93,6 +93,35 @@ pub struct CodeMetadata {
     /// one class a member call belongs to.
     #[serde(default)]
     pub declares_type: bool,
+    /// Name this symbol is another spelling of, when its initializer is a bare
+    /// name (`export const dispatch = send`). A call through the symbol reaches
+    /// the aliased one, so an import that binds this symbol must follow the
+    /// alias rather than settle on it.
+    #[serde(default)]
+    pub alias_of: Option<String>,
+    /// Properties an object literal initializer binds, in the literal's own
+    /// order, with a later property replacing an earlier one of its key
+    /// (`{ run() {}, run: right }` states `run -> right`). A member call on
+    /// this symbol reaches the value its key last named.
+    #[serde(default)]
+    pub object_members: Vec<MemberAlias>,
+    /// Value a later property of the same key replaces this declaration with
+    /// (`{ run() {}, run: right }` states `right` on the method's entity). A
+    /// call through that key reaches the replacement, not this declaration.
+    #[serde(default)]
+    pub overwritten_by: Option<String>,
+    /// Names an `export { local as exported }` clause republishes this
+    /// declaration under. The clause is a statement of its own, so this is the
+    /// only evidence that the exported name reaches this declaration.
+    #[serde(default)]
+    pub exported_as: Vec<String>,
+}
+
+/// One property of an object literal and the value it binds.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MemberAlias {
+    pub name: String,
+    pub target: String,
 }
 
 impl CodeMetadata {

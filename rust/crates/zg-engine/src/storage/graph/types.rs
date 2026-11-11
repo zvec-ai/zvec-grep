@@ -1,7 +1,7 @@
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-use crate::domain::{EdgeProvenance, PendingRef, SymbolType};
+use crate::domain::{EdgeProvenance, MemberAlias, PendingRef, SymbolType};
 
 /// Extensible evidence attached to edges and unresolved references.
 pub(crate) type Metadata = BTreeMap<String, Value>;
@@ -61,6 +61,17 @@ pub(crate) struct NameIndexEntry {
     /// Whether this entity introduces a type's name rather than carrying it
     /// over from the type it belongs to (`impl Target`, a Rust `impl` block).
     pub declares_type: bool,
+    /// Name this entity is another spelling of, when its initializer is a bare
+    /// name (`export const dispatch = send`). A call bound to this entity
+    /// reaches the aliased one, so import binding follows the link instead of
+    /// settling on the alias.
+    pub alias_of: Option<String>,
+    /// Properties this entity's object literal initializer binds
+    /// (`{ run: right }`), a later property replacing an earlier one of its
+    /// key. A member call on the entity reaches the value its key last named.
+    pub object_members: Vec<MemberAlias>,
+    /// Value a later property of the same key replaces this declaration with.
+    pub overwritten_by: Option<String>,
 }
 
 /// Name-index record for one entity. Entities without a symbol name are

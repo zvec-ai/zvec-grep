@@ -655,6 +655,10 @@ fn fixture(
                 package: None,
                 has_internal_linkage: false,
                 declares_type: false,
+                alias_of: None,
+                object_members: Vec::new(),
+                overwritten_by: None,
+                exported_as: Vec::new(),
             })),
         ),
         vector,
@@ -1956,6 +1960,10 @@ fn index_code_file(
             package: None,
             has_internal_linkage: false,
             declares_type: false,
+            alias_of: None,
+            object_members: Vec::new(),
+            overwritten_by: None,
+            exported_as: Vec::new(),
         })),
     );
     let graph = FileGraphResult {

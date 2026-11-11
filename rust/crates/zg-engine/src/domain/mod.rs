@@ -36,6 +36,7 @@ pub use metadata::EntityMetadata;
 pub(crate) use metadata::IndexField;
 pub use metadata::Language;
 pub use metadata::MarkdownMetadata;
+pub use metadata::MemberAlias;
 pub use metadata::SymbolType;
 // Visibility has no consumers yet.
 #[allow(unused_imports)]
