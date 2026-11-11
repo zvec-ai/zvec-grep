@@ -44,7 +44,7 @@ impl IndexField {
 
 // --- Code ---
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CodeMetadata {
     pub symbol_type: Option<SymbolType>,
     pub symbol_name: Option<String>,
@@ -55,6 +55,25 @@ pub struct CodeMetadata {
     pub documentation: Option<String>,
     pub visibility: Option<Visibility>,
     pub language: Option<Language>,
+    /// Declared parameter count of function-shaped symbols, with the
+    /// implicit receiver excluded.
+    pub arity: Option<usize>,
+    /// Whether the symbol is importable from outside its module.
+    #[serde(default)]
+    pub is_exported: bool,
+    /// True for pure declarations (C/C++ prototypes, in-class member
+    /// declarations) that never carry a body. Name-based binding prefers the
+    /// definition when both exist for the same symbol; a lone declaration is
+    /// the only known location and stays bindable.
+    #[serde(default)]
+    pub is_declaration: bool,
+    /// The `package` a Java source declares, empty for the default package.
+    /// `None` for languages without the declaration and for indexes written
+    /// before the field existed. Import binding needs it because a Java
+    /// symbol's name carries no package, so the name alone cannot tell
+    /// `my.List` from `java.util.List`.
+    #[serde(default)]
+    pub package: Option<String>,
 }
 
 impl CodeMetadata {
@@ -102,6 +121,7 @@ pub enum Language {
     Go,
     Java,
     JavaScript,
+    Php,
     Python,
     Rust,
     TypeScript,
@@ -116,6 +136,7 @@ impl Language {
             Self::Go => "go",
             Self::Java => "java",
             Self::JavaScript => "javascript",
+            Self::Php => "php",
             Self::Python => "python",
             Self::Rust => "rust",
             Self::TypeScript => "typescript",

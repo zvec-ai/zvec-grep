@@ -10,92 +10,98 @@ use super::{
 };
 
 pub(crate) async fn model_is_cached(entry: EmbeddingCatalogEntry, cache: Option<&Path>) -> bool {
+    cached_source(entry, cache).await.is_some()
+}
+
+pub(in crate::models) async fn cached_source(
+    entry: EmbeddingCatalogEntry,
+    cache: Option<&Path>,
+) -> Option<ArtifactSource> {
     let backend = match entry {
         EmbeddingCatalogEntry::LlamaCpp(_) => LocalModelBackend::LlamaCpp,
         EmbeddingCatalogEntry::Model2Vec(_) => LocalModelBackend::Model2Vec,
         EmbeddingCatalogEntry::Transformers(_) => LocalModelBackend::Transformers,
-        EmbeddingCatalogEntry::Qwen(_) => return false,
+        EmbeddingCatalogEntry::Bekko(_) => LocalModelBackend::Bekko,
+        EmbeddingCatalogEntry::Qwen(_) => return None,
     };
     let cache = cache.map_or_else(|| default_model_cache(backend), Path::to_path_buf);
     let cache = cache.as_path();
     let (download, sources) = match entry {
-        EmbeddingCatalogEntry::Qwen(_) => return false,
+        EmbeddingCatalogEntry::Bekko(model) => (
+            model.download,
+            [
+                Some(ArtifactSource::hugging_face(
+                    model.download.hugging_face,
+                    cache
+                        .join(model.download.hugging_face.repo)
+                        .join(model.download.hugging_face.revision),
+                )),
+                model.download.fallback_source(cache, "transformers-js"),
+            ],
+        ),
+        EmbeddingCatalogEntry::Qwen(_) => return None,
         EmbeddingCatalogEntry::LlamaCpp(model) => (
             model.download,
             [
-                ArtifactSource::hugging_face(model.download.hugging_face, cache.to_path_buf())
-                    .with_local_path(model.download.artifacts[0].path, model.cache_file),
-                ArtifactSource::model_scope(
-                    model.download.model_scope,
-                    cache
-                        .join("modelscope")
-                        .join("llama-cpp")
-                        .join(model.download.model_scope.repo.replace('/', "--"))
-                        .join(model.download.model_scope.revision),
+                Some(
+                    ArtifactSource::hugging_face(model.download.hugging_face, cache.to_path_buf())
+                        .with_local_path(model.download.artifacts[0].path, model.cache_file),
                 ),
+                model.download.fallback_source(cache, "llama-cpp"),
             ],
         ),
         EmbeddingCatalogEntry::Transformers(model) => (
             model.download,
             [
-                ArtifactSource::hugging_face(
+                Some(ArtifactSource::hugging_face(
                     model.download.hugging_face,
                     cache
                         .join(model.download.hugging_face.repo)
                         .join(model.download.hugging_face.revision),
-                ),
-                ArtifactSource::model_scope(
-                    model.download.model_scope,
-                    cache
-                        .join("modelscope")
-                        .join("transformers-js")
-                        .join(model.download.model_scope.repo.replace('/', "--"))
-                        .join(model.download.model_scope.revision),
-                ),
+                )),
+                model.download.fallback_source(cache, "transformers-js"),
             ],
         ),
         EmbeddingCatalogEntry::Model2Vec(model) => {
-            let Some(model_file) = Path::new(model.model_file).file_name() else {
-                return false;
-            };
+            let model_file = Path::new(model.model_file).file_name()?;
             (
                 model.download,
                 [
-                    ArtifactSource::hugging_face(
-                        model.download.hugging_face,
-                        cache
-                            .join("model2vec")
-                            .join(model.download.hugging_face.repo.replace('/', "--"))
-                            .join(model.download.hugging_face.revision),
-                    )
-                    .with_local_path(model.model_file, model_file)
-                    .with_local_path(model.tokenizer_file, "tokenizer/tokenizer.json"),
-                    ArtifactSource::model_scope(
-                        model.download.model_scope,
-                        cache
-                            .join("modelscope")
-                            .join("model2vec")
-                            .join(model.download.model_scope.repo.replace('/', "--"))
-                            .join(model.download.model_scope.revision),
-                    )
-                    .with_local_path(model.model_file, model_file)
-                    .with_local_path(model.tokenizer_file, "tokenizer/tokenizer.json"),
+                    Some(
+                        ArtifactSource::hugging_face(
+                            model.download.hugging_face,
+                            cache
+                                .join("model2vec")
+                                .join(model.download.hugging_face.repo.replace('/', "--"))
+                                .join(model.download.hugging_face.revision),
+                        )
+                        .with_local_path(model.model_file, model_file)
+                        .with_local_path(model.tokenizer_file, "tokenizer/tokenizer.json"),
+                    ),
+                    model
+                        .download
+                        .fallback_source(cache, "model2vec")
+                        .map(|source| {
+                            source
+                                .with_local_path(model.model_file, model_file)
+                                .with_local_path(model.tokenizer_file, "tokenizer/tokenizer.json")
+                        }),
                 ],
             )
         }
     };
-    for source in &sources {
-        let Ok(manifest) = Manifest::new(entry.reference(), source, download.artifacts) else {
+    for source in sources.into_iter().flatten() {
+        let Ok(manifest) = Manifest::new(entry.reference(), &source, download.artifacts) else {
             continue;
         };
-        if validate_snapshot(source, download.artifacts, &manifest, None)
+        if validate_snapshot(&source, download.artifacts, &manifest, None)
             .await
             .unwrap_or(false)
         {
-            return true;
+            return Some(source);
         }
     }
-    false
+    None
 }
 
 #[cfg(test)]
@@ -112,7 +118,7 @@ mod tests {
     };
     const DOWNLOAD: ArtifactDownloadConfig = ArtifactDownloadConfig {
         hugging_face: SOURCE,
-        model_scope: SOURCE,
+        model_scope: Some(SOURCE),
         artifacts: &[
             ArtifactConfig {
                 path: "model.safetensors",

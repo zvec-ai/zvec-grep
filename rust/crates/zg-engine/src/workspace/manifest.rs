@@ -363,12 +363,34 @@ mod tests {
                     .expect("valid embedding metadata"),
                     std::collections::BTreeMap::new(),
                     BTreeMap::from([("local/minilm".into(), ModelConfig::default())]),
+                    false,
                     crate::domain::FTS_CONFIG,
                 )
                 .expect("index descriptor"),
             )),
         )
         .expect("fixture manifest")
+    }
+
+    /// Rebuilds a manifest whose published descriptor records the graph switch.
+    fn with_graph_indexing(manifest: &Workspace, enabled: bool) -> Workspace {
+        let mut descriptor = manifest
+            .index()
+            .descriptor()
+            .expect("index descriptor")
+            .clone();
+        descriptor.set_graph_indexing(enabled);
+        Workspace::new(
+            manifest.source_root(),
+            manifest.layout().clone(),
+            manifest.scan().clone(),
+            manifest.index_version(),
+            manifest.storage_generation().map(str::to_owned),
+            manifest.created_epoch_ms(),
+            manifest.updated_epoch_ms(),
+            IndexState::Enabled(Box::new(descriptor)),
+        )
+        .expect("manifest")
     }
 
     #[test]
@@ -566,6 +588,61 @@ mod tests {
             );
         }
         write_workspace_manifest(layout.manifest_path(), &manifest).expect("write valid manifest");
+        assert_eq!(
+            read_workspace_manifest(directory.path(), &layout).expect("read manifest"),
+            Some(manifest)
+        );
+    }
+
+    #[test]
+    fn graph_indexing_persists_on_the_index_descriptor() {
+        let directory = tempdir().expect("workspace");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        fs::create_dir(layout.storage_dir()).expect("storage directory");
+        let manifest = fixture_manifest(&layout);
+        assert!(
+            !manifest
+                .index()
+                .descriptor()
+                .is_some_and(IndexDescriptor::graph_indexing),
+            "the switch defaults to off"
+        );
+        let manifest = with_graph_indexing(&manifest, true);
+        assert!(
+            manifest
+                .index()
+                .descriptor()
+                .is_some_and(IndexDescriptor::graph_indexing)
+        );
+
+        let mut value = serde_json::to_value(&manifest).expect("manifest JSON");
+        assert_eq!(
+            value["index"]["descriptor"]["graphIndexing"],
+            serde_json::json!(true)
+        );
+        assert!(
+            value.get("graphIndexing").is_none(),
+            "the workspace no longer stores the switch"
+        );
+        assert!(
+            decode_manifest(&value, &layout)
+                .expect("round trip")
+                .index()
+                .descriptor()
+                .is_some_and(IndexDescriptor::graph_indexing)
+        );
+
+        // The setting is required: there is no older layout to fall back to.
+        value["index"]["descriptor"]
+            .as_object_mut()
+            .expect("descriptor object")
+            .remove("graphIndexing");
+        assert!(
+            decode_manifest(&value, &layout).is_err(),
+            "a descriptor without the switch is invalid"
+        );
+
+        write_workspace_manifest(layout.manifest_path(), &manifest).expect("write manifest");
         assert_eq!(
             read_workspace_manifest(directory.path(), &layout).expect("read manifest"),
             Some(manifest)
@@ -1170,7 +1247,7 @@ mod tests {
         let current = fixture_manifest(&layout);
         write_workspace_manifest(layout.manifest_path(), &current).expect("current manifest");
         let bytes = fs::read(layout.manifest_path()).expect("persisted manifest");
-        for version in [0, 1, 2, 3, 5, u32::MAX] {
+        for version in [0, 1, 2, 3, 4, 6, u32::MAX] {
             let mut unsupported = current.clone();
             unsupported = crate::domain::Workspace::new(
                 directory.path(),

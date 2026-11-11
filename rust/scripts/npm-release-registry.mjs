@@ -195,7 +195,7 @@ export async function collectRelease({ manifest, version, tarballRoot, targets }
     "ZG_INSTALL_ACCELERATOR=auto (default) installs CPU first and requests CUDA plugins only when NVIDIA detection succeeds; cpu skips detection/downloads; cuda forces plugin installation and fails if unsuccessful. Later use npm rebuild -g @zvec/zvec-grep with the same settings; no compilation is performed. Stop zg/daemon first and restart it afterwards.",
     "CPU installs do not require CUDA component tarballs. CUDA plugins are exact-version, core-bound and integrity-checked; Linux and Windows ORT fragments are concatenated and checked before activation. ZG_INSTALL_OFFLINE=1 disables network downloads; ZG_PLUGIN_DIR selects local archives. --ignore-scripts skips even CPU bootstrap: explicitly permit the package's scripts and run npm rebuild to initialize it.",
     `Every compressed npm tarball must be at most ${MAX_NPM_TARBALL_BYTES / 1024 / 1024} MiB; this is checked at pack, collect, and publication preflight.`,
-    "Linux x64 and ARM64 candidates are built and CPU-tested on Ubuntu 20.04 (glibc 2.31), with a glibc audit of the executable and bundled libraries. CUDA acceleration additionally requires compatible NVIDIA drivers and CUDA/cuDNN host libraries.",
+    "Linux x64 and ARM64 candidates are built on manylinux_2_28 and CPU-tested on AlmaLinux 8.10 (glibc 2.28), with a glibc audit of the executable and bundled libraries. CUDA acceleration additionally requires compatible NVIDIA drivers and CUDA/cuDNN host libraries.",
     "SHA256SUMS and release.json identify the exact files and source commit.",
     "These artifacts use the regular npm package layout; no registry publication is needed to install them.",
     "macOS packages use the toolchain's local code signatures; Windows packages do not require a signing certificate.",
@@ -225,34 +225,70 @@ export async function checkPublishedPackage(entry, registryFetch = fetch, signal
       `npm registry returned ${response.status} for ${entry.name}@${entry.version}`,
     );
   const metadata = await response.json();
+  verifyPublishedIntegrity(entry, metadata);
+  return true;
+}
+
+function verifyPublishedIntegrity(entry, metadata) {
   if (metadata.dist?.integrity !== entry.integrity) {
     throw new Error(
       `npm already contains different bytes for ${entry.name}@${entry.version}; choose a new version`,
     );
   }
+}
+
+async function checkInstallMetadata(entry, accept, registryFetch, signal) {
+  // Match npm's package URL, including its escaped scope separator. Version
+  // metadata and full/abbreviated package documents can propagate independently.
+  const url = `https://registry.npmjs.org/${entry.name.replace("/", "%2f")}`;
+  const response = await registryFetch(url, {
+    headers: { accept },
+    signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
+  });
+  if (response.status === 404) return false;
+  if (!response.ok) {
+    throw new Error(`npm registry returned ${response.status} for ${entry.name}@${entry.version} (${accept})`);
+  }
+  const document = await response.json();
+  const metadata = document.versions?.[entry.version];
+  if (!metadata) return false;
+  verifyPublishedIntegrity(entry, metadata);
   return true;
 }
 
 export async function waitForPublishedPackages(packages, {
   registryFetch = fetch,
-  timeoutMs = 600_000,
+  timeoutMs = 1_200_000,
   intervalMs = 10_000,
 } = {}) {
   const signal = AbortSignal.timeout(timeoutMs);
-  const pending = [...packages];
+  const pending = packages.map((entry) => ({ entry, checks: [
+    { label: "version metadata" },
+    { label: "full package metadata", accept: "application/json" },
+    { label: "abbreviated package metadata", accept: "application/vnd.npm.install-v1+json" },
+  ] }));
+  const missing = () => pending.map(({ entry, checks }) =>
+    `${entry.name}@${entry.version} (${checks[0].label})`).join(", ");
   try {
     // Publication can succeed before every registry replica serves the metadata.
-    // Share one deadline across all packages and retain successful integrity checks.
+    // Share one deadline across all packages and retain successful integrity checks
+    // for each document. npm install must be able to resolve optional dependencies.
     while (pending.length) {
-      for (const entry of [...pending]) {
-        signal.throwIfAborted();
-        if (await checkPublishedPackage(entry, registryFetch, signal)) {
-          pending.splice(pending.indexOf(entry), 1);
+      for (const state of [...pending]) {
+        while (state.checks.length) {
+          signal.throwIfAborted();
+          const { accept } = state.checks[0];
+          const ready = accept
+            ? await checkInstallMetadata(state.entry, accept, registryFetch, signal)
+            : await checkPublishedPackage(state.entry, registryFetch, signal);
+          if (!ready) break;
+          state.checks.shift();
         }
+        if (!state.checks.length) pending.splice(pending.indexOf(state), 1);
       }
       if (pending.length) {
         console.log(`Waiting for npm registry metadata (${pending.length} packages): ${
-          pending.map((entry) => `${entry.name}@${entry.version}`).join(", ")
+          missing()
         }; retrying in ${intervalMs} ms`);
         await sleep(intervalMs, undefined, { signal });
       }
@@ -260,7 +296,7 @@ export async function waitForPublishedPackages(packages, {
   } catch (error) {
     if (signal.aborted) {
       throw new Error(`timed out after ${timeoutMs} ms waiting for npm registry metadata; registry candidate is missing: ${
-        pending.map((entry) => `${entry.name}@${entry.version}`).join(", ")
+        missing()
       }`, { cause: error });
     }
     throw error;

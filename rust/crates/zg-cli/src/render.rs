@@ -1,5 +1,8 @@
 mod compact;
 mod context;
+mod relationships;
+
+pub use relationships::write_relationships;
 
 #[cfg(test)]
 use crate::highlight::QueryHighlighter;
@@ -317,6 +320,7 @@ pub fn help_text(topic: Option<&str>) -> Result<String, HelpTopicError> {
     let text = match topic {
         None => return Ok(main_help()),
         Some("search") => SEARCH_HELP,
+        Some("callers" | "callees") => RELATIONSHIP_HELP,
         Some("index") => INDEX_HELP,
         Some("status") => STATUS_HELP,
         Some("config") => CONFIG_HELP,
@@ -360,6 +364,10 @@ Search:
   <query>        Search indexed context (no command prefix)
   --rg           Run managed ripgrep
 
+Relationships:
+  --callers      Show incoming call sites for a symbol
+  --callees      Show outgoing call sites for a symbol
+
 Management:
   --index        Build, rebuild, or drop the workspace index
   --status       Show workspace and index status
@@ -399,6 +407,29 @@ Run zg --help models or zg --help file-types for supported indexing capabilities
 Run zg --help environment for all variables, scopes, aliases, and precedence.
 Run zg --help search or zg --help <topic> for specific help.
 Use zg -h/--help for this page and zg -v/--version for the version."#;
+
+const RELATIONSHIP_HELP: &str = r"Usage:
+  zg --callers <symbol> [root] [options]
+  zg --callees <symbol> [root] [options]
+
+Options:
+  -g, --glob <GLOB>                Workspace-relative glob; prefix ! to exclude; repeatable
+  --iglob <GLOB>                   Case-insensitive glob; repeatable
+  --limit <N>                      Maximum call sites per matching symbol (default: 20, max: 50)
+  --color <auto|always|never>       Control ANSI colors (default: auto)
+  --mode <direct|server|auto>       Select the execution mode (default: auto)
+
+Globs follow the same ordered rules as ordinary search and filter definitions
+and suggestions, not call-site files.
+Names may be scope-qualified, such as Class::method. Same-name definitions are
+shown separately, with each related definition and its call-site location.
+Call-site locations always refer to the caller file, including calls without
+symbol metadata. Text line and byte-column numbers are one-based.
+A truncation notice indicates additional visible call sites beyond the limit.
+Unresolved references are excluded, so empty results do not prove that a relationship is absent.
+Output is readable text, shared with MCP text content.
+Requires graph indexing enabled with zg --index --graph; add --rebuild for an existing index.
+A query does not refresh or build the index.";
 
 const SEARCH_HELP: &str = r#"Usage:
   zg <query> [options]
@@ -443,8 +474,8 @@ Result options:
   --mode <direct|server|auto>       Select indexed query transport (default: auto)
 
 Preview modes: none keeps one source line; short uses compact bounded source;
-full uses compact full source; detail adds metadata, outlines, and file grouping.
-Full previews do not retrieve an entire function or file. TTY affects only color.
+full shows each complete indexed entity; detail adds metadata, outlines, and file grouping.
+Full previews do not expand beyond the matched entity. TTY affects only color.
 Multi-query results start each nonempty group with its original query and position.
 Plain output uses -- query i/n: text --; colored output adds a dim separator rule.
 Auto colors terminal output and leaves pipes plain; NO_COLOR disables auto color.
@@ -504,10 +535,14 @@ const INDEX_HELP: &str = r"Usage:
 
 Index options:
   --rebuild                         Rebuild the existing index
+  --graph[=true|false]               Enable or disable graph indexing; omitted keeps saved setting
   --drop                            Permanently remove the workspace index
   --debug                           Print skipped-file diagnostics to stderr
   --mode <direct|server|auto>       Select indexing transport
   --color <auto|always|never>       Color output (default: auto)
+
+Graph indexing defaults to disabled for new indexes. Changing it on an existing
+index requires --rebuild, for example: zg --index --rebuild --graph.
 
 Dropping an index runs immediately without a confirmation prompt.
 
@@ -517,7 +552,7 @@ Embedding options:
   --endpoint <url>                  Embedding provider endpoint
   --model-cache <path>              Local model cache directory
   --device <device>                 auto, cpu, metal, vulkan, cuda
-  --embedding-concurrency <n>        Positive embedding concurrency (index only)
+  --embedding-concurrency <n>        Embedding execution budget (index only)
   --allow-remote                    Allow Remote Embedding for this command only
 
 Explicit --device and --model-cache values are saved after successful indexing;
@@ -529,8 +564,16 @@ Index embedding concurrency:
   and refresh; query-vector inference keeps its own defaults. The CLI option
   is accepted only with --index and is never saved in workspace settings.
   llama.cpp: context limit capped at 8, with serialized batches; defaults to 1.
-  Transformers/ORT: in-flight batch limit capped at 8; defaults to 1. Native
-    sessions honor that budget; CoreML uses one physical session.
+  Transformers/ORT: C controls CPU/CUDA session count in direct mode (default 1),
+    capped by available hardware concurrency. Server pools use the startup
+    ZVEC_GREP_EMBEDDING_CONCURRENCY value; client C only limits execution within
+    the pool. Requests above capacity warn and are capped; omitted C uses capacity.
+    ZVEC_GREP_ORT_THREAD_BUDGET configures one global CPU intra-op pool shared by
+    all ORT models; defaults to half the available logical threads, rounded up.
+    Client C never resizes Server pools or changes their thread configuration.
+    Batch and prefetch limits are independent of the client's C.
+    Values must be positive; requests above server pool capacity are capped.
+  Bekko: CPU batch tasks; defaults to 1, capped at 8.
   Potion/model2vec: concurrent batch tasks; defaults to 2, with an independent
     CPU worker-pool capacity. No cap of 8 is applied.
   Remote: concurrent requests; adaptive scheduling may reduce the limit after
@@ -585,7 +628,7 @@ Environment:
   ZVEC_GREP_DEVICE       Local embedding device: auto, cpu, metal, vulkan, or cuda
 
 Index-only embedding concurrency:
-  ZVEC_GREP_EMBEDDING_CONCURRENCY  Positive index/update concurrency override
+  ZVEC_GREP_EMBEDDING_CONCURRENCY  Index/update execution concurrency override
   Applies to automatic indexing and refresh, never query-vector inference.
   Explicit CLI/API index settings take precedence. Invalid values warn and use
   automatic selection. Server mode reads the Server process environment;
@@ -672,7 +715,7 @@ when the client disconnects.
 
 The server listens on loopback. Authentication is disabled by default; pass a
 token file or set ZVEC_GREP_SERVER_TOKEN to require Bearer authentication.
-The public MCP endpoint defaults to the agent toolset (indexed search only).
+The public MCP endpoint defaults to the agent toolset (indexed search and callers/callees).
 Use --mcp-toolset full, or ZVEC_GREP_MCP_TOOLSET=full, to expose managed rg and
 the four index and status tools. CLI managed rg, index, and status commands
 continue to use the daemon's internal administration endpoint.
@@ -772,6 +815,7 @@ Supported text embedding models (one per workspace):
   MODEL                               RUNTIME  INPUT       DIMS  TOKENS  BACKEND
   ----------------------------------  -------  ----------  ----  ------  ---------------
   local/all-minilm-l6-v2              local    text         384     256  transformers
+  local/bekko-256-int8                local    text         256   32768  bekko
   local/bge-small-en-v1.5             local    text         384     512  transformers
   local/embeddinggemma-300m           local    text         768    2048  llama-cpp
   local/gte-modernbert-base           local    text         768    8192  transformers
@@ -805,6 +849,7 @@ Structured code (symbols and scopes):
   java        .java
   javascript  .js, .mjs, .cjs
   jsx         .jsx
+  php         .php, .phtml
   python      .py
   rust        .rs
   tsx         .tsx
@@ -826,7 +871,6 @@ Other code (plain-text chunks):
   kotlin      .kt, .kts
   less        .less
   makefile    Makefile
-  php         .php
   ruby        .rb
   scala       .scala
   scss        .scss
@@ -891,14 +935,20 @@ Embedding:
   ZVEC_GREP_ENDPOINT     Remote Embedding endpoint fallback
   ZVEC_GREP_MODEL_CACHE  Local embedding model cache directory
   ZVEC_GREP_DEVICE       Local embedding device: auto, cpu, metal, vulkan, or cuda
+  ZVEC_GREP_ORT_THREAD_BUDGET  Global ORT CPU intra-op thread configuration
+    Default: half the available logical threads, rounded up; capped by hardware.
+    All model/device pools share it. It is not a total process thread limit.
+    Restart the Server after changing it.
 
-Index-only embedding concurrency:
-  ZVEC_GREP_EMBEDDING_CONCURRENCY  Positive index/update concurrency override
-  Applies to automatic indexing and refresh, never query-vector inference.
-  Precedence: explicit CLI/API index setting, this variable, legacy llama.cpp
-  index setting, then backend defaults. Invalid values warn and use defaults.
-  Server mode reads the Server process environment; restart it after changes.
-  These overrides are not persisted in workspace settings.
+Embedding concurrency:
+  ZVEC_GREP_EMBEDDING_CONCURRENCY  Index/update concurrency default
+    ORT: direct-mode session count, or fixed per-model/device Server pool capacity.
+    CPU/CUDA default to 1. Client index overrides only limit pool execution;
+    they cannot expand Server capacity. Queries share the same model pool.
+    Other backends retain their index-only defaults and override precedence.
+  CLI/API index setting, this variable, legacy llama.cpp index setting, then defaults.
+  Invalid values warn and use defaults. Restart the Server after environment changes.
+  These settings are not persisted in workspace configuration.
 
 Qwen credential aliases:
   DASHSCOPE_API_KEY  Qwen credential fallback after ZVEC_GREP_API_KEY
@@ -1050,6 +1100,10 @@ mod output_tests {
             visibility: None,
             language: None,
             documentation: None,
+            arity: None,
+            is_exported: false,
+            is_declaration: false,
+            package: None,
         }));
         for source in [ContextSource::Index, ContextSource::Rg] {
             result.source = source;
@@ -1407,6 +1461,10 @@ mod output_tests {
                 visibility: None,
                 language: None,
                 documentation: None,
+                arity: None,
+                is_exported: false,
+                is_declaration: false,
+                package: None,
             }));
             let mut buffer = Vec::new();
             write_item_preview(

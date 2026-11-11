@@ -1,5 +1,5 @@
 use zg_cli::{ColorMode, OutputOptions, PreviewMode, write_context_with_options};
-use zg_engine::api::context::ContextResult;
+use zg_engine::api::context::{ContextResult, result::ContentRange};
 
 fn grouped_result() -> ContextResult {
     let fixtures: serde_json::Value =
@@ -294,6 +294,70 @@ fn short_and_full_keep_the_original_compact_layout_on_every_output() {
 }
 
 #[test]
+fn short_context_does_not_displace_fragment_lines_that_fit_in_the_preview() {
+    use std::fmt::Write as _;
+
+    let mut content = String::new();
+    for line in 1..=30 {
+        writeln!(content, "source-line-{line:02}").expect("source line");
+    }
+    let line_bytes = "source-line-01\n".len();
+    for matched_lines in [1, 7, 8, 9, 10, 12] {
+        let mut result = grouped_result();
+        result.group_results.clear();
+        result.items.truncate(1);
+        let item = &mut result.items[0];
+        item.content = content.clone();
+        item.content_range = ContentRange::Text {
+            start_line: 17,
+            end_line: 47,
+            start_byte_offset: 200,
+            end_byte_offset: 200 + content.len(),
+            start_byte_column: 0,
+            end_byte_column: 0,
+        };
+        item.range = item.content_range.clone();
+        item.excerpt_range = Some(ContentRange::Text {
+            start_line: 28,
+            end_line: 28 + matched_lines,
+            start_byte_offset: 200 + 11 * line_bytes,
+            end_byte_offset: 200 + (11 + matched_lines) * line_bytes,
+            start_byte_column: 0,
+            end_byte_column: 0,
+        });
+        let original = result.clone();
+        let mut bytes = Vec::new();
+        write_context_with_options(
+            &mut bytes,
+            &result,
+            OutputOptions {
+                preview: PreviewMode::Short,
+                color: ColorMode::Never,
+                ..OutputOptions::default()
+            },
+            false,
+        )
+        .expect("short render");
+        let output = String::from_utf8(bytes).expect("UTF-8");
+        for offset in 0..matched_lines.min(10) {
+            let required = format!("  {}: source-line-{:02}\n", 28 + offset, 12 + offset);
+            assert!(
+                output.contains(&required),
+                "{matched_lines} matched lines: {output}"
+            );
+        }
+        assert_eq!(
+            output
+                .lines()
+                .filter(|line| line.contains(": source-line-"))
+                .count(),
+            10
+        );
+        assert_eq!(result, original, "preview preserves retrieval metadata");
+    }
+}
+
+#[test]
 fn short_marks_truncated_source_lines_and_full_preserves_them() {
     for (content, short_line) in [
         ("a".repeat(160), "a".repeat(160)),
@@ -327,6 +391,115 @@ fn short_marks_truncated_source_lines_and_full_preserves_them() {
                 "{preview:?}: {output}"
             );
         }
+    }
+}
+
+#[test]
+fn bounded_previews_keep_fragment_text_after_restoring_a_long_line_prefix() {
+    let fragment = format!("node.name,{}needle", "x".repeat(143));
+    for prefix in [" ".repeat(200), "中😀".repeat(100)] {
+        let line = format!("{prefix}{fragment}tail");
+        for before in ["", "before\r\n"] {
+            let matched_line = 50 + usize::from(!before.is_empty());
+            let column_origin = if before.is_empty() { 4 } else { 0 };
+            let mut result = grouped_result();
+            result.group_results.clear();
+            let item = &mut result.items[0];
+            item.content = format!("{before}{line}");
+            item.content_range = ContentRange::Text {
+                start_line: 50,
+                end_line: matched_line,
+                start_byte_offset: 100,
+                end_byte_offset: 100 + item.content.len(),
+                start_byte_column: 4,
+                end_byte_column: column_origin + line.len(),
+            };
+            item.range = item.content_range.clone();
+            item.excerpt_range = Some(ContentRange::Text {
+                start_line: matched_line,
+                end_line: matched_line,
+                start_byte_offset: 100 + before.len() + prefix.len(),
+                end_byte_offset: 100 + before.len() + prefix.len() + fragment.len(),
+                start_byte_column: column_origin + prefix.len(),
+                end_byte_column: column_origin + prefix.len() + fragment.len(),
+            });
+            let original = result.clone();
+            for preview in [PreviewMode::None, PreviewMode::Short, PreviewMode::Full] {
+                for terminal in [false, true] {
+                    let mut bytes = Vec::new();
+                    write_context_with_options(
+                        &mut bytes,
+                        &result,
+                        OutputOptions {
+                            preview,
+                            color: ColorMode::Never,
+                            ..OutputOptions::default()
+                        },
+                        terminal,
+                    )
+                    .expect("fragment preview");
+                    let output = String::from_utf8(bytes).expect("UTF-8");
+                    let label = if preview == PreviewMode::None {
+                        format!("{matched_line}\t")
+                    } else {
+                        format!("  {matched_line}: ")
+                    };
+                    let displayed = output
+                        .lines()
+                        .find_map(|line| line.strip_prefix(&label))
+                        .expect("matched source line");
+                    assert!(displayed.contains(&fragment), "{preview:?}: {output}");
+                    if preview == PreviewMode::Full {
+                        assert_eq!(displayed, line);
+                    } else {
+                        assert!(displayed.starts_with("...") && displayed.ends_with("..."));
+                        assert!(displayed.chars().count() <= 198, "bounded source context");
+                    }
+                    assert_eq!(
+                        result, original,
+                        "rendering preserves retrieval and source coordinates"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn minimal_preview_preserves_its_utf16_limit_without_a_restored_prefix() {
+    for (content, expected) in [
+        ("a".repeat(160), "a".repeat(160)),
+        ("a".repeat(161), format!("{}...", "a".repeat(159))),
+        (
+            format!("{}😀", "a".repeat(158)),
+            format!("{}😀", "a".repeat(158)),
+        ),
+        (
+            format!("{}😀b", "a".repeat(158)),
+            format!("{}...", "a".repeat(158)),
+        ),
+    ] {
+        let mut result = grouped_result();
+        result.group_results.clear();
+        result.items[0].content = content;
+        result.items[0].excerpt_range = None;
+        let mut bytes = Vec::new();
+        write_context_with_options(
+            &mut bytes,
+            &result,
+            OutputOptions {
+                preview: PreviewMode::None,
+                color: ColorMode::Never,
+                ..OutputOptions::default()
+            },
+            false,
+        )
+        .expect("minimal render");
+        let output = String::from_utf8(bytes).expect("UTF-8");
+        assert_eq!(
+            output.lines().find_map(|line| line.strip_prefix("50\t")),
+            Some(expected.as_str())
+        );
     }
 }
 

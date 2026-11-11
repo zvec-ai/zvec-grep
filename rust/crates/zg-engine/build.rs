@@ -1,5 +1,6 @@
 fn main() {
     let native = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../native");
+    println!("cargo:rerun-if-changed={}", native.display());
     let expected = native
         .canonicalize()
         .expect("run npm run build:native first");

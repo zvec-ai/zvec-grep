@@ -25,6 +25,15 @@ pub mod options {
         pub root: Option<PathBuf>,
         /// Build from empty storage and replace the active index only after success.
         pub rebuild: bool,
+        /// Turns walk-time code graph indexing on or off for this workspace.
+        ///
+        /// Omitted keeps the saved setting, and a workspace saved before this
+        /// option existed indexes without a graph. Changing the setting requires
+        /// `rebuild`: the graph and the rest of the index must describe the same
+        /// build, so a refresh that flips the switch is rejected and the published
+        /// index stays untouched.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub graph_indexing: Option<bool>,
         /// Automatic refreshes require an existing enabled index instead of creating one.
         /// This admission policy is runtime-only and never accepted from transport requests.
         #[serde(skip)]
@@ -38,8 +47,11 @@ pub mod options {
         pub scan: ScanRulesUpdate,
         /// The single model used to embed text content in this workspace.
         pub embedding: Option<EmbeddingModelSpec>,
-        /// Index-only embedding concurrency: llama.cpp contexts, local inference
-        /// batches, or remote requests. Local native limits are capped at eight.
+        /// Index-only embedding concurrency: llama.cpp contexts (up to eight),
+        /// ORT CPU/CUDA sessions, or remote requests. Values must be positive.
+        /// ORT caps direct-mode sessions to available hardware concurrency.
+        /// Server requests only limit execution within the startup-configured
+        /// model pool; they never resize it or change the global ORT thread pool.
         /// Omitted values use `ZVEC_GREP_EMBEDDING_CONCURRENCY`, the legacy
         /// llama.cpp index override, then the backend default; never persisted.
         pub embedding_concurrency: Option<usize>,

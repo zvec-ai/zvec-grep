@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-ZVEC_COMMIT = "0e748ab60f6de6f3d3b0d7d64cbc9f95d138b89a"
+ZVEC_COMMIT = "06076297c1ca34cc7edc2fa46dff48fc02f6da06"
 NODE_COMMIT = "51c542807815a90275a5a14066a575cf991c65d8"
 
 

@@ -24,10 +24,64 @@ use zg_engine::{
         },
         index::{IndexOptions, options::WorkspaceChange},
         info::InfoOptions,
+        relationships::RelationshipOptions,
     },
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+#[tokio::test]
+async fn indexed_calls_preserve_distinct_source_positions() -> TestResult {
+    let temporary = tempdir()?;
+    let root = temporary.path();
+    let server = EmbeddingServer::start()?;
+    configure_remote_model(root, server.address)?;
+    fs::write(
+        root.join("calls.rs"),
+        "fn target() {}\nfn caller() {\n    target(); target();\n    target();\n}\n",
+    )?;
+    let engine = ZvecGrep::new();
+    let indexed = engine
+        .index(IndexOptions {
+            graph_indexing: Some(true),
+            rebuild: true,
+            ..index_options(root)
+        })
+        .await?;
+    assert_eq!((indexed.files_added, indexed.files_failed), (1, 0));
+    engine.close();
+    let engine = ZvecGrep::new();
+    let options = RelationshipOptions {
+        root: Some(root.to_path_buf()),
+        symbol: "caller".into(),
+        limit: Some(3),
+        ..RelationshipOptions::default()
+    };
+    let result = engine.callees(options.clone()).await?;
+    assert_eq!(result.matches.len(), 1);
+    let matched = &result.matches[0];
+    assert_eq!(matched.edges.len(), 3);
+    assert!(!matched.truncated);
+    let positions = matched
+        .edges
+        .iter()
+        .map(|edge| (edge.line, edge.column))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        positions,
+        BTreeSet::from([(Some(3), Some(4)), (Some(3), Some(14)), (Some(4), Some(4))])
+    );
+    let limited = engine
+        .callees(RelationshipOptions {
+            limit: Some(1),
+            ..options
+        })
+        .await?;
+    assert_eq!(limited.matches[0].edges.len(), 1);
+    assert!(limited.matches[0].truncated);
+    engine.close();
+    Ok(())
+}
 
 #[tokio::test]
 async fn extensionless_scripts_preserve_outline_language_across_reopen() -> TestResult {
@@ -227,7 +281,7 @@ async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -
             .as_ref()
             .expect("workspace")
             .index_version,
-        Some(4)
+        Some(5)
     );
     let collections = model_collections(&info.index_path)?;
     assert_eq!(collections.len(), 1);
@@ -240,7 +294,7 @@ async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -
     let manifest: Value =
         serde_json::from_slice(&fs::read(root.join(".zvec-grep/manifest.json"))?)?;
     assert!(manifest.get("manifestVersion").is_none());
-    assert_eq!(manifest["indexVersion"], 4);
+    assert_eq!(manifest["indexVersion"], 5);
     assert_eq!(
         manifest["index"]["descriptor"]["defaultEmbeddingModel"]["model"]["name"],
         "text-embedding-v4"
@@ -522,35 +576,52 @@ async fn long_entities_store_original_content_once_and_project_fragment_metadata
             .await?;
         assert_eq!(result.items.len(), 1);
         let item = &result.items[0];
-        let Some(zg_engine::api::context::result::ContentRange::Text {
-            start_line,
-            end_line,
+        let zg_engine::api::context::result::ContentRange::Text {
             start_byte_offset,
             end_byte_offset,
-            start_byte_column,
-            end_byte_column,
-        }) = &item.excerpt_range
+            ..
+        } = &item.content_range
         else {
-            panic!("text source excerpt");
+            panic!("text source content");
         };
-        assert_eq!(Some(&item.content_range), item.excerpt_range.as_ref());
         assert_eq!(
             source.get(*start_byte_offset..*end_byte_offset),
             Some(item.content.as_str())
         );
-        for (offset, line, column) in [
-            (*start_byte_offset, *start_line, *start_byte_column),
-            (*end_byte_offset, *end_line, *end_byte_column),
+        assert!(*start_byte_offset == 0 || source.as_bytes()[start_byte_offset - 1] == b'\n');
+        assert!(
+            *end_byte_offset == source.len() || source.as_bytes()[end_byte_offset - 1] == b'\n'
+        );
+        for range in [
+            &item.content_range,
+            item.excerpt_range.as_ref().expect("matched fragment"),
         ] {
-            let prefix = &source[..offset];
-            assert_eq!(
-                line,
-                prefix.bytes().filter(|byte| *byte == b'\n').count() + 1
-            );
-            assert_eq!(
-                column,
-                prefix.rfind('\n').map_or(offset, |last| offset - last - 1)
-            );
+            let zg_engine::api::context::result::ContentRange::Text {
+                start_line,
+                end_line,
+                start_byte_offset: matched_start,
+                end_byte_offset: matched_end,
+                start_byte_column,
+                end_byte_column,
+            } = range
+            else {
+                panic!("text source range");
+            };
+            assert!(start_byte_offset <= matched_start && matched_end <= end_byte_offset);
+            for (offset, line, column) in [
+                (*matched_start, *start_line, *start_byte_column),
+                (*matched_end, *end_line, *end_byte_column),
+            ] {
+                let prefix = &source[..offset];
+                assert_eq!(
+                    line,
+                    prefix.bytes().filter(|byte| *byte == b'\n').count() + 1
+                );
+                assert_eq!(
+                    column,
+                    prefix.rfind('\n').map_or(offset, |last| offset - last - 1)
+                );
+            }
         }
         assert_eq!(
             item.content_role,

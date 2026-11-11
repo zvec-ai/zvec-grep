@@ -156,6 +156,34 @@ impl FileFormat {
     }
 }
 
+/// Formats that could own `path`, resolved with the same file-name rules as
+/// [`FileFormat::from_file_name`].
+///
+/// A name that matches no rule reports [`FileFormat::Unknown`] instead of an
+/// empty result, and a path without a file name cannot be classified at all,
+/// so it reports the same marker. Callers that must distinguish "no rule" from
+/// a real match compare against `[FileFormat::Unknown]`.
+pub(crate) fn formats_for_path(path: &Path) -> Vec<FileFormat> {
+    path.file_name()
+        .map_or_else(|| vec![FileFormat::Unknown], FileFormat::from_file_name)
+}
+
+/// Whether a reference extracted from a file of `reference` format can address
+/// a declaration in a file of `candidate` format.
+///
+/// The pairs below share one reference namespace; everything else must match
+/// exactly.
+pub(crate) fn reference_compatible_with(reference: FileFormat, candidate: FileFormat) -> bool {
+    reference == candidate
+        || matches!(
+            (reference, candidate),
+            (FileFormat::C, FileFormat::Cpp)
+                | (FileFormat::Cpp, FileFormat::C)
+                | (FileFormat::TypeScript, FileFormat::JavaScript)
+                | (FileFormat::JavaScript, FileFormat::TypeScript)
+        )
+}
+
 fn match_longest_extension(file_name: &OsStr) -> &'static [FileFormat] {
     let file_name_bytes = file_name.as_encoded_bytes();
     file_name_bytes

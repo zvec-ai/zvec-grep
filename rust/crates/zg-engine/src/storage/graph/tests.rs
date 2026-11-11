@@ -44,15 +44,13 @@ fn node(id: &str) -> FileGraphNode {
         name: Some(id.to_owned()),
         qualified_name: id.to_owned(),
         language: "rust".into(),
-        start_line: 1,
-        end_line: 1,
-        start_column: 0,
-        end_column: 1,
+        range: None,
         signature: None,
         doc: None,
         arity: None,
         visibility: None,
         is_exported: false,
+        is_declaration: false,
     }
 }
 
@@ -74,6 +72,78 @@ fn proposal(storage: &SqliteGraphStorage, target: &str) -> Resolution {
     }
 }
 
+/// The proposal a hierarchy rule writes: `bind_nearest_member` stamps every
+/// receiver call it binds through extends/implements `file_scoped`.
+fn hierarchy_proposal(storage: &SqliteGraphStorage, target: &str) -> Resolution {
+    let pending = storage.list_pending_refs(100, 0).expect("read refs");
+    let stored = &pending.refs[0];
+    Resolution {
+        ref_id: stored.id,
+        target_id: target.into(),
+        provenance: EdgeProvenance::FileScoped,
+    }
+}
+
+/// One inheritance clause as extraction leaves it for the resolver: the
+/// owner's entity ID, the qualified name assembly records beside it, and the
+/// base the clause spells.
+fn inheritance_reference(owner_id: &str, owner: &str, base: &str) -> PendingRef {
+    PendingRef {
+        owner_id: owner_id.into(),
+        ref_name: base.into(),
+        receiver_name: None,
+        ref_kind: GraphEdgeKind::Extends,
+        arity: None,
+        line: 2,
+        column: 0,
+        status: PendingRefStatus::Pending,
+        metadata: Metadata::from_iter([("owner".into(), json!(owner))]),
+    }
+}
+
+/// The same clause for a file whose entity IDs still match their spellings.
+fn hierarchy_reference(owner: &str, base: &str) -> PendingRef {
+    inheritance_reference(owner, owner, base)
+}
+
+/// One import statement as extraction leaves it: the specifier the file spells,
+/// owned by the file node so a rewrite can compare it across writes.
+fn import_reference(owner: &str, specifier: &str) -> PendingRef {
+    PendingRef {
+        owner_id: owner.into(),
+        ref_name: specifier.into(),
+        receiver_name: None,
+        ref_kind: GraphEdgeKind::Imports,
+        arity: None,
+        line: 1,
+        column: 0,
+        status: PendingRefStatus::Pending,
+        metadata: Metadata::default(),
+    }
+}
+
+/// Resolves everything the queue holds so the next write starts clean: the
+/// inheriting file's own clause binds as an import, the replayed member call as
+/// the hierarchy rule writes it.
+fn settle_queue(db: &mut SqliteGraphStorage) {
+    let pending = db.list_pending_refs(100, 0).expect("refs");
+    let resolutions: Vec<Resolution> = pending
+        .refs
+        .iter()
+        .map(|stored| Resolution {
+            ref_id: stored.id,
+            target_id: "b".into(),
+            provenance: if stored.reference.ref_kind == GraphEdgeKind::Extends {
+                EdgeProvenance::ImportScoped
+            } else {
+                EdgeProvenance::FileScoped
+            },
+        })
+        .collect();
+    db.apply_resolutions(&resolutions).expect("resolve");
+    assert_eq!(db.list_pending_refs(100, 0).expect("queue").refs.len(), 0);
+}
+
 fn open(path: &Path) -> SqliteGraphStorage {
     SqliteGraphStorage::open(path, OpenMode::ReadWrite).expect("open writer")
 }
@@ -92,8 +162,10 @@ fn local_queries_preserve_direction_kinds_order_metadata_and_call_sites() {
     ];
     db.write_file_graph(
         1,
+        None,
         &graph(&["a", "b"], edges.clone(), vec![reference("a", "external")]),
         &[],
+        false,
     )
     .expect("write");
     assert_eq!(
@@ -127,22 +199,32 @@ fn replacement_and_repeated_deletion_remove_only_owned_rows() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
     db.write_file_graph(
         2,
+        None,
         &graph(
             &["a", "b"],
             vec![edge(GraphEdgeKind::Calls, "a", "b", 1)],
             vec![reference("a", "x")],
         ),
         &[],
+        false,
     )
     .expect("first");
     let other = edge(GraphEdgeKind::Calls, "x", "y", 2);
-    db.write_file_graph(3, &graph(&["x", "y"], vec![other.clone()], vec![]), &[])
-        .expect("second");
+    db.write_file_graph(
+        3,
+        None,
+        &graph(&["x", "y"], vec![other.clone()], vec![]),
+        &[],
+        false,
+    )
+    .expect("second");
     let new = edge(GraphEdgeKind::Calls, "c", "d", 3);
     db.write_file_graph(
         2,
+        None,
         &graph(&["c", "d"], vec![new.clone()], vec![]),
         &["a".into(), "b".into()],
+        false,
     )
     .expect("replace");
     assert!(
@@ -183,15 +265,17 @@ fn cross_file_resolution_is_idempotent_and_invalidation_requeues_refs() {
     let local = edge(GraphEdgeKind::Calls, "a", "b", 1);
     db.write_file_graph(
         4,
+        None,
         &graph(
             &["a", "b"],
             vec![local.clone()],
             vec![reference("a", "remote")],
         ),
         &[],
+        false,
     )
     .expect("caller");
-    db.write_file_graph(5, &graph(&["remote"], vec![], vec![]), &[])
+    db.write_file_graph(5, None, &graph(&["remote"], vec![], vec![]), &[], false)
         .expect("target");
     let resolution = proposal(&db, "remote");
     assert_eq!(
@@ -248,14 +332,26 @@ fn cross_file_resolution_is_idempotent_and_invalidation_requeues_refs() {
 #[test]
 fn replacing_a_target_with_the_same_id_invalidates_resolutions() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
-    db.write_file_graph(4, &graph(&["a"], vec![], vec![reference("a", "b")]), &[])
-        .expect("caller");
-    db.write_file_graph(5, &graph(&["b"], vec![], vec![]), &[])
+    db.write_file_graph(
+        4,
+        None,
+        &graph(&["a"], vec![], vec![reference("a", "b")]),
+        &[],
+        false,
+    )
+    .expect("caller");
+    db.write_file_graph(5, None, &graph(&["b"], vec![], vec![]), &[], false)
         .expect("target");
     let resolution = proposal(&db, "b");
     db.apply_resolutions(&[resolution]).expect("resolve");
-    db.write_file_graph(5, &graph(&["b"], vec![], vec![]), &["b".into()])
-        .expect("replace");
+    db.write_file_graph(
+        5,
+        None,
+        &graph(&["b"], vec![], vec![]),
+        &["b".into()],
+        false,
+    )
+    .expect("replace");
     assert!(
         db.neighborhood("b", Direction::In, Some(&[GraphEdgeKind::Calls]))
             .expect("invalidated")
@@ -286,7 +382,7 @@ fn file_level_import_targets_are_invalidated_without_entity_ids() {
     };
     let mut import = reference("f6", "module");
     import.ref_kind = GraphEdgeKind::Imports;
-    db.write_file_graph(6, &graph(&[], vec![], vec![import]), &[])
+    db.write_file_graph(6, None, &graph(&[], vec![], vec![import]), &[], false)
         .expect("import");
     let resolution = proposal(&db, "f7");
     db.apply_resolutions(&[resolution]).expect("resolve");
@@ -294,6 +390,374 @@ fn file_level_import_targets_are_invalidated_without_entity_ids() {
     db.delete_file_graph(7, &[]).expect("delete empty target");
     assert_eq!(import_count(), 0);
     assert_eq!(db.list_pending_refs(100, 0).expect("pending").refs.len(), 1);
+}
+
+#[test]
+fn writable_open_adds_the_index_a_database_was_built_without() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("graph.sqlite");
+    let mut db = open(&path);
+    db.write_file_graph(
+        1,
+        None,
+        &graph(&["a"], vec![], vec![reference("a", "target")]),
+        &[],
+        false,
+    )
+    .expect("write");
+    drop(db);
+
+    let raw = Connection::open(&path).expect("inspect");
+    raw.execute("DROP INDEX edges_name_tail", [])
+        .expect("drop index");
+    let index_sql = |raw: &Connection| {
+        raw.query_row(
+            "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = 'edges_name_tail'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+    };
+    assert!(index_sql(&raw).is_none());
+    drop(raw);
+
+    let _db = open(&path);
+    let raw = Connection::open(&path).expect("inspect");
+    let sql = index_sql(&raw).expect("index restored by a writable open");
+    assert!(sql.contains("name_tail"), "index covers name_tail: {sql}");
+    assert!(
+        sql.contains("reference_name IS NOT NULL"),
+        "index stays partial on the probe predicate: {sql}"
+    );
+    assert_eq!(
+        raw.query_row("SELECT count(*) FROM edges", [], |row| row.get::<_, i64>(0))
+            .expect("rows survive"),
+        1
+    );
+}
+
+#[test]
+fn requeue_matches_a_name_that_only_appears_as_the_receiver() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    db.write_file_graph(
+        1,
+        None,
+        &graph(&["a"], vec![], vec![reference("a", "target")]),
+        &[],
+        false,
+    )
+    .expect("write");
+    let resolution = proposal(&db, "b");
+    db.apply_resolutions(&[resolution]).expect("resolve");
+    assert_eq!(db.list_pending_refs(100, 0).expect("pending").refs.len(), 0);
+
+    // `reference` stores the receiver `module` and the name tail `target`, so
+    // only the receiver arm can match `module`. A later write that records the
+    // name is exactly the evidence a pass leaves behind.
+    db.write_file_graph(2, None, &graph(&["module"], vec![], vec![]), &[], false)
+        .expect("name evidence");
+    assert_eq!(db.requeue_stale_resolutions().expect("requeue"), 1);
+    assert_eq!(db.list_pending_refs(100, 0).expect("pending").refs.len(), 1);
+    assert_eq!(
+        db.requeue_stale_resolutions().expect("consumed"),
+        0,
+        "the requeue clears the evidence it consumed"
+    );
+}
+
+#[test]
+fn stale_evidence_survives_a_reopen_until_the_requeue_consumes_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("graph.sqlite");
+    {
+        let mut db = open(&path);
+        db.write_file_graph(
+            1,
+            None,
+            &graph(&["a"], vec![], vec![reference("a", "target")]),
+            &[],
+            false,
+        )
+        .expect("write");
+        let resolution = proposal(&db, "b");
+        db.apply_resolutions(&[resolution]).expect("resolve");
+        assert_eq!(db.list_pending_refs(100, 0).expect("pending").refs.len(), 0);
+        // A pass that stops before its sweep leaves the evidence in the
+        // database rather than in memory.
+        db.write_file_graph(2, None, &graph(&["module"], vec![], vec![]), &[], false)
+            .expect("later write");
+        db.close().expect("close");
+    }
+    let mut db = open(&path);
+    assert_eq!(
+        db.requeue_stale_resolutions()
+            .expect("requeue after reopen"),
+        1,
+        "the recorded evidence outlives the connection"
+    );
+    assert_eq!(db.list_pending_refs(100, 0).expect("pending").refs.len(), 1);
+    assert_eq!(
+        db.requeue_stale_resolutions().expect("consumed"),
+        0,
+        "a second requeue has nothing left to replay"
+    );
+}
+
+#[test]
+fn hierarchy_change_requeues_member_calls_bound_through_the_chain() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    db.write_file_graph(
+        1,
+        None,
+        &graph(&["a"], vec![], vec![reference("a", "target")]),
+        &[],
+        false,
+    )
+    .expect("write");
+    let resolution = hierarchy_proposal(&db, "b");
+    db.apply_resolutions(&[resolution]).expect("resolve");
+    assert_eq!(db.list_pending_refs(100, 0).expect("pending").refs.len(), 0);
+
+    // The base swap spells `Mid` and its new base, neither of which the call
+    // or its target names: only the inheritance evidence reaches the call.
+    db.write_file_graph(
+        2,
+        None,
+        &graph(&["Mid"], vec![], vec![hierarchy_reference("Mid", "B")]),
+        &[],
+        false,
+    )
+    .expect("hierarchy evidence");
+    assert_eq!(db.requeue_stale_resolutions().expect("requeue"), 1);
+    // The write also queued its own inheritance clause; only the earlier
+    // member call is the requeue's evidence.
+    let pending = db.list_pending_refs(100, 0).expect("pending");
+    assert!(
+        pending
+            .refs
+            .iter()
+            .any(|stored| stored.reference.ref_name == "target"),
+        "the hierarchy-bound member call returns to the queue"
+    );
+    assert_eq!(
+        db.requeue_stale_resolutions().expect("consumed"),
+        0,
+        "the hierarchy evidence is consumed with the requeue"
+    );
+}
+
+#[test]
+fn a_write_without_inheritance_keeps_hierarchy_bindings() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    db.write_file_graph(
+        1,
+        None,
+        &graph(&["a"], vec![], vec![reference("a", "target")]),
+        &[],
+        false,
+    )
+    .expect("write");
+    let resolution = hierarchy_proposal(&db, "b");
+    db.apply_resolutions(&[resolution]).expect("resolve");
+
+    // Rewriting an unrelated file records its names but no inheritance
+    // evidence, so the bound member call stays out of the sweep.
+    db.write_file_graph(2, None, &graph(&["unrelated"], vec![], vec![]), &[], false)
+        .expect("write");
+    assert_eq!(db.requeue_stale_resolutions().expect("requeue"), 0);
+    assert_eq!(db.list_pending_refs(100, 0).expect("pending").refs.len(), 0);
+}
+
+#[test]
+fn a_rewrite_that_restates_the_same_inheritance_keeps_hierarchy_bindings() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    db.write_file_graph(
+        1,
+        None,
+        &graph(&["a"], vec![], vec![reference("a", "target")]),
+        &[],
+        false,
+    )
+    .expect("write");
+    let resolution = hierarchy_proposal(&db, "b");
+    db.apply_resolutions(&[resolution]).expect("resolve");
+
+    // Joining a base stales every call bound through the chain.
+    let clause = inheritance_reference("Mid", "Mid", "B");
+    db.write_file_graph(2, None, &graph(&["Mid"], vec![], vec![clause]), &[], false)
+        .expect("first inheritance write");
+    assert_eq!(db.requeue_stale_resolutions().expect("requeue"), 1);
+    settle_queue(&mut db);
+
+    // Editing a method body re-mints the class ID: extraction keeps the class's
+    // full text and hashes it into the ID. The clause's owner spelling and base
+    // are what the rewrite repeats, so the bindings survive the new ID.
+    let entities = ["Mid".to_owned()];
+    db.write_file_graph(
+        2,
+        None,
+        &graph(
+            &["Mid@rewritten"],
+            vec![],
+            vec![inheritance_reference("Mid@rewritten", "Mid", "B")],
+        ),
+        &entities,
+        false,
+    )
+    .expect("second write");
+    assert_eq!(
+        db.requeue_stale_resolutions().expect("requeue"),
+        0,
+        "an unchanged base stales no binding"
+    );
+    let pending = db.list_pending_refs(100, 0).expect("queue");
+    assert_eq!(
+        pending.refs.len(),
+        1,
+        "only the rewritten file's own clause is queued: {pending:?}"
+    );
+    assert_eq!(pending.refs[0].reference.ref_name, "B");
+}
+
+#[test]
+fn a_renamed_base_stales_the_bindings_the_chain_fed() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    db.write_file_graph(
+        1,
+        None,
+        &graph(&["a"], vec![], vec![reference("a", "target")]),
+        &[],
+        false,
+    )
+    .expect("write");
+    let resolution = hierarchy_proposal(&db, "b");
+    db.apply_resolutions(&[resolution]).expect("resolve");
+    db.write_file_graph(
+        2,
+        None,
+        &graph(
+            &["Mid"],
+            vec![],
+            vec![inheritance_reference("Mid", "Mid", "B")],
+        ),
+        &[],
+        false,
+    )
+    .expect("first inheritance write");
+    assert_eq!(db.requeue_stale_resolutions().expect("requeue"), 1);
+    settle_queue(&mut db);
+
+    // The method body moved again, but this rewrite also swaps the base: the
+    // spelling is the evidence, so the new one still stales the chain.
+    db.write_file_graph(
+        2,
+        None,
+        &graph(
+            &["Mid@rewritten"],
+            vec![],
+            vec![inheritance_reference("Mid@rewritten", "Mid", "C")],
+        ),
+        &["Mid".to_owned()],
+        false,
+    )
+    .expect("second write");
+    assert_eq!(
+        db.requeue_stale_resolutions().expect("requeue"),
+        1,
+        "a changed base stales the chain"
+    );
+}
+
+#[test]
+fn a_moved_import_stales_the_bindings_the_base_chain_fed() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    db.write_file_graph(
+        1,
+        None,
+        &graph(&["a"], vec![], vec![reference("a", "target")]),
+        &[],
+        false,
+    )
+    .expect("write");
+    let resolution = hierarchy_proposal(&db, "b");
+    db.apply_resolutions(&[resolution]).expect("resolve");
+
+    // The header joins its base through `left`.
+    let header = |specifier: &str| {
+        graph(
+            &["Mid"],
+            vec![],
+            vec![
+                inheritance_reference("Mid", "Mid", "Base"),
+                import_reference("f2", specifier),
+            ],
+        )
+    };
+    db.write_file_graph(2, None, &header("./left.hpp"), &[], false)
+        .expect("joining write");
+    assert_eq!(db.requeue_stale_resolutions().expect("requeue"), 1);
+    settle_queue(&mut db);
+
+    // The clause still spells (extends, Mid, Base); only the include moved, so
+    // the base name now reads a different declaration.
+    db.write_file_graph(2, None, &header("./right.hpp"), &[], false)
+        .expect("moving write");
+    assert_eq!(
+        db.requeue_stale_resolutions().expect("requeue"),
+        1,
+        "a moved import stales the chain"
+    );
+    settle_queue(&mut db);
+
+    // Restating the same output is not a change.
+    db.write_file_graph(2, None, &header("./right.hpp"), &[], false)
+        .expect("repeated write");
+    assert_eq!(db.requeue_stale_resolutions().expect("requeue"), 0);
+}
+
+#[test]
+fn hierarchy_change_keeps_bindings_that_never_read_the_chain() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    db.write_file_graph(
+        1,
+        None,
+        &graph(
+            &["a"],
+            vec![],
+            vec![reference("a", "first"), reference("a", "second")],
+        ),
+        &[],
+        false,
+    )
+    .expect("write");
+    let pending = db.list_pending_refs(100, 0).expect("refs");
+    db.apply_resolutions(&[
+        Resolution {
+            ref_id: pending.refs[0].id,
+            target_id: "b".into(),
+            provenance: EdgeProvenance::FileScoped,
+        },
+        Resolution {
+            ref_id: pending.refs[1].id,
+            target_id: "b".into(),
+            provenance: EdgeProvenance::WorkspaceUnique,
+        },
+    ])
+    .expect("resolve");
+
+    db.write_file_graph(
+        2,
+        None,
+        &graph(&["Mid"], vec![], vec![hierarchy_reference("Mid", "B")]),
+        &[],
+        false,
+    )
+    .expect("hierarchy evidence");
+    assert_eq!(
+        db.requeue_stale_resolutions().expect("requeue"),
+        1,
+        "only the hierarchy-bound call returns to the queue"
+    );
 }
 
 #[test]
@@ -305,7 +769,7 @@ fn pagination_is_pending_only_and_readers_do_not_truncate_edges() {
     let edges = (1..=1100)
         .map(|i| edge(GraphEdgeKind::Calls, "a", "b", i))
         .collect();
-    db.write_file_graph(1, &graph(&["a", "b"], edges, refs), &[])
+    db.write_file_graph(1, None, &graph(&["a", "b"], edges, refs), &[], false)
         .expect("large graph");
     assert_eq!(
         db.neighborhood("a", Direction::Out, Some(&[GraphEdgeKind::Calls]))
@@ -341,18 +805,22 @@ fn deletion_chunks_large_entity_lists() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
     db.write_file_graph(
         8,
+        None,
         &graph(&["owner"], vec![], vec![reference("owner", "last")]),
         &[],
+        false,
     )
     .expect("source");
     let ids: Vec<String> = (0..1600).map(|i| format!("entity-{i}")).collect();
     db.write_file_graph(
         5,
+        None,
         &FileGraphResult {
             nodes: ids.iter().map(|id| node(id)).collect(),
             ..FileGraphResult::default()
         },
         &[],
+        false,
     )
     .expect("target");
     db.apply_resolutions(&[proposal(&db, "entity-1599")])
@@ -370,8 +838,14 @@ fn deletion_chunks_large_entity_lists() {
 fn ownership_validation_prevents_cross_file_snapshot_writes() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
     let original = edge(GraphEdgeKind::Calls, "a", "b", 1);
-    db.write_file_graph(1, &graph(&["a", "b"], vec![original.clone()], vec![]), &[])
-        .expect("write");
+    db.write_file_graph(
+        1,
+        None,
+        &graph(&["a", "b"], vec![original.clone()], vec![]),
+        &[],
+        false,
+    )
+    .expect("write");
     let mut nonlocal = original.clone();
     nonlocal.provenance = EdgeProvenance::WorkspaceUnique;
     for invalid in [
@@ -392,7 +866,7 @@ fn ownership_validation_prevents_cross_file_snapshot_writes() {
         graph(&[], vec![], vec![reference("external", "b")]),
     ] {
         assert!(
-            db.write_file_graph(1, &invalid, &["a".into(), "b".into()])
+            db.write_file_graph(1, None, &invalid, &["a".into(), "b".into()], false)
                 .is_err()
         );
         assert_eq!(
@@ -408,15 +882,27 @@ fn ownership_validation_prevents_cross_file_snapshot_writes() {
 fn non_pending_reference_status_preserves_the_previous_snapshot() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
     let original = reference("a", "target");
-    db.write_file_graph(1, &graph(&["a"], vec![], vec![original.clone()]), &[])
-        .expect("write");
+    db.write_file_graph(
+        1,
+        None,
+        &graph(&["a"], vec![], vec![original.clone()]),
+        &[],
+        false,
+    )
+    .expect("write");
     let before = db.list_pending_refs(100, 0).expect("pending refs");
 
     for status in [PendingRefStatus::Resolved, PendingRefStatus::Failed] {
         let mut invalid = original.clone();
         invalid.status = status;
         assert!(matches!(
-            db.write_file_graph(1, &graph(&["a"], vec![], vec![invalid]), &["a".into()]),
+            db.write_file_graph(
+                1,
+                None,
+                &graph(&["a"], vec![], vec![invalid]),
+                &["a".into()],
+                false,
+            ),
             Err(Error::InvalidInput(_))
         ));
         assert_eq!(db.list_pending_refs(100, 0).expect("unchanged"), before);
@@ -428,9 +914,15 @@ fn sql_failure_rolls_back_replacement_and_invalidation() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("graph.sqlite");
     let mut db = open(&path);
-    db.write_file_graph(8, &graph(&["a"], vec![], vec![reference("a", "b")]), &[])
-        .expect("source");
-    db.write_file_graph(5, &graph(&["b"], vec![], vec![]), &[])
+    db.write_file_graph(
+        8,
+        None,
+        &graph(&["a"], vec![], vec![reference("a", "b")]),
+        &[],
+        false,
+    )
+    .expect("source");
+    db.write_file_graph(5, None, &graph(&["b"], vec![], vec![]), &[], false)
         .expect("target");
     db.apply_resolutions(&[proposal(&db, "b")])
         .expect("resolve");
@@ -439,12 +931,14 @@ fn sql_failure_rolls_back_replacement_and_invalidation() {
     assert!(
         db.write_file_graph(
             5,
+            None,
             &graph(
                 &["b"],
                 vec![edge(GraphEdgeKind::Calls, "b", "b", 1)],
                 vec![]
             ),
-            &["b".into()]
+            &["b".into()],
+            false,
         )
         .is_err()
     );
@@ -469,12 +963,14 @@ fn sql_failure_rolls_back_an_entire_resolution_batch() {
     let mut db = open(&path);
     db.write_file_graph(
         1,
+        None,
         &graph(
             &["a"],
             vec![],
             vec![reference("a", "one"), reference("a", "two")],
         ),
         &[],
+        false,
     )
     .expect("write");
     let refs = db.list_pending_refs(100, 0).expect("refs").refs;
@@ -513,8 +1009,10 @@ fn readonly_connections_reopen_data_and_never_create_or_write() {
     let expected = edge(GraphEdgeKind::Calls, "a'\"\\", "b", 1);
     db.write_file_graph(
         1,
+        None,
         &graph(&["a'\"\\", "b"], vec![expected.clone()], vec![]),
         &[],
+        false,
     )
     .expect("escaped ids");
     db.close().expect("close writer");
@@ -543,7 +1041,7 @@ fn readonly_connections_reopen_data_and_never_create_or_write() {
 }
 
 #[test]
-fn schemas_reject_foreign_and_newer_databases_without_rewriting_versions() {
+fn schemas_reject_foreign_databases_and_other_owners_without_rewriting_identity() {
     let dir = tempfile::tempdir().expect("tempdir");
     let foreign = dir.path().join("foreign.sqlite");
     Connection::open(&foreign)
@@ -554,26 +1052,35 @@ fn schemas_reject_foreign_and_newer_databases_without_rewriting_versions() {
         SqliteGraphStorage::open(&foreign, OpenMode::ReadWrite),
         Err(Error::ForeignDatabase)
     ));
-    let path = dir.path().join("newer.sqlite");
+    let path = dir.path().join("unrelated.sqlite");
     open(&path).close().expect("init");
     let raw = Connection::open(&path).expect("raw");
-    raw.pragma_update(None, "user_version", 999)
-        .expect("new version");
-    for mode in [OpenMode::ReadOnly, OpenMode::ReadWrite] {
-        assert!(matches!(
-            SqliteGraphStorage::open(&path, mode),
-            Err(Error::UnsupportedSchema { version: 999, .. })
-        ));
-    }
+    // Version compatibility belongs to the workspace manifest, so the user version
+    // stays untouched and never gates opening the database.
     assert_eq!(
         raw.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .expect("version"),
-        999
+        0
+    );
+    raw.pragma_update(None, "application_id", 1_514_623_569)
+        .expect("other application");
+    for mode in [OpenMode::ReadOnly, OpenMode::ReadWrite] {
+        assert!(matches!(
+            SqliteGraphStorage::open(&path, mode),
+            Err(Error::UnsupportedSchema {
+                application_id: 1_514_623_569
+            })
+        ));
+    }
+    assert_eq!(
+        raw.query_row("PRAGMA application_id", [], |row| row.get::<_, i64>(0))
+            .expect("application"),
+        1_514_623_569
     );
 }
 
 #[test]
-fn schema_contains_only_edges_and_enforces_json_objects() {
+fn schema_keeps_edges_and_the_stale_evidence_and_enforces_json_objects() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("graph.sqlite");
     open(&path).close().expect("init");
@@ -586,7 +1093,9 @@ fn schema_contains_only_edges_and_enforces_json_objects() {
         .expect("query")
         .collect::<rusqlite::Result<_>>()
         .expect("rows");
-    assert_eq!(names, ["edges", "sqlite_sequence"]);
+    // Names, ownership and paths stay canonical in zvec; the graph holds the
+    // edges plus the evidence a pass recorded but has not requeued yet.
+    assert_eq!(names, ["edges", "sqlite_sequence", "zg_stale_names"]);
     assert!(raw.execute("INSERT INTO edges (file_id, kind, source, target, provenance, status, metadata) VALUES (1, 'calls', 'a', 'b', 'file_local', 'resolved', '[]')", []).is_err());
     assert!(raw.execute("INSERT INTO edges (file_id, kind, source, target, provenance, status, line) VALUES (1, 'calls', 'a', 'b', 'file_local', 'resolved', 0)", []).is_err());
 }
@@ -594,8 +1103,14 @@ fn schema_contains_only_edges_and_enforces_json_objects() {
 #[test]
 fn invalid_and_stale_resolution_proposals_do_not_mutate_pending_refs() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
-    db.write_file_graph(9, &graph(&["a"], vec![], vec![reference("a", "b")]), &[])
-        .expect("write");
+    db.write_file_graph(
+        9,
+        None,
+        &graph(&["a"], vec![], vec![reference("a", "b")]),
+        &[],
+        false,
+    )
+    .expect("write");
     let valid = proposal(&db, "b");
     for invalid in [
         Resolution {
@@ -644,7 +1159,13 @@ fn independent_connections_observe_commits_and_skip_deleted_refs() {
     let path = dir.path().join("graph.sqlite");
     let mut writer = open(&path);
     writer
-        .write_file_graph(9, &graph(&["a"], vec![], vec![reference("a", "b")]), &[])
+        .write_file_graph(
+            9,
+            None,
+            &graph(&["a"], vec![], vec![reference("a", "b")]),
+            &[],
+            false,
+        )
         .expect("write");
     let mut resolver = open(&path);
     let reader = SqliteGraphStorage::open(&path, OpenMode::ReadOnly).expect("reader");
@@ -674,44 +1195,49 @@ fn neighborhood_filters_direction_and_kinds() {
     ];
     db.write_file_graph(
         1,
+        None,
         &graph(
             &["a", "b", "c"],
             edges.clone(),
             vec![reference("b", "pending")],
         ),
         &[],
+        false,
     )
     .expect("write");
-    assert_eq!(
-        db.neighborhood("b", Direction::Both, None).expect("both"),
-        edges[..5]
-    );
-    assert_eq!(
-        db.neighborhood("b", Direction::In, None).expect("in"),
-        vec![
-            edges[0].clone(),
-            edges[1].clone(),
-            edges[2].clone(),
-            edges[4].clone()
-        ]
-    );
-    assert_eq!(
-        db.neighborhood("b", Direction::Out, None).expect("out"),
-        edges[2..4]
-    );
-    assert_eq!(
-        db.neighborhood(
-            "b",
+    for (direction, kinds, expected) in [
+        (Direction::Both, None, edges[..5].to_vec()),
+        (
+            Direction::In,
+            None,
+            vec![
+                edges[0].clone(),
+                edges[1].clone(),
+                edges[2].clone(),
+                edges[4].clone(),
+            ],
+        ),
+        (Direction::Out, None, edges[2..4].to_vec()),
+        (
             Direction::Both,
-            Some(&[
-                GraphEdgeKind::Imports,
-                GraphEdgeKind::Calls,
-                GraphEdgeKind::Calls
-            ])
-        )
-        .expect("kinds"),
-        edges[..4]
-    );
+            Some(
+                [
+                    GraphEdgeKind::Imports,
+                    GraphEdgeKind::Calls,
+                    GraphEdgeKind::Calls,
+                ]
+                .as_slice(),
+            ),
+            edges[..4].to_vec(),
+        ),
+    ] {
+        let mut actual = db
+            .neighborhood("b", direction, kinds)
+            .expect("neighborhood");
+        // Compare every stored row, including duplicates, without requiring query order.
+        actual.sort_by_key(|edge| edge.line);
+        assert_eq!(actual, expected);
+    }
     assert!(
         db.neighborhood("b", Direction::Both, Some(&[]))
             .expect("empty kinds")
@@ -736,13 +1262,19 @@ fn neighborhood_returns_all_edges_without_a_limit() {
     let edges: Vec<_> = (1..=1100)
         .map(|line| edge(GraphEdgeKind::Calls, "a", "b", line))
         .collect();
-    db.write_file_graph(1, &graph(&["a", "b"], edges.clone(), vec![]), &[])
-        .expect("write");
-    assert_eq!(
-        db.neighborhood("a", Direction::Both, None)
-            .expect("all edges"),
-        edges
-    );
+    db.write_file_graph(
+        1,
+        None,
+        &graph(&["a", "b"], edges.clone(), vec![]),
+        &[],
+        false,
+    )
+    .expect("write");
+    let mut actual = db
+        .neighborhood("a", Direction::Both, None)
+        .expect("all edges");
+    actual.sort_by_key(|edge| edge.line);
+    assert_eq!(actual, edges);
 }
 
 #[test]
@@ -754,8 +1286,14 @@ fn graph_queries_skip_unrelated_resolved_edges() {
 
     let mut db = SqliteGraphStorage::in_memory().expect("open");
     let expected = edge(GraphEdgeKind::Calls, "needle", "needle", 1);
-    db.write_file_graph(1, &graph(&["needle"], vec![expected.clone()], vec![]), &[])
-        .expect("write one relevant edge");
+    db.write_file_graph(
+        1,
+        None,
+        &graph(&["needle"], vec![expected.clone()], vec![]),
+        &[],
+        false,
+    )
+    .expect("write one relevant edge");
     let steps = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&steps);
     db.connection.progress_handler(
@@ -783,8 +1321,10 @@ fn graph_queries_skip_unrelated_resolved_edges() {
         // pending index would make even this one-row queue scan through them.
         db.write_file_graph(
             3,
+            None,
             &graph(&["waiting"], vec![], vec![reference("waiting", "external")]),
             &[],
+            false,
         )
         .expect("write pending reference");
         steps.store(0, Ordering::Relaxed);
@@ -822,17 +1362,20 @@ fn graph_queries_skip_unrelated_resolved_edges() {
 }
 
 #[test]
-fn previous_development_schema_requires_rebuild_without_mutation() {
+fn previous_development_schema_fails_the_structure_check_without_mutation() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("old.sqlite");
     let raw = Connection::open(&path).expect("raw");
+    // Owned by this application, but carrying the pre-release table layout: the
+    // identity check passes and the structure check is what refuses the database.
     raw.execute_batch("PRAGMA application_id = 1514623568; PRAGMA user_version = 10; CREATE TABLE pending_refs (id INTEGER PRIMARY KEY);").expect("old schema");
     for mode in [OpenMode::ReadOnly, OpenMode::ReadWrite] {
         assert!(matches!(
             SqliteGraphStorage::open(&path, mode),
-            Err(Error::UnsupportedSchema { version: 10, .. })
+            Err(Error::IncompleteSchema)
         ));
     }
+    // Neither the user version nor the foreign schema is rewritten on rejection.
     assert_eq!(
         raw.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .expect("version"),
@@ -855,8 +1398,14 @@ fn resolution_and_invalidation_preserve_reference_evidence() {
     let path = dir.path().join("graph.sqlite");
     let mut db = open(&path);
     let original = reference("source", "module::target");
-    db.write_file_graph(6, &graph(&["source"], vec![], vec![original.clone()]), &[])
-        .expect("write");
+    db.write_file_graph(
+        6,
+        None,
+        &graph(&["source"], vec![], vec![original.clone()]),
+        &[],
+        false,
+    )
+    .expect("write");
     let stored = db.list_pending_refs(100, 0).expect("refs").refs.remove(0);
     assert_eq!(stored.reference, original);
     assert!(
@@ -971,9 +1520,10 @@ fn reference_schema_defaults_and_state_constraints() {
 fn replaced_reference_ids_are_not_reused() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
     let snapshot = graph(&["a"], vec![], vec![reference("a", "b")]);
-    db.write_file_graph(1, &snapshot, &[]).expect("write");
+    db.write_file_graph(1, None, &snapshot, &[], false)
+        .expect("write");
     let old = proposal(&db, "b");
-    db.write_file_graph(1, &snapshot, &["a".into()])
+    db.write_file_graph(1, None, &snapshot, &["a".into()], false)
         .expect("replace");
     let new = proposal(&db, "b");
     assert!(new.ref_id > old.ref_id);
@@ -993,8 +1543,10 @@ fn file_ids_round_trip_as_u32_and_sqlite_rejects_out_of_range_values() {
         let key = format!("f{id}");
         db.write_file_graph(
             id,
+            None,
             &graph(&[], vec![], vec![reference(&key, "external")]),
             &[],
+            false,
         )
         .expect("write boundary");
     }
@@ -1034,8 +1586,14 @@ fn contains_references_use_the_same_kinds_as_resolved_edges() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
     let mut pending = reference("owner", "member");
     pending.ref_kind = GraphEdgeKind::Contains;
-    db.write_file_graph(1, &graph(&["owner"], vec![], vec![pending.clone()]), &[])
-        .expect("write contains ref");
+    db.write_file_graph(
+        1,
+        None,
+        &graph(&["owner"], vec![], vec![pending.clone()]),
+        &[],
+        false,
+    )
+    .expect("write contains ref");
     assert_eq!(
         db.list_pending_refs(100, 0).expect("pending").refs[0].reference,
         pending

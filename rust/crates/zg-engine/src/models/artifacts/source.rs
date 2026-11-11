@@ -74,7 +74,7 @@ impl ArtifactSource {
         self
     }
 
-    pub(super) fn local_path(
+    pub(in crate::models) fn local_path(
         &self,
         artifact: &ArtifactConfig,
     ) -> Result<PathBuf, ArtifactDownloadError> {
@@ -112,4 +112,18 @@ pub(super) fn validate_relative_path(path: &Path) -> Result<(), ArtifactDownload
         ));
     }
     Ok(())
+}
+impl super::spec::ArtifactDownloadConfig {
+    pub(crate) fn fallback_source(&self, cache: &Path, namespace: &str) -> Option<ArtifactSource> {
+        self.model_scope.map(|source| {
+            ArtifactSource::model_scope(
+                source,
+                cache
+                    .join("modelscope")
+                    .join(namespace)
+                    .join(source.repo.replace('/', "--"))
+                    .join(source.revision),
+            )
+        })
+    }
 }

@@ -19,7 +19,7 @@ use crate::{
     OutputOptions, PreviewMode,
     highlight::QueryHighlighter,
     output_path,
-    preview::{source_preview, split_lines, truncate_utf16 as truncate},
+    preview::{minimal_source_line, source_preview, split_lines, truncate_utf16 as truncate},
     theme::StatusTheme,
 };
 
@@ -475,7 +475,7 @@ fn source_lines(
             let prefix = first.map_or(String::new(), |first| (first + offset).to_string());
             let line = source.lines[offset];
             let text = if preview == PreviewMode::None {
-                truncate(line, 160)
+                minimal_source_line(item, offset, line)
             } else {
                 line.to_owned()
             };

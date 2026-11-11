@@ -24,6 +24,9 @@ use super::{
     ModelDownloadProgressReporter, StaticEmbeddingTable, TokenizerRuntime,
 };
 
+mod boundary_audit;
+mod tokenization;
+
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn matches_typescript_model2vec_oracle_and_reuses_loaded_assets() {

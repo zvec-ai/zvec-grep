@@ -9,6 +9,7 @@ use zg_engine::api::{
     context::{ContextOptions, ContextResult},
     index::{IndexOptions, IndexResult, progress::IndexProgress},
     info::{InfoOptions, InfoResult},
+    relationships::{RelationshipOptions, RelationshipResult},
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -16,6 +17,8 @@ use zg_engine::api::{
 pub enum DaemonCommand {
     IndexSetup(zg_engine::api::index::setup::IndexSetupOptions),
     Context(ContextOptions),
+    Callers(RelationshipOptions),
+    Callees(RelationshipOptions),
     Index(IndexOptions),
     IndexAuthorization(IndexOptions),
     QueryAuthorization(ContextOptions),
@@ -44,6 +47,8 @@ pub enum IndexStreamEvent {
 pub enum DaemonReply {
     IndexSetup(zg_engine::api::index::setup::IndexSetup),
     Context(Box<ContextResult>),
+    Callers(RelationshipResult),
+    Callees(RelationshipResult),
     Index(Box<IndexResult>),
     IndexAuthorization(Vec<zg_engine::authorization::IndexAuthorization>),
     QueryAuthorization(Vec<zg_engine::authorization::QueryAuthorization>),
@@ -70,6 +75,134 @@ mod tests {
     };
 
     use super::{DaemonCommand, ErrorReply, ExecutionResult, IndexStreamEvent};
+
+    #[test]
+    fn relationship_commands_and_replies_preserve_compact_payloads() {
+        use zg_engine::api::relationships::{
+            RelationshipEdge, RelationshipOptions, SymbolDefinition, SymbolRelationships,
+        };
+        let options = RelationshipOptions {
+            root: Some("/workspace".into()),
+            symbol: "Module::run".into(),
+            kinds: Some(vec![
+                zg_engine::api::relationships::GraphEdgeKind::Calls,
+                zg_engine::api::relationships::GraphEdgeKind::Imports,
+            ]),
+            globs: vec!["src/main.rs".into()],
+            limit: Some(2),
+            ..RelationshipOptions::default()
+        };
+        for command in [
+            DaemonCommand::Callers(options.clone()),
+            DaemonCommand::Callees(options),
+        ] {
+            let encoded = serde_json::to_value(&command).expect("relationship command");
+            assert!(encoded["request"].get("signal").is_none());
+            assert_eq!(encoded["request"]["symbol"], "Module::run");
+            assert_eq!(
+                encoded["request"]["kinds"],
+                serde_json::json!(["calls", "imports"])
+            );
+            assert_eq!(encoded["request"]["globs"][0]["pattern"], "src/main.rs");
+            assert_eq!(
+                serde_json::from_value::<DaemonCommand>(encoded).expect("decode command"),
+                command
+            );
+        }
+        let matches = vec![SymbolRelationships {
+            symbol: SymbolDefinition {
+                name: "Module::run".into(),
+                file_path: "src/main.rs".into(),
+                start_line: 3,
+                end_line: 8,
+            },
+            truncated: true,
+            edges: vec![RelationshipEdge {
+                kind: zg_engine::api::relationships::GraphEdgeKind::Calls,
+                direction: zg_engine::api::relationships::Direction::Out,
+                file_path: "src/caller.rs".into(),
+                symbol: None,
+                line: Some(5),
+                column: Some(0),
+            }],
+        }];
+        let result = zg_engine::api::relationships::RelationshipResult {
+            matches,
+            suggestions: Vec::new(),
+        };
+        for reply in [
+            super::DaemonReply::Callers(result.clone()),
+            super::DaemonReply::Callees(result),
+        ] {
+            let encoded = serde_json::to_value(&reply).expect("relationship reply");
+            assert_eq!(encoded["reply"]["matches"][0]["name"], "Module::run");
+            assert_eq!(encoded["reply"]["matches"][0]["filePath"], "src/main.rs");
+            assert_eq!(encoded["reply"]["matches"][0]["truncated"], true);
+            assert_eq!(encoded["reply"]["matches"][0]["edges"][0]["kind"], "calls");
+            assert_eq!(
+                encoded["reply"]["matches"][0]["edges"][0]["direction"],
+                "out"
+            );
+            assert!(encoded["reply"]["matches"][0]["edges"][0]["symbol"].is_null());
+            assert_eq!(
+                encoded["reply"]["matches"][0]["edges"][0]["filePath"],
+                "src/caller.rs"
+            );
+            assert_eq!(
+                serde_json::from_value::<super::DaemonReply>(encoded).expect("decode reply"),
+                reply
+            );
+        }
+    }
+
+    #[test]
+    fn relationship_replies_preserve_non_unicode_paths() {
+        use std::{ffi::OsString, path::PathBuf};
+        use zg_engine::api::relationships::{
+            RelationshipEdge, RelationshipResult, SymbolDefinition, SymbolRelationships,
+        };
+        #[cfg(unix)]
+        let path = {
+            use std::os::unix::ffi::OsStringExt;
+            PathBuf::from(OsString::from_vec(b"src/calls-\xff.rs".to_vec()))
+        };
+        #[cfg(windows)]
+        let path = {
+            use std::os::windows::ffi::OsStringExt;
+            PathBuf::from(OsString::from_wide(&[0xd800, 0x2e, 0x72, 0x73]))
+        };
+        let symbol = SymbolDefinition {
+            name: "run".into(),
+            file_path: path.clone(),
+            start_line: 1,
+            end_line: 3,
+        };
+        let result = RelationshipResult {
+            matches: vec![SymbolRelationships {
+                symbol: symbol.clone(),
+                truncated: false,
+                edges: vec![RelationshipEdge {
+                    kind: zg_engine::api::relationships::GraphEdgeKind::Calls,
+                    direction: zg_engine::api::relationships::Direction::Out,
+                    file_path: path,
+                    symbol: Some(symbol.clone()),
+                    line: Some(2),
+                    column: Some(0),
+                }],
+            }],
+            suggestions: vec![symbol],
+        };
+        for reply in [
+            super::DaemonReply::Callers(result.clone()),
+            super::DaemonReply::Callees(result),
+        ] {
+            let bytes = serde_json::to_vec(&reply).expect("encode native paths");
+            assert_eq!(
+                serde_json::from_slice::<super::DaemonReply>(&bytes).expect("decode native paths"),
+                reply
+            );
+        }
+    }
 
     #[test]
     fn index_round_trips_by_root_without_a_name() {

@@ -7,7 +7,8 @@ use zg_engine::api::context::result::{
 };
 
 use crate::{
-    OutputOptions, PreviewMode, highlight::QueryHighlighter, output_path, theme::StatusTheme,
+    OutputOptions, PreviewMode, highlight::QueryHighlighter, output_path,
+    preview::short_source_line, theme::StatusTheme,
 };
 
 pub(super) fn write_items(
@@ -104,15 +105,21 @@ pub(super) fn write_item_preview(
         .zip(first)
         .map_or(0, |(matched, first)| matched.saturating_sub(first))
         .min(lines.len().saturating_sub(1));
-    let from = if short { anchor.saturating_sub(3) } else { 0 };
+    let from = if short {
+        let matched_lines = item
+            .excerpt_range
+            .as_ref()
+            .and_then(ContentRange::line_count)
+            .unwrap_or(1);
+        // Surrounding context must not displace fragment lines within the limit.
+        let before = 3.min(max_lines.saturating_sub(matched_lines));
+        anchor.saturating_sub(before)
+    } else {
+        0
+    };
     for (offset, line) in lines.iter().enumerate().skip(from).take(max_lines) {
         let line = if short {
-            let mut chars = line.chars();
-            let mut text: String = chars.by_ref().take(160).collect();
-            if chars.next().is_some() {
-                text.push_str("...");
-            }
-            text
+            short_source_line(item, offset, line)
         } else {
             (*line).to_owned()
         };

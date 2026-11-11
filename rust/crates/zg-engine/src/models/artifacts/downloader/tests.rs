@@ -9,6 +9,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+mod live_sources;
+mod network;
+mod proxy;
+
 use super::*;
 use crate::domain::model::ModelProgress;
 use crate::models::artifacts::ArtifactSourceConfig;
@@ -28,15 +32,15 @@ const MS: ArtifactSourceConfig = ArtifactSourceConfig {
     revision: "ms-revision",
 };
 
-fn sources(root: &Path, base_url: Option<&str>) -> [ArtifactSource; 2] {
+fn sources(root: &Path, base_url: Option<&str>) -> Vec<ArtifactSource> {
     let hugging_face = ArtifactSource::hugging_face(HF, root.join("huggingface"));
     let model_scope = ArtifactSource::model_scope(MS, root.join("modelscope"));
     match base_url {
-        Some(base_url) => [
+        Some(base_url) => vec![
             hugging_face.with_base_url(base_url),
             model_scope.with_base_url(base_url),
         ],
-        None => [hugging_face, model_scope],
+        None => vec![hugging_face, model_scope],
     }
 }
 
@@ -57,7 +61,7 @@ async fn resolve(
     reporter: &ModelDownloadProgressReporter,
 ) -> Result<ResolvedArtifacts, ModelError> {
     resolve_model_artifacts(
-        &reqwest::Client::new(),
+        &ArtifactHttpClient::new(),
         ResolveArtifacts {
             model: "local/test-model",
             sources: sources(root, base_url),
@@ -81,6 +85,14 @@ impl TestServer {
         handler: impl Fn(usize, String, TcpStream) + Send + Sync + 'static,
     ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        Self::spawn_on(listener, expected_requests, handler)
+    }
+
+    fn spawn_on(
+        listener: TcpListener,
+        expected_requests: usize,
+        handler: impl Fn(usize, String, TcpStream) + Send + Sync + 'static,
+    ) -> Self {
         let address = listener.local_addr().expect("test server address");
         let requests = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&requests);
@@ -92,11 +104,18 @@ impl TestServer {
                 counted.fetch_add(1, Ordering::SeqCst);
                 let handler = Arc::clone(&handler);
                 workers.push(thread::spawn(move || {
-                    let mut line = String::new();
-                    BufReader::new(stream.try_clone().expect("clone request stream"))
-                        .read_line(&mut line)
-                        .expect("read request line");
-                    handler(index, line, stream);
+                    let mut reader =
+                        BufReader::new(stream.try_clone().expect("clone request stream"));
+                    let mut request = String::new();
+                    loop {
+                        let mut line = String::new();
+                        let read = reader.read_line(&mut line).expect("read request headers");
+                        request.push_str(&line);
+                        if read == 0 || line == "\r\n" {
+                            break;
+                        }
+                    }
+                    handler(index, request, stream);
                 }));
             }
             for worker in workers {
@@ -122,13 +141,15 @@ impl TestServer {
 
 fn respond(mut stream: TcpStream, status: u16, body: &[u8]) {
     let reason = if status == 200 { "OK" } else { "Unavailable" };
-    write!(
-        stream,
+    // Error responses may be rejected as soon as their headers arrive. Queue
+    // the complete response together before the client can close the socket.
+    let mut response = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     )
-    .expect("write response headers");
-    stream.write_all(body).expect("write response body");
+    .into_bytes();
+    response.extend_from_slice(body);
+    stream.write_all(&response).expect("write response");
 }
 
 fn partial_files(path: &Path) -> Vec<PathBuf> {
@@ -165,6 +186,91 @@ fn encodes_source_urls_like_node() {
     assert_eq!(
         artifact_url(&source, "onnx/model q4.onnx"),
         "https://huggingface.co/owner/model's%20name/resolve/release%2F(one)!/onnx/model%20q4.onnx"
+    );
+}
+
+#[tokio::test]
+async fn single_source_download_is_verified_and_can_recover_after_failure() {
+    let root = tempfile::tempdir().expect("cache");
+    let server = TestServer::spawn(2, |index, _request, stream| {
+        if index == 0 {
+            respond(stream, 404, b"missing");
+        } else {
+            respond(stream, 200, BYTES);
+        }
+    });
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let progress = reporter(&events);
+    for succeeds in [false, true] {
+        let mut source = sources(root.path(), Some(&server.base_url));
+        source.truncate(1);
+        let result = resolve_model_artifacts(
+            &ArtifactHttpClient::new(),
+            ResolveArtifacts {
+                model: "local/test-model",
+                sources: source,
+                artifacts: ARTIFACTS,
+                reporter: &progress,
+                signal: None,
+            },
+        )
+        .await;
+        assert_eq!(result.is_ok(), succeeds);
+        if let Ok(result) = result {
+            assert_eq!(
+                std::fs::read(&result.paths[ARTIFACTS[0].path]).expect("artifact"),
+                BYTES
+            );
+        }
+    }
+    assert_eq!(server.finish(), 2);
+    assert!(partial_files(root.path()).is_empty());
+    assert!(
+        !events
+            .lock()
+            .expect("events")
+            .iter()
+            .any(|event| matches!(event, ModelProgress::Warning { .. }))
+    );
+}
+
+#[tokio::test]
+async fn cancelled_single_source_does_not_publish_or_download() {
+    let root = tempfile::tempdir().expect("cache");
+    let signal = CancellationToken::new();
+    signal.cancel();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let progress = reporter(&events);
+    let mut source = sources(root.path(), None);
+    source.truncate(1);
+    let error = resolve_model_artifacts(
+        &ArtifactHttpClient::new(),
+        ResolveArtifacts {
+            model: "local/test-model",
+            sources: source,
+            artifacts: ARTIFACTS,
+            reporter: &progress,
+            signal: Some(&signal),
+        },
+    )
+    .await
+    .expect_err("cancelled");
+    assert_eq!(error.code(), crate::EngineError::CANCELLED);
+    assert_eq!(std::fs::read_dir(root.path()).expect("cache").count(), 0);
+}
+
+#[test]
+fn encodes_modelscope_source_url_with_models_prefix() {
+    let source = ArtifactSource::model_scope(
+        ArtifactSourceConfig {
+            repo: "owner/model's name",
+            revision: "release/(one)!",
+        },
+        PathBuf::from("cache"),
+    );
+    assert_eq!(
+        artifact_url(&source, "onnx/model q4.onnx"),
+        "https://modelscope.cn/models/owner/model's%20name/resolve/release%2F(one)!/onnx/model%20q4.onnx"
     );
 }
 
@@ -355,14 +461,15 @@ async fn unavailable_hugging_face_falls_back_to_modelscope() {
 #[tokio::test]
 async fn interrupted_stream_falls_back_and_removes_partial_file() {
     let root = tempfile::tempdir().expect("cache root");
-    let server = TestServer::spawn(2, |_index, request, mut stream| {
+    let server = TestServer::spawn(3, |_index, request, mut stream| {
         if request.contains("/owner/model/") {
-            write!(
-                stream,
+            let headers = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 BYTES.len()
-            )
-            .expect("write response headers");
+            );
+            stream
+                .write_all(headers.as_bytes())
+                .expect("write response headers");
             stream.write_all(&BYTES[..4]).expect("write partial body");
         } else {
             respond(stream, 200, BYTES);
@@ -373,7 +480,7 @@ async fn interrupted_stream_falls_back_and_removes_partial_file() {
         .await
         .expect("interrupted stream fallback");
     assert!(resolved.paths[ARTIFACTS[0].path].starts_with(root.path().join("modelscope")));
-    assert_eq!(server.finish(), 2);
+    assert_eq!(server.finish(), 3);
     assert!(partial_files(root.path()).is_empty());
 }
 
@@ -391,7 +498,7 @@ async fn does_not_fallback_for_unauthorized_or_cancelled_requests() {
     let signal = CancellationToken::new();
     signal.cancel();
     let error = resolve_model_artifacts(
-        &reqwest::Client::new(),
+        &ArtifactHttpClient::new(),
         ResolveArtifacts {
             model: "local/test-model",
             sources: sources(root.path(), None),
@@ -424,7 +531,7 @@ async fn modelscope_fallback_preserves_cancellation_code() {
         ARTIFACTS.iter().map(|artifact| artifact.path.to_owned()),
     );
     let error = resolve_model_artifacts(
-        &reqwest::Client::new(),
+        &ArtifactHttpClient::new(),
         ResolveArtifacts {
             model: "local/test-model",
             sources: sources(root.path(), Some(&server.base_url)),
@@ -443,7 +550,7 @@ async fn modelscope_fallback_preserves_cancellation_code() {
 #[tokio::test]
 async fn response_header_timeout_falls_back_without_total_download_deadline() {
     let root = tempfile::tempdir().expect("cache root");
-    let server = TestServer::spawn(2, |_index, request, stream| {
+    let server = TestServer::spawn(3, |_index, request, stream| {
         if request.contains("/owner/model/") {
             thread::sleep(Duration::from_millis(75));
             let _ = stream.shutdown(std::net::Shutdown::Both);
@@ -453,10 +560,12 @@ async fn response_header_timeout_falls_back_without_total_download_deadline() {
     });
     let short = Duration::from_millis(20);
     let sources = sources(root.path(), Some(&server.base_url))
-        .map(|source| source.with_timeouts(short, Duration::from_millis(50)));
+        .into_iter()
+        .map(|source| source.with_timeouts(short, Duration::from_millis(50)))
+        .collect();
     let events = Arc::new(Mutex::new(Vec::new()));
     let resolved = resolve_model_artifacts(
-        &reqwest::Client::new(),
+        &ArtifactHttpClient::new(),
         ResolveArtifacts {
             model: "local/test-model",
             sources,
@@ -468,20 +577,21 @@ async fn response_header_timeout_falls_back_without_total_download_deadline() {
     .await
     .expect("timeout fallback");
     assert!(resolved.paths[ARTIFACTS[0].path].starts_with(root.path().join("modelscope")));
-    assert_eq!(server.finish(), 2);
+    assert_eq!(server.finish(), 3);
 }
 
 #[tokio::test]
 async fn read_idle_timeout_falls_back_and_preserves_both_source_errors() {
     let root = tempfile::tempdir().expect("cache root");
-    let server = TestServer::spawn(2, |_index, request, mut stream| {
+    let server = TestServer::spawn(3, |_index, request, mut stream| {
         if request.contains("/owner/model/") {
-            write!(
-                stream,
+            let headers = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 BYTES.len()
-            )
-            .expect("write response headers");
+            );
+            stream
+                .write_all(headers.as_bytes())
+                .expect("write response headers");
             stream.flush().expect("flush response headers");
             thread::sleep(Duration::from_millis(75));
         } else {
@@ -490,10 +600,12 @@ async fn read_idle_timeout_falls_back_and_preserves_both_source_errors() {
     });
     let short = Duration::from_millis(20);
     let sources = sources(root.path(), Some(&server.base_url))
-        .map(|source| source.with_timeouts(Duration::from_millis(50), short));
+        .into_iter()
+        .map(|source| source.with_timeouts(Duration::from_millis(50), short))
+        .collect();
     let events = Arc::new(Mutex::new(Vec::new()));
     let error = resolve_model_artifacts(
-        &reqwest::Client::new(),
+        &ArtifactHttpClient::new(),
         ResolveArtifacts {
             model: "local/test-model",
             sources,
@@ -509,7 +621,7 @@ async fn read_idle_timeout_falls_back_and_preserves_both_source_errors() {
     assert!(message.contains("ModelScope"), "{message}");
     assert!(message.contains("timed out"), "{message}");
     assert!(message.contains("500"), "{message}");
-    assert_eq!(server.finish(), 2);
+    assert_eq!(server.finish(), 3);
 }
 
 #[tokio::test]

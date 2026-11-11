@@ -19,8 +19,8 @@ use crate::{
     },
     models::{
         artifacts::{
-            ArtifactSource, LocalModelBackend, ModelDownloadProgressReporter, ResolveArtifacts,
-            default_model_cache, resolve_model_artifacts,
+            ArtifactHttpClient, ArtifactSource, LocalModelBackend, ModelDownloadProgressReporter,
+            ResolveArtifacts, default_model_cache, resolve_model_artifacts,
         },
         catalog::Model2VecConfig,
         runtime::ModelComputeRuntime,
@@ -276,13 +276,13 @@ trait TokenizerRuntime: Send + Sync {
 }
 
 struct DefaultModel2VecDependencies {
-    client: reqwest::Client,
+    client: ArtifactHttpClient,
 }
 
 impl DefaultModel2VecDependencies {
     fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: ArtifactHttpClient::new(),
         }
     }
 }
@@ -301,19 +301,22 @@ impl Model2VecDependencies for DefaultModel2VecDependencies {
             .join("model2vec")
             .join(entry.download.hugging_face.repo.replace('/', "--"))
             .join(entry.download.hugging_face.revision);
-        let model_scope = model_cache_dir
-            .join("modelscope")
-            .join("model2vec")
-            .join(entry.download.model_scope.repo.replace('/', "--"))
-            .join(entry.download.model_scope.revision);
-        let sources = [
+        let sources = std::iter::once(
             ArtifactSource::hugging_face(entry.download.hugging_face, hugging_face)
                 .with_local_path(entry.model_file, local_model)
                 .with_local_path(entry.tokenizer_file, "tokenizer/tokenizer.json"),
-            ArtifactSource::model_scope(entry.download.model_scope, model_scope)
-                .with_local_path(entry.model_file, local_model)
-                .with_local_path(entry.tokenizer_file, "tokenizer/tokenizer.json"),
-        ];
+        )
+        .chain(
+            entry
+                .download
+                .fallback_source(model_cache_dir, "model2vec")
+                .map(|source| {
+                    source
+                        .with_local_path(entry.model_file, local_model)
+                        .with_local_path(entry.tokenizer_file, "tokenizer/tokenizer.json")
+                }),
+        )
+        .collect();
         let resolved = resolve_model_artifacts(
             &self.client,
             ResolveArtifacts {
@@ -348,8 +351,16 @@ impl Model2VecDependencies for DefaultModel2VecDependencies {
         let tokenizer_json = fs::read(&tokenizer_path).await.map_err(|error| {
             ModelError::storage_failure(format!("Unable to read Model2Vec tokenizer: {error}"))
         })?;
-        let tokenizer = Tokenizer::from_bytes(&tokenizer_json).map_err(|error| {
+        let mut tokenizer = Tokenizer::from_bytes(&tokenizer_json).map_err(|error| {
             ModelError::storage_failure("Unable to load Model2Vec tokenizer").with_cause(error)
+        })?;
+        // Static embeddings have no positional context limit. The catalog budget
+        // is enforced in embed_model2vec_texts, which needs the complete token
+        // sequence to report truncation. Serialized tokenizer defaults (e.g.
+        // Potion Code's 512-token limit) must not silently shorten that sequence.
+        tokenizer.with_truncation(None).map_err(|error| {
+            ModelError::storage_failure("Unable to disable Model2Vec tokenizer truncation")
+                .with_cause(error)
         })?;
         let unknown_token_id = resolve_unknown_token_id(&tokenizer, &tokenizer_json);
         Ok(Arc::new(HuggingFaceTokenizer {

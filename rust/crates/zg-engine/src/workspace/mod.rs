@@ -9,8 +9,10 @@ pub(crate) mod index;
 pub(crate) mod lock;
 pub(crate) mod manifest;
 
-/// Compatibility version of the workspace index contents.
-pub(crate) const CURRENT_INDEX_VERSION: u32 = 4;
+// Compatibility version of the workspace index contents; the workspace owns the
+// check, so an index written by another version is rebuilt instead of opened.
+// v5 combines DiskANN storage with the persisted graph resolution metadata.
+pub(crate) const CURRENT_INDEX_VERSION: u32 = 5;
 
 /// Finds the nearest workspace at or above the given directory.
 pub(crate) fn find_nearest_workspace(
