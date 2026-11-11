@@ -419,7 +419,7 @@ async fn non_relative_type_imports_keep_unique_receiver_targets() {
             SourceFile { path: "unrelated.ts", source: "export class Foo { run() {} }" },
             SourceFile { path: "src/use.ts", source },
         ], queries: vec![
-            Query { operation: "callees", symbol: "u", expected: json!([{"name":"u","edges":[{"symbol":{"name":"Foo::run","filePath":"src/foo.ts"}}]}]), ..Query::default() },
+            Query { operation: "callees", symbol: "u", expected: json!([{"name":"u","edges":[{"symbol":{"name":"Foo::run","filePath":std::path::Path::new("src").join("foo.ts")}}]}]), ..Query::default() },
         ] }).await;
     }
 }
