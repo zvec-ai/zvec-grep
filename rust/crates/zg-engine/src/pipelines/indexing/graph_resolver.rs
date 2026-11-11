@@ -237,6 +237,10 @@ struct RuleCaches {
     /// same owner and every sweep pages them again, so the read happens once
     /// per owner per sweep instead of once per call.
     declared_bindings: HashMap<String, Vec<DeclaredBinding>>,
+    /// Whether one qualified scope names a type, the evidence that tells a
+    /// method from a free function when a bare call spells its name. Keyed by
+    /// scope, read once per sweep.
+    owner_is_type: HashMap<String, bool>,
 }
 
 impl ResolutionSweep {
@@ -348,7 +352,11 @@ fn classify_names(
         // meaningful among candidates that can host this reference.
         let compatible =
             filter_compatible_hits(snapshot, stored, raw, &mut caches.candidate_formats);
-        prefer_definitions(compatible)
+        // A call can only land on a callable symbol, and a bare call cannot
+        // reach a member: both are facts about the candidates, so they narrow
+        // the set before any rule reads it.
+        let callable = callable_targets(snapshot, stored, compatible, &mut caches.owner_is_type);
+        prefer_definitions(callable)
     };
     if stored.reference.ref_kind == GraphEdgeKind::Imports && stored.language == "java" {
         // A Java import names an entity rather than a module, and only its own
@@ -519,6 +527,138 @@ fn filter_compatible_hits<'s>(
         }
     }
     filtered
+}
+
+/// Keeps only the candidates a call can reach.
+///
+/// A `Calls` reference names something invocable. A class, interface, enum,
+/// module or alias is a type or a namespace, so a call that matches one has
+/// matched a same-named declaration somewhere else: `struct PREFIX` for the
+/// macro-shaped `PREFIX(scan)(x)`, or the class of a C++ `WithConstructor();`
+/// statement that the grammar reads as a call expression although the language
+/// declares a function. Construction is no exception: `new X()` and `X x;`
+/// reach the constructor entity, which indexes as a function, so a type
+/// candidate there is just as wrong.
+///
+/// A bare call (`relogin()`) spells no receiver, so a member cannot answer it.
+/// A function-typed parameter shadows the package's method of the same name;
+/// binding the method writes a call the code never makes. The scope is only
+/// read as a type when the candidate's qualified name has an owner that the
+/// index resolves to a class-like entity, which keeps nested functions
+/// (`outer::work`) and module-scoped free functions (`ns::f`) callable.
+///
+/// Java is the exception: it has no package-level functions, so an
+/// unqualified call is either an inherited member (implicit `this`) or a
+/// statically imported one, and both are declared in a class. Excluding
+/// members there would drop exactly the target those forms address, so the
+/// bare-call rule stays off for Java and its class-scoped rules decide.
+///
+/// A construction site (`new X()`, `auto x = X(1)`) keeps type candidates:
+/// building a value is the one call where naming a type is correct. The index
+/// mints a separate constructor entity only when the source declares one, so
+/// dropping the class here would lose the construction wherever the type is
+/// all the source spells.
+///
+/// Missing type evidence keeps the candidate: the gate never discards on
+/// information the index does not carry.
+fn callable_targets<'s>(
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    hits: Vec<&'s NameIndexEntry>,
+    owner_is_type: &mut HashMap<String, bool>,
+) -> Vec<&'s NameIndexEntry> {
+    if stored.reference.ref_kind != GraphEdgeKind::Calls {
+        return hits;
+    }
+    if constructs_value(stored) {
+        return hits
+            .into_iter()
+            .filter(|hit| is_construction_target(hit))
+            .collect();
+    }
+    let bare = stored.reference.receiver_name.is_none() && stored.language != "java";
+    hits.into_iter()
+        .filter(|hit| is_callable_symbol(hit))
+        .filter(|hit| !bare || !bare_call_borrows_a_member(snapshot, hit, owner_is_type))
+        .collect()
+}
+
+/// Whether the reference stands at a construction site, the flag extraction
+/// records for `new X()` and for calls initializing a value.
+fn constructs_value(stored: &StoredPendingRef) -> bool {
+    stored
+        .reference
+        .metadata
+        .get("constructs")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Whether an entity can be what a construction site builds. A class is the
+/// type itself; a module or an interface is never constructed, and an alias
+/// names another entity rather than being one.
+fn is_construction_target(hit: &NameIndexEntry) -> bool {
+    !matches!(
+        hit.symbol_type,
+        Some(SymbolType::Alias | SymbolType::Interface | SymbolType::Module)
+    )
+}
+
+/// Whether the entity a call names can be invoked. `None` means the index
+/// recorded no kind, which is missing evidence rather than a negative one.
+fn is_callable_symbol(hit: &NameIndexEntry) -> bool {
+    !matches!(
+        hit.symbol_type,
+        Some(
+            SymbolType::Alias
+                | SymbolType::Class
+                | SymbolType::Enum
+                | SymbolType::Interface
+                | SymbolType::Module
+        )
+    )
+}
+
+/// Whether `hit` is a member of a class-like scope, which a bare call cannot
+/// address.
+fn bare_call_borrows_a_member(
+    snapshot: &ResolutionSnapshot,
+    hit: &NameIndexEntry,
+    owner_is_type: &mut HashMap<String, bool>,
+) -> bool {
+    let Some((scope, _)) = hit.qualified_name.rsplit_once("::") else {
+        return false;
+    };
+    if scope.is_empty() {
+        return false;
+    }
+    if let Some(is_type) = owner_is_type.get(scope) {
+        return *is_type;
+    }
+    let is_type = scope_declares_a_type(snapshot, scope);
+    owner_is_type.insert(scope.to_owned(), is_type);
+    is_type
+}
+
+/// Whether one qualified scope has a class-like declaration in the index.
+///
+/// The name index is keyed by the last segment, so the lookup starts there and
+/// keeps the candidate only when it spells the whole scope: a nested type is
+/// addressed by its full `ns::Class` breadcrumb, and the bare tail would
+/// otherwise match an unrelated top-level type of the same name.
+fn scope_declares_a_type(snapshot: &ResolutionSnapshot, scope: &str) -> bool {
+    let Some(tail) = scope.rsplit("::").next() else {
+        return false;
+    };
+    snapshot.lookup_candidates(tail).is_some_and(|hits| {
+        hits.iter().any(|hit| {
+            hit.qualified_name == scope
+                && matches!(
+                    hit.symbol_type,
+                    Some(SymbolType::Class | SymbolType::Enum | SymbolType::Interface)
+                )
+        })
+    })
 }
 
 /// Whether a reference can address a candidate file's already-parsed formats.

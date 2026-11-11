@@ -82,6 +82,10 @@ pub(crate) struct NameEdge {
     pub bound_type: Option<String>,
     /// Argument count at the call site, when the reference is a call.
     pub arity: Option<usize>,
+    /// Whether the call stands at a construction site (`new X()`,
+    /// `auto x = X(1)`), where a type is a legitimate target even though a
+    /// type is not callable in general.
+    pub constructs: bool,
     pub line: usize,
     pub column: usize,
 }
@@ -297,6 +301,56 @@ impl WalkContext {
         line: usize,
         column: usize,
     ) {
+        self.add_call_site(
+            owner_index,
+            ref_name,
+            receiver_name,
+            raw_text,
+            arity,
+            line,
+            column,
+            false,
+        );
+    }
+
+    /// Buffers a call that constructs a value (`new X()`, `auto x = X(1)`).
+    /// The construction site is the one place a type name is a correct call
+    /// target, so the flag travels with the reference to the resolver.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_construction_edge(
+        &mut self,
+        owner_index: usize,
+        ref_name: &str,
+        receiver_name: Option<&str>,
+        raw_text: Option<&str>,
+        arity: Option<usize>,
+        line: usize,
+        column: usize,
+    ) {
+        self.add_call_site(
+            owner_index,
+            ref_name,
+            receiver_name,
+            raw_text,
+            arity,
+            line,
+            column,
+            true,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_call_site(
+        &mut self,
+        owner_index: usize,
+        ref_name: &str,
+        receiver_name: Option<&str>,
+        raw_text: Option<&str>,
+        arity: Option<usize>,
+        line: usize,
+        column: usize,
+        constructs: bool,
+    ) {
         self.add_name_edge(NameEdge {
             ref_kind: GraphEdgeKind::Calls,
             owner_index,
@@ -305,6 +359,7 @@ impl WalkContext {
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
             arity,
+            constructs,
             line,
             column,
         });
@@ -338,6 +393,7 @@ impl WalkContext {
             raw_text: None,
             bound_type: Some(bound_type.to_owned()),
             arity: None,
+            constructs: false,
             line,
             column,
         });
@@ -382,6 +438,7 @@ impl WalkContext {
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
             arity: None,
+            constructs: false,
             line,
             column,
         });
@@ -409,6 +466,7 @@ impl WalkContext {
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
             arity: None,
+            constructs: false,
             line,
             column,
         });
@@ -533,6 +591,7 @@ mod tests {
                 raw_text: Some("dog.bark()".to_owned()),
                 bound_type: None,
                 arity: Some(2),
+                constructs: false,
                 line: 7,
                 column: 11,
             }

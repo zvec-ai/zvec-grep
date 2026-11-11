@@ -50,6 +50,9 @@ pub(crate) struct PendingNameRef {
     /// Declared type of the bound name for `Declares` edges.
     pub bound_type: Option<String>,
     pub arity: Option<usize>,
+    /// Whether the call stands at a construction site, where a type name is a
+    /// legitimate target.
+    pub constructs: bool,
     pub line: usize,
     pub column: usize,
 }
@@ -196,6 +199,7 @@ pub(crate) fn partition_walk(
                 raw_text: edge.raw_text,
                 bound_type: edge.bound_type,
                 arity: edge.arity,
+                constructs: edge.constructs,
                 line: edge.line,
                 column: edge.column,
             }),

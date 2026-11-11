@@ -129,6 +129,11 @@ fn file_pending_refs(
             if let Some(bound_type) = &reference.bound_type {
                 metadata.insert("type".to_owned(), serde_json::json!(bound_type));
             }
+            if reference.constructs {
+                // Only construction sites carry the flag: the resolver keeps
+                // type candidates for exactly these calls.
+                metadata.insert("constructs".to_owned(), serde_json::json!(true));
+            }
             if reference.ref_kind.spells_inheritance() {
                 insert_inheritance_metadata(
                     &mut metadata,
@@ -353,6 +358,7 @@ mod tests {
             raw_text: Some("Remote".into()),
             bound_type: None,
             arity: None,
+            constructs: false,
             line: 1,
             column: 20,
         });

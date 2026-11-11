@@ -297,15 +297,29 @@ fn visit_for_calls(
         let normalized = normalize_super_call(&normalized);
         if normalized.len() <= MAX_CALLEE_TEXT_CHARS && is_identifier_like(&normalized) {
             let (ref_name, receiver_name) = split_callee_name(&normalized);
-            context.add_call_edge(
-                owner_index,
-                &ref_name,
-                receiver_name.as_deref(),
-                Some(callee.as_str()),
-                call_arity_of(node),
-                node.start_position().row + 1,
-                node.start_position().column,
-            );
+            let line = node.start_position().row + 1;
+            let column = node.start_position().column;
+            if constructs_value(node) {
+                context.add_construction_edge(
+                    owner_index,
+                    &ref_name,
+                    receiver_name.as_deref(),
+                    Some(callee.as_str()),
+                    call_arity_of(node),
+                    line,
+                    column,
+                );
+            } else {
+                context.add_call_edge(
+                    owner_index,
+                    &ref_name,
+                    receiver_name.as_deref(),
+                    Some(callee.as_str()),
+                    call_arity_of(node),
+                    line,
+                    column,
+                );
+            }
         }
     }
     for child in named_children(node) {
@@ -313,6 +327,37 @@ fn visit_for_calls(
             continue;
         }
         visit_for_calls(child, owner_index, source, context, boundary);
+    }
+}
+
+/// Whether a call node initializes a value rather than producing one for a
+/// surrounding expression: `new X()`, or a call filling a variable's
+/// initializer or an assignment's right-hand side (`auto w = Widget(1)`).
+///
+/// The distinction decides whether a type name can answer the call. A type is
+/// not callable in general, so a call whose result is itself invoked
+/// (`PREFIX(scan)(x)`), passed as an argument (`f(helper(x))`), returned
+/// (`return helper(x);`) or left alone as a statement (`WithConstructor();`,
+/// the most vexing parse of a declaration) is not a construction: another
+/// entity of that name — a function — is the target whenever one exists.
+fn constructs_value(node: Node<'_>) -> bool {
+    if matches!(node.kind(), "new_expression" | "object_creation_expression") {
+        return true;
+    }
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    match parent.kind() {
+        "init_declarator" | "variable_declarator" => parent
+            .child_by_field_name("value")
+            .is_some_and(|value| value == node),
+        "assignment_expression" => parent
+            .child_by_field_name("right")
+            .is_some_and(|right| right == node),
+        // `Widget(1)` wrapped in parentheses is still the same construction
+        // site once the wrapper is peeled off.
+        "parenthesized_expression" => constructs_value(parent),
+        _ => false,
     }
 }
 
