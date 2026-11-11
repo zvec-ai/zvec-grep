@@ -6,7 +6,11 @@ import { parseArgs } from "node:util";
 import { loadSuite } from "../core/lib.mjs";
 import { QA_SCORING } from "../core/suite.mjs";
 import { buildCombined } from "./combined.mjs";
-import { PILOT_NAMES } from "./config.mjs";
+import {
+  PILOT_FILE_RECALL_METRICS,
+  PILOT_NAMES,
+  PILOT_QA_SCORING,
+} from "./config.mjs";
 import { compareReports } from "../reports/compare.mjs";
 import { QUALITY_METRICS } from "../reports/ci.mjs";
 import {
@@ -70,6 +74,7 @@ export function compareCombinedResults(baseline, candidate, metadata) {
         `${side}: QA scoring rules differ; rescore both reports from saved evidence`,
       );
   const rows = [];
+  const pilotQaGold = {};
   for (const name of ["sweqa", ...PILOT_NAMES]) {
     const before = name === "sweqa" ? baseline.sweqa : baseline.pilots[name];
     const after = name === "sweqa" ? candidate.sweqa : candidate.pilots[name];
@@ -86,6 +91,22 @@ export function compareCombinedResults(baseline, candidate, metadata) {
       after.model,
       `${name}: different embedding models`,
     );
+    const hasPilotQa =
+      name !== "sweqa" && (before.report.qa_gold || after.report.qa_gold);
+    if (hasPilotQa) {
+      assert.deepEqual(
+        before.report.qa_gold,
+        after.report.qa_gold,
+        `${name}: different pilot Gold`,
+      );
+      for (const pilot of [before, after])
+        assert.deepEqual(
+          pilot.report.qa_scoring,
+          PILOT_QA_SCORING,
+          `${name}: different pilot scoring rules`,
+        );
+      pilotQaGold[name] = before.report.qa_gold;
+    }
     for (const mode of MODES) {
       const select = (suite) =>
         name === "sweqa"
@@ -95,7 +116,10 @@ export function compareCombinedResults(baseline, candidate, metadata) {
         newRow = select(after);
       assert.ok(oldRow && newRow, `${name}/${mode}: missing mode`);
       const metrics = {};
-      for (const metric of QUALITY_METRICS) {
+      for (const metric of [
+        ...QUALITY_METRICS,
+        ...(hasPilotQa ? PILOT_FILE_RECALL_METRICS : []),
+      ]) {
         const a = oldRow.metrics?.[metric],
           b = newRow.metrics?.[metric];
         assert.ok(
@@ -107,8 +131,10 @@ export function compareCombinedResults(baseline, candidate, metadata) {
         metrics[metric] = { baseline: a, candidate: b, delta: b - a };
       }
       const row = { suite: name, mode, model: before.model, metrics };
-      if (name === "sweqa") {
-        for (const level of Object.keys(QA_DIAGNOSTICS)) {
+      if (name === "sweqa" || hasPilotQa) {
+        for (const level of name === "sweqa"
+          ? ["file", "entity"]
+          : ["entity"]) {
           const baseline = diagnosticFor(oldRow, level);
           const candidate = diagnosticFor(newRow, level);
           if (baseline || candidate)
@@ -125,6 +151,12 @@ export function compareCombinedResults(baseline, candidate, metadata) {
     preview: "full",
     ...metadata,
     ...(hasQa ? { qa_scoring: { ...QA_SCORING } } : {}),
+    ...(Object.keys(pilotQaGold).length
+      ? {
+          pilot_qa_gold: pilotQaGold,
+          pilot_qa_scoring: { ...PILOT_QA_SCORING },
+        }
+      : {}),
     harness_commit: baseline.harness_commit,
     rows,
     errors: [],
@@ -227,13 +259,18 @@ export function markdownVersionComparison(result) {
       ["quarry", "Quarry"],
     ]) {
       const qa = suite === "sweqa" && hasQa;
+      const pilotQa = result.rows.some(
+        (row) => row.suite === suite && row.entity_diagnostic,
+      );
       lines.push(
         "",
         `### ${title}`,
         "",
         qa
           ? "**Diagnostic QA results.** Entity hits require Gold containment in the returned Entity, independently of preview. Cells show percentages. N/A means unscored or missing QA data."
-          : "Original File metrics. File Recall and Entity evaluation data are not provided for this run and are shown as N/A.",
+          : pilotQa
+            ? "**Diagnostic Entity results.** File metrics use the original positive paths. Entity metrics use verified evidence spans or preimage functions and may cover fewer questions. N/A means unscored."
+            : "Original File metrics. File Recall and Entity evaluation data are not provided for this run and are shown as N/A.",
         "",
         `| Mode | Level | ${QA_ENTITY_METRICS.map(([label]) => label).join(" | ")} |`,
         `| --- | --- | ${QA_ENTITY_METRICS.map(() => "---:").join(" | ")} |`,
@@ -247,10 +284,12 @@ export function markdownVersionComparison(result) {
           ["entity", "Entity"],
         ]) {
           const scores = QA_ENTITY_METRICS.map(([, metric]) =>
-            qa
+            qa || (pilotQa && level === "entity")
               ? qaComparisonCell(row?.[`${level}_diagnostic`], level, metric)
-              : level === "file" && fileMetrics[metric]
-                ? comparisonCell(row?.metrics?.[fileMetrics[metric]])
+              : level === "file"
+                ? comparisonCell(
+                    row?.metrics?.[fileMetrics[metric] ?? `file_${metric}`],
+                  )
                 : "N/A",
           );
           lines.push(`| ${mode} | ${label} | ${scores.join(" | ")} |`);

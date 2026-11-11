@@ -1,6 +1,6 @@
 # Retrieval-only QA pair authoring and matching
 
-Each case contains its original question and the files (File) and code targets, such as functions or classes (Entity), that retrieval should find. These expected targets are the **Gold**.
+Each case contains its original question and the files (File) and source targets, such as functions, classes, or evidence passages (Entity), that retrieval should find. These expected targets are the **Gold**.
 
 Gold must include every expected target within the specified source version and search scope.
 
@@ -12,6 +12,7 @@ Gold must include every expected target within the specified source version and 
 4. Cases that have not passed correctness and completeness review must not enter formal evaluation.
 5. Resolve the question's meaning and scoring rules before evaluation.
 6. Changes to parser IDs or chunk boundaries do not change the Gold.
+7. Preserve original document and passage judgments. For Entity Gold, identify the specific evidence in the pinned source. Record a reason when the judgment cannot be narrowed to a verified span.
 
 ## Matching results
 

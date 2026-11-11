@@ -108,10 +108,10 @@ File and Entity rows for fts, vector and hybrid, with Hit@1/5/10,
 Recall@1/5/10, MRR@10 and nDCG@10 columns.
 
 SWE-QA20 uses QA diagnostic scores. A shared cell means both versions have equal
-displayed scores. The other suites retain their
-original File scores; their File Recall and Entity metrics are not yet provided
-and appear as N/A. The original SWE-QA20 File scores remain in the JSON and full
-reports, separate from QA Gold.
+displayed scores. The three pilots keep their original File scores and add
+File Recall and [Entity diagnostics](expansion/README.md#gold-and-scoring).
+Unscored values appear as N/A. The original SWE-QA20 File scores remain in the
+JSON and full reports, separate from QA Gold.
 
 ## Reports and artifacts
 

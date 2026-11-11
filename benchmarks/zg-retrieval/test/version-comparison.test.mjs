@@ -13,6 +13,10 @@ import {
 import { QUALITY_METRICS } from "../reports/ci.mjs";
 import { QA_ENTITY_METRICS } from "../reports/zg.mjs";
 import { QA_SCORING } from "../core/suite.mjs";
+import {
+  PILOT_FILE_RECALL_METRICS,
+  PILOT_QA_SCORING,
+} from "../expansion/config.mjs";
 
 const baseSha = "a".repeat(40),
   headSha = "b".repeat(40),
@@ -313,5 +317,47 @@ test("missing artifacts still produce an explicitly incomplete comment report wi
   assert.match(
     await readFile(join(directory, "summary.md"), "utf8"),
     /Missing or invalid results are not zero scores/,
+  );
+});
+
+test("paired pilot reports render added scores only under the same Gold and scoring rules", () => {
+  const before = result(baseSha);
+  const after = result(headSha);
+  for (const side of [before, after]) {
+    const report = side.pilots.beir.report;
+    report.qa_gold = { id: "beir20-entity-v1", sha256: "a".repeat(64) };
+    report.qa_scoring = { ...PILOT_QA_SCORING };
+    for (const row of report.summary) {
+      for (const key of PILOT_FILE_RECALL_METRICS) row.metrics[key] = 0.375;
+      row.qa_retrieval = {
+        diagnostic: {
+          eligible_tasks: 1,
+          entity: {
+            ...Object.fromEntries(
+              QA_ENTITY_METRICS.map(([, key]) => [key, 0.25]),
+            ),
+            metric_task_counts: Object.fromEntries(
+              QA_ENTITY_METRICS.map(([, key]) => [key, 1]),
+            ),
+          },
+        },
+      };
+    }
+  }
+  const comparison = compareCombinedResults(before, after, metadata);
+  const markdown = markdownVersionComparison(comparison);
+  assert.deepEqual(
+    tableRow(markdown, "BEIR", "fts", "File").slice(5, 8),
+    Array(3).fill("37.50%"),
+  );
+  assert.deepEqual(
+    tableRow(markdown, "BEIR", "fts", "Entity").slice(2),
+    Array(8).fill("25.00%"),
+  );
+  assert.match(markdown, /Diagnostic Entity results/);
+  after.pilots.beir.report.qa_gold.sha256 = "b".repeat(64);
+  assert.throws(
+    () => compareCombinedResults(before, after, metadata),
+    /different pilot Gold/,
   );
 });

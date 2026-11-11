@@ -1,5 +1,13 @@
 export const PILOT_PROTOCOL = "retrieval-pilots-mcp-full-v1";
 export const PILOT_PREVIEW = "full";
+export const PILOT_QA_SCORING = Object.freeze({
+  version: 1,
+  entity_match: "contains",
+  range: "source_bytes",
+});
+export const PILOT_FILE_RECALL_METRICS = [1, 5, 10].map(
+  (k) => `file_recall_at_${k}`,
+);
 
 // Suite metadata lives here; original queries, gold labels, and source hashes
 // remain in the corresponding data/*.json lock files.

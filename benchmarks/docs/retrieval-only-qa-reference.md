@@ -4,7 +4,7 @@ Use this reference when preparing data or writing scoring code. For the core rul
 
 ## Authoring and review
 
-- The annotator and reviewer each read the question and source code first, then use reference answers to check for gaps.
+- The annotator and reviewer each read the question and source first, then use reference answers to check for gaps.
 - Review must check both whether the targets are correct and whether any are missing. Record the conclusions.
 - Questions must pass both correctness and completeness review before entering formal evaluation.
 - Do not inspect the evaluated tool's name, retrieval ranks, or scores while authoring or reviewing.
@@ -35,7 +35,8 @@ Use this reference when preparing data or writing scoring code. For the core rul
 - Partial overlap is a miss. A returned class may match every Gold method whose full range it contains.
 - One result may match several Gold targets. Give each target its first matching result's rank; do not split or renumber results.
 - Use reliable source ranges for retrieved content. Reading a source file during verification does not make the whole file a retrieved result.
-- MCP source ranges describe the retrieved Entity before preview formatting. If line numbers alone cannot establish single-line boundaries, leave the affected score unknown; do not use preview text to fill the gap.
+- MCP source ranges describe the retrieved Entity before formatting. When a line range cannot establish containment, use verified byte coordinates or leave the affected score unknown.
+- When a response explicitly returns the full Entity, its content can be aligned to the pinned source to verify the coordinates. Require an unambiguous alignment. An excerpt cannot establish the full Entity's boundaries.
 - Changing `preview` between full and short must not change Entity scores for the same retrieved content. Preview text, indentation and truncation do not determine a hit.
 - Do not regenerate Gold using the parser under evaluation.
 
@@ -43,7 +44,7 @@ Use this reference when preparing data or writing scoring code. For the core rul
 
 - Specify which result group to use and how to read its order in advance. Do not adjust these choices based on Gold.
 - Duplicate results keep their original positions. Do not remove them and pull later results into the top K.
-- Before scoring at either level, its Gold must pass correctness and completeness review.
+- Formal scoring at either level requires a correctness and completeness review. Identify diagnostic scores based on verified targets separately.
 - The first K results must be complete, or there must be evidence that the tool returned all available results.
 - If uncertainty could change a metric, leave that metric unscored rather than assigning zero.
 - Record failures, missing data, parsing errors, limit violations, and valid misses separately.
@@ -83,7 +84,7 @@ Preserve historical File metrics, the old rules that match code start and end po
 
 When Gold or scoring rules change, recalculate both sides using the same new rules. List any information missing from historical records.
 
-Entity containment scoring is recorded as `qa_scoring: {version: 2, entity_match: "contains"}`.
+Reports record the Gold checksum and the containment scoring rules. Pilot reports additionally identify UTF-8 byte ranges as the matching evidence.
 Retain earlier scores and recompute both versions before comparing them under
 these rules. Rescoring historical responses is not a new retrieval run.
 

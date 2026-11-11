@@ -6,6 +6,7 @@ import { fileHash, inside, readJson, run } from "../core/io.mjs";
 import { embeddingModel } from "../core/embedding.mjs";
 import { prepareCorpus } from "../core/corpus.mjs";
 import { PILOT_SUITES } from "./config.mjs";
+import { loadPilotGold } from "./gold.mjs";
 
 const data = join(dirname(fileURLToPath(import.meta.url)), "data");
 const MODES = ["hybrid", "fts", "vector"];
@@ -16,7 +17,8 @@ export async function loadPilot(
 ) {
   assert.ok(Object.hasOwn(PILOT_SUITES, name), `unknown pilot: ${name}`);
   const config = PILOT_SUITES[name];
-  const lock = await readJson(join(data, config.lockFile));
+  const lockBytes = await readFile(join(data, config.lockFile));
+  const lock = JSON.parse(lockBytes);
   assert.equal(lock.schema_version, 1);
   assert.equal(lock.suite, config.suite);
   if (name === "beir")
@@ -59,6 +61,7 @@ export async function loadPilot(
     name,
     config,
     lock,
+    gold: await loadPilotGold(name, lock, lockBytes),
     model: embeddingModel(lock.model, embedding),
     modes: MODES,
   };

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { loadPilot } from "../expansion/datasets.mjs";
+import { locateFullEntity, summarizePilotEntity } from "../expansion/gold.mjs";
 import { PILOT_PREVIEW, PILOT_PROTOCOL } from "../expansion/config.mjs";
 import {
   searchArguments,
@@ -348,5 +349,79 @@ test("the shared parser accepts only one trailing empty Markdown line outside th
   assert.throws(
     () => parseVisibleResponse(response("unexpected")),
     /outside the item's public range/,
+  );
+});
+
+test("pilot Entity scoring distinguishes chunks on the same UTF-8 source line", () => {
+  const path = "docs/positive.md";
+  const text = "前缀 alpha beta tail";
+  const file = { lines: [{ text, offset: 0 }] };
+  const range = { kind: "text", start_line: 1, end_line: 1 };
+  const hit = (rank, content) => ({
+    path,
+    rank,
+    range,
+    source_lines: [{ line: 1, text: content }],
+  });
+  const alpha = locateFullEntity(hit(1, "alpha"), file);
+  assert.deepEqual(alpha, { start_byte: 7, end_byte: 12 });
+  assert.equal(
+    locateFullEntity(hit(1, "alpha"), {
+      lines: [{ text: "alpha alpha", offset: 0 }],
+    }),
+    null,
+  );
+
+  const gold = {
+    files: [{ path }],
+    targets: [
+      { path, source_id: "alpha", start_line: 1, end_line: 1, ...alpha },
+      {
+        path,
+        source_id: "beta",
+        start_line: 1,
+        end_line: 1,
+        start_byte: 13,
+        end_byte: 17,
+      },
+    ],
+  };
+  const score = (items) =>
+    summarizePilotEntity(
+      [1, 2, 3, 4, 5].map((repetition) => ({
+        repetition,
+        items,
+        status: "success",
+      })),
+      gold,
+    );
+  const withBytes = (item) => ({
+    ...item,
+    source_bytes: locateFullEntity(item, file),
+  });
+  const items = [
+    withBytes(hit(1, "tail")),
+    withBytes(hit(2, "alpha beta")),
+    withBytes(hit(3, "alpha")),
+  ];
+  const scored = score(items);
+  assert.equal(scored.file.recall_at_1, 1);
+  assert.equal(scored.entity.recall_at_1, 0);
+  assert.equal(scored.entity.recall_at_5, 1);
+  assert.equal(scored.entity.rr_at_10, 1 / 2);
+  assert.equal(scored.entity.ndcg_at_10, 1 / Math.log2(3));
+  assert.deepEqual(
+    score(items.map((item) => ({ ...item, source_lines: [] }))),
+    scored,
+  );
+  const uncertain = score([hit(1, "al…")]);
+  assert.equal(uncertain.entity.recall_at_1, null);
+  assert.equal(uncertain.entity.scored_calls.recall_at_1, 0);
+  assert.equal(uncertain.file.recall_at_1, 1);
+  const split = score([withBytes(hit(1, "al")), withBytes(hit(2, "pha"))]);
+  assert.equal(split.entity.recall_at_5, 0);
+  assert.equal(
+    summarizePilotEntity([], { ...gold, targets: [] }).reason,
+    "no_verified_entity_evidence",
   );
 });

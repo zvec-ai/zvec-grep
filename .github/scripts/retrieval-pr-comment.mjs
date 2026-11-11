@@ -7,7 +7,12 @@ import {
 } from "../../benchmarks/zg-retrieval/expansion/compare.mjs";
 import { QUALITY_METRICS } from "../../benchmarks/zg-retrieval/reports/ci.mjs";
 import { QA_SCORING } from "../../benchmarks/zg-retrieval/core/suite.mjs";
-import { PILOT_SUITES } from "../../benchmarks/zg-retrieval/expansion/config.mjs";
+import {
+  PILOT_FILE_RECALL_METRICS,
+  PILOT_NAMES,
+  PILOT_QA_SCORING,
+  PILOT_SUITES,
+} from "../../benchmarks/zg-retrieval/expansion/config.mjs";
 
 const marker = "<!-- zg-retrieval-pr -->";
 const versionMarker = (run) =>
@@ -89,11 +94,12 @@ function validateDiagnostic(
   group,
   level,
   { title, metrics, optionalMetrics = [] },
+  planned = 20,
 ) {
   if (group === null) return null;
   const eligible = group?.eligible_tasks;
   assert.ok(
-    Number.isSafeInteger(eligible) && eligible >= 0 && eligible <= 20,
+    Number.isSafeInteger(eligible) && eligible >= 0 && eligible <= planned,
     `Invalid ${title} diagnostic eligible count`,
   );
   const scores = { metric_task_counts: {} };
@@ -157,13 +163,43 @@ export function validateComparison(report, request) {
   );
   const hasQa =
     Object.hasOwn(report, "qa_scoring") ||
-    report.rows.some((row) => row?.file_diagnostic || row?.entity_diagnostic);
+    report.rows.some(
+      (row) =>
+        row?.suite === "sweqa" &&
+        (row.file_diagnostic || row.entity_diagnostic),
+    );
   if (hasQa)
     assert.deepEqual(
       report.qa_scoring,
       QA_SCORING,
       "Unsupported QA scoring rules; rescore both versions",
     );
+  const pilotQaGold = {};
+  if (
+    report.pilot_qa_gold !== undefined ||
+    report.pilot_qa_scoring !== undefined
+  ) {
+    assert.deepEqual(
+      report.pilot_qa_scoring,
+      PILOT_QA_SCORING,
+      "Unsupported pilot QA scoring rules",
+    );
+    const names = Object.keys(report.pilot_qa_gold ?? {});
+    assert.ok(
+      names.length && names.every((name) => PILOT_NAMES.includes(name)),
+      "Missing or unknown pilot Gold identity",
+    );
+    for (const name of names) {
+      const gold = report.pilot_qa_gold[name];
+      assert.equal(gold?.id, `${PILOT_SUITES[name].suite}-entity-v1`);
+      assert.match(
+        gold?.sha256 ?? "",
+        /^[a-f0-9]{64}$/,
+        "Invalid pilot Gold checksum",
+      );
+      pilotQaGold[name] = { id: gold.id, sha256: gold.sha256 };
+    }
+  }
   const rows = [];
   for (const suite of ["sweqa", "beir", "duretrieval", "quarry"]) {
     for (const mode of ["hybrid", "fts", "vector"]) {
@@ -178,7 +214,11 @@ export function validateComparison(report, request) {
           : PILOT_SUITES[suite].model;
       assert.equal(row.model, model, "Unexpected embedding model");
       const metrics = {};
-      for (const metric of QUALITY_METRICS) {
+      const hasPilotQa = Object.hasOwn(pilotQaGold, suite);
+      for (const metric of [
+        ...QUALITY_METRICS,
+        ...(hasPilotQa ? PILOT_FILE_RECALL_METRICS : []),
+      ]) {
         const cell = row.metrics?.[metric];
         assert.ok(
           [cell?.baseline, cell?.candidate].every(
@@ -207,6 +247,23 @@ export function validateComparison(report, request) {
             candidate: validateDiagnostic(row[field]?.candidate, level, config),
           };
         }
+      if (hasPilotQa) {
+        assert.ok(row.entity_diagnostic, "Missing pilot Entity diagnostic");
+        validated.entity_diagnostic = {
+          baseline: validateDiagnostic(
+            row.entity_diagnostic.baseline,
+            "entity",
+            QA_DIAGNOSTICS.entity,
+            PILOT_SUITES[suite].taskCount,
+          ),
+          candidate: validateDiagnostic(
+            row.entity_diagnostic.candidate,
+            "entity",
+            QA_DIAGNOSTICS.entity,
+            PILOT_SUITES[suite].taskCount,
+          ),
+        };
+      }
       rows.push(validated);
     }
   }
@@ -216,6 +273,12 @@ export function validateComparison(report, request) {
     schema_version: 1,
     ...(report.preview === "full" ? { preview: "full" } : {}),
     ...(hasQa ? { qa_scoring: { ...QA_SCORING } } : {}),
+    ...(Object.keys(pilotQaGold).length
+      ? {
+          pilot_qa_gold: pilotQaGold,
+          pilot_qa_scoring: { ...PILOT_QA_SCORING },
+        }
+      : {}),
     kind: report.kind,
     status: "success",
     baseline: {

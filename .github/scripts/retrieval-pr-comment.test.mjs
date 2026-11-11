@@ -7,6 +7,11 @@ import test from "node:test";
 import { publish, validateComparison } from "./retrieval-pr-comment.mjs";
 import { QA_SCORING } from "../../benchmarks/zg-retrieval/core/suite.mjs";
 import {
+  PILOT_FILE_RECALL_METRICS,
+  PILOT_QA_SCORING,
+  PILOT_SUITES,
+} from "../../benchmarks/zg-retrieval/expansion/config.mjs";
+import {
   QA_ENTITY_METRICS,
   QA_RECALL_METRICS,
 } from "../../benchmarks/zg-retrieval/reports/zg.mjs";
@@ -632,5 +637,47 @@ test("the read-only context job records the original fork PR event's exact versi
       ),
     ),
     request,
+  );
+});
+
+test("trusted publisher validates and retains pilot QA comparison data", () => {
+  const payload = structuredClone(report);
+  payload.pilot_qa_scoring = { ...PILOT_QA_SCORING };
+  payload.pilot_qa_gold = Object.fromEntries(
+    Object.entries(PILOT_SUITES).map(([name, config]) => [
+      name,
+      { id: `${config.suite}-entity-v1`, sha256: "a".repeat(64) },
+    ]),
+  );
+  const diagnostic = {
+    eligible_tasks: 1,
+    entity: {
+      ...Object.fromEntries(QA_ENTITY_METRICS.map(([, key]) => [key, 0.25])),
+      metric_task_counts: Object.fromEntries(
+        QA_ENTITY_METRICS.map(([, key]) => [key, 1]),
+      ),
+    },
+  };
+  for (const row of payload.rows.filter((item) => item.suite !== "sweqa")) {
+    for (const key of PILOT_FILE_RECALL_METRICS)
+      row.metrics[key] = { baseline: 0.25, candidate: 0.25, delta: 0 };
+    row.entity_diagnostic = {
+      baseline: structuredClone(diagnostic),
+      candidate: structuredClone(diagnostic),
+    };
+  }
+  const validated = validateComparison(payload, request);
+  assert.deepEqual(validated.pilot_qa_gold, payload.pilot_qa_gold);
+  assert.deepEqual(
+    validated.rows.find((row) => row.suite === "quarry").entity_diagnostic
+      .candidate,
+    diagnostic,
+  );
+  payload.rows.find(
+    (row) => row.suite === "duretrieval",
+  ).entity_diagnostic.candidate.eligible_tasks = 11;
+  assert.throws(
+    () => validateComparison(payload, request),
+    /Invalid Entity retrieval diagnostic eligible count/,
   );
 });

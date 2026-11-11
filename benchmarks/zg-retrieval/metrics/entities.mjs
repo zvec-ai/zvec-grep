@@ -152,7 +152,7 @@ function validateItems(items) {
   }
 }
 
-function entityMatch(item, targets) {
+function entityMatch(item, targets, entityByteRanges) {
   const sameFile = targets.filter((target) => target.path === item.path);
   if (item.range?.kind !== "text")
     return { hits: [], possible: sameFile.map((target) => target.id) };
@@ -161,6 +161,24 @@ function entityMatch(item, targets) {
     possible = [];
   for (const target of sameFile) {
     if (start > target.start_line || end < target.end_line) continue;
+    if (entityByteRanges) {
+      const { start_byte: startByte, end_byte: endByte } =
+        item.source_bytes ?? {};
+      if (startByte == null || endByte == null) {
+        possible.push(target.id);
+      } else {
+        assert.ok(
+          Number.isSafeInteger(startByte) &&
+            Number.isSafeInteger(endByte) &&
+            startByte >= 0 &&
+            endByte > startByte,
+          "invalid Entity source bytes",
+        );
+        if (startByte <= target.start_byte && endByte >= target.end_byte)
+          hits.push(target.id);
+      }
+      continue;
+    }
     // Public ranges identify the Entity in the pinned source, not its preview.
     // A single-line target on a boundary needs columns that this output omits.
     if (
@@ -268,7 +286,11 @@ function eligibility(pair) {
 export function scoreQaRetrieval(
   items,
   pair,
-  { executionStatus = "success", status = "scored" } = {},
+  {
+    executionStatus = "success",
+    status = "scored",
+    entityByteRanges = false,
+  } = {},
 ) {
   const review = eligibility(pair);
   if (review.status === "unavailable")
@@ -298,7 +320,7 @@ export function scoreQaRetrieval(
     entity: rankMetrics(
       items,
       pair.entity_targets,
-      entityMatch,
+      (item, targets) => entityMatch(item, targets, entityByteRanges),
       (ranks, _, k) => entityNdcg(ranks, pair.entity_targets, k),
     ),
   };
@@ -319,7 +341,7 @@ export function publicQaItems(items) {
 }
 
 /** A metric receives one question vote only when all five observations are known. */
-export function summarizeRepeatedQaRetrieval(calls, pair) {
+export function summarizeRepeatedQaRetrieval(calls, pair, options) {
   assert.equal(calls.length, 5, "QA quality requires five calls");
   assert.deepEqual(
     calls.map((call) => call.repetition),
@@ -330,6 +352,7 @@ export function summarizeRepeatedQaRetrieval(calls, pair) {
     return { ...review, file: null, entity: null };
   const scores = calls.map((call) =>
     scoreQaRetrieval(call.items, pair, {
+      ...options,
       executionStatus: call.execution_status,
       status: call.status,
     }),

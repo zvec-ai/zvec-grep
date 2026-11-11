@@ -1,0 +1,1367 @@
+{
+  "schema_version": 1,
+  "suite": "quarry20",
+  "source_lock_sha256": "2a927ed28942debd24491b6b1421aec139aa04e940743744021d13e8d0645bcb",
+  "tasks": {
+    "182a25d2b93fde206e6173f45764cd91f3fbb2cb-1::q1": {
+      "files": [
+        {
+          "path": "internal/handshake/client_session_cache.go",
+          "sha256": "cbe8ca04c42d790dff1a301f434de7bef234b1c4003282367c18b3e0ad439ef1",
+          "bytes": 3357
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "preimage:69ab66ba82dcf312d1d429fd1e29780cb6cedc74:internal/handshake/client_session_cache.go:Put:82-111",
+          "path": "internal/handshake/client_session_cache.go",
+          "start_line": 82,
+          "end_line": 111,
+          "start_byte": 2140,
+          "end_byte": 3356,
+          "sha256": "ea58fe99c12ac18e05755193d4d3cd163abd2b51242c8aad9f0c72aeaba280c0",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/internal/handshake.clientSessionCache.Put."
+        },
+        {
+          "source_id": "preimage:69ab66ba82dcf312d1d429fd1e29780cb6cedc74:internal/handshake/client_session_cache.go:Get:48-80",
+          "path": "internal/handshake/client_session_cache.go",
+          "start_line": 48,
+          "end_line": 80,
+          "start_byte": 858,
+          "end_byte": 2138,
+          "sha256": "26d425549e29f06b6f4601ac2863be104c7977447a3157cb82a8f7ae7b5b2721",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/internal/handshake.clientSessionCache.Get."
+        }
+      ],
+      "unresolved": []
+    },
+    "1372e5dd5ea2a9dfbe1aab7b164d63585d8f1d28-1::q1": {
+      "files": [
+        {
+          "path": "http3/roundtrip.go",
+          "sha256": "76e7d482656c89bfa1eab3ff36a3ef487c877c6ec672cc11e6b2c6f0c46977c1",
+          "bytes": 5348
+        },
+        {
+          "path": "http3/client.go",
+          "sha256": "a67a7c11037454ede910a258f9a8b42d9bc563d5acd3f0b35bf6af07dde5ac32",
+          "bytes": 6515
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "preimage:63c9272bf419e7bf47b579c80cf6353cbb7243c0:http3/roundtrip.go:getClient:120-146",
+          "path": "http3/roundtrip.go",
+          "start_line": 120,
+          "end_line": 146,
+          "start_byte": 3492,
+          "end_byte": 4069,
+          "sha256": "f65fd33dbdda46e950f0e7393315d08932410e3dbc6cbe546d981182efdbab0d",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/http3.RoundTripper.getClient."
+        },
+        {
+          "source_id": "preimage:63c9272bf419e7bf47b579c80cf6353cbb7243c0:http3/client.go:newClient:53-83",
+          "path": "http3/client.go",
+          "start_line": 53,
+          "end_line": 83,
+          "start_byte": 1000,
+          "end_byte": 1882,
+          "sha256": "a9221c86fdee2328d61ecd6d4ef29f601c8e25197ee62f85beb508170e22ef34",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/http3.newClient."
+        },
+        {
+          "source_id": "preimage:63c9272bf419e7bf47b579c80cf6353cbb7243c0:http3/client.go:dial:85-104",
+          "path": "http3/client.go",
+          "start_line": 85,
+          "end_line": 104,
+          "start_byte": 1884,
+          "end_byte": 2333,
+          "sha256": "3f5402409aef056c4576eb38b88c59b103f5dc235a631fcb1c0f3aa10708c7ed",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/http3.client.dial."
+        }
+      ],
+      "unresolved": []
+    },
+    "137491916b9ea63a4e67c84a462c082aaf309830-1::q1": {
+      "files": [
+        {
+          "path": "http3/roundtrip.go",
+          "sha256": "842a7ad5559b6cb48c713bbe06121b7d1a1a41f8f2346997a8a1f144f6b4464c",
+          "bytes": 5862
+        },
+        {
+          "path": "http3/client.go",
+          "sha256": "b5a4263d8ae63fbcdd0ca97cf4fe21d1afbf75c6514d2c0d9c6ca3b080bfc6f9",
+          "bytes": 10375
+        },
+        {
+          "path": "http3/request_writer.go",
+          "sha256": "2618781a769d047bdc526c8aad8e2702c0063297bfe70839c516d697ffc4aa1f",
+          "bytes": 8582
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "preimage:d4293fb274084bc8fda54d39941c1856cf00d3ed:http3/roundtrip.go:RoundTripOpt:78-119",
+          "path": "http3/roundtrip.go",
+          "start_line": 78,
+          "end_line": 119,
+          "start_byte": 2496,
+          "end_byte": 3742,
+          "sha256": "2b9c609f72ca361d112f3e4ce5065741ac04486e95a581157137254b305e6ae6",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/http3.RoundTripper.RoundTripOpt."
+        },
+        {
+          "source_id": "preimage:d4293fb274084bc8fda54d39941c1856cf00d3ed:http3/client.go:RoundTrip:209-267",
+          "path": "http3/client.go",
+          "start_line": 209,
+          "end_line": 267,
+          "start_byte": 5828,
+          "end_byte": 7495,
+          "sha256": "581c9b2c9b7a805069eae1040a4d4644f2667599ad403e2ca0902b712c2ea515",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/http3.client.RoundTrip."
+        },
+        {
+          "source_id": "preimage:d4293fb274084bc8fda54d39941c1856cf00d3ed:http3/client.go:dial:105-126",
+          "path": "http3/client.go",
+          "start_line": 105,
+          "end_line": 126,
+          "start_byte": 2716,
+          "end_byte": 3271,
+          "sha256": "5398103b4122a028c9b1e6d0fcf50ac92084050f02a66671e5b7bb42d7e09d55",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/http3.client.dial."
+        },
+        {
+          "source_id": "preimage:d4293fb274084bc8fda54d39941c1856cf00d3ed:http3/client.go:newClient:65-103",
+          "path": "http3/client.go",
+          "start_line": 65,
+          "end_line": 103,
+          "start_byte": 1441,
+          "end_byte": 2714,
+          "sha256": "cd83980a0d05d35b12f0d9db99b713b86e5287f6ca6c0a257c53de53014196df",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/http3.newClient."
+        },
+        {
+          "source_id": "preimage:d4293fb274084bc8fda54d39941c1856cf00d3ed:http3/roundtrip.go:RoundTrip:122-124",
+          "path": "http3/roundtrip.go",
+          "start_line": 122,
+          "end_line": 124,
+          "start_byte": 3776,
+          "end_byte": 3899,
+          "sha256": "e0c88fd5f4bd6862df764d48547b7bae45ce437892f8a3f58369eb0095d553a8",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/http3.RoundTripper.RoundTrip."
+        },
+        {
+          "source_id": "preimage:d4293fb274084bc8fda54d39941c1856cf00d3ed:http3/roundtrip.go:getClient:126-157",
+          "path": "http3/roundtrip.go",
+          "start_line": 126,
+          "end_line": 157,
+          "start_byte": 3901,
+          "end_byte": 4583,
+          "sha256": "418d1510d25236c06ecfb7d3cd3ed13095852df2982d50ae501fea812102a962",
+          "reason": "Published related function target: github.com/quic-go/quic-go/http3.RoundTripper.getClient."
+        },
+        {
+          "source_id": "preimage:d4293fb274084bc8fda54d39941c1856cf00d3ed:http3/request_writer.go:WriteRequest:41-91",
+          "path": "http3/request_writer.go",
+          "start_line": 41,
+          "end_line": 91,
+          "start_byte": 704,
+          "end_byte": 1853,
+          "sha256": "7abf9741d93a12b993270e060b7a497ab991ac25a1dc480d4ef17983e5e22ff6",
+          "reason": "Published related function target: github.com/quic-go/quic-go/http3.requestWriter.WriteRequest."
+        }
+      ],
+      "unresolved": []
+    },
+    "556e5c555981e1e70d2f88e8657aeaf51e11ff5f-1::q1": {
+      "files": [
+        {
+          "path": "internal/wire/reset_stream_frame.go",
+          "sha256": "299d6e01020b03b3407cdf087d57545aa2a1781bdc29e8c730cb6d88de8ba89a",
+          "bytes": 1510
+        },
+        {
+          "path": "internal/wire/path_challenge_frame.go",
+          "sha256": "91f51bb005981ae6bed2c9028411a653fbad0647265a2b66b0bfa69916537cef",
+          "bytes": 823
+        },
+        {
+          "path": "internal/wire/data_blocked_frame.go",
+          "sha256": "d5c8d264bc7c389f95d3c375e4cd1d001eb1962bccecf910eb90b65f278fb439",
+          "bytes": 930
+        },
+        {
+          "path": "internal/wire/path_response_frame.go",
+          "sha256": "9fbcb78b0dbf18f43912768fe89203954b964f7da570be91beef3259206d7bb6",
+          "bytes": 815
+        },
+        {
+          "path": "internal/wire/crypto_frame.go",
+          "sha256": "64be4bc667f103fda71b1b748a257dd62861dae672beed41ae0fa821081b829a",
+          "bytes": 1867
+        },
+        {
+          "path": "internal/wire/connection_close_frame.go",
+          "sha256": "7e6c02bb24e7b85be1b2ba96ecbad1af3e7e262e5ebd3cae90f85c02a11372b2",
+          "bytes": 2347
+        },
+        {
+          "path": "internal/wire/frame_parser.go",
+          "sha256": "2adc69da8b0adc4f63c880dc2f5203d0a386026864b51d38b87a046c693aa736",
+          "bytes": 3147
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "preimage:e08b6b37c495fee7876daf0a229962fe95ff217c:internal/wire/reset_stream_frame.go:parseResetStreamFrame:17-44",
+          "path": "internal/wire/reset_stream_frame.go",
+          "start_line": 17,
+          "end_line": 44,
+          "start_byte": 334,
+          "end_byte": 1017,
+          "sha256": "6e013edeeadf0edf58076b3b2c8ee319ac9cee4d2bb247ef9de9e2074f00c1ab",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/internal/wire.parseResetStreamFrame."
+        },
+        {
+          "source_id": "preimage:e08b6b37c495fee7876daf0a229962fe95ff217c:internal/wire/path_challenge_frame.go:parsePathChallengeFrame:15-27",
+          "path": "internal/wire/path_challenge_frame.go",
+          "start_line": 15,
+          "end_line": 27,
+          "start_byte": 197,
+          "end_byte": 553,
+          "sha256": "cd2666698f913462ce887a68fafc779be4d6b438d71cc30efd20d259134c1523",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/internal/wire.parsePathChallengeFrame."
+        },
+        {
+          "source_id": "preimage:e08b6b37c495fee7876daf0a229962fe95ff217c:internal/wire/data_blocked_frame.go:Write:28-33",
+          "path": "internal/wire/data_blocked_frame.go",
+          "start_line": 28,
+          "end_line": 33,
+          "start_byte": 567,
+          "end_byte": 761,
+          "sha256": "2418363c91ea7170d1be0f12850a22c795b3837b916dcea33a9bfa99290dc55f",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/internal/wire.DataBlockedFrame.Write."
+        },
+        {
+          "source_id": "preimage:e08b6b37c495fee7876daf0a229962fe95ff217c:internal/wire/path_response_frame.go:Write:29-33",
+          "path": "internal/wire/path_response_frame.go",
+          "start_line": 29,
+          "end_line": 33,
+          "start_byte": 549,
+          "end_byte": 686,
+          "sha256": "fc4ccca810809f54b6af0707229f8865f57ef8d9476eac2af0dd6bed2052f7f7",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/internal/wire.PathResponseFrame.Write."
+        },
+        {
+          "source_id": "preimage:e08b6b37c495fee7876daf0a229962fe95ff217c:internal/wire/data_blocked_frame.go:parseDataBlockedFrame:15-26",
+          "path": "internal/wire/data_blocked_frame.go",
+          "start_line": 15,
+          "end_line": 26,
+          "start_byte": 253,
+          "end_byte": 565,
+          "sha256": "d50c545b67f9b14c08e0c51c9efa11b20167372c8e47129284053763f27e2e31",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/internal/wire.parseDataBlockedFrame."
+        },
+        {
+          "source_id": "preimage:e08b6b37c495fee7876daf0a229962fe95ff217c:internal/wire/path_challenge_frame.go:Write:29-33",
+          "path": "internal/wire/path_challenge_frame.go",
+          "start_line": 29,
+          "end_line": 33,
+          "start_byte": 555,
+          "end_byte": 693,
+          "sha256": "ec9f2eb57539c7d6c048b9e8d64a237ec54aa2e653629c8f70a73a8cc14ee472",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/internal/wire.PathChallengeFrame.Write."
+        },
+        {
+          "source_id": "preimage:e08b6b37c495fee7876daf0a229962fe95ff217c:internal/wire/crypto_frame.go:parseCryptoFrame:17-43",
+          "path": "internal/wire/crypto_frame.go",
+          "start_line": 17,
+          "end_line": 43,
+          "start_byte": 255,
+          "end_byte": 915,
+          "sha256": "5f3a68582b0ee6c443cf2abea6fd2e618b0675a6a6659332266ebd41bf2c51fc",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/internal/wire.parseCryptoFrame."
+        },
+        {
+          "source_id": "preimage:e08b6b37c495fee7876daf0a229962fe95ff217c:internal/wire/connection_close_frame.go:parseConnectionCloseFrame:20-59",
+          "path": "internal/wire/connection_close_frame.go",
+          "start_line": 20,
+          "end_line": 59,
+          "start_byte": 406,
+          "end_byte": 1591,
+          "sha256": "20136e56af67ad2489c7aa61110aed9fd49f44a62b9dc3a491ec707eaf7ab3d4",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/internal/wire.parseConnectionCloseFrame."
+        },
+        {
+          "source_id": "preimage:e08b6b37c495fee7876daf0a229962fe95ff217c:internal/wire/frame_parser.go:parseFrame:43-99",
+          "path": "internal/wire/frame_parser.go",
+          "start_line": 43,
+          "end_line": 99,
+          "start_byte": 895,
+          "end_byte": 2715,
+          "sha256": "75da31ca588fb06675a998922b30b3ae5e42f0674fb03207fc516c0540881c92",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/internal/wire.frameParser.parseFrame."
+        },
+        {
+          "source_id": "preimage:e08b6b37c495fee7876daf0a229962fe95ff217c:internal/wire/connection_close_frame.go:Write:70-84",
+          "path": "internal/wire/connection_close_frame.go",
+          "start_line": 70,
+          "end_line": 84,
+          "start_byte": 1966,
+          "end_byte": 2346,
+          "sha256": "110baa5237a273423bac375039776178c401c5d96a70d6be03f705a0b9bcde5b",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/internal/wire.ConnectionCloseFrame.Write."
+        },
+        {
+          "source_id": "preimage:e08b6b37c495fee7876daf0a229962fe95ff217c:internal/wire/frame_parser.go:ParseNext:26-41",
+          "path": "internal/wire/frame_parser.go",
+          "start_line": 26,
+          "end_line": 41,
+          "start_byte": 466,
+          "end_byte": 893,
+          "sha256": "65750cabe6fd16971700f7b009ef4fa0fc45f2143fb31cf4b3dcb382829df64f",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/internal/wire.frameParser.ParseNext."
+        },
+        {
+          "source_id": "preimage:e08b6b37c495fee7876daf0a229962fe95ff217c:internal/wire/reset_stream_frame.go:Write:46-52",
+          "path": "internal/wire/reset_stream_frame.go",
+          "start_line": 46,
+          "end_line": 52,
+          "start_byte": 1019,
+          "end_byte": 1263,
+          "sha256": "a2536a2972c5ddd313b6bba3992bda456bcad2557bb09bcbf4a6adb54da03396",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/internal/wire.ResetStreamFrame.Write."
+        },
+        {
+          "source_id": "preimage:e08b6b37c495fee7876daf0a229962fe95ff217c:internal/wire/crypto_frame.go:Write:45-51",
+          "path": "internal/wire/crypto_frame.go",
+          "start_line": 45,
+          "end_line": 51,
+          "start_byte": 917,
+          "end_byte": 1127,
+          "sha256": "c3a654b871f9517fa713c5525ca4e50195c170407cbb206281ecba0613c68931",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/internal/wire.CryptoFrame.Write."
+        },
+        {
+          "source_id": "preimage:e08b6b37c495fee7876daf0a229962fe95ff217c:internal/wire/path_response_frame.go:parsePathResponseFrame:15-27",
+          "path": "internal/wire/path_response_frame.go",
+          "start_line": 15,
+          "end_line": 27,
+          "start_byte": 194,
+          "end_byte": 547,
+          "sha256": "33e52f51c001c13e0fdc3f48d6358b1c74ae916a5f6e6bf886a8b6231215f861",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/internal/wire.parsePathResponseFrame."
+        },
+        {
+          "source_id": "preimage:e08b6b37c495fee7876daf0a229962fe95ff217c:internal/wire/frame_parser.go:isAllowedAtEncLevel:101-112",
+          "path": "internal/wire/frame_parser.go",
+          "start_line": 101,
+          "end_line": 112,
+          "start_byte": 2717,
+          "end_byte": 3062,
+          "sha256": "374b5b696726302dab7ef1f0a7ae6d8c913b0752fb4be4bca6794b6948454294",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/internal/wire.frameParser.isAllowedAtEncLevel."
+        },
+        {
+          "source_id": "preimage:e08b6b37c495fee7876daf0a229962fe95ff217c:internal/wire/frame_parser.go:SetAckDelayExponent:114-116",
+          "path": "internal/wire/frame_parser.go",
+          "start_line": 114,
+          "end_line": 116,
+          "start_byte": 3064,
+          "end_byte": 3146,
+          "sha256": "2c9992319674ab83348a9503cb9daf617ad04cf9ca572a835d85290a3c2fc129",
+          "reason": "Published related function target: github.com/quic-go/quic-go/internal/wire.frameParser.SetAckDelayExponent."
+        },
+        {
+          "source_id": "preimage:e08b6b37c495fee7876daf0a229962fe95ff217c:internal/wire/frame_parser.go:NewFrameParser:20-22",
+          "path": "internal/wire/frame_parser.go",
+          "start_line": 20,
+          "end_line": 22,
+          "start_byte": 302,
+          "end_byte": 396,
+          "sha256": "6f1518b957105fd0d2394a8ab7857d99d0406943317f1edc49d689e6a6789dea",
+          "reason": "Published related function target: github.com/quic-go/quic-go/internal/wire.NewFrameParser."
+        }
+      ],
+      "unresolved": []
+    },
+    "2473eb0895d022574fe4f140057c7ecd2c119625-1::q1": {
+      "files": [
+        {
+          "path": "internal/ackhandler/sent_packet_handler.go",
+          "sha256": "dafcfbb0fdaf3b6e93214717232df288ff3ad6339f238587643044be06b8efad",
+          "bytes": 20523
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "preimage:bc82887effd218906c00a849c9a58e520e39d582:internal/ackhandler/sent_packet_handler.go:ResetForRetry:593-610",
+          "path": "internal/ackhandler/sent_packet_handler.go",
+          "start_line": 593,
+          "end_line": 610,
+          "start_byte": 19196,
+          "end_byte": 19848,
+          "sha256": "b9f0ced35d2e8e32cee48cb4a8f80e4e9237be8744c04a9b354b9609a504e900",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/internal/ackhandler.sentPacketHandler.ResetForRetry."
+        }
+      ],
+      "unresolved": []
+    },
+    "e57caf0bae3d3e113af163454e6285bc3761a68c-1::q1": {
+      "files": [
+        {
+          "path": "server.go",
+          "sha256": "89f5fc7785e3ee437c07d875981b2121da90a85c535ccc6720f3bb0e83dacae0",
+          "bytes": 16650
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "preimage:3e083d19f4bfee47c6b2e56fa6f8f0538e88cfbd:server.go:handleInitialImpl:346-408",
+          "path": "server.go",
+          "start_line": 346,
+          "end_line": 408,
+          "start_byte": 10027,
+          "end_byte": 11738,
+          "sha256": "c5ff9440ca8d5eecc1f9cac01eeda569f76336c816983987711a55260eae0b14",
+          "reason": "Published essential function target: github.com/quic-go/quic-go.baseServer.handleInitialImpl."
+        },
+        {
+          "source_id": "preimage:3e083d19f4bfee47c6b2e56fa6f8f0538e88cfbd:server.go:handlePacketImpl:295-344",
+          "path": "server.go",
+          "start_line": 295,
+          "end_line": 344,
+          "start_byte": 8182,
+          "end_byte": 10025,
+          "sha256": "ce7df408fceed3f5195118bd355336c3dc66fe7c6a8d1ed519f97d7ab2509729",
+          "reason": "Published essential function target: github.com/quic-go/quic-go.baseServer.handlePacketImpl."
+        },
+        {
+          "source_id": "preimage:3e083d19f4bfee47c6b2e56fa6f8f0538e88cfbd:server.go:sendRetry:482-513",
+          "path": "server.go",
+          "start_line": 482,
+          "end_line": 513,
+          "start_byte": 13648,
+          "end_byte": 14754,
+          "sha256": "ba312f297a2f1155a68891401779fa921c9a22a6bd79ede29e7cd30c18626478",
+          "reason": "Published essential function target: github.com/quic-go/quic-go.baseServer.sendRetry."
+        },
+        {
+          "source_id": "preimage:3e083d19f4bfee47c6b2e56fa6f8f0538e88cfbd:server.go:sendServerBusy:515-555",
+          "path": "server.go",
+          "start_line": 515,
+          "end_line": 555,
+          "start_byte": 14756,
+          "end_byte": 16137,
+          "sha256": "5fda06b30c3796ba20ecdf02d6294429de6974a1105c9e52afdc319f5a1ba140",
+          "reason": "Published essential function target: github.com/quic-go/quic-go.baseServer.sendServerBusy."
+        }
+      ],
+      "unresolved": []
+    },
+    "7676e455c5f5cdd0ce1bbef9070df53c937b11d0-1::q1": {
+      "files": [
+        {
+          "path": "fuzzing/header/fuzz.go",
+          "sha256": "fa6b5689ce163855916eaf320e93d12643d9c0a378275581d26a8bb931304538",
+          "bytes": 2538
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "preimage:b2c2e4940fcb0752cc778802aad4ddb0e6e6948f:fuzzing/header/fuzz.go:Fuzz:18-73",
+          "path": "fuzzing/header/fuzz.go",
+          "start_line": 18,
+          "end_line": 73,
+          "start_byte": 337,
+          "end_byte": 2039,
+          "sha256": "584d35270a16a02d60a1407c3dcbdf9371339b9c7eabcfcf447d6580140b288a",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/fuzzing/header.Fuzz."
+        }
+      ],
+      "unresolved": []
+    },
+    "fd38fe4a9a896e62c01cb6a5fcbf78261286cfda-1::q1": {
+      "files": [
+        {
+          "path": "internal/ackhandler/sent_packet_history.go",
+          "sha256": "88ea7eb65705623c99043e1d5a19768840009db197d76e6a16a6cf6db296bd8d",
+          "bytes": 4206
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "preimage:07412be8a02ef0e55580ebf8db9c38a759c0a0e5:internal/ackhandler/sent_packet_history.go:SentPacket:30-55",
+          "path": "internal/ackhandler/sent_packet_history.go",
+          "start_line": 30,
+          "end_line": 55,
+          "start_byte": 864,
+          "end_byte": 1545,
+          "sha256": "472b1badf6b787a6d79da571ce2342b0947516f03900989c35b5e8b0b1c545c1",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/internal/ackhandler.sentPacketHistory.SentPacket."
+        },
+        {
+          "source_id": "preimage:07412be8a02ef0e55580ebf8db9c38a759c0a0e5:internal/ackhandler/sent_packet_history.go:newSentPacketHistory:20-28",
+          "path": "internal/ackhandler/sent_packet_history.go",
+          "start_line": 20,
+          "end_line": 28,
+          "start_byte": 497,
+          "end_byte": 862,
+          "sha256": "4da208f8a93417d46079ec4b0a17446e94fb9bc3681fa775ad7edcd68bd1f691",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/internal/ackhandler.newSentPacketHistory."
+        },
+        {
+          "source_id": "preimage:07412be8a02ef0e55580ebf8db9c38a759c0a0e5:internal/ackhandler/sent_packet_history.go:Remove:100-109",
+          "path": "internal/ackhandler/sent_packet_history.go",
+          "start_line": 100,
+          "end_line": 109,
+          "start_byte": 2546,
+          "end_byte": 2823,
+          "sha256": "90107e74d7975a3362250f0417384b22cda77a81264b94443cf9835405ab77b7",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/internal/ackhandler.sentPacketHistory.Remove."
+        },
+        {
+          "source_id": "preimage:07412be8a02ef0e55580ebf8db9c38a759c0a0e5:internal/ackhandler/sent_packet_history.go:DeclareLost:131-154",
+          "path": "internal/ackhandler/sent_packet_history.go",
+          "start_line": 131,
+          "end_line": 154,
+          "start_byte": 3474,
+          "end_byte": 4205,
+          "sha256": "2dfd27a178432865664339383b55f93776228050ccc3ff61d4f7d6f51ac3cc8a",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/internal/ackhandler.sentPacketHistory.DeclareLost."
+        }
+      ],
+      "unresolved": []
+    },
+    "0baf16ea4e3afbfd0c4a2445cf6d1029940ec715-1::q1": {
+      "files": [
+        {
+          "path": "integrationtests/tools/proxy/proxy.go",
+          "sha256": "e537ba7541a4a010134ec5b688a2ba8c8a39549ab6e8c89394cf794b16d99f31",
+          "bytes": 6842
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "preimage:c956ca4447b3945920219db6dc79cbc613761970:integrationtests/tools/proxy/proxy.go:runProxy:179-238",
+          "path": "integrationtests/tools/proxy/proxy.go",
+          "start_line": 179,
+          "end_line": 238,
+          "start_byte": 4322,
+          "end_byte": 5696,
+          "sha256": "a21e84b6d31272f187dbe18ee7180d4c2582e18eb7cf912a67b8d8dfd3e1de8b",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/integrationtests/tools/proxy.QuicProxy.runProxy."
+        },
+        {
+          "source_id": "preimage:c956ca4447b3945920219db6dc79cbc613761970:integrationtests/tools/proxy/proxy.go:runConnection:241-283",
+          "path": "integrationtests/tools/proxy/proxy.go",
+          "start_line": 241,
+          "end_line": 283,
+          "start_byte": 5762,
+          "end_byte": 6841,
+          "sha256": "e304b9926cbd74d1ef6da94e43177f209068aca3396bdb7ea7d037fa6d7ea3a0",
+          "reason": "Published essential function target: github.com/quic-go/quic-go/integrationtests/tools/proxy.QuicProxy.runConnection."
+        }
+      ],
+      "unresolved": []
+    },
+    "9b71878d53aa2d1bd3fc1623d6b5f65397e27c36-1::q1": {
+      "files": [
+        {
+          "path": "zero_rtt_queue.go",
+          "sha256": "8fb6f35791bb765aa1659bfa15e61f84f54b74e4308c42dd89e623d766e12b8a",
+          "bytes": 1260
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "preimage:ba095dd3ff66b6a77d1eeb0762b3654450126601:zero_rtt_queue.go:Enqueue:24-44",
+          "path": "zero_rtt_queue.go",
+          "start_line": 24,
+          "end_line": 44,
+          "start_byte": 374,
+          "end_byte": 916,
+          "sha256": "43c15ff81624ee4e1f7ae3d6790d20f07dbedcbd794b3d4251cb645deefbf1bf",
+          "reason": "Published essential function target: github.com/quic-go/quic-go.zeroRTTQueue.Enqueue."
+        }
+      ],
+      "unresolved": []
+    },
+    "5e30947697c3f78e79b08cec63bf3bb6cc34cb48-1::q1": {
+      "files": [
+        {
+          "path": "traitlets/traitlets.py",
+          "sha256": "d3a1b9f549ec1f759bd25beefbe7d09f9c77cbc0ef59b8331b51f8fb7b22c32b",
+          "bytes": 62680
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "preimage:ad8172efc599f1e4f4bbeaf497ed0c7b40eba0cb:traitlets/traitlets.py:hold_trait_notifications:587-643",
+          "path": "traitlets/traitlets.py",
+          "start_line": 587,
+          "end_line": 643,
+          "start_byte": 19132,
+          "end_byte": 21552,
+          "sha256": "c0aee8764f9c4b03a1f49f79d9c85da6a77165364d3dcc054632a8d51b56960c",
+          "reason": "Published essential function target: traitlets.traitlets.HasTraits.hold_trait_notifications."
+        }
+      ],
+      "unresolved": []
+    },
+    "82beaf673748636ffe79cb103c5be0b0191731d7-1::q1": {
+      "files": [
+        {
+          "path": "litestar/_openapi/schema_generation/schema.py",
+          "sha256": "17480f6f10749db77c162b18f070e6ebef4dd0a742c8f4cfef5e18fd9cdf0882",
+          "bytes": 35220
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "preimage:d686e8776e577b35214f9c3ce230cd8399a650b8:litestar/_openapi/schema_generation/schema.py:create_literal_schema:306-321",
+          "path": "litestar/_openapi/schema_generation/schema.py",
+          "start_line": 306,
+          "end_line": 321,
+          "start_byte": 11706,
+          "end_byte": 12092,
+          "sha256": "7d38c3f5430d955b971288ee31e3ac2f9e3be6c5f57f3cd483579633259207d0",
+          "reason": "Published essential function target: litestar._openapi.schema_generation.schema.create_literal_schema."
+        },
+        {
+          "source_id": "preimage:d686e8776e577b35214f9c3ce230cd8399a650b8:litestar/_openapi/schema_generation/schema.py:create_schema_for_object_type:422-469",
+          "path": "litestar/_openapi/schema_generation/schema.py",
+          "start_line": 422,
+          "end_line": 469,
+          "start_byte": 14943,
+          "end_byte": 16746,
+          "sha256": "4d0c98f052e97b05b956cdb26778de516d8f2cc4566752cf7ffe08532113c57b",
+          "reason": "Published related function target: litestar._openapi.schema_generation.schema.create_schema_for_object_type."
+        }
+      ],
+      "unresolved": []
+    },
+    "0eec9aeda454c5915fab2c95ece83b2d3c4bf8be-1::q1": {
+      "files": [
+        {
+          "path": "lib/wasix/src/runtime/resolver/wapm_source.rs",
+          "sha256": "4dc297bd821fafe35660dba19d77592b25ff948a49f3100acd922547fce191d4",
+          "bytes": 35113
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "preimage:d6f0e98cfddbda49e119299949f6b866ba3bcb64:lib/wasix/src/runtime/resolver/wapm_source.rs:query:131-190",
+          "path": "lib/wasix/src/runtime/resolver/wapm_source.rs",
+          "start_line": 131,
+          "end_line": 190,
+          "start_byte": 3985,
+          "end_byte": 6169,
+          "sha256": "683c2e745569f15eba0a772030887f7488da4cab28a97d655d4a5e051ae056ba",
+          "reason": "Published essential function target: wasmer_wasix.runtime.resolver.wapm_source.WapmSource.query."
+        },
+        {
+          "source_id": "preimage:d6f0e98cfddbda49e119299949f6b866ba3bcb64:lib/wasix/src/runtime/resolver/wapm_source.rs:lookup_package:50-80",
+          "path": "lib/wasix/src/runtime/resolver/wapm_source.rs",
+          "start_line": 50,
+          "end_line": 80,
+          "start_byte": 1323,
+          "end_byte": 2355,
+          "sha256": "25615218c9d87829f84cc7bba1be85bbd1795e840f0e6c1a7680bf44b0700031",
+          "reason": "Published essential function target: wasmer_wasix.runtime.resolver.wapm_source.WapmSource.lookup_package."
+        },
+        {
+          "source_id": "preimage:d6f0e98cfddbda49e119299949f6b866ba3bcb64:lib/wasix/src/runtime/resolver/wapm_source.rs:lookup_cached_query:248-296",
+          "path": "lib/wasix/src/runtime/resolver/wapm_source.rs",
+          "start_line": 248,
+          "end_line": 296,
+          "start_byte": 7840,
+          "end_byte": 9630,
+          "sha256": "122921ba10b92442fbb1fed506a72c8f926d9cb8199822e496af4f8367f8b702",
+          "reason": "Published essential function target: wasmer_wasix.runtime.resolver.wapm_source.FileSystemCache.lookup_cached_query."
+        },
+        {
+          "source_id": "preimage:d6f0e98cfddbda49e119299949f6b866ba3bcb64:lib/wasix/src/runtime/resolver/wapm_source.rs:query_graphql:83-125",
+          "path": "lib/wasix/src/runtime/resolver/wapm_source.rs",
+          "start_line": 83,
+          "end_line": 125,
+          "start_byte": 2415,
+          "end_byte": 3848,
+          "sha256": "11a94fd358b3a106e71890a6134c50dd8b725600a79f37c38521f68e7f8f7685",
+          "reason": "Published essential function target: wasmer_wasix.runtime.resolver.wapm_source.WapmSource.query_graphql."
+        },
+        {
+          "source_id": "preimage:d6f0e98cfddbda49e119299949f6b866ba3bcb64:lib/wasix/src/runtime/resolver/wapm_source.rs:update:298-340",
+          "path": "lib/wasix/src/runtime/resolver/wapm_source.rs",
+          "start_line": 298,
+          "end_line": 340,
+          "start_byte": 9636,
+          "end_byte": 11199,
+          "sha256": "c80c77644ea3b2ccd9c5e115b644a4a8a1c177c7b7fbfed6ca5e2acc7885e335",
+          "reason": "Published essential function target: wasmer_wasix.runtime.resolver.wapm_source.FileSystemCache.update."
+        },
+        {
+          "source_id": "preimage:d6f0e98cfddbda49e119299949f6b866ba3bcb64:lib/wasix/src/runtime/resolver/wapm_source.rs:new:34-40",
+          "path": "lib/wasix/src/runtime/resolver/wapm_source.rs",
+          "start_line": 34,
+          "end_line": 40,
+          "start_byte": 862,
+          "end_byte": 1062,
+          "sha256": "5b884444a6a79e509869c5dcc518c58e114cc07e22838bf15fbe82589955eb82",
+          "reason": "Published related function target: wasmer_wasix.runtime.resolver.wapm_source.WapmSource.new."
+        },
+        {
+          "source_id": "preimage:d6f0e98cfddbda49e119299949f6b866ba3bcb64:lib/wasix/src/runtime/resolver/wapm_source.rs:with_local_cache:43-48",
+          "path": "lib/wasix/src/runtime/resolver/wapm_source.rs",
+          "start_line": 43,
+          "end_line": 48,
+          "start_byte": 1105,
+          "end_byte": 1317,
+          "sha256": "6b8844e5a323451cec490f9603b6e8ec7d37956e11e13d2c4fdc4ba98e1dd91f",
+          "reason": "Published related function target: wasmer_wasix.runtime.resolver.wapm_source.WapmSource.with_local_cache."
+        },
+        {
+          "source_id": "preimage:d6f0e98cfddbda49e119299949f6b866ba3bcb64:lib/wasix/src/runtime/resolver/wapm_source.rs:new:237-242",
+          "path": "lib/wasix/src/runtime/resolver/wapm_source.rs",
+          "start_line": 237,
+          "end_line": 242,
+          "start_byte": 7563,
+          "end_byte": 7733,
+          "sha256": "932fd1313134d8610422f4673e9fb63923c1379801f836ccbdc41d5f00e81f02",
+          "reason": "Published related function target: wasmer_wasix.runtime.resolver.wapm_source.FileSystemCache.new."
+        },
+        {
+          "source_id": "preimage:d6f0e98cfddbda49e119299949f6b866ba3bcb64:lib/wasix/src/runtime/resolver/wapm_source.rs:path:244-246",
+          "path": "lib/wasix/src/runtime/resolver/wapm_source.rs",
+          "start_line": 244,
+          "end_line": 246,
+          "start_byte": 7739,
+          "end_byte": 7834,
+          "sha256": "ce033bc569f5c4256c41598ebc7024849cd8f59e79cc1b98d939330d7323b585",
+          "reason": "Published related function target: wasmer_wasix.runtime.resolver.wapm_source.FileSystemCache.path."
+        },
+        {
+          "source_id": "preimage:d6f0e98cfddbda49e119299949f6b866ba3bcb64:lib/wasix/src/runtime/resolver/wapm_source.rs:is_still_valid:351-367",
+          "path": "lib/wasix/src/runtime/resolver/wapm_source.rs",
+          "start_line": 351,
+          "end_line": 367,
+          "start_byte": 11389,
+          "end_byte": 12032,
+          "sha256": "a9f6773c1ff969613e5211484da92f5dada03008cbcfb4bfe986ece8fee5564c",
+          "reason": "Published related function target: wasmer_wasix.runtime.resolver.wapm_source.CacheEntry.is_still_valid."
+        }
+      ],
+      "unresolved": []
+    },
+    "c14e99c8eb580d67922a12787aa53833fbd088b6-1::q1": {
+      "files": [
+        {
+          "path": "core/ast/src/scope_analyzer.rs",
+          "sha256": "3b259d232a17a76e1324b55a7a2a93a11315c185943897e9906ed0cf402fd2ae",
+          "bytes": 93239
+        },
+        {
+          "path": "core/ast/src/scope.rs",
+          "sha256": "a2ca2b604505e875da8be445729c53b9ef0d9733d5fbff8f34403d6ff2818766",
+          "bytes": 21227
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "preimage:0ea83516196f5e3d6f99904bd6d904adcc982fab:core/ast/src/scope_analyzer.rs:visit_identifier_mut:87-92",
+          "path": "core/ast/src/scope_analyzer.rs",
+          "start_line": 87,
+          "end_line": 92,
+          "start_byte": 2706,
+          "end_byte": 2979,
+          "sha256": "4c00629bdbe519a9402b76884627133130a97e625fbe4cda6378f42c6dfb5787",
+          "reason": "Published essential function target: core.ast.src.scope_analyzer.BindingEscapeAnalyzer.visit_identifier_mut."
+        },
+        {
+          "source_id": "preimage:0ea83516196f5e3d6f99904bd6d904adcc982fab:core/ast/src/scope.rs:access_binding:252-278",
+          "path": "core/ast/src/scope.rs",
+          "start_line": 252,
+          "end_line": 278,
+          "start_byte": 7205,
+          "end_byte": 8055,
+          "sha256": "8b231136d5d84a3ef48b0aa448bd4faa2ad22dce3cec823dc251da7900414bdf",
+          "reason": "Published essential function target: core.ast.src.scope.Scope.access_binding."
+        },
+        {
+          "source_id": "preimage:0ea83516196f5e3d6f99904bd6d904adcc982fab:core/ast/src/scope_analyzer.rs:visit_function_like:525-548",
+          "path": "core/ast/src/scope_analyzer.rs",
+          "start_line": 525,
+          "end_line": 548,
+          "start_byte": 18697,
+          "end_byte": 19656,
+          "sha256": "3d97f0d457d517d8d52aad8756ad7726303f012a71f92bab61eb5ec33ca06e0b",
+          "reason": "Published essential function target: core.ast.src.scope_analyzer.BindingEscapeAnalyzer.visit_function_like."
+        },
+        {
+          "source_id": "preimage:0ea83516196f5e3d6f99904bd6d904adcc982fab:core/ast/src/scope_analyzer.rs:function_declaration_instantiation:1787-2107",
+          "path": "core/ast/src/scope_analyzer.rs",
+          "start_line": 1787,
+          "end_line": 2107,
+          "start_byte": 62265,
+          "end_byte": 76472,
+          "sha256": "1e0b24cf04ea34fb8ffd2e186a4ffe568210c5ac1c3d75d924cbfb756882816b",
+          "reason": "Published essential function target: core.ast.src.scope_analyzer.function_declaration_instantiation."
+        },
+        {
+          "source_id": "preimage:0ea83516196f5e3d6f99904bd6d904adcc982fab:core/ast/src/scope_analyzer.rs:visit_with_mut:134-147",
+          "path": "core/ast/src/scope_analyzer.rs",
+          "start_line": 134,
+          "end_line": 147,
+          "start_byte": 4493,
+          "end_byte": 5059,
+          "sha256": "5ffc259c29ec8dfb42ac7c235f799f1c2baa342562e893400cc518a02341c602",
+          "reason": "Published essential function target: core.ast.src.scope_analyzer.BindingEscapeAnalyzer.visit_with_mut."
+        },
+        {
+          "source_id": "preimage:0ea83516196f5e3d6f99904bd6d904adcc982fab:core/ast/src/scope.rs:escape_all_bindings:669-680",
+          "path": "core/ast/src/scope.rs",
+          "start_line": 669,
+          "end_line": 680,
+          "start_byte": 19860,
+          "end_byte": 20346,
+          "sha256": "b907c7d3fd5710851397b0baf37bbea33c8eae9d265368ffe56d0b1064e0a44e",
+          "reason": "Published related function target: core.ast.src.scope.FunctionScopes.escape_all_bindings."
+        },
+        {
+          "source_id": "preimage:0ea83516196f5e3d6f99904bd6d904adcc982fab:core/ast/src/scope_analyzer.rs:analyze_binding_escapes:59-75",
+          "path": "core/ast/src/scope_analyzer.rs",
+          "start_line": 59,
+          "end_line": 75,
+          "start_byte": 2104,
+          "end_byte": 2469,
+          "sha256": "1857fc602e42a8d65afbc48e229c38f0e2914afce3a0ad6134ee7949fd7ab95d",
+          "reason": "Published related function target: core.ast.src.scope_analyzer.analyze_binding_escapes."
+        },
+        {
+          "source_id": "preimage:0ea83516196f5e3d6f99904bd6d904adcc982fab:core/ast/src/scope.rs:escape_all_bindings:107-111",
+          "path": "core/ast/src/scope.rs",
+          "start_line": 107,
+          "end_line": 111,
+          "start_byte": 2640,
+          "end_byte": 2796,
+          "sha256": "5503cc44c230e4f6a98cdefbbb13a9b3e01eeb097ef22abb2fd2a74b42cf27cc",
+          "reason": "Published related function target: core.ast.src.scope.Scope.escape_all_bindings."
+        }
+      ],
+      "unresolved": []
+    },
+    "84bc9bce482cf60e8d6333b1fc0e4dcf08e5c7e6-1::q1": {
+      "files": [
+        {
+          "path": "lib/EntryModuleNotFoundError.js",
+          "sha256": "4c882a8a7fd2a43758ca872bde0d075401fe3ca089af247c747cddd6e7d7bbcb",
+          "bytes": 476
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "preimage:818983ada5859dd23df9558776640b38306703b6:lib/EntryModuleNotFoundError.js:constructor:11-19",
+          "path": "lib/EntryModuleNotFoundError.js",
+          "start_line": 11,
+          "end_line": 19,
+          "start_byte": 220,
+          "end_byte": 429,
+          "sha256": "3fa1d95032be3f525d7d6098c36f23d1993fd002ba30af6fe9c404aba9989714",
+          "reason": "Published essential function target: EntryModuleNotFoundError.constructor."
+        }
+      ],
+      "unresolved": []
+    },
+    "aa0c13f637df7eb27faa2545ee731f543c0813ec-1::q1": {
+      "files": [
+        {
+          "path": "packages/runtime-core/src/components/Suspense.ts",
+          "sha256": "34e526cd8042ffd3dd2548232f35cebe2894ac19c92dce29e1dae7a98d1e1ecd",
+          "bytes": 23482
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "preimage:96aeb24d66500d91af9e6f81fee8d711fbbcf581:packages/runtime-core/src/components/Suspense.ts:createSuspenseBoundary:418-727",
+          "path": "packages/runtime-core/src/components/Suspense.ts",
+          "start_line": 418,
+          "end_line": 727,
+          "start_byte": 10938,
+          "end_byte": 19868,
+          "sha256": "ef7c3699afff78340cfa3d506a7e5ae72d4461f199d4c69cbcb032c1a225f0e6",
+          "reason": "Published essential function target: createSuspenseBoundary."
+        },
+        {
+          "source_id": "preimage:96aeb24d66500d91af9e6f81fee8d711fbbcf581:packages/runtime-core/src/components/Suspense.ts:patchSuspense:193-382",
+          "path": "packages/runtime-core/src/components/Suspense.ts",
+          "start_line": 193,
+          "end_line": 382,
+          "start_byte": 4650,
+          "end_byte": 9993,
+          "sha256": "993467a040850fa4b85495ba575660e21ad369085f161f6bc444169a3346c700",
+          "reason": "Published essential function target: patchSuspense."
+        },
+        {
+          "source_id": "preimage:96aeb24d66500d91af9e6f81fee8d711fbbcf581:packages/runtime-core/src/components/Suspense.ts:hydrateSuspense:729-780",
+          "path": "packages/runtime-core/src/components/Suspense.ts",
+          "start_line": 729,
+          "end_line": 780,
+          "start_byte": 19870,
+          "end_byte": 21381,
+          "sha256": "5a9f55cd2ff00f8a1d8fe130035677a3baf10bd58eba8655e0d285bbdb0a99b0",
+          "reason": "Published related function target: hydrateSuspense."
+        },
+        {
+          "source_id": "preimage:96aeb24d66500d91af9e6f81fee8d711fbbcf581:packages/runtime-core/src/components/Suspense.ts:mountSuspense:128-191",
+          "path": "packages/runtime-core/src/components/Suspense.ts",
+          "start_line": 128,
+          "end_line": 191,
+          "start_byte": 3145,
+          "end_byte": 4648,
+          "sha256": "1d94dbc4bcbb5c63748623438fdacc5a8038557b1456780027dcc8198a2bb2fc",
+          "reason": "Published related function target: mountSuspense."
+        }
+      ],
+      "unresolved": []
+    },
+    "59b3f72a598129bb7a8903c31c099125a2ae4768-1::q1": {
+      "files": [
+        {
+          "path": "src/java/org/apache/poi/hssf/record/SelectionRecord.java",
+          "sha256": "446571046cf82a356701cc766b0a2a8825c4fbf00dd84c174dd447218d6d6bde",
+          "bytes": 5976
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "preimage:4e26e6a8d8fea055f17fe856c01f359362c4ff58:src/java/org/apache/poi/hssf/record/SelectionRecord.java:setActiveCellRow:80-82",
+          "path": "src/java/org/apache/poi/hssf/record/SelectionRecord.java",
+          "start_line": 80,
+          "end_line": 82,
+          "start_byte": 3126,
+          "end_byte": 3210,
+          "sha256": "7b27bb39613d718f7ee1316e7646cc3f1bc60d14db9a284768eac0ddc32729d9",
+          "reason": "Published essential function target: org.apache.poi.hssf.record.SelectionRecord.setActiveCellRow."
+        },
+        {
+          "source_id": "preimage:4e26e6a8d8fea055f17fe856c01f359362c4ff58:src/java/org/apache/poi/hssf/record/SelectionRecord.java:getActiveCellRow:111-113",
+          "path": "src/java/org/apache/poi/hssf/record/SelectionRecord.java",
+          "start_line": 111,
+          "end_line": 113,
+          "start_byte": 3824,
+          "end_byte": 3901,
+          "sha256": "e0a4a5c1400863430cba461aaed6fbd506d577b22189a93375df4d9e5a1179cc",
+          "reason": "Published essential function target: org.apache.poi.hssf.record.SelectionRecord.getActiveCellRow."
+        },
+        {
+          "source_id": "preimage:4e26e6a8d8fea055f17fe856c01f359362c4ff58:src/java/org/apache/poi/hssf/record/SelectionRecord.java:getActiveCellCol:119-121",
+          "path": "src/java/org/apache/poi/hssf/record/SelectionRecord.java",
+          "start_line": 119,
+          "end_line": 121,
+          "start_byte": 3997,
+          "end_byte": 4074,
+          "sha256": "6750db17615f3a670c1bae595a445d48710631dd79ee1f8605681499b7bc413d",
+          "reason": "Published essential function target: org.apache.poi.hssf.record.SelectionRecord.getActiveCellCol."
+        },
+        {
+          "source_id": "preimage:4e26e6a8d8fea055f17fe856c01f359362c4ff58:src/java/org/apache/poi/hssf/record/SelectionRecord.java:setActiveCellCol:88-90",
+          "path": "src/java/org/apache/poi/hssf/record/SelectionRecord.java",
+          "start_line": 88,
+          "end_line": 90,
+          "start_byte": 3305,
+          "end_byte": 3391,
+          "sha256": "e569434fbc294eee9f658618a6fea78fd5b20577955b8016083a681df032739c",
+          "reason": "Published essential function target: org.apache.poi.hssf.record.SelectionRecord.setActiveCellCol."
+        }
+      ],
+      "unresolved": []
+    },
+    "47762e506c477084436e7aa4a147ee63423cb90c-1::q1": {
+      "files": [
+        {
+          "path": "StyleCop.Analyzers/StyleCop.Analyzers/DocumentationRules/SA1629DocumentationTextMustEndWithAPeriod.cs",
+          "sha256": "9c3247d55f2720a135b28404b89a96427bdb3ff011f72ac29503a01b64be636a",
+          "bytes": 6440
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "preimage:28329060f936b94298a08cddd63084d910705bb2:StyleCop.Analyzers/StyleCop.Analyzers/DocumentationRules/SA1629DocumentationTextMustEndWithAPeriod.cs:HandleXmlElement:76-104",
+          "path": "StyleCop.Analyzers/StyleCop.Analyzers/DocumentationRules/SA1629DocumentationTextMustEndWithAPeriod.cs",
+          "start_line": 76,
+          "end_line": 104,
+          "start_byte": 3895,
+          "end_byte": 5457,
+          "sha256": "36283cf1e24ba6198c2adc8d07ce48032587d44b1ee8883f431aa1df0161d2e7",
+          "reason": "Published essential function target: StyleCop.Analyzers.DocumentationRules.SA1629DocumentationTextMustEndWithAPeriod.HandleXmlElement."
+        }
+      ],
+      "unresolved": []
+    },
+    "5ae29a03f7c1a73e81ded44f2440062753d214f6-1::q1": {
+      "files": [
+        {
+          "path": "tls/s2n_server_cert.c",
+          "sha256": "0e1fa5127ce3ea3977ebdada69fc2b2097774a72c458aef7129e764bf67b0659",
+          "bytes": 2682
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "preimage:20ee6b92ef0d6d8f942fd7b1919682c1507e3d05:tls/s2n_server_cert.c:s2n_server_cert_recv:26-55",
+          "path": "tls/s2n_server_cert.c",
+          "start_line": 26,
+          "end_line": 55,
+          "start_byte": 752,
+          "end_byte": 2053,
+          "sha256": "42b530a16975d54029625467049f9a7654e82cd0cfe8564e50ad0e2576528f9c",
+          "reason": "Published essential function target: s2n_server_cert_recv."
+        },
+        {
+          "source_id": "preimage:20ee6b92ef0d6d8f942fd7b1919682c1507e3d05:tls/s2n_server_cert.c:s2n_server_cert_send:57-70",
+          "path": "tls/s2n_server_cert.c",
+          "start_line": 57,
+          "end_line": 70,
+          "start_byte": 2055,
+          "end_byte": 2681,
+          "sha256": "ac641a9e950d92dcb75fc012972d652d2e1d544d25ca29b5a144cff0a051efe0",
+          "reason": "Published essential function target: s2n_server_cert_send."
+        }
+      ],
+      "unresolved": []
+    },
+    "80bb85321933dffbc9ce58f1be154087ea072bb5-1::q1": {
+      "files": [
+        {
+          "path": "topdown/http.go",
+          "sha256": "123f10c38c4fe0adfe381e6d06e7fb0eeabc0b4f369d6a5eeb1743db8023a4de",
+          "bytes": 30158
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:insertIntoHTTPSendCache:508-515",
+          "path": "topdown/http.go",
+          "start_line": 508,
+          "end_line": 515,
+          "start_byte": 13274,
+          "end_byte": 13534,
+          "sha256": "1ba3c5d589fcdbde80fb2f60ffe8687bcdf177321f1bfce36a083d979002fa83",
+          "reason": "Published essential function target: github.com/open-policy-agent/opa/topdown.insertIntoHTTPSendCache."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:getHTTPSendCache:482-496",
+          "path": "topdown/http.go",
+          "start_line": 482,
+          "end_line": 496,
+          "start_byte": 12688,
+          "end_byte": 13015,
+          "sha256": "39fc076b372ec36875ac499a40e18f947e1d0752e2676d5854b3b478397716f6",
+          "reason": "Published essential function target: github.com/open-policy-agent/opa/topdown.getHTTPSendCache."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:isCachedResponseFresh:745-795",
+          "path": "topdown/http.go",
+          "start_line": 745,
+          "end_line": 795,
+          "start_byte": 20125,
+          "end_byte": 21870,
+          "sha256": "a58d68bee94be3d2bd2584e4c51d2a1d1996361e0b90701dff3b6f602c069855",
+          "reason": "Published essential function target: github.com/open-policy-agent/opa/topdown.isCachedResponseFresh."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:ExecuteHTTPRequest:1046-1052",
+          "path": "topdown/http.go",
+          "start_line": 1046,
+          "end_line": 1052,
+          "start_byte": 28992,
+          "end_byte": 29241,
+          "sha256": "ac571c692cde0abd9db192878314e000f38116ce6c95d1d304ebd4247b4391d4",
+          "reason": "Published essential function target: github.com/open-policy-agent/opa/topdown.intraQueryCache.ExecuteHTTPRequest."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:useInterQueryCache:1054-1066",
+          "path": "topdown/http.go",
+          "start_line": 1054,
+          "end_line": 1066,
+          "start_byte": 29243,
+          "end_byte": 29605,
+          "sha256": "eafe5a42804d2bce479a571873db6d215ac55245d221fa6e7ce472c770a9c147",
+          "reason": "Published essential function target: github.com/open-policy-agent/opa/topdown.useInterQueryCache."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:InsertIntoCache:996-1008",
+          "path": "topdown/http.go",
+          "start_line": 996,
+          "end_line": 1008,
+          "start_byte": 27340,
+          "end_byte": 27835,
+          "sha256": "ab7298481b859b9a9e63ccc4e648abda690c170caa1396e290e2e9c4693e926e",
+          "reason": "Published essential function target: github.com/open-policy-agent/opa/topdown.interQueryCache.InsertIntoCache."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:builtinHTTPSend:70-106",
+          "path": "topdown/http.go",
+          "start_line": 70,
+          "end_line": 106,
+          "start_byte": 1541,
+          "end_byte": 2461,
+          "sha256": "aca550cceaf45e618445ca32d57823b56c33c7c3a7693bf901ed9c2530a8c8e9",
+          "reason": "Published essential function target: github.com/open-policy-agent/opa/topdown.builtinHTTPSend."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:CheckCache:1025-1027",
+          "path": "topdown/http.go",
+          "start_line": 1025,
+          "end_line": 1027,
+          "start_byte": 28301,
+          "end_byte": 28409,
+          "sha256": "e94dc8a54dd9bdf4a9f34359111d2247ee3a3911caf46f7c3af0c2df1e1d5b9f",
+          "reason": "Published essential function target: github.com/open-policy-agent/opa/topdown.intraQueryCache.CheckCache."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:parseResponseAndInjectHeaders:673-697",
+          "path": "topdown/http.go",
+          "start_line": 673,
+          "end_line": 697,
+          "start_byte": 18544,
+          "end_byte": 19087,
+          "sha256": "bf59ddb9dd011519c9b56dacef0e9bfc0a8252d576f2e1d2b5f3e8a2e80253d1",
+          "reason": "Published essential function target: github.com/open-policy-agent/opa/topdown.parseResponseAndInjectHeaders."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:checkHTTPSendInterQueryCache:518-580",
+          "path": "topdown/http.go",
+          "start_line": 518,
+          "end_line": 580,
+          "start_byte": 13626,
+          "end_byte": 15613,
+          "sha256": "c21331cd8fef251ce2c0b922781d624903e136933725e45f35102bba3eb58f46",
+          "reason": "Published essential function target: github.com/open-policy-agent/opa/topdown.checkHTTPSendInterQueryCache."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:ExecuteHTTPRequest:1011-1013",
+          "path": "topdown/http.go",
+          "start_line": 1011,
+          "end_line": 1013,
+          "start_byte": 27883,
+          "end_byte": 28009,
+          "sha256": "389a262fe1ea46ce785afb2270344bbdb7652062b99f614e0dc10584958bde04",
+          "reason": "Published essential function target: github.com/open-policy-agent/opa/topdown.interQueryCache.ExecuteHTTPRequest."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:checkHTTPSendCache:499-506",
+          "path": "topdown/http.go",
+          "start_line": 499,
+          "end_line": 506,
+          "start_byte": 13085,
+          "end_byte": 13272,
+          "sha256": "adf67a25cf134f6a8b68db4331fb6e5993dd2a82c213ecdcfc3227e7a568f804",
+          "reason": "Published essential function target: github.com/open-policy-agent/opa/topdown.checkHTTPSendCache."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:revalidateCachedResponse:699-731",
+          "path": "topdown/http.go",
+          "start_line": 699,
+          "end_line": 731,
+          "start_byte": 19089,
+          "end_byte": 19787,
+          "sha256": "6bc3bfcb14f76ff9643f2c5a351b4b8e7e2c8df74ce305a773d284b933d4cf5d",
+          "reason": "Published essential function target: github.com/open-policy-agent/opa/topdown.revalidateCachedResponse."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:CheckCache:965-993",
+          "path": "topdown/http.go",
+          "start_line": 965,
+          "end_line": 993,
+          "start_byte": 26375,
+          "end_byte": 27248,
+          "sha256": "f8a39dcf9ee132ac7da52b0de04960040778c3cb0bc1aea8f2b466d5aef170fe",
+          "reason": "Published essential function target: github.com/open-policy-agent/opa/topdown.interQueryCache.CheckCache."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:insertIntoHTTPSendInterQueryCache:583-597",
+          "path": "topdown/http.go",
+          "start_line": 583,
+          "end_line": 597,
+          "start_byte": 15705,
+          "end_byte": 16067,
+          "sha256": "42d577825dddb12e2b7f1be4839f41d6a544968e8d550896cedd57a54a044381",
+          "reason": "Published essential function target: github.com/open-policy-agent/opa/topdown.insertIntoHTTPSendInterQueryCache."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:canStore:733-743",
+          "path": "topdown/http.go",
+          "start_line": 733,
+          "end_line": 743,
+          "start_byte": 19789,
+          "end_byte": 20123,
+          "sha256": "a46fc0d6672e6118d9cbf78567e74ad9af0b80828bd78e5f347d32af708321fd",
+          "reason": "Published essential function target: github.com/open-policy-agent/opa/topdown.canStore."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:newHTTPRequestExecutor:938-948",
+          "path": "topdown/http.go",
+          "start_line": 938,
+          "end_line": 948,
+          "start_byte": 25493,
+          "end_byte": 25873,
+          "sha256": "a7791d4f2c55719cb7fb3c1079f8bf6b6b01c577409f17388bd295bf38fb62eb",
+          "reason": "Published essential function target: github.com/open-policy-agent/opa/topdown.newHTTPRequestExecutor."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:newInterQueryCacheValue:659-667",
+          "path": "topdown/http.go",
+          "start_line": 659,
+          "end_line": 667,
+          "start_byte": 18183,
+          "end_byte": 18465,
+          "sha256": "6cf4f74794354ebfbb8db2ced267fadb8b6622be317e2ee955c8106f0f8efbd3",
+          "reason": "Published essential function target: github.com/open-policy-agent/opa/topdown.newInterQueryCacheValue."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:getResponseHeaderExpires:851-857",
+          "path": "topdown/http.go",
+          "start_line": 851,
+          "end_line": 857,
+          "start_byte": 23000,
+          "end_byte": 23209,
+          "sha256": "a0bbe7c0b8647e5d2fdced7e170851a2d508c6deeea9ea36253e636ad2ab30ca",
+          "reason": "Published related function target: github.com/open-policy-agent/opa/topdown.getResponseHeaderExpires."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:getCurrentTime:797-817",
+          "path": "topdown/http.go",
+          "start_line": 797,
+          "end_line": 817,
+          "start_byte": 21872,
+          "end_byte": 22232,
+          "sha256": "8620ffdfa421693f620b4526f9850206f1a08f00148ac5a8f4b0e9fae2ed5b88",
+          "reason": "Published related function target: github.com/open-policy-agent/opa/topdown.getCurrentTime."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:getResponseHeaders:917-927",
+          "path": "topdown/http.go",
+          "start_line": 917,
+          "end_line": 927,
+          "start_byte": 24776,
+          "end_byte": 25112,
+          "sha256": "86ec2ce06fdc6362189954a94d7e15f8fe66a88a74e5759e337f5142c8581720",
+          "reason": "Published related function target: github.com/open-policy-agent/opa/topdown.getResponseHeaders."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:getBoolValFromReqObj:633-642",
+          "path": "topdown/http.go",
+          "start_line": 633,
+          "end_line": 642,
+          "start_byte": 17121,
+          "end_byte": 17403,
+          "sha256": "bf25b6484b8797c68bd1baac061555f4c26dd44f5a31edf00ea061c4a7d652ca",
+          "reason": "Published related function target: github.com/open-policy-agent/opa/topdown.getBoolValFromReqObj."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:createHTTPRequest:174-465",
+          "path": "topdown/http.go",
+          "start_line": 174,
+          "end_line": 465,
+          "start_byte": 4608,
+          "end_byte": 12251,
+          "sha256": "8b8c71b9b6d64f39dfb9f266bb9b897baa7eacd75e79d5b7c5e4ada1fece33f4",
+          "reason": "Published related function target: github.com/open-policy-agent/opa/topdown.createHTTPRequest."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:parseMaxAgeCacheDirective:861-881",
+          "path": "topdown/http.go",
+          "start_line": 861,
+          "end_line": 881,
+          "start_byte": 23356,
+          "end_byte": 23854,
+          "sha256": "83e98cdac258ba5e3d7fee2ecbbe4c1cc8629b27af1123af7c71bacb380c8874",
+          "reason": "Published related function target: github.com/open-policy-agent/opa/topdown.parseMaxAgeCacheDirective."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:newInterQueryCache:960-962",
+          "path": "topdown/http.go",
+          "start_line": 960,
+          "end_line": 962,
+          "start_byte": 26115,
+          "end_byte": 26298,
+          "sha256": "94199af1d981e00e95c940a7de97744e532ba9616601d451f911f5814fb600f8",
+          "reason": "Published related function target: github.com/open-policy-agent/opa/topdown.newInterQueryCache."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:formatHTTPResponseToAST:883-915",
+          "path": "topdown/http.go",
+          "start_line": 883,
+          "end_line": 915,
+          "start_byte": 23856,
+          "end_byte": 24774,
+          "sha256": "6d9a71aa2354a44c534076d67ba59f54168bc2972e1bb464ee9a8c7dbaf2cb89",
+          "reason": "Published related function target: github.com/open-policy-agent/opa/topdown.formatHTTPResponseToAST."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:getResponseHeaderDate:842-849",
+          "path": "topdown/http.go",
+          "start_line": 842,
+          "end_line": 849,
+          "start_byte": 22767,
+          "end_byte": 22998,
+          "sha256": "3bcbcaf2f0b9daae61577bcfa5c1fefe3a6e21cd5e70188d19d419a8dec873b7",
+          "reason": "Published related function target: github.com/open-policy-agent/opa/topdown.getResponseHeaderDate."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:parseCacheControlHeader:819-840",
+          "path": "topdown/http.go",
+          "start_line": 819,
+          "end_line": 840,
+          "start_byte": 22234,
+          "end_byte": 22765,
+          "sha256": "2c0d9109349899f3c000c5320b595aec37afe7e5a8c9cda5e850fc46efcb3c27",
+          "reason": "Published related function target: github.com/open-policy-agent/opa/topdown.parseCacheControlHeader."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:isContentTypeJSON:476-478",
+          "path": "topdown/http.go",
+          "start_line": 476,
+          "end_line": 478,
+          "start_byte": 12432,
+          "end_byte": 12556,
+          "sha256": "f513fd1f38032378373ecf37bdeedd6176b43be9c91089ec2d21b41fa172497b",
+          "reason": "Published related function target: github.com/open-policy-agent/opa/topdown.isContentTypeJSON."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:newIntraQueryCache:1020-1022",
+          "path": "topdown/http.go",
+          "start_line": 1020,
+          "end_line": 1022,
+          "start_byte": 28082,
+          "end_byte": 28224,
+          "sha256": "dc202b38e208128dd56ca9b61709bc71a474aeb8981fccd6041009371c2275bd",
+          "reason": "Published related function target: github.com/open-policy-agent/opa/topdown.newIntraQueryCache."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:newForceCacheParams:1072-1086",
+          "path": "topdown/http.go",
+          "start_line": 1072,
+          "end_line": 1086,
+          "start_byte": 29674,
+          "end_byte": 30157,
+          "sha256": "d12634d31379c27055c2b1f57530d164c05d1a17f4a36f3c5d9dd2feedfedb92",
+          "reason": "Published related function target: github.com/open-policy-agent/opa/topdown.newForceCacheParams."
+        },
+        {
+          "source_id": "preimage:b84dfea858d0033ebd980f552cb751d991e37c68:topdown/http.go:parseTimeout:605-631",
+          "path": "topdown/http.go",
+          "start_line": 605,
+          "end_line": 631,
+          "start_byte": 16188,
+          "end_byte": 17119,
+          "sha256": "c6cd38eee4abfb7ebc94e7150824d7051720dfd7ad1b9b0d4cc1035295ccc99b",
+          "reason": "Published related function target: github.com/open-policy-agent/opa/topdown.parseTimeout."
+        }
+      ],
+      "unresolved": []
+    }
+  }
+}

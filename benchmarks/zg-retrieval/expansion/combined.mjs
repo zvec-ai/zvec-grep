@@ -9,7 +9,13 @@ import { scoreFileRetrieval } from "../metrics/files.mjs";
 import { scoreNdcg } from "../metrics/ndcg.mjs";
 import { validateSearchRoute } from "../engines/zg/parse.mjs";
 import { summarizeRepeatedQuality } from "../metrics/repetitions.mjs";
-import { PILOT_NAMES, PILOT_SUITES, PILOT_PROTOCOL } from "./config.mjs";
+import {
+  PILOT_NAMES,
+  PILOT_SUITES,
+  PILOT_PROTOCOL,
+  PILOT_QA_SCORING,
+} from "./config.mjs";
+import { summarizePilotEntity } from "./gold.mjs";
 import { loadPilot, targetsForTask } from "./datasets.mjs";
 import {
   markdownPilotReport,
@@ -27,7 +33,34 @@ async function checkPilot(name, report, candidateCommit) {
       error: "report artifact missing",
     };
   try {
-    assert.equal(report.schema_version, 2);
+    assert.ok(
+      [2, 3].includes(report.schema_version),
+      "Unknown pilot report schema",
+    );
+    const hasQa = report.schema_version === 3;
+    if (hasQa) {
+      assert.deepEqual(
+        report.qa_gold,
+        pilot.gold.identity,
+        "Pilot Gold changed",
+      );
+      assert.deepEqual(
+        report.qa_scoring,
+        PILOT_QA_SCORING,
+        "Pilot scoring rules changed",
+      );
+    } else {
+      assert.equal(
+        report.qa_gold,
+        undefined,
+        "Legacy report has unexpected Gold",
+      );
+      assert.equal(
+        report.qa_scoring,
+        undefined,
+        "Legacy report has unexpected QA rules",
+      );
+    }
     assert.equal(report.preview, "full", "pilot full preview required");
     assert.equal(report.protocol, PILOT_PROTOCOL, "pilot protocol mismatch");
     assert.equal(report.quality_aggregation, "mean_of_five");
@@ -60,6 +93,13 @@ async function checkPilot(name, report, candidateCommit) {
         targetsForTask(pilot, task),
         `changed gold ${row.task_id}`,
       );
+      const entry = pilot.gold.tasks[row.task_id];
+      if (!hasQa || row.status !== "success")
+        assert.equal(
+          row.qa_quality_mean,
+          undefined,
+          "Unexpected pilot QA score",
+        );
       assert.ok(row.calls.length <= 5);
       assert.deepEqual(
         row.calls.map((call) => call.repetition),
@@ -75,6 +115,25 @@ async function checkPilot(name, report, candidateCommit) {
         for (const call of row.calls) {
           assert.ok(Array.isArray(call.items));
           validateSearchRoute(call.items, row.mode);
+          if (hasQa) {
+            assert.equal(row.group_integrity, "verified");
+            for (const item of call.items) {
+              if (item.source_bytes === undefined) continue;
+              const { start_byte, end_byte } = item.source_bytes;
+              assert.equal(item.range?.kind, "text");
+              assert.ok(Number.isSafeInteger(start_byte) && start_byte >= 0);
+              assert.ok(
+                Number.isSafeInteger(end_byte) && end_byte > start_byte,
+              );
+              const file = entry.files.find(({ path }) => item.path === path);
+              // The file may instead be labeled by another question in the same group.
+              if (file)
+                assert.ok(
+                  end_byte <= file.bytes,
+                  "Entity range exceeds source file",
+                );
+            }
+          }
         }
         assert.ok(
           Number.isSafeInteger(row.output_bytes) && row.output_bytes >= 0,
@@ -84,8 +143,15 @@ async function checkPilot(name, report, candidateCommit) {
         assert.deepEqual(row.ndcg, scoreNdcg(row.items, row.targets));
         assert.deepEqual(
           row.quality_mean,
-          summarizeRepeatedQuality(row.calls, row.targets),
+          summarizeRepeatedQuality(row.calls, row.targets, {
+            includeFileRecall: hasQa,
+          }),
         );
+        if (hasQa)
+          assert.deepEqual(
+            row.qa_quality_mean,
+            summarizePilotEntity(row.calls, entry),
+          );
       } else {
         assert.equal(row.status, "failed");
         if (row.calls.length < 5)

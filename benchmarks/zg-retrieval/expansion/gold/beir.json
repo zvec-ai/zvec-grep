@@ -1,0 +1,642 @@
+{
+  "schema_version": 1,
+  "suite": "beir20",
+  "source_lock_sha256": "8f1c15bfd8083eebe4f85f5b308fa1cc6c52ceffd08d6b573e8f62572b3023fe",
+  "scifact_evidence": {
+    "source": "https://scifact.s3-us-west-2.amazonaws.com/release/latest/data.tar.gz",
+    "archive_sha256": "11c621288d41ac144d29b13b0f8503b3820b7d6e8b1f6ff24dff335c196d76be"
+  },
+  "tasks": {
+    "scifact/1": {
+      "files": [
+        {
+          "path": "docs/31715818.md",
+          "sha256": "1be6f9e293ff23b253f22f36050a7ec439f2095351902013862687c2f031b548",
+          "bytes": 725
+        }
+      ],
+      "targets": [],
+      "unresolved": [
+        {
+          "source_id": "31715818",
+          "reason": "The abstract discusses nanotechnology applications but does not establish inductive properties for zero-dimensional materials."
+        }
+      ]
+    },
+    "scifact/137": {
+      "files": [
+        {
+          "path": "docs/26016929.md",
+          "sha256": "658b60ac89074aa596e78a99b7bb4f3098d9a884d4b160ae2a78165cea4b0da8",
+          "bytes": 1575
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "26016929",
+          "path": "docs/26016929.md",
+          "start_line": 3,
+          "end_line": 3,
+          "start_byte": 931,
+          "end_byte": 1336,
+          "sha256": "1f2b9829f072e8045a00375e2e746f1f7c9d3fa993e3cb12f027da4d84bf0012",
+          "reason": "The original evidence links visual screening to the measured outcome and the conclusion for asymptomatic older people.",
+          "scifact_sentences": [7, 9]
+        }
+      ],
+      "unresolved": []
+    },
+    "scifact/268": {
+      "files": [
+        {
+          "path": "docs/970012.md",
+          "sha256": "81b5a38f428284742fb9c97d96c3b050f8693c227250047d4e7a87f606a219f9",
+          "bytes": 1287
+        }
+      ],
+      "targets": [],
+      "unresolved": [
+        {
+          "source_id": "970012",
+          "reason": "The abstract links cold exposure and BAT thermogenesis but does not report BAT recruitment."
+        }
+      ]
+    },
+    "scifact/436": {
+      "files": [
+        {
+          "path": "docs/14637235.md",
+          "sha256": "4c8f8d0fb8c196c9ed618c4dab6a9697f3e613f4fd2a503178a152d41d26053c",
+          "bytes": 1252
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "14637235",
+          "path": "docs/14637235.md",
+          "start_line": 3,
+          "end_line": 3,
+          "start_byte": 323,
+          "end_byte": 512,
+          "sha256": "8c43d8e114089ed8235b9e6d9e8a03caafbff4beef7a2222489a70e4c90e6b8a",
+          "reason": "The original evidence directly describes Rad53-dependent degradation of excess histones.",
+          "scifact_sentences": [1]
+        }
+      ],
+      "unresolved": []
+    },
+    "scifact/552": {
+      "files": [
+        {
+          "path": "docs/1471041.md",
+          "sha256": "f0a2d8ea74f4fffcae402a9723f3657e80b99666b6ab564238f551cdcb84a984",
+          "bytes": 1550
+        }
+      ],
+      "targets": [],
+      "unresolved": [
+        {
+          "source_id": "1471041",
+          "reason": "The abstract describes expansion in active celiac disease without the timing or dietary intervention stated in the claim."
+        }
+      ]
+    },
+    "scifact/702": {
+      "files": [
+        {
+          "path": "docs/4350400.md",
+          "sha256": "c209bb8d4c75f384eb2d72877cfe58ef75bdedde89a2b3e3c95b7bad548ccb55",
+          "bytes": 1762
+        }
+      ],
+      "targets": [],
+      "unresolved": [
+        {
+          "source_id": "4350400",
+          "reason": "The abstract discusses PIN polarity and endocytosis without identifying VPS9a or the specific root localization result."
+        }
+      ]
+    },
+    "scifact/830": {
+      "files": [
+        {
+          "path": "docs/1897324.md",
+          "sha256": "2943e39b1fdb7608762e75d66f081b4b15960ea4933dbad5b87e5ee4465a7fd0",
+          "bytes": 1135
+        }
+      ],
+      "targets": [],
+      "unresolved": [
+        {
+          "source_id": "1897324",
+          "reason": "The abstract describes a different upstream regulator in human cells and lacks the claimed organism and regulator."
+        }
+      ]
+    },
+    "scifact/975": {
+      "files": [
+        {
+          "path": "docs/5304891.md",
+          "sha256": "79696241c56f17bbb7f9c62fa02889d500016920609ea0dce2e0e54a948166dc",
+          "bytes": 1492
+        }
+      ],
+      "targets": [],
+      "unresolved": [
+        {
+          "source_id": "5304891",
+          "reason": "The abstract compares pathogen-associated cytokine responses without establishing induction of secondary mediators by primary cytokines."
+        }
+      ]
+    },
+    "scifact/1163": {
+      "files": [
+        {
+          "path": "docs/15305881.md",
+          "sha256": "361b5e0b286d05f0b25a4675b43fe25336ef2180fa3aa2c58aa690828555097e",
+          "bytes": 1243
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "15305881",
+          "path": "docs/15305881.md",
+          "start_line": 3,
+          "end_line": 3,
+          "start_byte": 692,
+          "end_byte": 893,
+          "sha256": "9f967f3ae1f519b0485300bb217fcbcae6bc3fd65a11573a04ffeabcdd70c832",
+          "reason": "The original evidence identifies DdrB as structurally distinct from other single-stranded DNA-binding proteins.",
+          "scifact_sentences": [5]
+        }
+      ],
+      "unresolved": []
+    },
+    "scifact/1274": {
+      "files": [
+        {
+          "path": "docs/12428814.md",
+          "sha256": "e01b13cff924cf033e0aeacda05437222a597c6414bb651979cd0e7613519b63",
+          "bytes": 1185
+        },
+        {
+          "path": "docs/27731651.md",
+          "sha256": "c373a12bb010bc2da2af438cdbde228febce3c9e7ed9446eb4d06ab0b994e0d6",
+          "bytes": 1115
+        },
+        {
+          "path": "docs/4406819.md",
+          "sha256": "972e51d0ff70d9eadbe24bc4b86c41a908d064258f9acab208e0d94a4ae9fff4",
+          "bytes": 1491
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "4406819",
+          "path": "docs/4406819.md",
+          "start_line": 3,
+          "end_line": 3,
+          "start_byte": 1258,
+          "end_byte": 1490,
+          "sha256": "fe27a06b96ca21bb7035f807cda15b787761e75ddb120ff67f424d0085395f53",
+          "reason": "This sentence is an original SciFact evidence set for the claim.",
+          "scifact_sentences": [7]
+        }
+      ],
+      "unresolved": [
+        {
+          "source_id": "12428814",
+          "reason": "This related abstract discusses substrate interaction with the tube rather than the annotated tip-specific evidence."
+        },
+        {
+          "source_id": "27731651",
+          "reason": "This review gives system-level context without the claim-specific evidence annotated in SciFact."
+        }
+      ]
+    },
+    "nfcorpus/PLAIN-307": {
+      "files": [
+        {
+          "path": "docs/MED-714.md",
+          "sha256": "6347e017254bd1ff6684a8ca5d464871138e038d932a1d04d327916e3765e151",
+          "bytes": 1730
+        },
+        {
+          "path": "docs/MED-919.md",
+          "sha256": "bc6872f0ba815540fd5ac6dad9fe99edcba326b1a7c2b1fb3e39dab8a9772d88",
+          "bytes": 1734
+        },
+        {
+          "path": "docs/MED-716.md",
+          "sha256": "68f5f67734edd9df79b08ccdeda7aa3a1b743d761d3abf139131297d0fea5167",
+          "bytes": 1288
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "MED-714",
+          "path": "docs/MED-714.md",
+          "start_line": 3,
+          "end_line": 3,
+          "start_byte": 132,
+          "end_byte": 1182,
+          "sha256": "e760a6fe270accb4f28ac0f346f94d2672d5280343b36c3f731fe279a4f2ab42",
+          "reason": "Describes the revised intake recommendations, the committee's approach and why uncertainty remains."
+        },
+        {
+          "source_id": "MED-919",
+          "path": "docs/MED-919.md",
+          "start_line": 3,
+          "end_line": 3,
+          "start_byte": 990,
+          "end_byte": 1733,
+          "sha256": "a0523ec9a3aba27a9c3c7bad8a9f5b9292f5c46de59c7ef2923f925c5f238869",
+          "reason": "Contains the guideline's recommendations and limitations rather than its review process."
+        },
+        {
+          "source_id": "MED-716",
+          "path": "docs/MED-716.md",
+          "start_line": 3,
+          "end_line": 3,
+          "start_byte": 1120,
+          "end_byte": 1287,
+          "sha256": "9e30e7bd09eaab1d9af45bf352f98f2846caf7a3f0092633c198010d4edd5d36",
+          "reason": "States this source's recommendation, which is relevant to comparison of intake recommendations."
+        }
+      ],
+      "unresolved": []
+    },
+    "nfcorpus/PLAIN-407": {
+      "files": [
+        {
+          "path": "docs/MED-906.md",
+          "sha256": "40d920f7a4e68ea00ceb1b7dd7745b30e6d9c71e7a8c23bcb50769aa50a23709",
+          "bytes": 1044
+        },
+        {
+          "path": "docs/MED-4936.md",
+          "sha256": "84935fa0ce0eeda086d69ec8310521297a3586f529b6d990a179d5e78c1f96f9",
+          "bytes": 1529
+        },
+        {
+          "path": "docs/MED-4932.md",
+          "sha256": "49800f294c7e49e7b4ac5561df8650033f06a9e49d5ba646a5f6fb4d45d23746",
+          "bytes": 1827
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "MED-906",
+          "path": "docs/MED-906.md",
+          "start_line": 3,
+          "end_line": 3,
+          "start_byte": 873,
+          "end_byte": 1043,
+          "sha256": "1f49511b3516c740c641d97f413a5f96b26b827bbb61db477bb29495359cbf5f",
+          "reason": "Identifies a reported rare adverse reaction and the proposed explanation."
+        }
+      ],
+      "unresolved": [
+        {
+          "source_id": "MED-4936",
+          "reason": "The abstract compares DHA sources and contains no annatto safety evidence."
+        },
+        {
+          "source_id": "MED-4932",
+          "reason": "The abstract addresses aquaculture exposure and contains no annatto safety evidence."
+        }
+      ]
+    },
+    "nfcorpus/PLAIN-418": {
+      "files": [
+        {
+          "path": "docs/MED-3714.md",
+          "sha256": "08a9763bf20d798b1d8b56ab744b0ab23a9cede07dc3f700b21ccf9634051735",
+          "bytes": 1164
+        },
+        {
+          "path": "docs/MED-917.md",
+          "sha256": "913928faae0841d2a10b140364c563dd095df2f606e2b13961ec72c587b28f28",
+          "bytes": 1118
+        },
+        {
+          "path": "docs/MED-4545.md",
+          "sha256": "479327f61a415e698cb65aeba208aa6b0c9179bf4d83c090b938829bbe45e708",
+          "bytes": 1479
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "MED-3714",
+          "path": "docs/MED-3714.md",
+          "start_line": 3,
+          "end_line": 3,
+          "start_byte": 594,
+          "end_byte": 1046,
+          "sha256": "c18512d4ec2e6730f0baa229cb974c14521c8c597dc496e5937214c73eb4b1fe",
+          "reason": "Compares fresh and frozen strawberries using both weight bases."
+        },
+        {
+          "source_id": "MED-917",
+          "path": "docs/MED-917.md",
+          "start_line": 3,
+          "end_line": 3,
+          "start_byte": 470,
+          "end_byte": 1117,
+          "sha256": "71b861a98cdc7762b1bb979aa19000fcbd84237bc99451b775ccdb670c8e52fe",
+          "reason": "Reports freezing and storage results and compares fresh and frozen raspberries per serving."
+        }
+      ],
+      "unresolved": [
+        {
+          "source_id": "MED-4545",
+          "reason": "The abstract reports açai feeding in flies without a fresh-versus-frozen comparison."
+        }
+      ]
+    },
+    "nfcorpus/PLAIN-430": {
+      "files": [
+        {
+          "path": "docs/MED-927.md",
+          "sha256": "28e51b4983945ffe72bd04d4cefc184effbf3bac66c20c3b3d027e34a2edb263",
+          "bytes": 1935
+        },
+        {
+          "path": "docs/MED-928.md",
+          "sha256": "4cf0cf4ba2796f1fec389338a71b804eaa4373623ef31a5d1b01160fb404f4bc",
+          "bytes": 2303
+        },
+        {
+          "path": "docs/MED-4936.md",
+          "sha256": "84935fa0ce0eeda086d69ec8310521297a3586f529b6d990a179d5e78c1f96f9",
+          "bytes": 1529
+        },
+        {
+          "path": "docs/MED-930.md",
+          "sha256": "d75feb2720f72961ad5560b21a8edb75bf29a123d71ff07d33b950ea02548d5c",
+          "bytes": 909
+        },
+        {
+          "path": "docs/MED-931.md",
+          "sha256": "15c1e437b36e66813f4e6e3048c051f77f45b1eac0168b31a4d0b28924016049",
+          "bytes": 1273
+        },
+        {
+          "path": "docs/MED-5091.md",
+          "sha256": "4eac3ff870853a358e10131906495c182ed38a5e4838b8324ba31fc5175df739",
+          "bytes": 1861
+        },
+        {
+          "path": "docs/MED-5092.md",
+          "sha256": "b4e2dd731be4a4cf1cfbd679b5a3a934c07048d017f806dbae31445681945e56",
+          "bytes": 1405
+        },
+        {
+          "path": "docs/MED-5093.md",
+          "sha256": "6370c1c5375109d1c6084675a341bd3e2686f18e6548f5d5390e6e62a3e92fb8",
+          "bytes": 1988
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "MED-927",
+          "path": "docs/MED-927.md",
+          "start_line": 3,
+          "end_line": 3,
+          "start_byte": 1347,
+          "end_byte": 1934,
+          "sha256": "029edf0e36cd3a17a11dc28c93537e3d40292c3418c40ec3b7e32a80c409f05a",
+          "reason": "Reports the head-to-head lipid outcomes and the authors' comparison."
+        },
+        {
+          "source_id": "MED-928",
+          "path": "docs/MED-928.md",
+          "start_line": 3,
+          "end_line": 3,
+          "start_byte": 1035,
+          "end_byte": 1592,
+          "sha256": "36c626df883498cd4805a875d621c2713274d26a49d8cc5ce9a5c1bf64a1bde6",
+          "reason": "Compares incorporation across the oils and qualifies the differences statistically."
+        }
+      ],
+      "unresolved": [
+        {
+          "source_id": "MED-4936",
+          "reason": "The comparison is between algal oil and salmon, with neither krill oil nor fish oil capsules."
+        },
+        {
+          "source_id": "MED-930",
+          "reason": "The abstract measures contaminants in environmental krill rather than comparing supplements."
+        },
+        {
+          "source_id": "MED-931",
+          "reason": "The abstract concerns ecotoxicology in larval krill, without a supplement comparison."
+        },
+        {
+          "source_id": "MED-5091",
+          "reason": "The abstract concerns maternal DHA supplementation without comparing the two oils."
+        },
+        {
+          "source_id": "MED-5092",
+          "reason": "The abstract concerns infant formula supplementation without comparing the two oils."
+        },
+        {
+          "source_id": "MED-5093",
+          "reason": "The abstract concerns maternal DHA supplementation without comparing the two oils."
+        }
+      ]
+    },
+    "arguana/test-education-egtuscpih-pro02a": {
+      "files": [
+        {
+          "path": "docs/test-education-egtuscpih-pro02b.md",
+          "sha256": "2c58e7ae318138587b5a23456b6150e62dc6287f700dc9576e2a757648310521",
+          "bytes": 851
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "test-education-egtuscpih-pro02b",
+          "path": "docs/test-education-egtuscpih-pro02b.md",
+          "start_line": 3,
+          "end_line": 3,
+          "start_byte": 79,
+          "end_byte": 850,
+          "sha256": "0836a976f4e90d10b1f78537d57b44c76fa3426bf0eedebfcb71be7856eafc37",
+          "reason": "The source's paired counterargument addresses whether online courses broaden access."
+        }
+      ],
+      "unresolved": []
+    },
+    "arguana/test-law-ilppppghb-pro02a": {
+      "files": [
+        {
+          "path": "docs/test-law-ilppppghb-pro02b.md",
+          "sha256": "37c12e30b2149851b3246458c9356bc2ad88750ff59fd3ef7da6d6d58ef816ef",
+          "bytes": 567
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "test-law-ilppppghb-pro02b",
+          "path": "docs/test-law-ilppppghb-pro02b.md",
+          "start_line": 3,
+          "end_line": 3,
+          "start_byte": 86,
+          "end_byte": 566,
+          "sha256": "a472149eb6038d233bd06afb2600e2ec7c96940ef846b39812e5c1522c65bfef",
+          "reason": "The source's paired counterargument addresses colonial wrongs, equal rights and self-determination."
+        }
+      ],
+      "unresolved": []
+    },
+    "arguana/test-environment-aeghhgwpe-pro02a": {
+      "files": [
+        {
+          "path": "docs/test-environment-aeghhgwpe-pro02b.md",
+          "sha256": "b78100085d1ab1ba78f1fab9c244395aaef10393ae9c312781cfb006b3124706",
+          "bytes": 1964
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "test-environment-aeghhgwpe-pro02b",
+          "path": "docs/test-environment-aeghhgwpe-pro02b.md",
+          "start_line": 3,
+          "end_line": 3,
+          "start_byte": 76,
+          "end_byte": 1963,
+          "sha256": "3c77917d3cecd2bc1bdd3782862381e75f2ea0590e55e1680121c19332d487f2",
+          "reason": "The source's paired counterargument disputes the environmental case for vegetarianism."
+        }
+      ],
+      "unresolved": []
+    },
+    "fiqa/588": {
+      "files": [
+        {
+          "path": "docs/570546.md",
+          "sha256": "ed46b2e2931836693725c755407089061b386593ce5815c52568736ae4cf6290",
+          "bytes": 494
+        },
+        {
+          "path": "docs/203710.md",
+          "sha256": "c7896e7712b82e03cfb4c567963086ec55c551f22484f2f981bc7ea112d485f8",
+          "bytes": 277
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "570546",
+          "path": "docs/570546.md",
+          "start_line": 3,
+          "end_line": 3,
+          "start_byte": 77,
+          "end_byte": 421,
+          "sha256": "3e414e06c1a8533817770bf5e85dfca10c83d36d639492bd3527f4ccadd7695e",
+          "reason": "Gives a reason involving the purchase discount and how the answer compares investment returns."
+        },
+        {
+          "source_id": "203710",
+          "path": "docs/203710.md",
+          "start_line": 3,
+          "end_line": 3,
+          "start_byte": 2,
+          "end_byte": 276,
+          "sha256": "488d9974ed8fffb8fef6cd973681997cd9ac058a821ff96935e02e1f44cc0090",
+          "reason": "Distinguishes the respondent's retail-investor view from institutional reasons."
+        }
+      ],
+      "unresolved": []
+    },
+    "fiqa/744": {
+      "files": [
+        {
+          "path": "docs/490443.md",
+          "sha256": "88407c0fc09e728443fc24020cf600cff6a2174c46b7f6e15236c9d910998104",
+          "bytes": 264
+        },
+        {
+          "path": "docs/566480.md",
+          "sha256": "9c02907d656213c2f1d90dd963ebc8b50dad61d218b69fc559ea96fc16937bb3",
+          "bytes": 354
+        },
+        {
+          "path": "docs/78176.md",
+          "sha256": "5abdacf4376a169b247f4ef31041312a52b1a07ac101074e72f0fa83281d2670",
+          "bytes": 540
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "490443",
+          "path": "docs/490443.md",
+          "start_line": 3,
+          "end_line": 3,
+          "start_byte": 2,
+          "end_byte": 263,
+          "sha256": "d48921baeaa85495e4c311cfb8e61875e112cb2d049e5d43949edb72bc3ecc1f",
+          "reason": "Names financing and rent-to-own options for the situation in the query."
+        },
+        {
+          "source_id": "566480",
+          "path": "docs/566480.md",
+          "start_line": 3,
+          "end_line": 3,
+          "start_byte": 2,
+          "end_byte": 353,
+          "sha256": "6d910e1ffec70a69d17abfcde509a2cd9dcb6b057c9bd21727df84c689103a8b",
+          "reason": "Explains income continuity as a factor the source says may offset low credit."
+        },
+        {
+          "source_id": "78176",
+          "path": "docs/78176.md",
+          "start_line": 3,
+          "end_line": 3,
+          "start_byte": 28,
+          "end_byte": 353,
+          "sha256": "d48cc2c4b4f7145d17ab436786e1b2830bf737a086c8cc6dff2a75b111032ddb",
+          "reason": "Discusses greater cash reserves, down payment and purchasing outright as alternatives."
+        }
+      ],
+      "unresolved": []
+    },
+    "fiqa/932": {
+      "files": [
+        {
+          "path": "docs/48722.md",
+          "sha256": "6a97a6a314d0dcf119cc62dad11dbf29740ce2ce1cd0e1461a83642b006ef7fd",
+          "bytes": 555
+        },
+        {
+          "path": "docs/387010.md",
+          "sha256": "cbd12913dd42d75cd6c0d7ee4ec71fba21545ac3f1daf190a7da9b59e76b8f6f",
+          "bytes": 1126
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "48722",
+          "path": "docs/48722.md",
+          "start_line": 3,
+          "end_line": 3,
+          "start_byte": 2,
+          "end_byte": 87,
+          "sha256": "d590bf7449650c24afe9e10caa0c872975a4eee36cf0d34c7f81e37a9cb05b73",
+          "reason": "States this source's answer about state tax, before unrelated federal advice."
+        },
+        {
+          "source_id": "387010",
+          "path": "docs/387010.md",
+          "start_line": 3,
+          "end_line": 3,
+          "start_byte": 2,
+          "end_byte": 808,
+          "sha256": "8c67b7e914993daebe65489b73018fe24a5055f1e81a4352273bfc51f86db319",
+          "reason": "Explains the source-based distinction and applies it to the freelance scenario."
+        }
+      ],
+      "unresolved": []
+    }
+  }
+}
