@@ -229,6 +229,9 @@ export async function buildCiSummary({
     status: errors.length ? "failed" : "success",
     model: suite.protocol.model,
     preview: "full",
+    ...(rows.some((row) => row.qa_retrieval)
+      ? { qa_gold: suite.qa_gold, qa_scoring: suite.qa_scoring }
+      : {}),
     quality_metrics: QUALITY_METRICS,
     run_url: runUrl,
     harness_commit: harnessCommit,

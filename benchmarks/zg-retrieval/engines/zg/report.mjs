@@ -556,6 +556,7 @@ export async function aggregate(directory, { expectedTasks } = {}) {
     generated_at: new Date().toISOString(),
     suite: suite.identity,
     qa_gold: suite.qa_gold,
+    qa_scoring: suite.qa_scoring,
     scope:
       expected.length === 20 ? "full-20-original-queries" : "explicit-subset",
     expected_task_ids: expected,

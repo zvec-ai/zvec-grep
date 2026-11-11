@@ -72,9 +72,18 @@ The normal runner and report commands also compute these metrics from the same
 five public responses per question and mode:
 
 - File Hit@1/5/10, Recall@1/5/10, MRR@10 and nDCG@10 against the new QA labels.
-- The same metrics for Entity, using returned paths, symbols, locations and
-  source content to confirm the fixed-source target. Full preview can provide
-  more evidence for this check; Gold and matching rules remain unchanged.
+- The same metrics for Entity: within the pinned source file, the retrieved
+  Entity's `content` must contain a Gold target's full source range. One result
+  may cover several targets; each target counts once at its first native rank.
+  Partial overlap is a miss. Preview length affects display and information
+  density, not these scores.
+
+MCP source ranges identify the retrieved Entity before preview formatting. If
+line numbers cannot establish a single-line boundary, the affected score remains
+unknown. Entity nDCG credits every distinct covered target at its first rank; its
+ideal score groups Gold targets by file, with larger groups first. See the
+[calculation](../docs/retrieval-only-qa-reference.md#ndcgk-calculation).
+File nDCG is unchanged.
 
 The QA section reports formal and diagnostic results separately, with a scored
 case count for each metric. Unknown matches and failed calls do not become
@@ -88,7 +97,11 @@ Entity score or a claim that all answer evidence was found.
 Reports bind the QA dataset through `qa_gold`, retain per-call `qa_observations`,
 and expose `qa_retrieval` and `qa_quality_mean` beside the legacy fields.
 Validation recomputes these values from the saved public evidence and frozen QA
-labels. The final PR comparison has one table per suite. Each table contains
+labels. `qa_scoring: {version: 2, entity_match: "contains"}` identifies the updated
+rules. Keep historical scores and recompute both versions before comparing them
+under these rules; rescoring saved responses is not a new retrieval run.
+
+The final PR comparison has one table per suite. Each table contains
 File and Entity rows for fts, vector and hybrid, with Hit@1/5/10,
 Recall@1/5/10, MRR@10 and nDCG@10 columns.
 

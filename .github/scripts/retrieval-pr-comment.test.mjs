@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { publish, validateComparison } from "./retrieval-pr-comment.mjs";
+import { QA_SCORING } from "../../benchmarks/zg-retrieval/core/suite.mjs";
 import {
   QA_ENTITY_METRICS,
   QA_RECALL_METRICS,
@@ -225,6 +226,7 @@ test("later results and failed-job reruns update one bot comment", async (t) => 
 test("the publisher renders validated File and Entity diagnostic scores and counts", async (t) => {
   const x = await fixture(t);
   const withDiagnostics = structuredClone(report);
+  withDiagnostics.qa_scoring = { ...QA_SCORING };
   const group = (level, metrics, score, count) => ({
     eligible_tasks: 17,
     [level]: {
@@ -245,6 +247,23 @@ test("the publisher renders validated File and Entity diagnostic scores and coun
   await x.write("comparison/summary.json", withDiagnostics);
   await publish(x);
   const body = x.messages()[0][1].body;
+  assert.deepEqual(
+    validateComparison(withDiagnostics, request).qa_scoring,
+    QA_SCORING,
+  );
+  for (const oldRules of [
+    undefined,
+    { entity_match: "identity" },
+    { version: 1, entity_match: "contains" },
+  ]) {
+    const old = structuredClone(withDiagnostics);
+    if (oldRules) old.qa_scoring = oldRules;
+    else delete old.qa_scoring;
+    assert.throws(
+      () => validateComparison(old, request),
+      /Unsupported QA scoring/,
+    );
+  }
   assert.match(body, /Diagnostic QA results/);
   assert.match(
     body,

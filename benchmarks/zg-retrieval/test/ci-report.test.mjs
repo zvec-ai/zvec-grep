@@ -16,6 +16,7 @@ import {
   summarizeFileRetrieval,
 } from "../metrics/files.mjs";
 import { loadSuite } from "../core/lib.mjs";
+import { compareReports } from "../reports/compare.mjs";
 import { summarizeMeasurements } from "../metrics/measurements.mjs";
 import { summarizeNdcg } from "../metrics/summary.mjs";
 import { scoreNdcg } from "../metrics/ndcg.mjs";
@@ -126,6 +127,7 @@ function zgReport({ failedModes = [], rankForTask = () => 3 } = {}) {
 
 function withQa(report = zgReport()) {
   report.qa_gold = clone(suite.qa_gold);
+  report.qa_scoring = clone(suite.qa_scoring);
   for (const row of report.tasks) {
     const pair = suite.qa_pairs[row.task_id];
     row.qa_observations = row.quality_observations.map(
@@ -206,6 +208,8 @@ test("CI exposes diagnostic QA scores and denominators while formal scores remai
   const report = withQa();
   const result = await buildCiSummary({ zg: report });
   assert.equal(result.status, "success", result.errors.join("\n"));
+  assert.deepEqual(result.qa_gold, suite.qa_gold);
+  assert.deepEqual(result.qa_scoring, { version: 2, entity_match: "contains" });
   for (const [index, mode] of ZG_MODES.entries()) {
     const qa = result.rows[index].qa_retrieval;
     assert.deepEqual(qa, report.modes[mode].qa_retrieval);
@@ -232,6 +236,12 @@ test("CI exposes diagnostic QA scores and denominators while formal scores remai
 
 test("CI rejects altered QA provenance, scores, eligibility, observations and aggregates", async () => {
   const mutations = [
+    (report) => {
+      delete report.qa_scoring;
+    },
+    (report) => {
+      report.qa_scoring = { entity_match: "identity" };
+    },
     (report) => {
       report.qa_gold = { ...report.qa_gold, forged: true };
     },
@@ -273,6 +283,32 @@ test("CI rejects altered QA provenance, scores, eligibility, observations and ag
     mutate(report, row);
     assertUnavailable(await buildCiSummary({ zg: report }));
   }
+});
+
+test("QA comparisons bind matching rules independently of unchanged Gold", () => {
+  const baseline = withQa();
+  const candidate = clone(baseline);
+  const result = compareReports(baseline, candidate, { suite });
+  assert.deepEqual(result.qa_gold, suite.qa_gold);
+  assert.deepEqual(result.qa_scoring, { version: 2, entity_match: "contains" });
+  for (const scoring of [
+    undefined,
+    { version: 1, entity_match: "identity" },
+    { version: 1, entity_match: "contains" },
+  ]) {
+    const legacy = clone(candidate);
+    if (scoring) legacy.qa_scoring = scoring;
+    else delete legacy.qa_scoring;
+    // Unchanged numeric scores cannot make older matching rules compatible.
+    assert.throws(
+      () => compareReports(baseline, legacy, { suite }),
+      /QA scoring rules differ/,
+    );
+  }
+  assert.throws(
+    () => compareReports(zgReport(), candidate, { suite }),
+    /incompatible QA Gold/,
+  );
 });
 
 test("QA failed calls remain unscored without changing historical File error zeros", async () => {

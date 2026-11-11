@@ -25,11 +25,12 @@ File matching evaluates location and ranking independently of how the product fo
 
 The metrics support concrete investigations: a Hit@10 regression means a labeled file disappeared from the search budget; stable Hit@10 with lower MRR suggests its first result moved later; lower nDCG can indicate that fewer labeled files were found or that they appeared later. Raw per-question results are needed to identify which case occurred. A miss alone cannot identify whether candidate generation, fusion, aggregation or ranking caused it.
 
-The separate QA diagnostics also score File Recall and Entity matches. Entity
-matching uses returned paths, symbols, locations and visible source to confirm
-the target. Full preview exposes available retrieved source, not entire files,
-and can resolve matches hidden by a short preview. It does not change Gold or
-matching rules, and it is not a content-coverage metric.
+The separate QA diagnostics also score File Recall and Entity coverage. In the
+pinned source file, retrieved Entity `content` must contain the Gold target's
+full source range. One result may cover several targets, each counted once at
+its first native rank. Partial overlap is a miss. Full and short previews of the
+same retrieved content produce the same scores; preview information density is
+a separate measure.
 
 ## Label limitations
 

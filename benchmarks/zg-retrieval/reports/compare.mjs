@@ -104,6 +104,12 @@ export function compareReports(baseline, candidate, { suite } = {}) {
 }
 
 function compareValidatedReports(baseline, candidate, before, after) {
+  assert.deepEqual(baseline.qa_gold, candidate.qa_gold, "incompatible QA Gold");
+  assert.deepEqual(
+    baseline.qa_scoring,
+    candidate.qa_scoring,
+    "incompatible QA scoring rules",
+  );
   assert.equal(
     baseline.preview,
     candidate.preview,
@@ -189,6 +195,12 @@ function compareValidatedReports(baseline, candidate, before, after) {
     quality_repetition: 5,
     quality_aggregation: "mean_of_five",
     suite: structuredClone(baseline.suite),
+    ...(baseline.qa_gold
+      ? {
+          qa_gold: structuredClone(baseline.qa_gold),
+          qa_scoring: structuredClone(baseline.qa_scoring),
+        }
+      : {}),
     scope: baseline.scope,
     expected_task_ids: [...baseline.expected_task_ids],
     task_order_policy:

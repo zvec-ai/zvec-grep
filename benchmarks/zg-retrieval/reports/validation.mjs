@@ -295,6 +295,7 @@ export function validateZgReport(
 ) {
   const hasQa =
     Object.hasOwn(report, "qa_gold") ||
+    Object.hasOwn(report, "qa_scoring") ||
     report.tasks?.some((row) =>
       ["qa_retrieval", "qa_quality_mean", "qa_observations"].some((field) =>
         Object.hasOwn(row, field),
@@ -305,13 +306,18 @@ export function validateZgReport(
     );
   if (hasQa) {
     assert.ok(
-      suite?.qa_pairs && suite?.qa_gold,
+      suite?.qa_pairs && suite?.qa_gold && suite?.qa_scoring,
       `${label}: QA validation requires the frozen QA suite`,
     );
     assert.deepEqual(
       report.qa_gold,
       suite.qa_gold,
       `${label}: QA Gold identity mismatch`,
+    );
+    assert.deepEqual(
+      report.qa_scoring,
+      suite.qa_scoring,
+      `${label}: QA scoring rules differ; rescore both reports from saved evidence`,
     );
   }
   assert.equal(

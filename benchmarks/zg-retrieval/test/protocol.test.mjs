@@ -454,6 +454,7 @@ test("complete product-error observations retain a zero score and denominator bu
   assert.deepEqual(report.integrity_errors, []);
   assert.equal(report.tasks.length, 3);
   assert.equal(report.schema_version, 7);
+  assert.deepEqual(report.qa_scoring, { version: 2, entity_match: "contains" });
   assert.equal(report.preview, "full");
   assert.deepEqual(Object.keys(report.modes), ["hybrid", "fts", "vector"]);
   assert.equal(Object.hasOwn(report, "previews"), false);

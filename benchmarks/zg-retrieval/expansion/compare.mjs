@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { loadSuite } from "../core/lib.mjs";
+import { QA_SCORING } from "../core/suite.mjs";
 import { buildCombined } from "./combined.mjs";
 import { PILOT_NAMES } from "./config.mjs";
 import { compareReports } from "../reports/compare.mjs";
@@ -58,6 +59,16 @@ export function compareCombinedResults(baseline, candidate, metadata) {
     candidate.harness_commit,
     "different benchmark harnesses",
   );
+  const hasQa = [baseline.sweqa, candidate.sweqa].some(
+    (suite) => suite.qa_scoring || suite.rows?.some((row) => row.qa_retrieval),
+  );
+  if (hasQa)
+    for (const [side, report] of Object.entries({ baseline, candidate }))
+      assert.deepEqual(
+        report.sweqa.qa_scoring,
+        QA_SCORING,
+        `${side}: QA scoring rules differ; rescore both reports from saved evidence`,
+      );
   const rows = [];
   for (const name of ["sweqa", ...PILOT_NAMES]) {
     const before = name === "sweqa" ? baseline.sweqa : baseline.pilots[name];
@@ -113,6 +124,7 @@ export function compareCombinedResults(baseline, candidate, metadata) {
     status: "success",
     preview: "full",
     ...metadata,
+    ...(hasQa ? { qa_scoring: { ...QA_SCORING } } : {}),
     harness_commit: baseline.harness_commit,
     rows,
     errors: [],
@@ -220,7 +232,7 @@ export function markdownVersionComparison(result) {
         `### ${title}`,
         "",
         qa
-          ? "**Diagnostic QA results.** Cells show score (scored/eligible questions) for each metric. A shared cell means equal scores and counts, not necessarily the same scored questions. N/A means unscored or missing QA data; original File scores are not substituted."
+          ? "**Diagnostic QA results.** Entity hits require Gold containment in the returned Entity, independently of preview. Cells show score (scored/eligible questions). A shared cell means equal scores and counts, not necessarily the same scored questions. N/A means unscored or missing QA data."
           : "Original File metrics. File Recall and Entity evaluation data are not provided for this run and are shown as N/A.",
         "",
         `| Mode | Level | ${QA_ENTITY_METRICS.map(([label]) => label).join(" | ")} |`,

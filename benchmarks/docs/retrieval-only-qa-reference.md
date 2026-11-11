@@ -31,11 +31,13 @@ Use this reference when preparing data or writing scoring code. For the core rul
 ### Entity
 
 - Internal IDs, names, and aliases help locate a target but do not prove a hit on their own.
-- Overlapping line ranges, or a returned class containing the target method, do not automatically count as a hit.
-- Do not split multiple code targets within one result into separate scored items.
-- Source code read during verification must not be treated as content returned by the tool.
+- Match the repository version and full file path, then check that the retrieved Entity's `content` contains the Gold target's full source range.
+- Partial overlap is a miss. A returned class may match every Gold method whose full range it contains.
+- One result may match several Gold targets. Give each target its first matching result's rank; do not split or renumber results.
+- Use reliable source ranges for retrieved content. Reading a source file during verification does not make the whole file a retrieved result.
+- MCP source ranges describe the retrieved Entity before preview formatting. If line numbers alone cannot establish single-line boundaries, leave the affected score unknown; do not use preview text to fill the gap.
+- Changing `preview` between full and short must not change Entity scores for the same retrieved content. Preview text, indentation and truncation do not determine a hit.
 - Do not regenerate Gold using the parser under evaluation.
-- Do not give credit for information obtained from an internal index but absent from the tool's response.
 
 ### Order and scoring eligibility
 
@@ -49,10 +51,18 @@ Use this reference when preparing data or writing scoring code. For the core rul
 
 ## nDCG@K calculation
 
-1. Each distinct Gold target contributes `1 / log2(rank + 1)` only at its first hit.
-2. Sum the contributions within the first K results to obtain the actual score.
-3. Place `min(K, number of Gold targets)` correct targets at the top of the ranking and apply the same formula to obtain the ideal score.
-4. Divide the actual score by the ideal score to obtain nDCG@K.
+Each distinct Gold target contributes `1 / log2(rank + 1)` only at its first hit.
+Sum these contributions within the first K results to obtain DCG. Several Entity
+targets may contribute at the same result rank.
+
+Divide DCG by the ideal score (IDCG):
+
+- **File:** place `min(K, number of Gold files)` distinct correct files at the top of the ranking, with one target per rank.
+- **Entity:** count Gold targets in each file and sort these counts from largest to smallest. At ideal rank `i`, one result covers every Gold target in that file. IDCG is the sum of `count[i] / log2(i + 1)` over the first K files.
+
+Entity IDCG uses the fixed Gold to define an upper bound on coverage, independent
+of parser boundaries and the current retrieval results. Both scores stay within
+0–1. The File calculation is unchanged.
 
 ## Reporting and version changes
 
@@ -70,13 +80,17 @@ Preserve historical File metrics, the old rules that match code start and end po
 
 When Gold or scoring rules change, recalculate both sides using the same new rules. List any information missing from historical records.
 
+Entity containment scoring is recorded as `qa_scoring: {version: 2, entity_match: "contains"}`.
+Retain earlier scores and recompute both versions before comparing them under
+these rules. Rescoring historical responses is not a new retrieval run.
+
 When source targets move, are renamed, split, merged, or deleted, review them again and publish a new Gold version.
 
 When missing correct targets are found, review them independently before publishing a new Gold version.
 
 The suite README must list the metrics and K values actually supported, and the scoring code version.
 
-When writing or changing scoring code, check cases involving changed code boundaries, a returned whole class, duplicate results, and uncertain target matches.
+When writing or changing scoring code, check full and partial coverage, multiple Gold targets in one result, duplicate results, unchanged retrieval with different previews, and missing range evidence.
 
 ## Fields to save
 
@@ -92,7 +106,7 @@ Checksums help detect changes to saved content.
 | Review process | Annotator and reviewer, initial drafts, reference material already seen, disagreements, and final conclusions. |
 | Verification status | Separate File and Entity statuses: verified, needs evidence, disputed, or not applicable. |
 | Run configuration | Invocation entry point, model and retrieval settings, output format, K values, and result count and length limits. |
-| Returned content | Raw responses, whether they contain previews only, and how overlong content is truncated. |
+| Returned content | Raw responses, retrieved content's source ranges, preview settings, and display truncation. |
 
 Use these position and checksum conventions:
 

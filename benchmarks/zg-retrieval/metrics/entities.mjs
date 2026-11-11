@@ -148,125 +148,59 @@ function validateItems(items) {
           item.range.end_line >= item.range.start_line,
         "invalid public source range",
       );
-      let previous = 0;
-      for (const line of item.source_lines ?? []) {
-        assert.ok(
-          Number.isSafeInteger(line.line) &&
-            line.line > previous &&
-            typeof line.text === "string",
-          "invalid public source line",
-        );
-        assert.ok(
-          line.line >= item.range.start_line &&
-            (line.line <= item.range.end_line ||
-              (line.line === item.range.end_line + 1 && line.text === "")),
-          "public source line falls outside the returned range",
-        );
-        previous = line.line;
-      }
     }
   }
 }
 
-function publicSymbol(item) {
-  const symbolRows = (item.metadata ?? []).filter((line) =>
-    line.startsWith("symbol: "),
-  );
-  if (symbolRows.length !== 1) return null;
-  let value = symbolRows[0].slice(8);
-  const kind =
-    /^\[([^\]]+)\]\s+/.exec(value) ??
-    /^(function|method|class|field|variable|constant)\s+/.exec(value);
-  if (kind) value = value.slice(kind[0].length);
-  const scoped = /^(.*?)\s+scope: (.+)$/.exec(value);
-  const name = scoped ? scoped[1] : value;
-  const scope =
-    scoped?.[2] ??
-    (item.metadata ?? []).find((line) => line.startsWith("scope: "))?.slice(7);
-  return {
-    name: canonicalSymbol(name),
-    qualified: canonicalSymbol(scope ? `${scope}.${name}` : name),
-    hasScope: Boolean(scope) || /\.|::/.test(name),
-    kind: kind?.[1] ?? null,
-  };
-}
-
-function sourceEvidence(item, target) {
-  const source = lines(target.definition_text);
-  const visible = (item.source_lines ?? []).filter(
-    (line) => line.line >= target.start_line && line.line <= target.end_line,
-  );
-  const conflict = visible.some(
-    (line) => line.text !== source[line.line - target.start_line],
-  );
-  return {
-    verified: !conflict && visible.some((line) => line.text.trim().length > 0),
-    declaration:
-      !conflict &&
-      visible.some(
-        (line) =>
-          line.line === target.declaration_start_line &&
-          line.text.trim().length > 0,
-      ),
-  };
-}
-
 function entityMatch(item, targets) {
   const sameFile = targets.filter((target) => target.path === item.path);
-  if (!sameFile.length) return { hit: null, possible: [] };
-  const symbol = publicSymbol(item);
-  const nativeRange = item.range?.kind === "text" ? item.range : null;
-  const namesTarget = (target) => {
-    if (!symbol) return false;
-    const expected = canonicalSymbol(target.symbol);
-    return symbol.hasScope
-      ? symbol.qualified === expected
-      : symbol.name === expected.split(".").at(-1);
-  };
-  const definiteParent = (target) =>
-    symbol?.kind === "class" &&
-    target.kind !== "class" &&
-    nativeRange &&
-    nativeRange.start_line < target.start_line;
-  const candidates = sameFile.filter(
-    (target) =>
-      namesTarget(target) ||
-      (nativeRange &&
-        nativeRange.end_line >= target.start_line &&
-        nativeRange.start_line <= target.end_line &&
-        !definiteParent(target)),
-  );
-  const declarations = candidates.filter((target) => {
-    const evidence = sourceEvidence(item, target);
-    // Fixed-source declarations take precedence over parser-generated names.
-    // An explicitly returned class cannot claim one of its nested methods.
-    return (
-      evidence.declaration &&
-      nativeRange &&
-      !(symbol?.kind === "class" && target.kind !== "class") &&
-      nativeRange.start_line >= target.start_line &&
-      nativeRange.start_line <= target.declaration_start_line
-    );
-  });
-  if (declarations.length === 1)
-    return { hit: declarations[0].id, possible: [] };
-  const verified = candidates.filter(
-    (target) =>
-      namesTarget(target) &&
-      !(symbol?.kind === "class" && target.kind !== "class") &&
-      sourceEvidence(item, target).verified,
-  );
-  if (verified.length === 1) return { hit: verified[0].id, possible: [] };
-  return { hit: null, possible: candidates.map((target) => target.id) };
+  if (item.range?.kind !== "text")
+    return { hits: [], possible: sameFile.map((target) => target.id) };
+  const { start_line: start, end_line: end } = item.range;
+  const hits = [],
+    possible = [];
+  for (const target of sameFile) {
+    if (start > target.start_line || end < target.end_line) continue;
+    // Public ranges identify the Entity in the pinned source, not its preview.
+    // A single-line target on a boundary needs columns that this output omits.
+    if (
+      target.start_line === target.end_line &&
+      (start === target.start_line || end === target.end_line)
+    )
+      possible.push(target.id);
+    else hits.push(target.id);
+  }
+  return { hits, possible };
 }
 
-function rankMetrics(items, targets, match) {
+function entityNdcg(relevantRanks, targets, k) {
+  const gains = new Map();
+  for (const rank of relevantRanks)
+    if (rank <= k) gains.set(rank, (gains.get(rank) ?? 0) + 1);
+  const dcg = [...gains].reduce(
+    (sum, [rank, gain]) => sum + gain / Math.log2(rank + 1),
+    0,
+  );
+  // An Entity cannot cross files. The ideal result for each file contains all
+  // its Gold targets; this fixed upper bound does not depend on parser splits.
+  const perFile = new Map();
+  for (const target of targets)
+    perFile.set(target.path, (perFile.get(target.path) ?? 0) + 1);
+  const ideal = [...perFile.values()]
+    .sort((a, b) => b - a)
+    .slice(0, k)
+    .reduce((sum, gain, index) => sum + gain / Math.log2(index + 2), 0);
+  return ideal ? dcg / ideal : 0;
+}
+
+function rankMetrics(items, targets, match, ndcg = ndcgAtK) {
   const found = new Map();
   const unknown = [];
   for (const item of items) {
     if (item.rank > 10) break;
     const result = match(item, targets);
-    if (result.hit && !found.has(result.hit)) found.set(result.hit, item.rank);
+    for (const hit of result.hits)
+      if (!found.has(hit)) found.set(hit, item.rank);
     if (result.possible.length)
       unknown.push({ rank: item.rank, target_ids: result.possible });
   }
@@ -297,7 +231,7 @@ function rankMetrics(items, targets, match) {
   );
   result.ndcg_at_10 = affectsRanking
     ? null
-    : ndcgAtK([...found.values()], targets.length, 10);
+    : ndcg([...found.values()], targets.length, 10);
   return result;
 }
 
@@ -357,11 +291,16 @@ export function scoreQaRetrieval(
   );
   return {
     ...review,
-    file: rankMetrics(items, pair.file_targets, (item, targets) => ({
-      hit: targets.find((target) => target.path === item.path)?.id ?? null,
-      possible: [],
-    })),
-    entity: rankMetrics(items, pair.entity_targets, entityMatch),
+    file: rankMetrics(items, pair.file_targets, (item, targets) => {
+      const target = targets.find((target) => target.path === item.path);
+      return { hits: target ? [target.id] : [], possible: [] };
+    }),
+    entity: rankMetrics(
+      items,
+      pair.entity_targets,
+      entityMatch,
+      (ranks, _, k) => entityNdcg(ranks, pair.entity_targets, k),
+    ),
   };
 }
 

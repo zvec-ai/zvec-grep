@@ -12,6 +12,7 @@ import {
 } from "../expansion/compare.mjs";
 import { QUALITY_METRICS } from "../reports/ci.mjs";
 import { QA_ENTITY_METRICS } from "../reports/zg.mjs";
+import { QA_SCORING } from "../core/suite.mjs";
 
 const baseSha = "a".repeat(40),
   headSha = "b".repeat(40),
@@ -43,7 +44,13 @@ function result(commit, value = 0.5) {
     status: "success",
     candidate: { commit },
     harness_commit: harnessSha,
-    sweqa: { status: "success", preview: "full", model: "local/code", rows },
+    sweqa: {
+      status: "success",
+      preview: "full",
+      model: "local/code",
+      qa_scoring: { ...QA_SCORING },
+      rows,
+    },
     pilots: Object.fromEntries(
       ["beir", "duretrieval", "quarry"].map((name) => [
         name,
@@ -64,6 +71,7 @@ test("all suites and modes retain exact deltas and render compact baseline-to-ca
   const comparison = compareCombinedResults(before, after, metadata);
   assert.equal(comparison.rows.length, 12);
   assert.equal(comparison.preview, "full");
+  assert.deepEqual(comparison.qa_scoring, QA_SCORING);
   assert.equal(comparison.rows[0].metrics.file_hit_at_1.delta, -0.25);
   assert.equal(comparison.rows[3].metrics.file_hit_at_1.delta, 0.25);
   const markdown = markdownVersionComparison(comparison);
@@ -129,6 +137,12 @@ test("incomplete, mixed-harness, wrong-commit and mixed-model results are reject
     },
     (before) => {
       before.sweqa.rows[0].metrics.ndcg_at_10 = null;
+    },
+    (before) => {
+      delete before.sweqa.qa_scoring;
+    },
+    (before) => {
+      before.sweqa.qa_scoring = { version: 1, entity_match: "contains" };
     },
   ]) {
     const before = result(baseSha);

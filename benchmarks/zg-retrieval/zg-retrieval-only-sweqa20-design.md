@@ -26,6 +26,12 @@ Install the packed native candidate outside the corpus and connect through its p
 
 FTS/vector requests omit the primary `query` and the other route. All requests explicitly use `preview: "full"`, `limit: 10`, `autoUpdate: false`, `freshness: eventual` and `preferSymbol: false`. Full preview displays available source from retrieved results, not the entire file. It changes presentation, not Gold or scoring rules. Disabling symbol preference prevents vector-only requests from adding a symbol-oriented FTS route. Public `matchedBy` evidence is checked against the requested mode. Native file aggregation, fusion and ranking remain product behavior under test; the harness adds no reranker.
 
+The separate QA Entity metrics use the retrieved content's source range, not its
+preview. A Gold target is found when its full range is contained in retrieved
+Entity `content` from the same pinned source file. One result may cover several
+targets, each counted once at its first native rank. See the [QA matching
+rules](../docs/benchmark-gold-authoring-and-matching.md).
+
 Modes run in fixed order **hybrid → fts → vector**. Within each mode, each original question runs five consecutive times. All five results contribute quality and ranking-stability observations; only the fifth supplies output size. This gives **20 × 3 × 5 = 300 MCP calls** and **60 question/mode quality summaries**. Repetitions are not independent questions.
 
 The protocol fixes the same model, corpus policy and index across modes. Shared runtime and model caches, together with fixed order, affect latency: later modes can reuse work initialized by earlier modes. Timings are observations under this protocol, not an unbiased speed comparison or cold-start benchmark.

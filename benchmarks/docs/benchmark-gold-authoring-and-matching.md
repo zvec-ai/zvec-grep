@@ -15,10 +15,11 @@ Gold must include every expected target within the specified source version and 
 
 ## Matching results
 
-- Use only information the tool actually returned, checked against the specified source version.
+- Check retrieved results against the specified source version.
 - File matches require the full repository-relative path.
-- Entity matches require the same code target. Returning a class does not automatically match its methods.
-- Each result can receive credit for at most one Entity.
+- An Entity match requires its `content` to contain the Gold target's full source range in the same file. Partial overlap is not enough.
+- One result may cover several Gold targets, including methods inside a returned class. Count each Gold target once, at its first matching rank.
+- `preview` controls displayed content, not Entity matches. Save evidence of the retrieved content's source range independently of the preview.
 - Take the first K results in their original order. Repeated targets count once but still occupy their original positions.
 - If a score cannot be determined, record why instead of assigning zero. Assign zero only to a confirmed miss in valid results.
 
@@ -34,7 +35,7 @@ K is the number of original result positions examined. Compute each metric separ
 | RR@K / MRR@K | RR is the reciprocal of the first-hit rank, or 0 for a top-K miss. MRR is the mean RR. |
 | nDCG@K | Measures whether relevant targets appear early; see the [calculation](retrieval-only-qa-reference.md#ndcgk-calculation). |
 
-Evaluate target matches and the completeness of returned content separately.
+Evaluate Entity coverage and preview information density separately.
 
 ## Aggregation and comparison
 

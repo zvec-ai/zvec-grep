@@ -6,6 +6,7 @@ import {
   markdownVersionComparison,
 } from "../../benchmarks/zg-retrieval/expansion/compare.mjs";
 import { QUALITY_METRICS } from "../../benchmarks/zg-retrieval/reports/ci.mjs";
+import { QA_SCORING } from "../../benchmarks/zg-retrieval/core/suite.mjs";
 import { PILOT_SUITES } from "../../benchmarks/zg-retrieval/expansion/config.mjs";
 
 const marker = "<!-- zg-retrieval-pr -->";
@@ -154,6 +155,15 @@ export function validateComparison(report, request) {
     Array.isArray(report.rows) && report.rows.length === 12,
     "Incomplete suite/mode coverage",
   );
+  const hasQa =
+    Object.hasOwn(report, "qa_scoring") ||
+    report.rows.some((row) => row?.file_diagnostic || row?.entity_diagnostic);
+  if (hasQa)
+    assert.deepEqual(
+      report.qa_scoring,
+      QA_SCORING,
+      "Unsupported QA scoring rules; rescore both versions",
+    );
   const rows = [];
   for (const suite of ["sweqa", "beir", "duretrieval", "quarry"]) {
     for (const mode of ["hybrid", "fts", "vector"]) {
@@ -205,6 +215,7 @@ export function validateComparison(report, request) {
   return {
     schema_version: 1,
     ...(report.preview === "full" ? { preview: "full" } : {}),
+    ...(hasQa ? { qa_scoring: { ...QA_SCORING } } : {}),
     kind: report.kind,
     status: "success",
     baseline: {

@@ -11,6 +11,12 @@ export const suiteDirectory = resolve(
   "..",
 );
 
+// Scoring changes do not change the frozen Gold or the retrieval requests.
+export const QA_SCORING = Object.freeze({
+  version: 2,
+  entity_match: "contains",
+});
+
 export async function loadSuite({
   embedding = process.env.RETRIEVAL_EMBEDDING ?? "local",
 } = {}) {
@@ -115,6 +121,7 @@ export async function loadSuite({
     qa_pairs: qaPairs.tasks,
     // Additional labels affect only QA rescoring, not legacy evidence identity.
     qa_gold: { id: qaPairs.id, sha256: objectHash(qaPairs) },
+    qa_scoring: { ...QA_SCORING },
     identity: {
       source: objectHash(lock),
       protocol: objectHash(protocol),

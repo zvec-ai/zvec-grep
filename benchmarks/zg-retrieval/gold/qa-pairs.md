@@ -29,6 +29,11 @@ checksums, review decisions, and reasons for relevance. Entity declarations and
 definition text come from the pinned source archive, not the tested parser.
 The target IDs identify annotations, not ZG index entities.
 
+Entity scoring checks whether retrieved `content` contains each Gold target's
+full range in the pinned source file. A result may cover several targets; each
+target counts once at its first native rank. Preview length does not affect
+matching. See the [matching rules](../../docs/benchmark-gold-authoring-and-matching.md).
+
 `provenance` records the hashes of the original review files. `source_licenses`
 preserves the source repositories' license files with commit-pinned links.
 Embedded source excerpts retain their original bytes and licenses. Gold and
