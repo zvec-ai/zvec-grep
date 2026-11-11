@@ -960,6 +960,7 @@ State:
 Advanced:
   ZVEC_GREP_METAL_KEEP_RESIDENCY       Set to 1 to keep llama.cpp Metal residency enabled (advanced)
   ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM  Legacy index-only llama.cpp fallback after the index concurrency variable
+  ZVEC_GREP_LLAMA_CONTEXT_SIZE         Positive llama.cpp context size and max input tokens in place of the catalog value
   NO_COLOR                             Disable automatic terminal colors; --color overrides it
 
 Agent integration paths:
