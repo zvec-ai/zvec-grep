@@ -16,12 +16,9 @@ import {
 } from "../metrics/repetitions.mjs";
 import { summarizeQaRetrieval } from "../metrics/entities.mjs";
 import { QA_ENTITY_METRICS, qaPercentCell } from "../reports/zg.mjs";
+import { summarizePilotEntity, verifyPilotGoldSources } from "./gold.mjs";
 import {
   locateFullEntity,
-  summarizePilotEntity,
-  verifyPilotGoldSources,
-} from "./gold.mjs";
-import {
   parseVisibleResponse,
   validateSearchRoute,
 } from "../engines/zg/parse.mjs";

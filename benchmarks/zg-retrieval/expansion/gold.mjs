@@ -246,45 +246,6 @@ export async function verifyPilotGoldSources(gold, group) {
   return files;
 }
 
-/**
- * Locate the full returned Entity in the verified source. Compact MCP headers
- * only expose line numbers. A unique alignment supplies the missing columns.
- */
-export function locateFullEntity(item, file) {
-  if (!file || item.range?.kind !== "text") return null;
-  const { start_line, end_line } = item.range;
-  if (end_line > file.lines.length) return null;
-  const visible = item.source_lines.filter(({ line }) => line <= end_line);
-  if (visible.length !== end_line - start_line + 1) return null;
-  for (const [i, row] of visible.entries()) {
-    if (row.line !== start_line + i) return null;
-    const text = file.lines[row.line - 1].text;
-    if (i > 0 && i < visible.length - 1 && row.text !== text) return null;
-  }
-  const first = file.lines[start_line - 1];
-  const last = file.lines[end_line - 1];
-  const head = visible[0].text;
-  const tail = visible.at(-1).text;
-  if (first === last) {
-    const start = first.text.indexOf(head);
-    if (!head || start < 0 || first.text.indexOf(head, start + 1) >= 0)
-      return null;
-    const startByte =
-      first.offset + Buffer.byteLength(first.text.slice(0, start));
-    return {
-      start_byte: startByte,
-      end_byte: startByte + Buffer.byteLength(head),
-    };
-  }
-  if (!first.text.endsWith(head) || !last.text.startsWith(tail)) return null;
-  return {
-    start_byte:
-      first.offset +
-      Buffer.byteLength(first.text.slice(0, first.text.length - head.length)),
-    end_byte: last.offset + Buffer.byteLength(tail),
-  };
-}
-
 export function summarizePilotEntity(calls, entry) {
   return summarizeDiagnosticRetrieval(
     calls,

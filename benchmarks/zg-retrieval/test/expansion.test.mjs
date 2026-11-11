@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { loadPilot } from "../expansion/datasets.mjs";
-import { locateFullEntity, summarizePilotEntity } from "../expansion/gold.mjs";
+import { locateFullEntity } from "../engines/zg/parse.mjs";
+import { summarizePilotEntity } from "../expansion/gold.mjs";
 import { PILOT_PREVIEW, PILOT_PROTOCOL } from "../expansion/config.mjs";
 import {
   searchArguments,

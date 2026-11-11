@@ -4,10 +4,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 import { sha256 } from "../core/io.mjs";
-import { parseVisibleResponse } from "../engines/zg/parse.mjs";
-import { loadPilot } from "../expansion/datasets.mjs";
 import {
   locateFullEntity,
+  parseVisibleResponse,
+} from "../engines/zg/parse.mjs";
+import { loadPilot } from "../expansion/datasets.mjs";
+import {
   summarizePilotEntity,
   validatePilotGold,
   verifyPilotGoldSources,
