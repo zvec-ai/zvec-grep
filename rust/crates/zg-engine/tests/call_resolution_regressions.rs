@@ -264,6 +264,35 @@ async fn initializer_position() {
 }
 
 #[tokio::test]
+async fn lexical_bindings_end_with_their_block_but_var_stays_in_the_function() {
+    for path in ["scope.js", "scope.ts"] {
+        check_case(Case { name: "lexical_binding_scope", files: vec![
+            SourceFile { path, source: "function target() {}\nfunction other() {}\nfunction caller() { { const target = 0; } target(); }\nfunction restored() { let target = other; { let target = 0; } target(); }\nfunction hoisted() { target(); { var target = 0; } target(); }\nfunction loop() { for (let target = 0; target < 1; target++) {} target(); }\n" },
+        ], queries: vec![
+            Query { operation: "callees", symbol: "caller", expected: json!([{"name":"caller","edges":[{"symbol":{"name":"target"}}]}]), ..Query::default() },
+            Query { operation: "callees", symbol: "restored", expected: json!([{"name":"restored","edges":[{"symbol":{"name":"other"}}]}]), ..Query::default() },
+            Query { operation: "callees", symbol: "hoisted", expected: json!([{"name":"hoisted","edges":[]}]), ..Query::default() },
+            Query { operation: "callees", symbol: "loop", expected: json!([{"name":"loop","edges":[{"symbol":{"name":"target"}}]}]), ..Query::default() },
+        ] }).await;
+    }
+}
+
+#[tokio::test]
+async fn receiver_rebinding_replaces_or_invalidates_old_properties() {
+    for path in ["rebind.js", "rebind.ts"] {
+        check_case(Case { name: "receiver_rebinding", files: vec![
+            SourceFile { path, source: "function original() {}\nfunction replacement() {}\nlet api = { run: original };\napi = { run: replacement };\nfunction invoke() { api.run(); }\nfunction removed() { let obj = { run: original }; obj = {}; obj.run(); }\nfunction local() { let obj = { run: original }; obj.run(); obj = { run: replacement }; obj.run(); }\nfunction overwritten() { let obj = { run: original }; obj = {}; obj.run = replacement; obj.run(); }\nfunction replacedMethod() { let obj = { run() { original(); } }; obj = { run() { replacement(); } }; obj.run(); }\n" },
+        ], queries: vec![
+            Query { operation: "callees", symbol: "invoke", expected: json!([{"name":"invoke","edges":[{"symbol":{"name":"replacement"}}]}]), ..Query::default() },
+            Query { operation: "callees", symbol: "replacedMethod", expected: json!([{"name":"replacedMethod","edges":[]}]), ..Query::default() },
+            Query { operation: "callees", symbol: "removed", expected: json!([{"name":"removed","edges":[]}]), ..Query::default() },
+            Query { operation: "callees", symbol: "local", expected: json!([{"name":"local","edges":[{"symbol":{"name":"original"}},{"symbol":{"name":"replacement"}}]}]), ..Query::default() },
+            Query { operation: "callees", symbol: "overwritten", expected: json!([{"name":"overwritten","edges":[{"symbol":{"name":"replacement"}}]}]), ..Query::default() },
+        ] }).await;
+    }
+}
+
+#[tokio::test]
 async fn nested_function_shadows_file_alias() {
     check_case(Case { name: "nested_function_shadows_file_alias", files: vec![
         SourceFile { path: "a.js", source: "function target() {}\nconst work = target;\nfunction outer() { function work() {} work(); }\n" },
