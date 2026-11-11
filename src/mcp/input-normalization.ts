@@ -1,8 +1,14 @@
-import type { CodeSymbolType, ZvecGrepContextOptions } from "../index.js";
+import type {
+  CodeSymbolType,
+  SemanticFeatures,
+  ZvecGrepContextOptions,
+} from "../index.js";
 import { parseModifiedTime, splitPathFilters } from "../cli/args.js";
 import { parseManagedRgCommand } from "../cli/managed-rg.js";
+import { DEFAULT_SEMANTIC_FEATURES } from "../engine/types.js";
 import type {
   StringListInput,
+  SemanticFeaturesInput,
   TimeInput,
   ZvecGrepCliSearchInput,
   ZvecGrepRgInput,
@@ -35,6 +41,7 @@ export type NormalizedSearchInput = {
   modifiedAfter?: number;
   modifiedBefore?: number;
   trace?: boolean;
+  semanticFeatures?: SemanticFeatures;
 };
 
 export function normalizeSearchInput(
@@ -99,6 +106,7 @@ function normalizeSearchFields(
     | "modifiedBefore"
     | "limit"
     | "trace"
+    | "semantic_features"
   > &
     Partial<Pick<ZvecGrepCliSearchInput, "routes">>,
 ) {
@@ -135,6 +143,10 @@ function normalizeSearchFields(
     fuse: input.fuse,
     limit: input.limit,
     trace: input.trace,
+    semanticFeatures: normalizeSemanticFeatures(
+      input.semantic_features,
+      input.trace,
+    ),
     preferSymbol: input.preferSymbol,
     symbolTypes: input.symbolTypes.length > 0 ? input.symbolTypes : undefined,
     globs: normalizePlainStringList(input.globs),
@@ -154,6 +166,24 @@ function normalizeSearchFields(
       "modifiedBefore",
     ),
   };
+}
+
+function normalizeSemanticFeatures(
+  value: SemanticFeaturesInput | undefined,
+  legacyTrace: boolean | undefined,
+): SemanticFeatures | undefined {
+  if (value !== undefined) {
+    return { ...value };
+  }
+
+  if (legacyTrace === true) {
+    return {
+      ...DEFAULT_SEMANTIC_FEATURES,
+      trace: "summary",
+    };
+  }
+
+  return undefined;
 }
 
 export function normalizeQueryList(value: StringListInput): string[] {

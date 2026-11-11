@@ -54,7 +54,14 @@ import {
   ConcurrentTiming,
   TimingCollector,
 } from "../../dist/engine/utils/timing.js";
-import { contextOptionsFromRgInput } from "../../dist/mcp/input-normalization.js";
+import {
+  contextOptionsFromRgInput,
+  normalizeSearchInput,
+} from "../../dist/mcp/input-normalization.js";
+import {
+  semanticFeaturesInputSchema,
+  zvecGrepSearchInputSchema,
+} from "../../dist/mcp/schemas.js";
 
 test("CLI argument parser handles command, provider, path, and rg options", () => {
   const parsed = parseArgs([
@@ -130,6 +137,65 @@ test("CLI argument parser handles command, provider, path, and rg options", () =
   assert.equal(rg.options.rgOptions?.beforeContext, 2);
   assert.equal(rg.options.rgOptions?.afterContext, 2);
   assert.deepEqual(rg.options.globs, ["*.ts"]);
+});
+
+test("semantic feature schema is strict and legacy trace remains compatible", () => {
+  const legacy = normalizeSearchInput(
+    zvecGrepSearchInputSchema.parse({
+      root: "/repo",
+      query: "legacy trace",
+      trace: true,
+    }),
+  );
+  assert.equal(legacy.semanticFeatures?.semantic_features_version, 1);
+  assert.equal(legacy.semanticFeatures?.trace, "summary");
+
+  const absent = normalizeSearchInput(
+    zvecGrepSearchInputSchema.parse({ root: "/repo", query: "plain" }),
+  );
+  assert.equal(absent.semanticFeatures, undefined);
+
+  assert.deepEqual(
+    semanticFeaturesInputSchema.parse({
+      semantic_features_version: 1,
+      representation: "symbol",
+      token_sketch: "off",
+      graph_rerank: "shadow",
+      graph_edge_confidence: "strong",
+      graph_expansion: "off",
+      trace: "full",
+    }),
+    {
+      semantic_features_version: 1,
+      representation: "symbol",
+      token_sketch: "off",
+      graph_rerank: "shadow",
+      graph_edge_confidence: "strong",
+      graph_expansion: "off",
+      trace: "full",
+    },
+  );
+  assert.throws(
+    () =>
+      semanticFeaturesInputSchema.parse({
+        semantic_features_version: 2,
+      }),
+    /Invalid input/,
+  );
+  assert.throws(
+    () =>
+      semanticFeaturesInputSchema.parse({
+        graph_rerank: "invalid",
+      }),
+    /Invalid option/,
+  );
+  assert.throws(
+    () =>
+      semanticFeaturesInputSchema.parse({
+        unexpected: true,
+      }),
+    /Unrecognized key/,
+  );
 });
 
 test("CLI index concurrency is accepted only for indexing", () => {

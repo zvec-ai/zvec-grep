@@ -283,6 +283,92 @@ test("search plans short-circuit empty path filters and force-track no-file reas
   );
 });
 
+test("semantic full traces are bounded, provenance-bearing, deterministic, and body-free", async () => {
+  const fixture = createFixture();
+  const semanticFeatures = {
+    semantic_features_version: 1,
+    representation: "all",
+    token_sketch: "trace",
+    graph_rerank: "shadow",
+    graph_edge_confidence: "strong",
+    graph_expansion: "off",
+    trace: "full",
+  };
+  const plan = {
+    routes: [{ mode: "fts", query: "AlphaSymbol" }],
+    limit: 1,
+    semanticFeatures,
+  };
+  const first = await searchWorkspaceIndex(plan, fixture.context);
+  const second = await searchWorkspaceIndex(plan, fixture.context);
+
+  assert.deepEqual(first.plan.semanticFeatures, semanticFeatures);
+  assert.deepEqual(first.trace, second.trace);
+  assert.equal(first.trace.schema_version, 1);
+  assert.match(first.trace.generation_id, /^sha256:/);
+  assert.match(first.trace.source_digest, /^sha256:/);
+  assert.match(first.trace.source_selection_digest, /^sha256:/);
+  assert.match(first.trace.artifacts.index_sha256, /^sha256:/);
+  assert.match(first.trace.artifacts.embedding_schema, /^sha256:/);
+  assert.equal(first.trace.artifacts.graph_generation_id, null);
+  assert.equal(first.trace.artifacts.graph_artifact_sha256, null);
+  assert.equal(first.trace.artifacts.graph_publication_sha256, null);
+  assert.equal(first.trace.source_files, fixture.files.length);
+  assert.equal(first.trace.source_bytes, 30);
+  assert.equal(first.trace.candidate_count, 3);
+  assert.equal(first.trace.candidates.length, 3);
+  assert.equal(first.trace.candidates[0].entity_id, "entity-a");
+  assert.deepEqual(first.trace.graph, {
+    binding: "unbound",
+    generation_id: null,
+    artifact_sha256: null,
+    publication_sha256: null,
+    seed_ids: [],
+    eligible_edges: 0,
+    excluded_edges: { unresolved: 0, ambiguous: 0, stale: 0 },
+  });
+  assert.deepEqual(first.trace.expansion, {
+    enabled: false,
+    related_count: 0,
+    items: [],
+  });
+  assert.equal(first.trace.candidates[0].graph_evidence.length, 0);
+  assert.equal(JSON.stringify(first.trace).includes("export function"), false);
+});
+
+test("semantic feature validation rejects unsupported versions and enum values", async () => {
+  const fixture = createFixture();
+  const base = {
+    semantic_features_version: 1,
+    representation: "all",
+    token_sketch: "off",
+    graph_rerank: "off",
+    graph_edge_confidence: "strong",
+    graph_expansion: "off",
+    trace: "off",
+  };
+  await assert.rejects(
+    searchWorkspaceIndex(
+      {
+        routes: [{ mode: "fts", query: "AlphaSymbol" }],
+        semanticFeatures: { ...base, semantic_features_version: 2 },
+      },
+      fixture.context,
+    ),
+    /Unsupported semantic features version/,
+  );
+  await assert.rejects(
+    searchWorkspaceIndex(
+      {
+        routes: [{ mode: "fts", query: "AlphaSymbol" }],
+        semanticFeatures: { ...base, graph_rerank: "invalid" },
+      },
+      fixture.context,
+    ),
+    /Unsupported semantic feature value/,
+  );
+});
+
 test("indexed rg-style globs match nested basenames and honor later overrides", async () => {
   const fixture = createFixture();
   const result = await searchWorkspaceIndex(
