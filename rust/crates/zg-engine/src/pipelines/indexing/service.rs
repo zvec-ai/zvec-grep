@@ -61,6 +61,10 @@ pub(crate) struct WorkspaceIndexService {
     scanner: NativeScanner,
     #[cfg(test)]
     fail_index_completion: bool,
+    #[cfg(test)]
+    fragment_count_reads: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    fail_fragment_count: bool,
 }
 
 impl WorkspaceIndexService {
@@ -70,6 +74,10 @@ impl WorkspaceIndexService {
             scanner: NativeScanner::default(),
             #[cfg(test)]
             fail_index_completion: false,
+            #[cfg(test)]
+            fragment_count_reads: Arc::default(),
+            #[cfg(test)]
+            fail_fragment_count: false,
         }
     }
 
@@ -416,7 +424,24 @@ impl WorkspaceIndexService {
                 storage_path: workspace.layout().index_dir().to_path_buf(),
             })?;
             let status =
-                get_workspace_index_status(&workspace, &storage, &self.scanner, None, true).await;
+                get_workspace_index_status(&workspace, &storage, &self.scanner, None, true)
+                    .await
+                    .and_then(|mut status| {
+                        if options.include_counts {
+                            #[cfg(test)]
+                            {
+                                self.fragment_count_reads
+                                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                                if self.fail_fragment_count {
+                                    return Err(EngineError::storage_failure(
+                                        "injected fragment count failure",
+                                    ));
+                                }
+                            }
+                            status.fragments_indexed = Some(storage.count_fragments()?);
+                        }
+                        Ok(status)
+                    });
             let close = storage.close();
             let status = status?;
             close?;
@@ -1326,6 +1351,7 @@ mod tests {
             .info(InfoOptions {
                 root: Some(moved.clone()),
                 include_status: true,
+                include_counts: false,
             })
             .await
             .expect("moved workspace info");
@@ -1373,6 +1399,7 @@ mod tests {
                 .drop_index(&InfoOptions {
                     root: Some(directory.path().to_path_buf()),
                     include_status: false,
+                    include_counts: false,
                 })
                 .await
                 .expect("missing index should be an idempotent no-op")
@@ -1398,6 +1425,7 @@ mod tests {
                 .drop_index(&InfoOptions {
                     root: Some(directory.path().to_path_buf()),
                     include_status: false,
+                    include_counts: false,
                 })
                 .await
                 .expect_err("reject storage alias");
@@ -1421,6 +1449,7 @@ mod tests {
         let options = InfoOptions {
             root: Some(directory.path().to_path_buf()),
             include_status: false,
+            include_counts: false,
         };
         assert!(!home.join("manifest.json").exists());
         assert!(!layout.has_build_record().expect("build record"));
@@ -1822,7 +1851,8 @@ mod tests {
             service
                 .drop_index(&InfoOptions {
                     root: Some(directory.path().to_path_buf()),
-                    include_status: false
+                    include_status: false,
+                    include_counts: false,
                 })
                 .await
                 .expect("drop incomplete build")
@@ -2021,6 +2051,7 @@ mod tests {
                 .info(InfoOptions {
                     root: Some(root.clone()),
                     include_status: false,
+                    include_counts: false,
                 })
                 .await
                 .expect("workspace info");
@@ -2060,7 +2091,8 @@ mod tests {
             service
                 .info(InfoOptions {
                     root: Some(child.clone()),
-                    include_status: false
+                    include_status: false,
+                    include_counts: false,
                 })
                 .await
                 .expect("ancestor info")
@@ -2112,7 +2144,8 @@ mod tests {
             service
                 .info(InfoOptions {
                     root: Some(child.clone()),
-                    include_status: true
+                    include_status: true,
+                    include_counts: false,
                 })
                 .await
                 .expect("child info")
@@ -2166,6 +2199,7 @@ mod tests {
         let options = InfoOptions {
             root: Some(deleted.clone()),
             include_status: false,
+            include_counts: false,
         };
         for _ in 0..2 {
             let error = service
@@ -2202,6 +2236,7 @@ mod tests {
                 .drop_index(&InfoOptions {
                     root: Some(moved.clone()),
                     include_status: false,
+                    include_counts: false,
                 })
                 .await
                 .expect("drop moved workspace")
@@ -2603,6 +2638,7 @@ mod tests {
                 .drop_index(&InfoOptions {
                     root: Some(directory.path().to_path_buf()),
                     include_status: false,
+                    include_counts: false,
                 })
                 .await
                 .expect("no index to drop")
@@ -2746,6 +2782,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_explicit_info_counts_fragments_once_and_isolates_count_failures() {
+        use std::sync::atomic::Ordering;
+
+        let directory = tempdir().expect("workspace");
+        let root = directory.path();
+        let mut service = WorkspaceIndexService::new();
+        let models = ModelRuntimeManager::new();
+        service
+            .index(&models, empty_index_options(root))
+            .await
+            .expect("empty index");
+        assert_eq!(service.fragment_count_reads.load(Ordering::Acquire), 0);
+        let options = InfoOptions {
+            root: Some(root.to_path_buf()),
+            include_status: true,
+            include_counts: false,
+        };
+        for expected in 1..=2 {
+            let plain = service
+                .info(options.clone())
+                .await
+                .expect("ordinary status");
+            assert_eq!(plain.status.expect("status").fragments_indexed, None);
+            assert_eq!(
+                service.fragment_count_reads.load(Ordering::Acquire),
+                expected - 1
+            );
+            let diagnostic = service
+                .info(InfoOptions {
+                    include_counts: true,
+                    ..options.clone()
+                })
+                .await
+                .expect("explicit counts");
+            assert_eq!(
+                diagnostic.status.expect("status").fragments_indexed,
+                Some(0)
+            );
+            assert_eq!(
+                service.fragment_count_reads.load(Ordering::Acquire),
+                expected
+            );
+        }
+
+        service.fail_fragment_count = true;
+        service
+            .info(options.clone())
+            .await
+            .expect("ordinary status skips failed count");
+        let layout = WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout");
+        let wait = super::LockWait::new(None, None).expect("lock wait");
+        assert!(
+            !service
+                .workspace_needs_refresh(root, &layout, &wait, None)
+                .await
+                .expect("freshness skips failed count")
+        );
+        assert_eq!(service.fragment_count_reads.load(Ordering::Acquire), 2);
+        let error = service
+            .info(InfoOptions {
+                include_counts: true,
+                ..options.clone()
+            })
+            .await
+            .expect_err("explicit count failure");
+        assert!(error.message().contains("injected fragment count failure"));
+        assert_eq!(service.fragment_count_reads.load(Ordering::Acquire), 3);
+        let plain = service
+            .info(options)
+            .await
+            .expect("ordinary status after failure");
+        assert_eq!(plain.status.expect("status").fragments_indexed, None);
+        assert_eq!(service.fragment_count_reads.load(Ordering::Acquire), 3);
+        models.close();
+    }
+
+    #[tokio::test]
     async fn composes_workspace_lifecycle_around_the_indexing_pipeline() {
         let directory = tempdir().expect("temporary directory");
         let sources = directory.path().join("sources");
@@ -2766,6 +2879,7 @@ mod tests {
         let info_options = InfoOptions {
             root: Some(directory.path().to_path_buf()),
             include_status: true,
+            include_counts: false,
         };
         let info = service
             .info(info_options.clone())

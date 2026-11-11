@@ -971,6 +971,7 @@ async fn execute_direct_context(
             .info(zg_engine::api::info::InfoOptions {
                 root: Some(result.root.clone()),
                 include_status: true,
+                include_counts: false,
             })
             .await?;
         result.indexing = info
@@ -1041,6 +1042,7 @@ async fn execute_index(
                 zg_engine::api::info::InfoOptions {
                     root: Some(root.clone()),
                     include_status: false,
+                    include_counts: false,
                 },
             )
             .await?;

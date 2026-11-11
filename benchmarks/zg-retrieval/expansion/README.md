@@ -57,6 +57,9 @@ six for BEIR, one for DuRetrieval and twenty for Quarry. Shared content across
 separate indexes is counted in each index; modes and repeated calls do not
 multiply counts. The JSON retains each index's counts. Missing counts remain
 N/A, including Fragment counts from older candidates that did not expose them.
+Counts come from explicit `zg --status --debug` calls before and after each
+index's retrieval batch, outside search timing. Each call reads the counts once;
+ordinary status, MCP status, and search freshness checks do not scan Fragments.
 
 Full preview displays each retrieved Entity's complete content; short preview
 displays excerpts. Preserve earlier default-short artifacts and use their

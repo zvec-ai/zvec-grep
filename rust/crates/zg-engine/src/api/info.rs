@@ -13,6 +13,9 @@ pub mod options {
         /// Workspace to inspect or mutate. `None` uses the working directory.
         pub root: Option<PathBuf>,
         pub include_status: bool,
+        /// Explicitly count stored fragments for diagnostic output.
+        #[serde(default)]
+        pub include_counts: bool,
     }
 }
 
@@ -195,8 +198,8 @@ pub mod result {
         pub files_stored: usize,
         pub files_indexed: usize,
         pub entities_indexed: u64,
-        /// Persisted searchable fragments, counted only for a detailed inspection.
-        /// Older replies and lightweight refresh checks leave this unknown.
+        /// Persisted searchable fragments, counted only when explicitly requested.
+        /// Ordinary status and freshness checks leave this unknown.
         #[serde(default)]
         pub fragments_indexed: Option<u64>,
         /// Total source snapshot bytes for successfully indexed files, excluding index storage.
@@ -275,7 +278,28 @@ impl From<&crate::domain::EmbeddingModelInfo> for result::WorkspaceIndexEmbeddin
 
 #[cfg(test)]
 mod tests {
-    use super::{InfoResult, result::*};
+    use super::{InfoOptions, InfoResult, result::*};
+
+    #[test]
+    fn stored_counts_require_an_explicit_request() {
+        let legacy: InfoOptions = serde_json::from_value(serde_json::json!({
+            "root": null,
+            "include_status": true
+        }))
+        .expect("legacy info options");
+        assert!(!legacy.include_counts);
+        assert!(!InfoOptions::default().include_counts);
+        let explicit = InfoOptions {
+            include_counts: true,
+            ..legacy
+        };
+        let encoded = serde_json::to_value(&explicit).expect("explicit counts");
+        assert_eq!(encoded["include_counts"], true);
+        assert_eq!(
+            serde_json::from_value::<InfoOptions>(encoded).expect("decoded counts"),
+            explicit
+        );
+    }
 
     fn indexed_info() -> InfoResult {
         InfoResult {

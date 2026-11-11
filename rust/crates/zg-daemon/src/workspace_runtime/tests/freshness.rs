@@ -88,6 +88,41 @@ fn lexical_search(root: &Path, policy: RefreshPolicy) -> ContextOptions {
 }
 
 #[tokio::test]
+async fn explicit_counts_are_forwarded_without_entering_runtime_status_cache() {
+    let workspace = tempdir().expect("workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let engine = empty_search_engine(&root).await;
+    let (manager, _sender) = fixture(Arc::new(RecordingExecutor::default()));
+    for include_counts in [false, true, false] {
+        let info = manager
+            .info(
+                &engine,
+                InfoOptions {
+                    root: Some(root.clone()),
+                    include_status: true,
+                    include_counts,
+                },
+            )
+            .await
+            .expect("inspection");
+        assert_eq!(
+            info.status.expect("status").fragments_indexed,
+            include_counts.then_some(0)
+        );
+        let snapshot = IndexOperationProvider::runtime_snapshot(&manager, &root)
+            .expect("runtime")
+            .index_status
+            .expect("inspection");
+        assert_eq!(
+            snapshot.stats.expect("cached status").fragments_indexed,
+            None
+        );
+    }
+    manager.shutdown_all().await.expect("shutdown");
+    engine.close();
+}
+
+#[tokio::test]
 async fn watcher_does_not_recreate_a_deleted_workspace_index() {
     let workspace = tempdir().expect("workspace");
     let root = workspace.path().canonicalize().expect("root");
@@ -560,6 +595,7 @@ async fn inspected_drift_is_evidence_but_pending_or_failed_counts_alone_are_not(
         .info(InfoOptions {
             root: Some(root.clone()),
             include_status: true,
+            include_counts: false,
         })
         .await
         .expect("status");

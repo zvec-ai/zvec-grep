@@ -13,7 +13,6 @@ pub(crate) trait IndexStorage: Send + Sync {
     fn graph_enabled(&self) -> bool;
     fn is_read_only(&self) -> bool;
     fn list_files(&self) -> EngineResult<Vec<FileRecord>>;
-    fn count_fragments(&self) -> EngineResult<u64>;
     fn resolve_file_ids(&self, paths: &[PathBuf]) -> EngineResult<Vec<FileId>>;
     fn replace_file(
         &self,
@@ -39,10 +38,6 @@ impl IndexStorage for IndexStore {
 
     fn list_files(&self) -> EngineResult<Vec<FileRecord>> {
         self.list_files()
-    }
-
-    fn count_fragments(&self) -> EngineResult<u64> {
-        self.count_fragments()
     }
 
     fn resolve_file_ids(&self, paths: &[PathBuf]) -> EngineResult<Vec<FileId>> {

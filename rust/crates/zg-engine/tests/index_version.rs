@@ -75,6 +75,7 @@ async fn assert_incompatible_operations(
             .info(InfoOptions {
                 root: Some(root.to_path_buf()),
                 include_status,
+                include_counts: false,
             })
             .await?;
         assert_eq!(info.index_status(), IndexStatus::RebuildRequired);

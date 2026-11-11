@@ -66,7 +66,10 @@ candidate counts are shown separately when different. Missing counts are N/A,
 never zero or a partial sum. Older candidates do not expose Fragment totals.
 Snapshot schema 3 records `entities` and `fragments` separately; schema 2's
 `fragments` field was an Entity-count alias and must not be used as a Fragment
-count. Counts are checked before and after retrieval and do not affect scoring.
+count. The benchmark explicitly runs `zg --status --debug` before and after
+each index's retrieval batch. Each invocation reads the counts once, outside
+search timing. Ordinary status, MCP status, and search freshness checks do not
+scan Fragments. Counts do not affect scoring.
 
 Rust candidates are built through the [shared package Action](../../.github/actions/rust-candidate-package/action.yml); its [manifest utility](../shared/rust-package-cache.mjs) binds each tarball to the exact source commit and package bytes. SWE-QA uses the same packaging path while retaining its own evaluation protocol.
 

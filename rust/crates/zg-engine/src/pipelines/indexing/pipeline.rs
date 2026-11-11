@@ -270,11 +270,7 @@ pub(crate) async fn get_workspace_index_status(
             .iter()
             .map(|file| file.index_status().entity_count())
             .sum(),
-        fragments_indexed: if detailed {
-            Some(storage.count_fragments()?)
-        } else {
-            None
-        },
+        fragments_indexed: None,
         indexed_size_bytes: indexed_files
             .iter()
             .map(|file| file.snapshot().size_bytes)
@@ -2537,7 +2533,6 @@ mod tests {
         resolved_paths: Mutex<Vec<Vec<PathBuf>>>,
         finalized: AtomicUsize,
         failed_markers: AtomicUsize,
-        fragment_count_reads: AtomicUsize,
         fail_replacements_once: Mutex<HashSet<FileId>>,
         fail_snapshot_updates: AtomicBool,
         snapshot_update_failed: Notify,
@@ -2802,17 +2797,6 @@ mod tests {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone())
-        }
-
-        fn count_fragments(&self) -> EngineResult<u64> {
-            self.fragment_count_reads.fetch_add(1, Ordering::AcqRel);
-            Ok(self
-                .entries
-                .lock()
-                .expect("stored entries")
-                .values()
-                .map(|entries| u64::try_from(entries.len()).expect("fixture fragment count"))
-                .sum())
         }
 
         fn replace_file(
@@ -3812,7 +3796,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detailed_status_counts_stored_fragments_separately_from_entities() {
+    async fn ordinary_status_does_not_count_stored_fragments() {
         let directory = tempdir().expect("workspace");
         let workspace = workspace(directory.path());
         let scanner = NativeScanner::default();
@@ -3822,7 +3806,7 @@ mod tests {
             .expect("empty status");
         assert_eq!(empty.files_scanned, 0);
         assert_eq!(empty.entities_indexed, 0);
-        assert_eq!(empty.fragments_indexed, Some(0));
+        assert_eq!(empty.fragments_indexed, None);
 
         std::fs::write(
             directory.path().join("harvest.rs"),
@@ -3854,10 +3838,7 @@ mod tests {
             .expect("indexed status");
         assert_eq!(status.files_unchanged, 1);
         assert_eq!(status.entities_indexed, 1);
-        assert_eq!(
-            status.fragments_indexed,
-            Some(u64::try_from(stored).expect("fragment count"))
-        );
+        assert_eq!(status.fragments_indexed, None);
     }
 
     #[tokio::test]
@@ -3896,14 +3877,12 @@ mod tests {
             .expect("lightweight status");
         assert_eq!(light.files_modified, 1);
         assert_eq!(light.fragments_indexed, None);
-        assert_eq!(storage.fragment_count_reads.load(Ordering::Acquire), 0);
         assert_eq!(scanner.reads.load(Ordering::Acquire), reads);
         let detailed = get_workspace_index_status(&workspace, &storage, &scanner, None, true)
             .await
             .expect("detailed status");
         assert_eq!(detailed.files_modified, 0);
-        assert_eq!(detailed.fragments_indexed, Some(1));
-        assert_eq!(storage.fragment_count_reads.load(Ordering::Acquire), 1);
+        assert_eq!(detailed.fragments_indexed, None);
         assert_eq!(scanner.reads.load(Ordering::Acquire), reads + 1);
 
         let result = index_workspace(&context).await.expect("refresh snapshot");
@@ -4006,7 +3985,7 @@ mod tests {
             .await
             .expect("status");
         assert_eq!(status.files_added, 1);
-        assert_eq!(status.fragments_indexed, Some(0));
+        assert_eq!(status.fragments_indexed, None);
         assert!(storage.identities.lock().expect("catalog").is_empty());
         let model = ConcurrentModel::new();
         let context = IndexingContext {
@@ -4171,7 +4150,7 @@ mod tests {
         assert_eq!(status.files_failed, 1);
         assert_eq!(status.indexed_size_bytes, 0);
         assert_eq!(status.entities_indexed, 0);
-        assert_eq!(status.fragments_indexed, Some(0));
+        assert_eq!(status.fragments_indexed, None);
     }
 
     #[tokio::test]
