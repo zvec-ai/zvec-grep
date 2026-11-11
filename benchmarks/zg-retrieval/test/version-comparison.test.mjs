@@ -84,6 +84,14 @@ test("all suites and modes retain exact deltas and render compact baseline-to-ca
     ["SWE-QA20", "BEIR", "DuRetrieval", "Quarry"],
   );
   assert.equal((markdown.match(/^\| Mode \| Level \|/gm) ?? []).length, 4);
+  assert.equal(
+    (
+      markdown.match(
+        /Indexed corpus: \*\*N\/A Entities · N\/A Fragments\*\*\./g,
+      ) ?? []
+    ).length,
+    4,
+  );
   for (const suite of ["SWE-QA20", "BEIR", "DuRetrieval", "Quarry"])
     for (const mode of ["fts", "vector", "hybrid"]) {
       const file = tableRow(markdown, suite, mode, "File");
@@ -111,6 +119,62 @@ test("all suites and modes retain exact deltas and render compact baseline-to-ca
       QUALITY_METRICS.every((metric) => row.metrics[metric].delta === 0),
     ),
   );
+});
+
+test("indexed corpus counts compare once per suite and preserve unknown totals", () => {
+  const before = result(baseSha),
+    after = result(headSha);
+  const counts = {
+    entities: 1007,
+    fragments: 2011,
+    corpora: [
+      { id: "first", entities: 1000, fragments: 2000 },
+      { id: "second", entities: 7, fragments: 11 },
+    ],
+  };
+  before.sweqa.index_counts = structuredClone(counts);
+  after.sweqa.index_counts = structuredClone(counts);
+  before.pilots.beir.report.index_counts = structuredClone(counts);
+  after.pilots.beir.report.index_counts = {
+    entities: 1008,
+    fragments: 2011,
+    corpora: [
+      { id: "first", entities: 1001, fragments: 2000 },
+      { id: "second", entities: 7, fragments: 11 },
+    ],
+  };
+  after.pilots.duretrieval.report.index_counts = {
+    entities: null,
+    fragments: 11,
+    corpora: [
+      { id: "first", entities: 7, fragments: 10 },
+      { id: "second", entities: null, fragments: 1 },
+    ],
+  };
+  const comparison = compareCombinedResults(before, after, metadata);
+  assert.deepEqual(comparison.index_counts.sweqa, {
+    baseline: counts,
+    candidate: counts,
+  });
+  assert.deepEqual(comparison.index_counts.quarry, {
+    baseline: null,
+    candidate: null,
+  });
+  assert.equal(comparison.index_counts.duretrieval.candidate.entities, null);
+  const markdown = markdownVersionComparison(comparison);
+  assert.deepEqual(
+    markdown.split("\n").filter((line) => line.startsWith("Indexed corpus:")),
+    [
+      "Indexed corpus: **1,007 Entities · 2,011 Fragments**.",
+      "Indexed corpus: **1,007 → 1,008 Entities · 2,011 Fragments**.",
+      "Indexed corpus: **N/A Entities · N/A → 11 Fragments**.",
+      "Indexed corpus: **N/A Entities · N/A Fragments**.",
+    ],
+  );
+  before.sweqa.index_counts.corpora[0].entities = 0;
+  assert.deepEqual(comparison.index_counts.sweqa.baseline, counts);
+  before.sweqa.index_counts = { ...counts, fragments: 2012 };
+  assert.throws(() => compareCombinedResults(before, after, metadata));
 });
 
 test("incomplete, mixed-harness, wrong-commit and mixed-model results are rejected", () => {

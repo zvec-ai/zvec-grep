@@ -106,6 +106,18 @@ function jsonl(content) {
     .map((line) => JSON.parse(line));
 }
 
+// Match the independently indexed groups produced by the preparation adapters.
+export function pilotCorpusIds(pilot) {
+  if (pilot.name === "beir")
+    return pilot.lock.datasets.flatMap((dataset) =>
+      dataset.id === "arguana"
+        ? dataset.tasks.map((_, index) => `arguana-${index + 1}`)
+        : [dataset.id],
+    );
+  if (pilot.name === "duretrieval") return ["duretrieval"];
+  return pilot.lock.tasks.map((_, index) => `task-${index + 1}`);
+}
+
 export async function prepareBeirDataset(dataset, directory) {
   const source = join(directory, "source", "beir");
   for (const part of ["corpus", "queries"]) {

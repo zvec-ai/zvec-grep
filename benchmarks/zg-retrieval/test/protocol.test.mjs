@@ -590,7 +590,10 @@ test("successful raw calls with missing or invalid latency invalidate the standa
     call.raw_sha256 = await fileHash(join(fixture.shard, call.raw_path));
   }
   await fixture.save();
-  assert.equal((await fixture.score()).integrity_passed, true);
+  const verified = await fixture.score();
+  assert.equal(verified.integrity_passed, true);
+  assert.equal(verified.repositories[0].index_counts.entities, 1);
+  assert.equal(verified.repositories[0].index_counts.fragments, null);
   const diagnosticPath = join(fixture.shard, "stages/before/status.stderr.txt");
   const diagnostics = await readFile(diagnosticPath, "utf8");
   await writeFile(diagnosticPath, "tampered diagnostics\n");

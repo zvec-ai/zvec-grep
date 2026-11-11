@@ -57,6 +57,17 @@ counts and readiness independently of the compact human layout. Historical
 candidates without that snapshot retain the legacy status parser; missing audit
 fields are never inferred from a coverage bar. Raw stdout and stderr are retained.
 
+Each suite also reports indexed Entity and Fragment totals, with a per-index
+breakdown in `index_counts.corpora`. Count each independently built index once,
+without multiplying by queries, modes or repetitions. BEIR's three ArguAna
+indexes exclude different query documents; Quarry indexes each preimage
+separately, so these totals include content shared across indexes. Baseline and
+candidate counts are shown separately when different. Missing counts are N/A,
+never zero or a partial sum. Older candidates do not expose Fragment totals.
+Snapshot schema 3 records `entities` and `fragments` separately; schema 2's
+`fragments` field was an Entity-count alias and must not be used as a Fragment
+count. Counts are checked before and after retrieval and do not affect scoring.
+
 Rust candidates are built through the [shared package Action](../../.github/actions/rust-candidate-package/action.yml); its [manifest utility](../shared/rust-package-cache.mjs) binds each tarball to the exact source commit and package bytes. SWE-QA uses the same packaging path while retaining its own evaluation protocol.
 
 ### QA pairs and File / Entity diagnostics

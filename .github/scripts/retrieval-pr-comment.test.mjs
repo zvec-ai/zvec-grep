@@ -6,6 +6,8 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { publish, validateComparison } from "./retrieval-pr-comment.mjs";
 import { QA_SCORING } from "../../benchmarks/zg-retrieval/core/suite.mjs";
+import { summarizeIndexCounts } from "../../benchmarks/zg-retrieval/core/index-counts.mjs";
+import { pilotCorpusIds } from "../../benchmarks/zg-retrieval/expansion/datasets.mjs";
 import {
   PILOT_FILE_RECALL_METRICS,
   PILOT_QA_SCORING,
@@ -36,6 +38,34 @@ const models = {
   duretrieval: "local/potion-multilingual-128m",
   quarry: "local/potion-code-16m-v2",
 };
+const readTrustedJson = async (path) =>
+  JSON.parse(await readFile(new URL(path, import.meta.url), "utf8"));
+const corpusIds = {
+  sweqa: (
+    await readTrustedJson("../../benchmarks/zg-retrieval/data/source.lock.json")
+  ).repositories.map(({ repository, commit }) => `${repository}@${commit}`),
+  ...Object.fromEntries(
+    await Promise.all(
+      Object.entries(PILOT_SUITES).map(async ([name, config]) => [
+        name,
+        pilotCorpusIds({
+          name,
+          lock: await readTrustedJson(
+            `../../benchmarks/zg-retrieval/expansion/data/${config.lockFile}`,
+          ),
+        }),
+      ]),
+    ),
+  ),
+};
+const countsFor = (suite, entities = 1000, fragments = 2000) =>
+  summarizeIndexCounts(
+    corpusIds[suite].map((id, index) => ({
+      id,
+      entities: index === 0 ? entities : 0,
+      fragments: index === 0 ? fragments : 0,
+    })),
+  );
 const report = {
   schema_version: 1,
   kind: "retrieval-version-comparison",
@@ -213,6 +243,126 @@ test("the publisher labels validated full preview without relabeling historical 
       () => validateComparison({ ...report, preview }, request),
       /Unsupported comparison preview/,
     );
+});
+
+test("the publisher validates corpus totals and renders each suite once", async (t) => {
+  const x = await fixture(t);
+  const counts = countsFor("beir");
+  const payload = {
+    ...structuredClone(report),
+    index_counts: Object.fromEntries(
+      Object.keys(models).map((suite) => [
+        suite,
+        {
+          baseline: countsFor(suite),
+          candidate: countsFor(suite),
+        },
+      ]),
+    ),
+  };
+  payload.index_counts.sweqa.candidate = countsFor("sweqa", 1001, null);
+  payload.index_counts.quarry = { baseline: null, candidate: null };
+  payload.index_counts.beir.baseline.markdown = "@everyone forged counts";
+  payload.index_counts.beir.baseline.corpora[0].url = "https://evil.invalid";
+  const validated = validateComparison(payload, request);
+  assert.deepEqual(validated.index_counts.beir.baseline, counts);
+  assert.notEqual(
+    validated.index_counts.beir.baseline,
+    payload.index_counts.beir.baseline,
+  );
+  assert.notEqual(
+    validated.index_counts.beir.baseline.corpora[0],
+    payload.index_counts.beir.baseline.corpora[0],
+  );
+  assert.equal(validateComparison(report, request).index_counts, undefined);
+  await x.write("comparison/summary.json", payload);
+  await publish(x);
+  const body = x.messages()[0][1].body;
+  assert.equal((body.match(/^Indexed corpus:/gm) ?? []).length, 4);
+  assert.match(body, /1,000 → 1,001 Entities · 2,000 → N\/A Fragments/);
+  assert.match(body, /N\/A Entities · N\/A Fragments/);
+  assert.doesNotMatch(body, /everyone|forged|evil/);
+
+  for (const change of [
+    (counts) => {
+      counts.entities = -1;
+    },
+    (counts) => {
+      counts.fragments = "2000";
+    },
+    (counts) => {
+      counts.entities = Number.MAX_SAFE_INTEGER + 1;
+    },
+    (counts) => {
+      counts.entities = 1001;
+    },
+    (counts) => {
+      counts.corpora[0].fragments = null;
+    },
+    (counts) => {
+      counts.corpora.push({ ...counts.corpora[0] });
+    },
+    (counts) => {
+      counts.corpora[0].id = "x".repeat(1025);
+    },
+  ]) {
+    const invalid = structuredClone(payload);
+    change(invalid.index_counts.beir.baseline);
+    assert.throws(() => validateComparison(invalid, request));
+  }
+  for (const index_counts of [null, [], { sweqa: payload.index_counts.sweqa }])
+    assert.throws(() =>
+      validateComparison({ ...payload, index_counts }, request),
+    );
+});
+
+test("the publisher requires every frozen corpus ID while retaining unknown counts", () => {
+  const payload = {
+    ...structuredClone(report),
+    index_counts: Object.fromEntries(
+      Object.keys(models).map((suite) => [
+        suite,
+        { baseline: countsFor(suite), candidate: countsFor(suite) },
+      ]),
+    ),
+  };
+  assert.deepEqual(
+    Object.values(corpusIds).map((ids) => ids.length),
+    [11, 6, 1, 20],
+  );
+  for (const suite of Object.keys(models)) {
+    for (const side of ["baseline", "candidate"]) {
+      for (const mutate of [
+        (corpora) => corpora.slice(1),
+        (corpora) => [
+          { ...corpora[0], id: `${corpora[0].id}-wrong` },
+          ...corpora.slice(1),
+        ],
+        (corpora) => [
+          ...corpora,
+          { id: "unexpected-corpus", entities: 1, fragments: 2 },
+        ],
+      ]) {
+        const invalid = structuredClone(payload);
+        invalid.index_counts[suite][side] = summarizeIndexCounts(
+          mutate(invalid.index_counts[suite][side].corpora),
+        );
+        assert.throws(
+          () => validateComparison(invalid, request),
+          /indexed corpus coverage differs/,
+        );
+      }
+      const unknown = structuredClone(payload);
+      unknown.index_counts[suite][side] = countsFor(suite, null, null);
+      unknown.index_counts[suite][side].corpora.reverse();
+      const checked = validateComparison(unknown, request).index_counts[suite][
+        side
+      ];
+      assert.equal(checked.entities, null);
+      assert.equal(checked.fragments, null);
+      assert.equal(checked.corpora.length, corpusIds[suite].length);
+    }
+  }
 });
 
 test("later results and failed-job reruns update one bot comment", async (t) => {

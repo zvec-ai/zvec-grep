@@ -8,6 +8,11 @@ import { summarizeNdcg } from "../metrics/summary.mjs";
 import { summarizeQaRetrieval } from "../metrics/entities.mjs";
 import { validateZgReport, ZG_MODES } from "./validation.mjs";
 import { qaRetrievalMarkdown } from "./zg.mjs";
+import {
+  summarizeIndexCounts,
+  validateIndexCounts,
+  indexCountsMarkdown,
+} from "../core/index-counts.mjs";
 
 export const QUALITY_METRICS = Object.freeze([
   "file_hit_at_1",
@@ -127,6 +132,7 @@ export async function buildCiSummary({
     errors = [];
   let failures = [];
   let tasks = [];
+  let indexCounts = summarizeIndexCounts([]);
   try {
     assert.ok(zg, "missing ZG report");
     const checked = validateZgReport(zg, "ZG", {
@@ -142,6 +148,27 @@ export async function buildCiSummary({
       checked.ids,
       suite.lock.tasks.map((task) => task.task_id).sort(),
       "CI task selection differs from frozen suite",
+    );
+    indexCounts = summarizeIndexCounts(
+      suite.lock.repositories.map((repo) => {
+        const id = `${repo.repository}@${repo.commit}`;
+        const manifest = zg.repositories.find(
+          (item) => item.repository === repo.repository,
+        );
+        const counts = manifest?.index_counts
+          ? validateIndexCounts(manifest.index_counts)
+          : null;
+        if (counts)
+          assert.deepEqual(
+            counts.corpora.map((entry) => entry.id),
+            [id],
+          );
+        return {
+          id,
+          entities: counts?.entities ?? null,
+          fragments: counts?.fragments ?? null,
+        };
+      }),
     );
     for (const mode of ZG_MODES)
       rows.push(
@@ -229,6 +256,7 @@ export async function buildCiSummary({
     status: errors.length ? "failed" : "success",
     model: suite.protocol.model,
     preview: "full",
+    index_counts: indexCounts,
     ...(rows.some((row) => row.qa_retrieval)
       ? { qa_gold: suite.qa_gold, qa_scoring: suite.qa_scoring }
       : {}),
@@ -258,6 +286,8 @@ export function markdownCiSummary(result) {
     "# SWE-QA20 Retrieval-only results",
     "",
     `**${status}** · 20 original questions · 11 pinned repositories · ZG hybrid / fts / vector · Rust MCP full presentation`,
+    "",
+    indexCountsMarkdown(result.index_counts),
     "",
     "| Arm | Status | Coverage | Stable Top 10 | File Hit@1 | File Hit@5 | File Hit@10 | File MRR@10 | nDCG@10 | Mean output (KiB) | Avg RT (ms) | P50 RT (ms) |",
     "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",

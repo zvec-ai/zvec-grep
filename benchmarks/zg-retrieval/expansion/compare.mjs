@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { loadSuite } from "../core/lib.mjs";
+import { validateIndexCounts } from "../core/index-counts.mjs";
 import { QA_SCORING } from "../core/suite.mjs";
 import { buildCombined } from "./combined.mjs";
 import {
@@ -75,6 +76,7 @@ export function compareCombinedResults(baseline, candidate, metadata) {
       );
   const rows = [];
   const pilotQaGold = {};
+  const indexCounts = {};
   for (const name of ["sweqa", ...PILOT_NAMES]) {
     const before = name === "sweqa" ? baseline.sweqa : baseline.pilots[name];
     const after = name === "sweqa" ? candidate.sweqa : candidate.pilots[name];
@@ -91,6 +93,11 @@ export function compareCombinedResults(baseline, candidate, metadata) {
       after.model,
       `${name}: different embedding models`,
     );
+    const counts = (suite) => {
+      const value = (name === "sweqa" ? suite : suite.report).index_counts;
+      return value === undefined ? null : validateIndexCounts(value);
+    };
+    indexCounts[name] = { baseline: counts(before), candidate: counts(after) };
     const hasPilotQa =
       name !== "sweqa" && (before.report.qa_gold || after.report.qa_gold);
     if (hasPilotQa) {
@@ -158,6 +165,7 @@ export function compareCombinedResults(baseline, candidate, metadata) {
         }
       : {}),
     harness_commit: baseline.harness_commit,
+    index_counts: indexCounts,
     rows,
     errors: [],
   };
@@ -225,6 +233,21 @@ function qaComparisonCell(pair, level, metric) {
   return same ? beforeCell : `${beforeCell} → ${afterCell}`;
 }
 
+function indexCountComparison(pair) {
+  const count = (value) =>
+    Number.isSafeInteger(value) && value >= 0
+      ? value.toLocaleString("en-US")
+      : "N/A";
+  const cell = (key) => {
+    const baseline = pair?.baseline?.[key] ?? null;
+    const candidate = pair?.candidate?.[key] ?? null;
+    return baseline === candidate
+      ? count(baseline)
+      : `${count(baseline)} → ${count(candidate)}`;
+  };
+  return `Indexed corpus: **${cell("entities")} Entities · ${cell("fragments")} Fragments**.`;
+}
+
 export function markdownVersionComparison(result) {
   const server = result.server_url ?? "https://github.com";
   const version = (side) => {
@@ -241,6 +264,7 @@ export function markdownVersionComparison(result) {
     `**${result.status === "success" ? "✅ Complete" : "❌ Failed / incomplete"}** · Baseline ${version("baseline")} · Candidate ${version("candidate")}`,
     "",
     "Scores are percentages. Different values show **baseline → candidate**; identical values are shown once. Both versions use the same queries, Gold and local embedding models, with five calls per question and mode.",
+    "Indexed corpus totals count each independently built index once; modes and repetitions do not multiply them. N/A means the count was not recorded.",
   ];
   if (result.preview === "full")
     lines.push("", 'Both versions explicitly request `preview: "full"`.');
@@ -265,6 +289,8 @@ export function markdownVersionComparison(result) {
       lines.push(
         "",
         `### ${title}`,
+        "",
+        indexCountComparison(result.index_counts?.[suite]),
         "",
         qa
           ? "**Diagnostic QA results.** Entity hits require Gold containment in the returned Entity, independently of preview. Cells show percentages. N/A means unscored or missing QA data."

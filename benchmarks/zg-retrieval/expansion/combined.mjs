@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { readJson, writeJson } from "../core/io.mjs";
+import { validateIndexCounts } from "../core/index-counts.mjs";
 import { buildCiSummary, markdownCiSummary } from "../reports/ci.mjs";
 import { scoreFileRetrieval } from "../metrics/files.mjs";
 import { scoreNdcg } from "../metrics/ndcg.mjs";
@@ -16,7 +17,7 @@ import {
   PILOT_QA_SCORING,
 } from "./config.mjs";
 import { summarizePilotEntity } from "./gold.mjs";
-import { loadPilot, targetsForTask } from "./datasets.mjs";
+import { loadPilot, pilotCorpusIds, targetsForTask } from "./datasets.mjs";
 import {
   markdownPilotReport,
   summarizePilotBreakdown,
@@ -33,6 +34,16 @@ async function checkPilot(name, report, candidateCommit) {
       error: "report artifact missing",
     };
   try {
+    const indexCounts =
+      report.index_counts === undefined
+        ? undefined
+        : validateIndexCounts(report.index_counts);
+    if (indexCounts)
+      assert.deepEqual(
+        indexCounts.corpora.map(({ id }) => id).sort(),
+        pilotCorpusIds(pilot).sort(),
+        "indexed corpus coverage differs from the pilot",
+      );
     assert.ok(
       [2, 3].includes(report.schema_version),
       "Unknown pilot report schema",
@@ -176,7 +187,15 @@ async function checkPilot(name, report, candidateCommit) {
         ),
       );
     }
-    return { status: report.status, report, model: pilot.model, error: null };
+    return {
+      status: report.status,
+      report: {
+        ...report,
+        ...(indexCounts === undefined ? {} : { index_counts: indexCounts }),
+      },
+      model: pilot.model,
+      error: null,
+    };
   } catch (error) {
     return {
       status: "invalid",

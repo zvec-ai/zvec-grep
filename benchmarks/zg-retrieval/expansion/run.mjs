@@ -40,12 +40,17 @@ import {
 } from "./config.mjs";
 import {
   loadPilot,
+  pilotCorpusIds,
   prepareBeirDataset,
   prepareDuRetrieval,
   prepareQuarryTask,
   targetsForTask,
   verifyQuarrySource,
 } from "./datasets.mjs";
+import {
+  summarizeIndexCounts,
+  indexCountsMarkdown,
+} from "../core/index-counts.mjs";
 
 const REPETITIONS = 5;
 const LIMIT = 10;
@@ -205,6 +210,8 @@ export function markdownPilotReport(report) {
     `## ${report.label} · ${report.status === "success" ? "✅ Complete" : "❌ Incomplete"}`,
     "",
     `${planned} original queries · model \`${report.model}\` · Rust MCP full preview · five calls/query`,
+    "",
+    indexCountsMarkdown(report.index_counts),
     "",
     "| Mode | Completed | Stable Top 10 | File Hit@1 | File Hit@5 | File Hit@10 | File MRR@10 | nDCG@10 | Mean output (KiB) | Avg RT (ms) | P50 RT (ms) |",
     "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -557,6 +564,20 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
       before.logical_content_sha256,
       "index changed during retrieval",
     );
+    const counts = {
+      id: group.id,
+      entities: after.entities,
+      fragments: after.fragments,
+    };
+    assert.ok(
+      report.index_counts.corpora.some(({ id }) => id === group.id),
+      "unknown indexed corpus",
+    );
+    report.index_counts = summarizeIndexCounts(
+      report.index_counts.corpora.map((entry) =>
+        entry.id === group.id ? counts : entry,
+      ),
+    );
     for (const row of groupRows) row.group_integrity = "verified";
   } catch (error) {
     invalidateGroupRows(
@@ -615,6 +636,13 @@ export async function main(args = process.argv.slice(2)) {
     rows: [],
     failures: [],
     index_seconds: {},
+    index_counts: summarizeIndexCounts(
+      pilotCorpusIds(pilot).map((id) => ({
+        id,
+        entities: null,
+        fragments: null,
+      })),
+    ),
   };
   try {
     const candidate = await packageCandidate(values.package, output);

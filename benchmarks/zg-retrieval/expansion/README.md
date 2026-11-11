@@ -52,6 +52,12 @@ existing per-query average. SWE-QA20 uses a repository macro average for its
 overall nDCG, while these pilots use a query average. Absolute scores across
 suites do not share a corpus or relevance definition.
 
+Indexed Entity and Fragment totals sum the independently built corpus indexes:
+six for BEIR, one for DuRetrieval and twenty for Quarry. Shared content across
+separate indexes is counted in each index; modes and repeated calls do not
+multiply counts. The JSON retains each index's counts. Missing counts remain
+N/A, including Fragment counts from older candidates that did not expose them.
+
 Full preview displays each retrieved Entity's complete content; short preview
 displays excerpts. Preserve earlier default-short artifacts and use their
 matching scorer for review.

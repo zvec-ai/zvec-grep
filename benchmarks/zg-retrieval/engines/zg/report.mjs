@@ -28,6 +28,7 @@ import {
   summarizeRepeatedQuality,
 } from "../../metrics/repetitions.mjs";
 import { markdownReport } from "../../reports/zg.mjs";
+import { summarizeIndexCounts } from "../../core/index-counts.mjs";
 import {
   publicQaItems,
   scoreQaRetrieval,
@@ -82,6 +83,9 @@ export async function aggregate(directory, { expectedTasks } = {}) {
   const seen = new Set();
   for (const runDirectory of runDirectories) {
     const manifest = await readJson(join(runDirectory, "run.json"));
+    // Rebuild counts from hashed status evidence, not the historical snapshot's
+    // misleading `fragments` alias (schema 2 stored the Entity count there).
+    delete manifest.index_counts;
     manifests.push(manifest);
     const invalid = [...(manifest.invalid_reasons ?? [])];
     if (objectHash(manifest.suite) !== objectHash(suite.identity))
@@ -111,13 +115,13 @@ export async function aggregate(directory, { expectedTasks } = {}) {
           "verified",
           "post-run integrity not verified",
         );
+        let beforeCounts;
         for (const phase of ["before", "after"]) {
           const snapshot = await readJson(
             join(runDirectory, `stages/${phase}/summary.json`),
           );
-          assert.equal(
-            snapshot.schema_version,
-            2,
+          assert.ok(
+            [2, 3].includes(snapshot.schema_version),
             "unsupported native snapshot",
           );
           assert.equal(snapshot.kind, "rust-public-status");
@@ -153,7 +157,26 @@ export async function aggregate(directory, { expectedTasks } = {}) {
               status.files_failed === 0,
             "native public status does not describe a ready index",
           );
+          const counts = summarizeIndexCounts([
+            {
+              id: `${manifest.repository}@${manifest.repository_commit}`,
+              entities: status.entities_indexed,
+              fragments: status.fragments_indexed ?? null,
+            },
+          ]);
+          if (phase === "before") beforeCounts = counts;
+          else
+            assert.deepEqual(
+              counts,
+              beforeCounts,
+              "index counts changed during retrieval",
+            );
+          if (snapshot.schema_version === 3) {
+            assert.equal(snapshot.entities, counts.entities);
+            assert.equal(snapshot.fragments, counts.fragments);
+          }
         }
+        manifest.index_counts = beforeCounts;
         const selection = suite.protocol.index_selection;
         assert.deepEqual(
           manifest.index_selection_audit,

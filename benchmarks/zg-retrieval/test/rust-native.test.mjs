@@ -511,7 +511,9 @@ test("successful status retains its existing snapshot identity", async (t) => {
     },
   });
   assert.equal(summary.files, 10);
-  assert.equal(summary.fragments, 42);
+  assert.equal(summary.schema_version, 3);
+  assert.equal(summary.entities, 42);
+  assert.equal(summary.fragments, null);
   assert.deepEqual(Object.keys(summary.artifacts).sort(), [
     "status.json",
     "status.stderr.txt",
@@ -575,7 +577,8 @@ Indexed source size: 3060923 bytes
     snapshots[2].logical_content_sha256,
   );
   assert.equal(snapshots[1].files, 381);
-  assert.equal(snapshots[1].fragments, 4269);
+  assert.equal(snapshots[1].entities, 4269);
+  assert.equal(snapshots[1].fragments, null);
   assert.equal(
     await readFile(join(output, "2", "status.stderr.txt"), "utf8"),
     diagnosticsLine(readyDiagnostics()),

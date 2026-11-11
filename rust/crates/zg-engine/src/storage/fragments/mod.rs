@@ -157,6 +157,24 @@ impl Fragments {
         Ok(())
     }
 
+    /// Count live search projections without loading text or embedding vectors.
+    pub(super) fn count(&self) -> EngineResult<u64> {
+        let mut count = 0_u64;
+        for index in self.indexes.values() {
+            let iterator = native(
+                index.iter_with_options(Some(&["document_id"]), false),
+                "iterate fragment identities",
+            )?;
+            for doc in iterator {
+                native(doc, "read fragment identity")?;
+                count = count.checked_add(1).ok_or_else(|| {
+                    EngineError::storage_failure("fragment count exceeds u64")
+                })?;
+            }
+        }
+        Ok(count)
+    }
+
     pub(super) fn flush(&self) -> EngineResult<()> {
         for index in self.indexes.values() {
             native(index.flush(), "flush fragment collection")?;

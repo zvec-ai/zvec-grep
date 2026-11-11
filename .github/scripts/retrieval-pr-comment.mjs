@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -7,12 +8,34 @@ import {
 } from "../../benchmarks/zg-retrieval/expansion/compare.mjs";
 import { QUALITY_METRICS } from "../../benchmarks/zg-retrieval/reports/ci.mjs";
 import { QA_SCORING } from "../../benchmarks/zg-retrieval/core/suite.mjs";
+import { validateIndexCounts } from "../../benchmarks/zg-retrieval/core/index-counts.mjs";
+import { pilotCorpusIds } from "../../benchmarks/zg-retrieval/expansion/datasets.mjs";
 import {
   PILOT_FILE_RECALL_METRICS,
   PILOT_NAMES,
   PILOT_QA_SCORING,
   PILOT_SUITES,
 } from "../../benchmarks/zg-retrieval/expansion/config.mjs";
+
+// Read only the trusted checkout's frozen corpus definitions, never artifact paths.
+const trustedJson = (path) =>
+  JSON.parse(readFileSync(new URL(path, import.meta.url), "utf8"));
+const expectedCorpusIds = {
+  sweqa: trustedJson("../../benchmarks/zg-retrieval/data/source.lock.json")
+    .repositories.map(({ repository, commit }) => `${repository}@${commit}`)
+    .sort(),
+  ...Object.fromEntries(
+    PILOT_NAMES.map((name) => [
+      name,
+      pilotCorpusIds({
+        name,
+        lock: trustedJson(
+          `../../benchmarks/zg-retrieval/expansion/data/${PILOT_SUITES[name].lockFile}`,
+        ),
+      }).sort(),
+    ]),
+  ),
+};
 
 const marker = "<!-- zg-retrieval-pr -->";
 const versionMarker = (run) =>
@@ -201,6 +224,34 @@ export function validateComparison(report, request) {
     }
   }
   const rows = [];
+  const indexCounts = {};
+  if (report.index_counts !== undefined) {
+    assert.ok(
+      report.index_counts &&
+        typeof report.index_counts === "object" &&
+        !Array.isArray(report.index_counts),
+      "Invalid indexed corpus counts",
+    );
+    for (const suite of ["sweqa", ...PILOT_NAMES]) {
+      const pair = report.index_counts[suite];
+      assert.ok(
+        pair && typeof pair === "object" && !Array.isArray(pair),
+        "Missing indexed corpus comparison",
+      );
+      indexCounts[suite] = {};
+      for (const side of ["baseline", "candidate"]) {
+        const counts =
+          pair[side] === null ? null : validateIndexCounts(pair[side]);
+        if (counts)
+          assert.deepEqual(
+            counts.corpora.map(({ id }) => id).sort(),
+            expectedCorpusIds[suite],
+            `${suite}/${side}: indexed corpus coverage differs from the frozen suite`,
+          );
+        indexCounts[suite][side] = counts;
+      }
+    }
+  }
   for (const suite of ["sweqa", "beir", "duretrieval", "quarry"]) {
     for (const mode of ["hybrid", "fts", "vector"]) {
       const matches = report.rows.filter(
@@ -290,6 +341,7 @@ export function validateComparison(report, request) {
       commit: request.candidate.commit,
     },
     harness_commit: report.harness_commit,
+    ...(report.index_counts === undefined ? {} : { index_counts: indexCounts }),
     rows,
     errors: [],
   };

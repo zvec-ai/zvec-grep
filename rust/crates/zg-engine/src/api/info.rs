@@ -195,6 +195,10 @@ pub mod result {
         pub files_stored: usize,
         pub files_indexed: usize,
         pub entities_indexed: u64,
+        /// Persisted searchable fragments, counted only for a detailed inspection.
+        /// Older replies and lightweight refresh checks leave this unknown.
+        #[serde(default)]
+        pub fragments_indexed: Option<u64>,
         /// Total source snapshot bytes for successfully indexed files, excluding index storage.
         pub indexed_size_bytes: u64,
         pub files_pending: usize,
@@ -285,6 +289,31 @@ mod tests {
             workspace_index: None,
             status: Some(IndexStats::default()),
             suggestion: None,
+        }
+    }
+
+    #[test]
+    fn fragment_counts_distinguish_legacy_unknown_from_empty_indexes() {
+        let mut value = serde_json::to_value(IndexStats::default()).expect("status JSON");
+        value
+            .as_object_mut()
+            .expect("status object")
+            .remove("fragments_indexed");
+        let legacy: IndexStats = serde_json::from_value(value).expect("legacy status");
+        assert_eq!(legacy.fragments_indexed, None);
+        assert!(serde_json::to_value(legacy).expect("status JSON")["fragments_indexed"].is_null());
+
+        for count in [0, u64::from(u32::MAX) + 1] {
+            let status = IndexStats {
+                fragments_indexed: Some(count),
+                ..IndexStats::default()
+            };
+            let encoded = serde_json::to_value(&status).expect("counted status");
+            assert_eq!(encoded["fragments_indexed"], count);
+            assert_eq!(
+                serde_json::from_value::<IndexStats>(encoded).expect("decoded status"),
+                status
+            );
         }
     }
 

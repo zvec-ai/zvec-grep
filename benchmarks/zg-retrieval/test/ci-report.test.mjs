@@ -28,6 +28,7 @@ import {
   summarizeQaRetrieval,
 } from "../metrics/entities.mjs";
 import { validateZgReport, ZG_MODES } from "../reports/validation.mjs";
+import { summarizeIndexCounts } from "../core/index-counts.mjs";
 
 const suite = await loadSuite();
 const clone = (value) => structuredClone(value);
@@ -153,6 +154,30 @@ function withQa(report = zgReport()) {
     );
   return report;
 }
+
+test("SWE-QA inventory sums each pinned repository once across all calls", async () => {
+  const report = zgReport();
+  for (const [index, manifest] of report.repositories.entries()) {
+    const repo = suite.lock.repositories[index];
+    manifest.index_counts = summarizeIndexCounts([
+      {
+        id: `${repo.repository}@${repo.commit}`,
+        entities: 2,
+        fragments: 5,
+      },
+    ]);
+  }
+  const summary = await buildCiSummary({ zg: report });
+  assert.equal(summary.status, "success");
+  assert.equal(summary.index_counts.entities, 22);
+  assert.equal(summary.index_counts.fragments, 55);
+  assert.match(markdownCiSummary(summary), /22 Entities · 55 Fragments/);
+  delete report.repositories[0].index_counts;
+  const missing = await buildCiSummary({ zg: report });
+  assert.equal(missing.status, "success");
+  assert.equal(missing.index_counts.entities, null);
+  assert.equal(missing.index_counts.fragments, null);
+});
 function assertUnavailable(result) {
   assert.equal(result.status, "failed");
   assert.deepEqual(
