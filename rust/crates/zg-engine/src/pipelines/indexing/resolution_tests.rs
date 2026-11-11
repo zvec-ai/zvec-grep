@@ -1529,6 +1529,54 @@ fn sweep_binds_a_call_to_the_enclosing_binding_that_shadows_the_import() {
 }
 
 #[test]
+fn sweep_keeps_a_bare_call_pending_when_the_imported_module_is_gone() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    // What the import used to name now lives in another module, so the
+    // statement names nothing and only the moved definition spells the name.
+    index_source(&store, "moved.py", "def first():\n    return 1\n");
+    let caller = index_source(
+        &store,
+        "caller.py",
+        "from targets import first\n\n\ndef caller():\n    return first()\n",
+    );
+
+    let owner = pending_call_owner(&store, caller, "first");
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    assert!(
+        call_target_files(&store, &owner).is_empty(),
+        "a stale import does not borrow the workspace's unique name: {sweep:?}"
+    );
+    assert_eq!(
+        sweep.import_bound, 0,
+        "no import decision is taken: {sweep:?}"
+    );
+}
+
+#[test]
+fn sweep_binds_an_imported_name_whose_module_root_the_paths_do_not_know() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    // `helpers` sits under a package root no import path rule knows, so the
+    // name index is the only rule that can place it. The statement is live,
+    // which is what tells it apart from the stale one above.
+    let module = index_source(&store, "lib/helpers.py", "def value():\n    return 42\n");
+    let caller = index_source(
+        &store,
+        "main.py",
+        "from helpers import value\n\n\ndef main():\n    return value()\n",
+    );
+
+    let owner = pending_call_owner(&store, caller, "value");
+    let sweep = resolve_pending(&store, None).expect("sweep");
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![module],
+        "a live import still binds through uniqueness: {sweep:?}"
+    );
+}
+
+#[test]
 fn sweep_keeps_an_argument_count_from_handing_a_shadowed_call_to_the_import() {
     let home = tempfile::tempdir().expect("workspace");
     let store = open(home.path());
@@ -2045,7 +2093,11 @@ fn sweep_suppresses_a_bare_call_the_unit_defines_as_a_macro() {
         "the name is a macro at this line, so the site reaches nothing"
     );
     assert_eq!(
-        store.list_pending_refs(100, 0).expect("queue").refs.len(),
+        store
+            .list_pending_refs(100, 0, &store.resolution_snapshot(None).expect("snapshot"))
+            .expect("queue")
+            .refs
+            .len(),
         1,
         "the expanded site stays out of the graph instead of binding the decoy"
     );

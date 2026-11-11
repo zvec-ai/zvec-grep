@@ -123,6 +123,34 @@ impl ResolutionSnapshot {
             .copied()
             .filter(|file_id| self.paths.indexed.contains(file_id))
     }
+
+    /// Whether the workspace holds a Python module of this name anywhere: a
+    /// `name.py` at any depth, or a package directory named `name`. A module
+    /// root the path rules do not know (a `pyproject` extra path) still counts,
+    /// so this answers "does the name exist at all", not "can it be imported".
+    pub(crate) fn has_python_module(&self, name: &str) -> bool {
+        let file = format!("/{name}.py");
+        let package = format!("/{name}/");
+        self.paths.known.iter().any(|path| {
+            path == &file[1..]
+                || path.ends_with(&file)
+                || path == &package[1..]
+                || path.ends_with(&package)
+                || path.contains(&package)
+        })
+    }
+
+    /// Whether any known workspace path sits at `base` or under it: the file
+    /// itself with any extension, or a directory tree rooted there.
+    pub(crate) fn has_path_under(&self, base: &str) -> bool {
+        let directory = format!("{base}/");
+        self.paths.known.iter().any(|path| {
+            path == base
+                || path.starts_with(&directory)
+                // `./helper` names `helper.ts` as much as `helper/index.ts`.
+                || path.rsplit_once('.').is_some_and(|(stem, _)| stem == base)
+        })
+    }
 }
 
 /// Path spellings of every file snapshot, partitioned by publication state.

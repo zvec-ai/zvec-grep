@@ -238,6 +238,11 @@ struct RuleCaches {
     module_paths: HashMap<(String, String), bool>,
     alias_bindings: HashMap<u32, Vec<AliasBinding>>,
     alias_targets: HashMap<(String, String), Option<u32>>,
+    /// Names one file's import statements bind locally, with the specifier
+    /// that names each module. A bound name belongs to that import alone, so
+    /// the fallback rules must not answer it from the workspace once the
+    /// statement's module is gone.
+    import_names: HashMap<u32, Vec<ImportBinding>>,
     /// Declarations read for one owner. Most untyped member calls reach the
     /// same owner and every sweep pages them again, so the read happens once
     /// per owner per sweep instead of once per call.
@@ -513,6 +518,9 @@ fn classify_names(
         // names only; applying them to a member call writes a guess into the
         // graph, and a name that is unique today stops being unique as soon
         // as a second class declares it. Defer to a later sweep instead.
+        return Ok(Outcome::Deferred);
+    }
+    if import_is_stale(store, snapshot, stored, &hits, caches)? {
         return Ok(Outcome::Deferred);
     }
     let visible = visible_scopes(snapshot, &stored.reference.owner_id);
@@ -1540,6 +1548,263 @@ fn without_line_comments<'a>(statement: &'a str, marker: &str) -> std::borrow::C
             .collect::<Vec<_>>()
             .join("\n"),
     )
+}
+
+/// One local name an import statement binds, with the specifier that names
+/// its module.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ImportBinding {
+    local: String,
+    specifier: String,
+}
+
+/// Whether the bare name reaches a definition only because an import
+/// statement of its own file no longer names anything.
+///
+/// The statement is the only evidence for what the name stands for: it binds
+/// the local spelling and names the module. Once that module is gone the
+/// import is stale, and a same-spelled definition elsewhere in the workspace
+/// is a different symbol — uniqueness, exports and arities must not answer
+/// for it. Keeping the reference pending lets a later import edit place it.
+/// A module the workspace still holds keeps the general rules, which place it
+/// by path where they can and by workspace uniqueness where a package root
+/// hides it from them.
+///
+/// # Errors
+/// Propagates graph storage failures.
+fn import_is_stale(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    hits: &[&NameIndexEntry],
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<bool> {
+    if !import_names_a_missing_module(store, snapshot, stored, caches)? {
+        return Ok(false);
+    }
+    // A candidate inside a module this file does import still answers the
+    // name: the stale statement is not the only binding evidence.
+    Ok(!hits_reach_an_imported_module(
+        snapshot, stored, hits, caches,
+    ))
+}
+
+/// Whether a bare name an import statement binds names a module the
+/// workspace no longer contains.
+///
+/// # Errors
+/// Propagates graph storage failures.
+fn import_names_a_missing_module(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<bool> {
+    load_import_names(store, stored, caches)?;
+    let bindings = caches
+        .import_names
+        .get(&stored.file_id)
+        .map_or(&[][..], Vec::as_slice);
+    let matched: Vec<&ImportBinding> = bindings
+        .iter()
+        .filter(|binding| binding.local == stored.name_tail)
+        .collect();
+    if matched.is_empty() {
+        return Ok(false);
+    }
+    if matched
+        .iter()
+        .any(|binding| !module_missing(snapshot, stored, &binding.specifier))
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// Whether the specifier addresses a module no indexed file holds.
+///
+/// Only module-path imports answer this: a Python dotted name is looked up as
+/// a module stem anywhere in the workspace (a package root the path rules do
+/// not know still counts), and a relative `./x` is looked up beside its
+/// importer. Every other specifier — a bare package, an alias — names nothing
+/// the workspace can be asked about.
+fn module_missing(
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    specifier: &str,
+) -> bool {
+    match stored.language.as_str() {
+        "python" => {
+            let module = specifier.rsplit('.').next().unwrap_or(specifier).trim();
+            !module.is_empty() && !snapshot.has_python_module(module)
+        }
+        "typescript" | "javascript" => {
+            if !specifier.starts_with('.') {
+                return false;
+            }
+            let Some(importer) = snapshot.file_path(stored.file_id) else {
+                return false;
+            };
+            let base = std::path::Path::new(importer).parent().map_or_else(
+                || std::path::PathBuf::from(specifier),
+                |dir| dir.join(specifier),
+            );
+            let base = base.to_string_lossy().replace('\\', "/");
+            // `Path::join` keeps a `./` segment, and a specifier that walks
+            // parents spells `src/services/../all`; the snapshot only holds
+            // normalized paths, so the lookup must be spelled the same way.
+            let base = normalize_path(&base);
+            !snapshot.has_path_under(&base)
+        }
+        _ => false,
+    }
+}
+
+/// One path spelling with empty and `.` segments dropped and `..` folded
+/// into its parent, so two spellings of one file compare equal.
+fn normalize_path(path: &str) -> String {
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other),
+        }
+    }
+    segments.join("/")
+}
+
+/// Whether one of the candidates lives in a module the reference's file
+/// imports, or in the file itself.
+fn hits_reach_an_imported_module(
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    hits: &[&NameIndexEntry],
+    caches: &mut RuleCaches,
+) -> bool {
+    let modules = imported_modules(snapshot, stored.file_id, caches);
+    hits.iter()
+        .any(|hit| hit.file_id == stored.file_id || modules.contains(&hit.file_id))
+}
+
+/// Imports of one file, read once per sweep.
+fn imported_modules(
+    snapshot: &ResolutionSnapshot,
+    file_id: u32,
+    caches: &mut RuleCaches,
+) -> Vec<u32> {
+    match caches.importing_files.entry(file_id) {
+        Entry::Occupied(entry) => entry.get().clone(),
+        Entry::Vacant(entry) => entry
+            .insert(snapshot.imported_file_ids(file_id).to_vec())
+            .clone(),
+    }
+}
+
+/// The local names one file's import statements bind, read once per sweep.
+///
+/// # Errors
+/// Propagates graph storage failures.
+fn load_import_names(
+    store: &IndexStore,
+    stored: &StoredPendingRef,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<()> {
+    if caches.import_names.contains_key(&stored.file_id) {
+        return Ok(());
+    }
+    let mut bound = Vec::new();
+    for reference in store.import_references(stored.file_id)? {
+        let Some(raw_text) = reference.raw_text.as_deref() else {
+            continue;
+        };
+        for local in import_bound_names(&stored.language, raw_text) {
+            bound.push(ImportBinding {
+                local,
+                specifier: reference.specifier.clone(),
+            });
+        }
+    }
+    caches.import_names.insert(stored.file_id, bound);
+    Ok(())
+}
+
+/// The names one import statement binds in the importing file: the local
+/// spelling a call reads (`from m import a, b as c` binds `a` and `c`).
+/// A `*` import binds nothing by name.
+///
+/// Only module-path languages are parsed: a Rust `use` and a Java `import`
+/// name an item, and their rules answer the call before the fallbacks run.
+fn import_bound_names(language: &str, statement: &str) -> Vec<String> {
+    match language {
+        "python" => python_bound_names(without_line_comments(statement, "#").trim()),
+        "typescript" | "javascript" => {
+            ts_bound_names(without_line_comments(statement, "//").trim())
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// `from m import a, b as c` binds `a` and `c`; `import a.b` binds `a`;
+/// `import m as n` binds `n`.
+fn python_bound_names(statement: &str) -> Vec<String> {
+    if let Some(rest) = statement.strip_prefix("from ") {
+        let Some((_, names)) = rest.split_once(" import ") else {
+            return Vec::new();
+        };
+        let names = names.trim();
+        let names = names
+            .strip_prefix('(')
+            .map_or(names, |inner| inner.strip_suffix(')').unwrap_or(inner));
+        return names.split(',').filter_map(bound_local).collect();
+    }
+    let Some(rest) = statement.strip_prefix("import ") else {
+        return Vec::new();
+    };
+    rest.split(',')
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            match entry.split_once(" as ") {
+                Some((_, local)) => bound_local(local),
+                // `import a.b` binds the root package.
+                None => bound_local(entry.split('.').next().unwrap_or(entry)),
+            }
+        })
+        .collect()
+}
+
+/// `import d, { a, b as c } from './x'` binds `d`, `a` and `c`;
+/// `import * as ns from './x'` binds `ns`.
+fn ts_bound_names(statement: &str) -> Vec<String> {
+    let Some(rest) = statement.strip_prefix("import ") else {
+        return Vec::new();
+    };
+    let clause = rest.split_once(" from ").map_or(rest, |(clause, _)| clause);
+    let clause = clause.trim();
+    // `import type { T }` binds a type alone; a call never reads it, but the
+    // entry still names a local spelling.
+    let clause = clause.strip_prefix("type ").unwrap_or(clause);
+    clause
+        .replace(['{', '}'], " ")
+        .split(',')
+        .filter_map(bound_local)
+        .filter(|local| local != "*")
+        .collect()
+}
+
+/// The local name a bare import entry binds, or `None` for an entry that
+/// names nothing by itself (empty, `*`).
+fn bound_local(entry: &str) -> Option<String> {
+    let entry = entry.trim();
+    if entry.is_empty() || entry == "*" {
+        return None;
+    }
+    let local = entry
+        .split_once(" as ")
+        .map_or(entry, |(_, local)| local.trim());
+    (!local.is_empty() && local != "*").then(|| local.to_owned())
 }
 
 /// Loads a file's import edges and parses their statement text into `as` alias
