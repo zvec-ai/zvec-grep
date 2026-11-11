@@ -44,6 +44,12 @@ impl IndexField {
 
 // --- Code ---
 
+// Every flag here is an independent fact extraction decided once and the
+// resolver reads directly; grouping them would hide which rule reads what.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is a separate extracted fact read by a different rule"
+)]
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CodeMetadata {
     pub symbol_type: Option<SymbolType>,
@@ -80,6 +86,13 @@ pub struct CodeMetadata {
     /// file that matches it by name matched a different declaration.
     #[serde(default)]
     pub has_internal_linkage: bool,
+    /// True for the entity that introduces a type's name (a class, struct,
+    /// interface, enum, or trait declaration). An `impl` block carries the
+    /// implemented type's name too, so a name index cannot tell the type from
+    /// its implementation without this fact; the resolver needs it to name the
+    /// one class a member call belongs to.
+    #[serde(default)]
+    pub declares_type: bool,
 }
 
 impl CodeMetadata {

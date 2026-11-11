@@ -1102,6 +1102,7 @@ mod tests {
                         is_declaration: false,
                         package: None,
                         has_internal_linkage: false,
+                        declares_type: false,
                     },
                 )),
                 stored.entity.fragments().to_vec(),

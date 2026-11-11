@@ -15,6 +15,7 @@ fn target_metadata(index: usize) -> CodeMetadata {
         is_declaration: false,
         package: None,
         has_internal_linkage: false,
+        declares_type: false,
     }
 }
 

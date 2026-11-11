@@ -11,7 +11,9 @@ use crate::{
     utils::line_byte_offsets,
 };
 
-use self::adapter::{LanguageAdapter, named_children, php_declaration, resolve_adapter};
+use self::adapter::{
+    LanguageAdapter, declares_type, named_children, php_declaration, resolve_adapter,
+};
 use super::graph::{
     WalkContext, collect_import_edge, collect_inheritance_edges, is_import_node, partition_walk,
     scan_binding_declarations, scan_call_edges, scan_return_types,
@@ -203,6 +205,12 @@ fn fallback(source: &TextSource, max_chars: usize, overlap_chars: usize) -> Vec<
     extract_plain_text_entities(source, max_chars, overlap_chars)
 }
 
+// The flags carry independent extraction facts; the entity is the one place
+// they are gathered before metadata is written.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is a separate extracted fact carried into metadata"
+)]
 #[derive(Debug)]
 struct CodeEntity<'tree> {
     node: Node<'tree>,
@@ -226,6 +234,9 @@ struct CodeEntity<'tree> {
     /// Whether a C/C++ declaration has internal linkage (unnamed namespace or
     /// file-scope `static`), so only its own file can address it by name.
     has_internal_linkage: bool,
+    /// Whether this entity introduces a type's name, as opposed to carrying it
+    /// (`impl Target`, which is a scope named after the type it implements).
+    declares_type: bool,
 }
 
 // The entity branch shares first/scope entity indices and the scope boundary
@@ -284,6 +295,7 @@ fn walk_code_node<'tree>(
                     is_declaration: adapter.is_declaration(entity),
                     package: java_package(entity, source, format),
                     has_internal_linkage: adapter.has_internal_linkage(entity, source),
+                    declares_type: declares_type(entity),
                 });
             }
             // Name-based references are collected from the first resolved
@@ -501,6 +513,7 @@ fn code_entity_metadata(entity: &CodeEntity<'_>) -> EntityMetadata {
         is_declaration: entity.is_declaration,
         package: entity.package.clone(),
         has_internal_linkage: entity.has_internal_linkage,
+        declares_type: entity.declares_type,
     })
 }
 
@@ -829,6 +842,7 @@ mod tests {
                 is_declaration: false,
                 package: None,
                 has_internal_linkage: false,
+                declares_type: false,
             }))
         );
         assert!(matches!(
@@ -850,6 +864,7 @@ mod tests {
                 is_declaration: false,
                 package: None,
                 has_internal_linkage: false,
+                declares_type: false,
             }))
         );
         assert!(matches!(
@@ -1044,6 +1059,7 @@ mod tests {
                     is_exported: false,
                     is_declaration: false,
                     has_internal_linkage: false,
+                    declares_type: false,
                     package: None,
                 })),
                 "{name}"
@@ -1253,6 +1269,7 @@ mod tests {
                 is_declaration: false,
                 package: None,
                 has_internal_linkage: false,
+                declares_type: false,
             }))
         );
         assert!(matches!(
@@ -1287,6 +1304,7 @@ mod tests {
                 is_declaration: false,
                 package: None,
                 has_internal_linkage: false,
+                declares_type: false,
             }))
         );
         assert!(matches!(
@@ -1322,6 +1340,7 @@ mod tests {
                 is_declaration: false,
                 package: None,
                 has_internal_linkage: false,
+                declares_type: false,
             }))
         );
     }

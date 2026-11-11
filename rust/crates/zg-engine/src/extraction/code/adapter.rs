@@ -529,6 +529,38 @@ impl LanguageAdapter {
     }
 }
 
+/// Reports whether this node introduces a type's name — the declaration is the
+/// type itself rather than a scope that carries the type's name.
+///
+/// Rust's `impl` block makes the difference matter: it is a class-scoped
+/// entity named after the type it implements, so the name index holds several
+/// entities under one class name and cannot say which one declares the class.
+/// Every other language's type declaration stands alone, so this only ever
+/// separates an implementation from its type.
+pub(super) fn declares_type(node: Node<'_>) -> bool {
+    if node.kind() == "decorated_definition" {
+        return inner_python_definition(node).is_some_and(declares_type);
+    }
+    matches!(
+        node.kind(),
+        "abstract_class_declaration"
+            | "class_declaration"
+            | "class_definition"
+            | "class_specifier"
+            | "enum_declaration"
+            | "enum_item"
+            | "enum_specifier"
+            | "interface_declaration"
+            | "record_declaration"
+            | "struct_item"
+            | "struct_specifier"
+            | "trait_item"
+            | "type_spec"
+            | "union_item"
+            | "union_specifier"
+    )
+}
+
 pub(super) fn named_children(node: Node<'_>) -> Vec<Node<'_>> {
     let mut cursor = node.walk();
     node.named_children(&mut cursor).collect()

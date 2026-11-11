@@ -1633,16 +1633,79 @@ fn is_self_receiver(language: &str, receiver: &str) -> bool {
     }
 }
 
+/// One class a member call is searched in.
+///
+/// The name is the spelling hit qualified names are built from, so it stays
+/// the primary key: extraction joins the declaring breadcrumb with `::`, and
+/// both the enclosing class and its bases are named by that string. The name
+/// alone cannot tell two modules apart, though — `caller::Target` and
+/// `decoy::Target` both spell `Target::reset` — so `declared_in` records the
+/// file whose declaration of that name this scope means. Whatever the index
+/// cannot place leaves the comparison at the name alone, which keeps the
+/// rule's older, coarser evidence instead of dropping a candidate on
+/// information it does not have.
+#[derive(Clone)]
+struct ClassScope {
+    name: String,
+    /// The file declaring the class. A class name is spelled the same in every
+    /// module that declares it, so the file is the evidence that separates
+    /// them; `None` when the index cannot place the name in one file.
+    declared_in: Option<u32>,
+    /// The class entity an inheritance walk starts from, when the index places
+    /// exactly one. A language that indexes an `impl` block as a second entity
+    /// of the same name leaves this `None` while `declared_in` still answers.
+    entity: Option<String>,
+}
+
+impl ClassScope {
+    /// The scope a class name means at a point that names `file_hint` as the
+    /// file it is written in.
+    fn at(snapshot: &ResolutionSnapshot, name: String, file_hint: Option<u32>) -> Self {
+        Self {
+            declared_in: class_declaration_file(snapshot, &name, file_hint),
+            entity: class_entity_id(snapshot, &name),
+            name,
+        }
+    }
+
+    /// Whether both scopes address the same class. A declaring file decides
+    /// whenever both are known; the name alone is the fallback for scopes the
+    /// index cannot place.
+    fn same_as(&self, other: &Self) -> bool {
+        self.name == other.name
+            && match (self.declared_in, other.declared_in) {
+                (Some(left), Some(right)) => left == right,
+                _ => true,
+            }
+    }
+}
+
 /// The candidates declaring a member inside `scope`, recognized by the
-/// qualified name extraction builds from the declaring breadcrumb.
-fn declarations_in<'a>(hits: &[&'a NameIndexEntry], scope: &str) -> Vec<&'a NameIndexEntry> {
+/// qualified name extraction builds from the declaring breadcrumb. A candidate
+/// whose declaring class is a namesake declared in another file is not a member
+/// of `scope` at all, however equal the two names look.
+fn declarations_in<'a>(
+    snapshot: &ResolutionSnapshot,
+    hits: &'a [&'a NameIndexEntry],
+    scope: &ClassScope,
+) -> Vec<&'a NameIndexEntry> {
     hits.iter()
         .filter(|hit| {
-            hit.qualified_name
-                .rsplit_once("::")
-                .is_some_and(|(candidate, _)| candidate == scope)
+            let Some((declaring, _)) = hit.qualified_name.rsplit_once("::") else {
+                return false;
+            };
+            if declaring != scope.name {
+                return false;
+            }
+            match (
+                scope.declared_in,
+                class_declaration_file(snapshot, declaring, Some(hit.file_id)),
+            ) {
+                (Some(expected), Some(actual)) => actual == expected,
+                _ => true,
+            }
         })
-        .copied()
+        .map(|hit| *hit)
         .collect()
 }
 
@@ -1664,12 +1727,13 @@ fn member_resolution(stored: &StoredPendingRef, hit: &NameIndexEntry) -> Resolut
 /// separate) leave the call to the rules below rather than binding an
 /// ancestor the override replaced.
 fn bind_nearest_member(
+    snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
     hits: &[&NameIndexEntry],
-    scopes: &[String],
+    scopes: &[ClassScope],
 ) -> Option<Resolution> {
     for scope in scopes {
-        match declarations_in(hits, scope).as_slice() {
+        match declarations_in(snapshot, hits, scope).as_slice() {
             [] => {}
             [hit] => return Some(member_resolution(stored, hit)),
             _ => return None,
@@ -1689,16 +1753,17 @@ fn bind_nearest_member(
 /// bind `B.save` over `Grand.save`. Where the walk cannot reproduce that
 /// order it declines to choose between the bases.
 fn bind_hierarchy_member(
+    snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
     hits: &[&NameIndexEntry],
-    caller: Option<&str>,
-    scopes: &[String],
+    caller: Option<&ClassScope>,
+    scopes: &[ClassScope],
     branched: bool,
 ) -> Option<Resolution> {
     if branched && stored.language == "python" {
-        return bind_sole_declaration(stored, hits, caller, scopes);
+        return bind_sole_declaration(snapshot, stored, hits, caller, scopes);
     }
-    bind_nearest_member(stored, hits, scopes)
+    bind_nearest_member(snapshot, stored, hits, scopes)
 }
 
 /// Binds a member call whose language searches the hierarchy in an order this
@@ -1709,13 +1774,14 @@ fn bind_hierarchy_member(
 /// several bases declaring it make the answer a function of the order, which
 /// stays pending rather than binding the base the walk happens to reach first.
 fn bind_sole_declaration(
+    snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
     hits: &[&NameIndexEntry],
-    caller: Option<&str>,
-    scopes: &[String],
+    caller: Option<&ClassScope>,
+    scopes: &[ClassScope],
 ) -> Option<Resolution> {
     if let Some(caller) = caller {
-        match declarations_in(hits, caller).as_slice() {
+        match declarations_in(snapshot, hits, caller).as_slice() {
             [] => {}
             [hit] => return Some(member_resolution(stored, hit)),
             _ => return None,
@@ -1723,10 +1789,10 @@ fn bind_sole_declaration(
     }
     let mut declaration: Option<&NameIndexEntry> = None;
     for scope in scopes {
-        if Some(scope.as_str()) == caller {
+        if caller.is_some_and(|caller| caller.same_as(scope)) {
             continue;
         }
-        match declarations_in(hits, scope).as_slice() {
+        match declarations_in(snapshot, hits, scope).as_slice() {
             [] => {}
             [hit] => {
                 if declaration.is_some() {
@@ -1785,15 +1851,18 @@ fn resolve_receiver_class(
     }) else {
         return Ok(None);
     };
-    let caller = (!superclass).then_some(enclosing.as_str());
-    let mut scopes = Vec::new();
-    if !superclass {
-        scopes.push(enclosing.clone());
-    }
+    // The call site is written inside this class, so its own file is the
+    // evidence that tells the class apart from a namesake in another module.
+    let root = ClassScope::at(snapshot, enclosing, Some(stored.file_id));
+    let mut scopes = if superclass {
+        Vec::new()
+    } else {
+        vec![root.clone()]
+    };
     let branched = collect_base_scopes(
         store,
         snapshot,
-        &enclosing,
+        &root,
         &mut scopes,
         &mut HashSet::new(),
         // `super` addresses the direct bases only; a self receiver walks the
@@ -1801,7 +1870,12 @@ fn resolve_receiver_class(
         if superclass { 1 } else { 8 },
     )?;
     Ok(bind_hierarchy_member(
-        stored, hits, caller, &scopes, branched,
+        snapshot,
+        stored,
+        hits,
+        (!superclass).then_some(&root),
+        &scopes,
+        branched,
     ))
 }
 
@@ -1877,33 +1951,36 @@ fn resolve_receiver_typed(
     }
     // The member's declaring scope is the bound type's own, then its
     // ancestors nearest first, mirroring the self-receiver hierarchy.
-    let mut scopes = vec![type_scope.clone()];
-    let branched = collect_base_scopes(
-        store,
-        snapshot,
-        &type_scope,
-        &mut scopes,
-        &mut HashSet::new(),
-        8,
-    )?;
+    // A bound type declared in one file is placed there; candidates spanning
+    // several files leave the declaring file to the index.
+    let single_file = {
+        let mut files = candidates.iter().map(|candidate| candidate.file_id);
+        files
+            .next()
+            .filter(|first| files.all(|file| file == *first))
+    };
+    let root = ClassScope::at(snapshot, type_scope, single_file);
+    let mut scopes = vec![root.clone()];
+    let branched =
+        collect_base_scopes(store, snapshot, &root, &mut scopes, &mut HashSet::new(), 8)?;
     Ok(bind_hierarchy_member(
+        snapshot,
         stored,
         hits,
-        Some(type_scope.as_str()),
+        Some(&root),
         &scopes,
         branched,
     ))
 }
 
-/// Appends the qualified names of every base class reachable from
-/// `class_scope` through extends/implements edges, nearest first: the direct
-/// bases before their own bases, so reading `scopes` in order walks the
-/// hierarchy by distance from `class_scope` — the order member lookup needs
-/// to let an override shadow the declarations of the bases it replaces.
-/// `remaining` bounds the chain depth (one hop for `super` receivers, a
-/// fixed limit for the transitive `self` chain) and `visited` guards against
-/// inheritance cycles; a class whose entities spell its scope ambiguously
-/// ends that branch conservatively.
+/// Appends every base class reachable from `root` through extends/implements
+/// edges, nearest first: the direct bases before their own bases, so reading
+/// `scopes` in order walks the hierarchy by distance from `root` — the order
+/// member lookup needs to let an override shadow the declarations of the bases
+/// it replaces. `remaining` bounds the chain depth (one hop for `super`
+/// receivers, a fixed limit for the transitive `self` chain) and `visited`
+/// guards against inheritance cycles; a root whose class the index cannot
+/// place ends the walk for that branch conservatively.
 ///
 /// Returns whether one class on the way declares several bases, the condition
 /// under which distance is no longer the language's own lookup order and the
@@ -1914,18 +1991,24 @@ fn resolve_receiver_typed(
 fn collect_base_scopes(
     store: &IndexStore,
     snapshot: &ResolutionSnapshot,
-    class_scope: &str,
-    scopes: &mut Vec<String>,
+    root: &ClassScope,
+    scopes: &mut Vec<ClassScope>,
     visited: &mut HashSet<String>,
     remaining: usize,
 ) -> crate::EngineResult<bool> {
-    visited.insert(class_scope.to_owned());
-    let mut frontier = vec![class_scope.to_owned()];
+    // A base is reached through its own entity, so every scope this walk adds
+    // starts from that exact entity; only the root may fall back to the name.
+    let mut frontier = vec![root.clone()];
+    visited.insert(root.entity.clone().unwrap_or_else(|| root.name.clone()));
     let mut branched = false;
     for _ in 0..remaining {
         let mut bases = Vec::new();
         for scope in &frontier {
-            let Some(class_id) = class_entity_id(snapshot, scope) else {
+            let class_id = scope
+                .entity
+                .clone()
+                .or_else(|| class_entity_id(snapshot, &scope.name));
+            let Some(class_id) = class_id else {
                 continue;
             };
             let (resolved, pending) = store.inheritance_bases(&class_id)?;
@@ -1954,8 +2037,12 @@ fn collect_base_scopes(
             let Some(base) = snapshot.entity_record(&base_id) else {
                 continue;
             };
-            let scope = base.qualified_name.clone();
-            if visited.insert(scope.clone()) {
+            let scope = ClassScope {
+                entity: Some(base_id),
+                ..ClassScope::at(snapshot, base.qualified_name.clone(), None)
+            };
+            let key = scope.entity.clone().unwrap_or_else(|| scope.name.clone());
+            if visited.insert(key) {
                 scopes.push(scope.clone());
                 next.push(scope);
             }
@@ -1974,15 +2061,75 @@ fn collect_base_scopes(
 fn class_entity_id(snapshot: &ResolutionSnapshot, class_scope: &str) -> Option<String> {
     let tail = class_scope.rsplit("::").next()?;
     let hits = snapshot.lookup_candidates(tail)?;
-    let matched: Vec<&NameIndexEntry> = hits
+    let spelled: Vec<&NameIndexEntry> = hits
         .iter()
         .filter(|hit| hit.qualified_name == class_scope)
         .collect();
+    // A type declaration outranks a scope that carries its name over (Rust's
+    // `impl Target`), which is a member container rather than the class.
+    let declared: Vec<&NameIndexEntry> = spelled
+        .iter()
+        .copied()
+        .filter(|hit| hit.declares_type)
+        .collect();
+    let matched = if declared.is_empty() {
+        spelled
+    } else {
+        declared
+    };
     // A prototype and the definition of one class share the qualified name;
     // they name one symbol, so the hierarchy resolves through either.
     let matched = prefer_definitions(matched);
     if let [hit] = matched.as_slice() {
         return Some(hit.entity_id.clone());
+    }
+    None
+}
+
+/// The file that declares the class `class_scope` for a reference written in
+/// `file_hint`.
+///
+/// A file is the identity a class name lacks: every module that declares a
+/// `Target` spells it `Target`, and an `impl` block adds a second entity of
+/// that name inside the same file, so neither the name nor a unique entity
+/// separates two modules. The hint decides whenever that file declares the
+/// name at all — a member and the class it belongs to are declared together,
+/// with out-of-line definitions being the exception the fallback covers. With
+/// no declaration at the hint, a single declaring file workspace-wide still
+/// answers; several leave the class unplaced, and the caller compares names.
+fn class_declaration_file(
+    snapshot: &ResolutionSnapshot,
+    class_scope: &str,
+    file_hint: Option<u32>,
+) -> Option<u32> {
+    let tail = class_scope.rsplit("::").next()?;
+    let hits = snapshot.lookup_candidates(tail)?;
+    let spelled: Vec<&NameIndexEntry> = hits
+        .iter()
+        .filter(|hit| hit.qualified_name == class_scope)
+        .collect();
+    // Only the declarations that introduce the name locate the class. A scope
+    // that carries the name over from the type it belongs to (Rust's `impl
+    // Target`) sits wherever its implementation is written, which says nothing
+    // about where the class is declared; a name no entity declares as a type
+    // falls back to every entity spelling it.
+    let declaring: HashSet<u32> = {
+        let types: Vec<u32> = spelled
+            .iter()
+            .filter(|hit| hit.declares_type)
+            .map(|hit| hit.file_id)
+            .collect();
+        if types.is_empty() {
+            spelled.iter().map(|hit| hit.file_id).collect()
+        } else {
+            types.into_iter().collect()
+        }
+    };
+    if let Some(hint) = file_hint.filter(|hint| declaring.contains(hint)) {
+        return Some(hint);
+    }
+    if declaring.len() == 1 {
+        return declaring.into_iter().next();
     }
     None
 }

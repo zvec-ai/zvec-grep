@@ -152,6 +152,7 @@ fn snapshot_candidates(case: &Case) -> Vec<SearchHit> {
                 is_declaration: false,
                 package: None,
                 has_internal_linkage: false,
+                declares_type: false,
             });
             let mut result = hit(
                 &i.to_string(),

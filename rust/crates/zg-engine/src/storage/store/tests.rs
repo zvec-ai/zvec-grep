@@ -654,6 +654,7 @@ fn fixture(
                 is_declaration: false,
                 package: None,
                 has_internal_linkage: false,
+                declares_type: false,
             })),
         ),
         vector,
@@ -1954,6 +1955,7 @@ fn index_code_file(
             is_declaration: false,
             package: None,
             has_internal_linkage: false,
+            declares_type: false,
         })),
     );
     let graph = FileGraphResult {

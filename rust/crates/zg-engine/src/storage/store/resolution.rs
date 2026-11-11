@@ -202,6 +202,7 @@ impl SymbolIndex {
                     parameters: parameter_evidence(metadata.signature.as_deref()),
                     package: metadata.package.clone(),
                     has_internal_linkage: metadata.has_internal_linkage,
+                    declares_type: metadata.declares_type,
                 });
             index.records.insert(
                 entity_id.clone(),

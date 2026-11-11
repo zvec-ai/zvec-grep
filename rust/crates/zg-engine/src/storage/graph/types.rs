@@ -26,6 +26,11 @@ pub(crate) struct StoredPendingRef {
 }
 
 /// One workspace name-index hit for a symbol name.
+// Each flag is one extracted fact a resolver rule reads on its own.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is a separate extracted fact read by a different rule"
+)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct NameIndexEntry {
     pub entity_id: String,
@@ -53,6 +58,9 @@ pub(crate) struct NameIndexEntry {
     /// namespace or file-scope `static`), so only its own translation unit can
     /// address it by name.
     pub has_internal_linkage: bool,
+    /// Whether this entity introduces a type's name rather than carrying it
+    /// over from the type it belongs to (`impl Target`, a Rust `impl` block).
+    pub declares_type: bool,
 }
 
 /// Name-index record for one entity. Entities without a symbol name are
