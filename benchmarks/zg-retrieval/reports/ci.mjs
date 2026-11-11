@@ -6,6 +6,7 @@ import { loadSuite, readJson, writeJson } from "../core/lib.mjs";
 import { summarizeMeasurements } from "../metrics/measurements.mjs";
 import { summarizeNdcg } from "../metrics/summary.mjs";
 import { validateZgReport, ZG_MODES } from "./validation.mjs";
+import { markdownPerformance, summarizePerformance } from "./performance.mjs";
 
 export const QUALITY_METRICS = Object.freeze([
   "file_hit_at_1",
@@ -221,6 +222,11 @@ export async function buildCiSummary({
       commit: candidateCommit,
     },
     rows,
+    performance: Array.isArray(zg?.repositories)
+      ? summarizePerformance(
+          zg.repositories.map((manifest) => manifest?.performance ?? {}),
+        )
+      : null,
     tasks,
     failed_tasks: failures,
     errors,
@@ -271,6 +277,7 @@ export function markdownCiSummary(result) {
           `- ${cell(row.label)}: ${row.measurements.output_sample_count} output samples; ${row.measurements.latency_sample_count} latency samples.`,
       ),
   );
+  lines.push("", markdownPerformance(result.performance));
   if (result.tasks?.length) {
     lines.push(
       "",

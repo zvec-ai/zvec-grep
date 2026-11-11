@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { publish, validateComparison } from "./retrieval-pr-comment.mjs";
+import { summarizePerformance } from "../../benchmarks/zg-retrieval/reports/performance.mjs";
 
 const base = "a".repeat(40),
   head = "b".repeat(40);
@@ -13,6 +14,7 @@ const request = {
   run_id: 123,
   run_attempt: 1,
   pr_number: 7,
+  harness_commit: "c".repeat(40),
   baseline: { repository: "Cuiyus/zvec-grep", commit: base, ref: "main" },
   candidate: {
     repository: "contributor/zvec-grep",
@@ -26,6 +28,23 @@ const models = {
   duretrieval: "local/potion-multilingual-128m",
   quarry: "local/potion-code-16m-v2",
 };
+const stage = {
+  status: "success",
+  concurrency: 4,
+  total_ms: 1000,
+  index_bytes: 1024,
+  samples_ms: [1, 2, 3, 4],
+  memory: { status: "available", samples: [{ rss_bytes: 1024 ** 2 }] },
+};
+const performance = summarizePerformance([
+  {
+    index: stage,
+    query: Object.fromEntries(
+      ["hybrid", "fts", "vector"].map((mode) => [mode, stage]),
+    ),
+  },
+  {},
+]);
 const report = {
   schema_version: 1,
   kind: "retrieval-version-comparison",
@@ -33,6 +52,13 @@ const report = {
   baseline: { repository: request.baseline.repository, commit: base },
   candidate: { repository: request.candidate.repository, commit: head },
   harness_commit: "c".repeat(40),
+  package_sha256: { baseline: "d".repeat(64), candidate: "e".repeat(64) },
+  performance: Object.fromEntries(
+    Object.keys(models).map((suite) => [
+      suite,
+      { baseline: performance, candidate: performance },
+    ]),
+  ),
   errors: [],
   rows: Object.entries(models).flatMap(([suite, model]) =>
     ["hybrid", "fts", "vector"].map((mode) => ({
@@ -172,14 +198,26 @@ test("a fork PR gets all twelve comparison rows, commit links and a source run l
   assert.equal(
     input.body
       .split("\n")
-      .filter((line) => /^\| (SWE-QA20|BEIR|DuRetrieval|Quarry)/.test(line))
-      .length,
+      .filter((line) =>
+        /^\| (SWE-QA20|BEIR|DuRetrieval|Quarry) \| (hybrid|fts|vector) \|/.test(
+          line,
+        ),
+      ).length,
     12,
   );
   assert.ok(input.body.includes(`/commit/${base}`));
   assert.ok(input.body.includes(`/commit/${head}`));
   assert.match(input.body, /actions\/runs\/123\/attempts\/1/);
   assert.match(input.body, /Embedding: local\. e2e: skipped/);
+  assert.ok(input.body.includes(request.harness_commit));
+  assert.ok(input.body.includes(report.package_sha256.candidate));
+  assert.equal(
+    (input.body.match(/RT n; mean \/ p50 \/ p95 \/ p99/g) ?? []).length,
+    1,
+  );
+  assert.match(input.body, /2\.50 \/ 2\.50 \/ 4\.00 \/ 4\.00/);
+  assert.match(input.body, /SWE-QA20 \/ head \| 1\/2; 0/);
+  assert.ok(input.body.length < 65536, "Fits GitHub's comment limit");
 });
 
 test("later results and failed-job reruns update one bot comment", async (t) => {
@@ -412,6 +450,135 @@ test("artifact Markdown, URLs and arbitrary fields never appear in a result comm
   assert.doesNotMatch(x.messages()[0][1].body, /evil|everyone|forged/);
 });
 
+test("missing RSS remains unavailable and artifact performance text is never rendered", async (t) => {
+  const x = await fixture(t);
+  const input = structuredClone(report);
+  input.performance.sweqa.baseline = summarizePerformance([{}]);
+  input.performance.sweqa.baseline.index.injected = "@everyone forged";
+  input.performance.sweqa.baseline.percentile_method = "@everyone forged";
+  await x.write("comparison/summary.json", input);
+  await publish(x);
+  const body = x.messages()[0][1].body;
+  assert.match(body, /✅ Complete/);
+  assert.match(body, /SWE-QA20 \/ base \| 0\/1; 0 \| 0; —/);
+  assert.doesNotMatch(body, /everyone|forged/);
+});
+
+test("invalid performance, package and harness identities cannot become a complete comment", () => {
+  for (const change of [
+    (r) => {
+      delete r.performance;
+    },
+    (r) => {
+      delete r.performance.quarry;
+    },
+    (r) => {
+      r.performance.beir.baseline.query.hybrid.latency_ms.p50 = "@everyone";
+    },
+    (r) => {
+      r.performance.beir.baseline.index.total_ms.count = -1;
+    },
+    (r) => {
+      r.performance.beir.baseline.index.total_ms.mean = Infinity;
+    },
+    (r) => {
+      r.performance.beir.baseline.index.total_ms.total = 100;
+    },
+    (r) => {
+      r.performance.beir.baseline.index.measured = 3;
+    },
+    (r) => {
+      r.performance.beir.baseline.index.concurrency = [5];
+    },
+    (r) => {
+      r.performance.beir.baseline.index.memory_rss_bytes.p95 = null;
+    },
+    (r) => {
+      r.package_sha256.candidate = "not-a-hash";
+    },
+    (r) => {
+      r.harness_commit = "f".repeat(40);
+    },
+  ]) {
+    const input = structuredClone(report);
+    change(input);
+    assert.throws(() => validateComparison(input, request));
+  }
+});
+
+test("quality comes first and is the only disclosure expanded by default", async (t) => {
+  const x = await fixture(t);
+  await publish(x);
+  const body = x.messages()[0][1].body;
+  const parts = ["1 · Retrieval quality", "2 · Index", "3 · Query"].map(
+    (part) => body.indexOf(part),
+  );
+  assert.ok(parts[0] >= 0 && parts[0] < parts[1] && parts[1] < parts[2]);
+  const disclosures = [
+    ...body.matchAll(/<details( open)?>\n<summary>([^<]+)<\/summary>/g),
+  ];
+  assert.equal(disclosures.length, 6);
+  assert.equal(disclosures[0][1], " open");
+  assert.equal(disclosures[0][2], "Quality scores · 4 suites × 3 modes");
+  assert.ok(disclosures.slice(1).every((match) => match[1] === undefined));
+  assert.equal((body.match(/<details open>/g) ?? []).length, 1);
+  assert.match(body, /### 2 · Index\n\n<details>\n<summary>Index performance/);
+  assert.match(body, /### 3 · Query\n\n<details>\n<summary>Query performance/);
+  assert.match(body, /Σ \/ μ \/ p95 \/ p99/);
+  assert.match(body, /mean \/ p50 \/ p95 \/ p99/);
+  assert.match(body, /complete phases/);
+  assert.match(body, /Peak RSS/);
+});
+
+test("performance cells show signed relative changes for index, RT and RSS", async (t) => {
+  const x = await fixture(t);
+  const input = structuredClone(report);
+  const summarize = (measured) =>
+    summarizePerformance([
+      {
+        index: measured,
+        query: Object.fromEntries(
+          ["hybrid", "fts", "vector"].map((mode) => [mode, measured]),
+        ),
+      },
+    ]);
+  input.performance.sweqa = {
+    baseline: summarize(stage),
+    candidate: summarize({
+      ...stage,
+      total_ms: 750,
+      samples_ms: [2, 4, 6, 8],
+      memory: {
+        status: "available",
+        samples: [{ rss_bytes: 1.5 * 1024 ** 2 }],
+      },
+    }),
+  };
+  await x.write("comparison/summary.json", input);
+  await publish(x);
+  const body = x.messages()[0][1].body;
+  assert.match(body, /1\.00 → 0\.75 \(-25\.00%\)/);
+  assert.match(body, /1\.00 → 1\.50 \(\+50\.00%\)/);
+  assert.match(body, /2\.50 → 5\.00 \(\+100\.00%\)/);
+  assert.match(body, /0\.00 → 0\.00 \(0\.00%\)/);
+});
+
+test("zero or missing baselines withhold percentages without Infinity or false zeros", async (t) => {
+  for (const index of [{ ...stage, total_ms: 0, index_bytes: 0 }, null]) {
+    const x = await fixture(t);
+    const input = structuredClone(report);
+    input.performance.sweqa = {
+      baseline: summarizePerformance([{ index }]),
+      candidate: performance,
+    };
+    await x.write("comparison/summary.json", input);
+    await publish(x);
+    const body = x.messages()[0][1].body;
+    assert.ok(body.includes(`${index ? "0.00" : "—"} → 1.00 (—)`));
+    assert.doesNotMatch(body, /Infinity|NaN|-0\.00%/);
+  }
+});
+
 test("publisher checks out trusted code and only reads artifacts from the triggering run", async () => {
   const workflow = await readFile(
     new URL("../workflows/retrieval-pr-comment.yml", import.meta.url),
@@ -469,6 +636,7 @@ test("the read-only context job records the original fork PR event's exact versi
       RUNNER_TEMP: x.directory,
       GITHUB_RUN_ID: "123",
       GITHUB_RUN_ATTEMPT: "1",
+      GITHUB_SHA: request.harness_commit,
     },
   });
   assert.equal(result.status, 0, result.stderr);
