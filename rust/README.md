@@ -110,6 +110,11 @@ do not configure a separate query worker and are not persisted in workspace sett
 Direct and Server indexing use the same engine boundary; restart the Server after
 changing its inherited environment, while explicit CLI overrides need no restart.
 
+For llama.cpp, `ZVEC_GREP_LLAMA_THREADS=<n>` fixes the threads of each context,
+for example to the CPU quota of a container, in place of the llama.cpp default.
+It takes a positive integer; other values warn and keep the default. It applies to
+indexing and queries.
+
 For llama.cpp, the limit controls contexts within a serialized batch and is capped
 at eight, defaulting to one. Transformers/ORT shares a bounded runtime between
 indexing and queries for the same model, cache and device:

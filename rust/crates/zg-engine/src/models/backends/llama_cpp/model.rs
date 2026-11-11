@@ -508,7 +508,28 @@ fn report_warning(
     }
 }
 
+/// Fixes the llama.cpp threads per context, so a process under a CPU quota does not
+/// size its compute threads from the host core count.
+const THREADS_ENV: &str = "ZVEC_GREP_LLAMA_THREADS";
+
+fn threads_override(value: Option<&str>) -> Option<i32> {
+    let value = value?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    match value.parse::<usize>() {
+        Ok(parsed) if parsed > 0 => Some(i32::try_from(parsed).unwrap_or(i32::MAX)),
+        _ => {
+            tracing::warn!("{THREADS_ENV} must be a positive integer; ignoring {value:?}");
+            None
+        }
+    }
+}
+
 fn threads_per_context(gpu: bool, execution_concurrency: usize) -> i32 {
+    if let Some(threads) = threads_override(env::var(THREADS_ENV).ok().as_deref()) {
+        return threads;
+    }
     if gpu || execution_concurrency <= 1 {
         return 0;
     }
