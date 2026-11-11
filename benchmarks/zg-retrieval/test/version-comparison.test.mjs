@@ -389,7 +389,7 @@ test("paired pilot reports render added scores only under the same Gold and scor
   const after = result(headSha);
   for (const side of [before, after]) {
     const report = side.pilots.beir.report;
-    report.qa_gold = { id: "beir20-entity-v1", sha256: "a".repeat(64) };
+    report.qa_gold = { id: "beir20-entity-v2", sha256: "a".repeat(64) };
     report.qa_scoring = { ...PILOT_QA_SCORING };
     for (const row of report.summary) {
       for (const key of PILOT_FILE_RECALL_METRICS) row.metrics[key] = 0.375;
@@ -419,6 +419,16 @@ test("paired pilot reports render added scores only under the same Gold and scor
     Array(8).fill("25.00%"),
   );
   assert.match(markdown, /Diagnostic Entity results/);
+  after.pilots.beir.report.qa_scoring = {
+    version: 1,
+    entity_match: "contains",
+    range: "source_bytes",
+  };
+  assert.throws(
+    () => compareCombinedResults(before, after, metadata),
+    /different pilot scoring rules/,
+  );
+  after.pilots.beir.report.qa_scoring = { ...PILOT_QA_SCORING };
   after.pilots.beir.report.qa_gold.sha256 = "b".repeat(64);
   assert.throws(
     () => compareCombinedResults(before, after, metadata),

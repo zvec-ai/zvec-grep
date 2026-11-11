@@ -40,6 +40,14 @@ Use this reference when preparing data or writing scoring code. For the core rul
 - Changing `preview` between full and short must not change Entity scores for the same retrieved content. Preview text, indentation and truncation do not determine a hit.
 - Do not regenerate Gold using the parser under evaluation.
 
+For targets with alternative evidence groups, keep the document ID separate
+from each group's ID. All spans in one group must be covered, but any complete
+group is sufficient. Each span must fit within one returned Entity; different
+spans may be covered by different results. Do not require intervening text or
+combine incomplete groups. The target's rank is the earliest position where
+one group becomes complete. Count that target once for Recall and nDCG, even
+when several groups are found.
+
 ### Order and scoring eligibility
 
 - Specify which result group to use and how to read its order in advance. Do not adjust these choices based on Gold.

@@ -214,7 +214,10 @@ export function validateComparison(report, request) {
     );
     for (const name of names) {
       const gold = report.pilot_qa_gold[name];
-      assert.equal(gold?.id, `${PILOT_SUITES[name].suite}-entity-v1`);
+      assert.equal(
+        gold?.id,
+        `${PILOT_SUITES[name].suite}-entity-v${PILOT_SUITES[name].goldVersion}`,
+      );
       assert.match(
         gold?.sha256 ?? "",
         /^[a-f0-9]{64}$/,

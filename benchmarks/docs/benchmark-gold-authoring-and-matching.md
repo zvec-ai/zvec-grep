@@ -18,8 +18,9 @@ Gold must include every expected target within the specified source version and 
 
 - Check retrieved results against the specified source version.
 - File matches require the full repository-relative path.
-- An Entity hit requires `Entity.content` to contain the Gold target's full source range in the same file. Partial overlap is not enough.
-- One result may cover several Gold targets. Count each target once, at its first matching rank.
+- Match each Gold source span by full containment in one returned Entity's `content` in the same file. Partial overlap is a miss.
+- One result may cover several Gold targets. Count each target once, at the rank where it first becomes fully covered.
+- Preserve alternative evidence groups from the source dataset. Cover every span in any one group to hit the target; other alternatives do not add credit.
 - `preview` affects display and information density, not Entity matches or Recall.
 - Take the first K results in their original order. Duplicate results still occupy their original positions.
 - If a score cannot be determined, record why instead of assigning zero. Assign zero only to a confirmed miss in valid results.

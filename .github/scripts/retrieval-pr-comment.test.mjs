@@ -796,7 +796,10 @@ test("trusted publisher validates and retains pilot QA comparison data", () => {
   payload.pilot_qa_gold = Object.fromEntries(
     Object.entries(PILOT_SUITES).map(([name, config]) => [
       name,
-      { id: `${config.suite}-entity-v1`, sha256: "a".repeat(64) },
+      {
+        id: `${config.suite}-entity-v${config.goldVersion}`,
+        sha256: "a".repeat(64),
+      },
     ]),
   );
   const diagnostic = {

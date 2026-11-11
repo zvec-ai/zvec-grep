@@ -106,23 +106,36 @@ Quarry questions ask for declarations or parts of a code path beyond the
 published functions. The Entity scores measure coverage of those published
 functions.
 
-BEIR has 22 verified evidence ranges. The cited abstracts for SciFact claims
+BEIR has 22 verified Entity targets. The cited abstracts for SciFact claims
 `1`, `268`, `552`, `702`, `830` and `975` do not establish the stated
 claim-specific evidence. These cases still count for File and are unscored at
 Entity level. DuRetrieval has 48 verified answer ranges. All ten questions have
 Entity Gold. Quarry keeps all 107 published positive functions.
 
-An Entity hit requires one result to contain the full Gold range in the same
-file. The runner aligns full MCP results to the verified source because the
+SciFact preserves every original evidence group: claim `436` accepts sentence
+`1` or `2`; `1274` accepts both `4` and `5`, or `7`. Claim `137` requires `7`
+and `9`, without requiring sentence `8`. These are zero-based source sentence
+indices, following the [official evidence rules](https://github.com/allenai/scifact/blob/master/doc/evaluation.md).
+Each document is one target. Complete any one group within the first K results;
+each member span must be fully contained in a returned Entity. The target's
+first-hit rank is the position completing its earliest group, and multiple
+complete alternatives still earn one target's credit.
+
+Each Gold span must be fully contained in one result from the same file.
+The runner aligns full MCP results to the verified source because the
 text header gives line numbers without columns. This distinguishes different
 chunks on the same line. Scores use the resulting byte coordinates. An
 ambiguous range remains unknown when it could affect a metric. Repeating a
-target or covering it across separate results does not add credit. See the
+target does not add credit. Partial pieces of one span cannot be combined
+across results; separate spans in an evidence group can. See the
 [matching rules](../../docs/benchmark-gold-authoring-and-matching.md) for
 ranking, aggregation and missing evidence.
 
 Pilot report schema 3 binds the Gold and scoring rules and saves per-call
 source coordinates. Comparisons recheck both sides with the same Gold and rules.
+BEIR Gold schema 2 stores alternative groups and individual sentence spans.
+Pilot scoring version 2 recognizes complete groups; recalculate both versions
+under these rules rather than comparing them with earlier scores.
 Historical schema 2 reports retain their File metrics. To add Entity metrics to
 an older run, use its saved full responses and pinned source to verify the
 ranges, or rerun both versions. Record which method produced the scores.

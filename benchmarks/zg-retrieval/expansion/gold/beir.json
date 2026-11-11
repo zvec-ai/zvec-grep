@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "suite": "beir20",
   "source_lock_sha256": "8f1c15bfd8083eebe4f85f5b308fa1cc6c52ceffd08d6b573e8f62572b3023fe",
   "scifact_evidence": {
@@ -35,13 +35,29 @@
         {
           "source_id": "26016929",
           "path": "docs/26016929.md",
-          "start_line": 3,
-          "end_line": 3,
-          "start_byte": 931,
-          "end_byte": 1336,
-          "sha256": "1f2b9829f072e8045a00375e2e746f1f7c9d3fa993e3cb12f027da4d84bf0012",
           "reason": "The original evidence links visual screening to the measured outcome and the conclusion for asymptomatic older people.",
-          "scifact_sentences": [7, 9]
+          "evidence_sets": [
+            {
+              "id": "26016929:evidence-1",
+              "scifact_sentences": [7, 9],
+              "spans": [
+                {
+                  "start_line": 3,
+                  "end_line": 3,
+                  "start_byte": 931,
+                  "end_byte": 1121,
+                  "sha256": "8bc88b556db99ea5254df273c96c3e8b24d7a7e3e7e3fc89dc755bdcec1ff4fc"
+                },
+                {
+                  "start_line": 3,
+                  "end_line": 3,
+                  "start_byte": 1231,
+                  "end_byte": 1336,
+                  "sha256": "70fa86cc7809d2472fc4791eb9611951f91513e44bf78e6b31c3f64815d46a3f"
+                }
+              ]
+            }
+          ]
         }
       ],
       "unresolved": []
@@ -74,13 +90,35 @@
         {
           "source_id": "14637235",
           "path": "docs/14637235.md",
-          "start_line": 3,
-          "end_line": 3,
-          "start_byte": 323,
-          "end_byte": 512,
-          "sha256": "8c43d8e114089ed8235b9e6d9e8a03caafbff4beef7a2222489a70e4c90e6b8a",
           "reason": "The original evidence directly describes Rad53-dependent degradation of excess histones.",
-          "scifact_sentences": [1]
+          "evidence_sets": [
+            {
+              "id": "14637235:evidence-1",
+              "scifact_sentences": [1],
+              "spans": [
+                {
+                  "start_line": 3,
+                  "end_line": 3,
+                  "start_byte": 323,
+                  "end_byte": 512,
+                  "sha256": "8c43d8e114089ed8235b9e6d9e8a03caafbff4beef7a2222489a70e4c90e6b8a"
+                }
+              ]
+            },
+            {
+              "id": "14637235:evidence-2",
+              "scifact_sentences": [2],
+              "spans": [
+                {
+                  "start_line": 3,
+                  "end_line": 3,
+                  "start_byte": 513,
+                  "end_byte": 717,
+                  "sha256": "0da7320f7f055f3a24af41c56dfea21491517b4db483e9f112772591ea1ef30e"
+                }
+              ]
+            }
+          ]
         }
       ],
       "unresolved": []
@@ -161,13 +199,22 @@
         {
           "source_id": "15305881",
           "path": "docs/15305881.md",
-          "start_line": 3,
-          "end_line": 3,
-          "start_byte": 692,
-          "end_byte": 893,
-          "sha256": "9f967f3ae1f519b0485300bb217fcbcae6bc3fd65a11573a04ffeabcdd70c832",
           "reason": "The original evidence identifies DdrB as structurally distinct from other single-stranded DNA-binding proteins.",
-          "scifact_sentences": [5]
+          "evidence_sets": [
+            {
+              "id": "15305881:evidence-1",
+              "scifact_sentences": [5],
+              "spans": [
+                {
+                  "start_line": 3,
+                  "end_line": 3,
+                  "start_byte": 692,
+                  "end_byte": 893,
+                  "sha256": "9f967f3ae1f519b0485300bb217fcbcae6bc3fd65a11573a04ffeabcdd70c832"
+                }
+              ]
+            }
+          ]
         }
       ],
       "unresolved": []
@@ -194,13 +241,42 @@
         {
           "source_id": "4406819",
           "path": "docs/4406819.md",
-          "start_line": 3,
-          "end_line": 3,
-          "start_byte": 1258,
-          "end_byte": 1490,
-          "sha256": "fe27a06b96ca21bb7035f807cda15b787761e75ddb120ff67f424d0085395f53",
           "reason": "This sentence is an original SciFact evidence set for the claim.",
-          "scifact_sentences": [7]
+          "evidence_sets": [
+            {
+              "id": "4406819:evidence-1",
+              "scifact_sentences": [4, 5],
+              "spans": [
+                {
+                  "start_line": 3,
+                  "end_line": 3,
+                  "start_byte": 749,
+                  "end_byte": 965,
+                  "sha256": "c703ca7b9180ff8296d5b576ed32aaf9ea0084814172f81b6b2e51af894f6bb5"
+                },
+                {
+                  "start_line": 3,
+                  "end_line": 3,
+                  "start_byte": 966,
+                  "end_byte": 1112,
+                  "sha256": "5abce59e34b0765233766310b4d64d919c618abd3fadf5d36cefc9cf6bc0a8f7"
+                }
+              ]
+            },
+            {
+              "id": "4406819:evidence-2",
+              "scifact_sentences": [7],
+              "spans": [
+                {
+                  "start_line": 3,
+                  "end_line": 3,
+                  "start_byte": 1258,
+                  "end_byte": 1490,
+                  "sha256": "fe27a06b96ca21bb7035f807cda15b787761e75ddb120ff67f424d0085395f53"
+                }
+              ]
+            }
+          ]
         }
       ],
       "unresolved": [

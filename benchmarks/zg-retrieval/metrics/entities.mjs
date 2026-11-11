@@ -222,6 +222,10 @@ function rankMetrics(items, targets, match, ndcg = ndcgAtK) {
     if (result.possible.length)
       unknown.push({ rank: item.rank, target_ids: result.possible });
   }
+  return metricsFromRanks(targets, found, unknown, ndcg);
+}
+
+function metricsFromRanks(targets, found, unknown, ndcg) {
   const result = {
     n_relevant: targets.length,
     target_ranks: targets.map((target) => found.get(target.id) ?? null),
@@ -251,6 +255,95 @@ function rankMetrics(items, targets, match, ndcg = ndcgAtK) {
     ? null
     : ndcg([...found.values()], targets.length, 10);
   return result;
+}
+
+function evidenceSetMetrics(items, targets, entityByteRanges, ndcg) {
+  const members = [];
+  const alternatives = targets.map((target, targetIndex) => {
+    // Ordinary targets remain a single required source span.
+    const sets = target.evidence_sets ?? [{ id: "single", spans: [target] }];
+    if (Object.hasOwn(target, "evidence_sets"))
+      assert.ok(
+        Array.isArray(target.evidence_sets) && target.evidence_sets.length > 0,
+        "Entity evidence sets must be nonempty",
+      );
+    const setIds = new Set();
+    return sets.map((set, setIndex) => {
+      assert.ok(
+        typeof set?.id === "string" && set.id && !setIds.has(set.id),
+        "Entity evidence set IDs must be nonempty and unique",
+      );
+      setIds.add(set.id);
+      assert.ok(
+        Array.isArray(set.spans) && set.spans.length > 0,
+        "Entity evidence spans must be nonempty",
+      );
+      return set.spans.map((span, spanIndex) => {
+        assert.ok(
+          Number.isSafeInteger(span?.start_line) &&
+            span.start_line > 0 &&
+            Number.isSafeInteger(span.end_line) &&
+            span.end_line >= span.start_line,
+          "invalid Entity evidence lines",
+        );
+        if (entityByteRanges)
+          assert.ok(
+            Number.isSafeInteger(span.start_byte) &&
+              span.start_byte >= 0 &&
+              Number.isSafeInteger(span.end_byte) &&
+              span.end_byte > span.start_byte,
+            "invalid Entity evidence bytes",
+          );
+        assert.ok(
+          span.path === undefined || span.path === target.path,
+          "Entity evidence must belong to its target file",
+        );
+        const id = `${targetIndex}/${setIndex}/${spanIndex}`;
+        members.push({ ...span, path: target.path, id });
+        return id;
+      });
+    });
+  });
+  const definite = new Map(),
+    possible = new Map();
+  for (const item of items) {
+    if (item.rank > 10) break;
+    const matched = entityMatch(item, members, entityByteRanges);
+    for (const id of matched.hits)
+      if (!definite.has(id)) definite.set(id, item.rank);
+    for (const id of matched.possible)
+      if (!possible.has(id)) possible.set(id, item.rank);
+  }
+  const found = new Map(),
+    uncertain = new Map();
+  for (const [index, target] of targets.entries()) {
+    // AND within a set: completion is its latest required member.
+    // OR across alternatives: the earliest complete set determines the rank.
+    const completion = (includePossible) =>
+      Math.min(
+        ...alternatives[index].map((set) =>
+          Math.max(
+            ...set.map((id) =>
+              Math.min(
+                definite.get(id) ?? Infinity,
+                includePossible ? (possible.get(id) ?? Infinity) : Infinity,
+              ),
+            ),
+          ),
+        ),
+      );
+    const knownRank = completion(false),
+      possibleRank = completion(true);
+    if (Number.isFinite(knownRank)) found.set(target.id, knownRank);
+    if (possibleRank < knownRank) {
+      if (!uncertain.has(possibleRank)) uncertain.set(possibleRank, []);
+      uncertain.get(possibleRank).push(target.id);
+    }
+  }
+  const unknown = [...uncertain]
+    .sort(([a], [b]) => a - b)
+    .map(([rank, target_ids]) => ({ rank, target_ids }));
+  return metricsFromRanks(targets, found, unknown, ndcg);
 }
 
 function eligibility(pair) {
@@ -317,12 +410,21 @@ export function scoreQaRetrieval(
       const target = targets.find((target) => target.path === item.path);
       return { hits: target ? [target.id] : [], possible: [] };
     }),
-    entity: rankMetrics(
-      items,
-      pair.entity_targets,
-      (item, targets) => entityMatch(item, targets, entityByteRanges),
-      (ranks, _, k) => entityNdcg(ranks, pair.entity_targets, k),
-    ),
+    entity: pair.entity_targets.some((target) =>
+      Object.hasOwn(target, "evidence_sets"),
+    )
+      ? evidenceSetMetrics(
+          items,
+          pair.entity_targets,
+          entityByteRanges,
+          (ranks, _, k) => entityNdcg(ranks, pair.entity_targets, k),
+        )
+      : rankMetrics(
+          items,
+          pair.entity_targets,
+          (item, targets) => entityMatch(item, targets, entityByteRanges),
+          (ranks, _, k) => entityNdcg(ranks, pair.entity_targets, k),
+        ),
   };
 }
 
