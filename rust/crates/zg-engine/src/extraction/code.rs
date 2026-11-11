@@ -11,7 +11,7 @@ use crate::{
     utils::line_byte_offsets,
 };
 
-use self::adapter::{LanguageAdapter, named_children, resolve_adapter};
+use self::adapter::{LanguageAdapter, named_children, php_declaration, resolve_adapter};
 use super::graph::{
     WalkContext, collect_import_edge, collect_inheritance_edges, is_import_node, partition_walk,
     scan_binding_declarations, scan_call_edges, scan_return_types,
@@ -136,11 +136,15 @@ fn extract_code(
 
     let mut output = Vec::new();
     let mut entity_heads = Vec::with_capacity(entities.len());
-    for entity in entities {
+    for entity in &entities {
         // Fragments are appended contiguously in walk order, so the output
         // length before each append is that entity's head fragment index.
         entity_heads.push(output.len());
-        append_entity(source, &entity, max_chars, overlap_chars, &mut output);
+        append_entity(source, entity, max_chars, overlap_chars, &mut output);
+    }
+    // Gap chunks follow every entity, so they leave the head indexes intact.
+    if code_format == FileFormat::Php && !output.is_empty() {
+        append_php_gaps(source, &entities, max_chars, overlap_chars, &mut output);
     }
     if output.is_empty() {
         Ok(ExtractionOutput {
@@ -168,6 +172,7 @@ fn grammar(format: FileFormat, jsx: bool) -> Option<Language> {
         FileFormat::Go => tree_sitter_go::LANGUAGE.into(),
         FileFormat::Java => tree_sitter_java::LANGUAGE.into(),
         FileFormat::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+        FileFormat::Php => tree_sitter_php::LANGUAGE_PHP.into(),
         FileFormat::Python => tree_sitter_python::LANGUAGE.into(),
         FileFormat::Rust => tree_sitter_rust::LANGUAGE.into(),
         FileFormat::TypeScript if !jsx => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
@@ -241,9 +246,11 @@ fn walk_code_node<'tree>(
 
         if is_entity {
             let start_index = out.len();
+            let mut entity_indexes = Vec::new();
             for entity in adapter.resolve_entities(child, source) {
                 let entity_index = graph_context.next_entity_index();
                 first_entity_index.get_or_insert(entity_index);
+                entity_indexes.push(entity_index);
                 scope_entity_index = Some(entity_index);
                 let name = adapter.extract_name(entity, source);
                 let entity_breadcrumb = adapter.scope_breadcrumb(entity, source, breadcrumb);
@@ -289,21 +296,26 @@ fn walk_code_node<'tree>(
                     |node: Node<'_>| adapter.is_entity(node) || adapter.is_scope(node);
                 let boundary: Option<&dyn Fn(Node<'_>) -> bool> =
                     is_scope.then_some(&member_owned as &dyn Fn(Node<'_>) -> bool);
-                scan_call_edges(
-                    first_entity.node,
-                    first_entity_index,
-                    source,
-                    graph_context,
-                    boundary,
-                );
-                scan_binding_declarations(
-                    first_entity.node,
-                    first_entity_index,
-                    source,
-                    format,
-                    graph_context,
-                    boundary,
-                );
+                // A split PHP statement resolves to its elements, so the first
+                // element's subtree misses the initializers of the others,
+                // as in `const A = new Foo, B = new Bar;`.
+                let scanned = if format == FileFormat::Php {
+                    entity_indexes.len()
+                } else {
+                    1
+                };
+                for (offset, entity_index) in entity_indexes.iter().take(scanned).enumerate() {
+                    let entity_node = out[start_index + offset].node;
+                    scan_call_edges(entity_node, *entity_index, source, graph_context, boundary);
+                    scan_binding_declarations(
+                        entity_node,
+                        *entity_index,
+                        source,
+                        format,
+                        graph_context,
+                        boundary,
+                    );
+                }
                 collect_inheritance_edges(
                     first_entity.node,
                     source,
@@ -394,6 +406,74 @@ fn append_entity(
         content: Content::Text(content),
         metadata: Some(metadata),
     });
+}
+
+// PHP files mix declarations with templates and top-level statements. The
+// source outside every declaration stays searchable as plain-text chunks.
+fn append_php_gaps(
+    source: &TextSource,
+    entities: &[CodeEntity<'_>],
+    max_chars: usize,
+    overlap_chars: usize,
+    output: &mut Vec<ExtractedEntity>,
+) {
+    let mut covered = Vec::with_capacity(entities.len() * 2);
+    for entity in entities {
+        covered.push((entity.node.start_byte(), entity.node.end_byte()));
+        // Comments stored as documentation count as covered. Split elements
+        // inherit theirs from the statement, so walk back from there, as
+        // `extract_doc` does, leaving comments between elements searchable.
+        if entity.documentation.is_some() {
+            let declaration = php_declaration(entity.node);
+            let mut sibling = declaration.prev_named_sibling();
+            let mut run: Option<(usize, usize)> = None;
+            while let Some(comment) = sibling.filter(|node| node.kind() == "comment") {
+                run = Some((
+                    comment.start_byte(),
+                    run.map_or(comment.end_byte(), |run| run.1),
+                ));
+                sibling = comment.prev_named_sibling();
+            }
+            covered.extend(run);
+        }
+    }
+    covered.sort_unstable();
+    let mut gaps = Vec::new();
+    let mut offset = 0;
+    for (start, end) in covered {
+        if start > offset {
+            gaps.push((offset, start));
+        }
+        offset = offset.max(end);
+    }
+    gaps.push((offset, source.text.len()));
+
+    let line_offsets = line_byte_offsets(&source.text);
+    let mut gap_source = source.clone();
+    for (start, end) in gaps {
+        let gap = &source.text[start..end];
+        let text = gap.trim();
+        if !has_searchable_text(text) {
+            continue;
+        }
+        let text_start = start + (gap.len() - gap.trim_start().len());
+        text.clone_into(&mut gap_source.text);
+        let chunks = fallback(&gap_source, max_chars, overlap_chars);
+        let remapped =
+            remap_script_block_entities(source, chunks, output.len(), &line_offsets, text_start);
+        output.extend(remapped);
+    }
+}
+
+// Bare open or close tags and separators left between split elements, such
+// as a lone `;`, carry nothing worth searching.
+fn has_searchable_text(text: &str) -> bool {
+    text.replace("<?php", "")
+        .replace("<?=", "")
+        .replace("<?", "")
+        .replace("?>", "")
+        .chars()
+        .any(char::is_alphanumeric)
 }
 
 fn code_entity_metadata(entity: &CodeEntity<'_>) -> EntityMetadata {
@@ -790,6 +870,359 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
+    fn preserves_php_symbols_scopes_properties_and_constants() {
+        let source = test_source(
+            FileFormat::Php,
+            "fixture.php",
+            &[
+                "<?php",
+                "namespace App {",
+                "/** Charges a guest. */",
+                "interface ChargerInterface { public function charge(int $cents): bool; }",
+                "trait Loggable { public function log(string $msg): void {} }",
+                "enum ChargeStatus: string { case Paid = 'paid'; const int MIN = 1; }",
+                "abstract class BaseCharger implements ChargerInterface {",
+                "  /** The wallet. */",
+                "  #[Inject]",
+                "  private readonly Wallet $wallet;",
+                "  public const int MAX = 100, MIN = 0;",
+                "  public string $full {",
+                "    get => $this->a;",
+                "    set(string $v) { $this->a = $v; }",
+                "  }",
+                "  private(set) int $counter = 0;",
+                "  const LIMIT = true ? 10 : 20;",
+                "  public static function make(int $limit): static { return new static($limit); }",
+                "  public function __construct(",
+                "    private Logger $logger,",
+                "    protected(set) string $tag,",
+                "    public array &$items,",
+                "    int $plain,",
+                "  ) {}",
+                "}",
+                "function helper(int $x): int { return $x * 2; }",
+                "}",
+            ]
+            .join("\n"),
+        );
+        let fragments = extract(&source, ChunkOptions::default()).expect("php extraction");
+        let expected: [(&str, SymbolType, &str, &str, Option<&str>); 16] = [
+            (
+                "ChargerInterface",
+                SymbolType::Interface,
+                "App",
+                "interface ChargerInterface",
+                Some("Charges a guest."),
+            ),
+            (
+                "charge",
+                SymbolType::Function,
+                "App::ChargerInterface",
+                "public function charge(int $cents): bool",
+                None,
+            ),
+            (
+                "Loggable",
+                SymbolType::Interface,
+                "App",
+                "trait Loggable",
+                None,
+            ),
+            (
+                "log",
+                SymbolType::Function,
+                "App::Loggable",
+                "public function log(string $msg): void",
+                None,
+            ),
+            (
+                "ChargeStatus",
+                SymbolType::Enum,
+                "App",
+                "enum ChargeStatus: string",
+                None,
+            ),
+            (
+                "Paid",
+                SymbolType::Value,
+                "App::ChargeStatus",
+                "case Paid = 'paid'",
+                None,
+            ),
+            (
+                "make",
+                SymbolType::Function,
+                "App::BaseCharger",
+                "public static function make(int $limit): static",
+                None,
+            ),
+            (
+                "wallet",
+                SymbolType::Value,
+                "App::BaseCharger",
+                "private readonly Wallet $wallet",
+                Some("The wallet."),
+            ),
+            (
+                "MAX",
+                SymbolType::Value,
+                "App::BaseCharger",
+                "public const int MAX = 100",
+                None,
+            ),
+            (
+                "LIMIT",
+                SymbolType::Value,
+                "App::BaseCharger",
+                "const LIMIT = true ? 10 : 20",
+                None,
+            ),
+            (
+                "items",
+                SymbolType::Value,
+                "App::BaseCharger",
+                "public array &$items",
+                None,
+            ),
+            (
+                "full",
+                SymbolType::Value,
+                "App::BaseCharger",
+                "public string $full",
+                None,
+            ),
+            (
+                "counter",
+                SymbolType::Value,
+                "App::BaseCharger",
+                "private(set) int $counter = 0",
+                None,
+            ),
+            (
+                "logger",
+                SymbolType::Value,
+                "App::BaseCharger",
+                "private Logger $logger",
+                None,
+            ),
+            (
+                "tag",
+                SymbolType::Value,
+                "App::BaseCharger",
+                "protected(set) string $tag",
+                None,
+            ),
+            (
+                "helper",
+                SymbolType::Function,
+                "App",
+                "function helper(int $x): int",
+                None,
+            ),
+        ];
+        for (name, kind, scope, signature, documentation) in expected {
+            assert_eq!(
+                test_metadata(named(&fragments, name)).cloned(),
+                Some(EntityMetadata::Code(CodeMetadata {
+                    symbol_type: Some(kind),
+                    symbol_name: Some(name.to_owned()),
+                    scope: Some(scope.to_owned()),
+                    signature: Some(signature.to_owned()),
+                    visibility: None,
+                    language: Some(CodeLanguage::Php),
+                    documentation: documentation.map(str::to_owned),
+                    // Every function in the table takes one parameter.
+                    arity: (kind == SymbolType::Function).then_some(1),
+                    is_exported: false,
+                    is_declaration: false,
+                    package: None,
+                })),
+                "{name}"
+            );
+        }
+        assert!(matches!(
+            test_metadata(named(&fragments, "App")),
+            Some(EntityMetadata::Code(CodeMetadata {
+                symbol_type: Some(SymbolType::Module),
+                scope: None,
+                ..
+            }))
+        ));
+        // A lone property spans its whole statement; split constants span one element.
+        assert_eq!(
+            test_content(named(&fragments, "wallet")),
+            Content::Code("#[Inject]\n  private readonly Wallet $wallet;".to_owned())
+        );
+        assert_eq!(
+            test_content(named(&fragments, "MAX")),
+            Content::Code("MAX = 100".to_owned())
+        );
+        // Multi-line signatures keep their source layout, like other languages.
+        assert!(matches!(
+            test_metadata(named(&fragments, "__construct")),
+            Some(EntityMetadata::Code(CodeMetadata { signature: Some(signature), arity: Some(4), .. }))
+                if signature.starts_with("public function __construct(\n")
+                    && signature.ends_with("int $plain,\n  )")
+        ));
+        // Both MIN constants are indexed, each under its own scope, and a split
+        // element carries only its own declaration.
+        let min_constants = fragments
+            .iter()
+            .filter_map(|fragment| match test_metadata(fragment) {
+                Some(EntityMetadata::Code(CodeMetadata {
+                    symbol_name: Some(name),
+                    scope: Some(scope),
+                    signature: Some(signature),
+                    ..
+                })) if name == "MIN" => Some((scope.as_str(), signature.as_str())),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            min_constants,
+            HashSet::from([
+                ("App::ChargeStatus", "const int MIN = 1"),
+                ("App::BaseCharger", "public const int MIN = 0")
+            ])
+        );
+        // The braced namespace covers the whole file, so no plain chunks remain.
+        assert!(plain_chunks(&fragments).is_empty());
+        // A plain constructor parameter declares no property.
+        assert!(fragments.iter().all(|fragment| !matches!(
+            test_metadata(fragment),
+            Some(EntityMetadata::Code(CodeMetadata { symbol_name: Some(name), .. })) if name == "plain"
+        )));
+    }
+
+    #[test]
+    fn extracts_php_symbols_from_templates_mixing_html() {
+        let source = test_source(
+            FileFormat::Php,
+            "view.phtml",
+            &[
+                "<html><body>",
+                "<?php",
+                "function title(string $name): string { return ucfirst($name); }",
+                "?>",
+                "<h1><?= title('home') ?></h1>",
+                "<?php class Widget { public function render(): void {} } ?>",
+                "</body></html>",
+            ]
+            .join("\n"),
+        );
+        let fragments = extract(&source, ChunkOptions::default()).expect("phtml extraction");
+        assert!(matches!(
+            test_metadata(named(&fragments, "title")),
+            Some(EntityMetadata::Code(CodeMetadata { signature: Some(signature), .. }))
+                if signature == "function title(string $name): string"
+        ));
+        assert!(matches!(
+            test_metadata(named(&fragments, "render")),
+            Some(EntityMetadata::Code(CodeMetadata { scope: Some(scope), .. })) if scope == "Widget"
+        ));
+        // Template markup between declarations stays searchable.
+        assert_eq!(
+            plain_chunks(&fragments),
+            [
+                "<html><body>\n<?php",
+                "?>\n<h1><?= title('home') ?></h1>\n<?php",
+                "?>\n</body></html>"
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_php_statements_outside_declarations_searchable() {
+        let text = [
+            "<?php",
+            "namespace App;",
+            "",
+            "use App\\Billing\\Key;",
+            "",
+            "/** Reads the key. */",
+            "function key(): string { return getenv('BILLING_KEY'); }",
+            "",
+            "echo key();",
+        ]
+        .join("\n");
+        let source = test_source(FileFormat::Php, "bootstrap.php", &text);
+        let fragments = extract(&source, ChunkOptions::default()).expect("php extraction");
+        assert!(matches!(
+            test_metadata(named(&fragments, "key")),
+            Some(EntityMetadata::Code(CodeMetadata { documentation: Some(doc), .. }))
+                if doc == "Reads the key."
+        ));
+        // Imports and statements become chunks, while the docblock stays with
+        // its function and bare open tags are skipped.
+        assert_eq!(
+            plain_chunks(&fragments),
+            ["use App\\Billing\\Key;", "echo key();"]
+        );
+        for fragment in &fragments {
+            let Range::Text(range) = fragment.source_range() else {
+                panic!("text range");
+            };
+            let (Content::Code(content) | Content::Text(content)) = test_content(fragment) else {
+                panic!("text content");
+            };
+            assert_eq!(
+                &text[range.start_byte_offset()..range.end_byte_offset()],
+                content
+            );
+        }
+        assert!(
+            fragments
+                .iter()
+                .enumerate()
+                .all(|(index, fragment)| fragment.index() == index)
+        );
+    }
+
+    #[test]
+    fn keeps_comments_between_split_php_elements_searchable() {
+        let source = test_source(
+            FileFormat::Php,
+            "constants.php",
+            &[
+                "<?php",
+                "/** Shared documentation. */",
+                "const /* ALPHA_MARKER */ A = 1,",
+                "      /* BETA_MARKER */ B = 2;",
+            ]
+            .join("\n"),
+        );
+        let fragments = extract(&source, ChunkOptions::default()).expect("php extraction");
+        for name in ["A", "B"] {
+            assert!(
+                matches!(
+                    test_metadata(named(&fragments, name)),
+                    Some(EntityMetadata::Code(CodeMetadata { documentation: Some(doc), .. }))
+                        if doc == "Shared documentation."
+                ),
+                "{name}"
+            );
+        }
+        // Only the statement's documentation is covered. Comments between
+        // elements stay searchable, and the trailing `;` is not a chunk.
+        assert_eq!(
+            plain_chunks(&fragments),
+            ["const /* ALPHA_MARKER */", ",\n      /* BETA_MARKER */"]
+        );
+    }
+
+    fn plain_chunks(fragments: &[ExtractedEntity]) -> Vec<String> {
+        fragments
+            .iter()
+            .filter(|fragment| test_metadata(fragment).is_none())
+            .map(|fragment| match test_content(fragment) {
+                Content::Code(text) | Content::Text(text) => text,
+                content @ Content::Image(_) => panic!("unexpected content {content:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
     fn preserves_c_go_and_python_language_specific_metadata() {
         let c_source = test_source(
             FileFormat::C,
@@ -1085,6 +1518,143 @@ mod tests {
             calls,
             vec!["factory"],
             "only the receiver's own call is a bindable name"
+        );
+    }
+
+    #[test]
+    fn php_member_and_static_calls_reach_the_graph() {
+        // PHP names the method in its own field, so the receiver must be
+        // rejoined. Code that runs nothing at the site (attribute arguments,
+        // first-class callables, inline class and closure definitions) is no
+        // call, matching the outline. Each element of a split statement owns
+        // its own initializer.
+        use super::{Parser, WalkContext, grammar, resolve_adapter};
+        use crate::domain::GraphEdgeKind;
+
+        let source = concat!(
+            "<?php\n",
+            "class Svc {\n",
+            "    #[Assert(new Length(5))]\n",
+            "    public function run() {\n",
+            "        $this->repo->find();\n",
+            "        $this?->log?->flush();\n",
+            "        Audit::record();\n",
+            "        \\App\\Audit::trace();\n",
+            "        $this->factory()->make();\n",
+            "        $cb = helper(...);\n",
+            "        $anon = new class {};\n",
+            "        (function () { iife(); })();\n",
+            "        self::boot();\n",
+            "        static::create();\n",
+            "        parent::__construct();\n",
+            "        return [new static(), new self(), new parent()];\n",
+            "    }\n",
+            "}\n",
+            "const A = new Foo, B = new Bar;\n",
+        );
+        let adapter = resolve_adapter(FileFormat::Php).expect("php adapter");
+        let language = grammar(FileFormat::Php, false).expect("php grammar");
+        let mut parser = Parser::new();
+        parser.set_language(&language).expect("grammar loads");
+        let tree = parser.parse(source, None).expect("source parses");
+
+        let mut entities = Vec::new();
+        let mut graph_context = WalkContext::new();
+        super::walk_code_node(
+            tree.root_node(),
+            adapter,
+            source.as_bytes(),
+            &[],
+            &mut entities,
+            &mut graph_context,
+            FileFormat::Php,
+        );
+
+        let owner = |name: &str| {
+            entities
+                .iter()
+                .position(|entity| entity.name.as_deref() == Some(name))
+                .expect("entity exists")
+        };
+        let calls: Vec<(usize, &str, Option<&str>)> = graph_context
+            .name_edges()
+            .iter()
+            .filter(|edge| edge.ref_kind == GraphEdgeKind::Calls)
+            .map(|edge| {
+                (
+                    edge.owner_index,
+                    edge.ref_name.as_str(),
+                    edge.receiver_name.as_deref(),
+                )
+            })
+            .collect();
+        let run = owner("run");
+        assert_eq!(
+            calls,
+            vec![
+                (run, "find", Some("$this.repo")),
+                (run, "flush", Some("$this.log")),
+                (run, "record", Some("Audit")),
+                (run, "trace", Some("\\App\\Audit")),
+                (run, "make", Some("$this->factory()")),
+                (run, "factory", Some("$this")),
+                (run, "iife", None),
+                (run, "boot", Some("self")),
+                (run, "create", Some("static")),
+                (run, "__construct", Some("parent")),
+                (owner("A"), "Foo", None),
+                (owner("B"), "Bar", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn php_member_calls_never_bind_to_same_named_functions() {
+        // A method call keeps its receiver even when the resolver cannot read
+        // it, so it stays pending instead of binding to the global `record()`.
+        let source = test_source(
+            FileFormat::Php,
+            "audit.php",
+            concat!(
+                "<?php\n",
+                "function record() {}\n",
+                "class Audit { public static function record() {} }\n",
+                "function run() {\n",
+                "    \\Audit::record();\n",
+                "    $this->factory()->record();\n",
+                "    $this->{'record'}();\n",
+                "    record();\n",
+                "}\n",
+            ),
+        );
+        let graph = extract_for_indexing(&source, ChunkOptions::default())
+            .expect("extraction")
+            .graph
+            .expect("code sources carry a graph");
+        let resolved: Vec<(usize, Option<&str>)> = graph
+            .resolved
+            .iter()
+            .filter(|edge| edge.ref_kind == crate::domain::GraphEdgeKind::Calls)
+            .map(|edge| (edge.line, edge.raw_text.as_deref()))
+            .collect();
+        assert_eq!(
+            resolved,
+            vec![(8, Some("record"))],
+            "only the plain call binds"
+        );
+        let pending: Vec<(&str, Option<&str>)> = graph
+            .pending
+            .iter()
+            .filter(|edge| edge.ref_kind == crate::domain::GraphEdgeKind::Calls)
+            .map(|edge| (edge.ref_name.as_str(), edge.receiver_name.as_deref()))
+            .collect();
+        assert_eq!(
+            pending,
+            vec![
+                ("record", Some("\\Audit")),
+                ("record", Some("$this->factory()")),
+                ("factory", Some("$this")),
+            ]
         );
     }
 

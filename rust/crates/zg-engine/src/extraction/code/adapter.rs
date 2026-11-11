@@ -89,6 +89,28 @@ const JAVASCRIPT: LanguageAdapter = LanguageAdapter {
     ],
     scope_types: &["class_declaration", "function_declaration"],
 };
+const PHP: LanguageAdapter = LanguageAdapter {
+    kind: Language::Php,
+    entity_types: &[
+        "class_declaration",
+        "const_declaration",
+        "enum_case",
+        "enum_declaration",
+        "function_definition",
+        "interface_declaration",
+        "method_declaration",
+        "namespace_definition",
+        "property_declaration",
+        "trait_declaration",
+    ],
+    scope_types: &[
+        "class_declaration",
+        "enum_declaration",
+        "interface_declaration",
+        "namespace_definition",
+        "trait_declaration",
+    ],
+};
 const PYTHON: LanguageAdapter = LanguageAdapter {
     kind: Language::Python,
     entity_types: &[
@@ -159,6 +181,7 @@ pub(super) fn resolve_adapter(format: FileFormat) -> Option<&'static LanguageAda
         FileFormat::Go => Some(&GO),
         FileFormat::Java => Some(&JAVA),
         FileFormat::JavaScript => Some(&JAVASCRIPT),
+        FileFormat::Php => Some(&PHP),
         FileFormat::Python => Some(&PYTHON),
         FileFormat::Rust => Some(&RUST),
         FileFormat::TypeScript => Some(&TYPESCRIPT),
@@ -192,6 +215,9 @@ impl LanguageAdapter {
                 return entities;
             }
         }
+        if self.kind == Language::Php {
+            return resolve_php_entities(node);
+        }
         vec![node]
     }
 
@@ -221,6 +247,7 @@ impl LanguageAdapter {
             Language::JavaScript | Language::TypeScript => {
                 extract_javascript_typescript_name(node, source)
             }
+            Language::Php => extract_php_name(node, source),
             Language::Python => {
                 if node.kind() == "decorated_definition" {
                     inner_python_definition(node)
@@ -296,6 +323,7 @@ impl LanguageAdapter {
             Language::Go => classify_go(node),
             Language::Java if node.kind() == "field_declaration" => Some(SymbolType::Value),
             Language::JavaScript | Language::TypeScript => classify_javascript_typescript(node),
+            Language::Php => classify_php(node),
             _ => classify_code_node(node),
         }
     }
@@ -309,11 +337,17 @@ impl LanguageAdapter {
                 let definition = inner_python_definition(node).unwrap_or(node);
                 extract_generic_signature(definition, source)
             }
+            Language::Php => extract_php_signature(node, source),
             _ => extract_generic_signature(node, source),
         }
     }
 
     pub(super) fn extract_doc(self, node: Node<'_>, source: &[u8]) -> Option<String> {
+        let node = if self.kind == Language::Php {
+            php_declaration(node)
+        } else {
+            node
+        };
         let mut documentation = extract_preceding_doc(node, source);
         let mut declaration = node;
         while let Some(parent) = declaration.parent().filter(|parent| match self.kind {
@@ -777,6 +811,112 @@ fn inner_python_definition(node: Node<'_>) -> Option<Node<'_>> {
         .find(|child| matches!(child.kind(), "function_definition" | "class_definition"))
 }
 
+// PHP property and constant statements carry no name of their own and can
+// declare several elements, so those statements split per element. Promoted
+// constructor parameters declare properties from inside a method signature,
+// which the walk never enters, so they are surfaced beside their method.
+fn resolve_php_entities(node: Node<'_>) -> Vec<Node<'_>> {
+    if matches!(node.kind(), "const_declaration" | "property_declaration") {
+        let elements = named_children(node)
+            .into_iter()
+            .filter(|child| is_php_element(*child))
+            .collect::<Vec<_>>();
+        // A lone element keeps the whole statement, so its source range
+        // carries the modifiers and type, as Java fields do.
+        return if elements.len() > 1 {
+            elements
+        } else {
+            vec![node]
+        };
+    }
+    let mut entities = vec![node];
+    if let Some(parameters) = node.child_by_field_name("parameters") {
+        entities.extend(
+            named_children(parameters)
+                .into_iter()
+                .filter(|child| child.kind() == "property_promotion_parameter"),
+        );
+    }
+    entities
+}
+
+fn is_php_element(node: Node<'_>) -> bool {
+    matches!(node.kind(), "const_element" | "property_element")
+}
+
+// Elements share the modifiers, type and documentation of their statement.
+pub(super) fn php_declaration(node: Node<'_>) -> Node<'_> {
+    if is_php_element(node) {
+        node.parent().unwrap_or(node)
+    } else {
+        node
+    }
+}
+
+fn extract_php_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if matches!(node.kind(), "const_declaration" | "property_declaration") {
+        let element = named_children(node)
+            .into_iter()
+            .find(|child| is_php_element(*child))?;
+        return extract_php_name(element, source);
+    }
+    // Properties name a `variable_name`, whose inner `name` drops the `$`.
+    let name = node.child_by_field_name("name").or_else(|| {
+        named_children(node)
+            .into_iter()
+            .find(|child| child.kind() == "name")
+    })?;
+    // A by-reference promoted parameter wraps its `variable_name` in `by_ref`.
+    let name = if name.kind() == "by_ref" {
+        named_children(name)
+            .into_iter()
+            .find(|child| child.kind() == "variable_name")?
+    } else {
+        name
+    };
+    let name = if name.kind() == "variable_name" {
+        named_children(name)
+            .into_iter()
+            .find(|child| child.kind() == "name")?
+    } else {
+        name
+    };
+    Some(text(name, source).to_owned())
+}
+
+// A split element keeps the statement's modifiers and type but only its own
+// name and value, so siblings do not repeat each other's declarations.
+fn extract_php_signature(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if !is_php_element(node) {
+        return extract_generic_signature(node, source);
+    }
+    let statement = php_declaration(node);
+    let first_element = named_children(statement)
+        .into_iter()
+        .find(|child| is_php_element(*child))?;
+    let prefix = extract_signature_prefix(statement, source, first_element.start_byte());
+    let element = extract_generic_signature(node, source)?;
+    let prefix = prefix.trim();
+    Some(if prefix.is_empty() {
+        element
+    } else {
+        format!("{prefix} {element}")
+    })
+}
+
+fn classify_php(node: Node<'_>) -> Option<SymbolType> {
+    match node.kind() {
+        "const_declaration"
+        | "const_element"
+        | "enum_case"
+        | "property_declaration"
+        | "property_element"
+        | "property_promotion_parameter" => Some(SymbolType::Value),
+        "trait_declaration" => Some(SymbolType::Interface),
+        _ => classify_code_node(node),
+    }
+}
+
 fn extract_javascript_signature(node: Node<'_>, source: &[u8]) -> Option<String> {
     let mut signature = if let Some(value) = node.child_by_field_name("value").filter(|value| {
         matches!(
@@ -850,6 +990,7 @@ fn append_signature(
             | "inner_attribute_item"
             | "attribute_specifier"
             | "attribute_declaration"
+            | "attribute_list"
             | "annotation"
             | "marker_annotation"
             | "decorator"
@@ -858,19 +999,24 @@ fn append_signature(
         out.push(' ');
         return;
     }
-    let body = node.child_by_field_name("body").or_else(|| {
-        named_children(node).into_iter().find(|child| {
-            matches!(
-                child.kind(),
-                "statement_block"
-                    | "compound_statement"
-                    | "block"
-                    | "class_body"
-                    | "declaration_list"
-                    | "field_declaration_list"
-            )
-        })
-    });
+    // PHP names a ternary's true branch `body`, but it is a value, not an implementation.
+    let body = node
+        .child_by_field_name("body")
+        .filter(|_| node.kind() != "conditional_expression")
+        .or_else(|| {
+            named_children(node).into_iter().find(|child| {
+                matches!(
+                    child.kind(),
+                    "statement_block"
+                        | "compound_statement"
+                        | "block"
+                        | "class_body"
+                        | "declaration_list"
+                        | "field_declaration_list"
+                        | "property_hook_list"
+                )
+            })
+        });
     let mut offset = node.start_byte();
     for child in named_children(node) {
         if child.start_byte() >= end_byte {
