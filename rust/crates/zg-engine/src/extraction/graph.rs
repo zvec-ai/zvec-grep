@@ -87,6 +87,8 @@ pub(crate) struct NameEdge {
     /// (`for (Widget w : ws)`): past that line the name means what the rest of
     /// the body says it means. `None` keeps the binding until the body ends.
     pub bound_until: Option<usize>,
+    /// Exclusive end of a branch/loop-local binding, in source coordinates.
+    pub scope_end: Option<(usize, usize)>,
     /// Argument count at the call site, when the reference is a call.
     pub arity: Option<usize>,
     /// Where the call stands relative to building a value. A type is a
@@ -450,6 +452,7 @@ impl WalkContext {
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
             bound_until: None,
+            scope_end: None,
             arity,
             constructs,
             line,
@@ -487,11 +490,29 @@ impl WalkContext {
             raw_text: None,
             bound_type: Some(bound_type.to_owned()),
             bound_until: until,
+            scope_end: None,
             arity: None,
             constructs: Constructs::None,
             line,
             column,
         });
+    }
+
+    pub(crate) fn add_scoped_binding(
+        &mut self,
+        owner: usize,
+        name: &str,
+        ty: &str,
+        start: (usize, usize),
+        end: (usize, usize),
+    ) {
+        if !self.collecting {
+            return;
+        }
+        self.add_declare_binding(owner, name, ty, start.0, start.1, None);
+        if let Some(binding) = self.name_edges.last_mut() {
+            binding.scope_end = Some(end);
+        }
     }
 
     /// Registers one function's factory return type: the signature's
@@ -533,6 +554,7 @@ impl WalkContext {
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
             bound_until: None,
+            scope_end: None,
             arity: None,
             constructs: Constructs::None,
             line,
@@ -562,6 +584,7 @@ impl WalkContext {
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
             bound_until: None,
+            scope_end: None,
             arity: None,
             constructs: Constructs::None,
             line,
@@ -688,6 +711,7 @@ mod tests {
                 raw_text: Some("dog.bark()".to_owned()),
                 bound_type: None,
                 bound_until: None,
+                scope_end: None,
                 arity: Some(2),
                 constructs: Constructs::None,
                 line: 7,

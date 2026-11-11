@@ -144,7 +144,7 @@ fn sweep_resolves_relative_import_and_imported_call_from_real_extraction() {
         "src/main.ts",
         "import { helper } from './utils';\n\nfunction run() {\n  helper();\n}\n",
     );
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert!(
         sweep.resolved >= 2,
@@ -297,7 +297,7 @@ fn sweep_resolves_relative_alias_specifiers_per_importing_directory() {
     let left_owner = pending_call_owner(&store, left_main, "run");
     let right_owner = pending_call_owner(&store, right_main, "run");
 
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert!(
         store
@@ -322,7 +322,7 @@ fn sweep_fails_bare_package_import_from_real_extraction() {
         "src/app.ts",
         "import react from 'react';\n\nexport function mount() {\n  react();\n}\n",
     );
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 1, "the package import terminates: {sweep:?}");
     // The call through the imported binding has no workspace definition, so it
     // stays queued; only the import itself terminates.
@@ -364,7 +364,7 @@ fn sweep_binds_qualified_calls_only_when_the_receiver_spells_the_indexed_scope()
         ),
     );
 
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "no call terminates: {sweep:?}");
     // Extraction spells an entity's scope as the module/impl breadcrumb joined
     // with `::`, and a receiver keeps its `::` path minus the member name. One
@@ -427,7 +427,7 @@ fn sweep_narrows_a_receiver_by_the_scope_its_whole_spelling_names() {
     );
 
     let owner = pending_call_owner(&store, caller, "find");
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert_eq!(
         call_target_files(&store, &owner),
@@ -453,7 +453,7 @@ fn sweep_binds_python_cls_receiver_to_the_enclosing_class() {
         ),
     );
 
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "no call terminates: {sweep:?}");
     assert_eq!(
         sweep.file_scoped, 1,
@@ -478,7 +478,7 @@ fn sweep_keeps_python_module_import_pending_until_its_module_is_indexed() {
         "pkg/app.py",
         "import pkg.math\n\n\ndef run():\n  return 1\n",
     );
-    let first = resolve_pending(&store, None).expect("sweep");
+    let first = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(first.failed, 0, "an in-workspace module path stays queued");
     assert_eq!(first.resolved, 0, "the module is not indexed yet");
     assert_eq!(
@@ -491,7 +491,7 @@ fn sweep_keeps_python_module_import_pending_until_its_module_is_indexed() {
     );
 
     index_source(&store, "pkg/math.py", "def math():\n  return 1\n");
-    let second = resolve_pending(&store, None).expect("sweep");
+    let second = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(second.failed, 0, "indexing the module clears the queue");
     assert_eq!(second.resolved, 1, "the import binds to the module file");
     assert!(
@@ -532,7 +532,7 @@ fn sweep_prefers_the_nearest_override_over_the_base_declaration() {
     let own = pending_receiver_call_owner(&store, child, "self");
     let parent = pending_receiver_call_owner(&store, child, "super");
 
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     // `Child::save` and `Base::save` share the short name, so the hierarchy
     // has to be walked nearest first: the override answers `self`, while
@@ -597,7 +597,7 @@ fn sweep_preserves_declaration_padded_inheritance_writeback() {
     let signal = CancellationToken::new();
     signal.cancel();
     assert_eq!(
-        resolve_pending(&store, Some(&signal))
+        resolve_pending(&store, None, Some(&signal))
             .expect_err("cancelled")
             .code(),
         EngineError::CANCELLED
@@ -609,7 +609,7 @@ fn sweep_preserves_declaration_padded_inheritance_writeback() {
         before
     );
 
-    let sweep = resolve_pending(&store, None).expect("single sweep after cancellation");
+    let sweep = resolve_pending(&store, None, None).expect("single sweep after cancellation");
     assert_eq!(
         call_target_files(&store, &owner),
         vec![base],
@@ -628,7 +628,7 @@ fn sweep_preserves_declaration_padded_inheritance_writeback() {
         )
     );
     assert_eq!(
-        resolve_pending(&store, None)
+        resolve_pending(&store, None, None)
             .expect("repeat sweep")
             .resolved,
         0
@@ -651,7 +651,7 @@ fn sweep_keeps_a_c_declaration_when_another_language_defines_the_name() {
         "int main(void) {\n  return compute(1);\n}\n",
     );
     let owner = pending_call_owner(&store, caller, "compute");
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert_eq!(
         call_target_files(&store, &owner),
@@ -676,7 +676,7 @@ fn sweep_prefers_a_c_definition_over_the_declaration_of_the_same_symbol() {
         "int main(void) {\n  return compute(1);\n}\n",
     );
     let owner = pending_call_owner(&store, caller, "compute");
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert_eq!(
         call_target_files(&store, &owner),
@@ -698,7 +698,7 @@ fn sweep_keeps_a_cpp_overload_declaration_from_a_differently_shaped_definition()
     index_source(&store, "src/impl.cpp", "void compute(int a) {\n}\n");
     let caller = index_source(&store, "src/app.cpp", "void run() {\n  compute(1, 2);\n}\n");
     let owner = pending_call_owner(&store, caller, "compute");
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert_eq!(
         call_target_files(&store, &owner),
@@ -726,7 +726,7 @@ fn sweep_keeps_an_equal_arity_overload_pending_when_the_parameter_types_differ()
         "void run() {\n  compute(\"x\");\n}\n",
     );
     let owner = pending_call_owner(&store, caller, "compute");
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert_eq!(
         sweep.arity_bound, 0,
@@ -773,7 +773,7 @@ fn sweep_pairs_a_declaration_with_the_definition_naming_the_same_parameters() {
         "void run() {\n  compute(\"x\");\n}\n",
     );
     let owner = pending_call_owner(&store, caller, "compute");
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert_eq!(
         call_target_files(&store, &owner),
@@ -796,7 +796,7 @@ fn sweep_pairs_a_declaration_with_the_default_argument_the_definition_omits() {
     let definition = index_source(&store, "src/impl.cpp", "void compute(int retries) {\n}\n");
     let caller = index_source(&store, "src/app.cpp", "void run() {\n  compute(1);\n}\n");
     let owner = pending_call_owner(&store, caller, "compute");
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert_eq!(
         call_target_files(&store, &owner),
@@ -829,7 +829,7 @@ fn sweep_keeps_a_qualifier_parenthesis_out_of_the_parameter_list() {
         "void run() {\n  compute(\"x\");\n}\n",
     );
     let owner = pending_call_owner(&store, caller, "compute");
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert!(
         call_target_files(&store, &owner).is_empty(),
@@ -869,7 +869,7 @@ fn sweep_pairs_an_unnamed_declaration_with_the_definition_that_names_its_paramet
         "void run() {\n  compute(\"x\", 1);\n}\n",
     );
     let owner = pending_call_owner(&store, caller, "compute");
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert_eq!(
         call_target_files(&store, &owner),
@@ -894,7 +894,7 @@ fn sweep_keeps_an_unnamed_user_defined_parameter_distinct() {
         "void run() {\n  compute(Foo{});\n}\n",
     );
     let owner = pending_call_owner(&store, caller, "compute");
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert!(
         call_target_files(&store, &owner).is_empty(),
@@ -925,7 +925,7 @@ fn sweep_pairs_an_unnamed_typedef_parameter_with_the_definition_that_names_it() 
         "void run() {\n    Token token;\n    consume(token);\n}\n",
     );
     let owner = pending_call_owner(&store, caller, "consume");
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert_eq!(
         call_target_files(&store, &owner),
@@ -954,7 +954,7 @@ fn sweep_binds_an_overload_by_the_scope_the_receiver_spells() {
     );
     let caller = index_source(&store, "src/app.cpp", "void drive() {\n  Api::run(1);\n}\n");
     let owner = pending_call_owner(&store, caller, "run");
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert_eq!(
         call_target_files(&store, &owner),
@@ -976,7 +976,7 @@ fn sweep_stops_before_writing_back_when_the_pass_is_cancelled() {
     let owner = pending_call_owner(&store, main, "helper");
     let cancelled = CancellationToken::new();
     cancelled.cancel();
-    let error = resolve_pending(&store, Some(&cancelled))
+    let error = resolve_pending(&store, None, Some(&cancelled))
         .expect_err("a cancelled pass must not drain the queue");
     assert_eq!(error.code(), EngineError::CANCELLED);
     assert_eq!(
@@ -996,7 +996,7 @@ fn sweep_stops_before_writing_back_when_the_pass_is_cancelled() {
     // The same sweep under a live token still resolves both references: the
     // boundary check must not change what an uncancelled pass does.
     let signal = CancellationToken::new();
-    let sweep = resolve_pending(&store, Some(&signal)).expect("sweep");
+    let sweep = resolve_pending(&store, None, Some(&signal)).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert_eq!(call_target_files(&store, &owner), vec![util]);
 }
@@ -1021,7 +1021,7 @@ fn sweep_resolves_java_static_import_through_the_member_path() {
         "package com.acme;\n\nimport static com.acme.Util.work;\n\nclass App {\n  void run() {\n    work();\n  }\n}\n",
     );
     let owner = pending_call_owner(&store, app, "work");
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert_eq!(
         import_target_files(&store, app),
@@ -1031,7 +1031,7 @@ fn sweep_resolves_java_static_import_through_the_member_path() {
 
     // The resolved import edge feeds this file's import scope on the next
     // pass, which pins the bare call that the shared name left ambiguous.
-    let sweep = resolve_pending(&store, None).expect("second sweep");
+    let sweep = resolve_pending(&store, None, None).expect("second sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert_eq!(
         call_target_files(&store, &owner),
@@ -1054,7 +1054,7 @@ fn sweep_resolves_java_type_import_to_its_class() {
         "com/acme/App.java",
         "package com.acme;\n\nimport com.acme.Widget;\n\nclass App {\n  Widget make() {\n    return null;\n  }\n}\n",
     );
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert_eq!(
         import_target_files(&store, app),
@@ -1077,7 +1077,7 @@ fn sweep_resolves_java_nested_type_import() {
         "com/acme/App.java",
         "package com.acme;\n\nimport com.acme.Outer.Inner;\n\nclass App {\n  Inner make() {\n    return null;\n  }\n}\n",
     );
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert_eq!(
         import_target_files(&store, app),
@@ -1100,7 +1100,7 @@ fn sweep_keeps_java_on_demand_import_pending() {
         "com/acme/App.java",
         "package com.acme;\n\nimport com.acme.*;\n\nclass App {\n}\n",
     );
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert!(
         import_target_files(&store, app).is_empty(),
@@ -1135,7 +1135,7 @@ fn sweep_keeps_a_java_import_of_another_package_pending() {
         "app/Use.java",
         "package app;\n\nimport java.util.List;\n\nclass Use {\n  List make() {\n    return null;\n  }\n}\n",
     );
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert!(
         import_target_files(&store, app).is_empty(),
@@ -1169,7 +1169,7 @@ fn sweep_resolves_a_java_import_below_its_source_root() {
         "src/main/java/com/acme/App.java",
         "package com.acme;\n\nimport com.acme.Widget;\n\nclass App {\n  Widget make() {\n    return null;\n  }\n}\n",
     );
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert_eq!(
         import_target_files(&store, app),
@@ -1195,7 +1195,7 @@ fn sweep_keeps_a_java_import_pending_when_the_directory_looks_like_the_package()
         "src/main/java/app/Use.java",
         "package app;\n\nimport java.util.List;\n\nclass Use {\n}\n",
     );
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert!(
         import_target_files(&store, app).is_empty(),
@@ -1247,7 +1247,7 @@ fn incremental_added_module_requeues_import_preference() {
         0,
         "a fresh graph holds no resolved references"
     );
-    resolve_pending(&store, None).expect("first sweep");
+    resolve_pending(&store, None, None).expect("first sweep");
     assert_eq!(
         import_target_ids(&store, main),
         vec![format!("f{}", nested.get())]
@@ -1263,7 +1263,7 @@ fn incremental_added_module_requeues_import_preference() {
         requeued >= 2,
         "the import and its scoped call return to the queue: {requeued}"
     );
-    resolve_pending(&store, None).expect("second sweep");
+    resolve_pending(&store, None, None).expect("second sweep");
     assert_eq!(
         import_target_ids(&store, main),
         vec![format!("f{}", sibling.get())],
@@ -1288,7 +1288,7 @@ fn incremental_added_duplicate_name_requeues_unique_resolution() {
     );
     let owner = pending_call_owner(&store, caller, "work");
     store.requeue_stale_resolutions().expect("requeue");
-    resolve_pending(&store, None).expect("first sweep");
+    resolve_pending(&store, None, None).expect("first sweep");
     assert_eq!(call_target_files(&store, &owner), vec![first]);
 
     // A second definition of the same name breaks the former unique match
@@ -1299,7 +1299,7 @@ fn incremental_added_duplicate_name_requeues_unique_resolution() {
         requeued >= 1,
         "the unique call returns to the queue: {requeued}"
     );
-    let sweep = resolve_pending(&store, None).expect("second sweep");
+    let sweep = resolve_pending(&store, None, None).expect("second sweep");
     assert!(
         call_target_files(&store, &owner).is_empty(),
         "the call no longer binds one workspace-wide definition"
@@ -1320,7 +1320,7 @@ fn incremental_requeue_revives_failed_import() {
         "import react from 'react';\n\nexport function mount() {\n}\n",
     );
     store.requeue_stale_resolutions().expect("requeue");
-    let sweep = resolve_pending(&store, None).expect("first sweep");
+    let sweep = resolve_pending(&store, None, None).expect("first sweep");
     assert_eq!(
         sweep.failed, 1,
         "the bare package import terminates: {sweep:?}"
@@ -1377,7 +1377,7 @@ fn sweep_keeps_an_untyped_receiver_call_pending_when_the_member_name_is_unique()
     );
 
     let receiver_owner = pending_receiver_call_owner(&store, caller, "expr");
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     // `match` is the only definition of that name in the workspace, but the
     // sweep cannot type `expr`: workspace uniqueness answers a bare name, so
     // the member call must stay pending instead of binding a guess. The
@@ -1425,7 +1425,7 @@ fn sweep_binds_a_bare_call_to_its_import_over_a_same_named_member() {
     );
 
     let owner = pending_call_owner(&store, tag, "loads");
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     // `loads` names both the imported module function and the enclosing
     // method. The bare call spells no receiver, so the same-file method is
     // not a shadowing definition and the import decides the target.
@@ -1462,7 +1462,7 @@ fn sweep_keeps_an_untyped_receiver_call_pending_when_several_definitions_exist()
     index_source(&store, "extra.py", "def match(a, b):\n    return a\n");
 
     let receiver_owner = pending_receiver_call_owner(&store, caller, "expr");
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(
         sweep.arity_bound, 0,
         "an argument count must not decide across scopes: {sweep:?}"
@@ -1508,7 +1508,7 @@ fn sweep_binds_a_call_to_the_enclosing_binding_that_shadows_the_import() {
     );
 
     let owner = pending_call_owner(&store, caller, "work");
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     // `outer::work` is a lexical binding of the enclosing function, not a
     // member reached through a receiver: the bare call inside `inner` reads
     // it, so the shadowed name is settled among this file's own candidates.
@@ -1542,7 +1542,7 @@ fn sweep_keeps_a_bare_call_pending_when_the_imported_module_is_gone() {
     );
 
     let owner = pending_call_owner(&store, caller, "first");
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert!(
         call_target_files(&store, &owner).is_empty(),
         "a stale import does not borrow the workspace's unique name: {sweep:?}"
@@ -1568,7 +1568,7 @@ fn sweep_binds_an_imported_name_whose_module_root_the_paths_do_not_know() {
     );
 
     let owner = pending_call_owner(&store, caller, "value");
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(
         call_target_files(&store, &owner),
         vec![module],
@@ -1596,7 +1596,7 @@ fn sweep_keeps_an_argument_count_from_handing_a_shadowed_call_to_the_import() {
     );
 
     let owner = pending_call_owner(&store, caller, "work");
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     // The call passes one argument while the enclosing binding declares two:
     // a count that describes the imported function must not reach past this
     // file's own binding to bind it.
@@ -1644,7 +1644,7 @@ fn sweep_does_not_hand_a_sibling_scope_to_the_nested_binding() {
         "only the sibling call stays queued: {calls:?}"
     );
     let sibling = &calls[0].1;
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     // `unrelated`'s nested definition is a local of `unrelated`; `run` never
     // sees it, so its own call reads the imported name.
     assert_eq!(
@@ -1682,7 +1682,7 @@ fn sweep_keeps_a_call_pending_when_the_only_candidate_is_out_of_scope() {
         "only the sibling call stays queued: {calls:?}"
     );
     let sibling = &calls[0].1;
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     // Nothing in the workspace is named `work` outside `unrelated`, and `run`
     // cannot see that local: the call waits instead of taking the sole hit.
     assert!(
@@ -1726,7 +1726,7 @@ fn sweep_keeps_a_shadowed_call_pending_when_the_file_binds_the_name_twice() {
     );
 
     let owner = pending_call_owner(&store, caller, "work");
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     // Two bindings of the name in this file leave it ambiguous; the import's
     // namespace and the call's argument count answer other scopes.
     assert!(
@@ -1757,7 +1757,7 @@ fn sweep_prefers_a_python_package_over_a_same_named_module_file() {
     );
 
     let owner = pending_call_owner(&store, caller, "work");
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     // Python checks the directory package's `__init__` before a same-named
     // module file, so the import and the call behind it both name `pkg`.
     assert_eq!(
@@ -1784,7 +1784,7 @@ fn stale_evidence_requeues_after_a_pass_stops_before_its_sweep() {
     );
     let owner = pending_call_owner(&store, main, "work");
     store.requeue_stale_resolutions().expect("requeue");
-    resolve_pending(&store, None).expect("first sweep");
+    resolve_pending(&store, None, None).expect("first sweep");
     assert_eq!(
         import_target_ids(&store, main),
         vec![format!("f{}", nested.get())]
@@ -1807,7 +1807,7 @@ fn stale_evidence_requeues_after_a_pass_stops_before_its_sweep() {
         requeued >= 2,
         "the import and its scoped call return to the queue: {requeued}"
     );
-    resolve_pending(&store, None).expect("second sweep");
+    resolve_pending(&store, None, None).expect("second sweep");
     assert_eq!(
         import_target_ids(&store, main),
         vec![format!("f{}", sibling.get())],
@@ -1827,7 +1827,7 @@ fn sweep_rebinds_an_import_after_a_failed_file_becomes_indexed() {
         "import { work } from './lib';\n\nexport function run() {\n  work();\n}\n",
     );
     let owner = pending_call_owner(&store, main, "work");
-    let sweep = resolve_pending(&store, None).expect("first sweep");
+    let sweep = resolve_pending(&store, None, None).expect("first sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert_eq!(
         import_target_ids(&store, main),
@@ -1843,7 +1843,7 @@ fn sweep_rebinds_an_import_after_a_failed_file_becomes_indexed() {
     store
         .requeue_stale_resolutions()
         .expect("requeue after the failure");
-    resolve_pending(&store, None).expect("pass over the failed file");
+    resolve_pending(&store, None, None).expect("pass over the failed file");
     assert_eq!(
         import_target_ids(&store, main),
         vec![format!("f{}", nested.get())],
@@ -1862,7 +1862,7 @@ fn sweep_rebinds_an_import_after_a_failed_file_becomes_indexed() {
         requeued >= 2,
         "the import and its scoped call return to the queue: {requeued}"
     );
-    let sweep = resolve_pending(&store, None).expect("second sweep");
+    let sweep = resolve_pending(&store, None, None).expect("second sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert_eq!(
         import_target_ids(&store, main),
@@ -1905,7 +1905,7 @@ fn sweep_rebinds_a_member_call_after_its_intermediate_base_changes() {
     // can walk the chain.
     for _ in 0..3 {
         store.requeue_stale_resolutions().expect("requeue");
-        resolve_pending(&store, None).expect("sweep");
+        resolve_pending(&store, None, None).expect("sweep");
     }
     assert_eq!(
         call_target_files(&store, &owner),
@@ -1930,7 +1930,7 @@ fn sweep_rebinds_a_member_call_after_its_intermediate_base_changes() {
         "the member call returns to the queue: {requeued}"
     );
     for _ in 0..2 {
-        resolve_pending(&store, None).expect("sweep after the base swap");
+        resolve_pending(&store, None, None).expect("sweep after the base swap");
     }
     assert_eq!(
         call_target_files(&store, &owner),
@@ -1970,7 +1970,7 @@ fn sweep_keeps_a_python_member_pending_when_two_bases_declare_it() {
     // stays pending rather than binding the base the walk reaches first.
     for _ in 0..3 {
         store.requeue_stale_resolutions().expect("requeue");
-        resolve_pending(&store, None).expect("sweep");
+        resolve_pending(&store, None, None).expect("sweep");
     }
     assert!(
         call_target_files(&store, &owner).is_empty(),
@@ -1998,7 +1998,7 @@ fn sweep_binds_a_python_member_only_one_base_declares() {
     // walk may still bind without knowing the order.
     for _ in 0..3 {
         store.requeue_stale_resolutions().expect("requeue");
-        resolve_pending(&store, None).expect("sweep");
+        resolve_pending(&store, None, None).expect("sweep");
     }
     assert_eq!(
         call_target_files(&store, &owner),
@@ -2034,7 +2034,7 @@ fn sweep_rebinds_a_hierarchy_call_after_the_base_import_moves() {
     let owner = pending_receiver_call_owner(&store, caller, "m");
     for _ in 0..3 {
         store.requeue_stale_resolutions().expect("requeue");
-        resolve_pending(&store, None).expect("sweep");
+        resolve_pending(&store, None, None).expect("sweep");
     }
     assert_eq!(
         call_target_files(&store, &owner),
@@ -2058,7 +2058,7 @@ fn sweep_rebinds_a_hierarchy_call_after_the_base_import_moves() {
         "the moved import returns the member call: {requeued}"
     );
     for _ in 0..2 {
-        resolve_pending(&store, None).expect("sweep after the import move");
+        resolve_pending(&store, None, None).expect("sweep after the import move");
     }
     assert_eq!(
         call_target_files(&store, &owner),
@@ -2086,7 +2086,7 @@ fn sweep_suppresses_a_bare_call_the_unit_defines_as_a_macro() {
     );
     let owner = pending_call_owner(&store, caller, "TRACE_POINT");
 
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert!(
         call_target_files(&store, &owner).is_empty(),
@@ -2129,7 +2129,7 @@ fn sweep_reads_macro_state_through_nested_includes_and_undef() {
     let calls = pending_call_owners(&store, caller, "TRACE_POINT");
     assert_eq!(calls.len(), 2, "two call sites queue: {calls:?}");
 
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert!(
         call_target_files(&store, &calls[0].1).is_empty(),
@@ -2172,7 +2172,7 @@ fn sweep_keeps_an_unsettled_conditional_from_defining_a_macro() {
     );
     let owner = pending_call_owner(&store, caller, "world_stopped");
 
-    let sweep = resolve_pending(&store, None).expect("sweep");
+    let sweep = resolve_pending(&store, None, None).expect("sweep");
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert_eq!(
         call_target_files(&store, &owner),

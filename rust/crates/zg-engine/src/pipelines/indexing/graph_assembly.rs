@@ -146,6 +146,12 @@ fn file_pending_refs(
                 // whether the language builds through a constructor instead.
                 metadata.insert("constructs".to_owned(), serde_json::json!(site));
             }
+            if let Some(end) = reference.scope_end {
+                // A block- or loop-scoped declaration stops standing for its
+                // name at this position: a later call through the name reads
+                // whatever the enclosing scope says, not this binding.
+                metadata.insert("scope_end".to_owned(), serde_json::json!(end));
+            }
             if reference.ref_kind.spells_inheritance() {
                 insert_inheritance_metadata(
                     &mut metadata,
@@ -370,6 +376,7 @@ mod tests {
             raw_text: Some("Remote".into()),
             bound_type: None,
             bound_until: None,
+            scope_end: None,
             arity: None,
             constructs: Constructs::None,
             shadowed: false,

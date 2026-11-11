@@ -111,6 +111,12 @@ pub(crate) struct DeclaredBinding {
     /// One-based last line the binding holds for, when a statement scopes it
     /// (`for (Widget w : ws)`). `None` keeps it until the body ends.
     pub until: Option<u32>,
+    /// One-based column of the declaring site, so a declaration and a call on
+    /// the same line are still ordered by position.
+    pub column: u32,
+    /// One-based `(line, column)` just past the block that scopes the binding,
+    /// exclusive. `None` keeps it to the end of the owner.
+    pub scope_end: Option<(usize, usize)>,
 }
 
 /// Page over pending references. Restart pagination after file mutations.

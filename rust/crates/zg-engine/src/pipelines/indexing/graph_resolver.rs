@@ -16,6 +16,8 @@
 //! ambiguities, external import specifiers terminate as failed, and
 //! [`IndexStore::apply_resolutions`] writes each batch atomically.
 
+mod bindings;
+
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -94,6 +96,7 @@ pub(crate) struct ResolutionSweep {
 /// returns [`EngineError::CANCELLED`].
 pub(crate) fn resolve_pending(
     store: &IndexStore,
+    source_root: Option<&Path>,
     signal: Option<&CancellationToken>,
 ) -> crate::EngineResult<ResolutionSweep> {
     if !store.graph_enabled() {
@@ -110,7 +113,10 @@ pub(crate) fn resolve_pending(
     throw_if_cancelled(signal)?;
     let snapshot = store.resolution_snapshot(signal)?;
     let mut sweep = ResolutionSweep::default();
-    let mut caches = RuleCaches::default();
+    let mut caches = RuleCaches {
+        go_module: source_root.and_then(bindings::go_module),
+        ..RuleCaches::default()
+    };
     let mut cursor = 0;
     loop {
         let page = store.list_pending_refs(PENDING_PAGE, cursor, &snapshot)?;
@@ -230,6 +236,7 @@ enum Rule {
 /// consumes evidence gathered by earlier references and adds its own.
 #[derive(Default)]
 struct RuleCaches {
+    go_module: Option<String>,
     importing_paths: HashMap<u32, Option<String>>,
     /// File formats of each candidate's file, read once per file instead of
     /// re-parsing the path for every reference that names the same symbol.
@@ -314,6 +321,34 @@ fn classify(
         // sees a call. Whatever function the name also spells elsewhere — the
         // decoy, a header's prototype — is not what this site reaches.
         return Ok(Outcome::Deferred);
+    }
+    if stored.reference.ref_kind == GraphEdgeKind::Calls
+        && matches!(stored.language.as_str(), "typescript" | "javascript")
+        && let Some(outcome) = bindings::resolve_call(store, snapshot, stored, caches)?
+    {
+        return Ok(outcome);
+    }
+    if stored.reference.ref_kind == GraphEdgeKind::Calls && stored.reference.receiver_name.is_none()
+    {
+        let bindings = match caches
+            .declared_bindings
+            .entry(stored.reference.owner_id.clone())
+        {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                entry.insert(store.declared_bindings(&stored.reference.owner_id)?)
+            }
+        };
+        if bindings.iter().any(|binding| {
+            binding.name == stored.name_tail
+                && (binding.line as usize, binding.column as usize)
+                    <= (stored.reference.line, stored.reference.column)
+                && binding
+                    .scope_end
+                    .is_none_or(|end| (stored.reference.line, stored.reference.column) < end)
+        }) {
+            return Ok(Outcome::Deferred);
+        }
     }
     if is_unresolvable_import(snapshot, stored, &mut caches.module_paths) {
         return Ok(Outcome::Failed);
@@ -2042,10 +2077,17 @@ fn alias_target_base_in(
 ) -> Option<String> {
     let module: String = match language {
         "typescript" | "javascript" => {
-            if !binding.specifier.starts_with("./") && !binding.specifier.starts_with("../") {
+            if binding.specifier != "."
+                && !binding.specifier.starts_with("./")
+                && !binding.specifier.starts_with("../")
+            {
                 return None;
             }
-            binding.specifier.clone()
+            if matches!(binding.specifier.as_str(), "." | "./") {
+                "./index".to_owned()
+            } else {
+                binding.specifier.clone()
+            }
         }
         "python" => {
             if binding.specifier.starts_with('.') {
@@ -2368,6 +2410,9 @@ fn resolve_receiver_typed(
     hits: &[&NameIndexEntry],
     caches: &mut RuleCaches,
 ) -> crate::EngineResult<Option<Resolution>> {
+    if matches!(stored.language.as_str(), "typescript" | "javascript" | "go") {
+        return bindings::resolve(store, snapshot, stored, hits, caches);
+    }
     let reference = &stored.reference;
     if reference.ref_kind != GraphEdgeKind::Calls {
         return Ok(None);

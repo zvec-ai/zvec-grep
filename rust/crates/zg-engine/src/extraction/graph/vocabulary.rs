@@ -15,6 +15,8 @@ use crate::domain::FileFormat;
 /// expressions with one of these types, so a single set covers the majority
 /// of languages without per-language entries.
 pub(super) const COMMON_CALL_TYPES: &[&str] = &[
+    "jsx_opening_element",
+    "jsx_self_closing_element",
     "call",
     "call_expression",
     "function_call",
@@ -48,7 +50,7 @@ pub(super) struct ImportVocabulary {
 }
 
 const JS_IMPORT_VOCABULARY: ImportVocabulary = ImportVocabulary {
-    import_types: &["import_statement"],
+    import_types: &["import_statement", "export_statement"],
     module_fields: &["source"],
 };
 

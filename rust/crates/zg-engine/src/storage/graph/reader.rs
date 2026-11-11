@@ -122,7 +122,7 @@ impl SqliteGraphStorage {
     pub(crate) fn declared_bindings(&self, owner_id: &str) -> Result<Vec<DeclaredBinding>> {
         nonempty(owner_id)?;
         let mut statement = self.connection.prepare(
-            "SELECT reference_name, metadata, line FROM edges
+            "SELECT reference_name, metadata, line, col FROM edges
              WHERE source = ?1 AND kind = 'declares' ORDER BY line, id",
         )?;
         let rows = statement.query_map([owner_id], |row| {
@@ -137,11 +137,25 @@ impl SqliteGraphStorage {
                 .and_then(Value::as_u64)
                 .and_then(|line| u32::try_from(line).ok());
             let line: i64 = row.get(2)?;
+            let scope_end = metadata
+                .get("scope_end")
+                .map(|value| {
+                    serde_json::from_value(value.clone()).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })
+                })
+                .transpose()?;
             Ok(DeclaredBinding {
                 name,
                 bound_type: bound_type.to_owned(),
                 line: u32::try_from(line).unwrap_or_default(),
                 until,
+                column: u32::try_from(row.get::<_, i64>(3)?).unwrap_or_default(),
+                scope_end,
             })
         })?;
         Ok(rows
