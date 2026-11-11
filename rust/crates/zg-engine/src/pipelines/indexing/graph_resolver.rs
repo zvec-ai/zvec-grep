@@ -114,6 +114,7 @@ pub(crate) fn resolve_pending(
     let snapshot = store.resolution_snapshot(signal)?;
     let mut sweep = ResolutionSweep::default();
     let mut caches = RuleCaches {
+        source_root: source_root.map(Path::to_path_buf),
         go_module: source_root.and_then(bindings::go_module),
         ..RuleCaches::default()
     };
@@ -236,6 +237,8 @@ enum Rule {
 /// consumes evidence gathered by earlier references and adds its own.
 #[derive(Default)]
 struct RuleCaches {
+    source_root: Option<std::path::PathBuf>,
+    module_configs: HashMap<String, Option<serde_json::Value>>,
     go_module: Option<String>,
     importing_paths: HashMap<u32, Option<String>>,
     /// File formats of each candidate's file, read once per file instead of

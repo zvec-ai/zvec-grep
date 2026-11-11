@@ -230,8 +230,13 @@ impl LanguageAdapter {
         if matches!(self.kind, Language::JavaScript | Language::TypeScript)
             && node.kind() == "variable_declarator"
         {
-            let entities = exported_object_function_entities(node, source);
+            let mut entities = exported_object_function_entities(node, source);
             if !entities.is_empty() {
+                // Non-exported objects remain searchable values and own calls
+                // in non-function initializers, alongside their member entities.
+                if !self.is_exported(node, false) {
+                    entities.insert(0, node);
+                }
                 return entities;
             }
         }

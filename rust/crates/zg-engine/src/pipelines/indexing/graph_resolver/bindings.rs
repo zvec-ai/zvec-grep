@@ -173,6 +173,16 @@ fn type_definition(
         if let Some(hit) = symbol_at(store, snapshot, stored, caches, binding.file_id, name, 8)? {
             return Ok(hit.symbol_type.is_some_and(is_type_scope).then_some(hit));
         }
+        if let Some(hit) = fallback_type(
+            store,
+            snapshot,
+            caches,
+            binding.file_id,
+            name,
+            &stored.language,
+        )? {
+            return Ok(Some(hit));
+        }
         return script_type(store, snapshot, stored, caches, binding.file_id, name);
     }
     if stored.language == "go"
@@ -214,6 +224,184 @@ fn type_definition(
         [hit] => Some((*hit).clone()),
         _ => None,
     })
+}
+
+/// Configured path aliases and workspace packages can supply an exported type.
+/// Package lookup requires a unique type within the named workspace package.
+/// Unimported TypeScript types must come from a global script declaration.
+fn fallback_type(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    caches: &mut RuleCaches,
+    file: u32,
+    name: &str,
+    language: &str,
+) -> crate::EngineResult<Option<NameIndexEntry>> {
+    let (local, member) = name
+        .split_once('.')
+        .map_or((name, None), |(local, member)| (local, Some(member)));
+    let mut imported = None;
+    let mut specifier = None;
+    for import in store.import_references(file)? {
+        let Some(original) = import
+            .raw_text
+            .as_deref()
+            .and_then(|raw| imported_name(raw, local))
+        else {
+            continue;
+        };
+        // An explicit relative path remains authoritative even if its target
+        // is absent. Never substitute a same-named type from another module.
+        if matches!(import.specifier.as_str(), "." | "..")
+            || import.specifier.starts_with("./")
+            || import.specifier.starts_with("../")
+        {
+            return Ok(None);
+        }
+        let original = match (original.as_str(), member) {
+            ("*", Some(member)) => member.to_owned(),
+            ("*" | "default", _) | (_, Some(_)) => return Ok(None),
+            _ => original,
+        };
+        if imported.replace(original).is_some() {
+            return Ok(None);
+        }
+        specifier = Some(import.specifier);
+    }
+    if imported.is_none() && language != "typescript" {
+        return Ok(None);
+    }
+    let name = imported.as_deref().unwrap_or(name);
+    let mut selected = None;
+    for hit in snapshot.lookup_candidates(name).unwrap_or_default() {
+        if hit.qualified_name != name || !hit.symbol_type.is_some_and(is_type_scope) {
+            continue;
+        }
+        let path = snapshot.file_path(hit.file_id).unwrap_or_default();
+        let extension = std::path::Path::new(path)
+            .extension()
+            .and_then(|ext| ext.to_str());
+        if !matches!(
+            extension,
+            Some("ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs")
+        ) {
+            continue;
+        }
+        if let Some(specifier) = &specifier {
+            if !hit.is_exported || !type_import_matches(snapshot, caches, file, hit, specifier) {
+                continue;
+            }
+        } else if !matches!(extension, Some("ts" | "tsx"))
+            || declared(
+                store,
+                caches,
+                &format!("f{}", hit.file_id),
+                "[[typescript_scope]]",
+                END_OF_SCOPE,
+            )?
+            .as_deref()
+                != Some("script")
+        {
+            continue;
+        }
+        if selected.replace(hit.clone()).is_some() {
+            return Ok(None);
+        }
+    }
+    Ok(selected)
+}
+
+/// Cache configuration once per sweep, alongside the source snapshot.
+fn module_config<'a>(caches: &'a mut RuleCaches, path: &str) -> Option<&'a serde_json::Value> {
+    let full_path = caches.source_root.as_ref()?.join(path);
+    caches
+        .module_configs
+        .entry(path.to_owned())
+        .or_insert_with(|| {
+            let source = std::fs::read(full_path).ok()?;
+            serde_json::from_slice(&source).ok()
+        })
+        .as_ref()
+}
+
+fn type_import_matches(
+    snapshot: &ResolutionSnapshot,
+    caches: &mut RuleCaches,
+    file: u32,
+    candidate: &NameIndexEntry,
+    specifier: &str,
+) -> bool {
+    let Some(path) = snapshot.file_path(file) else {
+        return false;
+    };
+    for directory in std::path::Path::new(path)
+        .parent()
+        .into_iter()
+        .flat_map(std::path::Path::ancestors)
+    {
+        let directory = directory.to_string_lossy().replace('\\', "/");
+        let config_path = format!("{directory}/tsconfig.json")
+            .trim_start_matches('/')
+            .to_owned();
+        let Some(config) = module_config(caches, &config_path) else {
+            continue;
+        };
+        let compiler = &config["compilerOptions"];
+        if let Some(paths) = compiler["paths"].as_object() {
+            // Exact mappings win, then the matching wildcard with longest prefix.
+            let mapping = paths
+                .iter()
+                .filter_map(|(pattern, targets)| {
+                    if pattern == specifier {
+                        return Some((usize::MAX, "", targets));
+                    }
+                    let (prefix, suffix) = pattern.split_once('*')?;
+                    let capture = specifier.strip_prefix(prefix)?.strip_suffix(suffix)?;
+                    Some((prefix.len(), capture, targets))
+                })
+                .max_by_key(|(priority, _, _)| *priority);
+            if let Some((_, capture, targets)) = mapping {
+                let base_url = compiler["baseUrl"].as_str().unwrap_or(".");
+                for target in targets
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                {
+                    let target = target.replace('*', capture);
+                    if let Some(base) =
+                        super::join_specifier(&directory, &format!("{base_url}/{target}"))
+                        && let Some(target_file) =
+                            super::alias_target_at(snapshot, "typescript", &base)
+                    {
+                        return target_file == candidate.file_id;
+                    }
+                }
+                return false;
+            }
+        }
+        // A nearer tsconfig is authoritative. Extends and package exports are
+        // not evaluated here; unsupported configurations remain unresolved.
+        break;
+    }
+    let Some(path) = snapshot.file_path(candidate.file_id) else {
+        return false;
+    };
+    for directory in std::path::Path::new(path)
+        .parent()
+        .into_iter()
+        .flat_map(std::path::Path::ancestors)
+    {
+        let config_path = directory
+            .join("package.json")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if let Some(config) = module_config(caches, &config_path) {
+            // The nearest package owns the file; do not inherit a parent's name.
+            return config["name"].as_str() == Some(specifier);
+        }
+    }
+    false
 }
 
 /// Classic JavaScript scripts share top-level declarations. Modules and

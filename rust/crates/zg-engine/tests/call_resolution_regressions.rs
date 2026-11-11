@@ -388,3 +388,111 @@ async fn go_grouped_import() {
         Query { operation: "callees", symbol: "invoke", expected: json!([{"name": "invoke", "edges": [{"symbol": {"name": "Work"}}, {"symbol": {"name": "Client::Run"}}]}]), ..Query::default() },
     ] }).await;
 }
+
+#[tokio::test]
+async fn object_initializers_keep_the_container_and_member_call_owners() {
+    for path in ["config.js", "config.ts"] {
+        check_case(Case { name: "object_initializer_owners", files: vec![
+            SourceFile { path, source: "function makeX() {}\nfunction helper() {}\nconst cfg = { x: makeX(), run() { helper(); }, arrow: () => helper() };\n" },
+        ], queries: vec![
+            Query { operation: "callers", symbol: "makeX", expected: json!([{"name":"makeX","edges":[{"symbol":{"name":"cfg"},"line":3}]}]), ..Query::default() },
+            Query { operation: "callees", symbol: "cfg", expected: json!([{"name":"cfg","edges":[{"symbol":{"name":"makeX"}}]}]), ..Query::default() },
+            Query { operation: "callers", symbol: "helper", expected: json!([{"name":"helper","edges":[{"symbol":{"name":"cfg::run"}},{"symbol":{"name":"cfg::arrow"}}]}]), ..Query::default() },
+        ] }).await;
+    }
+}
+
+#[tokio::test]
+async fn non_relative_type_imports_keep_unique_receiver_targets() {
+    for source in [
+        "import { Foo } from '@/foo'; export function u(x: Foo) { x.run(); }",
+        "import { Foo } from '~/foo'; export function u(x: Foo) { x.run(); }",
+        "import { Foo } from '@project/lib'; export function u(x: Foo) { x.run(); }",
+        "import { Foo as Imported } from '@project/lib'; export function u(x: Imported) { x.run(); }",
+        "import * as types from '@project/lib'; export function u(x: types.Foo) { x.run(); }",
+    ] {
+        check_case(Case { name: "non_relative_type_imports", files: vec![
+            SourceFile { path: "tsconfig.json", source: r#"{"compilerOptions":{"baseUrl":".","paths":{"@/*":["src/*"],"~/*":["src/*"]}}}"# },
+            SourceFile { path: "src/package.json", source: r#"{"name":"@project/lib"}"# },
+            SourceFile { path: "src/foo.ts", source: "export class Foo { run() {} }" },
+            SourceFile { path: "src/bar.ts", source: "export class Bar { run() {} }" },
+            SourceFile { path: "unrelated.ts", source: "export class Foo { run() {} }" },
+            SourceFile { path: "src/use.ts", source },
+        ], queries: vec![
+            Query { operation: "callees", symbol: "u", expected: json!([{"name":"u","edges":[{"symbol":{"name":"Foo::run","filePath":"src/foo.ts"}}]}]), ..Query::default() },
+        ] }).await;
+    }
+}
+
+#[tokio::test]
+async fn ambient_types_keep_receiver_targets() {
+    check_case(Case { name: "ambient_types", files: vec![
+        SourceFile { path: "globals.d.ts", source: "declare class Foo { run(): void; }" },
+        SourceFile { path: "bar.ts", source: "export class Bar { run() {} }" },
+        SourceFile { path: "use.ts", source: "export function u(x: Foo) { x.run(); }" },
+    ], queries: vec![
+        Query { operation: "callees", symbol: "u", expected: json!([{"name":"u","edges":[{"symbol":{"name":"Foo::run","filePath":"globals.d.ts"}}]}]), ..Query::default() },
+    ] }).await;
+}
+
+#[tokio::test]
+async fn type_fallback_does_not_cross_known_module_or_ambiguity_boundaries() {
+    for source in [
+        "import { Foo } from '@project/lib'; export function u(x: Foo) { x.run(); }",
+        "import type { Foo } from 'external-pkg'; export function u(x: Foo) { x.run(); }",
+        "import { Foo } from './missing'; export function u(x: Foo) { x.run(); }",
+        "export function u(x: Foo) { x.run(); }",
+    ] {
+        let mut files = vec![
+            SourceFile {
+                path: "one.ts",
+                source: "export class Foo { run() {} }",
+            },
+            SourceFile {
+                path: "use.ts",
+                source,
+            },
+        ];
+        if source.contains("@project/lib") {
+            files.push(SourceFile {
+                path: "package.json",
+                source: r#"{"name":"@project/lib"}"#,
+            });
+            files.push(SourceFile {
+                path: "two.ts",
+                source: "export class Foo { run() {} }",
+            });
+        }
+        check_case(Case {
+            name: "type_fallback_boundaries",
+            files,
+            queries: vec![Query {
+                operation: "callees",
+                symbol: "u",
+                expected: json!([{"name":"u","edges":[]}]),
+                ..Query::default()
+            }],
+        })
+        .await;
+    }
+    check_case(Case {
+        name: "declaration_module_is_not_global",
+        files: vec![
+            SourceFile {
+                path: "types.d.ts",
+                source: "declare class Foo { run(): void; } export {};",
+            },
+            SourceFile {
+                path: "use.ts",
+                source: "export function u(x: Foo) { x.run(); }",
+            },
+        ],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "u",
+            expected: json!([{"name":"u","edges":[]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}

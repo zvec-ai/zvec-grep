@@ -353,8 +353,11 @@ fn walk_code_node<'tree>(
                 let entity_scope = adapter.is_scope(entity.node);
                 let member_owned =
                     |node: Node<'_>| adapter.is_entity(node) || adapter.is_scope(node);
-                let boundary: Option<&dyn Fn(Node<'_>) -> bool> =
-                    entity_scope.then_some(&member_owned as &dyn Fn(Node<'_>) -> bool);
+                let has_member_entities =
+                    entity.node.id() == child.id() && out.len() > start_index + 1;
+                let boundary: Option<&dyn Fn(Node<'_>) -> bool> = (entity_scope
+                    || has_member_entities)
+                    .then_some(&member_owned as &dyn Fn(Node<'_>) -> bool);
                 scan_call_edges(entity.node, entity_index, source, graph_context, boundary);
                 scan_binding_declarations(
                     entity.node,
