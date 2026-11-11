@@ -1,4 +1,6 @@
 import { createRequire } from "node:module";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type * as SDK from "@zvec/zvec";
 
 export type ZVecCollectionSchema = SDK.ZVecCollectionSchema;
@@ -6,9 +8,14 @@ export type ZVecMetricType = SDK.ZVecMetricType;
 
 // Load our pinned source build explicitly. A missing build must not silently
 // select @zvec/zvec's platform package, which contains a different native core.
-const binding = createRequire(import.meta.url)(
-  "../../../native/zvec_node_binding.node",
+const loadBinding = createRequire(import.meta.url);
+const packagedBinding = new URL(
+  `../../../native/zvec-native-${process.platform}-${process.arch}/zvec_node_binding.node`,
+  import.meta.url,
 );
+const binding = existsSync(packagedBinding)
+  ? loadBinding(fileURLToPath(packagedBinding))
+  : loadBinding("../../../native/zvec_node_binding.node");
 
 export const ZVecCollectionSchema: typeof SDK.ZVecCollectionSchema =
   binding.CollectionSchema;
