@@ -5,7 +5,7 @@ use super::{
 use crate::{EngineError, models::layout::LayoutImage};
 use pdf_inspector::{PositionFrame, extract_text_with_positions_mem_in_frame, extractor::ItemType};
 use pdfium_render::prelude::*;
-use std::{collections::BTreeMap, path::PathBuf, sync::OnceLock};
+use std::{collections::BTreeMap, sync::OnceLock};
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 
@@ -21,28 +21,14 @@ fn runtime() -> Result<&'static Pdfium, PdfExtractionError> {
     static PDFIUM: OnceLock<Result<Pdfium, String>> = OnceLock::new();
     PDFIUM
         .get_or_init(|| {
-            let filename = Pdfium::pdfium_platform_library_name();
-            let path = if let Some(dir) = std::env::var_os("ZVEC_GREP_NATIVE_LIB_DIR") {
-                PathBuf::from(dir).join(&filename)
-            } else {
-                let exe = std::env::current_exe()
-                    .and_then(|p| p.canonicalize())
-                    .map_err(|e| e.to_string())?;
-                let adjacent = exe.parent().ok_or("PDFium executable has no parent")?;
-                adjacent
-                    .parent()
-                    .map(|root| root.join("lib").join(&filename))
-                    .filter(|p| p.is_file())
-                    .unwrap_or_else(|| adjacent.join(&filename))
-            };
-            Pdfium::bind_to_library(&path)
+            Pdfium::bind_to_statically_linked_library()
                 .map(Pdfium::new)
-                .map_err(|e| format!("{}: {e}", path.display()))
+                .map_err(|e| e.to_string())
         })
         .as_ref()
         .map_err(|e| {
             PdfExtractionError::Runtime(EngineError::internal(format!(
-                "Unable to load packaged PDFium: {e}"
+                "Unable to initialize statically linked PDFium: {e}"
             )))
         })
 }

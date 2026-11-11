@@ -65,6 +65,11 @@ test("includes model runtime libraries but excludes build files and other platfo
     "zg",
     "zg.exe",
     "zvec_c_api.lib",
+    "libpdfium.a",
+    "pdfium.lib",
+    "libpdfium.dylib",
+    "libpdfium.so",
+    "pdfium.dll",
   ]) {
     await writeFile(join(source, name), name);
   }
@@ -97,7 +102,7 @@ test("CPU packages retain ORT, PDFium and DirectML licenses without copying unre
   const files = await stageZvecRuntime(source, destination, "win32");
   assert.ok(files.includes("lib/licenses/onnxruntime-LICENSE"));
   assert.ok(files.includes("lib/licenses/directml-LICENSE"));
-  assert.ok(files.includes("lib/pdfium.dll"));
+  assert.ok(!files.includes("lib/pdfium.dll"));
   assert.ok(files.includes("lib/licenses/pdfium-ThirdPartyNotices.txt"));
   assert.equal(await readFile(join(destination, "licenses/directml-LICENSE-CODE"), "utf8"), "directml-LICENSE-CODE");
   await assert.rejects(readFile(join(destination, "licenses/unrelated.txt")), /ENOENT/);

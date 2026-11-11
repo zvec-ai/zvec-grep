@@ -20,6 +20,20 @@ The workspace pins its Rust toolchain in `rust-toolchain.toml`. Lexical search
 uses embedded `grep` and `ignore` crates, so a system `rg` executable is not
 required for builds or tests.
 
+PDFium 8076 is built from pinned sources and linked statically. The first build
+requires Git, Python 3.11+, internet access to Chromium's source/toolchain servers,
+and the platform SDK (Xcode or Command Line Tools, Linux C/C++ development headers,
+or Visual Studio with the Windows SDK). No PDFium shared library is installed or
+shipped; zvec and ONNX Runtime keep their existing linkage.
+`scripts/pdfium-build.json` pins PDFium and depot_tools; PDFium's DEPS pins its
+dependencies and Clang toolchain. Linux ARM64 uses the native GCC toolchain
+instead (Chromium only distributes x64 Linux compiler binaries).
+The completed static SDK and its SHA-256 manifest
+are cached under `target/pdfium-static/`, shared by debug and release builds.
+`ZG_PDFIUM_CACHE_DIR` overrides that cache. CI caches only the completed SDK.
+`CARGO_NET_OFFLINE=true` requires a matching, verified SDK already in the cache.
+To prepare it separately: `python3 scripts/prepare-pdfium.py --target aarch64-apple-darwin`.
+
 ## Engine changes
 
 Keep the application surface centered on `ZvecGrep`:

@@ -303,10 +303,12 @@ export async function stageZvecRuntime(sourceDir, libDir, platform) {
   // Reject, rather than silently filter, an ambiguous directory: the binary
   // might still require those libraries. Validate before copying any payload.
   const cpuRuntimePattern = {
-    linux: /^lib(?:zvec_c_api|onnxruntime|pdfium)\.so(?:\.\d+)*$/,
-    win32: /^(?:zvec_c_api|onnxruntime|DirectML|pdfium)\.dll$/i,
+    linux: /^lib(?:zvec_c_api|onnxruntime)\.so(?:\.\d+)*$/,
+    win32: /^(?:zvec_c_api|onnxruntime|DirectML)\.dll$/i,
   }[platform];
   for (const name of (await readdir(sourceDir)).sort()) {
+    // PDFium is linked into zg. Old dynamic builds may still be cached here.
+    if (/^(?:libpdfium\.(?:dylib|so(?:\.\d+)*)|pdfium\.dll)$/i.test(name)) continue;
     if (
       name !== library &&
       runtimePattern.test(name) &&
@@ -327,8 +329,8 @@ export async function stageZvecRuntime(sourceDir, libDir, platform) {
     await mkdir(dirname(destination), { recursive: true });
     await copyFile(join(sourceDir, file), destination);
   }
-  // Official ORT/DirectML notices travel with the native libraries on CPU
-  // targets too. Use a flat allowlist; never recursively copy a build directory.
+  // Keep notices for dynamic runtimes and statically linked PDFium alike.
+  // Use a flat allowlist; never recursively copy a build directory.
   const notices = join(sourceDir, "licenses");
   if ((await stat(notices).catch((error) => {
     if (error.code !== "ENOENT") throw error;

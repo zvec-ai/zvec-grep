@@ -40,7 +40,7 @@ llama-cpp-2.workspace = true
 # API selection does not select the download version; build.rs owns that pin.
 ort.workspace = true
 pdf-inspector = { version = "=1.25.2", default-features = false }
-pdfium-render = { version = "=0.9.5", default-features = false, features = ["pdfium_7881", "thread_safe"] }
+pdfium-render = { version = "=0.9.5", default-features = false, features = ["pdfium_7881", "thread_safe", "static"] }
 regex = "1.12"
 unicode-normalization = "0.1.24"
 unicode_categories = "0.1.1"
@@ -92,13 +92,6 @@ serde_json = { workspace = true, features = ["float_roundtrip"] }
 rusqlite = { version = "0.37", features = ["hooks"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing-subscriber.workspace = true
-
-[build-dependencies]
-flate2 = "1.1"
-tar = "0.4"
-serde_json.workspace = true
-sha2.workspace = true
-tempfile.workspace = true
 
 [lints]
 workspace = true
