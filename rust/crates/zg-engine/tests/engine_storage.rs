@@ -151,6 +151,110 @@ async fn extensionless_scripts_preserve_outline_language_across_reopen() -> Test
 }
 
 #[tokio::test]
+async fn unknown_extensions_are_indexed_and_searchable_as_text() -> TestResult {
+    let temporary = tempdir()?;
+    let root = temporary.path();
+    let server = EmbeddingServer::start()?;
+    configure_remote_model(root, server.address)?;
+    let sources = [
+        (
+            "module.bsl",
+            "Процедура ОбработатьЗаказ()\n    Сообщить(\"orchardguide\");\nКонецПроцедуры\n",
+        ),
+        (
+            "bom.bsl",
+            "\u{feff}Процедура Проверка()\n    Сообщить(\"orchardguide\");\nКонецПроцедуры\n",
+        ),
+        ("thing.custom", "orchardguide custom text"),
+        ("settings.conf", "orchardguide configuration"),
+        ("Caddyfile", "orchardguide server configuration"),
+        ("noext", "orchardguide extensionless text"),
+    ];
+    for (name, content) in sources {
+        fs::write(root.join(name), content)?;
+    }
+    fs::write(root.join("binary.bsl"), [0, 1, 2, 255])?;
+    fs::write(root.join("nul.bsl"), b"orchardguide\0binary")?;
+    fs::write(root.join("empty.bsl"), "")?;
+    let expected = sources
+        .map(|(name, _)| PathBuf::from(name))
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let engine = ZvecGrep::new();
+    for rebuild in [false, true] {
+        let indexed = engine
+            .index(IndexOptions {
+                rebuild,
+                ..index_options(root)
+            })
+            .await?;
+        assert_eq!(
+            (indexed.files_added, indexed.files_failed),
+            (6, 0),
+            "{indexed:?}"
+        );
+        assert_eq!(indexed.skipped_counts["unsupported"], 2);
+        assert_eq!(indexed.skipped_counts["empty"], 1);
+        for mode in [ContextRouteMode::Fts, ContextRouteMode::Vector] {
+            let result = engine
+                .context(ContextOptions {
+                    root: Some(root.to_path_buf()),
+                    routes: vec![ContextRoute {
+                        mode,
+                        query: "orchardguide".into(),
+                    }],
+                    auto_update: false,
+                    allow_remote: true,
+                    limit: Some(20),
+                    ..ContextOptions::default()
+                })
+                .await?;
+            assert_eq!(
+                result
+                    .items
+                    .iter()
+                    .map(|item| item.relative_path.clone())
+                    .collect::<BTreeSet<_>>(),
+                expected
+            );
+            assert!(result.items.iter().all(|item| item.metadata.is_none()));
+        }
+    }
+    let info = engine.info(info_options(root)).await?;
+    let entities = native_documents(&info.index_path.join("entities"))?;
+    assert_eq!(entities.len(), sources.len());
+    for entity in entities {
+        let payload: Value =
+            serde_json::from_str(&entity.get_string("payload")?.expect("payload"))?;
+        assert_eq!(payload["content"]["kind"], "text");
+    }
+    let inputs = server.inputs.load(Ordering::Acquire);
+    let unchanged = engine.index(index_options(root)).await?;
+    assert_eq!((unchanged.files_unchanged, unchanged.files_failed), (6, 0));
+    assert_eq!(server.inputs.load(Ordering::Acquire), inputs);
+    engine.close();
+
+    let engine = ZvecGrep::new();
+    fs::write(root.join("module.bsl"), "Сообщить(\"replacementguide\");\n")?;
+    let updated = engine.index(index_options(root)).await?;
+    assert_eq!(
+        (
+            updated.files_modified,
+            updated.files_deleted,
+            updated.files_failed
+        ),
+        (1, 0, 0)
+    );
+    assert_eq!(
+        fts_paths(&engine, root, "replacementguide").await?,
+        [PathBuf::from("module.bsl")]
+    );
+    engine.drop_index(info_options(root)).await?;
+    engine.close();
+    Ok(())
+}
+
+#[tokio::test]
 async fn text_and_code_share_one_model_and_support_incremental_search() -> TestResult {
     let temporary = tempdir()?;
     let root = temporary.path();
@@ -763,12 +867,10 @@ async fn public_engine_persists_searches_updates_and_drops_real_storage() -> Tes
 
     let engine = ZvecGrep::new();
     let initial = engine.index(index_options(root)).await?;
-    assert_eq!(initial.files_added, 2, "{initial:?}");
-    assert!(
-        initial
-            .skipped
-            .iter()
-            .any(|file| file.path == root.join("tmp"))
+    assert_eq!(initial.files_added, 3, "{initial:?}");
+    assert_eq!(
+        fts_paths(&engine, root, "memorandum").await?,
+        [PathBuf::from("tmp")]
     );
     assert_eq!(initial.files_failed, 0);
     let info = engine.info(info_options(root)).await?;
@@ -783,7 +885,7 @@ async fn public_engine_persists_searches_updates_and_drops_real_storage() -> Tes
         .expect("FTS info");
     assert_eq!(fts.tokenizer, "jieba");
     assert_eq!(fts.filters, ["lowercase"]);
-    assert_eq!(info.status.as_ref().expect("status").files_indexed, 2);
+    assert_eq!(info.status.as_ref().expect("status").files_indexed, 3);
     assert_eq!(
         fts_paths(&engine, root, "orchard").await?,
         [PathBuf::from("auth.rs")]
@@ -810,7 +912,7 @@ async fn public_engine_persists_searches_updates_and_drops_real_storage() -> Tes
     );
     let calls = server.requests.load(Ordering::Acquire);
     let unchanged = engine.index(index_options(root)).await?;
-    assert_eq!(unchanged.files_unchanged, 2);
+    assert_eq!(unchanged.files_unchanged, 3);
     assert_eq!(server.requests.load(Ordering::Acquire), calls);
     engine.close();
     assert_eq!(
@@ -884,7 +986,7 @@ async fn public_engine_persists_searches_updates_and_drops_real_storage() -> Tes
             ..index_options(root)
         })
         .await?;
-    assert_eq!(rebuilt.files_added, 2);
+    assert_eq!(rebuilt.files_added, 3);
     let after_rebuild = engine.info(info_options(root)).await?;
     assert_eq!(
         after_rebuild

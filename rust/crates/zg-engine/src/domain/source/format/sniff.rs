@@ -2,17 +2,21 @@ use crate::utils::decode_text;
 
 use super::FileFormat;
 
-/// A suffixless file is indexable only if its readable header names a supported interpreter.
-pub(super) fn script(bytes: &[u8], complete: bool) -> Option<FileFormat> {
+/// Unknown suffixes use text chunks; only suffixless files can supply interpreter hints.
+pub(super) fn format(bytes: &[u8], complete: bool, extensionless: bool) -> Option<FileFormat> {
     let text = decode_text(bytes, complete)?;
-    if text.trim().is_empty()
+    if text.is_empty()
         || text
             .chars()
             .any(|ch| ch.is_control() && !ch.is_whitespace())
     {
         return None;
     }
-    shebang(&text, complete)
+    if extensionless {
+        Some(shebang(&text, complete).unwrap_or(FileFormat::Text))
+    } else {
+        Some(FileFormat::Text)
+    }
 }
 
 fn shebang(text: &str, complete: bool) -> Option<FileFormat> {
