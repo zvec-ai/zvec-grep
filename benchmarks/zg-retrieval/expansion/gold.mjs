@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inside, sha256 } from "../core/io.mjs";
 import { relativePath } from "../core/response.mjs";
-import { summarizeRepeatedQaRetrieval } from "../metrics/entities.mjs";
+import { summarizeDiagnosticRetrieval } from "../metrics/entities.mjs";
 import { PILOT_SUITES_BY_ID } from "./config.mjs";
 
 const goldDirectory = fileURLToPath(new URL("./gold/", import.meta.url));
@@ -286,20 +286,9 @@ export function locateFullEntity(item, file) {
 }
 
 export function summarizePilotEntity(calls, entry) {
-  if (entry.targets.length === 0)
-    return {
-      status: "unavailable",
-      formal_eligible: false,
-      reason: "no_verified_entity_evidence",
-      file: null,
-      entity: null,
-    };
-  return summarizeRepeatedQaRetrieval(
+  return summarizeDiagnosticRetrieval(
     calls,
     {
-      diagnostic_eligible: true,
-      scoring_eligible: false,
-      review: { correctness: "reviewed", completeness: "not_reviewed" },
       file_targets: entry.files.map((file) => ({ ...file, id: file.path })),
       entity_targets: entry.targets.map((target) => ({
         ...target,

@@ -90,13 +90,21 @@ original query/qrel records are checked in.
 
 | Suite | File Gold | Entity Gold |
 | --- | --- | --- |
-| BEIR | Original positive document qrels | Original SciFact evidence sentences where available, reviewed evidence spans for NFCorpus and FiQA, and the paired ArguAna argument body |
-| DuRetrieval | Original positive passage qrels | Reviewed answer spans within the published passages |
+| BEIR | Original positive document qrels | Original SciFact evidence sentences where available, LLM-annotated evidence spans for NFCorpus and FiQA, and the paired ArguAna argument body |
+| DuRetrieval | Original positive passage qrels | LLM-annotated answer spans within the published passages |
 | Quarry | Unique paths of original positive units | Original function ranges on the pinned preimage, with indentation and separators outside the function excluded |
 
-[Gold manifests](gold/) record each original label, its source file checksum, the
-reviewed byte range and its checksum, or the reason a range could not be
-verified. The source locks bind the query, original labels and corpus version.
+ZG's [Gold manifests](gold/) are assembled, annotated, and checked with LLM
+assistance against the pinned data above. Entity scores are diagnostic, not
+independently human-validated results.
+
+The manifests record original labels, source file and span checksums, and
+`unresolved` reasons for targets that cannot be established. Source locks bind
+the query, original labels and corpus version. This section defines annotation
+rules; manifest hashes and Git commits identify each generated Gold version.
+Unresolved targets do not enter Entity scoring. A case without any established
+Entity target remains unscored.
+
 BEIR writes a title and a blank line before the body. DuRetrieval writes the
 unchanged passage. The runner checks these materialized bytes before indexing.
 Gold and reports stay outside the searchable corpus.

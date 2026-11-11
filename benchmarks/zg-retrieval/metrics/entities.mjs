@@ -376,22 +376,26 @@ function eligibility(pair) {
 }
 
 /** Score only public evidence. Diagnostic labels never authorize formal totals. */
-export function scoreQaRetrieval(
+export function scoreQaRetrieval(items, pair, options) {
+  return scoreRetrieval(items, pair, eligibility(pair), options);
+}
+
+function scoreRetrieval(
   items,
   pair,
+  qualification,
   {
     executionStatus = "success",
     status = "scored",
     entityByteRanges = false,
   } = {},
 ) {
-  const review = eligibility(pair);
-  if (review.status === "unavailable")
-    return { ...review, file: null, entity: null };
+  if (qualification.status === "unavailable")
+    return { ...qualification, file: null, entity: null };
   if (executionStatus !== "success" || status === "harness_invalid")
     return {
       status: "unavailable",
-      formal_eligible: review.formal_eligible,
+      formal_eligible: qualification.formal_eligible,
       reason:
         status === "harness_invalid"
           ? "harness_invalid"
@@ -405,7 +409,7 @@ export function scoreQaRetrieval(
     "QA scoring needs nonempty labels",
   );
   return {
-    ...review,
+    ...qualification,
     file: rankMetrics(items, pair.file_targets, (item, targets) => {
       const target = targets.find((target) => target.path === item.path);
       return { hits: target ? [target.id] : [], possible: [] };
@@ -444,22 +448,47 @@ export function publicQaItems(items) {
 
 /** A metric receives one question vote only when all five observations are known. */
 export function summarizeRepeatedQaRetrieval(calls, pair, options) {
+  return summarizeRepeatedRetrieval(calls, pair, eligibility(pair), options);
+}
+
+/** Pilot labels support diagnostics only; they do not assert a QA review. */
+export function summarizeDiagnosticRetrieval(calls, targets, options) {
+  if (targets.entity_targets.length === 0)
+    return {
+      status: "unavailable",
+      formal_eligible: false,
+      reason: "no_verified_entity_evidence",
+      file: null,
+      entity: null,
+    };
+  return summarizeRepeatedRetrieval(
+    calls,
+    targets,
+    {
+      status: "diagnostic",
+      formal_eligible: false,
+      reason: "diagnostic_only",
+    },
+    options,
+  );
+}
+
+function summarizeRepeatedRetrieval(calls, pair, qualification, options) {
   assert.equal(calls.length, 5, "QA quality requires five calls");
   assert.deepEqual(
     calls.map((call) => call.repetition),
     [1, 2, 3, 4, 5],
   );
-  const review = eligibility(pair);
-  if (review.status === "unavailable")
-    return { ...review, file: null, entity: null };
+  if (qualification.status === "unavailable")
+    return { ...qualification, file: null, entity: null };
   const scores = calls.map((call) =>
-    scoreQaRetrieval(call.items, pair, {
+    scoreRetrieval(call.items, pair, qualification, {
       ...options,
       executionStatus: call.execution_status,
       status: call.status,
     }),
   );
-  const result = { ...review };
+  const result = { ...qualification };
   for (const level of ["file", "entity"]) {
     const scoredCalls = {};
     result[level] = { n_relevant: pair[`${level}_targets`].length };
