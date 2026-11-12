@@ -420,6 +420,14 @@ impl LanguageAdapter {
                 nested_type_specifier(node).is_some()
                     || !matches!(node.kind(), "declaration" | "field_declaration")
                     || find_descendant_by_kind(node, "function_declarator").is_some()
+                    // A variable a namespace initializes with a call is the
+                    // caller of that call: the initializer runs at the unit's
+                    // scope, so the body around it — a function — is not the
+                    // one making the call. A local stays unindexed.
+                    || (node.kind() == "declaration"
+                        && outside_function_body(node)
+                        && find_descendant_by_kind(node, "init_declarator").is_some()
+                        && find_descendant_by_kind(node, "call_expression").is_some())
             }
             Language::JavaScript | Language::TypeScript => {
                 should_index_javascript_typescript_entity(node)
@@ -822,6 +830,15 @@ fn extract_c_family_name(node: Node<'_>, source: &[u8]) -> Option<String> {
     }
     if let Some(name) = node.child_by_field_name("name") {
         return Some(text(find_identifier_leaf(name).unwrap_or(name), source).to_owned());
+    }
+    // A variable initialized in place states its name in the declarator
+    // (`int caller = f();`). A function declaration already carried a `name`.
+    if node.kind() == "declaration"
+        && let Some(declarator) = node.child_by_field_name("declarator")
+        && declarator.kind() == "init_declarator"
+        && let Some(name) = find_identifier_leaf(declarator)
+    {
+        return Some(text(name, source).to_owned());
     }
     if node.kind() == "type_definition" {
         return node
@@ -1528,6 +1545,20 @@ fn find_descendant_by_kind<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<
     named_children(node)
         .into_iter()
         .find_map(|child| find_descendant_by_kind(child, kind))
+}
+
+/// Whether a declaration sits outside every function body, at the namespace
+/// level where a `static` initializer runs.
+fn outside_function_body(node: Node<'_>) -> bool {
+    let mut current = node;
+    while let Some(parent) = current.parent() {
+        match parent.kind() {
+            "compound_statement" | "function_definition" | "lambda_expression" => return false,
+            "translation_unit" => return true,
+            _ => current = parent,
+        }
+    }
+    false
 }
 
 // Nodes without a matching symbol category remain unclassified.

@@ -147,6 +147,7 @@ pub(crate) fn partition_walk(
         file_symbols,
         scoped_symbols,
         shadowed_names,
+        borrowed_names,
         value_aliases,
         preprocessor,
         ..
@@ -158,6 +159,13 @@ pub(crate) fn partition_walk(
         head_fragment_indices,
         directives: preprocessor,
     };
+    // Containment is the only record of which entity sits inside which, so it
+    // is what lets a call read the using-declarations of the classes above it.
+    let enclosing = partitioned
+        .contains
+        .iter()
+        .map(|edge| (edge.target_index, edge.source_index))
+        .collect::<HashMap<usize, usize>>();
     let aliases = alias_table(&name_edges);
     let mut collapsed: HashSet<RefSite> = HashSet::new();
     for edge in name_edges {
@@ -178,57 +186,93 @@ pub(crate) fn partition_walk(
                 continue;
             }
         }
-            // A bare name the owner's body already took for itself is not the
-            // file's name: `invoke(dispatch: () => void)` reaching `dispatch()`
-            // calls the parameter, never an imported function some alias table
-            // happens to spell. Only the owner's own tables may answer it, and a
-            // name no table can place stays pending instead of falling back.
-            let shadowed = edge.receiver_name.is_none()
-                && shadowed_names
-                    .get(&edge.owner_index)
-                    .is_some_and(|names| names.contains(&edge.ref_name));
-            let resolved_target = in_file_target(
-                &edge,
-                shadowed,
-                InFileTables {
-                    symbols: &symbols,
-                    scoped_symbols: &scoped_symbols,
-                    file_symbols: &file_symbols,
-                    aliases: &aliases,
-                    value_aliases: &value_aliases,
-                },
+        // A bare name the owner's body already took for itself is not the
+        // file's name: `invoke(dispatch: () => void)` reaching `dispatch()`
+        // calls the parameter, never an imported function some alias table
+        // happens to spell. Only the owner's own tables may answer it, and a
+        // name no table can place stays pending instead of falling back.
+        let shadowed = edge.receiver_name.is_none()
+            && shadowed_names
+                .get(&edge.owner_index)
+                .is_some_and(|names| names.contains(&edge.ref_name));
+        // A name one of the classes around the owner imports
+        // (`using First<T>::Run;`) is that class's member, not the file's
+        // namesake: the cross-file resolver decides which member it reaches.
+        let borrowed = edge.receiver_name.is_none()
+            && borrowed_by_enclosing_class(
+                edge.owner_index,
+                &edge.ref_name,
+                &enclosing,
+                &borrowed_names,
             );
-            match resolved_target {
-                Some(target_index) => partitioned.resolved.push(ResolvedNameEdge {
-                    ref_kind: edge.ref_kind,
-                    source_index: edge.owner_index,
-                    target_index,
-                    ref_name: edge.ref_name,
-                    raw_text: edge.raw_text,
-                    arity: edge.arity,
-                    receiver_name: edge.receiver_name,
-                    line: edge.line,
-                    column: edge.column,
-                    provenance: EdgeProvenance::FileLocal,
-                }),
-                None => partitioned.pending.push(PendingNameRef {
-                    ref_kind: edge.ref_kind,
-                    owner_index: edge.owner_index,
-                    ref_name: edge.ref_name,
-                    receiver_name: edge.receiver_name,
-                    raw_text: edge.raw_text,
-                    bound_type: edge.bound_type,
-                    bound_until: edge.bound_until,
-                    scope_end: edge.scope_end,
-                    arity: edge.arity,
-                    constructs: edge.constructs,
-                    shadowed,
-                    line: edge.line,
-                    column: edge.column,
-                }),
-            }
+        let resolved_target = in_file_target(
+            &edge,
+            shadowed || borrowed,
+            InFileTables {
+                symbols: &symbols,
+                scoped_symbols: &scoped_symbols,
+                file_symbols: &file_symbols,
+                aliases: &aliases,
+                value_aliases: &value_aliases,
+            },
+        );
+        match resolved_target {
+            Some(target_index) => partitioned.resolved.push(ResolvedNameEdge {
+                ref_kind: edge.ref_kind,
+                source_index: edge.owner_index,
+                target_index,
+                ref_name: edge.ref_name,
+                raw_text: edge.raw_text,
+                arity: edge.arity,
+                receiver_name: edge.receiver_name,
+                line: edge.line,
+                column: edge.column,
+                provenance: EdgeProvenance::FileLocal,
+            }),
+            None => partitioned.pending.push(PendingNameRef {
+                ref_kind: edge.ref_kind,
+                owner_index: edge.owner_index,
+                ref_name: edge.ref_name,
+                receiver_name: edge.receiver_name,
+                raw_text: edge.raw_text,
+                bound_type: edge.bound_type,
+                bound_until: edge.bound_until,
+                scope_end: edge.scope_end,
+                arity: edge.arity,
+                constructs: edge.constructs,
+                shadowed: shadowed || borrowed,
+                line: edge.line,
+                column: edge.column,
+            }),
+        }
     }
     partitioned
+}
+
+/// Whether one of the entities around `owner` imports `name` from another
+/// scope: a class body's `using First<T>::Run;` answers `Run()` in the
+/// methods written in that class, so the file's own namesake is not the call.
+fn borrowed_by_enclosing_class(
+    owner: usize,
+    name: &str,
+    enclosing: &HashMap<usize, usize>,
+    borrowed_names: &HashMap<usize, HashSet<String>>,
+) -> bool {
+    let mut current = owner;
+    // The file node is not an entity, so the walk ends where containment does.
+    for _ in 0..64 {
+        let Some(parent) = enclosing.get(&current) else {
+            return false;
+        };
+        if borrowed_names
+            .get(parent)
+            .is_some_and(|names| names.contains(name))
+        {
+            return true;
+        }
+        current = *parent;
+    }
+    false
 }
 
 /// The file's own name tables, as one reference reads them.

@@ -15,9 +15,7 @@ use crate::{
         MAX_SYMBOL_MATCHES, RelationshipEdge, RelationshipOptions, RelationshipResult,
         SymbolDefinition, SymbolRelationships,
     },
-    domain::{
-        Entity, EntityId, EntityMetadata, FileEdge, FileId, FileRecord, GraphEdgeKind, Range,
-    },
+    domain::{Entity, EntityId, EntityMetadata, FileEdge, FileRecord, GraphEdgeKind, Range},
     pipelines::indexed_search::path_filter::resolve_glob_filter,
     storage::{
         ReadView,
@@ -171,12 +169,9 @@ fn check_cancelled(signal: Option<&CancellationToken>) -> EngineResult<()> {
 /// and leaves the prototype out. A workspace that holds only the declaration
 /// still answers, since that is the one known location.
 ///
-/// The rule stops at the file boundary: a declaration and a definition written
-/// in one file are two statements about one file, and the corpus reads them as
-/// two locations — the in-class prototype keeps its own (empty) answer while
-/// the out-of-class body answers for the calls. A prototype in another file is
-/// only the same symbol's earlier record, and repeating it would report one
-/// implementation twice.
+/// The name is the symbol, not the statement: an in-class prototype and the
+/// out-of-class body written in one file are one implementation, and reporting
+/// them apart would answer one implementation twice.
 fn prefer_definitions(definitions: Vec<StoredEntity>) -> Vec<StoredEntity> {
     let is_declaration = |stored: &StoredEntity| {
         matches!(
@@ -184,16 +179,10 @@ fn prefer_definitions(definitions: Vec<StoredEntity>) -> Vec<StoredEntity> {
             Some(EntityMetadata::Code(metadata)) if metadata.is_declaration
         )
     };
-    let bodies: Vec<FileId> = definitions
-        .iter()
-        .filter(|stored| !is_declaration(stored))
-        .map(|stored| stored.file.id())
-        .collect();
+    let has_body = definitions.iter().any(|stored| !is_declaration(stored));
     definitions
         .into_iter()
-        .filter(|stored| {
-            !is_declaration(stored) || !bodies.iter().any(|body| *body != stored.file.id())
-        })
+        .filter(|stored| !has_body || !is_declaration(stored))
         .collect()
 }
 

@@ -275,10 +275,204 @@ struct CodeEntity<'tree> {
     exported_as: Vec<String>,
 }
 
-// The entity branch shares first/scope entity indices and the scope boundary
-// with the call, binding and inheritance scans below it; extracting it would
-// force an eight-argument helper, trading one lint for another.
+// A node's entities and their scans share one index sequence and one
+// boundary; splitting the entity branch from the scope descent keeps both in
+// one place for the walk and for the types a body declares.
 #[allow(clippy::too_many_lines)]
+fn walk_entity_node<'tree>(
+    child: Node<'tree>,
+    adapter: &LanguageAdapter,
+    source: &[u8],
+    breadcrumb: &[String],
+    out: &mut Vec<CodeEntity<'tree>>,
+    graph_context: &mut WalkContext,
+    format: FileFormat,
+) -> Option<usize> {
+    let start_index = out.len();
+    let mut first_entity_index = None;
+    let mut scope_entity_index = None;
+    for entity in adapter.resolve_entities(child, source) {
+        let entity_index = graph_context.next_entity_index();
+        first_entity_index.get_or_insert(entity_index);
+        scope_entity_index = Some(entity_index);
+        let name = adapter.extract_name(entity, source);
+        let entity_breadcrumb = adapter.scope_breadcrumb(entity, source, breadcrumb);
+        // Declarations stay out of the in-file symbol table: an in-file call
+        // must not bind to a bodyless prototype when a definition exists
+        // anywhere in the workspace, and the resolver's name index applies that
+        // preference globally.
+        if !adapter.is_declaration(entity) {
+            graph_context.register_symbol(name.as_deref(), entity_index);
+            graph_context.register_scoped_symbol(name.as_deref(), entity_index);
+        }
+        graph_context.add_contains_edge(
+            entity_index,
+            entity.start_position().row + 1,
+            entity.start_position().column,
+        );
+        // The alias belongs to this entity's own name, so it is read before the
+        // name moves into the record.
+        let alias_of = alias_target_of(entity, source, format)
+            .filter(|(aliased, _)| name.as_deref() == Some(aliased.as_str()))
+            .map(|(_, target)| target);
+        let object_members = object_member_aliases(entity, source)
+            .into_iter()
+            .map(|(name, target)| MemberAlias { name, target })
+            .collect();
+        out.push(CodeEntity {
+            node: entity,
+            language: adapter.language(),
+            name,
+            symbol_type: adapter.classify(entity),
+            breadcrumb: entity_breadcrumb,
+            signature: adapter.extract_signature(entity, source),
+            documentation: adapter.extract_doc(entity, source),
+            arity: adapter.extract_arity(entity, source),
+            is_exported: adapter.is_exported(entity, !breadcrumb.is_empty()),
+            format,
+            is_declaration: adapter.is_declaration(entity),
+            package: java_package(entity, source, format),
+            has_internal_linkage: adapter.has_internal_linkage(entity, source),
+            declares_type: declares_type(entity),
+            alias_of,
+            object_members,
+            overwritten_by: overwritten_by(entity, source),
+            exported_as: Vec::new(),
+        });
+    }
+    // A declaration can emit several object members. Each member owns its
+    // calls and nested definitions, independently of its siblings.
+    for (ordinal, entity) in out.iter().enumerate().skip(start_index) {
+        let entity_index = first_entity_index.expect("entity ordinal") + ordinal - start_index;
+        let entity_scope = adapter.is_scope(entity.node);
+        let member_owned = |node: Node<'_>| adapter.is_entity(node) || adapter.is_scope(node);
+        let local_type = |node: Node<'_>| {
+            matches!(
+                node.kind(),
+                "class_specifier" | "struct_specifier" | "union_specifier" | "enum_specifier"
+            )
+        };
+        let has_member_entities = entity.node.id() == child.id() && out.len() > start_index + 1;
+        // A body's own types are read after this entity, so its scans leave
+        // them out: what a member writes belongs to the member, not to the
+        // function that declares the class.
+        let boundary: Option<&dyn Fn(Node<'_>) -> bool> = if entity_scope || has_member_entities {
+            Some(&member_owned as &dyn Fn(Node<'_>) -> bool)
+        } else if format == FileFormat::Cpp && entity.node.kind() == "function_definition" {
+            Some(&local_type as &dyn Fn(Node<'_>) -> bool)
+        } else {
+            None
+        };
+        scan_call_edges(entity.node, entity_index, source, graph_context, boundary);
+        scan_binding_declarations(
+            entity.node,
+            entity_index,
+            source,
+            format,
+            graph_context,
+            boundary,
+        );
+        collect_inheritance_edges(entity.node, source, format, entity_index, graph_context);
+    }
+    // Synthetic members have no separate declaration walk. Descend their
+    // scopes here; ordinary scope nodes are handled by the caller.
+    let member_scopes: Vec<_> = out[start_index..]
+        .iter()
+        .enumerate()
+        .filter(|(_, entity)| entity.node.id() != child.id() && adapter.is_scope(entity.node))
+        .map(|(offset, entity)| {
+            let mut scope = entity.breadcrumb.clone();
+            scope.extend(entity.name.clone());
+            (
+                first_entity_index.expect("entity ordinal") + offset,
+                entity.node,
+                scope,
+            )
+        })
+        .collect();
+    for (owner, member, scope) in member_scopes {
+        graph_context.push_scope(owner);
+        walk_code_node(member, adapter, source, &scope, out, graph_context, format);
+        graph_context.pop_scope();
+    }
+    // A type a body declares (`void f() { class L { ... }; }`) is a type that
+    // body names: its members own the calls they write, and a name the body
+    // binds to it reads their members.
+    if format == FileFormat::Cpp
+        && child.kind() == "function_definition"
+        && let Some(body) = child.child_by_field_name("body")
+        && let Some(name) = adapter.extract_name(child, source)
+    {
+        let mut scope = breadcrumb.to_vec();
+        scope.push(name);
+        walk_body_types(body, adapter, source, &scope, out, graph_context, format);
+    }
+    scope_entity_index
+}
+
+/// Reads the types a body declares, leaving its statements alone.
+///
+/// The entity walk bounds entities at a declaration, so a body's types would
+/// otherwise be invisible: `void f() { class L { ... }; }` declares a type the
+/// file can name, and its members are entities of their own.
+fn walk_body_types<'tree>(
+    body: Node<'tree>,
+    adapter: &LanguageAdapter,
+    source: &[u8],
+    breadcrumb: &[String],
+    out: &mut Vec<CodeEntity<'tree>>,
+    graph_context: &mut WalkContext,
+    format: FileFormat,
+) {
+    for child in named_children(body) {
+        if !adapter.is_entity(child) {
+            // A statement may nest its own block (`if (…) { class L {}; }`).
+            walk_body_types(
+                child,
+                adapter,
+                source,
+                breadcrumb,
+                out,
+                graph_context,
+                format,
+            );
+            continue;
+        }
+        if !adapter.is_scope(child) {
+            continue;
+        }
+        let owner = walk_entity_node(
+            child,
+            adapter,
+            source,
+            breadcrumb,
+            out,
+            graph_context,
+            format,
+        );
+        let mut scope = breadcrumb.to_vec();
+        if let Some(name) = adapter.extract_name(child, source) {
+            scope.push(name);
+        }
+        if let Some(owner) = owner {
+            graph_context.push_scope(owner);
+        }
+        let scope_node = adapter.enter_scope_node(child);
+        walk_code_node(
+            scope_node,
+            adapter,
+            source,
+            &scope,
+            out,
+            graph_context,
+            format,
+        );
+        if owner.is_some() {
+            graph_context.pop_scope();
+        }
+    }
+}
+
 fn walk_code_node<'tree>(
     node: Node<'tree>,
     adapter: &LanguageAdapter,
@@ -291,109 +485,19 @@ fn walk_code_node<'tree>(
     for child in named_children(node) {
         let is_scope = adapter.is_scope(child);
         let is_entity = adapter.is_entity(child);
-        let mut first_entity_index = None;
-        let mut scope_entity_index = None;
 
-        if is_entity {
-            let start_index = out.len();
-            for entity in adapter.resolve_entities(child, source) {
-                let entity_index = graph_context.next_entity_index();
-                first_entity_index.get_or_insert(entity_index);
-                scope_entity_index = Some(entity_index);
-                let name = adapter.extract_name(entity, source);
-                let entity_breadcrumb = adapter.scope_breadcrumb(entity, source, breadcrumb);
-                // Declarations stay out of the in-file symbol table: an
-                // in-file call must not bind to a bodyless prototype when a
-                // definition exists anywhere in the workspace, and the
-                // resolver's name index applies that preference globally.
-                if !adapter.is_declaration(entity) {
-                    graph_context.register_symbol(name.as_deref(), entity_index);
-                    graph_context.register_scoped_symbol(name.as_deref(), entity_index);
-                }
-                graph_context.add_contains_edge(
-                    entity_index,
-                    entity.start_position().row + 1,
-                    entity.start_position().column,
-                );
-                // The alias belongs to this entity's own name, so it is read
-                // before the name moves into the record.
-                let alias_of = alias_target_of(entity, source, format)
-                    .filter(|(aliased, _)| name.as_deref() == Some(aliased.as_str()))
-                    .map(|(_, target)| target);
-                let object_members = object_member_aliases(entity, source)
-                    .into_iter()
-                    .map(|(name, target)| MemberAlias { name, target })
-                    .collect();
-                out.push(CodeEntity {
-                    node: entity,
-                    language: adapter.language(),
-                    name,
-                    symbol_type: adapter.classify(entity),
-                    breadcrumb: entity_breadcrumb,
-                    signature: adapter.extract_signature(entity, source),
-                    documentation: adapter.extract_doc(entity, source),
-                    arity: adapter.extract_arity(entity, source),
-                    is_exported: adapter.is_exported(entity, !breadcrumb.is_empty()),
-                    format,
-                    is_declaration: adapter.is_declaration(entity),
-                    package: java_package(entity, source, format),
-                    has_internal_linkage: adapter.has_internal_linkage(entity, source),
-                    declares_type: declares_type(entity),
-                    alias_of,
-                    object_members,
-                    overwritten_by: overwritten_by(entity, source),
-                    exported_as: Vec::new(),
-                });
-            }
-            // A declaration can emit several object members. Each member owns
-            // its calls and nested definitions, independently of its siblings.
-            for (ordinal, entity) in out.iter().enumerate().skip(start_index) {
-                let entity_index =
-                    first_entity_index.expect("entity ordinal") + ordinal - start_index;
-                let entity_scope = adapter.is_scope(entity.node);
-                let member_owned =
-                    |node: Node<'_>| adapter.is_entity(node) || adapter.is_scope(node);
-                let has_member_entities =
-                    entity.node.id() == child.id() && out.len() > start_index + 1;
-                let boundary: Option<&dyn Fn(Node<'_>) -> bool> = (entity_scope
-                    || has_member_entities)
-                    .then_some(&member_owned as &dyn Fn(Node<'_>) -> bool);
-                scan_call_edges(entity.node, entity_index, source, graph_context, boundary);
-                scan_binding_declarations(
-                    entity.node,
-                    entity_index,
-                    source,
-                    format,
-                    graph_context,
-                    boundary,
-                );
-                collect_inheritance_edges(entity.node, source, format, entity_index, graph_context);
-            }
-            // Synthetic members have no separate declaration walk. Descend their
-            // scopes here; ordinary scope nodes are handled below.
-            let member_scopes: Vec<_> = out[start_index..]
-                .iter()
-                .enumerate()
-                .filter(|(_, entity)| {
-                    entity.node.id() != child.id() && adapter.is_scope(entity.node)
-                })
-                .map(|(offset, entity)| {
-                    let mut scope = entity.breadcrumb.clone();
-                    scope.extend(entity.name.clone());
-                    (
-                        first_entity_index.expect("entity ordinal") + offset,
-                        entity.node,
-                        scope,
-                    )
-                })
-                .collect();
-            for (owner, member, scope) in member_scopes {
-                graph_context.push_scope(owner);
-                walk_code_node(member, adapter, source, &scope, out, graph_context, format);
-                graph_context.pop_scope();
-            }
-        }
-
+        let scope_entity_index = is_entity.then(|| {
+            walk_entity_node(
+                child,
+                adapter,
+                source,
+                breadcrumb,
+                out,
+                graph_context,
+                format,
+            )
+        });
+        let scope_entity_index = scope_entity_index.flatten();
         if is_scope {
             let name = adapter.extract_name(child, source);
             let mut child_breadcrumb = breadcrumb.to_vec();

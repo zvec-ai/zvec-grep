@@ -152,6 +152,10 @@ pub(crate) struct WalkContext {
     /// spell. A bare call through such a name reaches the local value, never
     /// the file-level symbol of the same name.
     shadowed_names: HashMap<usize, HashSet<String>>,
+    /// Names a class body imports from another scope (`using First<T>::Run;`).
+    /// A bare call of such a name inside that class reaches the imported
+    /// member, so the file's own namesake cannot answer it.
+    borrowed_names: HashMap<usize, HashSet<String>>,
     /// Names a declaration makes another spelling of an existing value
     /// (`const dispatch = send`): a bare call through the bound name reaches
     /// the aliased one. Grouped by owner like the shadow table, and keyed
@@ -198,6 +202,7 @@ impl WalkContext {
             file_symbols: HashMap::new(),
             scoped_symbols: HashMap::new(),
             shadowed_names: HashMap::new(),
+            borrowed_names: HashMap::new(),
             value_aliases: HashMap::new(),
             seen_name_edges: HashSet::new(),
             return_types: HashMap::new(),
@@ -291,6 +296,20 @@ impl WalkContext {
             return;
         }
         self.shadowed_names
+            .entry(owner)
+            .or_default()
+            .insert(name.to_owned());
+    }
+
+    /// Records that `owner`'s class body imports `name` from another scope
+    /// (`using First<T>::Run;`). A bare call of that name written in the
+    /// class's bodies reaches the imported member, so the file's own namesake
+    /// cannot answer it.
+    pub(crate) fn register_borrowed_name(&mut self, owner: usize, name: &str) {
+        if !self.collecting || name.is_empty() {
+            return;
+        }
+        self.borrowed_names
             .entry(owner)
             .or_default()
             .insert(name.to_owned());

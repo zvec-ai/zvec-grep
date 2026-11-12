@@ -616,8 +616,36 @@ fn visit_for_bindings(
             node.start_position().column,
         );
     }
+    if format == FileFormat::Cpp
+        && node.kind() == "using_declaration"
+        && owner_index == super::FILE_SCOPE_INDEX
+        && let Some(space) = node.named_child(0)
+        && space.kind() == "identifier"
+    {
+        // `using namespace rocksdb;` is a directive of the unit, not of one
+        // body: the names it opens are read wherever the file is compiled. The
+        // grammar reads it as a using declaration whose single name is the
+        // namespace, so a bare name here is the directive.
+        context.add_declare_binding(
+            super::FILE_SCOPE_INDEX,
+            "[[cpp_using_namespace]]",
+            node_text(space, source),
+            line,
+            column,
+            None,
+        );
+    }
     if format == FileFormat::Go {
         collect_go_scoped_binding(node, owner_index, source, context);
+    }
+    if format == FileFormat::Cpp
+        && node.kind() == "using_declaration"
+        && let Some((borrowed, _)) = cpp_binding_of(node, source, context)
+    {
+        // `using First<T>::Run;` puts that base member into the class's own
+        // lookup: a bare `Run()` written in the class's bodies reaches the
+        // base's member rather than a namespace-scope function of the name.
+        context.register_borrowed_name(owner_index, &borrowed);
     }
     if matches!(format, FileFormat::TypeScript | FileFormat::JavaScript)
         && matches!(node.kind(), "variable_declarator" | "assignment_expression")
@@ -1338,6 +1366,32 @@ pub(crate) fn scan_return_types(
             Some(&boundary),
         );
     }
+    if matches!(format, FileFormat::C | FileFormat::Cpp) {
+        // A translation-unit declaration states the type of the name it
+        // introduces (`extern MemTableRep::Iterator* iter;`), and every body of
+        // the file may read that name. A class body states its members for the
+        // class entity itself, so those are left to its own scan.
+        let boundary = |node: Node<'_>| {
+            matches!(
+                node.kind(),
+                "function_definition"
+                    | "lambda_expression"
+                    | "class_specifier"
+                    | "struct_specifier"
+                    | "union_specifier"
+                    | "enum_specifier"
+                    | "template_declaration"
+            )
+        };
+        visit_for_bindings(
+            root,
+            super::FILE_SCOPE_INDEX,
+            source,
+            format,
+            context,
+            Some(&boundary),
+        );
+    }
 }
 
 fn has_javascript_module_syntax(node: Node<'_>, source: &[u8]) -> bool {
@@ -1505,18 +1559,39 @@ fn go_return_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
 }
 
 fn cpp_return_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
-    if node.kind() != "function_definition" {
-        return None;
-    }
+    // A definition states the result beside its body, a prototype beside its
+    // parameter list. A call's result type reads the same either way, and the
+    // readers that need it — a `decltype(f(...))` base, an `auto x = f()`
+    // caller — often see only the prototype, the definition living elsewhere.
+    let declarator = match node.kind() {
+        "function_definition" => node.child_by_field_name("declarator")?,
+        "declaration" => {
+            let declarator = node.child_by_field_name("declarator")?;
+            // A variable declaration (`Widget w;`) states no result type; only
+            // a prototype's declarator ends in a parameter list.
+            let mut inner = declarator;
+            while matches!(
+                inner.kind(),
+                "pointer_declarator" | "reference_declarator" | "array_declarator"
+            ) {
+                inner = inner.child_by_field_name("declarator")?;
+            }
+            if inner.kind() != "function_declarator" {
+                return None;
+            }
+            declarator
+        }
+        _ => return None,
+    };
     let type_node = node.child_by_field_name("type")?;
-    let type_name = type_name_of(type_node, source)?;
+    let type_name = cpp_type_name_of(type_node, source)?;
     if type_name == "void" {
         return None;
     }
     // The function name sits under the declarator chain: the function
     // declarator itself, optionally wrapped in pointer/reference/array
     // declarators.
-    let mut declarator = node.child_by_field_name("declarator")?;
+    let mut declarator = declarator;
     while matches!(
         declarator.kind(),
         "function_declarator" | "pointer_declarator" | "reference_declarator" | "array_declarator"
@@ -1893,6 +1968,62 @@ fn go_initializer_type(node: Node<'_>, source: &[u8], context: &WalkContext) -> 
     }
 }
 
+/// Whether a declaration's declarator states a value rather than a function.
+///
+/// `std::unique_ptr<W> it(raw);` is the most vexing parse: the grammar reads
+/// the initializer as a parameter list, exactly as it reads a prototype's. Only
+/// a body states one of these, and what it states there is the holder being
+/// built from `raw` — a prototype written inside a body is a statement about a
+/// function declared elsewhere, which is never spelled this way. A holder is
+/// what makes the reading possible at all: it is a type built from one value.
+fn cpp_vexing_initializer(declared: Node<'_>, declarator: Node<'_>, source: &[u8]) -> bool {
+    let Some(type_name) = cpp_type_name_of(declared, source) else {
+        return false;
+    };
+    if !cpp_holds_one_value(&type_name) {
+        return false;
+    }
+    let Some(parameters) = declarator.child_by_field_name("parameters") else {
+        return false;
+    };
+    let parameters = named_children(parameters);
+    if parameters.is_empty()
+        || !parameters
+            .iter()
+            .all(|parameter| matches!(parameter.kind(), "parameter_declaration" | "identifier"))
+    {
+        return false;
+    }
+    inside_function_body(declarator)
+}
+
+/// The templates whose value is built from one other value, which is what
+/// makes a declaration beside them readable as either a variable or a function.
+const CPP_HOLDING_TEMPLATES: &[&str] = &["unique_ptr", "shared_ptr", "weak_ptr"];
+
+/// Whether a type spelling is a holding template's application
+/// (`std::unique_ptr<Widget>`).
+fn cpp_holds_one_value(type_name: &str) -> bool {
+    type_name
+        .split_once('<')
+        .map(|(head, _)| head)
+        .and_then(|head| head.rsplit("::").next())
+        .is_some_and(|name| CPP_HOLDING_TEMPLATES.contains(&name))
+}
+
+/// Whether a node is written inside a function's body rather than beside it.
+fn inside_function_body(node: Node<'_>) -> bool {
+    let mut current = node;
+    while let Some(parent) = current.parent() {
+        match parent.kind() {
+            "compound_statement" => return true,
+            "translation_unit" | "declaration_list" | "field_declaration_list" => return false,
+            _ => current = parent,
+        }
+    }
+    false
+}
+
 fn cpp_binding_of(
     node: Node<'_>,
     source: &[u8],
@@ -1909,9 +2040,19 @@ fn cpp_binding_of(
             let declarator = node.child_by_field_name("declarator")?;
             if declared.kind() != "placeholder_type_specifier" {
                 // A function prototype declares a function, not a receiver.
-                if declarator.kind() == "function_declarator" {
-                    return None;
-                }
+                // `std::unique_ptr<W> h(raw);` is the exception: the grammar
+                // reads the initializer as a parameter list, and a parameter
+                // that spells no type is the object's argument, so the name
+                // beside the type is the object's.
+                let declarator = match declarator.kind() {
+                    "function_declarator"
+                        if cpp_vexing_initializer(declared, declarator, source) =>
+                    {
+                        declarator.child_by_field_name("declarator")?
+                    }
+                    "function_declarator" => return None,
+                    _ => declarator,
+                };
                 let name = peel_declarator_name(declarator, source)?;
                 let type_name = cpp_type_name_of(declared, source)?;
                 return Some((name, cpp_array_suffix(&type_name, declarator)));
@@ -1996,6 +2137,20 @@ fn cpp_binding_of(
             let declarator = node.child_by_field_name("declarator")?;
             let name = peel_declarator_name(declarator, source)?;
             Some((name, cpp_type_name_of(target, source)?))
+        }
+        // `using google::protobuf::Descriptor;` puts that type's own name into
+        // this scope: a declaration writing `Descriptor` here means the type
+        // the clause qualifies, not a namesake another file declares. The
+        // grammar reads `using namespace rocksdb;` as the same statement, with
+        // a bare name for the namespace, which binds nothing.
+        "using_declaration" => {
+            let target = node.named_child(0)?;
+            if target.kind() != "qualified_identifier" {
+                return None;
+            }
+            let type_name = cpp_type_name_of(target, source)?;
+            let name = type_name.rsplit("::").next()?.to_owned();
+            (name != type_name).then_some((name, type_name))
         }
         _ => None,
     }
@@ -2615,7 +2770,7 @@ pub(crate) fn collect_inheritance_edges(
         return;
     };
     // (kind, clause node) pairs; the clause node feeds type-name extraction.
-    let clauses = match vocabulary {
+    let mut clauses = match vocabulary {
         HeritageVocabulary::Nested {
             extends_types,
             implements_types,
@@ -2648,8 +2803,24 @@ pub(crate) fn collect_inheritance_edges(
             }))
             .collect(),
     };
+    // `class X : public decltype(f(...))` parses the base as an ERROR node:
+    // the grammar takes a base name there, not an expression. The decltype is
+    // still the base the source states, and its answer is `f`'s result type.
+    if format == FileFormat::Cpp
+        && let Some(base) = named_children(entity_node)
+            .into_iter()
+            .find(|child| child.kind() == "ERROR")
+            .and_then(|error| {
+                descendants_within(error, 3)
+                    .into_iter()
+                    .find(|node| node.kind() == "decltype")
+            })
+    {
+        clauses.push((GraphEdgeKind::Extends, base));
+    }
     for (ref_kind, clause) in clauses {
-        for name in type_names_from_clause(clause, source) {
+        let dbg_names = type_names_from_clause(clause, source, &*context);
+        for name in dbg_names {
             context.add_inheritance_edge(
                 ref_kind,
                 owner_index,
@@ -2674,14 +2845,29 @@ const CLAUSE_DECORATION_KINDS: &[&str] = &[
 /// Splits an inheritance clause into type names. Handles the common shapes:
 /// a single type node, a comma-separated list, and C++ base specifiers with
 /// access labels (`public Base`).
-fn type_names_from_clause(clause: Node<'_>, source: &[u8]) -> Vec<String> {
+fn type_names_from_clause(clause: Node<'_>, source: &[u8], context: &WalkContext) -> Vec<String> {
     let mut names = Vec::new();
-    collect_type_names(clause, source, &mut names);
+    collect_type_names(clause, source, context, &mut names);
     names
 }
 
-fn collect_type_names(node: Node<'_>, source: &[u8], names: &mut Vec<String>) {
+fn collect_type_names(
+    node: Node<'_>,
+    source: &[u8],
+    context: &WalkContext,
+    names: &mut Vec<String>,
+) {
     if CLAUSE_DECORATION_KINDS.contains(&node.kind()) {
+        return;
+    }
+    // `class FlatAllocator : public decltype(ApplyTypeList<char, int>(0))`:
+    // the base is what that call returns, stated by the callee's own
+    // signature. Reading the callee's name as the base would link the class
+    // to a function instead of the class the call builds.
+    if node.kind() == "decltype"
+        && let Some(result) = decltype_result_type(node, source, context)
+    {
+        names.push(result);
         return;
     }
     let text = collapse_whitespace(node_text(node, source));
@@ -2693,8 +2879,32 @@ fn collect_type_names(node: Node<'_>, source: &[u8], names: &mut Vec<String>) {
         return;
     }
     for child in named_children(node) {
-        collect_type_names(child, source, names);
+        collect_type_names(child, source, context, names);
     }
+}
+
+/// The result type of the call a `decltype(...)` expression names, read from
+/// the file's own signature for that callee.
+fn decltype_result_type(node: Node<'_>, source: &[u8], context: &WalkContext) -> Option<String> {
+    if node.kind() == "call_expression"
+        && let Some(function) = node.child_by_field_name("function")
+    {
+        // `f(...)` and `f<int>(...)` name the same callee; the template
+        // arguments qualify it, they do not change what it returns.
+        let callee = match function.kind() {
+            "identifier" => Some(function),
+            "template_function" => function.child_by_field_name("name"),
+            _ => None,
+        };
+        if let Some(callee) = callee
+            && let Some(result) = context.factory_return_of(node_text(callee, source))
+        {
+            return Some(result.to_owned());
+        }
+    }
+    named_children(node)
+        .into_iter()
+        .find_map(|child| decltype_result_type(child, source, context))
 }
 
 #[cfg(test)]

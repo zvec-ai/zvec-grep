@@ -547,6 +547,15 @@ fn classify_names(
             rule: Rule::Receiver,
         });
     }
+    if let Some(resolution) = resolve_using_member(store, snapshot, stored, caches)? {
+        // A using-declaration in the owner's class states which base member a
+        // bare name reaches; the class's own scope answers before the
+        // namespaces around it do.
+        return Ok(Outcome::Resolved {
+            resolution,
+            rule: Rule::Receiver,
+        });
+    }
     if let Some(resolution) = resolve_object_member(store, snapshot, stored, caches)? {
         // The receiver is an object literal whose own property table says
         // which value this key holds; the method of that name was replaced by
@@ -2238,7 +2247,10 @@ fn declarations_in<'a>(
             let Some((declaring, _)) = hit.qualified_name.rsplit_once("::") else {
                 return false;
             };
-            if declaring != scope.name {
+            // A class template's name is one name however its arguments are
+            // spelled: `omt_node<omtdata_t, true>::get_marked` is a member of
+            // `omt_node`, the scope the bound type names.
+            if type_head(declaring) != type_head(&scope.name) {
                 return false;
             }
             match (
@@ -2569,7 +2581,14 @@ fn resolve_receiver_typed(
     // that name denotes.
     let root = type_root_scope(store, snapshot, stored, &bound_type, caches)?;
     let Some(root) = root else {
-        return Ok(None);
+        // A type the workspace never declares still names a member when the
+        // workspace declares exactly one by that name.
+        return Ok(resolve_undeclared_type_member(
+            snapshot,
+            stored,
+            &bound_type,
+            hits,
+        ));
     };
     let mut scopes = vec![root.clone()];
     let branched =
@@ -2582,6 +2601,105 @@ fn resolve_receiver_typed(
         &scopes,
         branched,
     ))
+}
+
+/// A bare call a using-declaration of the owner's class brings into scope.
+///
+/// `using First<T>::Run;` states that a bare `Run()` written in the class's
+/// bodies reaches `First::Run`, even when another base declares that member
+/// too. The declaration belongs to the class, so it answers before the
+/// namespaces around the class are searched — a namespace-scope function of
+/// the same name is a different symbol.
+///
+/// # Errors
+/// Propagates graph storage failures of the binding reads.
+fn resolve_using_member(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Option<Resolution>> {
+    let reference = &stored.reference;
+    if reference.ref_kind != GraphEdgeKind::Calls
+        || reference.receiver_name.is_some()
+        || !matches!(stored.language.as_str(), "c" | "cpp")
+    {
+        return Ok(None);
+    }
+    let Some(candidates) = snapshot.lookup_candidates(&stored.name_tail) else {
+        return Ok(None);
+    };
+    for scope in owner_class_scopes(store, snapshot, stored)? {
+        let Some(entity) = scope.entity.as_deref() else {
+            continue;
+        };
+        let bindings = match caches.declared_bindings.entry(entity.to_owned()) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(store.declared_bindings(entity)?),
+        };
+        // A using-declaration binds the imported name to the spelling it
+        // imports, which ends with that name; a member declaration binds it to
+        // its type instead, which says nothing about where the name lives.
+        let mut found: Vec<&NameIndexEntry> = Vec::new();
+        for binding in bindings.iter().filter(|binding| {
+            binding.name == stored.name_tail
+                && binding.bound_type.rsplit("::").next() == Some(binding.name.as_str())
+        }) {
+            let target = type_head(&binding.bound_type);
+            for hit in candidates {
+                let spells_target = hit.qualified_name == target
+                    || hit.qualified_name.ends_with(&format!("::{target}"));
+                if spells_target
+                    && is_callable_symbol(hit)
+                    && !found.iter().any(|known| known.entity_id == hit.entity_id)
+                {
+                    found.push(hit);
+                }
+            }
+        }
+        match found.as_slice() {
+            [] => {}
+            [hit] => return Ok(Some(member_resolution(stored, hit))),
+            // Several spellings of one brought-in name leave the call to the
+            // rules below rather than binding one of them.
+            _ => return Ok(None),
+        }
+    }
+    Ok(None)
+}
+
+/// A member call through a type the project never declares.
+///
+/// A generated class (`unittest::TestAllExtensions` from a `.proto`) has no
+/// declaration in the workspace, so no hierarchy answers the member. The one
+/// member the workspace declares by that name still answers it: the generated
+/// class carries the runtime base's members, and the runtime is what the
+/// workspace declares. Several same-named members elsewhere leave the call
+/// pending, since nothing here says which of them the type has.
+fn resolve_undeclared_type_member(
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    bound_type: &str,
+    hits: &[&NameIndexEntry],
+) -> Option<Resolution> {
+    if !matches!(stored.language.as_str(), "c" | "cpp") {
+        return None;
+    }
+    let head = type_head(&pointee_type(bound_type));
+    let tail = head.rsplit("::").next()?;
+    // The index answers `Some([])` for a name nothing declares; `None` is a
+    // snapshot that still hides some of it, which is not evidence of absence.
+    if tail.is_empty()
+        || snapshot
+            .lookup_candidates(tail)
+            .is_some_and(|known| !known.is_empty())
+    {
+        return None;
+    }
+    match hits {
+        [hit] => Some(member_resolution(stored, hit)),
+        _ => None,
+    }
 }
 
 /// The declaring scope of the type a binding names.
@@ -2713,7 +2831,152 @@ fn declared_receiver_type(
     if local.is_some() {
         return Ok(local);
     }
+    if let Some(binding) = translation_unit_binding(store, snapshot, stored, receiver, caches)? {
+        return Ok(Some(binding));
+    }
     member_type_of(store, snapshot, stored, receiver, caches)
+}
+
+/// The type the reference's translation unit states for one name outside every
+/// function (`extern MemTableRep::Iterator* iter;`).
+///
+/// Such a declaration belongs to the unit rather than to one body, so every
+/// body that sees it reads the same type. Textual inclusion is what makes a
+/// unit: the header states the declaration, the `.cc` that includes it writes
+/// the calls. Two files stating one name differently leave the name undecided.
+///
+/// # Errors
+/// Propagates graph storage failures of the binding and include-chain reads.
+fn translation_unit_binding(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    receiver: &str,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Option<String>> {
+    let mut types = translation_unit_bindings(store, snapshot, stored, receiver, caches)?;
+    match types.len() {
+        1 => Ok(types.pop()),
+        _ => Ok(None),
+    }
+}
+
+/// Every type the reference's translation unit states for one name outside
+/// every function, in file order and without repeats.
+///
+/// # Errors
+/// Propagates graph storage failures of the binding and include-chain reads.
+fn translation_unit_bindings(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    receiver: &str,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Vec<String>> {
+    let mut files = vec![stored.file_id];
+    if matches!(stored.language.as_str(), "c" | "cpp") {
+        if let Entry::Vacant(entry) = caches.include_closures.entry(stored.file_id) {
+            entry.insert(include_closure(
+                store,
+                snapshot,
+                &stored.language,
+                stored.file_id,
+            )?);
+        }
+        if let Some(closure) = caches.include_closures.get(&stored.file_id) {
+            let mut included: Vec<u32> = closure.iter().copied().collect();
+            // The walk answers a set; the readings stay in file order so the
+            // same workspace always resolves a name the same way.
+            included.sort_unstable();
+            files.extend(included);
+        }
+    }
+    let mut found: Vec<String> = Vec::new();
+    for file in files {
+        let owner = format!("f{file}");
+        let bindings = match caches.declared_bindings.entry(owner) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(store.declared_bindings(&format!("f{file}"))?),
+        };
+        // Lines order the declarations of one file; a header the unit includes
+        // states its names for the whole unit, whatever line it sits on.
+        let same_file = file == stored.file_id;
+        for binding in bindings.iter().filter(|binding| {
+            binding.name == receiver
+                && (!same_file || binding_holds_at(binding, stored.reference.line))
+        }) {
+            if !found.contains(&binding.bound_type) {
+                found.push(binding.bound_type.clone());
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// The candidates a bare type spelling names once the unit's own scope is read.
+///
+/// `using google::protobuf::Descriptor;` states what `Descriptor` means where
+/// the call is written, so a namesake another file declares is a different
+/// class. Only a spelling that names another scope says that: a declaration
+/// (`Widget w;`) states a value, not a meaning for the type's name.
+///
+/// # Errors
+/// Propagates graph storage failures.
+fn unit_spelled_hits<'a>(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    head: &str,
+    hits: Vec<&'a NameIndexEntry>,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Vec<&'a NameIndexEntry>> {
+    if hits.len() < 2 {
+        return Ok(hits);
+    }
+    // `using namespace rocksdb;` puts that namespace's own declarations into
+    // the unit's lookup, so `Iterator` there is the namespace's class rather
+    // than a class nested inside another one of its types.
+    let mut visible = used_namespace_hits(store, snapshot, stored, head, &hits, caches)?;
+    if !visible.is_empty() {
+        return Ok(visible);
+    }
+    let Some(aliased) = translation_unit_binding(store, snapshot, stored, head, caches)? else {
+        return Ok(hits);
+    };
+    if !aliased.contains("::") || aliased.rsplit("::").next() != Some(head) {
+        return Ok(hits);
+    }
+    visible = spelled_under(&hits, &aliased);
+    Ok(if visible.is_empty() { hits } else { visible })
+}
+
+/// The binding name extraction records for a `using namespace` directive.
+const USING_NAMESPACE_BINDING: &str = "[[cpp_using_namespace]]";
+
+/// The candidates a namespace the unit opens with `using namespace` declares
+/// by that name.
+///
+/// # Errors
+/// Propagates graph storage failures of the binding and include-chain reads.
+fn used_namespace_hits<'a>(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    head: &str,
+    hits: &[&'a NameIndexEntry],
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Vec<&'a NameIndexEntry>> {
+    let spaces =
+        translation_unit_bindings(store, snapshot, stored, USING_NAMESPACE_BINDING, caches)?;
+    Ok(hits
+        .iter()
+        .filter(|hit| {
+            spaces
+                .iter()
+                .any(|space| hit.qualified_name == format!("{space}::{head}"))
+        })
+        .copied()
+        .collect())
 }
 
 /// Whether a declaration is still in effect at the call line.
@@ -2735,24 +2998,24 @@ fn binding_holds_at(binding: &DeclaredBinding, line: usize) -> bool {
     }
 }
 
-/// The type the enclosing class (or one of its bases) gives a member name.
+/// The class scopes a body reads unqualified names from, in the order the
+/// language searches them.
 ///
 /// The owner's qualified name names its scopes innermost first
-/// (`ns::Cls::method` → `Cls`, then `ns`), and the first scope that is a class
-/// declares the member the method calls through. A member a base declares is
-/// reached through the class's inheritance edges, nearest base first.
+/// (`ns::Cls::method` → `Cls`, then `ns`), and every class is followed by its
+/// bases, nearest first: a member or a nested type a base declares is reached
+/// through the class's own inheritance edges.
 ///
 /// # Errors
 /// Propagates graph storage failures.
-fn member_type_of(
+fn owner_class_scopes(
     store: &IndexStore,
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
-    receiver: &str,
-    caches: &mut RuleCaches,
-) -> crate::EngineResult<Option<String>> {
+) -> crate::EngineResult<Vec<ClassScope>> {
+    let mut scopes = Vec::new();
     let Some(owner) = snapshot.entity_record(&stored.reference.owner_id) else {
-        return Ok(None);
+        return Ok(scopes);
     };
     for enclosing in enclosing_scopes(&owner.qualified_name) {
         let Some(entity) = class_entity_in(snapshot, enclosing, Some(stored.file_id)) else {
@@ -2763,27 +3026,79 @@ fn member_type_of(
             entity: Some(entity),
             name: enclosing.to_owned(),
         };
-        let mut scopes = vec![root.clone()];
+        scopes.push(root.clone());
         collect_base_scopes(store, snapshot, &root, &mut scopes, &mut HashSet::new(), 8)?;
-        for scope in &scopes {
-            let Some(entity) = scope.entity.as_deref() else {
-                continue;
-            };
-            let bindings = match caches.declared_bindings.entry(entity.to_owned()) {
-                Entry::Occupied(entry) => entry.into_mut(),
-                Entry::Vacant(entry) => entry.insert(store.declared_bindings(entity)?),
-            };
-            // Several declarations of one member name inside one class are a
-            // rebinding (`int x; double x;` is not C++, but macros can produce
-            // it); the last declaration is the one in effect.
-            if let Some(bound) = bindings
-                .iter()
-                .filter(|binding| binding.name == receiver)
-                .map(|binding| binding.bound_type.clone())
-                .next_back()
-            {
-                return Ok(Some(bound));
-            }
+    }
+    Ok(scopes)
+}
+
+/// The type the enclosing class (or one of its bases) gives a member name.
+///
+/// The first scope that declares the member the method calls through answers
+/// it; a member a base declares is reached through the class's inheritance
+/// edges, nearest base first.
+///
+/// # Errors
+/// Propagates graph storage failures.
+fn member_type_of(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    receiver: &str,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Option<String>> {
+    for scope in owner_class_scopes(store, snapshot, stored)? {
+        let Some(entity) = scope.entity.as_deref() else {
+            continue;
+        };
+        let bindings = match caches.declared_bindings.entry(entity.to_owned()) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(store.declared_bindings(entity)?),
+        };
+        // Several declarations of one member name inside one class are a
+        // rebinding (`int x; double x;` is not C++, but macros can produce
+        // it); the last declaration is the one in effect.
+        if let Some(bound) = bindings
+            .iter()
+            .filter(|binding| binding.name == receiver)
+            .map(|binding| binding.bound_type.clone())
+            .next_back()
+        {
+            return Ok(Some(bound));
+        }
+    }
+    Ok(None)
+}
+
+/// The candidates a nested type of the enclosing class (or of one of its
+/// bases) spells.
+///
+/// A C++ body reads an unqualified name from its own class, then its bases,
+/// and only then from the enclosing namespaces: inside a class deriving from
+/// `MemTableRep`, a member spelled `Iterator` is `MemTableRep::Iterator` rather
+/// than a namespace-scope namesake.
+fn class_scope_hits<'a>(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    head: &str,
+    hits: &[&'a NameIndexEntry],
+) -> crate::EngineResult<Option<Vec<&'a NameIndexEntry>>> {
+    if !matches!(stored.language.as_str(), "c" | "cpp") {
+        return Ok(None);
+    }
+    for scope in owner_class_scopes(store, snapshot, stored)? {
+        let nested = format!("{}::{head}", scope.name);
+        let found: Vec<&NameIndexEntry> = hits
+            .iter()
+            .filter(|hit| hit.qualified_name == nested)
+            .copied()
+            .collect();
+        match found.len() {
+            0 => {}
+            1 => return Ok(Some(found)),
+            // Two classes spelled alike in two files leave the name undecided.
+            _ => return Ok(None),
         }
     }
     Ok(None)
@@ -2928,14 +3243,25 @@ fn type_root_scope_in(
     // falling back to a namesake. A bare binding instead means what that name
     // means where the call is written: inside `namespace ui`, `Widget` is
     // `ui::Widget` even when another file's namespace declares a namesake.
-    let candidates = snapshot.lookup_candidates(tail).map(|candidates| {
-        let borrowed: Vec<&NameIndexEntry> = candidates.iter().collect();
-        if head.contains("::") {
-            spelled_under(&borrowed, &head)
-        } else {
-            enclosing_scope_hits(snapshot, stored, borrowed)
+    let candidates = match snapshot
+        .lookup_candidates(tail)
+        .map(|hits| hits.iter().collect::<Vec<&NameIndexEntry>>())
+    {
+        Some(hits) if head.contains("::") => Some(spelled_under(&hits, &head)),
+        Some(hits) => {
+            // A class the call is written in answers the name before the
+            // namespaces around it do; the enclosing-scope reading applies
+            // only when neither the class nor its bases declares it.
+            let hits = match class_scope_hits(store, snapshot, stored, &head, &hits)? {
+                Some(nested) => nested,
+                None => enclosing_scope_hits(snapshot, stored, hits),
+            };
+            Some(unit_spelled_hits(
+                store, snapshot, stored, &head, hits, caches,
+            )?)
         }
-    });
+        None => None,
+    };
     if let Some(candidates) = candidates
         && !candidates.is_empty()
     {
@@ -3543,11 +3869,15 @@ fn collect_base_scopes(
             branched |= resolved.len() + pending.len() > 1;
             let mut declared = resolved;
             for name in pending {
+                // A base spelled as an application (`Impl<T...>`) is looked up
+                // by the class name: the arguments say which specialization,
+                // not which class.
+                let lookup = type_head(&name);
                 // Hidden candidates must not turn an ambiguous base name into
                 // a seemingly unique ancestor.
                 let candidates = prefer_definitions(
                     snapshot
-                        .lookup_candidates(&name)
+                        .lookup_candidates(&lookup)
                         .unwrap_or_default()
                         .iter()
                         .collect::<Vec<_>>(),
