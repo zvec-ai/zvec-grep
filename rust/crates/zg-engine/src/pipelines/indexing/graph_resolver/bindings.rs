@@ -117,7 +117,7 @@ fn lexical_binding(
         }
     }
     if let Some((file, original)) =
-        named_import(store, snapshot, stored, caches, stored.file_id, name)?
+        named_import(store, snapshot, stored, caches, stored.file_id, name, false)?
         && let Some(ty) = declared(
             store,
             caches,
@@ -199,7 +199,9 @@ fn type_definition(
     if stored.language == "go"
         && let Some((package, short)) = name.rsplit_once('.')
     {
-        let Some(directory) = go_import_directory(store, caches, binding.file_id, package)? else {
+        let Some(directory) =
+            go_import_directory(store, snapshot, caches, binding.file_id, package)?
+        else {
             return Ok(None);
         };
         let candidates: Vec<_> = snapshot
@@ -253,12 +255,11 @@ fn fallback_type(
         .map_or((name, None), |(local, member)| (local, Some(member)));
     let mut imported = None;
     let mut specifier = None;
-    for import in store.import_references(file)? {
-        let Some(original) = import
-            .raw_text
-            .as_deref()
-            .and_then(|raw| imported_name(raw, local))
-        else {
+    for import in javascript_imports(store, caches, file)?.iter() {
+        if import.reexport {
+            continue;
+        }
+        let Some(original) = import.names.get(local).cloned() else {
             continue;
         };
         // An explicit relative path remains authoritative even if its target
@@ -277,7 +278,7 @@ fn fallback_type(
         if imported.replace(original).is_some() {
             return Ok(None);
         }
-        specifier = Some(import.specifier);
+        specifier = Some(import.specifier.clone());
     }
     if imported.is_none() && language != "typescript" {
         return Ok(None);
@@ -552,7 +553,8 @@ pub(super) fn resolve(
             (stored.reference.line, stored.reference.column),
         )?
         .is_none()
-        && let Some(directory) = go_import_directory(store, caches, stored.file_id, receiver)?
+        && let Some(directory) =
+            go_import_directory(store, snapshot, caches, stored.file_id, receiver)?
     {
         let candidates: Vec<_> = hits
             .iter()
@@ -685,12 +687,13 @@ fn named_import(
     caches: &mut RuleCaches,
     file: u32,
     name: &str,
+    include_reexports: bool,
 ) -> crate::EngineResult<Option<(u32, String)>> {
-    for import in store.import_references(file)? {
-        let Some(raw) = import.raw_text.as_deref() else {
+    for import in javascript_imports(store, caches, file)?.iter() {
+        if !include_reexports && import.reexport {
             continue;
-        };
-        let Some(original) = imported_name(raw, name) else {
+        }
+        let Some(original) = import.names.get(name).cloned() else {
             continue;
         };
         let mut context = stored.clone();
@@ -712,42 +715,151 @@ fn named_import(
     Ok(None)
 }
 
-fn imported_name(raw: &str, name: &str) -> Option<String> {
-    if let Some((local, value)) = raw.split_once('=')
-        && local.trim() == name
-        && value.trim_start().starts_with("require(")
-    {
-        return Some("*".to_owned());
+// Import statements are parsed once per file/sweep. The stored source text
+// remains the evidence; formatting and comments do not define binding names.
+pub(super) struct JavascriptImport {
+    specifier: String,
+    reexport: bool,
+    names: std::collections::HashMap<String, String>,
+}
+
+fn javascript_imports(
+    store: &IndexStore,
+    caches: &mut RuleCaches,
+    file: u32,
+) -> crate::EngineResult<std::sync::Arc<[JavascriptImport]>> {
+    if let Some(imports) = caches.javascript_imports.get(&file) {
+        return Ok(std::sync::Arc::clone(imports));
     }
-    if let Some(rest) = raw.trim_start().strip_prefix("import * as ")
-        && rest.split_whitespace().next() == Some(name)
-    {
-        return Some("*".to_owned());
-    }
-    if let Some(rest) = raw.trim_start().strip_prefix("import ") {
-        let local = rest.split(|c: char| c.is_whitespace() || c == ',').next()?;
-        if local == name && (rest.contains(" from ") || rest.contains("= require(")) {
-            return Some("default".to_owned());
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+        .map_err(|error| crate::EngineError::internal(format!("load import grammar: {error}")))?;
+    let mut result = Vec::new();
+    for import in caches.imports(store, file)?.iter() {
+        let Some(raw) = import.raw_text.as_deref() else {
+            continue;
+        };
+        let keyword = raw
+            .trim_start()
+            .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '$')
+            .next()
+            .unwrap_or_default();
+        // CommonJS evidence stores a variable_declarator, without const/let/var.
+        let source = if matches!(keyword, "import" | "export" | "const" | "let" | "var") {
+            raw.to_owned()
+        } else {
+            format!("const {raw};")
+        };
+        let Some(tree) = parser.parse(&source, None) else {
+            continue;
+        };
+        if tree.root_node().has_error() {
+            continue;
         }
+        let mut names = std::collections::HashMap::new();
+        collect_import_names(tree.root_node(), source.as_bytes(), &mut names);
+        result.push(JavascriptImport {
+            specifier: import.specifier.clone(),
+            reexport: keyword == "export",
+            names,
+        });
     }
-    let (_, entries) = raw.split_once('{')?;
-    let (entries, _) = entries.split_once('}')?;
-    entries.split(',').find_map(|entry| {
-        let entry = entry.trim().strip_prefix("type ").unwrap_or(entry.trim());
-        let (original, local) = entry.split_once(" as ").unwrap_or((entry, entry));
-        (local.trim() == name).then(|| original.trim().to_owned())
-    })
+    let result: std::sync::Arc<[JavascriptImport]> = result.into();
+    caches
+        .javascript_imports
+        .insert(file, std::sync::Arc::clone(&result));
+    Ok(result)
+}
+
+fn collect_import_names(
+    node: tree_sitter::Node<'_>,
+    source: &[u8],
+    names: &mut std::collections::HashMap<String, String>,
+) {
+    let text = |node: tree_sitter::Node<'_>| {
+        node.utf8_text(source)
+            .unwrap_or_default()
+            .trim_matches(['\'', '"'])
+            .to_owned()
+    };
+    match node.kind() {
+        "import_specifier" | "export_specifier" => {
+            if let Some(original) = node.child_by_field_name("name") {
+                let local = node.child_by_field_name("alias").unwrap_or(original);
+                names.insert(text(local), text(original));
+            }
+            return;
+        }
+        "namespace_import" | "import_require_clause" => {
+            if let Some(local) = node.named_child(0) {
+                names.insert(
+                    text(local),
+                    if node.kind() == "import_require_clause" {
+                        "default"
+                    } else {
+                        "*"
+                    }
+                    .to_owned(),
+                );
+            }
+            return;
+        }
+        "import_clause" => {
+            if let Some(local) = node
+                .named_child(0)
+                .filter(|node| node.kind() == "identifier")
+            {
+                names.insert(text(local), "default".to_owned());
+            }
+        }
+        "variable_declarator" => {
+            if let (Some(local), Some(value)) = (
+                node.child_by_field_name("name"),
+                node.child_by_field_name("value"),
+            ) && value.kind() == "call_expression"
+                && value
+                    .child_by_field_name("function")
+                    .is_some_and(|node| text(node) == "require")
+            {
+                if local.kind() == "identifier" {
+                    names.insert(text(local), "*".to_owned());
+                } else if local.kind() == "object_pattern" {
+                    let mut cursor = local.walk();
+                    for entry in local.named_children(&mut cursor) {
+                        if entry.kind() == "shorthand_property_identifier_pattern" {
+                            names.insert(text(entry), text(entry));
+                        } else if entry.kind() == "pair_pattern"
+                            && let (Some(key), Some(value)) = (
+                                entry.child_by_field_name("key"),
+                                entry.child_by_field_name("value"),
+                            )
+                            && value.kind() == "identifier"
+                        {
+                            names.insert(text(value), text(key));
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_import_names(child, source, names);
+    }
 }
 
 fn go_symbol_at(
     store: &IndexStore,
     snapshot: &ResolutionSnapshot,
-    caches: &RuleCaches,
+    caches: &mut RuleCaches,
     file: u32,
     package: &str,
     short: &str,
 ) -> crate::EngineResult<Option<NameIndexEntry>> {
-    let Some(directory) = go_import_directory(store, caches, file, package)? else {
+    let Some(directory) = go_import_directory(store, snapshot, caches, file, package)? else {
         return Ok(None);
     };
     let candidates: Vec<_> = snapshot
@@ -844,7 +956,7 @@ fn symbol_at(
             );
         }
         if let Some((origin, original)) =
-            named_import(store, snapshot, stored, caches, file, container)?
+            named_import(store, snapshot, stored, caches, file, container, false)?
         {
             return symbol_at(
                 store,
@@ -867,7 +979,9 @@ fn symbol_at(
     {
         return symbol_at(store, snapshot, stored, caches, file, original, depth - 1);
     }
-    if let Some((file, original)) = named_import(store, snapshot, stored, caches, file, name)? {
+    if let Some((file, original)) =
+        named_import(store, snapshot, stored, caches, file, name, false)?
+    {
         let original = exported_value_name(store, caches, file, &original)?;
         return symbol_at(store, snapshot, stored, caches, file, &original, depth - 1);
     }
@@ -1112,7 +1226,7 @@ fn follow_value(
     if let Some(value) = lookup_value(store, snapshot, &context, caches, name)? {
         return follow_value(store, snapshot, &context, caches, value, depth - 1);
     }
-    imported_value(store, snapshot, &context, caches, name, depth - 1)
+    imported_value(store, snapshot, &context, caches, name, depth - 1, false)
 }
 
 fn exported_target(
@@ -1148,7 +1262,7 @@ fn exported_target(
     };
     match value {
         Some(value) => follow_value(store, snapshot, &context, caches, value, depth - 1),
-        None => imported_value(store, snapshot, &context, caches, name, depth - 1),
+        None => imported_value(store, snapshot, &context, caches, name, depth - 1, true),
     }
 }
 
@@ -1159,6 +1273,7 @@ fn imported_value(
     caches: &mut RuleCaches,
     name: &str,
     depth: usize,
+    include_reexports: bool,
 ) -> crate::EngineResult<Option<NameIndexEntry>> {
     if depth == 0 {
         return Ok(None);
@@ -1166,8 +1281,15 @@ fn imported_value(
     let (local, member) = name
         .split_once('.')
         .map_or((name, None), |(local, member)| (local, Some(member)));
-    let Some((file, original)) =
-        named_import(store, snapshot, stored, caches, stored.file_id, local)?
+    let Some((file, original)) = named_import(
+        store,
+        snapshot,
+        stored,
+        caches,
+        stored.file_id,
+        local,
+        include_reexports,
+    )?
     else {
         return Ok(None);
     };
@@ -1202,7 +1324,7 @@ pub(super) fn resolve_call(
     let authoritative = value.is_some();
     let target = match value {
         Some(value) => follow_value(store, snapshot, stored, caches, value, 16)?,
-        None => imported_value(store, snapshot, stored, caches, &name, 16)?,
+        None => imported_value(store, snapshot, stored, caches, &name, 16, false)?,
     };
     if target.is_none() && !authoritative {
         return Ok(None);
@@ -1258,7 +1380,7 @@ fn exported_value_name(
 }
 
 /// The workspace module prefix anchors Go imports; external packages stay external.
-pub(super) fn go_module(root: &std::path::Path) -> Option<String> {
+fn go_module(root: &std::path::Path) -> Option<String> {
     let source = std::fs::read_to_string(root.join("go.mod")).ok()?;
     source.lines().find_map(|line| {
         let mut words = line.split_whitespace();
@@ -1270,14 +1392,16 @@ pub(super) fn go_module(root: &std::path::Path) -> Option<String> {
 
 fn go_import_directory(
     store: &IndexStore,
-    caches: &RuleCaches,
+    snapshot: &ResolutionSnapshot,
+    caches: &mut RuleCaches,
     file: u32,
     qualifier: &str,
 ) -> crate::EngineResult<Option<String>> {
-    let Some(module) = caches.go_module.as_deref() else {
+    let imports = caches.imports(store, file)?;
+    let Some((directory, module)) = enclosing_go_module(snapshot, caches, file) else {
         return Ok(None);
     };
-    for import in store.import_references(file)? {
+    for import in imports.iter() {
         let Some(raw) = import.raw_text.as_deref() else {
             continue;
         };
@@ -1286,18 +1410,61 @@ fn go_import_directory(
             .split_whitespace()
             .next_back()
             .filter(|word| *word != "import")
-            .unwrap_or_else(|| import.specifier.rsplit('/').next().unwrap_or_default());
+            .unwrap_or_else(|| go_package_qualifier(&import.specifier));
         if alias != qualifier {
             continue;
         }
         if import.specifier == module {
-            return Ok(Some(String::new()));
+            return Ok(Some(directory));
         }
         return Ok(import
             .specifier
-            .strip_prefix(module)
+            .strip_prefix(&module)
             .and_then(|path| path.strip_prefix('/'))
-            .map(str::to_owned));
+            .map(|path| {
+                if directory.is_empty() {
+                    path.to_owned()
+                } else {
+                    format!("{directory}/{path}")
+                }
+            }));
     }
     Ok(None)
+}
+
+// Restrict inference to the importing file's nearest module. A sibling module
+// requires go.work/replace resolution, which this static rule does not infer.
+fn enclosing_go_module(
+    snapshot: &ResolutionSnapshot,
+    caches: &mut RuleCaches,
+    file: u32,
+) -> Option<(String, String)> {
+    let root = caches.source_root.as_ref()?;
+    let mut directory = importing_dir(snapshot.file_path(file)?);
+    loop {
+        let module = caches
+            .go_modules
+            .entry(directory.to_owned())
+            .or_insert_with(|| go_module(&root.join(directory)));
+        if let Some(module) = module {
+            return Some((directory.to_owned(), module.clone()));
+        }
+        if directory.is_empty() {
+            return None;
+        }
+        directory = directory.rsplit_once('/').map_or("", |(parent, _)| parent);
+    }
+}
+
+fn go_package_qualifier(specifier: &str) -> &str {
+    let (parent, tail) = specifier.rsplit_once('/').unwrap_or(("", specifier));
+    if tail
+        .strip_prefix('v')
+        .and_then(|version| version.parse::<u32>().ok())
+        .is_some_and(|version| version >= 2)
+    {
+        parent.rsplit('/').next().unwrap_or(parent)
+    } else {
+        tail
+    }
 }

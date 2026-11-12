@@ -408,6 +408,30 @@ async fn require_binding() {
 }
 
 #[tokio::test]
+async fn require_destructuring_and_reexports_keep_separate_bindings() {
+    for path in ["use.js", "use.ts"] {
+        check_case(Case { name: "import_binding_kinds", files: vec![
+            SourceFile { path: "api.js", source: "export function work() {}\n" },
+            SourceFile { path: "bridge.js", source: "export { work /* name */ as\nrenamed } from './api';\nfunction missing() { renamed(); }\n" },
+            SourceFile { path, source: "const { work: alias } = require /* module */ ('./api');\nconst { work: second } = require('./api');\nimport { renamed } from './bridge';\nfunction destructured() { alias(); second(); }\nfunction forwarded() { renamed(); }\n" },
+        ], queries: vec![
+            Query { operation: "callees", symbol: "destructured", expected: json!([{"name":"destructured","edges":[{"symbol":{"name":"work"}}, {"symbol":{"name":"work"}}]}]), ..Query::default() },
+            Query { operation: "callees", symbol: "forwarded", expected: json!([{"name":"forwarded","edges":[{"symbol":{"name":"work"}}]}]), ..Query::default() },
+            Query { operation: "callees", symbol: "missing", expected: json!([{"name":"missing","edges":[]}]), ..Query::default() },
+        ] }).await;
+    }
+}
+
+#[tokio::test]
+async fn generators_do_not_publish_their_local_aliases_at_file_scope() {
+    for path in ["scope.js", "scope.ts"] {
+        check_case(Case { name: "generator_binding_scope", files: vec![
+            SourceFile { path, source: "function target() {}\nfunction other() {}\nfunction* generator() { var target = other; yield target; }\nconst expression = function* () { var target = other; yield target; };\nfunction invoke() { target(); }\n" },
+        ], queries: vec![Query { operation: "callees", symbol: "invoke", expected: json!([{"name":"invoke","edges":[{"symbol":{"name":"target"}}]}]), ..Query::default() }], }).await;
+    }
+}
+
+#[tokio::test]
 async fn go_grouped_import() {
     check_case(Case { name: "go_grouped_import", files: vec![
         SourceFile { path: "go.mod", source: "module example.com/project\n\ngo 1.23\n" },
@@ -416,6 +440,15 @@ async fn go_grouped_import() {
     ], queries: vec![
         Query { operation: "callees", symbol: "invoke", expected: json!([{"name": "invoke", "edges": [{"symbol": {"name": "Work"}}, {"symbol": {"name": "Client::Run"}}]}]), ..Query::default() },
     ] }).await;
+}
+
+#[tokio::test]
+async fn go_subdirectory_module_and_major_version_imports() {
+    check_case(Case { name: "go_subdirectory_module", files: vec![
+        SourceFile { path: "nested/go.mod", source: "module example.com/service/v2\n\ngo 1.23\n" },
+        SourceFile { path: "nested/service.go", source: "package service\nfunc Work() {}\ntype Client struct{}\nfunc (c Client) Run() {}\n" },
+        SourceFile { path: "nested/app/app.go", source: "package app\nimport \"example.com/service/v2\"\nfunc invoke(c service.Client) { service.Work(); c.Run() }\n" },
+    ], queries: vec![Query { operation: "callees", symbol: "invoke", expected: json!([{"name":"invoke","edges":[{"symbol":{"name":"Work"}}, {"symbol":{"name":"Client::Run"}}]}]), ..Query::default() }], }).await;
 }
 
 #[tokio::test]
