@@ -209,7 +209,8 @@ fn type_definition(
             .unwrap_or_default()
             .iter()
             .filter(|hit| {
-                hit.symbol_type.is_some_and(is_type_scope)
+                hit.symbol_type
+                    .is_some_and(|kind| is_type_scope(kind) || kind == SymbolType::Alias)
                     && snapshot
                         .file_path(hit.file_id)
                         .is_some_and(|path| importing_dir(path) == directory)
@@ -226,7 +227,8 @@ fn type_definition(
         .unwrap_or_default()
         .iter()
         .filter(|hit| {
-            hit.symbol_type.is_some_and(is_type_scope)
+            hit.symbol_type
+                .is_some_and(|kind| is_type_scope(kind) || kind == SymbolType::Alias)
                 && snapshot
                     .file_path(hit.file_id)
                     .zip(snapshot.file_path(binding.file_id))
@@ -323,19 +325,6 @@ fn fallback_type(
     Ok(selected)
 }
 
-/// Cache configuration once per sweep, alongside the source snapshot.
-fn module_config<'a>(caches: &'a mut RuleCaches, path: &str) -> Option<&'a serde_json::Value> {
-    let full_path = caches.source_root.as_ref()?.join(path);
-    caches
-        .module_configs
-        .entry(path.to_owned())
-        .or_insert_with(|| {
-            let source = std::fs::read(full_path).ok()?;
-            serde_json::from_slice(&source).ok()
-        })
-        .as_ref()
-}
-
 fn type_import_matches(
     snapshot: &ResolutionSnapshot,
     caches: &mut RuleCaches,
@@ -355,45 +344,45 @@ fn type_import_matches(
         let config_path = format!("{directory}/tsconfig.json")
             .trim_start_matches('/')
             .to_owned();
-        let Some(config) = module_config(caches, &config_path) else {
-            continue;
+        let config = match super::module_config::typescript(caches, &config_path) {
+            Ok(Some(config)) => config,
+            Ok(None) => continue,
+            Err(()) => return false,
         };
-        let compiler = &config["compilerOptions"];
-        if let Some(paths) = compiler["paths"].as_object() {
-            // Exact mappings win, then the matching wildcard with longest prefix.
-            let mapping = paths
-                .iter()
-                .filter_map(|(pattern, targets)| {
-                    if pattern == specifier {
-                        return Some((usize::MAX, "", targets));
-                    }
-                    let (prefix, suffix) = pattern.split_once('*')?;
-                    let capture = specifier.strip_prefix(prefix)?.strip_suffix(suffix)?;
-                    Some((prefix.len(), capture, targets))
-                })
-                .max_by_key(|(priority, _, _)| *priority);
-            if let Some((_, capture, targets)) = mapping {
-                let base_url = compiler["baseUrl"].as_str().unwrap_or(".");
-                for target in targets
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(serde_json::Value::as_str)
-                {
-                    let target = target.replace('*', capture);
-                    if let Some(base) =
-                        super::join_specifier(&directory, &format!("{base_url}/{target}"))
-                        && let Some(target_file) =
-                            super::alias_target_at(snapshot, "typescript", &base)
-                    {
-                        return target_file == candidate.file_id;
-                    }
+        // Exact mappings win, then the matching wildcard with longest prefix.
+        let mapping = config
+            .paths
+            .iter()
+            .filter_map(|(pattern, targets)| {
+                if pattern == specifier {
+                    return Some((usize::MAX, "", targets));
                 }
-                return false;
+                let (prefix, suffix) = pattern.split_once('*')?;
+                let capture = specifier.strip_prefix(prefix)?.strip_suffix(suffix)?;
+                Some((prefix.len(), capture, targets))
+            })
+            .max_by_key(|(priority, _, _)| *priority);
+        if let Some((_, capture, targets)) = mapping {
+            let base = config
+                .base_url
+                .as_deref()
+                .unwrap_or(&config.paths_directory);
+            for target in targets
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+            {
+                let target = target.replace('*', capture);
+                if let Some(base) = super::join_specifier(base, &target)
+                    && let Some(target_file) = super::alias_target_at(snapshot, "typescript", &base)
+                {
+                    return target_file == candidate.file_id;
+                }
             }
+            return false;
         }
-        // A nearer tsconfig is authoritative. Extends and package exports are
-        // not evaluated here; unsupported configurations remain unresolved.
+        // A nearer tsconfig is authoritative, including its explicit inheritance.
         break;
     }
     let Some(path) = snapshot.file_path(candidate.file_id) else {
@@ -408,9 +397,10 @@ fn type_import_matches(
             .join("package.json")
             .to_string_lossy()
             .replace('\\', "/");
-        if let Some(config) = module_config(caches, &config_path) {
-            // The nearest package owns the file; do not inherit a parent's name.
-            return config["name"].as_str() == Some(specifier);
+        match super::module_config::read(caches, &config_path) {
+            Ok(None) => {}
+            Ok(Some(config)) => return config["name"].as_str() == Some(specifier),
+            Err(()) => return false,
         }
     }
     false
@@ -536,6 +526,9 @@ pub(super) fn resolve(
     hits: &[NameIndexEntry],
     caches: &mut RuleCaches,
 ) -> crate::EngineResult<Option<Resolution>> {
+    if stored.reference.ref_kind != super::GraphEdgeKind::Calls {
+        return Ok(None);
+    }
     let Some(receiver) = stored.reference.receiver_name.as_deref() else {
         return Ok(None);
     };
