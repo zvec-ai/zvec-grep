@@ -684,9 +684,9 @@ async fn java_generic_receivers_respect_explicit_imports() {
             SourceFile { path: "app/Use.java", source: "package app; import base.Pair; import external.Missing; class Use { void run(Pair<String> pair) { pair.get(); } void blocked(Missing value) { value.get(); } void qualified(app.Pair<String> value) { value.get(); } }\n" },
         ],
         queries: vec![
-            Query { operation: "callees", symbol: "run", expected: json!([{"edges":[{"symbol":{"name":"Pair::get","filePath":"base/Pair.java","startLine":1,"endLine":1},"filePath":"app/Use.java","line":1,"column":98}],"name":"Use::run","filePath":"app/Use.java","startLine":1,"endLine":1}]), ..Query::default() },
-            Query { operation: "callees", symbol: "qualified", expected: json!([{"edges":[{"symbol":{"name":"Pair::get","filePath":"app/Decoys.java","startLine":1,"endLine":1},"filePath":"app/Use.java","line":1,"column":198}],"name":"Use::qualified","filePath":"app/Use.java","startLine":1,"endLine":1}]), ..Query::default() },
-            Query { operation: "callees", symbol: "blocked", expected: json!([{"edges":[],"name":"Use::blocked","filePath":"app/Use.java","startLine":1,"endLine":1}]), ..Query::default() },
+            Query { operation: "callees", symbol: "run", expected: json!([{"edges":[{"symbol":{"name":"Pair::get","filePath":std::path::Path::new("base").join("Pair.java"),"startLine":1,"endLine":1},"filePath":std::path::Path::new("app").join("Use.java"),"line":1,"column":98}],"name":"Use::run","filePath":std::path::Path::new("app").join("Use.java"),"startLine":1,"endLine":1}]), ..Query::default() },
+            Query { operation: "callees", symbol: "qualified", expected: json!([{"edges":[{"symbol":{"name":"Pair::get","filePath":std::path::Path::new("app").join("Decoys.java"),"startLine":1,"endLine":1},"filePath":std::path::Path::new("app").join("Use.java"),"line":1,"column":198}],"name":"Use::qualified","filePath":std::path::Path::new("app").join("Use.java"),"startLine":1,"endLine":1}]), ..Query::default() },
+            Query { operation: "callees", symbol: "blocked", expected: json!([{"edges":[],"name":"Use::blocked","filePath":std::path::Path::new("app").join("Use.java"),"startLine":1,"endLine":1}]), ..Query::default() },
         ],
     }).await;
 }
@@ -703,9 +703,9 @@ async fn rust_self_uses_the_imported_type_across_split_impls() {
             SourceFile { path: "src/params.rs", source: "struct Left; impl Left { fn work(&self) {} } struct Right; impl Right { fn work(&self) {} } fn use_left(left: &mut Left) { left.work(); }\n" },
         ],
         queries: vec![
-            Query { operation: "callees", symbol: "run", expected: json!([{"edges":[{"symbol":{"name":"Target::reset","filePath":"src/apply.rs","startLine":1,"endLine":1},"filePath":"src/run.rs","line":1,"column":60}],"name":"Target::run","filePath":"src/run.rs","startLine":1,"endLine":1}]), ..Query::default() },
-            Query { operation: "callees", symbol: "orphan", expected: json!([{"edges":[],"name":"Target::orphan","filePath":"src/decoy.rs","startLine":1,"endLine":1}]), ..Query::default() },
-            Query { operation: "callees", symbol: "use_left", expected: json!([{"edges":[{"symbol":{"name":"Left::work","filePath":"src/params.rs","startLine":1,"endLine":1},"filePath":"src/params.rs","line":1,"column":123}],"name":"use_left","filePath":"src/params.rs","startLine":1,"endLine":1}]), ..Query::default() },
+            Query { operation: "callees", symbol: "run", expected: json!([{"edges":[{"symbol":{"name":"Target::reset","filePath":std::path::Path::new("src").join("apply.rs"),"startLine":1,"endLine":1},"filePath":std::path::Path::new("src").join("run.rs"),"line":1,"column":60}],"name":"Target::run","filePath":std::path::Path::new("src").join("run.rs"),"startLine":1,"endLine":1}]), ..Query::default() },
+            Query { operation: "callees", symbol: "orphan", expected: json!([{"edges":[],"name":"Target::orphan","filePath":std::path::Path::new("src").join("decoy.rs"),"startLine":1,"endLine":1}]), ..Query::default() },
+            Query { operation: "callees", symbol: "use_left", expected: json!([{"edges":[{"symbol":{"name":"Left::work","filePath":std::path::Path::new("src").join("params.rs"),"startLine":1,"endLine":1},"filePath":std::path::Path::new("src").join("params.rs"),"line":1,"column":123}],"name":"use_left","filePath":std::path::Path::new("src").join("params.rs"),"startLine":1,"endLine":1}]), ..Query::default() },
         ],
     }).await;
 }
@@ -777,17 +777,17 @@ async fn java_this_and_super_calls_select_the_current_and_direct_base_constructo
         ],
         queries: vec![
             Query { operation: "callees", symbol: "Derived::Derived", expected: json!([
-                {"name":"Derived::Derived", "filePath":"app/Derived.java", "startLine":4, "endLine":4, "edges":[
-                    {"filePath":"app/Derived.java", "line":4, "column":13, "symbol":{"name":"Derived::Derived", "filePath":"app/Derived.java", "startLine":5, "endLine":5}}
+                {"name":"Derived::Derived", "filePath":std::path::Path::new("app").join("Derived.java"), "startLine":4, "endLine":4, "edges":[
+                    {"filePath":std::path::Path::new("app").join("Derived.java"), "line":4, "column":13, "symbol":{"name":"Derived::Derived", "filePath":std::path::Path::new("app").join("Derived.java"), "startLine":5, "endLine":5}}
                 ]},
-                {"name":"Derived::Derived", "filePath":"app/Derived.java", "startLine":5, "endLine":5, "edges":[
-                    {"filePath":"app/Derived.java", "line":5, "column":18, "symbol":{"name":"Base::Base", "filePath":"base/Base.java", "startLine":4, "endLine":4}}
+                {"name":"Derived::Derived", "filePath":std::path::Path::new("app").join("Derived.java"), "startLine":5, "endLine":5, "edges":[
+                    {"filePath":std::path::Path::new("app").join("Derived.java"), "line":5, "column":18, "symbol":{"name":"Base::Base", "filePath":std::path::Path::new("base").join("Base.java"), "startLine":4, "endLine":4}}
                 ]}
             ]), ..Query::default() },
             Query { operation: "callers", symbol: "Base::Base", file: Some("base/Base.java"), expected: json!([
-                {"name":"Base::Base", "filePath":"base/Base.java", "startLine":3, "endLine":3, "edges":[]},
-                {"name":"Base::Base", "filePath":"base/Base.java", "startLine":4, "endLine":4, "edges":[
-                    {"filePath":"app/Derived.java", "line":5, "column":18, "symbol":{"name":"Derived::Derived", "filePath":"app/Derived.java", "startLine":5, "endLine":5}}
+                {"name":"Base::Base", "filePath":std::path::Path::new("base").join("Base.java"), "startLine":3, "endLine":3, "edges":[]},
+                {"name":"Base::Base", "filePath":std::path::Path::new("base").join("Base.java"), "startLine":4, "endLine":4, "edges":[
+                    {"filePath":std::path::Path::new("app").join("Derived.java"), "line":5, "column":18, "symbol":{"name":"Derived::Derived", "filePath":std::path::Path::new("app").join("Derived.java"), "startLine":5, "endLine":5}}
                 ]}
             ]) },
         ],
