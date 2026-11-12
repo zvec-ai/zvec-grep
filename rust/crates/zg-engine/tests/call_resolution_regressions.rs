@@ -303,6 +303,61 @@ async fn receiver_rebinding_replaces_or_invalidates_old_properties() {
 }
 
 #[tokio::test]
+async fn assignments_inherit_the_declared_binding_scope() {
+    let source = "function target() {}\n\
+                  function first() {}\n\
+                  function second() {}\n\
+                  const api = { run: first };\n\
+                  function block() { { let target = 0; target = 1; } target(); }\n\
+                  function restored() { let cb = first; { let cb = second; cb = 0; } cb(); }\n\
+                  function outer() { let cb = first; { cb = second; } cb(); }\n\
+                  function hoisted() { { cb = second; } var cb; cb(); }\n\
+                  function properties() { { let api = { run: second }; api.run = second; } api.run(); }\n\
+                  function replaced() { { let api = { run: second }; api = { run: second }; } api.run(); }\n\
+                  function outerProperty() { let obj = { run: first }; { obj.run = second; } obj.run(); }\n\
+                  function loop() { for (let target = 0; target < 1; target = target + 1) {} target(); }\n\
+                  function parameter(cb) { { cb = second; } cb(); }\n\
+                  function destructured() { { let { target } = { target: 0 }; target = 1; } target(); }\n\
+                  function caught() { try { throw 0; } catch (target) { target = 1; } target(); }\n\
+                  function each() { for (let target of [0]) { target = 1; } target(); }\n";
+    for path in ["scope.js", "scope.ts"] {
+        let queries = [
+            ("block", "target", 1),
+            ("restored", "first", 2),
+            ("outer", "second", 3),
+            ("hoisted", "second", 3),
+            ("properties", "first", 2),
+            ("replaced", "first", 2),
+            ("outerProperty", "second", 3),
+            ("loop", "target", 1),
+            ("parameter", "second", 3),
+            ("destructured", "target", 1),
+            ("caught", "target", 1),
+            ("each", "target", 1),
+        ]
+        .into_iter()
+        .map(|(name, target, target_line)| {
+            let start = source.find(&format!("function {name}(" )).expect("caller");
+            let line = source[..start].bytes().filter(|byte| *byte == b'\n').count() + 1;
+            Query {
+                operation: "callees",
+                symbol: name,
+                expected: json!([{"name":name,"filePath":path,"startLine":line,"endLine":line,"edges":[
+                    {"filePath":path,"line":line,"symbol":{"name":target,"filePath":path,"startLine":target_line,"endLine":target_line}}
+                ]}]),
+                ..Query::default()
+            }
+        }).collect();
+        check_case(Case {
+            name: "assignment_binding_scope",
+            files: vec![SourceFile { path, source }],
+            queries,
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn nested_function_shadows_file_alias() {
     check_case(Case { name: "nested_function_shadows_file_alias", files: vec![
         SourceFile { path: "a.js", source: "function target() {}\nconst work = target;\nfunction outer() { function work() {} work(); }\n" },
