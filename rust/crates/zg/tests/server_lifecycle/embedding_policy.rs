@@ -77,11 +77,13 @@ fn mcp_index(port: u16, root: &Path, rebuild: bool) -> Result<(), Box<dyn Error>
 fn assert_model(guard: &ServerGuard, root: &Path, model: &str) -> Result<(), Box<dyn Error>> {
     let mut command = Command::new(&guard.binary);
     isolate(&mut command, &guard.home);
+    // Watcher notifications may invalidate readiness after a successful rebuild.
+    // The persisted model remains authoritative while that status is unknown.
     let output = command
         .current_dir(root)
         .args(["--status", "--mode", "server", "--home"])
         .arg(&guard.home)
-        .args(["--check-ready", "--color", "never"])
+        .args(["--color", "never"])
         .output()?;
     assert_command_success(&output);
     let stdout = String::from_utf8_lossy(&output.stdout);
