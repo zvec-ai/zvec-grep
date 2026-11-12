@@ -11,7 +11,7 @@ import tarfile
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
-ZVEC_COMMIT = "06076297c1ca34cc7edc2fa46dff48fc02f6da06"
+ZVEC_COMMIT = "e64c02eaa70eae0aaea2a683bee6298121df1ef0"
 NODE_COMMIT = "51c542807815a90275a5a14066a575cf991c65d8"
 
 
