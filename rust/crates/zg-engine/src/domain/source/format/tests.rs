@@ -365,40 +365,52 @@ fn catalog_matches_do_not_probe_content() {
 }
 
 #[test]
-fn unmatched_paths_only_detect_shebang_scripts() {
+fn unmatched_paths_detect_readable_text_and_extensionless_shebang_scripts() {
     let directory = tempdir().expect("temporary directory");
     let cases: &[(&str, &[u8], FileFormat)] = &[
         ("image", b"\x89PNG\r\n\x1a\n", Unknown),
-        ("document", b"%PDF-1.7\n", Unknown),
+        ("document", b"%PDF-1.7\n", Text),
         (
             "script",
             b"#!/usr/bin/env python3\nprint('hello')\n",
             Python,
         ),
-        ("script.custom", b"#!/bin/sh\necho hello\n", Unknown),
+        ("script.custom", b"#!/bin/sh\necho hello\n", Text),
         (
             "unsupported-script",
             b"#!/usr/bin/env awk\nBEGIN {}\n",
-            Unknown,
+            Text,
         ),
-        ("hashbang-text", b"not a script\n#!/bin/sh\n", Unknown),
-        ("README", b"Plain text without an extension.\n", Unknown),
-        ("unexpected.custom", b"plain text", Unknown),
-        ("main.RS", b"fn main() {}\n", Unknown),
+        ("hashbang-text", b"not a script\n#!/bin/sh\n", Text),
+        ("README", b"Plain text without an extension.\n", Text),
+        ("unexpected.custom", b"plain text", Text),
+        (
+            "module.bsl",
+            "Процедура Привет()\nКонецПроцедуры\n".as_bytes(),
+            Text,
+        ),
+        (
+            "bom-module.bsl",
+            "\u{feff}Процедура Привет()\nКонецПроцедуры\n".as_bytes(),
+            Text,
+        ),
+        ("main.RS", b"fn main() {}\n", Text),
         ("image.RS", b"\x89PNG\r\n\x1a\n", Unknown),
         (
             "drawing.EPS",
             b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 1 1\n",
-            Unknown,
+            Text,
         ),
-        ("drawing.custom", b"%!PS-Adobe-3.0 EPSF-3.0\n", Unknown),
-        ("utf16", b"\xff\xfeh\0i\0\n\0", Unknown),
-        ("encoded", b"-----BEGIN CERTIFICATE-----\nMIIB", Unknown),
+        ("drawing.custom", b"%!PS-Adobe-3.0 EPSF-3.0\n", Text),
+        ("utf16", b"\xff\xfeh\0i\0\n\0", Text),
+        ("encoded", b"-----BEGIN CERTIFICATE-----\nMIIB", Text),
         ("binary", b"\0\x01\x02\xff", Unknown),
         ("binary.custom", b"\0\x01\x02\xff", Unknown),
         ("invalid-utf8", b"otherwise readable\xff", Unknown),
+        ("invalid-utf8.custom", b"otherwise readable\xff", Unknown),
+        ("control.custom", b"otherwise readable\x01", Unknown),
         ("empty", b"", Unknown),
-        ("whitespace", b" \t\r\n", Unknown),
+        ("whitespace", b" \t\r\n", Text),
     ];
     for &(name, bytes, expected) in cases {
         let path = directory.path().join(name);
@@ -431,23 +443,27 @@ fn catalog_ambiguity_does_not_probe_content() {
 #[test]
 fn probing_respects_sample_boundaries() {
     let directory = tempdir().expect("temporary directory");
-    let path = directory.path().join("script");
-    let mut bytes = b"#!/bin/sh\n".to_vec();
-    bytes.resize(HEADER_BYTES - 2, b'a');
-    bytes.extend_from_slice(b"\xe4\xb8");
-    assert_eq!(bytes.len(), HEADER_BYTES);
-    fs::write(&path, &bytes).expect("write incomplete character at EOF");
-    assert_eq!(
-        FileFormat::from_path(&path).expect("complete file"),
-        [Unknown]
-    );
+    for (name, expected) in [("script", Shell), ("script.custom", Text)] {
+        let path = directory.path().join(name);
+        let mut bytes = b"#!/bin/sh\n".to_vec();
+        bytes.resize(HEADER_BYTES - 2, b'a');
+        bytes.extend_from_slice(b"\xe4\xb8");
+        assert_eq!(bytes.len(), HEADER_BYTES);
+        fs::write(&path, &bytes).expect("write incomplete character at EOF");
+        assert_eq!(
+            FileFormat::from_path(&path).expect("complete file"),
+            [Unknown],
+            "{name}"
+        );
 
-    bytes.extend_from_slice(b"\xad");
-    fs::write(&path, &bytes).expect("write character spanning the sample boundary");
-    assert_eq!(
-        FileFormat::from_path(&path).expect("partial sample"),
-        [Shell]
-    );
+        bytes.extend_from_slice(b"\xad");
+        fs::write(&path, &bytes).expect("write character spanning the sample boundary");
+        assert_eq!(
+            FileFormat::from_path(&path).expect("partial sample"),
+            [expected],
+            "{name}"
+        );
+    }
 }
 
 #[test]
@@ -464,10 +480,9 @@ fn invalid_paths_report_errors() {
         FileFormat::from_path(&directory.path().join("missing.rs")).expect("catalog"),
         [Rust]
     );
-    assert_eq!(
-        FileFormat::from_path(&directory.path().join("missing.RS")).expect("unknown suffix"),
-        [Unknown]
-    );
+    let error = FileFormat::from_path(&directory.path().join("missing.RS"))
+        .expect_err("unknown suffix requires content detection");
+    assert_eq!(error.code(), EngineError::NOT_FOUND);
 
     let child = directory.path().join("directory");
     fs::create_dir(&child).expect("create directory");
@@ -506,7 +521,7 @@ fn file_names_preserve_platform_encodings() {
         for name in [b"Dockerfile.\xff".as_slice(), b".env.\xff"] {
             let path = directory.path().join(OsString::from_vec(name.to_vec()));
             assert_eq!(
-                FileFormat::from_path(&path).expect("unknown suffix"),
+                FileFormat::from_file_name(path.file_name().expect("file name")),
                 [Unknown]
             );
         }
@@ -516,10 +531,7 @@ fn file_names_preserve_platform_encodings() {
         {
             let text = directory.path().join(OsString::from_vec(b"\xff".to_vec()));
             fs::write(&text, "plain text").expect("write sample");
-            assert_eq!(
-                FileFormat::from_path(&text).expect("content hint"),
-                [Unknown]
-            );
+            assert_eq!(FileFormat::from_path(&text).expect("content hint"), [Text]);
         }
     }
     #[cfg(windows)]

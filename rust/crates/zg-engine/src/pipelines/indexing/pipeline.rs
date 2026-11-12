@@ -4375,7 +4375,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn indexes_catalog_sources_and_shebang_scripts_only() {
+    async fn indexes_catalog_sources_readable_text_and_shebang_scripts() {
         let directory = tempdir().expect("temporary directory");
         std::fs::write(directory.path().join("readable"), "ordinary text 中文 😀").expect("text");
         std::fs::write(directory.path().join("known.txt"), "ordinary text 中文 😀")
@@ -4412,12 +4412,33 @@ mod tests {
         })
         .await
         .expect("index supported sources");
-        assert_eq!(result.files_added, 2);
+        assert_eq!(result.files_added, 4);
         let files = storage.list_files().expect("files");
-        assert_eq!(files.len(), 2);
+        assert_eq!(files.len(), 4);
         assert!(files.iter().all(|file| file.index_status().is_indexed()));
-        assert_eq!(storage.identities.lock().expect("catalog").len(), 2);
-        assert_eq!(result.skipped.len(), 5);
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.relative_path().to_path_buf())
+                .collect::<HashSet<_>>(),
+            ["readable", "known.txt", "script", "encoded"]
+                .into_iter()
+                .map(PathBuf::from)
+                .collect()
+        );
+        assert_eq!(storage.identities.lock().expect("catalog").len(), 4);
+        assert_eq!(result.skipped.len(), 3);
+        assert_eq!(
+            result
+                .skipped
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<HashSet<_>>(),
+            ["database", "unrecognized", "document.pdf"]
+                .into_iter()
+                .map(|name| workspace.source_root().join(name))
+                .collect()
+        );
     }
 
     #[tokio::test]
@@ -4633,7 +4654,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn large_unchanged_extensionless_text_is_skipped_after_classification() {
+    async fn large_unchanged_extensionless_text_is_retained_after_classification() {
         let directory = tempdir().expect("temporary directory");
         let workspace = workspace(directory.path());
         let size = MIN_DEFAULT_FILE_SIZE_BYTES + 1;
@@ -4671,9 +4692,15 @@ mod tests {
         )
         .await
         .expect("text classification");
-        assert!(scanned.is_empty());
-        assert_eq!(skipped[0].reason, SkippedFileReason::Unsupported);
-        assert_eq!(compute_diff(scanned, &[stored]).deleted.len(), 1);
+        assert_eq!(scanned.len(), 1);
+        assert!(skipped.is_empty());
+        assert_eq!(
+            scanned[0].formats.as_deref(),
+            Some([FileFormat::Text].as_slice())
+        );
+        let diff = compute_diff(scanned, &[stored]);
+        assert_eq!(diff.unchanged, 1);
+        assert!(diff.deleted.is_empty());
     }
 
     #[test]
