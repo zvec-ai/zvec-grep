@@ -661,3 +661,135 @@ async fn type_fallback_does_not_cross_known_module_or_ambiguity_boundaries() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn java_field_receiver_keeps_its_type_after_a_shadowing_parameter() {
+    check_case(Case {
+        name: "java_field_receiver_keeps_its_type_after_a_shadowing_parameter",
+        files: vec![SourceFile { path: "Use.java", source: "class Left { void work() {} }\nclass Right { void work() {} }\nclass Use {\n void run(Right field) { field.work(); this.field.work(); }\n Left field;\n void bare() { work(); }\n void work() {}\n}\n" }],
+        queries: vec![
+            Query { operation: "callees", symbol: "run", expected: json!([{"name":"Use::run","edges":[{"symbol":{"name":"Left::work","filePath":"Use.java","startLine":1,"endLine":1},"filePath":"Use.java","line":4,"column":39},{"symbol":{"name":"Right::work","filePath":"Use.java","startLine":2,"endLine":2},"filePath":"Use.java","line":4,"column":25}],"filePath":"Use.java","startLine":4,"endLine":4}]), ..Query::default() },
+            Query { operation: "callees", symbol: "bare", expected: json!([{"name":"Use::bare","edges":[{"symbol":{"name":"Use::work","filePath":"Use.java","startLine":7,"endLine":7},"filePath":"Use.java","line":6,"column":15}],"filePath":"Use.java","startLine":6,"endLine":6}]), ..Query::default() },
+        ],
+    }).await;
+}
+
+#[tokio::test]
+async fn java_generic_receivers_respect_explicit_imports() {
+    check_case(Case {
+        name: "java_generic_receivers_respect_explicit_imports",
+        files: vec![
+            SourceFile { path: "base/Pair.java", source: "package base; public class Pair<T> { public void get() {} }\n" },
+            SourceFile { path: "app/Decoys.java", source: "package app; class Pair<T> { void get() {} } class Missing { void get() {} }\n" },
+            SourceFile { path: "app/Use.java", source: "package app; import base.Pair; import external.Missing; class Use { void run(Pair<String> pair) { pair.get(); } void blocked(Missing value) { value.get(); } void qualified(app.Pair<String> value) { value.get(); } }\n" },
+        ],
+        queries: vec![
+            Query { operation: "callees", symbol: "run", expected: json!([{"edges":[{"symbol":{"name":"Pair::get","filePath":"base/Pair.java","startLine":1,"endLine":1},"filePath":"app/Use.java","line":1,"column":98}],"name":"Use::run","filePath":"app/Use.java","startLine":1,"endLine":1}]), ..Query::default() },
+            Query { operation: "callees", symbol: "qualified", expected: json!([{"edges":[{"symbol":{"name":"Pair::get","filePath":"app/Decoys.java","startLine":1,"endLine":1},"filePath":"app/Use.java","line":1,"column":198}],"name":"Use::qualified","filePath":"app/Use.java","startLine":1,"endLine":1}]), ..Query::default() },
+            Query { operation: "callees", symbol: "blocked", expected: json!([{"edges":[],"name":"Use::blocked","filePath":"app/Use.java","startLine":1,"endLine":1}]), ..Query::default() },
+        ],
+    }).await;
+}
+
+#[tokio::test]
+async fn rust_self_uses_the_imported_type_across_split_impls() {
+    check_case(Case {
+        name: "rust_self_uses_the_imported_type_across_split_impls",
+        files: vec![
+            SourceFile { path: "src/state.rs", source: "pub struct Target;\n" },
+            SourceFile { path: "src/apply.rs", source: "use crate::state::Target; impl Target { pub fn reset(&self) {} }\n" },
+            SourceFile { path: "src/run.rs", source: "use crate::state::Target; impl Target { pub fn run(&self) { self.reset(); } }\n" },
+            SourceFile { path: "src/decoy.rs", source: "pub struct Target; impl Target { pub fn orphan(&self) { self.reset(); } }\n" },
+            SourceFile { path: "src/params.rs", source: "struct Left; impl Left { fn work(&self) {} } struct Right; impl Right { fn work(&self) {} } fn use_left(left: &mut Left) { left.work(); }\n" },
+        ],
+        queries: vec![
+            Query { operation: "callees", symbol: "run", expected: json!([{"edges":[{"symbol":{"name":"Target::reset","filePath":"src/apply.rs","startLine":1,"endLine":1},"filePath":"src/run.rs","line":1,"column":60}],"name":"Target::run","filePath":"src/run.rs","startLine":1,"endLine":1}]), ..Query::default() },
+            Query { operation: "callees", symbol: "orphan", expected: json!([{"edges":[],"name":"Target::orphan","filePath":"src/decoy.rs","startLine":1,"endLine":1}]), ..Query::default() },
+            Query { operation: "callees", symbol: "use_left", expected: json!([{"edges":[{"symbol":{"name":"Left::work","filePath":"src/params.rs","startLine":1,"endLine":1},"filePath":"src/params.rs","line":1,"column":123}],"name":"use_left","filePath":"src/params.rs","startLine":1,"endLine":1}]), ..Query::default() },
+        ],
+    }).await;
+}
+
+#[tokio::test]
+async fn java_type_bounds_enum_members_and_loop_bindings_keep_their_scope() {
+    check_case(Case {
+        name: "java_type_bounds_enum_members_and_loop_bindings_keep_their_scope",
+        files: vec![SourceFile { path: "Scopes.java", source: "interface Bound { void work(); }\nclass Left { void work() {} Right[] items() { return null; } }\nclass Right { void work() {} Right[] items() { return null; } }\nenum Phase { ONE; void work() {} }\nclass Use<T extends Bound> {\n T typed; Left value;\n void bounded() { typed.work(); Phase.ONE.work(); }\n void loops(Right[] values) { for (Right value : values) { value.work(); Left local = null; local.work(); } value.work(); }\n void iterable() { for (Right value : value.items()) { value.work(); } }\n}\n" }],
+        queries: vec![
+            Query { operation: "callees", symbol: "bounded", expected: json!([{"edges":[{"symbol":{"name":"Bound::work","filePath":"Scopes.java","startLine":1,"endLine":1},"filePath":"Scopes.java","line":7,"column":18},{"symbol":{"name":"Phase::work","filePath":"Scopes.java","startLine":4,"endLine":4},"filePath":"Scopes.java","line":7,"column":32}],"name":"Use::bounded","filePath":"Scopes.java","startLine":7,"endLine":7}]), ..Query::default() },
+            Query { operation: "callees", symbol: "iterable", expected: json!([{"edges":[{"symbol":{"name":"Left::items","filePath":"Scopes.java","startLine":2,"endLine":2},"filePath":"Scopes.java","line":9,"column":38},{"symbol":{"name":"Right::work","filePath":"Scopes.java","startLine":3,"endLine":3},"filePath":"Scopes.java","line":9,"column":55}],"name":"Use::iterable","filePath":"Scopes.java","startLine":9,"endLine":9}]), ..Query::default() },
+            Query { operation: "callees", symbol: "loops", expected: json!([{"edges":[{"symbol":{"name":"Right::work","filePath":"Scopes.java","startLine":3,"endLine":3},"filePath":"Scopes.java","line":8,"column":59},{"symbol":{"name":"Left::work","filePath":"Scopes.java","startLine":2,"endLine":2},"filePath":"Scopes.java","line":8,"column":92},{"symbol":{"name":"Left::work","filePath":"Scopes.java","startLine":2,"endLine":2},"filePath":"Scopes.java","line":8,"column":108}],"name":"Use::loops","filePath":"Scopes.java","startLine":8,"endLine":8}]), ..Query::default() },
+        ],
+    }).await;
+}
+
+#[tokio::test]
+async fn array_receivers_do_not_borrow_the_element_types_methods() {
+    check_case(Case {
+        name: "array_receivers_do_not_borrow_the_element_types_methods",
+        files: vec![
+            SourceFile { path: "arrays.rs", source: "struct Item; impl Item { fn len(&self) {} } fn slice(items: &[Item]) { items.len(); }\n" },
+            SourceFile { path: "Arrays.java", source: "class Item { public Item clone() { return this; } } class Use { void array(Item[] items) { items.clone(); } }\n" },
+        ],
+        queries: vec![
+            Query { operation: "callees", symbol: "slice", expected: json!([{"edges":[],"name":"slice","filePath":"arrays.rs","startLine":1,"endLine":1}]), ..Query::default() },
+            Query { operation: "callees", symbol: "array", expected: json!([{"edges":[],"name":"Use::array","filePath":"Arrays.java","startLine":1,"endLine":1}]), ..Query::default() },
+        ],
+    }).await;
+}
+
+#[tokio::test]
+async fn java_creation_selects_constructors_without_calling_same_named_methods() {
+    check_case(Case {
+        name: "java_creation_selects_constructors_without_calling_same_named_methods",
+        files: vec![SourceFile { path: "Create.java", source: "class Target {\n Target() {}\n Target(int n) {}\n void Target(String s) {}\n}\nclass Implicit { void Implicit() {} }\nclass Ambiguous { Ambiguous(int n) {} Ambiguous(String s) {} }\nclass Use {\n void zero() { new Target(); }\n void one() { new Target(1); }\n void implicit() { new Implicit(); }\n void ambiguous() { new Ambiguous(1); }\n}\n" }],
+        queries: vec![
+            Query { operation: "callees", symbol: "zero", expected: json!([
+                {"name":"Use::zero", "filePath":"Create.java", "startLine":9, "endLine":9, "edges":[
+                    {"filePath":"Create.java", "line":9, "column":19, "symbol":{"name":"Target::Target", "filePath":"Create.java", "startLine":2, "endLine":2}}
+                ]}
+            ]), ..Query::default() },
+            Query { operation: "callees", symbol: "one", expected: json!([
+                {"name":"Use::one", "filePath":"Create.java", "startLine":10, "endLine":10, "edges":[
+                    {"filePath":"Create.java", "line":10, "column":18, "symbol":{"name":"Target::Target", "filePath":"Create.java", "startLine":3, "endLine":3}}
+                ]}
+            ]), ..Query::default() },
+            Query { operation: "callees", symbol: "implicit", expected: json!([
+                {"name":"Use::implicit", "filePath":"Create.java", "startLine":11, "endLine":11, "edges":[
+                    {"filePath":"Create.java", "line":11, "column":23, "symbol":{"name":"Implicit", "filePath":"Create.java", "startLine":6, "endLine":6}}
+                ]}
+            ]), ..Query::default() },
+            Query { operation: "callees", symbol: "ambiguous", expected: json!([
+                {"name":"Use::ambiguous", "filePath":"Create.java", "startLine":12, "endLine":12, "edges":[]}
+            ]), ..Query::default() },
+        ],
+    }).await;
+}
+
+#[tokio::test]
+async fn java_this_and_super_calls_select_the_current_and_direct_base_constructors() {
+    check_case(Case {
+        name: "java_this_and_super_calls_select_the_current_and_direct_base_constructors",
+        files: vec![
+            SourceFile { path: "base/Base.java", source: "package base;\npublic class Base {\n public Base() {}\n public Base(int n) {}\n}\n" },
+            SourceFile { path: "decoy/Base.java", source: "package decoy;\npublic class Base { public Base(int n) {} }\n" },
+            SourceFile { path: "app/Derived.java", source: "package app;\nimport base.Base;\nclass Derived extends Base {\n Derived() { this(1); }\n Derived(int n) { super(n); }\n}\n" },
+        ],
+        queries: vec![
+            Query { operation: "callees", symbol: "Derived::Derived", expected: json!([
+                {"name":"Derived::Derived", "filePath":"app/Derived.java", "startLine":4, "endLine":4, "edges":[
+                    {"filePath":"app/Derived.java", "line":4, "column":13, "symbol":{"name":"Derived::Derived", "filePath":"app/Derived.java", "startLine":5, "endLine":5}}
+                ]},
+                {"name":"Derived::Derived", "filePath":"app/Derived.java", "startLine":5, "endLine":5, "edges":[
+                    {"filePath":"app/Derived.java", "line":5, "column":18, "symbol":{"name":"Base::Base", "filePath":"base/Base.java", "startLine":4, "endLine":4}}
+                ]}
+            ]), ..Query::default() },
+            Query { operation: "callers", symbol: "Base::Base", file: Some("base/Base.java"), expected: json!([
+                {"name":"Base::Base", "filePath":"base/Base.java", "startLine":3, "endLine":3, "edges":[]},
+                {"name":"Base::Base", "filePath":"base/Base.java", "startLine":4, "endLine":4, "edges":[
+                    {"filePath":"app/Derived.java", "line":5, "column":18, "symbol":{"name":"Derived::Derived", "filePath":"app/Derived.java", "startLine":5, "endLine":5}}
+                ]}
+            ]), ..Query::default() },
+        ],
+    }).await;
+}
