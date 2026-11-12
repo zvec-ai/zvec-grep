@@ -1,4 +1,18 @@
-//! Receiver bindings retain their declaring file while walking fields and scopes.
+//! Resolve values and receiver types from lexical and module evidence.
+//!
+//! Value lookup walks the nearest declaration outward, then follows copied
+//! aliases at their assignment position. Unknown bindings stop fallback so a
+//! shadowed name cannot accidentally select a workspace-wide candidate.
+//! Receiver lookup materializes factory returns/awaited types and keeps the
+//! declaring file attached while selecting a type and its members.
+//!
+//! File initializers use source order; deferred function bodies use the module
+//! binding view. Imported bindings use the exporting file's view, never the
+//! importing file's coordinates. Recursive alias/import walks are bounded and
+//! unresolved or ambiguous evidence remains unresolved.
+
+#[cfg(test)]
+mod tests;
 use super::{
     AliasBinding, ClassScope, Entry, HashSet, IndexStore, NameIndexEntry, Outcome, Resolution,
     ResolutionSnapshot, Rule, RuleCaches, StoredPendingRef, SymbolType, alias_target_file,
@@ -83,7 +97,7 @@ fn lexical_binding(
         caches,
         &format!("f{}", stored.file_id),
         name,
-        (usize::MAX, usize::MAX),
+        file_position(snapshot, stored),
     )? {
         return Ok(Some(Binding {
             ty,
@@ -108,7 +122,7 @@ fn lexical_binding(
             caches,
             &variable.entity_id,
             name,
-            (usize::MAX, usize::MAX),
+            file_position(snapshot, stored),
         )? {
             return Ok(Some(Binding {
                 ty,
@@ -894,7 +908,7 @@ fn symbol_at(
             caches,
             &format!("f{file}"),
             &name.replace("::", "."),
-            (usize::MAX, usize::MAX),
+            module_position(snapshot, stored, file),
         )?
     {
         let Some(original) = ty.strip_prefix("typeof ") else {
@@ -935,7 +949,7 @@ fn symbol_at(
             caches,
             &format!("f{file}"),
             container,
-            (usize::MAX, usize::MAX),
+            module_position(snapshot, stored, file),
         )? && let Some(original) = ty.strip_prefix("typeof ")
         {
             return symbol_at(
@@ -967,7 +981,7 @@ fn symbol_at(
         caches,
         &format!("f{file}"),
         name,
-        (usize::MAX, usize::MAX),
+        module_position(snapshot, stored, file),
     )? && let Some(original) = ty.strip_prefix("typeof ")
     {
         return symbol_at(store, snapshot, stored, caches, file, original, depth - 1);
@@ -981,6 +995,10 @@ fn symbol_at(
     Ok(None)
 }
 
+/// Interpret the collector's type evidence, not arbitrary TypeScript types.
+/// Factory returns belong to the factory's module; Awaited unwraps Promise
+/// only when the original binding records an await. A local factory shadow
+/// prevents following a same-named imported function.
 fn materialize_type(
     store: &IndexStore,
     snapshot: &ResolutionSnapshot,
@@ -1086,6 +1104,18 @@ fn file_position(snapshot: &ResolutionSnapshot, stored: &StoredPendingRef) -> Po
             });
     if immediate {
         (stored.reference.line, stored.reference.column)
+    } else {
+        END_OF_SCOPE
+    }
+}
+
+fn module_position(
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    file: u32,
+) -> Position {
+    if file == stored.file_id {
+        file_position(snapshot, stored)
     } else {
         END_OF_SCOPE
     }
@@ -1383,6 +1413,9 @@ fn go_module(root: &std::path::Path) -> Option<String> {
     })
 }
 
+/// Resolve an import qualifier inside the nearest Go module. Explicit aliases
+/// override conventional package names (including /v2 suffix handling). A
+/// matching qualifier outside this module does not fall back to a local name.
 fn go_import_directory(
     store: &IndexStore,
     snapshot: &ResolutionSnapshot,

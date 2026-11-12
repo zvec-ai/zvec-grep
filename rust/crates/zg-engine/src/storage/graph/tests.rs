@@ -150,6 +150,40 @@ fn create(path: &Path) -> SqliteGraphStorage {
 }
 
 #[test]
+fn declared_bindings_tolerate_legacy_scope_end_metadata() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    for (value, expected) in [
+        (None, None),
+        (Some(json!(null)), None),
+        (Some(json!("legacy")), None),
+        (Some(json!({"line": 8, "column": 3})), None),
+        (Some(json!([-1, 0])), None),
+        (Some(json!([8])), None),
+        (Some(json!([8, 3])), Some((8, 3))),
+    ] {
+        let mut binding = reference("owner", "receiver");
+        binding.ref_kind = GraphEdgeKind::Declares;
+        binding.receiver_name = None;
+        binding.metadata.insert("type".into(), json!("Widget"));
+        if let Some(value) = value {
+            binding.metadata.insert("scope_end".into(), value);
+        }
+        db.write_file_graph(
+            1,
+            None,
+            &graph(&["owner"], vec![], vec![binding]),
+            &[],
+            false,
+        )
+        .expect("write");
+        let bindings = db.declared_bindings("owner").expect("read declarations");
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].bound_type, "Widget");
+        assert_eq!(bindings[0].scope_end, expected);
+    }
+}
+
+#[test]
 fn local_queries_preserve_direction_kinds_order_metadata_and_call_sites() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
     let edges = vec![
