@@ -25,7 +25,7 @@ pub enum Direction {
 /// Resolved edges and buffered name references share this vocabulary because
 /// they become rows of the same table: the pending queue stores the kind the
 /// resolved edge will carry. Resolution state is therefore structural, not a
-/// kind — a [`PendingRef`] has no target, a [`FileEdge`] requires one — and the
+/// kind — a `PendingRef` has no target, a `FileEdge` requires one — and the
 /// store keeps the same split in its `status` column.
 ///
 /// `Contains` comes only from containment, which is collected as a resolved
