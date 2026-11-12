@@ -789,7 +789,7 @@ async fn java_this_and_super_calls_select_the_current_and_direct_base_constructo
                 {"name":"Base::Base", "filePath":"base/Base.java", "startLine":4, "endLine":4, "edges":[
                     {"filePath":"app/Derived.java", "line":5, "column":18, "symbol":{"name":"Derived::Derived", "filePath":"app/Derived.java", "startLine":5, "endLine":5}}
                 ]}
-            ]), ..Query::default() },
+            ]) },
         ],
     }).await;
 }

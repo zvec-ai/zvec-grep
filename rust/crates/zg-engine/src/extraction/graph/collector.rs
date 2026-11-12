@@ -574,104 +574,14 @@ fn visit_for_bindings(
         };
         context.register_value_alias(alias_owner, &name, &target);
     }
-    if matches!(format, FileFormat::TypeScript | FileFormat::JavaScript)
-        && node.kind() == "export_statement"
-        && node.child_by_field_name("source").is_none()
-        && (node_text(node, source).starts_with("export default")
-            || node_text(node, source).starts_with("export ="))
-        && let Some(value) = node
-            .child_by_field_name("value")
-            .or_else(|| node.child_by_field_name("declaration"))
-            .or_else(|| node.named_child(0))
-        && let Some(name) = (value.kind() == "identifier")
-            .then_some(value)
-            .or_else(|| value.child_by_field_name("name"))
-    {
-        context.add_declare_binding(
-            owner_index,
-            "[[export:default]]",
-            &format!("typeof {}", node_text(name, source)),
-            node.start_position().row + 1,
-            node.start_position().column,
-            None,
-        );
+    if matches!(format, FileFormat::TypeScript | FileFormat::JavaScript) {
+        collect_ts_js_statement_bindings(node, owner_index, source, context);
     }
-    if matches!(format, FileFormat::TypeScript | FileFormat::JavaScript)
-        && owner_index == super::FILE_SCOPE_INDEX
-        && node.kind() == "variable_declarator"
-        && let Some(value) = node.child_by_field_name("value")
-        && value.kind() == "call_expression"
-        && value
-            .child_by_field_name("function")
-            .is_some_and(|name| node_text(name, source) == "require")
-        && let Some(path) = value
-            .child_by_field_name("arguments")
-            .and_then(|args| args.named_child(0))
-        && path.kind() == "string"
-    {
-        context.add_import_edge(
-            &normalize_module_path(node_text(path, source)),
-            Some(node_text(node, source)),
-            node.start_position().row + 1,
-            node.start_position().column,
-        );
-    }
-    if format == FileFormat::Cpp
-        && node.kind() == "using_declaration"
-        && owner_index == super::FILE_SCOPE_INDEX
-        && let Some(space) = node.named_child(0)
-        && space.kind() == "identifier"
-    {
-        // `using namespace rocksdb;` is a directive of the unit, not of one
-        // body: the names it opens are read wherever the file is compiled. The
-        // grammar reads it as a using declaration whose single name is the
-        // namespace, so a bare name here is the directive.
-        context.add_declare_binding(
-            super::FILE_SCOPE_INDEX,
-            "[[cpp_using_namespace]]",
-            node_text(space, source),
-            line,
-            column,
-            None,
-        );
+    if format == FileFormat::Cpp {
+        collect_cpp_statement_bindings(node, owner_index, source, context);
     }
     if format == FileFormat::Go {
         collect_go_scoped_binding(node, owner_index, source, context);
-    }
-    if format == FileFormat::Cpp
-        && node.kind() == "using_declaration"
-        && let Some((borrowed, _)) = cpp_binding_of(node, source, context)
-    {
-        // `using First<T>::Run;` puts that base member into the class's own
-        // lookup: a bare `Run()` written in the class's bodies reaches the
-        // base's member rather than a namespace-scope function of the name.
-        context.register_borrowed_name(owner_index, &borrowed);
-    }
-    if matches!(format, FileFormat::TypeScript | FileFormat::JavaScript)
-        && matches!(node.kind(), "variable_declarator" | "assignment_expression")
-    {
-        collect_object_bindings(node, owner_index, source, context);
-    }
-    if matches!(format, FileFormat::TypeScript | FileFormat::JavaScript)
-        && node.kind() == "export_specifier"
-        && node
-            .parent()
-            .and_then(|clause| clause.parent())
-            .is_none_or(|export| export.child_by_field_name("source").is_none())
-        && let (Some(name), Some(alias)) = (
-            node.child_by_field_name("name"),
-            node.child_by_field_name("alias"),
-        )
-    {
-        context.add_declare_binding(
-            owner_index,
-            // Export names are not local bindings; named exports remain live.
-            &format!("[[export:{}]]", node_text(alias, source)),
-            &format!("export typeof {}", node_text(name, source)),
-            node.start_position().row + 1,
-            node.start_position().column,
-            None,
-        );
     }
     if let Some((name, bound_type)) = binding {
         if format == FileFormat::TypeScript
@@ -718,6 +628,117 @@ fn visit_for_bindings(
             continue;
         }
         visit_for_bindings(child, owner_index, source, format, context, boundary);
+    }
+}
+
+/// Records the bindings a TypeScript or JavaScript statement states without
+/// declaring a name of the body: an export's own key, a `require` module, an
+/// object literal's properties, and a re-export's alias.
+fn collect_ts_js_statement_bindings(
+    node: Node<'_>,
+    owner_index: usize,
+    source: &[u8],
+    context: &mut WalkContext,
+) {
+    if node.kind() == "export_statement"
+        && node.child_by_field_name("source").is_none()
+        && (node_text(node, source).starts_with("export default")
+            || node_text(node, source).starts_with("export ="))
+        && let Some(value) = node
+            .child_by_field_name("value")
+            .or_else(|| node.child_by_field_name("declaration"))
+            .or_else(|| node.named_child(0))
+        && let Some(name) = (value.kind() == "identifier")
+            .then_some(value)
+            .or_else(|| value.child_by_field_name("name"))
+    {
+        context.add_declare_binding(
+            owner_index,
+            "[[export:default]]",
+            &format!("typeof {}", node_text(name, source)),
+            node.start_position().row + 1,
+            node.start_position().column,
+            None,
+        );
+    }
+    if owner_index == super::FILE_SCOPE_INDEX
+        && node.kind() == "variable_declarator"
+        && let Some(value) = node.child_by_field_name("value")
+        && value.kind() == "call_expression"
+        && value
+            .child_by_field_name("function")
+            .is_some_and(|name| node_text(name, source) == "require")
+        && let Some(path) = value
+            .child_by_field_name("arguments")
+            .and_then(|args| args.named_child(0))
+        && path.kind() == "string"
+    {
+        context.add_import_edge(
+            &normalize_module_path(node_text(path, source)),
+            Some(node_text(node, source)),
+            node.start_position().row + 1,
+            node.start_position().column,
+        );
+    }
+    if matches!(node.kind(), "variable_declarator" | "assignment_expression") {
+        collect_object_bindings(node, owner_index, source, context);
+    }
+    if node.kind() == "export_specifier"
+        && node
+            .parent()
+            .and_then(|clause| clause.parent())
+            .is_none_or(|export| export.child_by_field_name("source").is_none())
+        && let (Some(name), Some(alias)) = (
+            node.child_by_field_name("name"),
+            node.child_by_field_name("alias"),
+        )
+    {
+        context.add_declare_binding(
+            owner_index,
+            // Export names are not local bindings; named exports remain live.
+            &format!("[[export:{}]]", node_text(alias, source)),
+            &format!("export typeof {}", node_text(name, source)),
+            node.start_position().row + 1,
+            node.start_position().column,
+            None,
+        );
+    }
+}
+
+/// Records what a C++ using-declaration states: a directive at the file's top
+/// level opens its namespace to the whole unit, and a declaration inside a
+/// class body borrows the named base member into that class's lookup.
+fn collect_cpp_statement_bindings(
+    node: Node<'_>,
+    owner_index: usize,
+    source: &[u8],
+    context: &mut WalkContext,
+) {
+    if node.kind() != "using_declaration" {
+        return;
+    }
+    if owner_index == super::FILE_SCOPE_INDEX
+        && let Some(space) = node.named_child(0)
+        && space.kind() == "identifier"
+    {
+        // `using namespace rocksdb;` is a directive of the unit, not of one
+        // body: the names it opens are read wherever the file is compiled. The
+        // grammar reads it as a using declaration whose single name is the
+        // namespace, so a bare name here is the directive.
+        context.add_declare_binding(
+            super::FILE_SCOPE_INDEX,
+            "[[cpp_using_namespace]]",
+            node_text(space, source),
+            node.start_position().row + 1,
+            node.start_position().column,
+            None,
+        );
+    }
+    if let Some((borrowed, _)) = cpp_binding_of(node, source, context) {
+        // `using First<T>::Run;` puts that base member into the class's own
+        // lookup: a bare `Run()` written in the class's bodies reaches the
+        // base's member rather than a namespace-scope function of the name.
+        context.register_borrowed_name(owner_index, &borrowed);
     }
 }
 

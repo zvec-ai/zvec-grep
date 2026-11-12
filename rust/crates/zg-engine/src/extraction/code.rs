@@ -97,24 +97,15 @@ fn extract_code(
     let Some((adapter, language, code_format)) =
         format.and_then(|format| Some((resolve_adapter(format)?, grammar(format, jsx)?, format)))
     else {
-        return Ok(ExtractionOutput {
-            fragments: fallback(source, max_chars, overlap_chars),
-            graph: None,
-        });
+        return Ok(fallback_output(source, max_chars, overlap_chars));
     };
 
     let mut parser = Parser::new();
     if parser.set_language(&language).is_err() {
-        return Ok(ExtractionOutput {
-            fragments: fallback(source, max_chars, overlap_chars),
-            graph: None,
-        });
+        return Ok(fallback_output(source, max_chars, overlap_chars));
     }
     let Some(tree) = parser.parse(&source.text, None) else {
-        return Ok(ExtractionOutput {
-            fragments: fallback(source, max_chars, overlap_chars),
-            graph: None,
-        });
+        return Ok(fallback_output(source, max_chars, overlap_chars));
     };
     let bytes = source.text.as_bytes();
     let mut entities = Vec::new();
@@ -223,6 +214,19 @@ fn resolve_options(options: ChunkOptions) -> Result<(usize, usize), EngineError>
 
 fn fallback(source: &TextSource, max_chars: usize, overlap_chars: usize) -> Vec<ExtractedEntity> {
     extract_plain_text_entities(source, max_chars, overlap_chars)
+}
+
+/// What a file no adapter parses still yields: its text, chunked, and no
+/// graph. Nothing was walked, so there are no edges to partition.
+fn fallback_output(
+    source: &TextSource,
+    max_chars: usize,
+    overlap_chars: usize,
+) -> ExtractionOutput {
+    ExtractionOutput {
+        fragments: fallback(source, max_chars, overlap_chars),
+        graph: None,
+    }
 }
 
 // The flags carry independent extraction facts; the entity is the one place
@@ -1485,6 +1489,9 @@ mod tests {
             .collect()
     }
 
+    // The three languages are one regression: the same extractor reads each
+    // metadata field, and the assertions compare side by side.
+    #[allow(clippy::too_many_lines)]
     #[test]
     #[expect(
         clippy::too_many_lines,

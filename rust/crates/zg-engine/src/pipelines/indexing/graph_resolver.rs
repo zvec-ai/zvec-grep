@@ -590,6 +590,19 @@ fn classify_names(
         // as a second class declares it. Defer to a later sweep instead.
         return Ok(Outcome::Deferred);
     }
+    bare_name_outcome(store, snapshot, stored, hits, caches)
+}
+
+/// The rules a bare name still allows once its candidates are known: the
+/// file's own single declaration, then the import, export and arity bounds,
+/// then ambiguity between what is left.
+fn bare_name_outcome(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    hits: Vec<NameIndexEntry>,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Outcome> {
     if import_is_stale(store, snapshot, stored, &hits, caches)? {
         return Ok(Outcome::Deferred);
     }
