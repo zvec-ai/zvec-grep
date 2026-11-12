@@ -24,7 +24,7 @@ use super::pipeline::bind_entities;
 
 const MODEL: &str = "fixture/fixture-model";
 
-fn open(path: &std::path::Path) -> IndexStore {
+pub(super) fn open(path: &std::path::Path) -> IndexStore {
     IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         storage_path: path.to_owned(),
         graph_enabled: true,
@@ -49,7 +49,7 @@ fn open(path: &std::path::Path) -> IndexStore {
 }
 
 /// Extracts, assembles, and stores one source file exactly as indexing does.
-fn index_source(store: &IndexStore, path: &str, text: &str) -> FileId {
+pub(super) fn index_source(store: &IndexStore, path: &str, text: &str) -> FileId {
     let relative_path = SourcePath::new(path).expect("source path");
     let id = store
         .resolve_file_ids(&[relative_path.to_path_buf()])

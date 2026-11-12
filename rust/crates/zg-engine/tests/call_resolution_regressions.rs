@@ -264,6 +264,16 @@ async fn initializer_position() {
 }
 
 #[tokio::test]
+async fn typed_file_initializers_do_not_use_later_receiver_assignments() {
+    check_case(Case { name: "typed_initializer_position", files: vec![
+        SourceFile { path: "a.ts", source: "class First { run() {} }\nclass Second { run() {} }\nlet receiver = new First();\nconst result = receiver.run();\nreceiver = new Second();\nfunction deferred() { receiver.run(); }\n" },
+    ], queries: vec![
+        Query { operation: "callees", symbol: "result", expected: json!([{"name": "result", "edges": [{"symbol": {"name": "First::run"}}]}]), ..Query::default() },
+        Query { operation: "callees", symbol: "deferred", expected: json!([{"name": "deferred", "edges": [{"symbol": {"name": "Second::run"}}]}]), ..Query::default() },
+    ] }).await;
+}
+
+#[tokio::test]
 async fn lexical_bindings_end_with_their_block_but_var_stays_in_the_function() {
     for path in ["scope.js", "scope.ts"] {
         check_case(Case { name: "lexical_binding_scope", files: vec![

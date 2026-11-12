@@ -133,18 +133,11 @@ impl SqliteGraphStorage {
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             let line: i64 = row.get(2)?;
+            // Optional evidence may be absent or use an older encoding. Keep
+            // reading the declaration even when this field cannot be decoded.
             let scope_end = metadata
                 .get("scope_end")
-                .map(|value| {
-                    serde_json::from_value(value.clone()).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            1,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })
-                })
-                .transpose()?;
+                .and_then(|value| serde_json::from_value(value.clone()).ok());
             Ok(DeclaredBinding {
                 name,
                 bound_type: bound_type.to_owned(),
