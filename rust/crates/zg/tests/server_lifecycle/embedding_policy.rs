@@ -78,10 +78,11 @@ fn assert_model(guard: &ServerGuard, root: &Path, model: &str) -> Result<(), Box
     let mut command = Command::new(&guard.binary);
     isolate(&mut command, &guard.home);
     // Watcher notifications may invalidate readiness after a successful rebuild.
-    // The persisted model remains authoritative while that status is unknown.
+    // Read the persisted model directly so this assertion does not depend on
+    // transient workspace readiness or the daemon's short health-check timeout.
     let output = command
         .current_dir(root)
-        .args(["--status", "--mode", "server", "--home"])
+        .args(["--status", "--mode", "direct", "--home"])
         .arg(&guard.home)
         .args(["--color", "never"])
         .output()?;
