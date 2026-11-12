@@ -15,6 +15,40 @@ use zg_host_native::{
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn directory_reads_do_not_starve_watcher_reconciliation() -> TestResult {
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path().canonicalize()?;
+    for number in 0..128 {
+        fs::create_dir(root.join(format!("directory-{number}")))?;
+    }
+    let factory = NativeWatcherFactory::default().with_config(NativeWatcherConfig {
+        // Registration reads generate more IN_OPEN events than this queue holds.
+        raw_event_capacity: 64,
+        reconcile_interval: None,
+        resume_check_interval: None,
+        ..NativeWatcherConfig::default()
+    });
+    let control = TaskControl::new(CancellationToken::new());
+    let session = factory
+        .watch(
+            &WatchRequest {
+                root: RootSpec::new(root, Arc::new(AllowAllPaths)),
+            },
+            &control,
+        )
+        .await?;
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        session.flush().await?;
+        session.next_changes(&control).await
+    })
+    .await;
+    session.close().await?;
+    assert!(result??.changes.contains(&WorkspaceChange::Rescan));
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn watcher_debounces_changes_and_obeys_injected_selection_policy() -> TestResult {
     let temporary = tempdir_in(std::env::current_dir()?)?;

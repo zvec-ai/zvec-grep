@@ -597,10 +597,7 @@ fn create_watcher(
     let overflowed = Arc::clone(overflowed);
     let overflow_notify = Arc::clone(overflow_notify);
     let handler = move |event| {
-        if sender.try_send(event).is_err() {
-            overflowed.store(true, Ordering::Release);
-            overflow_notify.notify_one();
-        }
+        enqueue_event(event, &sender, &overflowed, &overflow_notify);
     };
     let backend = if let Some(interval) = poll_interval {
         WatchBackend::Poll(
@@ -628,6 +625,24 @@ fn create_watcher(
     };
     watcher.refresh(root, root_is_file)?;
     Ok(watcher)
+}
+
+fn enqueue_event(
+    event: notify::Result<Event>,
+    sender: &mpsc::Sender<notify::Result<Event>>,
+    overflowed: &AtomicBool,
+    overflow_notify: &Notify,
+) {
+    // Directory enumeration itself produces access events on Linux. Drop them
+    // before they can overflow the queue and trigger another enumeration.
+    if matches!(&event, Ok(event) if matches!(event.kind, EventKind::Access(_)) && !event.need_rescan())
+    {
+        return;
+    }
+    if sender.try_send(event).is_err() {
+        overflowed.store(true, Ordering::Release);
+        overflow_notify.notify_one();
+    }
 }
 
 fn watcher_error(error: impl std::fmt::Display) -> HostError {
@@ -1081,13 +1096,13 @@ fn normalize_event(
     event: &Event,
 ) -> Result<NormalizedEvent, HostError> {
     let mut normalized = NormalizedEvent::default();
-    if matches!(event.kind, EventKind::Access(_)) {
-        return Ok(normalized);
-    }
     if event.need_rescan() || matches!(event.kind, EventKind::Any | EventKind::Other) {
         root.policy.invalidate()?;
         normalized.changes.push(WorkspaceChange::Rescan);
         normalized.refresh_registration = true;
+        return Ok(normalized);
+    }
+    if matches!(event.kind, EventKind::Access(_)) {
         return Ok(normalized);
     }
     let topology_event = is_topology_event(event.kind);
@@ -1295,8 +1310,77 @@ fn lock_task(
 mod tests {
     use super::*;
     use crate::PathPolicy;
-    use notify::event::CreateKind;
+    use notify::event::{AccessKind, AccessMode, CreateKind, Flag};
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn access_events_do_not_displace_changes_or_report_overflow() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let overflowed = AtomicBool::new(false);
+        let overflow_notify = Notify::new();
+        for kind in [
+            AccessKind::Read,
+            AccessKind::Open(AccessMode::Any),
+            AccessKind::Close(AccessMode::Read),
+            AccessKind::Close(AccessMode::Write),
+        ] {
+            for _ in 0..DEFAULT_RAW_EVENT_CAPACITY {
+                enqueue_event(
+                    Ok(Event::new(EventKind::Access(kind))),
+                    &sender,
+                    &overflowed,
+                    &overflow_notify,
+                );
+            }
+        }
+        let change =
+            Event::new(EventKind::Create(CreateKind::File)).add_path(PathBuf::from("tracked.rs"));
+        enqueue_event(Ok(change.clone()), &sender, &overflowed, &overflow_notify);
+        assert!(!overflowed.load(Ordering::Acquire));
+        assert_eq!(receiver.try_recv().expect("change").expect("event"), change);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn raw_queue_preserves_rescan_flags_and_backend_errors() {
+        let (sender, mut receiver) = mpsc::channel(2);
+        let overflowed = AtomicBool::new(false);
+        let overflow_notify = Notify::new();
+        let event =
+            Event::new(EventKind::Access(AccessKind::Open(AccessMode::Any))).set_flag(Flag::Rescan);
+        enqueue_event(Ok(event.clone()), &sender, &overflowed, &overflow_notify);
+        enqueue_event(
+            Err(notify::Error::generic("watcher interrupted")),
+            &sender,
+            &overflowed,
+            &overflow_notify,
+        );
+        assert_eq!(receiver.try_recv().expect("rescan").expect("event"), event);
+        assert!(receiver.try_recv().expect("backend error").is_err());
+        assert!(!overflowed.load(Ordering::Acquire));
+
+        let temporary = tempfile::tempdir().expect("fixture");
+        let root = test_root(temporary.path(), temporary.path().join(".rules"));
+        let normalized = normalize_event(&root, false, &event).expect("rescan event");
+        assert_eq!(normalized.changes, vec![WorkspaceChange::Rescan]);
+        assert!(normalized.refresh_registration);
+    }
+
+    #[test]
+    fn actionable_events_still_report_raw_queue_overflow() {
+        let (sender, _receiver) = mpsc::channel(1);
+        let overflowed = AtomicBool::new(false);
+        let overflow_notify = Notify::new();
+        for _ in 0..2 {
+            enqueue_event(
+                Ok(Event::new(EventKind::Create(CreateKind::File))),
+                &sender,
+                &overflowed,
+                &overflow_notify,
+            );
+        }
+        assert!(overflowed.load(Ordering::Acquire));
+    }
 
     #[test]
     fn watcher_recovery_uses_node_backoff_schedule() {
