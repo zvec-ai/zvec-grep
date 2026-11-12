@@ -274,7 +274,26 @@ fn visit_for_calls(
     // A call node still descends below: `outer(inner())` and `factory().run()`
     // reach their inner calls only through its subtree, and the declaration
     // walk never comes back for them.
-    if is_call_node(node) && !is_unreported_call(node, source) && is_php_member_call(node) {
+    if let Some((target, ty)) = java_constructor_target(node, source) {
+        let name = ty.rsplit('.').next().unwrap_or(&ty);
+        let raw = if node.kind() == "object_creation_expression" {
+            format!("new {}", node_text(target, source))
+        } else {
+            node_text(target, source).to_owned()
+        };
+        // Keep a receiver so partition cannot bind `new X()` to the class
+        // before the resolver has considered X's explicit constructors.
+        let position = target.start_position();
+        context.add_call_edge(
+            owner_index,
+            name,
+            Some(&ty),
+            Some(&raw),
+            call_arity_of(node),
+            position.row + 1,
+            position.column,
+        );
+    } else if is_call_node(node) && !is_unreported_call(node, source) && is_php_member_call(node) {
         if let Some(call) = php_member_call(node, source) {
             context.add_call_edge(
                 owner_index,
@@ -335,6 +354,31 @@ fn visit_for_calls(
             continue;
         }
         visit_for_calls(child, owner_index, source, context, boundary);
+    }
+}
+
+/// Java construction names a type, while this/super name the enclosing or
+/// direct base constructor. Other grammars' creation nodes keep their rules.
+fn java_constructor_target<'tree>(
+    node: Node<'tree>,
+    source: &[u8],
+) -> Option<(Node<'tree>, String)> {
+    match node.kind() {
+        "object_creation_expression" => {
+            let ty = node.child_by_field_name("type")?;
+            if !matches!(
+                ty.kind(),
+                "type_identifier" | "scoped_type_identifier" | "generic_type"
+            ) {
+                return None;
+            }
+            Some((ty, java_type_name(ty, source)?))
+        }
+        "explicit_constructor_invocation" => {
+            let target = node.child_by_field_name("constructor")?;
+            Some((target, node_text(target, source).to_owned()))
+        }
+        _ => None,
     }
 }
 
@@ -494,6 +538,12 @@ fn visit_for_bindings(
             );
         }
         collect_binding(node, owner_index, &name, &bound_type, format, context);
+        if format == FileFormat::Java
+            && node.kind() == "enhanced_for_statement"
+            && let Some(body) = node.child_by_field_name("body")
+        {
+            visit_for_bindings(body, owner_index, source, format, context, boundary);
+        }
         return;
     }
     for child in named_children(node) {
@@ -512,6 +562,21 @@ fn collect_binding(
     format: FileFormat,
     context: &mut WalkContext,
 ) {
+    if format == FileFormat::Java {
+        if node.kind() == "enhanced_for_statement" {
+            // The loop variable is not in scope in the iterable expression.
+            if let Some(body) = node.child_by_field_name("body") {
+                add_binding_in_scope(body, Some(body), owner_index, name, ty, context);
+            }
+        } else {
+            let scope = node
+                .parent()
+                .filter(|parent| parent.kind() == "local_variable_declaration")
+                .and_then(|parent| parent.parent());
+            add_binding_in_scope(node, scope, owner_index, name, ty, context);
+        }
+        return;
+    }
     if matches!(format, FileFormat::TypeScript | FileFormat::JavaScript)
         && node.kind() == "variable_declarator"
     {
@@ -1089,24 +1154,72 @@ fn peel_declarator_name(node: Node<'_>, source: &[u8]) -> Option<String> {
     }
 }
 
+/// Generic arguments do not change the declaring Java class of a member.
+fn java_type_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    // An array has its own members, not its element type's method set.
+    if node.kind() == "array_type" {
+        return None;
+    }
+    let node = if node.kind() == "generic_type" {
+        node.named_child(0)?
+    } else {
+        node
+    };
+    type_name_of(node, source)
+}
+
 fn java_binding_of(
     node: Node<'_>,
     source: &[u8],
     context: &WalkContext,
 ) -> Option<(String, String)> {
     match node.kind() {
-        // `var x = new X()` and `X x = new X()`: the creation expression
-        // spells the type regardless of how the declaration's own type
-        // field spells it (`var` placeholder or the explicit name). A
-        // bare-call initializer (`var x = makeX()`) binds the factory's
-        // registered return type instead; a receiver turns the callee
-        // into a member call no factory table answers.
+        "type_parameter" => {
+            let children = named_children(node);
+            let name = children
+                .iter()
+                .find(|child| child.kind() == "type_identifier")?;
+            let bounds = children.iter().find(|child| child.kind() == "type_bound")?;
+            // Intersections need member selection across all bounds; do not
+            // claim the first bound is the complete receiver type.
+            if bounds.named_child_count() != 1 {
+                return None;
+            }
+            Some((
+                format!("[[type:{}]]", node_text(*name, source)),
+                java_type_name(bounds.named_child(0)?, source)?,
+            ))
+        }
+        "enum_constant" => {
+            let name = node.child_by_field_name("name")?;
+            let declaration = node.parent()?.parent()?;
+            if declaration.kind() != "enum_declaration" {
+                return None;
+            }
+            Some((
+                node_text(name, source).to_owned(),
+                node_text(declaration.child_by_field_name("name")?, source).to_owned(),
+            ))
+        }
+
+        // An explicit type selects the static method target. Inferred `var`
+        // declarations use a creation expression or known factory return type.
         "variable_declarator" => {
-            let value = node.child_by_field_name("value")?;
             let name = node.child_by_field_name("name")?;
             if name.kind() != "identifier" {
                 return None;
             }
+            // Explicit Java types remain authoritative, including fields
+            // without initializers and variables initialized to null.
+            if let Some(ty) = node.parent()?.child_by_field_name("type")
+                && node_text(ty, source) != "var"
+            {
+                return Some((
+                    node_text(name, source).to_owned(),
+                    java_type_name(ty, source)?,
+                ));
+            }
+            let value = node.child_by_field_name("value")?;
             if value.kind() == "method_invocation" {
                 if value.child_by_field_name("object").is_some() {
                     return None;
@@ -1128,10 +1241,10 @@ fn java_binding_of(
             ))
         }
         // `void m(Left a)`: the parameter binds its declared type.
-        "formal_parameter" => {
+        "formal_parameter" | "enhanced_for_statement" => {
             let name = node.child_by_field_name("name")?;
             let type_node = node.child_by_field_name("type")?;
-            let type_name = type_name_of(type_node, source)?;
+            let type_name = java_type_name(type_node, source)?;
             Some((node_text(name, source).to_owned(), type_name))
         }
         _ => None,
@@ -1209,12 +1322,24 @@ fn rust_binding_of(
     source: &[u8],
     context: &WalkContext,
 ) -> Option<(String, String)> {
-    if node.kind() != "let_declaration" {
+    if !matches!(node.kind(), "let_declaration" | "parameter") {
         return None;
     }
     let pattern = node.child_by_field_name("pattern")?;
     if pattern.kind() != "identifier" {
         return None;
+    }
+    if let Some(ty) = node.child_by_field_name("type") {
+        let ty = if ty.kind() == "reference_type" {
+            ty.child_by_field_name("type")?
+        } else {
+            ty
+        };
+        if matches!(ty.kind(), "type_identifier" | "scoped_type_identifier")
+            && let Some(ty) = type_name_of(ty, source)
+        {
+            return Some((node_text(pattern, source).to_owned(), ty));
+        }
     }
     let value = node.child_by_field_name("value")?;
     // `let x = make_x()`: a bare call binds the callee's registered
@@ -2340,14 +2465,15 @@ mod tests {
             vec![]
         );
 
-        // A member call never consults the factory table.
+        // The parameter has a known type, but the member-call result must
+        // not borrow a same-named free factory's return type.
         assert_eq!(
             factory_bindings(
                 FileFormat::Rust,
                 &tree_sitter_rust::LANGUAGE.into(),
                 "fn make_x() -> X {\n    todo!()\n}\nfn caller(v: V) {\n    let m = v.make_x();\n}\n",
             ),
-            vec![]
+            vec![("v".to_owned(), "V".to_owned(), 4)]
         );
     }
 }

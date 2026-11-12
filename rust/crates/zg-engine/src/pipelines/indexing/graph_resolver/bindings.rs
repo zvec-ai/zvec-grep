@@ -166,7 +166,12 @@ fn enclosing_binding(
                     caches,
                     &candidate.entity_id,
                     name,
-                    (stored.reference.line, stored.reference.column),
+                    if stored.language == "java" && candidate.symbol_type.is_some_and(is_type_scope)
+                    {
+                        (usize::MAX, usize::MAX)
+                    } else {
+                        (stored.reference.line, stored.reference.column)
+                    },
                 )?
             {
                 return Ok(Some(Binding {
@@ -210,6 +215,29 @@ fn type_definition(
         }
         return script_type(store, snapshot, stored, caches, binding.file_id, name);
     }
+    if stored.language == "java" {
+        let mut binding = binding;
+        for _ in 0..8 {
+            if let Some(hit) = java_type_definition(store, snapshot, stored, caches, &binding)? {
+                return Ok(Some(hit));
+            }
+            let Some(bound) = lexical_binding(
+                store,
+                snapshot,
+                stored,
+                caches,
+                &format!("[[type:{}]]", binding.ty),
+            )?
+            else {
+                break;
+            };
+            if bound.ty == binding.ty {
+                break;
+            }
+            binding = bound;
+        }
+        return Ok(None);
+    }
     if stored.language == "go"
         && let Some((package, short)) = name.rsplit_once('.')
     {
@@ -251,6 +279,205 @@ fn type_definition(
         .collect();
     Ok(match candidates.as_slice() {
         [hit] => Some((*hit).clone()),
+        _ => None,
+    })
+}
+
+/// Java types are scoped by their declaration/import and package. An explicit
+/// external import must not fall back to an unrelated same-named local class.
+fn java_type_definition(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    caches: &mut RuleCaches,
+    binding: &Binding,
+) -> crate::EngineResult<Option<NameIndexEntry>> {
+    let name = binding.ty.replace('.', "::");
+    let short = name.rsplit("::").next().unwrap_or(&name);
+    let candidates: Vec<_> = snapshot
+        .lookup_candidates(short)
+        .unwrap_or_default()
+        .iter()
+        .filter(|hit| hit.symbol_type.is_some_and(is_type_scope))
+        .collect();
+    let local: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|hit| hit.file_id == binding.file_id && hit.qualified_name == name)
+        .collect();
+    if !local.is_empty() {
+        return Ok(match local.as_slice() {
+            [hit] => Some((*hit).clone()),
+            _ => None,
+        });
+    }
+    let imports = caches.imports(store, binding.file_id)?;
+    let explicit: Vec<_> = imports
+        .iter()
+        .filter(|import| import.specifier.rsplit('.').next() == Some(short))
+        .collect();
+    let package = snapshot
+        .entity_record(&stored.reference.owner_id)
+        .and_then(|owner| snapshot.lookup_candidates(&owner.name))
+        .and_then(|hits| {
+            hits.iter()
+                .find(|hit| hit.entity_id == stored.reference.owner_id)
+        })
+        .and_then(|hit| hit.package.as_deref());
+    let matches: Vec<_> = candidates
+        .into_iter()
+        .filter(|hit| {
+            if binding.ty.contains('.') {
+                super::java_import_match(hit.package.as_deref(), &binding.ty, &hit.qualified_name)
+            } else if !explicit.is_empty() {
+                explicit.iter().any(|import| {
+                    super::java_import_match(
+                        hit.package.as_deref(),
+                        &import.specifier,
+                        &hit.qualified_name,
+                    )
+                })
+            } else {
+                binding.file_id == stored.file_id
+                    && package.is_some()
+                    && hit.package.as_deref() == package
+                    && hit.qualified_name == name
+            }
+        })
+        .collect();
+    Ok(match matches.as_slice() {
+        [hit] => Some((*hit).clone()),
+        _ => None,
+    })
+}
+
+/// Construction never falls through to ordinary name/member lookup: a class
+/// or a same-named method cannot stand in for an ambiguous explicit constructor.
+pub(super) fn resolve_java_constructor(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Option<Outcome>> {
+    if stored.language != "java" || stored.reference.ref_kind != super::GraphEdgeKind::Calls {
+        return Ok(None);
+    }
+    let raw = stored
+        .reference
+        .metadata
+        .get("rawText")
+        .and_then(serde_json::Value::as_str);
+    let receiver = stored.reference.receiver_name.as_deref();
+    let chained = matches!(
+        (receiver, raw),
+        (Some("this"), Some("this")) | (Some("super"), Some("super"))
+    );
+    if !chained && !raw.is_some_and(|text| text.starts_with("new ")) {
+        return Ok(None);
+    }
+    let ty = if chained {
+        snapshot
+            .entity_record(&stored.reference.owner_id)
+            .and_then(|owner| owner.qualified_name.rsplit_once("::"))
+            .map(|(scope, _)| scope)
+    } else {
+        receiver
+    };
+    let Some(ty) = ty else {
+        return Ok(Some(Outcome::Deferred));
+    };
+    let Some(mut owner) = java_type_definition(
+        store,
+        snapshot,
+        stored,
+        caches,
+        &Binding {
+            ty: ty.to_owned(),
+            file_id: stored.file_id,
+        },
+    )?
+    else {
+        return Ok(Some(Outcome::Deferred));
+    };
+    if receiver == Some("super") {
+        let Some(base) = java_superclass(store, snapshot, stored, caches, &owner)? else {
+            return Ok(Some(Outcome::Deferred));
+        };
+        owner = base;
+    }
+    if owner.symbol_type != Some(SymbolType::Class) {
+        return Ok(Some(Outcome::Deferred));
+    }
+    let name = owner
+        .qualified_name
+        .rsplit([':', '.'])
+        .next()
+        .unwrap_or(&owner.qualified_name);
+    let qualified = format!("{}::{name}", owner.qualified_name);
+    let constructors: Vec<_> = snapshot
+        .lookup_candidates(name)
+        .unwrap_or_default()
+        .iter()
+        .filter(|hit| {
+            hit.file_id == owner.file_id && hit.qualified_name == qualified && hit.is_constructor
+        })
+        .collect();
+    let target = if constructors.is_empty() && stored.reference.arity == Some(0) {
+        // With no explicit constructor, the zero-argument default is represented
+        // by the class. Never inherit a constructor from a more distant base.
+        Some(&owner)
+    } else {
+        stored
+            .reference
+            .arity
+            .and_then(|arity| super::unique_arity_match(constructors.into_iter(), arity))
+    };
+    Ok(Some(target.map_or(Outcome::Deferred, |hit| {
+        Outcome::Resolved {
+            resolution: member_resolution(stored, hit),
+            rule: Rule::Receiver,
+        }
+    })))
+}
+
+fn java_superclass(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    caches: &mut RuleCaches,
+    owner: &NameIndexEntry,
+) -> crate::EngineResult<Option<NameIndexEntry>> {
+    let (resolved, pending) = store.inheritance_bases(&owner.entity_id)?;
+    let mut bases = Vec::new();
+    for id in resolved {
+        if let Some(record) = snapshot.entity_record(&id)
+            && let Some(hit) = snapshot
+                .lookup_candidates(&record.name)
+                .unwrap_or_default()
+                .iter()
+                .find(|hit| hit.entity_id == id && hit.symbol_type == Some(SymbolType::Class))
+        {
+            bases.push(hit.clone());
+        }
+    }
+    for name in pending {
+        if let Some(hit) = java_type_definition(
+            store,
+            snapshot,
+            stored,
+            caches,
+            &Binding {
+                ty: name,
+                file_id: owner.file_id,
+            },
+        )? && hit.symbol_type == Some(SymbolType::Class)
+            && !bases.iter().any(|base| base.entity_id == hit.entity_id)
+        {
+            bases.push(hit);
+        }
+    }
+    Ok(match bases.as_slice() {
+        [base] => Some(base.clone()),
         _ => None,
     })
 }
@@ -595,10 +822,14 @@ pub(super) fn resolve(
             file_id: stored.file_id,
         }
     } else {
-        let Some(binding) = lexical_binding(store, snapshot, stored, caches, root)? else {
-            return Ok(None);
-        };
-        binding
+        match lexical_binding(store, snapshot, stored, caches, root)? {
+            Some(binding) => binding,
+            None if stored.language == "java" => Binding {
+                ty: root.to_owned(),
+                file_id: stored.file_id,
+            },
+            None => return Ok(None),
+        }
     };
     let Some(mut owner) = type_definition(store, snapshot, stored, caches, &binding)? else {
         return Ok(None);

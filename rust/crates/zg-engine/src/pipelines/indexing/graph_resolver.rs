@@ -243,6 +243,7 @@ struct RuleCaches {
     /// per owner per sweep instead of once per call.
     declared_bindings: HashMap<String, Vec<DeclaredBinding>>,
     import_references: HashMap<u32, Arc<[ImportReference]>>,
+    rust_type_owners: HashMap<(u32, String), (u32, String)>,
     javascript_imports: HashMap<u32, Arc<[bindings::JavascriptImport]>>,
 }
 
@@ -292,6 +293,9 @@ fn classify(
         // bound variable name must never reach the name-index lookup below.
         // Declares edges stay pending in the table for every later sweep.
         return Ok(Outcome::Deferred);
+    }
+    if let Some(outcome) = bindings::resolve_java_constructor(store, snapshot, stored, caches)? {
+        return Ok(outcome);
     }
     if stored.reference.ref_kind == GraphEdgeKind::Calls
         && matches!(stored.language.as_str(), "typescript" | "javascript")
@@ -405,7 +409,7 @@ fn classify_names(
             None => Outcome::Deferred,
         });
     }
-    if let Some(resolution) = resolve_receiver_class(store, snapshot, stored, &hits)? {
+    if let Some(resolution) = resolve_receiver_class(store, snapshot, stored, &hits, caches)? {
         // The receiver names the enclosing instance or superclass, so the
         // member's declaring scope is pinned to the owner's class hierarchy
         // before workspace-wide ambiguity is considered.
@@ -1475,13 +1479,16 @@ fn resolve_receiver_class(
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
     hits: &[NameIndexEntry],
+    caches: &mut RuleCaches,
 ) -> crate::EngineResult<Option<Resolution>> {
     let reference = &stored.reference;
     if reference.ref_kind != GraphEdgeKind::Calls {
         return Ok(None);
     }
-    let Some(receiver) = reference.receiver_name.as_deref() else {
-        return Ok(None);
+    let receiver = match reference.receiver_name.as_deref() {
+        Some(receiver) => receiver,
+        None if stored.language == "java" => "this",
+        None => return Ok(None),
     };
     let superclass = receiver == "super";
     if !superclass && !is_self_receiver(&stored.language, receiver) {
@@ -1500,6 +1507,9 @@ fn resolve_receiver_class(
     }) else {
         return Ok(None);
     };
+    if stored.language == "rust" {
+        return resolve_rust_self(store, snapshot, stored, hits, &enclosing, caches);
+    }
     let caller = (!superclass).then_some(enclosing.as_str());
     let mut scopes = Vec::new();
     if !superclass {
@@ -1518,6 +1528,102 @@ fn resolve_receiver_class(
     Ok(bind_hierarchy_member(
         stored, hits, caller, &scopes, branched,
     ))
+}
+
+/// Rust impl blocks in different files may share a type through an import,
+/// but matching the spelling alone would mix unrelated same-named structs.
+fn resolve_rust_self(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    hits: &[NameIndexEntry],
+    enclosing: &str,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Option<Resolution>> {
+    let identity = rust_type_identity(store, snapshot, stored.file_id, enclosing, caches)?;
+    let mut matched = None;
+    for hit in hits {
+        let Some((scope, _)) = hit.qualified_name.rsplit_once("::") else {
+            continue;
+        };
+        if rust_type_identity(store, snapshot, hit.file_id, scope, caches)? == identity {
+            if matched.is_some() {
+                return Ok(None);
+            }
+            matched = Some(hit);
+        }
+    }
+    Ok(matched.map(|hit| member_resolution(stored, hit)))
+}
+
+fn rust_type_identity(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    file: u32,
+    scope: &str,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<(u32, String)> {
+    let key = (file, scope.to_owned());
+    if let Some(identity) = caches.rust_type_owners.get(&key) {
+        return Ok(identity.clone());
+    }
+    // Keep concrete/generic arguments: erasing them would conflate specialized impls.
+    let (name, arguments) = scope.find('<').map_or((scope, ""), |at| scope.split_at(at));
+    let mut identity = key.clone();
+    for import in caches.imports(store, file)?.iter() {
+        let alias = import
+            .raw_text
+            .as_deref()
+            .into_iter()
+            .flat_map(rust_alias_pairs)
+            .find(|(local, _)| local == name);
+        let original = alias
+            .as_ref()
+            .and_then(|(_, original)| original.as_deref())
+            .unwrap_or(name);
+        if import.specifier.rsplit("::").next() != Some(original) {
+            continue;
+        }
+        let Some((module, _)) = import.specifier.rsplit_once("::") else {
+            continue;
+        };
+        // Unknown imports still allow same-file impls, but cannot justify a
+        // cross-file match. Relative imports need a module-tree lookup.
+        if module == "self"
+            || module == "super"
+            || module.starts_with("self::")
+            || module.starts_with("super::")
+        {
+            break;
+        }
+        let targets: HashSet<_> = if module == "crate" {
+            ["src/lib.rs", "lib.rs", "src/main.rs", "main.rs"]
+                .into_iter()
+                .filter_map(|path| snapshot.file_id_by_path(path))
+                .collect()
+        } else {
+            let module = module
+                .strip_prefix("crate::")
+                .unwrap_or(module)
+                .replace("::", "/");
+            [
+                alias_target_at(snapshot, "rust", &module),
+                alias_target_at(snapshot, "rust", &format!("src/{module}")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect()
+        };
+        if targets.len() == 1 {
+            identity = (
+                *targets.iter().next().expect("one type module"),
+                format!("{original}{arguments}"),
+            );
+        }
+        break;
+    }
+    caches.rust_type_owners.insert(key, identity.clone());
+    Ok(identity)
 }
 
 /// Binds a receiver call through the owner's declared bindings: a local
@@ -1540,7 +1646,10 @@ fn resolve_receiver_typed(
     if reference.ref_kind != GraphEdgeKind::Calls {
         return Ok(None);
     }
-    if matches!(stored.language.as_str(), "typescript" | "javascript" | "go") {
+    if matches!(
+        stored.language.as_str(),
+        "typescript" | "javascript" | "go" | "java"
+    ) {
         return bindings::resolve(store, snapshot, stored, hits, caches);
     }
     let Some(receiver) = reference.receiver_name.as_deref() else {
