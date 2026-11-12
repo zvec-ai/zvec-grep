@@ -32,7 +32,7 @@
 **zg**（**z**vec-**g**rep）は、[zvec](https://github.com/alibaba/zvec) を基盤に、
 ripgrep、BM25、ベクトル検索を
 ローカルファーストな 1 つのインターフェースに統合します。ターミナルから直接使うことも、
-エージェントに任せて使わせることもできます。
+エージェントに zg を使ってもらうこともできます。
 
 <a id="tour"></a>
 
@@ -59,7 +59,7 @@ ripgrep、BM25、ベクトル検索を
   少ないツール呼び出し、少ないトークン、少ないノイズで、
   適切な根拠を浮かび上がらせます。
 - **既定ではローカル** — ファイル、インデックス、ローカルモデルはあなたのマシンに残ります。
-  リモートの埋め込みは、あなたが許可した場合にのみデータを受け取ります。
+  リモートの埋め込みサービスにデータが送信されるのは、あなたが許可した場合のみです。
 
 <a id="try-it-yourself"></a>
 
@@ -152,10 +152,10 @@ zg は `sherlock-holmes.txt` の関連する箇所を、
 
 ### 1. ドメイン横断のエージェントベンチマーク
 
-[SWE-QA-Bench](./benchmarks/swe-qa-bench/README.md) は、推論エフォートを high にした
-Claude Opus 5 の Claude Code を使います。
-[BrowseComp-Plus](./benchmarks/browse-comp-plus/README.md) は、推論エフォートを medium にした
-Codex gpt-5.6-sol を使います。どちらの zg プロファイルも Qwen3.7 Text
+[SWE-QA-Bench](./benchmarks/swe-qa-bench/README.md) は、Claude Code で Claude Opus 5 を使用し、
+推論エフォートを high に設定しています。
+[BrowseComp-Plus](./benchmarks/browse-comp-plus/README.md) は、Codex で gpt-5.6-sol を使用し、
+推論エフォートを medium に設定しています。どちらの zg プロファイルも Qwen3.7 Text
 Embedding を使います。
 
 <p align="center">
