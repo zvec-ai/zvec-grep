@@ -870,10 +870,12 @@ async fn rust_split_impls_resolve_relative_modules_within_each_cargo_crate() {
             SourceFile { path:"Cargo.toml", source:"[workspace]\nmembers = [\"crates/app\", \"crates/other\"]\n" },
             SourceFile { path:"crates/app/Cargo.toml", source:"[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n" },
             SourceFile { path:"crates/app/src/lib.rs", source:"mod store;\n" },
-            SourceFile { path:"crates/app/src/store/mod.rs", source:"pub struct Store;\nimpl Store { pub fn read(&self) {} }\npub struct Marker;\nmod extra; mod by_crate; mod by_alias; mod nested; mod self_call;\n" },
+            SourceFile { path:"crates/app/src/store/mod.rs", source:"pub struct Store;\nimpl Store { pub fn read(&self) {} }\npub struct Marker;\nmod extra; mod by_crate; mod by_alias; mod nested; mod self_call; mod by_glob; mod grouped_glob;\n" },
             SourceFile { path:"crates/app/src/store/extra.rs", source:"use super::{Store, Marker};\nimpl Store { pub fn super_go(&self) { self.read(); } }\n" },
             SourceFile { path:"crates/app/src/store/by_crate.rs", source:"use crate::store::Store;\nimpl Store { pub fn crate_go(&self) { self.read(); } }\n" },
             SourceFile { path:"crates/app/src/store/by_alias.rs", source:"use super::{Store as Shared, Marker};\nimpl Shared { pub fn alias_go(&self) { self.read(); } }\n" },
+            SourceFile { path:"crates/app/src/store/by_glob.rs", source:"use super::*;\nimpl Store { pub fn glob_go(&self) { self.read(); } }\n" },
+            SourceFile { path:"crates/app/src/store/grouped_glob.rs", source:"use super::{*};\nimpl Store { pub fn group_go(&self) { self.read(); } }\n" },
             SourceFile { path:"crates/app/src/store/nested.rs", source:"mod deeper;\n" },
             SourceFile { path:"crates/app/src/store/nested/deeper.rs", source:"use super::super::Store;\nimpl Store { pub fn deep_go(&self) { self.read(); } }\n" },
             SourceFile { path:"crates/app/src/store/self_call.rs", source:"mod actual;\nuse self::actual::Store;\nimpl Store { pub fn self_go(&self) { self.read(); } }\n" },
@@ -888,6 +890,8 @@ async fn rust_split_impls_resolve_relative_modules_within_each_cargo_crate() {
             ("super_go","Store::super_go","crates/app/src/store/extra.rs",2,"crates/app/src/store/mod.rs"),
             ("crate_go","Store::crate_go","crates/app/src/store/by_crate.rs",2,"crates/app/src/store/mod.rs"),
             ("alias_go","Shared::alias_go","crates/app/src/store/by_alias.rs",2,"crates/app/src/store/mod.rs"),
+            ("glob_go","Store::glob_go","crates/app/src/store/by_glob.rs",2,"crates/app/src/store/mod.rs"),
+            ("group_go","Store::group_go","crates/app/src/store/grouped_glob.rs",2,"crates/app/src/store/mod.rs"),
             ("deep_go","Store::deep_go","crates/app/src/store/nested/deeper.rs",2,"crates/app/src/store/mod.rs"),
             ("self_go","Store::self_go","crates/app/src/store/self_call.rs",3,"crates/app/src/store/self_call/actual.rs"),
             ("other_go","Store::other_go","crates/other/src/extra.rs",2,"crates/other/src/store.rs"),
@@ -895,8 +899,72 @@ async fn rust_split_impls_resolve_relative_modules_within_each_cargo_crate() {
         ].into_iter().map(|(query,name,path,line,target)| Query {
             operation:"callees",symbol:query,
             expected:json!([{"name":name,"filePath":path.split('/').collect::<std::path::PathBuf>(),"startLine":line,"endLine":line,"edges":[
-                {"filePath":path.split('/').collect::<std::path::PathBuf>(),"line":line,"column":if query=="relative_go" {41} else if query=="alias_go" {39} else if query=="super_go" || query=="crate_go" || query=="other_go" {38} else {37},"symbol":{"name":"Store::read","filePath":target.split('/').collect::<std::path::PathBuf>(),"startLine":2,"endLine":2}}
+                {"filePath":path.split('/').collect::<std::path::PathBuf>(),"line":line,"column":if query=="relative_go" {41} else if query=="alias_go" {39} else if query=="super_go" || query=="crate_go" || query=="other_go" || query=="group_go" {38} else {37},"symbol":{"name":"Store::read","filePath":target.split('/').collect::<std::path::PathBuf>(),"startLine":2,"endLine":2}}
             ]}]),..Query::default()
         }).collect(),
     }).await;
+}
+
+#[tokio::test]
+async fn rust_glob_imports_respect_local_types_and_explicit_imports() {
+    for (source, parent_type, target, target_line) in [
+        (
+            "use super::*;\npub union Store { value: u32 }\nimpl Store { pub fn read(&self) {} pub fn go(&self) { self.read(); } }\n",
+            true,
+            Some("src/store/extra.rs"),
+            3,
+        ),
+        (
+            "use super::*;\npub struct Store;\nimpl Store { pub fn read(&self) {} pub fn go(&self) { self.read(); } }\n",
+            true,
+            Some("src/store/extra.rs"),
+            3,
+        ),
+        (
+            "use super::*;\npub struct Store;\nimpl Store { pub fn go(&self) { self.read(); } }\n",
+            true,
+            None,
+            0,
+        ),
+        (
+            "use super::*;\nuse crate::alternate::Store;\nimpl Store { pub fn go(&self) { self.read(); } }\n",
+            true,
+            Some("src/alternate.rs"),
+            2,
+        ),
+        (
+            "use super::*;\nuse crate::alternate::*;\nimpl Store { pub fn go(&self) { self.read(); } }\n",
+            true,
+            None,
+            0,
+        ),
+        (
+            "use super::*;\nimpl Store { pub fn go(&self) { self.read(); } }\n",
+            false,
+            None,
+            0,
+        ),
+    ] {
+        let call = source.rfind("self.read()").expect("call site");
+        let line = source[..call].bytes().filter(|byte| *byte == b'\n').count() + 1;
+        let column = call - source[..call].rfind('\n').map_or(0, |at| at + 1);
+        let path = std::path::Path::new("src").join("store").join("extra.rs");
+        let edges = target.map(|target| json!({
+            "filePath":path, "line":line, "column":column,
+            "symbol":{"name":"Store::read", "filePath":target.split('/').collect::<std::path::PathBuf>(), "startLine":target_line, "endLine":target_line}
+        })).into_iter().collect::<Vec<_>>();
+        check_case(Case {
+            name:"rust_glob_imports_respect_local_types_and_explicit_imports",
+            files:vec![
+                SourceFile { path:"Cargo.toml", source:"[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n" },
+                SourceFile { path:"src/lib.rs", source:"mod store; mod alternate;\n" },
+                SourceFile { path:"src/store/mod.rs", source:if parent_type {"pub struct Store;\nimpl Store { pub fn read(&self) {} }\nmod extra;\n"} else {"mod extra;\n"} },
+                SourceFile { path:"src/store/extra.rs", source },
+                SourceFile { path:"src/alternate.rs", source:"pub struct Store;\nimpl Store { pub fn read(&self) {} }\n" },
+            ],
+            queries:vec![Query { operation:"callees",symbol:"go",expected:json!([
+                {"name":"Store::go","filePath":path,"startLine":line,"endLine":line,"edges":edges}
+            ]),..Query::default() }],
+        }).await;
+    }
 }

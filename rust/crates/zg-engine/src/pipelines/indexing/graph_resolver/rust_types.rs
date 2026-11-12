@@ -1,4 +1,4 @@
-//! Rust impl identities follow explicit use paths inside their own crate.
+//! Rust impl identities follow module-scoped use paths inside their own crate.
 //! Source/module and import evidence is cached for one sweep; unresolved paths
 //! never justify matching a different file's same-named type.
 use std::collections::{HashMap, HashSet};
@@ -7,14 +7,22 @@ use std::sync::Arc;
 
 use tree_sitter::{Node, Parser};
 
+use crate::domain::EntityId;
+
 use super::{IndexStore, ResolutionSnapshot, RuleCaches, is_type_scope};
 
 #[derive(Default)]
 pub(super) struct TypeCache {
     identities: HashMap<(u32, String), (u32, String)>,
-    imports: HashMap<u32, Arc<HashMap<String, Option<String>>>>,
+    imports: HashMap<u32, Arc<Imports>>,
     modules: HashMap<u32, Module>,
     crate_directories: HashMap<String, Option<String>>,
+}
+
+#[derive(Default)]
+struct Imports {
+    named: HashMap<String, Option<String>>,
+    globs: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -56,11 +64,13 @@ fn identity_inner(
     }
     let (name, arguments) = scope.find('<').map_or((scope, ""), |at| scope.split_at(at));
     let imports = imports(store, file, caches)?;
-    let Some(path) = imports.get(name).and_then(Option::as_deref) else {
-        return Ok(key);
-    };
-    let Some((module, original)) = path.rsplit_once("::") else {
-        return Ok(key);
+    let path = match imports.named.get(name) {
+        Some(Some(path)) => Some(path.as_str()),
+        Some(None) => return Ok(key),
+        None if imports.globs.is_empty() || declares_type(store, snapshot, file, name)? => {
+            return Ok(key);
+        }
+        None => None,
     };
     let Some(source) = snapshot.file_path(file) else {
         return Ok(key);
@@ -77,6 +87,23 @@ fn identity_inner(
             )
         })
         .clone();
+    let Some(path) = path else {
+        let result = glob_identity(
+            store,
+            snapshot,
+            &key,
+            &context,
+            &imports.globs,
+            caches,
+            remaining,
+        )?
+        .unwrap_or_else(|| key.clone());
+        caches.rust_types.identities.insert(key, result.clone());
+        return Ok(result);
+    };
+    let Some((module, original)) = path.rsplit_once("::") else {
+        return Ok(key);
+    };
     let mut targets = context.files(snapshot, file, module);
     if targets.len() > 1 {
         // A package may have both lib.rs and main.rs; the indexed type must
@@ -109,15 +136,97 @@ fn identity_inner(
     Ok(result)
 }
 
+/// An impl block is indexed as a class too, but does not declare a local type
+/// that can shadow a glob. Read signatures only for this file's type candidates.
+fn declares_type(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    file: u32,
+    name: &str,
+) -> crate::EngineResult<bool> {
+    let ids = snapshot
+        .lookup_candidates(name)
+        .unwrap_or_default()
+        .iter()
+        .filter(|hit| hit.file_id == file && hit.qualified_name == name)
+        .map(|hit| EntityId::from_string(hit.entity_id.clone()))
+        .collect::<Vec<_>>();
+    if ids.is_empty() {
+        return Ok(false);
+    }
+    let metadata = store.read_snapshot(|view| view.fetch_code_metadata(&ids))?;
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_rust::LANGUAGE.into())
+        .expect("Rust grammar");
+    Ok(metadata.values().any(|(_, metadata)| {
+        let Some(signature) = &metadata.signature else {
+            // Without a signature, this could be a local type declaration.
+            return true;
+        };
+        let Some(tree) = parser.parse(format!("{signature} {{}}"), None) else {
+            return true;
+        };
+        let mut cursor = tree.root_node().walk();
+        tree.root_node().named_children(&mut cursor).any(|node| {
+            matches!(
+                node.kind(),
+                "struct_item" | "enum_item" | "trait_item" | "union_item" | "type_item"
+            )
+        })
+    }))
+}
+
+fn glob_identity(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    key: &(u32, String),
+    context: &Module,
+    globs: &[String],
+    caches: &mut RuleCaches,
+    remaining: usize,
+) -> crate::EngineResult<Option<(u32, String)>> {
+    let name = key.1.split('<').next().unwrap_or(&key.1);
+    let Some(candidates) = snapshot.lookup_candidates(name) else {
+        return Ok(None);
+    };
+    let mut target = None;
+    for module in globs {
+        let files = context.files(snapshot, key.0, module);
+        if files.is_empty() {
+            // An unindexed glob could introduce another same-named type.
+            return Ok(None);
+        }
+        for file in files {
+            if !candidates.iter().any(|hit| {
+                hit.file_id == file
+                    && hit.qualified_name == name
+                    && hit.symbol_type.is_some_and(is_type_scope)
+            }) {
+                continue;
+            }
+            let identity = identity_inner(store, snapshot, file, &key.1, caches, remaining - 1)?;
+            if target
+                .as_ref()
+                .is_some_and(|previous| previous != &identity)
+            {
+                return Ok(None);
+            }
+            target = Some(identity);
+        }
+    }
+    Ok(target)
+}
+
 fn imports(
     store: &IndexStore,
     file: u32,
     caches: &mut RuleCaches,
-) -> crate::EngineResult<Arc<HashMap<String, Option<String>>>> {
+) -> crate::EngineResult<Arc<Imports>> {
     if let Some(imports) = caches.rust_types.imports.get(&file) {
         return Ok(Arc::clone(imports));
     }
-    let mut imports = HashMap::new();
+    let mut imports = Imports::default();
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_rust::LANGUAGE.into())
@@ -143,12 +252,7 @@ fn imports(
     Ok(imports)
 }
 
-fn collect_use(
-    node: Node<'_>,
-    prefix: &str,
-    source: &[u8],
-    imports: &mut HashMap<String, Option<String>>,
-) {
+fn collect_use(node: Node<'_>, prefix: &str, source: &[u8], imports: &mut Imports) {
     let text = |node: Node<'_>| {
         node.utf8_text(source)
             .unwrap_or_default()
@@ -176,16 +280,26 @@ fn collect_use(
                 node.child_by_field_name("path"),
                 node.child_by_field_name("alias"),
             ) {
-                add_import(imports, text(alias), qualified(prefix, &text(path)));
+                add_import(
+                    &mut imports.named,
+                    text(alias),
+                    qualified(prefix, &text(path)),
+                );
             }
         }
         "identifier" | "scoped_identifier" | "self" | "super" | "crate" => {
             let path = qualified(prefix, &text(node));
             if let Some(name) = path.rsplit("::").next() {
-                add_import(imports, name.to_owned(), path);
+                add_import(&mut imports.named, name.to_owned(), path);
             }
         }
-        _ => {} // Glob imports alone do not prove a type's defining module.
+        "use_wildcard" => {
+            let path = qualified(prefix, &text(node));
+            if let Some(module) = path.strip_suffix("::*") {
+                imports.globs.push(module.to_owned());
+            }
+        }
+        _ => {}
     }
 }
 
