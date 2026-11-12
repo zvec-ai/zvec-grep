@@ -2501,7 +2501,13 @@ public class Service {
                 FileFormat::Go,
                 "package demo\ntype UserID int",
                 "UserID",
-                Some(SymbolType::Class),
+                Some(SymbolType::Alias),
+            ),
+            (
+                FileFormat::Go,
+                "package demo\ntype Handler func()",
+                "Handler",
+                Some(SymbolType::Alias),
             ),
             (
                 FileFormat::Rust,

@@ -35,6 +35,7 @@ ignore.workspace = true
 httpdate = "1.0.3"
 hyper.workspace = true
 hyper-util = { workspace = true, features = ["client-legacy", "client-proxy"] }
+jsonc-parser = { version = "0.34", features = ["serde"] }
 llama-cpp-2.workspace = true
 # Use the same pinned official runtime in Cargo tests and every native package.
 # API selection does not select the download version; build.rs owns that pin.

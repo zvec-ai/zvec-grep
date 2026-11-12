@@ -17,6 +17,7 @@
 //! [`IndexStore::apply_resolutions`] writes each batch atomically.
 
 mod bindings;
+mod module_config;
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
@@ -240,7 +241,8 @@ enum Rule {
 #[derive(Default)]
 struct RuleCaches {
     source_root: Option<std::path::PathBuf>,
-    module_configs: HashMap<String, Option<serde_json::Value>>,
+    module_configs: HashMap<String, Result<Option<Arc<serde_json::Value>>, ()>>,
+    tsconfigs: HashMap<String, Result<Option<Arc<module_config::TsConfig>>, ()>>,
     go_modules: HashMap<String, Option<String>>,
     importing_paths: HashMap<u32, Option<String>>,
     /// File formats of each candidate's file, read once per file instead of
@@ -358,7 +360,11 @@ fn classify(
     {
         return Ok(outcome);
     }
-    if stored.reference.ref_kind == GraphEdgeKind::Calls && stored.reference.receiver_name.is_none()
+    // TS/JS lexical calls were handled above. Keep this new binding rule
+    // confined to Go; other languages retain their existing resolution rules.
+    if stored.language == "go"
+        && stored.reference.ref_kind == GraphEdgeKind::Calls
+        && stored.reference.receiver_name.is_none()
     {
         let bindings = match caches
             .declared_bindings
