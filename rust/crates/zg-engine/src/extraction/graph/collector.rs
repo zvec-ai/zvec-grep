@@ -939,6 +939,11 @@ fn collect_binding(
             (node.start_position().row + 1, node.start_position().column),
         );
         add_binding_in_scope(node, Some(scope), owner_index, name, ty, context);
+    } else if matches!(format, FileFormat::TypeScript | FileFormat::JavaScript)
+        && node.kind() == "assignment_expression"
+    {
+        let end = context.assignment_scope_end(name, node.start_byte());
+        add_binding_until(node, end, owner_index, name, ty, context);
     } else {
         add_binding_in_scope(node, None, owner_index, name, ty, context);
     }
@@ -978,6 +983,79 @@ fn javascript_variable_scope(mut node: Node<'_>) -> Node<'_> {
     node
 }
 
+// Register declarations before collecting values, including declarations that
+// appear after an assignment. Scope lookup must not inherit a TDZ marker's end
+// or use the assignment's own block when it updates an outer binding.
+fn collect_javascript_binding_scopes(node: Node<'_>, source: &[u8], context: &mut WalkContext) {
+    let binding = match node.kind() {
+        "variable_declarator" => node
+            .child_by_field_name("name")
+            .map(|name| (name, javascript_variable_scope(node))),
+        "formal_parameters" => node.parent().map(|function| (node, function)),
+        "arrow_function" => node
+            .child_by_field_name("parameter")
+            .map(|name| (name, node)),
+        "catch_clause" => node
+            .child_by_field_name("parameter")
+            .zip(node.child_by_field_name("body")),
+        "for_in_statement" => {
+            let mut cursor = node.walk();
+            let lexical = node
+                .children_by_field_name("kind", &mut cursor)
+                .any(|kind| matches!(node_text(kind, source), "let" | "const"));
+            lexical
+                .then(|| node.child_by_field_name("left").map(|name| (name, node)))
+                .flatten()
+        }
+        _ => None,
+    };
+    if let Some((pattern, scope)) = binding {
+        register_javascript_pattern_scope(pattern, scope, source, context);
+    }
+    for child in named_children(node) {
+        collect_javascript_binding_scopes(child, source, context);
+    }
+}
+
+fn register_javascript_pattern_scope(
+    pattern: Node<'_>,
+    scope: Node<'_>,
+    source: &[u8],
+    context: &mut WalkContext,
+) {
+    match pattern.kind() {
+        "identifier" | "shorthand_property_identifier_pattern" => {
+            context.register_binding_scope(
+                node_text(pattern, source),
+                scope.start_byte()..scope.end_byte(),
+                (scope.kind() != "program")
+                    .then(|| (scope.end_position().row + 1, scope.end_position().column)),
+            );
+        }
+        "pair_pattern" => {
+            if let Some(value) = pattern.child_by_field_name("value") {
+                register_javascript_pattern_scope(value, scope, source, context);
+            }
+        }
+        "assignment_pattern" | "object_assignment_pattern" => {
+            if let Some(left) = pattern.child_by_field_name("left") {
+                register_javascript_pattern_scope(left, scope, source, context);
+            }
+        }
+        "required_parameter" | "optional_parameter" => {
+            if let Some(name) = pattern.child_by_field_name("pattern") {
+                register_javascript_pattern_scope(name, scope, source, context);
+            }
+        }
+        "rest_pattern" | "array_pattern" | "object_pattern" | "formal_parameters" => {
+            for child in named_children(pattern) {
+                register_javascript_pattern_scope(child, scope, source, context);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn add_binding_in_scope(
     node: Node<'_>,
     scope: Option<Node<'_>>,
@@ -986,15 +1064,23 @@ fn add_binding_in_scope(
     ty: &str,
     context: &mut WalkContext,
 ) {
+    let end = scope
+        .filter(|scope| scope.kind() != "program")
+        .map(|scope| (scope.end_position().row + 1, scope.end_position().column));
+    add_binding_until(node, end, owner, name, ty, context);
+}
+
+fn add_binding_until(
+    node: Node<'_>,
+    end: Option<(usize, usize)>,
+    owner: usize,
+    name: &str,
+    ty: &str,
+    context: &mut WalkContext,
+) {
     let start = (node.start_position().row + 1, node.start_position().column);
-    if let Some(scope) = scope.filter(|scope| scope.kind() != "program") {
-        context.add_scoped_binding(
-            owner,
-            name,
-            ty,
-            start,
-            (scope.end_position().row + 1, scope.end_position().column),
-        );
+    if let Some(end) = end {
+        context.add_scoped_binding(owner, name, ty, start, end);
     } else {
         context.add_declare_binding(owner, name, ty, start.0, start.1, None);
     }
@@ -1100,7 +1186,13 @@ fn collect_object_bindings(node: Node<'_>, owner: usize, source: &[u8], context:
     let Some(object) = member_expression(name, source) else {
         return;
     };
-    let scope = (node.kind() == "variable_declarator").then(|| javascript_variable_scope(node));
+    let end = if node.kind() == "variable_declarator" {
+        let scope = javascript_variable_scope(node);
+        (scope.kind() != "program")
+            .then(|| (scope.end_position().row + 1, scope.end_position().column))
+    } else {
+        context.assignment_scope_end(&object, node.start_byte())
+    };
     let mut keys = std::collections::BTreeSet::new();
     for property in named_children(value) {
         let key = property
@@ -1120,9 +1212,9 @@ fn collect_object_bindings(node: Node<'_>, owner: usize, source: &[u8], context:
         let Some(key) = key else {
             // An unknown spread/computed key can overwrite every preceding property.
             for key in &keys {
-                add_binding_in_scope(
+                add_binding_until(
                     property,
-                    scope,
+                    end,
                     owner,
                     &format!("{object}.{key}"),
                     "?",
@@ -1150,9 +1242,9 @@ fn collect_object_bindings(node: Node<'_>, owner: usize, source: &[u8], context:
             }
             _ => "?".to_owned(),
         };
-        add_binding_in_scope(
+        add_binding_until(
             property,
-            scope,
+            end,
             owner,
             &format!("{object}.{key}"),
             &ty,
@@ -1365,6 +1457,9 @@ pub(crate) fn scan_return_types(
 ) {
     if !context.is_collecting() {
         return;
+    }
+    if matches!(format, FileFormat::JavaScript | FileFormat::TypeScript) {
+        collect_javascript_binding_scopes(root, source, context);
     }
     visit_for_return_types(root, source, format, context);
     let script_scope = match format {

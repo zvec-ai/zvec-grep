@@ -131,6 +131,12 @@ impl Constructs {
     }
 }
 
+#[derive(Debug)]
+struct BindingScope {
+    bytes: std::ops::Range<usize>,
+    end: Option<(usize, usize)>,
+}
+
 /// Mutable state carried through a single AST walk.
 #[derive(Debug)]
 pub(crate) struct WalkContext {
@@ -170,6 +176,9 @@ pub(crate) struct WalkContext {
     /// C/C++ preprocessor directives in source order. The resolver replays
     /// them to decide whether a call site's name was already a macro.
     preprocessor: Vec<PreprocessorDirective>,
+    /// Declaration scopes for assignment lookup, prepared once from the AST.
+    /// This is walk-only state; only the existing `scope_end` travels with edges.
+    binding_scopes: HashMap<String, Vec<BindingScope>>,
     entity_counter: usize,
     /// False when the workspace does not keep a graph: every collector
     /// returns immediately and no buffer is ever filled.
@@ -207,6 +216,7 @@ impl WalkContext {
             seen_name_edges: HashSet::new(),
             return_types: HashMap::new(),
             preprocessor: Vec::new(),
+            binding_scopes: HashMap::new(),
             entity_counter: 0,
             collecting,
         }
@@ -532,6 +542,31 @@ impl WalkContext {
         if let Some(binding) = self.name_edges.last_mut() {
             binding.scope_end = Some(end);
         }
+    }
+
+    pub(super) fn register_binding_scope(
+        &mut self,
+        name: &str,
+        bytes: std::ops::Range<usize>,
+        end: Option<(usize, usize)>,
+    ) {
+        if !self.collecting {
+            return;
+        }
+        self.binding_scopes
+            .entry(name.to_owned())
+            .or_default()
+            .push(BindingScope { bytes, end });
+    }
+
+    pub(super) fn assignment_scope_end(&self, name: &str, at: usize) -> Option<(usize, usize)> {
+        let root = name.split('.').next().unwrap_or(name);
+        self.binding_scopes
+            .get(root)?
+            .iter()
+            .filter(|scope| scope.bytes.contains(&at))
+            .min_by_key(|scope| scope.bytes.end - scope.bytes.start)
+            .and_then(|scope| scope.end)
     }
 
     /// Registers one function's factory return type: the signature's
