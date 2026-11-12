@@ -1,4 +1,4 @@
-//! Search projections: one zvec collection per embedding model, with FTS and FP16 vectors.
+//! Canonical and semantic-projection zvec collections per embedding model.
 
 use std::{
     borrow::Cow,
@@ -29,14 +29,20 @@ use crate::{
         FileRecord, FragmentId, IndexField, SourcePath,
         model::{EmbeddingMetric, EmbeddingModelInfo},
     },
-    utils::sha256_hex_parts,
+    utils::{directory_exists, sha256_hex_parts},
 };
 
 const MAX_TOP_K: usize = 100_000;
 
 pub(super) struct Fragments {
     indexes: BTreeMap<String, Collection>,
-    supports_representation_projections: bool,
+    projection_indexes: BTreeMap<String, Collection>,
+    canonical_has_representation: bool,
+}
+
+pub(super) struct PreparedFragments {
+    canonical: BTreeMap<String, Vec<Doc>>,
+    projections: BTreeMap<String, Vec<Doc>>,
 }
 
 impl Fragments {
@@ -46,7 +52,9 @@ impl Fragments {
         read_only: bool,
     ) -> EngineResult<Self> {
         let mut indexes = BTreeMap::new();
-        let mut supports_representation_projections = None;
+        let mut projection_indexes = BTreeMap::new();
+        let mut canonical_has_representation = None;
+        let mut projections_available = None;
         for embedding in embeddings {
             let dimension = u32::try_from(embedding.dimension())
                 .ok()
@@ -62,30 +70,68 @@ impl Fragments {
                 EmbeddingMetric::Euclidean => MetricType::L2,
             };
             let name = fragment_collection_name(embedding);
+            let canonical_path = root.join(&name);
+            let canonical_exists = directory_exists(&canonical_path)?;
             let collection = open_collection(
-                &root.join(&name),
+                &canonical_path,
                 &fragments_schema(dimension, metric)?,
                 read_only,
             )?;
             let supports =
                 native(collection.schema(), "inspect fragment schema")?.has_field("representation");
-            if supports_representation_projections.is_some_and(|previous| previous != supports) {
+            if canonical_has_representation.is_some_and(|previous| previous != supports) {
                 return Err(EngineError::invalid_argument(
                     "fragment collections have incompatible semantic representation schemas; rebuild the index",
                 ));
             }
-            supports_representation_projections = Some(supports);
+            canonical_has_representation = Some(supports);
+            let projection_name = fragment_projection_collection_name(embedding);
+            let projection_path = root.join(&projection_name);
+            let projection_exists = directory_exists(&projection_path)?;
+            let projection = if projection_exists {
+                Some(open_collection(
+                    &projection_path,
+                    &fragments_schema(dimension, metric)?,
+                    read_only,
+                )?)
+            } else if !read_only && !canonical_exists {
+                Some(open_collection(
+                    &projection_path,
+                    &fragments_schema(dimension, metric)?,
+                    read_only,
+                )?)
+            } else {
+                None
+            };
+            if let Some(projection) = &projection
+                && !native(projection.schema(), "inspect projection schema")?
+                    .has_field("representation")
+            {
+                return Err(EngineError::invalid_argument(
+                    "semantic projection collection has an incompatible schema; rebuild the index",
+                ));
+            }
+            let has_projection = projection.is_some();
+            if projections_available.is_some_and(|previous| previous != has_projection) {
+                return Err(EngineError::invalid_argument(
+                    "fragment collections have incompatible semantic projection storage; rebuild the index",
+                ));
+            }
+            projections_available = Some(has_projection);
             if indexes
                 .insert(embedding.model().reference(), collection)
                 .is_some()
             {
                 return Err(EngineError::invalid_argument("duplicate embedding model"));
             }
+            if let Some(projection) = projection {
+                projection_indexes.insert(embedding.model().reference(), projection);
+            }
         }
         Ok(Self {
             indexes,
-            supports_representation_projections: supports_representation_projections
-                .unwrap_or(false),
+            projection_indexes,
+            canonical_has_representation: canonical_has_representation.unwrap_or(false),
         })
     }
 
@@ -95,7 +141,7 @@ impl Fragments {
         entities: &[Entity],
         entries: &[IndexedFragment],
         directories: &[DirectoryId],
-    ) -> EngineResult<BTreeMap<String, Vec<Doc>>> {
+    ) -> EngineResult<PreparedFragments> {
         let owners = entities
             .iter()
             .map(|entity| {
@@ -116,6 +162,7 @@ impl Fragments {
             .flat_map(Entity::fragments)
             .map(|fragment| (&fragment.id, fragment))
             .collect::<HashMap<_, _>>();
+        let mut canonical: BTreeMap<String, Vec<Doc>> = BTreeMap::new();
         let mut projections: BTreeMap<String, Vec<Doc>> = BTreeMap::new();
         for entry in entries {
             let (owner, fields) = owners.get(&entry.entity_id).ok_or_else(|| {
@@ -156,17 +203,51 @@ impl Fragments {
                 zg_zvec_fp16::add_embedding(&mut doc, "embedding", &entry.vector),
                 "encode embedding vector",
             )?;
-            projections
+            let destination = if entry.projection.is_some() {
+                &mut projections
+            } else {
+                &mut canonical
+            };
+            destination
                 .entry(entry.model.clone())
                 .or_default()
                 .push(doc);
         }
-        Ok(projections)
+        Ok(PreparedFragments {
+            canonical,
+            projections,
+        })
     }
 
-    pub(super) fn write(&self, projections: &BTreeMap<String, Vec<Doc>>) -> EngineResult<()> {
-        for (model, docs) in projections {
+    pub(super) fn write(&self, prepared: &PreparedFragments) -> EngineResult<()> {
+        if !prepared.projections.is_empty() && !self.supports_representation_projections() {
+            return Err(EngineError::invalid_argument(
+                "semantic representation projections are unavailable in this index; rebuild it",
+            ));
+        }
+        for (model, docs) in &prepared.canonical {
             write_docs(self.index(model)?, docs, "write model fragments")?;
+        }
+        for (model, docs) in &prepared.projections {
+            write_docs(
+                self.projection_index(model)?,
+                docs,
+                "write model fragment projections",
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_projection_support(
+        &self,
+        entries: &[IndexedFragment],
+    ) -> EngineResult<()> {
+        if entries.iter().any(|entry| entry.projection.is_some())
+            && !self.supports_representation_projections()
+        {
+            return Err(EngineError::invalid_argument(
+                "semantic representation projections are unavailable in this index; rebuild it",
+            ));
         }
         Ok(())
     }
@@ -183,6 +264,17 @@ impl Fragments {
         for index in self.indexes.values() {
             reject_foreign_ids(index, &keys, file_id)?;
         }
+        let projection_keys = entries
+            .iter()
+            .filter_map(|entry| {
+                entry.projection.as_ref().map(|projection| {
+                    projection_document_id(&entry.entity_id, projection.representation)
+                })
+            })
+            .collect::<Vec<_>>();
+        for index in self.projection_indexes.values() {
+            reject_foreign_ids(index, &projection_keys, file_id)?;
+        }
         Ok(())
     }
 
@@ -191,12 +283,21 @@ impl Fragments {
         for index in self.indexes.values() {
             native(index.delete_by_filter(&filter), "delete source fragments")?;
         }
+        for index in self.projection_indexes.values() {
+            native(
+                index.delete_by_filter(&filter),
+                "delete fragment projections",
+            )?;
+        }
         Ok(())
     }
 
     pub(super) fn flush(&self) -> EngineResult<()> {
         for index in self.indexes.values() {
             native(index.flush(), "flush fragment collection")?;
+        }
+        for index in self.projection_indexes.values() {
+            native(index.flush(), "flush fragment projection collection")?;
         }
         Ok(())
     }
@@ -208,6 +309,12 @@ impl Fragments {
                 return Ok(true);
             }
         }
+        for index in self.projection_indexes.values() {
+            let stats = native(index.stats(), "inspect fragment projection indexes")?;
+            if stats.indexes.iter().any(|stat| stat.completeness < 1.0) {
+                return Ok(true);
+            }
+        }
         Ok(false)
     }
 
@@ -215,25 +322,47 @@ impl Fragments {
         for index in self.indexes.values() {
             native(index.optimize(), "optimize fragment collection")?;
         }
+        for index in self.projection_indexes.values() {
+            native(index.optimize(), "optimize fragment projection collection")?;
+        }
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn search_fts(
         &self,
         query: &str,
         limit: usize,
         filter: Option<&str>,
     ) -> EngineResult<Vec<StorageSearchHit>> {
+        self.search_fts_for_representation(query, limit, filter, representation_from_filter(filter))
+    }
+
+    pub(super) fn search_fts_for_representation(
+        &self,
+        query: &str,
+        limit: usize,
+        filter: Option<&str>,
+        representation: Option<SearchRepresentation>,
+    ) -> EngineResult<Vec<StorageSearchHit>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let use_projections =
+            representation.is_some_and(|value| value != SearchRepresentation::All);
+        let indexes = if use_projections {
+            self.projection_indexes_or_error()?
+        } else {
+            &self.indexes
+        };
         let mut fts = native(Fts::new(), "create full-text request")?;
         native(
             fts.set_match_string(&index_text(query)),
             "set full-text query",
         )?;
-        let default_filter = (filter.is_none() && self.supports_representation_projections)
-            .then(|| "representation = 'all'".to_owned());
+        let default_filter =
+            (filter.is_none() && !use_projections && self.canonical_has_representation)
+                .then(|| "representation = 'all'".to_owned());
         let mut request = native(
             SearchQuery::fts("text", &fts, top_k(limit)?),
             "create full-text query",
@@ -241,10 +370,10 @@ impl Fragments {
         configure_query(
             &mut request,
             filter.or(default_filter.as_deref()),
-            &search_output_fields(self.supports_representation_projections),
+            &search_output_fields(use_projections || self.canonical_has_representation),
         )?;
         let mut hits = Vec::new();
-        for index in self.indexes.values() {
+        for index in indexes.values() {
             for (rank, doc) in native(index.query(&request), "search full-text index")?
                 .into_iter()
                 .enumerate()
@@ -252,10 +381,10 @@ impl Fragments {
                 let mut hit = decode_search_hit(
                     &doc,
                     StorageSearchPath::Fts,
-                    self.supports_representation_projections,
+                    use_projections || self.canonical_has_representation,
                 )?;
                 // BM25 is computed against each table's corpus; merge independent rankings.
-                if self.indexes.len() > 1 {
+                if indexes.len() > 1 {
                     let rank = u32::try_from(rank + 1)
                         .map_err(|_| corrupt("FTS rank exceeds query limit"))?;
                     hit.score = 1.0 / (60.0 + f64::from(rank));
@@ -292,6 +421,7 @@ impl Fragments {
         Ok(ids.into_iter().map(EntityId::from_string).collect())
     }
 
+    #[cfg(test)]
     pub(super) fn search_vector(
         &self,
         model: &str,
@@ -299,7 +429,30 @@ impl Fragments {
         limit: usize,
         filter: Option<&str>,
     ) -> EngineResult<Vec<StorageSearchHit>> {
-        let index = self.index(model)?;
+        self.search_vector_for_representation(
+            model,
+            vector,
+            limit,
+            filter,
+            representation_from_filter(filter),
+        )
+    }
+
+    pub(super) fn search_vector_for_representation(
+        &self,
+        model: &str,
+        vector: &[f32],
+        limit: usize,
+        filter: Option<&str>,
+        representation: Option<SearchRepresentation>,
+    ) -> EngineResult<Vec<StorageSearchHit>> {
+        let use_projections =
+            representation.is_some_and(|value| value != SearchRepresentation::All);
+        let index = if use_projections {
+            self.projection_index(model)?
+        } else {
+            self.index(model)?
+        };
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -307,12 +460,13 @@ impl Fragments {
             zg_zvec_fp16::embedding_query("embedding", vector, top_k(limit)?),
             "create vector query",
         )?;
-        let default_filter = (filter.is_none() && self.supports_representation_projections)
-            .then(|| "representation = 'all'".to_owned());
+        let default_filter =
+            (filter.is_none() && !use_projections && self.canonical_has_representation)
+                .then(|| "representation = 'all'".to_owned());
         configure_query(
             &mut request,
             filter.or(default_filter.as_deref()),
-            &search_output_fields(self.supports_representation_projections),
+            &search_output_fields(use_projections || self.canonical_has_representation),
         )?;
         native(index.query(&request), "search vector index")?
             .into_iter()
@@ -320,7 +474,7 @@ impl Fragments {
                 decode_search_hit(
                     &doc,
                     StorageSearchPath::Vector,
-                    self.supports_representation_projections,
+                    use_projections || self.canonical_has_representation,
                 )
             })
             .collect()
@@ -332,6 +486,27 @@ impl Fragments {
         })
     }
 
+    fn projection_index(&self, model: &str) -> EngineResult<&Collection> {
+        self.projection_indexes.get(model).ok_or_else(|| {
+            EngineError::invalid_argument(
+                "semantic representation projections are unavailable in this index; rebuild it",
+            )
+        })
+    }
+
+    fn projection_indexes_or_error(&self) -> EngineResult<&BTreeMap<String, Collection>> {
+        if !self.supports_representation_projections() {
+            return Err(EngineError::invalid_argument(
+                "semantic representation projections are unavailable in this index; rebuild it",
+            ));
+        }
+        Ok(&self.projection_indexes)
+    }
+
+    fn supports_representation_projections(&self) -> bool {
+        self.projection_indexes.len() == self.indexes.len()
+    }
+
     pub(super) fn build_filter(
         &self,
         filter: Option<&StorageSearchFilter>,
@@ -340,7 +515,8 @@ impl Fragments {
         build_filter_for_schema(
             filter,
             resolve_directory,
-            self.supports_representation_projections,
+            self.supports_representation_projections(),
+            self.canonical_has_representation,
             true,
         )
     }
@@ -355,6 +531,23 @@ fn primary_key(namespace: &str, value: &str) -> String {
     sha256_hex_parts([namespace.as_bytes(), b"\0", value.as_bytes()])
 }
 
+#[cfg(test)]
+fn representation_from_filter(filter: Option<&str>) -> Option<SearchRepresentation> {
+    let filter = filter?;
+    [
+        ("symbol", SearchRepresentation::Symbol),
+        ("body", SearchRepresentation::Body),
+        ("document", SearchRepresentation::Document),
+        ("all", SearchRepresentation::All),
+    ]
+    .into_iter()
+    .find_map(|(name, representation)| {
+        filter
+            .contains(&format!("representation = '{name}'"))
+            .then_some(representation)
+    })
+}
+
 fn projection_document_id(entity_id: &EntityId, representation: SearchRepresentation) -> String {
     primary_key(
         "semantic-projection",
@@ -365,6 +558,22 @@ fn projection_document_id(entity_id: &EntityId, representation: SearchRepresenta
 pub(super) fn fragment_collection_name(embedding: &EmbeddingModelInfo) -> String {
     format!(
         "fragments_{:.4}",
+        primary_key(
+            "space",
+            &format!(
+                "{}\0{}\0{}\0{:?}",
+                embedding.model().provider(),
+                embedding.model().name(),
+                embedding.dimension(),
+                embedding.metric()
+            )
+        )
+    )
+}
+
+pub(super) fn fragment_projection_collection_name(embedding: &EmbeddingModelInfo) -> String {
+    format!(
+        "fragment_projections_{:.4}",
         primary_key(
             "space",
             &format!(
@@ -547,17 +756,19 @@ pub(super) fn build_filter(
     filter: Option<&StorageSearchFilter>,
     resolve_directory: &impl Fn(&SourcePath) -> EngineResult<Option<DirectoryId>>,
 ) -> EngineResult<Option<String>> {
-    build_filter_for_schema(filter, resolve_directory, true, false)
+    build_filter_for_schema(filter, resolve_directory, true, true, false)
 }
 
 fn build_filter_for_schema(
     filter: Option<&StorageSearchFilter>,
     resolve_directory: &impl Fn(&SourcePath) -> EngineResult<Option<DirectoryId>>,
     supports_representation_projections: bool,
+    has_representation_field: bool,
     default_to_all_representation: bool,
 ) -> EngineResult<Option<String>> {
     let Some(filter) = filter else {
-        return Ok(default_to_all_representation.then(|| "representation = 'all'".to_owned()));
+        return Ok((default_to_all_representation && has_representation_field)
+            .then(|| "representation = 'all'".to_owned()));
     };
     if empty_filter(Some(filter)) {
         return Ok(Some(constant_filter(false)));
@@ -592,12 +803,14 @@ fn build_filter_for_schema(
                 "semantic representation projections are unavailable in this index; rebuild it",
             ));
         }
-        if supports_representation_projections {
+        if has_representation_field {
             clauses.push(format!(
                 "representation = {}",
                 quote(representation.as_str())
             ));
         }
+    } else if default_to_all_representation && has_representation_field {
+        clauses.push("representation = 'all'".to_owned());
     }
     Ok((!clauses.is_empty()).then(|| clauses.join(" AND ")))
 }

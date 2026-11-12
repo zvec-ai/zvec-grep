@@ -340,12 +340,17 @@ impl IndexStore {
             if limit == 0 || fragments::empty_filter(filter) {
                 return Ok(Vec::new());
             }
+            let representation = filter.and_then(|filter| filter.representation);
             let filter = state
                 .fragments
                 .build_filter(filter, &|path| state.directories.get(path))?;
-            state
-                .fragments
-                .search_vector(model, vector, limit, filter.as_deref())
+            state.fragments.search_vector_for_representation(
+                model,
+                vector,
+                limit,
+                filter.as_deref(),
+                representation,
+            )
         })
     }
 
@@ -554,6 +559,7 @@ fn replace_file(
     state.files.validate(file)?;
     state.entities.validate_ownership(entities, file.id())?;
     state.fragments.validate_ownership(entries, file.id())?;
+    state.fragments.validate_projection_support(entries)?;
     // Endpoint invalidation below only revisits references that pointed at this
     // file's old entities. A file that enters or leaves the indexed set, or one
     // that introduces a name another entity already uses, changes the

@@ -158,13 +158,17 @@ impl ReadView<'_> {
         if limit == 0 || fragments::empty_filter(filter) {
             return Ok(Vec::new());
         }
+        let representation = filter.and_then(|filter| filter.representation);
         let filter = self
             .state
             .fragments
             .build_filter(filter, &|path| self.state.directories.get(path))?;
-        self.state
-            .fragments
-            .search_fts(query, limit, filter.as_deref())
+        self.state.fragments.search_fts_for_representation(
+            query,
+            limit,
+            filter.as_deref(),
+            representation,
+        )
     }
 }
 

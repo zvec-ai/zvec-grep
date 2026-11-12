@@ -4,7 +4,7 @@ use crate::domain::{
     SymbolType, TextRange,
 };
 use crate::storage::types::IndexedProjection;
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 fn file(id: u32, path: impl Into<PathBuf>) -> FileRecord {
     FileRecord::new(
@@ -669,17 +669,93 @@ fn representation_search_ranks_projections_but_returns_canonical_evidence() {
             .is_empty()
     );
     let symbol = store
-        .search_fts("symbolneedle", 10, Some("representation = 'symbol'"))
+        .search_fts_for_representation(
+            "symbolneedle",
+            10,
+            Some("representation = 'symbol'"),
+            Some(SearchRepresentation::Symbol),
+        )
         .expect("symbol projection search");
     assert_eq!(symbol.len(), 1);
     assert_ne!(symbol[0].document_id, evidence_fragment_id.as_str());
     assert_eq!(symbol[0].evidence_fragment_id, evidence_fragment_id);
+    let symbol_vector = store
+        .search_vector_for_representation(
+            "fixture/fixture",
+            &[0.0, 0.0, 1.0],
+            10,
+            Some("representation = 'symbol'"),
+            Some(SearchRepresentation::Symbol),
+        )
+        .expect("symbol projection vector search");
+    assert_eq!(symbol_vector.len(), 1);
+    assert_eq!(symbol_vector[0].evidence_fragment_id, evidence_fragment_id);
+    let all_vector = store
+        .search_vector_for_representation(
+            "fixture/fixture",
+            &[0.0, 0.0, 1.0],
+            10,
+            Some("representation = 'all'"),
+            Some(SearchRepresentation::All),
+        )
+        .expect("canonical all vector search");
+    assert!(
+        all_vector
+            .iter()
+            .all(|hit| hit.document_id == entries[0].fragment_id.as_str()
+                || hit.document_id == entries[1].fragment_id.as_str())
+    );
 
     let body = store
-        .search_fts("bodyneedle", 10, Some("representation = 'body'"))
+        .search_fts_for_representation(
+            "bodyneedle",
+            10,
+            Some("representation = 'body'"),
+            Some(SearchRepresentation::Body),
+        )
         .expect("body projection search");
     assert_eq!(body.len(), 1);
     assert_eq!(body[0].evidence_fragment_id, evidence_fragment_id);
+    assert!(
+        store
+            .search_fts_for_representation(
+                "symbolneedle",
+                10,
+                Some("representation = 'all'"),
+                Some(SearchRepresentation::All),
+            )
+            .expect("canonical all search")
+            .is_empty()
+    );
+    store
+        .delete_file(source.id())
+        .expect("replace both collections");
+    write_fixture(&store, &source, &entities, &entries[..2]);
+    assert!(
+        store
+            .search_fts_for_representation(
+                "bodyneedle",
+                10,
+                Some("representation = 'body'"),
+                Some(SearchRepresentation::Body),
+            )
+            .expect("replaced projection search")
+            .is_empty()
+    );
+    store
+        .delete_file(source.id())
+        .expect("delete both collections");
+    assert!(
+        store
+            .search_fts_for_representation(
+                "bodyneedle",
+                10,
+                Some("representation = 'body'"),
+                Some(SearchRepresentation::Body),
+            )
+            .expect("deleted projection search")
+            .is_empty()
+    );
 }
 
 #[test]
@@ -688,15 +764,65 @@ fn explicit_representation_requires_projection_schema() {
         representation: Some(SearchRepresentation::Symbol),
         ..StorageSearchFilter::default()
     };
-    assert!(build_filter_for_schema(Some(&filter), &DIRECTORY_LOOKUP, false, false).is_err());
+    assert!(
+        build_filter_for_schema(Some(&filter), &DIRECTORY_LOOKUP, false, false, false).is_err()
+    );
     let legacy_all = StorageSearchFilter {
         representation: Some(SearchRepresentation::All),
         ..StorageSearchFilter::default()
     };
     assert_eq!(
-        build_filter_for_schema(Some(&legacy_all), &DIRECTORY_LOOKUP, false, false)
+        build_filter_for_schema(Some(&legacy_all), &DIRECTORY_LOOKUP, false, false, false)
             .expect("legacy all filter"),
         None
+    );
+}
+
+#[test]
+fn missing_projection_collection_keeps_canonical_reads_and_rejects_modes() {
+    let temporary = tempfile::tempdir().expect("storage");
+    {
+        let store = metadata_store(temporary.path());
+        let (source, entities, entries) = metadata_fragments(0, "legacy");
+        write_fixture(&store, &source, &entities, &entries);
+        store.flush().expect("flush canonical storage");
+    }
+    fs::remove_dir_all(
+        temporary
+            .path()
+            .join(fragment_projection_collection_name(&model())),
+    )
+    .expect("remove projection collection");
+
+    let store = Fragments::open(temporary.path(), &[model()], true).expect("legacy reader");
+    assert_eq!(
+        store
+            .search_fts_for_representation("orchard", 10, None, None)
+            .expect("default canonical read")
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .search_fts_for_representation(
+                "orchard",
+                10,
+                Some("representation = 'all'"),
+                Some(SearchRepresentation::All),
+            )
+            .expect("explicit all canonical read")
+            .len(),
+        1
+    );
+    assert!(
+        store
+            .search_fts_for_representation(
+                "orchard",
+                10,
+                Some("representation = 'symbol'"),
+                Some(SearchRepresentation::Symbol),
+            )
+            .is_err()
     );
 }
 

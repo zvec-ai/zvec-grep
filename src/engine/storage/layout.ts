@@ -3,11 +3,13 @@ import { dirname, join, resolve } from "node:path";
 
 const FILES_ZVEC = "files.zvec";
 const ENTITIES_ZVEC = "index.zvec";
+const PROJECTIONS_ZVEC = "projections.zvec";
 
 type WorkspaceIndexStoragePaths = {
   storagePath: string;
   filesPath: string;
   indexPath: string;
+  projectionPath: string;
 };
 
 export function resolveWorkspaceIndexStoragePaths(
@@ -18,6 +20,7 @@ export function resolveWorkspaceIndexStoragePaths(
     storagePath: resolvedStoragePath,
     filesPath: join(resolvedStoragePath, FILES_ZVEC),
     indexPath: join(resolvedStoragePath, ENTITIES_ZVEC),
+    projectionPath: join(resolvedStoragePath, ENTITIES_ZVEC, PROJECTIONS_ZVEC),
   };
 }
 
