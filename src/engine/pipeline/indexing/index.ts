@@ -29,6 +29,7 @@ import { sha256Bytes } from "../../utils/hash.js";
 import { normalizePath } from "../../utils/path.js";
 import { ConcurrentTiming, TimingCollector } from "../../utils/timing.js";
 import {
+  chunkOptionsForMetadata,
   extractForIndexing,
   fitTextToChars,
   type Source,
@@ -1941,7 +1942,13 @@ function semanticProjectionFragments(
       const embeddingText =
         maxChars === undefined
           ? searchText
-          : fitTextToChars(searchText, maxChars);
+          : fitTextToChars(
+              searchText,
+              chunkOptionsForMetadata(
+                { maxChunkChars: maxChars, chunkOverlapChars: 0 },
+                projectionFragment.metadata,
+              ).maxChunkChars,
+            );
       output.push({
         fragment: projectionFragment,
         embeddingContent: vectorContentForFragment(

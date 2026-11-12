@@ -145,7 +145,7 @@ pub(super) fn validate_formats(formats: &[FileFormat]) -> Result<(), EngineError
     Ok(())
 }
 
-pub(super) fn chunk_options_for_metadata(
+pub(crate) fn chunk_options_for_metadata(
     max_chunk_chars: usize,
     chunk_overlap_chars: usize,
     metadata: Option<&EntityMetadata>,
