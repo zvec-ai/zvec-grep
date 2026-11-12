@@ -49,6 +49,8 @@ pub(crate) struct PendingNameRef {
     pub raw_text: Option<String>,
     /// Declared type of the bound name for `Declares` edges.
     pub bound_type: Option<String>,
+    /// Last line the bound name stays in effect, for a loop-scoped binding.
+    pub bound_until: Option<usize>,
     pub arity: Option<usize>,
     /// Whether the call stands at a construction site, where a type name is a
     /// legitimate target.
@@ -196,6 +198,7 @@ pub(crate) fn partition_walk(
                 receiver_name: edge.receiver_name,
                 raw_text: edge.raw_text,
                 bound_type: edge.bound_type,
+                bound_until: edge.bound_until,
                 arity: edge.arity,
                 constructs: edge.constructs,
                 shadowed,

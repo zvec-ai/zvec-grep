@@ -132,11 +132,16 @@ impl SqliteGraphStorage {
                 .get("type")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
+            let until = metadata
+                .get("until")
+                .and_then(Value::as_u64)
+                .and_then(|line| u32::try_from(line).ok());
             let line: i64 = row.get(2)?;
             Ok(DeclaredBinding {
                 name,
                 bound_type: bound_type.to_owned(),
                 line: u32::try_from(line).unwrap_or_default(),
+                until,
             })
         })?;
         Ok(rows

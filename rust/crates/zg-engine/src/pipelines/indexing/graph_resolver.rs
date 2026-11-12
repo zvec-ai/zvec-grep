@@ -2205,7 +2205,8 @@ fn bind_nearest_member(
     scopes: &[ClassScope],
 ) -> Option<Resolution> {
     for scope in scopes {
-        match declarations_in(snapshot, hits, scope).as_slice() {
+        let found = declarations_in(snapshot, hits, scope);
+        match found.as_slice() {
             [] => {}
             [hit] => return Some(member_resolution(stored, hit)),
             _ => return None,
@@ -2382,56 +2383,14 @@ fn resolve_receiver_typed(
     let Some(bound_type) = receiver_type_of(store, snapshot, stored, receiver, caches)? else {
         return Ok(None);
     };
-    // The name index keys entities by their own name, so a qualified binding
-    // (`MemTableRep::Iterator`) is looked up by its tail and then narrowed by
-    // the enclosing class it spells.
-    let type_tail = bound_type.rsplit("::").next().unwrap_or(&bound_type);
-    let Some(candidates) = snapshot.lookup_candidates(type_tail) else {
-        // Hidden type candidates keep this rule out of the sweep instead of
-        // matching against an unfinished snapshot.
+    // The binding names the class whose members answer the call, once the
+    // spelling is read: a holder answers as what it holds, an iterator member
+    // as the element it walks, and a member type a class states by name as what
+    // that name denotes.
+    let root = type_root_scope(store, snapshot, stored, &bound_type, caches)?;
+    let Some(root) = root else {
         return Ok(None);
     };
-    // A binding the declaration spelled with a scope (`absl::Status`,
-    // `MemTableRep::Iterator`) names one class, and only that class answers:
-    // a project type whose tail happens to match (`upb::Status`) is a
-    // different class, so an unmatched spelling leaves the call pending
-    // rather than falling back to a namesake. A bare binding instead means
-    // what that name means where the call is written: inside `namespace ui`,
-    // `Widget` is `ui::Widget` even when another file's namespace declares a
-    // namesake.
-    let spelled: Vec<&NameIndexEntry> = candidates.iter().collect();
-    let candidates = if bound_type.contains("::") {
-        match spelled_under(&spelled, &bound_type).as_slice() {
-            [] => return Ok(None),
-            spelled => spelled.to_vec(),
-        }
-    } else {
-        enclosing_scope_hits(snapshot, stored, spelled)
-    };
-    // Constructors (`X::X`) and impl blocks index under the type's name
-    // inside the type's declaring scope, so the binding identifies the type
-    // by the one scope its candidates share; candidates spelling several
-    // distinct scopes keep the type ambiguous.
-    let mut shared_scopes = candidates
-        .iter()
-        .map(|candidate| type_declaring_scope(candidate, &bound_type));
-    let Some(type_scope) = shared_scopes.next() else {
-        return Ok(None);
-    };
-    if shared_scopes.any(|scope| scope != type_scope) {
-        return Ok(None);
-    }
-    // The member's declaring scope is the bound type's own, then its
-    // ancestors nearest first, mirroring the self-receiver hierarchy.
-    // A bound type declared in one file is placed there; candidates spanning
-    // several files leave the declaring file to the index.
-    let single_file = {
-        let mut files = candidates.iter().map(|candidate| candidate.file_id);
-        files
-            .next()
-            .filter(|first| files.all(|file| file == *first))
-    };
-    let root = ClassScope::at(snapshot, type_scope, single_file);
     let mut scopes = vec![root.clone()];
     let branched =
         collect_base_scopes(store, snapshot, &root, &mut scopes, &mut HashSet::new(), 8)?;
@@ -2472,14 +2431,87 @@ fn type_declaring_scope(candidate: &NameIndexEntry, bound_type: &str) -> String 
 ///
 /// The calling body answers first: a local or parameter declares the name and
 /// its line orders the evidence, so the latest declaration at or before the call
-/// wins. A name the body never declares is a member the enclosing class states
-/// in its own body — a header, another file, a base class — and member
-/// declarations carry no line order the call site could be compared against, so
-/// the member answer is not filtered by line.
+/// wins, and a loop's own variable stops applying at the end of the loop. A name
+/// the body never declares is a member the enclosing class states in its own
+/// body — a header, another file, a base class — and member declarations carry no
+/// line order the call site could be compared against, so the member answer is
+/// not filtered by line.
+///
+/// A receiver is not always one name. `statuses[0]`, `kv.second` and
+/// `(*it).second` read through what the step before them holds, so the receiver
+/// is evaluated one step at a time and the type of the last step answers.
 ///
 /// # Errors
 /// Propagates graph storage failures.
 fn receiver_type_of(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    receiver: &str,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Option<String>> {
+    receiver_path_type(store, snapshot, stored, receiver, caches, 0)
+}
+
+/// The type one receiver path denotes, a step at a time.
+///
+/// The extractor records two steps that are not a single name: `element:(path)`
+/// for a subscript or a loop's element, and `<base>.<member>` for a member read.
+/// Everything else is the name itself, which the owner's body or the enclosing
+/// class states.
+///
+/// # Errors
+/// Propagates graph storage failures.
+fn receiver_path_type(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    receiver: &str,
+    caches: &mut RuleCaches,
+    depth: usize,
+) -> crate::EngineResult<Option<String>> {
+    if depth > MAX_TYPE_STEPS {
+        return Ok(None);
+    }
+    if let Some((marker, inner)) = step_marker(receiver) {
+        let Some(inner_type) =
+            receiver_path_type(store, snapshot, stored, inner, caches, depth + 1)?
+        else {
+            return Ok(None);
+        };
+        return Ok(step_type(marker, &inner_type));
+    }
+    if let Some(bound) = declared_receiver_type(store, snapshot, stored, receiver, caches)? {
+        // A loop or a placeholder declaration binds what the range or path it
+        // was taken from holds, which is only known once that is read.
+        if let Some((marker, inner)) = step_marker(&bound) {
+            let Some(inner_type) =
+                receiver_path_type(store, snapshot, stored, inner, caches, depth + 1)?
+            else {
+                return Ok(None);
+            };
+            return Ok(step_type(marker, &inner_type));
+        }
+        // The spelling keeps the declarator's decorations: a pointer answers a
+        // subscript with what it points at, and the step that reads the value
+        // decides what the name itself denotes.
+        return Ok(Some(bound));
+    }
+    let Some((base, member)) = receiver.rsplit_once('.') else {
+        return Ok(None);
+    };
+    let Some(base_type) = receiver_path_type(store, snapshot, stored, base, caches, depth + 1)?
+    else {
+        return Ok(None);
+    };
+    member_of_type(store, snapshot, stored, &base_type, member, caches, depth)
+}
+
+/// The type the call site's own body or enclosing class states for one name.
+///
+/// # Errors
+/// Propagates graph storage failures.
+fn declared_receiver_type(
     store: &IndexStore,
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
@@ -2494,10 +2526,7 @@ fn receiver_type_of(
         };
         bindings
             .iter()
-            .filter(|binding| {
-                binding.name == receiver
-                    && usize::try_from(binding.line).is_ok_and(|line| line <= reference.line)
-            })
+            .filter(|binding| binding.name == receiver && binding_holds_at(binding, reference.line))
             .map(|binding| binding.bound_type.clone())
             .next_back() // bindings are line-ordered; the latest earlier one shadows
     };
@@ -2505,6 +2534,25 @@ fn receiver_type_of(
         return Ok(local);
     }
     member_type_of(store, snapshot, stored, receiver, caches)
+}
+
+/// Whether a declaration is still in effect at the call line.
+///
+/// The declaration has to come earlier (`line <= call`) and, when a loop scopes
+/// it, the call has to be inside that loop: `for (Engine* car : engines)` states
+/// `car` for its body alone, so a call after the loop reads the name's other
+/// declaration instead.
+fn binding_holds_at(binding: &DeclaredBinding, line: usize) -> bool {
+    let Ok(declared) = usize::try_from(binding.line) else {
+        return false;
+    };
+    if declared > line {
+        return false;
+    }
+    match binding.until {
+        Some(until) => usize::try_from(until).is_ok_and(|last| line <= last),
+        None => true,
+    }
 }
 
 /// The type the enclosing class (or one of its bases) gives a member name.
@@ -2564,12 +2612,531 @@ fn member_type_of(
 /// The candidates whose qualified name ends with the binding's own spelling:
 /// `MemTableRep::Iterator` selects `rocksdb::MemTableRep::Iterator` and leaves
 /// the global `rocksdb::Iterator` out.
-fn spelled_under<'s>(hits: &'s [&'s NameIndexEntry], bound_type: &str) -> Vec<&'s NameIndexEntry> {
+fn spelled_under<'a>(hits: &[&'a NameIndexEntry], bound_type: &str) -> Vec<&'a NameIndexEntry> {
     let suffix = format!("::{bound_type}");
     hits.iter()
         .filter(|hit| hit.qualified_name == bound_type || hit.qualified_name.ends_with(&suffix))
         .map(|hit| *hit)
         .collect()
+}
+
+/// How many steps one receiver path or type spelling may take before the
+/// evidence stops being a spelling and becomes a guess (`A<B>::C::D` chains and
+/// member types that name each other).
+const MAX_TYPE_STEPS: usize = 8;
+
+/// Words that qualify a spelled type without naming another type.
+const TYPE_QUALIFIER_WORDS: &[&str] = &["const", "volatile", "typename", "struct", "class", "enum"];
+
+/// Holding templates whose argument is the type the calls written through them
+/// reach: `std::unique_ptr<Widget>` answers `w->Draw()` with `Widget`'s members.
+///
+/// A container is not a holder. `std::vector<Widget>` answers calls with its own
+/// members, so treating its element as the receiver would bind `ws.size()` to
+/// `Widget::size`.
+const HOLDER_TEMPLATES: &[&str] = &[
+    "unique_ptr",
+    "shared_ptr",
+    "weak_ptr",
+    "optional",
+    "StatusOr",
+    "NoDestructor",
+];
+
+/// The names a container states for the position it walks. They are lowercase
+/// because a nested class named `Iterator` (`SkipList::Iterator`) is a class in
+/// its own right, not a position in another type.
+const ELEMENT_MEMBER_NAMES: &[&str] = &[
+    "iterator",
+    "const_iterator",
+    "reverse_iterator",
+    "const_reverse_iterator",
+    "value_type",
+    "reference",
+    "const_reference",
+];
+
+/// One step the extractor records instead of a spelling: the name a binding
+/// declares is not a type, but what a container, a subscript, a position or a
+/// path yields.
+#[derive(Clone, Copy)]
+enum StepMarker {
+    /// The element a loop walks (`for (auto& kv : buffers)`).
+    Element,
+    /// The value a subscript reads (`buffers[k]`).
+    Index,
+    /// The element an iterator taken from a range walks (`auto it = v.begin()`).
+    Position,
+    /// Whatever the path on the right of a placeholder declaration holds
+    /// (`auto& v = it->second`).
+    TypeOf,
+}
+
+/// The step a binding spells, with the path it steps from.
+fn step_marker(text: &str) -> Option<(StepMarker, &str)> {
+    let markers = [
+        ("element:(", StepMarker::Element),
+        ("index:(", StepMarker::Index),
+        ("position:(", StepMarker::Position),
+        ("type_of:(", StepMarker::TypeOf),
+    ];
+    markers.into_iter().find_map(|(prefix, marker)| {
+        text.strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix(')'))
+            .map(|inner| (marker, inner))
+    })
+}
+
+/// The type a step answers for the type it steps from.
+fn step_type(marker: StepMarker, inner_type: &str) -> Option<String> {
+    match marker {
+        StepMarker::Element => element_type(inner_type),
+        StepMarker::Index => index_type(inner_type),
+        StepMarker::Position => position_element_type(inner_type),
+        StepMarker::TypeOf => Some(unwrap_binding_type(inner_type)),
+    }
+}
+
+/// The class a spelled type names, as the member rule searches it.
+///
+/// The spelling states a type the way the source wrote it, so it is read before
+/// it is looked up: a holder answers as the type it holds, a pointer or an array
+/// as what it addresses, an iterator member as the element it walks, and a
+/// member type a class states by name (`BaseHyperClockCache<Table>::Shard`) as
+/// what that name denotes in the class.
+///
+/// # Errors
+/// Propagates graph storage failures.
+fn type_root_scope(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    type_text: &str,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Option<ClassScope>> {
+    type_root_scope_in(store, snapshot, stored, type_text, caches, 0)
+}
+
+/// The class a spelled type names, after `depth` readings of the spelling.
+///
+/// # Errors
+/// Propagates graph storage failures.
+fn type_root_scope_in(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    type_text: &str,
+    caches: &mut RuleCaches,
+    depth: usize,
+) -> crate::EngineResult<Option<ClassScope>> {
+    if depth > MAX_TYPE_STEPS {
+        return Ok(None);
+    }
+    let head = type_head(&pointee_type(type_text));
+    let Some(tail) = head.rsplit("::").next() else {
+        return Ok(None);
+    };
+    if tail.is_empty() {
+        return Ok(None);
+    }
+    // The name index keys entities by their own name, so a qualified binding
+    // (`MemTableRep::Iterator`) is looked up by its tail and then narrowed by
+    // the enclosing class it spells. A binding the declaration spelled with a
+    // scope (`absl::Status`) names one class, and only that class answers: a
+    // project type whose tail happens to match (`upb::Status`) is a different
+    // class, so an unmatched spelling leaves the call pending rather than
+    // falling back to a namesake. A bare binding instead means what that name
+    // means where the call is written: inside `namespace ui`, `Widget` is
+    // `ui::Widget` even when another file's namespace declares a namesake.
+    let candidates = snapshot.lookup_candidates(tail).map(|candidates| {
+        let borrowed: Vec<&NameIndexEntry> = candidates.iter().collect();
+        if head.contains("::") {
+            spelled_under(&borrowed, &head)
+        } else {
+            enclosing_scope_hits(snapshot, stored, borrowed)
+        }
+    });
+    if let Some(candidates) = candidates
+        && !candidates.is_empty()
+    {
+        // An alias or typedef states the type it names (`using Line = Row`),
+        // and the declaration's own binding carries that spelling: a call
+        // written through the alias reaches the named type's members, which the
+        // alias itself declares none of.
+        if let [candidate] = candidates.as_slice()
+            && candidate.symbol_type == Some(SymbolType::Alias)
+            && !head.contains("::")
+            && let Some(aliased) = self_named_binding(store, caches, candidate)?
+            && aliased != type_text
+        {
+            return type_root_scope_in(store, snapshot, stored, &aliased, caches, depth + 1);
+        }
+        // Constructors (`X::X`) and impl blocks index under the type's name
+        // inside the type's declaring scope, so the binding identifies the type
+        // by the one scope its candidates share; candidates spelling several
+        // distinct scopes keep the type ambiguous.
+        let mut shared_scopes = candidates
+            .iter()
+            .map(|candidate| type_declaring_scope(candidate, &head));
+        let Some(type_scope) = shared_scopes.next() else {
+            return Ok(None);
+        };
+        if shared_scopes.any(|scope| scope != type_scope) {
+            return Ok(None);
+        }
+        // The member's declaring scope is the bound type's own, then its
+        // ancestors nearest first, mirroring the self-receiver hierarchy.
+        // A bound type declared in one file is placed there; candidates spanning
+        // several files leave the declaring file to the index.
+        let single_file = {
+            let mut files = candidates.iter().map(|candidate| candidate.file_id);
+            files
+                .next()
+                .filter(|first| files.all(|file| file == *first))
+        };
+        return Ok(Some(ClassScope::at(snapshot, type_scope, single_file)));
+    }
+    // `A<T>::B` where `B` is a type `A` states by name: the alias answers as
+    // what it names, so the spelling is read one level in.
+    let Some((scope, _)) = head.rsplit_once("::") else {
+        return Ok(None);
+    };
+    let Some(member_type) =
+        member_of_type(store, snapshot, stored, scope, tail, caches, depth + 1)?
+    else {
+        return Ok(None);
+    };
+    type_root_scope_in(store, snapshot, stored, &member_type, caches, depth + 1)
+}
+
+/// The type a spelling's own declaration binds it to, when that declaration is
+/// an alias rather than a class (`using Line = Row`, `typedef Row Line`).
+///
+/// # Errors
+/// Propagates graph storage failures.
+fn self_named_binding(
+    store: &IndexStore,
+    caches: &mut RuleCaches,
+    candidate: &NameIndexEntry,
+) -> crate::EngineResult<Option<String>> {
+    let bindings = match caches.declared_bindings.entry(candidate.entity_id.clone()) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => entry.insert(store.declared_bindings(&candidate.entity_id)?),
+    };
+    Ok(bindings
+        .iter()
+        .filter(|binding| candidate.qualified_name.ends_with(&binding.name))
+        .map(|binding| binding.bound_type.clone())
+        .next_back())
+}
+
+/// The type whose members answer a call written through a value of this type.
+///
+/// A holder answers as what it holds, a pointer or an array as what it
+/// addresses, and an iterator member as the element it walks:
+/// `std::deque<Slice>::const_iterator` answers `it->data()` with `Slice`.
+fn pointee_type(text: &str) -> String {
+    let mut text = unwrap_binding_type(text);
+    if let Some(base) = text.strip_suffix("[]") {
+        text = unwrap_binding_type(base);
+    }
+    if let Some(element) = iterator_element(&text) {
+        text = unwrap_binding_type(&element);
+    }
+    text
+}
+
+/// The type a spelled value holds, with the spelling's decoration removed.
+///
+/// Qualifiers (`const`, `typename`), pointer and reference markers, and holders
+/// all describe how a value is stored rather than what its members are, so each
+/// is read through: `const std::unique_ptr<Widget>&` is a `Widget`.
+fn unwrap_binding_type(text: &str) -> String {
+    let mut current = text.trim().to_owned();
+    for _ in 0..MAX_TYPE_STEPS {
+        let mut trimmed = current.as_str();
+        loop {
+            let trimmed_now = trimmed.trim();
+            if let Some((word, rest)) = trimmed_now.split_once(char::is_whitespace)
+                && TYPE_QUALIFIER_WORDS.contains(&word)
+            {
+                trimmed = rest;
+                continue;
+            }
+            if let Some((rest, word)) = trimmed_now.rsplit_once(char::is_whitespace)
+                && TYPE_QUALIFIER_WORDS.contains(&word)
+            {
+                trimmed = rest;
+                continue;
+            }
+            trimmed = trimmed_now;
+            break;
+        }
+        // A pointer or reference marker sits on either end: `Node*` in a
+        // template argument, `*Widget` in a declarator's abstract spelling.
+        let trimmed = trimmed.trim_matches(['*', '&']).trim();
+        let next = holder_argument(trimmed).unwrap_or_else(|| trimmed.to_owned());
+        if next == current {
+            return next;
+        }
+        current = next;
+    }
+    current
+}
+
+/// The type a holding template argument names: `std::unique_ptr<Widget>` holds a
+/// `Widget`.
+fn holder_argument(text: &str) -> Option<String> {
+    let segments = type_segments(text);
+    let (head, args) = segments.last()?;
+    let name = head.rsplit("::").next()?;
+    if !HOLDER_TEMPLATES.contains(&name) || !text.trim_end().ends_with('>') {
+        return None;
+    }
+    args.first().cloned()
+}
+
+/// The type one element of a container, array or iterator names.
+fn element_type(text: &str) -> Option<String> {
+    element_type_spelling(text).map(|element| unwrap_binding_type(&element))
+}
+
+/// The element as the container spells it, before decoration is read through:
+/// a container of owners (`std::vector<std::shared_ptr<T>>`) states an element
+/// that is the holder itself.
+fn element_type_spelling(text: &str) -> Option<String> {
+    let text = unwrap_binding_type(text);
+    // `Status[2]` states its element count in the declarator; the binding
+    // records the levels as `[]`, one per subscript the value answers.
+    if let Some(base) = text.strip_suffix("[]") {
+        return Some(base.to_owned());
+    }
+    if let Some(element) = iterator_element(&text) {
+        return Some(element);
+    }
+    let segments = type_segments(&text);
+    let (head, args) = segments.last()?;
+    if args.is_empty() {
+        return None;
+    }
+    if is_map_name(head) && args.len() >= 2 {
+        return Some(format!("pair<{}, {}>", args[0], args[1]));
+    }
+    Some(args[0].clone())
+}
+
+/// The value a subscript reads.
+///
+/// A map's subscript answers the value it pairs with the key (`buffers[k]` is a
+/// `Buffer`, not the pair a loop over the same map walks), a container or an
+/// array its element, and a pointer what its declarator points at. A class that
+/// states its own `operator[]` answers a type only its return type could name,
+/// so a spelling with none of those shapes stays unanswered.
+fn index_type(text: &str) -> Option<String> {
+    let text = text.trim();
+    if let Some(base) = text.strip_suffix("[]") {
+        return Some(base.to_owned());
+    }
+    let bare = unwrap_binding_type(text);
+    if let Some(element) = iterator_element(&bare) {
+        return Some(element);
+    }
+    let segments = type_segments(&bare);
+    let (head, args) = segments.last()?;
+    if is_map_name(head) && args.len() >= 2 {
+        return Some(args[1].clone());
+    }
+    if args.is_empty() {
+        return text.strip_suffix('*').map(unwrap_binding_type);
+    }
+    Some(args[0].clone())
+}
+
+/// The element a position walks.
+///
+/// `it->member()` reaches the element's own members, so the element answers as
+/// a value. When that value is itself a holder (`std::vector<std::shared_ptr<T>>`
+/// walks a `std::shared_ptr<T>`), the call reaches the holder's members — but a
+/// call written as `(*it)->member()` reaches the held type's instead, and the
+/// extractor records only the receiver's name, not which of the two spellings
+/// the source wrote. A position over owners therefore stays unanswered rather
+/// than binding the held type's namesakes.
+fn position_element_type(text: &str) -> Option<String> {
+    let element = element_type_spelling(text)?;
+    if holder_argument(&element).is_some() {
+        return None;
+    }
+    Some(unwrap_binding_type(&element))
+}
+
+/// The element an iterator, `value_type` or `reference` member walks.
+///
+/// `std::deque<Slice>::const_iterator` walks `Slice`, and
+/// `RepeatedPtrField<Location>::iterator` walks the `Location` the container
+/// states, whatever the iterator class is called.
+fn iterator_element(text: &str) -> Option<String> {
+    let segments = type_segments(text);
+    let (tail, tail_args) = segments.last()?;
+    if !tail_args.is_empty() || !ELEMENT_MEMBER_NAMES.contains(&tail.as_str()) {
+        return None;
+    }
+    let (container, args) = segments[..segments.len().checked_sub(1)?]
+        .iter()
+        .rev()
+        .find(|(_, args)| !args.is_empty())?;
+    if is_map_name(container) && args.len() >= 2 {
+        return Some(format!("pair<{}, {}>", args[0], args[1]));
+    }
+    args.first().cloned()
+}
+
+/// The two types a pair-shaped value holds: a `pair<A, B>` states them, a map
+/// pairs each key with its value, and an iterator over either names the pair its
+/// element is.
+fn pair_elements(text: &str) -> Option<(String, String)> {
+    let text = unwrap_binding_type(text);
+    if iterator_element(&text).is_some() {
+        return pair_elements(&iterator_element(&text)?);
+    }
+    let segments = type_segments(&text);
+    let (head, args) = segments.last()?;
+    if args.len() < 2 || !(head == "pair" || is_map_name(head)) {
+        return None;
+    }
+    Some((args[0].clone(), args[1].clone()))
+}
+
+/// Whether a template name is a map, whose element pairs a key with a value.
+fn is_map_name(name: &str) -> bool {
+    matches!(
+        name,
+        "map" | "multimap" | "unordered_map" | "unordered_multimap"
+    )
+}
+
+/// The type a member of the named type holds.
+///
+/// A pair-shaped type answers `first` and `second` from what it pairs. Anything
+/// else is a class the spelling names, and the member is what its own body (or a
+/// base's) states for that name.
+///
+/// # Errors
+/// Propagates graph storage failures.
+fn member_of_type(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    type_text: &str,
+    member: &str,
+    caches: &mut RuleCaches,
+    depth: usize,
+) -> crate::EngineResult<Option<String>> {
+    if depth > MAX_TYPE_STEPS {
+        return Ok(None);
+    }
+    if let Some((first, second)) = pair_elements(type_text) {
+        match member {
+            "first" => return Ok(Some(unwrap_binding_type(&first))),
+            "second" => return Ok(Some(unwrap_binding_type(&second))),
+            _ => {}
+        }
+    }
+    let Some(root) = type_root_scope_in(store, snapshot, stored, type_text, caches, depth + 1)?
+    else {
+        return Ok(None);
+    };
+    let mut scopes = vec![root.clone()];
+    collect_base_scopes(store, snapshot, &root, &mut scopes, &mut HashSet::new(), 8)?;
+    for scope in &scopes {
+        let Some(entity) = scope.entity.as_deref() else {
+            continue;
+        };
+        let bindings = match caches.declared_bindings.entry(entity.to_owned()) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(store.declared_bindings(entity)?),
+        };
+        if let Some(bound) = bindings
+            .iter()
+            .filter(|binding| binding.name == member)
+            .map(|binding| binding.bound_type.clone())
+            .next_back()
+        {
+            return Ok(Some(unwrap_binding_type(&bound)));
+        }
+    }
+    Ok(None)
+}
+
+/// The qualified head a spelled type names, with the template arguments
+/// dropped: `std::deque<Slice>::const_iterator` heads `std::deque::const_iterator`.
+fn type_head(text: &str) -> String {
+    type_segments(text)
+        .into_iter()
+        .map(|(name, _)| name)
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
+/// Splits a spelled type into its `::` segments, each with the template
+/// arguments it applies: `std::deque<Slice>::const_iterator` yields
+/// `[("std", []), ("deque", ["Slice"]), ("const_iterator", [])]`.
+///
+/// Angle brackets nest (`std::map<int, std::pair<A, B>>`), and a comma separates
+/// arguments only at the outermost level of one application.
+fn type_segments(text: &str) -> Vec<(String, Vec<String>)> {
+    let mut segments: Vec<(String, Vec<String>)> = Vec::new();
+    let mut name = String::new();
+    let mut args: Vec<String> = Vec::new();
+    let mut argument = String::new();
+    let mut depth = 0usize;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '<' => {
+                depth += 1;
+                if depth > 1 {
+                    argument.push(ch);
+                }
+            }
+            '>' => {
+                if depth == 0 {
+                    continue;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    push_argument(&mut args, &mut argument);
+                } else {
+                    argument.push(ch);
+                }
+            }
+            ',' if depth == 1 => push_argument(&mut args, &mut argument),
+            ':' if depth == 0 && chars.peek() == Some(&':') => {
+                chars.next();
+                segments.push((name.trim().to_owned(), std::mem::take(&mut args)));
+                name.clear();
+            }
+            _ => {
+                if depth == 0 {
+                    name.push(ch);
+                } else {
+                    argument.push(ch);
+                }
+            }
+        }
+    }
+    push_argument(&mut args, &mut argument);
+    segments.push((name.trim().to_owned(), args));
+    segments
+}
+
+/// Records one template argument when the text between separators names one.
+fn push_argument(args: &mut Vec<String>, argument: &mut String) {
+    let trimmed = argument.trim();
+    if !trimmed.is_empty() {
+        args.push(trimmed.to_owned());
+    }
+    argument.clear();
 }
 
 /// Binds a member call whose receiver names an object literal: the literal's

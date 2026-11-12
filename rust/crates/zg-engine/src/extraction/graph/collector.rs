@@ -101,6 +101,45 @@ fn callee_text_of(node: Node<'_>, source: &[u8]) -> Option<String> {
         .map(|first| node_text(first, source).to_owned())
 }
 
+/// The member name, receiver and raw text a call site names.
+///
+/// C/C++ arrow member access joins the identifier gate and the split under the
+/// dot spelling: `ptr->bar()` names the same member shape as `ref.bar()`. The
+/// raw text keeps the original spelling. A receiver the gate rejects because it
+/// reads through something other than a name (`statuses[0].ok()`,
+/// `(*it).second.Flush()`) is answered by the path the expression spells, which
+/// the resolver evaluates the same way it evaluates a loop variable.
+fn callee_of(node: Node<'_>, source: &[u8]) -> Option<(String, Option<String>, String)> {
+    let callee = callee_text_of(node, source)?;
+    let normalized = callee.replace("->", ".");
+    let normalized = normalize_super_call(&normalized);
+    if normalized.len() <= MAX_CALLEE_TEXT_CHARS && is_identifier_like(&normalized) {
+        let (ref_name, receiver_name) = split_callee_name(&normalized);
+        return Some((ref_name, receiver_name, callee));
+    }
+    let (ref_name, receiver_name) = cpp_member_callee(node, source)?;
+    Some((ref_name, Some(receiver_name), callee))
+}
+
+/// Reads a C++ member call written through an expression the identifier gate
+/// rejects: `statuses[0].ok()` and `(*it).second.Flush()` name a member of
+/// something the receiver path reaches.
+///
+/// Only a `field_expression` function qualifies. A callee the grammar spells as
+/// one identifier (`helper()`, `Namespace::helper()`) never reaches here — its
+/// text passes the gate — and a call-shaped receiver (`factory().run()`) has no
+/// name whose type the resolver could read.
+fn cpp_member_callee(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
+    let function = node.child_by_field_name("function")?;
+    if function.kind() != "field_expression" {
+        return None;
+    }
+    let field = function.child_by_field_name("field")?;
+    let argument = function.child_by_field_name("argument")?;
+    let receiver = cpp_receiver_path(argument, source)?;
+    Some((node_text(field, source).to_owned(), receiver))
+}
+
 /// Joins a Java `method_invocation`'s `object` and `name` fields back into
 /// the spelled receiver expression (`this.foo`, `super.foo`, `util.run`).
 /// Call-shaped receivers (`new Foo().run()`) keep the bare member name:
@@ -274,6 +313,9 @@ fn visit_for_calls(
     // reach their inner calls only through its subtree, and the declaration
     // walk never comes back for them.
     if is_call_node(node) && !is_unreported_call(node, source) && is_php_member_call(node) {
+        // PHP spells a member call as a receiver, a separator and a name. The
+        // receiver stays on the edge even when the resolver cannot read it: a
+        // bare name would bind to a same-named function of the file instead.
         if let Some(call) = php_member_call(node, source) {
             context.add_call_edge(
                 owner_index,
@@ -286,42 +328,32 @@ fn visit_for_calls(
             );
         }
     } else if is_call_node(node)
-        && !is_unreported_call(node, source)
-        && let Some(callee) = callee_text_of(node, source)
+        && let Some((ref_name, receiver_name, callee)) = callee_of(node, source)
     {
-        // C/C++ and PHP arrow member access joins the identifier gate and
-        // the split under the dot spelling: `ptr->bar()` names the same
-        // member shape as `ref.bar()`. The buffered raw text keeps the
-        // original spelling.
-        let normalized = normalize_member_access(&callee);
-        let normalized = normalize_super_call(&normalized);
-        if normalized.len() <= MAX_CALLEE_TEXT_CHARS && is_identifier_like(&normalized) {
-            let (ref_name, receiver_name) = split_callee_name(&normalized);
-            let line = node.start_position().row + 1;
-            let column = node.start_position().column;
-            let constructs = construction_site(node);
-            if constructs.is_some() {
-                context.add_construction_edge(
-                    owner_index,
-                    &ref_name,
-                    receiver_name.as_deref(),
-                    Some(callee.as_str()),
-                    call_arity_of(node),
-                    line,
-                    column,
-                    constructs,
-                );
-            } else {
-                context.add_call_edge(
-                    owner_index,
-                    &ref_name,
-                    receiver_name.as_deref(),
-                    Some(callee.as_str()),
-                    call_arity_of(node),
-                    line,
-                    column,
-                );
-            }
+        let line = node.start_position().row + 1;
+        let column = node.start_position().column;
+        let constructs = construction_site(node);
+        if constructs.is_some() {
+            context.add_construction_edge(
+                owner_index,
+                &ref_name,
+                receiver_name.as_deref(),
+                Some(callee.as_str()),
+                call_arity_of(node),
+                line,
+                column,
+                constructs,
+            );
+        } else {
+            context.add_call_edge(
+                owner_index,
+                &ref_name,
+                receiver_name.as_deref(),
+                Some(callee.as_str()),
+                call_arity_of(node),
+                line,
+                column,
+            );
         }
     }
     for child in named_children(node) {
@@ -429,7 +461,8 @@ fn visit_for_bindings(
         context.register_value_alias(alias_owner, &name, &target);
     }
     if let Some((name, bound_type)) = binding {
-        context.add_declare_binding(owner_index, &name, &bound_type, line, column);
+        let until = binding_scope_end(node);
+        context.add_declare_binding(owner_index, &name, &bound_type, line, column, until);
         return;
     }
     for child in named_children(node) {
@@ -438,6 +471,31 @@ fn visit_for_bindings(
         }
         visit_for_bindings(child, owner_index, source, format, context, boundary);
     }
+}
+
+/// Last line a binding the statement itself scopes stays in effect, when that
+/// is not simply the rest of the body.
+///
+/// A loop states its variable for its own body only (`for (Engine* e : es)`),
+/// so a call after the loop through the same name reads the name's other
+/// declaration, not the loop's. Everything else — a local, a parameter, a
+/// member — holds until the body ends, which the owner's range already
+/// expresses.
+fn binding_scope_end(node: Node<'_>) -> Option<usize> {
+    // A declaration written in the loop's own header (`for (auto it = v.begin(); …)`)
+    // belongs to the loop even though the declaration node is matched first.
+    let mut statement = node;
+    while matches!(statement.kind(), "declaration" | "init_declarator") {
+        statement = statement.parent()?;
+    }
+    if !matches!(
+        statement.kind(),
+        "for_range_loop" | "for_in_statement" | "for_statement" | "for_expression"
+    ) {
+        return None;
+    }
+    let body = statement.child_by_field_name("body")?;
+    Some(body.end_position().row + 1)
 }
 
 /// Whether a declaration sits at the file's top level: nothing that owns a
@@ -978,7 +1036,9 @@ fn peel_declarator_name(node: Node<'_>, source: &[u8]) -> Option<String> {
     let mut current = node;
     loop {
         match current.kind() {
-            "identifier" | "field_identifier" => {
+            // A `typedef` spells its new name with the type grammar's own
+            // identifier (`typedef Iter<Element> iterator`).
+            "identifier" | "field_identifier" | "type_identifier" => {
                 return Some(node_text(current, source).to_owned());
             }
             "pointer_declarator"
@@ -1227,7 +1287,7 @@ fn cpp_binding_of(
                 }
                 let name = peel_declarator_name(declarator, source)?;
                 let type_name = cpp_type_name_of(declared, source)?;
-                return Some((name, type_name));
+                return Some((name, cpp_array_suffix(&type_name, declarator)));
             }
             // `auto x = X{}` / `auto* const x = new X()`: the placeholder type
             // defers to the initializer's spelled type. `auto x = makeX()`: a
@@ -1244,12 +1304,22 @@ fn cpp_binding_of(
                 "call_expression" => {
                     let function = value.child_by_field_name("function")?;
                     if function.kind() != "identifier" {
-                        return None;
+                        // `auto it = values.begin()`: the container states the
+                        // position the iterator walks, so the binding names the
+                        // range's element and the resolver reads it from the
+                        // range's own declared type.
+                        return Some((name, cpp_iterator_marker_of(function, source)?));
                     }
                     let type_name = context.factory_return_of(node_text(function, source))?;
                     return Some((name, type_name.to_owned()));
                 }
-                _ => return None,
+                // `auto& v = it->second`: the placeholder denotes whatever the
+                // path on the right names, which the resolver reads from the
+                // declarations that path walks.
+                _ => {
+                    let path = cpp_receiver_path(value, source)?;
+                    return Some((name, cpp_type_of_marker(&path)));
+                }
             };
             Some((name, node_text(type_node, source).to_owned()))
         }
@@ -1266,27 +1336,212 @@ fn cpp_binding_of(
             }
             let type_name = cpp_type_name_of(type_node, source)?;
             let name = peel_declarator_name(declarator, source)?;
-            Some((name, type_name))
+            Some((name, cpp_array_suffix(&type_name, declarator)))
+        }
+        // `for (Engine* car : engines)`: the loop states the type of what it
+        // yields, and the binding holds for its body alone. A placeholder type
+        // (`for (const auto& meta : blob_files)`) defers to the element the
+        // range's own type yields, which is answered where that type is
+        // declared.
+        "for_range_loop" => {
+            let type_node = node.child_by_field_name("type")?;
+            let declarator = node.child_by_field_name("declarator")?;
+            let name = peel_declarator_name(declarator, source)?;
+            if type_node.kind() != "placeholder_type_specifier" {
+                let type_name = cpp_type_name_of(type_node, source)?;
+                return Some((name, cpp_array_suffix(&type_name, declarator)));
+            }
+            let range = node.child_by_field_name("right")?;
+            let range = cpp_receiver_path(range, source)?;
+            Some((name, cpp_element_marker(&range)))
+        }
+        // `using Shard = ClockCacheShard<Table>` / `typedef Iter<Element>
+        // iterator`: the class states a member type that a declaration or a
+        // call reaches by name alone, so the alias answers like a field would.
+        "alias_declaration" => {
+            let name = node.child_by_field_name("name")?;
+            let target = node.child_by_field_name("type")?;
+            let type_name = cpp_type_name_of(target, source)?;
+            Some((node_text(name, source).to_owned(), type_name))
+        }
+        "type_definition" => {
+            let target = node.child_by_field_name("type")?;
+            let declarator = node.child_by_field_name("declarator")?;
+            let name = peel_declarator_name(declarator, source)?;
+            Some((name, cpp_type_name_of(target, source)?))
         }
         _ => None,
     }
 }
 
-/// The type a C++ declaration names, spelled so the resolver can find it.
+/// The receiver path an expression names, for a call site or a range's element.
 ///
-/// A pointer or reference addresses the same member set as its inner type, so
-/// the wrapper is peeled. A holder template names what it holds
-/// (`std::unique_ptr<Widget>` binds `Widget`); a container names itself, since
-/// the calls written through it (`v.size()`) reach the container's own members
-/// and its element type is a separate question. A qualified type keeps its
-/// enclosing class (`MemTableRep::Iterator`), which is what tells it from a
-/// global namesake.
+/// Only a path of plain names and element reads qualifies (`logs_`, `vs->logs_`,
+/// `statuses[0]`, `(*it).second`). A path that depends on a call's return value
+/// (`*versions_->Set()`, `layout.optimized_order()`) stays unanswered rather
+/// than guessed: the extractor holds no return types to answer it with.
+///
+/// `*it` and `&it` add no step: a pointer binding already spells its pointee,
+/// and an iterator binding spells the iterator whose element the same name
+/// denotes. A subscript reads one element of what the base holds, which the
+/// resolver evaluates against the base's type the way it evaluates a loop
+/// variable's.
+fn cpp_receiver_path(node: Node<'_>, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        "identifier" | "field_identifier" | "this" => Some(node_text(node, source).to_owned()),
+        "field_expression" => {
+            let base = cpp_receiver_path(node.child_by_field_name("argument")?, source)?;
+            let field = node.child_by_field_name("field")?;
+            Some(format!("{base}.{}", node_text(field, source)))
+        }
+        "pointer_expression" => cpp_receiver_path(node.child_by_field_name("argument")?, source),
+        "parenthesized_expression" => cpp_receiver_path(node.named_child(0)?, source),
+        "subscript_expression" => {
+            let base = cpp_receiver_path(node.child_by_field_name("argument")?, source)?;
+            Some(cpp_index_marker(&base))
+        }
+        _ => None,
+    }
+}
+
+/// Appends the decorations the declarator adds, so the resolver can read the
+/// value the name holds one step at a time: one `[]` per array level (`Status
+/// statuses[2]` yields a `Status`, `std::vector<Buffer> pools[2]` a vector) and
+/// one `*` per pointer level (`Status* statuses` answers `statuses[i]` with a
+/// `Status`).
+fn cpp_array_suffix(type_name: &str, declarator: Node<'_>) -> String {
+    let mut levels = 0;
+    let mut pointers = 0;
+    let mut current = declarator;
+    loop {
+        match current.kind() {
+            "array_declarator" => {
+                levels += 1;
+                let Some(inner) = current.child_by_field_name("declarator") else {
+                    break;
+                };
+                current = inner;
+            }
+            "pointer_declarator" => {
+                pointers += 1;
+                let Some(inner) = current.child_by_field_name("declarator") else {
+                    break;
+                };
+                current = inner;
+            }
+            "reference_declarator" | "parenthesized_declarator" => {
+                let Some(inner) = current.child_by_field_name("declarator") else {
+                    break;
+                };
+                current = inner;
+            }
+            _ => break,
+        }
+    }
+    format!("{type_name}{}{}", "[]".repeat(levels), "*".repeat(pointers))
+}
+
+/// The binding a loop variable takes from the range it walks: the element of
+/// the range's type, asked where the range is declared rather than here.
+fn cpp_element_marker(range: &str) -> String {
+    format!("{ELEMENT_MARKER}({range})")
+}
+
+/// The binding a placeholder declaration takes from an iterator-returning
+/// member call: `auto it = values.begin()` holds a position over `values`, so
+/// the name denotes that range's element.
+///
+/// Only the members whose result walks the receiver's own elements qualify.
+/// Any other member answers with a type only a return-type index could name,
+/// and the call stays unanswered rather than guessed.
+fn cpp_iterator_marker_of(function: Node<'_>, source: &[u8]) -> Option<String> {
+    if function.kind() != "field_expression" {
+        return None;
+    }
+    let field = function.child_by_field_name("field")?;
+    if !ITERATOR_MEMBERS.contains(&node_text(field, source)) {
+        return None;
+    }
+    let receiver = cpp_receiver_path(function.child_by_field_name("argument")?, source)?;
+    Some(cpp_position_marker(&receiver))
+}
+
+/// The members whose result walks the receiver's own elements.
+const ITERATOR_MEMBERS: &[&str] = &[
+    "begin",
+    "end",
+    "cbegin",
+    "cend",
+    "rbegin",
+    "rend",
+    "crbegin",
+    "crend",
+    "find",
+    "lower_bound",
+    "upper_bound",
+    "equal_range",
+];
+
+/// Prefix of a binding that names something derived from another binding
+/// rather than a type the source spells (`for (auto& kv : buffers)`).
+const ELEMENT_MARKER: &str = "element:";
+
+/// The binding an iterator-returning call gives a placeholder declaration:
+/// `auto it = values.begin()` holds a position over `values`, which answers the
+/// element it walks rather than the container itself.
+fn cpp_position_marker(range: &str) -> String {
+    format!("{POSITION_MARKER}({range})")
+}
+
+/// Prefix of a binding that names a position in another binding's type. An
+/// iterator answers the element it walks; a call written through it reaches
+/// that element, not the container.
+const POSITION_MARKER: &str = "position:";
+
+/// The binding a placeholder declaration takes from the path it is
+/// initialized with: `auto& v = it->second` holds exactly what that member
+/// holds, wherever the member is declared.
+fn cpp_type_of_marker(path: &str) -> String {
+    format!("{TYPE_OF_MARKER}({path})")
+}
+
+/// Prefix of a binding that repeats the type of another path (`auto& v = it->second`).
+const TYPE_OF_MARKER: &str = "type_of:";
+
+/// The binding a subscript takes from the value it indexes: `buffers[k]`.
+fn cpp_index_marker(base: &str) -> String {
+    format!("{INDEX_MARKER}({base})")
+}
+
+/// Prefix of a binding that names one value a container read by subscript
+/// answers: a map answers the value it pairs with the key, a vector or array
+/// the element it holds.
+const INDEX_MARKER: &str = "index:";
+
+/// The type a C++ declaration names, kept in the spelling the source wrote.
+///
+/// The text keeps what qualifies it — the enclosing namespace or class
+/// (`MemTableRep::Iterator`, `BaseHyperClockCache<Table>::Shard`), the template
+/// arguments (`std::deque<Slice>`, `autovector<std::pair<int, FileMetaData*>>`)
+/// — because the resolver decides from it which class answers a call: a
+/// container answers with its own members, its element answers a subscript or a
+/// loop variable, an iterator member answers as the element it walks, and a
+/// holder (`std::unique_ptr<Widget>`) answers as the type it holds.
+///
+/// Pointer and reference wrappers are not part of the spelling: they arrive
+/// through the declarator, which already peels them to reach the name.
 fn cpp_type_name_of(node: Node<'_>, source: &[u8]) -> Option<String> {
     match node.kind() {
-        "type_identifier" => Some(node_text(node, source).to_owned()),
+        // A qualified or template spelling states the whole name a call through
+        // it is looked up by, so the text is kept as written.
+        "type_identifier"
+        | "primitive_type"
+        | "sized_type_specifier"
+        | "qualified_identifier"
+        | "template_type" => Some(collapse_whitespace(node_text(node, source))),
         "struct_specifier" | "class_specifier" | "union_specifier" | "enum_specifier" => node
             .child_by_field_name("name")
-            .map(|name| node_text(name, source).to_owned()),
+            .map(|name| collapse_whitespace(node_text(name, source))),
         // `const Widget&`: the qualifier sits beside the type descriptor.
         "type_descriptor" => {
             let inner = node
@@ -1294,35 +1549,16 @@ fn cpp_type_name_of(node: Node<'_>, source: &[u8]) -> Option<String> {
                 .or_else(|| node.named_child(0))?;
             cpp_type_name_of(inner, source)
         }
-        "qualified_identifier" => {
-            let name = node.child_by_field_name("name")?;
-            if name.kind() == "template_type" {
-                return cpp_held_type_of(name, source);
-            }
-            Some(node_text(node, source).to_owned())
+        // `typename SkipList<Key, Comparator>::Iterator`: `typename` says the
+        // name is a type, not which type it is.
+        "dependent_type" => {
+            let inner = node
+                .child_by_field_name("type")
+                .or_else(|| node.named_child(0))?;
+            cpp_type_name_of(inner, source)
         }
-        "template_type" => cpp_held_type_of(node, source),
         _ => None,
     }
-}
-
-/// The type a holder template argument names: `std::unique_ptr<Widget>` holds
-/// a `Widget`, so its members answer the calls written through the holder.
-///
-/// Only holders qualify. A container (`std::vector<Widget>`) answers calls with
-/// its own members, and treating its element type as the receiver would bind
-/// `ws.size()` to `Widget::size`. A non-type argument (`std::atomic<bool>`)
-/// names no receiver at all.
-fn cpp_held_type_of(node: Node<'_>, source: &[u8]) -> Option<String> {
-    let name = node.child_by_field_name("name")?;
-    if !matches!(
-        node_text(name, source),
-        "unique_ptr" | "shared_ptr" | "weak_ptr" | "optional" | "StatusOr" | "NoDestructor"
-    ) {
-        return None;
-    }
-    let arguments = node.child_by_field_name("arguments")?;
-    cpp_type_name_of(arguments.named_child(0)?, source)
 }
 
 fn ts_binding_of(node: Node<'_>, source: &[u8], context: &WalkContext) -> Option<(String, String)> {
@@ -1902,6 +2138,19 @@ mod tests {
         lang: &tree_sitter::Language,
         source: &str,
     ) -> Vec<(String, String, usize)> {
+        name_edges(format, lang, source)
+            .into_iter()
+            .map(|(name, bound_type, line, _)| (name, bound_type, line))
+            .collect()
+    }
+
+    /// Every name a source binds, with the last line a loop-scoped binding
+    /// holds for.
+    fn name_edges(
+        format: FileFormat,
+        lang: &tree_sitter::Language,
+        source: &str,
+    ) -> Vec<(String, String, usize, Option<usize>)> {
         let mut parser = tree_sitter::Parser::new();
         parser.set_language(lang).expect("grammar loads");
         let tree = parser.parse(source, None).expect("parses");
@@ -1923,6 +2172,7 @@ mod tests {
                     edge.ref_name.clone(),
                     edge.bound_type.clone().expect("bound type"),
                     edge.line,
+                    edge.bound_until,
                 )
             })
             .collect()
@@ -2055,9 +2305,12 @@ mod tests {
                 &cpp(),
                 "void m(Widget const& w, Slice* const s) { w.Draw(); }",
             ),
+            // The pointer the declarator states stays in the spelling: a
+            // subscript through `s` reads the `Slice` it points at, while a
+            // member call reads through the pointer to the same type.
             vec![
                 ("w".to_owned(), "Widget".to_owned(), 1),
-                ("s".to_owned(), "Slice".to_owned(), 1),
+                ("s".to_owned(), "Slice*".to_owned(), 1),
             ]
         );
         // A member field states the receiver its class's methods call through.
@@ -2068,23 +2321,87 @@ mod tests {
                 "class A {\n  Slice* blocks_;\n  InstrumentedMutex mutex_;\n};",
             ),
             vec![
-                ("blocks_".to_owned(), "Slice".to_owned(), 2),
+                ("blocks_".to_owned(), "Slice*".to_owned(), 2),
                 ("mutex_".to_owned(), "InstrumentedMutex".to_owned(), 3),
             ]
         );
-        // A holder names what it holds, a container names itself.
+        // A holder keeps its spelling and a container keeps its own: the
+        // resolver unwraps the holder and reads the container's element where
+        // the call is written, so the extractor states what the source says.
         assert_eq!(
             bindings(
                 FileFormat::Cpp,
                 &cpp(),
-                "void m() {\n  std::unique_ptr<VersionSet> versions_;\n  std::shared_ptr<DB> db;\n}",
+                "void m() {\n  std::unique_ptr<VersionSet> versions_;\n  std::shared_ptr<DB> db;\n  std::vector<DB> dbs;\n}",
             ),
             vec![
-                ("versions_".to_owned(), "VersionSet".to_owned(), 2),
-                ("db".to_owned(), "DB".to_owned(), 3),
+                (
+                    "versions_".to_owned(),
+                    "std::unique_ptr<VersionSet>".to_owned(),
+                    2
+                ),
+                ("db".to_owned(), "std::shared_ptr<DB>".to_owned(), 3),
+                ("dbs".to_owned(), "std::vector<DB>".to_owned(), 4),
             ]
         );
-        assert!(bindings(FileFormat::Cpp, &cpp(), "void m() { std::vector<DB> dbs; }").is_empty());
+        // A loop variable holds what the loop states or, for a placeholder
+        // type, the element of what the loop walks.
+        assert_eq!(
+            bindings(
+                FileFormat::Cpp,
+                &cpp(),
+                "void m(std::vector<Engine*>& engines, std::vector<Meta>& metas) {\n  for (Engine* car : engines) car->Start();\n  for (const auto& meta : metas) meta.Get();\n}",
+            ),
+            vec![
+                ("engines".to_owned(), "std::vector<Engine*>".to_owned(), 1),
+                ("metas".to_owned(), "std::vector<Meta>".to_owned(), 1),
+                ("car".to_owned(), "Engine*".to_owned(), 2),
+                ("meta".to_owned(), "element:(metas)".to_owned(), 3),
+            ]
+        );
+        // The loop's own header scopes its variable; nothing outside it sees
+        // that binding.
+        let loop_scoped = name_edges(
+            FileFormat::Cpp,
+            &cpp(),
+            "void m(std::vector<Engine*>& engines) {\n  for (Engine* car : engines) {\n    car->Start();\n  }\n}",
+        );
+        assert_eq!(
+            loop_scoped,
+            vec![
+                (
+                    "engines".to_owned(),
+                    "std::vector<Engine*>".to_owned(),
+                    1,
+                    None
+                ),
+                ("car".to_owned(), "Engine*".to_owned(), 2, Some(4)),
+            ]
+        );
+        // A member type a class states by name answers like a field would.
+        assert_eq!(
+            bindings(
+                FileFormat::Cpp,
+                &cpp(),
+                "class A {\n  using Shard = ClockCacheShard<Table>;\n  typedef Iter<Element> iterator;\n};",
+            ),
+            vec![
+                ("Shard".to_owned(), "ClockCacheShard<Table>".to_owned(), 2),
+                ("iterator".to_owned(), "Iter<Element>".to_owned(), 3),
+            ]
+        );
+        // Array levels live in the declarator, not the type spelling.
+        assert_eq!(
+            bindings(
+                FileFormat::Cpp,
+                &cpp(),
+                "void m() {\n  Status statuses[2];\n  Status grid[2][3];\n}",
+            ),
+            vec![
+                ("statuses".to_owned(), "Status[]".to_owned(), 2),
+                ("grid".to_owned(), "Status[][]".to_owned(), 3),
+            ]
+        );
         // A qualified type keeps the class it is nested in.
         assert_eq!(
             bindings(
@@ -2092,7 +2409,7 @@ mod tests {
                 &cpp(),
                 "class A {\n  MemTableRep::Iterator* iter_;\n};",
             ),
-            vec![("iter_".to_owned(), "MemTableRep::Iterator".to_owned(), 2)]
+            vec![("iter_".to_owned(), "MemTableRep::Iterator*".to_owned(), 2)]
         );
         // A function declarator names a callable, not a receiver.
         assert!(bindings(FileFormat::Cpp, &cpp(), "class A {\n  void Run();\n};").is_empty());

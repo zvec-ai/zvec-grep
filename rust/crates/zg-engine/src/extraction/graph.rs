@@ -83,6 +83,10 @@ pub(crate) struct NameEdge {
     /// Declared type of the bound name for `Declares` edges
     /// (`var x = new X()` → `Some("X")`).
     pub bound_type: Option<String>,
+    /// Last line the binding stays in effect, for a name a loop scopes
+    /// (`for (Widget w : ws)`): past that line the name means what the rest of
+    /// the body says it means. `None` keeps the binding until the body ends.
+    pub bound_until: Option<usize>,
     /// Argument count at the call site, when the reference is a call.
     pub arity: Option<usize>,
     /// Where the call stands relative to building a value. A type is a
@@ -445,6 +449,7 @@ impl WalkContext {
             receiver_name: receiver_name.map(str::to_owned),
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
+            bound_until: None,
             arity,
             constructs,
             line,
@@ -456,7 +461,8 @@ impl WalkContext {
     /// `caller(Left a)`): the owner declares that `name`'s receiver type is
     /// `bound_type`. Always pending — the type entity may live in another
     /// file — and consumed by the resolver when a call names `name` as its
-    /// receiver at or after this line.
+    /// receiver at or after this line. `until` bounds the binding to the
+    /// statement that scopes it (`for (Widget w : ws)`).
     pub(crate) fn add_declare_binding(
         &mut self,
         owner_index: usize,
@@ -464,6 +470,7 @@ impl WalkContext {
         bound_type: &str,
         line: usize,
         column: usize,
+        until: Option<usize>,
     ) {
         if !self.collecting {
             return;
@@ -479,6 +486,7 @@ impl WalkContext {
             receiver_name: None,
             raw_text: None,
             bound_type: Some(bound_type.to_owned()),
+            bound_until: until,
             arity: None,
             constructs: Constructs::None,
             line,
@@ -524,6 +532,7 @@ impl WalkContext {
             receiver_name: None,
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
+            bound_until: None,
             arity: None,
             constructs: Constructs::None,
             line,
@@ -552,6 +561,7 @@ impl WalkContext {
             receiver_name: None,
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
+            bound_until: None,
             arity: None,
             constructs: Constructs::None,
             line,
@@ -677,6 +687,7 @@ mod tests {
                 receiver_name: Some("dog".to_owned()),
                 raw_text: Some("dog.bark()".to_owned()),
                 bound_type: None,
+                bound_until: None,
                 arity: Some(2),
                 constructs: Constructs::None,
                 line: 7,

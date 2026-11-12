@@ -41,6 +41,7 @@ const CPP: LanguageAdapter = LanguageAdapter {
         "class_specifier",
         "struct_specifier",
         "union_specifier",
+        "field_declaration",
     ],
 };
 const GO: LanguageAdapter = LanguageAdapter {
@@ -223,6 +224,9 @@ impl LanguageAdapter {
 
     pub(super) fn enter_scope_node(self, node: Node<'_>) -> Node<'_> {
         match self.kind {
+            // A nested type's members belong to the type, whose own body is the
+            // scope the walk has to read.
+            Language::C | Language::Cpp => nested_type_specifier(node).unwrap_or(node),
             Language::Go => node.child_by_field_name("type").unwrap_or(node),
             Language::Python if node.kind() == "decorated_definition" => {
                 inner_python_definition(node)
@@ -235,7 +239,9 @@ impl LanguageAdapter {
 
     pub(super) fn extract_name(self, node: Node<'_>, source: &[u8]) -> Option<String> {
         match self.kind {
-            Language::C | Language::Cpp => extract_c_family_name(node, source),
+            Language::C | Language::Cpp => nested_type_specifier(node)
+                .and_then(|specifier| extract_c_family_name(specifier, source))
+                .or_else(|| extract_c_family_name(node, source)),
             Language::Go => field_text(node, "name", source),
             Language::Java
                 if matches!(node.kind(), "field_declaration" | "constant_declaration") =>
@@ -383,9 +389,13 @@ impl LanguageAdapter {
         match self.kind {
             // Only function-shaped declarations (`void f(int);`, in-class
             // member declarations, function-pointer variables) become
-            // entities; plain variable declarations stay unindexed.
+            // entities; plain variable declarations stay unindexed. A member
+            // that declares a nested type in place states that type, whose
+            // name — not the first function its body happens to hold — is the
+            // entity's.
             Language::C | Language::Cpp => {
-                !matches!(node.kind(), "declaration" | "field_declaration")
+                nested_type_specifier(node).is_some()
+                    || !matches!(node.kind(), "declaration" | "field_declaration")
                     || find_descendant_by_kind(node, "function_declarator").is_some()
             }
             Language::JavaScript | Language::TypeScript => {
@@ -411,6 +421,7 @@ impl LanguageAdapter {
     pub(super) fn is_declaration(self, node: Node<'_>) -> bool {
         matches!(self.kind, Language::C | Language::Cpp)
             && matches!(node.kind(), "declaration" | "field_declaration")
+            && nested_type_specifier(node).is_none()
     }
 
     /// Counts a function-shaped entity's declared parameters, excluding the
@@ -517,6 +528,12 @@ impl LanguageAdapter {
 
     fn should_enter_scope(self, node: Node<'_>) -> bool {
         match self.kind {
+            // A member that declares a nested type opens that type's body as a
+            // scope; any other member declaration is a value of the enclosing
+            // class, not a scope of its own.
+            Language::C | Language::Cpp if node.kind() == "field_declaration" => {
+                nested_type_specifier(node).is_some()
+            }
             Language::Go if node.kind() == "type_spec" => node
                 .child_by_field_name("type")
                 .is_some_and(|kind| matches!(kind.kind(), "interface_type" | "struct_type")),
@@ -541,6 +558,9 @@ pub(super) fn declares_type(node: Node<'_>) -> bool {
     if node.kind() == "decorated_definition" {
         return inner_python_definition(node).is_some_and(declares_type);
     }
+    if nested_type_specifier(node).is_some() {
+        return true;
+    }
     matches!(
         node.kind(),
         "abstract_class_declaration"
@@ -559,6 +579,29 @@ pub(super) fn declares_type(node: Node<'_>) -> bool {
             | "union_item"
             | "union_specifier"
     )
+}
+
+/// The type a C++ member declares in place, when the member is a nested class
+/// rather than a value: `struct Iterator { ... };` written inside a class body
+/// parses as a `field_declaration` whose type is the struct specifier, and the
+/// specifier's own body is that type's scope.
+///
+/// A member that also declares a value (`struct Point { int x; } origin;`)
+/// declares a name of the enclosing class the type alone does not answer, so
+/// only a body the member gives no value for qualifies.
+fn nested_type_specifier(node: Node<'_>) -> Option<Node<'_>> {
+    if node.kind() != "field_declaration" || node.child_by_field_name("declarator").is_some() {
+        return None;
+    }
+    let type_node = node.child_by_field_name("type")?;
+    if !matches!(
+        type_node.kind(),
+        "struct_specifier" | "class_specifier" | "union_specifier" | "enum_specifier"
+    ) {
+        return None;
+    }
+    type_node.child_by_field_name("body")?;
+    Some(type_node)
 }
 
 pub(super) fn named_children(node: Node<'_>) -> Vec<Node<'_>> {
@@ -834,6 +877,9 @@ fn is_simple_c_identifier(value: &str) -> bool {
 
 fn classify_c_family(node: Node<'_>) -> Option<SymbolType> {
     match node.kind() {
+        "field_declaration" if nested_type_specifier(node).is_some() => {
+            nested_type_specifier(node).and_then(classify_c_family)
+        }
         "type_definition" => {
             let definition = node
                 .child_by_field_name("type")

@@ -130,6 +130,11 @@ fn file_pending_refs(
             if let Some(bound_type) = &reference.bound_type {
                 metadata.insert("type".to_owned(), serde_json::json!(bound_type));
             }
+            if let Some(until) = reference.bound_until {
+                // A loop's variable stops meaning what the loop said once the
+                // loop ends; the resolver needs the last line it holds for.
+                metadata.insert("until".to_owned(), serde_json::json!(until));
+            }
             if reference.shadowed {
                 // The owner's own body took this name, so no file-level symbol
                 // answers it: the resolver must not bind it either.
@@ -364,6 +369,7 @@ mod tests {
             receiver_name: None,
             raw_text: Some("Remote".into()),
             bound_type: None,
+            bound_until: None,
             arity: None,
             constructs: Constructs::None,
             shadowed: false,

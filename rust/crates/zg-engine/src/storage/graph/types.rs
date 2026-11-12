@@ -108,6 +108,9 @@ pub(crate) struct DeclaredBinding {
     /// One-based line of the declaring site; rebindings of the same name
     /// shadow earlier ones at later lines.
     pub line: u32,
+    /// One-based last line the binding holds for, when a statement scopes it
+    /// (`for (Widget w : ws)`). `None` keeps it until the body ends.
+    pub until: Option<u32>,
 }
 
 /// Page over pending references. Restart pagination after file mutations.
