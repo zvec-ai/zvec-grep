@@ -793,3 +793,110 @@ async fn java_this_and_super_calls_select_the_current_and_direct_base_constructo
         ],
     }).await;
 }
+
+#[tokio::test]
+async fn java_wildcard_imports_respect_package_and_explicit_import_precedence() {
+    for (source, same_package, target) in [
+        (
+            "package com.c; import com.a.*; class Use { void u(Foo x) { x.run(); } }",
+            false,
+            Some("com/a/Foo.java"),
+        ),
+        (
+            "package com.c; import com.a.*; import com.b.*; class Use { void u(Foo x) { x.run(); } }",
+            false,
+            None,
+        ),
+        (
+            "package com.c; import com.a.*; import com.b.Foo; class Use { void u(Foo x) { x.run(); } }",
+            false,
+            Some("com/b/Foo.java"),
+        ),
+        (
+            "package com.c; import com.a.*; class Use { void u(Foo x) { x.run(); } }",
+            true,
+            Some("com/c/Foo.java"),
+        ),
+        (
+            "package com.c; import com.a.*; import missing.Foo; class Use { void u(Foo x) { x.run(); } }",
+            false,
+            None,
+        ),
+        (
+            "package com.c; import missing.*; class Use { void u(Foo x) { x.run(); } }",
+            false,
+            None,
+        ),
+    ] {
+        let mut files = vec![
+            SourceFile {
+                path: "com/a/Foo.java",
+                source: "package com.a; public class Foo { public void run() {} }",
+            },
+            SourceFile {
+                path: "com/b/Foo.java",
+                source: "package com.b; public class Foo { public void run() {} }",
+            },
+            SourceFile {
+                path: "com/c/Use.java",
+                source,
+            },
+        ];
+        if same_package {
+            files.push(SourceFile {
+                path: "com/c/Foo.java",
+                source: "package com.c; public class Foo { public void run() {} }",
+            });
+        }
+        let edges = target.map(|path| json!({
+            "filePath":std::path::Path::new("com").join("c").join("Use.java"), "line":1,
+            "column":source.find("x.run()").expect("call site"),
+            "symbol":{"name":"Foo::run", "filePath":path.split('/').collect::<std::path::PathBuf>(), "startLine":1,"endLine":1}
+        })).into_iter().collect::<Vec<_>>();
+        check_case(Case {
+            name: "java_wildcard_imports_respect_package_and_explicit_import_precedence", files,
+            queries: vec![Query { operation:"callees", symbol:"u", expected:json!([
+                {"name":"Use::u","filePath":std::path::Path::new("com").join("c").join("Use.java"),"startLine":1,"endLine":1,"edges":edges}
+            ]), ..Query::default() }],
+        }).await;
+    }
+}
+
+#[tokio::test]
+async fn rust_split_impls_resolve_relative_modules_within_each_cargo_crate() {
+    check_case(Case {
+        name:"rust_split_impls_resolve_relative_modules_within_each_cargo_crate",
+        files:vec![
+            SourceFile { path:"Cargo.toml", source:"[workspace]\nmembers = [\"crates/app\", \"crates/other\"]\n" },
+            SourceFile { path:"crates/app/Cargo.toml", source:"[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n" },
+            SourceFile { path:"crates/app/src/lib.rs", source:"mod store;\n" },
+            SourceFile { path:"crates/app/src/store/mod.rs", source:"pub struct Store;\nimpl Store { pub fn read(&self) {} }\npub struct Marker;\nmod extra; mod by_crate; mod by_alias; mod nested; mod self_call;\n" },
+            SourceFile { path:"crates/app/src/store/extra.rs", source:"use super::{Store, Marker};\nimpl Store { pub fn super_go(&self) { self.read(); } }\n" },
+            SourceFile { path:"crates/app/src/store/by_crate.rs", source:"use crate::store::Store;\nimpl Store { pub fn crate_go(&self) { self.read(); } }\n" },
+            SourceFile { path:"crates/app/src/store/by_alias.rs", source:"use super::{Store as Shared, Marker};\nimpl Shared { pub fn alias_go(&self) { self.read(); } }\n" },
+            SourceFile { path:"crates/app/src/store/nested.rs", source:"mod deeper;\n" },
+            SourceFile { path:"crates/app/src/store/nested/deeper.rs", source:"use super::super::Store;\nimpl Store { pub fn deep_go(&self) { self.read(); } }\n" },
+            SourceFile { path:"crates/app/src/store/self_call.rs", source:"mod actual;\nuse self::actual::Store;\nimpl Store { pub fn self_go(&self) { self.read(); } }\n" },
+            SourceFile { path:"crates/app/src/store/self_call/actual.rs", source:"pub struct Store;\nimpl Store { pub fn read(&self) {} }\n" },
+            SourceFile { path:"crates/other/Cargo.toml", source:"[package]\nname = \"other\"\nversion = \"0.1.0\"\nedition = \"2021\"\n" },
+            SourceFile { path:"crates/other/src/lib.rs", source:"mod store; mod extra;\n" },
+            SourceFile { path:"crates/other/src/store.rs", source:"pub struct Store;\nimpl Store { pub fn read(&self) {} }\nmod relative;\n" },
+            SourceFile { path:"crates/other/src/extra.rs", source:"use crate::store::Store;\nimpl Store { pub fn other_go(&self) { self.read(); } }\n" },
+            SourceFile { path:"crates/other/src/store/relative.rs", source:"use super::Store;\nimpl Store { pub fn relative_go(&self) { self.read(); } }\n" },
+        ],
+        queries:[
+            ("super_go","Store::super_go","crates/app/src/store/extra.rs",2,"crates/app/src/store/mod.rs"),
+            ("crate_go","Store::crate_go","crates/app/src/store/by_crate.rs",2,"crates/app/src/store/mod.rs"),
+            ("alias_go","Shared::alias_go","crates/app/src/store/by_alias.rs",2,"crates/app/src/store/mod.rs"),
+            ("deep_go","Store::deep_go","crates/app/src/store/nested/deeper.rs",2,"crates/app/src/store/mod.rs"),
+            ("self_go","Store::self_go","crates/app/src/store/self_call.rs",3,"crates/app/src/store/self_call/actual.rs"),
+            ("other_go","Store::other_go","crates/other/src/extra.rs",2,"crates/other/src/store.rs"),
+            ("relative_go","Store::relative_go","crates/other/src/store/relative.rs",2,"crates/other/src/store.rs"),
+        ].into_iter().map(|(query,name,path,line,target)| Query {
+            operation:"callees",symbol:query,
+            expected:json!([{"name":name,"filePath":path.split('/').collect::<std::path::PathBuf>(),"startLine":line,"endLine":line,"edges":[
+                {"filePath":path.split('/').collect::<std::path::PathBuf>(),"line":line,"column":if query=="relative_go" {41} else if query=="alias_go" {39} else if query=="super_go" || query=="crate_go" || query=="other_go" {38} else {37},"symbol":{"name":"Store::read","filePath":target.split('/').collect::<std::path::PathBuf>(),"startLine":2,"endLine":2}}
+            ]}]),..Query::default()
+        }).collect(),
+    }).await;
+}

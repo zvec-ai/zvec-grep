@@ -16,6 +16,7 @@
 
 mod bindings;
 mod module_config;
+mod rust_types;
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
@@ -243,7 +244,7 @@ struct RuleCaches {
     /// per owner per sweep instead of once per call.
     declared_bindings: HashMap<String, Vec<DeclaredBinding>>,
     import_references: HashMap<u32, Arc<[ImportReference]>>,
-    rust_type_owners: HashMap<(u32, String), (u32, String)>,
+    rust_types: rust_types::TypeCache,
     javascript_imports: HashMap<u32, Arc<[bindings::JavascriptImport]>>,
 }
 
@@ -1540,13 +1541,13 @@ fn resolve_rust_self(
     enclosing: &str,
     caches: &mut RuleCaches,
 ) -> crate::EngineResult<Option<Resolution>> {
-    let identity = rust_type_identity(store, snapshot, stored.file_id, enclosing, caches)?;
+    let identity = rust_types::identity(store, snapshot, stored.file_id, enclosing, caches)?;
     let mut matched = None;
     for hit in hits {
         let Some((scope, _)) = hit.qualified_name.rsplit_once("::") else {
             continue;
         };
-        if rust_type_identity(store, snapshot, hit.file_id, scope, caches)? == identity {
+        if rust_types::identity(store, snapshot, hit.file_id, scope, caches)? == identity {
             if matched.is_some() {
                 return Ok(None);
             }
@@ -1554,76 +1555,6 @@ fn resolve_rust_self(
         }
     }
     Ok(matched.map(|hit| member_resolution(stored, hit)))
-}
-
-fn rust_type_identity(
-    store: &IndexStore,
-    snapshot: &ResolutionSnapshot,
-    file: u32,
-    scope: &str,
-    caches: &mut RuleCaches,
-) -> crate::EngineResult<(u32, String)> {
-    let key = (file, scope.to_owned());
-    if let Some(identity) = caches.rust_type_owners.get(&key) {
-        return Ok(identity.clone());
-    }
-    // Keep concrete/generic arguments: erasing them would conflate specialized impls.
-    let (name, arguments) = scope.find('<').map_or((scope, ""), |at| scope.split_at(at));
-    let mut identity = key.clone();
-    for import in caches.imports(store, file)?.iter() {
-        let alias = import
-            .raw_text
-            .as_deref()
-            .into_iter()
-            .flat_map(rust_alias_pairs)
-            .find(|(local, _)| local == name);
-        let original = alias
-            .as_ref()
-            .and_then(|(_, original)| original.as_deref())
-            .unwrap_or(name);
-        if import.specifier.rsplit("::").next() != Some(original) {
-            continue;
-        }
-        let Some((module, _)) = import.specifier.rsplit_once("::") else {
-            continue;
-        };
-        // Unknown imports still allow same-file impls, but cannot justify a
-        // cross-file match. Relative imports need a module-tree lookup.
-        if module == "self"
-            || module == "super"
-            || module.starts_with("self::")
-            || module.starts_with("super::")
-        {
-            break;
-        }
-        let targets: HashSet<_> = if module == "crate" {
-            ["src/lib.rs", "lib.rs", "src/main.rs", "main.rs"]
-                .into_iter()
-                .filter_map(|path| snapshot.file_id_by_path(path))
-                .collect()
-        } else {
-            let module = module
-                .strip_prefix("crate::")
-                .unwrap_or(module)
-                .replace("::", "/");
-            [
-                alias_target_at(snapshot, "rust", &module),
-                alias_target_at(snapshot, "rust", &format!("src/{module}")),
-            ]
-            .into_iter()
-            .flatten()
-            .collect()
-        };
-        if targets.len() == 1 {
-            identity = (
-                *targets.iter().next().expect("one type module"),
-                format!("{original}{arguments}"),
-            );
-        }
-        break;
-    }
-    caches.rust_type_owners.insert(key, identity.clone());
-    Ok(identity)
 }
 
 /// Binds a receiver call through the owner's declared bindings: a local

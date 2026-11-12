@@ -1753,7 +1753,10 @@ fn module_path_of(node: Node<'_>, source: &[u8], format: FileFormat) -> Option<S
             for child in node.named_children(&mut cursor) {
                 let path = collapse_whitespace(node_text(child, source));
                 if is_identifier_like(&path) {
-                    return Some(path);
+                    let wildcard = node
+                        .named_children(&mut node.walk())
+                        .any(|child| child.kind() == "asterisk");
+                    return Some(if wildcard { format!("{path}.*") } else { path });
                 }
             }
         }
