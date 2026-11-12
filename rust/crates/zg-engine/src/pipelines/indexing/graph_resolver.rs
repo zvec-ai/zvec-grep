@@ -2375,46 +2375,46 @@ fn resolve_receiver_typed(
         return Ok(None);
     };
     // The self family has its own hierarchy rule; typed bindings only
-    // address named locals and parameters.
+    // address named locals, parameters and members.
     if receiver == "super" || is_self_receiver(&stored.language, receiver) {
         return Ok(None);
     }
-    let bound_type = {
-        let bindings = match caches.declared_bindings.entry(reference.owner_id.clone()) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => entry.insert(store.declared_bindings(&reference.owner_id)?),
-        };
-        bindings
-            .iter()
-            .filter(|binding| {
-                binding.name == receiver
-                    && usize::try_from(binding.line).is_ok_and(|line| line <= reference.line)
-            })
-            .map(|binding| binding.bound_type.clone())
-            .next_back() // bindings are line-ordered; the latest earlier one shadows
-    };
-    let Some(bound_type) = bound_type else {
+    let Some(bound_type) = receiver_type_of(store, snapshot, stored, receiver, caches)? else {
         return Ok(None);
     };
-    let Some(candidates) = snapshot.lookup_candidates(&bound_type) else {
+    // The name index keys entities by their own name, so a qualified binding
+    // (`MemTableRep::Iterator`) is looked up by its tail and then narrowed by
+    // the enclosing class it spells.
+    let type_tail = bound_type.rsplit("::").next().unwrap_or(&bound_type);
+    let Some(candidates) = snapshot.lookup_candidates(type_tail) else {
         // Hidden type candidates keep this rule out of the sweep instead of
         // matching against an unfinished snapshot.
         return Ok(None);
     };
-    // The binding spells a bare type name, so it means what that name means
-    // where the call is written: inside `namespace ui`, `Widget` is
-    // `ui::Widget` even when another file's namespace declares a namesake.
-    let candidates = enclosing_scope_hits(snapshot, stored, candidates.iter().collect());
+    // A binding the declaration spelled with a scope (`absl::Status`,
+    // `MemTableRep::Iterator`) names one class, and only that class answers:
+    // a project type whose tail happens to match (`upb::Status`) is a
+    // different class, so an unmatched spelling leaves the call pending
+    // rather than falling back to a namesake. A bare binding instead means
+    // what that name means where the call is written: inside `namespace ui`,
+    // `Widget` is `ui::Widget` even when another file's namespace declares a
+    // namesake.
+    let spelled: Vec<&NameIndexEntry> = candidates.iter().collect();
+    let candidates = if bound_type.contains("::") {
+        match spelled_under(&spelled, &bound_type).as_slice() {
+            [] => return Ok(None),
+            spelled => spelled.to_vec(),
+        }
+    } else {
+        enclosing_scope_hits(snapshot, stored, spelled)
+    };
     // Constructors (`X::X`) and impl blocks index under the type's name
     // inside the type's declaring scope, so the binding identifies the type
     // by the one scope its candidates share; candidates spelling several
     // distinct scopes keep the type ambiguous.
-    let mut shared_scopes = candidates.iter().map(|candidate| {
-        candidate.qualified_name.rsplit_once("::").map_or_else(
-            || candidate.qualified_name.clone(),
-            |(scope, _)| scope.to_owned(),
-        )
-    });
+    let mut shared_scopes = candidates
+        .iter()
+        .map(|candidate| type_declaring_scope(candidate, &bound_type));
     let Some(type_scope) = shared_scopes.next() else {
         return Ok(None);
     };
@@ -2443,6 +2443,133 @@ fn resolve_receiver_typed(
         &scopes,
         branched,
     ))
+}
+
+/// The declaring scope of the type a binding names.
+///
+/// The index holds a class under its own qualified name (`leveldb::Slice`) and,
+/// when the class has a constructor, once more under the class's name inside it
+/// (`leveldb::Slice::Slice`). Both spellings share one declaring scope, which
+/// is what the member rule searches; a name that repeats the class's own
+/// segment is the nested spelling, anything else is the class itself.
+fn type_declaring_scope(candidate: &NameIndexEntry, bound_type: &str) -> String {
+    let type_name = bound_type.rsplit("::").next().unwrap_or(bound_type);
+    let qualified = &candidate.qualified_name;
+    let Some((scope, tail)) = qualified.rsplit_once("::") else {
+        return qualified.clone();
+    };
+    if tail != type_name {
+        return qualified.clone();
+    }
+    match scope.rsplit_once("::") {
+        Some((_, parent)) if parent == type_name => scope.to_owned(),
+        None if scope == type_name => scope.to_owned(),
+        _ => qualified.clone(),
+    }
+}
+
+/// The receiver type the call site's name holds.
+///
+/// The calling body answers first: a local or parameter declares the name and
+/// its line orders the evidence, so the latest declaration at or before the call
+/// wins. A name the body never declares is a member the enclosing class states
+/// in its own body — a header, another file, a base class — and member
+/// declarations carry no line order the call site could be compared against, so
+/// the member answer is not filtered by line.
+///
+/// # Errors
+/// Propagates graph storage failures.
+fn receiver_type_of(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    receiver: &str,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Option<String>> {
+    let reference = &stored.reference;
+    let local = {
+        let bindings = match caches.declared_bindings.entry(reference.owner_id.clone()) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(store.declared_bindings(&reference.owner_id)?),
+        };
+        bindings
+            .iter()
+            .filter(|binding| {
+                binding.name == receiver
+                    && usize::try_from(binding.line).is_ok_and(|line| line <= reference.line)
+            })
+            .map(|binding| binding.bound_type.clone())
+            .next_back() // bindings are line-ordered; the latest earlier one shadows
+    };
+    if local.is_some() {
+        return Ok(local);
+    }
+    member_type_of(store, snapshot, stored, receiver, caches)
+}
+
+/// The type the enclosing class (or one of its bases) gives a member name.
+///
+/// The owner's qualified name names its scopes innermost first
+/// (`ns::Cls::method` → `Cls`, then `ns`), and the first scope that is a class
+/// declares the member the method calls through. A member a base declares is
+/// reached through the class's inheritance edges, nearest base first.
+///
+/// # Errors
+/// Propagates graph storage failures.
+fn member_type_of(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    receiver: &str,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Option<String>> {
+    let Some(owner) = snapshot.entity_record(&stored.reference.owner_id) else {
+        return Ok(None);
+    };
+    for enclosing in enclosing_scopes(&owner.qualified_name) {
+        let Some(entity) = class_entity_in(snapshot, enclosing, Some(stored.file_id)) else {
+            continue;
+        };
+        let root = ClassScope {
+            declared_in: class_declaration_file(snapshot, enclosing, Some(stored.file_id)),
+            entity: Some(entity),
+            name: enclosing.to_owned(),
+        };
+        let mut scopes = vec![root.clone()];
+        collect_base_scopes(store, snapshot, &root, &mut scopes, &mut HashSet::new(), 8)?;
+        for scope in &scopes {
+            let Some(entity) = scope.entity.as_deref() else {
+                continue;
+            };
+            let bindings = match caches.declared_bindings.entry(entity.to_owned()) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => entry.insert(store.declared_bindings(entity)?),
+            };
+            // Several declarations of one member name inside one class are a
+            // rebinding (`int x; double x;` is not C++, but macros can produce
+            // it); the last declaration is the one in effect.
+            if let Some(bound) = bindings
+                .iter()
+                .filter(|binding| binding.name == receiver)
+                .map(|binding| binding.bound_type.clone())
+                .next_back()
+            {
+                return Ok(Some(bound));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The candidates whose qualified name ends with the binding's own spelling:
+/// `MemTableRep::Iterator` selects `rocksdb::MemTableRep::Iterator` and leaves
+/// the global `rocksdb::Iterator` out.
+fn spelled_under<'s>(hits: &'s [&'s NameIndexEntry], bound_type: &str) -> Vec<&'s NameIndexEntry> {
+    let suffix = format!("::{bound_type}");
+    hits.iter()
+        .filter(|hit| hit.qualified_name == bound_type || hit.qualified_name.ends_with(&suffix))
+        .map(|hit| *hit)
+        .collect()
 }
 
 /// Binds a member call whose receiver names an object literal: the literal's
@@ -2708,17 +2835,28 @@ fn collect_base_scopes(
 }
 
 /// The entity whose qualified name spells `class_scope`, addressed through
-/// its last `::` segment in the name index. A scope no entity spells
-/// exactly, or several that do, keeps the hierarchy unknown.
-fn class_entity_id(snapshot: &ResolutionSnapshot, class_scope: &str) -> Option<String> {
+/// its last `::` segment in the name index.
+///
+/// A type declaration outranks a scope that carries its name over (`impl
+/// Target` in Rust, a C++ constructor `X::X`), and a definition outranks a
+/// prototype: both name one class, so the hierarchy resolves through either.
+/// A scope no entity spells exactly, or several that do, keeps the hierarchy
+/// unknown.
+///
+/// `file_hint` places a class two modules declare under one name: the class a
+/// method belongs to is declared beside it, which is the evidence the name
+/// alone cannot carry. Without a hint the name has to be workspace-unique.
+fn class_entity_in(
+    snapshot: &ResolutionSnapshot,
+    class_scope: &str,
+    file_hint: Option<u32>,
+) -> Option<String> {
     let tail = class_scope.rsplit("::").next()?;
     let hits = snapshot.lookup_candidates(tail)?;
     let spelled: Vec<&NameIndexEntry> = hits
         .iter()
         .filter(|hit| hit.qualified_name == class_scope)
         .collect();
-    // A type declaration outranks a scope that carries its name over (Rust's
-    // `impl Target`), which is a member container rather than the class.
     let declared: Vec<&NameIndexEntry> = spelled
         .iter()
         .copied()
@@ -2729,13 +2867,22 @@ fn class_entity_id(snapshot: &ResolutionSnapshot, class_scope: &str) -> Option<S
     } else {
         declared
     };
-    // A prototype and the definition of one class share the qualified name;
-    // they name one symbol, so the hierarchy resolves through either.
+    let in_file: Vec<&NameIndexEntry> = matched
+        .iter()
+        .copied()
+        .filter(|hit| file_hint == Some(hit.file_id))
+        .collect();
+    let matched = if in_file.is_empty() { matched } else { in_file };
     let matched = prefer_definitions(matched);
     if let [hit] = matched.as_slice() {
         return Some(hit.entity_id.clone());
     }
     None
+}
+
+/// `class_entity_in` for a scope no single file hints at.
+fn class_entity_id(snapshot: &ResolutionSnapshot, class_scope: &str) -> Option<String> {
+    class_entity_in(snapshot, class_scope, None)
 }
 
 /// The file that declares the class `class_scope` for a reference written in

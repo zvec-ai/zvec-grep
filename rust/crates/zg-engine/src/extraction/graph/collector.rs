@@ -968,15 +968,50 @@ fn type_name_of(node: Node<'_>, source: &[u8]) -> Option<String> {
     is_identifier_like(text).then(|| text.to_owned())
 }
 
-/// Follows pointer/reference declarator wrappers down to the spelled name.
+/// Follows pointer/reference/attribute declarator wrappers down to the
+/// spelled name.
+///
+/// The wrapper carries the name in its `declarator` field; a cv-qualifier
+/// (`const`, `volatile`) or a macro attribute sits beside it as a child, so
+/// reading the first named child answers `const` instead of the name.
 fn peel_declarator_name(node: Node<'_>, source: &[u8]) -> Option<String> {
-    match node.kind() {
-        "reference_declarator" | "pointer_declarator" | "array_declarator" => {
-            peel_declarator_name(node.named_child(0)?, source)
+    let mut current = node;
+    loop {
+        match current.kind() {
+            "identifier" | "field_identifier" => {
+                return Some(node_text(current, source).to_owned());
+            }
+            "pointer_declarator"
+            | "reference_declarator"
+            | "array_declarator"
+            | "parenthesized_declarator"
+            | "attributed_declarator"
+            | "init_declarator" => {
+                current = current.child_by_field_name("declarator").or_else(|| {
+                    named_children(current)
+                        .into_iter()
+                        .find(|child| carries_name(child.kind()))
+                })?;
+            }
+            _ => return None,
         }
-        "identifier" => Some(node_text(node, source).to_owned()),
-        _ => None,
     }
+}
+
+/// Declarator node kinds that wrap another declarator, so the search for the
+/// spelled name has to descend through them. A function declarator is
+/// deliberately absent: it names a callable, not a receiver.
+fn carries_name(kind: &str) -> bool {
+    matches!(
+        kind,
+        "identifier"
+            | "field_identifier"
+            | "pointer_declarator"
+            | "reference_declarator"
+            | "array_declarator"
+            | "parenthesized_declarator"
+            | "attributed_declarator"
+    )
 }
 
 fn java_binding_of(
@@ -1177,19 +1212,30 @@ fn cpp_binding_of(
     context: &WalkContext,
 ) -> Option<(String, String)> {
     match node.kind() {
-        // `auto x = X{}` / `auto x = new X()`: the placeholder type defers
-        // to the initializer's spelled type. `auto x = makeX()`: a bare
-        // call binds the registered factory's return type.
+        // `Widget w;` / `Widget* p = f();` / `Widget& r = w;` /
+        // `std::unique_ptr<W> h(new W());`: the declaration spells the type
+        // the name holds — through pointer/reference wrappers, an enclosing
+        // class (`MemTableRep::Iterator`) and a holding template argument.
+        // `auto x = ...` carries no type of its own and is handled below.
         "declaration" => {
             let declared = node.child_by_field_name("type")?;
-            if declared.kind() != "placeholder_type_specifier" {
-                return None;
-            }
             let declarator = node.child_by_field_name("declarator")?;
+            if declared.kind() != "placeholder_type_specifier" {
+                // A function prototype declares a function, not a receiver.
+                if declarator.kind() == "function_declarator" {
+                    return None;
+                }
+                let name = peel_declarator_name(declarator, source)?;
+                let type_name = cpp_type_name_of(declared, source)?;
+                return Some((name, type_name));
+            }
+            // `auto x = X{}` / `auto* const x = new X()`: the placeholder type
+            // defers to the initializer's spelled type. `auto x = makeX()`: a
+            // bare call binds the registered factory's return type.
             if declarator.kind() != "init_declarator" {
                 return None;
             }
-            let name = declarator.child_by_field_name("declarator")?;
+            let name = peel_declarator_name(declarator, source)?;
             let value = declarator.child_by_field_name("value")?;
             let type_node = match value.kind() {
                 "new_expression" | "compound_literal_expression" => {
@@ -1201,26 +1247,82 @@ fn cpp_binding_of(
                         return None;
                     }
                     let type_name = context.factory_return_of(node_text(function, source))?;
-                    return Some((node_text(name, source).to_owned(), type_name.to_owned()));
+                    return Some((name, type_name.to_owned()));
                 }
                 _ => return None,
             };
-            Some((
-                node_text(name, source).to_owned(),
-                node_text(type_node, source).to_owned(),
-            ))
+            Some((name, node_text(type_node, source).to_owned()))
         }
         // `void m(Left &a)`: the parameter name sits under the reference
-        // declarator wrapper.
-        "parameter_declaration" => {
+        // declarator wrapper, and the type may be qualified or a holder.
+        // `Widget* member_;`: the class states the receiver type of the name
+        // its methods call through, exactly as a parameter states one. The
+        // binding belongs to the class entity, so every method body reaches it.
+        "parameter_declaration" | "field_declaration" => {
             let type_node = node.child_by_field_name("type")?;
             let declarator = node.child_by_field_name("declarator")?;
-            let type_name = type_name_of(type_node, source)?;
+            if declarator.kind() == "function_declarator" {
+                return None;
+            }
+            let type_name = cpp_type_name_of(type_node, source)?;
             let name = peel_declarator_name(declarator, source)?;
             Some((name, type_name))
         }
         _ => None,
     }
+}
+
+/// The type a C++ declaration names, spelled so the resolver can find it.
+///
+/// A pointer or reference addresses the same member set as its inner type, so
+/// the wrapper is peeled. A holder template names what it holds
+/// (`std::unique_ptr<Widget>` binds `Widget`); a container names itself, since
+/// the calls written through it (`v.size()`) reach the container's own members
+/// and its element type is a separate question. A qualified type keeps its
+/// enclosing class (`MemTableRep::Iterator`), which is what tells it from a
+/// global namesake.
+fn cpp_type_name_of(node: Node<'_>, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        "type_identifier" => Some(node_text(node, source).to_owned()),
+        "struct_specifier" | "class_specifier" | "union_specifier" | "enum_specifier" => node
+            .child_by_field_name("name")
+            .map(|name| node_text(name, source).to_owned()),
+        // `const Widget&`: the qualifier sits beside the type descriptor.
+        "type_descriptor" => {
+            let inner = node
+                .child_by_field_name("type")
+                .or_else(|| node.named_child(0))?;
+            cpp_type_name_of(inner, source)
+        }
+        "qualified_identifier" => {
+            let name = node.child_by_field_name("name")?;
+            if name.kind() == "template_type" {
+                return cpp_held_type_of(name, source);
+            }
+            Some(node_text(node, source).to_owned())
+        }
+        "template_type" => cpp_held_type_of(node, source),
+        _ => None,
+    }
+}
+
+/// The type a holder template argument names: `std::unique_ptr<Widget>` holds
+/// a `Widget`, so its members answer the calls written through the holder.
+///
+/// Only holders qualify. A container (`std::vector<Widget>`) answers calls with
+/// its own members, and treating its element type as the receiver would bind
+/// `ws.size()` to `Widget::size`. A non-type argument (`std::atomic<bool>`)
+/// names no receiver at all.
+fn cpp_held_type_of(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let name = node.child_by_field_name("name")?;
+    if !matches!(
+        node_text(name, source),
+        "unique_ptr" | "shared_ptr" | "weak_ptr" | "optional" | "StatusOr" | "NoDestructor"
+    ) {
+        return None;
+    }
+    let arguments = node.child_by_field_name("arguments")?;
+    cpp_type_name_of(arguments.named_child(0)?, source)
 }
 
 fn ts_binding_of(node: Node<'_>, source: &[u8], context: &WalkContext) -> Option<(String, String)> {
@@ -1794,40 +1896,41 @@ mod tests {
         );
     }
 
+    /// Every name a source binds to a spelled type, as `(name, type, line)`.
+    fn bindings(
+        format: FileFormat,
+        lang: &tree_sitter::Language,
+        source: &str,
+    ) -> Vec<(String, String, usize)> {
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(lang).expect("grammar loads");
+        let tree = parser.parse(source, None).expect("parses");
+        let mut context = WalkContext::new();
+        let owner = context.next_entity_index();
+        scan_binding_declarations(
+            tree.root_node(),
+            owner,
+            source.as_bytes(),
+            format,
+            &mut context,
+            None,
+        );
+        context
+            .name_edges()
+            .iter()
+            .map(|edge| {
+                (
+                    edge.ref_name.clone(),
+                    edge.bound_type.clone().expect("bound type"),
+                    edge.line,
+                )
+            })
+            .collect()
+    }
+
     #[test]
     #[allow(clippy::too_many_lines)]
     fn collects_creation_and_parameter_bindings() {
-        fn bindings(
-            format: FileFormat,
-            lang: &tree_sitter::Language,
-            source: &str,
-        ) -> Vec<(String, String, usize)> {
-            let mut parser = tree_sitter::Parser::new();
-            parser.set_language(lang).expect("grammar loads");
-            let tree = parser.parse(source, None).expect("parses");
-            let mut context = WalkContext::new();
-            let owner = context.next_entity_index();
-            scan_binding_declarations(
-                tree.root_node(),
-                owner,
-                source.as_bytes(),
-                format,
-                &mut context,
-                None,
-            );
-            context
-                .name_edges()
-                .iter()
-                .map(|edge| {
-                    (
-                        edge.ref_name.clone(),
-                        edge.bound_type.clone().expect("bound type"),
-                        edge.line,
-                    )
-                })
-                .collect()
-        }
-
         // Creation-initialized locals across the grammars.
         assert_eq!(
             bindings(
@@ -1939,6 +2042,60 @@ mod tests {
                 ("b".to_owned(), "Right".to_owned(), 1),
             ]
         );
+    }
+
+    #[test]
+    fn collects_declared_type_and_member_bindings() {
+        let cpp = || tree_sitter_cpp::LANGUAGE.into();
+        // A cv-qualifier and an attribute macro sit beside the name rather
+        // than wrapping it, so the spelling must come from the declarator.
+        assert_eq!(
+            bindings(
+                FileFormat::Cpp,
+                &cpp(),
+                "void m(Widget const& w, Slice* const s) { w.Draw(); }",
+            ),
+            vec![
+                ("w".to_owned(), "Widget".to_owned(), 1),
+                ("s".to_owned(), "Slice".to_owned(), 1),
+            ]
+        );
+        // A member field states the receiver its class's methods call through.
+        assert_eq!(
+            bindings(
+                FileFormat::Cpp,
+                &cpp(),
+                "class A {\n  Slice* blocks_;\n  InstrumentedMutex mutex_;\n};",
+            ),
+            vec![
+                ("blocks_".to_owned(), "Slice".to_owned(), 2),
+                ("mutex_".to_owned(), "InstrumentedMutex".to_owned(), 3),
+            ]
+        );
+        // A holder names what it holds, a container names itself.
+        assert_eq!(
+            bindings(
+                FileFormat::Cpp,
+                &cpp(),
+                "void m() {\n  std::unique_ptr<VersionSet> versions_;\n  std::shared_ptr<DB> db;\n}",
+            ),
+            vec![
+                ("versions_".to_owned(), "VersionSet".to_owned(), 2),
+                ("db".to_owned(), "DB".to_owned(), 3),
+            ]
+        );
+        assert!(bindings(FileFormat::Cpp, &cpp(), "void m() { std::vector<DB> dbs; }").is_empty());
+        // A qualified type keeps the class it is nested in.
+        assert_eq!(
+            bindings(
+                FileFormat::Cpp,
+                &cpp(),
+                "class A {\n  MemTableRep::Iterator* iter_;\n};",
+            ),
+            vec![("iter_".to_owned(), "MemTableRep::Iterator".to_owned(), 2)]
+        );
+        // A function declarator names a callable, not a receiver.
+        assert!(bindings(FileFormat::Cpp, &cpp(), "class A {\n  void Run();\n};").is_empty());
     }
 
     #[test]
