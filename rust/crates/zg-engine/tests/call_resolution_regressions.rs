@@ -522,6 +522,21 @@ async fn typescript_config_comments_inheritance_and_invalid_boundaries() {
             r#"{"compilerOptions":{"baseUrl":"../app", "paths":{"@/*":["src/*"]}}}"#,
             Some("app/other/foo.ts"),
         ),
+        (
+            r#"{"extends":"@tsconfig/node20/tsconfig.json","compilerOptions":{"baseUrl":".","paths":{"@/*":["src/*"]}}}"#,
+            "{}",
+            Some("app/src/foo.ts"),
+        ),
+        (
+            r#"{"extends":["../configs/base.json"]}"#,
+            r#"{"compilerOptions":{"baseUrl":"../app","paths":{"@/*":["src/*"]}}}"#,
+            Some("app/src/foo.ts"),
+        ),
+        (
+            r#"{"extends":"@tsconfig/node20/tsconfig.json","compilerOptions":{"paths":{"@/*":["src/*"]}}}"#,
+            "{}",
+            None,
+        ),
         (r#"{"compilerOptions": broken}"#, "{}", None),
         (r#"{"extends":"../configs/base.json"}"#, "broken", None),
         (r#"{"extends":"./tsconfig.json"}"#, "{}", None),

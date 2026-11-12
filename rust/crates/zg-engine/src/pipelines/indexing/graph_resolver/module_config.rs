@@ -1,5 +1,8 @@
 //! Configuration evidence is cached for one resolution sweep. An invalid
 //! nearest config is authoritative; it must not expose a parent config.
+#[cfg(test)]
+mod tests;
+
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
@@ -9,7 +12,8 @@ use super::{RuleCaches, importing_dir, join_specifier};
 #[derive(Clone, Default)]
 pub(super) struct TsConfig {
     pub base_url: Option<String>,
-    pub paths: Map<String, Value>,
+    // None inherits earlier mappings; Some(empty) explicitly clears them.
+    pub paths: Option<Map<String, Value>>,
     pub paths_directory: String,
 }
 
@@ -87,29 +91,66 @@ fn load_typescript(
         return Ok(None);
     };
     let directory = importing_dir(path);
-    let mut config = if let Some(extends) = value.get("extends") {
-        let extends = extends.as_str().ok_or(())?;
-        // Package-based inheritance requires package resolution; never guess.
-        if !extends.starts_with("./") && !extends.starts_with("../") {
-            return Err(());
-        }
-        let base = join_specifier(directory, extends).ok_or(())?;
-        match typescript_inner(caches, &base, remaining)? {
-            Some(config) => (*config).clone(),
-            None if !std::path::Path::new(&base)
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("json")) =>
-            {
-                typescript_inner(caches, &format!("{base}.json"), remaining)?
-                    .ok_or(())?
-                    .as_ref()
-                    .clone()
-            }
-            None => return Err(()),
-        }
-    } else {
-        TsConfig::default()
+    let own = compiler_options(&value, directory)?;
+    // Both fields are fully specified here: no parent can change how these
+    // mappings resolve, even when package-based inheritance is unavailable.
+    if own.base_url.is_some() && own.paths.is_some() {
+        return Ok(Some(own));
+    }
+    let bases = match value.get("extends") {
+        None => &[][..],
+        Some(value @ Value::String(_)) => std::slice::from_ref(value),
+        Some(Value::Array(bases)) => bases.as_slice(),
+        Some(_) => return Err(()),
     };
+    let mut config = TsConfig::default();
+    // Each later base overrides only the options it defines. In particular,
+    // paths is replaced as a whole rather than merging individual aliases.
+    for base in bases {
+        let inherited = relative_base(caches, directory, base.as_str().ok_or(())?, remaining)?;
+        config.overlay(&inherited);
+    }
+    config.overlay(&own);
+    Ok(Some(config))
+}
+
+fn relative_base(
+    caches: &mut RuleCaches,
+    directory: &str,
+    extends: &str,
+    remaining: usize,
+) -> Result<Arc<TsConfig>, ()> {
+    // Package-based inheritance requires package resolution; never guess.
+    if !extends.starts_with("./") && !extends.starts_with("../") {
+        return Err(());
+    }
+    let base = join_specifier(directory, extends).ok_or(())?;
+    match typescript_inner(caches, &base, remaining)? {
+        Some(config) => Ok(config),
+        None if !std::path::Path::new(&base)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json")) =>
+        {
+            typescript_inner(caches, &format!("{base}.json"), remaining)?.ok_or(())
+        }
+        None => Err(()),
+    }
+}
+
+impl TsConfig {
+    fn overlay(&mut self, next: &Self) {
+        if next.base_url.is_some() {
+            self.base_url.clone_from(&next.base_url);
+        }
+        if next.paths.is_some() {
+            self.paths.clone_from(&next.paths);
+            self.paths_directory.clone_from(&next.paths_directory);
+        }
+    }
+}
+
+fn compiler_options(value: &Value, directory: &str) -> Result<TsConfig, ()> {
+    let mut config = TsConfig::default();
     if let Some(compiler) = value.get("compilerOptions") {
         let compiler = compiler.as_object().ok_or(())?;
         if let Some(base_url) = compiler.get("baseUrl") {
@@ -119,9 +160,9 @@ fn load_typescript(
             config.base_url = Some(importing_dir(&joined).to_owned());
         }
         if let Some(paths) = compiler.get("paths") {
-            config.paths.clone_from(paths.as_object().ok_or(())?);
+            config.paths = Some(paths.as_object().ok_or(())?.clone());
             directory.clone_into(&mut config.paths_directory);
         }
     }
-    Ok(Some(config))
+    Ok(config)
 }
