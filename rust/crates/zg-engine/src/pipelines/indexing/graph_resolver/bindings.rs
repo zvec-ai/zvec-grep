@@ -367,6 +367,7 @@ fn type_import_matches(
         let mapping = config
             .paths
             .iter()
+            .flat_map(|paths| paths.iter())
             .filter_map(|(pattern, targets)| {
                 if pattern == specifier {
                     return Some((usize::MAX, "", targets));
