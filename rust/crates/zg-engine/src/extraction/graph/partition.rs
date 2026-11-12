@@ -111,7 +111,7 @@ fn alias_at<'a>(
         .and_then(|binding| binding.bound_type.as_deref())
 }
 
-/// Shape used to collapse non-call, non-binding references.
+/// Shape used to collapse references without per-site binding evidence.
 type RefSite = (GraphEdgeKind, usize, Option<String>, String, Option<usize>);
 
 /// Partitions the walk buffers against the completed symbol table.
@@ -146,10 +146,10 @@ pub(crate) fn partition_walk(
     for edge in name_edges {
         if !matches!(
             edge.ref_kind,
-            GraphEdgeKind::Calls | GraphEdgeKind::Declares
+            GraphEdgeKind::Calls | GraphEdgeKind::Declares | GraphEdgeKind::Imports
         ) {
-            // Preserve each call position and binding declaration. The walk already
-            // deduplicates collecting the same call site more than once.
+            // Preserve call sites, declarations and import statements: two imports
+            // of the same module can bind different local names in their raw text.
             let site = (
                 edge.ref_kind,
                 edge.owner_index,

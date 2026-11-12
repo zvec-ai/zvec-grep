@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 use std::path::Path;
+use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
@@ -29,7 +30,9 @@ use crate::domain::{
     EdgeProvenance, FileFormat, GraphEdgeKind, SymbolType, formats_for_path,
     reference_compatible_with,
 };
-use crate::storage::graph::{DeclaredBinding, NameIndexEntry, Resolution, StoredPendingRef};
+use crate::storage::graph::{
+    DeclaredBinding, ImportReference, NameIndexEntry, Resolution, StoredPendingRef,
+};
 use crate::storage::{IndexStore, ResolutionSnapshot};
 
 /// Outcome of one resolution sweep.
@@ -112,7 +115,6 @@ pub(crate) fn resolve_pending(
     let mut sweep = ResolutionSweep::default();
     let mut caches = RuleCaches {
         source_root: source_root.map(Path::to_path_buf),
-        go_module: source_root.and_then(bindings::go_module),
         ..RuleCaches::default()
     };
     let mut cursor = 0;
@@ -227,7 +229,7 @@ enum Rule {
 struct RuleCaches {
     source_root: Option<std::path::PathBuf>,
     module_configs: HashMap<String, Option<serde_json::Value>>,
-    go_module: Option<String>,
+    go_modules: HashMap<String, Option<String>>,
     importing_paths: HashMap<u32, Option<String>>,
     candidate_paths: HashMap<u32, Option<String>>,
     importing_files: HashMap<u32, Vec<u32>>,
@@ -238,6 +240,23 @@ struct RuleCaches {
     /// same owner and every sweep pages them again, so the read happens once
     /// per owner per sweep instead of once per call.
     declared_bindings: HashMap<String, Vec<DeclaredBinding>>,
+    import_references: HashMap<u32, Arc<[ImportReference]>>,
+    javascript_imports: HashMap<u32, Arc<[bindings::JavascriptImport]>>,
+}
+
+impl RuleCaches {
+    // The workspace writer serializes the sweep, so imports cannot change
+    // until it finishes. Drop this cache before the next indexing pass.
+    fn imports(
+        &mut self,
+        store: &IndexStore,
+        file: u32,
+    ) -> crate::EngineResult<Arc<[ImportReference]>> {
+        Ok(match self.import_references.entry(file) {
+            Entry::Occupied(entry) => Arc::clone(entry.get()),
+            Entry::Vacant(entry) => Arc::clone(entry.insert(store.import_references(file)?.into())),
+        })
+    }
 }
 
 impl ResolutionSweep {
@@ -324,14 +343,7 @@ fn classify(
         // later bare-name resolution. Defer instead.
         return Ok(Outcome::Deferred);
     }
-    if let Some(resolution) = resolve_alias_bound(
-        store,
-        snapshot,
-        stored,
-        &mut caches.alias_bindings,
-        &mut caches.importing_paths,
-        &mut caches.alias_targets,
-    )? {
+    if let Some(resolution) = resolve_alias_bound(store, snapshot, stored, caches)? {
         // An `as` alias never names an indexed symbol itself, so the bare-name
         // lookup below would only park the call; the alias binding pins its
         // imported name's module directly.
@@ -340,14 +352,7 @@ fn classify(
             rule: Rule::ImportBound,
         });
     }
-    if let Some(resolution) = resolve_namespace_bound(
-        store,
-        snapshot,
-        stored,
-        &mut caches.alias_bindings,
-        &mut caches.importing_paths,
-        &mut caches.alias_targets,
-    )? {
+    if let Some(resolution) = resolve_namespace_bound(store, snapshot, stored, caches)? {
         // The receiver names a module object, so the bare-name lookup below
         // would only see workspace-wide ambiguity; the binding scopes the
         // member to its one module.
@@ -910,15 +915,13 @@ fn resolve_alias_bound(
     store: &IndexStore,
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
-    bindings: &mut HashMap<u32, Vec<AliasBinding>>,
-    importing_paths: &mut HashMap<u32, Option<String>>,
-    targets: &mut HashMap<(String, String), Option<u32>>,
+    caches: &mut RuleCaches,
 ) -> crate::EngineResult<Option<Resolution>> {
     let reference = &stored.reference;
     if reference.receiver_name.is_some() || reference.ref_kind != GraphEdgeKind::Calls {
         return Ok(None);
     }
-    let file_bindings = load_bindings(store, stored, bindings)?;
+    let file_bindings = load_bindings(store, stored, caches)?;
     let matched: Vec<&AliasBinding> = file_bindings
         .iter()
         .filter(|binding| binding.imported.is_some() && binding.local == stored.name_tail)
@@ -931,8 +934,8 @@ fn resolve_alias_bound(
         stored,
         binding.imported.as_deref().expect("imported binding"),
         binding,
-        importing_paths,
-        targets,
+        &mut caches.importing_paths,
+        &mut caches.alias_targets,
     ))
 }
 
@@ -949,9 +952,7 @@ fn resolve_namespace_bound(
     store: &IndexStore,
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
-    bindings: &mut HashMap<u32, Vec<AliasBinding>>,
-    importing_paths: &mut HashMap<u32, Option<String>>,
-    targets: &mut HashMap<(String, String), Option<u32>>,
+    caches: &mut RuleCaches,
 ) -> crate::EngineResult<Option<Resolution>> {
     let reference = &stored.reference;
     let Some(receiver) = reference.receiver_name.as_deref() else {
@@ -960,7 +961,7 @@ fn resolve_namespace_bound(
     if reference.ref_kind != GraphEdgeKind::Calls {
         return Ok(None);
     }
-    let file_bindings = load_bindings(store, stored, bindings)?;
+    let file_bindings = load_bindings(store, stored, caches)?;
     let matched: Vec<&AliasBinding> = file_bindings
         .iter()
         .filter(|binding| binding.imported.is_none() && binding.local == receiver)
@@ -973,8 +974,8 @@ fn resolve_namespace_bound(
         stored,
         &stored.name_tail,
         binding,
-        importing_paths,
-        targets,
+        &mut caches.importing_paths,
+        &mut caches.alias_targets,
     ))
 }
 
@@ -985,12 +986,23 @@ fn resolve_namespace_bound(
 fn load_bindings(
     store: &IndexStore,
     stored: &StoredPendingRef,
-    bindings: &mut HashMap<u32, Vec<AliasBinding>>,
+    caches: &mut RuleCaches,
 ) -> crate::EngineResult<Vec<AliasBinding>> {
-    Ok(match bindings.entry(stored.file_id) {
-        Entry::Occupied(entry) => entry.get().clone(),
-        Entry::Vacant(entry) => entry.insert(load_alias_bindings(store, stored)?).clone(),
-    })
+    if !matches!(
+        stored.language.as_str(),
+        "typescript" | "javascript" | "python" | "rust"
+    ) {
+        return Ok(Vec::new());
+    }
+    if let Some(bindings) = caches.alias_bindings.get(&stored.file_id) {
+        return Ok(bindings.clone());
+    }
+    let references = caches.imports(store, stored.file_id)?;
+    let bindings = load_alias_bindings(&references, &stored.language);
+    caches
+        .alias_bindings
+        .insert(stored.file_id, bindings.clone());
+    Ok(bindings)
 }
 
 /// Binds the addressed member to the one declaration inside the binding's
@@ -1057,21 +1069,15 @@ fn without_line_comments<'a>(statement: &'a str, marker: &str) -> std::borrow::C
 /// alias bindings. Only statements spelling an explicit `as` produce
 /// bindings: unaliased imports keep flowing through the bare-name and
 /// import-bound rules, which already resolve them.
-///
-/// # Errors
-/// Propagates graph storage failures.
-fn load_alias_bindings(
-    store: &IndexStore,
-    stored: &StoredPendingRef,
-) -> crate::EngineResult<Vec<AliasBinding>> {
-    let pairs: AliasPairs = match stored.language.as_str() {
+fn load_alias_bindings(references: &[ImportReference], language: &str) -> Vec<AliasBinding> {
+    let pairs: AliasPairs = match language {
         "typescript" | "javascript" => ts_alias_pairs,
         "python" => python_alias_pairs,
         "rust" => rust_alias_pairs,
-        _ => return Ok(Vec::new()),
+        _ => return Vec::new(),
     };
     let mut bindings = Vec::new();
-    for reference in store.import_references(stored.file_id)? {
+    for reference in references {
         let Some(raw_text) = reference.raw_text.as_deref() else {
             continue;
         };
@@ -1083,7 +1089,7 @@ fn load_alias_bindings(
             });
         }
     }
-    Ok(bindings)
+    bindings
 }
 
 /// Parses an import statement into aliased `(local, imported)` pairs and
@@ -1092,6 +1098,9 @@ fn load_alias_bindings(
 /// binds the module itself (`imported` stays `None`). Default imports and
 /// unaliased names never spell a binding.
 fn ts_alias_pairs(statement: &str) -> Vec<(String, Option<String>)> {
+    if !statement.trim_start().starts_with("import ") {
+        return Vec::new();
+    }
     let statement = without_line_comments(statement, "//");
     let statement = statement.as_ref();
     let Some(clause_end) = statement.rfind(" from ") else {
@@ -1521,12 +1530,12 @@ fn resolve_receiver_typed(
     hits: &[NameIndexEntry],
     caches: &mut RuleCaches,
 ) -> crate::EngineResult<Option<Resolution>> {
-    if matches!(stored.language.as_str(), "typescript" | "javascript" | "go") {
-        return bindings::resolve(store, snapshot, stored, hits, caches);
-    }
     let reference = &stored.reference;
     if reference.ref_kind != GraphEdgeKind::Calls {
         return Ok(None);
+    }
+    if matches!(stored.language.as_str(), "typescript" | "javascript" | "go") {
+        return bindings::resolve(store, snapshot, stored, hits, caches);
     }
     let Some(receiver) = reference.receiver_name.as_deref() else {
         return Ok(None);

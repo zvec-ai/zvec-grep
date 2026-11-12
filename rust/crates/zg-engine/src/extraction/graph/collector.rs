@@ -820,6 +820,9 @@ pub(crate) fn scan_return_types(
             matches!(
                 node.kind(),
                 "function_declaration"
+                    | "generator_function_declaration"
+                    | "generator_function"
+                    | "func_literal"
                     | "class"
                     | "method_definition"
                     | "method_declaration"
@@ -1861,6 +1864,42 @@ fn collect_type_names(node: Node<'_>, source: &[u8], names: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_binding_scan_stops_at_callable_and_class_bodies() {
+        for (format, grammar, source) in [
+            (
+                FileFormat::JavaScript,
+                tree_sitter_javascript::LANGUAGE,
+                "function* generator() { var hidden = 1; } const f = function* () { var hidden = 2; }; const object = { method(hidden) { var local = 3; } }; const C = class { method(hidden) { var local = 4; } };",
+            ),
+            (
+                FileFormat::TypeScript,
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
+                "function* generator() { var hidden = 1; } const f = function* () { var hidden = 2; }; const object = { method(hidden: number) { var local = 3; } }; const C = class { method(hidden: number) { var local = 4; } };",
+            ),
+            (
+                FileFormat::Go,
+                tree_sitter_go::LANGUAGE,
+                "package main\nvar f = func(hidden int) { var local int }\n",
+            ),
+        ] {
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&grammar.into())
+                .expect("fixture grammar");
+            let tree = parser.parse(source, None).expect("fixture syntax tree");
+            let mut context = WalkContext::new();
+            scan_return_types(tree.root_node(), source.as_bytes(), format, &mut context);
+            assert!(
+                context
+                    .name_edges()
+                    .iter()
+                    .all(|edge| !matches!(edge.ref_name.as_str(), "hidden" | "local")),
+                "{format:?}"
+            );
+        }
+    }
 
     #[test]
     fn splits_callee_names_into_receiver_and_member() {
