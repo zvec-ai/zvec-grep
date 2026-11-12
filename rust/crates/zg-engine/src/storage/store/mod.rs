@@ -295,6 +295,10 @@ impl IndexStore {
         self.read(|state| state.files.list())
     }
 
+    pub(crate) fn count_fragments(&self) -> EngineResult<u64> {
+        self.read(|state| state.fragments.count())
+    }
+
     pub(crate) fn list_file_paths(&self) -> EngineResult<Vec<(FileId, PathBuf)>> {
         self.read(|state| state.files.list_paths())
     }

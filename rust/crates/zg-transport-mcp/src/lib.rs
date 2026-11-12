@@ -579,6 +579,7 @@ impl ZvecGrepMcpServer {
         let request = InfoOptions {
             root: Some(root.clone()),
             include_status: false,
+            include_counts: false,
         };
         Ok(match self.index_operations.drop_index(request).await {
             Ok(removed) => drop_result_to_result(&root, removed),
@@ -657,6 +658,7 @@ impl ZvecGrepMcpServer {
         let request = InfoOptions {
             root: Some(root),
             include_status: true,
+            include_counts: false,
         };
         Ok(
             match self.index_operations.info(&self.engine, request).await {
@@ -1781,6 +1783,7 @@ impl IndexInput {
             return Ok(IndexToolRequest::Drop(InfoOptions {
                 root: Some(root),
                 include_status: false,
+                include_counts: false,
             }));
         }
         if let Some(api_key) = &self.api_key {

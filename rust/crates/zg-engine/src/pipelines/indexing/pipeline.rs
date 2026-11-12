@@ -270,6 +270,7 @@ pub(crate) async fn get_workspace_index_status(
             .iter()
             .map(|file| file.index_status().entity_count())
             .sum(),
+        fragments_indexed: None,
         indexed_size_bytes: indexed_files
             .iter()
             .map(|file| file.snapshot().size_bytes)
@@ -3795,6 +3796,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ordinary_status_does_not_count_stored_fragments() {
+        let directory = tempdir().expect("workspace");
+        let workspace = workspace(directory.path());
+        let scanner = NativeScanner::default();
+        let storage = MemoryStorage::default();
+        let empty = get_workspace_index_status(&workspace, &storage, &scanner, None, true)
+            .await
+            .expect("empty status");
+        assert_eq!(empty.files_scanned, 0);
+        assert_eq!(empty.entities_indexed, 0);
+        assert_eq!(empty.fragments_indexed, None);
+
+        std::fs::write(
+            directory.path().join("harvest.rs"),
+            format!("fn harvest() {{\n{}}}\n", "    let value = 1;\n".repeat(40)),
+        )
+        .expect("source");
+        let model = ConcurrentModel::new();
+        let context = IndexingContext {
+            workspace: &workspace,
+            storage: &storage,
+            scanner: &scanner,
+            embedding_models: &[&model],
+            embedding_concurrency: None,
+            on_progress: None,
+            signal: None,
+            changes: &[],
+        };
+        index_workspace(&context).await.expect("index source");
+        let stored = storage
+            .entries
+            .lock()
+            .expect("stored entries")
+            .values()
+            .map(Vec::len)
+            .sum::<usize>();
+        assert!(stored > 1, "one code entity must have multiple fragments");
+        let status = get_workspace_index_status(&workspace, &storage, &scanner, None, true)
+            .await
+            .expect("indexed status");
+        assert_eq!(status.files_unchanged, 1);
+        assert_eq!(status.entities_indexed, 1);
+        assert_eq!(status.fragments_indexed, None);
+    }
+
+    #[tokio::test]
     async fn unchanged_content_updates_snapshot_and_lightweight_status_skips_reads() {
         let directory = tempdir().expect("workspace");
         std::fs::write(directory.path().join("file.txt"), "unchanged source").expect("source");
@@ -3829,11 +3876,13 @@ mod tests {
             .await
             .expect("lightweight status");
         assert_eq!(light.files_modified, 1);
+        assert_eq!(light.fragments_indexed, None);
         assert_eq!(scanner.reads.load(Ordering::Acquire), reads);
         let detailed = get_workspace_index_status(&workspace, &storage, &scanner, None, true)
             .await
             .expect("detailed status");
         assert_eq!(detailed.files_modified, 0);
+        assert_eq!(detailed.fragments_indexed, None);
         assert_eq!(scanner.reads.load(Ordering::Acquire), reads + 1);
 
         let result = index_workspace(&context).await.expect("refresh snapshot");
@@ -3936,6 +3985,7 @@ mod tests {
             .await
             .expect("status");
         assert_eq!(status.files_added, 1);
+        assert_eq!(status.fragments_indexed, None);
         assert!(storage.identities.lock().expect("catalog").is_empty());
         let model = ConcurrentModel::new();
         let context = IndexingContext {
@@ -4100,6 +4150,7 @@ mod tests {
         assert_eq!(status.files_failed, 1);
         assert_eq!(status.indexed_size_bytes, 0);
         assert_eq!(status.entities_indexed, 0);
+        assert_eq!(status.fragments_indexed, None);
     }
 
     #[tokio::test]

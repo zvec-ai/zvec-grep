@@ -10,31 +10,56 @@ import { fileHash, run, writeJson } from "../core/io.mjs";
 import { embeddingRuntime } from "../core/embedding.mjs";
 import { scoreFileRetrieval } from "../metrics/files.mjs";
 import { scoreNdcg } from "../metrics/ndcg.mjs";
-import { summarizeRepeatedQuality } from "../metrics/repetitions.mjs";
 import {
+  rankedLocations,
+  summarizeRepeatedQuality,
+} from "../metrics/repetitions.mjs";
+import { summarizeQaRetrieval } from "../metrics/entities.mjs";
+import { QA_ENTITY_METRICS, qaPercentCell } from "../reports/zg.mjs";
+import { summarizePilotEntity, verifyPilotGoldSources } from "./gold.mjs";
+import {
+  locateFullEntity,
   parseVisibleResponse,
   validateSearchRoute,
 } from "../engines/zg/parse.mjs";
-import { freePort, packageCandidate } from "../engines/zg/run.mjs";
+import {
+  assertFullPreviewSchema,
+  freePort,
+  packageCandidate,
+} from "../engines/zg/run.mjs";
 import { snapshotIndex } from "../engines/zg/snapshot.mjs";
-import { PILOT_SUITES_BY_ID } from "./config.mjs";
+import {
+  PILOT_FILE_RECALL_METRICS,
+  PILOT_PREVIEW,
+  PILOT_QA_SCORING,
+  PILOT_PROTOCOL,
+  PILOT_SUITES_BY_ID,
+} from "./config.mjs";
 import {
   loadPilot,
+  pilotCorpusIds,
   prepareBeirDataset,
   prepareDuRetrieval,
   prepareQuarryTask,
   targetsForTask,
   verifyQuarrySource,
 } from "./datasets.mjs";
+import {
+  summarizeIndexCounts,
+  indexCountsMarkdown,
+} from "../core/index-counts.mjs";
+import { summarizeIndexSettings } from "../core/index-settings.mjs";
+import { indexSettingsMarkdown } from "../reports/index-settings.mjs";
 
 const REPETITIONS = 5;
 const LIMIT = 10;
 
-function searchArguments(task, root, mode) {
+export function searchArguments(task, root, mode) {
   return {
     root,
     ...(mode === "hybrid" ? { query: task.query } : { [mode]: [task.query] }),
     limit: LIMIT,
+    preview: PILOT_PREVIEW,
     autoUpdate: false,
     freshness: "eventual",
     preferSymbol: false,
@@ -70,6 +95,7 @@ export function summarizePilotRows(
         ? valid.reduce((sum, row) => sum + select(row), 0) / valid.length
         : null;
     const latencies = selected.flatMap(measuredCallLatencies);
+    const hasQa = selected.some((row) => row.qa_quality_mean);
     return {
       mode,
       completed: valid.length,
@@ -80,7 +106,18 @@ export function summarizePilotRows(
         file_hit_at_10: average((row) => row.quality_mean.file.hit_at_10),
         file_mrr_at_10: average((row) => row.quality_mean.file.rr_at_10),
         ndcg_at_10: average((row) => row.quality_mean.ndcg_at_10),
+        ...(hasQa
+          ? Object.fromEntries(
+              PILOT_FILE_RECALL_METRICS.map((metric) => [
+                metric,
+                average(
+                  (row) => row.quality_mean.file[metric.slice("file_".length)],
+                ),
+              ]),
+            )
+          : {}),
       },
+      ...(hasQa ? { qa_retrieval: summarizeQaRetrieval(selected) } : {}),
       ranking_repeatable_cases: valid.filter(
         (row) => row.quality_mean.ranking_repeatable,
       ).length,
@@ -160,6 +197,7 @@ export function invalidateGroupRows(rows, reason) {
     delete row.output_bytes;
     delete row.items;
     delete row.quality_mean;
+    delete row.qa_quality_mean;
   }
 }
 
@@ -170,7 +208,11 @@ export function markdownPilotReport(report) {
   const lines = [
     `## ${report.label} · ${report.status === "success" ? "✅ Complete" : "❌ Incomplete"}`,
     "",
-    `${planned} original queries · model \`${report.model}\` · Rust MCP default presentation · five calls/query`,
+    `${planned} original queries · model \`${report.model}\` · Rust MCP full preview · five calls/query`,
+    "",
+    indexCountsMarkdown(report.index_counts),
+    "",
+    indexSettingsMarkdown(report.index_settings, report.model),
     "",
     "| Mode | Completed | Stable Top 10 | File Hit@1 | File Hit@5 | File Hit@10 | File MRR@10 | nDCG@10 | Mean output (KiB) | Avg RT (ms) | P50 RT (ms) |",
     "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -183,6 +225,38 @@ export function markdownPilotReport(report) {
     lines.push(
       `| zg-${row.mode} | ${row.completed}/${row.planned} | ${row.ranking_repeatable_cases}/${row.completed} | ${hit(1)} | ${hit(5)} | ${hit(10)} | ${formatNumber(row.metrics.file_mrr_at_10)} | ${formatNumber(row.metrics.ndcg_at_10)} | ${formatNumber(row.measurements.output_bytes_mean == null ? null : row.measurements.output_bytes_mean / 1024, 2)} | ${formatNumber(row.measurements.latency_ms_mean, 2)} | ${formatNumber(row.measurements.latency_ms_p50, 2)} |`,
     );
+  }
+  if (report.qa_gold) {
+    lines.push(
+      "",
+      "### File Recall and Entity diagnostics",
+      "",
+      "File Recall uses the original positive paths. Entity metrics use verified source ranges. N/A means the score could not be established.",
+      "",
+      `| Mode | Level | ${QA_ENTITY_METRICS.map(([label]) => label).join(" | ")} |`,
+      `| --- | --- | ${QA_ENTITY_METRICS.map(() => "---:").join(" | ")} |`,
+    );
+    const fileMetricNames = {
+      hit_at_1: "file_hit_at_1",
+      hit_at_5: "file_hit_at_5",
+      hit_at_10: "file_hit_at_10",
+      mrr_at_10: "file_mrr_at_10",
+      ndcg_at_10: "ndcg_at_10",
+    };
+    for (const row of report.summary) {
+      const group = row.qa_retrieval?.diagnostic;
+      const fileScores = QA_ENTITY_METRICS.map(([, metric]) => {
+        const score = row.metrics[fileMetricNames[metric] ?? `file_${metric}`];
+        return Number.isFinite(score) ? `${(score * 100).toFixed(2)}%` : "N/A";
+      });
+      const entityScores = QA_ENTITY_METRICS.map(([, metric]) =>
+        qaPercentCell(group?.entity, metric, group?.eligible_tasks),
+      );
+      lines.push(
+        `| zg-${row.mode} | File | ${fileScores.join(" | ")} |`,
+        `| zg-${row.mode} | Entity | ${entityScores.join(" | ")} |`,
+      );
+    }
   }
   if (report.breakdown?.length) {
     lines.push(
@@ -265,6 +339,7 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
   const evidence = join(options.output, "evidence", group.id);
   await mkdir(evidence, { recursive: true });
   const root = resolve(group.root);
+  const goldSources = await verifyPilotGoldSources(pilot.gold, group);
   const indexTimeoutMs = pilot.config.indexTimeoutMinutes * 60_000;
   const home = join(evidence, "runtime-home");
   const opencode = join(evidence, "opencode.json");
@@ -363,6 +438,11 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
       env,
     });
     assert.equal(before.failed_files.length, 0);
+    assert.equal(
+      before.index_settings.model,
+      pilot.model,
+      "indexed model differs from the suite",
+    );
     assert.ok(before.files > 0);
     if (group.expectedIndexedFiles)
       assert.equal(
@@ -380,7 +460,11 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
     client = new mcp.Client({ name: "zg-retrieval-pilots", version: "1.0.0" });
     await client.connect(transport, { timeout: 120_000 });
     const listed = await client.listTools();
-    assert.ok(listed.tools.some((tool) => tool.name === "zvec_grep_search"));
+    const search = listed.tools.find(
+      (tool) => tool.name === "zvec_grep_search",
+    );
+    assert.ok(search, "candidate lacks the required public search endpoint");
+    assertFullPreviewSchema(search.inputSchema);
     for (const mode of pilot.modes) {
       for (const task of group.tasks) {
         const row = {
@@ -409,14 +493,15 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
             assert.notEqual(response.isError, true, "MCP product error");
             const parsed = parseVisibleResponse(response);
             validateSearchRoute(parsed.items, mode);
-            parsedItems = parsed.items.map(
-              ({ rank, path, range, matched_by }) => ({
-                rank,
-                path,
-                range,
-                matched_by,
-              }),
-            );
+            parsedItems = rankedLocations(parsed.items);
+            for (const [index, item] of parsedItems.entries()) {
+              const file = goldSources.get(item.path);
+              if (!file) continue;
+              const location = locateFullEntity(parsed.items[index], file);
+              if (location) item.source_bytes = location;
+              else
+                item.range_unverified_reason = "full_entity_range_unverified";
+            }
             if (repetition === REPETITIONS) {
               row.file = scoreFileRetrieval(parsed.items, task.targets);
               row.ndcg = scoreNdcg(parsed.items, task.targets);
@@ -463,8 +548,15 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
           row.ndcg
             ? "success"
             : "failed";
-        if (row.status === "success")
-          row.quality_mean = summarizeRepeatedQuality(row.calls, task.targets);
+        if (row.status === "success") {
+          row.quality_mean = summarizeRepeatedQuality(row.calls, task.targets, {
+            includeFileRecall: true,
+          });
+          row.qa_quality_mean = summarizePilotEntity(
+            row.calls,
+            pilot.gold.tasks[task.id],
+          );
+        }
       }
     }
     const after = await snapshotIndex({
@@ -477,6 +569,32 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
       after.logical_content_sha256,
       before.logical_content_sha256,
       "index changed during retrieval",
+    );
+    assert.deepEqual(
+      after.index_settings,
+      before.index_settings,
+      "index settings changed during retrieval",
+    );
+    const counts = {
+      id: group.id,
+      entities: after.entities,
+      fragments: after.fragments,
+    };
+    assert.ok(
+      report.index_counts.corpora.some(({ id }) => id === group.id),
+      "unknown indexed corpus",
+    );
+    report.index_counts = summarizeIndexCounts(
+      report.index_counts.corpora.map((entry) =>
+        entry.id === group.id ? counts : entry,
+      ),
+    );
+    report.index_settings = summarizeIndexSettings(
+      report.index_settings.corpora.map((entry) =>
+        entry.id === group.id
+          ? { id: group.id, ...after.index_settings }
+          : entry,
+      ),
     );
     for (const row of groupRows) row.group_integrity = "verified";
   } catch (error) {
@@ -517,8 +635,12 @@ export async function main(args = process.argv.slice(2)) {
   };
   await mkdir(options.modelCache, { recursive: true });
   const report = {
-    schema_version: 2,
+    schema_version: 3,
+    protocol: PILOT_PROTOCOL,
+    preview: PILOT_PREVIEW,
     quality_aggregation: "mean_of_five",
+    qa_gold: pilot.gold.identity,
+    qa_scoring: PILOT_QA_SCORING,
     suite: pilot.lock.suite,
     label: pilot.config.report.title,
     model: pilot.model,
@@ -532,6 +654,20 @@ export async function main(args = process.argv.slice(2)) {
     rows: [],
     failures: [],
     index_seconds: {},
+    index_counts: summarizeIndexCounts(
+      pilotCorpusIds(pilot).map((id) => ({
+        id,
+        entities: null,
+        fragments: null,
+      })),
+    ),
+    index_settings: summarizeIndexSettings(
+      pilotCorpusIds(pilot).map((id) => ({
+        id,
+        model: pilot.model,
+        input_budget: null,
+      })),
+    ),
   };
   try {
     const candidate = await packageCandidate(values.package, output);

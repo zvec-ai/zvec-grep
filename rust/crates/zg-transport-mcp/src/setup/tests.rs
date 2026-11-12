@@ -41,10 +41,55 @@ impl IndexOperationProvider for ExistingIndex {
         engine: &ZvecGrep,
         options: InfoOptions,
     ) -> Result<crate::InfoResult, EngineError> {
+        assert!(
+            !options.include_counts,
+            "MCP must not request full stored counts"
+        );
         let mut info = engine.info(options).await?;
         info.indexed = true;
         Ok(info)
     }
+}
+
+#[tokio::test]
+async fn mcp_status_does_not_request_full_stored_counts() {
+    let root = tempfile::tempdir().expect("workspace");
+    let server = ZvecGrepMcpServer::build_with_index_operations(
+        Arc::new(ZvecGrep::new()),
+        McpToolset::Full,
+        None,
+        Arc::new(ExistingIndex),
+    );
+    let (server_io, client_io) = tokio::io::duplex(65536);
+    let task = tokio::spawn(async move {
+        server
+            .serve(server_io)
+            .await
+            .expect("server")
+            .waiting()
+            .await
+    });
+    let client = Client {
+        version: ProtocolVersion::V_2026_07_28,
+        answers: Mutex::default(),
+        forms: false,
+    }
+    .serve(client_io)
+    .await
+    .expect("client");
+    let request = CallToolRequestParams::new("zvec_grep_index_status").with_arguments(
+        json!({"root": root.path()})
+            .as_object()
+            .expect("arguments")
+            .clone(),
+    );
+    let CallToolResponse::Complete(result) = client.call_tool_once(request).await.expect("status")
+    else {
+        panic!("status response")
+    };
+    assert_ne!(result.is_error, Some(true));
+    client.cancel().await.expect("close client");
+    task.await.expect("server task").expect("stop server");
 }
 
 #[async_trait]

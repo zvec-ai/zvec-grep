@@ -4,11 +4,18 @@ import { dirname, join, resolve, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readJson, sha256, objectHash, inside, fileHash } from "./io.mjs";
 import { embeddingModel } from "./embedding.mjs";
+import { validateQaPair } from "../metrics/entities.mjs";
 
 export const suiteDirectory = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "..",
 );
+
+// Scoring changes do not change the frozen Gold or the retrieval requests.
+export const QA_SCORING = Object.freeze({
+  version: 2,
+  entity_match: "contains",
+});
 
 export async function loadSuite({
   embedding = process.env.RETRIEVAL_EMBEDDING ?? "local",
@@ -18,7 +25,8 @@ export async function loadSuite({
     join(suiteDirectory, "configs/protocol.json"),
   );
   assert.deepEqual(protocol.modes, ["hybrid", "fts", "vector"]);
-  assert.equal(protocol.preview, "mcp-default");
+  assert.equal(protocol.preview, "full");
+  assert.equal(protocol.request.preview, "full");
   assert.equal(protocol.request.preferSymbol, false);
   assert.equal(protocol.repetitions, 5);
   assert.equal(protocol.quality_repetition, 5);
@@ -97,11 +105,23 @@ export async function loadSuite({
       "file labels must be the frozen accepted-file projection",
     );
   }
+  const qaPairs = await readJson(join(suiteDirectory, "gold/qa-pairs-v1.json"));
+  assert.equal(qaPairs.schema_version, 1);
+  assert.deepEqual(
+    Object.keys(qaPairs.tasks).sort(),
+    lock.tasks.map((task) => task.task_id).sort(),
+  );
+  for (const task of lock.tasks)
+    validateQaPair(task, qaPairs.tasks[task.task_id]);
   return {
     lock,
     protocol,
     gold,
     file_gold: fileGold.tasks,
+    qa_pairs: qaPairs.tasks,
+    // Additional labels affect only QA rescoring, not legacy evidence identity.
+    qa_gold: { id: qaPairs.id, sha256: objectHash(qaPairs) },
+    qa_scoring: { ...QA_SCORING },
     identity: {
       source: objectHash(lock),
       protocol: objectHash(protocol),
@@ -203,6 +223,41 @@ export async function validateGoldSources(root, tasks, gold) {
           lines.slice(anchor.start_line - 1, anchor.end_line).join("\n"),
           anchor.text,
           `${task.task_id}: stale source anchor ${target.id}`,
+        );
+      }
+    }
+  }
+}
+
+/** Bind the new QA annotations to the same frozen source checkout as retrieval. */
+export async function validateQaGoldSources(root, tasks, pairs) {
+  const files = new Map();
+  for (const task of tasks) {
+    const pair = pairs[task.task_id];
+    validateQaPair(task, pair);
+    for (const target of [...pair.file_targets, ...pair.entity_targets]) {
+      const path = join(root, target.path);
+      assert.ok(
+        inside(await realpath(root), await realpath(path)),
+        "QA source escapes corpus",
+      );
+      if (!files.has(target.path)) files.set(target.path, await readFile(path));
+      const source = files.get(target.path);
+      assert.equal(
+        sha256(source),
+        target.file_sha256,
+        `${task.task_id}: stale QA source ${target.path}`,
+      );
+      if (target.definition_text != null) {
+        const actual = source
+          .toString("utf8")
+          .split(/\r?\n/)
+          .slice(target.start_line - 1, target.end_line)
+          .join("\n");
+        assert.equal(
+          actual,
+          target.definition_text.replace(/\r\n/g, "\n").replace(/\n$/, ""),
+          `${task.task_id}: QA definition differs from fixed source`,
         );
       }
     }

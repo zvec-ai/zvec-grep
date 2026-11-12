@@ -2,6 +2,98 @@ import { ZG_MODES } from "./validation.mjs";
 
 const display = (value) => (Number.isFinite(value) ? value.toFixed(4) : "N/A");
 
+export const QA_RECALL_METRICS = [1, 5, 10].map((k) => [
+  `Recall@${k}`,
+  `recall_at_${k}`,
+]);
+
+export const QA_ENTITY_METRICS = [
+  ...[1, 5, 10].map((k) => [`Hit@${k}`, `hit_at_${k}`]),
+  ...QA_RECALL_METRICS,
+  ["MRR@10", "mrr_at_10"],
+  ["nDCG@10", "ndcg_at_10"],
+];
+
+export function qaMetricCell(level, metric, eligible) {
+  if (eligible == null || eligible === 0) return "N/A";
+  const count = level?.metric_task_counts?.[metric];
+  return count > 0 ? display(level?.[metric]) : "N/A";
+}
+
+export function qaPercentCell(level, metric, eligible) {
+  if (eligible == null || eligible === 0) return "N/A";
+  const count = level?.metric_task_counts?.[metric];
+  return count > 0 && Number.isFinite(level?.[metric])
+    ? `${(level[metric] * 100).toFixed(2)}%`
+    : "N/A";
+}
+
+/** Keep diagnostic QA results separate from the existing File metrics. */
+export function qaRetrievalMarkdown(entries, expectedQuestions) {
+  if (!entries.some(([, qa]) => qa)) return [];
+  const scopes = [
+    ["formal", "Formal"],
+    ["diagnostic", "Diagnostic"],
+  ].filter(([scope]) =>
+    entries.some(([, qa]) => qa?.[scope]?.eligible_tasks > 0),
+  );
+  const lines = [
+    "",
+    "## QA File and Entity retrieval",
+    "",
+    "Cells show percentages. Unknown results remain N/A. Diagnostic scores do not establish formal Entity performance.",
+    "",
+    ...(scopes.some(([scope]) => scope === "formal")
+      ? []
+      : [
+          "Formal QA scores are unavailable: Gold must pass correctness and completeness review.",
+          "",
+        ]),
+  ];
+  const table = (metrics) => {
+    const rows = [
+      `| Scope | Arm | Level | ${metrics.map(([label]) => label).join(" | ")} |`,
+      `| --- | --- | --- | ${metrics.map(() => "---:").join(" | ")} |`,
+    ];
+    for (const [scope, label] of scopes)
+      for (const [arm, qa] of entries) {
+        const group = qa?.[scope];
+        const eligible = group?.eligible_tasks;
+        for (const [level, name] of [
+          ["file", "File"],
+          ["entity", "Entity"],
+        ])
+          rows.push(
+            `| ${label} | ${arm} | ${name} | ${metrics.map(([, metric]) => qaPercentCell(group?.[level], metric, eligible)).join(" | ")} |`,
+          );
+      }
+    return rows;
+  };
+  if (scopes.length)
+    lines.push(
+      ...table(QA_RECALL_METRICS),
+      "",
+      "<details>",
+      "<summary>All File and Entity metrics</summary>",
+      "",
+      ...table(QA_ENTITY_METRICS),
+      "",
+      "Each question needs five computable calls for a metric. Scores average those calls, then weight questions equally, including QA nDCG.",
+      "",
+      "</details>",
+    );
+  lines.push(
+    "",
+    ...entries
+      .filter(([, qa]) => qa)
+      .map(
+        ([arm, qa]) =>
+          `${arm}: QA scoring unavailable for ${qa.unavailable_tasks.length}/${qa.planned_tasks ?? expectedQuestions} questions. Reasons and matching evidence are retained in the JSON report.`,
+      ),
+  );
+  return lines;
+}
+
 export function markdownReport(report) {
   const modeEntries = ZG_MODES.map((mode) => [
     `zg-${mode}`,
@@ -15,7 +107,7 @@ export function markdownReport(report) {
   const lines = [
     "# zg Retrieval-only",
     "",
-    `Status: **${report.integrity_passed ? "PASS" : "FAIL"}**. Dataset: **${queryCount} original questions / ${repoCount} repositories**. Quality: **mean of five calls per question and mode; Rust MCP default presentation**. Five repetitions are stability observations, not additional questions.`,
+    `Status: **${report.integrity_passed ? "PASS" : "FAIL"}**. Dataset: **${queryCount} original questions / ${repoCount} repositories**. Quality: **mean of five calls per question and mode; Rust MCP full presentation**. Five repetitions are stability observations, not additional questions.`,
     "",
     "| Arm | Coverage | Stable Top 10 | File Hit@1 | File Hit@5 | File Hit@10 | File MRR@10 | nDCG@10 | Output mean (KiB) | Avg RT (ms) | P50 RT (ms) |",
     "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
@@ -29,7 +121,11 @@ export function markdownReport(report) {
     "",
     "File Hit@1/5/10 and MRR@10 give every valid question equal weight, including misses and product-error zeros. nDCG@10 first averages valid questions within each represented repository, then weights those repositories equally. Invalid evidence is excluded, never scored as zero; partial scores are diagnostic and cannot be compared directly with complete 20-question scores. All five metrics use the same frozen accepted-file targets and native result ranks; repeated chunks consume ranks without file deduplication. Finding a file does not establish sufficient answer evidence.",
     "",
-    "Hybrid, fts and vector use the Rust public MCP default presentation on the same frozen repository index with the original query and Top-10 limit. The benchmark does not send a preview override because the current Rust MCP schema does not expose one. Presentation text and output length do not affect the five file-ranking metrics. Quality thresholds are report-only.",
+    "Hybrid, fts and vector use the Rust public MCP full presentation on the same frozen repository index with the original query and Top-10 limit. Every request explicitly sets preview to full, preserving all available content of each retrieved item. Presentation text and output length do not affect the five file-ranking metrics. Quality thresholds are report-only.",
+    ...qaRetrievalMarkdown(
+      modeEntries.map(([label, entry]) => [label, entry?.qa_retrieval]),
+      queryCount,
+    ),
   ];
   lines.push(
     "",

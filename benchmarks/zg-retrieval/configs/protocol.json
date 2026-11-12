@@ -1,13 +1,14 @@
 {
-  "id": "sweqa20-zg-rust-three-modes-mcp-default-v7",
+  "id": "sweqa20-zg-rust-three-modes-mcp-full-v8",
   "model": "local/potion-code-16m-v2",
   "device": "cpu",
   "modes": ["hybrid", "fts", "vector"],
-  "preview": "mcp-default",
+  "preview": "full",
   "limit": 10,
   "repetitions": 5,
   "quality_repetition": 5,
   "request": {
+    "preview": "full",
     "autoUpdate": false,
     "freshness": "eventual",
     "preferSymbol": false
@@ -20,7 +21,7 @@
   "quality_gate": "report-only-until-a-reviewed-baseline-is-frozen",
   "integrity_gate": "fail-on-runtime-error-invalid-experiment-or-incomplete-call-matrix",
   "call_order": "mode-task-repetition",
-  "preview_contract": "public-rust-mcp-default-bounded-source-presentation;no-preview-request-argument",
+  "preview_contract": "public-rust-mcp-full-source-presentation;explicit-preview-full",
   "primary_metric": "ndcg.repository_macro.ndcg_at_10",
   "index_selection": {
     "content": "code",

@@ -165,6 +165,7 @@ impl ZvecGrep {
             .info(InfoOptions {
                 root: Some(root.to_path_buf()),
                 include_status: false,
+                include_counts: false,
             })
             .await?;
         info.compatibility

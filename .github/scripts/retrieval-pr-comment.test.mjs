@@ -5,6 +5,19 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { publish, validateComparison } from "./retrieval-pr-comment.mjs";
+import { QA_SCORING } from "../../benchmarks/zg-retrieval/core/suite.mjs";
+import { summarizeIndexCounts } from "../../benchmarks/zg-retrieval/core/index-counts.mjs";
+import { summarizeIndexSettings } from "../../benchmarks/zg-retrieval/core/index-settings.mjs";
+import { pilotCorpusIds } from "../../benchmarks/zg-retrieval/expansion/datasets.mjs";
+import {
+  PILOT_FILE_RECALL_METRICS,
+  PILOT_QA_SCORING,
+  PILOT_SUITES,
+} from "../../benchmarks/zg-retrieval/expansion/config.mjs";
+import {
+  QA_ENTITY_METRICS,
+  QA_RECALL_METRICS,
+} from "../../benchmarks/zg-retrieval/reports/zg.mjs";
 
 const base = "a".repeat(40),
   head = "b".repeat(40);
@@ -26,6 +39,34 @@ const models = {
   duretrieval: "local/potion-multilingual-128m",
   quarry: "local/potion-code-16m-v2",
 };
+const readTrustedJson = async (path) =>
+  JSON.parse(await readFile(new URL(path, import.meta.url), "utf8"));
+const corpusIds = {
+  sweqa: (
+    await readTrustedJson("../../benchmarks/zg-retrieval/data/source.lock.json")
+  ).repositories.map(({ repository, commit }) => `${repository}@${commit}`),
+  ...Object.fromEntries(
+    await Promise.all(
+      Object.entries(PILOT_SUITES).map(async ([name, config]) => [
+        name,
+        pilotCorpusIds({
+          name,
+          lock: await readTrustedJson(
+            `../../benchmarks/zg-retrieval/expansion/data/${config.lockFile}`,
+          ),
+        }),
+      ]),
+    ),
+  ),
+};
+const countsFor = (suite, entities = 1000, fragments = 2000) =>
+  summarizeIndexCounts(
+    corpusIds[suite].map((id, index) => ({
+      id,
+      entities: index === 0 ? entities : 0,
+      fragments: index === 0 ? fragments : 0,
+    })),
+  );
 const report = {
   schema_version: 1,
   kind: "retrieval-version-comparison",
@@ -160,7 +201,7 @@ async function fixture(t) {
   return x;
 }
 
-test("a fork PR gets all twelve comparison rows, commit links and a source run link", async (t) => {
+test("a fork PR gets four File/Entity tables, commit links and a source run link", async (t) => {
   const x = await fixture(t);
   await publish(x);
   assert.equal(x.messages().length, 1);
@@ -168,18 +209,272 @@ test("a fork PR gets all twelve comparison rows, commit links and a source run l
   assert.equal(action, "create");
   assert.equal(input.issue_number, 7);
   assert.match(input.body, /✅ Complete/);
-  assert.match(input.body, /0\.5000 \/ 0\.6000 \/ \+0\.1000/);
+  assert.match(input.body, /50\.00% → 60\.00%/);
   assert.equal(
     input.body
       .split("\n")
-      .filter((line) => /^\| (SWE-QA20|BEIR|DuRetrieval|Quarry)/.test(line))
-      .length,
-    12,
+      .filter((line) =>
+        /^\| (fts|vector|hybrid) \| (File|Entity) \|/.test(line),
+      ).length,
+    24,
+  );
+  assert.deepEqual(
+    [...input.body.matchAll(/^### (SWE-QA20|BEIR|DuRetrieval|Quarry)$/gm)].map(
+      (match) => match[1],
+    ),
+    ["SWE-QA20", "BEIR", "DuRetrieval", "Quarry"],
   );
   assert.ok(input.body.includes(`/commit/${base}`));
   assert.ok(input.body.includes(`/commit/${head}`));
   assert.match(input.body, /actions\/runs\/123\/attempts\/1/);
   assert.match(input.body, /Embedding: local\. e2e: skipped/);
+  assert.doesNotMatch(input.body, /explicitly request `preview: "full"`/);
+});
+
+test("the publisher labels validated full preview without relabeling historical results", async (t) => {
+  const x = await fixture(t);
+  const full = { ...report, preview: "full" };
+  assert.equal(validateComparison(full, request).preview, "full");
+  await x.write("comparison/summary.json", full);
+  await publish(x);
+  assert.match(x.messages()[0][1].body, /explicitly request `preview: "full"`/);
+  assert.equal(validateComparison(report, request).preview, undefined);
+  for (const preview of ["short", "mcp-default", "<script>", null])
+    assert.throws(
+      () => validateComparison({ ...report, preview }, request),
+      /Unsupported comparison preview/,
+    );
+});
+
+test("the publisher validates corpus totals and renders each suite once", async (t) => {
+  const x = await fixture(t);
+  const counts = countsFor("beir");
+  const payload = {
+    ...structuredClone(report),
+    index_counts: Object.fromEntries(
+      Object.keys(models).map((suite) => [
+        suite,
+        {
+          baseline: countsFor(suite),
+          candidate: countsFor(suite),
+        },
+      ]),
+    ),
+  };
+  payload.index_counts.sweqa.candidate = countsFor("sweqa", 1001, null);
+  payload.index_counts.quarry = { baseline: null, candidate: null };
+  payload.index_counts.beir.baseline.markdown = "@everyone forged counts";
+  payload.index_counts.beir.baseline.corpora[0].url = "https://evil.invalid";
+  const validated = validateComparison(payload, request);
+  assert.deepEqual(validated.index_counts.beir.baseline, counts);
+  assert.notEqual(
+    validated.index_counts.beir.baseline,
+    payload.index_counts.beir.baseline,
+  );
+  assert.notEqual(
+    validated.index_counts.beir.baseline.corpora[0],
+    payload.index_counts.beir.baseline.corpora[0],
+  );
+  assert.equal(validateComparison(report, request).index_counts, undefined);
+  await x.write("comparison/summary.json", payload);
+  await publish(x);
+  const body = x.messages()[0][1].body;
+  assert.equal((body.match(/^Indexed corpus:/gm) ?? []).length, 4);
+  assert.match(body, /1,000 → 1,001 Entities · 2,000 → N\/A Fragments/);
+  assert.match(body, /N\/A Entities · N\/A Fragments/);
+  assert.doesNotMatch(body, /everyone|forged|evil/);
+
+  for (const change of [
+    (counts) => {
+      counts.entities = -1;
+    },
+    (counts) => {
+      counts.fragments = "2000";
+    },
+    (counts) => {
+      counts.entities = Number.MAX_SAFE_INTEGER + 1;
+    },
+    (counts) => {
+      counts.entities = 1001;
+    },
+    (counts) => {
+      counts.corpora[0].fragments = null;
+    },
+    (counts) => {
+      counts.corpora.push({ ...counts.corpora[0] });
+    },
+    (counts) => {
+      counts.corpora[0].id = "x".repeat(1025);
+    },
+  ]) {
+    const invalid = structuredClone(payload);
+    change(invalid.index_counts.beir.baseline);
+    assert.throws(() => validateComparison(invalid, request));
+  }
+  for (const index_counts of [null, [], { sweqa: payload.index_counts.sweqa }])
+    assert.throws(() =>
+      validateComparison({ ...payload, index_counts }, request),
+    );
+});
+
+test("the publisher requires every frozen corpus ID while retaining unknown counts", () => {
+  const payload = {
+    ...structuredClone(report),
+    index_counts: Object.fromEntries(
+      Object.keys(models).map((suite) => [
+        suite,
+        { baseline: countsFor(suite), candidate: countsFor(suite) },
+      ]),
+    ),
+  };
+  assert.deepEqual(
+    Object.values(corpusIds).map((ids) => ids.length),
+    [11, 6, 1, 20],
+  );
+  for (const suite of Object.keys(models)) {
+    for (const side of ["baseline", "candidate"]) {
+      for (const mutate of [
+        (corpora) => corpora.slice(1),
+        (corpora) => [
+          { ...corpora[0], id: `${corpora[0].id}-wrong` },
+          ...corpora.slice(1),
+        ],
+        (corpora) => [
+          ...corpora,
+          { id: "unexpected-corpus", entities: 1, fragments: 2 },
+        ],
+      ]) {
+        const invalid = structuredClone(payload);
+        invalid.index_counts[suite][side] = summarizeIndexCounts(
+          mutate(invalid.index_counts[suite][side].corpora),
+        );
+        assert.throws(
+          () => validateComparison(invalid, request),
+          /indexed corpus coverage differs/,
+        );
+      }
+      const unknown = structuredClone(payload);
+      unknown.index_counts[suite][side] = countsFor(suite, null, null);
+      unknown.index_counts[suite][side].corpora.reverse();
+      const checked = validateComparison(unknown, request).index_counts[suite][
+        side
+      ];
+      assert.equal(checked.entities, null);
+      assert.equal(checked.fragments, null);
+      assert.equal(checked.corpora.length, corpusIds[suite].length);
+    }
+  }
+});
+
+test("the publisher validates and displays collected model budgets for all four suites", async (t) => {
+  const budget = {
+    max_input_tokens: 1024,
+    unit: "utf16_code_units",
+    rounding: "floor",
+    overlap_percent: 15,
+    normal: { chars_per_100_tokens: 185, max_length: 1894, overlap: 284 },
+    dense: { chars_per_100_tokens: 100, max_length: 1024, overlap: 153 },
+  };
+  const settingsFor = (suite, input_budget) =>
+    summarizeIndexSettings(
+      corpusIds[suite].map((id) => ({
+        id,
+        model: models[suite],
+        input_budget,
+      })),
+    );
+  const payload = {
+    ...structuredClone(report),
+    index_settings: Object.fromEntries(
+      Object.keys(models).map((suite) => [
+        suite,
+        {
+          baseline: settingsFor(suite, null),
+          candidate: settingsFor(suite, budget),
+        },
+      ]),
+    ),
+  };
+  payload.index_settings.beir.candidate.markdown = "@everyone forged settings";
+  payload.index_settings.beir.candidate.corpora[0].url = "https://evil.invalid";
+  const validated = validateComparison(payload, request);
+  assert.deepEqual(
+    validated.index_settings.beir.candidate,
+    settingsFor("beir", budget),
+  );
+  assert.equal(validateComparison(report, request).index_settings, undefined);
+  const x = await fixture(t);
+  await x.write("comparison/summary.json", payload);
+  await publish(x);
+  const body = x.messages()[0][1].body;
+  assert.equal((body.match(/^Embedding:.*ZG input limit:/gm) ?? []).length, 4);
+  assert.equal((body.match(/^\| Mode \| Level \|/gm) ?? []).length, 4);
+  assert.match(body, /ZG input limit: \*\*N\/A → 1,024 tokens\*\*/);
+  assert.match(body, /normal \*\*N\/A → 1,894 \/ 284\*\*/);
+  assert.doesNotMatch(body, /everyone|forged|evil/);
+  for (const change of [
+    (entry) => {
+      entry.input_budget.max_input_tokens = -1;
+    },
+    (entry) => {
+      entry.input_budget.unit = "tokens";
+    },
+    (entry) => {
+      entry.input_budget.rounding = "<script>";
+    },
+    (entry) => {
+      entry.input_budget.normal.overlap = 9999;
+    },
+    (entry) => {
+      entry.model = "local/wrong";
+    },
+    (entry) => {
+      entry.corpora.pop();
+    },
+    (entry) => {
+      entry.corpora[0].id = "wrong";
+    },
+  ]) {
+    const invalid = structuredClone(payload);
+    change(invalid.index_settings.beir.candidate);
+    assert.throws(() => validateComparison(invalid, request));
+  }
+  for (const index_settings of [
+    null,
+    [],
+    { sweqa: payload.index_settings.sweqa },
+  ])
+    assert.throws(() =>
+      validateComparison({ ...payload, index_settings }, request),
+    );
+  const absent = structuredClone(payload);
+  absent.index_settings.beir = { baseline: null, candidate: null };
+  assert.deepEqual(validateComparison(absent, request).index_settings.beir, {
+    baseline: null,
+    candidate: null,
+  });
+  for (const suite of Object.keys(models)) {
+    const legacy = structuredClone(payload);
+    const corpora = corpusIds[suite].map((id) => ({
+      id,
+      model: null,
+      input_budget: null,
+    }));
+    legacy.index_settings[suite].baseline = summarizeIndexSettings(corpora);
+    assert.equal(
+      validateComparison(legacy, request).index_settings[suite].baseline.model,
+      null,
+    );
+    corpora[0].model = models[suite];
+    legacy.index_settings[suite].baseline = summarizeIndexSettings(corpora);
+    assert.doesNotThrow(() => validateComparison(legacy, request));
+    corpora[0].model = "local/wrong";
+    legacy.index_settings[suite].baseline = summarizeIndexSettings(corpora);
+    assert.throws(
+      () => validateComparison(legacy, request),
+      /Unexpected indexed model/,
+    );
+  }
 });
 
 test("later results and failed-job reruns update one bot comment", async (t) => {
@@ -193,6 +488,130 @@ test("later results and failed-job reruns update one bot comment", async (t) => 
     ["create", "update"],
   );
   assert.match(x.messages()[1][1].body, /zg-retrieval-run:123:2/);
+});
+
+test("the publisher renders diagnostic scores while preserving validated counts", async (t) => {
+  const x = await fixture(t);
+  const withDiagnostics = structuredClone(report);
+  withDiagnostics.qa_scoring = { ...QA_SCORING };
+  const group = (level, metrics, score, count) => ({
+    eligible_tasks: 17,
+    [level]: {
+      ...Object.fromEntries(metrics.map(([, metric]) => [metric, score])),
+      metric_task_counts: Object.fromEntries(
+        metrics.map(([, metric]) => [metric, count]),
+      ),
+    },
+  });
+  withDiagnostics.rows[0].entity_diagnostic = {
+    baseline: group("entity", QA_ENTITY_METRICS, 0.5, 13),
+    candidate: group("entity", QA_ENTITY_METRICS, 0.5, 14),
+  };
+  withDiagnostics.rows[0].file_diagnostic = {
+    baseline: group("file", QA_RECALL_METRICS, 0.6, 17),
+    candidate: group("file", QA_RECALL_METRICS, 0.7, 17),
+  };
+  await x.write("comparison/summary.json", withDiagnostics);
+  await publish(x);
+  const body = x.messages()[0][1].body;
+  assert.deepEqual(
+    validateComparison(withDiagnostics, request).qa_scoring,
+    QA_SCORING,
+  );
+  for (const oldRules of [
+    undefined,
+    { entity_match: "identity" },
+    { version: 1, entity_match: "contains" },
+  ]) {
+    const old = structuredClone(withDiagnostics);
+    if (oldRules) old.qa_scoring = oldRules;
+    else delete old.qa_scoring;
+    assert.throws(
+      () => validateComparison(old, request),
+      /Unsupported QA scoring/,
+    );
+  }
+  assert.match(body, /Diagnostic QA results/);
+  assert.doesNotMatch(body, /(?:%|N\/A) \([^)]*\/[^)]*\)/);
+  const diagnostic = validateComparison(withDiagnostics, request).rows[0]
+    .entity_diagnostic;
+  assert.equal(diagnostic.baseline.entity.metric_task_counts.recall_at_10, 13);
+  assert.equal(diagnostic.candidate.entity.metric_task_counts.recall_at_10, 14);
+  assert.match(
+    body,
+    /\| hybrid \| File \| N\/A \| N\/A \| N\/A \| 60\.00% → 70\.00%/,
+  );
+  assert.match(body, /\| hybrid \| Entity \| 50\.00% \|/);
+  assert.match(
+    body,
+    /Hit@1 \| Hit@5 \| Hit@10 \| Recall@1 \| Recall@5 \| Recall@10 \| MRR@10 \| nDCG@10/,
+  );
+
+  for (const level of ["file", "entity"]) {
+    const invalid = structuredClone(withDiagnostics);
+    invalid.rows[0][`${level}_diagnostic`].candidate[
+      level
+    ].metric_task_counts.recall_at_10 = 18;
+    assert.throws(
+      () => validateComparison(invalid, request),
+      /Invalid .* diagnostic scored count/,
+    );
+  }
+});
+
+test("extra QA File metrics are validated without substituting original File scores", () => {
+  const value = structuredClone(report);
+  value.qa_scoring = { ...QA_SCORING };
+  const group = {
+    eligible_tasks: 17,
+    file: {
+      ...Object.fromEntries(
+        QA_RECALL_METRICS.map(([, metric]) => [metric, 0.25]),
+      ),
+      metric_task_counts: Object.fromEntries(
+        QA_RECALL_METRICS.map(([, metric]) => [metric, 17]),
+      ),
+    },
+  };
+  value.rows[0].file_diagnostic = {
+    baseline: structuredClone(group),
+    candidate: structuredClone(group),
+  };
+  assert.equal(
+    validateComparison(value, request).rows[0].file_diagnostic.baseline.file
+      .hit_at_1,
+    undefined,
+  );
+  for (const side of ["baseline", "candidate"]) {
+    const file = value.rows[0].file_diagnostic[side].file;
+    for (const [, metric] of QA_ENTITY_METRICS.filter(
+      ([, name]) => !name.startsWith("recall_"),
+    )) {
+      file[metric] = 0;
+      file.metric_task_counts[metric] = 17;
+    }
+  }
+  const validated = validateComparison(value, request);
+  assert.equal(validated.rows[0].file_diagnostic.baseline.file.hit_at_1, 0);
+  assert.equal(validated.rows[0].metrics.file_hit_at_1.baseline, 0.5);
+  for (const mutate of [
+    (file) => {
+      file.hit_at_1 = 2;
+    },
+    (file) => {
+      file.metric_task_counts.hit_at_1 = 18;
+    },
+    (file) => {
+      delete file.metric_task_counts.hit_at_1;
+    },
+  ]) {
+    const invalid = structuredClone(value);
+    mutate(invalid.rows[0].file_diagnostic.baseline.file);
+    assert.throws(
+      () => validateComparison(invalid, request),
+      /Invalid File retrieval diagnostic/,
+    );
+  }
 });
 
 test("user-copied and @zg-bench comment markers are never edited", async (t) => {
@@ -480,5 +899,50 @@ test("the read-only context job records the original fork PR event's exact versi
       ),
     ),
     request,
+  );
+});
+
+test("trusted publisher validates and retains pilot QA comparison data", () => {
+  const payload = structuredClone(report);
+  payload.pilot_qa_scoring = { ...PILOT_QA_SCORING };
+  payload.pilot_qa_gold = Object.fromEntries(
+    Object.entries(PILOT_SUITES).map(([name, config]) => [
+      name,
+      {
+        id: `${config.suite}-entity-v${config.goldVersion}`,
+        sha256: "a".repeat(64),
+      },
+    ]),
+  );
+  const diagnostic = {
+    eligible_tasks: 1,
+    entity: {
+      ...Object.fromEntries(QA_ENTITY_METRICS.map(([, key]) => [key, 0.25])),
+      metric_task_counts: Object.fromEntries(
+        QA_ENTITY_METRICS.map(([, key]) => [key, 1]),
+      ),
+    },
+  };
+  for (const row of payload.rows.filter((item) => item.suite !== "sweqa")) {
+    for (const key of PILOT_FILE_RECALL_METRICS)
+      row.metrics[key] = { baseline: 0.25, candidate: 0.25, delta: 0 };
+    row.entity_diagnostic = {
+      baseline: structuredClone(diagnostic),
+      candidate: structuredClone(diagnostic),
+    };
+  }
+  const validated = validateComparison(payload, request);
+  assert.deepEqual(validated.pilot_qa_gold, payload.pilot_qa_gold);
+  assert.deepEqual(
+    validated.rows.find((row) => row.suite === "quarry").entity_diagnostic
+      .candidate,
+    diagnostic,
+  );
+  payload.rows.find(
+    (row) => row.suite === "duretrieval",
+  ).entity_diagnostic.candidate.eligible_tasks = 11;
+  assert.throws(
+    () => validateComparison(payload, request),
+    /Invalid Entity retrieval diagnostic eligible count/,
   );
 });

@@ -191,6 +191,75 @@ fn assert_projection(store: &IndexStore, entry: &IndexedFragment) {
 }
 
 #[test]
+fn counts_live_fragments_across_models_and_read_only_reopens() {
+    let temporary = tempfile::tempdir().expect("temporary storage");
+    let mut other = serde_json::to_value(model()).expect("model metadata");
+    other["model"]["name"] = serde_json::json!("other");
+    let embeddings = vec![
+        model(),
+        serde_json::from_value(other).expect("second model"),
+    ];
+    let store = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        graph_enabled: false,
+        storage_path: temporary.path().to_owned(),
+        embeddings: embeddings.clone(),
+    })
+    .expect("two model storage");
+    assert_eq!(store.count_fragments().expect("empty count"), 0);
+
+    for (id, name) in ["fixture", "other"].into_iter().enumerate() {
+        let (source, entities, mut entries) =
+            metadata_fragments(u32::try_from(id).expect("fixture ID"), name);
+        let source = FileRecord::new(
+            source.id(),
+            SourcePath::new(format!("{name}.rs")).expect("source path"),
+            source.snapshot().clone(),
+            source.index_status().clone(),
+        )
+        .expect("file record");
+        for entry in &mut entries {
+            entry.model = format!("fixture/{name}");
+        }
+        store
+            .apply_fixture_records(&source, &entities, &entries)
+            .expect("write one entity with two fragments");
+    }
+    assert_eq!(store.count_fragments().expect("fragment count"), 4);
+    assert_eq!(
+        store
+            .list_files()
+            .expect("files")
+            .iter()
+            .map(|file| file.index_status().entity_count())
+            .sum::<u64>(),
+        2
+    );
+    store.close().expect("close writer");
+    let reader = IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
+        graph_enabled: false,
+        storage_path: temporary.path().to_owned(),
+    })
+    .expect("read-only storage");
+    assert_eq!(reader.count_fragments().expect("persisted count"), 4);
+    reader.close().expect("close reader");
+
+    let store = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        graph_enabled: false,
+        storage_path: temporary.path().to_owned(),
+        embeddings,
+    })
+    .expect("reopen writer");
+    store
+        .delete_file(FileId::new(0))
+        .expect("delete first file");
+    assert_eq!(store.count_fragments().expect("remaining count"), 2);
+    store
+        .delete_file(FileId::new(1))
+        .expect("delete second file");
+    assert_eq!(store.count_fragments().expect("empty count"), 0);
+}
+
+#[test]
 fn stores_shared_metadata_once_and_filters_windows_by_owner_fields() {
     let temporary = tempfile::tempdir().expect("temporary storage");
     let store = metadata_store(temporary.path());

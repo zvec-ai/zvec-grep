@@ -44,7 +44,7 @@ async function temporary(t) {
 
 async function isolatedSuite(t) {
   const directory = await temporary(t);
-  for (const name of ["core", "data", "configs", "gold"])
+  for (const name of ["core", "data", "configs", "gold", "metrics"])
     await cp(join(suiteDirectory, name), join(directory, name), {
       recursive: true,
     });
@@ -235,6 +235,7 @@ test("each mode receives the unmodified original question exactly once, without 
         "autoUpdate",
         "freshness",
         "preferSymbol",
+        "preview",
       ].sort(),
     );
     assert.deepEqual(
@@ -244,7 +245,7 @@ test("each mode receives the unmodified original question exactly once, without 
     assert.equal(args.autoUpdate, false);
     assert.equal(args.freshness, "eventual");
     assert.equal(args.limit, 10);
-    assert.equal(Object.hasOwn(args, "preview"), false);
+    assert.equal(args.preview, "full");
     assert.equal(args.preferSymbol, false);
   }
   assert.throws(
@@ -255,9 +256,9 @@ test("each mode receives the unmodified original question exactly once, without 
     () =>
       requestArguments(task, "/app", "hybrid", {
         ...suite.protocol,
-        preview: "full",
+        preview: "short",
       }),
-    /requires the public MCP default presentation/,
+    /requires the public MCP full presentation/,
   );
 });
 
@@ -278,8 +279,7 @@ test("the fixed plan runs all three modes with five Rust MCP calls per question"
       assert.ok(
         repeats.every(
           (call) =>
-            call.task.task_id === task.task_id &&
-            call.preview === "mcp-default",
+            call.task.task_id === task.task_id && call.preview === "full",
         ),
       );
       assert.deepEqual(
@@ -454,7 +454,8 @@ test("complete product-error observations retain a zero score and denominator bu
   assert.deepEqual(report.integrity_errors, []);
   assert.equal(report.tasks.length, 3);
   assert.equal(report.schema_version, 7);
-  assert.equal(report.preview, "mcp-default");
+  assert.deepEqual(report.qa_scoring, { version: 2, entity_match: "contains" });
+  assert.equal(report.preview, "full");
   assert.deepEqual(Object.keys(report.modes), ["hybrid", "fts", "vector"]);
   assert.equal(Object.hasOwn(report, "previews"), false);
   assert.equal(report.tasks[0].repetition, 5);
@@ -589,7 +590,69 @@ test("successful raw calls with missing or invalid latency invalidate the standa
     call.raw_sha256 = await fileHash(join(fixture.shard, call.raw_path));
   }
   await fixture.save();
-  assert.equal((await fixture.score()).integrity_passed, true);
+  const verified = await fixture.score();
+  assert.equal(verified.integrity_passed, true);
+  assert.equal(verified.repositories[0].index_counts.entities, 1);
+  assert.equal(verified.repositories[0].index_counts.fragments, null);
+  assert.equal(
+    verified.repositories[0].index_settings.model,
+    suite.protocol.model,
+  );
+  assert.equal(verified.repositories[0].index_settings.input_budget, null);
+  const budget = {
+    max_input_tokens: 1024,
+    unit: "utf16_code_units",
+    rounding: "floor",
+    overlap_percent: 15,
+    normal: { chars_per_100_tokens: 185, max_length: 1894, overlap: 284 },
+    dense: { chars_per_100_tokens: 100, max_length: 1024, overlap: 153 },
+  };
+  const saveSettings = async (phase, model, inputBudget) => {
+    const directory = join(fixture.shard, "stages", phase);
+    const status = await readJson(join(directory, "status.json"));
+    status.embedding = model;
+    status.input_budget = inputBudget;
+    await writeJson(join(directory, "status.json"), status);
+    const snapshot = await readJson(join(directory, "summary.json"));
+    Object.assign(snapshot, {
+      schema_version: 3,
+      entities: 1,
+      fragments: null,
+      index_settings: { model, input_budget: inputBudget },
+    });
+    snapshot.artifacts["status.json"] = await fileHash(
+      join(directory, "status.json"),
+    );
+    await writeJson(join(directory, "summary.json"), snapshot);
+  };
+  for (const phase of ["before", "after"])
+    await saveSettings(phase, suite.protocol.model, budget);
+  const recordedSettings = await fixture.score();
+  assert.equal(recordedSettings.integrity_passed, true);
+  assert.deepEqual(
+    recordedSettings.repositories[0].index_settings.input_budget,
+    budget,
+  );
+  await saveSettings("after", suite.protocol.model, {
+    ...budget,
+    overlap_percent: 10,
+  });
+  const changedSettings = await fixture.score();
+  assertNoHeadline(changedSettings);
+  assert.ok(
+    changedSettings.integrity_errors.some((error) =>
+      /index settings changed/.test(error),
+    ),
+  );
+  await saveSettings("after", "local/wrong-model", budget);
+  const wrongModel = await fixture.score();
+  assertNoHeadline(wrongModel);
+  assert.ok(
+    wrongModel.integrity_errors.some((error) =>
+      /configured suite model/.test(error),
+    ),
+  );
+  await saveSettings("after", suite.protocol.model, budget);
   const diagnosticPath = join(fixture.shard, "stages/before/status.stderr.txt");
   const diagnostics = await readFile(diagnosticPath, "utf8");
   await writeFile(diagnosticPath, "tampered diagnostics\n");
@@ -648,6 +711,12 @@ test("missing fts/vector arms cannot silently become a valid hybrid-only run", a
 });
 
 for (const [label, mutate] of [
+  [
+    "omitted full preview request",
+    (fixture) => {
+      delete fixture.calls[1].request.arguments.preview;
+    },
+  ],
   [
     "missing preview identity",
     (fixture) => {

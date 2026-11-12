@@ -1,12 +1,12 @@
 # ZG Retrieval-only benchmark
 
-The workflow measures **zg-hybrid, zg-fts and zg-vector** on four independent suites. The original SWE-QA20 suite uses 20 unchanged questions and 11 pinned repositories from [Actions run 35206585943](https://github.com/Cuiyus/zvec-grep/actions/runs/35206585943). The exploratory suites contain 20 original BEIR queries across four datasets, ten DuRetrieval queries and 20 original Quarry queries across eight languages; see the [pilot design](expansion/README.md). Each mode calls the Rust public MCP search endpoint directly with its default response presentation. No answering agent, query rewriting, subquery generation or LLM judge participates. See the [SWE-QA20 design](./zg-retrieval-only-sweqa20-design.md) for its frozen protocol and scoring details.
+The workflow measures **zg-hybrid, zg-fts and zg-vector** on four independent suites. The original SWE-QA20 suite uses 20 unchanged questions and 11 pinned repositories from [Actions run 35206585943](https://github.com/Cuiyus/zvec-grep/actions/runs/35206585943). The exploratory suites contain 20 original BEIR queries across four datasets, ten DuRetrieval queries and 20 original Quarry queries across eight languages; see the [pilot design](expansion/README.md). Each mode calls the Rust public MCP search endpoint directly with `preview: "full"`. No answering agent, query rewriting, subquery generation or LLM judge participates. See the [SWE-QA20 design](./zg-retrieval-only-sweqa20-design.md) for its frozen protocol and scoring details.
 
 ## Run CI and read the result
 
 The [Retrieval-only workflow](../../.github/workflows/retrieval-only.yml) supports manual runs and reuse by the [PR version comparison](../../.github/workflows/retrieval-comparison.yml). For a manual single-version run, select **Retrieval-only → Run workflow**. Use GitHub's workflow-ref selector to choose the benchmark harness (`main` for the latest merged harness), then set `candidate_ref` to the branch, tag or commit containing the `rust/` workspace to compile. It defaults to `main`. The `embedding` choice defaults to `local`, which preserves each suite's configured local model. Select `remote` to run every suite with `qwen/qwen3.7-text-embedding`; this requires the repository secret `QWEN_EMBEDDING_API_KEY` and variable `QWEN_EMBEDDING_ENDPOINT`. Every run includes all three modes.
 
-PR creation, reopening and new commits automatically compare the frozen PR base and head through all four suites. An authorized `@zg-bench` PR comment requests the same comparison and posts its table. Both versions use the same harness and local models, with separate fresh indexes; neither receives remote embedding credentials. e2e is skipped by default. Each metric cell is base / head / delta (head minus base), on a 0–1 scale. Missing or invalid results make the comparison incomplete rather than zero. The default-branch [result publisher](../../.github/workflows/retrieval-pr-comment.yml) creates or updates one English PR comment with the table and run link, including for fork PRs. It skips cancelled or outdated runs, keeps benchmark execution read-only, and becomes active after its workflow is merged into the default branch. The `retrieval-comparison` artifact and Actions summary also retain the result; `retrieval-base-*` and `retrieval-head-*` retain the underlying reports. See [benchmark setup](../README.md).
+PR creation, reopening and new commits automatically compare the frozen PR base and head through all four suites. An authorized `@zg-bench` PR comment requests the same comparison and posts its table. Both versions use the same harness and local models, with separate fresh indexes; neither receives remote embedding credentials. e2e is skipped by default. Comparison cells show percentages: identical baseline/candidate values appear once; differences use baseline → candidate. The JSON retains exact scores and deltas. Missing or invalid results make the comparison incomplete rather than zero. The default-branch [result publisher](../../.github/workflows/retrieval-pr-comment.yml) creates or updates one English PR comment with the table and run link, including for fork PRs. It skips cancelled or outdated runs, keeps benchmark execution read-only, and becomes active after its workflow is merged into the default branch. The `retrieval-comparison` artifact and Actions summary also retain the result; `retrieval-base-*` and `retrieval-head-*` retain the underlying reports. See [benchmark setup](../README.md).
 
 For a manual paired comparison without a PR comment, select **Retrieval-only PR → Run workflow** and supply full `baseline_sha` / `candidate_sha` commit identities and their `baseline_repository` / `candidate_repository` (`owner/name`). This uses the same local-only comparison and does not run e2e. Manual runs require maintain/admin access.
 
@@ -18,11 +18,11 @@ The **Retrieval results** job publishes one page with a suite overview and a sep
 
 | Arm | Public MCP search input | Presentation |
 | --- | --- | --- |
-| zg-hybrid | `query: originalQuestion` | Rust MCP default |
-| zg-fts | `fts: [originalQuestion]` | Rust MCP default |
-| zg-vector | `vector: [originalQuestion]` | Rust MCP default |
+| zg-hybrid | `query: originalQuestion` | `preview: "full"` |
+| zg-fts | `fts: [originalQuestion]` | `preview: "full"` |
+| zg-vector | `vector: [originalQuestion]` | `preview: "full"` |
 
-Every request also uses `limit: 10`, `autoUpdate: false`, `freshness: eventual` and `preferSymbol: false`. FTS and vector requests omit `query` and the other route. The benchmark leaves `preview` unset to measure the default presentation. The product retains its native chunking, aggregation, ranking and bounded response presentation.
+Every request explicitly uses `preview: "full"`, `limit: 10`, `autoUpdate: false`, `freshness: eventual` and `preferSymbol: false`. FTS and vector requests omit `query` and the other route. Full preview displays each retrieved Entity's complete content; short preview displays excerpts. This presentation choice does not change Entity Recall, native chunking, aggregation or ranking.
 
 The public response parser requires the MCP `freshness:` header and accepts both the legacy MCP body and the CLI compact body. Compact output does not expose per-hit route labels, so unavailable routes remain `null`; the parser never invents route evidence from the requested mode. Route validation still rejects any reported label that conflicts with the requested mode. Global CLI freshness and indexing diagnostics remain visible evidence before the compact body; legacy trailing diagnostics are also supported.
 
@@ -57,7 +57,86 @@ counts and readiness independently of the compact human layout. Historical
 candidates without that snapshot retain the legacy status parser; missing audit
 fields are never inferred from a coverage bar. Raw stdout and stderr are retained.
 
+Each suite also reports indexed Entity and Fragment totals, with a per-index
+breakdown in `index_counts.corpora`. Count each independently built index once,
+without multiplying by queries, modes or repetitions. BEIR's three ArguAna
+indexes exclude different query documents; Quarry indexes each preimage
+separately, so these totals include content shared across indexes. Baseline and
+candidate counts are shown separately when different. Missing counts are N/A,
+never zero or a partial sum. Older candidates do not expose Fragment totals.
+Snapshot schema 3 records `entities` and `fragments` separately; schema 2's
+`fragments` field was an Entity-count alias and must not be used as a Fragment
+count. The benchmark explicitly runs `zg --status --debug` before and after
+each index's retrieval batch. Each invocation reads the counts once, outside
+search timing. Ordinary status, MCP status, and search freshness checks do not
+scan Fragments. Counts do not affect scoring.
+
+The same debug status records the indexed embedding model's configured input-token
+limit and normal/dense Fragment length and overlap budgets. Reports show these
+beside each dataset's counts. Budgets use UTF-16 units, before the metadata
+allowance; they are not actual fragment sizes or measured token consumption.
+The current rule uses 1.85 units/token for normal content, 1 for dense content,
+and 15% overlap, rounding down. Values come from the public status response;
+older versions without these fields display N/A. No extra retrieval or status
+call is made. Settings must remain unchanged across the run.
+
 Rust candidates are built through the [shared package Action](../../.github/actions/rust-candidate-package/action.yml); its [manifest utility](../shared/rust-package-cache.mjs) binds each tarball to the exact source commit and package bytes. SWE-QA uses the same packaging path while retaining its own evaluation protocol.
+
+### QA pairs and File / Entity diagnostics
+
+The [QA dataset](gold/qa-pairs.md) adds the same 20 original questions with
+65 reviewed File targets and 114 Entity targets. Its source locations and
+declarations are tied to the pinned repositories, independently of ZG's parser.
+Seventeen cases permit diagnostic scoring; three have unresolved question
+interpretations. This dataset version reports diagnostic scores against the
+recorded targets. Recall does not imply exhaustive coverage of all relevant
+code in the repositories. Gold updates must state their annotation scope and
+be applied to both sides of a comparison.
+
+The normal runner and report commands also compute these metrics from the same
+five public responses per question and mode:
+
+- File Hit@1/5/10, Recall@1/5/10, MRR@10 and nDCG@10 against the new QA labels.
+- The same metrics for Entity: within the pinned source file, the retrieved
+  Entity's `content` must contain a Gold target's full source range. One result
+  may cover several targets; each target counts once at its first native rank.
+  Partial overlap is a miss. Preview length affects display and information
+  density, not these scores.
+
+MCP source ranges identify the retrieved Entity before preview formatting. If
+line numbers cannot establish a single-line boundary, the affected score remains
+unknown. Entity nDCG credits every distinct covered target at its first rank; its
+ideal score groups Gold targets by file, with larger groups first. See the
+[calculation](../docs/retrieval-only-qa-reference.md#ndcgk-calculation).
+File nDCG is unchanged.
+
+The QA section reports formal and diagnostic scores separately. Result tables
+show scores only; scored/eligible question counts stay in machine-readable
+reports and are not repeated beside tables. Unknown matches and failed calls do
+not become zeros. A repeated-run metric is withheld if any of its five
+observations is unknown. Both levels use equal question weights after averaging
+repeats.
+
+The existing File labels and aggregation remain unchanged.
+Its denominator differs from the new QA table. A QA diagnostic is not a formal
+Entity score or a claim that all answer evidence was found.
+
+Reports bind the QA dataset through `qa_gold`, retain per-call `qa_observations`,
+and expose `qa_retrieval` and `qa_quality_mean` beside the legacy fields.
+Validation recomputes these values from the saved public evidence and frozen QA
+labels. `qa_scoring: {version: 2, entity_match: "contains"}` identifies the updated
+rules. Keep historical scores and recompute both versions before comparing them
+under these rules; rescoring saved responses is not a new retrieval run.
+
+The final PR comparison has one table per suite. Each table contains
+File and Entity rows for fts, vector and hybrid, with Hit@1/5/10,
+Recall@1/5/10, MRR@10 and nDCG@10 columns.
+
+SWE-QA20 uses QA diagnostic scores. A shared cell means both versions have equal
+displayed scores. The three pilots keep their original File scores and add
+File Recall and [Entity diagnostics](expansion/README.md#gold-and-scoring).
+Unscored values appear as N/A. The original SWE-QA20 File scores remain in the
+JSON and full reports, separate from QA Gold.
 
 ## Reports and artifacts
 
@@ -69,9 +148,9 @@ Rust candidates are built through the [shared package Action](../../.github/acti
 
 Evidence retention is 14 days. After a shared candidate build, SWE-QA20, BEIR, DuRetrieval and Quarry run as four independent suite jobs. Each suite publishes its own aggregate metrics and a per-question table even if an individual question fails. The final results job publishes the combined page. Missing artifacts and failed upstream jobs remain explicit in the overview.
 
-SWE-QA20 ZG reports use **schema 7**, with `preview: "mcp-default"`, three `modes`, and one quality row per question/mode. Its section uses the **schema 5** overview with fixed `zg-hybrid`, `zg-fts`, `zg-vector` rows; the combined page uses schema 1. The SWE-QA20 overview records coverage, failed task IDs/modes/reasons, the frozen harness commit and selected candidate ref/commit. Quality rows retain all five public result lists and measurement observations so validators can recompute the case mean, ranking stability, output size and latency. The representative fifth-call `file_retrieval` and `ndcg` fields remain for evidence; `quality_mean` supplies headline quality.
+SWE-QA20 ZG reports use **schema 7**, with `preview: "full"`, three `modes`, and one quality row per question/mode. Its section uses the **schema 5** overview with fixed `zg-hybrid`, `zg-fts`, `zg-vector` rows; the combined page uses schema 1. The SWE-QA20 overview records coverage, failed task IDs/modes/reasons, the frozen harness commit and selected candidate ref/commit. Quality rows retain all five public result lists and measurement observations so validators can recompute the case mean, ranking stability, output size and latency. The representative fifth-call `file_retrieval` and `ndcg` fields remain for evidence; `quality_mean` supplies headline quality.
 
-The protocol ID is `sweqa20-zg-rust-three-modes-mcp-default-v7`. The comparator accepts schema 7 reports with matching protocol and frozen inputs, Rust MCP default presentation and all three modes. Reports from other protocol versions require their matching scorer checkout. Replaying saved evidence is not a new retrieval run.
+The protocol ID is `sweqa20-zg-rust-three-modes-mcp-full-v8`. The comparator accepts schema 7 reports with matching protocol, frozen inputs, explicit full preview and all three modes. Keep earlier v7 default-short results and use their matching scorer checkout to review them. They are not full-preview results; replaying saved evidence is not a new retrieval run.
 
 ## Code structure
 
@@ -79,7 +158,7 @@ The protocol ID is `sweqa20-zg-rust-three-modes-mcp-default-v7`. The comparator 
 zg-retrieval/
   *.mjs              Stable command-line entrypoints
   core/              Frozen suite, corpus, I/O and shared response scoring
-  metrics/           File ranking, nDCG and operational measurements
+  metrics/           File and Entity ranking, nDCG and operational measurements
   engines/zg/        Runner, public response parser, snapshots and evidence audit
   reports/           Validation, same-protocol comparisons and CI rendering
   configs/           Frozen protocol

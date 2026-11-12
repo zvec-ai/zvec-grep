@@ -947,6 +947,7 @@ impl Cli {
                 request: InfoOptions {
                     root: Some(resolve_from(&current_dir, args.root.as_deref())),
                     include_status: true,
+                    include_counts: args.debug,
                 },
                 check_ready: args.check_ready,
                 output: OutputOptions {
@@ -1629,6 +1630,7 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
             operation: IndexOperation::Drop(InfoOptions {
                 root: Some(root),
                 include_status: false,
+                include_counts: false,
             }),
             output,
         });
@@ -2101,6 +2103,22 @@ mod tests {
                 let cli = Cli::try_parse_from(arguments.clone()).expect("explicit color mode");
                 assert_eq!(cli.output_options().color, expected, "{arguments:?}");
             }
+        }
+    }
+
+    #[test]
+    fn only_debug_status_requests_stored_counts() {
+        for (arguments, expected) in [
+            (vec!["zg", "--status"], false),
+            (vec!["zg", "--status", "--check-ready"], false),
+            (vec!["zg", "--status", "--debug"], true),
+            (vec!["zg", "--status", "--debug", "--mode", "server"], true),
+        ] {
+            let CliPlan::Status { request, .. } = plan(&arguments) else {
+                panic!("status plan")
+            };
+            assert!(request.include_status);
+            assert_eq!(request.include_counts, expected, "{arguments:?}");
         }
     }
 

@@ -110,7 +110,10 @@ impl CachedIndexStatus {
         self.job = job;
         let snapshot = IndexStatusSnapshot {
             status: info.index_status(),
-            stats: info.status.clone(),
+            stats: info.status.clone().map(|mut stats| {
+                stats.fragments_indexed = None;
+                stats
+            }),
             checked_epoch_ms: u64::try_from(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -563,6 +566,7 @@ impl WorkspaceRuntimeManager {
             .info(InfoOptions {
                 root: options.root.clone(),
                 include_status: false,
+                include_counts: false,
             })
             .await?;
         let runtime = self.runtime(
@@ -580,6 +584,7 @@ impl WorkspaceRuntimeManager {
             .info(InfoOptions {
                 root: Some(metadata.root),
                 include_status: true,
+                include_counts: options.include_counts,
             })
             .await?;
         let current_job = self.job_for_root(&info.root).map(|job| (job.id, job.state));
@@ -1053,6 +1058,7 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
                     .info(InfoOptions {
                         root: request.root.clone(),
                         include_status: false,
+                        include_counts: false,
                     })
                     .await
             })
@@ -1646,6 +1652,7 @@ mod tests {
         let stats = info.status.as_mut().expect("index status");
         stats.files_scanned = 1001;
         stats.files_unchanged = 1000;
+        stats.fragments_indexed = Some(2000);
         let epoch = cached.invalidate();
         assert!(cached.record(epoch, &info, None));
         cached.invalidate();
@@ -1656,6 +1663,11 @@ mod tests {
             .and_then(|baseline| baseline.stats.as_ref())
             .expect("completion baseline");
         assert_eq!((stats.files_unchanged, stats.files_scanned), (1000, 1001));
+        assert_eq!(stats.fragments_indexed, None);
+        assert_eq!(
+            info.status.expect("original response").fragments_indexed,
+            Some(2000)
+        );
     }
 
     #[test]
@@ -1688,6 +1700,7 @@ mod tests {
         let options = InfoOptions {
             root: Some(root.clone()),
             include_status: true,
+            include_counts: false,
         };
         assert!(IndexOperationProvider::runtime_snapshot(&manager, &root).is_none());
         let reply = manager
@@ -2252,7 +2265,8 @@ mod tests {
             engine
                 .info(InfoOptions {
                     root: Some(child.clone()),
-                    include_status: false
+                    include_status: false,
+                    include_counts: false,
                 })
                 .await
                 .expect("child info")
@@ -2341,6 +2355,7 @@ mod tests {
             .drop_index(InfoOptions {
                 root: Some(workspace.path().to_path_buf()),
                 include_status: false,
+                include_counts: false,
             })
             .await
             .expect("drop should complete");

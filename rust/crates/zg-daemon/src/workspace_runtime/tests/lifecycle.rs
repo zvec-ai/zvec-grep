@@ -391,7 +391,8 @@ async fn retiring_one_workspace_preserves_shared_engine_models_and_persisted_ind
         engine
             .info(InfoOptions {
                 root: Some(first_root),
-                include_status: false
+                include_status: false,
+                include_counts: false,
             })
             .await
             .expect("persisted index")

@@ -80,6 +80,7 @@ pub fn info_options(root: &Path) -> InfoOptions {
     InfoOptions {
         root: Some(root.to_path_buf()),
         include_status: true,
+        include_counts: false,
     }
 }
 

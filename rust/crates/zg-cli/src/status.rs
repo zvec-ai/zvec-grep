@@ -263,6 +263,7 @@ mod tests {
                     model: "text-embedding-v4".into(),
                     dimension: 1024,
                     metric: "cosine".into(),
+                    input_budget: None,
                 }),
                 fts: Some(WorkspaceIndexFts {
                     tokenizer: "jieba".into(),

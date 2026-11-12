@@ -1,0 +1,104 @@
+{
+  "provenance": {
+    "archive_url": "https://scifact.s3-us-west-2.amazonaws.com/release/latest/data.tar.gz",
+    "archive_sha256": "11c621288d41ac144d29b13b0f8503b3820b7d6e8b1f6ff24dff335c196d76be",
+    "claims_member": "data/claims_dev.jsonl",
+    "claims_sha256": "86f0435d08fdb65d1aa41d1472684f57e6e71930626497bdf4d7a9ec1a632217",
+    "corpus_member": "data/corpus.jsonl",
+    "corpus_sha256": "b8d6c89624cb2ed74dee8938effc4f5d8bd2086887880af8110d64be4ceade62",
+    "beir_source_lock_sha256": "8f1c15bfd8083eebe4f85f5b308fa1cc6c52ceffd08d6b573e8f62572b3023fe",
+    "beir_mirror_revision": "b3b5335604bf5ee3c4447671af975ea25143d4f5",
+    "semantics_url": "https://github.com/allenai/scifact/blob/master/doc/evaluation.md",
+    "description": "Four fixed materialized abstracts and their complete original SciFact evidence sets. Sentence numbers are zero-based."
+  },
+  "cases": [
+    {
+      "id": "scifact/137",
+      "query": "Asymptomatic visual impairment screening in elderly populations does not lead to improved vision.",
+      "claim_line": 31,
+      "document_id": "26016929",
+      "corpus_line": 3854,
+      "path": "docs/26016929.md",
+      "source_sha256": "658b60ac89074aa596e78a99b7bb4f3098d9a884d4b160ae2a78165cea4b0da8",
+      "source_text": "Effectiveness of screening older people for impaired vision in community setting: systematic review of evidence from randomised controlled trials.\n\nOBJECTIVE To assess whether population screening for impaired vision among older people in the community leads to improvements in vision. DESIGN Systematic review of randomised controlled trials of population screening in the community that included any assessment of vision or visual function with at least 6 months' follow up. SUBJECTS Adults aged 65 or over. MAIN OUTCOME MEASURE Proportions with visual impairment in intervention and control groups with any method of assessing visual impairment. RESULTS There were no trials that primarily assessed visual screening. Outcome data on vision were available for 3494 people in five trials of multiphasic assessment. All the trials used self reported measures for vision impairment, both as screening tools and as outcome measures. The inclusion of a visual screening component in the assessment did not result in improvements in self reported visual problems (pooled odds ratio 1.04:95% confidence interval 0.89 to 1.22). A small reduction (11%) in the number of older people with self reported visual problems cannot be excluded. CONCLUSIONS Screening of asymptomatic older people in the community is not justified on present evidence. Visual impairment in this age group can usually be reduced with treatment. It is unclear why no benefit was seen. Further work is needed to clarify what interventions are appropriate for older people with unreported impairment of vision.\n",
+      "original_evidence": [
+        {
+          "sentences": [7, 9],
+          "label": "SUPPORT"
+        }
+      ],
+      "evidence_sentences": {
+        "7": "The inclusion of a visual screening component in the assessment did not result in improvements in self reported visual problems (pooled odds ratio 1.04:95% confidence interval 0.89 to 1.22).",
+        "9": "CONCLUSIONS Screening of asymptomatic older people in the community is not justified on present evidence."
+      }
+    },
+    {
+      "id": "scifact/436",
+      "query": "Free histones are degraded by a Rad53-dependent mechanism once DNA has been replicated.",
+      "claim_line": 91,
+      "document_id": "14637235",
+      "corpus_line": 2411,
+      "path": "docs/14637235.md",
+      "source_sha256": "4c8f8d0fb8c196c9ed618c4dab6a9697f3e613f4fd2a503178a152d41d26053c",
+      "source_text": "Histone levels are regulated by phosphorylation and ubiquitylation dependent proteolysis\n\nHistone levels are tightly regulated to prevent harmful effects such as genomic instability and hypersensitivity to DNA-damaging agents due to the accumulation of these highly basic proteins when DNA replication slows down or stops. Although chromosomal histones are stable, excess (non-chromatin bound) histones are rapidly degraded in a Rad53 (radiation sensitive 53) kinase-dependent manner in Saccharomyces cerevisiae. Here we demonstrate that excess histones associate with Rad53 in vivo and seem to undergo modifications such as tyrosine phosphorylation and polyubiquitylation, before their proteolysis by the proteasome. We have identified the Tyr 99 residue of histone H3 as being critical for the efficient ubiquitylation and degradation of this histone. We have also identified the ubiquitin conjugating enzymes (E2) Ubc4 and Ubc5, as well as the ubiquitin ligase (E3) Tom1 (temperature dependent organization in mitotic nucleus 1), as enzymes involved in the ubiquitylation of excess histones. Regulated histone proteolysis has major implications for the maintenance of epigenetic marks on chromatin, genomic stability and the packaging of sperm DNA.\n",
+      "original_evidence": [
+        {
+          "sentences": [1],
+          "label": "SUPPORT"
+        },
+        {
+          "sentences": [2],
+          "label": "SUPPORT"
+        }
+      ],
+      "evidence_sentences": {
+        "1": "Although chromosomal histones are stable, excess (non-chromatin bound) histones are rapidly degraded in a Rad53 (radiation sensitive 53) kinase-dependent manner in Saccharomyces cerevisiae.",
+        "2": "Here we demonstrate that excess histones associate with Rad53 in vivo and seem to undergo modifications such as tyrosine phosphorylation and polyubiquitylation, before their proteolysis by the proteasome."
+      }
+    },
+    {
+      "id": "scifact/1163",
+      "query": "The DdrB protein from Deinococcus radiodurans is an alternative SSB.",
+      "claim_line": 241,
+      "document_id": "15305881",
+      "corpus_line": 2484,
+      "path": "docs/15305881.md",
+      "source_sha256": "361b5e0b286d05f0b25a4675b43fe25336ef2180fa3aa2c58aa690828555097e",
+      "source_text": "The structure of DdrB from Deinococcus: a new fold for single-stranded DNA binding proteins\n\nDeinococcus spp. are renowned for their amazing ability to recover rapidly from severe genomic fragmentation as a result of exposure to extreme levels of ionizing radiation or desiccation. Despite having been originally characterized over 50 years ago, the mechanism underlying this remarkable repair process is still poorly understood. Here, we report the 2.8 A structure of DdrB, a single-stranded DNA (ssDNA) binding protein unique to Deinococcus spp. that is crucial for recovery following DNA damage. DdrB forms a pentameric ring capable of binding single-stranded but not double-stranded DNA. Unexpectedly, the crystal structure reveals that DdrB comprises a novel fold that is structurally and topologically distinct from all other single-stranded binding (SSB) proteins characterized to date. The need for a unique ssDNA binding function in response to severe damage, suggests a distinct role for DdrB which may encompass not only standard SSB protein function in protection of ssDNA, but also more specialized roles in protein recruitment or DNA architecture maintenance. Possible mechanisms of DdrB action in damage recovery are discussed.\n",
+      "original_evidence": [
+        {
+          "sentences": [5],
+          "label": "SUPPORT"
+        }
+      ],
+      "evidence_sentences": {
+        "5": "Unexpectedly, the crystal structure reveals that DdrB comprises a novel fold that is structurally and topologically distinct from all other single-stranded binding (SSB) proteins characterized to date."
+      }
+    },
+    {
+      "id": "scifact/1274",
+      "query": "The tip of the inner tube of the toxic type VI secretion system (T6SS) antibacterial effector in Escherichia coli (E. coli) carries toxic effector proteins.",
+      "claim_line": 271,
+      "document_id": "4406819",
+      "corpus_line": 807,
+      "path": "docs/4406819.md",
+      "source_sha256": "972e51d0ff70d9eadbe24bc4b86c41a908d064258f9acab208e0d94a4ae9fff4",
+      "source_text": "PAAR-repeat proteins sharpen and diversify the Type VI secretion system spike\n\nThe bacterial type VI secretion system (T6SS) is a large multicomponent, dynamic macromolecular machine that has an important role in the ecology of many Gram-negative bacteria. T6SS is responsible for translocation of a wide range of toxic effector molecules, allowing predatory cells to kill both prokaryotic as well as eukaryotic prey cells. The T6SS organelle is functionally analogous to contractile tails of bacteriophages and is thought to attack cells by initially penetrating them with a trimeric protein complex called the VgrG spike. Neither the exact protein composition of the T6SS organelle nor the mechanisms of effector selection and delivery are known. Here we report that proteins from the PAAR (proline-alanine-alanine-arginine) repeat superfamily form a sharp conical extension on the VgrG spike, which is further involved in attaching effector domains to the spike. The crystal structures of two PAAR-repeat proteins bound to VgrG-like partners show that these proteins sharpen the tip of the T6SS spike complex. We demonstrate that PAAR proteins are essential for T6SS-mediated secretion and target cell killing by Vibrio cholerae and Acinetobacter baylyi. Our results indicate a new model of the T6SS organelle in which the VgrG-PAAR spike complex is decorated with multiple effectors that are delivered simultaneously into target cells in a single contraction-driven translocation event.\n",
+      "original_evidence": [
+        {
+          "sentences": [4, 5],
+          "label": "SUPPORT"
+        },
+        {
+          "sentences": [7],
+          "label": "SUPPORT"
+        }
+      ],
+      "evidence_sentences": {
+        "4": "Here we report that proteins from the PAAR (proline-alanine-alanine-arginine) repeat superfamily form a sharp conical extension on the VgrG spike, which is further involved in attaching effector domains to the spike.",
+        "5": "The crystal structures of two PAAR-repeat proteins bound to VgrG-like partners show that these proteins sharpen the tip of the T6SS spike complex.",
+        "7": "Our results indicate a new model of the T6SS organelle in which the VgrG-PAAR spike complex is decorated with multiple effectors that are delivered simultaneously into target cells in a single contraction-driven translocation event."
+      }
+    }
+  ]
+}
