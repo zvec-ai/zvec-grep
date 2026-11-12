@@ -159,7 +159,7 @@ pub(super) fn chunk_options_for_metadata(
     (content_max, overlap)
 }
 
-pub(super) fn fit_text_to_chars(value: &str, max_chars: usize) -> String {
+pub(crate) fn fit_text_to_chars(value: &str, max_chars: usize) -> String {
     if utf16_len(value) <= max_chars {
         return value.to_owned();
     }

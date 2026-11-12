@@ -14,8 +14,8 @@ use zvec_rust::{
 use super::{
     path::{file_membership_doc, file_membership_schema},
     types::{
-        IndexedFragment, StoragePathFilter, StorageSearchFilter, StorageSearchHit,
-        StorageSearchPath,
+        IndexedFragment, SearchRepresentation, StoragePathFilter, StorageSearchFilter,
+        StorageSearchHit, StorageSearchPath,
     },
     zvec::{
         collect_entity_ids, corrupt, doc_key, fetch_map, native, open_collection, quote, scalar,
@@ -25,8 +25,8 @@ use super::{
 use crate::{
     EngineError, EngineResult,
     domain::{
-        CodeMetadata, DirectoryId, Entity, EntityFragment, EntityId, EntityMetadata, FTS_CONFIG,
-        FileId, FileRecord, FragmentId, IndexField, SourcePath,
+        CodeMetadata, DirectoryId, Entity, EntityId, EntityMetadata, FTS_CONFIG, FileId,
+        FileRecord, FragmentId, IndexField, SourcePath,
         model::{EmbeddingMetric, EmbeddingModelInfo},
     },
     utils::sha256_hex_parts,
@@ -36,6 +36,7 @@ const MAX_TOP_K: usize = 100_000;
 
 pub(super) struct Fragments {
     indexes: BTreeMap<String, Collection>,
+    supports_representation_projections: bool,
 }
 
 impl Fragments {
@@ -45,6 +46,7 @@ impl Fragments {
         read_only: bool,
     ) -> EngineResult<Self> {
         let mut indexes = BTreeMap::new();
+        let mut supports_representation_projections = None;
         for embedding in embeddings {
             let dimension = u32::try_from(embedding.dimension())
                 .ok()
@@ -65,6 +67,14 @@ impl Fragments {
                 &fragments_schema(dimension, metric)?,
                 read_only,
             )?;
+            let supports =
+                native(collection.schema(), "inspect fragment schema")?.has_field("representation");
+            if supports_representation_projections.is_some_and(|previous| previous != supports) {
+                return Err(EngineError::invalid_argument(
+                    "fragment collections have incompatible semantic representation schemas; rebuild the index",
+                ));
+            }
+            supports_representation_projections = Some(supports);
             if indexes
                 .insert(embedding.model().reference(), collection)
                 .is_some()
@@ -72,7 +82,11 @@ impl Fragments {
                 return Err(EngineError::invalid_argument("duplicate embedding model"));
             }
         }
-        Ok(Self { indexes })
+        Ok(Self {
+            indexes,
+            supports_representation_projections: supports_representation_projections
+                .unwrap_or(false),
+        })
     }
 
     /// Encode the entire replacement before any stored rows are changed.
@@ -107,10 +121,33 @@ impl Fragments {
             let (owner, fields) = owners.get(&entry.entity_id).ok_or_else(|| {
                 EngineError::invalid_argument("search projection references a missing entity")
             })?;
-            let fragment = fragments.get(&entry.fragment_id).ok_or_else(|| {
+            let evidence_fragment_id = entry
+                .projection
+                .as_ref()
+                .map_or(&entry.fragment_id, |projection| {
+                    &projection.evidence_fragment_id
+                });
+            let _fragment = fragments.get(evidence_fragment_id).ok_or_else(|| {
                 EngineError::invalid_argument("search projection references a missing fragment")
             })?;
-            let mut doc = fragment_doc(owner, fragment, file, directories, fields)?;
+            let document_id = entry.projection.as_ref().map_or_else(
+                || entry.fragment_id.as_str().to_owned(),
+                |projection| projection_document_id(&entry.entity_id, projection.representation),
+            );
+            let mut doc = fragment_doc(
+                owner,
+                file,
+                directories,
+                fields,
+                &document_id,
+                evidence_fragment_id,
+                entry
+                    .projection
+                    .as_ref()
+                    .map_or(SearchRepresentation::All, |projection| {
+                        projection.representation
+                    }),
+            )?;
             native(
                 doc.add_string("text", &index_text(&entry.fts_text)),
                 "encode searchable text",
@@ -195,14 +232,16 @@ impl Fragments {
             fts.set_match_string(&index_text(query)),
             "set full-text query",
         )?;
+        let default_filter = (filter.is_none() && self.supports_representation_projections)
+            .then(|| "representation = 'all'".to_owned());
         let mut request = native(
             SearchQuery::fts("text", &fts, top_k(limit)?),
             "create full-text query",
         )?;
         configure_query(
             &mut request,
-            filter,
-            &["document_id", "entity_id", "file_id"],
+            filter.or(default_filter.as_deref()),
+            &search_output_fields(self.supports_representation_projections),
         )?;
         let mut hits = Vec::new();
         for index in self.indexes.values() {
@@ -210,7 +249,11 @@ impl Fragments {
                 .into_iter()
                 .enumerate()
             {
-                let mut hit = decode_search_hit(&doc, StorageSearchPath::Fts)?;
+                let mut hit = decode_search_hit(
+                    &doc,
+                    StorageSearchPath::Fts,
+                    self.supports_representation_projections,
+                )?;
                 // BM25 is computed against each table's corpus; merge independent rankings.
                 if self.indexes.len() > 1 {
                     let rank = u32::try_from(rank + 1)
@@ -264,14 +307,22 @@ impl Fragments {
             zg_zvec_fp16::embedding_query("embedding", vector, top_k(limit)?),
             "create vector query",
         )?;
+        let default_filter = (filter.is_none() && self.supports_representation_projections)
+            .then(|| "representation = 'all'".to_owned());
         configure_query(
             &mut request,
-            filter,
-            &["document_id", "entity_id", "file_id"],
+            filter.or(default_filter.as_deref()),
+            &search_output_fields(self.supports_representation_projections),
         )?;
         native(index.query(&request), "search vector index")?
             .into_iter()
-            .map(|doc| decode_search_hit(&doc, StorageSearchPath::Vector))
+            .map(|doc| {
+                decode_search_hit(
+                    &doc,
+                    StorageSearchPath::Vector,
+                    self.supports_representation_projections,
+                )
+            })
             .collect()
     }
 
@@ -279,6 +330,19 @@ impl Fragments {
         self.indexes.get(model).ok_or_else(|| {
             EngineError::invalid_argument(format!("unknown embedding model {model:?}"))
         })
+    }
+
+    pub(super) fn build_filter(
+        &self,
+        filter: Option<&StorageSearchFilter>,
+        resolve_directory: &impl Fn(&SourcePath) -> EngineResult<Option<DirectoryId>>,
+    ) -> EngineResult<Option<String>> {
+        build_filter_for_schema(
+            filter,
+            resolve_directory,
+            self.supports_representation_projections,
+            true,
+        )
     }
 
     #[cfg(test)]
@@ -289,6 +353,13 @@ impl Fragments {
 
 fn primary_key(namespace: &str, value: &str) -> String {
     sha256_hex_parts([namespace.as_bytes(), b"\0", value.as_bytes()])
+}
+
+fn projection_document_id(entity_id: &EntityId, representation: SearchRepresentation) -> String {
+    primary_key(
+        "semantic-projection",
+        &format!("{}\0{}", entity_id.as_str(), representation.as_str()),
+    )
 }
 
 pub(super) fn fragment_collection_name(embedding: &EmbeddingModelInfo) -> String {
@@ -312,6 +383,14 @@ fn identity_schema(name: &str) -> EngineResult<CollectionSchema> {
     scalar(&mut schema, "file_id", DataType::Uint32, false, true)?;
     scalar(&mut schema, "entity_id", DataType::String, false, true)?;
     scalar(&mut schema, "document_id", DataType::String, false, false)?;
+    scalar(
+        &mut schema,
+        "evidence_fragment_id",
+        DataType::String,
+        false,
+        false,
+    )?;
+    scalar(&mut schema, "representation", DataType::String, false, true)?;
     Ok(schema)
 }
 
@@ -358,9 +437,14 @@ fn fragments_schema(dimension: u32, metric: MetricType) -> EngineResult<Collecti
     Ok(schema)
 }
 
-fn identity_doc(entity: &Entity, fragment: &EntityFragment) -> EngineResult<Doc> {
+fn identity_doc(
+    entity: &Entity,
+    document_id: &str,
+    evidence_fragment_id: &FragmentId,
+    representation: SearchRepresentation,
+) -> EngineResult<Doc> {
     let mut doc = native(Doc::new(), "create fragment record")?;
-    doc.set_pk(fragment.id.as_str());
+    doc.set_pk(document_id);
     native(
         doc.add_u32("file_id", entity.file_id().get()),
         "encode source identity",
@@ -370,20 +454,30 @@ fn identity_doc(entity: &Entity, fragment: &EntityFragment) -> EngineResult<Doc>
         "encode entity identity",
     )?;
     native(
-        doc.add_string("document_id", fragment.id.as_str()),
+        doc.add_string("document_id", document_id),
         "encode document identity",
+    )?;
+    native(
+        doc.add_string("evidence_fragment_id", evidence_fragment_id.as_str()),
+        "encode evidence identity",
+    )?;
+    native(
+        doc.add_string("representation", representation.as_str()),
+        "encode search representation",
     )?;
     Ok(doc)
 }
 
 fn fragment_doc(
     entity: &Entity,
-    fragment: &EntityFragment,
     file: &FileRecord,
     directories: &[DirectoryId],
     fields: &[(IndexField, String)],
+    document_id: &str,
+    evidence_fragment_id: &FragmentId,
+    representation: SearchRepresentation,
 ) -> EngineResult<Doc> {
-    let mut doc = identity_doc(entity, fragment)?;
+    let mut doc = identity_doc(entity, document_id, evidence_fragment_id, representation)?;
     file_membership_doc(&mut doc, file, directories)?;
     for (field, value) in fields {
         native(
@@ -394,8 +488,17 @@ fn fragment_doc(
     Ok(doc)
 }
 
-fn decode_search_hit(doc: &Doc, path: StorageSearchPath) -> EngineResult<StorageSearchHit> {
+fn decode_search_hit(
+    doc: &Doc,
+    path: StorageSearchPath,
+    supports_representation_projections: bool,
+) -> EngineResult<StorageSearchHit> {
     let document_id = FragmentId::from_string(string_field(doc, "document_id")?);
+    let evidence_fragment_id = if supports_representation_projections {
+        FragmentId::from_string(string_field(doc, "evidence_fragment_id")?)
+    } else {
+        document_id.clone()
+    };
     let entity_id = EntityId::from_string(string_field(doc, "entity_id")?);
     if doc_key(doc)? != document_id.as_str() {
         return Err(corrupt(
@@ -404,6 +507,7 @@ fn decode_search_hit(doc: &Doc, path: StorageSearchPath) -> EngineResult<Storage
     }
     Ok(StorageSearchHit {
         document_id: document_id.as_str().to_owned(),
+        evidence_fragment_id,
         entity_id,
         file_id: FileId::new(u32_field(doc, "file_id")?),
         path,
@@ -430,12 +534,30 @@ fn configure_query(
     Ok(())
 }
 
+fn search_output_fields(supports_representation_projections: bool) -> Vec<&'static str> {
+    let mut fields = vec!["document_id", "entity_id", "file_id"];
+    if supports_representation_projections {
+        fields.push("evidence_fragment_id");
+    }
+    fields
+}
+
+#[cfg(test)]
 pub(super) fn build_filter(
     filter: Option<&StorageSearchFilter>,
     resolve_directory: &impl Fn(&SourcePath) -> EngineResult<Option<DirectoryId>>,
 ) -> EngineResult<Option<String>> {
+    build_filter_for_schema(filter, resolve_directory, true, false)
+}
+
+fn build_filter_for_schema(
+    filter: Option<&StorageSearchFilter>,
+    resolve_directory: &impl Fn(&SourcePath) -> EngineResult<Option<DirectoryId>>,
+    supports_representation_projections: bool,
+    default_to_all_representation: bool,
+) -> EngineResult<Option<String>> {
     let Some(filter) = filter else {
-        return Ok(None);
+        return Ok(default_to_all_representation.then(|| "representation = 'all'".to_owned()));
     };
     if empty_filter(Some(filter)) {
         return Ok(Some(constant_filter(false)));
@@ -463,6 +585,19 @@ pub(super) fn build_filter(
             CodeMetadata::SYMBOL_TYPE,
             types.iter().map(|kind| kind.as_str()),
         ));
+    }
+    if let Some(representation) = filter.representation {
+        if representation != SearchRepresentation::All && !supports_representation_projections {
+            return Err(EngineError::invalid_argument(
+                "semantic representation projections are unavailable in this index; rebuild it",
+            ));
+        }
+        if supports_representation_projections {
+            clauses.push(format!(
+                "representation = {}",
+                quote(representation.as_str())
+            ));
+        }
     }
     Ok((!clauses.is_empty()).then(|| clauses.join(" AND ")))
 }
@@ -648,7 +783,8 @@ fn reject_foreign_ids(
     Ok(())
 }
 
-/// Every canonical fragment has exactly one projection, and its entity has one model.
+/// Every canonical fragment has one source row, optional entity projections use
+/// the source row as evidence, and every entity has one model.
 pub(super) fn validate_projections(
     entities: &[Entity],
     entries: &[IndexedFragment],
@@ -662,7 +798,8 @@ pub(super) fn validate_projections(
                 .map(move |fragment| (&fragment.id, entity.id()))
         })
         .collect::<HashMap<_, _>>();
-    let mut seen = HashSet::new();
+    let mut canonical_seen = HashSet::new();
+    let mut projection_seen = HashSet::new();
     let mut models = HashMap::new();
     for entry in entries {
         if expected.get(&entry.fragment_id).copied() != Some(&entry.entity_id) {
@@ -670,9 +807,22 @@ pub(super) fn validate_projections(
                 "search projection does not reference its canonical entity fragment",
             ));
         }
-        if !seen.insert(&entry.fragment_id) {
+        if let Some(projection) = &entry.projection {
+            if projection.evidence_fragment_id != entry.fragment_id
+                || projection.representation == SearchRepresentation::All
+            {
+                return Err(EngineError::invalid_argument(
+                    "search projection has invalid evidence or representation",
+                ));
+            }
+            if !projection_seen.insert((entry.entity_id.clone(), projection.representation)) {
+                return Err(EngineError::invalid_argument(
+                    "entity has more than one search projection for a representation",
+                ));
+            }
+        } else if !canonical_seen.insert(&entry.fragment_id) {
             return Err(EngineError::invalid_argument(
-                "canonical fragment has more than one search projection",
+                "canonical fragment has more than one source projection",
             ));
         }
         if models
@@ -684,9 +834,9 @@ pub(super) fn validate_projections(
             ));
         }
     }
-    if expected.len() != seen.len() {
+    if expected.len() != canonical_seen.len() {
         return Err(EngineError::invalid_argument(
-            "every canonical fragment requires a search projection",
+            "every canonical fragment requires a source projection",
         ));
     }
     Ok(())

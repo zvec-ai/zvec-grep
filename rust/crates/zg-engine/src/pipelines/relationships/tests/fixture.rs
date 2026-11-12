@@ -273,6 +273,7 @@ pub(super) fn write_symbols(
                     Content::Text(text) | Content::Code(text) => text.clone(),
                     Content::Image(_) => unreachable!("text fixture"),
                 },
+                projection: None,
             })
         })
         .collect();

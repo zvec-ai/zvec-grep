@@ -23,12 +23,14 @@ import type {
   IndexProgress,
   IndexEmbeddingProgress,
   IndexResult,
+  SemanticProjectionRepresentation,
 } from "../../types.js";
 import { sha256Bytes } from "../../utils/hash.js";
 import { normalizePath } from "../../utils/path.js";
 import { ConcurrentTiming, TimingCollector } from "../../utils/timing.js";
 import {
   extractForIndexing,
+  fitTextToChars,
   type Source,
   vectorContentForFragment,
 } from "../../extraction/index.js";
@@ -59,6 +61,8 @@ type DiffResult = {
 type PreparedFragment = {
   fragment: EntityFragment;
   embeddingContent: Content;
+  representation?: SemanticProjectionRepresentation;
+  searchText?: string;
 };
 
 type PreparedFile = {
@@ -909,7 +913,7 @@ async function prepareFile(
     );
     const extracted = await extractForIndexing(source, chunkOptions);
     throwIfIndexCancelled(ctx);
-    const fragments = extracted
+    const sourceFragments = extracted
       .filter(({ fragment }) =>
         ctx.embeddingModel.info.inputKinds.includes(fragment.content.kind),
       )
@@ -921,6 +925,13 @@ async function prepareFile(
           chunkOptions.maxChunkChars,
         ),
       }));
+    const fragments = [
+      ...sourceFragments,
+      ...semanticProjectionFragments(
+        sourceFragments.map(({ fragment }) => fragment),
+        chunkOptions.maxChunkChars,
+      ),
+    ];
 
     return { file, fragments };
   } catch (error) {
@@ -1085,9 +1096,11 @@ function commitFile(
     }
     ctx.storage.replaceFile(
       file.file,
-      file.fragments.map(({ fragment }, index) => ({
+      file.fragments.map(({ fragment, representation, searchText }, index) => ({
         fragment,
         vector: vectors[index],
+        representation,
+        searchText,
       })),
       {
         truncatedFragmentCount,
@@ -1095,7 +1108,9 @@ function commitFile(
     );
     stats.filesIndexed++;
     stats.entitiesCreated += countPublicEntities(
-      file.fragments.map(({ fragment }) => fragment),
+      file.fragments
+        .filter(({ representation }) => representation === undefined)
+        .map(({ fragment }) => fragment),
     );
     return true;
   } catch (error) {
@@ -1880,6 +1895,119 @@ function countPublicEntities(fragments: readonly EntityFragment[]): number {
   }
 
   return count;
+}
+
+function semanticProjectionFragments(
+  fragments: readonly EntityFragment[],
+  maxChars: number | undefined,
+): PreparedFragment[] {
+  const byEntity = new Map<string, EntityFragment[]>();
+  const majorByEntity = new Map<string, EntityFragment>();
+
+  for (const fragment of fragments) {
+    const entityId = fragment.group ?? fragment.id;
+    const group = byEntity.get(entityId) ?? [];
+    group.push(fragment);
+    byEntity.set(entityId, group);
+    if (!fragment.group || fragment.group === fragment.id) {
+      majorByEntity.set(entityId, fragment);
+    }
+  }
+
+  const output: PreparedFragment[] = [];
+  for (const [entityId, entityFragments] of byEntity) {
+    const major = majorByEntity.get(entityId);
+    if (!major || major.content.kind !== "text") {
+      continue;
+    }
+
+    const representations: SemanticProjectionRepresentation[] =
+      major.metadata?.kind === "code"
+        ? ["symbol", "body"]
+        : major.metadata?.kind === "markdown"
+          ? ["document"]
+          : [];
+
+    for (const representation of representations) {
+      const searchText = projectionText(representation, major, entityFragments);
+      if (!searchText) {
+        continue;
+      }
+
+      const projectionFragment: EntityFragment = {
+        ...major,
+        group: entityId,
+      };
+      const embeddingText =
+        maxChars === undefined
+          ? searchText
+          : fitTextToChars(searchText, maxChars);
+      output.push({
+        fragment: projectionFragment,
+        embeddingContent: vectorContentForFragment(
+          projectionFragment,
+          { kind: "text", text: embeddingText },
+          maxChars,
+        ),
+        representation,
+        searchText,
+      });
+    }
+  }
+
+  return output;
+}
+
+function projectionText(
+  representation: SemanticProjectionRepresentation,
+  major: EntityFragment,
+  fragments: readonly EntityFragment[],
+): string | null {
+  const metadata = major.metadata;
+  if (!metadata) {
+    return null;
+  }
+
+  if (representation === "symbol" && metadata.kind === "code") {
+    const qualifiedName =
+      metadata.scope && metadata.symbolName
+        ? `${metadata.scope}::${metadata.symbolName}`
+        : metadata.symbolName;
+    return [
+      qualifiedName,
+      metadata.symbolName,
+      metadata.scope,
+      metadata.signature,
+      metadata.modifiers.join(" "),
+    ]
+      .filter((value): value is string => Boolean(value && value.trim()))
+      .join("\n");
+  }
+
+  if (representation === "body" && metadata.kind === "code") {
+    return [
+      metadata.doc,
+      ...fragments.map((fragment) =>
+        fragment.content.kind === "text" ? fragment.content.text : "",
+      ),
+    ]
+      .filter((value): value is string => Boolean(value && value.trim()))
+      .join("\n");
+  }
+
+  if (representation === "document" && metadata.kind === "markdown") {
+    return [
+      metadata.heading,
+      metadata.scope,
+      ...fragments.map((fragment) =>
+        fragment.content.kind === "text" ? fragment.content.text : "",
+      ),
+    ]
+      .filter((value): value is string => Boolean(value && value.trim()))
+      .join("\n");
+  }
+
+  return null;
 }
 
 async function withContentHash(file: FileInfo): Promise<FileInfo> {

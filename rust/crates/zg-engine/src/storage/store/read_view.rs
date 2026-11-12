@@ -73,7 +73,10 @@ impl ReadView<'_> {
         if fragments::empty_filter(filter) {
             return Ok(Vec::new());
         }
-        let filter = fragments::build_filter(filter, &|path| self.state.directories.get(path))?;
+        let filter = self
+            .state
+            .fragments
+            .build_filter(filter, &|path| self.state.directories.get(path))?;
         self.state
             .fragments
             .find_symbol_entity_ids(name, filter.as_deref())
@@ -155,7 +158,10 @@ impl ReadView<'_> {
         if limit == 0 || fragments::empty_filter(filter) {
             return Ok(Vec::new());
         }
-        let filter = fragments::build_filter(filter, &|path| self.state.directories.get(path))?;
+        let filter = self
+            .state
+            .fragments
+            .build_filter(filter, &|path| self.state.directories.get(path))?;
         self.state
             .fragments
             .search_fts(query, limit, filter.as_deref())

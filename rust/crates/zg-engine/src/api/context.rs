@@ -11,6 +11,99 @@ pub mod options {
 
     use serde::{Deserialize, Serialize};
 
+    const SEMANTIC_FEATURES_VERSION: u32 = 1;
+
+    #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum SemanticRepresentation {
+        Symbol,
+        Body,
+        Document,
+        #[default]
+        All,
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum SemanticTokenSketch {
+        #[default]
+        Off,
+        Trace,
+        Rerank,
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum SemanticGraphRerank {
+        #[default]
+        Off,
+        Shadow,
+        On,
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum SemanticGraphEdgeConfidence {
+        Syntax,
+        #[default]
+        Strong,
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum SemanticGraphExpansion {
+        #[default]
+        Off,
+        Related,
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum SemanticTraceMode {
+        #[default]
+        Off,
+        Summary,
+        Full,
+    }
+
+    #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(default, deny_unknown_fields)]
+    pub struct SemanticFeatures {
+        pub semantic_features_version: u32,
+        pub representation: SemanticRepresentation,
+        pub token_sketch: SemanticTokenSketch,
+        pub graph_rerank: SemanticGraphRerank,
+        pub graph_edge_confidence: SemanticGraphEdgeConfidence,
+        pub graph_expansion: SemanticGraphExpansion,
+        pub trace: SemanticTraceMode,
+    }
+
+    impl Default for SemanticFeatures {
+        fn default() -> Self {
+            Self {
+                semantic_features_version: SEMANTIC_FEATURES_VERSION,
+                representation: SemanticRepresentation::All,
+                token_sketch: SemanticTokenSketch::Off,
+                graph_rerank: SemanticGraphRerank::Off,
+                graph_edge_confidence: SemanticGraphEdgeConfidence::Strong,
+                graph_expansion: SemanticGraphExpansion::Off,
+                trace: SemanticTraceMode::Off,
+            }
+        }
+    }
+
+    impl SemanticFeatures {
+        pub(crate) fn validate(&self) -> crate::EngineResult<()> {
+            if self.semantic_features_version != SEMANTIC_FEATURES_VERSION {
+                return Err(crate::EngineError::invalid_argument(format!(
+                    "unsupported semantic features version {}",
+                    self.semantic_features_version
+                )));
+            }
+            Ok(())
+        }
+    }
+
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     pub struct ContextRoute {
         pub mode: ContextRouteMode,
@@ -71,6 +164,9 @@ pub mod options {
         /// Temporary filter over indexed files; does not alter workspace selection.
         #[serde(default)]
         pub filter: QueryFilter,
+        /// Versioned, opt-in semantic retrieval controls.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub semantic_features: Option<SemanticFeatures>,
         /// Filesystem glob options for the independent rg backend only.
         pub globs: Vec<String>,
         pub insensitive_globs: Vec<String>,
@@ -116,6 +212,11 @@ pub mod options {
     impl ContextOptions {
         pub(crate) fn validate_file_selection(&self) -> crate::EngineResult<()> {
             if self.rg {
+                if self.semantic_features.is_some() {
+                    return Err(crate::EngineError::invalid_argument(
+                        "semantic features require indexed search and cannot be combined with rg",
+                    ));
+                }
                 if self.filter != QueryFilter::default() {
                     return Err(crate::EngineError::invalid_argument(
                         "indexed file filters cannot be combined with rg; use rg glob and type options",
@@ -159,6 +260,7 @@ pub mod options {
                 trace: false,
                 prefer_symbol: false,
                 filter: QueryFilter::default(),
+                semantic_features: None,
                 globs: Vec::new(),
                 insensitive_globs: Vec::new(),
                 file_types: Vec::new(),
@@ -293,6 +395,22 @@ pub mod options {
             for value in [r#"{"files":{}}"#, r#"{"hidden":true}"#] {
                 assert!(serde_json::from_str::<QueryFilter>(value).is_err());
             }
+        }
+
+        #[test]
+        fn semantic_features_have_deterministic_defaults_and_validation() {
+            let defaults: SemanticFeatures = serde_json::from_str("{}").expect("defaults");
+            assert_eq!(defaults, SemanticFeatures::default());
+            assert!(
+                serde_json::from_str::<SemanticFeatures>(r#"{"representation":"invalid"}"#)
+                    .is_err()
+            );
+            assert!(serde_json::from_str::<SemanticFeatures>(r#"{"unknown":true}"#).is_err());
+            let unsupported = SemanticFeatures {
+                semantic_features_version: 2,
+                ..defaults
+            };
+            assert!(unsupported.validate().is_err());
         }
     }
 }

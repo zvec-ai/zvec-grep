@@ -3,6 +3,7 @@ import type {
   Entity,
   EntityFragment,
   FileInfo,
+  SemanticProjectionRepresentation,
   WorkspaceIndexEmbeddingSchema,
 } from "../types.js";
 
@@ -14,6 +15,8 @@ type StoredEntity = {
 type IndexedFragment = {
   fragment: EntityFragment;
   vector: readonly number[];
+  representation?: SemanticProjectionRepresentation;
+  searchText?: string;
 };
 
 type FileIndexDiagnostics = {
@@ -25,6 +28,7 @@ type StorageSearchFilter = {
   groupIds?: readonly string[];
   symbolNames?: readonly string[];
   symbolTypes?: readonly CodeSymbolType[];
+  representation?: "symbol" | "body" | "document" | "all";
 };
 
 type StorageSearchHit = {

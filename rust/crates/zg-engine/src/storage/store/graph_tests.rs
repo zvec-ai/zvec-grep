@@ -103,6 +103,7 @@ fn snapshot(store: &IndexStore, path: impl Into<PathBuf>, symbols: &[&str]) -> S
             model: "fixture/graph".into(),
             vector: vec![1.0, 0.0, 0.0],
             fts_text: (*symbol).into(),
+            projection: None,
         })
         .collect();
     let graph = FileGraphResult {

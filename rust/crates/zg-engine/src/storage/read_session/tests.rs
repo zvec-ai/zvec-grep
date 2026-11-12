@@ -166,6 +166,7 @@ fn write_text(layout: &WorkspaceLayout, storage_home: &Path, text: &str) {
                 model: schema().model().reference(),
                 vector: vec![1.0, 0.0, 0.0],
                 fts_text: text.into(),
+                projection: None,
             }],
         )
         .expect("replace indexed text");

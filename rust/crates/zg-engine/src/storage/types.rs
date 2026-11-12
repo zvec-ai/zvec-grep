@@ -87,6 +87,32 @@ pub(crate) struct IndexedFragment {
     pub model: String,
     pub vector: Vec<f32>,
     pub fts_text: String,
+    pub projection: Option<IndexedProjection>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum SearchRepresentation {
+    Symbol,
+    Body,
+    Document,
+    All,
+}
+
+impl SearchRepresentation {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Symbol => "symbol",
+            Self::Body => "body",
+            Self::Document => "document",
+            Self::All => "all",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct IndexedProjection {
+    pub representation: SearchRepresentation,
+    pub evidence_fragment_id: FragmentId,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -96,6 +122,7 @@ pub(crate) struct StorageSearchFilter {
     pub entity_ids: Option<Vec<EntityId>>,
     pub symbol_names: Option<Vec<String>>,
     pub symbol_types: Option<Vec<SymbolType>>,
+    pub representation: Option<SearchRepresentation>,
 }
 
 /// Boolean predicates over metadata projected into each model collection.
@@ -121,6 +148,7 @@ pub(crate) enum StorageSearchPath {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StorageSearchHit {
     pub document_id: String,
+    pub evidence_fragment_id: FragmentId,
     pub entity_id: EntityId,
     pub file_id: FileId,
     pub path: StorageSearchPath,

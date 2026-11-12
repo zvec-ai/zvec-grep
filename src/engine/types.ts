@@ -300,6 +300,10 @@ export type SearchMatchedBy = "fts" | "vector" | "fts+vector";
 export const SEMANTIC_FEATURES_VERSION = 1 as const;
 
 export type SemanticRepresentation = "symbol" | "body" | "document" | "all";
+export type SemanticProjectionRepresentation = Exclude<
+  SemanticRepresentation,
+  "all"
+>;
 export type SemanticTokenSketch = "off" | "trace" | "rerank";
 export type SemanticGraphRerank = "off" | "shadow" | "on";
 export type SemanticGraphEdgeConfidence = "syntax" | "strong";

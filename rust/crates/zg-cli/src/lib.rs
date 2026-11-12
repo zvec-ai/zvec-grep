@@ -49,7 +49,7 @@ use zg_engine::api::{
         ContextOptions,
         options::{
             ContextRoute, ContextRouteMode, FileCategory, FileFormat, QueryFilter, RgGlob,
-            SymbolType,
+            SemanticFeatures, SymbolType,
         },
     },
     files::FilesOptions,
@@ -468,6 +468,18 @@ fn parse_categories(values: &[String]) -> Result<Vec<FileCategory>, CliError> {
         .collect()
 }
 
+fn parse_semantic_features(value: &str) -> Result<SemanticFeatures, String> {
+    let features = serde_json::from_str::<SemanticFeatures>(value)
+        .map_err(|error| format!("--semantic-features is invalid: {error}"))?;
+    if features.semantic_features_version != 1 {
+        return Err(format!(
+            "--semantic-features is invalid: unsupported semantic features version {}",
+            features.semantic_features_version
+        ));
+    }
+    Ok(features)
+}
+
 fn ordered_glob_rules(matches: &clap::ArgMatches) -> Vec<GlobRule> {
     let mut rules = Vec::new();
     for (name, case_insensitive) in [("globs", false), ("insensitive_globs", true)] {
@@ -502,6 +514,9 @@ pub struct QueryArgs {
     pub debug: bool,
     #[arg(long)]
     pub trace: bool,
+    /// Versioned semantic retrieval controls encoded as deterministic JSON.
+    #[arg(long = "semantic-features", value_name = "JSON", value_parser = parse_semantic_features)]
+    pub semantic_features: Option<SemanticFeatures>,
     #[arg(long, value_enum)]
     pub preview: Option<PreviewMode>,
     #[arg(long, value_enum)]
@@ -778,7 +793,9 @@ pub enum CliError {
     MissingQuery,
     #[error("--rg cannot be combined with --hybrid, --fts, --vector, or --fuse")]
     RgWithIndexedRoutes,
-    #[error("--rg cannot be combined with indexed preview, trace, refresh, or symbol options")]
+    #[error(
+        "--rg cannot be combined with indexed preview, trace, refresh, symbol, or semantic feature options"
+    )]
     RgWithIndexedOptions,
     #[error(
         "filesystem scanning options apply to --index or --rg; use --index to change saved scanning settings"
@@ -1281,6 +1298,7 @@ fn query_option_with_value(value: &str) -> bool {
             | "--hybrid"
             | "--fts"
             | "--vector"
+            | "--semantic-features"
             | "--refresh"
             | "--symbol-type"
             | "--modified-after"
@@ -1312,6 +1330,7 @@ fn query_attached_option(value: &str) -> bool {
         || value.starts_with("--hybrid=")
         || value.starts_with("--fts=")
         || value.starts_with("--vector=")
+        || value.starts_with("--semantic-features=")
         || value.starts_with("--refresh=")
         || value.starts_with("--symbol-type=")
         || value.starts_with("--modified-after=")
@@ -1407,6 +1426,7 @@ fn validate_query(args: &QueryArgs, mode: ClientMode) -> Result<(), CliError> {
     if args.rg
         && (args.preview.is_some()
             || args.trace
+            || args.semantic_features.is_some()
             || args.refresh.is_some()
             || args.prefer_symbol
             || !args.symbol_types.is_empty())
@@ -1514,6 +1534,7 @@ fn query_plan(mut args: QueryArgs, current_dir: PathBuf) -> Result<CliPlan, CliE
                 && (mode != ClientMode::Direct || matches!(args.refresh, Some(RefreshMode::Wait))),
             trace: args.trace,
             prefer_symbol: args.prefer_symbol,
+            semantic_features: args.semantic_features,
             filter: QueryFilter {
                 symbol_types: args.symbol_types.into_iter().map(Into::into).collect(),
                 modified_after_epoch_ms: args.modified_after,
@@ -1574,6 +1595,7 @@ fn uses_path_lookup(args: &QueryArgs) -> bool {
         && !args.fuse
         && !args.prefer_symbol
         && !args.trace
+        && args.semantic_features.is_none()
         && args.refresh.is_none()
         && args.symbol_types.is_empty()
         && args.values.len() == 1
@@ -1832,9 +1854,11 @@ pub fn parse_modified_time(value: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, CliPlan, FileFormat, IndexOperation, QueryFilter, parse_byte_size, parse_modified_time,
+        Cli, CliPlan, FileFormat, IndexOperation, QueryFilter, SemanticFeatures, parse_byte_size,
+        parse_modified_time,
     };
     use std::{ffi::OsString, path::PathBuf};
+    use zg_engine::api::context::options::{SemanticRepresentation, SemanticTokenSketch};
 
     fn plan(arguments: &[&str]) -> CliPlan {
         Cli::try_parse_from(arguments.iter().copied())
@@ -3458,6 +3482,59 @@ mod tests {
         assert_eq!(request.limit, Some(7));
         assert_eq!(output.preview, super::PreviewMode::Short);
         assert!(output.trace);
+    }
+
+    #[test]
+    fn parses_semantic_features_json_with_defaults_and_keeps_wire_round_trip() {
+        let CliPlan::Query {
+            request,
+            path_lookup,
+            ..
+        } = plan(&[
+            "zg",
+            "auth.ts",
+            "--semantic-features",
+            r#"{"representation":"symbol"}"#,
+        ])
+        else {
+            panic!("query")
+        };
+        assert!(!path_lookup);
+        let features = request.semantic_features.expect("semantic features");
+        assert_eq!(features.representation, SemanticRepresentation::Symbol);
+        assert_eq!(features.token_sketch, SemanticTokenSketch::Off);
+        assert_eq!(features.semantic_features_version, 1);
+        let wire = serde_json::to_string(&features).expect("semantic feature wire");
+        assert_eq!(
+            serde_json::from_str::<SemanticFeatures>(&wire).expect("wire parse"),
+            features
+        );
+
+        let CliPlan::Query { request, .. } = plan(&["zg", "query", "--semantic-features", "{}"])
+        else {
+            panic!("query")
+        };
+        assert_eq!(request.semantic_features, Some(SemanticFeatures::default()));
+    }
+
+    #[test]
+    fn semantic_features_json_rejects_malformed_unknown_and_unsupported_values() {
+        for value in [
+            "not-json",
+            r#"{"representation":"invalid"}"#,
+            r#"{"unknown":true}"#,
+            r#"{"semantic_features_version":2}"#,
+        ] {
+            assert!(
+                Cli::try_parse_from(["zg", "query", "--semantic-features", value]).is_err(),
+                "accepted {value}"
+            );
+        }
+        let error = Cli::try_parse_from(["zg", "--rg", "--semantic-features", "{}", "needle"])
+            .expect("query syntax")
+            .into_plan(std::env::temp_dir())
+            .expect_err("rg semantic features");
+        assert!(error.to_string().contains("semantic feature"));
     }
 
     #[test]

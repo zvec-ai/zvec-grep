@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     collections::HashMap,
     future::Future,
     path::{Component, Path, PathBuf},
@@ -41,14 +40,14 @@ use crate::{
     },
     extraction::{
         ExtractedEntity, SourceKind, TextSource, extract_for_indexing, extract_without_graph,
-        source_kind, vector_content_for_fragment,
+        fit_text_to_chars, source_kind, vector_content_for_fragment,
     },
     file_selection::ScanPolicy,
     models::{
         EmbeddingConcurrencyDefaults, EmbeddingOptions, EmbeddingPrepareOptions, ModelError,
         ModelRuntimeLease,
     },
-    storage::types::IndexedFragment,
+    storage::types::{IndexedFragment, IndexedProjection, SearchRepresentation},
     utils::{collapse_whitespace, decode_index_text, sha256_hex},
 };
 
@@ -613,6 +612,7 @@ struct PreparedFragment {
     fragment_id: FragmentId,
     embedding_content: Vec<Content>,
     fts_text: String,
+    projection: Option<IndexedProjection>,
 }
 
 struct PreparedFile {
@@ -935,6 +935,7 @@ fn commit_file(
             fragment_id: fragment.fragment_id,
             fts_text: fragment.fts_text,
             vector,
+            projection: fragment.projection,
         })
         .collect::<Vec<_>>();
     if let Err(error) = storage.replace_file(&file.file, &file.entities, &entries, &file.graph) {
@@ -1122,29 +1123,11 @@ fn prepare_fragments(
     entities: &[Entity],
     max_chars: Option<usize>,
 ) -> Result<Vec<PreparedFragment>, EngineError> {
-    entities
+    let mut prepared: Vec<PreparedFragment> = entities
         .iter()
         .flat_map(|entity| {
             entity.fragments().iter().map(move |fragment| {
-                let content = match (fragment.range, entity.content()) {
-                    (Range::Full, content) => Cow::Borrowed(content),
-                    (Range::Byte(range), Content::Text(text) | Content::Code(text)) => {
-                        let start = usize::try_from(range.start_offset()).map_err(|_| {
-                            EngineError::invalid_argument("fragment start offset exceeds platform limits")
-                        })?;
-                        let end = usize::try_from(range.end_offset()).map_err(|_| {
-                            EngineError::invalid_argument("fragment end offset exceeds platform limits")
-                        })?;
-                        let selected = crate::utils::slice_text(text, start, end)?.to_owned();
-                        Cow::Owned(match entity.content() {
-                            Content::Code(_) => Content::Code(selected),
-                            _ => Content::Text(selected),
-                        })
-                    }
-                    _ => return Err(EngineError::invalid_argument(
-                        "fragments use Full or entity-relative byte ranges for text and code; images require Full",
-                    )),
-                };
+                let content = fragment_content(entity, fragment)?;
                 Ok(PreparedFragment {
                     model: String::new(),
                     entity_id: entity.id().clone(),
@@ -1155,10 +1138,149 @@ fn prepare_fragments(
                         entity.metadata(),
                         max_chars,
                     ),
+                    projection: None,
                 })
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, EngineError>>()?;
+    prepared.extend(prepare_semantic_projections(entities, max_chars)?);
+    Ok(prepared)
+}
+
+fn fragment_content(entity: &Entity, fragment: &EntityFragment) -> Result<Content, EngineError> {
+    match (fragment.range, entity.content()) {
+        (Range::Full, content) => Ok(content.clone()),
+        (Range::Byte(range), Content::Text(text) | Content::Code(text)) => {
+            let start = usize::try_from(range.start_offset()).map_err(|_| {
+                EngineError::invalid_argument("fragment start offset exceeds platform limits")
+            })?;
+            let end = usize::try_from(range.end_offset()).map_err(|_| {
+                EngineError::invalid_argument("fragment end offset exceeds platform limits")
+            })?;
+            let selected = crate::utils::slice_text(text, start, end)?.to_owned();
+            Ok(match entity.content() {
+                Content::Code(_) => Content::Code(selected),
+                _ => Content::Text(selected),
+            })
+        }
+        _ => Err(EngineError::invalid_argument(
+            "fragments use Full or entity-relative byte ranges for text and code; images require Full",
+        )),
+    }
+}
+
+fn prepare_semantic_projections(
+    entities: &[Entity],
+    max_chars: Option<usize>,
+) -> Result<Vec<PreparedFragment>, EngineError> {
+    let mut projections = Vec::new();
+    for entity in entities {
+        let Some(metadata) = entity.metadata() else {
+            continue;
+        };
+        let representations = match metadata {
+            EntityMetadata::Code(_) => {
+                vec![SearchRepresentation::Symbol, SearchRepresentation::Body]
+            }
+            EntityMetadata::Markdown(_) => vec![SearchRepresentation::Document],
+        };
+        let evidence_fragment = entity
+            .fragments()
+            .first()
+            .ok_or_else(|| EngineError::invalid_argument("entity has no evidence fragment"))?;
+        let contents = entity
+            .fragments()
+            .iter()
+            .map(|fragment| fragment_content(entity, fragment))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for representation in representations {
+            let text = projection_text(representation, metadata, &contents);
+            if text.trim().is_empty() {
+                continue;
+            }
+            let embedding_text = max_chars
+                .map(|limit| fit_text_to_chars(&text, limit))
+                .unwrap_or_else(|| text.clone());
+            let embedding_content = match entity.content() {
+                Content::Code(_) => Content::Code(embedding_text),
+                _ => Content::Text(embedding_text),
+            };
+            projections.push(PreparedFragment {
+                model: String::new(),
+                entity_id: entity.id().clone(),
+                fragment_id: evidence_fragment.id.clone(),
+                fts_text: lexical_text(
+                    &match entity.content() {
+                        Content::Code(_) => Content::Code(text.clone()),
+                        _ => Content::Text(text),
+                    },
+                    Some(metadata),
+                ),
+                embedding_content: vector_content_for_fragment(
+                    &embedding_content,
+                    Some(metadata),
+                    max_chars,
+                ),
+                projection: Some(IndexedProjection {
+                    representation,
+                    evidence_fragment_id: evidence_fragment.id.clone(),
+                }),
+            });
+        }
+    }
+    Ok(projections)
+}
+
+fn projection_text(
+    representation: SearchRepresentation,
+    metadata: &EntityMetadata,
+    contents: &[Content],
+) -> String {
+    let mut output = String::new();
+    match (representation, metadata) {
+        (SearchRepresentation::Symbol, EntityMetadata::Code(code)) => {
+            for value in [
+                code.symbol_type.map(|kind| kind.as_str().to_owned()),
+                code.symbol_name.clone(),
+                code.scope.clone(),
+                code.signature.clone(),
+                code.documentation.clone(),
+                code.package.clone(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                output.push_str(&value);
+                output.push('\n');
+            }
+            if code.is_exported {
+                output.push_str("exported\n");
+            }
+            if code.is_declaration {
+                output.push_str("declaration\n");
+            }
+        }
+        (SearchRepresentation::Body, EntityMetadata::Code(code)) => {
+            if let Some(documentation) = &code.documentation {
+                output.push_str(documentation);
+                output.push('\n');
+            }
+            append_contents(&mut output, contents);
+        }
+        (SearchRepresentation::Document, EntityMetadata::Markdown(markdown)) => {
+            for value in [markdown.heading.clone(), markdown.scope.clone()]
+                .into_iter()
+                .flatten()
+            {
+                output.push_str(&value);
+                output.push('\n');
+            }
+            append_contents(&mut output, contents);
+        }
+        _ => {}
+    }
+    output
 }
 
 fn lexical_text(content: &Content, metadata: Option<&EntityMetadata>) -> String {
@@ -2501,7 +2623,10 @@ mod tests {
         let prepared =
             prepare_fragments(&entities, options.max_chunk_chars).expect("embedding inputs");
         assert_eq!(
-            prepared.len(),
+            prepared
+                .iter()
+                .filter(|item| item.projection.is_none())
+                .count(),
             entities
                 .iter()
                 .map(|entity| entity.fragments().len())
@@ -2513,6 +2638,7 @@ mod tests {
             .expect("long section");
         for item in prepared
             .iter()
+            .filter(|item| item.projection.is_none())
             .filter(|item| &item.entity_id == section.id())
         {
             let [Content::Text(text)] = item.embedding_content.as_slice() else {
@@ -2691,7 +2817,11 @@ mod tests {
         )
         .expect("entity");
         let entities = vec![entity];
-        let mut fragments = prepare_fragments(&entities, None).expect("prepare both projections");
+        let mut fragments = prepare_fragments(&entities, None)
+            .expect("prepare canonical fragments and projections")
+            .into_iter()
+            .filter(|fragment| fragment.projection.is_none())
+            .collect::<Vec<_>>();
         for (fragment, body) in fragments.iter_mut().zip(bodies) {
             assert_eq!(fragment.fts_text, format!("Heading\nParent\n{body}\n"));
             let [Content::Text(embedding)] = fragment.embedding_content.as_slice() else {
@@ -3243,6 +3373,7 @@ mod tests {
             entity_id,
             embedding_content: vec![content],
             fts_text: text.to_owned(),
+            projection: None,
         }
     }
 

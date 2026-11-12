@@ -28,6 +28,7 @@ import type {
   Range,
 } from "../types.js";
 import { normalizePath } from "../utils/path.js";
+import { sha256Text } from "../utils/hash.js";
 import type {
   WorkspaceIndexStorage,
   WorkspaceIndexStorageOptions,
@@ -46,6 +47,8 @@ type StoredEntity = {
 type IndexedFragment = {
   fragment: EntityFragment;
   vector: readonly number[];
+  representation?: "symbol" | "body" | "document";
+  searchText?: string;
 };
 
 type FileIndexDiagnostics = {
@@ -57,6 +60,7 @@ type StorageSearchFilter = {
   groupIds?: readonly string[];
   symbolNames?: readonly string[];
   symbolTypes?: readonly CodeSymbolType[];
+  representation?: "symbol" | "body" | "document" | "all";
 };
 
 type StorageSearchHit = {
@@ -96,6 +100,7 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
   private readonly files: ZvecFileMetaStore;
   private readonly filesById = new Map<string, FileRecord>();
   private readonly filesByAbsolutePath = new Map<string, FileRecord>();
+  private readonly supportsRepresentationProjections: boolean;
   private needsOptimize = false;
 
   constructor(options: WorkspaceIndexStorageOptions) {
@@ -128,6 +133,9 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
           ZVecCreateAndOpen(zvecPath, createSchema(options.embedding)),
         );
       }
+      this.supportsRepresentationProjections = this.collection.schema
+        .fields()
+        .some((field) => field.name === "representation");
     } catch (error) {
       // Opening the entity collection can fail after metadata acquired its lock.
       try {
@@ -219,7 +227,9 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     diagnostics: FileIndexDiagnostics = {},
   ): void {
     this.assertWritable("replaceFile");
-    const fragments = entries.map(({ fragment }) => fragment);
+    const fragments = entries
+      .filter(({ representation }) => representation === undefined)
+      .map(({ fragment }) => fragment);
     validateFragmentGroups(file.id, fragments);
     this.markFileDirty(file);
     this.deleteFileDocuments(file.id);
@@ -238,13 +248,34 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     };
 
     if (entries.length > 0) {
-      const docs = entries.map(({ fragment, vector }, index): ZVecDocInput => ({
-        id: fragment.id,
-        vectors: {
-          [ENTITY_VECTOR_FIELD]: [...vector],
+      const docs = entries.map(
+        (
+          { fragment, vector, representation, searchText },
+          index,
+        ): ZVecDocInput => {
+          const entityId = publicEntityId(fragment);
+          const storedFragment = representation
+            ? { ...fragment, group: entityId }
+            : fragment;
+          const documentId = representation
+            ? projectionDocumentId(entityId, representation)
+            : fragment.id;
+
+          return {
+            id: documentId,
+            vectors: {
+              [ENTITY_VECTOR_FIELD]: [...vector],
+            },
+            fields: fragmentToFields(
+              indexedFile,
+              storedFragment,
+              index,
+              representation,
+              searchText,
+            ),
+          };
         },
-        fields: fragmentToFields(indexedFile, fragment, index),
-      }));
+      );
 
       this.upsertDocs(file.id, docs);
 
@@ -305,7 +336,10 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     limit: number,
     filter?: StorageSearchFilter,
   ): StorageSearchHit[] {
-    const zvecFilter = buildFilter(filter);
+    const zvecFilter = buildFilter(
+      filter,
+      this.supportsRepresentationProjections,
+    );
     const docs = this.collection.querySync({
       fieldName: ENTITY_TEXT_FIELD,
       fts: { matchString: query },
@@ -322,7 +356,10 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     limit: number,
     filter?: StorageSearchFilter,
   ): StorageSearchHit[] {
-    const zvecFilter = buildFilter(filter);
+    const zvecFilter = buildFilter(
+      filter,
+      this.supportsRepresentationProjections,
+    );
     const docs = this.collection.querySync({
       fieldName: ENTITY_VECTOR_FIELD,
       vector: [...vector],
@@ -400,10 +437,22 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
       return null;
     }
 
+    const evidenceFragmentId =
+      readNullableStringFieldFromFields(doc.fields, "evidence_fragment_id") ??
+      doc.id;
+    const representation = readNullableStringFieldFromFields(
+      doc.fields,
+      "representation",
+    );
+
+    if (representation !== null && representation !== "all") {
+      return this.getFragment(evidenceFragmentId);
+    }
+
     return {
       file: fileRecordToInfo(file),
       fragment: {
-        id: doc.id,
+        id: evidenceFragmentId,
         group:
           readNullableStringFieldFromFields(doc.fields, "group") ?? undefined,
         fileId,
@@ -909,6 +958,8 @@ function createSchema(
     fields: [
       indexedStringField("group", true),
       indexedStringField("file_id"),
+      indexedStringField("representation", true),
+      stringField("evidence_fragment_id", true),
       stringField("content_kind"),
       stringField("content_hash", true),
       stringField("metadata_kind", true),
@@ -996,6 +1047,8 @@ function fragmentToFields(
   file: FileRecord,
   fragment: EntityFragment,
   fragmentIndex: number,
+  representation?: "symbol" | "body" | "document",
+  searchText?: string,
 ): Record<string, unknown> {
   const contentFields = contentToFields(fragment.content);
 
@@ -1005,11 +1058,14 @@ function fragmentToFields(
       content_hash: file.contentHash,
     }),
     file_id: file.id,
+    representation: representation ?? "all",
+    evidence_fragment_id: fragment.id,
     content_kind: fragment.content.kind,
     ...metadataToFields(fragment.metadata),
     fragment_index: fragmentIndex,
     range_json: JSON.stringify(fragment.range),
     ...contentFields,
+    ...(searchText === undefined ? {} : { text: searchText }),
   };
 }
 
@@ -1310,9 +1366,12 @@ function assertZvecStatus(
 
 function buildFilter(
   filter: StorageSearchFilter | undefined,
+  supportsRepresentationProjections: boolean,
 ): string | undefined {
   if (!filter) {
-    return undefined;
+    return supportsRepresentationProjections
+      ? `representation = 'all'`
+      : undefined;
   }
 
   const clauses: string[] = [];
@@ -1333,7 +1392,30 @@ function buildFilter(
     clauses.push(buildNonEmptyInFilter("symbol_type", filter.symbolTypes));
   }
 
+  if (filter.representation !== undefined) {
+    if (filter.representation !== "all" && !supportsRepresentationProjections) {
+      throw new EngineError(
+        "Semantic representation projections are unavailable in this index; rebuild it",
+        {
+          code: "ZVEC_GREP.ENGINE.STORAGE.REPRESENTATION_PROJECTIONS_MISSING",
+        },
+      );
+    }
+    if (supportsRepresentationProjections) {
+      clauses.push(
+        `representation = ${quoteFilterString(filter.representation)}`,
+      );
+    }
+  }
+
   return clauses.length > 0 ? clauses.join(" AND ") : undefined;
+}
+
+function projectionDocumentId(
+  entityId: string,
+  representation: "symbol" | "body" | "document",
+): string {
+  return sha256Text(`semantic-projection\0${entityId}\0${representation}`);
 }
 
 function buildNonEmptyInFilter(
