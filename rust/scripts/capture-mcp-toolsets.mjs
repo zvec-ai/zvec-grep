@@ -1,5 +1,4 @@
 // Run after the root npm build to capture the Node.js public toolset metadata.
-import { writeFile } from "node:fs/promises";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { createZvecGrepMcpServer } from "../../dist/mcp/tools.js";
 
@@ -21,7 +20,4 @@ for (const toolset of ["agent", "full"]) {
   await client.close();
   await server.close();
 }
-await writeFile(
-  new URL("../compat/mcp/toolsets.json", import.meta.url),
-  `${JSON.stringify(fixtures, null, 2)}\n`,
-);
+console.log(JSON.stringify(fixtures, null, 2));

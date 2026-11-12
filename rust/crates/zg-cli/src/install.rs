@@ -1140,7 +1140,9 @@ fn install_claude(options: &AgentOptions) -> Result<(), InstallError> {
         &directory.join("CLAUDE.md"),
         GUIDANCE_START,
         GUIDANCE_END,
-        &guidance_block("", false, ""),
+        &format!(
+            "{GUIDANCE_START}\n## zvec-grep\n\nFollow the connected zvec-grep MCP server instructions and the zvec_grep_search tool description for workspace retrieval, search routing, and index lifecycle.\n{GUIDANCE_END}"
+        ),
         true,
         None,
         None,
