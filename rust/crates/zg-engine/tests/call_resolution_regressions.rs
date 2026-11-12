@@ -529,7 +529,7 @@ async fn typescript_config_comments_inheritance_and_invalid_boundaries() {
     ] {
         let edges = expected_file.map_or_else(Vec::new, |path| {
             vec![json!({
-                "symbol":{"name":"Foo::run", "filePath":std::path::Path::new(path)}
+                "symbol":{"name":"Foo::run", "filePath":path.split('/').collect::<std::path::PathBuf>()}
             })]
         });
         check_case(Case {
