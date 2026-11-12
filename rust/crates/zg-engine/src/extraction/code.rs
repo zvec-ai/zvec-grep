@@ -142,10 +142,16 @@ fn extract_code(
         entity_heads.push(output.len());
         append_entity(source, entity, max_chars, overlap_chars, &mut output);
     }
-    // Gap chunks follow every entity, so they leave the head indexes intact.
-    if code_format == FileFormat::Php && !output.is_empty() {
-        append_php_gaps(source, &entities, max_chars, overlap_chars, &mut output);
-    }
+    // Anonymous retrieval chunks follow the symbols, preserving graph ordinals.
+    append_code_gaps(
+        source,
+        &entities,
+        tree.root_node(),
+        code_format,
+        max_chars,
+        overlap_chars,
+        &mut output,
+    );
     if output.is_empty() {
         output = fallback(source, max_chars, overlap_chars);
     }
@@ -410,15 +416,26 @@ fn append_entity(
     });
 }
 
-// PHP files mix declarations with templates and top-level statements. The
-// source outside every declaration stays searchable as plain-text chunks.
-fn append_php_gaps(
+// PHP retains all code outside declarations. JS/TS also needs the bodies of
+// callbacks with no symbol owner: excluding their local variables must not
+// remove their contents from retrieval. Existing entities remain authoritative.
+fn append_code_gaps(
     source: &TextSource,
     entities: &[CodeEntity<'_>],
+    root: Node<'_>,
+    format: FileFormat,
     max_chars: usize,
     overlap_chars: usize,
     output: &mut Vec<ExtractedEntity>,
 ) {
+    if output.is_empty()
+        || !matches!(
+            format,
+            FileFormat::Php | FileFormat::JavaScript | FileFormat::TypeScript
+        )
+    {
+        return;
+    }
     let mut covered = Vec::with_capacity(entities.len() * 2);
     for entity in entities {
         covered.push((entity.node.start_byte(), entity.node.end_byte()));
@@ -426,7 +443,11 @@ fn append_php_gaps(
         // inherit theirs from the statement, so walk back from there, as
         // `extract_doc` does, leaving comments between elements searchable.
         if entity.documentation.is_some() {
-            let declaration = php_declaration(entity.node);
+            let declaration = if format == FileFormat::Php {
+                php_declaration(entity.node)
+            } else {
+                entity.node
+            };
             let mut sibling = declaration.prev_named_sibling();
             let mut run: Option<(usize, usize)> = None;
             while let Some(comment) = sibling.filter(|node| node.kind() == "comment") {
@@ -450,6 +471,24 @@ fn append_php_gaps(
     }
     gaps.push((offset, source.text.len()));
 
+    if format != FileFormat::Php {
+        let mut callbacks = Vec::new();
+        collect_uncovered_callbacks(root, &gaps, &mut callbacks);
+        gaps = callbacks
+            .into_iter()
+            .flat_map(|(start, end)| {
+                let first = gaps.partition_point(|&(_, gap_end)| gap_end <= start);
+                gaps[first..]
+                    .iter()
+                    .take_while(move |&&(gap_start, _)| gap_start < end)
+                    .map(move |&(gap_start, gap_end)| (start.max(gap_start), end.min(gap_end)))
+            })
+            .collect();
+    }
+    if gaps.is_empty() {
+        return;
+    }
+
     let line_offsets = line_byte_offsets(&source.text);
     let mut gap_source = source.clone();
     for (start, end) in gaps {
@@ -464,6 +503,31 @@ fn append_php_gaps(
         let remapped =
             remap_script_block_entities(source, chunks, output.len(), &line_offsets, text_start);
         output.extend(remapped);
+    }
+}
+
+fn collect_uncovered_callbacks(
+    node: Node<'_>,
+    gaps: &[(usize, usize)],
+    callbacks: &mut Vec<(usize, usize)>,
+) {
+    let first = gaps.partition_point(|&(_, end)| end <= node.start_byte());
+    if gaps
+        .get(first)
+        .is_none_or(|&(start, _)| start >= node.end_byte())
+    {
+        return;
+    }
+    if matches!(
+        node.kind(),
+        "arrow_function" | "function_expression" | "generator_function" | "method_definition"
+    ) {
+        // An outer callback contains its nested callbacks; do not index both.
+        callbacks.push((node.start_byte(), node.end_byte()));
+        return;
+    }
+    for child in named_children(node) {
+        collect_uncovered_callbacks(child, gaps, callbacks);
     }
 }
 
@@ -2467,6 +2531,57 @@ public class Service {
             })
             .collect::<Vec<_>>();
         assert_eq!(names, ["limit", "run"]);
+    }
+
+    #[test]
+    fn keeps_unowned_callbacks_searchable_without_local_symbols() {
+        let text = "const head = 1;\n\
+                    function helper() {}\n\
+                    suite('outside', () => {\n\
+                      const expected = 'callbackneedle🙂';\n\
+                      function nested() { return 'ownednested'; }\n\
+                      suite('inside', function() { const inner = 'innerneedle'; helper(); });\n\
+                    });\n\
+                    register({ run() { const methodLocal = 'methodneedle'; } });\n\
+                    const tail = 2;\n\
+                    function covered() { register(() => { const inside = 'coveredneedle'; }); }\n";
+        for format in [FileFormat::JavaScript, FileFormat::TypeScript] {
+            let source = test_source(format, "callbacks", text);
+            for collect_graph in [false, true] {
+                let output = super::extract_for_indexing(
+                    &source,
+                    ChunkOptions {
+                        max_chunk_chars: Some(120),
+                        chunk_overlap_chars: Some(20),
+                    },
+                    collect_graph,
+                )
+                .expect("callback extraction");
+                let names = output
+                    .fragments
+                    .iter()
+                    .filter_map(|entity| match test_metadata(entity) {
+                        Some(EntityMetadata::Code(metadata)) => metadata.symbol_name.as_deref(),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(names, ["head", "helper", "nested", "tail", "covered"]);
+                let anonymous = plain_chunks(&output.fragments).join("\n");
+                assert!(anonymous.contains("callbackneedle🙂"), "{format:?}");
+                assert!(anonymous.contains("innerneedle"), "{format:?}");
+                assert!(anonymous.contains("methodneedle"), "{format:?}");
+                // Bodies already owned by symbols are not duplicated in gap chunks.
+                assert!(!anonymous.contains("ownednested"));
+                assert!(!anonymous.contains("coveredneedle"));
+                for (index, entity) in output.fragments.iter().enumerate() {
+                    assert_source_backed(&source, entity);
+                    assert_eq!(entity.index, index);
+                }
+                if let Some(graph) = output.graph {
+                    assert_eq!(graph.head_fragment_indices.len(), names.len());
+                }
+            }
+        }
     }
 
     #[test]
