@@ -34,15 +34,30 @@ pub(crate) fn configured_selection(
     options: &IndexOptions,
 ) -> Result<Option<EmbeddingSelection>, EngineError> {
     let config = config::read()?;
+    let existing = existing
+        .and_then(|workspace| workspace.index().descriptor())
+        .map(IndexDescriptor::default_embedding_model)
+        .map(|model| model.model().reference());
+    if options.embedding.is_none()
+        && existing.is_none()
+        && let Some(default) = &options.embedding_default
+    {
+        if matches!(
+            default.source,
+            EmbeddingSelectionSource::Explicit | EmbeddingSelectionSource::ExistingIndex
+        ) {
+            return Err(EngineError::invalid_argument(
+                "Caller embedding defaults cannot be explicit or existing-index selections",
+            ));
+        }
+        return Ok(Some(default.clone()));
+    }
     choose_configured(
         options
             .embedding
             .as_ref()
             .map(|model| model.reference.clone()),
-        existing
-            .and_then(|workspace| workspace.index().descriptor())
-            .map(IndexDescriptor::default_embedding_model)
-            .map(|model| model.model().reference()),
+        existing,
         std::env::var("ZVEC_GREP_EMBEDDING").unwrap_or_default(),
         config::string(&config, &["defaults", "embedding"]),
     )
@@ -86,12 +101,13 @@ pub(super) async fn select(
 ) -> Result<EmbeddingSelection, EngineError> {
     let configured = configured_selection(existing, options)?;
     if configured.as_ref().is_some_and(|selection| {
-        matches!(
-            selection.source,
-            EmbeddingSelectionSource::Explicit | EmbeddingSelectionSource::ExistingIndex
-        )
+        options.embedding_default.is_some()
+            || matches!(
+                selection.source,
+                EmbeddingSelectionSource::Explicit | EmbeddingSelectionSource::ExistingIndex
+            )
     }) {
-        return Ok(configured.expect("explicit or existing selection"));
+        return Ok(configured.expect("resolved selection"));
     }
     let analysis = analyze(root, scan, options.signal.clone()).await?;
     let mut selection = configured.unwrap_or_else(|| EmbeddingSelection {

@@ -773,6 +773,7 @@ mod tests {
     fn setup() -> IndexSetup {
         IndexSetup {
             selection: None,
+            supports_embedding_defaults: true,
             default_model: Some("remote/ready".into()),
             models: vec![
                 EmbeddingChoice {

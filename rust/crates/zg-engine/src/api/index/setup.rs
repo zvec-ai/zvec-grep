@@ -25,6 +25,9 @@ pub struct IndexSetupOptions {
 pub struct IndexSetup {
     pub models: Vec<EmbeddingChoice>,
     pub default_model: Option<String>,
+    /// Supports caller defaults without treating them as explicit overrides.
+    #[serde(default)]
+    pub supports_embedding_defaults: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection: Option<super::embedding::EmbeddingSelection>,
 }

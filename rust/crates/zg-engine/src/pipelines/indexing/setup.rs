@@ -81,6 +81,7 @@ pub(crate) async fn index_setup(mut options: IndexSetupOptions) -> Result<IndexS
     Ok(IndexSetup {
         models,
         default_model,
+        supports_embedding_defaults: true,
         selection,
     })
 }

@@ -115,6 +115,7 @@ mod tests {
         }))
         .expect("v2 reply without selection metadata");
         assert!(reply.selection.is_none());
+        assert!(!reply.supports_embedding_defaults);
     }
 
     #[test]
@@ -134,6 +135,27 @@ mod tests {
             assert_eq!(wire["request"], expected);
             serde_json::from_value::<DaemonCommand>(wire).expect("v2 request");
         }
+    }
+
+    #[test]
+    fn negotiated_caller_defaults_remain_distinct_from_explicit_models() {
+        use zg_engine::api::index::embedding::{EmbeddingSelection, EmbeddingSelectionSource};
+
+        let options = zg_engine::api::index::IndexOptions {
+            embedding_default: Some(EmbeddingSelection {
+                model: "local/bekko-256-int8".into(),
+                source: EmbeddingSelectionSource::Automatic,
+                analysis: None,
+            }),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(DaemonCommand::Index(options.clone())).expect("request");
+        assert!(wire["request"]["embedding"].is_null());
+        assert_eq!(wire["request"]["embedding_default"]["source"], "automatic");
+        assert_eq!(
+            serde_json::from_value::<DaemonCommand>(wire).expect("request roundtrip"),
+            DaemonCommand::Index(options)
+        );
     }
 
     #[test]

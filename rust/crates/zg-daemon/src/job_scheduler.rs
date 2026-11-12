@@ -684,6 +684,10 @@ fn merge_runtime_options(current: &mut IndexOptions, incoming: &mut IndexOptions
         .embedding
         .as_ref()
         .is_some_and(|model| current.embedding.as_ref() != Some(model))
+        || (current.embedding.is_none()
+            && incoming.embedding_default.as_ref().is_some_and(|default| {
+                current.embedding_default.as_ref().map(|value| &value.model) != Some(&default.model)
+            }))
         || incoming
             .endpoint
             .as_ref()
@@ -718,10 +722,14 @@ fn merge_runtime_options(current: &mut IndexOptions, incoming: &mut IndexOptions
     {
         current.runtime_model_cache = None;
     }
-    // Runtime/model settings are explicit updates too. A filter-only request
-    // must not erase the model or credentials of an already queued manual job.
+    // Preserve runtime/model updates and caller defaults across queued jobs. A
+    // filter-only request must not erase a queued manual job's model or credentials.
     merge_update(&mut current.root, incoming.root.take());
     merge_update(&mut current.embedding, incoming.embedding.take());
+    merge_update(
+        &mut current.embedding_default,
+        incoming.embedding_default.take(),
+    );
     merge_update(&mut current.api_key, incoming.api_key.take());
     merge_update(
         &mut current.runtime_api_key,
@@ -2057,6 +2065,29 @@ mod tests {
         let reset = pending.expect("pending reset");
         assert!(reset.reset_paths);
         assert_eq!(reset.scan.nested_git, None);
+    }
+
+    #[test]
+    fn merging_embedding_defaults_does_not_promote_them_to_explicit_models() {
+        use zg_engine::api::index::embedding::{EmbeddingSelection, EmbeddingSelectionSource};
+
+        let default = EmbeddingSelection {
+            model: "local/bekko-256-int8".into(),
+            source: EmbeddingSelectionSource::Automatic,
+            analysis: None,
+        };
+        let mut pending = Some(IndexOptions::default());
+        super::merge_options(
+            &mut pending,
+            IndexOptions {
+                embedding_default: Some(default.clone()),
+                ..Default::default()
+            },
+        );
+        super::merge_options(&mut pending, IndexOptions::default());
+        let pending = pending.expect("queued request");
+        assert_eq!(pending.embedding_default, Some(default));
+        assert!(pending.embedding.is_none());
     }
 
     #[test]

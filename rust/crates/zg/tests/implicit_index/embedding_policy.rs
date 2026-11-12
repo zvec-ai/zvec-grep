@@ -17,6 +17,92 @@ fn assert_no_download(fixture: &Fixture) {
     assert!(!cache.exists() || fs::read_dir(cache).expect("model cache").next().is_none());
 }
 
+#[tokio::test]
+async fn queued_defaults_preserve_models_published_before_writer_admission() {
+    for mode in ["direct", "server"] {
+        for rebuild in [false, true] {
+            let mut fixture = Fixture::new();
+            if mode == "server" {
+                fixture.start_server();
+            }
+            weighted_workspace(&fixture);
+            fixture.success(&["--index", "--mode", "direct", "--embedding", CODE]);
+            let storage = fixture.root.path().join(".zvec-grep");
+            let manifest = storage.join("manifest.json");
+            let published = fs::read(&manifest).expect("prepared writer manifest");
+            let writer = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(storage.join("locks/home"))
+                .expect("workspace lock");
+            writer.try_lock().expect("hold writer admission");
+            // Keep the first writer's finished explicit build in staging while
+            // the second process completes preflight, as in a real first build.
+            let staged = storage.join("temp/new");
+            fs::create_dir_all(staged.parent().expect("staging parent"))
+                .expect("staging directory");
+            fs::rename(storage.join("index"), &staged).expect("withhold index publication");
+            fs::remove_file(&manifest).expect("withhold manifest");
+            let intent = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(storage.join("locks/write-intent"))
+                .expect("writer intent");
+            let mut command = tokio::process::Command::from(
+                fixture.command(&["--index", "--mode", mode, "--color", "never"]),
+            );
+            if rebuild {
+                command.arg("--rebuild");
+            }
+            let mut child = command
+                .kill_on_drop(true)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("queued index process");
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+            loop {
+                match intent.try_lock() {
+                    Err(fs::TryLockError::WouldBlock) => {
+                        if intent.try_lock_shared().is_ok() {
+                            intent.unlock().expect("release shared intent probe");
+                            break;
+                        }
+                    }
+                    Ok(()) => intent.unlock().expect("release intent probe"),
+                    Err(error) => panic!("intent probe: {error}"),
+                }
+                if child.try_wait().expect("child status").is_some() {
+                    let output = child.wait_with_output().await.expect("early exit");
+                    panic!(
+                        "{mode}, rebuild={rebuild}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "writer never queued"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            // Observing shared writer intent proves the CLI has passed preflight
+            // and is blocked on our exclusive home lock; no timing sleep decides it.
+            fs::rename(staged, storage.join("index")).expect("publish first writer's index");
+            fs::write(&manifest, published).expect("publish first writer's manifest");
+            drop(writer);
+            let output = success(child.wait_with_output().await.expect("queued indexing"));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains(&format!("Using: {CODE} (existing index)")),
+                "{mode}, rebuild={rebuild}: {stderr}"
+            );
+            assert!(!stderr.contains("Using recommended"), "{stderr}");
+            fixture.assert_model(mode, CODE);
+            assert_no_download(&fixture);
+        }
+    }
+}
+
 #[test]
 fn capped_weights_and_rebuild_choices_match_in_direct_and_server_modes() {
     for mode in ["direct", "server"] {

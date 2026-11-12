@@ -50,6 +50,11 @@ pub mod options {
         pub scan: ScanRulesUpdate,
         /// The single model used to embed text content in this workspace.
         pub embedding: Option<EmbeddingModelSpec>,
+        /// Caller-resolved default, used only if neither an explicit model nor
+        /// an existing index is present at writer admission. Daemon clients must
+        /// check setup capabilities before sending this optional v2 extension.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub embedding_default: Option<super::embedding::EmbeddingSelection>,
         /// Index-only embedding concurrency: llama.cpp contexts (up to eight),
         /// ORT CPU/CUDA sessions, or remote requests. Values must be positive.
         /// ORT caps direct-mode sessions to available hardware concurrency.

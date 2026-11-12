@@ -1033,14 +1033,14 @@ async fn execute_index(
     let server = use_server(mode, home).await?;
     match operation {
         IndexOperation::Build(mut request) => {
-            let selection = resolve_cli_index_embedding(&mut request).await?;
+            resolve_cli_index_embedding(&mut request).await?;
             authorize_index(&mut request, server, home).await?;
             let progress = zg_cli::IndexProgressDisplay::new(
                 io::stderr(),
                 animated_progress(output),
                 output.color,
             );
-            let reporter = cli_index_reporter(progress.reporter(), selection);
+            let reporter = progress.reporter();
             let result = if server {
                 let home = zg_daemon::resolve_home(home.map(Path::to_owned))?;
                 zg_daemon::index_with_progress(&home, *request, &reporter).await?
@@ -1118,49 +1118,28 @@ async fn execute_index(
     Ok(ExitCode::SUCCESS)
 }
 
+#[cfg(test)]
+#[path = "embedding_policy_tests.rs"]
+mod embedding_policy_tests;
+
 async fn resolve_cli_index_embedding(
     request: &mut zg_engine::api::index::IndexOptions,
-) -> Result<Option<zg_engine::api::index::embedding::EmbeddingSelection>, Box<dyn Error>> {
-    use zg_engine::api::index::{embedding::EmbeddingSelectionSource, options::EmbeddingModelSpec};
+) -> Result<(), Box<dyn Error>> {
+    use zg_engine::api::index::embedding::EmbeddingSelectionSource;
 
     if request.embedding.is_some() {
-        return Ok(None);
+        return Ok(());
     }
     let engine = ZvecGrep::new();
     let selection = engine.resolve_index_embedding(request.clone()).await;
     engine.close();
     let selection = selection?;
     if selection.source != EmbeddingSelectionSource::ExistingIndex {
-        // Send the resolved caller choice using the existing v2 field. Saved
-        // models remain authoritative at writer admission, including rebuilds.
-        request.embedding = Some(EmbeddingModelSpec {
-            reference: selection.model.clone(),
-            revision: None,
-            cache_dir: None,
-            endpoint: None,
-            device: zg_engine::api::index::options::Device::Auto,
-        });
+        // Keep defaults distinct from explicit overrides. Another writer may
+        // publish an index after preflight; its saved model must still win.
+        request.embedding_default = Some(selection);
     }
-    Ok(Some(selection))
-}
-
-fn cli_index_reporter(
-    reporter: zg_engine::api::index::progress::IndexProgressReporter,
-    selection: Option<zg_engine::api::index::embedding::EmbeddingSelection>,
-) -> zg_engine::api::index::progress::IndexProgressReporter {
-    zg_engine::api::index::progress::IndexProgressReporter::new(move |mut progress| {
-        if let Some(selection) = &selection {
-            let embedding = progress.embedding.get_or_insert_default();
-            if embedding
-                .selection
-                .as_ref()
-                .is_none_or(|actual| actual.model == selection.model)
-            {
-                embedding.selection = Some(selection.clone());
-            }
-        }
-        reporter.report(progress);
-    })
+    Ok(())
 }
 
 async fn authorize_index(
