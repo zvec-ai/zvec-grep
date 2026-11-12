@@ -324,6 +324,13 @@ fn java_type_definition(
                 .find(|hit| hit.entity_id == stored.reference.owner_id)
         })
         .and_then(|hit| hit.package.as_deref());
+    // A current-package type wins over on-demand imports. Single-type
+    // imports remain authoritative, including imports we cannot resolve.
+    let same_package = binding.file_id == stored.file_id
+        && package.is_some()
+        && candidates
+            .iter()
+            .any(|hit| hit.package.as_deref() == package && hit.qualified_name == name);
     let matches: Vec<_> = candidates
         .into_iter()
         .filter(|hit| {
@@ -337,17 +344,41 @@ fn java_type_definition(
                         &hit.qualified_name,
                     )
                 })
+            } else if same_package {
+                hit.package.as_deref() == package && hit.qualified_name == name
             } else {
-                binding.file_id == stored.file_id
-                    && package.is_some()
-                    && hit.package.as_deref() == package
-                    && hit.qualified_name == name
+                imports.iter().any(|import| {
+                    java_wildcard_prefix(import).is_some_and(|prefix| {
+                        super::java_import_match(
+                            hit.package.as_deref(),
+                            &format!("{prefix}.{short}"),
+                            &hit.qualified_name,
+                        )
+                    })
+                })
             }
         })
         .collect();
     Ok(match matches.as_slice() {
         [hit] => Some((*hit).clone()),
         _ => None,
+    })
+}
+
+fn java_wildcard_prefix(import: &super::ImportReference) -> Option<&str> {
+    import.specifier.strip_suffix(".*").or_else(|| {
+        // Earlier extraction omitted `.*` from the saved path, but retained
+        // the original import declaration. Existing indexes need not be rebuilt.
+        import
+            .raw_text
+            .as_deref()
+            .is_some_and(|raw| {
+                raw.trim_end()
+                    .trim_end_matches(';')
+                    .trim_end()
+                    .ends_with('*')
+            })
+            .then_some(import.specifier.as_str())
     })
 }
 

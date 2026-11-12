@@ -5,6 +5,22 @@ use serde_json::json;
 use std::sync::Arc;
 
 #[test]
+fn java_wildcards_keep_working_with_legacy_import_paths() {
+    for (specifier, raw, expected) in [
+        ("com.a.*", None, Some("com.a")),
+        ("com.a", Some("import com.a.*;"), Some("com.a")),
+        ("com.a", Some("import com.a. * ;"), Some("com.a")),
+        ("com.a.Foo", Some("import com.a.Foo /* * */;"), None),
+    ] {
+        let import = ImportReference {
+            specifier: specifier.into(),
+            raw_text: raw.map(str::to_owned),
+        };
+        assert_eq!(java_wildcard_prefix(&import), expected);
+    }
+}
+
+#[test]
 fn import_names_follow_syntax_instead_of_text_separators() {
     let directory = tempfile::tempdir().expect("fixture");
     let store = open(directory.path());
