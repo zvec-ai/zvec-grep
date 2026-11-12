@@ -1243,7 +1243,10 @@ function fuseCandidates(candidates: Map<string, Candidate>): Candidate[] {
       return right.score - left.score;
     }
 
-    return left.id.localeCompare(right.id);
+    const leftKey = candidateTieKey(left);
+    const rightKey = candidateTieKey(right);
+
+    return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
   });
 
   for (const [index, candidate] of fused.entries()) {
@@ -1251,6 +1254,10 @@ function fuseCandidates(candidates: Map<string, Candidate>): Candidate[] {
   }
 
   return fused;
+}
+
+function candidateTieKey(candidate: Candidate): string {
+  return JSON.stringify([candidate.file.relativePath, candidate.entity.range]);
 }
 
 function candidateToHit(

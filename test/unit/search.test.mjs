@@ -259,6 +259,76 @@ test("hybrid search filters, deduplicates, fuses, traces, prefers symbols, and t
   assert.ok(result.timings.some((entry) => entry.name === "search_total"));
 });
 
+test("hybrid fusion ties use source locations instead of workspace-specific entity IDs", async () => {
+  function createTieFixture(firstId, secondId) {
+    const fixture = createFixture();
+    const first = fixture.entities[0];
+    const second = fixture.entities[1];
+    const firstFile = fixture.files[0];
+    const secondFile = fixture.files[1];
+
+    const firstCandidate = { entity: first, id: firstId };
+    const secondCandidate = { entity: second, id: secondId };
+
+    function sparseHits(path, rankSixCandidate, rankTenCandidate) {
+      const hits = new Array(10);
+      hits[5] = {
+        fragment: fragment(rankSixCandidate.entity, {
+          id: rankSixCandidate.id,
+        }),
+        file: rankSixCandidate === firstCandidate ? firstFile : secondFile,
+        path,
+        score: 1,
+      };
+      hits[9] = {
+        fragment: fragment(rankTenCandidate.entity, {
+          id: rankTenCandidate.id,
+        }),
+        file: rankTenCandidate === firstCandidate ? firstFile : secondFile,
+        path,
+        score: 1,
+      };
+      return hits;
+    }
+
+    fixture.storage.searchFts = () =>
+      sparseHits("fts", secondCandidate, firstCandidate);
+    fixture.storage.searchVector = () =>
+      sparseHits("vector", firstCandidate, secondCandidate);
+    return fixture;
+  }
+
+  const first = await searchWorkspaceIndex(
+    {
+      routes: [
+        { mode: "fts", query: "tie" },
+        { mode: "vector", query: "tie" },
+      ],
+      limit: 2,
+    },
+    createTieFixture("workspace-a", "workspace-b").context,
+  );
+  const second = await searchWorkspaceIndex(
+    {
+      routes: [
+        { mode: "fts", query: "tie" },
+        { mode: "vector", query: "tie" },
+      ],
+      limit: 2,
+    },
+    createTieFixture("workspace-z", "workspace-a").context,
+  );
+
+  assert.deepEqual(
+    first.hits.map((hit) => hit.file.relativePath),
+    ["src/a.ts", "src/b.test.ts"],
+  );
+  assert.deepEqual(
+    second.hits.map((hit) => hit.file.relativePath),
+    ["src/a.ts", "src/b.test.ts"],
+  );
+});
+
 test("search plans short-circuit empty path filters and force-track no-file reasons", async () => {
   const fixture = createFixture();
   const result = await searchWorkspaceIndex(
