@@ -429,7 +429,7 @@ fn stored_model_info_preserves_metadata_and_only_checks_index_fields() {
     let record: serde_json::Value = serde_json::from_slice(&persisted).expect("descriptor JSON");
     assert_eq!(
         record,
-        serde_json::json!({"path_encoding": "components", "embeddings": [original]})
+        serde_json::json!({"path_encoding": "components", "vector_engine": "zvec_diskann_fp16_v1", "embeddings": [original]})
     );
     assert_eq!(
         read_json::<SchemaRecord>(&descriptor)
@@ -1164,6 +1164,22 @@ fn writes_fragments_across_native_batch_boundaries() {
             .len(),
         entries.len()
     );
+    let all_file_fragments = StorageSearchFilter {
+        file_ids: Some(vec![file.id()]),
+        ..StorageSearchFilter::default()
+    };
+    assert_eq!(
+        storage
+            .search_vector(
+                "fixture/fixture-model",
+                &prototype.vector,
+                1030,
+                Some(&all_file_fragments)
+            )
+            .expect("filtered membership spans scalar batches")
+            .len(),
+        entries.len()
+    );
     let hits = storage
         .search_vector(
             "fixture/fixture-model",
@@ -1324,18 +1340,10 @@ fn multi_model_file(storage: &IndexStore) -> (FileRecord, Vec<FixtureEntity>) {
     (file, vec![text, image])
 }
 
-fn vector_index_completeness(storage: &IndexStore, model: &str) -> f32 {
+fn optimization_pending(storage: &IndexStore) -> bool {
     storage
-        .read(|state| {
-            let stats = state
-                .fragments
-                .collection(model)?
-                .stats()
-                .expect("native index statistics");
-            assert_eq!(stats.indexes.len(), 1);
-            Ok(stats.indexes[0].completeness)
-        })
-        .expect("vector index completeness")
+        .read(|state| Ok(state.needs_optimize))
+        .expect("optimization state")
 }
 
 #[test]
@@ -1385,7 +1393,7 @@ fn partial_optimization_is_retried_on_the_same_store_and_after_reopening() {
         writer.close().expect("flush without optimizing");
 
         let writer = open(home.path(), false);
-        assert!(vector_index_completeness(&writer, "fixture/fixture-model") < 1.0);
+        assert!(optimization_pending(&writer));
         let error = writer
             .finalize_writes_with(|state| {
                 optimize_collections([
@@ -1401,7 +1409,7 @@ fn partial_optimization_is_retried_on_the_same_store_and_after_reopening() {
             })
             .expect_err("one collection failed");
         assert!(error.message().contains("injected"));
-        assert!(vector_index_completeness(&writer, "fixture/fixture-model") >= 1.0);
+        assert!(optimization_pending(&writer));
 
         let writer = if reopen {
             writer.close().expect("close after partial failure");
@@ -1447,8 +1455,15 @@ fn finalization_builds_every_model_index_in_reopened_flush_only_storage() {
     writer.close().expect("flush without optimizing");
 
     let writer = open_multi_model(home.path());
+    assert!(optimization_pending(&writer));
     for entry in &entries {
-        assert!(vector_index_completeness(&writer, &entry.model) < 1.0);
+        assert_eq!(
+            writer
+                .search_vector(&entry.model, &entry.vector, 10, None)
+                .expect("vectors are immediately durable")
+                .len(),
+            1
+        );
     }
     writer.finalize_writes().expect("finish existing indexes");
     writer.finalize_writes().expect("unchanged finalization");
@@ -1456,7 +1471,7 @@ fn finalization_builds_every_model_index_in_reopened_flush_only_storage() {
 
     let reader = open(home.path(), true);
     for entry in &entries {
-        assert!(vector_index_completeness(&reader, &entry.model) >= 1.0);
+        assert!(!optimization_pending(&reader));
         let hits = reader
             .search_vector(&entry.model, &entry.vector, 10, None)
             .expect("optimized model retrieval");
@@ -1489,7 +1504,7 @@ fn finalization_preserves_replacements_and_deletions_after_reopen() {
     writer.close().expect("close writer");
 
     let reader = open(home.path(), true);
-    assert!(vector_index_completeness(&reader, "fixture/fixture-model") >= 1.0);
+    assert!(!optimization_pending(&reader));
     for removed in ["orchard", "vineyard"] {
         assert!(
             reader
@@ -1832,6 +1847,48 @@ fn native_path_schema_requires_rebuild_without_mutating_collections() {
         assert!(error.message().contains("rebuild the index"));
         assert_eq!(fs::read(&path).expect("unchanged descriptor"), bytes);
         assert!(!root.path().join("files").exists());
+    }
+}
+
+#[test]
+fn old_vector_backends_and_missing_collections_require_rebuild() {
+    for legacy in [true, false] {
+        let root = tempfile::tempdir().expect("workspace");
+        open(root.path(), false).close().expect("create index");
+        let descriptor = root.path().join("schema.json");
+        if legacy {
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&fs::read(&descriptor).expect("schema")).expect("JSON");
+            value["vector_engine"] = serde_json::json!("diskann_sqlite_v1");
+            fs::write(&descriptor, serde_json::to_vec(&value).expect("old schema"))
+                .expect("write old schema");
+        } else {
+            fs::remove_dir_all(
+                root.path()
+                    .join(fragments::fragment_collection_name(&schema())),
+            )
+            .expect("remove vectors");
+        }
+        let before = fs::read(&descriptor).expect("descriptor");
+        for read_only in [true, false] {
+            let options = if read_only {
+                WorkspaceIndexStorageOptions::ReadOnly {
+                    graph_enabled: true,
+                    storage_path: root.path().to_owned(),
+                }
+            } else {
+                WorkspaceIndexStorageOptions::ReadWrite {
+                    graph_enabled: false,
+                    storage_path: root.path().to_owned(),
+                    embeddings: vec![schema()],
+                }
+            };
+            let error = IndexStore::open(options)
+                .err()
+                .expect("reject incompatible vector storage");
+            assert!(error.message().contains("rebuild the index"));
+            assert_eq!(fs::read(&descriptor).expect("unchanged schema"), before);
+        }
     }
 }
 

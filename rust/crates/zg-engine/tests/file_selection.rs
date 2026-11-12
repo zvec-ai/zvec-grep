@@ -804,6 +804,7 @@ async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResul
         .map(|entry| entry.map(|entry| entry.path()))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
+        .filter(|path| path.is_dir())
         .filter(|path| {
             path.file_name()
                 .expect("collection name")
@@ -823,6 +824,8 @@ async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResul
     )?;
     let mut fts = zvec_rust::Fts::new()?;
     fts.set_match_string("orchard")?;
+    let mut vector_query = zg_zvec_fp16::embedding_query("embedding", &vec![1.0; dimension], 64)?;
+    vector_query.set_diskann_params(zvec_rust::DiskannQueryParams::new(80))?;
     for (mode, operation, mut native_query) in [
         (
             ContextRouteMode::Fts,
@@ -831,8 +834,8 @@ async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResul
         ),
         (
             ContextRouteMode::Vector,
-            "search vector index",
-            zg_zvec_fp16::embedding_query("embedding", &vec![1.0; dimension], 64)?,
+            "search zvec DiskANN index",
+            vector_query,
         ),
     ] {
         // Excluding Rust negates both its suffix and the dot-only filename exception.

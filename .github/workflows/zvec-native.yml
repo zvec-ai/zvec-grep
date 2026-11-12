@@ -1,0 +1,72 @@
+name: Build pinned zvec runtimes
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: zvec native (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: linux-x64
+          - os: macos-15
+            target: darwin-arm64
+          - os: windows-2022
+            target: win32-x64
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: npm ci --ignore-scripts
+      - uses: actions/cache@v5
+        id: runtime
+        with:
+          path: native/
+          key: zvec-native-v1-${{ matrix.target }}-${{ hashFiles('scripts/build-zvec.py', 'scripts/zvec-node.cmake', 'package-lock.json', '.github/workflows/zvec-native.yml') }}
+      - name: Install Linux build and I/O dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake libaio-dev
+      - name: Use the pinned source's CMake version
+        if: steps.runtime.outputs.cache-hit != 'true'
+        run: python -m pip install cmake==3.30.0
+      - name: Build the pinned runtime
+        if: steps.runtime.outputs.cache-hit != 'true'
+        shell: bash
+        run: >-
+          python scripts/build-zvec.py
+          --source "$RUNNER_TEMP/zvec"
+          --node-source "$RUNNER_TEMP/zvec-node"
+          --build-dir "$RUNNER_TEMP/zvec-build"
+          --jobs 2
+      - name: Verify runtime identity, checksums and Node binding
+        run: python scripts/build-zvec.py --verify
+      - uses: actions/upload-artifact@v7
+        with:
+          name: zvec-native-${{ matrix.target }}
+          path: native/
+          if-no-files-found: error
+          retention-days: 1

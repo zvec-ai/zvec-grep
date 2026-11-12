@@ -8,7 +8,13 @@ on:
 permissions: {}
 
 jobs:
+  native-runtime:
+    uses: ./.github/workflows/zvec-native.yml
+    permissions:
+      contents: read
+
   ranges:
+    needs: native-runtime
     name: dependency ranges (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -26,10 +32,12 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: npm install --package-lock=false
+      - uses: ./.github/actions/restore-zvec
       - run: npm test
       - run: npm audit --omit=dev --audit-level=high
 
   package-candidate:
+    needs: native-runtime
     name: local model package candidate
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -44,6 +52,11 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: zvec-native-*
+          path: native/
+      - run: node scripts/check-native.mjs --all
       - name: Build the candidate tarball
         run: |
           mkdir -p "$RUNNER_TEMP/package"

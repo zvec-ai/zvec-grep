@@ -15,6 +15,9 @@ zvec-rust.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 
+[build-dependencies]
+zvec-rust-build.workspace = true
+
 # Copied from the workspace so this crate can allow the zvec C calls below.
 # zvec-rust 0.8.0 exposes `DataType::VectorFp16` but no safe writer or query
 # constructor. Every other crate keeps the workspace `unsafe_code = "forbid"`.

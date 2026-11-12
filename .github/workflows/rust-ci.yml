@@ -6,6 +6,10 @@ on:
     paths:
       - "rust/**"
       - ".github/workflows/rust-ci.yml"
+      - ".github/workflows/zvec-native.yml"
+      - "scripts/build-zvec.py"
+      - "scripts/zvec-node.cmake"
+      - ".cargo/config.toml"
       - ".github/workflows/rust-package-build.yml"
       - ".github/actions/**"
       - ".gitignore"
@@ -15,6 +19,10 @@ on:
     paths:
       - "rust/**"
       - ".github/workflows/rust-ci.yml"
+      - ".github/workflows/zvec-native.yml"
+      - "scripts/build-zvec.py"
+      - "scripts/zvec-node.cmake"
+      - ".cargo/config.toml"
       - ".github/workflows/rust-package-build.yml"
       - ".github/actions/**"
       - ".gitignore"
@@ -99,9 +107,17 @@ jobs:
               output.write("gpu_matrix=" + json.dumps({"include": gpu}) + "\n")
               output.write(f"run_cuda={str(bool(gpu)).lower()}\n")
 
+  native-runtime:
+    needs: source
+    uses: ./.github/workflows/zvec-native.yml
+    permissions:
+      contents: read
+    with:
+      ref: ${{ needs.source.outputs.sha }}
+
   quality:
     name: rust quality
-    needs: source
+    needs: [source, native-runtime]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -111,6 +127,10 @@ jobs:
         with:
           ref: ${{ needs.source.outputs.sha }}
           persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: ./.github/actions/restore-zvec
       - name: Install the pinned Rust toolchain
         run: rustup show active-toolchain
       - name: Cache Rust dependencies
@@ -143,7 +163,7 @@ jobs:
 
   test:
     name: rust test (${{ matrix.os }}${{ matrix.cuda && ', CUDA build on CPU' || '' }})
-    needs: source
+    needs: [source, native-runtime]
     runs-on: ${{ matrix.os }}
     # Compile on CPU; GPU jobs only run the selected tests and original Cargo CLI.
     timeout-minutes: ${{ matrix.cuda && 180 || 90 }}
@@ -166,6 +186,7 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
+      - uses: ./.github/actions/restore-zvec
       - name: Test installed npm command lifecycle on this OS
         run: node --test scripts/npm-installed-cli.test.mjs
       - name: Use a short Windows Cargo home

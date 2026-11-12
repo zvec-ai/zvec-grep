@@ -788,12 +788,12 @@ fn incompatible_index_errors_are_actionable_without_rebuilding_existing_data() {
             assert!(stderr.contains("zg --index --rebuild"), "{stderr}");
             if presentation == "debug" {
                 assert!(stderr.contains("unsupported index version 1"), "{stderr}");
-                assert!(stderr.contains("expected 3"), "{stderr}");
+                assert!(stderr.contains("expected 5"), "{stderr}");
                 assert!(stderr.contains("Error location:"), "{stderr}");
             } else {
                 for internal_detail in [
                     "unsupported index version",
-                    "expected 3",
+                    "expected 5",
                     "manifest.json",
                     "Error location:",
                     "ZG.ENGINE.",

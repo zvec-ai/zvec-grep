@@ -11,7 +11,13 @@ permissions:
   contents: read
 
 jobs:
+  native-runtime:
+    uses: ./.github/workflows/zvec-native.yml
+    permissions:
+      contents: read
+
   package-candidate:
+    needs: native-runtime
     name: Build release candidate
     runs-on: ubuntu-latest
     timeout-minutes: 35
@@ -71,6 +77,11 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: zvec-native-*
+          path: native/
+      - run: node scripts/check-native.mjs --all
 
       - name: Run release checks
         run: npm run check

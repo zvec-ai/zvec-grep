@@ -4668,6 +4668,7 @@ dependencies = [
  "zg-llama-native",
  "zg-zvec-fp16",
  "zvec-rust",
+ "zvec-rust-build",
 ]
 
 [[package]]
@@ -4744,6 +4745,7 @@ dependencies = [
  "half",
  "tempfile",
  "zvec-rust",
+ "zvec-rust-build",
 ]
 
 [[package]]

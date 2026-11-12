@@ -58,10 +58,23 @@ test("npm package contains and exposes the supported public surface", async (t) 
   ]) {
     assert.ok(paths.has(required), `package is missing ${required}`);
   }
+  const platformNative = `native/zvec-native-${process.platform}-${process.arch}`;
+  const nativeRoot = paths.has(`${platformNative}/manifest.json`)
+    ? platformNative
+    : "native";
+  for (const file of [
+    "manifest.json",
+    "zvec_node_binding.node",
+    "LICENSE.zvec",
+    "LICENSE.zvec-node",
+  ]) {
+    assert.ok(paths.has(`${nativeRoot}/${file}`), `package is missing ${file}`);
+  }
   assert.equal(
     [...paths].some(
       ([path]) =>
         path.startsWith("src/") ||
+        path.startsWith("scripts/") ||
         path.startsWith("test/") ||
         path.startsWith("docs/"),
     ),

@@ -18,6 +18,7 @@ RUN sources=sources.list \
         cmake \
         curl \
         git \
+        libaio-dev \
         libclang-dev \
         ninja-build \
         patchelf \

@@ -289,6 +289,7 @@ async fn text_and_code_share_one_model_and_support_incremental_search() -> TestR
     assert_eq!(
         fs::read_dir(&info.index_path)?
             .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_dir())
             .filter(|entry| entry
                 .file_name()
                 .to_string_lossy()
@@ -384,7 +385,7 @@ async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -
             .as_ref()
             .expect("workspace")
             .index_version,
-        Some(3)
+        Some(5)
     );
     let collections = model_collections(&info.index_path)?;
     assert_eq!(collections.len(), 1);
@@ -397,7 +398,7 @@ async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -
     let manifest: Value =
         serde_json::from_slice(&fs::read(root.join(".zvec-grep/manifest.json"))?)?;
     assert!(manifest.get("manifestVersion").is_none());
-    assert_eq!(manifest["indexVersion"], 3);
+    assert_eq!(manifest["indexVersion"], 5);
     assert_eq!(
         manifest["index"]["descriptor"]["defaultEmbeddingModel"]["model"]["name"],
         "text-embedding-v4"
@@ -1298,6 +1299,7 @@ async fn public_engine_recovers_pending_files_without_skipping_unchanged_sources
     let collections = fs::read_dir(&index_path)?
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
+        .filter(|entry| entry.path().is_dir())
         .filter(|entry| {
             entry
                 .file_name()
@@ -1757,6 +1759,7 @@ fn model_collections(index_path: &Path) -> Result<Vec<PathBuf>, Box<dyn std::err
     Ok(fs::read_dir(index_path)?
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
+        .filter(|entry| entry.path().is_dir())
         .filter(|entry| {
             entry
                 .file_name()
@@ -1779,10 +1782,13 @@ fn assert_vector_indexes_complete(index_path: &Path) -> TestResult {
         )?;
         let stats = collection.stats()?;
         assert!(stats.doc_count > 0);
-        assert_eq!(stats.indexes.len(), 1);
+        let field =
+            zg_zvec_fp16::vector_field_info(&collection, "embedding")?.expect("embedding field");
+        assert_eq!(field.index_type, zvec_rust::IndexType::Diskann);
+        assert_eq!(field.data_type, zvec_rust::DataType::VectorFp16);
         assert!(
-            stats.indexes[0].completeness >= 1.0,
-            "default indexing must finish the vector index: {stats:?}"
+            stats.indexes.iter().any(|index| index.name == "embedding"
+                && (index.completeness - 1.0).abs() < f32::EPSILON)
         );
         collection.close()?;
     }

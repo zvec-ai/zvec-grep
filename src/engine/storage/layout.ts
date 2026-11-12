@@ -28,7 +28,13 @@ export function hasWorkspaceIndexStorage(storagePath: string): boolean {
 
 export function deleteWorkspaceIndexStorage(storagePath: string): void {
   const paths = resolveWorkspaceIndexStoragePaths(storagePath);
-  for (const target of [paths.filesPath, paths.indexPath]) {
+  for (const target of [
+    paths.filesPath,
+    paths.indexPath,
+    // Explicit rebuild also removes the previous backend's vector sidecar.
+    join(paths.storagePath, "vectors.diskann.sqlite"),
+    join(paths.storagePath, "vectors.diskann.sqlite-journal"),
+  ]) {
     if (dirname(target) !== paths.storagePath) {
       throw new Error("Workspace index data must be inside its storage path");
     }

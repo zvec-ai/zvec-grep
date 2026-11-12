@@ -66,7 +66,7 @@ Indexed search combines full-text and vector retrieval to return relevant source
 
 ### Vector storage
 
-Embedding vectors are stored as IEEE binary16. The engine keeps embeddings and query vectors as `f32` until they are narrowed for the FP16 field. `indexVersion` remains 2. Existing FP32 indexes require an explicit rebuild with `zg --index --rebuild` before use.
+Vector search uses zvec's native DiskANN with FP16 vectors. `indexVersion` is 4; older vector indexes require an explicit rebuild with `zg --index --rebuild`.
 
 ### Embedding models
 

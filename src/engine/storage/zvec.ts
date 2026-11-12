@@ -11,14 +11,13 @@ import {
   type ZVecDoc,
   type ZVecDocInput,
   type ZVecStatus,
-} from "@zvec/zvec";
+} from "./native.js";
 import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { EngineError } from "../errors.js";
 import type {
   CodeEntityModifier,
   CodeSymbolType,
-  WorkspaceIndexEmbeddingSchema,
   Content,
   Entity,
   EntityFragment,
@@ -26,6 +25,7 @@ import type {
   FileInfo,
   ImageFormat,
   Range,
+  WorkspaceIndexEmbeddingSchema,
 } from "../types.js";
 import { normalizePath } from "../utils/path.js";
 import type {
@@ -66,7 +66,6 @@ type StorageSearchHit = {
   score: number;
 };
 
-const ENTITY_VECTOR_FIELD = "embedding";
 const ENTITY_TEXT_FIELD = "text";
 const ZVEC_LOCK_FILE = "LOCK";
 const NO_MATCH_FILTER = "file_id = '__zvec_grep_no_match__'";
@@ -93,6 +92,7 @@ type StoredEntityFragment = {
 class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
   readonly readOnly: boolean;
   private readonly collection: ZVecCollection;
+  private readonly vectorMetric: ZVecMetricType;
   private readonly files: ZvecFileMetaStore;
   private readonly filesById = new Map<string, FileRecord>();
   private readonly filesByAbsolutePath = new Map<string, FileRecord>();
@@ -108,6 +108,7 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     }
 
     this.files = new ZvecFileMetaStore(paths.filesPath, readOnly);
+    let openedCollection: ZVecCollection | undefined;
     try {
       for (const file of this.files.list()) {
         this.rememberFile(file);
@@ -128,8 +129,33 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
           ZVecCreateAndOpen(zvecPath, createSchema(options.embedding)),
         );
       }
+      openedCollection = this.collection;
+      const vector = this.collection.schema
+        .vectors()
+        .find((field) => field.name === "embedding");
+      if (
+        vector?.indexParams?.indexType !== ZVecIndexType.DISKANN ||
+        vector.dataType !== ZVecDataType.VECTOR_FP16 ||
+        (!readOnly &&
+          (vector.dimension !== options.embedding.dimension ||
+            vector.indexParams.metricType !==
+              metricType(options.embedding.metric)))
+      ) {
+        throw new EngineError(
+          "Vector storage is incompatible; rebuild with zg --index --rebuild",
+          {
+            code: "ZVEC_GREP.ENGINE.STORAGE.INCOMPATIBLE_VECTOR_INDEX",
+          },
+        );
+      }
+      this.vectorMetric = vector.indexParams.metricType ?? ZVecMetricType.IP;
     } catch (error) {
       // Opening the entity collection can fail after metadata acquired its lock.
+      try {
+        openedCollection?.closeSync();
+      } catch {
+        // Preserve the initialization error.
+      }
       try {
         this.files.close();
       } catch {
@@ -240,10 +266,8 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     if (entries.length > 0) {
       const docs = entries.map(({ fragment, vector }, index): ZVecDocInput => ({
         id: fragment.id,
-        vectors: {
-          [ENTITY_VECTOR_FIELD]: [...vector],
-        },
         fields: fragmentToFields(indexedFile, fragment, index),
+        vectors: { embedding: [...vector] },
       }));
 
       this.upsertDocs(file.id, docs);
@@ -322,16 +346,37 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     limit: number,
     filter?: StorageSearchFilter,
   ): StorageSearchHit[] {
+    if (!Number.isInteger(limit) || limit < 0 || limit > ZVEC_MAX_QUERY_TOPK) {
+      throw new RangeError(
+        `Vector search limit must be in 0..${ZVEC_MAX_QUERY_TOPK}`,
+      );
+    }
+    if (limit === 0) return [];
     const zvecFilter = buildFilter(filter);
     const docs = this.collection.querySync({
-      fieldName: ENTITY_VECTOR_FIELD,
+      fieldName: "embedding",
       vector: [...vector],
-      ...(zvecFilter ? { filter: zvecFilter } : {}),
       topk: limit,
       includeVector: false,
+      ...(zvecFilter ? { filter: zvecFilter } : {}),
+      params: {
+        indexType: ZVecIndexType.DISKANN,
+        listSize: Math.max(80, limit),
+      },
     });
-
-    return docsToHits(docs, "vector", this);
+    return docsToHits(
+      docs.map((doc) => ({
+        ...doc,
+        score:
+          this.vectorMetric === ZVecMetricType.COSINE
+            ? 1 - doc.score
+            : this.vectorMetric === ZVecMetricType.L2
+              ? -doc.score
+              : doc.score,
+      })),
+      "vector",
+      this,
+    );
   }
 
   async finalizeWrites(): Promise<void> {
@@ -901,12 +946,44 @@ function sleepSync(ms: number): void {
   Atomics.wait(values, 0, 0, ms);
 }
 
+function metricType(
+  metric: WorkspaceIndexEmbeddingSchema["metric"],
+): ZVecMetricType {
+  switch (metric) {
+    case "cosine":
+      return ZVecMetricType.COSINE;
+    case "dot_product":
+      return ZVecMetricType.IP;
+    case "euclidean":
+      return ZVecMetricType.L2;
+    default:
+      throw new Error(`Unsupported embedding metric: ${metric}`);
+  }
+}
+
 function createSchema(
   embedding: WorkspaceIndexEmbeddingSchema,
 ): ZVecCollectionSchema {
+  let chunks = Math.min(64, embedding.dimension);
+  while (chunks > 1 && embedding.dimension % chunks !== 0) chunks--;
   return new ZVecCollectionSchema({
     name: "zvec_grep_entities",
+    vectors: [
+      {
+        name: "embedding",
+        dataType: ZVecDataType.VECTOR_FP16,
+        dimension: embedding.dimension,
+        indexParams: {
+          indexType: ZVecIndexType.DISKANN,
+          metricType: metricType(embedding.metric),
+          maxDegree: 64,
+          listSize: 200,
+          pqChunkNum: chunks,
+        },
+      },
+    ],
     fields: [
+      indexedStringField("document_id"),
       indexedStringField("group", true),
       indexedStringField("file_id"),
       stringField("content_kind"),
@@ -944,15 +1021,6 @@ function createSchema(
       { name: "content_base64", dataType: ZVecDataType.STRING, nullable: true },
       { name: "image_format", dataType: ZVecDataType.STRING, nullable: true },
     ],
-    vectors: {
-      name: ENTITY_VECTOR_FIELD,
-      dataType: ZVecDataType.VECTOR_FP32,
-      dimension: embedding.dimension,
-      indexParams: {
-        indexType: ZVecIndexType.HNSW,
-        metricType: metricToZvec(embedding.metric),
-      },
-    },
   });
 }
 
@@ -973,25 +1041,6 @@ function stringField(name: string, nullable = false) {
   };
 }
 
-function metricToZvec(metric: string): ZVecMetricType {
-  if (metric === "cosine") {
-    return ZVecMetricType.COSINE;
-  }
-
-  if (metric === "dot") {
-    return ZVecMetricType.IP;
-  }
-
-  if (metric === "euclidean") {
-    return ZVecMetricType.L2;
-  }
-
-  throw new EngineError("Unsupported vector metric for zvec storage", {
-    code: "ZVEC_GREP.ENGINE.STORAGE.UNSUPPORTED_VECTOR_METRIC",
-    context: `metric=${metric}`,
-  });
-}
-
 function fragmentToFields(
   file: FileRecord,
   fragment: EntityFragment,
@@ -1005,6 +1054,7 @@ function fragmentToFields(
       content_hash: file.contentHash,
     }),
     file_id: file.id,
+    document_id: fragment.id,
     content_kind: fragment.content.kind,
     ...metadataToFields(fragment.metadata),
     fragment_index: fragmentIndex,

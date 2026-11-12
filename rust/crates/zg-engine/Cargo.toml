@@ -81,6 +81,9 @@ ort = { workspace = true, features = ["coreml"] }
 dunce = "1.0.5"
 ort = { workspace = true, features = ["directml"] }
 
+[build-dependencies]
+zvec-rust-build.workspace = true
+
 [dev-dependencies]
 # Count SQLite VM instructions in graph query performance regression tests.
 rusqlite = { version = "0.37", features = ["hooks"] }

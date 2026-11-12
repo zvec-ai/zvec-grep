@@ -1167,7 +1167,16 @@ mod tests {
             super::CURRENT_INDEX_VERSION,
         ))
         .expect("current index");
-        for version in [None, Some(0), Some(1), Some(2), Some(5), Some(u32::MAX)] {
+        for version in [
+            None,
+            Some(0),
+            Some(1),
+            Some(2),
+            Some(3),
+            Some(4),
+            Some(6),
+            Some(u32::MAX),
+        ] {
             assert_ne!(
                 version,
                 Some(super::CURRENT_INDEX_VERSION),

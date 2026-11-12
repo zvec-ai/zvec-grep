@@ -1,4 +1,4 @@
-//! Search projections: one zvec collection per embedding model, with FTS and FP16 vectors.
+//! Per-model full-text projections and FP16 `DiskANN` vectors in zvec.
 
 use std::{
     borrow::Cow,
@@ -7,8 +7,8 @@ use std::{
 };
 
 use zvec_rust::{
-    Collection, CollectionSchema, DataType, Doc, FieldSchema, Fts, IndexParams, MetricType,
-    SearchQuery,
+    Collection, CollectionSchema, DataType, DiskannQueryParams, Doc, FieldSchema, Fts, IndexParams,
+    IndexType, MetricType, SearchQuery,
 };
 
 use super::{
@@ -36,6 +36,7 @@ const MAX_TOP_K: usize = 100_000;
 
 pub(super) struct Fragments {
     indexes: BTreeMap<String, Collection>,
+    metrics: BTreeMap<String, EmbeddingMetric>,
 }
 
 impl Fragments {
@@ -45,26 +46,24 @@ impl Fragments {
         read_only: bool,
     ) -> EngineResult<Self> {
         let mut indexes = BTreeMap::new();
+        let mut metrics = BTreeMap::new();
         for embedding in embeddings {
-            let dimension = u32::try_from(embedding.dimension())
-                .ok()
-                .filter(|value| (1..=20_000).contains(value))
-                .ok_or_else(|| {
-                    EngineError::invalid_argument(
-                        "storage embedding dimension must be between 1 and 20,000",
-                    )
-                })?;
-            let metric = match embedding.metric() {
-                EmbeddingMetric::Cosine => MetricType::Cosine,
-                EmbeddingMetric::DotProduct => MetricType::Ip,
-                EmbeddingMetric::Euclidean => MetricType::L2,
-            };
             let name = fragment_collection_name(embedding);
-            let collection = open_collection(
-                &root.join(&name),
-                &fragments_schema(dimension, metric)?,
-                read_only,
+            let collection =
+                open_collection(&root.join(&name), &fragments_schema(embedding)?, read_only)?;
+            let field = native(
+                zg_zvec_fp16::vector_field_info(&collection, "embedding"),
+                "inspect vector schema",
             )?;
+            if !field.is_some_and(|field| {
+                field.index_type == IndexType::Diskann
+                    && field.data_type == DataType::VectorFp16
+                    && usize::try_from(field.dimension).ok() == Some(embedding.dimension())
+                    && field.metric == vector_metric(embedding.metric())
+            }) {
+                return Err(corrupt("incompatible vector storage; rebuild the index"));
+            }
+            metrics.insert(embedding.model().reference(), embedding.metric());
             if indexes
                 .insert(embedding.model().reference(), collection)
                 .is_some()
@@ -72,7 +71,7 @@ impl Fragments {
                 return Err(EngineError::invalid_argument("duplicate embedding model"));
             }
         }
-        Ok(Self { indexes })
+        Ok(Self { indexes, metrics })
     }
 
     /// Encode the entire replacement before any stored rows are changed.
@@ -117,7 +116,7 @@ impl Fragments {
             )?;
             native(
                 zg_zvec_fp16::add_embedding(&mut doc, "embedding", &entry.vector),
-                "encode embedding vector",
+                "encode FP16 embedding",
             )?;
             projections
                 .entry(entry.model.clone())
@@ -278,18 +277,32 @@ impl Fragments {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let top_k = top_k(limit)?;
         let mut request = native(
-            zg_zvec_fp16::embedding_query("embedding", vector, top_k(limit)?),
-            "create vector query",
+            zg_zvec_fp16::embedding_query("embedding", vector, top_k),
+            "create FP16 vector query",
+        )?;
+        native(
+            request.set_diskann_params(DiskannQueryParams::new(top_k.max(80))),
+            "configure DiskANN search",
         )?;
         configure_query(
             &mut request,
             filter,
             &["document_id", "entity_id", "file_id"],
         )?;
-        native(index.query(&request), "search vector index")?
-            .into_iter()
-            .map(|doc| decode_search_hit(&doc, StorageSearchPath::Vector))
+        native(index.query(&request), "search zvec DiskANN index")?
+            .iter()
+            .map(|doc| {
+                let mut hit = decode_search_hit(doc, StorageSearchPath::Vector)?;
+                // zvec returns cosine/L2 distances, but inner product similarity.
+                hit.score = match self.metrics[model] {
+                    EmbeddingMetric::Cosine => 1.0 - hit.score,
+                    EmbeddingMetric::DotProduct => hit.score,
+                    EmbeddingMetric::Euclidean => -hit.score,
+                };
+                Ok(hit)
+            })
             .collect()
     }
 
@@ -329,7 +342,7 @@ fn identity_schema(name: &str) -> EngineResult<CollectionSchema> {
     let mut schema = native(CollectionSchema::new(name), "create collection schema")?;
     scalar(&mut schema, "file_id", DataType::Uint32, false, true)?;
     scalar(&mut schema, "entity_id", DataType::String, false, true)?;
-    scalar(&mut schema, "document_id", DataType::String, false, false)?;
+    scalar(&mut schema, "document_id", DataType::String, false, true)?;
     Ok(schema)
 }
 
@@ -346,7 +359,7 @@ fn retrieval_schema(name: &str) -> EngineResult<CollectionSchema> {
     Ok(schema)
 }
 
-fn fragments_schema(dimension: u32, metric: MetricType) -> EngineResult<CollectionSchema> {
+fn fragments_schema(embedding: &EmbeddingModelInfo) -> EngineResult<CollectionSchema> {
     let mut schema = retrieval_schema("fragments")?;
     let mut text = native(
         FieldSchema::new("text", DataType::String, false, 0),
@@ -361,19 +374,43 @@ fn fragments_schema(dimension: u32, metric: MetricType) -> EngineResult<Collecti
     )?;
     native(schema.add_field(&text), "add full-text field")?;
 
+    let metric = vector_metric(embedding.metric());
     let mut vector = native(
-        FieldSchema::new("embedding", DataType::VectorFp16, false, dimension),
-        "define vector field",
+        FieldSchema::new(
+            "embedding",
+            DataType::VectorFp16,
+            false,
+            u32::try_from(embedding.dimension())
+                .map_err(|_| EngineError::invalid_argument("embedding dimension exceeds u32"))?,
+        ),
+        "define FP16 vector field",
     )?;
-    native(
-        vector.set_index_params(&native(
-            IndexParams::hnsw(metric, 50, 500),
-            "define vector index",
-        )?),
-        "attach vector index",
+    // Use at most 64 PQ bytes per vector, with equal-size chunks at every dimension.
+    let chunks = (1..=embedding.dimension().min(64))
+        .rev()
+        .find(|chunks| embedding.dimension().is_multiple_of(*chunks))
+        .unwrap_or(1);
+    let params = native(
+        IndexParams::diskann(
+            metric,
+            64,
+            200,
+            i32::try_from(chunks).expect("PQ chunks <= 64"),
+        ),
+        "define zvec DiskANN index",
     )?;
+    native(vector.set_index_params(&params), "attach DiskANN index")?;
     native(schema.add_field(&vector), "add vector field")?;
+
     Ok(schema)
+}
+
+fn vector_metric(metric: EmbeddingMetric) -> MetricType {
+    match metric {
+        EmbeddingMetric::Cosine => MetricType::Cosine,
+        EmbeddingMetric::DotProduct => MetricType::Ip,
+        EmbeddingMetric::Euclidean => MetricType::L2,
+    }
 }
 
 fn identity_doc(entity: &Entity, fragment: &EntityFragment) -> EngineResult<Doc> {
