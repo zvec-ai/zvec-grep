@@ -7,17 +7,26 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct IndexSetupOptions {
+    /// Workspace to analyze. Omitted returns catalog choices without scanning.
+    pub root: Option<PathBuf>,
+    pub scan: super::options::ScanRulesUpdate,
     pub model_cache: Option<PathBuf>,
+    /// Same caller-environment semantics as `IndexOptions::embedding_environment`.
+    pub embedding_environment: Option<String>,
     /// A caller's model preference, without authorizing index creation.
     pub preferred_model: Option<String>,
     /// Whether this request supplies an API credential. Never contains the credential.
     pub credential_available: bool,
+    #[serde(skip)]
+    pub signal: Option<tokio_util::sync::CancellationToken>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct IndexSetup {
     pub models: Vec<EmbeddingChoice>,
     pub default_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<super::embedding::EmbeddingSelection>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

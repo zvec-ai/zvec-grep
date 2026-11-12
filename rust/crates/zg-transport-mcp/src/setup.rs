@@ -174,7 +174,7 @@ impl SetupState {
                 )));
             }
             let setup = engine.index_setup(IndexSetupOptions {
-                model_cache: request.model_cache.clone(), ..Default::default()
+                root: Some(info.root.clone()), model_cache: request.model_cache.clone(), ..Default::default()
             }).await?;
             self.drive(engine, provider, &request, context, Phase::Model { root: info.root, setup }, None).await
         }.await;

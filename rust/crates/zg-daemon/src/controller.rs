@@ -30,7 +30,7 @@ const STARTUP_FILE: &str = "startup.lock";
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const SIGNAL_GRACE: Duration = Duration::from_secs(2);
-const DAEMON_PROTOCOL_VERSION: u32 = 2;
+const DAEMON_PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum StopMode {

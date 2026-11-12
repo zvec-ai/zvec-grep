@@ -1,5 +1,6 @@
 //! Workspace discovery, extraction, embedding, and storage orchestration.
 
+pub(crate) mod embedding_policy;
 mod graph_assembly;
 pub(crate) mod graph_resolver;
 mod input_budget;

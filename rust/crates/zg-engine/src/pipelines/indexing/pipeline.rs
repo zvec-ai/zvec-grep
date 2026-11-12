@@ -2053,7 +2053,7 @@ fn scanned_files(
     Ok(scanned)
 }
 
-fn default_file_size_limit(formats: &[FileFormat]) -> u64 {
+pub(super) fn default_file_size_limit(formats: &[FileFormat]) -> u64 {
     let has_category = |category| {
         formats
             .iter()

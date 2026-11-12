@@ -6,6 +6,9 @@ pub use result::IndexResult;
 /// Read-only model choices for interactive index creation.
 pub mod setup;
 
+/// Workspace analysis and the source of an embedding selection.
+pub mod embedding;
+
 /// Input types for [`crate::ZvecGrep::index`].
 pub mod options {
     use std::{
@@ -47,6 +50,10 @@ pub mod options {
         pub scan: ScanRulesUpdate,
         /// The single model used to embed text content in this workspace.
         pub embedding: Option<EmbeddingModelSpec>,
+        /// The calling process's embedding environment override. An empty string
+        /// suppresses the server's environment; omitted uses the engine's environment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub embedding_environment: Option<String>,
         /// Index-only embedding concurrency: llama.cpp contexts (up to eight),
         /// ORT CPU/CUDA sessions, or remote requests. Values must be positive.
         /// ORT caps direct-mode sessions to available hardware concurrency.
@@ -712,6 +719,9 @@ pub mod progress {
 
     #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
     pub struct IndexEmbeddingProgress {
+        /// Retained across snapshots so transports cannot lose the selection explanation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub selection: Option<super::embedding::EmbeddingSelection>,
         pub concurrency: Option<usize>,
         pub max_concurrency: Option<usize>,
         pub retryable_failures: Option<usize>,

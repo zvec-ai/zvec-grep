@@ -453,8 +453,15 @@ impl ModelSelection {
     }
 
     fn lines(&self, root: &Path, columns: u16, height: u16) -> Vec<String> {
+        let analysis = self
+            .setup
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.analysis.as_ref())
+            .map_or_else(Vec::new, crate::embedding::analysis_lines);
+        let analysis_rows = u16::try_from(analysis.len()).unwrap_or(u16::MAX);
         let mut title = directory_title(root);
-        let title_budget = usize::from(height.saturating_sub(10).max(1));
+        let title_budget = usize::from(height.saturating_sub(10 + analysis_rows).max(1));
         if title_ranges(&title, columns.saturating_sub(1)).len() > title_budget {
             // Preserve space for the active model and controls on a short terminal.
             let width = usize::from(columns.saturating_sub(1));
@@ -469,7 +476,7 @@ impl ModelSelection {
             .unwrap_or(u16::MAX);
         let choices = self.choices();
         let active = self.positions[self.tab];
-        if height <= 10 {
+        if height <= 10 + analysis_rows {
             let selected = choices.get(active).map_or_else(
                 || "  No supported models".to_owned(),
                 |model| format!("  › {}", model.reference),
@@ -478,15 +485,13 @@ impl ModelSelection {
             if height >= 3 {
                 lines.insert(0, title);
             }
+            if height >= 5
+                && let Some(summary) = analysis.first()
+            {
+                lines.insert(1, summary.clone());
+            }
             if height >= 4 {
-                lines.push(format!(
-                    "  ↑/↓ Select · ←/→ or Tab Switch · Enter {} · Esc Cancel",
-                    if self.tab == 0 {
-                        "Build & search"
-                    } else {
-                        "Continue"
-                    }
-                ));
+                lines.push(self.controls());
             }
             return lines;
         }
@@ -503,8 +508,15 @@ impl ModelSelection {
             .into(),
             String::new(),
         ];
-        let visible =
-            usize::from(height.saturating_sub(10_u16.saturating_add(title_rows))).clamp(1, 12);
+        lines.splice(3..3, analysis);
+        let visible = usize::from(
+            height.saturating_sub(
+                10_u16
+                    .saturating_add(title_rows)
+                    .saturating_add(analysis_rows),
+            ),
+        )
+        .clamp(1, 12);
         let start = active.saturating_sub(visible - 1);
         let width = choices
             .iter()
@@ -512,23 +524,7 @@ impl ModelSelection {
             .max()
             .unwrap_or(0);
         for (index, model) in choices.iter().enumerate().skip(start).take(visible) {
-            let status = if model.local {
-                if model.downloaded {
-                    "Downloaded".to_owned()
-                } else {
-                    model.download_bytes.map_or_else(
-                        || "Download needed".to_owned(),
-                        |bytes| format!("Download {} MiB", bytes.div_ceil(1024 * 1024)),
-                    )
-                }
-            } else {
-                if model.credential_available {
-                    "Credential available"
-                } else {
-                    "Missing API credential"
-                }
-                .to_owned()
-            };
+            let status = self.model_status(model);
             lines.push(format!(
                 "  {} {:width$}  {status}",
                 if index == active { "›" } else { " " },
@@ -542,18 +538,58 @@ impl ModelSelection {
             lines.push(format!("  {}/{} models", active + 1, choices.len()));
         }
         lines.push(String::new());
-        lines.push(format!(
+        lines.push(self.controls());
+        if choices.get(active).is_some_and(|model| !model.available()) {
+            lines.push("  ! An API Key is required before building.".into());
+        }
+        lines
+    }
+
+    fn model_status(&self, model: &EmbeddingChoice) -> String {
+        let mut status = if model.local {
+            if model.downloaded {
+                "Downloaded".to_owned()
+            } else {
+                model.download_bytes.map_or_else(
+                    || "Download needed".to_owned(),
+                    |bytes| format!("Download {} MiB", bytes.div_ceil(1024 * 1024)),
+                )
+            }
+        } else {
+            if model.credential_available {
+                "Credential available"
+            } else {
+                "Missing API credential"
+            }
+            .to_owned()
+        };
+        if let Some(selection) = &self.setup.selection {
+            if selection
+                .analysis
+                .as_ref()
+                .is_some_and(|analysis| analysis.recommended_model == model.reference)
+            {
+                status = format!("Recommended · {status}");
+            }
+            if selection.source
+                != zg_engine::api::index::embedding::EmbeddingSelectionSource::Automatic
+                && selection.model == model.reference
+            {
+                status = format!("Configured · {status}");
+            }
+        }
+        status
+    }
+
+    fn controls(&self) -> String {
+        format!(
             "  ↑/↓ Select · ←/→ or Tab Switch · Enter {} · Esc Cancel",
             if self.tab == 0 {
                 "Build & search"
             } else {
                 "Continue"
             }
-        ));
-        if choices.get(active).is_some_and(|model| !model.available()) {
-            lines.push("  ! An API Key is required before building.".into());
-        }
-        lines
+        )
     }
 
     /// Preserves each tab's selection across switches and later prompts.
@@ -736,6 +772,7 @@ mod tests {
 
     fn setup() -> IndexSetup {
         IndexSetup {
+            selection: None,
             default_model: Some("remote/ready".into()),
             models: vec![
                 EmbeddingChoice {
@@ -776,6 +813,44 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn recommendation_is_preselected_and_analysis_survives_a_short_terminal() {
+        use zg_engine::api::index::embedding::{
+            EmbeddingAnalysis, EmbeddingEvidence, EmbeddingScene, EmbeddingSelection,
+            EmbeddingSelectionSource,
+        };
+        let mut setup = setup();
+        setup.default_model = Some("local/two".into());
+        setup.selection = Some(EmbeddingSelection {
+            model: "local/two".into(),
+            source: EmbeddingSelectionSource::Automatic,
+            analysis: Some(EmbeddingAnalysis {
+                scene: EmbeddingScene::Text,
+                code: EmbeddingEvidence {
+                    files: 1,
+                    weight_bytes: 10,
+                },
+                text: EmbeddingEvidence {
+                    files: 2,
+                    weight_bytes: 90,
+                },
+                other_files: 3,
+                recommended_model: "local/two".into(),
+            }),
+        });
+        let selection = ModelSelection::new(&setup);
+        assert_eq!(selection.tab, 0);
+        assert_eq!(selection.positions[0], 1);
+        let lines = selection.lines(Path::new("workspace"), 160, 30).join("\n");
+        assert!(lines.contains("Workspace: text-dominant (code 10%, text 90%"));
+        assert!(lines.contains("Recommended: local/two"));
+        assert!(lines.contains("Recommended · Download needed"));
+        let short = selection.lines(Path::new("workspace"), 80, 6);
+        assert!(short.iter().any(|line| line.contains("text-dominant")));
+        assert!(short.iter().any(|line| line.contains("› local/two")));
+        assert!(short.len() <= 6);
     }
 
     #[test]

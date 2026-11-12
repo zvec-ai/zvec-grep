@@ -722,6 +722,10 @@ fn merge_runtime_options(current: &mut IndexOptions, incoming: &mut IndexOptions
     // must not erase the model or credentials of an already queued manual job.
     merge_update(&mut current.root, incoming.root.take());
     merge_update(&mut current.embedding, incoming.embedding.take());
+    merge_update(
+        &mut current.embedding_environment,
+        incoming.embedding_environment.take(),
+    );
     merge_update(&mut current.api_key, incoming.api_key.take());
     merge_update(
         &mut current.runtime_api_key,
@@ -2352,6 +2356,29 @@ mod tests {
         assert_eq!(scan.globs()[0].pattern, "*.rs");
         assert_eq!(scan.globs()[1].pattern, "*.MD");
         assert!(scan.globs()[1].case_insensitive);
+    }
+
+    #[test]
+    fn merged_environment_keeps_an_explicitly_absent_caller_override() {
+        let mut pending = Some(IndexOptions {
+            embedding_environment: Some("local/bekko-256-int8".into()),
+            ..Default::default()
+        });
+        super::merge_options(
+            &mut pending,
+            IndexOptions {
+                embedding_environment: Some(String::new()),
+                ..Default::default()
+            },
+        );
+        super::merge_options(&mut pending, IndexOptions::default());
+        assert_eq!(
+            pending
+                .expect("merged request")
+                .embedding_environment
+                .as_deref(),
+            Some("")
+        );
     }
 
     #[test]

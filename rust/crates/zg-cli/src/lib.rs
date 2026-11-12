@@ -2,6 +2,7 @@
 
 mod authorization;
 mod diagnostics;
+mod embedding;
 mod highlight;
 mod install;
 mod jsonc;
@@ -1665,6 +1666,7 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
             reset_paths: args.reset_paths,
             scan,
             embedding,
+            embedding_environment: Some(std::env::var("ZVEC_GREP_EMBEDDING").unwrap_or_default()),
             allow_remote: args.allow_remote,
             api_key: args.api_key,
             endpoint: args.endpoint.clone(),

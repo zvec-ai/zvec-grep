@@ -16,7 +16,9 @@ use crate::{
         index::{
             IndexOptions, IndexResult,
             options::EmbeddingModelSpec,
-            progress::{DETAIL_SAVING_INDEX, IndexProgress},
+            progress::{
+                DETAIL_SAVING_INDEX, IndexProgress, IndexProgressPhase, IndexProgressReporter,
+            },
         },
         info::{
             InfoOptions, InfoResult,
@@ -29,7 +31,7 @@ use crate::{
     },
     models::{
         ModelError, ModelRuntimeLease, ModelRuntimeManager, ModelRuntimeRequest,
-        ResolveEmbeddingReferenceOptions, resolve_embedding_reference, resolve_index_concurrency,
+        resolve_index_concurrency,
     },
     storage::{IndexStore, types::WorkspaceIndexStorageOptions},
     utils::{directory_exists, resolve_directory},
@@ -50,13 +52,12 @@ use crate::{
 };
 
 use super::{
+    embedding_policy,
     input_budget::embedding_input_budget,
     pipeline::{
         IndexEmbeddingRuntime, IndexingContext, get_workspace_index_status, index_workspace,
     },
 };
-
-const DEFAULT_LOCAL_EMBEDDING: &str = "local/potion-code-16m-v2";
 
 #[derive(Clone)]
 pub(crate) struct WorkspaceIndexService {
@@ -138,9 +139,41 @@ impl WorkspaceIndexService {
             // A changed selection can admit files outside a watcher's narrow change scope.
             options.changes.clear();
         }
+        let selection =
+            embedding_policy::select(&requested_root, &scan, existing.as_ref(), &options).await?;
+        if options.embedding.is_none() {
+            if let Some(reporter) = options.on_progress.take() {
+                let explanation = selection.clone();
+                // Daemon clients consume coalesced snapshots. Keep the decision on
+                // every event, including completion, rather than a lossy one-off event.
+                let reporter = IndexProgressReporter::new(move |mut progress| {
+                    progress.embedding.get_or_insert_default().selection =
+                        Some(explanation.clone());
+                    reporter.report(progress);
+                });
+                reporter.report(IndexProgress {
+                    phase: IndexProgressPhase::Scanning,
+                    files_total: None,
+                    files_indexed: None,
+                    files_failed: None,
+                    detail: None,
+                    embedding: None,
+                });
+                options.on_progress = Some(reporter);
+            }
+            // Freeze this operation's choice before acquiring models. Auto device
+            // and absent runtime overrides preserve the saved workspace settings.
+            options.embedding = Some(EmbeddingModelSpec {
+                reference: selection.model,
+                revision: None,
+                cache_dir: None,
+                endpoint: None,
+                device: Device::Auto,
+            });
+        }
         // Resolve only at the shared index boundary; query runtimes never read these overrides.
         options.embedding_concurrency = resolve_index_concurrency(
-            &embedding_reference(existing.as_ref(), options.embedding.as_ref())?,
+            &embedding_reference(existing.as_ref(), &options)?,
             options.embedding_concurrency,
         )
         .map_err(ModelError::into_engine_error)?;
@@ -670,7 +703,7 @@ fn acquire_model(
             "embedding revision overrides are not supported by the catalog-backed runtime",
         ));
     }
-    let reference = embedding_reference(existing, options.embedding.as_ref())?;
+    let reference = embedding_reference(existing, options)?;
     let config = crate::config::read()?;
     let provider = reference.split('/').next().unwrap_or_default();
     let local = provider == "local";
@@ -765,27 +798,15 @@ fn acquire_model(
         .map_err(ModelError::into_engine_error)
 }
 
-pub(crate) fn embedding_reference(
+fn embedding_reference(
     existing: Option<&Workspace>,
-    requested: Option<&EmbeddingModelSpec>,
+    options: &IndexOptions,
 ) -> Result<String, EngineError> {
-    let config = crate::config::read()?;
-    resolve_embedding_reference(ResolveEmbeddingReferenceOptions {
-        explicit: requested.map(|embedding| embedding.reference.clone()),
-        existing: existing
-            .and_then(|workspace| {
-                workspace
-                    .index()
-                    .descriptor()
-                    .map(IndexDescriptor::default_embedding_model)
-            })
-            .map(|embedding| embedding.model().reference()),
-        global_default: crate::config::string(&config, &["defaults", "embedding"]),
-        fallback: Some(DEFAULT_LOCAL_EMBEDDING.to_owned()),
-        ..ResolveEmbeddingReferenceOptions::default()
-    })
-    .map_err(ModelError::into_engine_error)?
-    .ok_or_else(|| EngineError::internal("default embedding model is not configured"))
+    embedding_policy::configured_selection(existing, options)?
+        .map(|selection| selection.model)
+        .ok_or_else(|| {
+            EngineError::internal("index embedding selection must precede model acquisition")
+        })
 }
 
 pub(in crate::pipelines) fn environment_api_key() -> Option<String> {

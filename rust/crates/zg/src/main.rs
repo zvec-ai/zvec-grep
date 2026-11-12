@@ -674,15 +674,14 @@ async fn ensure_query_index(
         )).into());
     }
     let options = zg_engine::api::index::setup::IndexSetupOptions {
+        root: Some(info.root.clone()),
         model_cache: request.model_cache.clone(),
-        preferred_model: std::env::var("ZVEC_GREP_EMBEDDING")
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty()),
+        embedding_environment: Some(std::env::var("ZVEC_GREP_EMBEDDING").unwrap_or_default()),
         credential_available: request
             .api_key
             .as_ref()
             .is_some_and(|key| !key.trim().is_empty()),
+        ..Default::default()
     };
     let engine = ZvecGrep::new();
     let setup = if let Some(home) = &server_home {
