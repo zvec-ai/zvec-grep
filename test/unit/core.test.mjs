@@ -58,6 +58,7 @@ import {
   contextOptionsFromRgInput,
   normalizeSearchInput,
 } from "../../dist/mcp/input-normalization.js";
+import { contextOptions } from "../../dist/cli/commands.js";
 import {
   semanticFeaturesInputSchema,
   zvecGrepSearchInputSchema,
@@ -85,6 +86,50 @@ test("CLI argument parser handles command, provider, path, and rg options", () =
   assert.equal(parsed.options.limit, 7);
   assert.deepEqual(parsed.options.globs, ["src/**", "test/**", "!dist/**"]);
   assert.equal(typeof parsed.options.modifiedAfter, "number");
+
+  const semanticFeatures = parseArgs([
+    "--semantic-features",
+    JSON.stringify({
+      semantic_features_version: 1,
+      representation: "symbol",
+      token_sketch: "trace",
+      graph_rerank: "shadow",
+      graph_edge_confidence: "strong",
+      graph_expansion: "off",
+      trace: "full",
+    }),
+    "query text",
+  ]);
+  assert.equal(
+    semanticFeatures.options.semanticFeatures?.representation,
+    "symbol",
+  );
+  assert.equal(semanticFeatures.options.semanticFeatures?.trace, "full");
+  assert.deepEqual(
+    parseArgs(["--semantic-features", "{}", "query"]).options.semanticFeatures,
+    {
+      semantic_features_version: 1,
+      representation: "all",
+      token_sketch: "off",
+      graph_rerank: "off",
+      graph_edge_confidence: "strong",
+      graph_expansion: "off",
+      trace: "off",
+    },
+  );
+  assert.throws(
+    () => parseArgs(["--semantic-features", "not-json", "query"]),
+    /requires valid JSON/,
+  );
+  assert.throws(
+    () =>
+      parseArgs(["--semantic-features", '{"graph_rerank":"invalid"}', "query"]),
+    /--semantic-features is invalid/,
+  );
+  assert.throws(
+    () => parseArgs(["--semantic-features", "{}", "--index"]),
+    /can only be used for search/,
+  );
 
   const index = parseArgs([
     "--index",
@@ -195,6 +240,26 @@ test("semantic feature schema is strict and legacy trace remains compatible", ()
         unexpected: true,
       }),
     /Unrecognized key/,
+  );
+
+  const featureConfig = {
+    semantic_features_version: 1,
+    representation: "symbol",
+    token_sketch: "off",
+    graph_rerank: "shadow",
+    graph_edge_confidence: "strong",
+    graph_expansion: "off",
+    trace: "off",
+  };
+  assert.deepEqual(
+    contextOptions({ refresh: "off", semanticFeatures: featureConfig }, [
+      "query",
+    ]).semanticFeatures,
+    featureConfig,
+  );
+  assert.equal(
+    contextOptions({ refresh: "off" }, ["query"]).semanticFeatures,
+    undefined,
   );
 });
 
