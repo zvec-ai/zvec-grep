@@ -104,6 +104,18 @@ impl ZvecGrep {
             .map_err(|error| error.report_here())
     }
 
+    /// Resolves an index's model using saved metadata, caller configuration and scan rules.
+    /// Does not create an index, acquire models or download files.
+    pub async fn resolve_index_embedding(
+        &self,
+        options: IndexOptions,
+    ) -> EngineResult<api::index::embedding::EmbeddingSelection> {
+        self.service
+            .resolve_index_embedding(options)
+            .await
+            .map_err(|error| error.report_here())
+    }
+
     /// Finds incoming calls for matching symbol definitions in an existing index.
     pub async fn callers(
         &self,

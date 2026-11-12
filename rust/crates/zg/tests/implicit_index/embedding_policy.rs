@@ -86,6 +86,15 @@ fn automatic_selection_uses_index_filters_and_explains_configured_overrides() {
             "{stderr}"
         );
         fixture.assert_model(mode, TEXT);
+        let rebuilt = success(
+            fixture
+                .command(&["--index", "--rebuild", "--mode", mode, "--color", "never"])
+                .env("ZVEC_GREP_EMBEDDING", CODE)
+                .output()
+                .expect("rebuild with a different caller default"),
+        );
+        assert!(String::from_utf8_lossy(&rebuilt.stderr).contains("existing index"));
+        fixture.assert_model(mode, TEXT);
         fixture.success(&["--index", "--drop", "--mode", mode]);
         fixture.success(&["--config", "model", "set", CODE, "--default"]);
         let output = fixture.success(&["--index", "--mode", mode, "--color", "never"]);

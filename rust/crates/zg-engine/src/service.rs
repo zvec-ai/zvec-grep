@@ -121,6 +121,14 @@ impl EngineService {
         self.indexing.index(&self.models, options).await
     }
 
+    pub(crate) async fn resolve_index_embedding(
+        &self,
+        options: IndexOptions,
+    ) -> Result<crate::api::index::embedding::EmbeddingSelection, EngineError> {
+        self.ensure_open()?;
+        crate::pipelines::indexing::service::resolve_index_embedding(options).await
+    }
+
     pub(crate) async fn paths(
         &self,
         options: crate::api::paths::PathsOptions,

@@ -530,6 +530,18 @@ impl WorkspaceIndexService {
     }
 }
 
+pub(crate) async fn resolve_index_embedding(
+    mut options: IndexOptions,
+) -> Result<crate::api::index::embedding::EmbeddingSelection, EngineError> {
+    let root = resolve_directory(options.root.as_deref())?;
+    let layout = WorkspaceLayout::new(root.join(".zvec-grep"))?;
+    let existing = load_index_workspace(&root, &layout, &options)?;
+    options.scan.normalize_ignore_paths(&root)?;
+    let scan = resolve_scan(existing.as_ref().map(Workspace::scan), &options)?;
+    crate::file_selection::ScanPolicy::new(&root, &scan)?;
+    embedding_policy::select(&root, &scan, existing.as_ref(), &options).await
+}
+
 fn load_index_workspace(
     root: &Path,
     layout: &WorkspaceLayout,

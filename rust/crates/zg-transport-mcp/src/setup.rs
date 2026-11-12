@@ -174,7 +174,8 @@ impl SetupState {
                 )));
             }
             let setup = engine.index_setup(IndexSetupOptions {
-                root: Some(info.root.clone()), model_cache: request.model_cache.clone(), ..Default::default()
+                root: Some(info.root.clone()), model_cache: request.model_cache.clone(),
+                signal: Some(context.ct.clone()), ..Default::default()
             }).await?;
             self.drive(engine, provider, &request, context, Phase::Model { root: info.root, setup }, None).await
         }.await;
@@ -490,6 +491,26 @@ fn choice_property(
 fn form(phase: &Phase, version: Option<&ProtocolVersion>) -> (String, Value) {
     match phase {
         Phase::Model { root, setup } => {
+            let analysis = setup
+                .selection
+                .as_ref()
+                .and_then(|selection| selection.analysis.as_ref())
+                .map(|analysis| {
+                    format!(
+                        "\nWorkspace: {}. Recommended: {}.",
+                        match analysis.scene {
+                            zg_engine::api::index::embedding::EmbeddingScene::Code =>
+                                "code-dominant",
+                            zg_engine::api::index::embedding::EmbeddingScene::Text =>
+                                "text-dominant",
+                            zg_engine::api::index::embedding::EmbeddingScene::Mixed => "mixed",
+                            zg_engine::api::index::embedding::EmbeddingScene::Unknown =>
+                                "undetermined",
+                        },
+                        analysis.recommended_model
+                    )
+                })
+                .unwrap_or_default();
             let choices = setup.models.iter().filter(|model| model.available()).map(|model| json!({
                 "const": model.reference,
                 "title": format!("{} · {} · {}", if model.local { "Local" } else { "Remote" }, model.reference,
@@ -515,7 +536,7 @@ fn form(phase: &Phase, version: Option<&ProtocolVersion>) -> (String, Value) {
                 });
             (
                 format!(
-                    "No index found in {}. Select an embedding model to create a persistent index in the background. Local models run on this server. Remote models require a separate authorization step. Cancel to exit without creating an index.",
+                    "No index found in {}. Select an embedding model to create a persistent index in the background. Local models run on this server. Remote models require a separate authorization step. Cancel to exit without creating an index.{analysis}",
                     zg_cli::output_path(root).display()
                 ),
                 json!({"type": "object", "properties": {"model": choice_property("Embedding model", &choices, default.as_deref(), version)}, "required": ["model"]}),

@@ -673,27 +673,8 @@ async fn ensure_query_index(
             zg_cli::output_path(&info.root).display()
         )).into());
     }
-    let options = zg_engine::api::index::setup::IndexSetupOptions {
-        root: Some(info.root.clone()),
-        model_cache: request.model_cache.clone(),
-        embedding_environment: Some(std::env::var("ZVEC_GREP_EMBEDDING").unwrap_or_default()),
-        credential_available: request
-            .api_key
-            .as_ref()
-            .is_some_and(|key| !key.trim().is_empty()),
-        ..Default::default()
-    };
     let engine = ZvecGrep::new();
-    let setup = if let Some(home) = &server_home {
-        let DaemonReply::IndexSetup(setup) =
-            zg_daemon::execute_command(home, DaemonCommand::IndexSetup(options)).await?
-        else {
-            return Err(protocol_mismatch("index_setup"));
-        };
-        setup
-    } else {
-        engine.index_setup(options).await?
-    };
+    let setup = query_index_setup(&engine, request, &info.root, server_home.as_deref()).await?;
     let mut index_request = select_query_index(
         request,
         &info.root,
@@ -737,6 +718,42 @@ async fn ensure_query_index(
     let result = result?;
     zg_cli::write_index_with_options(io::stderr().lock(), &info.root, &result, None, output, ansi)?;
     Ok(true)
+}
+
+async fn query_index_setup(
+    engine: &ZvecGrep,
+    request: &ContextOptions,
+    root: &Path,
+    server_home: Option<&Path>,
+) -> Result<zg_engine::api::index::setup::IndexSetup, Box<dyn Error>> {
+    let options = zg_engine::api::index::setup::IndexSetupOptions {
+        root: Some(root.to_owned()),
+        model_cache: request.model_cache.clone(),
+        credential_available: request
+            .api_key
+            .as_ref()
+            .is_some_and(|key| !key.trim().is_empty()),
+        signal: request.signal.clone(),
+        ..Default::default()
+    };
+    // Analyze in the calling process; the v2 daemon request stays catalog-only.
+    let local_setup = engine.index_setup(options.clone()).await?;
+    let Some(home) = server_home else {
+        return Ok(local_setup);
+    };
+    let DaemonReply::IndexSetup(mut setup) = zg_daemon::execute_command(
+        home,
+        DaemonCommand::IndexSetup(zg_engine::api::index::setup::IndexSetupOptions {
+            preferred_model: local_setup.default_model.clone(),
+            ..options
+        }),
+    )
+    .await?
+    else {
+        return Err(protocol_mismatch("index_setup"));
+    };
+    setup.selection = local_setup.selection;
+    Ok(setup)
 }
 
 async fn select_query_index(
@@ -1016,13 +1033,14 @@ async fn execute_index(
     let server = use_server(mode, home).await?;
     match operation {
         IndexOperation::Build(mut request) => {
+            let selection = resolve_cli_index_embedding(&mut request).await?;
             authorize_index(&mut request, server, home).await?;
             let progress = zg_cli::IndexProgressDisplay::new(
                 io::stderr(),
                 animated_progress(output),
                 output.color,
             );
-            let reporter = progress.reporter();
+            let reporter = cli_index_reporter(progress.reporter(), selection);
             let result = if server {
                 let home = zg_daemon::resolve_home(home.map(Path::to_owned))?;
                 zg_daemon::index_with_progress(&home, *request, &reporter).await?
@@ -1098,6 +1116,51 @@ async fn execute_index(
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+async fn resolve_cli_index_embedding(
+    request: &mut zg_engine::api::index::IndexOptions,
+) -> Result<Option<zg_engine::api::index::embedding::EmbeddingSelection>, Box<dyn Error>> {
+    use zg_engine::api::index::{embedding::EmbeddingSelectionSource, options::EmbeddingModelSpec};
+
+    if request.embedding.is_some() {
+        return Ok(None);
+    }
+    let engine = ZvecGrep::new();
+    let selection = engine.resolve_index_embedding(request.clone()).await;
+    engine.close();
+    let selection = selection?;
+    if selection.source != EmbeddingSelectionSource::ExistingIndex {
+        // Send the resolved caller choice using the existing v2 field. Saved
+        // models remain authoritative at writer admission, including rebuilds.
+        request.embedding = Some(EmbeddingModelSpec {
+            reference: selection.model.clone(),
+            revision: None,
+            cache_dir: None,
+            endpoint: None,
+            device: zg_engine::api::index::options::Device::Auto,
+        });
+    }
+    Ok(Some(selection))
+}
+
+fn cli_index_reporter(
+    reporter: zg_engine::api::index::progress::IndexProgressReporter,
+    selection: Option<zg_engine::api::index::embedding::EmbeddingSelection>,
+) -> zg_engine::api::index::progress::IndexProgressReporter {
+    zg_engine::api::index::progress::IndexProgressReporter::new(move |mut progress| {
+        if let Some(selection) = &selection {
+            let embedding = progress.embedding.get_or_insert_default();
+            if embedding
+                .selection
+                .as_ref()
+                .is_none_or(|actual| actual.model == selection.model)
+            {
+                embedding.selection = Some(selection.clone());
+            }
+        }
+        reporter.report(progress);
+    })
 }
 
 async fn authorize_index(

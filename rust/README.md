@@ -39,8 +39,10 @@ A code or text share of at least 60% identifies the dominant scene. Mixed
 workspaces use the larger share; ties and absent evidence use Potion Code.
 Explicit indexing explains the selection on stderr. First-search setup shows
 the same analysis and preselects the recommendation unless a configured model
-takes precedence, regardless of download status. Direct and Server modes use
-the caller's embedding environment and the requested workspace root.
+takes precedence, regardless of download status. Direct and Server CLI modes resolve
+the caller's choice through the shared engine and send it using the existing model
+field. MCP performs the same analysis inside the daemon. Workspace analysis inputs
+for model setup stay in-process; daemon v2 requests are unchanged.
 Compatible existing indexes retain their stored model, including during
 `--rebuild` without `--embedding`; supply a model explicitly to switch it.
 
@@ -381,9 +383,9 @@ It rotates at 10 MiB and keeps five numbered backups by default. The global
 are written to `<home>/daemon/bootstrap.log`.
 
 The instance record at `<home>/daemon/instance.lock` carries
-`daemonProtocolVersion: 3`. This version adds workspace-aware embedding setup
-and caller embedding-environment snapshots. Version 2 daemons must be explicitly
-stopped and restarted before using the new client. Status checks and daemon-backed
+`daemonProtocolVersion: 2`. Embedding recommendations add only optional response
+metadata, so existing v2 requests remain compatible. Update the running daemon to
+enable the new policy for daemon-owned operations. Status checks and daemon-backed
 CLI requests reject live legacy daemons without this field or with version 1,
 including Node.js daemons; `auto` mode
 does not silently fall back to direct execution. Run `zg --server on` with the
@@ -680,7 +682,7 @@ The required field changes the internal daemon reply contract. Native ripgrep
 type filters apply to queries; persisted scan rules support path globs and file
 formats using the same filename rules as indexed queries. The daemon wire
 distinguishes complete ordered glob replacement from case-category updates.
-The instance record uses `daemonProtocolVersion: 3`; see the daemon migration
+The instance record uses `daemonProtocolVersion: 2`; see the daemon migration
 notes above when replacing older resident processes. Replies without
 `content_range` are rejected during deserialization. Direct and server rendering
 consume the same engine contract.

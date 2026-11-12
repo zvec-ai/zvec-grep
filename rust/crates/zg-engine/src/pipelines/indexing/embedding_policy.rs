@@ -43,10 +43,7 @@ pub(crate) fn configured_selection(
             .and_then(|workspace| workspace.index().descriptor())
             .map(IndexDescriptor::default_embedding_model)
             .map(|model| model.model().reference()),
-        options
-            .embedding_environment
-            .clone()
-            .unwrap_or_else(|| std::env::var("ZVEC_GREP_EMBEDDING").unwrap_or_default()),
+        std::env::var("ZVEC_GREP_EMBEDDING").unwrap_or_default(),
         config::string(&config, &["defaults", "embedding"]),
     )
 }

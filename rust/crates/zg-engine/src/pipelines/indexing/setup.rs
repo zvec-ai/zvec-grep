@@ -21,7 +21,6 @@ pub(crate) async fn index_setup(mut options: IndexSetupOptions) -> Result<IndexS
             endpoint: None,
             device: crate::domain::model::Device::Auto,
         }),
-        embedding_environment: options.embedding_environment,
         signal: options.signal,
         ..Default::default()
     };

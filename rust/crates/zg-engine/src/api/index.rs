@@ -50,10 +50,6 @@ pub mod options {
         pub scan: ScanRulesUpdate,
         /// The single model used to embed text content in this workspace.
         pub embedding: Option<EmbeddingModelSpec>,
-        /// The calling process's embedding environment override. An empty string
-        /// suppresses the server's environment; omitted uses the engine's environment.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub embedding_environment: Option<String>,
         /// Index-only embedding concurrency: llama.cpp contexts (up to eight),
         /// ORT CPU/CUDA sessions, or remote requests. Values must be positive.
         /// ORT caps direct-mode sessions to available hardware concurrency.

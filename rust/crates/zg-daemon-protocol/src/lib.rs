@@ -77,6 +77,66 @@ mod tests {
     use super::{DaemonCommand, ErrorReply, ExecutionResult, IndexStreamEvent};
 
     #[test]
+    fn embedding_setup_keeps_the_v2_request_shape() {
+        use zg_engine::api::index::setup::{IndexSetup, IndexSetupOptions};
+
+        let options = IndexSetupOptions {
+            root: Some("workspace".into()),
+            scan: zg_engine::api::index::options::ScanRulesUpdate {
+                include_hidden: Some(true),
+                ..Default::default()
+            },
+            preferred_model: Some("local/bekko-256-int8".into()),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(DaemonCommand::IndexSetup(options)).expect("request");
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "kind": "index_setup",
+                "request": {
+                    "model_cache": null,
+                    "preferred_model": "local/bekko-256-int8",
+                    "credential_available": false
+                }
+            })
+        );
+        let DaemonCommand::IndexSetup(decoded) = serde_json::from_value(wire).expect("v2 request")
+        else {
+            panic!("setup request")
+        };
+        assert!(decoded.root.is_none());
+        assert_eq!(
+            decoded.scan,
+            zg_engine::api::index::options::ScanRulesUpdate::default()
+        );
+        let reply: IndexSetup = serde_json::from_value(serde_json::json!({
+            "models": [], "default_model": "local/bekko-256-int8"
+        }))
+        .expect("v2 reply without selection metadata");
+        assert!(reply.selection.is_none());
+    }
+
+    #[test]
+    fn indexing_and_authorization_keep_the_v2_request_shape() {
+        let options = zg_engine::api::index::IndexOptions::default();
+        let expected = serde_json::json!({
+            "root": null, "rebuild": false, "reset_paths": false,
+            "changes": [], "scan": {}, "embedding": null,
+            "embedding_concurrency": null, "allow_remote": false,
+            "api_key": null, "endpoint": null, "device": null, "model_cache": null
+        });
+        for command in [
+            DaemonCommand::Index(options.clone()),
+            DaemonCommand::IndexAuthorization(options),
+        ] {
+            let wire = serde_json::to_value(command).expect("request");
+            assert_eq!(wire["request"], expected);
+            serde_json::from_value::<DaemonCommand>(wire).expect("v2 request");
+        }
+    }
+
+    #[test]
     fn relationship_commands_and_replies_preserve_compact_payloads() {
         use zg_engine::api::relationships::{
             RelationshipEdge, RelationshipOptions, SymbolDefinition, SymbolRelationships,

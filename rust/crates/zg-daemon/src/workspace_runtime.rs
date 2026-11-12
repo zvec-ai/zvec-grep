@@ -1374,7 +1374,6 @@ fn index_template(options: &IndexOptions) -> IndexOptions {
     template.scan = ScanRulesUpdate::default();
     template.graph_indexing = None;
     template.embedding = None;
-    template.embedding_environment = None;
     template
 }
 
@@ -1480,7 +1479,6 @@ mod tests {
             runtime_api_key: Some("temporary-key".into()),
             runtime_device: Some(Device::Auto),
             runtime_model_cache: Some("temporary-cache".into()),
-            embedding_environment: Some("local/bekko-256-int8".into()),
             embedding: Some(EmbeddingModelSpec {
                 reference: "local/potion-code-16m-v2".into(),
                 revision: None,
@@ -1497,7 +1495,6 @@ mod tests {
         assert!(template.api_key.is_none());
         assert!(template.endpoint.is_none());
         assert!(template.embedding.is_none());
-        assert!(template.embedding_environment.is_none());
         assert!(template.device.is_none());
     }
 
