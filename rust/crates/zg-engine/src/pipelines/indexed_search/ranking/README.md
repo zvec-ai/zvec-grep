@@ -18,12 +18,30 @@ Name-token bonuses also depend on distinct query-token coverage; incidental
 Value matches receive one quarter of the weak bonus, except explicit field or
 constant queries. Exact names retain their full bonus.
 
+For a single non-symbol query, body evidence corroborates existing name/path
+matches. At least two distinct informative terms and 60% query-term coverage
+must occur in one window. The bonus is `0.10 * coverage^2 * anchor`, where
+`anchor = clamp((name_bonus + path_bonus) / 0.35, 0, 1)`. It cannot exceed the
+remaining 0.35 weak-name/path lexical budget. Generic text without an anchor
+receives no bonus; missing body evidence never penalizes short declarations.
+Repeating a term does not add support. This applies to FTS, hybrid and vector
+ranking without changing recall evidence or the fixed RRF constant.
+Pure symbols and fused requests with different queries skip body scoring.
+
+Body support uses at most 32 distinct recalled fragments, each capped at 32 KiB
+on a UTF-8 boundary. Within each fragment, overlapping 128-token windows prevent
+distant terms in a large entity from manufacturing co-occurrence. Separate
+fragments are never concatenated. Entity text is a fallback only when there is
+no fragment evidence. Queries above 8 KiB or 64 distinct terms are neutral.
+The scorer reuses identifier tokenization; it does not add stemming, broad prefix
+matching or candidate-population frequency weights.
+
 Definition bonuses require an exact or qualified name match and an eligible
 symbol kind. High-confidence bare symbols receive 0.85; a single explicit
 identifier embedded in a longer query receives 0.40; multiple identifiers
 receive 0.10. Explicit symbol-kind requests must match the candidate kind.
 Usage queries disable definition bonuses. Queries asking for implementations
-do not boost the interface/trait declaration itself. Static name/definition/path
+do not boost the interface/trait declaration itself. Static name/definition/path/body
 bonuses are capped at 1.25 in the normalized RRF scale.
 
 Path roles use workspace-relative components and explicit filename patterns.
@@ -46,16 +64,17 @@ extra term after the static bonus cap.
 `score` is the rule selection score, not a probability. Trace preserves original
 `fusion` rank/score and includes optional `ranking` evidence: policy identifier,
 query features, name match/bonus, definition bonus, path roles/exemptions, static
-score, positive `path_bonus`, `file_support_bonus`, `file_support_count`, selected
+score, positive `path_bonus`, `body_support`, `body_anchor`, `body_bonus`, `file_support_bonus`, `file_support_count`, selected
 file count, diversity factor, and group-local final rank.
 `path_overrides` lists roles exempted by query/scope, including those not present
 on a particular hit. Without trace, detailed explanation strings are not built.
 Serialized traces may omit `ranking`. Within a ranking trace, omitted
-`path_bonus`, `file_support_bonus`, and `file_support_count` fields default to zero.
+`path_bonus`, `body_support`, `body_anchor`, `body_bonus`, `file_support_bonus`, and
+`file_support_count` fields default to zero.
 
 The loader batches the whole candidate pool, including entity content, before
 ranking and selection. Monitor both `load_results` and `ranking` timings to
-account for candidate loading and scoring costs. Ranking uses stored metadata
+account for candidate loading and scoring costs. Ranking uses stored metadata and text
 without scanning source files or widening recall.
 
 The tests exercise definition promotion before the result limit, symbol roles,

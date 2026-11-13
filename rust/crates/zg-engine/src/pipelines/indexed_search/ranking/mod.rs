@@ -1,4 +1,5 @@
 //! Deterministic rule ranking over the complete recalled entity pool.
+mod lexical;
 mod paths;
 mod query;
 mod support;
@@ -24,16 +25,18 @@ struct Policy {
     definition_intent: bool,
     support_weight: f64,
     bonus_cap: f64,
+    body_weight: f64,
 }
 
 impl Policy {
     const CURRENT: Self = Self {
-        name: "code-rules",
+        name: "code-rules-window-v2",
         path_weight: 0.35,
         weak_names: true,
         definition_intent: true,
         support_weight: 0.15,
         bonus_cap: 1.25,
+        body_weight: 0.10,
     };
 
     #[cfg(test)]
@@ -44,6 +47,7 @@ impl Policy {
         definition_intent: false,
         support_weight: 0.0,
         bonus_cap: 0.50,
+        body_weight: 0.0,
     };
 }
 
@@ -55,6 +59,9 @@ struct Scored {
     symbol_bonus: f64,
     definition_bonus: f64,
     path_bonus: f64,
+    body_support: f64,
+    body_anchor: f64,
+    body_bonus: f64,
     support_bonus: f64,
     support_count: u32,
     roles: Roles,
@@ -87,6 +94,11 @@ fn rank_with_policy(
     queries.sort_unstable();
     queries.dedup();
     let query = QueryFeatures::new(&queries.join("\n"));
+    // Separate query groups have separate intent; a fused multi-query request
+    // must not manufacture co-occurrence from unrelated questions.
+    let body_query = (policy.body_weight > 0.0 && queries.len() == 1 && !query.pure_symbol)
+        .then(|| lexical::BodyQuery::new(queries[0]))
+        .flatten();
     let mut overrides = Roles::overrides(&query, filter);
     let roles = hits
         .iter()
@@ -109,8 +121,26 @@ fn rank_with_policy(
             if symbol_match == "tokens" {
                 path_bonus = (path_bonus - symbol_bonus).max(0.0);
             }
+            let body_support = body_query.as_ref().map_or(0.0, |query| query.support(&hit));
+            // Name, path and body coverage share a weak lexical budget. Exact
+            // symbol/definition evidence remains a separate structural signal.
+            let weak_bonus = if symbol_match == "tokens" {
+                symbol_bonus
+            } else {
+                0.0
+            };
+            // Body co-occurrence corroborates an existing anchor; absence of
+            // name/path evidence must not create a larger reward for generic text.
+            let body_anchor = ((symbol_bonus + path_bonus) / 0.35).clamp(0.0, 1.0);
+            let body_bonus = if body_support >= 0.60 {
+                (policy.body_weight * body_support.powi(2) * body_anchor)
+                    .min((0.35 - path_bonus - weak_bonus).max(0.0))
+            } else {
+                0.0
+            };
             let static_score = (base
-                + (symbol_bonus + definition_bonus + path_bonus).min(policy.bonus_cap))
+                + (symbol_bonus + definition_bonus + path_bonus + body_bonus)
+                    .min(policy.bonus_cap))
                 * roles.factor(overrides);
             Scored {
                 hit,
@@ -120,6 +150,9 @@ fn rank_with_policy(
                 symbol_bonus,
                 definition_bonus,
                 path_bonus,
+                body_support,
+                body_anchor,
+                body_bonus,
                 support_bonus: 0.0,
                 support_count: 0,
                 roles,
@@ -184,6 +217,9 @@ fn select(
                 symbol_bonus: item.symbol_bonus,
                 definition_bonus: item.definition_bonus,
                 path_bonus: item.path_bonus,
+                body_support: item.body_support,
+                body_anchor: item.body_anchor,
+                body_bonus: item.body_bonus,
                 file_support_bonus: item.support_bonus,
                 file_support_count: item.support_count,
                 path_roles: item.roles.names(),
