@@ -29,14 +29,6 @@ cargo test --manifest-path rust/Cargo.toml -p zg-transport-mcp
 
 Configure the native library path as for the other Rust workspace tests.
 
-`toolsets.json` records Rust MCP server instructions and search descriptions
-for both toolsets. The metadata test checks the 2,048 UTF-16 code unit limit
-that older hosts apply to both fields. Tool selection stays in the server
-instructions so it is visible when the host defers tool definitions. Search
-arguments and examples appear in the tool description. After `npm run build`,
-`node rust/scripts/capture-mcp-toolsets.mjs` prints legacy Node.js metadata for
-comparison.
-
 Optional numeric and boolean tool inputs advertise scalar JSON Schema types,
 matching Node.js, with optionality expressed by omission from `required`.
 The tested Qwen-compatible provider returns string arguments when these types

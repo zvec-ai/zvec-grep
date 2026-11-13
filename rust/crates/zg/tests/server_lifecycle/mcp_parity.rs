@@ -12,14 +12,25 @@ fn modern_post(
 fn protocol_post(
     port: u16,
     method: &str,
+    params: serde_json::Value,
+    extra: &str,
+    version: &str,
+) -> Result<String, Box<dyn Error>> {
+    post_as_client(port, method, params, extra, version, "parity-test")
+}
+
+fn post_as_client(
+    port: u16,
+    method: &str,
     mut params: serde_json::Value,
     extra: &str,
     version: &str,
+    client: &str,
 ) -> Result<String, Box<dyn Error>> {
     params["_meta"] = json!({
         "io.modelcontextprotocol/protocolVersion": version,
         "io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}},
-        "io.modelcontextprotocol/clientInfo": {"name": "parity-test", "version": "1"}
+        "io.modelcontextprotocol/clientInfo": {"name": client, "version": "1"}
     });
     let name_header = params["name"]
         .as_str()
@@ -45,6 +56,96 @@ fn rpc(response: &str) -> serde_json::Value {
                 .filter(|value| value.get("jsonrpc").is_some())
         })
         .unwrap_or_else(|| panic!("missing JSON-RPC response: {response}"))
+}
+
+#[test]
+fn claude_receives_compact_instructions_on_http_and_stdio() -> Result<(), Box<dyn Error>> {
+    let _permit = server_test_permit();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
+    let home = TempDir::new()?;
+    let (mut guard, _) = start_server(&binary, &home, "full", None, |_| {})?;
+    let port = guard.listen.parse::<SocketAddr>()?.port();
+    let baseline: serde_json::Value =
+        serde_json::from_str(include_str!("../../../../compat/mcp/toolsets.json"))?;
+    let list = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}});
+    let mut claude_instructions = None;
+
+    for (name, version) in [("claude-code", "2.1.284"), ("other-client", "1.0.0")] {
+        let initialize = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25", "capabilities": {},
+                "clientInfo": { "name": name, "version": version }
+            }
+        });
+        let modern = rpc(&post_as_client(
+            port,
+            "server/discover",
+            json!({}),
+            "",
+            "2026-07-28",
+            name,
+        )?);
+        let http = rpc(&post_json(port, None, &initialize.to_string())?);
+        let mut stdio = StdioBridge::spawn(&binary, home.path(), &guard.listen)?;
+        let stdio_init = stdio.request(&initialize)?;
+        let instructions = modern["result"]["instructions"]
+            .as_str()
+            .ok_or("discovery instructions")?;
+        assert_eq!(http["result"]["instructions"], instructions);
+        assert_eq!(stdio_init["result"]["instructions"], instructions);
+        assert_eq!(http["result"]["protocolVersion"], "2025-11-25");
+        assert_eq!(stdio_init["result"]["protocolVersion"], "2025-11-25");
+        if name == "claude-code" {
+            assert!(instructions.encode_utf16().count() <= 2_048);
+            assert!(instructions.contains("Use zvec_grep_rg for exact-only lookups"));
+            assert!(instructions.contains("Require explicit user authorization"));
+            claude_instructions = Some(instructions.to_owned());
+        } else {
+            assert_eq!(baseline["full"]["instructions"], instructions);
+        }
+
+        stdio.notify(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))?;
+        let stdio_tools = stdio.request(&list)?;
+        let modern_tools = rpc(&post_as_client(
+            port,
+            "tools/list",
+            json!({}),
+            "",
+            "2026-07-28",
+            name,
+        )?);
+        assert_eq!(
+            stdio_tools["result"]["tools"],
+            modern_tools["result"]["tools"]
+        );
+        let search = modern_tools["result"]["tools"]
+            .as_array()
+            .ok_or("tool list")?
+            .iter()
+            .find(|tool| tool["name"] == "zvec_grep_search")
+            .ok_or("search tool")?;
+        assert_eq!(
+            search["description"],
+            baseline["full"]["search_description"]
+        );
+        stdio.close()?;
+    }
+
+    let claude = rpc(&post_as_client(
+        port,
+        "server/discover",
+        json!({}),
+        "",
+        "2026-07-28",
+        "claude-code",
+    )?);
+    assert_eq!(
+        claude["result"]["instructions"].as_str(),
+        claude_instructions.as_deref()
+    );
+    assert_command_success(&guard.stop()?);
+    Ok(())
 }
 
 #[test]
