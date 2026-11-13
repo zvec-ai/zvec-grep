@@ -534,7 +534,7 @@ fn claude_opencode_and_cursor_match_the_typescript_shapes() {
 }
 
 #[test]
-fn claude_reinstall_replaces_legacy_guidance_with_a_single_pointer() {
+fn claude_reinstall_without_a_server_keeps_the_full_guidance() {
     let claude = TempDir::new().expect("claude dir");
     let guidance = claude.path().join("CLAUDE.md");
     fs::write(
@@ -551,10 +551,8 @@ fn claude_reinstall_replaces_legacy_guidance_with_a_single_pointer() {
         let installed = fs::read_to_string(&guidance).expect("installed guidance");
         assert_eq!(installed.matches("<!-- ZVEC_GREP_START -->").count(), 1);
         assert_eq!(installed.matches("<!-- ZVEC_GREP_END -->").count(), 1);
-        assert!(
-            installed.contains("MCP server instructions and the zvec_grep_search tool description")
-        );
-        assert!(!installed.contains("### Retrieval routing"));
+        assert!(installed.contains("### Retrieval routing"));
+        assert!(installed.contains("requires an explicit user request or authorization"));
         assert!(installed.starts_with("# Personal instructions\n"));
         assert!(installed.ends_with("\nKeep this note.\n"));
     }

@@ -137,6 +137,7 @@ fn status(pid: u32, url: &str) -> DaemonStatus {
         pid: Some(pid),
         server_url: Some(url.to_owned()),
         mcp_toolset: Some("agent".to_owned()),
+        compact_claude_instructions: true,
     }
 }
 

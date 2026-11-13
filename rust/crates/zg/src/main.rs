@@ -387,6 +387,20 @@ async fn execute_install_plan(args: &zg_cli::InstallArgs) -> Result<(), Box<dyn 
     } else {
         Some(start_installed_server(&outcome).await?)
     };
+    if let Some(status) = &status
+        && status.ready
+        && outcome.installed_claude()
+        && (outcome.transport == McpInstallTransport::Stdio
+            || status.server_url.as_deref() == Some(zg_cli::resolve_server_url()?.as_str()))
+    {
+        if status.compact_claude_instructions {
+            outcome.compact_claude_guidance()?;
+        } else {
+            report_warning(
+                "Kept the full Claude guidance. Restart the daemon with the updated zg, then rerun this install command to enable compact guidance.",
+            );
+        }
+    }
     if zg_cli::stdout_supports_ansi() {
         if let Some(status) = &status {
             write_server_status(status)?;
