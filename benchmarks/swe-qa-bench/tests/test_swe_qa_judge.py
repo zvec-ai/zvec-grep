@@ -181,7 +181,7 @@ class JudgeTests(unittest.TestCase):
                 self.assertNotIn("response_format", call)
             self.assertTrue(all(call["model"] == "openai/glm-5.2" for call in requests))
             self.assertTrue(all(call["api_key"] == "test-secret" for call in requests))
-            self.assertEqual(report["schema_version"], 2)
+            self.assertEqual(report["schema_version"], 4)
             self.assertEqual(report["judge"]["label"], SELF_JUDGE_LABEL)
             self.assertTrue(report["judge"]["self_judge"])
             self.assertEqual(report["judge"]["temperature"], 0)
@@ -248,9 +248,10 @@ class JudgeTests(unittest.TestCase):
             )
             self.assertIn("not an average of task percentages", markdown)
             self.assertLess(
-                markdown.index("| **Aggregate** |"), markdown.index("| reflex:6 |")
+                markdown.index("| **After MAD task screening** |"),
+                markdown.index("| reflex:6 |"),
             )
-            self.assertNotIn("cost", markdown.lower())
+            self.assertNotIn("| cost", markdown.lower())
             self.assertNotIn("$", markdown)
             self.assertEqual(summary.read_text(), markdown)
             serialized = (output_dir / "report.json").read_text()
@@ -729,7 +730,7 @@ class JudgeTests(unittest.TestCase):
                     )
             self.assertFalse((root / "report" / "report.json").exists())
 
-    def test_all_filtered_judged_task_remains_valid_for_offline_aggregation(
+    def test_high_input_task_remains_in_offline_aggregation(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -782,33 +783,19 @@ class JudgeTests(unittest.TestCase):
                 self.assertEqual(report["judge"]["usage"]["calls"], 6)
                 self.assertEqual(len(report["cases"]), 1)
                 aggregate = report["aggregate"]
-                self.assertEqual(aggregate["filter"]["included_count"], 0)
-                self.assertEqual(aggregate["filter"]["excluded_count"], 1)
-                self.assertTrue(
-                    all(value is None for value in aggregate["comparison"].values())
+                self.assertEqual(aggregate["filter"]["task_count"], 1)
+                self.assertEqual(
+                    aggregate["filter"]["profiles"]["zvec-grep"]["excluded_count"], 2
                 )
-                self.assertTrue(
-                    all(
-                        value == 0 for value in aggregate["comparison_samples"].values()
-                    )
+                self.assertEqual(
+                    aggregate["profiles"]["zvec-grep"]["input_tokens"], 10000
                 )
-                for profile in aggregate["profiles"].values():
-                    for metric in (
-                        "judge",
-                        "input_tokens",
-                        "output_tokens",
-                        "tool_calls",
-                        "agent_wall_seconds",
-                        "cost_usd",
-                    ):
-                        self.assertIsNone(profile[metric])
             for directory in ("source", "combined"):
                 markdown = (root / directory / "report.md").read_text()
-                self.assertIn("| **Aggregate** | N/A | N/A | N/A | N/A |", markdown)
-                self.assertNotIn("| reflex:6 |", markdown)
-                self.assertIn("reflex:6", markdown)
+                self.assertIn("| reflex:6 |", markdown)
+                self.assertIn("Excluded trials (4)", markdown)
 
-    def test_judge_only_filtered_task_keeps_evidence_and_can_merge(self) -> None:
+    def test_large_score_difference_keeps_task_and_can_merge(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             pairs_root, references = self._write_pair_and_reference(root)
@@ -860,38 +847,15 @@ class JudgeTests(unittest.TestCase):
                 self.assertEqual(report["judge"]["usage"]["calls"], 6)
                 self.assertEqual(len(report["cases"]), 1)
                 aggregate = report["aggregate"]
-                self.assertEqual(aggregate["filter"]["included_count"], 0)
-                self.assertEqual(aggregate["filter"]["excluded_count"], 1)
+                self.assertEqual(aggregate["filter"]["task_count"], 1)
+                self.assertEqual(aggregate["comparison"]["judge_delta"], 25)
                 self.assertEqual(
-                    aggregate["filter"]["excluded_tasks"][0]["reasons"],
-                    ["judge_delta_outside_range"],
+                    aggregate["filter"]["profiles"]["zvec-grep"]["excluded_count"], 2
                 )
-                self.assertTrue(
-                    all(value is None for value in aggregate["comparison"].values())
-                )
-                self.assertTrue(
-                    all(
-                        value == 0 for value in aggregate["comparison_samples"].values()
-                    )
-                )
-                for profile in aggregate["profiles"].values():
-                    for metric in (
-                        "judge",
-                        "input_tokens",
-                        "output_tokens",
-                        "tool_calls",
-                        "agent_wall_seconds",
-                        "cost_usd",
-                    ):
-                        self.assertIsNone(profile[metric])
             for directory in ("source", "combined"):
                 markdown = (root / directory / "report.md").read_text()
-                main_table, excluded_section = markdown.split(
-                    "### Tasks excluded for Judge differences", 1
-                )
-                self.assertIn("| **Aggregate** | N/A | N/A | N/A | N/A |", main_table)
-                self.assertNotIn("| reflex:6 |", main_table)
-                self.assertIn("| reflex:6 | 50.00 | 75.00 | +25.00 |", excluded_section)
+                self.assertIn("| reflex:6 | 50.00 / 75.00 / +25.00", markdown)
+                self.assertIn("Excluded trials (4)", markdown)
 
     def test_missing_expected_pair_fails_before_model_call(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
