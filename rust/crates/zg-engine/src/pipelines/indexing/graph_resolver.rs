@@ -496,8 +496,7 @@ fn name_hits<'s>(
     };
     // The language gate runs first: preference for definitions is only
     // meaningful among candidates that can host this reference.
-    let compatible =
-        filter_compatible_hits(snapshot, stored, raw, &mut caches.candidate_formats);
+    let compatible = filter_compatible_hits(snapshot, stored, raw, &mut caches.candidate_formats);
     // Reachability and callability are facts about the candidates, so they
     // narrow the set before any rule reads it.
     let reachable = linkage_reachable(store, snapshot, stored, compatible, caches)?;
@@ -2387,7 +2386,7 @@ fn declarations_in<'a>(
                 _ => true,
             }
         })
-        .map(|hit| *hit)
+        .copied()
         .collect()
 }
 
@@ -3167,7 +3166,7 @@ fn spelled_under<'a>(hits: &[&'a NameIndexEntry], bound_type: &str) -> Vec<&'a N
     let suffix = format!("::{bound_type}");
     hits.iter()
         .filter(|hit| hit.qualified_name == bound_type || hit.qualified_name.ends_with(&suffix))
-        .map(|hit| *hit)
+        .copied()
         .collect()
 }
 

@@ -392,14 +392,8 @@ fn member(
     );
     let root = ClassScope::at(snapshot, owner.qualified_name.clone(), Some(owner.file_id));
     let mut scopes = vec![root.clone()];
-    let branched = collect_base_scopes(
-        store,
-        snapshot,
-        &root,
-        &mut scopes,
-        &mut HashSet::new(),
-        8,
-    )?;
+    let branched =
+        collect_base_scopes(store, snapshot, &root, &mut scopes, &mut HashSet::new(), 8)?;
     let mut inherited = None;
     for scope in scopes {
         let declarations = hits

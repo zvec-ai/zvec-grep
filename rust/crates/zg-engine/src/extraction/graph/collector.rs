@@ -355,66 +355,7 @@ fn visit_for_calls(
     } else if is_call_node(node)
         && let Some((_, _, callee)) = callee_of(node, source)
     {
-        // C/C++ and PHP arrow member access joins the identifier gate and
-        // the split under the dot spelling: `ptr->bar()` names the same
-        // member shape as `ref.bar()`. The buffered raw text keeps the
-        // original spelling.
-        let normalized =
-            structured_callee(node, source).unwrap_or_else(|| normalize_member_access(&callee));
-        let normalized = normalize_super_call(&normalized);
-        let intrinsic_jsx = matches!(
-            node.kind(),
-            "jsx_opening_element" | "jsx_self_closing_element"
-        ) && !normalized.contains('.')
-            && normalized.chars().next().is_some_and(char::is_lowercase);
-        let proven_expression = normalized.rsplit_once('.').is_some_and(|(receiver, name)| {
-            receiver.starts_with("ReturnType<typeof ") && is_identifier_like(name)
-        });
-        if !intrinsic_jsx
-            && normalized.len() <= MAX_CALLEE_TEXT_CHARS
-            && (is_identifier_like(&normalized) || proven_expression)
-        {
-            let (ref_name, receiver_name) = split_callee_name(&normalized);
-            let line = node.start_position().row + 1;
-            let column = node.start_position().column;
-            let constructs = construction_site(node);
-            if constructs.is_some() {
-                // A construction names its type, and that spelling — `X` after the
-                // `new` keyword — is where the call stands.
-                let position = node
-                    .child_by_field_name("type")
-                    .map_or_else(|| node.start_position(), |spelled| spelled.start_position());
-                context.add_construction_edge(
-                    owner_index,
-                    &ref_name,
-                    receiver_name.as_deref(),
-                    Some(callee.as_str()),
-                    call_arity_of(node),
-                    position.row + 1,
-                    position.column,
-                    constructs,
-                );
-            } else {
-                context.add_call_edge(
-                    owner_index,
-                    &ref_name,
-                    receiver_name.as_deref(),
-                    Some(
-                        if matches!(
-                            node.kind(),
-                            "jsx_opening_element" | "jsx_self_closing_element"
-                        ) {
-                            node_text(node, source)
-                        } else {
-                            callee.as_str()
-                        },
-                    ),
-                    call_arity_of(node),
-                    line,
-                    column,
-                );
-            }
-        }
+        record_callee_call(node, owner_index, source, context, &callee);
     } else if node.kind() == "compound_literal_expression"
         && let Some((name, position)) = constructed_type_name(node, source)
     {
@@ -438,6 +379,76 @@ fn visit_for_calls(
         }
         visit_for_calls(child, owner_index, source, context, boundary);
     }
+}
+
+/// Records the call a callee names, when the callee passes the identifier
+/// gate: C/C++ and PHP arrow member access joins it under the dot spelling
+/// (`ptr->bar()` names the same member shape as `ref.bar()`), and the buffered
+/// raw text keeps the original spelling.
+fn record_callee_call(
+    node: Node<'_>,
+    owner_index: usize,
+    source: &[u8],
+    context: &mut WalkContext,
+    callee: &str,
+) {
+    let normalized =
+        structured_callee(node, source).unwrap_or_else(|| normalize_member_access(callee));
+    let normalized = normalize_super_call(&normalized);
+    let intrinsic_jsx = matches!(
+        node.kind(),
+        "jsx_opening_element" | "jsx_self_closing_element"
+    ) && !normalized.contains('.')
+        && normalized.chars().next().is_some_and(char::is_lowercase);
+    let proven_expression = normalized.rsplit_once('.').is_some_and(|(receiver, name)| {
+        receiver.starts_with("ReturnType<typeof ") && is_identifier_like(name)
+    });
+    if intrinsic_jsx
+        || normalized.len() > MAX_CALLEE_TEXT_CHARS
+        || !(is_identifier_like(&normalized) || proven_expression)
+    {
+        return;
+    }
+    let (ref_name, receiver_name) = split_callee_name(&normalized);
+    let line = node.start_position().row + 1;
+    let column = node.start_position().column;
+    let constructs = construction_site(node);
+    if constructs.is_some() {
+        // A construction names its type, and that spelling — `X` after the
+        // `new` keyword — is where the call stands.
+        let position = node
+            .child_by_field_name("type")
+            .map_or_else(|| node.start_position(), |spelled| spelled.start_position());
+        context.add_construction_edge(
+            owner_index,
+            &ref_name,
+            receiver_name.as_deref(),
+            Some(callee),
+            call_arity_of(node),
+            position.row + 1,
+            position.column,
+            constructs,
+        );
+        return;
+    }
+    context.add_call_edge(
+        owner_index,
+        &ref_name,
+        receiver_name.as_deref(),
+        Some(
+            if matches!(
+                node.kind(),
+                "jsx_opening_element" | "jsx_self_closing_element"
+            ) {
+                node_text(node, source)
+            } else {
+                callee
+            },
+        ),
+        call_arity_of(node),
+        line,
+        column,
+    );
 }
 
 /// The plain type a brace construction builds and where it is written:
@@ -1263,7 +1274,7 @@ fn collect_object_bindings(node: Node<'_>, owner: usize, source: &[u8], context:
                     owner,
                     &format!("{object}.{key}"),
                     "?",
-                        context,
+                    context,
                 );
             }
             continue;
@@ -1293,7 +1304,7 @@ fn collect_object_bindings(node: Node<'_>, owner: usize, source: &[u8], context:
             owner,
             &format!("{object}.{key}"),
             &ty,
-                context,
+            context,
         );
     }
 }
@@ -2367,7 +2378,11 @@ fn inside_function_body(node: Node<'_>) -> bool {
     false
 }
 
-fn cpp_binding_of(node: Node<'_>, source: &[u8], context: &WalkContext) -> Option<(String, String)> {
+fn cpp_binding_of(
+    node: Node<'_>,
+    source: &[u8],
+    context: &WalkContext,
+) -> Option<(String, String)> {
     match node.kind() {
         // `Widget w;` / `Widget* p = f();` / `Widget& r = w;` /
         // `std::unique_ptr<W> h(new W());`: the declaration spells the type
