@@ -7,13 +7,10 @@ everyday use. This page covers implementation behavior, native builds, and
 packaging. The repository root retains the legacy TypeScript implementation and
 its separate checks.
 
-The Rust catalog includes `local/bekko-256-int8`, using the pinned
-[Bekko static ONNX weights](https://huggingface.co/hotchpotch/bekko-static-embedding-v1/tree/c18167b8f244c1bc6de21ce9b710bac8a29c4615/onnx).
+The Rust catalog includes `local/bekko-256-int8`.
 Select it with `zg --index --embedding local/bekko-256-int8 --device cpu`.
-It downloads 52,000,965 bytes of INT8 weights plus a 5,104,874-byte tokenizer,
-verified by SHA-256. Mean pooling and the 256-dimensional normalized output
-remain FP32. Queries and documents have no prefix or special tokens, with a
-32,768-token limit. Only Hugging Face is configured for this model.
+Mean pooling and the 256-dimensional normalized output remain FP32.
+Queries and documents have no prefix or special tokens, with a 32,768-token limit.
 The Rust Bekko backend (`bekko`) reads the quantized table and per-token scales
 directly from the pinned ONNX file; inference runs on the shared CPU pool
 without an ONNX session or padded batches. It retains unknown tokens and
@@ -262,8 +259,7 @@ cargo test --locked -p zg-engine --lib models::artifacts::downloader::tests::liv
 Each suite dynamically enumerates every local catalog model and fully downloads
 its pinned artifacts when configured for the selected source (Hugging Face or
 ModelScope), using a fresh temporary cache for every model/source pair and
-verifying artifact integrity. Remote API models are excluded. Bekko is checked
-only from Hugging Face because it has no configured ModelScope mirror.
+verifying artifact integrity. Remote API models are excluded.
 The suites require live network access, never fall back to the other source, and
 do not run inference. They emit a catalog manifest and a JSON result for every
 configured model/source pair. The normal Linux CPU CI job runs both suites using
