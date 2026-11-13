@@ -20,6 +20,29 @@ The workspace pins its Rust toolchain in `rust-toolchain.toml`. Lexical search
 uses embedded `grep` and `ignore` crates, so a system `rg` executable is not
 required for builds or tests.
 
+PDFium 8076 is built from pinned sources and linked statically. The first build
+requires Git, Python 3.11+, internet access to Chromium's source/toolchain servers,
+and the platform SDK (Xcode or Command Line Tools, Linux C/C++ development headers,
+or Visual Studio with the Windows SDK). No PDFium shared library is installed or
+shipped; zvec and ONNX Runtime keep their existing linkage.
+`scripts/pdfium-build.json` pins PDFium and depot_tools; PDFium's DEPS pins its
+dependencies and Clang toolchain. Linux ARM64 uses the native GCC toolchain
+instead (Chromium only distributes x64 Linux compiler binaries).
+The completed static SDK and its SHA-256 manifest
+are cached under `target/pdfium-static/`, shared by debug and release builds.
+`ZG_PDFIUM_CACHE_DIR` overrides that cache. CI caches only the completed SDK.
+`CARGO_NET_OFFLINE=true` requires a matching, verified SDK already in the cache.
+To prepare it separately: `python3 scripts/prepare-pdfium.py --target aarch64-apple-darwin`.
+
+On Windows, prepare the SDK **before** invoking Cargo and export its absolute
+library path: `python scripts/prepare-pdfium.py --target x86_64-pc-windows-msvc`,
+then `$env:PDFIUM_STATIC_LIB_PATH = (Resolve-Path target/pdfium-static/156.0.8076.0/x86_64-pc-windows-msvc/sdk/lib).Path`.
+Use `aarch64-pc-windows-msvc` for ARM64. Upstream pdfium-render also builds a
+dependency DLL, before the engine can supply its own native linker flags.
+The workspace Cargo configuration supplies that DLL's GDI/User32 system libraries.
+CI performs this preparation automatically. Installed packages need neither
+Python nor a compiler; the model still uses the existing download/cache path.
+
 ## Engine changes
 
 Keep the application surface centered on `ZvecGrep`:

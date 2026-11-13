@@ -19,13 +19,13 @@ fn make_entity(
     metadata: Option<EntityMetadata>,
     ranges: &[Range],
 ) -> Entity {
-    let id = EntityId::new(file_id, &content, source_range).expect("entity id");
+    let id = EntityId::new(file_id, &content, &source_range).expect("entity id");
     let fragments = ranges
         .iter()
         .enumerate()
-        .map(|(ordinal, &range)| EntityFragment {
+        .map(|(ordinal, range)| EntityFragment {
             id: FragmentId::new(&id, u32::try_from(ordinal).expect("fragment ordinal")),
-            range,
+            range: range.clone(),
         })
         .collect();
     Entity::new(id, file_id, source_range, content, metadata, fragments).expect("entity")
@@ -37,6 +37,51 @@ fn round_trip(entity: &Entity) {
         decode_entity(&encoded, entity.metadata()).expect("decode entity"),
         *entity
     );
+}
+
+#[test]
+fn pdf_provenance_round_trips_and_rejects_corrupt_page_or_text_ranges() {
+    use crate::domain::{PdfBlock, PdfSourceMap, PdfSourcePart};
+    let text = "中文 on page two\ncontinued on page four";
+    let split = text.find("continued").expect("split");
+    let source = Range::Pdf(std::sync::Arc::new(PdfSourceMap {
+        markdown_start: 12,
+        text_len: text.len(),
+        parts: vec![
+            PdfSourcePart {
+                range: 0..split,
+                block: PdfBlock {
+                    page: 2,
+                    id: 1,
+                    bounds: None,
+                },
+            },
+            PdfSourcePart {
+                range: split..text.len(),
+                block: PdfBlock {
+                    page: 4,
+                    id: 2,
+                    bounds: None,
+                },
+            },
+        ],
+    }));
+    let entity = make_entity(
+        FileId::new(3),
+        Content::Text(text.into()),
+        source,
+        None,
+        &[Range::Full],
+    );
+    round_trip(&entity);
+    let record: Value =
+        serde_json::from_str(&encode_entity(&entity).expect("encode")).expect("JSON");
+    let mut bad_page = record.clone();
+    bad_page["source_range"]["source"]["parts"][0]["block"]["page"] = json!(0);
+    assert_corrupt_entity(&bad_page);
+    let mut bad_utf8 = record;
+    bad_utf8["source_range"]["source"]["parts"][0]["range"]["start"] = json!(1);
+    assert_corrupt_entity(&bad_utf8);
 }
 
 #[test]
@@ -229,7 +274,7 @@ fn code_records_preserve_kind_without_metadata_and_validate_text_ranges() {
         &EntityId::new(
             entity.file_id(),
             &Content::Text("a中文b".into()),
-            Range::Full
+            &Range::Full
         )
         .expect("text entity id"),
     );

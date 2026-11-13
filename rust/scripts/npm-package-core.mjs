@@ -307,6 +307,8 @@ export async function stageZvecRuntime(sourceDir, libDir, platform) {
     win32: /^(?:zvec_c_api|onnxruntime|DirectML)\.dll$/i,
   }[platform];
   for (const name of (await readdir(sourceDir)).sort()) {
+    // PDFium is linked into zg. Old dynamic builds may still be cached here.
+    if (/^(?:libpdfium\.(?:dylib|so(?:\.\d+)*)|pdfium\.dll)$/i.test(name)) continue;
     if (
       name !== library &&
       runtimePattern.test(name) &&
@@ -327,14 +329,14 @@ export async function stageZvecRuntime(sourceDir, libDir, platform) {
     await mkdir(dirname(destination), { recursive: true });
     await copyFile(join(sourceDir, file), destination);
   }
-  // Official ORT/DirectML notices travel with the native libraries on CPU
-  // targets too. Use a flat allowlist; never recursively copy a build directory.
+  // Keep notices for dynamic runtimes and statically linked PDFium alike.
+  // Use a flat allowlist; never recursively copy a build directory.
   const notices = join(sourceDir, "licenses");
   if ((await stat(notices).catch((error) => {
     if (error.code !== "ENOENT") throw error;
   }))?.isDirectory()) {
     for (const name of (await readdir(notices)).sort()) {
-      if (!/^(?:onnxruntime|directml)-(?:LICENSE(?:-CODE)?|ThirdPartyNotices\.txt)$/.test(name)) continue;
+      if (!/^(?:onnxruntime|directml|pdfium)-(?:LICENSE(?:-CODE)?|ThirdPartyNotices\.txt)$/.test(name)) continue;
       if (!(await stat(join(notices, name))).isFile()) continue;
       await mkdir(join(libDir, "licenses"), { recursive: true });
       await copyFile(join(notices, name), join(libDir, "licenses", name));

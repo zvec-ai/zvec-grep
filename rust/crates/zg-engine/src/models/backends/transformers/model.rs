@@ -415,7 +415,7 @@ fn load_session(
     path: &Path,
     provider: TransformersExecutionProvider,
 ) -> Result<Session, ModelError> {
-    let builder = Session::builder(&super::native_runtime::initialize()?)
+    let builder = Session::builder(&crate::models::runtime::onnx::initialize()?)
         .map_err(|error| {
             ModelError::internal("Unable to configure ONNX embedding model").with_cause(error)
         })?

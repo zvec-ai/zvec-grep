@@ -91,6 +91,8 @@ try {
     & python scripts/cuda/runtime.py --cargo-messages $messages --destination $libDirectory
     if ($LASTEXITCODE -ne 0) { throw "Staging the selected llama runtime failed" }
     Copy-RequiredFile (Join-Path $profileDirectory "zvec_c_api.dll") (Join-Path $libDirectory "zvec_c_api.dll")
+    New-Item -ItemType Directory -Force -Path (Join-Path $libDirectory "licenses") | Out-Null
+    Copy-RequiredFile (Join-Path $profileDirectory "licenses/pdfium-ThirdPartyNotices.txt") (Join-Path $libDirectory "licenses/pdfium-ThirdPartyNotices.txt")
 
     & python scripts/prepare-onnxruntime.py --target x86_64-pc-windows-msvc --cuda `
         --cache-dir (Join-Path $targetDirectory "ort-prebuilt") --destination $libDirectory

@@ -17,7 +17,7 @@ async fn definitions_without_text_locations_do_not_suppress_suggestions() {
             &[("unlocated", Some(scope), 1, "fn unlocated() {}")],
         );
         let entity = &mut entities[0];
-        let id = EntityId::new(entity.file_id(), entity.content(), range).expect("identity");
+        let id = EntityId::new(entity.file_id(), entity.content(), &range).expect("identity");
         let fragments = vec![EntityFragment {
             id: FragmentId::new(&id, 0),
             range: Range::Full,

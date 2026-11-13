@@ -81,6 +81,40 @@ Rg requests return plain text matches and requested context without parsing code
 or Markdown structure. CLI and MCP rg searches share this behavior; current-file
 path lookup keeps its structural entity grouping.
 
+## PDF search
+
+PDF indexing combines native text from pdf-inspector with PP-DocLayout-S page
+layout, then reuses Markdown entity extraction. The layout model downloads into
+the existing model cache. PDFium 8076 is statically linked; installed packages do
+not require Python, a PDF viewer, or a system PDFium installation.
+
+Run `zg --index`, then `zg "How does recovery work?" -t pdf` or
+`zg --rg -F "recovery" -t pdf`. PDF rg searches the indexed entity text, retaining
+literal/regex, case, context and file-filter behavior within each entity. A PDF
+without a usable extraction index produces an error directing you to index it;
+raw PDF bytes and metadata are never searched as a fallback.
+
+Results show the file, physical `pages` (one-based), `kind: text/native`, and text.
+Query pages cover the whole entity; rg pages cover the actual matches, excluding
+context-only pages. The default `--preview short` follows Markdown preview rules.
+`full` returns the complete PDF entity; `detail` also shows normalized block boxes
+with a top-left origin, retaining separate boxes across blocks and pages.
+
+A file either commits its complete extraction or fails. Other files continue
+indexing, and failures identify the file. PDFs with no searchable native text
+produce a warning and zero entities. OCR, image understanding, precise table or
+formula reconstruction, `--read`, and `--show` are outside this release.
+
+The index format is now version 4. Existing incompatible indexes require
+`zg --index --rebuild`; preserve any explicit embedding selection when rebuilding.
+PDFs unchanged since indexing reuse their saved entities and provenance.
+
+The native release workflow runs `scripts/pdf-package-smoke.py` against installed
+packages on all six platforms. It checks a pinned real 14-page PDF, preview/page
+and box output, mixed Markdown/PDF search, failed-file isolation, empty-text
+warnings, retry, updates and deletion. Logs and `results.json` are retained in
+the CPU artifact evidence. This is functional validation, not a retrieval score.
+
 `zg --status` shows only **Coverage**, **Embedding**, **FTS**, and **Storage**.
 Coverage compares the current scan with unchanged indexed files and includes
 any non-ready state. Missing statistics show `Unavailable`; missing embedding

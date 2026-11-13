@@ -23,7 +23,7 @@ extern "C" fn release_environment() {
     drop(environment);
 }
 
-pub(super) fn initialize() -> Result<Environment, ModelError> {
+pub(crate) fn initialize() -> Result<Environment, ModelError> {
     RUNTIME.get_or_init(|| {
         let path = runtime_path(
             env::var_os("ORT_DYLIB_PATH").map(PathBuf::from),
@@ -121,5 +121,5 @@ fn runtime_path(
 }
 
 #[cfg(test)]
-#[path = "native_runtime_tests.rs"]
+#[path = "onnx_tests.rs"]
 mod tests;

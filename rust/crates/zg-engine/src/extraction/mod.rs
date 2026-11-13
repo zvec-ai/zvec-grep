@@ -5,6 +5,7 @@ mod code;
 mod graph;
 mod image;
 mod markdown;
+pub(crate) mod pdf;
 mod service;
 mod spi;
 mod text;

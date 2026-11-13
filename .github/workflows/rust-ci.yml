@@ -103,7 +103,7 @@ jobs:
     name: rust quality
     needs: source
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
@@ -124,6 +124,11 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Check formatting
         run: cargo fmt --all --check
+      - name: Cache the static PDFium SDK
+        uses: actions/cache@v5
+        with:
+          path: rust/target/pdfium-static/**/sdk/
+          key: pdfium-static-v1-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust/scripts/pdfium-build.json', 'rust/scripts/prepare-pdfium.py', 'rust/scripts/licenses/gcc-runtime.txt') }}
       - name: Check packages independently
         shell: bash
         run: |
@@ -138,6 +143,8 @@ jobs:
         run: |
           python3 scripts/test-prepare-onnxruntime.py
           python3 scripts/test-check-glibc.py
+      - name: Test static PDFium preparation
+        run: python3 scripts/test-prepare-pdfium.py
       - name: Test npm packaging
         run: node --test scripts/npm-*.test.mjs npm/meta/install.test.cjs
 
@@ -218,7 +225,15 @@ jobs:
         uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-nextest@0.9.148
+      - name: Cache the static PDFium SDK
+        uses: actions/cache@v5
+        with:
+          path: rust/target/pdfium-static/**/sdk/
+          key: pdfium-static-v1-test-${{ runner.os }}-${{ runner.arch }}-${{ matrix.cuda }}-${{ hashFiles('rust/scripts/pdfium-build.json', 'rust/scripts/prepare-pdfium.py', 'rust/scripts/licenses/gcc-runtime.txt') }}
       # Keep Windows tests on the fast workspace drive, including GPU runners.
+      - name: Prepare PDFium before linking the Windows dependency DLL
+        if: runner.os == 'Windows'
+        run: python scripts/prepare-pdfium.py --target x86_64-pc-windows-msvc --github-env
       - name: Keep test temp files on the workspace drive
         if: runner.os == 'Windows'
         shell: bash
@@ -314,7 +329,7 @@ jobs:
           pathlib.Path("target").mkdir(exist_ok=True)
           # Keep targets/features/profile identical to nextest; this JSON also
           # identifies the active model tests and plugins for no-build GPU checks.
-          command = ["cargo", "test", "--locked", "--workspace", "--all-targets", "--no-run", "--message-format=json"]
+          command = ["cargo", "test", "--locked", "--workspace", "--all-targets", "--no-run", "--message-format=json-render-diagnostics"]
           if os.environ["CUDA_VERIFY"] == "true":
               command += ["--features", "zg/cuda"]
           # Direct file output also avoids PowerShell 5's UTF-16 redirection.

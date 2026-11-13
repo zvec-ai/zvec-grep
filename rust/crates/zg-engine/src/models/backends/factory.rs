@@ -12,6 +12,23 @@ use crate::models::{
     spi::{EmbeddingModel, ModelError},
 };
 
+pub(crate) fn create_layout_model(
+    reference: &str,
+    config: crate::models::layout::LayoutModelConfig,
+    compute: ModelComputeRuntime,
+) -> Result<Arc<dyn crate::models::layout::LayoutModel>, ModelError> {
+    if reference != crate::models::catalog::layout::PP_S_REFERENCE {
+        return Err(ModelError::new(
+            crate::EngineError::NOT_FOUND,
+            "Layout model is not in the catalog",
+            None,
+        ));
+    }
+    Ok(Arc::new(super::pp_doclayout::PpDocLayoutModel::new(
+        config, compute,
+    )))
+}
+
 /// Creates a catalog-backed embedding model.
 ///
 /// `None` for `options` is the Rust equivalent of omitting the optional

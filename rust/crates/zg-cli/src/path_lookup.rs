@@ -345,6 +345,14 @@ fn range_label(range: &ContentRange) -> String {
             end_offset,
         } => format!("bytes:{start_offset}-{end_offset}"),
         ContentRange::File => "file".to_owned(),
+        ContentRange::Pdf { pages, .. } => format!(
+            "pages:{}",
+            pages
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
     }
 }
 
@@ -453,6 +461,8 @@ mod tests {
                 match_ranges: Vec::new(),
                 content: content.into(),
                 outline: None,
+                content_windows: Vec::new(),
+                pdf_boxes: Vec::new(),
                 content_role: Some(ContextContentRole::Source),
                 status: ContextItemStatus::Fresh,
                 score: None,

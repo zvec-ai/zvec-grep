@@ -482,6 +482,15 @@ pub mod result {
         pub path: PathBuf,
     }
 
+    /// A source content block, in top-left page coordinates normalized to millionths.
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct PdfBox {
+        pub page: u32,
+        pub block: u32,
+        /// `[left, top, right, bottom]`, each between 0 and `1_000_000`.
+        pub bounds: [u32; 4],
+    }
+
     #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
     pub struct ContextItem {
         pub kind: ContextItemKind,
@@ -496,6 +505,13 @@ pub mod result {
         /// Individual lexical matches in decoded source coordinates, independent of context lines.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub match_ranges: Vec<ContentRange>,
+        /// Visible lexical context windows within `content`; gaps can be omitted
+        /// without changing the source coordinates. Empty means all content.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub content_windows: Vec<ContentRange>,
+        /// Entity block geometry for detailed PDF presentation.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub pdf_boxes: Vec<PdfBox>,
         /// Complete stored entity for indexed hits; context window for lexical matches.
         pub content: String,
         /// Optional structural context supplied with the retrieved source.
@@ -618,6 +634,16 @@ pub mod result {
     #[serde(rename_all = "snake_case", tag = "kind")]
     pub enum ContentRange {
         File,
+        /// Physical PDF pages. Offsets refer to the transient assembled Markdown,
+        /// allowing excerpts to be located within returned text without exposing
+        /// generated Markdown line numbers as PDF source coordinates.
+        Pdf {
+            /// Sorted physical pages of the selection. Merged lexical matches
+            /// can skip unmatched pages within the bounding byte offsets.
+            pages: Vec<u32>,
+            start_byte_offset: usize,
+            end_byte_offset: usize,
+        },
         /// Half-open UTF-8 byte offsets and columns; endpoint lines are one-based.
         Text {
             start_line: usize,
@@ -634,12 +660,41 @@ pub mod result {
     }
 
     impl ContentRange {
+        /// Starting byte in decoded text, assembled PDF text, or binary content.
+        #[must_use]
+        pub fn start_byte_offset(&self) -> Option<usize> {
+            match self {
+                Self::Text {
+                    start_byte_offset, ..
+                }
+                | Self::Pdf {
+                    start_byte_offset, ..
+                } => Some(*start_byte_offset),
+                Self::Byte { start_offset, .. } => usize::try_from(*start_offset).ok(),
+                Self::File => None,
+            }
+        }
+        /// Exclusive ending byte in the same coordinate space as the start.
+        #[must_use]
+        pub fn end_byte_offset(&self) -> Option<usize> {
+            match self {
+                Self::Text {
+                    end_byte_offset, ..
+                }
+                | Self::Pdf {
+                    end_byte_offset, ..
+                } => Some(*end_byte_offset),
+                Self::Byte { end_offset, .. } => usize::try_from(*end_offset).ok(),
+                Self::File => None,
+            }
+        }
+
         /// Returns the one-based starting line when source line coordinates are available.
         #[must_use]
         pub fn start_line(&self) -> Option<usize> {
             match self {
                 Self::Text { start_line, .. } => Some(*start_line),
-                Self::File | Self::Byte { .. } => None,
+                Self::File | Self::Byte { .. } | Self::Pdf { .. } => None,
             }
         }
 
@@ -657,7 +712,7 @@ pub mod result {
                 } => Some(end_line.saturating_sub(usize::from(
                     *end_byte_column == 0 && start_byte_offset < end_byte_offset,
                 ))),
-                Self::File | Self::Byte { .. } => None,
+                Self::File | Self::Byte { .. } | Self::Pdf { .. } => None,
             }
         }
 
@@ -673,11 +728,35 @@ pub mod result {
     }
 }
 
+impl result::PdfBox {
+    pub(crate) fn from_source(source: &crate::domain::PdfSourceMap) -> Vec<Self> {
+        let mut seen = std::collections::BTreeSet::new();
+        source
+            .parts
+            .iter()
+            .filter_map(|part| {
+                let bounds = part.block.bounds?;
+                seen.insert((part.block.page, part.block.id, bounds))
+                    .then_some(Self {
+                        page: part.block.page,
+                        block: part.block.id,
+                        bounds,
+                    })
+            })
+            .collect()
+    }
+}
+
 impl From<crate::domain::Range> for result::ContentRange {
     fn from(range: crate::domain::Range) -> Self {
         use crate::domain::Range;
         match range {
             Range::Full => Self::File,
+            Range::Pdf(source) => Self::Pdf {
+                pages: source.pages(0..source.text_len),
+                start_byte_offset: source.markdown_start,
+                end_byte_offset: source.markdown_start + source.text_len,
+            },
             Range::Text(range) => Self::Text {
                 start_line: range.start_line(),
                 end_line: range.end_line(),
@@ -696,7 +775,7 @@ impl From<crate::domain::Range> for result::ContentRange {
 
 impl From<&crate::domain::Range> for result::ContentRange {
     fn from(range: &crate::domain::Range) -> Self {
-        (*range).into()
+        range.clone().into()
     }
 }
 
@@ -719,6 +798,40 @@ mod tests {
     use crate::domain::{ByteRange, Range, TextRange};
 
     use super::result;
+
+    #[test]
+    fn pdf_boxes_preserve_blocks_and_pages_without_duplicate_or_missing_bounds() {
+        use crate::domain::{PdfBlock, PdfSourceMap, PdfSourcePart};
+        let bounds = [100_000, 200_000, 400_000, 250_000];
+        let parts = [
+            (1, 1, Some(bounds)),
+            (1, 1, Some(bounds)),
+            (1, 2, Some(bounds)),
+            (2, 1, Some(bounds)),
+            (2, 2, None),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(offset, (page, id, bounds))| PdfSourcePart {
+            range: offset..offset + 1,
+            block: PdfBlock { page, id, bounds },
+        })
+        .collect();
+        let source = PdfSourceMap {
+            markdown_start: 100,
+            text_len: 5,
+            parts,
+        };
+        let boxes = result::PdfBox::from_source(&source);
+        assert_eq!(
+            boxes
+                .iter()
+                .map(|region| (region.page, region.block))
+                .collect::<Vec<_>>(),
+            vec![(1, 1), (1, 2), (2, 1)]
+        );
+        assert!(boxes.iter().all(|region| region.bounds == bounds));
+    }
 
     #[test]
     fn search_traces_allow_omitted_ranking() {

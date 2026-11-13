@@ -1,0 +1,17 @@
+{
+  "version": "156.0.8076.0",
+  "repository": "https://pdfium.googlesource.com/pdfium.git",
+  "revision": "8ca5b735df4263f43c830479b78213854a392c22",
+  "depot_tools": {
+    "repository": "https://chromium.googlesource.com/chromium/tools/depot_tools.git",
+    "revision": "2859de01cf7ba07979d3e44d2b8523f1fb9b8fe6"
+  },
+  "targets": {
+    "aarch64-apple-darwin": { "os": "mac", "cpu": "arm64" },
+    "x86_64-apple-darwin": { "os": "mac", "cpu": "x64" },
+    "aarch64-unknown-linux-gnu": { "os": "linux", "cpu": "arm64", "compiler": "gcc" },
+    "x86_64-unknown-linux-gnu": { "os": "linux", "cpu": "x64" },
+    "aarch64-pc-windows-msvc": { "os": "win", "cpu": "arm64" },
+    "x86_64-pc-windows-msvc": { "os": "win", "cpu": "x64" }
+  }
+}

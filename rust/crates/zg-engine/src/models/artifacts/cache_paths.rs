@@ -4,6 +4,7 @@ use std::{ffi::OsString, path::PathBuf};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LocalModelBackend {
+    Layout,
     LlamaCpp,
     Model2Vec,
     Transformers,
@@ -25,7 +26,7 @@ pub(super) fn default_model_cache_from_env(
             let home = if windows {
                 variable("USERPROFILE").or_else(|| match backend {
                     LocalModelBackend::LlamaCpp => variable("HOME"),
-                    LocalModelBackend::Model2Vec => {
+                    LocalModelBackend::Model2Vec | LocalModelBackend::Layout => {
                         let mut home = variable("HOMEDRIVE")?;
                         home.push(variable("HOMEPATH")?);
                         Some(home)

@@ -1,4 +1,8 @@
+#[path = "build_support/pdfium.rs"]
+mod pdfium;
+
 fn main() {
+    pdfium::prepare();
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts");
     let script = root.join("prepare-onnxruntime.py");
     println!("cargo:rerun-if-changed={}", script.display());

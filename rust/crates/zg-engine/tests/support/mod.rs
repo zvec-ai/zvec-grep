@@ -94,7 +94,7 @@ pub fn configure_remote_model(root: &Path, address: SocketAddr) -> std::io::Resu
             "recordedUsername": std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).ok(),
         },
         "scan": {},
-        "indexVersion": 3,
+        "indexVersion": 4,
         "storageGeneration": generation,
         "createdTime": 1,
         "updatedTime": 1,

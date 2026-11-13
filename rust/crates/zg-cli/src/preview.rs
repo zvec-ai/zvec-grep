@@ -17,12 +17,16 @@ pub fn source_preview(item: &ContextItem, max_lines: Option<usize>) -> SourcePre
     } else {
         split_lines(&item.content).collect()
     };
-    let anchor = item
-        .excerpt_range
-        .as_ref()
-        .and_then(ContentRange::start_line)
-        .zip(item.content_range.start_line())
-        .map_or(0, |(line, first)| line.saturating_sub(first));
+    let anchor = pdf_excerpt_position(item).map_or_else(
+        || {
+            item.excerpt_range
+                .as_ref()
+                .and_then(ContentRange::start_line)
+                .zip(item.content_range.start_line())
+                .map_or(0, |(line, first)| line.saturating_sub(first))
+        },
+        |(line, _)| line,
+    );
     let matched_lines = item
         .excerpt_range
         .as_ref()
@@ -30,6 +34,54 @@ pub fn source_preview(item: &ContextItem, max_lines: Option<usize>) -> SourcePre
         .unwrap_or(1);
     let window = select_window(lines.len(), anchor, matched_lines, max_lines);
     SourcePreview { lines, window }
+}
+
+pub(crate) fn pdf_excerpt_position(item: &ContextItem) -> Option<(usize, usize)> {
+    let ContentRange::Pdf {
+        start_byte_offset: origin,
+        ..
+    } = &item.content_range
+    else {
+        return None;
+    };
+    let ContentRange::Pdf {
+        start_byte_offset: matched,
+        ..
+    } = item.excerpt_range.as_ref()?
+    else {
+        return None;
+    };
+    let prefix = item.content.get(..matched.checked_sub(*origin)?)?;
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count();
+    let column = prefix.len() - prefix.rfind('\n').map_or(0, |index| index + 1);
+    Some((line, column))
+}
+
+/// Match the complete boundary lines returned for Markdown fragments, while
+/// retaining the full PDF entity for full/detail presentation.
+pub(crate) fn pdf_excerpt_lines(item: &ContextItem) -> Option<Range<usize>> {
+    let ContentRange::Pdf {
+        start_byte_offset: origin,
+        ..
+    } = &item.content_range
+    else {
+        return None;
+    };
+    let ContentRange::Pdf {
+        start_byte_offset: start,
+        end_byte_offset: end,
+        ..
+    } = item.excerpt_range.as_ref()?
+    else {
+        return None;
+    };
+    let excerpt = item
+        .content
+        .get(start.checked_sub(*origin)?..end.checked_sub(*origin)?)?;
+    let (first, _) = pdf_excerpt_position(item)?;
+    let count = excerpt.bytes().filter(|byte| *byte == b'\n').count()
+        + usize::from(!excerpt.is_empty() && !excerpt.ends_with('\n'));
+    Some(first..first + count)
 }
 
 fn select_window(
@@ -102,6 +154,9 @@ fn bounded_source_line(
         ) if first.checked_add(offset) == Some(*start_line) => {
             start_byte_column.saturating_sub(if offset == 0 { *first_column } else { 0 })
         }
+        (Some(ContentRange::Pdf { .. }), ContentRange::Pdf { .. }) => pdf_excerpt_position(item)
+            .filter(|(line, _)| *line == offset)
+            .map_or(0, |(_, column)| column),
         _ => 0,
     };
     // Invalid or mismatched coordinates retain the normal line-prefix preview.

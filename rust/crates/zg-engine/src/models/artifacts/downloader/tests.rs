@@ -14,8 +14,8 @@ mod network;
 mod proxy;
 
 use super::*;
-use crate::domain::model::ModelProgress;
 use crate::models::artifacts::ArtifactSourceConfig;
+use crate::{EngineError, domain::model::ModelProgress};
 
 const BYTES: &[u8] = b"verified model artifact";
 const ARTIFACTS: &[ArtifactConfig] = &[ArtifactConfig {
@@ -172,6 +172,76 @@ fn partial_files(path: &Path) -> Vec<PathBuf> {
             }
         })
         .collect()
+}
+
+#[tokio::test]
+async fn single_source_download_reuses_verified_cache_and_honors_cancellation() {
+    let root = tempfile::tempdir().expect("valid test fixture");
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let reporter = reporter(&events);
+    let server = TestServer::spawn(1, |_, _, stream| respond(stream, 200, BYTES));
+    let source =
+        ArtifactSource::hugging_face(HF, root.path().join("one")).with_base_url(&server.base_url);
+    let client = ArtifactHttpClient::new();
+    for _ in 0..2 {
+        let resolved = resolve_model_artifacts(
+            &client,
+            ResolveArtifacts {
+                model: "local/test-model",
+                sources: vec![source.clone()],
+                artifacts: ARTIFACTS,
+                reporter: &reporter,
+                signal: None,
+            },
+        )
+        .await
+        .expect("valid test fixture");
+        assert_eq!(
+            fs::read(&resolved.paths[ARTIFACTS[0].path]).expect("valid test fixture"),
+            BYTES
+        );
+    }
+    assert_eq!(server.finish(), 1);
+    assert!(partial_files(root.path()).is_empty());
+    let signal = CancellationToken::new();
+    signal.cancel();
+    let error = resolve_model_artifacts(
+        &client,
+        ResolveArtifacts {
+            model: "local/test-model",
+            sources: vec![source],
+            artifacts: ARTIFACTS,
+            reporter: &reporter,
+            signal: Some(&signal),
+        },
+    )
+    .await
+    .expect_err("expected failure");
+    assert_eq!(error.code(), EngineError::CANCELLED);
+}
+
+#[tokio::test]
+async fn single_source_failure_returns_shared_error_without_fallback_or_partial_snapshot() {
+    let root = tempfile::tempdir().expect("valid test fixture");
+    let reporter = reporter(&Arc::new(Mutex::new(Vec::new())));
+    let server = TestServer::spawn(1, |_, _, stream| respond(stream, 404, b"missing"));
+    let source =
+        ArtifactSource::hugging_face(HF, root.path().join("one")).with_base_url(&server.base_url);
+    let result = resolve_model_artifacts(
+        &ArtifactHttpClient::new(),
+        ResolveArtifacts {
+            model: "local/test-model",
+            sources: vec![source],
+            artifacts: ARTIFACTS,
+            reporter: &reporter,
+            signal: None,
+        },
+    )
+    .await;
+    assert!(result.expect_err("expected failure").should_fail_fast());
+    assert_eq!(server.finish(), 1);
+    assert!(partial_files(root.path()).is_empty());
+    assert!(!root.path().join("one").join(ARTIFACTS[0].path).exists());
 }
 
 #[test]

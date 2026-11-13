@@ -2289,7 +2289,7 @@ mod tests {
                 .expect("source range"),
         );
         let content = Content::Text(content.to_owned());
-        let id = EntityId::new(file.id(), &content, source_range).expect("entity id");
+        let id = EntityId::new(file.id(), &content, &source_range).expect("entity id");
         let fragment = EntityFragment {
             id: FragmentId::new(&id, 0),
             range: Range::Full,

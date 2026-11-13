@@ -65,6 +65,11 @@ test("includes model runtime libraries but excludes build files and other platfo
     "zg",
     "zg.exe",
     "zvec_c_api.lib",
+    "libpdfium.a",
+    "pdfium.lib",
+    "libpdfium.dylib",
+    "libpdfium.so",
+    "pdfium.dll",
   ]) {
     await writeFile(join(source, name), name);
   }
@@ -81,22 +86,24 @@ test("includes model runtime libraries but excludes build files and other platfo
   }
 });
 
-test("CPU packages retain ORT and DirectML licenses without copying unrelated build files", async (t) => {
+test("CPU packages retain ORT, PDFium and DirectML licenses without copying unrelated build files", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "zg-ort-notices-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const source = join(root, "profile");
   await mkdir(join(source, "licenses"), { recursive: true });
-  for (const name of ["zvec_c_api.dll", "onnxruntime.dll", "DirectML.dll"]) {
+  for (const name of ["zvec_c_api.dll", "onnxruntime.dll", "DirectML.dll", "pdfium.dll"]) {
     await writeFile(join(source, name), name);
   }
   for (const name of ["onnxruntime-LICENSE", "onnxruntime-ThirdPartyNotices.txt",
-    "directml-LICENSE", "directml-LICENSE-CODE", "directml-ThirdPartyNotices.txt", "unrelated.txt"]) {
+    "directml-LICENSE", "directml-LICENSE-CODE", "directml-ThirdPartyNotices.txt", "pdfium-ThirdPartyNotices.txt", "unrelated.txt"]) {
     await writeFile(join(source, "licenses", name), name);
   }
   const destination = join(root, "package/lib");
   const files = await stageZvecRuntime(source, destination, "win32");
   assert.ok(files.includes("lib/licenses/onnxruntime-LICENSE"));
   assert.ok(files.includes("lib/licenses/directml-LICENSE"));
+  assert.ok(!files.includes("lib/pdfium.dll"));
+  assert.ok(files.includes("lib/licenses/pdfium-ThirdPartyNotices.txt"));
   assert.equal(await readFile(join(destination, "licenses/directml-LICENSE-CODE"), "utf8"), "directml-LICENSE-CODE");
   await assert.rejects(readFile(join(destination, "licenses/unrelated.txt")), /ENOENT/);
 });
@@ -421,7 +428,7 @@ test("Linux artifact smoke loads packaged ORT and runs inference on both archite
     assert.equal(failedLoad.status, 73, failedLoad.stderr);
     assert.doesNotMatch(failedLoad.stdout, /unexpected inference/);
   }
-  assert.match(workflow, /name: Restore the real model cache\n\s+if:.*matrix\.target == 'linux-arm64-gnu'/);
+  assert.match(workflow, /name: Restore the real model cache\n\s+uses: actions\/cache@/);
 });
 
 test("Linux Vulkan ORT build-script validation uses a network-disabled container and separate outputs", { skip: process.platform !== "linux" }, async (t) => {

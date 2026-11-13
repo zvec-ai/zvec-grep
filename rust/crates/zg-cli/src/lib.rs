@@ -78,7 +78,7 @@ pub use path_lookup::{write_path_lookup_result, write_path_lookup_with_terminals
 pub use render::{
     HelpTopicError, help_text, print_help, write_context_result, write_context_status,
     write_context_status_with_options, write_context_with_options, write_file_paths,
-    write_index_incompatible_error, write_relationships, write_warning,
+    write_index_incompatible_error, write_pdf_rg_preview, write_relationships, write_warning,
 };
 
 #[derive(Debug, Parser)]

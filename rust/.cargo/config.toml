@@ -1,0 +1,4 @@
+# pdfium-render also builds a cdylib before zg-engine supplies its own native
+# link flags. Its static PDFium backend needs these Windows system libraries.
+[target.'cfg(target_os = "windows")']
+rustflags = ["-l", "gdi32", "-l", "user32"]

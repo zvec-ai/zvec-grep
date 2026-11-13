@@ -47,7 +47,7 @@ jobs:
             `CARGO_BUILD_JOBS=${jobs}\nCMAKE_BUILD_PARALLEL_LEVEL=${jobs}\n`);
           console.log(`Native build resources: cores=${cores}, RAM=${memoryGiB.toFixed(1)} GiB, jobs=${jobs} (3 GiB/job, cap 8)`);
       - uses: actions/setup-python@v6
-        if: runner.os == 'Windows'
+        if: runner.os != 'Linux'
         with:
           python-version: "3.12"
           architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
@@ -122,9 +122,17 @@ jobs:
         with:
           path: rust/target/ort-prebuilt/
           key: rust-ort-1.21-${{ inputs.target }}-${{ hashFiles('rust/scripts/onnxruntime-distributions.json') }}
+      - name: Cache the static PDFium SDK
+        uses: actions/cache@v5
+        with:
+          path: rust/target/pdfium-static/**/sdk/
+          key: pdfium-static-v1-${{ inputs.target }}-${{ inputs.runner }}-${{ hashFiles('rust/scripts/pdfium-build.json', 'rust/scripts/prepare-pdfium.py', 'rust/scripts/licenses/gcc-runtime.txt') }}
       - name: Preserve the Intel macOS deployment target
         if: inputs.target == 'darwin-x64'
         run: echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
+      - name: Prepare PDFium before linking the Windows dependency DLL
+        if: runner.os == 'Windows'
+        run: python scripts/prepare-pdfium.py --target ${{ inputs.target == 'win32-arm64-msvc' && 'aarch64-pc-windows-msvc' || 'x86_64-pc-windows-msvc' }} --github-env
       - name: Build the manylinux 2.28 Rust builder without a CUDA compiler
         if: runner.os == 'Linux'
         working-directory: ${{ github.workspace }}
@@ -173,6 +181,7 @@ jobs:
             zvec-grep-release-builder bash -euo pipefail -c '
               env -u ORT_DYLIB_PATH -u CARGO_FEATURE_CUDA CARGO_FEATURE_VULKAN=1 CARGO_NET_OFFLINE=true \
                 TARGET="$ORT_TARGET" OUT_DIR=/work-target/ort-vulkan/debug/build/zg-engine/out \
+                ZG_PDFIUM_CACHE_DIR=/work-target/pdfium-static \
                 ZG_ORT_CACHE_DIR=/work-target/ort-prebuilt /work-target/ort-build-script
               cmp /work-target/ort-cpu/libonnxruntime.so.1 /work-target/ort-vulkan/debug/libonnxruntime.so.1
             '
