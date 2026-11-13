@@ -40,7 +40,8 @@ pub(crate) async fn query(
         .descriptor()
         .is_some_and(IndexDescriptor::graph_indexing)
     {
-        return Err(EngineError::unsupported("graph support is disabled"));
+        return Err(EngineError::unsupported("graph support is disabled")
+            .with_help("Rebuild the index with `zg --index --rebuild --graph`."));
     }
     let source = acquire_read_source(
         &source_root,

@@ -596,14 +596,18 @@ mod tests {
                 .is_some_and(IndexDescriptor::graph_indexing)
         );
 
-        // The setting is required: there is no older layout to fall back to.
+        // Released v2 manifests predate the optional graph setting.
         value["index"]["descriptor"]
             .as_object_mut()
             .expect("descriptor object")
             .remove("graphIndexing");
         assert!(
-            decode_manifest(&value, &layout).is_err(),
-            "a descriptor without the switch is invalid"
+            !decode_manifest(&value, &layout)
+                .expect("legacy v2 manifest")
+                .index()
+                .descriptor()
+                .expect("enabled index")
+                .graph_indexing()
         );
 
         write_workspace_manifest(layout.manifest_path(), &manifest).expect("write manifest");
@@ -1278,7 +1282,7 @@ mod tests {
         let current = fixture_manifest(&layout);
         write_workspace_manifest(layout.manifest_path(), &current).expect("current manifest");
         let bytes = fs::read(layout.manifest_path()).expect("persisted manifest");
-        for version in [0, 1, 2, 4, 5, u32::MAX] {
+        for version in [0, 1, 3, 4, 5, u32::MAX] {
             let mut unsupported = current.clone();
             unsupported = crate::domain::Workspace::new(
                 directory.path(),
@@ -1317,7 +1321,7 @@ mod tests {
             );
             let diagnostics = error.help().expect("version diagnostics");
             assert!(diagnostics.contains(&format!("unsupported index version {version}")));
-            assert!(diagnostics.contains("expected 3"));
+            assert!(diagnostics.contains("expected 2"));
             assert!(diagnostics.contains("zg --index --rebuild"));
             fs::write(layout.manifest_path(), &bytes).expect("restore current manifest");
         }

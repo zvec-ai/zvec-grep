@@ -156,7 +156,11 @@ impl WorkspaceIndexService {
             previous
                 .ensure_index_compatible(&descriptor)
                 .map_err(|error| {
-                    error.with_help("Rebuild the index with `zg --index --rebuild`.")
+                    error.with_help(if descriptor.graph_indexing() {
+                        "Rebuild the index with `zg --index --rebuild --graph`."
+                    } else {
+                        "Rebuild the index with `zg --index --rebuild`."
+                    })
                 })?;
         }
         let mut workspace = index_workspace_state(
@@ -1987,11 +1991,16 @@ mod tests {
                         )
                         .await;
                     if graph_enabled {
-                        assert!(result.expect("enabled graph read").matches.is_empty());
+                        let result = result.expect("enabled graph read");
+                        assert!(result.matches.is_empty());
+                        assert!(result.suggestions.is_empty());
                     } else {
-                        assert_eq!(
-                            result.expect_err("disabled graph read").code(),
-                            crate::EngineError::UNSUPPORTED
+                        let error = result.expect_err("disabled graph read");
+                        assert_eq!(error.code(), crate::EngineError::UNSUPPORTED);
+                        assert!(
+                            error
+                                .help()
+                                .is_some_and(|help| help.contains("zg --index --rebuild --graph"))
                         );
                     }
                 }
@@ -2464,12 +2473,9 @@ mod tests {
             "{}",
             error.message()
         );
-        assert!(
-            error
-                .help()
-                .is_some_and(|help| help.contains("zg --index --rebuild")),
-            "{:?}",
-            error.help()
+        assert_eq!(
+            error.help(),
+            Some("Rebuild the index with `zg --index --rebuild --graph`.")
         );
         let rejected = published(&layout);
         assert!(
@@ -2520,6 +2526,10 @@ mod tests {
             error.message().contains("stores the code graph"),
             "{}",
             error.message()
+        );
+        assert_eq!(
+            error.help(),
+            Some("Rebuild the index with `zg --index --rebuild`.")
         );
         let still_enabled = published(&layout);
         assert!(

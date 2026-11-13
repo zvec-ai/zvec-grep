@@ -144,8 +144,8 @@ fn settle_queue(db: &mut SqliteGraphStorage) {
     assert_eq!(db.list_pending_refs(100, 0).expect("queue").refs.len(), 0);
 }
 
-fn open(path: &Path) -> SqliteGraphStorage {
-    SqliteGraphStorage::open(path, OpenMode::ReadWrite).expect("open writer")
+fn create(path: &Path) -> SqliteGraphStorage {
+    SqliteGraphStorage::open(path, OpenMode::Create).expect("create graph")
 }
 
 #[test]
@@ -370,7 +370,7 @@ fn replacing_a_target_with_the_same_id_invalidates_resolutions() {
 fn file_level_import_targets_are_invalidated_without_entity_ids() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("graph.sqlite");
-    let mut db = open(&path);
+    let mut db = create(&path);
     let raw = Connection::open(&path).expect("inspect persisted edges");
     let import_count = || {
         raw.query_row(
@@ -393,10 +393,10 @@ fn file_level_import_targets_are_invalidated_without_entity_ids() {
 }
 
 #[test]
-fn writable_open_adds_the_index_a_database_was_built_without() {
+fn writable_open_adds_indexes_and_invalidation_storage_a_database_was_built_without() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("graph.sqlite");
-    let mut db = open(&path);
+    let mut db = create(&path);
     db.write_file_graph(
         1,
         None,
@@ -408,8 +408,8 @@ fn writable_open_adds_the_index_a_database_was_built_without() {
     drop(db);
 
     let raw = Connection::open(&path).expect("inspect");
-    raw.execute("DROP INDEX edges_name_tail", [])
-        .expect("drop index");
+    raw.execute_batch("DROP INDEX edges_name_tail; DROP TABLE zg_stale_names;")
+        .expect("drop additive schema");
     let index_sql = |raw: &Connection| {
         raw.query_row(
             "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = 'edges_name_tail'",
@@ -419,9 +419,16 @@ fn writable_open_adds_the_index_a_database_was_built_without() {
         .ok()
     };
     assert!(index_sql(&raw).is_none());
+    let reader = SqliteGraphStorage::open(&path, OpenMode::ReadOnly).expect("read older graph");
+    assert_eq!(
+        reader.list_pending_refs(100, 0).expect("refs").refs.len(),
+        1
+    );
+    reader.close().expect("close reader");
+    assert!(index_sql(&raw).is_none());
     drop(raw);
 
-    let _db = open(&path);
+    let _db = SqliteGraphStorage::open(&path, OpenMode::ReadWrite).expect("reopen writer");
     let raw = Connection::open(&path).expect("inspect");
     let sql = index_sql(&raw).expect("index restored by a writable open");
     assert!(sql.contains("name_tail"), "index covers name_tail: {sql}");
@@ -433,6 +440,12 @@ fn writable_open_adds_the_index_a_database_was_built_without() {
         raw.query_row("SELECT count(*) FROM edges", [], |row| row.get::<_, i64>(0))
             .expect("rows survive"),
         1
+    );
+    assert_eq!(
+        raw.query_row("SELECT count(*) FROM zg_stale_names", [], |row| row
+            .get::<_, i64>(0))
+            .expect("invalidation storage restored"),
+        0
     );
 }
 
@@ -470,7 +483,7 @@ fn stale_evidence_survives_a_reopen_until_the_requeue_consumes_it() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("graph.sqlite");
     {
-        let mut db = open(&path);
+        let mut db = create(&path);
         db.write_file_graph(
             1,
             None,
@@ -488,7 +501,7 @@ fn stale_evidence_survives_a_reopen_until_the_requeue_consumes_it() {
             .expect("later write");
         db.close().expect("close");
     }
-    let mut db = open(&path);
+    let mut db = SqliteGraphStorage::open(&path, OpenMode::ReadWrite).expect("reopen writer");
     assert_eq!(
         db.requeue_stale_resolutions()
             .expect("requeue after reopen"),
@@ -967,7 +980,7 @@ fn non_pending_reference_status_preserves_the_previous_snapshot() {
 fn sql_failure_rolls_back_replacement_and_invalidation() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("graph.sqlite");
-    let mut db = open(&path);
+    let mut db = create(&path);
     db.write_file_graph(
         8,
         None,
@@ -1014,7 +1027,7 @@ fn sql_failure_rolls_back_replacement_and_invalidation() {
 fn sql_failure_rolls_back_an_entire_resolution_batch() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("graph.sqlite");
-    let mut db = open(&path);
+    let mut db = create(&path);
     db.write_file_graph(
         1,
         None,
@@ -1053,13 +1066,59 @@ fn sql_failure_rolls_back_an_entire_resolution_batch() {
 }
 
 #[test]
+fn existing_open_modes_never_create_a_missing_database_or_parent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for relative in ["graph.sqlite", "nested/graph.sqlite"] {
+        let path = dir.path().join(relative);
+        for mode in [OpenMode::ReadOnly, OpenMode::ReadWrite] {
+            assert!(SqliteGraphStorage::open(&path, mode).is_err());
+            assert!(!path.exists());
+        }
+    }
+    assert!(!dir.path().join("nested").exists());
+}
+
+#[test]
+fn existing_open_modes_accept_a_valid_empty_graph() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("nested/graph.sqlite");
+    create(&path).close().expect("create empty graph");
+    for mode in [OpenMode::ReadOnly, OpenMode::ReadWrite] {
+        let db = SqliteGraphStorage::open(&path, mode).expect("open empty graph");
+        assert!(db.is_empty().expect("empty"));
+        assert!(
+            db.list_pending_refs(100, 0)
+                .expect("pending")
+                .refs
+                .is_empty()
+        );
+        assert!(
+            db.neighborhood("missing", Direction::Both, None)
+                .expect("no edges")
+                .is_empty()
+        );
+        db.close().expect("close");
+    }
+}
+
+#[test]
+fn existing_open_modes_reject_uninitialized_and_corrupt_files_without_mutation() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("graph.sqlite");
+    for bytes in [b"".as_slice(), b"this is not a SQLite database".as_slice()] {
+        std::fs::write(&path, bytes).expect("write invalid database");
+        for mode in [OpenMode::ReadOnly, OpenMode::ReadWrite] {
+            assert!(SqliteGraphStorage::open(&path, mode).is_err());
+            assert_eq!(std::fs::read(&path).expect("unchanged file"), bytes);
+        }
+    }
+}
+
+#[test]
 fn readonly_connections_reopen_data_and_never_create_or_write() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("nested/graph.sqlite");
-    assert!(SqliteGraphStorage::open(&path, OpenMode::ReadOnly).is_err());
-    assert!(!path.exists());
-    assert!(!path.parent().expect("parent").exists());
-    let mut db = open(&path);
+    let mut db = create(&path);
     let expected = edge(GraphEdgeKind::Calls, "a'\"\\", "b", 1);
     db.write_file_graph(
         1,
@@ -1103,13 +1162,13 @@ fn schemas_reject_foreign_databases_and_other_owners_without_rewriting_identity(
         .execute_batch("CREATE TABLE unrelated (id INTEGER);")
         .expect("table");
     assert!(matches!(
-        SqliteGraphStorage::open(&foreign, OpenMode::ReadWrite),
+        SqliteGraphStorage::open(&foreign, OpenMode::Create),
         Err(Error::ForeignDatabase)
     ));
     let path = dir.path().join("unrelated.sqlite");
-    open(&path).close().expect("init");
+    create(&path).close().expect("init");
     let raw = Connection::open(&path).expect("raw");
-    // Version compatibility belongs to the workspace manifest, so the user version
+    // Graph compatibility checks ownership and columns, so the SQLite user version
     // stays untouched and never gates opening the database.
     assert_eq!(
         raw.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
@@ -1137,7 +1196,7 @@ fn schemas_reject_foreign_databases_and_other_owners_without_rewriting_identity(
 fn schema_keeps_edges_and_the_stale_evidence_and_enforces_json_objects() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("graph.sqlite");
-    open(&path).close().expect("init");
+    create(&path).close().expect("init");
     let raw = Connection::open(&path).expect("raw");
     let mut statement = raw
         .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
@@ -1211,7 +1270,7 @@ fn invalid_and_stale_resolution_proposals_do_not_mutate_pending_refs() {
 fn independent_connections_observe_commits_and_skip_deleted_refs() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("graph.sqlite");
-    let mut writer = open(&path);
+    let mut writer = create(&path);
     writer
         .write_file_graph(
             9,
@@ -1221,7 +1280,7 @@ fn independent_connections_observe_commits_and_skip_deleted_refs() {
             false,
         )
         .expect("write");
-    let mut resolver = open(&path);
+    let mut resolver = SqliteGraphStorage::open(&path, OpenMode::ReadWrite).expect("resolver");
     let reader = SqliteGraphStorage::open(&path, OpenMode::ReadOnly).expect("reader");
     let old = proposal(&resolver, "b");
     writer.delete_file_graph(9, &["a".into()]).expect("delete");
@@ -1447,10 +1506,59 @@ fn previous_development_schema_fails_the_structure_check_without_mutation() {
 }
 
 #[test]
+fn incompatible_edges_columns_are_rejected_before_additive_schema_changes() {
+    for wrong_type in [false, true] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("graph.sqlite");
+        create(&path).close().expect("create");
+        let raw = Connection::open(&path).expect("raw");
+        raw.execute_batch("DROP INDEX edges_name_tail; DROP TABLE zg_stale_names;")
+            .expect("remove additive schema");
+        // `language` is required by the resolver but absent from every index.
+        // Checking the table's identity or initializing indexes would miss it.
+        if wrong_type {
+            let sql: String = raw
+                .query_row(
+                    "SELECT sql FROM sqlite_schema WHERE name = 'edges'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("edges definition");
+            raw.execute_batch("DROP TABLE edges;")
+                .expect("remove edges");
+            raw.execute_batch(&sql.replace("language TEXT", "language INTEGER"))
+                .expect("incompatible language type");
+        } else {
+            raw.execute_batch("ALTER TABLE edges DROP COLUMN language;")
+                .expect("older edges columns");
+        }
+        raw.close().expect("close fixture");
+        let before = std::fs::read(&path).expect("database bytes");
+        for mode in [OpenMode::ReadOnly, OpenMode::ReadWrite, OpenMode::Create] {
+            assert!(matches!(
+                SqliteGraphStorage::open(&path, mode),
+                Err(Error::IncompleteSchema)
+            ));
+            assert_eq!(std::fs::read(&path).expect("unchanged database"), before);
+        }
+        let raw = Connection::open(&path).expect("inspect rejected schema");
+        assert_eq!(
+            raw.query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name IN ('edges_name_tail', 'zg_stale_names')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("additions remain absent"),
+            0
+        );
+    }
+}
+
+#[test]
 fn resolution_and_invalidation_preserve_reference_evidence() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("graph.sqlite");
-    let mut db = open(&path);
+    let mut db = create(&path);
     let original = reference("source", "module::target");
     db.write_file_graph(
         6,
@@ -1519,7 +1627,7 @@ fn resolution_and_invalidation_preserve_reference_evidence() {
 fn reference_schema_defaults_and_state_constraints() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("graph.sqlite");
-    open(&path).close().expect("init");
+    create(&path).close().expect("init");
     let raw = Connection::open(&path).expect("raw");
     raw.execute("INSERT INTO edges (source, file_id, reference_name, kind, line, col) VALUES ('a', 1, 'b', 'calls', 1, 0)", []).expect("defaults");
     let status: String = raw
@@ -1592,7 +1700,7 @@ fn replaced_reference_ids_are_not_reused() {
 fn file_ids_round_trip_as_u32_and_sqlite_rejects_out_of_range_values() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("graph.sqlite");
-    let mut db = open(&path);
+    let mut db = create(&path);
     for id in [0, u32::MAX] {
         let key = format!("f{id}");
         db.write_file_graph(
@@ -1626,7 +1734,7 @@ fn file_ids_round_trip_as_u32_and_sqlite_rejects_out_of_range_values() {
         );
     }
     db.close().expect("close");
-    let mut db = open(&path);
+    let mut db = SqliteGraphStorage::open(&path, OpenMode::ReadWrite).expect("reopen writer");
     assert_eq!(db.list_pending_refs(100, 0).expect("reopen").refs, refs);
     db.delete_file_graph(u32::MAX, &[]).expect("delete max");
     assert_eq!(

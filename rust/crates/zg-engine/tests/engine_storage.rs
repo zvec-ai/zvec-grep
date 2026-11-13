@@ -19,7 +19,7 @@ use zg_engine::{
     api::{
         context::{
             ContextOptions,
-            options::{ContextRoute, ContextRouteMode, QueryFilter, SymbolType},
+            options::{ContextRoute, ContextRouteMode, QueryFilter, RefreshPolicy, SymbolType},
             result::{ContextItemStatus, EntityMetadata},
         },
         index::{IndexOptions, options::WorkspaceChange},
@@ -79,6 +79,107 @@ async fn indexed_calls_preserve_distinct_source_positions() -> TestResult {
         .await?;
     assert_eq!(limited.matches[0].edges.len(), 1);
     assert!(limited.matches[0].truncated);
+    engine.close();
+    Ok(())
+}
+
+#[tokio::test]
+async fn missing_graph_requires_rebuild_and_restores_unchanged_relationships() -> TestResult {
+    let temporary = tempdir()?;
+    let root = temporary.path();
+    let server = EmbeddingServer::start()?;
+    configure_remote_model(root, server.address)?;
+    for (path, source) in [
+        (
+            "changed.rs",
+            "fn changed_target() {}\nfn changed_caller() { changed_target(); }\n",
+        ),
+        (
+            "stable.rs",
+            "fn stable_target() {}\nfn stable_caller() { stable_target(); }\n",
+        ),
+    ] {
+        fs::write(root.join(path), source)?;
+    }
+    let options = |symbol: &str| RelationshipOptions {
+        root: Some(root.to_path_buf()),
+        symbol: symbol.into(),
+        ..RelationshipOptions::default()
+    };
+    let rebuild_options = IndexOptions {
+        graph_indexing: Some(true),
+        rebuild: true,
+        ..index_options(root)
+    };
+    let engine = ZvecGrep::new();
+    let indexed = engine.index(rebuild_options.clone()).await?;
+    assert_eq!((indexed.files_added, indexed.files_failed), (2, 0));
+    let original_outgoing = engine.callees(options("stable_caller")).await?;
+    let original_incoming = engine.callers(options("stable_target")).await?;
+    assert_eq!(original_outgoing.matches[0].edges.len(), 1);
+    assert_eq!(original_incoming.matches[0].edges.len(), 1);
+    engine.close();
+
+    let graph_path = root.join(".zvec-grep/index/graph/graph.sqlite");
+    fs::remove_file(&graph_path)?;
+    fs::write(
+        root.join("changed.rs"),
+        "fn changed_target() {}\nfn changed_caller() { changed_target(); changed_target(); }\n",
+    )?;
+    let manifest_path = root.join(".zvec-grep/manifest.json");
+    let manifest = fs::read(&manifest_path)?;
+    let embedded = server.inputs.load(Ordering::Acquire);
+    let engine = ZvecGrep::new();
+    engine.enable_read_session_cache()?;
+    let search = ContextOptions {
+        root: Some(root.to_path_buf()),
+        routes: vec![ContextRoute {
+            mode: ContextRouteMode::Fts,
+            query: "stable_caller".into(),
+        }],
+        refresh: Some(RefreshPolicy::Off),
+        ..ContextOptions::default()
+    };
+    assert!(!engine.context(search.clone()).await?.items.is_empty());
+    for error in [
+        engine
+            .callers(options("stable_target"))
+            .await
+            .expect_err("missing graph"),
+        engine
+            .callees(options("stable_caller"))
+            .await
+            .expect_err("missing graph"),
+        engine
+            .index(index_options(root))
+            .await
+            .expect_err("incremental indexing cannot recreate a graph"),
+    ] {
+        assert_eq!(error.code(), EngineError::NOT_FOUND);
+        assert!(
+            error
+                .help()
+                .is_some_and(|help| help.contains("zg --index --rebuild --graph"))
+        );
+        assert!(!graph_path.exists());
+        assert_eq!(fs::read(&manifest_path)?, manifest);
+    }
+    assert_eq!(server.inputs.load(Ordering::Acquire), embedded);
+    assert!(!engine.context(search).await?.items.is_empty());
+
+    let rebuilt = engine.index(rebuild_options).await?;
+    assert_eq!((rebuilt.files_added, rebuilt.files_failed), (2, 0));
+    assert_eq!(
+        engine.callees(options("stable_caller")).await?,
+        original_outgoing
+    );
+    assert_eq!(
+        engine.callers(options("stable_target")).await?,
+        original_incoming
+    );
+    let changed = engine.callees(options("changed_caller")).await?;
+    assert_eq!(changed.matches[0].edges.len(), 2);
+    assert!(graph_path.is_file());
     engine.close();
     Ok(())
 }
@@ -384,7 +485,7 @@ async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -
             .as_ref()
             .expect("workspace")
             .index_version,
-        Some(3)
+        Some(2)
     );
     let collections = model_collections(&info.index_path)?;
     assert_eq!(collections.len(), 1);
@@ -397,7 +498,7 @@ async fn one_text_model_indexes_text_and_skips_images_without_embedding_them() -
     let manifest: Value =
         serde_json::from_slice(&fs::read(root.join(".zvec-grep/manifest.json"))?)?;
     assert!(manifest.get("manifestVersion").is_none());
-    assert_eq!(manifest["indexVersion"], 3);
+    assert_eq!(manifest["indexVersion"], 2);
     assert_eq!(
         manifest["index"]["descriptor"]["defaultEmbeddingModel"]["model"]["name"],
         "text-embedding-v4"

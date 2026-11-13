@@ -788,12 +788,12 @@ fn incompatible_index_errors_are_actionable_without_rebuilding_existing_data() {
             assert!(stderr.contains("zg --index --rebuild"), "{stderr}");
             if presentation == "debug" {
                 assert!(stderr.contains("unsupported index version 1"), "{stderr}");
-                assert!(stderr.contains("expected 3"), "{stderr}");
+                assert!(stderr.contains("expected 2"), "{stderr}");
                 assert!(stderr.contains("Error location:"), "{stderr}");
             } else {
                 for internal_detail in [
                     "unsupported index version",
-                    "expected 3",
+                    "expected 2",
                     "manifest.json",
                     "Error location:",
                     "ZG.ENGINE.",
@@ -1027,7 +1027,7 @@ fn disabled_workspace_is_not_rebuilt_from_a_nested_query_directory() {
                 "recordedUsername": std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).ok(),
             },
             "scan": {},
-            "indexVersion": 3,
+            "indexVersion": 2,
             "createdTime": 0,
             "updatedTime": 0,
             "index": { "state": "disabled" }

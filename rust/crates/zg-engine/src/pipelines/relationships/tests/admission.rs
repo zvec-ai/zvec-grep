@@ -18,6 +18,11 @@ async fn missing_graph_errors_without_creating_a_database() {
         assert_eq!(error.code(), EngineError::NOT_FOUND);
         assert!(error.to_string().to_lowercase().contains("graph"));
         assert!(
+            error
+                .help()
+                .is_some_and(|help| help.contains("zg --index --rebuild --graph"))
+        );
+        assert!(
             !fixture.graph_path.exists(),
             "relationship reads never initialize SQLite"
         );
@@ -30,9 +35,10 @@ async fn unreadable_graphs_do_not_break_search_but_relationships_report_the_erro
         ContextOptions,
         options::{ContextRoute, ContextRouteMode, RefreshPolicy},
     };
-    for damage in ["empty", "schema", "corrupt", "directory"] {
+    for damage in ["missing", "empty", "schema", "corrupt", "directory"] {
         let fixture = Fixture::new();
         match damage {
+            "missing" => fs::remove_file(&fixture.graph_path).expect("remove graph"),
             "empty" => fs::write(&fixture.graph_path, []).expect("empty database"),
             "schema" => rusqlite::Connection::open(&fixture.graph_path)
                 .expect("graph")
@@ -77,11 +83,25 @@ async fn unreadable_graphs_do_not_break_search_but_relationships_report_the_erro
                     .expect_err("graph error is retained");
                 assert_eq!(
                     error.code(),
-                    EngineError::STORAGE_FAILURE,
+                    if damage == "missing" {
+                        EngineError::NOT_FOUND
+                    } else {
+                        EngineError::STORAGE_FAILURE
+                    },
                     "{damage}: {error}"
                 );
                 assert!(
-                    error.message().contains("workspace graph operation failed"),
+                    error.message().contains(if damage == "missing" {
+                        "workspace graph is missing"
+                    } else {
+                        "workspace graph operation failed"
+                    }),
+                    "{damage}: {error}"
+                );
+                assert!(
+                    error
+                        .help()
+                        .is_some_and(|help| help.contains("zg --index --rebuild --graph")),
                     "{damage}: {error}"
                 );
             }
@@ -353,19 +373,23 @@ async fn disabled_workspaces_reject_old_graphs_before_read_admission() {
         if state == "missing" {
             fs::remove_file(&fixture.graph_path).expect("remove old graph");
         }
-        for direction in [Direction::In, Direction::Out] {
-            let error = engine
-                .relationships(
-                    direction,
-                    RelationshipOptions {
-                        lock_timeout_ms: Some(0),
-                        ..fixture.options("run")
-                    },
-                )
-                .await
-                .expect_err("disabled even with an old readable graph");
+        let options = RelationshipOptions {
+            lock_timeout_ms: Some(0),
+            ..fixture.options("run")
+        };
+        for result in [
+            engine.callers(options.clone()).await,
+            engine.callees(options).await,
+        ] {
+            let error = result.expect_err("disabled even with an old readable graph");
             assert_eq!(error.code(), EngineError::UNSUPPORTED, "{state}");
             assert!(error.message().contains("disabled"), "{state}: {error}");
+            assert!(
+                error
+                    .help()
+                    .is_some_and(|help| help.contains("zg --index --rebuild --graph")),
+                "{state}: {error}"
+            );
         }
         drop(writer);
     }
