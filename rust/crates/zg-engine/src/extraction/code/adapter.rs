@@ -348,6 +348,7 @@ impl LanguageAdapter {
 
     pub(super) fn classify(self, node: Node<'_>) -> Option<SymbolType> {
         match self.kind {
+            Language::Cpp if cpp_initializer_entity(node) => Some(SymbolType::Value),
             Language::C | Language::Cpp => classify_c_family(node),
             Language::Go => classify_go(node),
             Language::Java if node.kind() == "field_declaration" => Some(SymbolType::Value),
@@ -424,10 +425,7 @@ impl LanguageAdapter {
                     // caller of that call: the initializer runs at the unit's
                     // scope, so the body around it — a function — is not the
                     // one making the call. A local stays unindexed.
-                    || (node.kind() == "declaration"
-                        && outside_function_body(node)
-                        && find_descendant_by_kind(node, "init_declarator").is_some()
-                        && find_descendant_by_kind(node, "call_expression").is_some())
+                    || (self.kind == Language::Cpp && cpp_initializer_entity(node))
             }
             Language::JavaScript | Language::TypeScript => {
                 should_index_javascript_typescript_entity(node)
@@ -453,6 +451,7 @@ impl LanguageAdapter {
         matches!(self.kind, Language::C | Language::Cpp)
             && matches!(node.kind(), "declaration" | "field_declaration")
             && nested_type_specifier(node).is_none()
+            && !(self.kind == Language::Cpp && cpp_initializer_entity(node))
     }
 
     /// Counts a function-shaped entity's declared parameters, excluding the
@@ -814,6 +813,46 @@ fn name_field(node: Node<'_>, source: &[u8]) -> Option<String> {
             })
             .map(|child| text(child, source).to_owned())
     })
+}
+
+/// A direct namespace initializer needs a callable owner; local variables stay
+/// inside their enclosing function. Multi-declarator statements need splitting.
+fn cpp_initializer_entity(node: Node<'_>) -> bool {
+    if node.kind() != "declaration" {
+        return false;
+    }
+    let mut cursor = node.walk();
+    let declarators = node
+        .children_by_field_name("declarator", &mut cursor)
+        .collect::<Vec<_>>();
+    let [declarator] = declarators.as_slice() else {
+        return false;
+    };
+    if declarator.kind() != "init_declarator"
+        || !declarator
+            .child_by_field_name("value")
+            .is_some_and(|value| {
+                matches!(value.kind(), "call_expression" | "new_expression")
+                    && find_descendant_by_kind(value, "lambda_expression").is_none()
+            })
+    {
+        return false;
+    }
+    let mut parent = node.parent();
+    while let Some(node) = parent {
+        if matches!(
+            node.kind(),
+            "function_definition"
+                | "lambda_expression"
+                | "class_specifier"
+                | "struct_specifier"
+                | "union_specifier"
+        ) {
+            return false;
+        }
+        parent = node.parent();
+    }
+    true
 }
 
 fn is_c_function_type(kind: &str) -> bool {
@@ -1545,20 +1584,6 @@ fn find_descendant_by_kind<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<
     named_children(node)
         .into_iter()
         .find_map(|child| find_descendant_by_kind(child, kind))
-}
-
-/// Whether a declaration sits outside every function body, at the namespace
-/// level where a `static` initializer runs.
-fn outside_function_body(node: Node<'_>) -> bool {
-    let mut current = node;
-    while let Some(parent) = current.parent() {
-        match parent.kind() {
-            "compound_statement" | "function_definition" | "lambda_expression" => return false,
-            "translation_unit" => return true,
-            _ => current = parent,
-        }
-    }
-    false
 }
 
 // Nodes without a matching symbol category remain unclassified.
