@@ -1,0 +1,16 @@
+name: caller-callee-symbols
+path: ../datasets-symbols
+graph_index: true
+index_ignore_file: ../zg_bench/swe_qa/data/index-symbols.ignore
+tiers:
+  smoke:
+    tasks:
+      - requests-cc1
+      - matplotlib-cc2
+  full:
+    tasks:
+      - requests-cc1
+      - matplotlib-cc1
+      - sympy-cc1
+      - matplotlib-cc2
+      - sympy-cc2
