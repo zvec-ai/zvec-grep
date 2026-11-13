@@ -8,8 +8,8 @@ import sys
 from pathlib import Path
 
 from .artifacts import find_run, read_json
-from .console import Console
 from .config import DEFAULT_ARTIFACTS_DIR, load_config
+from .console import Console
 from .corpus import materialize, prepared_corpus, workspace_root
 from .dataset import fetch, prepared_dataset
 from .doctor import format_report, run_doctor
@@ -22,12 +22,12 @@ from .runner import RunTerminated, resume_benchmark, run_benchmark
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="zg-bench",
-        description="Native Codex A/B benchmark on BrowseComp-Plus.",
+        description="Native OpenCode A/B benchmark on BrowseComp-Plus.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     doctor = subparsers.add_parser("doctor", help="validate the local environment")
-    doctor.add_argument("--codex-bin", default="codex")
+    doctor.add_argument("--opencode-bin", default="opencode")
     doctor.add_argument("--json", action="store_true")
 
     prepare = subparsers.add_parser(
@@ -44,11 +44,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="study",
         help="suite name or .txt path (default: study)",
     )
-    run.add_argument("--codex-bin", default="codex")
+    run.add_argument("--opencode-bin", default="opencode")
+    run.add_argument("--case", help="run one case from the selected suite")
 
     resume = subparsers.add_parser("resume", help="resume an interrupted run")
     resume.add_argument("run_id")
-    resume.add_argument("--codex-bin", default="codex")
+    resume.add_argument("--opencode-bin", default="opencode")
 
     status = subparsers.add_parser("status", help="show paired run progress")
     status.add_argument("run_id", nargs="?")
@@ -65,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
         "evaluate", help="judge completed runs and generate reports"
     )
     evaluate_parser.add_argument("run_id", nargs="?")
-    evaluate_parser.add_argument("--codex-bin", default="codex")
+    evaluate_parser.add_argument("--opencode-bin", default="opencode")
 
     report = subparsers.add_parser(
         "report", help="generate a run report"
@@ -319,7 +320,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "doctor":
         report = run_doctor(
             config,
-            codex_bin=args.codex_bin,
+            opencode_bin=args.opencode_bin,
         )
         color = (
             sys.stdout.isatty()
@@ -464,7 +465,8 @@ def main(argv: list[str] | None = None) -> int:
                 config,
                 artifacts,
                 suite=args.suite,
-                codex_bin=args.codex_bin,
+                opencode_bin=args.opencode_bin,
+                case_id=args.case,
             )
         except (OSError, RuntimeError, ValueError) as error:
             console.error(str(error))
@@ -488,7 +490,7 @@ def main(argv: list[str] | None = None) -> int:
                 config,
                 artifacts,
                 args.run_id,
-                codex_bin=args.codex_bin,
+                opencode_bin=args.opencode_bin,
             )
         except (OSError, RuntimeError, ValueError) as error:
             console.error(str(error))
@@ -563,7 +565,7 @@ def main(argv: list[str] | None = None) -> int:
             report = evaluate(
                 artifacts,
                 run_root.name,
-                codex_bin=args.codex_bin,
+                opencode_bin=args.opencode_bin,
                 console=console,
             )
         except (OSError, RuntimeError, ValueError) as error:

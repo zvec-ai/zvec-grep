@@ -9,7 +9,7 @@ import signal
 import sys
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -23,19 +23,20 @@ from .artifacts import (
     utc_now,
     write_json,
 )
-from .codex import (
-    run_attempt,
-    validate_model,
-)
+from .config import BENCHMARK_ROOT, PROMPT_PATH, SUITES_DIR, BenchmarkConfig
 from .console import Console
-from .config import BENCHMARK_ROOT, BenchmarkConfig, PROMPT_PATH, SUITES_DIR
-from .corpus import prepared_corpus, validate_workspace
+from .corpus import prepared_corpus, validate_workspace, workspace_root
 from .dataset import load_queries, prepared_dataset
 from .index import prepared_index
 from .models import PROFILES, AttemptResult, Profile
+from .opencode import (
+    run_attempt,
+    validate_model,
+)
 from .process import resolve_executable, run_command
 from .profiles import (
     ensure_server,
+    model_base_url,
     prepare_profiles,
     prepare_search_runtime,
     server_url,
@@ -91,13 +92,14 @@ def _cpu_model() -> str:
                 lines = []
             for line in lines:
                 key, separator, value = line.partition(":")
-                if separator and key.strip() in {"model name", "Hardware"}:
-                    if value.strip():
-                        return value.strip()
+                if (
+                    separator
+                    and key.strip() in {"model name", "Hardware"}
+                    and value.strip()
+                ):
+                    return value.strip()
     if platform.system() == "Darwin":
-        result = run_command(
-            ["sysctl", "-n", "machdep.cpu.brand_string"], timeout=5
-        )
+        result = run_command(["sysctl", "-n", "machdep.cpu.brand_string"], timeout=5)
         if result.ok and result.stdout.strip():
             return result.stdout.strip()
     return platform.processor().strip() or platform.machine()
@@ -116,8 +118,8 @@ def _available_cpu_count() -> int | None:
 def _environment_metadata(
     config: BenchmarkConfig,
     *,
-    codex: Path,
-    codex_version: str,
+    opencode: Path,
+    opencode_version: str,
     zg_version: str,
 ) -> dict[str, Any]:
     return {
@@ -130,8 +132,13 @@ def _environment_metadata(
         "logical_cpu_count": os.cpu_count(),
         "available_cpu_count": _available_cpu_count(),
         "python": sys.version.split()[0],
-        "codex_bin": str(codex),
-        "codex_version": codex_version,
+        "opencode_bin": str(opencode),
+        "opencode_version": opencode_version,
+        "model_base_url": model_base_url(),
+        "temperature_requested": config.run.temperature,
+        "seed": config.run.seed,
+        "max_output_tokens": config.run.max_output_tokens,
+        "context_limit": config.run.context_limit,
         "query_dataset_repo": config.dataset.queries_repo,
         "query_dataset_revision": config.dataset.queries_revision,
         "query_dataset_split": config.dataset.queries_split,
@@ -148,9 +155,9 @@ def _environment_metadata(
         "mcp_tool_timeout_seconds": config.zvec_grep.mcp_tool_timeout_seconds,
         "server_port": config.zvec_grep.server_port,
         "zg_server_url": server_url(config),
-        "codex_sandbox": "workspace-write",
+        "agent_isolation": "separate-home-and-workspace; no OS sandbox",
         "web_search": "disabled",
-        "history_persistence": "none",
+        "history_persistence": "isolated session per attempt",
     }
 
 
@@ -164,6 +171,7 @@ class SuiteSelection:
     scanned_query_count: int | None
     excluded_query_ids: tuple[str, ...]
     query_ids: tuple[str, ...]
+    case_filter: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         resolved = self.path.resolve()
@@ -180,6 +188,7 @@ class SuiteSelection:
             "scanned_query_count": self.scanned_query_count,
             "excluded_query_ids": list(self.excluded_query_ids),
             "selected_query_count": len(self.query_ids),
+            **({"case_filter": self.case_filter} if self.case_filter else {}),
         }
 
 
@@ -243,9 +252,7 @@ def _select_suite(
     if selector is None:
         missing = sorted(set(explicit_ids) - known_ids)
         if missing:
-            raise ValueError(
-                f"suite contains unknown query IDs: {', '.join(missing)}"
-            )
+            raise ValueError(f"suite contains unknown query IDs: {', '.join(missing)}")
         if len(set(explicit_ids)) != len(explicit_ids):
             raise ValueError("suite contains duplicate query IDs")
         selected_ids = explicit_ids
@@ -313,6 +320,14 @@ def load_suite(name: str, queries: list[dict[str, Any]]) -> SuiteSelection:
     return _select_suite(path, lines, all_ids, hashlib.sha256(definition).hexdigest())
 
 
+def select_case(selection: SuiteSelection, case_id: str | None) -> SuiteSelection:
+    if case_id is None:
+        return selection
+    if case_id not in selection.query_ids:
+        raise ValueError(f"case {case_id} is not in the selected suite")
+    return replace(selection, query_ids=(case_id,), case_filter=case_id)
+
+
 def _randomized_profile_orders(
     query_ids: list[str], trials_per_case: int
 ) -> dict[str, dict[int, tuple[Profile, Profile]]]:
@@ -321,26 +336,19 @@ def _randomized_profile_orders(
         query_id: {} for query_id in query_ids
     }
     for trial_index in range(1, trials_per_case + 1):
-        orders: list[tuple[Profile, Profile]] = [PROFILES] * (
-            len(query_ids) // 2
-        )
-        orders.extend(
-            [("zvec-grep", "baseline")] * (len(query_ids) // 2)
-        )
+        orders: list[tuple[Profile, Profile]] = [PROFILES] * (len(query_ids) // 2)
+        orders.extend([("zvec-grep", "baseline")] * (len(query_ids) // 2))
         if len(query_ids) % 2:
-            orders.append(
-                PROFILES
-                if trial_index % 2
-                else ("zvec-grep", "baseline")
-            )
+            orders.append(PROFILES if trial_index % 2 else ("zvec-grep", "baseline"))
         rng.shuffle(orders)
         for query_id, order in zip(query_ids, orders, strict=True):
             output[query_id][trial_index] = order
     return output
 
 
-def _prompt(query: str) -> str:
+def _prompt(query: str, workspace: Path) -> str:
     template = PROMPT_PATH.read_text(encoding="utf-8")
+    template = template.replace("{workspace_root}", str(workspace.resolve()))
     return template.replace("{query}", query).rstrip() + "\n"
 
 
@@ -361,16 +369,25 @@ def _result_path(
 def _attempt_results(selected_path: Path) -> list[dict[str, Any]]:
     attempts_root = selected_path.parent / "attempts"
     results = [
-        read_json(path)
-        for path in sorted(attempts_root.glob("attempt-*/result.json"))
+        read_json(path) for path in sorted(attempts_root.glob("attempt-*/result.json"))
     ]
     return sorted(results, key=lambda result: int(result["attempt"]))
 
 
 def _remaining_attempts(config: BenchmarkConfig, selected_path: Path) -> int:
-    failures = sum(
+    from .ci_resume import retry_start
+
+    first_attempt = retry_start(selected_path)
+    interrupted = sum(
+        not (attempt / "result.json").is_file()
+        for attempt in (selected_path.parent / "attempts").glob("attempt-*")
+        if attempt.is_dir()
+        and int(attempt.name.removeprefix("attempt-")) >= first_attempt
+    )
+    failures = interrupted + sum(
         result.get("infrastructure_failure") is True
         for result in _attempt_results(selected_path)
+        if int(result["attempt"]) >= first_attempt
     )
     return max(0, config.run.infrastructure_retries + 1 - failures)
 
@@ -399,7 +416,13 @@ def _needs_run(config: BenchmarkConfig, path: Path) -> bool:
     if not path.is_file():
         return True
     result = read_json(path)
-    if result["status"] in {"completed", "failed"}:
+    if result["status"] == "completed":
+        return False
+    from .ci_resume import retry_start
+
+    if int(result["attempt"]) < retry_start(path):
+        return True
+    if result["status"] == "failed":
         return False
     if result["status"] != "infrastructure_failed":
         raise RuntimeError(f"unknown trial status in {path}: {result['status']}")
@@ -416,7 +439,9 @@ def _run_profile(
     model: str,
     reasoning_effort: str,
     profiles_root: Path,
-    codex_bin: str,
+    opencode_bin: str,
+    *,
+    shared_runtime: bool = False,
 ) -> AttemptResult:
     query_id = str(query["query_id"])
     selected_path = _result_path(run_root, query_id, profile, trial_index)
@@ -447,9 +472,14 @@ def _run_profile(
             trial_index=trial_index,
             path=latest_path,
         )
-        if (
-            latest["status"] in {"completed", "failed"}
-            or _remaining_attempts(config, selected_path) == 0
+        from .ci_resume import retry_start
+
+        if latest["status"] == "completed" or (
+            int(latest["attempt"]) >= retry_start(selected_path)
+            and (
+                latest["status"] == "failed"
+                or _remaining_attempts(config, selected_path) == 0
+            )
         ):
             write_json(selected_path, latest)
             return _result_from_dict(latest)
@@ -461,32 +491,43 @@ def _run_profile(
     for offset in range(_remaining_attempts(config, selected_path)):
         number = first_attempt + offset
         output = attempts_root / f"attempt-{number:03d}"
+        if os.environ.get("GITHUB_RUN_ID"):
+            write_json(
+                output / "origin.json",
+                {
+                    "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+                    "workflow_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+                    "attempt": number,
+                    "started_at": utc_now(),
+                },
+            )
         try:
             final = run_attempt(
                 config,
                 artifacts,
                 query_id=query_id,
                 trial_index=trial_index,
-                prompt=_prompt(str(query["query"])),
+                prompt=_prompt(str(query["query"]), workspace_root(artifacts, profile)),
                 profile=profile,
                 model=model,
                 reasoning_effort=reasoning_effort,
                 attempt=number,
                 output_dir=output,
                 profiles_root=profiles_root,
-                codex_bin=codex_bin,
+                opencode_bin=opencode_bin,
                 idle_timeout_seconds=config.run.idle_timeout_seconds,
+                **({"shared_runtime": True} if shared_runtime else {}),
             )
         finally:
             # Validate corpus metadata and remove all non-whitelisted files,
             # including residue left by failed or interrupted attempts.
             validate_workspace(artifacts, profile)
-        if (
-            final.status == "completed"
-            or not final.infrastructure_failure
-        ):
+        if final.status == "completed" or not final.infrastructure_failure:
             break
-    assert final is not None
+    if final is None:
+        raise RuntimeError(
+            "trial retry budget exhausted by an interrupted attempt; rerun the CI job explicitly"
+        )
     write_json(selected_path, final.to_dict())
     return final
 
@@ -495,7 +536,7 @@ def _execution_source_fingerprint() -> str:
     paths = [
         BENCHMARK_ROOT / "zg_bench" / name
         for name in (
-            "codex.py",
+            "opencode.py",
             "config.py",
             "artifacts.py",
             "corpus.py",
@@ -505,6 +546,10 @@ def _execution_source_fingerprint() -> str:
             "process.py",
             "profiles.py",
             "runner.py",
+            "ci_resume.py",
+            "ci_shared.py",
+            "ci_parallel.py",
+            "runtime_snapshot.py",
             "trace.py",
         )
     ]
@@ -526,8 +571,8 @@ def _run_protocol(
     profile_orders: dict[str, dict[int, tuple[Profile, Profile]]],
     model: str,
     reasoning_effort: str,
-    codex: Path,
-    codex_version: str,
+    opencode: Path,
+    opencode_version: str,
     profiles_fingerprint: str,
 ) -> dict[str, Any]:
     dataset_state = read_json(artifacts / "state" / "dataset.json")
@@ -558,17 +603,18 @@ def _run_protocol(
         "corpus_fingerprint": corpus_state["fingerprint"],
         "index_fingerprint": index_state["fingerprint"],
         "profiles_fingerprint": profiles_fingerprint,
-        "codex_sha256": sha256_file(codex),
-        "codex_path": str(codex),
-        "codex_version": codex_version,
+        "opencode_sha256": sha256_file(opencode),
+        "opencode_path": str(opencode),
+        "opencode_version": opencode_version,
         "platform": platform.platform(),
         "machine": platform.machine(),
         "python": sys.version.split()[0],
         "model": model,
+        "model_base_url": model_base_url(),
         "reasoning_effort": reasoning_effort,
-        "sandbox": "workspace-write",
+        "isolation": "separate-home-and-workspace; no OS sandbox",
         "web_search": "disabled",
-        "history_persistence": "none",
+        "history_persistence": "isolated session per attempt",
         "git_ceiling": "workspace-parent",
         "infrastructure_retries": config.run.infrastructure_retries,
         "trials_per_case": config.run.trials_per_case,
@@ -759,9 +805,7 @@ class _RunTokenCounter:
     def add_run(self, run_root: Path) -> None:
         for profile in PROFILES:
             for attempts_root in sorted(
-                run_root.glob(
-                    f"cases/*/{profile}/trials/trial-*/attempts"
-                )
+                run_root.glob(f"cases/*/{profile}/trials/trial-*/attempts")
             ):
                 self.add_attempts(attempts_root, profile)
 
@@ -772,7 +816,11 @@ def run_benchmark(
     *,
     suite: str,
     run_id: str | None = None,
-    codex_bin: str = "codex",
+    opencode_bin: str = "opencode",
+    case_id: str | None = None,
+    planned_orders: dict[str, dict[int, tuple[Profile, Profile]]] | None = None,
+    fresh_profiles: bool = False,
+    shared_runtime: dict[str, Any] | None = None,
 ) -> Path:
     model = config.run.model
     reasoning_effort = config.run.reasoning_effort
@@ -782,13 +830,13 @@ def run_benchmark(
     queries = load_queries(query_path)
     by_id = {str(row["query_id"]): row for row in queries}
     validate_model(artifacts, model)
-    codex = resolve_executable(codex_bin)
+    opencode = resolve_executable(opencode_bin)
     zg = resolve_executable("zg")
-    if codex is None or zg is None:
-        raise RuntimeError("Codex and zvec-grep must be available before a run")
-    codex_version = run_command([codex, "--version"], timeout=30)
-    if not codex_version.ok or not codex_version.stdout.strip():
-        raise RuntimeError("could not determine the installed Codex version")
+    if opencode is None or zg is None:
+        raise RuntimeError("OpenCode and zvec-grep must be available before a run")
+    opencode_version = run_command([opencode, "--version"], timeout=30)
+    if not opencode_version.ok or not opencode_version.stdout.strip():
+        raise RuntimeError("could not determine the installed OpenCode version")
     zg_version = run_command([zg, "--version"], timeout=30)
     actual_zg_version = (
         zg_version.stdout.strip().splitlines()[0] if zg_version.stdout else ""
@@ -808,6 +856,8 @@ def run_benchmark(
         )
     if run_id is None:
         run_id = new_run_id()
+        if shared_runtime is not None:
+            run_id += f"-case-{case_id}"
         run_root = artifacts / "runs" / run_id
         if run_root.exists():
             raise RuntimeError(f"benchmark run already exists: {run_id}")
@@ -828,7 +878,9 @@ def run_benchmark(
         suite_path = Path(str(suite_metadata["definition"]))
         if not suite_path.is_absolute():
             suite_path = BENCHMARK_ROOT / suite_path
-        current_suite = load_suite(str(suite_path), queries)
+        current_suite = select_case(
+            load_suite(str(suite_path), queries), suite_metadata.get("case_filter")
+        )
         if (
             current_suite.to_dict() != suite_metadata
             or list(current_suite.query_ids) != query_ids
@@ -839,8 +891,7 @@ def run_benchmark(
             )
         profile_orders = {
             str(query_id): {
-                int(trial_index): tuple(order)
-                for trial_index, order in trials.items()
+                int(trial_index): tuple(order) for trial_index, order in trials.items()
             }
             for query_id, trials in metadata["profile_orders"].items()
         }
@@ -857,6 +908,15 @@ def run_benchmark(
         recorded_manifest = Path(metadata["profiles_manifest"])
         if recorded_manifest.resolve() != profiles_manifest_path.resolve():
             raise RuntimeError("run profile manifest path does not match its run")
+        if fresh_profiles:
+            # Raw artifacts deliberately exclude all homes and credentials.
+            prepare_profiles(
+                config,
+                artifacts,
+                opencode_bin=str(opencode),
+                profiles_root=profiles_root,
+                manifest_path=profiles_manifest_path,
+            )
         profile_manifest = validate_profiles(recorded_manifest)
         if metadata["profiles_fingerprint"] != profile_manifest["fingerprint"]:
             raise RuntimeError("run profile fingerprint does not match its manifest")
@@ -871,26 +931,31 @@ def run_benchmark(
             profile_orders=profile_orders,
             model=model,
             reasoning_effort=reasoning_effort,
-            codex=codex,
-            codex_version=codex_version.stdout.strip(),
+            opencode=opencode,
+            opencode_version=opencode_version.stdout.strip(),
             profiles_fingerprint=profile_manifest["fingerprint"],
         )
-        if metadata["protocol_fingerprint"] != _protocol_fingerprint(
-            recorded_protocol
-        ):
+        if metadata["protocol_fingerprint"] != _protocol_fingerprint(recorded_protocol):
             raise RuntimeError("recorded run protocol fingerprint is invalid")
         _validate_run_protocol(recorded_protocol, actual_protocol)
     else:
         required_states = {
-            name: artifacts / "state" / f"{name}.json"
-            for name in ("corpus", "index")
+            name: artifacts / "state" / f"{name}.json" for name in ("corpus", "index")
         }
-        suite_selection = load_suite(suite, queries)
+        full_selection = load_suite(suite, queries)
+        suite_selection = select_case(full_selection, case_id)
         suite_metadata = suite_selection.to_dict()
         query_ids = list(suite_selection.query_ids)
-        profile_orders = _randomized_profile_orders(
-            query_ids, config.run.trials_per_case
+        all_orders = planned_orders or _randomized_profile_orders(
+            list(full_selection.query_ids), config.run.trials_per_case
         )
+        profile_orders = {query_id: all_orders[query_id] for query_id in query_ids}
+        for orders in profile_orders.values():
+            if set(orders) != set(range(1, config.run.trials_per_case + 1)) or any(
+                len(order) != 2 or set(order) != set(PROFILES)
+                for order in orders.values()
+            ):
+                raise ValueError("invalid planned profile order")
         corpus_state = read_json(required_states["corpus"])
         index_state = read_json(required_states["index"])
 
@@ -915,12 +980,8 @@ def run_benchmark(
                     pending += 1
             pending_profiles[(query_id, trial_index)] = pending
     total_paired_trials = len(query_ids) * config.run.trials_per_case
-    finished_paired_trials = sum(
-        pending == 0 for pending in pending_profiles.values()
-    )
-    server_required = new_run or any(
-        profile == "zvec-grep" for _, _, profile in tasks
-    )
+    finished_paired_trials = sum(pending == 0 for pending in pending_profiles.values())
+    server_required = new_run or any(profile == "zvec-grep" for _, _, profile in tasks)
     benchmark_error: BaseException | None = None
     with _cleanup_on_termination():
         preparation_started_at = utc_now()
@@ -929,7 +990,7 @@ def run_benchmark(
         profile_preparation_wall_seconds = 0.0
         profile_install_wall_seconds = 0.0
         try:
-            if server_required:
+            if server_required and shared_runtime is None:
                 print(
                     "Preparing the zvec-grep daemon, profiles, and existing index...",
                     flush=True,
@@ -942,7 +1003,7 @@ def run_benchmark(
                 prepare_profiles(
                     config,
                     artifacts,
-                    codex_bin=str(codex),
+                    opencode_bin=str(opencode),
                     profiles_root=profiles_root,
                     manifest_path=profiles_manifest_path,
                 )
@@ -963,8 +1024,8 @@ def run_benchmark(
                     profile_orders=profile_orders,
                     model=model,
                     reasoning_effort=reasoning_effort,
-                    codex=codex,
-                    codex_version=codex_version.stdout.strip(),
+                    opencode=opencode,
+                    opencode_version=opencode_version.stdout.strip(),
                     profiles_fingerprint=profile_manifest["fingerprint"],
                 )
                 metadata = {
@@ -991,8 +1052,8 @@ def run_benchmark(
                     "configuration": str(config.path),
                     "environment": _environment_metadata(
                         config,
-                        codex=codex,
-                        codex_version=codex_version.stdout.strip(),
+                        opencode=opencode,
+                        opencode_version=opencode_version.stdout.strip(),
                         zg_version=zg_version.stdout.strip(),
                     ),
                     "corpus_fingerprint": corpus_state["fingerprint"],
@@ -1006,15 +1067,28 @@ def run_benchmark(
                 }
                 write_json(metadata_path, metadata)
 
-            if server_required:
+            if shared_runtime is not None:
+                metadata["execution"] = "shared_job"
+                metadata["runtime_setups"].append(dict(shared_runtime))
+                metadata["runtime_setups"].append(
+                    {
+                        "role": "case_profiles",
+                        "case_id": case_id,
+                        "total_wall_seconds": profile_preparation_wall_seconds,
+                        "server_start_wall_seconds": 0.0,
+                        "profile_preparation_wall_seconds": profile_preparation_wall_seconds,
+                        "profile_install_wall_seconds": profile_install_wall_seconds,
+                        "warmup_wall_seconds": 0.0,
+                    }
+                )
+                write_json(metadata_path, metadata)
+            elif server_required:
                 runtime_setup = prepare_search_runtime(
                     config,
                     artifacts,
                     restart_server=False,
                 )
-                total_preparation_wall_seconds = (
-                    time.monotonic() - preparation_started
-                )
+                total_preparation_wall_seconds = time.monotonic() - preparation_started
                 runtime_setup.update(
                     {
                         "started_at": preparation_started_at,
@@ -1024,9 +1098,7 @@ def run_benchmark(
                         "profile_preparation_wall_seconds": (
                             profile_preparation_wall_seconds
                         ),
-                        "profile_install_wall_seconds": (
-                            profile_install_wall_seconds
-                        ),
+                        "profile_install_wall_seconds": (profile_install_wall_seconds),
                     }
                 )
                 metadata["runtime_setups"].append(runtime_setup)
@@ -1050,29 +1122,22 @@ def run_benchmark(
                     model,
                     reasoning_effort,
                     profiles_root,
-                    str(codex),
+                    str(opencode),
+                    **({"shared_runtime": True} if shared_runtime is not None else {}),
                 )
-                _write_pair(
-                    run_root, query_id, config.run.trials_per_case
-                )
+                _write_pair(run_root, query_id, config.run.trials_per_case)
                 pair_key = (query_id, trial_index)
                 pending_profiles[pair_key] -= 1
                 if pending_profiles[pair_key] == 0:
                     finished_paired_trials += 1
                 input_tokens = (
-                    result.trace.usage.input_tokens
-                    if result.trace.usage
-                    else None
+                    result.trace.usage.input_tokens if result.trace.usage else None
                 )
                 output_tokens = (
-                    result.trace.usage.output_tokens
-                    if result.trace.usage
-                    else None
+                    result.trace.usage.output_tokens if result.trace.usage else None
                 )
                 run_tokens.add_attempts(
-                    _result_path(
-                        run_root, query_id, profile, trial_index
-                    ).parent
+                    _result_path(run_root, query_id, profile, trial_index).parent
                     / "attempts",
                     profile,
                 )
@@ -1092,6 +1157,9 @@ def run_benchmark(
                     flush=True,
                 )
 
+            from .ci_resume import execution_costs
+
+            metadata["agent_attempt_costs"] = execution_costs(run_root)
             metadata["finished_at"] = utc_now()
             metadata["completed_cases"] = completed_cases(run_root, query_ids)
             metadata.pop("error", None)
@@ -1124,7 +1192,7 @@ def run_benchmark(
                 write_json(metadata_path, failed_metadata)
             raise
         finally:
-            if server_required:
+            if server_required and shared_runtime is None:
                 try:
                     stop_server(config, artifacts)
                 except RuntimeError as error:
@@ -1148,7 +1216,7 @@ def resume_benchmark(
     artifacts: Path,
     run_id: str,
     *,
-    codex_bin: str = "codex",
+    opencode_bin: str = "opencode",
 ) -> Path:
     metadata = read_json(find_run(artifacts, run_id) / "run.json")
     return run_benchmark(
@@ -1156,5 +1224,5 @@ def resume_benchmark(
         artifacts,
         suite=str(metadata["suite"]),
         run_id=run_id,
-        codex_bin=codex_bin,
+        opencode_bin=opencode_bin,
     )

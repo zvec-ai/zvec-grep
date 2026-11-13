@@ -21,7 +21,10 @@ test("PR comment jobs have write permission and the run title retains its PR num
     new URL("../workflows/zg-bench.yml", import.meta.url),
     "utf8",
   );
-  assert.match(workflow, /^run-name: "ZG Bench · PR #\$\{\{/m);
+  assert.match(
+    workflow,
+    /format\('ZG Bench · PR #\{0\}', github.event.issue.number \|\| inputs.pr_number\)/,
+  );
   for (const name of ["request", "reply"]) {
     const job = workflow
       .split(`\n  ${name}:\n`)[1]
