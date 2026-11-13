@@ -7,6 +7,9 @@ inputs:
   package_directory:
     description: Workspace-relative directory containing release.json, meta, platform and component tarballs.
     default: rust/dist/npm/release/tarballs
+  standalone_directory:
+    description: Optional workspace-relative standalone archives and installer metadata from this run.
+    default: ""
 runs:
   using: composite
   steps:
@@ -83,6 +86,15 @@ runs:
         Copy-Item "$env:RUNNER_TEMP/zg-i12/installation.json" gpu-logs/cuda12-installation.json
         python rust/scripts/cuda/e2e.py --auto-only --bundle "$env:RUNNER_TEMP/zg-i12/prefix/node_modules/@zvec/zvec-grep" --model-cache "$env:RUNNER_TEMP/zvec-grep-model-cache" --logs gpu-logs/auto-cuda12 --expected-gguf-cuda 12.4
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        if ('${{ inputs.standalone_directory }}') {
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          $standaloneJson = node rust/scripts/standalone-smoke.mjs --directory '${{ inputs.standalone_directory }}' --prefix-root "$env:RUNNER_TEMP/zg-standalone" --expect-cuda --keep-install
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $standaloneJson | Set-Content -LiteralPath "$env:RUNNER_TEMP/zg-standalone.json" -Encoding UTF8
+          $bundle = ($standaloneJson | ConvertFrom-Json).bundle
+          python rust/scripts/cuda/e2e.py --auto-only --bundle "$bundle" --model-cache "$env:RUNNER_TEMP/zvec-grep-model-cache" --logs gpu-logs/standalone-cuda12 --expected-gguf-cuda 12.4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        }
     - name: Install Windows CUDA 13.1 runtime alongside CUDA 12
       if: runner.os == 'Windows'
       uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
@@ -108,6 +120,12 @@ runs:
         python rust/scripts/cuda/e2e.py --bundle "$env:RUNNER_TEMP/zg-icpu/prefix/node_modules/@zvec/zvec-grep" --model-cache "$env:RUNNER_TEMP/zvec-grep-model-cache" --logs gpu-logs/cuda13 --expected-gguf-cuda 13.1
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         python rust/scripts/cuda/e2e.py --auto-only --bundle "$env:RUNNER_TEMP/zg-i12/prefix/node_modules/@zvec/zvec-grep" --model-cache "$env:RUNNER_TEMP/zvec-grep-model-cache" --logs gpu-logs/auto-cuda13 --expected-gguf-cuda 13.1
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        if ('${{ inputs.standalone_directory }}') {
+          $bundle = (Get-Content -LiteralPath "$env:RUNNER_TEMP/zg-standalone.json" -Raw -Encoding UTF8 | ConvertFrom-Json).bundle
+          python rust/scripts/cuda/e2e.py --auto-only --bundle "$bundle" --model-cache "$env:RUNNER_TEMP/zvec-grep-model-cache" --logs gpu-logs/standalone-cuda13 --expected-gguf-cuda 13.1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        }
     - name: Rebuild the Linux CPU installation for GGUF and ONNX CUDA 12
       if: runner.os == 'Linux'
       shell: bash
@@ -129,7 +147,7 @@ runs:
             # are needed; do not depend on the NVIDIA repository mirror state.
             apt_options=(-o Dir::Etc::sourcelist=sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- -o APT::Update::Error-Mode=any -o Acquire::Retries=3)
             apt-get "${apt_options[@]}" update -qq
-            apt-get "${apt_options[@]}" install --yes --no-install-recommends python3 ca-certificates >/dev/null
+            apt-get "${apt_options[@]}" install --yes --no-install-recommends python3 ca-certificates curl >/dev/null
             cd /work/rust
             node scripts/npm-release.mjs install-artifacts --target "${{ inputs.target }}" --tarball-dir "/work/${{ inputs.package_directory }}" --prefix-root /tmp/zg-install/install --accelerator cpu
             python3 scripts/cuda/e2e.py --explicit-cpu --bundle /tmp/zg-install/install/prefix/lib/node_modules/@zvec/zvec-grep --model-cache /model-cache --logs /logs/cpu-base
@@ -143,6 +161,11 @@ runs:
             python3 scripts/cuda/e2e.py --auto-only \
               --bundle /tmp/zg-install/auto/prefix/lib/node_modules/@zvec/zvec-grep \
               --model-cache /model-cache --logs /logs/auto-cuda12 --expected-gguf-cuda 12.4
+            if [ -n "${{ inputs.standalone_directory }}" ]; then
+              node scripts/standalone-smoke.mjs --directory "/work/${{ inputs.standalone_directory }}" --prefix-root /tmp/zg-install/standalone --expect-cuda --keep-install > /tmp/zg-install/standalone.json
+              bundle="$(node -p "require(\"/tmp/zg-install/standalone.json\").bundle")"
+              python3 scripts/cuda/e2e.py --auto-only --bundle "$bundle" --model-cache /model-cache --logs /logs/standalone-cuda12 --expected-gguf-cuda 12.4
+            fi
           '
     - name: Run Linux GGUF primary on CUDA 13.1
       if: runner.os == 'Linux'
@@ -170,6 +193,10 @@ runs:
             python3 /work/rust/scripts/cuda/e2e.py --auto-only \
               --bundle /tmp/zg-install/auto/prefix/lib/node_modules/@zvec/zvec-grep \
               --model-cache /model-cache --logs /logs/auto-cuda13 --backend gguf --expected-gguf-cuda 13.1
+            if [ -n "${{ inputs.standalone_directory }}" ]; then
+              bundle="$(node -p "require(\"/tmp/zg-install/standalone.json\").bundle")"
+              python3 scripts/cuda/e2e.py --auto-only --bundle "$bundle" --model-cache /model-cache --logs /logs/standalone-cuda13 --backend gguf --expected-gguf-cuda 13.1
+            fi
           '
     - name: Make Linux cache and logs readable
       shell: bash
@@ -201,5 +228,11 @@ runs:
         path: |
           gpu-logs/
           rust/dist/npm/release/artifact-smoke/installation.json
+          ${{ runner.temp }}/zg-standalone.json
+          ${{ runner.temp }}/zg-standalone/results.json
+          ${{ runner.temp }}/zg-standalone/commands.json
+          ${{ runner.temp }}/zg-icpu/standalone.json
+          ${{ runner.temp }}/zg-icpu/standalone/results.json
+          ${{ runner.temp }}/zg-icpu/standalone/commands.json
         if-no-files-found: warn
         retention-days: 7

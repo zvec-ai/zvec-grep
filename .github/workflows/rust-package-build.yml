@@ -122,9 +122,9 @@ jobs:
         with:
           path: rust/target/ort-prebuilt/
           key: rust-ort-1.21-${{ inputs.target }}-${{ hashFiles('rust/scripts/onnxruntime-distributions.json') }}
-      - name: Preserve the Intel macOS deployment target
-        if: inputs.target == 'darwin-x64'
-        run: echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
+      - name: Match the pinned macOS SDK deployment targets
+        if: runner.os == 'macOS'
+        run: echo "MACOSX_DEPLOYMENT_TARGET=${{ inputs.target == 'darwin-arm64' && '14.5' || '14.0' }}" >> "$GITHUB_ENV"
       - name: Build the manylinux 2.28 Rust builder without a CUDA compiler
         if: runner.os == 'Linux'
         working-directory: ${{ github.workspace }}

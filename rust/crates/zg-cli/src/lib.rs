@@ -67,9 +67,11 @@ pub use authorization::{
 };
 
 pub use install::{
-    InstallError, InstallOutcome, IntegrationUpgradeEntryKind, IntegrationUpgradeSummary,
+    InstallError, InstallOutcome, IntegrationLaunch, IntegrationUpgradeEntry,
+    IntegrationUpgradeEntryKind, IntegrationUpgradeReport, IntegrationUpgradeSummary,
     execute_install, execute_uninstall, execute_upgrade_installed, resolve_server_listen,
-    resolve_server_url, write_integration_upgrade_entry, write_integration_upgrade_summary,
+    resolve_server_url, upgrade_installed, write_integration_upgrade_entry,
+    write_integration_upgrade_summary,
 };
 pub use managed_rg::{
     ManagedRgArgumentError, ParsedRgArgs, files_options, parse_managed_rg_args, parse_rg_args,
@@ -114,6 +116,9 @@ pub enum CommandLine {
     Auth(AuthArgs),
     /// Install agent integrations.
     Install(InstallArgs),
+    /// Activate a verified standalone bundle (used by the installation scripts).
+    #[command(hide = true)]
+    Standalone(StandaloneArgs),
     /// Remove agent integrations.
     Uninstall(UninstallArgs),
     /// Show help for a command or topic.
@@ -202,6 +207,8 @@ pub struct InstallArgs {
     pub upgrade_installed: bool,
     #[arg(long, requires = "upgrade_installed")]
     pub dry_run: bool,
+    #[arg(long, requires = "upgrade_installed")]
+    pub launcher: Option<PathBuf>,
     #[arg(long = "target", value_name = "AGENT", action = clap::ArgAction::Append)]
     pub targets: Vec<String>,
     #[arg(long = "mcp-transport", value_enum)]
@@ -223,6 +230,33 @@ pub struct InstallArgs {
     pub force: bool,
     #[arg(value_name = "AGENT")]
     pub positional_targets: Vec<String>,
+}
+
+#[derive(Clone, Debug, Args)]
+#[allow(clippy::struct_excessive_bools)] // Independent installer options map directly to CLI switches.
+pub struct StandaloneArgs {
+    #[arg(long)]
+    pub install_dir: PathBuf,
+    #[arg(long)]
+    pub launcher: Option<PathBuf>,
+    #[arg(long, conflicts_with = "remove")]
+    pub activate: Option<String>,
+    #[arg(long, value_parser = ["auto", "cpu", "cuda"], default_value = "auto")]
+    pub accelerator: String,
+    #[arg(long)]
+    pub home: Option<PathBuf>,
+    #[arg(long)]
+    pub token_file: Option<PathBuf>,
+    #[arg(long)]
+    pub skip_agent_upgrade: bool,
+    #[arg(long)]
+    pub no_modify_path: bool,
+    #[arg(long)]
+    pub path_managed: bool,
+    #[arg(long, default_value = "zvec-ai/zvec-grep")]
+    pub repository: String,
+    #[arg(long)]
+    pub remove: bool,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -738,6 +772,7 @@ pub enum CliPlan {
     Config(ConfigArgs),
     Server(ServerPlan),
     Install(InstallArgs),
+    Standalone(StandaloneArgs),
     Uninstall(UninstallArgs),
     Help(Option<String>),
     Version,
@@ -972,6 +1007,7 @@ impl Cli {
                 Ok(CliPlan::Install(args))
             }
             CommandLine::Uninstall(args) => Ok(CliPlan::Uninstall(args)),
+            CommandLine::Standalone(args) => Ok(CliPlan::Standalone(args)),
         }
     }
 }
@@ -983,6 +1019,7 @@ fn action_for_flag(value: &OsStr) -> Option<&'static str> {
         "--callees" => Some("callees"),
         "--status" => Some("status"),
         "--install" => Some("install"),
+        "--standalone" => Some("standalone"),
         "--uninstall" => Some("uninstall"),
         "--config" => Some("config"),
         "--auth" => Some("auth"),
@@ -1079,6 +1116,10 @@ fn management_option_with_value(text: &str) -> bool {
             | "--mcp-token-env"
             | "--capability"
             | "--scope"
+            | "--launcher"
+            | "--install-dir"
+            | "--accelerator"
+            | "--repository"
     )
 }
 

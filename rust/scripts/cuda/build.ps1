@@ -87,6 +87,7 @@ function Copy-RequiredFile {
 
 try {
     Copy-RequiredFile (Join-Path $profileDirectory "zg.exe") (Join-Path $binDirectory "zg.exe")
+    Copy-RequiredFile (Join-Path $profileDirectory "zg-launcher.exe") (Join-Path $libDirectory "zg-launcher.exe")
 
     & python scripts/cuda/runtime.py --cargo-messages $messages --destination $libDirectory
     if ($LASTEXITCODE -ne 0) { throw "Staging the selected llama runtime failed" }

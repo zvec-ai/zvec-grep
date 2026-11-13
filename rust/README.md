@@ -902,6 +902,17 @@ every driver/runtime failure can be caught and retried on CPU.
 See [npm distribution](npm/README.md) for the complete layout, OS/backend
 support matrix, runtime dependencies, and publication policy.
 
+## Standalone installation
+
+The [GitHub Releases installers](standalone/README.md) install complete native
+bundles without Node/npm. Re-run the installer to upgrade, or select a tagged
+version. On Unix, versioned programs live in `~/.zvec-grep/dist` and `~/.local/bin/zg` links
+through the `current` package symlink; PATH setup is printed for the user to apply. The installers
+preserve user data and coordinate
+upgrades with the local daemon. CUDA still requires compatible host runtime
+libraries. The installer endpoints become available after the first standalone
+release is published by the updated workflow.
+
 ## Local npm installation
 
 Build the release binary with the same script name used by the TypeScript

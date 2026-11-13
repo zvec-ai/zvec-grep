@@ -236,6 +236,10 @@ async function packPlatform(options) {
       await chmod(join(binDir, entry.binary), 0o755);
     }
 
+    if (entry.os === "win32") {
+      if (!bundleDir) await copyFile(join(dirname(binary), "zg-launcher.exe"), join(libDir, "zg-launcher.exe"));
+      await stat(join(libDir, "zg-launcher.exe"));
+    }
     const checksums = await checksumManifest(temporary, entry.target);
     for (const component of components) {
       const directory = join(stagingRoot, component.package.replace(/^@/, "").replaceAll("/", "-"));

@@ -24,7 +24,10 @@ use std::{
     time::Duration,
 };
 
-pub use controller::{DaemonStatus, server_status, start_server, stop_server_with_token};
+pub use controller::{
+    DaemonStatus, ExternalDaemon, InstallationDaemon, server_status, start_server,
+    stop_server_with_token,
+};
 pub use stdio::run_stdio_bridge;
 use thiserror::Error;
 use zg_engine::ErrorReport;
@@ -106,6 +109,10 @@ impl ServerConfig {
 
 #[derive(Debug, Error)]
 pub enum DaemonError {
+    #[error(
+        "the daemon for this home belongs to another executable; stop it explicitly before installing: {executable}"
+    )]
+    InstallationConflict { executable: String },
     #[error(transparent)]
     Engine(#[from] zg_engine::EngineError),
     #[error("invalid daemon listen address {0:?}; expected a loopback host and non-zero port")]

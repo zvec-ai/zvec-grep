@@ -118,6 +118,215 @@ struct StartupLock {
     _held: HeldToken,
 }
 
+/// Non-secret startup settings observed from an external daemon record.
+#[derive(Clone, Debug)]
+pub struct ExternalDaemon {
+    pub executable: PathBuf,
+    pub listen: String,
+    pub mcp_toolset: String,
+}
+
+/// Holds the startup claim across an installation so bridges cannot restart the
+/// old executable between graceful shutdown and activation of the new bundle.
+pub struct InstallationDaemon {
+    _lock: StartupLock,
+    home: PathBuf,
+    executables: Vec<PathBuf>,
+    token_file: Option<PathBuf>,
+    config: Option<ServerConfig>,
+    authentication_required: bool,
+    external: Option<ExternalDaemon>,
+}
+
+impl InstallationDaemon {
+    /// Claims a local home and distinguishes owned daemons from external installations.
+    /// External daemons are observed without probing their credentials or stopping them.
+    ///
+    /// # Errors
+    /// Returns ownership, locking, instance-record or configuration errors.
+    pub async fn acquire(
+        home: &Path,
+        executables: &[PathBuf],
+        token_file: Option<&Path>,
+    ) -> Result<Self, DaemonError> {
+        let lock = StartupLock::acquire(home).await?;
+        let environment_file = std::env::var_os("ZVEC_GREP_SERVER_TOKEN_FILE").map(PathBuf::from);
+        let token_file = token_file.or(environment_file.as_deref());
+        let mut guard = Self {
+            _lock: lock,
+            home: home.to_owned(),
+            executables: executables.to_vec(),
+            token_file: token_file.map(std::path::absolute).transpose()?,
+            config: None,
+            authentication_required: false,
+            external: None,
+        };
+        if let Some(record) = read_running_instance(home).await? {
+            let executable = Self::process_executable(&record)?;
+            if !guard.owns_executable(&executable) {
+                guard.external = Some(ExternalDaemon {
+                    executable,
+                    listen: if record.listen.is_empty() {
+                        record
+                            .server_url
+                            .strip_prefix("http://")
+                            .and_then(|url| url.strip_suffix("/mcp"))
+                            .unwrap_or_default()
+                            .to_owned()
+                    } else {
+                        record.listen.clone()
+                    },
+                    mcp_toolset: record.mcp_toolset.clone(),
+                });
+                return Ok(guard);
+            }
+            let mut config =
+                ServerConfig::new(record_address(&record, home).await?, home.to_owned());
+            // GET cannot shut down the service, but still crosses its authentication middleware.
+            let status = http_request(
+                &config.listen,
+                "GET",
+                "/control/shutdown",
+                HTTP_TIMEOUT,
+                None,
+            )
+            .await?;
+            guard.authentication_required = match status {
+                401 => true,
+                405 => false,
+                _ => {
+                    return Err(DaemonError::McpBridge(format!(
+                        "unexpected daemon authentication response: {status}"
+                    )));
+                }
+            };
+            if guard.authentication_required
+                && crate::resolve_token(guard.token_file.as_deref())?.is_none()
+            {
+                return Err(DaemonError::McpBridge(
+                    "the installed daemon requires its existing authentication token".into(),
+                ));
+            }
+            config.token_file.clone_from(&guard.token_file);
+            config.mcp_toolset = Some(match record.mcp_toolset.as_str() {
+                "full" => crate::McpToolset::Full,
+                _ => crate::McpToolset::Agent,
+            });
+            guard.config = Some(config);
+        }
+        Ok(guard)
+    }
+
+    #[must_use]
+    pub const fn config(&self) -> Option<&ServerConfig> {
+        self.config.as_ref()
+    }
+
+    /// Whether restarting this installation must preserve authentication.
+    #[must_use]
+    pub const fn authentication_required(&self) -> bool {
+        self.authentication_required
+    }
+
+    #[must_use]
+    pub fn external_executable(&self) -> Option<&Path> {
+        self.external
+            .as_ref()
+            .map(|external| external.executable.as_path())
+    }
+
+    /// Observed startup settings, read without contacting the external service.
+    #[must_use]
+    pub const fn external_daemon(&self) -> Option<&ExternalDaemon> {
+        self.external.as_ref()
+    }
+
+    /// Rejects a restart or recovery that would take over an external daemon.
+    ///
+    /// # Errors
+    /// Returns an installation conflict when the active daemon belongs elsewhere.
+    pub fn require_owned(&self) -> Result<(), DaemonError> {
+        if let Some(executable) = self.external_executable() {
+            return Err(DaemonError::InstallationConflict {
+                executable: executable.display().to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn process_executable(record: &DaemonInstanceRecord) -> Result<PathBuf, DaemonError> {
+        let actual =
+            with_process(record.pid, |process| process.exe().map(Path::to_owned)).flatten();
+        actual
+            .as_ref()
+            .and_then(|path| path.canonicalize().ok())
+            .ok_or_else(|| DaemonError::InstallationConflict {
+                executable: actual
+                    .map_or_else(|| "unknown".to_owned(), |path| path.display().to_string()),
+            })
+    }
+
+    fn owns_executable(&self, actual: &Path) -> bool {
+        self.executables
+            .iter()
+            .any(|expected| expected.canonicalize().ok().as_deref() == Some(actual))
+    }
+
+    fn verify_executable(&self, record: &DaemonInstanceRecord) -> Result<(), DaemonError> {
+        let actual = Self::process_executable(record)?;
+        if !self.owns_executable(&actual) {
+            return Err(DaemonError::InstallationConflict {
+                executable: actual.display().to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Stops only this installation's verified process, without signal escalation.
+    /// External daemons are left running.
+    ///
+    /// # Errors
+    /// Returns identity, authentication, shutdown or timeout errors.
+    pub async fn stop(&self) -> Result<(), DaemonError> {
+        if self.external.is_some() {
+            return Ok(());
+        }
+        if let Some(record) = read_running_instance(&self.home).await? {
+            self.verify_executable(&record)?;
+            let token = crate::resolve_token(self.token_file.as_deref())?;
+            stop_recorded_server(
+                &self.home,
+                &record,
+                crate::default_stop_timeout(),
+                token.as_deref(),
+                StopMode::Graceful,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Restarts the previously active configuration while retaining the startup claim.
+    ///
+    /// # Errors
+    /// Returns startup, readiness or executable-identity errors.
+    pub async fn restart(
+        &self,
+        executable: &Path,
+        config: Option<&ServerConfig>,
+    ) -> Result<(), DaemonError> {
+        if let Some(config) = config {
+            self.require_owned()?;
+            start_server_with_lock(executable, config).await?;
+            let record = read_running_instance(&self.home)
+                .await?
+                .ok_or(DaemonError::Timeout { action: "start" })?;
+            self.verify_executable(&record)?;
+        }
+        Ok(())
+    }
+}
+
 impl StartupLock {
     async fn acquire(home: &Path) -> Result<Self, DaemonError> {
         let daemon_dir = daemon_dir(home);
@@ -474,8 +683,15 @@ async fn start_server_with_lock(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let child = command.spawn()?;
-    wait_until_ready(&config.home, Some((child, log_path))).await
+    let mut child = (command.spawn()?, log_path);
+    let result = wait_until_ready(&config.home, Some(&mut child)).await;
+    // Installation recovery can stop this daemon again before the parent exits.
+    // Reap it even after readiness or startup failure, so zombies cannot look alive.
+    #[cfg(unix)]
+    std::thread::spawn(move || {
+        let _ = child.0.wait();
+    });
+    result
 }
 
 /// Requests graceful shutdown using an explicitly selected token file and falls
@@ -661,7 +877,7 @@ async fn remove_startup_record_if_same(
 
 async fn wait_until_ready(
     home: &Path,
-    mut child: Option<(DaemonChild, PathBuf)>,
+    mut child: Option<&mut (DaemonChild, PathBuf)>,
 ) -> Result<DaemonStatus, DaemonError> {
     let deadline = tokio::time::Instant::now() + START_TIMEOUT;
     loop {

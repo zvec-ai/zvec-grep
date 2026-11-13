@@ -46,6 +46,30 @@ pub struct IntegrationUpgradeSummary {
 
 type Report = IntegrationUpgradeSummary;
 
+/// Structured migration results shared by the CLI and native installer.
+#[derive(Debug, Default)]
+pub struct IntegrationUpgradeReport {
+    pub summary: IntegrationUpgradeSummary,
+    pub entries: Vec<IntegrationUpgradeEntry>,
+    pub launches: Vec<IntegrationLaunch>,
+}
+
+/// One configuration outcome, retained independently of terminal presentation.
+#[derive(Debug)]
+pub struct IntegrationUpgradeEntry {
+    pub kind: IntegrationUpgradeEntryKind,
+    pub detail: String,
+}
+
+impl IntegrationUpgradeReport {
+    fn entry(&mut self, kind: IntegrationUpgradeEntryKind, detail: String) {
+        self.entries.push(IntegrationUpgradeEntry { kind, detail });
+    }
+}
+
+mod launch;
+pub use launch::IntegrationLaunch;
+
 /// The presentation category of one inspected integration or its backup.
 #[derive(Clone, Copy, Debug)]
 pub enum IntegrationUpgradeEntryKind {
@@ -89,31 +113,16 @@ enum Launch {
 /// Reports unreadable, invalid or unsupported configurations after processing
 /// all independent files. Each changed file is backed up before replacement.
 pub fn execute_upgrade_installed(args: &InstallArgs) -> Result<(), InstallError> {
+    let outcome = upgrade_installed(args.launcher.as_deref(), args.dry_run)?;
     writeln!(
         crate::stdout(),
         "Upgrading existing integrations{}",
         if args.dry_run { " (dry run)" } else { "" }
     )?;
-    let mut report = Report::default();
-    let mut visited = HashSet::new();
-    for candidate in configuration_files() {
-        let result = candidate.and_then(|file| {
-            (|| {
-                let target = resolve_atomic_target(&file.path, &mut HashSet::new())?;
-                if !visited.insert((target.clone(), file.container)) {
-                    return Ok(());
-                }
-                upgrade_file(&file, &target, args.dry_run, &mut report)
-            })()
-            .map_err(|error: InstallError| {
-                InstallError::Message(format!("{}: {error}", file.path.display()))
-            })
-        });
-        if let Err(error) = result {
-            report.failed += 1;
-            write_entry(IntegrationUpgradeEntryKind::Failed, &error.to_string())?;
-        }
+    for entry in &outcome.entries {
+        write_entry(entry.kind, &entry.detail)?;
     }
+    let report = outcome.summary;
     write_report(
         &mut crate::stdout(),
         &report,
@@ -137,6 +146,44 @@ pub fn execute_upgrade_installed(args: &InstallArgs) -> Result<(), InstallError>
         return Err(InstallError::Message("Some configurations need attention; review the paths above and rerun zg --install --upgrade-installed.".to_owned()));
     }
     Ok(())
+}
+
+/// Inspects or migrates configurations and returns outcomes without terminal output.
+///
+/// # Errors
+/// Rejects an invalid launcher. Per-file failures are collected in the report.
+pub fn upgrade_installed(
+    launcher: Option<&Path>,
+    dry_run: bool,
+) -> Result<IntegrationUpgradeReport, InstallError> {
+    if let Some(launcher) = launcher
+        && (!launcher.is_absolute() || !launcher.is_file())
+    {
+        return Err(InstallError::Message(
+            "--launcher must be an absolute path to an installed executable".to_owned(),
+        ));
+    }
+    let mut report = IntegrationUpgradeReport::default();
+    let mut visited = HashSet::new();
+    for candidate in configuration_files() {
+        let result = candidate.and_then(|file| {
+            (|| {
+                let target = resolve_atomic_target(&file.path, &mut HashSet::new())?;
+                if !visited.insert((target.clone(), file.container)) {
+                    return Ok(());
+                }
+                upgrade_file(&file, &target, dry_run, launcher, &mut report)
+            })()
+            .map_err(|error: InstallError| {
+                InstallError::Message(format!("{}: {error}", file.path.display()))
+            })
+        });
+        if let Err(error) = result {
+            report.summary.failed += 1;
+            report.entry(IntegrationUpgradeEntryKind::Failed, error.to_string());
+        }
+    }
+    Ok(report)
 }
 
 fn write_report(
@@ -316,7 +363,8 @@ fn upgrade_file(
     file: &ConfigFile,
     target: &Path,
     dry_run: bool,
-    report: &mut Report,
+    launcher: Option<&Path>,
+    report: &mut IntegrationUpgradeReport,
 ) -> Result<(), InstallError> {
     let source = match fs::read_to_string(target) {
         Ok(source) => source,
@@ -327,28 +375,33 @@ fn upgrade_file(
         return Ok(());
     }
     let (next, changes) = if matches!(file.format, Format::Toml) {
-        upgrade_toml(&source, &file.path, report)?
+        upgrade_toml(&source, &file.path, launcher, report)?
     } else {
-        upgrade_json(&source, file, report)?
+        upgrade_json(&source, file, launcher, report)?
     };
     if next != source {
         if !dry_run {
-            write_upgrade(target, &source, &next)?;
+            write_upgrade(target, &source, &next, report)?;
         }
-        report.updated += changes;
-        write_entry(
+        report.summary.updated += changes;
+        report.entry(
             if dry_run {
                 IntegrationUpgradeEntryKind::Preview
             } else {
                 IntegrationUpgradeEntryKind::Upgraded
             },
-            &format!("{} ({changes} entries)", file.path.display()),
-        )?;
+            format!("{} ({changes} entries)", file.path.display()),
+        );
     }
     Ok(())
 }
 
-fn write_upgrade(target: &Path, source: &str, next: &str) -> Result<(), InstallError> {
+fn write_upgrade(
+    target: &Path,
+    source: &str,
+    next: &str,
+    report: &mut IntegrationUpgradeReport,
+) -> Result<(), InstallError> {
     if fs::read_to_string(target)? != source {
         return Err(InstallError::Message(
             "Configuration changed during migration; retry.".to_owned(),
@@ -372,10 +425,10 @@ fn write_upgrade(target: &Path, source: &str, next: &str) -> Result<(), InstallE
         ));
     }
     atomic_write(target, next)?;
-    write_entry(
+    report.entry(
         IntegrationUpgradeEntryKind::Backup,
-        &backup.display().to_string(),
-    )?;
+        backup.display().to_string(),
+    );
     Ok(())
 }
 
@@ -508,39 +561,85 @@ fn launch(name: &str, server: &Value) -> Launch {
     }
 }
 
-fn note_launch(
-    path: &Path,
-    name: &str,
-    launch: &Launch,
-    report: &mut Report,
-) -> Result<(), InstallError> {
+fn note_launch(path: &Path, name: &str, launch: &Launch, report: &mut IntegrationUpgradeReport) {
     match launch {
         Launch::Compatible => {
-            report.compatible += 1;
-            write_entry(
+            report.summary.compatible += 1;
+            report.entry(
                 IntegrationUpgradeEntryKind::Compatible,
-                &format!("{} [{name}]", path.display()),
-            )?;
+                format!("{} [{name}]", path.display()),
+            );
         }
         Launch::Manual => {
-            report.manual += 1;
-            write_entry(
+            report.summary.manual += 1;
+            report.entry(
                 IntegrationUpgradeEntryKind::Manual,
-                &format!(
+                format!(
                     "{} [{name}] has an unsupported launcher; use zg --server --stdio for stdio MCP",
                     path.display()
                 ),
-            )?;
+            );
         }
         _ => {}
     }
-    Ok(())
+}
+
+fn installation_launch(name: &str, server: &Value, launcher: Option<&Path>) -> Launch {
+    let detected = launch(name, server);
+    let Some(launcher) = launcher else {
+        return detected;
+    };
+    let detected = match detected {
+        Launch::Update {
+            array,
+            action_index,
+            script,
+            ..
+        } => {
+            return Launch::Update {
+                array,
+                action_index,
+                script,
+                replace_executable: true,
+            };
+        }
+        Launch::Compatible => Launch::Compatible,
+        other => return other,
+    };
+    let (array, command, action_index) = match server.get("command") {
+        Some(Value::String(command)) => ("args", command.as_str(), 0),
+        Some(Value::Array(command)) => {
+            let Some(command) = command.first().and_then(Value::as_str) else {
+                return detected;
+            };
+            ("command", command, 1)
+        }
+        _ => return detected,
+    };
+    // HTTP integrations and unrelated launchers retain their existing routing.
+    if !zg_executable(command) || Path::new(command) == launcher {
+        return detected;
+    }
+    Launch::Update {
+        array,
+        action_index,
+        script: None,
+        replace_executable: true,
+    }
+}
+
+fn replacement_executable(launcher: Option<&Path>) -> Result<String, InstallError> {
+    Ok(launcher
+        .map_or_else(env::current_exe, |path| Ok(path.to_owned()))?
+        .to_string_lossy()
+        .into_owned())
 }
 
 fn upgrade_json(
     source: &str,
     file: &ConfigFile,
-    report: &mut Report,
+    launcher: Option<&Path>,
+    report: &mut IntegrationUpgradeReport,
 ) -> Result<(String, usize), InstallError> {
     let root = read_json_config(source, file)?;
     let Some(container) = root.get(file.container) else {
@@ -552,8 +651,9 @@ fn upgrade_json(
     let mut next = source.to_owned();
     let mut upgraded = Vec::new();
     for (name, server) in servers {
-        let launch = launch(name, server);
-        note_launch(&file.path, name, &launch, report)?;
+        let launch = installation_launch(name, server, launcher);
+        launch::record(server, &launch, &mut report.launches);
+        note_launch(&file.path, name, &launch, report);
         if let Launch::Update {
             array,
             action_index,
@@ -570,7 +670,7 @@ fn upgrade_json(
                     .0;
             }
             if replace_executable {
-                let executable = env::current_exe()?.to_string_lossy().into_owned();
+                let executable = replacement_executable(launcher)?;
                 next = if array == "command" {
                     crate::jsonc::replace_array_string(&next, path, 0, &executable)
                         .map_err(|error| InstallError::Message(error.to_string()))?
@@ -595,7 +695,7 @@ fn upgrade_json(
                     .or_else(|| command.as_array()?.first()?.as_str())
             });
             let executable_matches = !replace_executable
-                || executable == Some(env::current_exe()?.to_string_lossy().as_ref());
+                || executable == Some(replacement_executable(launcher)?.as_str());
             if !executable_matches || !matches!(launch(name, server), Launch::Compatible) {
                 return Err(InstallError::Message(
                     "Ambiguous configuration properties; original file left unchanged.".to_owned(),
@@ -630,12 +730,17 @@ struct TomlServer {
     args: Option<Vec<toml::Spanned<String>>>,
     url: Option<String>,
     description: Option<String>,
+    #[serde(default)]
+    env: Value,
+    #[serde(default)]
+    env_vars: Value,
 }
 
 fn upgrade_toml(
     source: &str,
     path: &Path,
-    report: &mut Report,
+    launcher: Option<&Path>,
+    report: &mut IntegrationUpgradeReport,
 ) -> Result<(String, usize), InstallError> {
     let root: TomlConfig = toml::from_str(source)
         .map_err(|_| InstallError::Message("Invalid TOML configuration".to_owned()))?;
@@ -658,8 +763,12 @@ fn upgrade_toml(
         if let Some(description) = &server.description {
             value.insert("description".to_owned(), json!(description));
         }
-        let launch = launch(&name, &Value::Object(value));
-        note_launch(path, &name, &launch, report)?;
+        value.insert("env".to_owned(), json!(server.env));
+        value.insert("env_vars".to_owned(), json!(server.env_vars));
+        let value = Value::Object(value);
+        let launch = installation_launch(&name, &value, launcher);
+        launch::record(&value, &launch, &mut report.launches);
+        note_launch(path, &name, &launch, report);
         if let Launch::Update {
             action_index,
             script,
@@ -696,8 +805,7 @@ fn upgrade_toml(
                         .as_ref()
                         .expect("validated launch command")
                         .span(),
-                    toml::Value::String(env::current_exe()?.to_string_lossy().into_owned())
-                        .to_string(),
+                    toml::Value::String(replacement_executable(launcher)?).to_string(),
                 ));
             }
         }
