@@ -39,8 +39,8 @@ use crate::{
         model::{EmbeddingModelInfo, EmbeddingPurpose, EmbeddingResult},
     },
     extraction::{
-        ExtractedEntity, SourceKind, TextSource, chunk_options_for_metadata, extract_for_indexing,
-        extract_without_graph, fit_text_to_chars, source_kind, vector_content_for_fragment,
+        ExtractedEntity, SourceKind, TextSource, extract_for_indexing, extract_without_graph,
+        fit_text_to_chars, source_kind, vector_content_for_fragment,
     },
     file_selection::ScanPolicy,
     models::{
@@ -1200,10 +1200,7 @@ fn prepare_semantic_projections(
                 continue;
             }
             let embedding_text = max_chars
-                .map(|limit| {
-                    let (content_max, _) = chunk_options_for_metadata(limit, 0, Some(metadata));
-                    fit_text_to_chars(&text, content_max)
-                })
+                .map(|limit| fit_text_to_chars(&text, limit))
                 .unwrap_or_else(|| text.clone());
             let embedding_content = match entity.content() {
                 Content::Code(_) => Content::Code(embedding_text),
