@@ -521,25 +521,14 @@ fn filter_compatible_hits<'s>(
     filtered
 }
 
-/// Whether a reference whose language is `reference` can address a candidate
-/// file at `path`.
+/// Whether a reference can address a candidate file's already-parsed formats.
+/// The sweep reads each file's extension evidence once instead of per reference.
 ///
 /// Missing evidence keeps the candidate: the gate never discards on
 /// information it does not have. An unregistered extension is unknown
 /// evidence just like a reference the walk could not tag with a language —
 /// `unknown` is not a language of its own, so requiring an `unknown` candidate
 /// to match it would drop every candidate spelling a real one.
-#[cfg_attr(not(test), allow(dead_code))]
-fn language_compatible(reference: Option<FileFormat>, path: Option<&str>) -> bool {
-    language_compatible_formats(
-        reference,
-        path.map(|path| formats_for_path(Path::new(path)))
-            .as_deref(),
-    )
-}
-
-/// The same gate over a candidate file's already-parsed formats, so the
-/// sweep reads each file's extension evidence once instead of per reference.
 fn language_compatible_formats(
     reference: Option<FileFormat>,
     formats: Option<&[FileFormat]>,
@@ -2203,44 +2192,48 @@ mod overload_evidence_tests {
 
 #[cfg(test)]
 mod language_gate_tests {
-    use super::language_compatible;
+    use super::{formats_for_path, language_compatible_formats};
     use crate::domain::FileFormat;
+    use std::path::Path;
 
     #[test]
     fn unknown_reference_language_keeps_every_candidate() {
         // `unknown` marks a reference the walk could not tag with a language,
         // not a language whose candidates must spell `unknown` too.
-        assert!(language_compatible(
+        assert!(language_compatible_formats(
             Some(FileFormat::Unknown),
-            Some("src/lib.rs")
+            Some(&formats_for_path(Path::new("src/lib.rs")))
         ));
-        assert!(language_compatible(Some(FileFormat::Unknown), None));
+        assert!(language_compatible_formats(Some(FileFormat::Unknown), None));
     }
 
     #[test]
     fn missing_evidence_on_either_side_keeps_the_candidate() {
-        assert!(language_compatible(None, Some("src/lib.py")));
-        assert!(language_compatible(Some(FileFormat::Rust), None));
+        assert!(language_compatible_formats(
+            None,
+            Some(&formats_for_path(Path::new("src/lib.py")))
+        ));
+        assert!(language_compatible_formats(Some(FileFormat::Rust), None));
         // An unregistered extension is unknown evidence, not a mismatch.
-        assert!(language_compatible(
+        assert!(language_compatible_formats(
             Some(FileFormat::Rust),
-            Some("src/data.zzz")
+            Some(&formats_for_path(Path::new("src/data.zzz")))
         ));
     }
 
     #[test]
     fn known_languages_gate_on_the_shared_namespace() {
-        assert!(!language_compatible(
+        assert!(!language_compatible_formats(
             Some(FileFormat::Rust),
-            Some("src/lib.py")
+            Some(&formats_for_path(Path::new("src/lib.py")))
         ));
-        assert!(language_compatible(
+        assert!(language_compatible_formats(
             Some(FileFormat::C),
-            Some("src/api.cpp")
+            Some(&formats_for_path(Path::new("src/api.cpp")))
         ));
-        assert!(language_compatible(
+        assert!(language_compatible_formats(
             Some(FileFormat::TypeScript),
-            Some("src/main.js")
+            Some(&formats_for_path(Path::new("src/main.js")))
         ));
     }
 }

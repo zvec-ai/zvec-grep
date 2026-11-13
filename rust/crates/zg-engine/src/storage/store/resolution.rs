@@ -719,6 +719,37 @@ fn eligible_ref_ids(
 }
 
 #[cfg(test)]
+mod endpoint_visibility_tests {
+    use super::ResolutionSnapshot;
+
+    #[test]
+    fn canonical_file_endpoints_do_not_require_entity_owners() {
+        let mut snapshot = ResolutionSnapshot::default();
+        snapshot.paths.indexed.extend([0, 1]);
+        assert_eq!(snapshot.visible_file_id("f0"), Some(0));
+        assert_eq!(snapshot.visible_file_id("f1"), Some(1));
+        assert_eq!(snapshot.visible_file_id("f2"), None);
+        assert_eq!(snapshot.visible_file_id("f00"), None);
+        assert_eq!(snapshot.visible_file_id("f01"), None);
+    }
+
+    #[test]
+    fn leading_zero_endpoints_use_entity_ownership_not_the_parsed_file() {
+        let mut snapshot = ResolutionSnapshot::default();
+        snapshot.paths.indexed.extend([1, 2]);
+        assert_eq!(snapshot.visible_file_id("f01"), None);
+
+        snapshot.owners.insert("f01".into(), 2);
+        assert_eq!(snapshot.visible_file_id("f01"), Some(2));
+        assert_eq!(snapshot.visible_file_id("f1"), Some(1));
+
+        snapshot.paths.indexed.remove(&2);
+        assert_eq!(snapshot.visible_file_id("f01"), None);
+        assert_eq!(snapshot.visible_file_id("f1"), Some(1));
+    }
+}
+
+#[cfg(test)]
 mod parameter_evidence_tests {
     use super::parameter_evidence;
 
