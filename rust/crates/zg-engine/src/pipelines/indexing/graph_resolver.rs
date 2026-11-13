@@ -324,27 +324,6 @@ fn classify(
     stored: &StoredPendingRef,
     caches: &mut RuleCaches,
 ) -> crate::EngineResult<Outcome> {
-    if stored
-        .reference
-        .metadata
-        .get("shadowed")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-        // A TypeScript or JavaScript binding states the range it lives in, so
-        // the call resolution below reads the scope at the reference itself. A
-        // block-local name is gone by the call that follows its block, and the
-        // owner-wide flag would defer that call instead of letting the file's
-        // name answer it.
-        && !(stored.reference.ref_kind == GraphEdgeKind::Calls
-            && stored.reference.receiver_name.is_none()
-            && matches!(stored.language.as_str(), "typescript" | "javascript"))
-    {
-        // A local value or parameter already took this name inside the
-        // referencing entity. Whatever the workspace declares under it, the
-        // call reaches the local binding, so the reference waits instead of
-        // borrowing a same-named symbol from the file or the workspace.
-        return Ok(Outcome::Deferred);
-    }
     if stored.reference.ref_kind == GraphEdgeKind::Declares {
         // Binding evidence for `resolve_receiver_typed`, not a call site: the
         // bound variable name must never reach the name-index lookup below.
@@ -634,6 +613,22 @@ fn bare_name_outcome(
         // whose constructor answers it, which the class owns rather than the
         // caller's scope.
         if declares_in(hit, &visible) || construction_names(stored, hit) {
+            // A call that reaches an overload taking a different number of
+            // arguments names nothing the caller can see: the nearer scope
+            // hides the unit-scope overload that would answer it, and binding
+            // the hidden sibling would report the wrong symbol.
+            if matches!(stored.language.as_str(), "c" | "cpp")
+                && stored.reference.ref_kind == GraphEdgeKind::Calls
+                && !compatible_arity(
+                    stored
+                        .reference
+                        .arity
+                        .and_then(|arity| u32::try_from(arity).ok()),
+                    hit.arity,
+                )
+            {
+                return Ok(Outcome::Ambiguous(vec![hit.entity_id.clone()]));
+            }
             return Ok(Outcome::Resolved {
                 resolution: Resolution {
                     ref_id: stored.id,
@@ -856,7 +851,7 @@ fn enclosing_scope_hits<'s>(
     if scopes.is_empty() {
         return hits;
     }
-    let narrowed: Vec<&'s NameIndexEntry> = hits
+    let narrowed: Vec<&NameIndexEntry> = hits
         .iter()
         .filter(|hit| {
             hit.qualified_name
@@ -1228,8 +1223,12 @@ fn resolve_lexical_binding(
         .collect();
     // One file may bind the name to several overloads (`send(int)` and
     // `send(int, int)`), and the call's argument count still names one of them:
-    // the counts are read before the set is called ambiguous.
+    // the counts are read before the set is called ambiguous. Only a language
+    // whose same-named definitions really are overloads has that reading — a
+    // Python or JS script rebinds the name instead, so its later definition is
+    // the only one the file has to offer and the count decides nothing.
     if lexical.len() > 1
+        && matches!(stored.language.as_str(), "c" | "cpp")
         && let Some(expected) = stored.reference.arity
         && let Some(hit) = unique_arity_match(lexical.iter().copied(), expected)
     {
@@ -2364,7 +2363,7 @@ impl ClassScope {
 /// of `scope` at all, however equal the two names look.
 fn declarations_in<'a>(
     snapshot: &ResolutionSnapshot,
-    hits: &'a [&'a NameIndexEntry],
+    hits: &[&'a NameIndexEntry],
     scope: &ClassScope,
 ) -> Vec<&'a NameIndexEntry> {
     hits.iter()
@@ -2610,7 +2609,7 @@ fn resolve_receiver_typed(
     caches: &mut RuleCaches,
 ) -> crate::EngineResult<Option<Resolution>> {
     let reference = &stored.reference;
-    if reference.ref_kind != GraphEdgeKind::Calls || stored.language == "cpp" {
+    if reference.ref_kind != GraphEdgeKind::Calls {
         return Ok(None);
     }
     if matches!(

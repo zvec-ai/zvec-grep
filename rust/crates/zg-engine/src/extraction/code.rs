@@ -1195,7 +1195,10 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "each language's whole metadata is asserted in one fixture"
+    )]
     fn preserves_php_symbols_scopes_properties_and_constants() {
         let source = test_source(
             FileFormat::Php,
@@ -1361,9 +1364,16 @@ mod tests {
                     arity: (kind == SymbolType::Function).then_some(1),
                     is_exported: false,
                     is_declaration: false,
-                    has_internal_linkage: false,
-                    declares_type: false,
                     package: None,
+                    has_internal_linkage: false,
+                    // A PHP class, interface or enum introduces the type's
+                    // name; a trait only groups members, and the members
+                    // inside either never do.
+                    declares_type: !signature.starts_with("trait ")
+                        && matches!(
+                            kind,
+                            SymbolType::Class | SymbolType::Enum | SymbolType::Interface
+                        ),
                     alias_of: None,
                     object_members: Vec::new(),
                     overwritten_by: None,
@@ -1557,10 +1567,6 @@ mod tests {
     // metadata field, and the assertions compare side by side.
     #[allow(clippy::too_many_lines)]
     #[test]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "each language's whole metadata is asserted in one fixture"
-    )]
     fn preserves_c_go_and_python_language_specific_metadata() {
         let c_source = test_source(
             FileFormat::C,

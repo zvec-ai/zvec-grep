@@ -49,6 +49,7 @@ pub(crate) struct PendingNameRef {
     pub raw_text: Option<String>,
     /// Declared type of the bound name for `Declares` edges.
     pub bound_type: Option<String>,
+    /// Last line the bound name stays in effect, for a loop-scoped binding.
     pub bound_until: Option<usize>,
     /// Exclusive end of a branch/loop-local binding, in source coordinates.
     pub scope_end: Option<(usize, usize)>,
@@ -56,9 +57,6 @@ pub(crate) struct PendingNameRef {
     /// Whether the call stands at a construction site, where a type name is a
     /// legitimate target.
     pub constructs: Constructs,
-    /// Whether the owner's body already took the name for a local value or
-    /// parameter, so no file-level symbol answers it.
-    pub shadowed: bool,
     pub line: usize,
     pub column: usize,
 }
@@ -84,10 +82,13 @@ pub(crate) struct PartitionedGraph {
     pub directives: Vec<PreprocessorDirective>,
 }
 
-/// Function-pointer initializers (`void (*work)(void) = target;`) alias
-/// one name to a same-file function per owner: a call spelled through the
-/// alias reaches that function rather than a same-named declaration the
-/// local hides.
+/// Declarations binding one name to another, per owner: a function-pointer
+/// initializer (`void (*work)(void) = target;` records `target` as the bound
+/// *type*) and a value initializer (`const dispatch = send` records `send`).
+/// A call spelled through the bound name reaches the named function rather than
+/// a same-named declaration the local hides — but only as far as the binding
+/// that is in effect where the call stands, so the bindings stay in source
+/// order instead of collapsing into one answer per name.
 fn alias_table(name_edges: &[NameEdge]) -> HashMap<(usize, String), Vec<NameEdge>> {
     let mut aliases: HashMap<_, Vec<_>> = HashMap::new();
     for edge in name_edges
@@ -102,6 +103,12 @@ fn alias_table(name_edges: &[NameEdge]) -> HashMap<(usize, String), Vec<NameEdge
     aliases
 }
 
+/// The name a reference spelled through `edge.ref_name` reaches at its own
+/// position: the last local binding written before it that has not gone out of
+/// scope, and failing that the file's own declaration, which every body of the
+/// file can see. Position is the whole point — a `const target = other` inside
+/// a block stops answering when the block ends, and a later declaration must
+/// not reach backwards past an earlier one.
 fn alias_at<'a>(
     aliases: &'a HashMap<(usize, String), Vec<NameEdge>>,
     edge: &NameEdge,
@@ -122,6 +129,25 @@ fn alias_at<'a>(
                 .and_then(|bindings| bindings.last())
         })
         .and_then(|binding| binding.bound_type.as_deref())
+}
+
+/// Whether a binding states a value this file can place. `?` marks a
+/// declaration whose value is unreadable here — a parameter, or an initializer
+/// that is neither a construction nor a factory call — and `typeof X` marks a
+/// callable copy. Binding the spelled name instead would claim the file's
+/// namesake even where a parameter or a nested definition of that name is the
+/// value, while the cross-file resolver still reads the declared binding at the
+/// call's position and can tell the two apart.
+fn states_a_placeable_value(bound: &str) -> bool {
+    !(bound == "?" || bound.starts_with("typeof "))
+}
+
+/// The entity the file declares exactly once under `name`; two same-named
+/// declarations are not evidence for either.
+fn unique_symbol(symbols: &HashMap<String, Vec<usize>>, name: &str) -> Option<usize> {
+    symbols
+        .get(name)
+        .and_then(|indices| (indices.len() == 1).then(|| indices[0]))
 }
 
 /// Shape used to collapse references without per-site binding evidence.
@@ -240,7 +266,6 @@ pub(crate) fn partition_walk(
                 scope_end: edge.scope_end,
                 arity: edge.arity,
                 constructs: edge.constructs,
-                shadowed: shadowed || borrowed,
                 line: edge.line,
                 column: edge.column,
             }),
@@ -311,56 +336,49 @@ fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> 
         // `legacy::Widget`). Only the cross-file resolver sees the
         // enclosing namespaces, so constructions stay pending.
         GraphEdgeKind::Calls if edge.constructs.is_some() => None,
-        // A bare call resolves through, in order: its owner's alias
-        // initializers, the file-level aliases (a module-level
-        // `const dispatch = send` is visible to every body in the file),
-        // its owner's local name table (the nested spelling an entity
-        // declares in its body shadows any file-level name inside it),
-        // then the file-level table. Members and nested definitions stay
-        // out of that last table: a top-level `caller()` naming `run`
-        // does not see `A::run` just because the file declares it once.
-        // Without better evidence the reference stays pending for the
+        // A bare call resolves through, in order: the binding its owner's body
+        // gave the name *at the call's own position*, the file-level bindings
+        // (a module-level `const dispatch = send` is visible to every body in
+        // the file, whatever its order), its owner's local name table (the
+        // nested spelling an entity declares in its body shadows any file-level
+        // name inside it), then the file-level table. Members and nested
+        // definitions stay out of that last table: a top-level `caller()`
+        // naming `run` does not see `A::run` just because the file declares it
+        // once. Without better evidence the reference stays pending for the
         // cross-file resolver, which also weighs imports.
-        GraphEdgeKind::Calls => {
-            if let Some(bound) = alias_at(aliases, edge) {
-                // Callable copies require lexical lookup at the assignment
-                // position; the resolver owns that decision.
-                return if bound.starts_with("typeof ") || bound == "?" {
-                    None
-                } else {
-                    symbols
-                        .get(bound)
-                        .and_then(|indices| (indices.len() == 1).then(|| indices[0]))
-                };
+        GraphEdgeKind::Calls => match alias_at(aliases, edge) {
+            // The binding states no value this file can place, so the spelled
+            // name is not the answer: the resolver reads the declared binding
+            // at the call's position and can still tell a parameter, a nested
+            // definition or a later reassignment apart from the file's name.
+            Some(bound) if !states_a_placeable_value(bound) => None,
+            Some(bound) => unique_symbol(symbols, bound),
+            None => {
+                let value_alias = value_aliases
+                    .get(&(edge.owner_index, edge.ref_name.clone()))
+                    .or_else(|| {
+                        value_aliases.get(&(super::FILE_SCOPE_INDEX, edge.ref_name.clone()))
+                    });
+                match value_alias {
+                    // A pair the walk recorded without a position of its own
+                    // (`x = y` where the declaration states no type) is the
+                    // only evidence there is.
+                    Some(bound) => unique_symbol(symbols, bound),
+                    None => scoped_symbols
+                        .get(&edge.owner_index)
+                        .and_then(|locals| locals.get(&edge.ref_name))
+                        .copied()
+                        .or_else(|| {
+                            (!shadowed)
+                                .then(|| unique_symbol(file_symbols, &edge.ref_name))
+                                .flatten()
+                        }),
+                }
             }
-            let value_alias = value_aliases
-                .get(&(edge.owner_index, edge.ref_name.clone()))
-                .or_else(|| value_aliases.get(&(super::FILE_SCOPE_INDEX, edge.ref_name.clone())));
-            if let Some(bound) = value_alias {
-                // A pair the walk recorded without a position of its own
-                // (`x = y` where the declaration states no type) is the
-                // only evidence there is.
-                return symbols
-                    .get(bound)
-                    .and_then(|indices| (indices.len() == 1).then(|| indices[0]));
-            }
-            scoped_symbols
-                .get(&edge.owner_index)
-                .and_then(|locals| locals.get(&edge.ref_name))
-                .copied()
-                .or_else(|| {
-                    (!shadowed)
-                        .then(|| {
-                            file_symbols
-                                .get(&edge.ref_name)
-                                .and_then(|indices| (indices.len() == 1).then(|| indices[0]))
-                        })
-                        .flatten()
-                })
+        },
+        GraphEdgeKind::Extends | GraphEdgeKind::Implements => {
+            unique_symbol(symbols, &edge.ref_name)
         }
-        GraphEdgeKind::Extends | GraphEdgeKind::Implements => symbols
-            .get(&edge.ref_name)
-            .and_then(|indices| (indices.len() == 1).then(|| indices[0])),
     }
 }
 

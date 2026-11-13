@@ -135,11 +135,6 @@ fn file_pending_refs(
                 // loop ends; the resolver needs the last line it holds for.
                 metadata.insert("until".to_owned(), serde_json::json!(until));
             }
-            if reference.shadowed {
-                // The owner's own body took this name, so no file-level symbol
-                // answers it: the resolver must not bind it either.
-                metadata.insert("shadowed".to_owned(), serde_json::json!(true));
-            }
             if let Some(site) = reference.constructs.as_str() {
                 // Only construction sites carry the flag: the resolver keeps
                 // type candidates for exactly these calls, and the form says
@@ -385,7 +380,6 @@ mod tests {
             scope_end: None,
             arity: None,
             constructs: Constructs::None,
-            shadowed: false,
             line: 1,
             column: 20,
         });

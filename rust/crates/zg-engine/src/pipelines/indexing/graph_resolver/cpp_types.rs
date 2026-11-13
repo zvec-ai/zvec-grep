@@ -3,7 +3,6 @@
 //! These per-sweep caches never outlive the workspace resolution snapshot.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use tree_sitter::{Node, Parser};
 
 use super::{
@@ -92,7 +91,7 @@ fn scopes(scope: &str) -> Vec<&str> {
 fn compatible(snapshot: &ResolutionSnapshot, hit: &NameIndexEntry) -> bool {
     let formats = snapshot
         .file_path(hit.file_id)
-        .map(|path| formats_for_path(Path::new(path)));
+        .map(|path| formats_for_path(std::path::Path::new(path)));
     language_compatible_formats(Some(FileFormat::Cpp), formats.as_deref())
 }
 
@@ -390,7 +389,11 @@ fn member(
             })
             .collect::<Vec<_>>(),
     );
-    let root = ClassScope::at(snapshot, owner.qualified_name.clone(), Some(owner.file_id));
+    let root = ClassScope {
+        name: owner.qualified_name.clone(),
+        declared_in: Some(owner.file_id),
+        entity: Some(owner.entity_id.clone()),
+    };
     let mut scopes = vec![root.clone()];
     let branched =
         collect_base_scopes(store, snapshot, &root, &mut scopes, &mut HashSet::new(), 8)?;
@@ -410,7 +413,7 @@ fn member(
             [hit] => Some(*hit),
             _ => arity.and_then(|arity| unique_arity_match(declarations.into_iter(), arity)),
         };
-        if scope.same_as(&root) || !branched {
+        if scope.name == owner.qualified_name || !branched {
             return Ok(hit.cloned());
         }
         let Some(hit) = hit else { return Ok(None) };

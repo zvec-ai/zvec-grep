@@ -113,9 +113,30 @@ fn callee_of(node: Node<'_>, source: &[u8]) -> Option<(String, Option<String>, S
     let callee = callee_text_of(node, source)?;
     let normalized = callee.replace("->", ".");
     let normalized = normalize_super_call(&normalized);
+    // `<button />` is one of the language's own elements, not a call to a
+    // project symbol named `button`: a lowercase tag without a member path
+    // names no value this index can place. A capitalized or dotted tag does.
+    if matches!(
+        node.kind(),
+        "jsx_opening_element" | "jsx_self_closing_element"
+    ) && !normalized.contains('.')
+        && normalized.chars().next().is_some_and(char::is_lowercase)
+    {
+        return None;
+    }
     if normalized.len() <= MAX_CALLEE_TEXT_CHARS && is_identifier_like(&normalized) {
         let (ref_name, receiver_name) = split_callee_name(&normalized);
         return Some((ref_name, receiver_name, callee));
+    }
+    // A receiver written as a chain or a call (`factory().run`, `a.b.c`) is
+    // read structurally: the grammar's own fields say which part is the
+    // receiver, and a call-shaped one answers through the type it builds.
+    if let Some(structured) = structured_callee(node, source) {
+        let structured = normalize_super_call(&structured);
+        if structured.len() <= MAX_CALLEE_TEXT_CHARS && is_identifier_like(&structured) {
+            let (ref_name, receiver_name) = split_callee_name(&structured);
+            return Some((ref_name, receiver_name, callee));
+        }
     }
     let (ref_name, receiver_name) = cpp_member_callee(node, source)?;
     Some((ref_name, Some(receiver_name), callee))
@@ -319,12 +340,10 @@ fn visit_for_calls(
     // A call node still descends below: `outer(inner())` and `factory().run()`
     // reach their inner calls only through its subtree, and the declaration
     // walk never comes back for them.
-    if let Some((target, ty)) = constructor_target(node, source) {
-        let name = ty.rsplit([':', '.']).next().unwrap_or(&ty);
-        let raw = if matches!(node.kind(), "object_creation_expression" | "new_expression") {
+    if let Some((target, ty)) = java_constructor_target(node, source) {
+        let name = ty.rsplit('.').next().unwrap_or(&ty);
+        let raw = if node.kind() == "object_creation_expression" {
             format!("new {}", node_text(target, source))
-        } else if node.kind() == "compound_literal_expression" {
-            format!("{ty}{{}}")
         } else {
             node_text(target, source).to_owned()
         };
@@ -341,6 +360,9 @@ fn visit_for_calls(
             position.column,
         );
     } else if is_call_node(node) && !is_unreported_call(node, source) && is_php_member_call(node) {
+        // PHP spells a member call as a receiver, a separator and a name. The
+        // receiver stays on the edge even when the resolver cannot read it: a
+        // bare name would bind to a same-named function of the file instead.
         if let Some(call) = php_member_call(node, source) {
             context.add_call_edge(
                 owner_index,
@@ -353,9 +375,39 @@ fn visit_for_calls(
             );
         }
     } else if is_call_node(node)
-        && let Some((_, _, callee)) = callee_of(node, source)
+        && !is_unreported_call(node, source)
+        && let Some((ref_name, receiver_name, callee)) = callee_of(node, source)
     {
-        record_callee_call(node, owner_index, source, context, &callee);
+        let line = node.start_position().row + 1;
+        let column = node.start_position().column;
+        let constructs = construction_site(node);
+        if constructs.is_some() {
+            // A construction names its type, and that spelling — `X` after the
+            // `new` keyword — is where the call stands.
+            let position = node
+                .child_by_field_name("type")
+                .map_or_else(|| node.start_position(), |spelled| spelled.start_position());
+            context.add_construction_edge(
+                owner_index,
+                &ref_name,
+                receiver_name.as_deref(),
+                Some(callee.as_str()),
+                call_arity_of(node),
+                position.row + 1,
+                position.column,
+                constructs,
+            );
+        } else {
+            context.add_call_edge(
+                owner_index,
+                &ref_name,
+                receiver_name.as_deref(),
+                Some(callee.as_str()),
+                call_arity_of(node),
+                line,
+                column,
+            );
+        }
     } else if node.kind() == "compound_literal_expression"
         && let Some((name, position)) = constructed_type_name(node, source)
     {
@@ -379,76 +431,6 @@ fn visit_for_calls(
         }
         visit_for_calls(child, owner_index, source, context, boundary);
     }
-}
-
-/// Records the call a callee names, when the callee passes the identifier
-/// gate: C/C++ and PHP arrow member access joins it under the dot spelling
-/// (`ptr->bar()` names the same member shape as `ref.bar()`), and the buffered
-/// raw text keeps the original spelling.
-fn record_callee_call(
-    node: Node<'_>,
-    owner_index: usize,
-    source: &[u8],
-    context: &mut WalkContext,
-    callee: &str,
-) {
-    let normalized =
-        structured_callee(node, source).unwrap_or_else(|| normalize_member_access(callee));
-    let normalized = normalize_super_call(&normalized);
-    let intrinsic_jsx = matches!(
-        node.kind(),
-        "jsx_opening_element" | "jsx_self_closing_element"
-    ) && !normalized.contains('.')
-        && normalized.chars().next().is_some_and(char::is_lowercase);
-    let proven_expression = normalized.rsplit_once('.').is_some_and(|(receiver, name)| {
-        receiver.starts_with("ReturnType<typeof ") && is_identifier_like(name)
-    });
-    if intrinsic_jsx
-        || normalized.len() > MAX_CALLEE_TEXT_CHARS
-        || !(is_identifier_like(&normalized) || proven_expression)
-    {
-        return;
-    }
-    let (ref_name, receiver_name) = split_callee_name(&normalized);
-    let line = node.start_position().row + 1;
-    let column = node.start_position().column;
-    let constructs = construction_site(node);
-    if constructs.is_some() {
-        // A construction names its type, and that spelling — `X` after the
-        // `new` keyword — is where the call stands.
-        let position = node
-            .child_by_field_name("type")
-            .map_or_else(|| node.start_position(), |spelled| spelled.start_position());
-        context.add_construction_edge(
-            owner_index,
-            &ref_name,
-            receiver_name.as_deref(),
-            Some(callee),
-            call_arity_of(node),
-            position.row + 1,
-            position.column,
-            constructs,
-        );
-        return;
-    }
-    context.add_call_edge(
-        owner_index,
-        &ref_name,
-        receiver_name.as_deref(),
-        Some(
-            if matches!(
-                node.kind(),
-                "jsx_opening_element" | "jsx_self_closing_element"
-            ) {
-                node_text(node, source)
-            } else {
-                callee
-            },
-        ),
-        call_arity_of(node),
-        line,
-        column,
-    );
 }
 
 /// The plain type a brace construction builds and where it is written:
@@ -509,32 +491,13 @@ fn construction_site(node: Node<'_>) -> Constructs {
         _ => Constructs::None,
     }
 }
-/// Keep C++ constructions pending until explicit constructors are considered.
-fn cpp_constructor_target<'tree>(
+
+/// Java construction names a type, while this/super name the enclosing or
+/// direct base constructor. Other grammars' creation nodes keep their rules.
+fn java_constructor_target<'tree>(
     node: Node<'tree>,
     source: &[u8],
 ) -> Option<(Node<'tree>, String)> {
-    if !matches!(
-        node.kind(),
-        "new_expression" | "compound_literal_expression"
-    ) || node.child_by_field_name("declarator").is_some()
-    {
-        return None;
-    }
-    let ty = node.child_by_field_name("type")?;
-    // C compound literals use type_descriptor; primitive/array initialization
-    // has no user-defined constructor, and templates need additional evidence.
-    if !matches!(ty.kind(), "type_identifier" | "qualified_identifier") {
-        return None;
-    }
-    Some((ty, node_text(ty, source).to_owned()))
-}
-
-/// Java this/super address constructors; C compound literals are not calls.
-fn constructor_target<'tree>(node: Node<'tree>, source: &[u8]) -> Option<(Node<'tree>, String)> {
-    if let Some(target) = cpp_constructor_target(node, source) {
-        return Some(target);
-    }
     match node.kind() {
         "object_creation_expression" => {
             let ty = node.child_by_field_name("type")?;
@@ -657,24 +620,9 @@ fn visit_for_bindings(
         collect_go_scoped_binding(node, owner_index, source, context);
     }
     if let Some((name, bound_type)) = binding {
-        if format == FileFormat::TypeScript
-            && node.kind() == "required_parameter"
-            && node_text(node, source)
-                .split_whitespace()
-                .next()
-                .is_some_and(|word| matches!(word, "public" | "private" | "protected" | "readonly"))
-        {
-            context.add_declare_binding(
-                owner_index,
-                &format!("this.{name}"),
-                &bound_type,
-                line,
-                column,
-                None,
-            );
-        }
         // A scoped binding carries the range it lives in, for the languages
-        // whose declarations state a scope narrower than the owner's body.
+        // whose declarations state a scope narrower than the owner's body:
+        // a JavaScript block, a Java loop, a Go case, a C++ block.
         if matches!(
             format,
             FileFormat::TypeScript
@@ -683,6 +631,24 @@ fn visit_for_bindings(
                 | FileFormat::Go
                 | FileFormat::Cpp
         ) {
+            if format == FileFormat::TypeScript
+                && node.kind() == "required_parameter"
+                && node_text(node, source)
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|word| {
+                        matches!(word, "public" | "private" | "protected" | "readonly")
+                    })
+            {
+                context.add_declare_binding(
+                    owner_index,
+                    &format!("this.{name}"),
+                    &bound_type,
+                    node.start_position().row + 1,
+                    node.start_position().column,
+                    None,
+                );
+            }
             collect_binding(node, owner_index, &name, &bound_type, format, context);
             if format == FileFormat::Java
                 && node.kind() == "enhanced_for_statement"
@@ -946,6 +912,11 @@ fn collect_binding(
     context: &mut WalkContext,
 ) {
     if format == FileFormat::Cpp {
+        // A C++ name lives to the end of the block that declares it, so an
+        // inner block's declaration shadows an outer one for its own range
+        // only. A range-for states its variable for the loop body alone. The
+        // owner's own body states nothing new: the owner's range already ends
+        // there.
         let mut scope = node;
         while !matches!(
             scope.kind(),
@@ -958,6 +929,12 @@ fn collect_binding(
             if let Some(body) = node.child_by_field_name("body") {
                 add_binding_in_scope(body, Some(body), owner_index, name, ty, context);
             }
+        } else if scope.kind() == "function_definition"
+            || scope
+                .parent()
+                .is_some_and(|parent| parent.kind() == "function_definition")
+        {
+            add_binding_in_scope(node, None, owner_index, name, ty, context);
         } else {
             add_binding_in_scope(node, Some(scope), owner_index, name, ty, context);
         }
@@ -1518,9 +1495,6 @@ pub(crate) fn scan_return_types(
         collect_javascript_binding_scopes(root, source, context);
     }
     visit_for_return_types(root, source, format, context);
-    if format == FileFormat::Cpp {
-        collect_cpp_type_aliases(root, source, &[], context);
-    }
     let script_scope = match format {
         FileFormat::JavaScript => Some(if has_javascript_module_syntax(root, source) {
             "module"
@@ -1601,141 +1575,6 @@ pub(crate) fn scan_return_types(
             context,
             Some(&boundary),
         );
-    }
-}
-
-/// C++ type aliases belong to their declaring namespace/class, including using
-/// declarations that do not produce a searchable entity. Keep them in the
-/// existing file-owned declaration evidence rather than adding an index table.
-fn collect_cpp_type_aliases(
-    node: Node<'_>,
-    source: &[u8],
-    scopes: &[String],
-    context: &mut WalkContext,
-) {
-    if node.kind() == "template_declaration" {
-        collect_cpp_template_parameters(node, source, scopes, context);
-    }
-    if matches!(node.kind(), "function_definition" | "lambda_expression") {
-        return;
-    }
-    let alias = match node.kind() {
-        "alias_declaration" => node
-            .child_by_field_name("name")
-            .zip(node.child_by_field_name("type"))
-            .map(|(name, ty)| {
-                (
-                    node_text(name, source).to_owned(),
-                    node_text(ty, source).to_owned(),
-                )
-            }),
-        "using_declaration"
-            if !node_text(node, source)
-                .split_whitespace()
-                .take(2)
-                .eq(["using", "namespace"]) =>
-        {
-            named_children(node)
-                .into_iter()
-                .find(|child| child.kind() == "qualified_identifier")
-                .map(|target| {
-                    let target = node_text(target, source).to_owned();
-                    (
-                        target.rsplit("::").next().unwrap_or(&target).to_owned(),
-                        target,
-                    )
-                })
-        }
-        _ => None,
-    };
-    if let Some((name, target)) = alias {
-        let name = scopes
-            .iter()
-            .map(String::as_str)
-            .chain([name.as_str()])
-            .collect::<Vec<_>>()
-            .join("::");
-        context.add_declare_binding(
-            super::FILE_SCOPE_INDEX,
-            &name,
-            &target,
-            node.start_position().row + 1,
-            node.start_position().column,
-            None,
-        );
-    }
-    let mut scopes = scopes.to_vec();
-    if matches!(
-        node.kind(),
-        "namespace_definition" | "class_specifier" | "struct_specifier"
-    ) && let Some(name) = node.child_by_field_name("name")
-    {
-        scopes.push(node_text(name, source).to_owned());
-    }
-    for child in named_children(node) {
-        collect_cpp_type_aliases(child, source, &scopes, context);
-    }
-}
-
-/// Unbound template parameters shadow workspace names; erasing class arguments
-/// must never turn T into an unrelated project class named T.
-fn collect_cpp_template_parameters(
-    node: Node<'_>,
-    source: &[u8],
-    scopes: &[String],
-    context: &mut WalkContext,
-) {
-    let Some(parameters) = node.child_by_field_name("parameters") else {
-        return;
-    };
-    let Some(declaration) = named_children(node).into_iter().rev().find(|child| {
-        matches!(
-            child.kind(),
-            "class_specifier"
-                | "struct_specifier"
-                | "function_definition"
-                | "alias_declaration"
-                | "declaration"
-        )
-    }) else {
-        return;
-    };
-    let name = declaration.child_by_field_name("name").or_else(|| {
-        let mut declarator = declaration.child_by_field_name("declarator")?;
-        while let Some(inner) = declarator.child_by_field_name("declarator") {
-            declarator = inner;
-        }
-        Some(declarator)
-    });
-    let Some(name) = name else { return };
-    let owner = scopes
-        .iter()
-        .map(String::as_str)
-        .chain([node_text(name, source)])
-        .collect::<Vec<_>>()
-        .join("::");
-    for parameter in named_children(parameters) {
-        if !matches!(
-            parameter.kind(),
-            "type_parameter_declaration"
-                | "optional_type_parameter_declaration"
-                | "variadic_type_parameter_declaration"
-        ) {
-            continue;
-        }
-        if let Some(name) = parameter
-            .child_by_field_name("name")
-            .or_else(|| parameter.named_child(0))
-        {
-            context.add_declare_binding(
-                super::FILE_SCOPE_INDEX,
-                &format!("{owner}::{}", node_text(name, source)),
-                "?",
-                parameter.start_position().row + 1,
-                parameter.start_position().column,
-                None,
-            );
-        }
     }
 }
 
@@ -1935,7 +1774,8 @@ fn cpp_return_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
     }
     // The function name sits under the declarator chain: the function
     // declarator itself, optionally wrapped in pointer/reference/array
-    // declarators.
+    // declarators. The wrappers are the result type's own decoration, so they
+    // stay on the spelling the binding carries.
     let mut declarator = declarator;
     while matches!(
         declarator.kind(),
@@ -1949,10 +1789,7 @@ fn cpp_return_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
         }
         declarator = declarator.child_by_field_name("declarator")?;
     }
-    if !matches!(
-        declarator.kind(),
-        "identifier" | "field_identifier" | "qualified_identifier"
-    ) {
+    if !matches!(declarator.kind(), "identifier" | "field_identifier") {
         return None;
     }
     Some((node_text(declarator, source).to_owned(), type_name))
@@ -2383,6 +2220,15 @@ fn cpp_binding_of(
     source: &[u8],
     context: &WalkContext,
 ) -> Option<(String, String)> {
+    // A type spelled with a template parameter (`std::unique_ptr<T>`) holds
+    // whatever the instantiation supplies. The parameter name must not reach a
+    // workspace class that happens to spell the same, so the name stays
+    // unbound rather than guessed.
+    if let Some(declared) = node.child_by_field_name("type")
+        && cpp_type_uses_template_parameter(node, declared, source)
+    {
+        return None;
+    }
     match node.kind() {
         // `Widget w;` / `Widget* p = f();` / `Widget& r = w;` /
         // `std::unique_ptr<W> h(new W());`: the declaration spells the type
@@ -2426,13 +2272,15 @@ fn cpp_binding_of(
                 "call_expression" => {
                     let function = value.child_by_field_name("function")?;
                     if function.kind() != "identifier" {
-                        // `auto it = values.begin()`: the container states the
-                        // position the iterator walks, so the binding names the
-                        // range's element and the resolver reads it from the
-                        // range's own declared type.
-                        return Some((name, cpp_iterator_marker_of(function, source)?));
+                        // `auto it = values.begin()`: the call itself states the
+                        // position the name walks, and the resolver reads the
+                        // element its receiver yields from the spelling.
+                        return Some((name, cpp_decltype_marker_of(value, source)));
                     }
-                    let type_name = context.factory_return_of(node_text(function, source))?;
+                    let Some(type_name) = context.factory_return_of(node_text(function, source))
+                    else {
+                        return Some((name, cpp_decltype_marker_of(value, source)));
+                    };
                     return Some((name, type_name.to_owned()));
                 }
                 // `auto& v = it->second`: the placeholder denotes whatever the
@@ -2510,6 +2358,48 @@ fn cpp_binding_of(
     }
 }
 
+/// Whether a declared type spells a template parameter the enclosing template
+/// declarations leave unbound: each ancestor `template_declaration` states the
+/// names its own subtree may spell (`template<class T> struct Box`, `template
+/// <typename T> void unknown(...)`).
+fn cpp_type_uses_template_parameter(node: Node<'_>, declared: Node<'_>, source: &[u8]) -> bool {
+    let spelled = node_text(declared, source);
+    let mut scope = node.parent();
+    while let Some(current) = scope {
+        if current.kind() == "template_declaration"
+            && let Some(parameters) = current.child_by_field_name("parameters")
+            && named_children(parameters).iter().any(|parameter| {
+                // A `type_parameter_declaration` names its parameter as a
+                // plain child (`class T`, `typename T`), not through a field.
+                parameter
+                    .child_by_field_name("name")
+                    .or_else(|| parameter.named_child(0))
+                    .is_some_and(|name| cpp_spells_word(spelled, node_text(name, source)))
+            })
+        {
+            return true;
+        }
+        scope = current.parent();
+    }
+    false
+}
+
+/// Whether `text` names `word` as a whole identifier, so `T` does not match
+/// inside `Table`.
+fn cpp_spells_word(text: &str, word: &str) -> bool {
+    let names_char = |ch: char| ch.is_alphanumeric() || matches!(ch, '_' | '$');
+    let mut rest = text;
+    while let Some(index) = rest.find(word) {
+        let before = rest[..index].chars().next_back();
+        let after = rest[index + word.len()..].chars().next();
+        if !before.is_some_and(names_char) && !after.is_some_and(names_char) {
+            return true;
+        }
+        rest = &rest[index + word.len()..];
+    }
+    false
+}
+
 /// The receiver path an expression names, for a call site or a range's element.
 ///
 /// Only a path of plain names and element reads qualifies (`logs_`, `vs->logs_`,
@@ -2583,56 +2473,20 @@ fn cpp_element_marker(range: &str) -> String {
     format!("{ELEMENT_MARKER}({range})")
 }
 
-/// The binding a placeholder declaration takes from an iterator-returning
-/// member call: `auto it = values.begin()` holds a position over `values`, so
-/// the name denotes that range's element.
-///
-/// Only the members whose result walks the receiver's own elements qualify.
-/// Any other member answers with a type only a return-type index could name,
-/// and the call stays unanswered rather than guessed.
-fn cpp_iterator_marker_of(function: Node<'_>, source: &[u8]) -> Option<String> {
-    if function.kind() != "field_expression" {
-        return None;
-    }
-    let field = function.child_by_field_name("field")?;
-    if !ITERATOR_MEMBERS.contains(&node_text(field, source)) {
-        return None;
-    }
-    let receiver = cpp_receiver_path(function.child_by_field_name("argument")?, source)?;
-    Some(cpp_position_marker(&receiver))
+/// The call its own spelling as the binding of a placeholder declaration:
+/// `auto it = values.begin()` holds the position the call yields and `auto
+/// boxed = real::Box<int>()` the value it builds; the resolver reads both from
+/// the expression the source writes.
+fn cpp_decltype_marker_of(value: Node<'_>, source: &[u8]) -> String {
+    format!(
+        "decltype({})",
+        collapse_whitespace(node_text(value, source))
+    )
 }
-
-/// The members whose result walks the receiver's own elements.
-const ITERATOR_MEMBERS: &[&str] = &[
-    "begin",
-    "end",
-    "cbegin",
-    "cend",
-    "rbegin",
-    "rend",
-    "crbegin",
-    "crend",
-    "find",
-    "lower_bound",
-    "upper_bound",
-    "equal_range",
-];
 
 /// Prefix of a binding that names something derived from another binding
 /// rather than a type the source spells (`for (auto& kv : buffers)`).
 const ELEMENT_MARKER: &str = "element:";
-
-/// The binding an iterator-returning call gives a placeholder declaration:
-/// `auto it = values.begin()` holds a position over `values`, which answers the
-/// element it walks rather than the container itself.
-fn cpp_position_marker(range: &str) -> String {
-    format!("{POSITION_MARKER}({range})")
-}
-
-/// Prefix of a binding that names a position in another binding's type. An
-/// iterator answers the element it walks; a call written through it reaches
-/// that element, not the container.
-const POSITION_MARKER: &str = "position:";
 
 /// The binding a placeholder declaration takes from the path it is
 /// initialized with: `auto& v = it->second` holds exactly what that member
@@ -3478,8 +3332,10 @@ mod tests {
             .collect()
     }
 
-    /// Every name a source binds, with the last line a loop-scoped binding
-    /// holds for.
+    /// Every name a source binds, with the last line a scoped binding holds
+    /// for. A binding the collector bounds by statement carries `bound_until`;
+    /// one it bounds by the block or loop that declares it states the range as
+    /// `scope_end`, so both spell the answer here.
     fn name_edges(
         format: FileFormat,
         lang: &tree_sitter::Language,
@@ -3506,7 +3362,8 @@ mod tests {
                     edge.ref_name.clone(),
                     edge.bound_type.clone().expect("bound type"),
                     edge.line,
-                    edge.bound_until,
+                    edge.bound_until
+                        .or_else(|| edge.scope_end.map(|(line, _)| line)),
                 )
             })
             .collect()
@@ -3562,7 +3419,7 @@ mod tests {
                 &tree_sitter_cpp::LANGUAGE.into(),
                 "void m() { auto x = new X(); x->foo(); }",
             ),
-            vec![("x".to_owned(), "X*".to_owned(), 1)]
+            vec![("x".to_owned(), "X".to_owned(), 1)]
         );
         assert_eq!(
             bindings(
@@ -3606,8 +3463,8 @@ mod tests {
                 "void m(Left &a, Right &b) { a.run(); }",
             ),
             vec![
-                ("a".to_owned(), "Left&".to_owned(), 1),
-                ("b".to_owned(), "Right&".to_owned(), 1),
+                ("a".to_owned(), "Left".to_owned(), 1),
+                ("b".to_owned(), "Right".to_owned(), 1),
             ]
         );
         assert_eq!(
@@ -3833,7 +3690,7 @@ mod tests {
                 &tree_sitter_cpp::LANGUAGE.into(),
                 "X makeX() {\n    return X{};\n}\nvoid caller() {\n    auto x = makeX();\n}\n",
             ),
-            vec![("x".to_owned(), "decltype(makeX())".to_owned(), 5)]
+            vec![("x".to_owned(), "X".to_owned(), 5)]
         );
 
         // Untyped languages infer from the body's `return` constructions.
