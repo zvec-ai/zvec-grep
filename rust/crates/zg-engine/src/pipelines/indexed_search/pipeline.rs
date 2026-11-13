@@ -11,10 +11,7 @@ use async_trait::async_trait;
 use crate::{
     EngineError,
     api::context::{
-        options::{
-            ContextRoute as SearchRoute, ContextRouteMode as SearchRouteMode, QueryFilter,
-            SemanticFeatures, SemanticRepresentation,
-        },
+        options::{ContextRoute as SearchRoute, ContextRouteMode as SearchRouteMode, QueryFilter},
         result::{
             MatchedBy, SearchFinalTrace, SearchFusionTrace, SearchHitTrace, SearchRecallTrace,
             TimingEntry,
@@ -25,10 +22,7 @@ use crate::{
         model::{EmbeddingModelInfo, EmbeddingPurpose},
     },
     models::{EmbeddingOptions, ModelError, ModelRuntimeLease},
-    storage::types::{
-        SearchRepresentation, StoragePathFilter, StorageSearchFilter, StorageSearchHit,
-        StoredSearchData,
-    },
+    storage::types::{StoragePathFilter, StorageSearchFilter, StorageSearchHit, StoredSearchData},
 };
 
 use super::{
@@ -50,7 +44,6 @@ pub(crate) struct SearchPlan {
     pub limit: Option<usize>,
     pub trace: bool,
     pub prefer_symbol: bool,
-    pub semantic_features: Option<SemanticFeatures>,
     pub filter: QueryFilter,
 }
 
@@ -550,7 +543,7 @@ fn load_candidates(
     let hits = candidates
         .iter()
         .flat_map(|candidate| &candidate.evidence)
-        .filter(|evidence| seen.insert(evidence.hit.evidence_fragment_id.as_str().to_owned()))
+        .filter(|evidence| seen.insert(evidence.hit.document_id.clone()))
         .map(|evidence| evidence.hit.clone())
         .collect::<Vec<_>>();
     let mut data = storage.load_search_hits(&hits)?;
@@ -592,11 +585,10 @@ fn candidate_to_hit(
     });
     let mut loaded_evidence = Vec::with_capacity(evidence.len());
     for evidence in evidence {
-        let evidence_id = evidence.hit.evidence_fragment_id.as_str();
-        let Some(fragment) = data.fragments.get(evidence_id) else {
+        let Some(fragment) = data.fragments.get(&evidence.hit.document_id) else {
             continue;
         };
-        if fragment.id.as_str() != evidence_id
+        if fragment.id.as_str() != evidence.hit.document_id
             || !stored
                 .entity
                 .fragments()
@@ -765,22 +757,16 @@ fn search_plan_to_storage_filter(
     };
     let symbol_types =
         (!plan.filter.symbol_types.is_empty()).then(|| plan.filter.symbol_types.clone());
-    let representation = Some(plan.semantic_features.as_ref().map_or(
-        SearchRepresentation::All,
-        |features| match features.representation {
-            SemanticRepresentation::Symbol => SearchRepresentation::Symbol,
-            SemanticRepresentation::Body => SearchRepresentation::Body,
-            SemanticRepresentation::Document => SearchRepresentation::Document,
-            SemanticRepresentation::All => SearchRepresentation::All,
-        },
-    ));
-    Ok(Some(StorageSearchFilter {
-        path,
-        file_ids,
-        symbol_types,
-        representation,
-        ..StorageSearchFilter::default()
-    }))
+    if file_ids.is_none() && symbol_types.is_none() && path.is_none() {
+        Ok(None)
+    } else {
+        Ok(Some(StorageSearchFilter {
+            path,
+            file_ids,
+            symbol_types,
+            ..StorageSearchFilter::default()
+        }))
+    }
 }
 
 fn matches_file_filters(
@@ -863,7 +849,6 @@ mod tests {
 
     use crate::{
         EngineResult,
-        api::context::options::{SemanticFeatures, SemanticRepresentation},
         domain::{
             ByteRange, Content, Entity, EntityFragment, EntityId, FileCategory, FileFormat, FileId,
             FileIndexStatus, FileRecord, FileSnapshot, FragmentId, GlobRule, Range, TextRange,
@@ -873,8 +858,8 @@ mod tests {
         models::ModelError,
         pipelines::indexed_search::path_filter::compile_path_filter,
         storage::types::{
-            SearchRepresentation, StoragePathFilter, StorageSearchFilter, StorageSearchHit,
-            StorageSearchPath, StoredEntity, StoredFileAttributes, StoredSearchData,
+            StoragePathFilter, StorageSearchFilter, StorageSearchHit, StorageSearchPath,
+            StoredEntity, StoredFileAttributes, StoredSearchData,
         },
     };
 
@@ -1029,17 +1014,10 @@ mod tests {
                         .flatten()
                         .chain(&self.vector)
                         .filter(|found| found.hit.entity_id == hit.entity_id)
-                        .filter(|found| {
-                            seen.insert(found.hit.evidence_fragment_id.as_str().to_owned())
-                        })
-                        .map(|found| {
-                            stored
-                                .entity
-                                .fragments()
-                                .iter()
-                                .find(|fragment| fragment.id == found.hit.evidence_fragment_id)
-                                .cloned()
-                                .unwrap_or_else(|| found.fragment.clone())
+                        .filter(|found| seen.insert(found.hit.document_id.clone()))
+                        .map(|found| EntityFragment {
+                            id: FragmentId::from_string(found.hit.document_id.clone()),
+                            range: Range::Full,
                         })
                         .collect();
                     stored.entity = Entity::new(
@@ -1057,15 +1035,10 @@ mod tests {
                     .values()
                     .flatten()
                     .chain(&self.vector)
-                    .find(|found| {
-                        found.hit.entity_id == hit.entity_id
-                            && found.hit.evidence_fragment_id == hit.evidence_fragment_id
-                    })
+                    .find(|found| found.hit.document_id == hit.document_id)
                 {
-                    data.fragments.insert(
-                        hit.evidence_fragment_id.as_str().to_owned(),
-                        found.fragment.clone(),
-                    );
+                    data.fragments
+                        .insert(hit.document_id.clone(), found.fragment.clone());
                 }
             }
             Ok(data)
@@ -1597,49 +1570,6 @@ mod tests {
             filters: Arc::default(),
             load_batches: Mutex::default(),
         }
-    }
-
-    #[test]
-    fn semantic_representation_filters_are_defaulted_and_mapped() {
-        for (api, storage) in [
-            (SemanticRepresentation::Symbol, SearchRepresentation::Symbol),
-            (SemanticRepresentation::Body, SearchRepresentation::Body),
-            (
-                SemanticRepresentation::Document,
-                SearchRepresentation::Document,
-            ),
-            (SemanticRepresentation::All, SearchRepresentation::All),
-        ] {
-            let mut plan = plan(vec![SearchRoute {
-                mode: SearchRouteMode::Fts,
-                query: "needle".into(),
-            }]);
-            plan.semantic_features = Some(SemanticFeatures {
-                representation: api,
-                ..SemanticFeatures::default()
-            });
-            let filter = super::search_plan_to_storage_filter(
-                Path::new("/workspace"),
-                &plan,
-                &pushdown_storage(),
-            )
-            .expect("semantic filter")
-            .expect("representation filter");
-            assert_eq!(filter.representation, Some(storage));
-        }
-
-        let plan = plan(vec![SearchRoute {
-            mode: SearchRouteMode::Fts,
-            query: "needle".into(),
-        }]);
-        let filter = super::search_plan_to_storage_filter(
-            Path::new("/workspace"),
-            &plan,
-            &pushdown_storage(),
-        )
-        .expect("default filter")
-        .expect("default representation filter");
-        assert_eq!(filter.representation, Some(SearchRepresentation::All));
     }
 
     #[test]
@@ -2332,7 +2262,6 @@ mod tests {
             limit: Some(10),
             trace: true,
             prefer_symbol: false,
-            semantic_features: None,
             filter: QueryFilter::default(),
         }
     }
@@ -2377,7 +2306,6 @@ mod tests {
         FixtureHit {
             hit: StorageSearchHit {
                 document_id: fragment_id.as_str().to_owned(),
-                evidence_fragment_id: fragment_id.clone(),
                 entity_id: stored.entity.id().clone(),
                 file_id: stored.file.id(),
                 path,

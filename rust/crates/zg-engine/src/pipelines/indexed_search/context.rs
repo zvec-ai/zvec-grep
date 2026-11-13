@@ -46,9 +46,6 @@ pub(crate) struct NormalizedContextGroup {
 pub(crate) fn normalize_context_request(
     options: &ContextOptions,
 ) -> Result<NormalizedContextRequest, EngineError> {
-    if let Some(features) = &options.semantic_features {
-        features.validate()?;
-    }
     let primary_queries = options
         .query
         .iter()
@@ -169,7 +166,6 @@ pub(crate) async fn context_from_index(
                     limit: Some(limit),
                     trace: options.trace,
                     prefer_symbol: options.prefer_symbol,
-                    semantic_features: options.semantic_features,
                     filter: options.filter.clone(),
                 },
                 storage,

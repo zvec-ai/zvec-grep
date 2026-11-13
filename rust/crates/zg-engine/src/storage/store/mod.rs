@@ -340,9 +340,7 @@ impl IndexStore {
             if limit == 0 || fragments::empty_filter(filter) {
                 return Ok(Vec::new());
             }
-            let filter = state
-                .fragments
-                .build_filter(filter, &|path| state.directories.get(path))?;
+            let filter = fragments::build_filter(filter, &|path| state.directories.get(path))?;
             state
                 .fragments
                 .search_vector(model, vector, limit, filter.as_deref())
@@ -685,16 +683,6 @@ fn load_search_hits(
             && owner.file.id() != hit.file_id
         {
             return Err(corrupt("search identities differ from their stored entity"));
-        }
-        if let Some(owner) = entities.get(&hit.entity_id)
-            && !owner
-                .entity
-                .fragments()
-                .iter()
-                .any(|fragment| fragment.id.as_str() == hit.evidence_fragment_id.as_str())
-            && fragments.contains_key(hit.evidence_fragment_id.as_str())
-        {
-            return Err(corrupt("search evidence differs from its stored entity"));
         }
     }
     Ok(StoredSearchData {

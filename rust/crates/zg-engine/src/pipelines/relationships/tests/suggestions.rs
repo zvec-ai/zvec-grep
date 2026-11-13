@@ -43,7 +43,6 @@ async fn definitions_without_text_locations_do_not_suppress_suggestions() {
             model: schema().model().reference(),
             vector: vec![1.0, 0.0, 0.0],
             fts_text: "unlocated".into(),
-            projection: None,
         };
         store
             .replace_file(&file, &entities, &[fragment])

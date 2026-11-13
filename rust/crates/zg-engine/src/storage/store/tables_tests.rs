@@ -157,7 +157,6 @@ fn metadata_fragments(
             entity_id: owner.id().clone(),
             fragment_id: fragment.id.clone(),
             vector,
-            projection: None,
         })
         .collect();
     (source, vec![owner], entries)

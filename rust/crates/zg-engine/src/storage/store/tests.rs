@@ -36,7 +36,6 @@ fn fixture_records(
                         model: fixture.model.clone(),
                         vector: fixture.vector.clone(),
                         fts_text: fixture.fts_text.clone(),
-                        projection: None,
                     }
                 })
             })
@@ -704,7 +703,6 @@ fn persists_filters_and_replaces_complete_files() {
         entity_ids: Some(vec![entry.entity.id().clone()]),
         symbol_names: Some(vec!["quoted'\\name\0suffix".to_owned()]),
         symbol_types: Some(vec![SymbolType::Function]),
-        representation: None,
     };
     for query in ["orchard", "数据库", "orchard\0"] {
         let hits = storage

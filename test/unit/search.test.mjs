@@ -353,39 +353,6 @@ test("search plans short-circuit empty path filters and force-track no-file reas
   );
 });
 
-test("semantic representation filters default to canonical rows and map explicit modes", async () => {
-  const fixture = createFixture();
-  const base = {
-    semantic_features_version: 1,
-    representation: "all",
-    token_sketch: "off",
-    graph_rerank: "off",
-    graph_edge_confidence: "strong",
-    graph_expansion: "off",
-    trace: "off",
-  };
-
-  await searchWorkspaceIndex(
-    { routes: [{ mode: "fts", query: "AlphaSymbol" }] },
-    fixture.context,
-  );
-  assert.equal(fixture.calls.fts.at(-1).filter.representation, "all");
-
-  for (const representation of ["symbol", "body", "document"]) {
-    await searchWorkspaceIndex(
-      {
-        routes: [{ mode: "fts", query: "AlphaSymbol" }],
-        semanticFeatures: { ...base, representation },
-      },
-      fixture.context,
-    );
-    assert.equal(
-      fixture.calls.fts.at(-1).filter.representation,
-      representation,
-    );
-  }
-});
-
 test("semantic full traces are bounded, provenance-bearing, deterministic, and body-free", async () => {
   const fixture = createFixture();
   const semanticFeatures = {

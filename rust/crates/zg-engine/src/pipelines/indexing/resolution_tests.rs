@@ -79,7 +79,6 @@ fn index_source(store: &IndexStore, path: &str, text: &str) -> FileId {
                 model: MODEL.to_owned(),
                 vector: vec![1.0, 0.0, 0.0],
                 fts_text: text.to_owned(),
-                projection: None,
             })
         })
         .collect();

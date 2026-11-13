@@ -345,65 +345,6 @@ test("unfinalized FTS writes survive close and can be optimized after reopen", a
   }
 });
 
-test("semantic projection hits resolve to canonical source evidence", async (t) => {
-  const parent = await mkdtemp(join(tmpdir(), "zvec-grep-semantic-evidence-"));
-  const storage = createWorkspaceIndexStorage(storageOptions(parent));
-  t.after(() => {
-    storage.close();
-    return rm(parent, { recursive: true, force: true });
-  });
-  const file = fileInfo("a", parent, "src/a.ts");
-  const canonical = {
-    id: "entity-a",
-    fileId: file.id,
-    range: {
-      kind: "text",
-      startLine: 1,
-      endLine: 1,
-      startOffset: 0,
-      endOffset: 24,
-    },
-    content: { kind: "text", text: "canonical source body" },
-    metadata: {
-      kind: "code",
-      symbolType: "function",
-      symbolName: "canonicalName",
-      scope: null,
-      nodeType: "function_declaration",
-      signature: "function canonicalName()",
-      doc: null,
-      modifiers: [],
-    },
-  };
-  const projection = (representation, searchText, vector) => ({
-    fragment: { ...canonical, group: canonical.id },
-    vector,
-    representation,
-    searchText,
-  });
-  storage.replaceFile(file, [
-    { fragment: canonical, vector: [1, 0] },
-    projection("symbol", "symbolneedle", [0, 1]),
-    projection("body", "bodyneedle", [0, 1]),
-  ]);
-
-  assert.equal(storage.searchFts("symbolneedle", 10).length, 0);
-  const symbol = storage.searchFts("symbolneedle", 10, {
-    representation: "symbol",
-  });
-  assert.equal(symbol.length, 1);
-  assert.equal(symbol[0].fragment.id, canonical.id);
-  assert.equal(symbol[0].fragment.content.text, canonical.content.text);
-  assert.equal(symbol[0].fragment.metadata.symbolName, "canonicalName");
-
-  const body = storage.searchFts("bodyneedle", 10, {
-    representation: "body",
-  });
-  assert.equal(body.length, 1);
-  assert.equal(body[0].fragment.id, canonical.id);
-  assert.equal(storage.searchFts("bodyneedle", 10).length, 0);
-});
-
 test("finalize waits for metadata optimization and does not repeat it after success", async (t) => {
   const parent = await mkdtemp(join(tmpdir(), "zvec-grep-await-optimize-"));
   t.after(() => rm(parent, { recursive: true, force: true }));

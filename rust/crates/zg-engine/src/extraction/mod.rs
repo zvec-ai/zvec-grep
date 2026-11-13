@@ -32,7 +32,6 @@ use crate::{
 };
 
 // Shared implementation helpers used by the format-specific extractors.
-pub(crate) use service::fit_text_to_chars;
 use service::{chunk_options_for_metadata, validate_formats};
 
 #[cfg(test)]

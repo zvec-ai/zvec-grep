@@ -1129,16 +1129,14 @@ function searchPlanToStorageFilter(
     plan.symbolTypes && plan.symbolTypes.length > 0
       ? plan.symbolTypes
       : undefined;
-  const representation = plan.semanticFeatures?.representation ?? "all";
 
   if (fileIds === undefined && symbolTypes === undefined) {
-    return { representation };
+    return undefined;
   }
 
   return {
     ...(fileIds !== undefined ? { fileIds } : {}),
     ...(symbolTypes !== undefined ? { symbolTypes } : {}),
-    representation,
   };
 }
 

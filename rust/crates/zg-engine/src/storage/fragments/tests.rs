@@ -1,9 +1,8 @@
 use super::*;
 use crate::domain::{
-    ByteRange, Content, EntityFragment, FileIndexStatus, FileSnapshot, MarkdownMetadata, Range,
-    SymbolType, TextRange,
+    ByteRange, Content, FileIndexStatus, FileSnapshot, MarkdownMetadata, Range, SymbolType,
+    TextRange,
 };
-use crate::storage::types::IndexedProjection;
 use std::path::PathBuf;
 
 fn file(id: u32, path: impl Into<PathBuf>) -> FileRecord {
@@ -126,7 +125,6 @@ fn metadata_fragments(
             entity_id: owner.id().clone(),
             fragment_id: fragment.id.clone(),
             vector,
-            projection: None,
         })
         .collect();
     (source, vec![owner], entries)
@@ -631,76 +629,6 @@ fn projection_validation_keeps_one_model_and_one_row_per_fragment() {
 }
 
 #[test]
-fn representation_search_ranks_projections_but_returns_canonical_evidence() {
-    let temporary = tempfile::tempdir().expect("storage");
-    let store = metadata_store(temporary.path());
-    let (source, entities, mut entries) = metadata_fragments(1, "representation");
-    let evidence_fragment_id = entries[0].fragment_id.clone();
-    for (representation, text, vector) in [
-        (
-            SearchRepresentation::Symbol,
-            "symbolneedle",
-            vec![0.0, 0.0, 1.0],
-        ),
-        (
-            SearchRepresentation::Body,
-            "bodyneedle",
-            vec![0.0, 1.0, 0.0],
-        ),
-    ] {
-        entries.push(IndexedFragment {
-            entity_id: entities[0].id().clone(),
-            fragment_id: evidence_fragment_id.clone(),
-            model: model().model().reference(),
-            vector,
-            fts_text: text.into(),
-            projection: Some(IndexedProjection {
-                representation,
-                evidence_fragment_id: evidence_fragment_id.clone(),
-            }),
-        });
-    }
-    write_fixture(&store, &source, &entities, &entries);
-
-    assert!(
-        store
-            .search_fts("symbolneedle", 10, None)
-            .expect("default canonical search")
-            .is_empty()
-    );
-    let symbol = store
-        .search_fts("symbolneedle", 10, Some("representation = 'symbol'"))
-        .expect("symbol projection search");
-    assert_eq!(symbol.len(), 1);
-    assert_ne!(symbol[0].document_id, evidence_fragment_id.as_str());
-    assert_eq!(symbol[0].evidence_fragment_id, evidence_fragment_id);
-
-    let body = store
-        .search_fts("bodyneedle", 10, Some("representation = 'body'"))
-        .expect("body projection search");
-    assert_eq!(body.len(), 1);
-    assert_eq!(body[0].evidence_fragment_id, evidence_fragment_id);
-}
-
-#[test]
-fn explicit_representation_requires_projection_schema() {
-    let filter = StorageSearchFilter {
-        representation: Some(SearchRepresentation::Symbol),
-        ..StorageSearchFilter::default()
-    };
-    assert!(build_filter_for_schema(Some(&filter), &DIRECTORY_LOOKUP, false, false).is_err());
-    let legacy_all = StorageSearchFilter {
-        representation: Some(SearchRepresentation::All),
-        ..StorageSearchFilter::default()
-    };
-    assert_eq!(
-        build_filter_for_schema(Some(&legacy_all), &DIRECTORY_LOOKUP, false, false)
-            .expect("legacy all filter"),
-        None
-    );
-}
-
-#[test]
 fn fragment_ownership_is_checked_across_model_collections() {
     super::super::zvec::initialize().expect("initialize zvec");
     let home = tempfile::tempdir().expect("storage");
@@ -861,7 +789,6 @@ fn exact_symbol_lookup_collects_all_models_and_deduplicates_large_fragment_sets(
                     model: first.model().reference(),
                     vector: vec![1.0, 0.0, 0.0],
                     fts_text: "harvest".into(),
-                    projection: None,
                 })
                 .collect();
         }

@@ -469,7 +469,6 @@ Result options:
   --color <auto|always|never>       Color output (default: auto)
   --debug                           Print diagnostics to stderr
   --trace                           Include per-hit indexed search trace
-  --semantic-features <json>        Versioned semantic retrieval controls
   --refresh <background|wait|off>   Refresh policy (defaults: server=background, direct=off)
                                     In direct mode, background warns and falls back to off
   --mode <direct|server|auto>       Select indexed query transport (default: auto)
