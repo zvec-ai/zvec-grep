@@ -238,7 +238,7 @@ fn try_recover_publication(
     if !try_lock_handle(&residency, LockMode::Exclusive)? {
         return Ok(());
     }
-    crate::workspace::manifest::require_compatible_manifest(source_root, layout)?;
+    crate::workspace::manifest::read_workspace_manifest(source_root, layout)?;
     index::recover_build(layout)
 }
 

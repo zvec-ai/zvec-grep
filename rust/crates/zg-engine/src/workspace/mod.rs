@@ -9,8 +9,9 @@ pub(crate) mod index;
 pub(crate) mod lock;
 pub(crate) mod manifest;
 
-// Compatibility version of the workspace index contents; the workspace owns the
-// check, so an index written by another version is rebuilt instead of opened.
+// Compatibility version of persisted index metadata and storage. Every manifest
+// declares it, including uninitialized and disabled workspaces without an index.
+// Incompatible formats require an explicit rebuild instead of an implicit upgrade.
 pub(crate) const CURRENT_INDEX_VERSION: u32 = 3;
 
 /// Finds the nearest workspace at or above the given directory.

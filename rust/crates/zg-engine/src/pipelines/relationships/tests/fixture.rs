@@ -20,7 +20,7 @@ impl Fixture {
             &root,
             layout.clone(),
             ScanRules::default(),
-            Some(CURRENT_INDEX_VERSION),
+            CURRENT_INDEX_VERSION,
             Some(uuid::Uuid::new_v4().to_string()),
             1,
             1,

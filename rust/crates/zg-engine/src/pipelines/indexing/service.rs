@@ -567,7 +567,7 @@ fn index_workspace_state(
         source_root,
         layout.clone(),
         scan,
-        Some(CURRENT_INDEX_VERSION),
+        CURRENT_INDEX_VERSION,
         Some(generation),
         active.map_or(now, Workspace::created_epoch_ms),
         now,
@@ -1072,7 +1072,7 @@ mod tests {
             previous.source_root(),
             previous.layout().clone(),
             previous.scan().clone(),
-            Some(super::CURRENT_INDEX_VERSION - 1),
+            super::CURRENT_INDEX_VERSION - 1,
             previous.storage_generation().map(str::to_owned),
             previous.created_epoch_ms(),
             previous.updated_epoch_ms(),
@@ -1163,14 +1163,17 @@ mod tests {
 
     #[test]
     fn rejects_incompatible_index_versions() {
-        crate::workspace::manifest::require_current_index_version(Some(
-            super::CURRENT_INDEX_VERSION,
-        ))
-        .expect("current index");
-        for version in [None, Some(0), Some(1), Some(2), Some(5), Some(u32::MAX)] {
+        crate::workspace::manifest::require_current_index_version(super::CURRENT_INDEX_VERSION)
+            .expect("current index");
+        for version in [
+            0,
+            super::CURRENT_INDEX_VERSION - 1,
+            super::CURRENT_INDEX_VERSION + 1,
+            u32::MAX,
+        ] {
             assert_ne!(
                 version,
-                Some(super::CURRENT_INDEX_VERSION),
+                super::CURRENT_INDEX_VERSION,
                 "samples must stay incompatible with the current version"
             );
             let error = crate::workspace::manifest::require_current_index_version(version)
@@ -1199,7 +1202,7 @@ mod tests {
             }
             .apply(&crate::domain::ScanRules::default())
             .expect("scan rules"),
-            None,
+            super::CURRENT_INDEX_VERSION,
             None,
             0,
             0,
@@ -3054,7 +3057,7 @@ mod tests {
         )
         .expect("manifest read")
         .expect("manifest");
-        assert_eq!(rebuilt.index_version(), Some(super::CURRENT_INDEX_VERSION));
+        assert_eq!(rebuilt.index_version(), super::CURRENT_INDEX_VERSION);
         assert_eq!(rebuilt.source_root(), manifest.source_root());
         assert_eq!(rebuilt.scan(), manifest.scan());
         assert_eq!(

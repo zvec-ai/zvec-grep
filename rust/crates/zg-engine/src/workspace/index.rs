@@ -318,7 +318,7 @@ mod tests {
         IndexDescriptor, IndexState, Workspace,
         model::{EmbeddingMetric, EmbeddingModelInfo},
     };
-    use crate::workspace::manifest::read_workspace_manifest;
+    use crate::workspace::manifest::{inspect_workspace_manifest, read_workspace_manifest};
 
     use super::*;
 
@@ -356,7 +356,7 @@ mod tests {
             &root,
             WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout"),
             crate::domain::ScanRules::default(),
-            Some(crate::workspace::CURRENT_INDEX_VERSION),
+            crate::workspace::CURRENT_INDEX_VERSION,
             Some(Uuid::new_v4().to_string()),
             1,
             2,
@@ -486,34 +486,91 @@ mod tests {
     #[tokio::test]
     async fn the_first_read_recovers_an_interrupted_swap_under_the_write_lock() {
         use crate::workspace::lock::{LockMode, LockWait};
-        let directory = tempdir().expect("workspace");
-        let active = manifest(directory.path());
-        write_active(&active);
-        let build = stage(&active);
-        begin_publication(&build).expect("commit marker");
-        move_index(
-            active.layout().index_dir(),
-            active.layout().backup_index_dir(),
-        )
-        .expect("backup");
-        move_index(
-            build.layout().staged_index_dir(),
-            active.layout().index_dir(),
-        )
-        .expect("install");
-        let _reader = LockWait::new(None, None)
-            .expect("wait")
-            .acquire(
-                active.source_root(),
-                active.layout(),
-                LockMode::Shared,
-                "test.read",
+        for had_index in [false, true] {
+            let directory = tempdir().expect("workspace");
+            let active = manifest(directory.path());
+            if had_index {
+                write_active(&active);
+            }
+            let build = stage(&active);
+            begin_publication(&build).expect("commit marker");
+            if had_index {
+                move_index(
+                    active.layout().index_dir(),
+                    active.layout().backup_index_dir(),
+                )
+                .expect("backup");
+            }
+            move_index(
+                build.layout().staged_index_dir(),
+                active.layout().index_dir(),
             )
-            .await
-            .expect("recovered read");
-        assert!(active.layout().index_dir().join("old").exists());
-        assert!(!active.layout().index_dir().join("new").exists());
-        assert!(!active.layout().has_build_record().expect("build record"));
+            .expect("install");
+            let _reader = LockWait::new(None, None)
+                .expect("wait")
+                .acquire(
+                    active.source_root(),
+                    active.layout(),
+                    LockMode::Shared,
+                    "test.read",
+                )
+                .await
+                .expect("recovered read");
+            assert_eq!(active.layout().index_dir().join("old").exists(), had_index);
+            assert!(!active.layout().index_dir().join("new").exists());
+            assert!(!active.layout().has_build_record().expect("build record"));
+            assert_eq!(
+                read_workspace_manifest(active.source_root(), active.layout()).expect("manifest"),
+                had_index.then_some(active)
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_current_metadata_requires_explicit_recovery_before_rebuilding() {
+        for field in ["scan", "descriptor", "generation"] {
+            let directory = tempdir().expect("workspace");
+            let active = manifest(directory.path());
+            write_active(&active);
+            let mut value = serde_json::to_value(&active).expect("manifest JSON");
+            match field {
+                "scan" => value["scan"] = serde_json::json!({ "include_hidden": "invalid" }),
+                "descriptor" => value["index"]["descriptor"] = serde_json::Value::Null,
+                "generation" => {
+                    value["storageGeneration"] = serde_json::json!("invalid-generation");
+                }
+                _ => unreachable!(),
+            }
+            let bytes = serde_json::to_vec(&value).expect("invalid manifest JSON");
+            assert_automatic_recovery_preserves_invalid_manifest(&active, &bytes);
+
+            assert!(
+                inspect_workspace_manifest(active.source_root(), active.layout())
+                    .expect("inspect")
+                    .into_workspace(true)
+                    .expect("explicit rebuild ignores invalid metadata")
+                    .is_none()
+            );
+            recover_build_for_rebuild(active.layout()).expect("explicit rollback");
+            assert!(active.layout().index_dir().join("old").exists());
+            assert!(!active.layout().index_dir().join("new").exists());
+            assert!(!active.layout().temp_dir().exists());
+            assert_eq!(
+                fs::read(active.layout().manifest_path()).expect("preserved invalid manifest"),
+                bytes
+            );
+
+            let fresh = stage(&active);
+            let generation = fresh.storage_generation().map(str::to_owned);
+            publish_build(fresh, 3).expect("publish replacement");
+            let rebuilt = read_workspace_manifest(active.source_root(), active.layout())
+                .expect("read replacement")
+                .expect("replacement manifest");
+            assert_eq!(rebuilt.storage_generation(), generation.as_deref());
+            assert!(active.layout().index_dir().join("new").exists());
+            assert!(!active.layout().index_dir().join("old").exists());
+            assert!(!active.layout().temp_dir().exists());
+        }
     }
 
     #[test]
@@ -595,48 +652,103 @@ mod tests {
         assert!(!layout.temp_dir().exists());
     }
 
-    #[test]
-    fn automatic_recovery_rejects_unknown_versions_before_moving_index_data() {
-        let directory = tempdir().expect("workspace");
-        let active = manifest(directory.path());
-        write_active(&active);
-        let build = stage(&active);
-        begin_publication(&build).expect("pending publication");
+    fn assert_automatic_recovery_preserves_invalid_manifest(active: &Workspace, bytes: &[u8]) {
         let layout = active.layout();
+        // Match the build's previous-manifest hash, so only the manifest preflight
+        // prevents recovery from deleting the new index and restoring the backup.
+        fs::write(layout.manifest_path(), bytes).expect("invalid manifest");
+        let build = stage(active);
+        begin_publication(&build).expect("pending publication");
         move_index(layout.index_dir(), layout.backup_index_dir()).expect("backup");
         move_index(layout.staged_index_dir(), layout.index_dir()).expect("install");
-        let original = fs::read(layout.manifest_path()).expect("manifest");
-        let mut future: serde_json::Value = serde_json::from_slice(&original).expect("JSON");
-        future["indexVersion"] = serde_json::json!(super::super::CURRENT_INDEX_VERSION + 1);
-        fs::write(layout.manifest_path(), future.to_string()).expect("future version");
+        let record = fs::read(layout.build_record_path()).expect("build record");
+        let staged = fs::read(layout.staged_manifest_path()).expect("staged manifest");
         let error = crate::workspace::lock::try_acquire_workspace_read(
             active.source_root(),
             layout,
             "test.recovery",
         )
-        .expect_err("unsupported manifest must not recover");
+        .expect_err("invalid manifest must not recover");
         assert_eq!(error.code(), EngineError::INDEX_INCOMPATIBLE);
-        assert!(
-            error
-                .help()
-                .expect("index diagnostics")
-                .contains("unsupported index version")
+        assert_eq!(fs::read(layout.manifest_path()).expect("manifest"), bytes);
+        assert_eq!(
+            fs::read(layout.build_record_path()).expect("build record"),
+            record
+        );
+        assert_eq!(
+            fs::read(layout.staged_manifest_path()).expect("staged manifest"),
+            staged
         );
         assert!(layout.index_dir().join("new").exists());
         assert!(layout.backup_index_dir().join("old").exists());
-        fs::write(layout.manifest_path(), original).expect("restore manifest");
-        recover_build(layout).expect("recover current format");
-        assert!(layout.index_dir().join("old").exists());
+    }
 
-        let build = stage(&active);
-        let mut record: serde_json::Value =
-            serde_json::from_slice(&fs::read(layout.build_record_path()).expect("build record"))
-                .expect("record JSON");
-        record["index_version"] = serde_json::json!(super::super::CURRENT_INDEX_VERSION + 1);
-        fs::write(layout.build_record_path(), record.to_string()).expect("future build record");
-        assert!(recover_build(layout).is_err());
-        assert!(build.layout().staged_index_dir().join("new").exists());
-        assert!(layout.index_dir().join("old").exists());
+    #[test]
+    fn automatic_recovery_requires_current_version_in_every_manifest_state() {
+        let current = super::super::CURRENT_INDEX_VERSION;
+        let version_fields = [
+            String::new(),
+            "\"indexVersion\":null,".to_owned(),
+            "\"indexVersion\":\"invalid\",".to_owned(),
+            "\"indexVersion\":true,".to_owned(),
+            "\"indexVersion\":-1,".to_owned(),
+            "\"indexVersion\":1.5,".to_owned(),
+            format!("\"indexVersion\":{},", u64::from(u32::MAX) + 1),
+            format!("\"indexVersion\":{},", current - 1),
+            format!("\"indexVersion\":{},", current + 1),
+            format!("\"indexVersion\":{current},\"indexVersion\":{current},"),
+            format!(
+                "\"indexVersion\":{},\"indexVersion\":{current},",
+                current - 1
+            ),
+            format!("\"indexVersion\":null,\"indexVersion\":{current},"),
+        ];
+        for state in ["enabled", "disabled", "uninitialized"] {
+            for fields in &version_fields {
+                let directory = tempdir().expect("workspace");
+                let active = manifest(directory.path());
+                write_active(&active);
+                let mut value = serde_json::to_value(&active).expect("manifest JSON");
+                value
+                    .as_object_mut()
+                    .expect("object")
+                    .remove("indexVersion");
+                if state != "enabled" {
+                    value["index"] = serde_json::json!({ "state": state });
+                    value["storageGeneration"] = serde_json::Value::Null;
+                }
+                let json = serde_json::to_string(&value).expect("manifest JSON");
+                let bytes = format!("{{{fields}{}", &json[1..]);
+                assert_automatic_recovery_preserves_invalid_manifest(&active, bytes.as_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_build_versions_never_discard_a_possible_backup() {
+        for version in [
+            super::super::CURRENT_INDEX_VERSION - 1,
+            super::super::CURRENT_INDEX_VERSION + 1,
+        ] {
+            let directory = tempdir().expect("workspace");
+            let active = manifest(directory.path());
+            write_active(&active);
+            let build = stage(&active);
+            begin_publication(&build).expect("pending publication");
+            let layout = active.layout();
+            move_index(layout.index_dir(), layout.backup_index_dir()).expect("backup");
+            let mut record: serde_json::Value = serde_json::from_slice(
+                &fs::read(layout.build_record_path()).expect("build record"),
+            )
+            .expect("record JSON");
+            record["index_version"] = serde_json::json!(version);
+            fs::write(layout.build_record_path(), record.to_string()).expect("unsupported version");
+            assert!(recover_build(layout).is_err());
+            assert!(recover_build_for_rebuild(layout).is_err());
+            assert!(build.layout().staged_index_dir().join("new").exists());
+            assert!(layout.backup_index_dir().join("old").exists());
+            assert!(layout.has_build_record().expect("build record"));
+        }
     }
 
     #[test]
@@ -657,7 +769,8 @@ mod tests {
             active.layout().index_dir(),
         )
         .expect("install");
-        discard_build(&build).expect("rollback failed replacement");
+        recover_build_for_rebuild(active.layout())
+            .expect("explicit rebuild rolls back replacement");
         assert!(active.layout().index_dir().join("old").exists());
         assert_eq!(
             fs::read(active.layout().manifest_path()).expect("manifest"),

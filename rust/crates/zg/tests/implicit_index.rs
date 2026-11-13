@@ -1027,7 +1027,7 @@ fn disabled_workspace_is_not_rebuilt_from_a_nested_query_directory() {
                 "recordedUsername": std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).ok(),
             },
             "scan": {},
-            "indexVersion": null,
+            "indexVersion": 3,
             "createdTime": 0,
             "updatedTime": 0,
             "index": { "state": "disabled" }

@@ -3252,7 +3252,7 @@ mod tests {
             root,
             crate::domain::WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout"),
             crate::domain::ScanRules::default(),
-            Some(crate::workspace::CURRENT_INDEX_VERSION),
+            crate::workspace::CURRENT_INDEX_VERSION,
             Some(uuid::Uuid::new_v4().to_string()),
             1,
             1,
@@ -3930,13 +3930,7 @@ mod tests {
                     workspace.source_root(),
                     workspace.layout().clone(),
                     workspace.scan().clone(),
-                    if matches!(index, crate::domain::IndexState::Enabled(_)) {
-                        workspace
-                            .index_version()
-                            .or(Some(crate::workspace::CURRENT_INDEX_VERSION))
-                    } else {
-                        None
-                    },
+                    workspace.index_version(),
                     if matches!(index, crate::domain::IndexState::Enabled(_)) {
                         workspace.storage_generation().map(str::to_owned)
                     } else {
