@@ -2066,7 +2066,7 @@ fn resolver_binds_workspace_unique_cross_file_call() {
     assert_eq!(sweep.failed, 0);
     assert!(
         storage
-            .list_pending_refs(10, 0)
+            .list_pending_refs(10, 0, &storage.resolution_snapshot(None).expect("snapshot"))
             .expect("queue")
             .refs
             .is_empty()
@@ -2130,7 +2130,7 @@ fn resolver_fails_import_of_missing_package() {
     assert_eq!(sweep.failed, 1);
     assert!(
         storage
-            .list_pending_refs(10, 0)
+            .list_pending_refs(10, 0, &storage.resolution_snapshot(None).expect("snapshot"))
             .expect("queue")
             .refs
             .is_empty()
@@ -2164,7 +2164,9 @@ fn resolver_records_candidates_for_ambiguous_names() {
     assert_eq!(sweep.scanned, 1);
     assert_eq!(sweep.resolved, 0, "two definitions stay ambiguous");
     assert_eq!(sweep.candidates_recorded, 1);
-    let page = storage.list_pending_refs(10, 0).expect("queue");
+    let page = storage
+        .list_pending_refs(10, 0, &storage.resolution_snapshot(None).expect("snapshot"))
+        .expect("queue");
     assert_eq!(page.refs.len(), 1);
     assert_eq!(page.refs[0].candidates.as_ref().map(Vec::len), Some(2));
 }
@@ -2201,7 +2203,9 @@ fn resolver_defers_scoped_import_instead_of_binding_a_same_named_entity() {
         sweep.failed, 0,
         "a path alias may still route inside the workspace: {sweep:?}"
     );
-    let page = storage.list_pending_refs(10, 0).expect("queue");
+    let page = storage
+        .list_pending_refs(10, 0, &storage.resolution_snapshot(None).expect("snapshot"))
+        .expect("queue");
     assert_eq!(
         page.refs.len(),
         1,
@@ -2353,7 +2357,9 @@ fn resolver_keeps_self_receiver_pending_when_the_member_belongs_to_another_class
         sweep.resolved, 0,
         "self.save() must not bind to B.save: {sweep:?}"
     );
-    let page = storage.list_pending_refs(10, 0).expect("queue");
+    let page = storage
+        .list_pending_refs(10, 0, &storage.resolution_snapshot(None).expect("snapshot"))
+        .expect("queue");
     assert_eq!(page.refs.len(), 1, "the receiver call stays queued");
     assert!(resolved_edges(&storage, id).is_empty());
 }

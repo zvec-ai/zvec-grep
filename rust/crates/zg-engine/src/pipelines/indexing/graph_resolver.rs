@@ -110,7 +110,7 @@ pub(crate) fn resolve_pending(
     let mut caches = RuleCaches::default();
     let mut cursor = 0;
     loop {
-        let page = store.list_pending_refs(PENDING_PAGE, cursor)?;
+        let page = store.list_pending_refs(PENDING_PAGE, cursor, &snapshot)?;
         sweep.scanned += page.refs.len();
         let mut batch = QueuedBatch::default();
         for stored in &page.refs {
@@ -127,13 +127,19 @@ pub(crate) fn resolve_pending(
                     sweep.record(rule);
                     batch.resolutions.push(resolution);
                 }
-                Outcome::Ambiguous(candidates) => batch.candidates.push((stored.id, candidates)),
+                Outcome::Ambiguous(candidates) => {
+                    // An unchanged candidate set is already durable evidence:
+                    // rewriting the same JSON every sweep only burns WAL writes.
+                    if stored.candidates.as_deref() != Some(candidates.as_slice()) {
+                        batch.candidates.push((stored.id, candidates));
+                    }
+                }
             }
         }
         // Write back at the page boundary: everything decided so far is
         // durable, so a cancelled or failing later page leaves its references
         // pending without discarding the work already done.
-        batch.write_back(store, &mut sweep)?;
+        batch.write_back(store, &snapshot, &mut sweep)?;
         let Some(next) = page.next_cursor else {
             break;
         };
@@ -164,18 +170,19 @@ impl QueuedBatch {
     fn write_back(
         self,
         store: &IndexStore,
+        snapshot: &ResolutionSnapshot,
         sweep: &mut ResolutionSweep,
     ) -> crate::EngineResult<()> {
         if !self.resolutions.is_empty() {
-            let stats = store.apply_resolutions(&self.resolutions)?;
+            let stats = store.apply_resolutions(&self.resolutions, snapshot)?;
             sweep.resolved += stats.resolved;
             sweep.stale += stats.stale;
         }
         if !self.failures.is_empty() {
-            sweep.failed += store.apply_failures(&self.failures)?;
+            sweep.failed += store.apply_failures(&self.failures, snapshot)?;
         }
         if !self.candidates.is_empty() {
-            sweep.candidates_recorded += store.record_candidates(&self.candidates)?;
+            sweep.candidates_recorded += store.record_candidates(&self.candidates, snapshot)?;
         }
         Ok(())
     }
@@ -219,7 +226,9 @@ enum Rule {
 #[derive(Default)]
 struct RuleCaches {
     importing_paths: HashMap<u32, Option<String>>,
-    candidate_paths: HashMap<u32, Option<String>>,
+    /// File formats of each candidate's file, read once per file instead of
+    /// re-parsing the path for every reference that names the same symbol.
+    candidate_formats: HashMap<u32, Option<Vec<FileFormat>>>,
     importing_files: HashMap<u32, Vec<u32>>,
     module_paths: HashMap<(String, String), bool>,
     alias_bindings: HashMap<u32, Vec<AliasBinding>>,
@@ -337,7 +346,8 @@ fn classify_names(
         };
         // The language gate runs first: preference for definitions is only
         // meaningful among candidates that can host this reference.
-        let compatible = filter_compatible_hits(snapshot, stored, raw, &mut caches.candidate_paths);
+        let compatible =
+            filter_compatible_hits(snapshot, stored, raw, &mut caches.candidate_formats);
         prefer_definitions(compatible)
     };
     if stored.reference.ref_kind == GraphEdgeKind::Imports && stored.language == "java" {
@@ -450,7 +460,7 @@ fn classify_names(
             });
         }
         return Ok(Outcome::Ambiguous(
-            hits.into_iter().map(|hit| hit.entity_id).collect(),
+            hits.into_iter().map(|hit| hit.entity_id.clone()).collect(),
         ));
     }
     Ok(Outcome::Deferred)
@@ -487,22 +497,25 @@ fn record_import_scope(
 /// candidate paths, and unregistered extensions all keep their entries.
 /// [`prefer_definitions`] runs right after it, so a definition only ever
 /// supersedes a declaration of the reference's own language.
-fn filter_compatible_hits(
-    snapshot: &ResolutionSnapshot,
+fn filter_compatible_hits<'s>(
+    snapshot: &'s ResolutionSnapshot,
     stored: &StoredPendingRef,
-    hits: &[NameIndexEntry],
-    candidate_paths: &mut HashMap<u32, Option<String>>,
-) -> Vec<NameIndexEntry> {
+    hits: &'s [NameIndexEntry],
+    candidate_formats: &mut HashMap<u32, Option<Vec<FileFormat>>>,
+) -> Vec<&'s NameIndexEntry> {
+    let reference = FileFormat::parse(&stored.language);
     let mut filtered = Vec::with_capacity(hits.len());
     for hit in hits {
-        let path = match candidate_paths.entry(hit.file_id) {
-            Entry::Occupied(entry) => entry.get().clone(),
-            Entry::Vacant(entry) => entry
-                .insert(snapshot.file_path(hit.file_id).map(str::to_owned))
-                .clone(),
+        let formats = match candidate_formats.entry(hit.file_id) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(
+                snapshot
+                    .file_path(hit.file_id)
+                    .map(|path| formats_for_path(Path::new(path))),
+            ),
         };
-        if language_compatible(FileFormat::parse(&stored.language), path.as_deref()) {
-            filtered.push(hit.clone());
+        if language_compatible_formats(reference, formats.as_deref()) {
+            filtered.push(hit);
         }
     }
     filtered
@@ -516,14 +529,27 @@ fn filter_compatible_hits(
 /// evidence just like a reference the walk could not tag with a language —
 /// `unknown` is not a language of its own, so requiring an `unknown` candidate
 /// to match it would drop every candidate spelling a real one.
+#[cfg_attr(not(test), allow(dead_code))]
 fn language_compatible(reference: Option<FileFormat>, path: Option<&str>) -> bool {
-    let (Some(reference), Some(path)) = (reference, path) else {
+    language_compatible_formats(
+        reference,
+        path.map(|path| formats_for_path(Path::new(path)))
+            .as_deref(),
+    )
+}
+
+/// The same gate over a candidate file's already-parsed formats, so the
+/// sweep reads each file's extension evidence once instead of per reference.
+fn language_compatible_formats(
+    reference: Option<FileFormat>,
+    formats: Option<&[FileFormat]>,
+) -> bool {
+    let (Some(reference), Some(formats)) = (reference, formats) else {
         return true;
     };
     if reference == FileFormat::Unknown {
         return true;
     }
-    let formats = formats_for_path(Path::new(path));
     formats.iter().all(|format| *format == FileFormat::Unknown)
         || formats
             .iter()
@@ -645,7 +671,7 @@ fn split_parameters(list: &str) -> Vec<&str> {
 fn resolve_lexical_binding(
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
-    hits: &[NameIndexEntry],
+    hits: &[&NameIndexEntry],
     visible: &HashSet<&str>,
 ) -> Option<Outcome> {
     if stored.reference.receiver_name.is_some()
@@ -663,6 +689,7 @@ fn resolve_lexical_binding(
         .iter()
         .filter(|hit| hit.file_id == stored.file_id && shadows_import(snapshot, hit))
         .filter(|hit| declares_in(hit, visible))
+        .copied()
         .collect();
     match lexical.as_slice() {
         [] => None,
@@ -744,7 +771,7 @@ fn resolve_import(
 fn resolve_import_bound(
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
-    hits: &[NameIndexEntry],
+    hits: &[&NameIndexEntry],
     importing_files: &mut HashMap<u32, Vec<u32>>,
 ) -> Option<Resolution> {
     let reference = &stored.reference;
@@ -765,6 +792,7 @@ fn resolve_import_bound(
     let scoped: Vec<&NameIndexEntry> = hits
         .iter()
         .filter(|hit| modules.contains(&hit.file_id))
+        .copied()
         .collect();
     if let [hit] = scoped.as_slice() {
         return Some(Resolution {
@@ -1291,13 +1319,14 @@ fn is_self_receiver(language: &str, receiver: &str) -> bool {
 
 /// The candidates declaring a member inside `scope`, recognized by the
 /// qualified name extraction builds from the declaring breadcrumb.
-fn declarations_in<'a>(hits: &'a [NameIndexEntry], scope: &str) -> Vec<&'a NameIndexEntry> {
+fn declarations_in<'a>(hits: &[&'a NameIndexEntry], scope: &str) -> Vec<&'a NameIndexEntry> {
     hits.iter()
         .filter(|hit| {
             hit.qualified_name
                 .rsplit_once("::")
                 .is_some_and(|(candidate, _)| candidate == scope)
         })
+        .copied()
         .collect()
 }
 
@@ -1320,7 +1349,7 @@ fn member_resolution(stored: &StoredPendingRef, hit: &NameIndexEntry) -> Resolut
 /// ancestor the override replaced.
 fn bind_nearest_member(
     stored: &StoredPendingRef,
-    hits: &[NameIndexEntry],
+    hits: &[&NameIndexEntry],
     scopes: &[String],
 ) -> Option<Resolution> {
     for scope in scopes {
@@ -1345,7 +1374,7 @@ fn bind_nearest_member(
 /// order it declines to choose between the bases.
 fn bind_hierarchy_member(
     stored: &StoredPendingRef,
-    hits: &[NameIndexEntry],
+    hits: &[&NameIndexEntry],
     caller: Option<&str>,
     scopes: &[String],
     branched: bool,
@@ -1365,7 +1394,7 @@ fn bind_hierarchy_member(
 /// stays pending rather than binding the base the walk happens to reach first.
 fn bind_sole_declaration(
     stored: &StoredPendingRef,
-    hits: &[NameIndexEntry],
+    hits: &[&NameIndexEntry],
     caller: Option<&str>,
     scopes: &[String],
 ) -> Option<Resolution> {
@@ -1414,7 +1443,7 @@ fn resolve_receiver_class(
     store: &IndexStore,
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
-    hits: &[NameIndexEntry],
+    hits: &[&NameIndexEntry],
 ) -> crate::EngineResult<Option<Resolution>> {
     let reference = &stored.reference;
     if reference.ref_kind != GraphEdgeKind::Calls {
@@ -1473,7 +1502,7 @@ fn resolve_receiver_typed(
     store: &IndexStore,
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
-    hits: &[NameIndexEntry],
+    hits: &[&NameIndexEntry],
     caches: &mut RuleCaches,
 ) -> crate::EngineResult<Option<Resolution>> {
     let reference = &stored.reference;
@@ -1654,7 +1683,7 @@ fn class_entity_id(snapshot: &ResolutionSnapshot, class_scope: &str) -> Option<S
 /// stay pending.
 fn resolve_qualified_name(
     stored: &StoredPendingRef,
-    hits: &[NameIndexEntry],
+    hits: &[&NameIndexEntry],
 ) -> Option<Resolution> {
     let reference = &stored.reference;
     if reference.ref_kind != GraphEdgeKind::Calls {
@@ -1670,6 +1699,7 @@ fn resolve_qualified_name(
     let matches: Vec<&NameIndexEntry> = hits
         .iter()
         .filter(|hit| hit.qualified_name == expected_full || hit.qualified_name == expected_tail)
+        .copied()
         .collect();
     if let [hit] = matches.as_slice() {
         return Some(Resolution {
@@ -1697,7 +1727,7 @@ fn resolve_qualified_name(
 /// no package. Without that agreement — including when the declaring file's
 /// package is unknown — the reference stays pending instead of binding an
 /// unrelated file into this file's import scope.
-fn resolve_java_import(stored: &StoredPendingRef, hits: &[NameIndexEntry]) -> Option<Resolution> {
+fn resolve_java_import(stored: &StoredPendingRef, hits: &[&NameIndexEntry]) -> Option<Resolution> {
     let specifier = stored.reference.ref_name.as_str();
     let mut matched = hits
         .iter()
@@ -1802,7 +1832,7 @@ fn is_unresolvable_import(
 /// every candidate is declared in another file and exactly one is exported,
 /// the rest are unreachable shadows. A same-file candidate (free local
 /// access) or several exported declarations keeps the ambiguity path.
-fn resolve_export_bound(stored: &StoredPendingRef, hits: &[NameIndexEntry]) -> Option<Resolution> {
+fn resolve_export_bound(stored: &StoredPendingRef, hits: &[&NameIndexEntry]) -> Option<Resolution> {
     if !matches!(stored.language.as_str(), "typescript" | "javascript")
         || !matches!(
             stored.reference.ref_kind,
@@ -1811,7 +1841,8 @@ fn resolve_export_bound(stored: &StoredPendingRef, hits: &[NameIndexEntry]) -> O
     {
         return None;
     }
-    let exported: Vec<&NameIndexEntry> = hits.iter().filter(|hit| hit.is_exported).collect();
+    let exported: Vec<&NameIndexEntry> =
+        hits.iter().filter(|hit| hit.is_exported).copied().collect();
     if exported.len() == 1 && hits.iter().all(|hit| hit.file_id != stored.file_id) {
         return Some(Resolution {
             ref_id: stored.id,
@@ -1835,16 +1866,18 @@ fn resolve_export_bound(stored: &StoredPendingRef, hits: &[NameIndexEntry]) -> O
 /// nothing and leaves the reference to the caller's guard.
 fn resolve_receiver_arity(
     stored: &StoredPendingRef,
-    hits: &[NameIndexEntry],
+    hits: &[&NameIndexEntry],
 ) -> Option<Resolution> {
     let receiver = stored.reference.receiver_name.as_deref()?;
     let expected = stored.reference.arity?;
     let hit = unique_arity_match(
-        hits.iter().filter(|hit| {
-            hit.qualified_name
-                .rsplit_once("::")
-                .is_some_and(|(owner, _)| owner == receiver)
-        }),
+        hits.iter()
+            .filter(|hit| {
+                hit.qualified_name
+                    .rsplit_once("::")
+                    .is_some_and(|(owner, _)| owner == receiver)
+            })
+            .copied(),
         expected,
     )?;
     Some(Resolution {
@@ -1859,9 +1892,9 @@ fn resolve_receiver_arity(
 /// all declare their arity, a single match is the invoked overload.
 /// Candidates with unknown arity cannot rule themselves out, so their
 /// presence keeps the reference pending.
-fn resolve_arity_bound(stored: &StoredPendingRef, hits: &[NameIndexEntry]) -> Option<Resolution> {
+fn resolve_arity_bound(stored: &StoredPendingRef, hits: &[&NameIndexEntry]) -> Option<Resolution> {
     let expected = stored.reference.arity?;
-    let hit = unique_arity_match(hits.iter(), expected)?;
+    let hit = unique_arity_match(hits.iter().copied(), expected)?;
     Some(Resolution {
         ref_id: stored.id,
         target_id: hit.entity_id.clone(),

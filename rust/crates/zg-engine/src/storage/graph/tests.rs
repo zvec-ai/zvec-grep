@@ -801,6 +801,60 @@ fn pagination_is_pending_only_and_readers_do_not_truncate_edges() {
 }
 
 #[test]
+fn pending_declarations_preserve_writeback_boundaries() {
+    let mut db = SqliteGraphStorage::in_memory().expect("open");
+    let declarations = (0..999)
+        .map(|i| PendingRef {
+            ref_kind: GraphEdgeKind::Declares,
+            ..reference("child", &format!("binding-{i}"))
+        })
+        .collect::<Vec<_>>();
+    let mut refs = declarations.clone();
+    refs.push(hierarchy_reference("child", "Base"));
+    refs.push(reference("child", "save"));
+    db.write_file_graph(1, None, &graph(&["child"], vec![], refs), &[], false)
+        .expect("write queue");
+
+    let page = db.list_pending_refs(1000, 0).expect("first page");
+    assert_eq!(page.refs.len(), 1000);
+    assert!(
+        page.refs[..999]
+            .iter()
+            .all(|row| row.reference.ref_kind == GraphEdgeKind::Declares)
+    );
+    let inheritance = &page.refs[999];
+    assert_eq!(inheritance.reference.ref_kind, GraphEdgeKind::Extends);
+    let cursor = page.next_cursor.expect("call is on the next page");
+    assert_eq!(cursor, inheritance.id);
+    db.apply_resolutions(&[Resolution {
+        ref_id: inheritance.id,
+        target_id: "base".into(),
+        provenance: EdgeProvenance::ImportBound,
+    }])
+    .expect("commit inheritance before reading the call");
+
+    let next = db
+        .list_pending_refs(1000, cursor)
+        .expect("resume at cursor");
+    assert_eq!(next.refs.len(), 1);
+    assert_eq!(next.refs[0].reference.ref_name, "save");
+    assert_eq!(next.next_cursor, None);
+    assert_eq!(
+        db.inheritance_bases("child").expect("committed base"),
+        (vec!["base".into()], vec![])
+    );
+
+    // Declarations remain readable after writeback, including pages with no
+    // actionable reference. Restarting pagination must not discard them.
+    let first = db.list_pending_refs(1, 0).expect("declaration-only page");
+    assert_eq!(first.refs[0].reference, declarations[0]);
+    let second = db
+        .list_pending_refs(1, first.next_cursor.expect("more declarations"))
+        .expect("next declaration");
+    assert_eq!(second.refs[0].reference, declarations[1]);
+}
+
+#[test]
 fn deletion_chunks_large_entity_lists() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
     db.write_file_graph(
