@@ -43,11 +43,14 @@ in order: `pytest:46`, then `scikit-learn:38`; the first qualifying candidate is
 Questions and Gold come unchanged from SWE-QA-Bench revision
 `c13deac7a0d99b0ca2e593e004c4739475785b08`.
 
-The current candidate is `pytest:46`, pinned to pytest commit
-`5989efe3efec31a9d14f550d89903b6311dfc828`. Manual source review and an independent
-AST check confirm `Pytester.runpytest_subprocess` calls `Pytester.run` at
-`src/_pytest/pytester.py:1506`; `run` delegates to `popen` at line 1420.
-The candidate's natural-call admission is pending the run recorded below.
+The first candidate, `pytest:46`, completed all ten trials in
+[run 43401631120](https://github.com/zhanglei1949/zvec-grep/actions/runs/43401631120)
+with zero callees calls in five ZG trials, so it was not admitted.
+The remaining candidate is `scikit-learn:38`, pinned to commit
+`adb1ae76d798e822984d4e312c90c6ca8f01a3df`. Source review and an AST check confirm
+`_SetOutputMixin.__init_subclass__` calls `_wrap_method_output` at
+`sklearn/utils/_set_output.py:386`, which wraps tuple element zero via
+`_wrap_data_with_container` at line 320. Its natural-call admission is pending.
 
 This suite enables graph indexing for the ZG profile. Graph mode is recorded in
 setup and index-seed identity, so a text-only seed cannot satisfy a graph run.

@@ -3,15 +3,15 @@ version = "1.0"
 [metadata]
 benchmark = "peng-weihan/SWE-QA-Bench"
 benchmark_revision = "c13deac7a0d99b0ca2e593e004c4739475785b08"
-task_id = "pytest:46"
-source_index = 46
+task_id = "scikit-learn:38"
+source_index = 38
 index_base = 0
 role = "category"
 category = "where"
 question_type = "where"
-question_hash = "d24d65a6b809b4263a88407d41c3b2c5f75459976d41fade2255d2d02b7f37ef"
-repository = "pytest-dev/pytest"
-repository_commit = "5989efe3efec31a9d14f550d89903b6311dfc828"
+question_hash = "deb8a440a36a8c378817a30552dc9a73909b4fdd0baf0f3b59d320f4159b3030"
+repository = "scikit-learn/scikit-learn"
+repository_commit = "adb1ae76d798e822984d4e312c90c6ca8f01a3df"
 
 [verifier]
 timeout_sec = 60.0

@@ -225,8 +225,8 @@ jobs:
           (cd "$root" && "$binary" --index --embedding "$model" --graph --ignore-file .zg-bench-index.ignore) > "$evidence/index.log" 2>&1
           "$binary" --install --target opencode --mcp-transport http --yes > "$evidence/install.log" 2>&1
           node benchmarks/swe-qa-bench/zg_bench/preflight_callees.mjs "$root" \
-            'Pytester::runpytest_subprocess' 'Pytester::run  src/_pytest/pytester.py:1373' \
-            'call at src/_pytest/pytester.py:1506:' "$evidence/query.json"
+            '_SetOutputMixin::__init_subclass__' '_wrap_method_output  sklearn/utils/_set_output.py:311' \
+            'call at sklearn/utils/_set_output.py:386:' "$evidence/query.json"
       - name: Preserve callee preflight evidence
         if: always() && steps.authorize.outcome == 'success' && inputs.scope == 'callees'
         uses: actions/upload-artifact@v7

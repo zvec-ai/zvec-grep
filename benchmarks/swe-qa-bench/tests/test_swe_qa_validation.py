@@ -52,7 +52,7 @@ class AutoSelectionValidationTests(unittest.TestCase):
             self._validate_selection(selection)
 
     def test_callee_scope_rejects_missing_or_unknown_members(self) -> None:
-        for tasks in ([], ["missing:0"], ["pytest:46", "pytest:46"]):
+        for tasks in ([], ["missing:0"], ["requests:45", "requests:45"]):
             with self.subTest(tasks=tasks):
                 selection = json.loads(SELECTION_PATH.read_text())
                 selection["gate"]["callees_tasks"] = tasks

@@ -36,9 +36,9 @@
       "conan:27",
       "requests:45",
       "sympy:37",
-      "pytest:46"
+      "scikit-learn:38"
     ],
-    "callees_tasks": ["pytest:46"]
+    "callees_tasks": ["scikit-learn:38"]
   },
   "tasks": [
     {
@@ -372,19 +372,19 @@
       "question_hash": "c434992f432ede3f148088244b15d0fd61164a17e09d77b642fb122c9b00d773"
     },
     {
-      "task_id": "pytest:46",
-      "source_file": "Benchmark/pytest.jsonl",
-      "source_index": 46,
-      "repository": "pytest-dev/pytest",
-      "repository_commit": "5989efe3efec31a9d14f550d89903b6311dfc828",
-      "question": "Where is the subprocess execution mechanism that `pytester.runpytest_subprocess` delegates to, and how does it handle system exception propagation during test collection?",
+      "task_id": "scikit-learn:38",
+      "source_file": "Benchmark/scikit-learn.jsonl",
+      "source_index": 38,
+      "repository": "scikit-learn/scikit-learn",
+      "repository_commit": "adb1ae76d798e822984d4e312c90c6ca8f01a3df",
+      "question": "Where in the codebase are the lower-level helper functions that _SetOutputMixin delegates to in order to wrap the tuple output returned by EstimatorReturnTuple's transform method?",
       "order": 23,
-      "task_slug": "pytest-46",
+      "task_slug": "scikit-learn-38",
       "role": "category",
       "category": "where",
       "question_type": "where",
-      "repository_url": "https://github.com/pytest-dev/pytest.git",
-      "question_hash": "d24d65a6b809b4263a88407d41c3b2c5f75459976d41fade2255d2d02b7f37ef"
+      "repository_url": "https://github.com/scikit-learn/scikit-learn.git",
+      "question_hash": "deb8a440a36a8c378817a30552dc9a73909b4fdd0baf0f3b59d320f4159b3030"
     }
   ],
   "selection_revision": 2
