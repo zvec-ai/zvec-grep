@@ -31,6 +31,78 @@ use zg_engine::{
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 #[tokio::test]
+async fn unowned_callback_content_survives_reopen_for_fts_and_vector_search() -> TestResult {
+    let server = EmbeddingServer::start()?;
+    for extension in ["js", "ts"] {
+        for graph_enabled in [false, true] {
+            let temporary = tempdir()?;
+            let root = temporary.path();
+            configure_remote_model(root, server.address)?;
+            let path = root.join(format!("callbacks.{extension}"));
+            fs::write(
+                &path,
+                "function helper() {}\n\
+                 suite('case', () => { const expected = 'callbackneedle'; });\n\
+                 function run() { helper(); }\n",
+            )?;
+            let engine = ZvecGrep::new();
+            let indexed = engine
+                .index(IndexOptions {
+                    graph_indexing: Some(graph_enabled),
+                    rebuild: true,
+                    ..index_options(root)
+                })
+                .await?;
+            assert_eq!((indexed.files_added, indexed.files_failed), (1, 0));
+            engine.close();
+            fs::remove_file(&path)?;
+            let engine = ZvecGrep::new();
+            for mode in [ContextRouteMode::Fts, ContextRouteMode::Vector] {
+                let result = engine
+                    .context(ContextOptions {
+                        root: Some(root.to_path_buf()),
+                        routes: vec![ContextRoute {
+                            mode,
+                            query: "callbackneedle".into(),
+                        }],
+                        auto_update: false,
+                        allow_remote: true,
+                        limit: Some(20),
+                        ..ContextOptions::default()
+                    })
+                    .await?;
+                assert!(
+                    result.items.iter().any(|item| {
+                        item.content.contains("callbackneedle") && item.metadata.is_none()
+                    }),
+                    "{extension} graph={graph_enabled} {mode:?}: {result:?}"
+                );
+            }
+            if graph_enabled {
+                let relationships = engine
+                    .callees(RelationshipOptions {
+                        root: Some(root.to_path_buf()),
+                        symbol: "run".into(),
+                        ..RelationshipOptions::default()
+                    })
+                    .await?;
+                assert_eq!(relationships.matches.len(), 1);
+                assert_eq!(relationships.matches[0].edges.len(), 1);
+                assert_eq!(
+                    relationships.matches[0].edges[0]
+                        .symbol
+                        .as_ref()
+                        .map(|s| s.name.as_str()),
+                    Some("helper")
+                );
+            }
+            engine.close();
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn indexed_calls_preserve_distinct_source_positions() -> TestResult {
     let temporary = tempdir()?;
     let root = temporary.path();

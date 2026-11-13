@@ -177,12 +177,18 @@ fn normalize_member_access(callee: &str) -> String {
 fn call_arity_of(node: Node<'_>) -> Option<usize> {
     let arguments = node
         .child_by_field_name("arguments")
-        .or_else(|| node.child_by_field_name("argument_list"))?;
+        .or_else(|| node.child_by_field_name("argument_list"))
+        .or_else(|| {
+            node.child_by_field_name("value")
+                .filter(|_| node.kind() == "compound_literal_expression")
+        })?;
     let mut cursor = arguments.walk();
     Some(
         arguments
             .named_children(&mut cursor)
-            .filter(|child| child.kind() != "," && !child.kind().ends_with("_comment"))
+            .filter(|child| {
+                !matches!(child.kind(), "," | "comment") && !child.kind().ends_with("_comment")
+            })
             .count(),
     )
 }
@@ -240,7 +246,8 @@ fn is_identifier_like(value: &str) -> bool {
         return false;
     };
     let first_ok = first.is_ascii_alphabetic() || matches!(first, '_' | '$');
-    first_ok && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '.' | ':'))
+    first_ok
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '.' | ':' | '#'))
 }
 
 /// Scans an entity body for call sites and buffers one `calls` reference per
@@ -273,7 +280,28 @@ fn visit_for_calls(
     // A call node still descends below: `outer(inner())` and `factory().run()`
     // reach their inner calls only through its subtree, and the declaration
     // walk never comes back for them.
-    if is_call_node(node) && !is_unreported_call(node, source) && is_php_member_call(node) {
+    if let Some((target, ty)) = constructor_target(node, source) {
+        let name = ty.rsplit([':', '.']).next().unwrap_or(&ty);
+        let raw = if matches!(node.kind(), "object_creation_expression" | "new_expression") {
+            format!("new {}", node_text(target, source))
+        } else if node.kind() == "compound_literal_expression" {
+            format!("{ty}{{}}")
+        } else {
+            node_text(target, source).to_owned()
+        };
+        // Keep a receiver so partition cannot bind `new X()` to the class
+        // before the resolver has considered X's explicit constructors.
+        let position = target.start_position();
+        context.add_call_edge(
+            owner_index,
+            name,
+            Some(&ty),
+            Some(&raw),
+            call_arity_of(node),
+            position.row + 1,
+            position.column,
+        );
+    } else if is_call_node(node) && !is_unreported_call(node, source) && is_php_member_call(node) {
         if let Some(call) = php_member_call(node, source) {
             context.add_call_edge(
                 owner_index,
@@ -293,15 +321,36 @@ fn visit_for_calls(
         // the split under the dot spelling: `ptr->bar()` names the same
         // member shape as `ref.bar()`. The buffered raw text keeps the
         // original spelling.
-        let normalized = normalize_member_access(&callee);
+        let normalized =
+            structured_callee(node, source).unwrap_or_else(|| normalize_member_access(&callee));
         let normalized = normalize_super_call(&normalized);
-        if normalized.len() <= MAX_CALLEE_TEXT_CHARS && is_identifier_like(&normalized) {
+        let intrinsic_jsx = matches!(
+            node.kind(),
+            "jsx_opening_element" | "jsx_self_closing_element"
+        ) && !normalized.contains('.')
+            && normalized.chars().next().is_some_and(char::is_lowercase);
+        let proven_expression = normalized.rsplit_once('.').is_some_and(|(receiver, name)| {
+            receiver.starts_with("ReturnType<typeof ") && is_identifier_like(name)
+        });
+        if !intrinsic_jsx
+            && normalized.len() <= MAX_CALLEE_TEXT_CHARS
+            && (is_identifier_like(&normalized) || proven_expression)
+        {
             let (ref_name, receiver_name) = split_callee_name(&normalized);
             context.add_call_edge(
                 owner_index,
                 &ref_name,
                 receiver_name.as_deref(),
-                Some(callee.as_str()),
+                Some(
+                    if matches!(
+                        node.kind(),
+                        "jsx_opening_element" | "jsx_self_closing_element"
+                    ) {
+                        node_text(node, source)
+                    } else {
+                        callee.as_str()
+                    },
+                ),
                 call_arity_of(node),
                 node.start_position().row + 1,
                 node.start_position().column,
@@ -313,6 +362,79 @@ fn visit_for_calls(
             continue;
         }
         visit_for_calls(child, owner_index, source, context, boundary);
+    }
+}
+
+/// Keep C++ constructions pending until explicit constructors are considered.
+fn cpp_constructor_target<'tree>(
+    node: Node<'tree>,
+    source: &[u8],
+) -> Option<(Node<'tree>, String)> {
+    if !matches!(
+        node.kind(),
+        "new_expression" | "compound_literal_expression"
+    ) || node.child_by_field_name("declarator").is_some()
+    {
+        return None;
+    }
+    let ty = node.child_by_field_name("type")?;
+    // C compound literals use type_descriptor; primitive/array initialization
+    // has no user-defined constructor, and templates need additional evidence.
+    if !matches!(ty.kind(), "type_identifier" | "qualified_identifier") {
+        return None;
+    }
+    Some((ty, node_text(ty, source).to_owned()))
+}
+
+/// Java this/super address constructors; C compound literals are not calls.
+fn constructor_target<'tree>(node: Node<'tree>, source: &[u8]) -> Option<(Node<'tree>, String)> {
+    if let Some(target) = cpp_constructor_target(node, source) {
+        return Some(target);
+    }
+    match node.kind() {
+        "object_creation_expression" => {
+            let ty = node.child_by_field_name("type")?;
+            if !matches!(
+                ty.kind(),
+                "type_identifier" | "scoped_type_identifier" | "generic_type"
+            ) {
+                return None;
+            }
+            Some((ty, java_type_name(ty, source)?))
+        }
+        "explicit_constructor_invocation" => {
+            let target = node.child_by_field_name("constructor")?;
+            Some((target, node_text(target, source).to_owned()))
+        }
+        _ => None,
+    }
+}
+
+fn structured_callee(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let target = node.child_by_field_name("function")?;
+    member_expression(target, source)
+}
+
+fn member_expression(node: Node<'_>, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        "selector_expression" => {
+            let receiver = member_expression(node.child_by_field_name("operand")?, source)?;
+            Some(format!(
+                "{receiver}.{}",
+                node_text(node.child_by_field_name("field")?, source)
+            ))
+        }
+        "member_expression" => {
+            let receiver = member_expression(node.child_by_field_name("object")?, source)?;
+            let property = node.child_by_field_name("property")?;
+            Some(format!("{receiver}.{}", node_text(property, source)))
+        }
+        "non_null_expression" | "parenthesized_expression" => {
+            member_expression(node.named_child(0)?, source)
+        }
+        "identifier" | "this" | "super" => Some(node_text(node, source).to_owned()),
+        "call_expression" | "new_expression" => creation_or_factory_type(node, source),
+        _ => None,
     }
 }
 
@@ -334,6 +456,19 @@ pub(crate) fn scan_binding_declarations(
     if !context.is_collecting() {
         return;
     }
+    if matches!(
+        format,
+        FileFormat::TypeScript | FileFormat::JavaScript | FileFormat::Go | FileFormat::Cpp
+    ) && let Some((_, ty)) = function_return_of(entity_node, source, format)
+    {
+        context.add_declare_binding(
+            owner_index,
+            "return",
+            &ty,
+            entity_node.start_position().row + 1,
+            entity_node.start_position().column,
+        );
+    }
     visit_for_bindings(entity_node, owner_index, source, format, context, boundary);
 }
 
@@ -345,14 +480,99 @@ fn visit_for_bindings(
     context: &mut WalkContext,
     boundary: Option<&dyn Fn(Node<'_>) -> bool>,
 ) {
-    if let Some((name, bound_type)) = declaration_binding_of(node, source, format, context) {
+    if matches!(format, FileFormat::TypeScript | FileFormat::JavaScript)
+        && node.kind() == "export_statement"
+        && node.child_by_field_name("source").is_none()
+        && (node_text(node, source).starts_with("export default")
+            || node_text(node, source).starts_with("export ="))
+        && let Some(value) = node
+            .child_by_field_name("value")
+            .or_else(|| node.child_by_field_name("declaration"))
+            .or_else(|| node.named_child(0))
+        && let Some(name) = (value.kind() == "identifier")
+            .then_some(value)
+            .or_else(|| value.child_by_field_name("name"))
+    {
         context.add_declare_binding(
             owner_index,
-            &name,
-            &bound_type,
+            "[[export:default]]",
+            &format!("typeof {}", node_text(name, source)),
             node.start_position().row + 1,
             node.start_position().column,
         );
+    }
+    if matches!(format, FileFormat::TypeScript | FileFormat::JavaScript)
+        && owner_index == super::FILE_SCOPE_INDEX
+        && node.kind() == "variable_declarator"
+        && let Some(value) = node.child_by_field_name("value")
+        && value.kind() == "call_expression"
+        && value
+            .child_by_field_name("function")
+            .is_some_and(|name| node_text(name, source) == "require")
+        && let Some(path) = value
+            .child_by_field_name("arguments")
+            .and_then(|args| args.named_child(0))
+        && path.kind() == "string"
+    {
+        context.add_import_edge(
+            &normalize_module_path(node_text(path, source)),
+            Some(node_text(node, source)),
+            node.start_position().row + 1,
+            node.start_position().column,
+        );
+    }
+    if format == FileFormat::Go {
+        collect_go_scoped_binding(node, owner_index, source, context);
+    }
+    if matches!(format, FileFormat::TypeScript | FileFormat::JavaScript)
+        && matches!(node.kind(), "variable_declarator" | "assignment_expression")
+    {
+        collect_object_bindings(node, owner_index, source, context);
+    }
+    if matches!(format, FileFormat::TypeScript | FileFormat::JavaScript)
+        && node.kind() == "export_specifier"
+        && node
+            .parent()
+            .and_then(|clause| clause.parent())
+            .is_none_or(|export| export.child_by_field_name("source").is_none())
+        && let (Some(name), Some(alias)) = (
+            node.child_by_field_name("name"),
+            node.child_by_field_name("alias"),
+        )
+    {
+        context.add_declare_binding(
+            owner_index,
+            // Export names are not local bindings; named exports remain live.
+            &format!("[[export:{}]]", node_text(alias, source)),
+            &format!("export typeof {}", node_text(name, source)),
+            node.start_position().row + 1,
+            node.start_position().column,
+        );
+    }
+    let binding = declaration_binding_of(node, owner_index, source, format, context);
+    if let Some((name, bound_type)) = binding {
+        if format == FileFormat::TypeScript
+            && node.kind() == "required_parameter"
+            && node_text(node, source)
+                .split_whitespace()
+                .next()
+                .is_some_and(|word| matches!(word, "public" | "private" | "protected" | "readonly"))
+        {
+            context.add_declare_binding(
+                owner_index,
+                &format!("this.{name}"),
+                &bound_type,
+                node.start_position().row + 1,
+                node.start_position().column,
+            );
+        }
+        collect_binding(node, owner_index, &name, &bound_type, format, context);
+        if format == FileFormat::Java
+            && node.kind() == "enhanced_for_statement"
+            && let Some(body) = node.child_by_field_name("body")
+        {
+            visit_for_bindings(body, owner_index, source, format, context, boundary);
+        }
         return;
     }
     for child in named_children(node) {
@@ -363,10 +583,383 @@ fn visit_for_bindings(
     }
 }
 
+fn collect_binding(
+    node: Node<'_>,
+    owner_index: usize,
+    name: &str,
+    ty: &str,
+    format: FileFormat,
+    context: &mut WalkContext,
+) {
+    if format == FileFormat::Cpp {
+        let mut scope = node;
+        while !matches!(
+            scope.kind(),
+            "compound_statement" | "function_definition" | "for_range_loop" | "for_statement"
+        ) {
+            let Some(parent) = scope.parent() else { break };
+            scope = parent;
+        }
+        if node.kind() == "for_range_loop" {
+            if let Some(body) = node.child_by_field_name("body") {
+                add_binding_in_scope(body, Some(body), owner_index, name, ty, context);
+            }
+        } else {
+            add_binding_in_scope(node, Some(scope), owner_index, name, ty, context);
+        }
+        return;
+    }
+    if format == FileFormat::Java {
+        if node.kind() == "enhanced_for_statement" {
+            // The loop variable is not in scope in the iterable expression.
+            if let Some(body) = node.child_by_field_name("body") {
+                add_binding_in_scope(body, Some(body), owner_index, name, ty, context);
+            }
+        } else {
+            let scope = node
+                .parent()
+                .filter(|parent| parent.kind() == "local_variable_declaration")
+                .and_then(|parent| parent.parent());
+            add_binding_in_scope(node, scope, owner_index, name, ty, context);
+        }
+        return;
+    }
+    if matches!(format, FileFormat::TypeScript | FileFormat::JavaScript)
+        && node.kind() == "variable_declarator"
+    {
+        // The local name already shadows outer bindings before its
+        // initializer, but has no callable value yet (TDZ or undefined).
+        let scope = javascript_variable_scope(node);
+        context.add_scoped_binding(
+            owner_index,
+            name,
+            "?",
+            (
+                scope.start_position().row + 1,
+                scope.start_position().column,
+            ),
+            (node.start_position().row + 1, node.start_position().column),
+        );
+        add_binding_in_scope(node, Some(scope), owner_index, name, ty, context);
+    } else if matches!(format, FileFormat::TypeScript | FileFormat::JavaScript)
+        && node.kind() == "assignment_expression"
+    {
+        let end = context.assignment_scope_end(name, node.start_byte());
+        add_binding_until(node, end, owner_index, name, ty, context);
+    } else {
+        add_binding_in_scope(node, None, owner_index, name, ty, context);
+    }
+}
+
+fn javascript_variable_scope(mut node: Node<'_>) -> Node<'_> {
+    // `var` belongs to the function; `let`/`const` belong to the nearest
+    // block or loop, including declarations in a loop initializer.
+    let function_scoped = node
+        .parent()
+        .is_some_and(|parent| parent.kind() == "variable_declaration");
+    while let Some(parent) = node.parent() {
+        node = parent;
+        if node.kind() == "program" {
+            break;
+        }
+        if matches!(
+            node.kind(),
+            "function_declaration"
+                | "function_expression"
+                | "arrow_function"
+                | "method_definition"
+                | "generator_function"
+                | "generator_function_declaration"
+        ) {
+            return node.child_by_field_name("body").unwrap_or(node);
+        }
+        if !function_scoped
+            && matches!(
+                node.kind(),
+                "statement_block" | "for_statement" | "for_in_statement" | "switch_body"
+            )
+        {
+            break;
+        }
+    }
+    node
+}
+
+// Register declarations before collecting values, including declarations that
+// appear after an assignment. Scope lookup must not inherit a TDZ marker's end
+// or use the assignment's own block when it updates an outer binding.
+fn collect_javascript_binding_scopes(node: Node<'_>, source: &[u8], context: &mut WalkContext) {
+    let binding = match node.kind() {
+        "variable_declarator" => node
+            .child_by_field_name("name")
+            .map(|name| (name, javascript_variable_scope(node))),
+        "formal_parameters" => node.parent().map(|function| (node, function)),
+        "arrow_function" => node
+            .child_by_field_name("parameter")
+            .map(|name| (name, node)),
+        "catch_clause" => node
+            .child_by_field_name("parameter")
+            .zip(node.child_by_field_name("body")),
+        "for_in_statement" => {
+            let mut cursor = node.walk();
+            let lexical = node
+                .children_by_field_name("kind", &mut cursor)
+                .any(|kind| matches!(node_text(kind, source), "let" | "const"));
+            lexical
+                .then(|| node.child_by_field_name("left").map(|name| (name, node)))
+                .flatten()
+        }
+        _ => None,
+    };
+    if let Some((pattern, scope)) = binding {
+        register_javascript_pattern_scope(pattern, scope, source, context);
+    }
+    for child in named_children(node) {
+        collect_javascript_binding_scopes(child, source, context);
+    }
+}
+
+fn register_javascript_pattern_scope(
+    pattern: Node<'_>,
+    scope: Node<'_>,
+    source: &[u8],
+    context: &mut WalkContext,
+) {
+    match pattern.kind() {
+        "identifier" | "shorthand_property_identifier_pattern" => {
+            context.register_binding_scope(
+                node_text(pattern, source),
+                scope.start_byte()..scope.end_byte(),
+                (scope.kind() != "program")
+                    .then(|| (scope.end_position().row + 1, scope.end_position().column)),
+            );
+        }
+        "pair_pattern" => {
+            if let Some(value) = pattern.child_by_field_name("value") {
+                register_javascript_pattern_scope(value, scope, source, context);
+            }
+        }
+        "assignment_pattern" | "object_assignment_pattern" => {
+            if let Some(left) = pattern.child_by_field_name("left") {
+                register_javascript_pattern_scope(left, scope, source, context);
+            }
+        }
+        "required_parameter" | "optional_parameter" => {
+            if let Some(name) = pattern.child_by_field_name("pattern") {
+                register_javascript_pattern_scope(name, scope, source, context);
+            }
+        }
+        "rest_pattern" | "array_pattern" | "object_pattern" | "formal_parameters" => {
+            for child in named_children(pattern) {
+                register_javascript_pattern_scope(child, scope, source, context);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn add_binding_in_scope(
+    node: Node<'_>,
+    scope: Option<Node<'_>>,
+    owner: usize,
+    name: &str,
+    ty: &str,
+    context: &mut WalkContext,
+) {
+    let end = scope
+        .filter(|scope| scope.kind() != "program")
+        .map(|scope| (scope.end_position().row + 1, scope.end_position().column));
+    add_binding_until(node, end, owner, name, ty, context);
+}
+
+fn add_binding_until(
+    node: Node<'_>,
+    end: Option<(usize, usize)>,
+    owner: usize,
+    name: &str,
+    ty: &str,
+    context: &mut WalkContext,
+) {
+    let start = (node.start_position().row + 1, node.start_position().column);
+    if let Some(end) = end {
+        context.add_scoped_binding(owner, name, ty, start, end);
+    } else {
+        context.add_declare_binding(owner, name, ty, start.0, start.1);
+    }
+}
+
+fn collect_go_scoped_binding(
+    node: Node<'_>,
+    owner: usize,
+    source: &[u8],
+    context: &mut WalkContext,
+) {
+    let bound = match node.kind() {
+        "type_case" => {
+            let Some(switch) = node
+                .parent()
+                .filter(|parent| parent.kind() == "type_switch_statement")
+            else {
+                return;
+            };
+            let Some(alias) = switch
+                .child_by_field_name("alias")
+                .and_then(|alias| alias.named_child(0))
+            else {
+                return;
+            };
+            let mut cursor = node.walk();
+            let types: Vec<_> = node
+                .children_by_field_name("type", &mut cursor)
+                .filter(Node::is_named)
+                .collect();
+            let [ty] = types.as_slice() else { return };
+            type_name_of(*ty, source).map(|ty| (node_text(alias, source).to_owned(), ty, node))
+        }
+        "range_clause" => {
+            let Some(value) = node.child_by_field_name("right") else {
+                return;
+            };
+            let Some(name) = node
+                .child_by_field_name("left")
+                .and_then(|left| left.named_child(1))
+            else {
+                return;
+            };
+            let Some(parent) = node.parent() else { return };
+            context
+                .name_edges
+                .iter()
+                .rev()
+                .find(|edge| {
+                    edge.owner_index == owner
+                        && edge.ref_kind == GraphEdgeKind::Declares
+                        && edge.ref_name == node_text(value, source)
+                })
+                .and_then(|edge| edge.bound_type.as_deref())
+                .and_then(|ty| ty.strip_prefix("[]"))
+                .map(|ty| (node_text(name, source).to_owned(), ty.to_owned(), parent))
+        }
+        _ => None,
+    };
+    if let Some((name, ty, scope)) = bound {
+        context.add_scoped_binding(
+            owner,
+            &name,
+            &ty,
+            (node.start_position().row + 1, node.start_position().column),
+            (scope.end_position().row + 1, scope.end_position().column),
+        );
+    }
+}
+
+fn collect_object_bindings(node: Node<'_>, owner: usize, source: &[u8], context: &mut WalkContext) {
+    let Some(name) = node
+        .child_by_field_name("name")
+        .or_else(|| node.child_by_field_name("left"))
+    else {
+        return;
+    };
+    let Some(mut value) = node
+        .child_by_field_name("value")
+        .or_else(|| node.child_by_field_name("right"))
+    else {
+        return;
+    };
+    while value.kind() == "parenthesized_expression" {
+        let Some(inner) = value.named_child(0) else {
+            return;
+        };
+        value = inner;
+    }
+    if value.kind() == "call_expression"
+        && value
+            .child_by_field_name("function")
+            .is_some_and(|function| node_text(function, source) == "Object.freeze")
+        && let Some(argument) = value
+            .child_by_field_name("arguments")
+            .and_then(|arguments| arguments.named_child(0))
+    {
+        value = argument;
+    }
+    if value.kind() != "object" {
+        return;
+    }
+    let Some(object) = member_expression(name, source) else {
+        return;
+    };
+    let end = if node.kind() == "variable_declarator" {
+        let scope = javascript_variable_scope(node);
+        (scope.kind() != "program")
+            .then(|| (scope.end_position().row + 1, scope.end_position().column))
+    } else {
+        context.assignment_scope_end(&object, node.start_byte())
+    };
+    let mut keys = std::collections::BTreeSet::new();
+    for property in named_children(value) {
+        let key = property
+            .child_by_field_name("key")
+            .or_else(|| property.child_by_field_name("name"))
+            .or_else(|| (property.kind() == "shorthand_property_identifier").then_some(property));
+        let key = key
+            .and_then(|key| {
+                if key.kind() == "computed_property_name" {
+                    key.named_child(0).filter(|key| key.kind() == "string")
+                } else {
+                    Some(key)
+                }
+            })
+            .map(|key| node_text(key, source).trim_matches(['\'', '"']))
+            .filter(|key| is_identifier_like(key));
+        let Some(key) = key else {
+            // An unknown spread/computed key can overwrite every preceding property.
+            for key in &keys {
+                add_binding_until(
+                    property,
+                    end,
+                    owner,
+                    &format!("{object}.{key}"),
+                    "?",
+                    context,
+                );
+            }
+            continue;
+        };
+        keys.insert(key.to_owned());
+        let value = property
+            .child_by_field_name("value")
+            .or_else(|| (property.kind() == "shorthand_property_identifier").then_some(property));
+        let ty = match value.map(|value| value.kind()) {
+            Some("identifier" | "shorthand_property_identifier") => format!(
+                "typeof {}",
+                node_text(value.expect("property value"), source)
+            ),
+            Some("arrow_function" | "function_expression")
+                if node.kind() == "variable_declarator" =>
+            {
+                format!("typeof {object}::{key}")
+            }
+            _ if property.kind() == "method_definition" && node.kind() == "variable_declarator" => {
+                format!("typeof {object}::{key}")
+            }
+            _ => "?".to_owned(),
+        };
+        add_binding_until(
+            property,
+            end,
+            owner,
+            &format!("{object}.{key}"),
+            &ty,
+            context,
+        );
+    }
+}
+
 /// Extracts `(bound name, declared type)` from a declaration node whose
 /// shape one of the per-language readers recognizes.
 fn declaration_binding_of(
     node: Node<'_>,
+    owner_index: usize,
     source: &[u8],
     format: FileFormat,
     context: &WalkContext,
@@ -376,10 +969,10 @@ fn declaration_binding_of(
         FileFormat::Python => python_binding_of(node, source, context),
         FileFormat::Rust => rust_binding_of(node, source, context),
         FileFormat::Go => go_binding_of(node, source, context),
-        FileFormat::Cpp => cpp_binding_of(node, source, context),
+        FileFormat::Cpp => cpp_binding_of(node, owner_index, source, context),
         FileFormat::C => c_binding_of(node, source),
-        FileFormat::TypeScript => ts_binding_of(node, source, context),
-        FileFormat::JavaScript => js_binding_of(node, source, context),
+        FileFormat::TypeScript => ts_binding_of(node, source),
+        FileFormat::JavaScript => js_binding_of(node, source),
         _ => None,
     }
 }
@@ -399,7 +992,211 @@ pub(crate) fn scan_return_types(
     if !context.is_collecting() {
         return;
     }
+    if matches!(format, FileFormat::JavaScript | FileFormat::TypeScript) {
+        collect_javascript_binding_scopes(root, source, context);
+    }
     visit_for_return_types(root, source, format, context);
+    if format == FileFormat::Cpp {
+        collect_cpp_type_aliases(root, source, &[], context);
+    }
+    let script_scope = match format {
+        FileFormat::JavaScript => Some(if has_javascript_module_syntax(root, source) {
+            "module"
+        } else {
+            "script"
+        }),
+        FileFormat::TypeScript if !has_javascript_module_syntax(root, source) => Some("script"),
+        _ => None,
+    };
+    if let Some(scope) = script_scope {
+        // Only explicit script evidence authorizes cross-file global types.
+        // A missing marker (including an older index) is not global evidence.
+        context.add_declare_binding(
+            super::FILE_SCOPE_INDEX,
+            if format == FileFormat::TypeScript {
+                "[[typescript_scope]]"
+            } else {
+                "[[javascript_scope]]"
+            },
+            scope,
+            1,
+            0,
+        );
+    }
+    if matches!(
+        format,
+        FileFormat::TypeScript | FileFormat::JavaScript | FileFormat::Go
+    ) {
+        let boundary = |node: Node<'_>| {
+            matches!(
+                node.kind(),
+                "function_declaration"
+                    | "generator_function_declaration"
+                    | "generator_function"
+                    | "func_literal"
+                    | "class"
+                    | "method_definition"
+                    | "method_declaration"
+                    | "class_declaration"
+                    | "abstract_class_declaration"
+                    | "type_spec"
+                    | "function_expression"
+                    | "arrow_function"
+            )
+        };
+        visit_for_bindings(
+            root,
+            super::FILE_SCOPE_INDEX,
+            source,
+            format,
+            context,
+            Some(&boundary),
+        );
+    }
+}
+
+/// C++ type aliases belong to their declaring namespace/class, including using
+/// declarations that do not produce a searchable entity. Keep them in the
+/// existing file-owned declaration evidence rather than adding an index table.
+fn collect_cpp_type_aliases(
+    node: Node<'_>,
+    source: &[u8],
+    scopes: &[String],
+    context: &mut WalkContext,
+) {
+    if node.kind() == "template_declaration" {
+        collect_cpp_template_parameters(node, source, scopes, context);
+    }
+    if matches!(node.kind(), "function_definition" | "lambda_expression") {
+        return;
+    }
+    let alias = match node.kind() {
+        "alias_declaration" => node
+            .child_by_field_name("name")
+            .zip(node.child_by_field_name("type"))
+            .map(|(name, ty)| {
+                (
+                    node_text(name, source).to_owned(),
+                    node_text(ty, source).to_owned(),
+                )
+            }),
+        "using_declaration"
+            if !node_text(node, source)
+                .split_whitespace()
+                .take(2)
+                .eq(["using", "namespace"]) =>
+        {
+            named_children(node)
+                .into_iter()
+                .find(|child| child.kind() == "qualified_identifier")
+                .map(|target| {
+                    let target = node_text(target, source).to_owned();
+                    (
+                        target.rsplit("::").next().unwrap_or(&target).to_owned(),
+                        target,
+                    )
+                })
+        }
+        _ => None,
+    };
+    if let Some((name, target)) = alias {
+        let name = scopes
+            .iter()
+            .map(String::as_str)
+            .chain([name.as_str()])
+            .collect::<Vec<_>>()
+            .join("::");
+        context.add_declare_binding(
+            super::FILE_SCOPE_INDEX,
+            &name,
+            &target,
+            node.start_position().row + 1,
+            node.start_position().column,
+        );
+    }
+    let mut scopes = scopes.to_vec();
+    if matches!(
+        node.kind(),
+        "namespace_definition" | "class_specifier" | "struct_specifier"
+    ) && let Some(name) = node.child_by_field_name("name")
+    {
+        scopes.push(node_text(name, source).to_owned());
+    }
+    for child in named_children(node) {
+        collect_cpp_type_aliases(child, source, &scopes, context);
+    }
+}
+
+/// Unbound template parameters shadow workspace names; erasing class arguments
+/// must never turn T into an unrelated project class named T.
+fn collect_cpp_template_parameters(
+    node: Node<'_>,
+    source: &[u8],
+    scopes: &[String],
+    context: &mut WalkContext,
+) {
+    let Some(parameters) = node.child_by_field_name("parameters") else {
+        return;
+    };
+    let Some(declaration) = named_children(node).into_iter().rev().find(|child| {
+        matches!(
+            child.kind(),
+            "class_specifier"
+                | "struct_specifier"
+                | "function_definition"
+                | "alias_declaration"
+                | "declaration"
+        )
+    }) else {
+        return;
+    };
+    let name = declaration.child_by_field_name("name").or_else(|| {
+        let mut declarator = declaration.child_by_field_name("declarator")?;
+        while let Some(inner) = declarator.child_by_field_name("declarator") {
+            declarator = inner;
+        }
+        Some(declarator)
+    });
+    let Some(name) = name else { return };
+    let owner = scopes
+        .iter()
+        .map(String::as_str)
+        .chain([node_text(name, source)])
+        .collect::<Vec<_>>()
+        .join("::");
+    for parameter in named_children(parameters) {
+        if !matches!(
+            parameter.kind(),
+            "type_parameter_declaration"
+                | "optional_type_parameter_declaration"
+                | "variadic_type_parameter_declaration"
+        ) {
+            continue;
+        }
+        if let Some(name) = parameter
+            .child_by_field_name("name")
+            .or_else(|| parameter.named_child(0))
+        {
+            context.add_declare_binding(
+                super::FILE_SCOPE_INDEX,
+                &format!("{owner}::{}", node_text(name, source)),
+                "?",
+                parameter.start_position().row + 1,
+                parameter.start_position().column,
+            );
+        }
+    }
+}
+
+fn has_javascript_module_syntax(node: Node<'_>, source: &[u8]) -> bool {
+    matches!(node.kind(), "import_statement" | "export_statement")
+        // Treat CommonJS evidence conservatively, even when the identifier
+        // could be shadowed. It must not enable project-global class lookup.
+        || (node.kind() == "identifier"
+            && matches!(node_text(node, source), "require" | "module" | "exports"))
+        || named_children(node)
+            .into_iter()
+            .any(|child| has_javascript_module_syntax(child, source))
 }
 
 fn visit_for_return_types(
@@ -556,12 +1353,15 @@ fn go_return_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
 }
 
 fn cpp_return_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
-    if node.kind() != "function_definition" {
+    if !matches!(
+        node.kind(),
+        "function_definition" | "declaration" | "field_declaration"
+    ) {
         return None;
     }
     let type_node = node.child_by_field_name("type")?;
-    let type_name = type_name_of(type_node, source)?;
-    if type_name == "void" {
+    let mut type_name = node_text(type_node, source).to_owned();
+    if type_node.kind() == "primitive_type" {
         return None;
     }
     // The function name sits under the declarator chain: the function
@@ -572,20 +1372,29 @@ fn cpp_return_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
         declarator.kind(),
         "function_declarator" | "pointer_declarator" | "reference_declarator" | "array_declarator"
     ) {
+        if declarator.kind() == "pointer_declarator" {
+            type_name.push('*');
+        }
+        if declarator.kind() == "reference_declarator" {
+            type_name.push('&');
+        }
         declarator = declarator.child_by_field_name("declarator")?;
     }
-    if declarator.kind() != "identifier" {
+    if !matches!(
+        declarator.kind(),
+        "identifier" | "field_identifier" | "qualified_identifier"
+    ) {
         return None;
     }
     Some((node_text(declarator, source).to_owned(), type_name))
 }
 
 fn ts_return_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
-    if node.kind() != "function_declaration" {
+    if !matches!(node.kind(), "function_declaration" | "method_definition") {
         return None;
     }
     let name = node.child_by_field_name("name")?;
-    if name.kind() != "identifier" {
+    if !matches!(name.kind(), "identifier" | "property_identifier") {
         return None;
     }
     let annotation = node.child_by_field_name("return_type")?;
@@ -593,7 +1402,7 @@ fn ts_return_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
         return None;
     }
     let inner = annotation.named_child(0)?;
-    if inner.kind() != "type_identifier" {
+    if !matches!(inner.kind(), "type_identifier" | "generic_type") {
         return None;
     }
     Some((
@@ -636,24 +1445,72 @@ fn peel_declarator_name(node: Node<'_>, source: &[u8]) -> Option<String> {
     }
 }
 
+/// Generic arguments do not change the declaring Java class of a member.
+fn java_type_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    // An array has its own members, not its element type's method set.
+    if node.kind() == "array_type" {
+        return None;
+    }
+    let node = if node.kind() == "generic_type" {
+        node.named_child(0)?
+    } else {
+        node
+    };
+    type_name_of(node, source)
+}
+
 fn java_binding_of(
     node: Node<'_>,
     source: &[u8],
     context: &WalkContext,
 ) -> Option<(String, String)> {
     match node.kind() {
-        // `var x = new X()` and `X x = new X()`: the creation expression
-        // spells the type regardless of how the declaration's own type
-        // field spells it (`var` placeholder or the explicit name). A
-        // bare-call initializer (`var x = makeX()`) binds the factory's
-        // registered return type instead; a receiver turns the callee
-        // into a member call no factory table answers.
+        "type_parameter" => {
+            let children = named_children(node);
+            let name = children
+                .iter()
+                .find(|child| child.kind() == "type_identifier")?;
+            let bounds = children.iter().find(|child| child.kind() == "type_bound")?;
+            // Intersections need member selection across all bounds; do not
+            // claim the first bound is the complete receiver type.
+            if bounds.named_child_count() != 1 {
+                return None;
+            }
+            Some((
+                format!("[[type:{}]]", node_text(*name, source)),
+                java_type_name(bounds.named_child(0)?, source)?,
+            ))
+        }
+        "enum_constant" => {
+            let name = node.child_by_field_name("name")?;
+            let declaration = node.parent()?.parent()?;
+            if declaration.kind() != "enum_declaration" {
+                return None;
+            }
+            Some((
+                node_text(name, source).to_owned(),
+                node_text(declaration.child_by_field_name("name")?, source).to_owned(),
+            ))
+        }
+
+        // An explicit type selects the static method target. Inferred `var`
+        // declarations use a creation expression or known factory return type.
         "variable_declarator" => {
-            let value = node.child_by_field_name("value")?;
             let name = node.child_by_field_name("name")?;
             if name.kind() != "identifier" {
                 return None;
             }
+            // Explicit Java types remain authoritative, including fields
+            // without initializers and variables initialized to null.
+            if let Some(ty) = node.parent()?.child_by_field_name("type")
+                && node_text(ty, source) != "var"
+            {
+                return Some((
+                    node_text(name, source).to_owned(),
+                    java_type_name(ty, source)?,
+                ));
+            }
+            let value = node.child_by_field_name("value")?;
             if value.kind() == "method_invocation" {
                 if value.child_by_field_name("object").is_some() {
                     return None;
@@ -675,10 +1532,10 @@ fn java_binding_of(
             ))
         }
         // `void m(Left a)`: the parameter binds its declared type.
-        "formal_parameter" => {
+        "formal_parameter" | "enhanced_for_statement" => {
             let name = node.child_by_field_name("name")?;
             let type_node = node.child_by_field_name("type")?;
-            let type_name = type_name_of(type_node, source)?;
+            let type_name = java_type_name(type_node, source)?;
             Some((node_text(name, source).to_owned(), type_name))
         }
         _ => None,
@@ -756,12 +1613,24 @@ fn rust_binding_of(
     source: &[u8],
     context: &WalkContext,
 ) -> Option<(String, String)> {
-    if node.kind() != "let_declaration" {
+    if !matches!(node.kind(), "let_declaration" | "parameter") {
         return None;
     }
     let pattern = node.child_by_field_name("pattern")?;
     if pattern.kind() != "identifier" {
         return None;
+    }
+    if let Some(ty) = node.child_by_field_name("type") {
+        let ty = if ty.kind() == "reference_type" {
+            ty.child_by_field_name("type")?
+        } else {
+            ty
+        };
+        if matches!(ty.kind(), "type_identifier" | "scoped_type_identifier")
+            && let Some(ty) = type_name_of(ty, source)
+        {
+            return Some((node_text(pattern, source).to_owned(), ty));
+        }
     }
     let value = node.child_by_field_name("value")?;
     // `let x = make_x()`: a bare call binds the callee's registered
@@ -786,43 +1655,62 @@ fn rust_binding_of(
 }
 
 fn go_binding_of(node: Node<'_>, source: &[u8], context: &WalkContext) -> Option<(String, String)> {
+    let (name, declared, value) = match node.kind() {
+        "short_var_declaration" => (
+            node.child_by_field_name("left")?.named_child(0)?,
+            None,
+            node.child_by_field_name("right")?.named_child(0),
+        ),
+        "var_spec" => (
+            node.child_by_field_name("name")?,
+            node.child_by_field_name("type"),
+            node.child_by_field_name("value")
+                .and_then(|value| value.named_child(0)),
+        ),
+        "parameter_declaration" | "field_declaration" | "type_parameter_declaration" => (
+            node.child_by_field_name("name")?,
+            node.child_by_field_name("type"),
+            None,
+        ),
+        _ => return None,
+    };
+    if !matches!(name.kind(), "identifier" | "field_identifier") {
+        return None;
+    }
+    let bound_type = declared
+        .and_then(|ty| {
+            if ty.kind() == "slice_type" {
+                Some(node_text(ty, source).to_owned())
+            } else {
+                type_name_of(ty, source)
+            }
+        })
+        .or_else(|| value.and_then(|value| go_initializer_type(value, source, context)))
+        // An unknown parameter/local still shadows a same-named function.
+        // `?` cannot name a source type and must never resolve by name.
+        .unwrap_or_else(|| "?".to_owned());
+    Some((node_text(name, source).to_owned(), bound_type))
+}
+
+fn go_initializer_type(node: Node<'_>, source: &[u8], context: &WalkContext) -> Option<String> {
     match node.kind() {
-        // `x := new(X)`: the new call's type argument is the type.
-        // `x := makeX()`: a bare call binds the registered factory's
-        // return type instead.
-        "short_var_declaration" => {
-            let left = node.child_by_field_name("left")?;
-            let right = node.child_by_field_name("right")?;
-            let call = right.named_child(0)?;
-            if call.kind() != "call_expression" {
-                return None;
-            }
-            let function = call.child_by_field_name("function")?;
+        "unary_expression" if node_text(node, source).starts_with('&') => {
+            go_initializer_type(node.child_by_field_name("operand")?, source, context)
+        }
+        "composite_literal" => type_name_of(node.child_by_field_name("type")?, source),
+        "call_expression" => {
+            let function = node.child_by_field_name("function")?;
             if function.kind() != "identifier" {
-                return None;
-            }
-            let name = left.named_child(0)?;
-            if name.kind() != "identifier" {
                 return None;
             }
             let callee = node_text(function, source);
             if callee == "new" {
-                let arguments = call.child_by_field_name("arguments")?;
-                let type_node = arguments.named_child(0)?;
-                return Some((
-                    node_text(name, source).to_owned(),
-                    node_text(type_node, source).to_owned(),
-                ));
+                return type_name_of(
+                    node.child_by_field_name("arguments")?.named_child(0)?,
+                    source,
+                );
             }
-            let type_name = context.factory_return_of(callee)?;
-            Some((node_text(name, source).to_owned(), type_name.to_owned()))
-        }
-        // `func m(a Left, b *Right)`: the parameter binds its type.
-        "parameter_declaration" => {
-            let name = node.child_by_field_name("name")?;
-            let type_node = node.child_by_field_name("type")?;
-            let type_name = type_name_of(type_node, source)?;
-            Some((node_text(name, source).to_owned(), type_name))
+            context.factory_return_of(callee).map(str::to_owned)
         }
         _ => None,
     }
@@ -830,6 +1718,7 @@ fn go_binding_of(node: Node<'_>, source: &[u8], context: &WalkContext) -> Option
 
 fn cpp_binding_of(
     node: Node<'_>,
+    owner_index: usize,
     source: &[u8],
     context: &WalkContext,
 ) -> Option<(String, String)> {
@@ -839,49 +1728,144 @@ fn cpp_binding_of(
         // call binds the registered factory's return type.
         "declaration" => {
             let declared = node.child_by_field_name("type")?;
-            if declared.kind() != "placeholder_type_specifier" {
-                return None;
-            }
             let declarator = node.child_by_field_name("declarator")?;
-            if declarator.kind() != "init_declarator" {
+            // Tree-sitter can parse `Pointer value(raw)` as a prototype. A
+            // parameter-shaped token already bound as a value proves this is
+            // direct initialization; an empty list remains a function declaration.
+            if declarator.kind() == "function_declarator"
+                && declared.kind() != "placeholder_type_specifier"
+            {
+                let parameters = named_children(declarator.child_by_field_name("parameters")?);
+                if !parameters.is_empty()
+                    && parameters.iter().all(|parameter| {
+                        parameter.child_by_field_name("declarator").is_none()
+                            && parameter.child_by_field_name("type").is_some_and(|ty| {
+                                context.name_edges.iter().rev().any(|edge| {
+                                    edge.ref_kind == GraphEdgeKind::Declares
+                                        && edge.owner_index == owner_index
+                                        && edge.ref_name == node_text(ty, source)
+                                        && (edge.line, edge.column)
+                                            < (
+                                                node.start_position().row + 1,
+                                                node.start_position().column,
+                                            )
+                                        && edge.scope_end.is_none_or(|end| {
+                                            (
+                                                node.start_position().row + 1,
+                                                node.start_position().column,
+                                            ) < end
+                                        })
+                                })
+                            })
+                    })
+                {
+                    return Some((
+                        peel_declarator_name(
+                            declarator.child_by_field_name("declarator")?,
+                            source,
+                        )?,
+                        node_text(declared, source).to_owned(),
+                    ));
+                }
                 return None;
             }
-            let name = declarator.child_by_field_name("declarator")?;
+            let name = if declarator.kind() == "init_declarator" {
+                declarator.child_by_field_name("declarator")?
+            } else {
+                declarator
+            };
+            let name = peel_declarator_name(name, source)?;
+            if declared.kind() != "placeholder_type_specifier" {
+                return Some((name, cpp_declared_type(declared, declarator, source)));
+            }
             let value = declarator.child_by_field_name("value")?;
             let type_node = match value.kind() {
                 "new_expression" | "compound_literal_expression" => {
                     value.child_by_field_name("type")?
                 }
-                "call_expression" => {
-                    let function = value.child_by_field_name("function")?;
-                    if function.kind() != "identifier" {
-                        return None;
-                    }
-                    let type_name = context.factory_return_of(node_text(function, source))?;
-                    return Some((node_text(name, source).to_owned(), type_name.to_owned()));
+                "call_expression" | "identifier" => {
+                    return Some((name, format!("decltype({})", node_text(value, source))));
                 }
                 _ => return None,
             };
             Some((
-                node_text(name, source).to_owned(),
-                node_text(type_node, source).to_owned(),
+                name,
+                format!(
+                    "{}{}",
+                    node_text(type_node, source),
+                    if value.kind() == "new_expression" {
+                        "*"
+                    } else {
+                        ""
+                    }
+                ),
             ))
         }
         // `void m(Left &a)`: the parameter name sits under the reference
         // declarator wrapper.
-        "parameter_declaration" => {
+        "parameter_declaration" | "for_range_loop" => {
             let type_node = node.child_by_field_name("type")?;
             let declarator = node.child_by_field_name("declarator")?;
-            let type_name = type_name_of(type_node, source)?;
+            if type_node.kind() == "placeholder_type_specifier" {
+                return None;
+            }
             let name = peel_declarator_name(declarator, source)?;
-            Some((name, type_name))
+            Some((name, cpp_declared_type(type_node, declarator, source)))
         }
         _ => None,
     }
 }
 
-fn ts_binding_of(node: Node<'_>, source: &[u8], context: &WalkContext) -> Option<(String, String)> {
+fn cpp_declared_type(ty: Node<'_>, declarator: Node<'_>, source: &[u8]) -> String {
+    let mut ty = node_text(ty, source).to_owned();
+    let mut declarator = declarator;
+    loop {
+        if declarator.kind() == "pointer_declarator" {
+            ty.push('*');
+        }
+        if declarator.kind() == "reference_declarator" {
+            ty.push('&');
+        }
+        let Some(inner) = declarator
+            .child_by_field_name("declarator")
+            .or_else(|| declarator.named_child(0))
+        else {
+            break;
+        };
+        declarator = inner;
+    }
+    ty
+}
+
+/// Nullability does not change the target of a member call that executes.
+/// Several concrete union members still need branch/type evidence.
+fn ts_type_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut members = node_text(node, source)
+        .split('|')
+        .map(str::trim)
+        .filter(|member| !matches!(*member, "null" | "undefined"));
+    let ty = members.next()?;
+    (members.next().is_none() && is_identifier_like(ty.strip_prefix("typeof ").unwrap_or(ty)))
+        .then(|| ty.to_owned())
+}
+
+fn ts_binding_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
     match node.kind() {
+        "public_field_definition" | "field_definition" => {
+            let name = node
+                .child_by_field_name("name")
+                .or_else(|| node.child_by_field_name("property"))?;
+            let ty = node
+                .child_by_field_name("type")
+                .and_then(|annotation| annotation.named_child(0))
+                .and_then(|ty| ts_type_name(ty, source))
+                .or_else(|| {
+                    node.child_by_field_name("value")
+                        .and_then(|value| creation_or_factory_type(value, source))
+                })
+                .unwrap_or_else(|| "?".to_owned());
+            Some((node_text(name, source).to_owned(), ty))
+        }
         // `const x = new X()`: the constructor expression spells the type.
         // `const x = makeX()`: a bare call binds the registered factory's
         // return type.
@@ -891,19 +1875,29 @@ fn ts_binding_of(node: Node<'_>, source: &[u8], context: &WalkContext) -> Option
             if name.kind() != "identifier" {
                 return None;
             }
-            let type_name = creation_or_factory_type(value, source, context)?;
+            if matches!(
+                value.kind(),
+                "function_expression" | "arrow_function" | "class"
+            ) || (value.kind() == "call_expression"
+                && value
+                    .child_by_field_name("function")
+                    .is_some_and(|function| node_text(function, source) == "require"))
+            {
+                return None;
+            }
+            let type_name =
+                creation_or_factory_type(value, source).unwrap_or_else(|| "?".to_owned());
             Some((node_text(name, source).to_owned(), type_name))
         }
         // `x = new X()`: a reassignment rebinds the name; the resolver
         // orders the bindings by line so calls after it see the new type.
         "assignment_expression" => {
             let left = node.child_by_field_name("left")?;
-            if left.kind() != "identifier" {
-                return None;
-            }
+            let name = member_expression(left, source)?;
             let value = node.child_by_field_name("right")?;
-            let type_name = creation_or_factory_type(value, source, context)?;
-            Some((node_text(left, source).to_owned(), type_name))
+            let type_name =
+                creation_or_factory_type(value, source).unwrap_or_else(|| "?".to_owned());
+            Some((name, type_name))
         }
         // `function m(a: Left, b: Right)`: the parameter binds its type
         // annotation's single type; unions stay unbound (either type may
@@ -918,12 +1912,9 @@ fn ts_binding_of(node: Node<'_>, source: &[u8], context: &WalkContext) -> Option
                 return None;
             }
             let inner = annotation.named_child(0)?;
-            if inner.kind() != "type_identifier" {
-                return None;
-            }
             Some((
                 node_text(pattern, source).to_owned(),
-                node_text(inner, source).to_owned(),
+                ts_type_name(inner, source).unwrap_or_else(|| "?".to_owned()),
             ))
         }
         _ => None,
@@ -934,19 +1925,47 @@ fn ts_binding_of(node: Node<'_>, source: &[u8], context: &WalkContext) -> Option
 /// constructor names `X`, a bare `makeX()` call binds the registered
 /// factory's return type, and anything else carries no locally spellable
 /// type.
-fn creation_or_factory_type(
-    value: Node<'_>,
-    source: &[u8],
-    context: &WalkContext,
-) -> Option<String> {
+fn creation_or_factory_type(value: Node<'_>, source: &[u8]) -> Option<String> {
+    if value.kind() == "await_expression" {
+        let returned = creation_or_factory_type(value.named_child(0)?, source)?;
+        return Some(
+            returned
+                .strip_prefix("Promise<")
+                .and_then(|ty| ty.strip_suffix('>'))
+                .map_or_else(|| format!("Awaited<{returned}>"), str::to_owned),
+        );
+    }
+    if value.kind() == "parenthesized_expression" {
+        return creation_or_factory_type(value.named_child(0)?, source);
+    }
     if value.kind() == "call_expression" {
         let function = value.child_by_field_name("function")?;
+        if function.kind() == "selector_expression" {
+            return Some(format!(
+                "ReturnType<typeof {}>",
+                node_text(function, source)
+            ));
+        }
+        if function.kind() == "member_expression"
+            && let Some(object) = function.child_by_field_name("object")
+            && object.kind() == "new_expression"
+        {
+            let class = object.child_by_field_name("constructor")?;
+            let method = function.child_by_field_name("property")?;
+            return Some(format!(
+                "ReturnType<typeof {}::{}>",
+                node_text(class, source),
+                node_text(method, source)
+            ));
+        }
         if function.kind() != "identifier" {
             return None;
         }
-        return context
-            .factory_return_of(node_text(function, source))
-            .map(str::to_owned);
+        let name = node_text(function, source);
+        return Some(format!("ReturnType<typeof {name}>"));
+    }
+    if value.kind() == "identifier" {
+        return Some(format!("typeof {}", node_text(value, source)));
     }
     if value.kind() != "new_expression" {
         return None;
@@ -955,8 +1974,27 @@ fn creation_or_factory_type(
     (constructor.kind() == "identifier").then(|| node_text(constructor, source).to_owned())
 }
 
-fn js_binding_of(node: Node<'_>, source: &[u8], context: &WalkContext) -> Option<(String, String)> {
+fn js_binding_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
     match node.kind() {
+        "field_definition" => ts_binding_of(node, source),
+        "identifier"
+            if node.parent().is_some_and(|parent| {
+                parent.kind() == "formal_parameters"
+                    || (parent.kind() == "arrow_function"
+                        && parent.child_by_field_name("parameter") == Some(node))
+            }) =>
+        {
+            Some((node_text(node, source).to_owned(), "?".to_owned()))
+        }
+        "assignment_pattern" | "rest_pattern"
+            if node
+                .parent()
+                .is_some_and(|parent| parent.kind() == "formal_parameters") =>
+        {
+            let name = node.named_child(0)?;
+            (name.kind() == "identifier")
+                .then(|| (node_text(name, source).to_owned(), "?".to_owned()))
+        }
         // `const x = new X()`: the constructor expression spells the type.
         // `const x = makeX()`: a bare call binds the factory type the
         // function's `return` construction spells (JavaScript signs no
@@ -967,19 +2005,29 @@ fn js_binding_of(node: Node<'_>, source: &[u8], context: &WalkContext) -> Option
                 return None;
             }
             let value = node.child_by_field_name("value")?;
-            let type_name = creation_or_factory_type(value, source, context)?;
+            if matches!(
+                value.kind(),
+                "function_expression" | "arrow_function" | "class"
+            ) || (value.kind() == "call_expression"
+                && value
+                    .child_by_field_name("function")
+                    .is_some_and(|function| node_text(function, source) == "require"))
+            {
+                return None;
+            }
+            let type_name =
+                creation_or_factory_type(value, source).unwrap_or_else(|| "?".to_owned());
             Some((node_text(name, source).to_owned(), type_name))
         }
         // `x = new X()`: a reassignment rebinds the name; the resolver
         // orders the bindings by line so calls after it see the new type.
         "assignment_expression" => {
             let left = node.child_by_field_name("left")?;
-            if left.kind() != "identifier" {
-                return None;
-            }
+            let name = member_expression(left, source)?;
             let value = node.child_by_field_name("right")?;
-            let type_name = creation_or_factory_type(value, source, context)?;
-            Some((node_text(left, source).to_owned(), type_name))
+            let type_name =
+                creation_or_factory_type(value, source).unwrap_or_else(|| "?".to_owned());
+            Some((name, type_name))
         }
         _ => None,
     }
@@ -1010,6 +2058,14 @@ fn strip_trailing_semicolons(value: &str) -> &str {
 
 /// Extracts the module path from an import node via grammar fields or text.
 fn module_path_of(node: Node<'_>, source: &[u8], format: FileFormat) -> Option<String> {
+    if matches!(format, FileFormat::TypeScript | FileFormat::JavaScript)
+        && let Some(clause) = named_children(node)
+            .into_iter()
+            .find(|child| child.kind() == "import_require_clause")
+        && let Some(path) = clause.child_by_field_name("source")
+    {
+        return Some(normalize_module_path(node_text(path, source)));
+    }
     if let Some(vocabulary) = import_vocabulary_for(format) {
         for field in vocabulary.module_fields {
             if let Some(target) = node.child_by_field_name(field) {
@@ -1057,7 +2113,10 @@ fn module_path_of(node: Node<'_>, source: &[u8], format: FileFormat) -> Option<S
             for child in node.named_children(&mut cursor) {
                 let path = collapse_whitespace(node_text(child, source));
                 if is_identifier_like(&path) {
-                    return Some(path);
+                    let wildcard = node
+                        .named_children(&mut node.walk())
+                        .any(|child| child.kind() == "asterisk");
+                    return Some(if wildcard { format!("{path}.*") } else { path });
                 }
             }
         }
@@ -1163,6 +2222,7 @@ fn strip_trailing_as_alias(text: &str) -> String {
 pub(crate) fn is_import_node(node: Node<'_>, format: FileFormat) -> bool {
     import_vocabulary_for(format)
         .is_some_and(|vocabulary| vocabulary.import_types.contains(&node.kind()))
+        && (node.kind() != "export_statement" || node.child_by_field_name("source").is_some())
 }
 
 /// Buffers an `imports` reference for an import declaration node. The owner
@@ -1174,6 +2234,10 @@ pub(crate) fn collect_import_edge(
     context: &mut WalkContext,
 ) {
     if !context.is_collecting() {
+        return;
+    }
+    if format == FileFormat::Go && node.kind() == "import_declaration" {
+        // Visit each import_spec so grouped imports retain their own alias.
         return;
     }
     let Some(path) = module_path_of(node, source, format) else {
@@ -1288,6 +2352,42 @@ fn collect_type_names(node: Node<'_>, source: &[u8], names: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_binding_scan_stops_at_callable_and_class_bodies() {
+        for (format, grammar, source) in [
+            (
+                FileFormat::JavaScript,
+                tree_sitter_javascript::LANGUAGE,
+                "function* generator() { var hidden = 1; } const f = function* () { var hidden = 2; }; const object = { method(hidden) { var local = 3; } }; const C = class { method(hidden) { var local = 4; } };",
+            ),
+            (
+                FileFormat::TypeScript,
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
+                "function* generator() { var hidden = 1; } const f = function* () { var hidden = 2; }; const object = { method(hidden: number) { var local = 3; } }; const C = class { method(hidden: number) { var local = 4; } };",
+            ),
+            (
+                FileFormat::Go,
+                tree_sitter_go::LANGUAGE,
+                "package main\nvar f = func(hidden int) { var local int }\n",
+            ),
+        ] {
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&grammar.into())
+                .expect("fixture grammar");
+            let tree = parser.parse(source, None).expect("fixture syntax tree");
+            let mut context = WalkContext::new();
+            scan_return_types(tree.root_node(), source.as_bytes(), format, &mut context);
+            assert!(
+                context
+                    .name_edges()
+                    .iter()
+                    .all(|edge| !matches!(edge.ref_name.as_str(), "hidden" | "local")),
+                "{format:?}"
+            );
+        }
+    }
 
     #[test]
     fn splits_callee_names_into_receiver_and_member() {
@@ -1532,7 +2632,7 @@ mod tests {
                 &tree_sitter_cpp::LANGUAGE.into(),
                 "void m() { auto x = new X(); x->foo(); }",
             ),
-            vec![("x".to_owned(), "X".to_owned(), 1)]
+            vec![("x".to_owned(), "X*".to_owned(), 1)]
         );
         assert_eq!(
             bindings(
@@ -1540,7 +2640,10 @@ mod tests {
                 &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
                 "function m() { const x = new X(); x.foo(); }",
             ),
-            vec![("x".to_owned(), "X".to_owned(), 1)]
+            vec![
+                ("x".to_owned(), "?".to_owned(), 1),
+                ("x".to_owned(), "X".to_owned(), 1),
+            ]
         );
         assert_eq!(
             bindings(
@@ -1548,7 +2651,10 @@ mod tests {
                 &tree_sitter_javascript::LANGUAGE.into(),
                 "function m() { const x = new X(); x.foo(); }",
             ),
-            vec![("x".to_owned(), "X".to_owned(), 1)]
+            vec![
+                ("x".to_owned(), "?".to_owned(), 1),
+                ("x".to_owned(), "X".to_owned(), 1),
+            ]
         );
 
         // Typed parameters.
@@ -1570,8 +2676,8 @@ mod tests {
                 "void m(Left &a, Right &b) { a.run(); }",
             ),
             vec![
-                ("a".to_owned(), "Left".to_owned(), 1),
-                ("b".to_owned(), "Right".to_owned(), 1),
+                ("a".to_owned(), "Left&".to_owned(), 1),
+                ("b".to_owned(), "Right&".to_owned(), 1),
             ]
         );
         assert_eq!(
@@ -1656,7 +2762,11 @@ mod tests {
                 &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
                 "function makeX(): X {\n    return new X();\n}\nfunction caller() {\n    const x = makeX();\n}\n",
             ),
-            vec![("x".to_owned(), "X".to_owned(), 5)]
+            vec![
+                ("[[typescript_scope]]".to_owned(), "script".to_owned(), 1),
+                ("x".to_owned(), "?".to_owned(), 4),
+                ("x".to_owned(), "ReturnType<typeof makeX>".to_owned(), 5),
+            ]
         );
         assert_eq!(
             factory_bindings(
@@ -1672,7 +2782,7 @@ mod tests {
                 &tree_sitter_cpp::LANGUAGE.into(),
                 "X makeX() {\n    return X{};\n}\nvoid caller() {\n    auto x = makeX();\n}\n",
             ),
-            vec![("x".to_owned(), "X".to_owned(), 5)]
+            vec![("x".to_owned(), "decltype(makeX())".to_owned(), 5)]
         );
 
         // Untyped languages infer from the body's `return` constructions.
@@ -1690,7 +2800,11 @@ mod tests {
                 &tree_sitter_javascript::LANGUAGE.into(),
                 "function makeX() {\n    return new X();\n}\nfunction caller() {\n    const x = makeX();\n}\n",
             ),
-            vec![("x".to_owned(), "X".to_owned(), 5)]
+            vec![
+                ("[[javascript_scope]]".to_owned(), "script".to_owned(), 1),
+                ("x".to_owned(), "?".to_owned(), 4),
+                ("x".to_owned(), "ReturnType<typeof makeX>".to_owned(), 5),
+            ]
         );
 
         // A Python arrow annotation outranks what the body returns.
@@ -1714,14 +2828,15 @@ mod tests {
             vec![]
         );
 
-        // A member call never consults the factory table.
+        // The parameter has a known type, but the member-call result must
+        // not borrow a same-named free factory's return type.
         assert_eq!(
             factory_bindings(
                 FileFormat::Rust,
                 &tree_sitter_rust::LANGUAGE.into(),
                 "fn make_x() -> X {\n    todo!()\n}\nfn caller(v: V) {\n    let m = v.make_x();\n}\n",
             ),
-            vec![]
+            vec![("v".to_owned(), "V".to_owned(), 4)]
         );
     }
 }

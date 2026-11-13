@@ -79,7 +79,10 @@ const JAVA: LanguageAdapter = LanguageAdapter {
 const JAVASCRIPT: LanguageAdapter = LanguageAdapter {
     kind: Language::JavaScript,
     entity_types: &[
+        "class",
+        "function_expression",
         "class_declaration",
+        "class_static_block",
         "field_definition",
         "function_declaration",
         "generator_function_declaration",
@@ -87,7 +90,14 @@ const JAVASCRIPT: LanguageAdapter = LanguageAdapter {
         "pair",
         "variable_declarator",
     ],
-    scope_types: &["class_declaration", "function_declaration"],
+    scope_types: &[
+        "method_definition",
+        "class",
+        "function_expression",
+        "class_declaration",
+        "class_static_block",
+        "function_declaration",
+    ],
 };
 const PHP: LanguageAdapter = LanguageAdapter {
     kind: Language::Php,
@@ -146,9 +156,12 @@ const RUST: LanguageAdapter = LanguageAdapter {
 const TYPESCRIPT: LanguageAdapter = LanguageAdapter {
     kind: Language::TypeScript,
     entity_types: &[
+        "class",
+        "function_expression",
         "abstract_class_declaration",
         "abstract_method_signature",
         "class_declaration",
+        "class_static_block",
         "enum_declaration",
         "field_definition",
         "function_declaration",
@@ -166,8 +179,13 @@ const TYPESCRIPT: LanguageAdapter = LanguageAdapter {
         "variable_declarator",
     ],
     scope_types: &[
+        "method_definition",
+        "class",
+        "function_expression",
+        "function_declaration",
         "abstract_class_declaration",
         "class_declaration",
+        "class_static_block",
         "internal_module",
         "interface_declaration",
         "module",
@@ -210,8 +228,13 @@ impl LanguageAdapter {
         if matches!(self.kind, Language::JavaScript | Language::TypeScript)
             && node.kind() == "variable_declarator"
         {
-            let entities = exported_object_function_entities(node, source);
+            let mut entities = exported_object_function_entities(node, source);
             if !entities.is_empty() {
+                // Non-exported objects remain searchable values and own calls
+                // in non-function initializers, alongside their member entities.
+                if !self.is_exported(node, false) {
+                    entities.insert(0, node);
+                }
                 return entities;
             }
         }
@@ -319,6 +342,7 @@ impl LanguageAdapter {
 
     pub(super) fn classify(self, node: Node<'_>) -> Option<SymbolType> {
         match self.kind {
+            Language::Cpp if cpp_initializer_entity(node) => Some(SymbolType::Value),
             Language::C | Language::Cpp => classify_c_family(node),
             Language::Go => classify_go(node),
             Language::Java if node.kind() == "field_declaration" => Some(SymbolType::Value),
@@ -387,6 +411,7 @@ impl LanguageAdapter {
             Language::C | Language::Cpp => {
                 !matches!(node.kind(), "declaration" | "field_declaration")
                     || find_descendant_by_kind(node, "function_declarator").is_some()
+                    || (self.kind == Language::Cpp && cpp_initializer_entity(node))
             }
             Language::JavaScript | Language::TypeScript => {
                 should_index_javascript_typescript_entity(node)
@@ -411,6 +436,7 @@ impl LanguageAdapter {
     pub(super) fn is_declaration(self, node: Node<'_>) -> bool {
         matches!(self.kind, Language::C | Language::Cpp)
             && matches!(node.kind(), "declaration" | "field_declaration")
+            && !(self.kind == Language::Cpp && cpp_initializer_entity(node))
     }
 
     /// Counts a function-shaped entity's declared parameters, excluding the
@@ -485,6 +511,10 @@ impl LanguageAdapter {
 
     fn should_enter_scope(self, node: Node<'_>) -> bool {
         match self.kind {
+            Language::JavaScript | Language::TypeScript if node.kind() == "function_expression" => {
+                node.parent()
+                    .is_some_and(|parent| parent.kind() == "export_statement")
+            }
             Language::Go if node.kind() == "type_spec" => node
                 .child_by_field_name("type")
                 .is_some_and(|kind| matches!(kind.kind(), "interface_type" | "struct_type")),
@@ -537,6 +567,46 @@ fn name_field(node: Node<'_>, source: &[u8]) -> Option<String> {
             })
             .map(|child| text(child, source).to_owned())
     })
+}
+
+/// A direct namespace initializer needs a callable owner; local variables stay
+/// inside their enclosing function. Multi-declarator statements need splitting.
+fn cpp_initializer_entity(node: Node<'_>) -> bool {
+    if node.kind() != "declaration" {
+        return false;
+    }
+    let mut cursor = node.walk();
+    let declarators = node
+        .children_by_field_name("declarator", &mut cursor)
+        .collect::<Vec<_>>();
+    let [declarator] = declarators.as_slice() else {
+        return false;
+    };
+    if declarator.kind() != "init_declarator"
+        || !declarator
+            .child_by_field_name("value")
+            .is_some_and(|value| {
+                matches!(value.kind(), "call_expression" | "new_expression")
+                    && find_descendant_by_kind(value, "lambda_expression").is_none()
+            })
+    {
+        return false;
+    }
+    let mut parent = node.parent();
+    while let Some(node) = parent {
+        if matches!(
+            node.kind(),
+            "function_definition"
+                | "lambda_expression"
+                | "class_specifier"
+                | "struct_specifier"
+                | "union_specifier"
+        ) {
+            return false;
+        }
+        parent = node.parent();
+    }
+    true
 }
 
 fn is_c_function_type(kind: &str) -> bool {
@@ -664,7 +734,8 @@ fn classify_go(node: Node<'_>) -> Option<SymbolType> {
         "type_spec" => match node.child_by_field_name("type").map(|item| item.kind()) {
             Some("interface_type") => Some(SymbolType::Interface),
             Some("struct_type") => Some(SymbolType::Class),
-            _ => None,
+            // Non-aggregate named types are searchable type definitions, not classes.
+            _ => Some(SymbolType::Alias),
         },
         "method_elem" | "method_spec" => Some(SymbolType::Function),
         _ => classify_code_node(node),
@@ -672,6 +743,11 @@ fn classify_go(node: Node<'_>) -> Option<SymbolType> {
 }
 
 fn should_index_javascript_typescript_entity(node: Node<'_>) -> bool {
+    if node.kind() == "function_expression" {
+        return node
+            .parent()
+            .is_some_and(|parent| parent.kind() == "export_statement");
+    }
     if node.kind() == "method_definition"
         && node
             .parent()
@@ -715,7 +791,10 @@ fn should_index_javascript_typescript_entity(node: Node<'_>) -> bool {
 fn inside_function_declaration(node: Node<'_>) -> bool {
     let mut parent = node.parent();
     while let Some(current) = parent {
-        if current.kind() == "function_declaration" {
+        if matches!(
+            current.kind(),
+            "function_declaration" | "method_definition" | "function_expression" | "arrow_function"
+        ) {
             return true;
         }
         parent = current.parent();
@@ -745,8 +824,7 @@ fn contains_function_value(node: Node<'_>) -> bool {
 }
 
 fn exported_object_function_entities<'tree>(node: Node<'tree>, _source: &[u8]) -> Vec<Node<'tree>> {
-    if node.kind() != "variable_declarator" || closest_ancestor(node, "export_statement").is_none()
-    {
+    if node.kind() != "variable_declarator" || inside_function_declaration(node) {
         return Vec::new();
     }
     let Some(value) = node.child_by_field_name("value") else {
@@ -765,12 +843,11 @@ fn exported_object_function_entities<'tree>(node: Node<'tree>, _source: &[u8]) -
 }
 
 fn exported_object_variable(node: Node<'_>) -> Option<Node<'_>> {
-    let object =
-        closest_ancestor(node, "object").or_else(|| closest_ancestor(node, "object_expression"))?;
+    let object = node
+        .parent()
+        .filter(|parent| matches!(parent.kind(), "object" | "object_expression"))?;
     let variable = object.parent()?;
-    (variable.kind() == "variable_declarator"
-        && closest_ancestor(variable, "export_statement").is_some())
-    .then_some(variable)
+    (variable.kind() == "variable_declarator").then_some(variable)
 }
 
 fn exported_object_variable_name(node: Node<'_>, source: &[u8]) -> Option<String> {
@@ -779,14 +856,32 @@ fn exported_object_variable_name(node: Node<'_>, source: &[u8]) -> Option<String
 }
 
 fn extract_javascript_typescript_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if node.kind() == "class_static_block" {
+        return Some("static {}".to_owned());
+    }
+    if node.kind() == "field_definition" {
+        return field_text(node, "property", source);
+    }
     if node.kind() == "pair" {
         return field_text(node, "key", source)
             .map(|value| value.trim_matches(['\'', '"', '`']).to_owned());
     }
-    name_field(node, source)
+    name_field(node, source).or_else(|| {
+        let parent = node.parent()?;
+        if node.kind() == "class" && parent.kind() == "variable_declarator" {
+            return field_text(parent, "name", source);
+        }
+        (parent.kind() == "export_statement" && text(parent, source).starts_with("export default"))
+            .then(|| "default".to_owned())
+    })
 }
 
 fn classify_javascript_typescript(node: Node<'_>) -> Option<SymbolType> {
+    match node.kind() {
+        "class" => return Some(SymbolType::Class),
+        "function_expression" | "class_static_block" => return Some(SymbolType::Function),
+        _ => {}
+    }
     if node.kind() == "pair"
         || matches!(
             node.kind(),
@@ -1222,16 +1317,6 @@ fn clean_comment_text(value: &str) -> String {
         .join("\n")
         .trim()
         .to_owned()
-}
-
-fn closest_ancestor<'tree>(mut node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
-    while let Some(parent) = node.parent() {
-        if parent.kind() == kind {
-            return Some(parent);
-        }
-        node = parent;
-    }
-    None
 }
 
 fn find_descendant_by_kind<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {

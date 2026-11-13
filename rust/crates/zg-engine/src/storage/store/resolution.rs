@@ -171,6 +171,13 @@ impl SymbolIndex {
                     is_exported: metadata.is_exported,
                     arity,
                     is_declaration: metadata.is_declaration,
+                    is_constructor: metadata
+                        .language
+                        .is_some_and(|language| language.as_str() == "java")
+                        && metadata
+                            .signature
+                            .as_deref()
+                            .is_some_and(|signature| java_constructor_signature(signature, &name)),
                     parameters: parameter_evidence(metadata.signature.as_deref()),
                     package: metadata.package.clone(),
                 });
@@ -261,6 +268,57 @@ fn outer_parameter_group(signature: &str) -> Option<(usize, usize)> {
         }
     }
     group
+}
+
+/// Constructors have no return type. Skip annotations, visibility and generic
+/// parameters before the class name; `void X()` is a method, not X's constructor.
+fn java_constructor_signature(signature: &str, name: &str) -> bool {
+    let Some((start, _)) = outer_parameter_group(signature) else {
+        return false;
+    };
+    let Some(mut prefix) = signature[..start - 1].trim().strip_suffix(name) else {
+        return false;
+    };
+    loop {
+        prefix = prefix.trim();
+        if prefix.is_empty() {
+            return true;
+        }
+        if let Some(rest) = ["public", "protected", "private"]
+            .into_iter()
+            .find_map(|modifier| prefix.strip_prefix(modifier))
+            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            prefix = rest;
+            continue;
+        }
+        if let Some(annotation) = prefix.strip_prefix('@') {
+            prefix = annotation
+                .trim_start_matches(|c: char| c.is_alphanumeric() || matches!(c, '_' | '$' | '.'));
+            if !prefix.starts_with('(') {
+                continue;
+            }
+        }
+        let (open, close) = match prefix.chars().next() {
+            Some('(') => ('(', ')'),
+            Some('<') => ('<', '>'),
+            _ => return false,
+        };
+        let mut depth = 0usize;
+        let end = prefix.char_indices().find_map(|(offset, c)| {
+            if c == open {
+                depth += 1;
+            } else if c == close {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(offset + c.len_utf8());
+                }
+            }
+            None
+        });
+        let Some(end) = end else { return false };
+        prefix = &prefix[end..];
+    }
 }
 
 /// Whether the text before a parenthesis and its body spell a function

@@ -14,11 +14,17 @@
 //! remaining ambiguities, external import specifiers terminate as failed,
 //! and [`IndexStore::apply_resolutions`] writes each batch atomically.
 
+mod bindings;
+mod cpp_types;
+mod module_config;
+mod rust_types;
+
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 use std::path::Path;
+use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
@@ -27,7 +33,9 @@ use crate::domain::{
     EdgeProvenance, FileFormat, GraphEdgeKind, SymbolType, formats_for_path,
     reference_compatible_with,
 };
-use crate::storage::graph::{DeclaredBinding, NameIndexEntry, Resolution, StoredPendingRef};
+use crate::storage::graph::{
+    DeclaredBinding, ImportReference, NameIndexEntry, Resolution, StoredPendingRef,
+};
 use crate::storage::{IndexStore, ResolutionSnapshot};
 
 /// Outcome of one resolution sweep.
@@ -91,6 +99,7 @@ pub(crate) struct ResolutionSweep {
 /// returns [`EngineError::CANCELLED`].
 pub(crate) fn resolve_pending(
     store: &IndexStore,
+    source_root: Option<&Path>,
     signal: Option<&CancellationToken>,
 ) -> crate::EngineResult<ResolutionSweep> {
     if !store.graph_enabled() {
@@ -107,7 +116,10 @@ pub(crate) fn resolve_pending(
     throw_if_cancelled(signal)?;
     let snapshot = store.resolution_snapshot(signal)?;
     let mut sweep = ResolutionSweep::default();
-    let mut caches = RuleCaches::default();
+    let mut caches = RuleCaches {
+        source_root: source_root.map(Path::to_path_buf),
+        ..RuleCaches::default()
+    };
     let mut cursor = 0;
     loop {
         let page = store.list_pending_refs(PENDING_PAGE, cursor)?;
@@ -218,6 +230,10 @@ enum Rule {
 /// consumes evidence gathered by earlier references and adds its own.
 #[derive(Default)]
 struct RuleCaches {
+    source_root: Option<std::path::PathBuf>,
+    module_configs: HashMap<String, Result<Option<Arc<serde_json::Value>>, ()>>,
+    tsconfigs: HashMap<String, Result<Option<Arc<module_config::TsConfig>>, ()>>,
+    go_modules: HashMap<String, Option<String>>,
     importing_paths: HashMap<u32, Option<String>>,
     candidate_paths: HashMap<u32, Option<String>>,
     importing_files: HashMap<u32, Vec<u32>>,
@@ -228,6 +244,25 @@ struct RuleCaches {
     /// same owner and every sweep pages them again, so the read happens once
     /// per owner per sweep instead of once per call.
     declared_bindings: HashMap<String, Vec<DeclaredBinding>>,
+    import_references: HashMap<u32, Arc<[ImportReference]>>,
+    rust_types: rust_types::TypeCache,
+    cpp_types: cpp_types::TypeCache,
+    javascript_imports: HashMap<u32, Arc<[bindings::JavascriptImport]>>,
+}
+
+impl RuleCaches {
+    // The workspace writer serializes the sweep, so imports cannot change
+    // until it finishes. Drop this cache before the next indexing pass.
+    fn imports(
+        &mut self,
+        store: &IndexStore,
+        file: u32,
+    ) -> crate::EngineResult<Arc<[ImportReference]>> {
+        Ok(match self.import_references.entry(file) {
+            Entry::Occupied(entry) => Arc::clone(entry.get()),
+            Entry::Vacant(entry) => Arc::clone(entry.insert(store.import_references(file)?.into())),
+        })
+    }
 }
 
 impl ResolutionSweep {
@@ -262,6 +297,47 @@ fn classify(
         // Declares edges stay pending in the table for every later sweep.
         return Ok(Outcome::Deferred);
     }
+    if let Some(outcome) = bindings::resolve_java_constructor(store, snapshot, stored, caches)? {
+        return Ok(outcome);
+    }
+    if let Some(outcome) = cpp_types::resolve_constructor(store, snapshot, stored, caches)? {
+        return Ok(outcome);
+    }
+    if let Some(outcome) = cpp_types::resolve_receiver(store, snapshot, stored, caches)? {
+        return Ok(outcome);
+    }
+    if stored.reference.ref_kind == GraphEdgeKind::Calls
+        && matches!(stored.language.as_str(), "typescript" | "javascript")
+        && let Some(outcome) = bindings::resolve_call(store, snapshot, stored, caches)?
+    {
+        return Ok(outcome);
+    }
+    // TS/JS lexical calls were handled above. Keep this new binding rule
+    // confined to Go; other languages retain their existing resolution rules.
+    if stored.language == "go"
+        && stored.reference.ref_kind == GraphEdgeKind::Calls
+        && stored.reference.receiver_name.is_none()
+    {
+        let bindings = match caches
+            .declared_bindings
+            .entry(stored.reference.owner_id.clone())
+        {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                entry.insert(store.declared_bindings(&stored.reference.owner_id)?)
+            }
+        };
+        if bindings.iter().any(|binding| {
+            binding.name == stored.name_tail
+                && (binding.line as usize, binding.column as usize)
+                    <= (stored.reference.line, stored.reference.column)
+                && binding
+                    .scope_end
+                    .is_none_or(|end| (stored.reference.line, stored.reference.column) < end)
+        }) {
+            return Ok(Outcome::Deferred);
+        }
+    }
     if is_unresolvable_import(snapshot, stored, &mut caches.module_paths) {
         return Ok(Outcome::Failed);
     }
@@ -286,14 +362,7 @@ fn classify(
         // later bare-name resolution. Defer instead.
         return Ok(Outcome::Deferred);
     }
-    if let Some(resolution) = resolve_alias_bound(
-        store,
-        snapshot,
-        stored,
-        &mut caches.alias_bindings,
-        &mut caches.importing_paths,
-        &mut caches.alias_targets,
-    )? {
+    if let Some(resolution) = resolve_alias_bound(store, snapshot, stored, caches)? {
         // An `as` alias never names an indexed symbol itself, so the bare-name
         // lookup below would only park the call; the alias binding pins its
         // imported name's module directly.
@@ -302,14 +371,7 @@ fn classify(
             rule: Rule::ImportBound,
         });
     }
-    if let Some(resolution) = resolve_namespace_bound(
-        store,
-        snapshot,
-        stored,
-        &mut caches.alias_bindings,
-        &mut caches.importing_paths,
-        &mut caches.alias_targets,
-    )? {
+    if let Some(resolution) = resolve_namespace_bound(store, snapshot, stored, caches)? {
         // The receiver names a module object, so the bare-name lookup below
         // would only see workspace-wide ambiguity; the binding scopes the
         // member to its one module.
@@ -356,7 +418,7 @@ fn classify_names(
             None => Outcome::Deferred,
         });
     }
-    if let Some(resolution) = resolve_receiver_class(store, snapshot, stored, &hits)? {
+    if let Some(resolution) = resolve_receiver_class(store, snapshot, stored, &hits, caches)? {
         // The receiver names the enclosing instance or superclass, so the
         // member's declaring scope is pinned to the owner's class hierarchy
         // before workspace-wide ambiguity is considered.
@@ -674,6 +736,34 @@ fn resolve_lexical_binding(
             },
             rule: Rule::Unique,
         }),
+        _ if stored.language == "cpp" && stored.reference.ref_kind == GraphEdgeKind::Calls => {
+            let nearest = lexical.iter().map(|hit| hit.qualified_name.len()).max()?;
+            let nearest: Vec<_> = lexical
+                .into_iter()
+                .filter(|hit| hit.qualified_name.len() == nearest)
+                .collect();
+            Some(
+                stored
+                    .reference
+                    .arity
+                    .and_then(|arity| unique_arity_match(nearest.iter().copied(), arity))
+                    .map_or_else(
+                        || {
+                            Outcome::Ambiguous(
+                                nearest.iter().map(|hit| hit.entity_id.clone()).collect(),
+                            )
+                        },
+                        |hit| Outcome::Resolved {
+                            resolution: Resolution {
+                                ref_id: stored.id,
+                                target_id: hit.entity_id.clone(),
+                                provenance: EdgeProvenance::ArityBound,
+                            },
+                            rule: Rule::ArityBound,
+                        },
+                    ),
+            )
+        }
         _ => Some(Outcome::Ambiguous(
             lexical.iter().map(|hit| hit.entity_id.clone()).collect(),
         )),
@@ -872,15 +962,13 @@ fn resolve_alias_bound(
     store: &IndexStore,
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
-    bindings: &mut HashMap<u32, Vec<AliasBinding>>,
-    importing_paths: &mut HashMap<u32, Option<String>>,
-    targets: &mut HashMap<(String, String), Option<u32>>,
+    caches: &mut RuleCaches,
 ) -> crate::EngineResult<Option<Resolution>> {
     let reference = &stored.reference;
     if reference.receiver_name.is_some() || reference.ref_kind != GraphEdgeKind::Calls {
         return Ok(None);
     }
-    let file_bindings = load_bindings(store, stored, bindings)?;
+    let file_bindings = load_bindings(store, stored, caches)?;
     let matched: Vec<&AliasBinding> = file_bindings
         .iter()
         .filter(|binding| binding.imported.is_some() && binding.local == stored.name_tail)
@@ -893,8 +981,8 @@ fn resolve_alias_bound(
         stored,
         binding.imported.as_deref().expect("imported binding"),
         binding,
-        importing_paths,
-        targets,
+        &mut caches.importing_paths,
+        &mut caches.alias_targets,
     ))
 }
 
@@ -911,9 +999,7 @@ fn resolve_namespace_bound(
     store: &IndexStore,
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
-    bindings: &mut HashMap<u32, Vec<AliasBinding>>,
-    importing_paths: &mut HashMap<u32, Option<String>>,
-    targets: &mut HashMap<(String, String), Option<u32>>,
+    caches: &mut RuleCaches,
 ) -> crate::EngineResult<Option<Resolution>> {
     let reference = &stored.reference;
     let Some(receiver) = reference.receiver_name.as_deref() else {
@@ -922,7 +1008,7 @@ fn resolve_namespace_bound(
     if reference.ref_kind != GraphEdgeKind::Calls {
         return Ok(None);
     }
-    let file_bindings = load_bindings(store, stored, bindings)?;
+    let file_bindings = load_bindings(store, stored, caches)?;
     let matched: Vec<&AliasBinding> = file_bindings
         .iter()
         .filter(|binding| binding.imported.is_none() && binding.local == receiver)
@@ -935,8 +1021,8 @@ fn resolve_namespace_bound(
         stored,
         &stored.name_tail,
         binding,
-        importing_paths,
-        targets,
+        &mut caches.importing_paths,
+        &mut caches.alias_targets,
     ))
 }
 
@@ -947,12 +1033,23 @@ fn resolve_namespace_bound(
 fn load_bindings(
     store: &IndexStore,
     stored: &StoredPendingRef,
-    bindings: &mut HashMap<u32, Vec<AliasBinding>>,
+    caches: &mut RuleCaches,
 ) -> crate::EngineResult<Vec<AliasBinding>> {
-    Ok(match bindings.entry(stored.file_id) {
-        Entry::Occupied(entry) => entry.get().clone(),
-        Entry::Vacant(entry) => entry.insert(load_alias_bindings(store, stored)?).clone(),
-    })
+    if !matches!(
+        stored.language.as_str(),
+        "typescript" | "javascript" | "python" | "rust"
+    ) {
+        return Ok(Vec::new());
+    }
+    if let Some(bindings) = caches.alias_bindings.get(&stored.file_id) {
+        return Ok(bindings.clone());
+    }
+    let references = caches.imports(store, stored.file_id)?;
+    let bindings = load_alias_bindings(&references, &stored.language);
+    caches
+        .alias_bindings
+        .insert(stored.file_id, bindings.clone());
+    Ok(bindings)
 }
 
 /// Binds the addressed member to the one declaration inside the binding's
@@ -1019,21 +1116,15 @@ fn without_line_comments<'a>(statement: &'a str, marker: &str) -> std::borrow::C
 /// alias bindings. Only statements spelling an explicit `as` produce
 /// bindings: unaliased imports keep flowing through the bare-name and
 /// import-bound rules, which already resolve them.
-///
-/// # Errors
-/// Propagates graph storage failures.
-fn load_alias_bindings(
-    store: &IndexStore,
-    stored: &StoredPendingRef,
-) -> crate::EngineResult<Vec<AliasBinding>> {
-    let pairs: AliasPairs = match stored.language.as_str() {
+fn load_alias_bindings(references: &[ImportReference], language: &str) -> Vec<AliasBinding> {
+    let pairs: AliasPairs = match language {
         "typescript" | "javascript" => ts_alias_pairs,
         "python" => python_alias_pairs,
         "rust" => rust_alias_pairs,
-        _ => return Ok(Vec::new()),
+        _ => return Vec::new(),
     };
     let mut bindings = Vec::new();
-    for reference in store.import_references(stored.file_id)? {
+    for reference in references {
         let Some(raw_text) = reference.raw_text.as_deref() else {
             continue;
         };
@@ -1045,7 +1136,7 @@ fn load_alias_bindings(
             });
         }
     }
-    Ok(bindings)
+    bindings
 }
 
 /// Parses an import statement into aliased `(local, imported)` pairs and
@@ -1054,6 +1145,9 @@ fn load_alias_bindings(
 /// binds the module itself (`imported` stays `None`). Default imports and
 /// unaliased names never spell a binding.
 fn ts_alias_pairs(statement: &str) -> Vec<(String, Option<String>)> {
+    if !statement.trim_start().starts_with("import ") {
+        return Vec::new();
+    }
     let statement = without_line_comments(statement, "//");
     let statement = statement.as_ref();
     let Some(clause_end) = statement.rfind(" from ") else {
@@ -1226,10 +1320,17 @@ fn alias_target_base(
     let language = stored.language.as_str();
     let module: String = match language {
         "typescript" | "javascript" => {
-            if !binding.specifier.starts_with("./") && !binding.specifier.starts_with("../") {
+            if binding.specifier != "."
+                && !binding.specifier.starts_with("./")
+                && !binding.specifier.starts_with("../")
+            {
                 return None;
             }
-            binding.specifier.clone()
+            if matches!(binding.specifier.as_str(), "." | "./") {
+                "./index".to_owned()
+            } else {
+                binding.specifier.clone()
+            }
         }
         "python" => {
             if binding.specifier.starts_with('.') {
@@ -1415,13 +1516,16 @@ fn resolve_receiver_class(
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
     hits: &[NameIndexEntry],
+    caches: &mut RuleCaches,
 ) -> crate::EngineResult<Option<Resolution>> {
     let reference = &stored.reference;
     if reference.ref_kind != GraphEdgeKind::Calls {
         return Ok(None);
     }
-    let Some(receiver) = reference.receiver_name.as_deref() else {
-        return Ok(None);
+    let receiver = match reference.receiver_name.as_deref() {
+        Some(receiver) => receiver,
+        None if stored.language == "java" => "this",
+        None => return Ok(None),
     };
     let superclass = receiver == "super";
     if !superclass && !is_self_receiver(&stored.language, receiver) {
@@ -1440,6 +1544,9 @@ fn resolve_receiver_class(
     }) else {
         return Ok(None);
     };
+    if stored.language == "rust" {
+        return resolve_rust_self(store, snapshot, stored, hits, &enclosing, caches);
+    }
     let caller = (!superclass).then_some(enclosing.as_str());
     let mut scopes = Vec::new();
     if !superclass {
@@ -1460,6 +1567,32 @@ fn resolve_receiver_class(
     ))
 }
 
+/// Rust impl blocks in different files may share a type through an import,
+/// but matching the spelling alone would mix unrelated same-named structs.
+fn resolve_rust_self(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    hits: &[NameIndexEntry],
+    enclosing: &str,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Option<Resolution>> {
+    let identity = rust_types::identity(store, snapshot, stored.file_id, enclosing, caches)?;
+    let mut matched = None;
+    for hit in hits {
+        let Some((scope, _)) = hit.qualified_name.rsplit_once("::") else {
+            continue;
+        };
+        if rust_types::identity(store, snapshot, hit.file_id, scope, caches)? == identity {
+            if matched.is_some() {
+                return Ok(None);
+            }
+            matched = Some(hit);
+        }
+    }
+    Ok(matched.map(|hit| member_resolution(stored, hit)))
+}
+
 /// Binds a receiver call through the owner's declared bindings: a local
 /// whose creation or parameter line pins exactly one indexed type answers
 /// the member calls that follow it. Bindings at or after the call line say
@@ -1477,8 +1610,14 @@ fn resolve_receiver_typed(
     caches: &mut RuleCaches,
 ) -> crate::EngineResult<Option<Resolution>> {
     let reference = &stored.reference;
-    if reference.ref_kind != GraphEdgeKind::Calls {
+    if reference.ref_kind != GraphEdgeKind::Calls || stored.language == "cpp" {
         return Ok(None);
+    }
+    if matches!(
+        stored.language.as_str(),
+        "typescript" | "javascript" | "go" | "java"
+    ) {
+        return bindings::resolve(store, snapshot, stored, hits, caches);
     }
     let Some(receiver) = reference.receiver_name.as_deref() else {
         return Ok(None);

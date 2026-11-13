@@ -142,27 +142,28 @@ fn extract_code(
         entity_heads.push(output.len());
         append_entity(source, entity, max_chars, overlap_chars, &mut output);
     }
-    // Gap chunks follow every entity, so they leave the head indexes intact.
-    if code_format == FileFormat::Php && !output.is_empty() {
-        append_php_gaps(source, &entities, max_chars, overlap_chars, &mut output);
-    }
+    // Anonymous retrieval chunks follow the symbols, preserving graph ordinals.
+    append_code_gaps(
+        source,
+        &entities,
+        tree.root_node(),
+        code_format,
+        max_chars,
+        overlap_chars,
+        &mut output,
+    );
     if output.is_empty() {
-        Ok(ExtractionOutput {
-            fragments: fallback(source, max_chars, overlap_chars),
-            graph: None,
-        })
-    } else {
-        // The symbol table is complete now, so partitioning resolves forward
-        // references as readily as backward ones. A walk that recorded nothing
-        // produces no graph at all, so assembly skips it.
-        let partitioned = graph_context
-            .is_collecting()
-            .then(|| partition_walk(graph_context, entity_heads));
-        Ok(ExtractionOutput {
-            fragments: output,
-            graph: partitioned,
-        })
+        output = fallback(source, max_chars, overlap_chars);
     }
+    // Import-only barrels still own graph references even though they have no
+    // symbol entities. Their references use the implicit file endpoint.
+    let partitioned = graph_context
+        .is_collecting()
+        .then(|| partition_walk(graph_context, entity_heads));
+    Ok(ExtractionOutput {
+        fragments: output,
+        graph: partitioned,
+    })
 }
 
 fn grammar(format: FileFormat, jsx: bool) -> Option<Language> {
@@ -246,11 +247,9 @@ fn walk_code_node<'tree>(
 
         if is_entity {
             let start_index = out.len();
-            let mut entity_indexes = Vec::new();
             for entity in adapter.resolve_entities(child, source) {
                 let entity_index = graph_context.next_entity_index();
                 first_entity_index.get_or_insert(entity_index);
-                entity_indexes.push(entity_index);
                 scope_entity_index = Some(entity_index);
                 let name = adapter.extract_name(entity, source);
                 let entity_breadcrumb = adapter.scope_breadcrumb(entity, source, breadcrumb);
@@ -282,54 +281,63 @@ fn walk_code_node<'tree>(
                     package: java_package(entity, source, format),
                 });
             }
-            // Name-based references are collected from the first resolved
-            // entity's subtree: the walk does not descend into entity bodies,
-            // so this attributes call sites and inheritance clauses to their
-            // owning entity. A container entity (class/namespace) also walks
-            // as a scope, so its scan must skip nested member subtrees —
-            // those claim their own call sites when the scope recursion
-            // reaches them, and claiming them twice duplicates edges.
-            if let (Some(first_entity_index), Some(first_entity)) =
-                (first_entity_index, out.get(start_index))
-            {
+            // A declaration can emit several object members. Each member owns
+            // its calls and nested definitions, independently of its siblings.
+            for (ordinal, entity) in out.iter().enumerate().skip(start_index) {
+                let entity_index =
+                    first_entity_index.expect("entity ordinal") + ordinal - start_index;
+                let entity_scope = adapter.is_scope(entity.node);
                 let member_owned =
                     |node: Node<'_>| adapter.is_entity(node) || adapter.is_scope(node);
-                let boundary: Option<&dyn Fn(Node<'_>) -> bool> =
-                    is_scope.then_some(&member_owned as &dyn Fn(Node<'_>) -> bool);
-                // A split PHP statement resolves to its elements, so the first
-                // element's subtree misses the initializers of the others,
-                // as in `const A = new Foo, B = new Bar;`.
-                let scanned = if format == FileFormat::Php {
-                    entity_indexes.len()
-                } else {
-                    1
-                };
-                for (offset, entity_index) in entity_indexes.iter().take(scanned).enumerate() {
-                    let entity_node = out[start_index + offset].node;
-                    scan_call_edges(entity_node, *entity_index, source, graph_context, boundary);
-                    scan_binding_declarations(
-                        entity_node,
-                        *entity_index,
-                        source,
-                        format,
-                        graph_context,
-                        boundary,
-                    );
-                }
-                collect_inheritance_edges(
-                    first_entity.node,
+                let has_member_entities =
+                    entity.node.id() == child.id() && out.len() > start_index + 1;
+                let boundary: Option<&dyn Fn(Node<'_>) -> bool> = (entity_scope
+                    || has_member_entities)
+                    .then_some(&member_owned as &dyn Fn(Node<'_>) -> bool);
+                scan_call_edges(entity.node, entity_index, source, graph_context, boundary);
+                scan_binding_declarations(
+                    entity.node,
+                    entity_index,
                     source,
                     format,
-                    first_entity_index,
                     graph_context,
+                    boundary,
                 );
+                collect_inheritance_edges(entity.node, source, format, entity_index, graph_context);
+            }
+            // Synthetic members have no separate declaration walk. Descend their
+            // scopes here; ordinary scope nodes are handled below.
+            let member_scopes: Vec<_> = out[start_index..]
+                .iter()
+                .enumerate()
+                .filter(|(_, entity)| {
+                    entity.node.id() != child.id() && adapter.is_scope(entity.node)
+                })
+                .map(|(offset, entity)| {
+                    let mut scope = entity.breadcrumb.clone();
+                    scope.extend(entity.name.clone());
+                    (
+                        first_entity_index.expect("entity ordinal") + offset,
+                        entity.node,
+                        scope,
+                    )
+                })
+                .collect();
+            for (owner, member, scope) in member_scopes {
+                graph_context.push_scope(owner);
+                walk_code_node(member, adapter, source, &scope, out, graph_context, format);
+                graph_context.pop_scope();
             }
         }
 
         if is_scope {
             let name = adapter.extract_name(child, source);
             let mut child_breadcrumb = breadcrumb.to_vec();
-            if let Some(name) = name {
+            // Static initializers own their direct calls; nested functions
+            // retain the class-qualified names used by call hierarchy clients.
+            if let Some(name) = name
+                && child.kind() != "class_static_block"
+            {
                 child_breadcrumb.push(name);
             }
             let scope_node = adapter.enter_scope_node(child);
@@ -408,15 +416,26 @@ fn append_entity(
     });
 }
 
-// PHP files mix declarations with templates and top-level statements. The
-// source outside every declaration stays searchable as plain-text chunks.
-fn append_php_gaps(
+// PHP retains all code outside declarations. JS/TS also needs the bodies of
+// callbacks with no symbol owner: excluding their local variables must not
+// remove their contents from retrieval. Existing entities remain authoritative.
+fn append_code_gaps(
     source: &TextSource,
     entities: &[CodeEntity<'_>],
+    root: Node<'_>,
+    format: FileFormat,
     max_chars: usize,
     overlap_chars: usize,
     output: &mut Vec<ExtractedEntity>,
 ) {
+    if output.is_empty()
+        || !matches!(
+            format,
+            FileFormat::Php | FileFormat::JavaScript | FileFormat::TypeScript
+        )
+    {
+        return;
+    }
     let mut covered = Vec::with_capacity(entities.len() * 2);
     for entity in entities {
         covered.push((entity.node.start_byte(), entity.node.end_byte()));
@@ -424,7 +443,11 @@ fn append_php_gaps(
         // inherit theirs from the statement, so walk back from there, as
         // `extract_doc` does, leaving comments between elements searchable.
         if entity.documentation.is_some() {
-            let declaration = php_declaration(entity.node);
+            let declaration = if format == FileFormat::Php {
+                php_declaration(entity.node)
+            } else {
+                entity.node
+            };
             let mut sibling = declaration.prev_named_sibling();
             let mut run: Option<(usize, usize)> = None;
             while let Some(comment) = sibling.filter(|node| node.kind() == "comment") {
@@ -448,6 +471,24 @@ fn append_php_gaps(
     }
     gaps.push((offset, source.text.len()));
 
+    if format != FileFormat::Php {
+        let mut callbacks = Vec::new();
+        collect_uncovered_callbacks(root, &gaps, &mut callbacks);
+        gaps = callbacks
+            .into_iter()
+            .flat_map(|(start, end)| {
+                let first = gaps.partition_point(|&(_, gap_end)| gap_end <= start);
+                gaps[first..]
+                    .iter()
+                    .take_while(move |&&(gap_start, _)| gap_start < end)
+                    .map(move |&(gap_start, gap_end)| (start.max(gap_start), end.min(gap_end)))
+            })
+            .collect();
+    }
+    if gaps.is_empty() {
+        return;
+    }
+
     let line_offsets = line_byte_offsets(&source.text);
     let mut gap_source = source.clone();
     for (start, end) in gaps {
@@ -462,6 +503,31 @@ fn append_php_gaps(
         let remapped =
             remap_script_block_entities(source, chunks, output.len(), &line_offsets, text_start);
         output.extend(remapped);
+    }
+}
+
+fn collect_uncovered_callbacks(
+    node: Node<'_>,
+    gaps: &[(usize, usize)],
+    callbacks: &mut Vec<(usize, usize)>,
+) {
+    let first = gaps.partition_point(|&(_, end)| end <= node.start_byte());
+    if gaps
+        .get(first)
+        .is_none_or(|&(start, _)| start >= node.end_byte())
+    {
+        return;
+    }
+    if matches!(
+        node.kind(),
+        "arrow_function" | "function_expression" | "generator_function" | "method_definition"
+    ) {
+        // An outer callback contains its nested callbacks; do not index both.
+        callbacks.push((node.start_byte(), node.end_byte()));
+        return;
+    }
+    for child in named_children(node) {
+        collect_uncovered_callbacks(child, gaps, callbacks);
     }
 }
 
@@ -2314,13 +2380,19 @@ public class Service {
     }
 
     #[test]
-    fn keeps_unclassified_type_declarations_without_value_fallback() {
+    fn classifies_type_declarations_without_value_fallback() {
         let fixtures = [
             (
                 FileFormat::Go,
                 "package demo\ntype UserID int",
                 "UserID",
-                None,
+                Some(SymbolType::Alias),
+            ),
+            (
+                FileFormat::Go,
+                "package demo\ntype Handler func()",
+                "Handler",
+                Some(SymbolType::Alias),
             ),
             (
                 FileFormat::Rust,
@@ -2459,6 +2531,57 @@ public class Service {
             })
             .collect::<Vec<_>>();
         assert_eq!(names, ["limit", "run"]);
+    }
+
+    #[test]
+    fn keeps_unowned_callbacks_searchable_without_local_symbols() {
+        let text = "const head = 1;\n\
+                    function helper() {}\n\
+                    suite('outside', () => {\n\
+                      const expected = 'callbackneedle🙂';\n\
+                      function nested() { return 'ownednested'; }\n\
+                      suite('inside', function() { const inner = 'innerneedle'; helper(); });\n\
+                    });\n\
+                    register({ run() { const methodLocal = 'methodneedle'; } });\n\
+                    const tail = 2;\n\
+                    function covered() { register(() => { const inside = 'coveredneedle'; }); }\n";
+        for format in [FileFormat::JavaScript, FileFormat::TypeScript] {
+            let source = test_source(format, "callbacks", text);
+            for collect_graph in [false, true] {
+                let output = super::extract_for_indexing(
+                    &source,
+                    ChunkOptions {
+                        max_chunk_chars: Some(120),
+                        chunk_overlap_chars: Some(20),
+                    },
+                    collect_graph,
+                )
+                .expect("callback extraction");
+                let names = output
+                    .fragments
+                    .iter()
+                    .filter_map(|entity| match test_metadata(entity) {
+                        Some(EntityMetadata::Code(metadata)) => metadata.symbol_name.as_deref(),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(names, ["head", "helper", "nested", "tail", "covered"]);
+                let anonymous = plain_chunks(&output.fragments).join("\n");
+                assert!(anonymous.contains("callbackneedle🙂"), "{format:?}");
+                assert!(anonymous.contains("innerneedle"), "{format:?}");
+                assert!(anonymous.contains("methodneedle"), "{format:?}");
+                // Bodies already owned by symbols are not duplicated in gap chunks.
+                assert!(!anonymous.contains("ownednested"));
+                assert!(!anonymous.contains("coveredneedle"));
+                for (index, entity) in output.fragments.iter().enumerate() {
+                    assert_source_backed(&source, entity);
+                    assert_eq!(entity.index, index);
+                }
+                if let Some(graph) = output.graph {
+                    assert_eq!(graph.head_fragment_indices.len(), names.len());
+                }
+            }
+        }
     }
 
     #[test]

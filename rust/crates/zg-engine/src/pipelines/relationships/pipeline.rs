@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
 };
 
-use super::storage::RelationshipStorage;
+use super::{rust_modules::RustModules, storage::RelationshipStorage};
 
 use tokio_util::sync::CancellationToken;
 
@@ -15,7 +15,9 @@ use crate::{
         MAX_SYMBOL_MATCHES, RelationshipEdge, RelationshipOptions, RelationshipResult,
         SymbolDefinition, SymbolRelationships,
     },
-    domain::{Entity, EntityId, EntityMetadata, FileEdge, FileRecord, GraphEdgeKind, Range},
+    domain::{
+        Entity, EntityId, EntityMetadata, FileEdge, FileRecord, GraphEdgeKind, Language, Range,
+    },
     pipelines::indexed_search::path_filter::resolve_glob_filter,
     storage::{
         ReadView,
@@ -345,6 +347,7 @@ fn select_symbols(
     }
     let ids = storage.find_symbol_entity_ids(name, filter)?;
     let mut selected = Vec::new();
+    let mut modules = RustModules::default();
     'batches: for batch in ids.chunks(128) {
         let mut owners: HashMap<_, _> = storage
             .fetch_code_metadata(batch)?
@@ -353,21 +356,30 @@ fn select_symbols(
                 (metadata.symbol_name.as_deref() == Some(name)
                     && scope.is_none_or(|scope| {
                         metadata.scope.as_deref().unwrap_or("").replace('.', "::") == scope
+                            || metadata.language == Some(Language::Rust)
                     }))
-                .then_some((id, file_id))
+                .then_some((id, (file_id, metadata)))
             })
             .collect();
         let file_ids: Vec<_> = owners
             .values()
-            .copied()
+            .map(|(file_id, _)| *file_id)
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
         let files = storage.fetch_files(&file_ids)?;
         for id in batch {
-            if let Some(file) = owners.remove(id).and_then(|file_id| files.get(&file_id))
-                && file.index_status().is_indexed()
+            if let Some((file_id, metadata)) = owners.remove(id)
+                && let Some(file) = files
+                    .get(&file_id)
+                    .filter(|file| file.index_status().is_indexed())
             {
+                if let Some(scope) = scope
+                    && metadata.scope.as_deref().unwrap_or("").replace('.', "::") != scope
+                    && !modules.matches_scope(storage, file, &metadata, scope)?
+                {
+                    continue;
+                }
                 selected.push((id.clone(), file.clone()));
                 if selected.len() == limit {
                     break 'batches;

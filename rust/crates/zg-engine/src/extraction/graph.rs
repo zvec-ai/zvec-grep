@@ -80,10 +80,18 @@ pub(crate) struct NameEdge {
     /// Declared type of the bound name for `Declares` edges
     /// (`var x = new X()` → `Some("X")`).
     pub bound_type: Option<String>,
+    /// Exclusive end of a branch/loop-local binding, in source coordinates.
+    pub scope_end: Option<(usize, usize)>,
     /// Argument count at the call site, when the reference is a call.
     pub arity: Option<usize>,
     pub line: usize,
     pub column: usize,
+}
+
+#[derive(Debug)]
+struct BindingScope {
+    bytes: std::ops::Range<usize>,
+    end: Option<(usize, usize)>,
 }
 
 /// Mutable state carried through a single AST walk.
@@ -107,6 +115,9 @@ pub(crate) struct WalkContext {
     /// initializer (`x = makeX()`), `None` marks a name registered with two
     /// different types whose factory answer is ambiguous.
     return_types: HashMap<String, Option<String>>,
+    /// Declaration scopes for assignment lookup, prepared once from the AST.
+    /// This is walk-only state; only the existing `scope_end` travels with edges.
+    binding_scopes: HashMap<String, Vec<BindingScope>>,
     entity_counter: usize,
     /// False when the workspace does not keep a graph: every collector
     /// returns immediately and no buffer is ever filled.
@@ -140,6 +151,7 @@ impl WalkContext {
             scoped_symbols: HashMap::new(),
             seen_name_edges: HashSet::new(),
             return_types: HashMap::new(),
+            binding_scopes: HashMap::new(),
             entity_counter: 0,
             collecting,
         }
@@ -304,6 +316,7 @@ impl WalkContext {
             receiver_name: receiver_name.map(str::to_owned),
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
+            scope_end: None,
             arity,
             line,
             column,
@@ -337,10 +350,53 @@ impl WalkContext {
             receiver_name: None,
             raw_text: None,
             bound_type: Some(bound_type.to_owned()),
+            scope_end: None,
             arity: None,
             line,
             column,
         });
+    }
+
+    pub(crate) fn add_scoped_binding(
+        &mut self,
+        owner: usize,
+        name: &str,
+        ty: &str,
+        start: (usize, usize),
+        end: (usize, usize),
+    ) {
+        if !self.collecting {
+            return;
+        }
+        self.add_declare_binding(owner, name, ty, start.0, start.1);
+        if let Some(binding) = self.name_edges.last_mut() {
+            binding.scope_end = Some(end);
+        }
+    }
+
+    pub(super) fn register_binding_scope(
+        &mut self,
+        name: &str,
+        bytes: std::ops::Range<usize>,
+        end: Option<(usize, usize)>,
+    ) {
+        if !self.collecting {
+            return;
+        }
+        self.binding_scopes
+            .entry(name.to_owned())
+            .or_default()
+            .push(BindingScope { bytes, end });
+    }
+
+    pub(super) fn assignment_scope_end(&self, name: &str, at: usize) -> Option<(usize, usize)> {
+        let root = name.split('.').next().unwrap_or(name);
+        self.binding_scopes
+            .get(root)?
+            .iter()
+            .filter(|scope| scope.bytes.contains(&at))
+            .min_by_key(|scope| scope.bytes.end - scope.bytes.start)
+            .and_then(|scope| scope.end)
     }
 
     /// Registers one function's factory return type: the signature's
@@ -381,6 +437,7 @@ impl WalkContext {
             receiver_name: None,
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
+            scope_end: None,
             arity: None,
             line,
             column,
@@ -408,6 +465,7 @@ impl WalkContext {
             receiver_name: None,
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
+            scope_end: None,
             arity: None,
             line,
             column,
@@ -532,6 +590,7 @@ mod tests {
                 receiver_name: Some("dog".to_owned()),
                 raw_text: Some("dog.bark()".to_owned()),
                 bound_type: None,
+                scope_end: None,
                 arity: Some(2),
                 line: 7,
                 column: 11,

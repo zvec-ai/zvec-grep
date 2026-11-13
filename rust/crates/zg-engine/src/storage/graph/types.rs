@@ -39,6 +39,9 @@ pub(crate) struct NameIndexEntry {
     pub arity: Option<u32>,
     /// Pure declaration without a body (C/C++ prototypes).
     pub is_declaration: bool,
+    /// Java constructor signature, distinct from a method named after its class.
+    /// Derived for the in-memory snapshot; no extra persisted field.
+    pub is_constructor: bool,
     /// The parameter list the declared signature states, whitespace and
     /// pointer/reference spacing normalized; `None` when the signature carries
     /// no parameter list. An equal count can describe a different C++ overload,
@@ -85,6 +88,8 @@ pub(crate) struct DeclaredBinding {
     /// One-based line of the declaring site; rebindings of the same name
     /// shadow earlier ones at later lines.
     pub line: u32,
+    pub column: u32,
+    pub scope_end: Option<(usize, usize)>,
 }
 
 /// Page over pending references. Restart pagination after file mutations.
