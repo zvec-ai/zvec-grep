@@ -862,6 +862,7 @@ async function runServerQuery(
       fuse: options.fuse,
       limit: options.limit,
       trace: options.trace,
+      semantic_features: options.semanticFeatures,
       preferSymbol: options.preferSymbol,
       symbolTypes: options.symbolTypes,
       globs: options.globs,
@@ -975,7 +976,7 @@ function printServerControlStatus(
   if (status.mcpToolset) console.log(`MCP toolset: ${status.mcpToolset}`);
 }
 
-function contextOptions(
+export function contextOptions(
   options: CliOptions,
   queries: readonly string[],
   onAutoUpdateProgress?: (progress: IndexProgress) => void,
@@ -992,6 +993,7 @@ function contextOptions(
     autoUpdate: policy.autoUpdate,
     onAutoUpdateProgress,
     trace: options.trace,
+    semanticFeatures: options.semanticFeatures,
     preferSymbol: options.preferSymbol,
     globs: options.globs,
     insensitiveGlobs: options.insensitiveGlobs,

@@ -58,6 +58,11 @@ export type {
   SearchHitTrace,
   SearchRecallTrace,
   SearchStageTrace,
+  SemanticFeatures,
+  SemanticRepresentation,
+  SemanticSearchTrace,
+  SemanticSearchTraceCandidate,
+  SemanticTraceMode,
   TextContent,
   TimingEntry,
 } from "./engine/types.js";
