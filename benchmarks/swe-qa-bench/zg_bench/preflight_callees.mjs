@@ -22,7 +22,7 @@ async function request(method, params, id) {
     ?.includes("text/event-stream")
     ? text
         .split(/\r?\n/)
-        .filter((line) => line.startsWith("data:"))
+        .filter((line) => line.startsWith("data:") && line.slice(5).trim())
         .map((line) => JSON.parse(line.slice(5)))
         .find((message) => message.id === id)
     : JSON.parse(text);
