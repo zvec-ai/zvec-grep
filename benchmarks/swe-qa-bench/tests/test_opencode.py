@@ -506,6 +506,20 @@ class OpenCodeSamplingContractTests(unittest.TestCase):
                     if use_mcp:
                         self.assertEqual(len(mcp_calls), 2)
                         self.assertTrue(all(c["name"] == "zvec_grep_callees" for c in mcp_calls))
+                        calls = [
+                            json.loads(row["data"])
+                            for row in json.loads(snapshot)
+                            if row["kind"] == "tool"
+                        ]
+                        zg_calls = [call for call in calls if call["zg_state"]]
+                        self.assertEqual(len(zg_calls), 2)
+                        self.assertEqual(len({call["session_id"] for call in zg_calls}), 2)
+                        for call in zg_calls:
+                            state = call["zg_state"]
+                            self.assertEqual(state["status"], "completed")
+                            self.assertEqual(state["input"], {"root": str(corpus), "symbol": "entry"})
+                            self.assertIn("42", state["output"])
+                            self.assertLessEqual(state["time"]["start"], state["time"]["end"])
                         for body in task_requests:
                             names = {t["function"]["name"] for t in body["tools"]}
                             self.assertEqual(

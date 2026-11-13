@@ -64,6 +64,8 @@ empty results and low scores never trigger reruns or prompt tuning. Admission
 requires a completed paired run and at least one voluntary, successful ZG
 callees call returning a source-verified edge. Every trial is retained when
 checking adoption, including rows excluded by the normal summary sensitivity filter.
+The recursive `opencode-session-snapshot.json` retains each zg call's session,
+part/call identifiers, arguments, output, error and timing in `zg_state`.
 
 The callee candidate is provisional until that gate passes. If neither candidate
 qualifies, the change remains a draft with only the two caller additions (22
