@@ -60,9 +60,9 @@ test("the locked suite preserves all original questions, category balance and in
     "swe-qa-bench/zg_bench/swe_qa/data",
   );
   const selectionBytes = await readFile(join(data, "selection.json"));
-  const referenceBytes = await readFile(join(data, "references.json"));
-  assert.equal(sha256(selectionBytes), suite.lock.source.selection_sha256);
-  assert.equal(sha256(referenceBytes), suite.lock.source.references_sha256);
+  const references = await readJson(join(data, "references.json"));
+  // Whole-file hashes identify the historical source snapshot. The E2E suite
+  // can grow while these twenty query, answer and corpus records stay frozen.
   const originals = JSON.parse(selectionBytes).tasks;
   assert.equal(suite.lock.tasks.length, 20);
   assert.equal(
@@ -80,6 +80,27 @@ test("the locked suite preserves all original questions, category balance and in
     assert.ok(original);
     assert.equal(task.query, original.question);
     assert.equal(sha256(task.query), original.question_hash);
+    const reference = references.references.find(
+      (entry) => entry.task_id === task.task_id,
+    );
+    assert.ok(reference);
+    assert.equal(reference.question, task.query);
+    assert.equal(
+      sha256(reference.reference_answer),
+      task.reference_answer_sha256,
+    );
+    for (const key of [
+      "category",
+      "repository",
+      "repository_commit",
+      "source_file",
+      "source_index",
+    ]) {
+      assert.equal(original[key], task[key]);
+      assert.equal(reference[key], task[key]);
+    }
+    assert.equal(original.order, task.order);
+    assert.equal(original.task_slug, task.task_slug);
     const gold = suite.gold[task.task_id];
     assert.equal(gold.status, "reviewed");
     assert.notEqual(gold.review.proposer, gold.review.reviewer);

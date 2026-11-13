@@ -1,4 +1,4 @@
-"""Account for OpenCode's stored session tree without exporting message text.
+"""Account for OpenCode's session tree and retain recursive zg call evidence.
 
 OpenCode 1.18.4 stores per-request usage on assistant messages and repeats it
 on step-finish parts. Only messages contribute tokens; only tool parts
@@ -15,8 +15,8 @@ from typing import Any
 
 
 # Pass as one argv argument to `opencode db ... --format json`. JSON objects
-# keep the three row types distinct without exposing content, tool arguments,
-# tool output, reasoning text, or credentials from the local database.
+# keep row types distinct. Only zg tools retain their full state for source
+# verification; native tool content and message/reasoning text stay excluded.
 USAGE_SQL = """
 SELECT 'session' AS kind,
        json_object('id', id, 'parent_id', parent_id) AS data
@@ -46,7 +46,9 @@ SELECT 'tool' AS kind,
            'session_id', session_id, 'message_id', message_id,
            'name', json_extract(data, '$.tool'),
            'status', json_extract(data, '$.state.status'),
-           'child_session_id', json_extract(data, '$.state.metadata.sessionId')
+           'child_session_id', json_extract(data, '$.state.metadata.sessionId'),
+           'zg_state', CASE WHEN json_extract(data, '$.tool') GLOB 'zvec_grep_*'
+                           THEN json_extract(data, '$.state') END
        ) AS data
 FROM part
 WHERE json_extract(data, '$.type') = 'tool'

@@ -784,10 +784,10 @@ class RunValidationTests(unittest.TestCase):
                             config["provider"][provider_id]["options"]["baseURL"],
                             settings.OPENCODE_CUSTOM_QWEN_BASE_URL,
                         )
-                    self.assertEqual(
-                        config["permission"],
-                        {"websearch": "deny", "webfetch": "deny"},
-                    )
+                    permissions = {"websearch": "deny", "webfetch": "deny"}
+                    if profile == "zvec-grep":
+                        permissions["zvec_grep_*"] = "allow"
+                    self.assertEqual(config["permission"], permissions)
                     for name in (
                         "build", "plan", "general", "explore",
                         "compaction", "title", "summary",
@@ -801,13 +801,11 @@ class RunValidationTests(unittest.TestCase):
                         self.assertEqual(config["agent"][name]["options"]["seed"], 42)
                         self.assertEqual(
                             config["agent"][name]["permission"],
-                            {"websearch": "deny", "webfetch": "deny"},
+                            permissions,
                         )
                     self.assertEqual("mcp" in config, profile == "zvec-grep")
                     configs.append(config)
             self.assertEqual(configs[0]["provider"], configs[1]["provider"])
-            self.assertEqual(configs[0]["agent"], configs[1]["agent"])
-            self.assertEqual(configs[0]["permission"], configs[1]["permission"])
 
     def test_custom_glm_environment_normalizes_and_scrubs_source_key(self) -> None:
         with patch.dict(
@@ -1082,6 +1080,8 @@ class SuiteTierTests(unittest.TestCase):
             ).resolve(),
         )
         self.assertIsNone(external.index_ignore_file)
+        self.assertTrue(swe_qa.graph_index)
+        self.assertFalse(external.graph_index)
         swe_qa_command = runner.build_harbor_command(
             swe_qa,
             profile="zvec-grep",
@@ -1097,6 +1097,12 @@ class SuiteTierTests(unittest.TestCase):
             job_name="external-no-ignore",
         )
         self.assertIn(f"index_ignore_file={swe_qa.index_ignore_file}", swe_qa_command)
+        self.assertIn("graph_index=true", swe_qa_command)
+        baseline_command = runner.build_harbor_command(
+            swe_qa, profile="baseline", agent="opencode",
+            model="custom-openai/glm-5.2", job_name="baseline-no-graph",
+        )
+        self.assertNotIn("graph_index=true", baseline_command)
         self.assertFalse(
             any(value.startswith("index_ignore_file=") for value in external_command)
         )
