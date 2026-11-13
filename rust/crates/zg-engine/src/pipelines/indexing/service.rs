@@ -227,6 +227,16 @@ impl WorkspaceIndexService {
                 .is_some_and(IndexDescriptor::graph_indexing),
             storage_path: storage_path.to_path_buf(),
             embeddings: models.iter().map(|model| model.info().clone()).collect(),
+        })
+        .map_err(|mut error| {
+            if let Some(help) = error.help() {
+                let help = format!(
+                    "{help} Run this command in workspace '{}'.",
+                    workspace.source_root().display()
+                );
+                error = error.with_help(help);
+            }
+            error.with_workspace_root(workspace.source_root())
         })?;
         let writer = self.writers.register(
             crate::pipelines::indexed_search::writer::WriterSession::new(

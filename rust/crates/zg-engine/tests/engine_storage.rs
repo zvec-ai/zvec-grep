@@ -114,10 +114,10 @@ async fn missing_graph_requires_rebuild_and_restores_unchanged_relationships() -
     let engine = ZvecGrep::new();
     let indexed = engine.index(rebuild_options.clone()).await?;
     assert_eq!((indexed.files_added, indexed.files_failed), (2, 0));
-    let original_outgoing = engine.callees(options("stable_caller")).await?;
-    let original_incoming = engine.callers(options("stable_target")).await?;
-    assert_eq!(original_outgoing.matches[0].edges.len(), 1);
-    assert_eq!(original_incoming.matches[0].edges.len(), 1);
+    let outgoing = engine.callees(options("stable_caller")).await?;
+    let callers = engine.callers(options("stable_target")).await?;
+    assert_eq!(outgoing.matches[0].edges.len(), 1);
+    assert_eq!(callers.matches[0].edges.len(), 1);
     engine.close();
 
     let graph_path = root.join(".zvec-grep/index/graph/graph.sqlite");
@@ -129,6 +129,9 @@ async fn missing_graph_requires_rebuild_and_restores_unchanged_relationships() -
     let manifest_path = root.join(".zvec-grep/manifest.json");
     let manifest = fs::read(&manifest_path)?;
     let embedded = server.inputs.load(Ordering::Acquire);
+    let nested = root.join("nested");
+    fs::create_dir(&nested)?;
+    let workspace_root = fs::canonicalize(root)?;
     let engine = ZvecGrep::new();
     engine.enable_read_session_cache()?;
     let search = ContextOptions {
@@ -154,13 +157,18 @@ async fn missing_graph_requires_rebuild_and_restores_unchanged_relationships() -
             .index(index_options(root))
             .await
             .expect_err("incremental indexing cannot recreate a graph"),
+        engine
+            .context(ContextOptions {
+                root: Some(nested.clone()),
+                refresh: Some(RefreshPolicy::Wait),
+                allow_remote: true,
+                ..search.clone()
+            })
+            .await
+            .expect_err("nested refresh must report the parent workspace's missing graph"),
     ] {
-        assert_eq!(error.code(), EngineError::NOT_FOUND);
-        assert!(
-            error
-                .help()
-                .is_some_and(|help| help.contains("zg --index --rebuild --graph"))
-        );
+        assert_missing_graph_error(&error, &workspace_root);
+        assert!(!nested.join(".zvec-grep").exists());
         assert!(!graph_path.exists());
         assert_eq!(fs::read(&manifest_path)?, manifest);
     }
@@ -169,19 +177,21 @@ async fn missing_graph_requires_rebuild_and_restores_unchanged_relationships() -
 
     let rebuilt = engine.index(rebuild_options).await?;
     assert_eq!((rebuilt.files_added, rebuilt.files_failed), (2, 0));
-    assert_eq!(
-        engine.callees(options("stable_caller")).await?,
-        original_outgoing
-    );
-    assert_eq!(
-        engine.callers(options("stable_target")).await?,
-        original_incoming
-    );
+    assert_eq!(engine.callees(options("stable_caller")).await?, outgoing);
+    assert_eq!(engine.callers(options("stable_target")).await?, callers);
     let changed = engine.callees(options("changed_caller")).await?;
     assert_eq!(changed.matches[0].edges.len(), 2);
     assert!(graph_path.is_file());
     engine.close();
     Ok(())
+}
+
+fn assert_missing_graph_error(error: &EngineError, root: &Path) {
+    assert_eq!(error.code(), EngineError::NOT_FOUND);
+    let help = error.help().expect("rebuild guidance");
+    assert!(help.contains("zg --index --rebuild --graph"));
+    assert!(help.contains(root.to_string_lossy().as_ref()));
+    assert_eq!(error.report().workspace_root.as_deref(), Some(root));
 }
 
 #[tokio::test]

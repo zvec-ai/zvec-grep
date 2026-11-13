@@ -1,31 +1,42 @@
 use super::*;
 
 #[tokio::test]
-async fn missing_graph_errors_without_creating_a_database() {
+async fn nested_missing_graph_errors_identify_the_workspace_without_creating_a_database() {
     let fixture = Fixture::new();
+    let nested = fixture.root.join("nested");
+    fs::create_dir(&nested).expect("nested query directory");
     fs::remove_file(&fixture.graph_path).expect("remove graph fixture");
     let engine = &fixture.engine;
+    let options = RelationshipOptions {
+        root: Some(nested.clone()),
+        ..fixture.options("run")
+    };
     for error in [
         engine
-            .callers(fixture.options("run"))
+            .callers(options.clone())
             .await
             .expect_err("missing graph"),
-        engine
-            .callees(fixture.options("run"))
-            .await
-            .expect_err("missing graph"),
+        engine.callees(options).await.expect_err("missing graph"),
     ] {
         assert_eq!(error.code(), EngineError::NOT_FOUND);
         assert!(error.to_string().to_lowercase().contains("graph"));
-        assert!(
-            error
-                .help()
-                .is_some_and(|help| help.contains("zg --index --rebuild --graph"))
+        assert_eq!(
+            error.help().expect("rebuild guidance"),
+            format!(
+                "Rebuild the index with `zg --index --rebuild --graph`. \
+                 Run this command in workspace '{}'.",
+                fixture.root.display()
+            )
+        );
+        assert_eq!(
+            error.report().workspace_root.as_deref(),
+            Some(fixture.root.as_path())
         );
         assert!(
             !fixture.graph_path.exists(),
             "relationship reads never initialize SQLite"
         );
+        assert!(!nested.join(".zvec-grep").exists());
     }
 }
 
@@ -341,6 +352,8 @@ async fn waiting_relationship_reads_leave_the_async_worker_free_and_retain_the_w
 #[tokio::test]
 async fn disabled_workspaces_reject_old_graphs_before_read_admission() {
     let fixture = Fixture::new();
+    let nested = fixture.root.join("nested");
+    fs::create_dir(&nested).expect("nested query directory");
     let manifest = fixture.manifest();
     let disabled = Workspace::new(
         &fixture.root,
@@ -374,6 +387,7 @@ async fn disabled_workspaces_reject_old_graphs_before_read_admission() {
             fs::remove_file(&fixture.graph_path).expect("remove old graph");
         }
         let options = RelationshipOptions {
+            root: Some(nested.clone()),
             lock_timeout_ms: Some(0),
             ..fixture.options("run")
         };
@@ -384,12 +398,20 @@ async fn disabled_workspaces_reject_old_graphs_before_read_admission() {
             let error = result.expect_err("disabled even with an old readable graph");
             assert_eq!(error.code(), EngineError::UNSUPPORTED, "{state}");
             assert!(error.message().contains("disabled"), "{state}: {error}");
-            assert!(
-                error
-                    .help()
-                    .is_some_and(|help| help.contains("zg --index --rebuild --graph")),
+            assert_eq!(
+                error.help().expect("rebuild guidance"),
+                format!(
+                    "Rebuild the index with `zg --index --rebuild --graph`. \
+                     Run this command in workspace '{}'.",
+                    fixture.root.display()
+                ),
                 "{state}: {error}"
             );
+            assert_eq!(
+                error.report().workspace_root.as_deref(),
+                Some(fixture.root.as_path())
+            );
+            assert!(!nested.join(".zvec-grep").exists());
         }
         drop(writer);
     }
