@@ -295,7 +295,7 @@ Intel macOS uses the official precompiled ORT 1.21.0 dylib. ORT is not built
 from source on any published target. The Intel release targets macOS 14 and later.
 
 Windows ARM64 uses `windows-11-arm` with ARM64 Node, Rust, and MSVC. It uses
-zvec-rust 0.8.0's automatically selected Windows ARM64 prebuilt SDK instead of
+zvec-rust 0.8.1's automatically selected Windows ARM64 prebuilt SDK instead of
 building zvec from source. The shared DLL is staged by zvec-rust-build and
 bundled in `@zvec/zvec-grep-win32-arm64-msvc`. ONNX Runtime uses the official
 ARM64 DirectML 1.21.0 NuGet runtime and Microsoft.AI.DirectML 1.15.4, with
