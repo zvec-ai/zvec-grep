@@ -119,7 +119,9 @@ OpenCode 的两个 profile、子代理和评审统一使用所选模型，并请
 
 [百炼 Chat Completions 文档](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions) 说明了模型间的参数差异：Qwen3.8 Max 在思考模式下会将低于 `0.6` 的温度自动调整为 `0.6`，并将 `reasoning_effort="high"` 映射为 `xhigh`。因此此配置下 Qwen 的**实际温度不是零**。此外，`max_tokens=32000` 对 Qwen 只限制最终回答，不包含思考；对未设置 `thinking_budget` 的 GLM-5.2 则限制思考与回答的总和。本 benchmark 保留相同请求字段，但两个模型的实际采样设置和 token 预算并不完全相同。
 
-Qwen3.8 Max 默认开启 `preserve_thinking`。OpenCode 模型配置设置 `interleaved: {"field": "reasoning_content"}`，将历史思考内容通过独立的 `reasoning_content` 字段回传，不拼入回答正文。参见[深度思考用法](https://help.aliyun.com/zh/model-studio/deep-thinking)和[Qwen3.8 Max 模型信息](https://help.aliyun.com/zh/model-studio/qwen3-8-max)。原有独立的 Qwen3.7 配置仍保持关闭 thinking。
+Qwen3.8 Max（custom-openai）和 GLM-5.2（custom-openai / DashScope）均显式设置 `interleaved: {"field": "reasoning_content"}`，通过独立字段回传历史思考，不拼入回答正文 `content`。这是 OpenCode 的消息映射配置，不是开启 thinking 的开关。百炼的默认策略分别是 Qwen `preserve_thinking=true` 和 GLM `clear_thinking=false`，两者均使用客户端传入的历史思考；Qwen 要求完整回传，不能通过漏传来降低 token。参见[百炼 Chat 参数说明](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)和[GLM 文档](https://help.aliyun.com/zh/model-studio/glm)。原有独立的 Qwen3.7 配置仍保持关闭 thinking。
+
+**历史配置解读：**旧 GLM 配置缺少显式 `interleaved` 字段，不代表没有回传历史思考。已核验的 OpenCode `1.18.4`、`ai 6.0.168` 和 `@ai-sdk/openai-compatible 2.0.41` 中，默认 SDK 路径与显式映射都将非空思考写入 `reasoning_content`；空思考时可能仅有省略字段与空字符串的差别。显式统一配置是为了明确契约，不能据此改写历史报告或推断旧 GLM 没有回传。这是客户端行为验证，并非逐条审计历史 HTTP 请求；相同回传行为也不表示两模型思考量、实际预算或缓存成本相同。
 
 执行和评审请求均不传入 `response_format`。评审提示词仍要求 JSON，并保留严格的评分解析与格式错误重试；报告元数据记录 `response_format = null`，表示请求未强制响应格式。
 
@@ -127,7 +129,7 @@ OpenCode 配置同时声明模型支持 temperature，并为所有内置 agent�
 
 两个 OpenCode profile 在全局及全部内置 agent（包含子代理）统一禁止 `websearch` 和 `webfetch`。即使 Harbor 跳过交互式权限确认，这两个工具也不会出现在发给模型的工具列表中。本地仓库搜索、文件读取和 zvec-grep MCP 仍可使用。这是网页工具限制，并非容器网络隔离；shell 命令及安装、模型连接仍可访问网络。
 
-CI 还会使用锁定版本的 OpenCode 连接本地模拟服务，验证连续工具调用请求中的采样参数、开启 Qwen3.8 Max / GLM thinking、实际 HTTP 字段 `reasoning_effort = "high"`、网页工具限制，以及 Qwen 历史 `reasoning_content` 字段的回传，不需要模型凭证。
+CI 使用锁定版本的 OpenCode 连接本地模拟服务，检查实际 HTTP 请求中的采样参数、Qwen3.8 Max / GLM thinking、`reasoning_effort = "high"` 和网页工具限制。历史思考检查覆盖两模型的工具调用和子代理续接、多段 SSE 思考、空思考，以及旧配置无显式映射的路径，确认 `reasoning_content` 完整回传且不混入正文。测试不需要模型凭证，也不测量百炼的在线质量或计费影响。
 
 每个任务在同一个 runner 上运行 Baseline 和 zvec-grep，对配对结果进行评审，并将 Harbor 运行证据和独立任务报告上传为 artifacts。全部任务完成后生成聚合报告；部分任务失败时，Summary 仍展示已完成任务的报告，不将不完整结果作为完整 benchmark 聚合。
 

@@ -54,6 +54,8 @@ class OpenCodeModel:
     reasoning_effort: str | None = None
     output_limit: int | None = None
     display_name: str | None = None
+    # Explicit OpenCode field mapping, not a switch for retaining reasoning.
+    # The compatible SDK can serialize reasoning parts without this mapping.
     interleaved: bool = False
 
     @property
@@ -105,6 +107,7 @@ AGENT_MODEL_SUPPORT: tuple[AgentModelSupport, ...] = (
             enable_thinking=_GLM_REQUEST.enable_thinking,
             reasoning_effort=_GLM_REQUEST.reasoning_effort,
             output_limit=_GLM_REQUEST.max_tokens,
+            interleaved=True,
         ),
     ),
     AgentModelSupport(
@@ -121,6 +124,7 @@ AGENT_MODEL_SUPPORT: tuple[AgentModelSupport, ...] = (
             reasoning_effort=_GLM_REQUEST.reasoning_effort,
             output_limit=_GLM_REQUEST.max_tokens,
             display_name="GLM 5.2",
+            interleaved=True,
         ),
     ),
     AgentModelSupport(
