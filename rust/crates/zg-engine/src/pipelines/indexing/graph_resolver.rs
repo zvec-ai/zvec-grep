@@ -600,7 +600,7 @@ fn bare_name_outcome(
     store: &IndexStore,
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
-    hits: Vec<NameIndexEntry>,
+    hits: Vec<&NameIndexEntry>,
     caches: &mut RuleCaches,
 ) -> crate::EngineResult<Outcome> {
     if import_is_stale(store, snapshot, stored, &hits, caches)? {
@@ -622,8 +622,10 @@ fn bare_name_outcome(
         // declaration entities, so a pending bare call can only mean this
         // one indexed location — provided the caller can see it. A definition
         // nested in another scope is a local there, and file membership alone
-        // never makes it the caller's binding.
-        if declares_in(hit, &visible) {
+        // never makes it the caller's binding. A construction names the class
+        // whose constructor answers it, which the class owns rather than the
+        // caller's scope.
+        if declares_in(hit, &visible) || construction_names(stored, hit) {
             return Ok(Outcome::Resolved {
                 resolution: Resolution {
                     ref_id: stored.id,
@@ -833,6 +835,12 @@ fn enclosing_scope_hits<'s>(
     if !matches!(stored.language.as_str(), "c" | "cpp") || hits.len() < 2 {
         return hits;
     }
+    // A call that spells the scope it reaches (`Base::foo()`) states its own
+    // binding: the caller's class is no evidence about where that scope is, and
+    // narrowing to it would hide the member the call names.
+    if spells_a_scope(stored) {
+        return hits;
+    }
     let Some(owner) = snapshot.entity_record(&stored.reference.owner_id) else {
         return hits;
     };
@@ -862,6 +870,28 @@ fn enclosing_scopes(qualified_name: &str) -> Vec<&str> {
         current = scope;
     }
     scopes
+}
+
+/// Whether the call site spells a declaring scope rather than a value:
+/// `Base::foo()` versus `x.foo()`. The stored spelling is the callee as the
+/// source wrote it, so a `::` before the member name marks the qualified form
+/// (a leading `::` alone is the global qualifier of a bare name).
+fn spells_a_scope(stored: &StoredPendingRef) -> bool {
+    let Some(raw) = stored
+        .reference
+        .metadata
+        .get("rawText")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let callee = raw
+        .split(['(', '<'])
+        .next()
+        .unwrap_or(raw)
+        .trim()
+        .trim_start_matches("::");
+    callee.contains("::")
 }
 
 /// Keeps only the candidates a call can reach.
@@ -914,12 +944,41 @@ fn callable_targets<'s>(
                 .filter(|hit| is_construction_target(hit))
                 .collect();
         }
+        // C and C++ `new X()` builds through the constructor the index mints
+        // under `X::X`, so the class itself cannot answer the call. The
+        // bare-call rule stays off too: it guards against borrowing a member of
+        // the enclosing class, while a construction names its own type.
+        return hits
+            .into_iter()
+            .filter(|hit| is_constructor_of(&stored.name_tail, &hit.qualified_name))
+            .collect();
     }
     let bare = stored.reference.receiver_name.is_none() && stored.language != "java";
     hits.into_iter()
         .filter(|hit| is_callable_symbol(hit))
         .filter(|hit| !bare || !bare_call_borrows_a_member(snapshot, hit, owner_is_type))
         .collect()
+}
+
+/// Whether a candidate is the constructor a construction site names.
+///
+/// The index mints a constructor under its class's own name (`X::X`,
+/// `ns::X::X`), so the last two segments repeat. The class itself keeps its
+/// namespace as the owner and is not that entity.
+fn is_constructor_of(name: &str, qualified_name: &str) -> bool {
+    let Some((scope, tail)) = qualified_name.rsplit_once("::") else {
+        return false;
+    };
+    tail == name && scope.rsplit("::").next() == Some(tail)
+}
+
+/// Whether the reference is a construction site that names the candidate's
+/// class. The class owns its constructor, so such a site reaches it from any
+/// scope, unlike a bare call to a function declared elsewhere in the file.
+fn construction_names(stored: &StoredPendingRef, hit: &NameIndexEntry) -> bool {
+    construction_site(stored).is_some()
+        && matches!(stored.language.as_str(), "c" | "cpp")
+        && is_constructor_of(&stored.name_tail, &hit.qualified_name)
 }
 
 /// The construction form extraction recorded for the reference: `"value"` for
@@ -1131,9 +1190,10 @@ fn split_parameters(list: &str) -> Vec<&str> {
 /// definition or one declared in an enclosing function — and that binding is
 /// what the call or base clause means. Import, export and argument-count rules
 /// answer the namespace a module publishes instead, so a name this file binds
-/// is settled among this file's own candidates: one binding is the target, and
-/// several leave the reference ambiguous rather than falling through to a rule
-/// that describes a different scope. A receiver names a member, and an import
+/// is settled among this file's own candidates: one binding is the target,
+/// and several leave the reference ambiguous rather than falling through to a
+/// rule that describes a different scope — unless the call's argument count
+/// picks one of the file's overloads. A receiver names a member, and an import
 /// statement addresses a module, so neither reads a lexical binding.
 fn resolve_lexical_binding(
     snapshot: &ResolutionSnapshot,
@@ -1158,6 +1218,22 @@ fn resolve_lexical_binding(
         .filter(|hit| declares_in(hit, visible))
         .copied()
         .collect();
+    // One file may bind the name to several overloads (`send(int)` and
+    // `send(int, int)`), and the call's argument count still names one of them:
+    // the counts are read before the set is called ambiguous.
+    if lexical.len() > 1
+        && let Some(expected) = stored.reference.arity
+        && let Some(hit) = unique_arity_match(lexical.iter().copied(), expected)
+    {
+        return Some(Outcome::Resolved {
+            resolution: Resolution {
+                ref_id: stored.id,
+                target_id: hit.entity_id.clone(),
+                provenance: EdgeProvenance::ArityBound,
+            },
+            rule: Rule::ArityBound,
+        });
+    }
     match lexical.as_slice() {
         [] => None,
         [hit] => Some(Outcome::Resolved {
@@ -3128,6 +3204,19 @@ fn spelled_under<'a>(hits: &[&'a NameIndexEntry], bound_type: &str) -> Vec<&'a N
         .collect()
 }
 
+/// The candidates a spelling qualified from the global namespace names:
+/// `::upb::Arena` selects `upb::Arena` alone, while `hpb::upb::Arena` is a
+/// class of another scope that merely repeats the tail.
+fn global_spelled_under<'a>(
+    hits: &[&'a NameIndexEntry],
+    bound_type: &str,
+) -> Vec<&'a NameIndexEntry> {
+    hits.iter()
+        .filter(|hit| hit.qualified_name == bound_type)
+        .copied()
+        .collect()
+}
+
 /// How many steps one receiver path or type spelling may take before the
 /// evidence stops being a spelling and becomes a guess (`A<B>::C::D` chains and
 /// member types that name each other).
@@ -3240,7 +3329,12 @@ fn type_root_scope_in(
     if depth > MAX_TYPE_STEPS {
         return Ok(None);
     }
-    let head = type_head(&pointee_type(type_text));
+    let spelled = pointee_type(type_text);
+    let head = type_head(&spelled);
+    // A spelling that starts at the global namespace (`::upb::Arena`) names one
+    // class wherever the call stands: `hpb::upb::Arena` repeats the tail but is
+    // a different class, so only the exact name answers it.
+    let global = spelled.trim_start().starts_with("::");
     let Some(tail) = head.rsplit("::").next() else {
         return Ok(None);
     };
@@ -3260,6 +3354,7 @@ fn type_root_scope_in(
         .lookup_candidates(tail)
         .map(|hits| hits.iter().collect::<Vec<&NameIndexEntry>>())
     {
+        Some(hits) if global => Some(global_spelled_under(&hits, &head)),
         Some(hits) if head.contains("::") => Some(spelled_under(&hits, &head)),
         Some(hits) => {
             // A class the call is written in answers the name before the

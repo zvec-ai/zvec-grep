@@ -371,14 +371,19 @@ fn visit_for_calls(
             let column = node.start_position().column;
             let constructs = construction_site(node);
             if constructs.is_some() {
+                // A construction names its type, and that spelling — `X` after the
+                // `new` keyword — is where the call stands.
+                let position = node
+                    .child_by_field_name("type")
+                    .map_or_else(|| node.start_position(), |spelled| spelled.start_position());
                 context.add_construction_edge(
                     owner_index,
                     &ref_name,
                     receiver_name.as_deref(),
                     Some(callee.as_str()),
                     call_arity_of(node),
-                    line,
-                    column,
+                    position.row + 1,
+                    position.column,
                     constructs,
                 );
             } else {
@@ -402,6 +407,22 @@ fn visit_for_calls(
                 );
             }
         }
+    } else if node.kind() == "compound_literal_expression"
+        && let Some((name, position)) = constructed_type_name(node, source)
+    {
+        // `X{}` builds a value through the same constructor `X(…)` reaches, but
+        // the grammar spells it as a literal rather than a call, so the type
+        // field is the whole call site.
+        context.add_construction_edge(
+            owner_index,
+            &name,
+            None,
+            Some(&name),
+            call_arity_of(node),
+            position.row + 1,
+            position.column,
+            Constructs::New,
+        );
     }
     for child in named_children(node) {
         if is_call_scan_barrier(child) || boundary.is_some_and(|owns| owns(child)) {
@@ -409,6 +430,20 @@ fn visit_for_calls(
         }
         visit_for_calls(child, owner_index, source, context, boundary);
     }
+}
+
+/// The plain type a brace construction builds and where it is written:
+/// `X{}` names `X` at that spelling. A template or qualified spelling names a
+/// type the bare-name resolution cannot place, so it stays unreported.
+fn constructed_type_name(node: Node<'_>, source: &[u8]) -> Option<(String, tree_sitter::Point)> {
+    let spelled = node.child_by_field_name("type")?;
+    if spelled.kind() != "type_identifier" {
+        return None;
+    }
+    Some((
+        node_text(spelled, source).to_owned(),
+        spelled.start_position(),
+    ))
 }
 
 /// Where a call node stands relative to building a value: a `new X()` site, a
