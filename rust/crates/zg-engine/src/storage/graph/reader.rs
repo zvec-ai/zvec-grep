@@ -122,7 +122,7 @@ impl SqliteGraphStorage {
     pub(crate) fn declared_bindings(&self, owner_id: &str) -> Result<Vec<DeclaredBinding>> {
         nonempty(owner_id)?;
         let mut statement = self.connection.prepare(
-            "SELECT reference_name, metadata, line FROM edges
+            "SELECT reference_name, metadata, line, col FROM edges
              WHERE source = ?1 AND kind = 'declares' ORDER BY line, id",
         )?;
         let rows = statement.query_map([owner_id], |row| {
@@ -132,11 +132,23 @@ impl SqliteGraphStorage {
                 .get("type")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
+            let until = metadata
+                .get("until")
+                .and_then(Value::as_u64)
+                .and_then(|line| u32::try_from(line).ok());
             let line: i64 = row.get(2)?;
+            // Optional evidence may be absent or use an older encoding. Keep
+            // reading the declaration even when this field cannot be decoded.
+            let scope_end = metadata
+                .get("scope_end")
+                .and_then(|value| serde_json::from_value(value.clone()).ok());
             Ok(DeclaredBinding {
                 name,
                 bound_type: bound_type.to_owned(),
                 line: u32::try_from(line).unwrap_or_default(),
+                until,
+                column: u32::try_from(row.get::<_, i64>(3)?).unwrap_or_default(),
+                scope_end,
             })
         })?;
         Ok(rows
@@ -205,4 +217,45 @@ fn edge_from_row(row: &Row<'_>) -> rusqlite::Result<FileEdge> {
         provenance: decode_enum(row.get(5)?)?,
         metadata: decode_metadata(&row.get::<_, String>(6)?)?,
     })
+}
+
+impl SqliteGraphStorage {
+    /// The preprocessor directives one file spells, in source order. The
+    /// resolver replays them against the include a call site sees, so this is
+    /// the file's own list rather than anything the include chain contributes.
+    ///
+    /// # Errors
+    /// Propagates SQLite errors and invalid stored metadata.
+    pub(crate) fn preprocessor_directives(
+        &self,
+        file_id: u32,
+    ) -> Result<Vec<crate::domain::PreprocessorDirective>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT directives FROM zg_file_preprocessor WHERE file_id = ?1")?;
+        let rows = statement.query_map([file_id], |row| row.get::<_, String>(0))?;
+        let mut directives = Vec::new();
+        for row in rows {
+            directives = serde_json::from_str(&row?)?;
+        }
+        Ok(directives)
+    }
+
+    /// Names of the bare calls one file still leaves pending.
+    ///
+    /// These are the names the macro replay has to answer for: a call the
+    /// resolver already bound is not re-examined until a write requeues it, and
+    /// only a bare call can spell a macro — `x.TRACE()` names a member.
+    ///
+    /// # Errors
+    /// Propagates SQLite errors.
+    pub(crate) fn pending_call_names(&self, file_id: u32) -> Result<Vec<String>> {
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT name_tail FROM edges
+             WHERE file_id = ?1 AND kind = 'calls' AND reference_name IS NOT NULL
+               AND receiver_name IS NULL AND status = 'pending'",
+        )?;
+        let rows = statement.query_map([file_id], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
 }

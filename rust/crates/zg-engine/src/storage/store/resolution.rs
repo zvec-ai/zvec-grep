@@ -123,6 +123,34 @@ impl ResolutionSnapshot {
             .copied()
             .filter(|file_id| self.paths.indexed.contains(file_id))
     }
+
+    /// Whether the workspace holds a Python module of this name anywhere: a
+    /// `name.py` at any depth, or a package directory named `name`. A module
+    /// root the path rules do not know (a `pyproject` extra path) still counts,
+    /// so this answers "does the name exist at all", not "can it be imported".
+    pub(crate) fn has_python_module(&self, name: &str) -> bool {
+        let file = format!("/{name}.py");
+        let package = format!("/{name}/");
+        self.paths.known.iter().any(|path| {
+            path == &file[1..]
+                || path.ends_with(&file)
+                || path == &package[1..]
+                || path.ends_with(&package)
+                || path.contains(&package)
+        })
+    }
+
+    /// Whether any known workspace path sits at `base` or under it: the file
+    /// itself with any extension, or a directory tree rooted there.
+    pub(crate) fn has_path_under(&self, base: &str) -> bool {
+        let directory = format!("{base}/");
+        self.paths.known.iter().any(|path| {
+            path == base
+                || path.starts_with(&directory)
+                // `./helper` names `helper.ts` as much as `helper/index.ts`.
+                || path.rsplit_once('.').is_some_and(|(stem, _)| stem == base)
+        })
+    }
 }
 
 /// Path spellings of every file snapshot, partitioned by publication state.
@@ -187,21 +215,44 @@ impl SymbolIndex {
                 None => name.clone(),
             };
             let arity = metadata.arity.and_then(|arity| u32::try_from(arity).ok());
-            index
-                .names
-                .entry(name.clone())
-                .or_default()
-                .push(NameIndexEntry {
-                    entity_id: entity_id.clone(),
-                    file_id: file_id.get(),
-                    qualified_name: qualified_name.clone(),
-                    symbol_type: metadata.symbol_type,
-                    is_exported: metadata.is_exported,
-                    arity,
-                    is_declaration: metadata.is_declaration,
-                    parameters: parameter_evidence(metadata.signature.as_deref()),
-                    package: metadata.package.clone(),
-                });
+            let entry = NameIndexEntry {
+                entity_id: entity_id.clone(),
+                file_id: file_id.get(),
+                qualified_name: qualified_name.clone(),
+                symbol_type: metadata.symbol_type,
+                is_exported: metadata.is_exported,
+                arity,
+                is_declaration: metadata.is_declaration,
+                is_constructor: metadata
+                    .language
+                    .is_some_and(|language| language.as_str() == "java")
+                    && metadata
+                        .signature
+                        .as_deref()
+                        .is_some_and(|signature| java_constructor_signature(signature, &name)),
+                parameters: parameter_evidence(metadata.signature.as_deref()),
+                package: metadata.package.clone(),
+                has_internal_linkage: metadata.has_internal_linkage,
+                declares_type: metadata.declares_type,
+                alias_of: metadata.alias_of.clone(),
+                object_members: metadata.object_members.clone(),
+                overwritten_by: metadata.overwritten_by.clone(),
+            };
+            // An `export { local as exported }` clause publishes this
+            // declaration under another name without the declaration spelling
+            // it, so the index answers that name too: a call or import written
+            // through it reaches this one entity.
+            for exported in &metadata.exported_as {
+                index
+                    .names
+                    .entry(exported.clone())
+                    .or_default()
+                    .push(NameIndexEntry {
+                        is_exported: true,
+                        ..entry.clone()
+                    });
+            }
+            index.names.entry(name.clone()).or_default().push(entry);
             index.records.insert(
                 entity_id.clone(),
                 EntityRecord {
@@ -289,6 +340,57 @@ fn outer_parameter_group(signature: &str) -> Option<(usize, usize)> {
         }
     }
     group
+}
+
+/// Constructors have no return type. Skip annotations, visibility and generic
+/// parameters before the class name; `void X()` is a method, not X's constructor.
+fn java_constructor_signature(signature: &str, name: &str) -> bool {
+    let Some((start, _)) = outer_parameter_group(signature) else {
+        return false;
+    };
+    let Some(mut prefix) = signature[..start - 1].trim().strip_suffix(name) else {
+        return false;
+    };
+    loop {
+        prefix = prefix.trim();
+        if prefix.is_empty() {
+            return true;
+        }
+        if let Some(rest) = ["public", "protected", "private"]
+            .into_iter()
+            .find_map(|modifier| prefix.strip_prefix(modifier))
+            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            prefix = rest;
+            continue;
+        }
+        if let Some(annotation) = prefix.strip_prefix('@') {
+            prefix = annotation
+                .trim_start_matches(|c: char| c.is_alphanumeric() || matches!(c, '_' | '$' | '.'));
+            if !prefix.starts_with('(') {
+                continue;
+            }
+        }
+        let (open, close) = match prefix.chars().next() {
+            Some('(') => ('(', ')'),
+            Some('<') => ('<', '>'),
+            _ => return false,
+        };
+        let mut depth = 0usize;
+        let end = prefix.char_indices().find_map(|(offset, c)| {
+            if c == open {
+                depth += 1;
+            } else if c == close {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(offset + c.len_utf8());
+                }
+            }
+            None
+        });
+        let Some(end) = end else { return false };
+        prefix = &prefix[end..];
+    }
 }
 
 /// Whether the text before a parenthesis and its body spell a function
@@ -609,6 +711,34 @@ impl IndexStore {
             }
             graph(state)?
                 .import_references(file_id)
+                .map_err(graph_error)
+        })
+    }
+
+    /// The preprocessor directives of one Indexed file, in source order.
+    pub(crate) fn preprocessor_directives(
+        &self,
+        file_id: u32,
+    ) -> EngineResult<Vec<crate::domain::PreprocessorDirective>> {
+        self.read(|state| {
+            if !is_indexed(state, file_id)? {
+                return Ok(Vec::new());
+            }
+            graph(state)?
+                .preprocessor_directives(file_id)
+                .map_err(graph_error)
+        })
+    }
+
+    /// Names of the bare calls one file still leaves pending, the watch set of
+    /// the macro replay.
+    pub(crate) fn pending_call_names(&self, file_id: u32) -> EngineResult<Vec<String>> {
+        self.read(|state| {
+            if !is_indexed(state, file_id)? {
+                return Ok(Vec::new());
+            }
+            graph(state)?
+                .pending_call_names(file_id)
                 .map_err(graph_error)
         })
     }

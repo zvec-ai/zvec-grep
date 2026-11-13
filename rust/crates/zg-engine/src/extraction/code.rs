@@ -5,16 +5,22 @@ pub(crate) use outline::code_outline;
 
 use tree_sitter::{Language, Node, Parser};
 
+use std::collections::HashMap;
+
 use crate::{
     EngineError,
-    domain::{CodeMetadata, Content, EntityMetadata, FileFormat, Range, SymbolType},
+    domain::{CodeMetadata, Content, EntityMetadata, FileFormat, MemberAlias, Range, SymbolType},
     utils::line_byte_offsets,
 };
 
-use self::adapter::{LanguageAdapter, named_children, php_declaration, resolve_adapter};
+use self::adapter::{
+    LanguageAdapter, declares_type, named_children, object_member_aliases, overwritten_by,
+    php_declaration, resolve_adapter, text,
+};
 use super::graph::{
-    WalkContext, collect_import_edge, collect_inheritance_edges, is_import_node, partition_walk,
-    scan_binding_declarations, scan_call_edges, scan_return_types,
+    WalkContext, alias_target_of, collect_import_edge, collect_inheritance_edges, is_import_node,
+    partition_walk, scan_binding_declarations, scan_call_edges, scan_preprocessor,
+    scan_return_types,
 };
 use super::{
     ChunkOptions, ExtractedEntity, ExtractionOutput, TextRange, TextSource,
@@ -91,24 +97,15 @@ fn extract_code(
     let Some((adapter, language, code_format)) =
         format.and_then(|format| Some((resolve_adapter(format)?, grammar(format, jsx)?, format)))
     else {
-        return Ok(ExtractionOutput {
-            fragments: fallback(source, max_chars, overlap_chars),
-            graph: None,
-        });
+        return Ok(fallback_output(source, max_chars, overlap_chars));
     };
 
     let mut parser = Parser::new();
     if parser.set_language(&language).is_err() {
-        return Ok(ExtractionOutput {
-            fragments: fallback(source, max_chars, overlap_chars),
-            graph: None,
-        });
+        return Ok(fallback_output(source, max_chars, overlap_chars));
     }
     let Some(tree) = parser.parse(&source.text, None) else {
-        return Ok(ExtractionOutput {
-            fragments: fallback(source, max_chars, overlap_chars),
-            graph: None,
-        });
+        return Ok(fallback_output(source, max_chars, overlap_chars));
     };
     let bytes = source.text.as_bytes();
     let mut entities = Vec::new();
@@ -124,6 +121,10 @@ fn extract_code(
     // initializer binds its factory even when the factory is spelled after
     // the caller in this file.
     scan_return_types(tree.root_node(), bytes, code_format, &mut graph_context);
+    // Directives describe the file rather than any entity, so they are read
+    // once from the root: the resolver replays them to decide whether a call
+    // site's name was already a macro in that translation unit.
+    graph_context.register_preprocessor(scan_preprocessor(tree.root_node(), bytes, code_format));
     walk_code_node(
         tree.root_node(),
         adapter,
@@ -133,6 +134,9 @@ fn extract_code(
         &mut graph_context,
         code_format,
     );
+    // `export { realImpl as aliasName }` renames a declaration from a
+    // statement of its own, so the walk cannot see it from the declaration.
+    attach_export_aliases(tree.root_node(), bytes, code_format, &mut entities);
 
     let mut output = Vec::new();
     let mut entity_heads = Vec::with_capacity(entities.len());
@@ -142,14 +146,29 @@ fn extract_code(
         entity_heads.push(output.len());
         append_entity(source, entity, max_chars, overlap_chars, &mut output);
     }
-    // Gap chunks follow every entity, so they leave the head indexes intact.
-    if code_format == FileFormat::Php && !output.is_empty() {
-        append_php_gaps(source, &entities, max_chars, overlap_chars, &mut output);
-    }
+    // Anonymous retrieval chunks follow the symbols, preserving graph ordinals.
+    append_code_gaps(
+        source,
+        &entities,
+        tree.root_node(),
+        code_format,
+        max_chars,
+        overlap_chars,
+        &mut output,
+    );
     if output.is_empty() {
+        // A file that declares no entity the walk could bound still describes
+        // its translation units when it carries preprocessor directives — a
+        // header of nothing but `#define`s and `#include`s is exactly that, and
+        // the resolver needs those directives to read the includer's macro
+        // state. The graph is therefore kept when the scan recorded one.
+        let partitioned = graph_context
+            .is_collecting()
+            .then(|| partition_walk(graph_context, entity_heads))
+            .filter(|graph| !graph.directives.is_empty());
         Ok(ExtractionOutput {
             fragments: fallback(source, max_chars, overlap_chars),
-            graph: None,
+            graph: partitioned,
         })
     } else {
         // The symbol table is complete now, so partitioning resolves forward
@@ -203,6 +222,25 @@ fn fallback(source: &TextSource, max_chars: usize, overlap_chars: usize) -> Vec<
     extract_plain_text_entities(source, max_chars, overlap_chars)
 }
 
+/// What a file no adapter parses still yields: its text, chunked, and no
+/// graph. Nothing was walked, so there are no edges to partition.
+fn fallback_output(
+    source: &TextSource,
+    max_chars: usize,
+    overlap_chars: usize,
+) -> ExtractionOutput {
+    ExtractionOutput {
+        fragments: fallback(source, max_chars, overlap_chars),
+        graph: None,
+    }
+}
+
+// The flags carry independent extraction facts; the entity is the one place
+// they are gathered before metadata is written.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is a separate extracted fact carried into metadata"
+)]
 #[derive(Debug)]
 struct CodeEntity<'tree> {
     node: Node<'tree>,
@@ -223,12 +261,228 @@ struct CodeEntity<'tree> {
     /// The Java `package` this source declares, empty for the default package;
     /// `None` for every other language.
     package: Option<String>,
+    /// Whether a C/C++ declaration has internal linkage (unnamed namespace or
+    /// file-scope `static`), so only its own file can address it by name.
+    has_internal_linkage: bool,
+    /// Whether this entity introduces a type's name, as opposed to carrying it
+    /// (`impl Target`, which is a scope named after the type it implements).
+    declares_type: bool,
+    /// Name this entity is another spelling of, when its initializer is a bare
+    /// name (`const dispatch = send`). Bare calls through the alias reach the
+    /// aliased function, and an import of the alias follows the same link.
+    alias_of: Option<String>,
+    /// Properties an object literal initializer binds (`{ run: right }`), in
+    /// the literal's order, a later property replacing an earlier one of its
+    /// key. A member call on this entity reaches the value its key last named.
+    object_members: Vec<MemberAlias>,
+    /// Value a later property of the same key replaces this declaration with.
+    overwritten_by: Option<String>,
+    /// Names an `export { local as exported }` clause republishes this
+    /// declaration under. The clause is a statement of its own, so the
+    /// declared node never spells these names; they are attached after the
+    /// walk from a scan of the file's export clauses, and an import of one
+    /// binds to the declaration it renames.
+    exported_as: Vec<String>,
 }
 
-// The entity branch shares first/scope entity indices and the scope boundary
-// with the call, binding and inheritance scans below it; extracting it would
-// force an eight-argument helper, trading one lint for another.
+// A node's entities and their scans share one index sequence and one
+// boundary; splitting the entity branch from the scope descent keeps both in
+// one place for the walk and for the types a body declares.
 #[allow(clippy::too_many_lines)]
+fn walk_entity_node<'tree>(
+    child: Node<'tree>,
+    adapter: &LanguageAdapter,
+    source: &[u8],
+    breadcrumb: &[String],
+    out: &mut Vec<CodeEntity<'tree>>,
+    graph_context: &mut WalkContext,
+    format: FileFormat,
+) -> Option<usize> {
+    let start_index = out.len();
+    let mut first_entity_index = None;
+    let mut scope_entity_index = None;
+    for entity in adapter.resolve_entities(child, source) {
+        let entity_index = graph_context.next_entity_index();
+        first_entity_index.get_or_insert(entity_index);
+        scope_entity_index = Some(entity_index);
+        let name = adapter.extract_name(entity, source);
+        let entity_breadcrumb = adapter.scope_breadcrumb(entity, source, breadcrumb);
+        // Declarations stay out of the in-file symbol table: an in-file call
+        // must not bind to a bodyless prototype when a definition exists
+        // anywhere in the workspace, and the resolver's name index applies that
+        // preference globally.
+        if !adapter.is_declaration(entity) {
+            graph_context.register_symbol(name.as_deref(), entity_index);
+            graph_context.register_scoped_symbol(name.as_deref(), entity_index);
+        }
+        graph_context.add_contains_edge(
+            entity_index,
+            entity.start_position().row + 1,
+            entity.start_position().column,
+        );
+        // The alias belongs to this entity's own name, so it is read before the
+        // name moves into the record.
+        let alias_of = alias_target_of(entity, source, format)
+            .filter(|(aliased, _)| name.as_deref() == Some(aliased.as_str()))
+            .map(|(_, target)| target);
+        let object_members = object_member_aliases(entity, source)
+            .into_iter()
+            .map(|(name, target)| MemberAlias { name, target })
+            .collect();
+        out.push(CodeEntity {
+            node: entity,
+            language: adapter.language(),
+            name,
+            symbol_type: adapter.classify(entity),
+            breadcrumb: entity_breadcrumb,
+            signature: adapter.extract_signature(entity, source),
+            documentation: adapter.extract_doc(entity, source),
+            arity: adapter.extract_arity(entity, source),
+            is_exported: adapter.is_exported(entity, !breadcrumb.is_empty()),
+            format,
+            is_declaration: adapter.is_declaration(entity),
+            package: java_package(entity, source, format),
+            has_internal_linkage: adapter.has_internal_linkage(entity, source),
+            declares_type: declares_type(entity),
+            alias_of,
+            object_members,
+            overwritten_by: overwritten_by(entity, source),
+            exported_as: Vec::new(),
+        });
+    }
+    // A declaration can emit several object members. Each member owns its
+    // calls and nested definitions, independently of its siblings.
+    for (ordinal, entity) in out.iter().enumerate().skip(start_index) {
+        let entity_index = first_entity_index.expect("entity ordinal") + ordinal - start_index;
+        let entity_scope = adapter.is_scope(entity.node);
+        let member_owned = |node: Node<'_>| adapter.is_entity(node) || adapter.is_scope(node);
+        let local_type = |node: Node<'_>| {
+            matches!(
+                node.kind(),
+                "class_specifier" | "struct_specifier" | "union_specifier" | "enum_specifier"
+            )
+        };
+        let has_member_entities = entity.node.id() == child.id() && out.len() > start_index + 1;
+        // A body's own types are read after this entity, so its scans leave
+        // them out: what a member writes belongs to the member, not to the
+        // function that declares the class.
+        let boundary: Option<&dyn Fn(Node<'_>) -> bool> = if entity_scope || has_member_entities {
+            Some(&member_owned as &dyn Fn(Node<'_>) -> bool)
+        } else if format == FileFormat::Cpp && entity.node.kind() == "function_definition" {
+            Some(&local_type as &dyn Fn(Node<'_>) -> bool)
+        } else {
+            None
+        };
+        scan_call_edges(entity.node, entity_index, source, graph_context, boundary);
+        scan_binding_declarations(
+            entity.node,
+            entity_index,
+            source,
+            format,
+            graph_context,
+            boundary,
+        );
+        collect_inheritance_edges(entity.node, source, format, entity_index, graph_context);
+    }
+    // Synthetic members have no separate declaration walk. Descend their
+    // scopes here; ordinary scope nodes are handled by the caller.
+    let member_scopes: Vec<_> = out[start_index..]
+        .iter()
+        .enumerate()
+        .filter(|(_, entity)| entity.node.id() != child.id() && adapter.is_scope(entity.node))
+        .map(|(offset, entity)| {
+            let mut scope = entity.breadcrumb.clone();
+            scope.extend(entity.name.clone());
+            (
+                first_entity_index.expect("entity ordinal") + offset,
+                entity.node,
+                scope,
+            )
+        })
+        .collect();
+    for (owner, member, scope) in member_scopes {
+        graph_context.push_scope(owner);
+        walk_code_node(member, adapter, source, &scope, out, graph_context, format);
+        graph_context.pop_scope();
+    }
+    // A type a body declares (`void f() { class L { ... }; }`) is a type that
+    // body names: its members own the calls they write, and a name the body
+    // binds to it reads their members.
+    if format == FileFormat::Cpp
+        && child.kind() == "function_definition"
+        && let Some(body) = child.child_by_field_name("body")
+        && let Some(name) = adapter.extract_name(child, source)
+    {
+        let mut scope = breadcrumb.to_vec();
+        scope.push(name);
+        walk_body_types(body, adapter, source, &scope, out, graph_context, format);
+    }
+    scope_entity_index
+}
+
+/// Reads the types a body declares, leaving its statements alone.
+///
+/// The entity walk bounds entities at a declaration, so a body's types would
+/// otherwise be invisible: `void f() { class L { ... }; }` declares a type the
+/// file can name, and its members are entities of their own.
+fn walk_body_types<'tree>(
+    body: Node<'tree>,
+    adapter: &LanguageAdapter,
+    source: &[u8],
+    breadcrumb: &[String],
+    out: &mut Vec<CodeEntity<'tree>>,
+    graph_context: &mut WalkContext,
+    format: FileFormat,
+) {
+    for child in named_children(body) {
+        if !adapter.is_entity(child) {
+            // A statement may nest its own block (`if (…) { class L {}; }`).
+            walk_body_types(
+                child,
+                adapter,
+                source,
+                breadcrumb,
+                out,
+                graph_context,
+                format,
+            );
+            continue;
+        }
+        if !adapter.is_scope(child) {
+            continue;
+        }
+        let owner = walk_entity_node(
+            child,
+            adapter,
+            source,
+            breadcrumb,
+            out,
+            graph_context,
+            format,
+        );
+        let mut scope = breadcrumb.to_vec();
+        if let Some(name) = adapter.extract_name(child, source) {
+            scope.push(name);
+        }
+        if let Some(owner) = owner {
+            graph_context.push_scope(owner);
+        }
+        let scope_node = adapter.enter_scope_node(child);
+        walk_code_node(
+            scope_node,
+            adapter,
+            source,
+            &scope,
+            out,
+            graph_context,
+            format,
+        );
+        if owner.is_some() {
+            graph_context.pop_scope();
+        }
+    }
+}
+
 fn walk_code_node<'tree>(
     node: Node<'tree>,
     adapter: &LanguageAdapter,
@@ -241,95 +495,27 @@ fn walk_code_node<'tree>(
     for child in named_children(node) {
         let is_scope = adapter.is_scope(child);
         let is_entity = adapter.is_entity(child);
-        let mut first_entity_index = None;
-        let mut scope_entity_index = None;
 
-        if is_entity {
-            let start_index = out.len();
-            let mut entity_indexes = Vec::new();
-            for entity in adapter.resolve_entities(child, source) {
-                let entity_index = graph_context.next_entity_index();
-                first_entity_index.get_or_insert(entity_index);
-                entity_indexes.push(entity_index);
-                scope_entity_index = Some(entity_index);
-                let name = adapter.extract_name(entity, source);
-                let entity_breadcrumb = adapter.scope_breadcrumb(entity, source, breadcrumb);
-                // Declarations stay out of the in-file symbol table: an
-                // in-file call must not bind to a bodyless prototype when a
-                // definition exists anywhere in the workspace, and the
-                // resolver's name index applies that preference globally.
-                if !adapter.is_declaration(entity) {
-                    graph_context.register_symbol(name.as_deref(), entity_index);
-                    graph_context.register_scoped_symbol(name.as_deref(), entity_index);
-                }
-                graph_context.add_contains_edge(
-                    entity_index,
-                    entity.start_position().row + 1,
-                    entity.start_position().column,
-                );
-                out.push(CodeEntity {
-                    node: entity,
-                    language: adapter.language(),
-                    name,
-                    symbol_type: adapter.classify(entity),
-                    breadcrumb: entity_breadcrumb,
-                    signature: adapter.extract_signature(entity, source),
-                    documentation: adapter.extract_doc(entity, source),
-                    arity: adapter.extract_arity(entity, source),
-                    is_exported: adapter.is_exported(entity, !breadcrumb.is_empty()),
-                    format,
-                    is_declaration: adapter.is_declaration(entity),
-                    package: java_package(entity, source, format),
-                });
-            }
-            // Name-based references are collected from the first resolved
-            // entity's subtree: the walk does not descend into entity bodies,
-            // so this attributes call sites and inheritance clauses to their
-            // owning entity. A container entity (class/namespace) also walks
-            // as a scope, so its scan must skip nested member subtrees —
-            // those claim their own call sites when the scope recursion
-            // reaches them, and claiming them twice duplicates edges.
-            if let (Some(first_entity_index), Some(first_entity)) =
-                (first_entity_index, out.get(start_index))
-            {
-                let member_owned =
-                    |node: Node<'_>| adapter.is_entity(node) || adapter.is_scope(node);
-                let boundary: Option<&dyn Fn(Node<'_>) -> bool> =
-                    is_scope.then_some(&member_owned as &dyn Fn(Node<'_>) -> bool);
-                // A split PHP statement resolves to its elements, so the first
-                // element's subtree misses the initializers of the others,
-                // as in `const A = new Foo, B = new Bar;`.
-                let scanned = if format == FileFormat::Php {
-                    entity_indexes.len()
-                } else {
-                    1
-                };
-                for (offset, entity_index) in entity_indexes.iter().take(scanned).enumerate() {
-                    let entity_node = out[start_index + offset].node;
-                    scan_call_edges(entity_node, *entity_index, source, graph_context, boundary);
-                    scan_binding_declarations(
-                        entity_node,
-                        *entity_index,
-                        source,
-                        format,
-                        graph_context,
-                        boundary,
-                    );
-                }
-                collect_inheritance_edges(
-                    first_entity.node,
-                    source,
-                    format,
-                    first_entity_index,
-                    graph_context,
-                );
-            }
-        }
-
+        let scope_entity_index = is_entity.then(|| {
+            walk_entity_node(
+                child,
+                adapter,
+                source,
+                breadcrumb,
+                out,
+                graph_context,
+                format,
+            )
+        });
+        let scope_entity_index = scope_entity_index.flatten();
         if is_scope {
             let name = adapter.extract_name(child, source);
             let mut child_breadcrumb = breadcrumb.to_vec();
-            if let Some(name) = name {
+            // Static initializers own their direct calls; nested functions
+            // retain the class-qualified names used by call hierarchy clients.
+            if let Some(name) = name
+                && child.kind() != "class_static_block"
+            {
                 child_breadcrumb.push(name);
             }
             let scope_node = adapter.enter_scope_node(child);
@@ -408,15 +594,26 @@ fn append_entity(
     });
 }
 
-// PHP files mix declarations with templates and top-level statements. The
-// source outside every declaration stays searchable as plain-text chunks.
-fn append_php_gaps(
+// PHP retains all code outside declarations. JS/TS also needs the bodies of
+// callbacks with no symbol owner: excluding their local variables must not
+// remove their contents from retrieval. Existing entities remain authoritative.
+fn append_code_gaps(
     source: &TextSource,
     entities: &[CodeEntity<'_>],
+    root: Node<'_>,
+    format: FileFormat,
     max_chars: usize,
     overlap_chars: usize,
     output: &mut Vec<ExtractedEntity>,
 ) {
+    if output.is_empty()
+        || !matches!(
+            format,
+            FileFormat::Php | FileFormat::JavaScript | FileFormat::TypeScript
+        )
+    {
+        return;
+    }
     let mut covered = Vec::with_capacity(entities.len() * 2);
     for entity in entities {
         covered.push((entity.node.start_byte(), entity.node.end_byte()));
@@ -424,7 +621,11 @@ fn append_php_gaps(
         // inherit theirs from the statement, so walk back from there, as
         // `extract_doc` does, leaving comments between elements searchable.
         if entity.documentation.is_some() {
-            let declaration = php_declaration(entity.node);
+            let declaration = if format == FileFormat::Php {
+                php_declaration(entity.node)
+            } else {
+                entity.node
+            };
             let mut sibling = declaration.prev_named_sibling();
             let mut run: Option<(usize, usize)> = None;
             while let Some(comment) = sibling.filter(|node| node.kind() == "comment") {
@@ -448,6 +649,24 @@ fn append_php_gaps(
     }
     gaps.push((offset, source.text.len()));
 
+    if format != FileFormat::Php {
+        let mut callbacks = Vec::new();
+        collect_uncovered_callbacks(root, &gaps, &mut callbacks);
+        gaps = callbacks
+            .into_iter()
+            .flat_map(|(start, end)| {
+                let first = gaps.partition_point(|&(_, gap_end)| gap_end <= start);
+                gaps[first..]
+                    .iter()
+                    .take_while(move |&&(gap_start, _)| gap_start < end)
+                    .map(move |&(gap_start, gap_end)| (start.max(gap_start), end.min(gap_end)))
+            })
+            .collect();
+    }
+    if gaps.is_empty() {
+        return;
+    }
+
     let line_offsets = line_byte_offsets(&source.text);
     let mut gap_source = source.clone();
     for (start, end) in gaps {
@@ -462,6 +681,31 @@ fn append_php_gaps(
         let remapped =
             remap_script_block_entities(source, chunks, output.len(), &line_offsets, text_start);
         output.extend(remapped);
+    }
+}
+
+fn collect_uncovered_callbacks(
+    node: Node<'_>,
+    gaps: &[(usize, usize)],
+    callbacks: &mut Vec<(usize, usize)>,
+) {
+    let first = gaps.partition_point(|&(_, end)| end <= node.start_byte());
+    if gaps
+        .get(first)
+        .is_none_or(|&(start, _)| start >= node.end_byte())
+    {
+        return;
+    }
+    if matches!(
+        node.kind(),
+        "arrow_function" | "function_expression" | "generator_function" | "method_definition"
+    ) {
+        // An outer callback contains its nested callbacks; do not index both.
+        callbacks.push((node.start_byte(), node.end_byte()));
+        return;
+    }
+    for child in named_children(node) {
+        collect_uncovered_callbacks(child, gaps, callbacks);
     }
 }
 
@@ -496,7 +740,76 @@ fn code_entity_metadata(entity: &CodeEntity<'_>) -> EntityMetadata {
         is_exported: entity.is_exported,
         is_declaration: entity.is_declaration,
         package: entity.package.clone(),
+        has_internal_linkage: entity.has_internal_linkage,
+        declares_type: entity.declares_type,
+        alias_of: entity.alias_of.clone(),
+        object_members: entity.object_members.clone(),
+        overwritten_by: entity.overwritten_by.clone(),
+        exported_as: entity.exported_as.clone(),
     })
+}
+
+/// Attaches the names the file's export clauses republish each declaration
+/// under, so an import of one of them binds to the declaration it renames.
+fn attach_export_aliases(
+    root: Node<'_>,
+    source: &[u8],
+    format: FileFormat,
+    entities: &mut [CodeEntity<'_>],
+) {
+    let aliases = scan_export_aliases(root, source, format);
+    for entity in entities {
+        let Some(names) = entity.name.as_deref().and_then(|local| aliases.get(local)) else {
+            continue;
+        };
+        entity.exported_as.clone_from(names);
+        entity.is_exported = true;
+    }
+}
+
+/// Exported names an `export { local as exported }` clause republishes, keyed
+/// by the local name it re-exports.
+///
+/// Only TypeScript and JavaScript spell the rename in a statement of its own;
+/// the other languages rename at the declaration, which the walk already reads.
+fn scan_export_aliases(
+    root: Node<'_>,
+    source: &[u8],
+    format: FileFormat,
+) -> HashMap<String, Vec<String>> {
+    let mut aliases: HashMap<String, Vec<String>> = HashMap::new();
+    if !matches!(format, FileFormat::TypeScript | FileFormat::JavaScript) {
+        return aliases;
+    }
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "export_statement" {
+            for clause in named_children(node) {
+                if clause.kind() != "export_clause" {
+                    continue;
+                }
+                for specifier in named_children(clause) {
+                    if specifier.kind() != "export_specifier" {
+                        continue;
+                    }
+                    let (Some(local), Some(alias)) = (
+                        specifier.child_by_field_name("name"),
+                        specifier.child_by_field_name("alias"),
+                    ) else {
+                        // An unrenamed specifier exports the name it already
+                        // has, which the name index answers on its own.
+                        continue;
+                    };
+                    aliases
+                        .entry(text(local, source).to_owned())
+                        .or_default()
+                        .push(text(alias, source).to_owned());
+                }
+            }
+        }
+        pending.extend(named_children(node));
+    }
+    aliases
 }
 
 /// The `package` a Java source declares, read from the declaration at the root
@@ -823,6 +1136,12 @@ mod tests {
                 is_exported: false,
                 is_declaration: false,
                 package: None,
+                has_internal_linkage: false,
+                declares_type: false,
+                alias_of: None,
+                object_members: Vec::new(),
+                overwritten_by: None,
+                exported_as: Vec::new(),
             }))
         );
         assert!(matches!(
@@ -843,6 +1162,12 @@ mod tests {
                 is_exported: false,
                 is_declaration: false,
                 package: None,
+                has_internal_linkage: false,
+                declares_type: false,
+                alias_of: None,
+                object_members: Vec::new(),
+                overwritten_by: None,
+                exported_as: Vec::new(),
             }))
         );
         assert!(matches!(
@@ -870,7 +1195,10 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "each language's whole metadata is asserted in one fixture"
+    )]
     fn preserves_php_symbols_scopes_properties_and_constants() {
         let source = test_source(
             FileFormat::Php,
@@ -1037,6 +1365,19 @@ mod tests {
                     is_exported: false,
                     is_declaration: false,
                     package: None,
+                    has_internal_linkage: false,
+                    // A PHP class, interface or enum introduces the type's
+                    // name; a trait only groups members, and the members
+                    // inside either never do.
+                    declares_type: !signature.starts_with("trait ")
+                        && matches!(
+                            kind,
+                            SymbolType::Class | SymbolType::Enum | SymbolType::Interface
+                        ),
+                    alias_of: None,
+                    object_members: Vec::new(),
+                    overwritten_by: None,
+                    exported_as: Vec::new(),
                 })),
                 "{name}"
             );
@@ -1222,6 +1563,9 @@ mod tests {
             .collect()
     }
 
+    // The three languages are one regression: the same extractor reads each
+    // metadata field, and the assertions compare side by side.
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn preserves_c_go_and_python_language_specific_metadata() {
         let c_source = test_source(
@@ -1244,6 +1588,12 @@ mod tests {
                 is_exported: false,
                 is_declaration: false,
                 package: None,
+                has_internal_linkage: false,
+                declares_type: false,
+                alias_of: None,
+                object_members: Vec::new(),
+                overwritten_by: None,
+                exported_as: Vec::new(),
             }))
         );
         assert!(matches!(
@@ -1277,6 +1627,12 @@ mod tests {
                 is_exported: false,
                 is_declaration: false,
                 package: None,
+                has_internal_linkage: false,
+                declares_type: false,
+                alias_of: None,
+                object_members: Vec::new(),
+                overwritten_by: None,
+                exported_as: Vec::new(),
             }))
         );
         assert!(matches!(
@@ -1311,6 +1667,12 @@ mod tests {
                 is_exported: false,
                 is_declaration: false,
                 package: None,
+                has_internal_linkage: false,
+                declares_type: false,
+                alias_of: None,
+                object_members: Vec::new(),
+                overwritten_by: None,
+                exported_as: Vec::new(),
             }))
         );
     }
@@ -2314,13 +2676,19 @@ public class Service {
     }
 
     #[test]
-    fn keeps_unclassified_type_declarations_without_value_fallback() {
+    fn classifies_type_declarations_without_value_fallback() {
         let fixtures = [
             (
                 FileFormat::Go,
                 "package demo\ntype UserID int",
                 "UserID",
-                None,
+                Some(SymbolType::Alias),
+            ),
+            (
+                FileFormat::Go,
+                "package demo\ntype Handler func()",
+                "Handler",
+                Some(SymbolType::Alias),
             ),
             (
                 FileFormat::Rust,
@@ -2459,6 +2827,57 @@ public class Service {
             })
             .collect::<Vec<_>>();
         assert_eq!(names, ["limit", "run"]);
+    }
+
+    #[test]
+    fn keeps_unowned_callbacks_searchable_without_local_symbols() {
+        let text = "const head = 1;\n\
+                    function helper() {}\n\
+                    suite('outside', () => {\n\
+                      const expected = 'callbackneedle🙂';\n\
+                      function nested() { return 'ownednested'; }\n\
+                      suite('inside', function() { const inner = 'innerneedle'; helper(); });\n\
+                    });\n\
+                    register({ run() { const methodLocal = 'methodneedle'; } });\n\
+                    const tail = 2;\n\
+                    function covered() { register(() => { const inside = 'coveredneedle'; }); }\n";
+        for format in [FileFormat::JavaScript, FileFormat::TypeScript] {
+            let source = test_source(format, "callbacks", text);
+            for collect_graph in [false, true] {
+                let output = super::extract_for_indexing(
+                    &source,
+                    ChunkOptions {
+                        max_chunk_chars: Some(120),
+                        chunk_overlap_chars: Some(20),
+                    },
+                    collect_graph,
+                )
+                .expect("callback extraction");
+                let names = output
+                    .fragments
+                    .iter()
+                    .filter_map(|entity| match test_metadata(entity) {
+                        Some(EntityMetadata::Code(metadata)) => metadata.symbol_name.as_deref(),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(names, ["head", "helper", "nested", "tail", "covered"]);
+                let anonymous = plain_chunks(&output.fragments).join("\n");
+                assert!(anonymous.contains("callbackneedle🙂"), "{format:?}");
+                assert!(anonymous.contains("innerneedle"), "{format:?}");
+                assert!(anonymous.contains("methodneedle"), "{format:?}");
+                // Bodies already owned by symbols are not duplicated in gap chunks.
+                assert!(!anonymous.contains("ownednested"));
+                assert!(!anonymous.contains("coveredneedle"));
+                for (index, entity) in output.fragments.iter().enumerate() {
+                    assert_source_backed(&source, entity);
+                    assert_eq!(entity.index, index);
+                }
+                if let Some(graph) = output.graph {
+                    assert_eq!(graph.head_fragment_indices.len(), names.len());
+                }
+            }
+        }
     }
 
     #[test]

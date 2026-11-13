@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use crate::domain::{
     EdgeProvenance, Entity, EntityMetadata, FileEdge, FileFormat, FileGraphNode, FileGraphResult,
-    GraphEdgeKind, PendingRef, PendingRefStatus, Range, SymbolType,
+    GraphEdgeKind, Language, PendingRef, PendingRefStatus, Range, SymbolType,
 };
 use crate::extraction::{FILE_SCOPE_INDEX, PartitionedGraph};
 
@@ -49,6 +49,7 @@ pub(super) fn assemble_file_graph(
         nodes: entity_nodes,
         edges: file_edges(graph, entities, &file_scope),
         pending_refs: file_pending_refs(graph, entities, &file_scope),
+        directives: graph.directives.clone(),
     }
 }
 
@@ -128,6 +129,23 @@ fn file_pending_refs(
             );
             if let Some(bound_type) = &reference.bound_type {
                 metadata.insert("type".to_owned(), serde_json::json!(bound_type));
+            }
+            if let Some(until) = reference.bound_until {
+                // A loop's variable stops meaning what the loop said once the
+                // loop ends; the resolver needs the last line it holds for.
+                metadata.insert("until".to_owned(), serde_json::json!(until));
+            }
+            if let Some(site) = reference.constructs.as_str() {
+                // Only construction sites carry the flag: the resolver keeps
+                // type candidates for exactly these calls, and the form says
+                // whether the language builds through a constructor instead.
+                metadata.insert("constructs".to_owned(), serde_json::json!(site));
+            }
+            if let Some(end) = reference.scope_end {
+                // A block- or loop-scoped declaration stops standing for its
+                // name at this position: a later call through the name reads
+                // whatever the enclosing scope says, not this binding.
+                metadata.insert("scope_end".to_owned(), serde_json::json!(end));
             }
             if reference.ref_kind.spells_inheritance() {
                 insert_inheritance_metadata(
@@ -211,7 +229,13 @@ fn entity_node(entity: &Entity, language: FileFormat) -> FileGraphNode {
         kind,
         name,
         qualified_name,
-        language: language.as_str().to_owned(),
+        language: match entity.metadata() {
+            Some(EntityMetadata::Code(metadata)) => metadata
+                .language
+                .map_or(language.as_str(), Language::as_str),
+            _ => language.as_str(),
+        }
+        .to_owned(),
         range,
         signature,
         doc,
@@ -299,7 +323,7 @@ mod tests {
         CodeMetadata, Content, Entity, EntityFragment, EntityId, EntityMetadata, FileId,
         FragmentId, Range, SymbolType,
     };
-    use crate::extraction::{PendingNameRef, ResolvedNameEdge};
+    use crate::extraction::{Constructs, PendingNameRef, ResolvedNameEdge};
 
     fn code_entity(id: &str, name: &str, scope: Option<&str>) -> Entity {
         let file_id = FileId::new(7);
@@ -352,7 +376,10 @@ mod tests {
             receiver_name: None,
             raw_text: Some("Remote".into()),
             bound_type: None,
+            bound_until: None,
+            scope_end: None,
             arity: None,
+            constructs: Constructs::None,
             line: 1,
             column: 20,
         });

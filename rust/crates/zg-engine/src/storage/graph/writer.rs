@@ -84,6 +84,21 @@ impl SqliteGraphStorage {
         // every save.
         let hierarchy_changed = inheritance_changed(&tx, file_id, graph)?;
         tx.execute("DELETE FROM edges WHERE file_id = ?", [file_id])?;
+        // The directives describe the file's preprocessor state, so they are
+        // replaced with the rows: a file that stops being C/C++ leaves none
+        // behind, and one that keeps its directives rewrites them.
+        if graph.directives.is_empty() {
+            tx.execute(
+                "DELETE FROM zg_file_preprocessor WHERE file_id = ?",
+                [file_id],
+            )?;
+        } else {
+            tx.execute(
+                "INSERT INTO zg_file_preprocessor (file_id, directives) VALUES (?1, ?2)
+                 ON CONFLICT(file_id) DO UPDATE SET directives = excluded.directives",
+                params![file_id, serde_json::to_string(&graph.directives)?],
+            )?;
+        }
         {
             let mut insert = tx.prepare(
                 "INSERT INTO edges

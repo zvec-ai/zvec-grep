@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     EngineError, EngineResult,
-    domain::{Entity, FileId, FileIndexStatus, FileRecord},
+    domain::{Entity, EntityMetadata, FileId, FileIndexStatus, FileRecord, Language},
     utils::{
         atomic_write as write_record, directory_exists, ensure_directory, file_exists,
         reject_symlink, sync_directory,
@@ -593,9 +593,17 @@ fn replace_file(
         .as_path()
         .to_string_lossy()
         .replace('\\', "/");
-    let language = crate::domain::formats_for_path(std::path::Path::new(&relative_path))
-        .first()
-        .map_or("unknown", |format| format.as_str());
+    let formats = crate::domain::formats_for_path(std::path::Path::new(&relative_path));
+    // Shared extensions such as .h must use the grammar that produced the
+    // entities, rather than the first extension candidate (which can be C).
+    let language = entities
+        .iter()
+        .find_map(|entity| match entity.metadata() {
+            Some(EntityMetadata::Code(metadata)) => metadata.language.map(Language::as_str),
+            _ => None,
+        })
+        .or_else(|| formats.first().map(|format| format.as_str()))
+        .unwrap_or("unknown");
     // zvec writes are durable on success: record retry intent before advancing SQLite.
     if let Ok(storage) = state.graph.as_mut() {
         storage
