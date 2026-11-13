@@ -8,10 +8,7 @@
   "gate": {
     "required_tasks": 5,
     "smoke_task": "requests:cc1",
-    "auto_tasks": [
-      "requests:cc1",
-      "matplotlib:cc2"
-    ],
+    "auto_tasks": ["requests:cc1", "matplotlib:cc2"],
     "full_tasks": [
       "requests:cc1",
       "matplotlib:cc1",
