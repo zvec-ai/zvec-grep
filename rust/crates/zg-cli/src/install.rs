@@ -70,6 +70,30 @@ pub struct InstallOutcome {
     pub agent_labels: Vec<&'static str>,
     pub transport: McpInstallTransport,
     pub mcp_toolset: Option<McpToolset>,
+    claude_guidance: Option<PathBuf>,
+}
+
+impl InstallOutcome {
+    /// Shortens the managed guidance after startup confirms support in the connected server.
+    ///
+    /// # Errors
+    /// Returns an error when the guidance file cannot be updated.
+    pub fn compact_claude_guidance(&self) -> Result<(), InstallError> {
+        if let Some(path) = &self.claude_guidance {
+            write_claude_guidance(
+                path,
+                &format!(
+                    "{GUIDANCE_START}\n## zvec-grep\n\nFollow the connected zvec-grep MCP server instructions and the zvec_grep_search tool description for workspace retrieval, search routing, and index lifecycle.\n{GUIDANCE_END}"
+                ),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub const fn installed_claude(&self) -> bool {
+        self.claude_guidance.is_some()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -160,6 +184,7 @@ pub fn execute_install(args: &InstallArgs) -> Result<InstallOutcome, InstallErro
             agent_labels: Vec::new(),
             transport: args.transport.unwrap_or_default(),
             mcp_toolset: args.mcp_toolset,
+            claude_guidance: None,
         });
     }
     let transport = resolve_transport(args.transport, args.yes)?;
@@ -188,6 +213,9 @@ pub fn execute_install(args: &InstallArgs) -> Result<InstallOutcome, InstallErro
         agent_labels: agents.iter().map(|agent| agent.label()).collect(),
         transport,
         mcp_toolset: args.mcp_toolset,
+        claude_guidance: agents
+            .contains(&Agent::Claude)
+            .then(|| claude_config_dir().join("CLAUDE.md")),
     })
 }
 
@@ -1082,8 +1110,12 @@ fn uninstall_grok_from(config: &Path, guidance: &Path) -> Result<(), InstallErro
     Ok(())
 }
 
+fn claude_config_dir() -> PathBuf {
+    env_path("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home_dir().join(".claude"))
+}
+
 fn install_claude(options: &AgentOptions) -> Result<(), InstallError> {
-    let directory = env_path("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home_dir().join(".claude"));
+    let directory = claude_config_dir();
     let mcp_path = if env::var_os("CLAUDE_CONFIG_DIR").is_some() {
         directory.join(".claude.json")
     } else {
@@ -1136,19 +1168,16 @@ fn install_claude(options: &AgentOptions) -> Result<(), InstallError> {
 
     let settings_path = directory.join("settings.json");
     update_claude_permission(&settings_path, true)?;
-    write_marked_file(
-        &directory.join("CLAUDE.md"),
-        GUIDANCE_START,
-        GUIDANCE_END,
-        &guidance_block("", false, ""),
-        true,
-        None,
-        None,
-    )
+    // Keep the fallback available while startup may still reuse an older daemon.
+    write_claude_guidance(&directory.join("CLAUDE.md"), &guidance_block("", false, ""))
+}
+
+fn write_claude_guidance(path: &Path, block: &str) -> Result<(), InstallError> {
+    write_marked_file(path, GUIDANCE_START, GUIDANCE_END, block, true, None, None)
 }
 
 fn uninstall_claude() -> Result<(), InstallError> {
-    let directory = env_path("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home_dir().join(".claude"));
+    let directory = claude_config_dir();
     let mcp_path = if env::var_os("CLAUDE_CONFIG_DIR").is_some() {
         directory.join(".claude.json")
     } else {

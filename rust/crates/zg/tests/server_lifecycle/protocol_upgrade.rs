@@ -64,6 +64,80 @@ fn assert_healthy(listen: &str) -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn claude_reinstall_keeps_full_guidance_for_a_compatible_older_daemon() -> Result<(), Box<dyn Error>>
+{
+    let _permit = server_test_permit();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
+    let home = TempDir::new()?;
+    let (mut guard, _) = start_server(&binary, &home, "full", None, |_| {})?;
+    let mut older_record = instance_record(home.path())?;
+    assert_eq!(older_record["daemonProtocolVersion"], 2);
+    // Older Rust daemons have the same protocol version and no guidance capability.
+    older_record
+        .as_object_mut()
+        .ok_or("instance record object")?
+        .remove("compactClaudeInstructions");
+    write_record(home.path(), &older_record)?;
+
+    let claude = home.path().join("claude");
+    std::fs::create_dir_all(&claude)?;
+    let guidance = claude.join("CLAUDE.md");
+    std::fs::write(&guidance, "# Personal guidance\n")?;
+    std::fs::create_dir_all(home.path().join(".zvec-grep"))?;
+    let port = guard.listen.parse::<SocketAddr>()?.port();
+    std::fs::write(
+        home.path().join(".zvec-grep/config.json"),
+        json!({"version": 1, "server": {"host": "127.0.0.1", "port": port}}).to_string(),
+    )?;
+    let install = |transport, server_url: Option<&str>| {
+        let mut command = Command::new(&binary);
+        command
+            .args([
+                "--install",
+                "--target",
+                "claude",
+                "--yes",
+                "--mcp-toolset",
+                "full",
+                "--mcp-transport",
+                transport,
+            ])
+            .current_dir(home.path())
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env("ZVEC_GREP_HOME", home.path())
+            .env("CLAUDE_CONFIG_DIR", &claude)
+            .env_remove("ZVEC_GREP_INSTALL_SKIP_SERVER")
+            .env("ZVEC_GREP_SERVER_URL", server_url.unwrap_or(""));
+        command.output()
+    };
+    for transport in ["stdio", "http"] {
+        let output = install(transport, None)?;
+        assert_command_success(&output);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Kept the full Claude guidance"));
+        let installed = std::fs::read_to_string(&guidance)?;
+        assert!(installed.contains("### Retrieval routing"), "{installed}");
+        assert!(installed.contains("requires an explicit user request or authorization"));
+        assert_eq!(instance_record(home.path())?, older_record);
+    }
+
+    assert_command_success(&guard.stop()?);
+    guard.active = true;
+    for transport in ["http", "stdio"] {
+        assert_command_success(&install(transport, None)?);
+        let installed = std::fs::read_to_string(&guidance)?;
+        assert!(installed.starts_with("# Personal guidance\n"));
+        assert_eq!(installed.matches("<!-- ZVEC_GREP_START -->").count(), 1);
+        assert!(installed.contains("Follow the connected zvec-grep MCP server instructions"));
+        assert!(!installed.contains("### Retrieval routing"));
+    }
+    assert_command_success(&install("http", Some("http://127.0.0.1:1/mcp"))?);
+    assert!(std::fs::read_to_string(guidance)?.contains("### Retrieval routing"));
+    assert_command_success(&guard.stop()?);
+    Ok(())
+}
+
+#[test]
 fn legacy_checks_fail_without_requests_or_direct_fallback_and_off_still_works()
 -> Result<(), Box<dyn Error>> {
     let _permit = server_test_permit();

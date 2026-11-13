@@ -534,6 +534,40 @@ fn claude_opencode_and_cursor_match_the_typescript_shapes() {
 }
 
 #[test]
+fn claude_reinstall_without_a_server_keeps_the_full_guidance() {
+    let claude = TempDir::new().expect("claude dir");
+    let guidance = claude.path().join("CLAUDE.md");
+    fs::write(
+        &guidance,
+        "# Personal instructions\n\n<!-- ZVEC_GREP_START -->\n## zvec-grep\n\nChoose the evidence source before the retrieval mode.\n\n### Retrieval routing\n- Old routing rules.\n<!-- ZVEC_GREP_END -->\n\nKeep this note.\n",
+    )
+    .expect("legacy guidance");
+
+    for _ in 0..2 {
+        run_ok(
+            zg().args(["--install", "--target", "claude", "--yes"])
+                .env("CLAUDE_CONFIG_DIR", claude.path()),
+        );
+        let installed = fs::read_to_string(&guidance).expect("installed guidance");
+        assert_eq!(installed.matches("<!-- ZVEC_GREP_START -->").count(), 1);
+        assert_eq!(installed.matches("<!-- ZVEC_GREP_END -->").count(), 1);
+        assert!(installed.contains("### Retrieval routing"));
+        assert!(installed.contains("requires an explicit user request or authorization"));
+        assert!(installed.starts_with("# Personal instructions\n"));
+        assert!(installed.ends_with("\nKeep this note.\n"));
+    }
+
+    run_ok(
+        zg().args(["--uninstall", "--target", "claude", "--yes"])
+            .env("CLAUDE_CONFIG_DIR", claude.path()),
+    );
+    assert_eq!(
+        fs::read_to_string(guidance).expect("user guidance"),
+        "# Personal instructions\n\nKeep this note.\n"
+    );
+}
+
+#[test]
 fn install_starts_the_configured_server_with_the_selected_toolset() {
     let temporary = TempDir::new().expect("tempdir");
     let home = temporary.path().join("home");

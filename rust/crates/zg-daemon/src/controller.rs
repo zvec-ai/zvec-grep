@@ -93,6 +93,8 @@ struct DaemonInstanceRecord {
     mcp_toolset: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     daemon_protocol_version: Option<u32>,
+    #[serde(default)]
+    compact_claude_instructions: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -102,6 +104,7 @@ pub struct DaemonStatus {
     pub pid: Option<u32>,
     pub server_url: Option<String>,
     pub mcp_toolset: Option<String>,
+    pub compact_claude_instructions: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -237,6 +240,7 @@ impl InstanceLock {
             ready: false,
             mcp_toolset: config.mcp_toolset.unwrap_or_default().to_string(),
             daemon_protocol_version: Some(DAEMON_PROTOCOL_VERSION),
+            compact_claude_instructions: true,
         };
         // Register before publishing so a contender in this process never
         // sees our record without its token; dropping the guard on failure
@@ -588,6 +592,7 @@ pub async fn server_status(home: &Path) -> Result<DaemonStatus, DaemonError> {
         pid: Some(record.pid),
         server_url: Some(record.server_url),
         mcp_toolset: Some(record.mcp_toolset),
+        compact_claude_instructions: record.compact_claude_instructions,
     })
 }
 
@@ -1005,6 +1010,7 @@ mod tests {
             ready: true,
             mcp_toolset: "full".to_owned(),
             daemon_protocol_version: None,
+            compact_claude_instructions: false,
         };
         std::fs::write(&path, serde_json::to_vec(&stale).expect("stale record"))
             .expect("write stale record");
