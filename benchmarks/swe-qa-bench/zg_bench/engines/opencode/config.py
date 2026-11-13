@@ -71,6 +71,10 @@ def build_opencode_config(model: OpenCodeModel, *, profile: str) -> dict[str, An
     config["agent"] = agent_config
     config["permission"] = dict(web_permissions)
     if profile == "zvec-grep":
+        # OpenCode's explore agent denies unknown tools unless explicitly allowed.
+        config["permission"]["zvec_grep_*"] = "allow"
+        for agent in agent_config.values():
+            agent["permission"]["zvec_grep_*"] = "allow"
         # Harbor renders opencode.json again before execution. Preserve the
         # managed MCP entry installed by the zvec-grep adapter during setup.
         config["mcp"] = {

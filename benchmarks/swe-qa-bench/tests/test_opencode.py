@@ -153,16 +153,17 @@ class OpenCodeSamplingContractTests(unittest.TestCase):
         )
         suite = runner.load_suite("swe-qa-bench", tier="smoke")
         cases = (
-            ("custom-openai/glm-5.2", True),
-            ("custom-openai/qwen3.8-max", True),
-            ("aliyun-glm-5.2", True),
+            ("custom-openai/glm-5.2", True, False),
+            ("custom-openai/qwen3.8-max", True, False),
+            ("aliyun-glm-5.2", True, False),
             # Prove that neither provider defaults nor the fixture itself hide
             # web tools: removing the benchmark denies must expose both tools.
-            ("custom-openai/glm-5.2", False),
+            ("custom-openai/glm-5.2", False, False),
+            ("custom-openai/glm-5.2", True, True),
         )
-        for model, disable_web_tools in cases:
+        for model, disable_web_tools, use_mcp in cases:
             with (
-                self.subTest(model=model, disable_web_tools=disable_web_tools),
+                self.subTest(model=model, disable_web_tools=disable_web_tools, mcp=use_mcp),
                 tempfile.TemporaryDirectory() as temp_dir,
             ):
                 # macOS /var is a symlink to /private/var. Match the runtime's
@@ -175,6 +176,66 @@ class OpenCodeSamplingContractTests(unittest.TestCase):
                 child_requests: list[dict[str, Any]] = []
                 authorization_headers: list[str | None] = []
                 fixture_key = "offline-fixture-not-a-real-key"
+                mcp_calls = []
+
+                class FakeMcp(BaseHTTPRequestHandler):
+                    protocol_version = "HTTP/1.1"
+
+                    def log_message(self, *_args: object) -> None:
+                        pass
+
+                    def do_GET(self) -> None:
+                        self.send_response(405)
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+
+                    def do_POST(self) -> None:
+                        body = json.loads(
+                            self.rfile.read(int(self.headers["Content-Length"]))
+                        )
+                        method = body["method"]
+                        if "id" not in body:
+                            self.send_response(202)
+                            self.send_header("Content-Length", "0")
+                            self.end_headers()
+                            return
+                        if method == "initialize":
+                            result = {
+                                "protocolVersion": "2025-03-26",
+                                "capabilities": {"tools": {}},
+                                "serverInfo": {"name": "fixture", "version": "1"},
+                            }
+                        elif method == "tools/list":
+                            result = {
+                                "tools": [
+                                    {
+                                        "name": "zvec_grep_" + name,
+                                        "description": "Fixture " + name,
+                                        "inputSchema": {
+                                            "type": "object",
+                                            "properties": {
+                                                "root": {"type": "string"},
+                                                "symbol": {"type": "string"},
+                                            },
+                                            "required": ["root", "symbol"],
+                                        },
+                                    }
+                                    for name in ("search", "callers", "callees")
+                                ]
+                            }
+                        elif method == "tools/call":
+                            mcp_calls.append(body["params"])
+                            result = {"content": [{"type": "text", "text": "The fixture value is 42."}]}
+                        else:
+                            raise AssertionError(f"unexpected MCP method: {method}")
+                        payload = json.dumps({
+                            "jsonrpc": "2.0", "id": body["id"], "result": result,
+                        }).encode()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(payload)))
+                        self.end_headers()
+                        self.wfile.write(payload)
 
                 class FakeProvider(BaseHTTPRequestHandler):
                     def log_message(self, *_args: Any) -> None:
@@ -230,9 +291,10 @@ class OpenCodeSamplingContractTests(unittest.TestCase):
                                         "id": "read-fixture",
                                         "type": "function",
                                         "function": {
-                                            "name": "read",
+                                            "name": "zvec_grep_zvec_grep_callees" if use_mcp else "read",
                                             "arguments": json.dumps(
-                                                {"filePath": str(corpus / "README.md")}
+                                                {"root": str(corpus), "symbol": "entry"} if use_mcp
+                                                else {"filePath": str(corpus / "README.md")}
                                             ),
                                         },
                                     }
@@ -303,6 +365,12 @@ class OpenCodeSamplingContractTests(unittest.TestCase):
                 server.daemon_threads = True
                 thread = threading.Thread(target=server.serve_forever, daemon=True)
                 thread.start()
+                mcp_server = None
+                if use_mcp:
+                    mcp_server = ThreadingHTTPServer(("127.0.0.1", 0), FakeMcp)
+                    mcp_server.daemon_threads = True
+                    mcp_thread = threading.Thread(target=mcp_server.serve_forever, daemon=True)
+                    mcp_thread.start()
                 try:
                     command = runner.build_harbor_command(
                         suite,
@@ -323,6 +391,21 @@ class OpenCodeSamplingContractTests(unittest.TestCase):
                         f"http://127.0.0.1:{server.server_port}/v1"
                     )
                     config.update(autoupdate=False, share="disabled", lsp=False)
+                    if mcp_server is not None:
+                        zg_config = runner.build_opencode_config(
+                            runner.resolve_opencode_model(model).configuration,
+                            profile="zvec-grep",
+                        )
+                        config["permission"] = zg_config["permission"]
+                        config["agent"] = zg_config["agent"]
+                        config["mcp"] = {
+                            "zvec_grep": {
+                                "type": "remote",
+                                "url": f"http://127.0.0.1:{mcp_server.server_port}/mcp",
+                                "oauth": False,
+                                "enabled": True,
+                            }
+                        }
                     if not disable_web_tools:
                         for permissions in (
                             config["permission"],
@@ -420,6 +503,18 @@ class OpenCodeSamplingContractTests(unittest.TestCase):
                     self.assertEqual(usage["total"]["text_output_tokens"], 180)
                     self.assertTrue((logs_dir / "trajectory.json").exists())
                     task_requests = [body for body in requests if body.get("tools")]
+                    if use_mcp:
+                        self.assertEqual(len(mcp_calls), 2)
+                        self.assertTrue(all(c["name"] == "zvec_grep_callees" for c in mcp_calls))
+                        for body in task_requests:
+                            names = {t["function"]["name"] for t in body["tools"]}
+                            self.assertEqual(
+                                {n for n in names if n.startswith("zvec_grep_")},
+                                {
+                                    "zvec_grep_zvec_grep_" + name
+                                    for name in ("search", "callers", "callees")
+                                },
+                            )
                     self.assertEqual(
                         len(task_requests), 6, result.stdout + result.stderr
                     )
@@ -473,6 +568,9 @@ class OpenCodeSamplingContractTests(unittest.TestCase):
                                 f"Unexpected {tool} availability: {sorted(tool_names)}",
                             )
                 finally:
+                    if mcp_server is not None:
+                        mcp_server.shutdown()
+                        mcp_server.server_close()
                     server.shutdown()
                     server.server_close()
                     thread.join(timeout=5)

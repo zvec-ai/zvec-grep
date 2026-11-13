@@ -34,8 +34,9 @@ class ValidationTests(unittest.TestCase):
         )
 
         self.assertTrue(result["valid"])
-        self.assertEqual(result["task_count"], 20)
-        self.assertEqual(tuple(result["task_ids"]), EXPECTED_TASK_IDS)
+        self.assertEqual(result["task_count"], 23)
+        callee_tasks = tuple(json.loads(SELECTION_PATH.read_text())["gate"]["callees_tasks"])
+        self.assertEqual(tuple(result["task_ids"]), EXPECTED_TASK_IDS + ("requests:45", "sympy:37") + callee_tasks)
         self.assertTrue(result["references_are_judge_only"])
 
     def test_reference_answer_leak_in_dataset_is_rejected(self) -> None:
@@ -81,7 +82,7 @@ class ValidationTests(unittest.TestCase):
                     dataset_path=DATASET_PATH,
                 )
 
-    def test_category_distribution_mismatch_is_rejected(self) -> None:
+    def test_auto_category_mismatch_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             selection = json.loads(SELECTION_PATH.read_text())
             selection["tasks"][4]["category"] = "where"
@@ -89,7 +90,7 @@ class ValidationTests(unittest.TestCase):
             selection_path = Path(temp_dir) / "selection.json"
             _write_json(selection_path, selection)
 
-            with self.assertRaisesRegex(SweQaError, "5 tasks in each"):
+            with self.assertRaisesRegex(SweQaError, "what/where/how/why order"):
                 validate_assets(
                     selection_path=selection_path,
                     references_path=REFERENCES_PATH,

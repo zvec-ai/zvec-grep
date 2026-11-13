@@ -5,7 +5,7 @@
   "index_base": 0,
   "dataset_path": "benchmarks/swe-qa-bench/datasets",
   "gate": {
-    "required_tasks": 20,
+    "required_tasks": 23,
     "smoke_task": "reflex:6",
     "auto_tasks": [
       "reflex:6",
@@ -33,8 +33,12 @@
       "xarray:32",
       "streamlink:43",
       "sympy:26",
-      "conan:27"
-    ]
+      "conan:27",
+      "requests:45",
+      "sympy:37",
+      "pytest:46"
+    ],
+    "callees_tasks": ["pytest:46"]
   },
   "tasks": [
     {
@@ -336,6 +340,52 @@
       "repository_commit": "52f43d98fe44ab92d01317110488d0670c3e9e64",
       "question_hash": "398215b212b50d4744d9bfeaa41a4bcf64d763ba47ead21a575bad12fa38deca",
       "question": "Why does the method that checks if a repository has uncommitted changes implement its own exclusion filtering instead of using git's built‑in pathspec options?"
+    },
+    {
+      "task_id": "requests:45",
+      "source_file": "Benchmark/requests.jsonl",
+      "source_index": 45,
+      "repository": "psf/requests",
+      "repository_commit": "46e939b5525d9c72b677340985582b04b128478a",
+      "question": "Where in the codebase is the TooManyRedirects exception raised and what is the call chain that leads to its instantiation from the redirect handling logic?",
+      "order": 21,
+      "task_slug": "requests-45",
+      "role": "category",
+      "category": "where",
+      "question_type": "where",
+      "repository_url": "https://github.com/psf/requests.git",
+      "question_hash": "21f5cb775c83641fbf4ac202c52600e6842be3c91f1dc21c493477fd7dbe97b6"
+    },
+    {
+      "task_id": "sympy:37",
+      "source_file": "Benchmark/sympy.jsonl",
+      "source_index": 37,
+      "repository": "sympy/sympy",
+      "repository_commit": "3c817ed8ab551d71e36907ce869afe5e4ca789ff",
+      "question": "Where does data flow through the helper that computes maximum derivative orders for each dependent variable when the recursive order-finding utility is called for each equation-function pair?",
+      "order": 22,
+      "task_slug": "sympy-37",
+      "role": "category",
+      "category": "where",
+      "question_type": "where",
+      "repository_url": "https://github.com/sympy/sympy.git",
+      "question_hash": "c434992f432ede3f148088244b15d0fd61164a17e09d77b642fb122c9b00d773"
+    },
+    {
+      "task_id": "pytest:46",
+      "source_file": "Benchmark/pytest.jsonl",
+      "source_index": 46,
+      "repository": "pytest-dev/pytest",
+      "repository_commit": "5989efe3efec31a9d14f550d89903b6311dfc828",
+      "question": "Where is the subprocess execution mechanism that `pytester.runpytest_subprocess` delegates to, and how does it handle system exception propagation during test collection?",
+      "order": 23,
+      "task_slug": "pytest-46",
+      "role": "category",
+      "category": "where",
+      "question_type": "where",
+      "repository_url": "https://github.com/pytest-dev/pytest.git",
+      "question_hash": "d24d65a6b809b4263a88407d41c3b2c5f75459976d41fade2255d2d02b7f37ef"
     }
-  ]
+  ],
+  "selection_revision": 2
 }

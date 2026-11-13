@@ -18,7 +18,7 @@ time.
 
 ## Benchmark definition
 
-This benchmark uses a pinned 20-task subset of
+This benchmark uses a pinned 23-task subset of
 [`peng-weihan/SWE-QA-Bench`](https://github.com/peng-weihan/SWE-QA-Bench).
 The benchmark inputs are locked in this directory:
 
@@ -33,6 +33,43 @@ The benchmark inputs are locked in this directory:
 
 The validation command below checks the locked selection, repository commits,
 hashes, and reference isolation before model-backed runs.
+
+### Upstream relationship coverage (selection revision 2)
+
+The original twenty questions, references, repository commits, smoke selection
+and `repro-3` selection are retained. `requests:45` and `sympy:37` add upstream
+caller scenarios. The third addition is selected from these fixed callee candidates,
+in order: `pytest:46`, then `scikit-learn:38`; the first qualifying candidate is kept.
+Questions and Gold come unchanged from SWE-QA-Bench revision
+`c13deac7a0d99b0ca2e593e004c4739475785b08`.
+
+The current candidate is `pytest:46`, pinned to pytest commit
+`5989efe3efec31a9d14f550d89903b6311dfc828`. Manual source review and an independent
+AST check confirm `Pytester.runpytest_subprocess` calls `Pytester.run` at
+`src/_pytest/pytester.py:1506`; `run` delegates to `popen` at line 1420.
+The candidate's natural-call admission is pending the run recorded below.
+
+This suite enables graph indexing for the ZG profile. Graph mode is recorded in
+setup and index-seed identity, so a text-only seed cannot satisfy a graph run.
+Default zg search/callers/callees tools and guidance are retained; delegated
+agents explicitly receive zg permissions. No question or instruction requires
+a tool call. Index preparation remains separate from agent time.
+
+The existing workflow's `callees` scope selects only the callee candidate.
+Before model trials it indexes the entire pinned repository and verifies a
+source-checked outgoing edge through real MCP. It then runs baseline/ZG five
+times each with the existing sampling, budget, judge and exception retry policy.
+At most two candidates are tested (twenty nominal trials); absent tool calls,
+empty results and low scores never trigger reruns or prompt tuning. Admission
+requires a completed paired run and at least one voluntary, successful ZG
+callees call returning a source-verified edge. Every trial is retained when
+checking adoption, including rows excluded by the normal summary sensitivity filter.
+
+The callee candidate is provisional until that gate passes. If neither candidate
+qualifies, the change remains a draft with only the two caller additions (22
+tasks); unqualified candidate data and the temporary scope are removed. Raw
+preflight records, recursive sessions and screening scripts live in Actions
+artifacts and the ignored `runs/suite-relationships-20261113/` directory.
 
 ## Published protocol
 
@@ -123,7 +160,7 @@ identifies tasks excluded by the input-token condition.
 This is a sensitivity filter, not evidence that excluded data is invalid. All
 selected tasks still execute and must complete their required trials and judge
 calls; filtering cannot turn an incomplete benchmark into a successful one.
-For `all-full`, each round still runs 20 tasks × 2 profiles × 5 trials. An
+For `all-full`, each round runs 23 tasks × 2 profiles × 5 trials. An
 otherwise complete run with no tasks left after filtering may still succeed.
 
 ## GitHub Actions
@@ -148,7 +185,7 @@ runs path-scoped Python and shared Node regression tests on pull requests and
 `main` pushes. It does not read model credentials, build a candidate, or run
 Harbor/model trials.
 
-`workflow_dispatch` defaults to `repro-3` (3 tasks); `all-full` (20 tasks) and
+`workflow_dispatch` defaults to `repro-3` (3 tasks); `all-full` (23 tasks) and
 `smoke` (5 tasks) remain available. `candidate_ref` defaults to `main` and
 selects the Rust source branch, tag, or commit to build as the candidate npm
 package; the harness checkout and candidate source are separate. Its `model` input defaults to
@@ -196,7 +233,7 @@ UTF-16/32 data. The ignore-file digest is part of the local index-seed identity;
 any other indexing failure remains fatal and visible in the task result. This
 setting belongs to the suite and is not inherited by other runner suites.
 
-The full run contains 20 tasks × 2 profiles × 5 trials = 200 independent
+The full run contains 23 tasks × 2 profiles × 5 trials = 230 independent
 trials. CI passes `--max-retries 2`: an exception, including an agent timeout,
 can trigger at most two additional attempts of the same trial. API usage-limit
 errors are not retried. Successful trials and low scores are not retried, and
@@ -425,7 +462,7 @@ zg-bench run swe-qa-bench \
 ```
 
 Remove `--dry-run` to execute the five-task smoke run. To run the published
-20-task paired-agent protocol, change `--tier smoke` to `--tier full`. The
+full paired-agent protocol, change `--tier smoke` to `--tier full`. The
 runner pins Claude Code `2.1.212`, Claude Opus 5, high reasoning effort, and the
 USD 4.00 per-profile budget for both Baseline and zvec-grep. Harbor trajectories
 and verifier output are written to `runs/`; the command does not automatically

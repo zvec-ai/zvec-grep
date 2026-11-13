@@ -1,0 +1,23 @@
+version = "1.0"
+
+[metadata]
+benchmark = "peng-weihan/SWE-QA-Bench"
+benchmark_revision = "c13deac7a0d99b0ca2e593e004c4739475785b08"
+task_id = "pytest:46"
+source_index = 46
+index_base = 0
+role = "category"
+category = "where"
+question_type = "where"
+question_hash = "d24d65a6b809b4263a88407d41c3b2c5f75459976d41fade2255d2d02b7f37ef"
+repository = "pytest-dev/pytest"
+repository_commit = "5989efe3efec31a9d14f550d89903b6311dfc828"
+
+[verifier]
+timeout_sec = 60.0
+
+[agent]
+timeout_sec = 1800.0
+
+[environment]
+build_timeout_sec = 1200.0
