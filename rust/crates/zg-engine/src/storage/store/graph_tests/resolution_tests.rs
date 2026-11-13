@@ -116,6 +116,68 @@ fn candidates_are_complete_and_distinct_without_loading_source_bodies() {
 }
 
 #[test]
+fn indexed_files_without_entities_remain_visible_to_resolution() {
+    let temporary = tempfile::tempdir().expect("workspace");
+    let store = open(temporary.path(), false);
+    let empty = snapshot(&store, "empty.rs", &[]);
+    write(&store, &empty);
+    assert!(empty.entities.is_empty());
+    assert!(
+        store.list_files().expect("indexed files")[0]
+            .index_status()
+            .is_indexed()
+    );
+
+    let mut source = snapshot(&store, "source.rs", &["caller"]);
+    source
+        .graph
+        .pending_refs
+        .push(reference(&source.entities[0]));
+    write(&store, &source);
+    let snapshot = store
+        .resolution_snapshot(None)
+        .expect("resolution snapshot");
+    let endpoint = format!("f{}", empty.file.id().get());
+    let leading_zero = format!("f0{}", empty.file.id().get());
+    assert_eq!(
+        snapshot.visible_file_id(&endpoint),
+        Some(empty.file.id().get())
+    );
+    assert_eq!(snapshot.visible_file_id(&leading_zero), None);
+
+    let page = store
+        .list_pending_refs(10, 0, &snapshot)
+        .expect("pending call");
+    assert_eq!(page.refs.len(), 1);
+    let proposal = Resolution {
+        ref_id: page.refs[0].id,
+        target_id: leading_zero,
+        provenance: EdgeProvenance::ImportScoped,
+    };
+    let stats = store
+        .apply_resolutions(std::slice::from_ref(&proposal), &snapshot)
+        .expect("reject noncanonical file spelling");
+    assert_eq!((stats.resolved, stats.stale), (0, 1));
+    let stats = store
+        .apply_resolutions(
+            &[Resolution {
+                target_id: endpoint.clone(),
+                ..proposal
+            }],
+            &snapshot,
+        )
+        .expect("resolve to empty file");
+    assert_eq!((stats.resolved, stats.stale), (1, 0));
+
+    store
+        .write(|state| state.files.put(&empty.file, &[]))
+        .expect("hide empty file");
+    let hidden = store.resolution_snapshot(None).expect("hidden snapshot");
+    assert_eq!(hidden.visible_file_id(&endpoint), None);
+    store.close().expect("close writer");
+}
+
+#[test]
 fn pending_pages_preserve_cursor_and_writeback_checks_both_endpoints() {
     let temporary = tempfile::tempdir().expect("workspace");
     let store = open(temporary.path(), false);
@@ -135,12 +197,19 @@ fn pending_pages_preserve_cursor_and_writeback_checks_both_endpoints() {
     store
         .write(|state| state.files.put(&hidden.file, &[]))
         .expect("unfinished file");
-    let page = store.list_pending_refs(1, 0).expect("hidden page");
+    // Visibility is frozen for the sweep: one snapshot answers every page
+    // read and writeback check below.
+    let snapshot = store
+        .resolution_snapshot(None)
+        .expect("resolution snapshot");
+    let page = store
+        .list_pending_refs(1, 0, &snapshot)
+        .expect("hidden page");
     assert!(page.refs.is_empty());
     // Ordinary store reads between resolver operations do not recursively lock.
     assert_eq!(store.list_files().expect("read files").len(), 2);
     let page = store
-        .list_pending_refs(1, page.next_cursor.expect("advance cursor"))
+        .list_pending_refs(1, page.next_cursor.expect("advance cursor"), &snapshot)
         .expect("visible page");
     assert_eq!(page.refs.len(), 1);
     assert!(page.next_cursor.is_none());
@@ -172,20 +241,23 @@ fn pending_pages_preserve_cursor_and_writeback_checks_both_endpoints() {
         },
     ] {
         let stats = store
-            .apply_resolutions(&[invalid])
+            .apply_resolutions(&[invalid], &snapshot)
             .expect("skip unavailable endpoints");
         assert_eq!((stats.resolved, stats.stale), (0, 1));
     }
     // An invalid batch must not partially resolve its valid proposal.
     assert!(
         store
-            .apply_resolutions(&[
-                proposal.clone(),
-                Resolution {
-                    provenance: EdgeProvenance::FileLocal,
-                    ..proposal.clone()
-                }
-            ])
+            .apply_resolutions(
+                &[
+                    proposal.clone(),
+                    Resolution {
+                        provenance: EdgeProvenance::FileLocal,
+                        ..proposal.clone()
+                    }
+                ],
+                &snapshot
+            )
             .is_err()
     );
     let proposal = Resolution {
@@ -193,17 +265,17 @@ fn pending_pages_preserve_cursor_and_writeback_checks_both_endpoints() {
         ..proposal
     };
     let stats = store
-        .apply_resolutions(std::slice::from_ref(&proposal))
+        .apply_resolutions(std::slice::from_ref(&proposal), &snapshot)
         .expect("visible file endpoint");
     assert_eq!((stats.resolved, stats.stale), (1, 0));
     let stats = store
-        .apply_resolutions(&[proposal])
+        .apply_resolutions(&[proposal], &snapshot)
         .expect("already resolved");
     assert_eq!((stats.resolved, stats.stale), (0, 1));
     store.close().expect("close writer");
-    assert!(store.list_pending_refs(1, 0).is_err());
+    assert!(store.list_pending_refs(1, 0, &snapshot).is_err());
     let reader = open(temporary.path(), true);
-    assert!(reader.list_pending_refs(1, 0).is_err());
-    assert!(reader.apply_resolutions(&[]).is_err());
+    assert!(reader.list_pending_refs(1, 0, &snapshot).is_err());
+    assert!(reader.apply_resolutions(&[], &snapshot).is_err());
     reader.close().expect("close reader");
 }

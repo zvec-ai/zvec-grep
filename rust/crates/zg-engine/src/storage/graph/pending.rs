@@ -30,6 +30,10 @@ impl SqliteGraphStorage {
 
     /// Lists only pending refs using keyset pagination; no snapshot spans pages.
     /// Restart with cursor 0 after file mutations.
+    /// Keep Declares rows in the page even though the resolver defers them:
+    /// filtering them here changes writeback boundaries, and receiver rules
+    /// can observe inheritance resolved by earlier pages. Removing them needs
+    /// a resolver whose dependency reads no longer depend on those boundaries.
     /// Limit must be positive and at most [`MAX_PENDING_PAGE_SIZE`].
     /// # Errors
     /// Rejects invalid limits/cursors and malformed stored rows or SQLite errors.
@@ -106,7 +110,7 @@ impl SqliteGraphStorage {
     ///
     /// # Errors
     /// Rejects invalid proposals and SQLite failures; the entire batch rolls back.
-    pub(crate) fn record_candidates(&mut self, entries: &[(i64, Vec<String>)]) -> Result<usize> {
+    pub(crate) fn record_candidates(&mut self, entries: &[(i64, &[String])]) -> Result<usize> {
         if entries.iter().any(|(ref_id, _)| *ref_id < 1) {
             return Err(Error::InvalidInput(
                 "candidate records require a positive ref ID",

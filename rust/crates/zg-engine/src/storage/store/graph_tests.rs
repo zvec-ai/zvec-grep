@@ -199,17 +199,23 @@ fn callers(store: &IndexStore, target: &Entity) -> Vec<FileEdge> {
 }
 
 fn resolve(store: &IndexStore, target: &Entity) -> i64 {
+    let snapshot = store
+        .resolution_snapshot(None)
+        .expect("resolution snapshot");
     let refs = store
-        .list_pending_refs(100, 0)
+        .list_pending_refs(100, 0, &snapshot)
         .expect("visible pending refs");
     assert_eq!(refs.refs.len(), 1);
     let id = refs.refs[0].id;
     let stats = store
-        .apply_resolutions(&[Resolution {
-            ref_id: id,
-            target_id: target.id().as_str().into(),
-            provenance: EdgeProvenance::ImportScoped,
-        }])
+        .apply_resolutions(
+            &[Resolution {
+                ref_id: id,
+                target_id: target.id().as_str().into(),
+                provenance: EdgeProvenance::ImportScoped,
+            }],
+            &snapshot,
+        )
         .expect("resolve reference through IndexStore");
     assert_eq!(stats.resolved, 1);
     id
@@ -336,14 +342,14 @@ fn disabled_graph_rejects_data_and_resolution_without_changing_files() {
     }
     assert_eq!(
         store
-            .list_pending_refs(10, 0)
+            .list_pending_refs(10, 0, &ResolutionSnapshot::default())
             .expect_err("disabled resolver")
             .code(),
         EngineError::UNSUPPORTED
     );
     assert_eq!(
         store
-            .apply_resolutions(&[])
+            .apply_resolutions(&[], &ResolutionSnapshot::default())
             .expect_err("disabled resolver")
             .code(),
         EngineError::UNSUPPORTED

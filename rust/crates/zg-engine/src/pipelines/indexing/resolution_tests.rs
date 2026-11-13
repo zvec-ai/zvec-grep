@@ -50,6 +50,16 @@ fn open(path: &std::path::Path) -> IndexStore {
 
 /// Extracts, assembles, and stores one source file exactly as indexing does.
 fn index_source(store: &IndexStore, path: &str, text: &str) -> FileId {
+    index_source_with_graph(store, path, text, |_| {})
+}
+
+/// Allows queue-shape fixtures to adjust graph evidence before publication.
+fn index_source_with_graph(
+    store: &IndexStore,
+    path: &str,
+    text: &str,
+    adjust: impl FnOnce(&mut crate::domain::FileGraphResult),
+) -> FileId {
     let relative_path = SourcePath::new(path).expect("source path");
     let id = store
         .resolve_file_ids(&[relative_path.to_path_buf()])
@@ -62,7 +72,7 @@ fn index_source(store: &IndexStore, path: &str, text: &str) -> FileId {
     };
     let extracted = extract_for_indexing(&source, ChunkOptions::default()).expect("extraction");
     let entities = bind_entities(id, extracted.fragments).expect("bound entities");
-    let graph = extracted
+    let mut graph = extracted
         .graph
         .as_ref()
         .map(|graph| {
@@ -70,6 +80,7 @@ fn index_source(store: &IndexStore, path: &str, text: &str) -> FileId {
             assemble_file_graph(&id.get().to_string(), language, graph, &entities)
         })
         .unwrap_or_default();
+    adjust(&mut graph);
     let entries: Vec<IndexedFragment> = entities
         .iter()
         .flat_map(|entity| {
@@ -141,7 +152,7 @@ fn sweep_resolves_relative_import_and_imported_call_from_real_extraction() {
     );
     assert!(
         store
-            .list_pending_refs(10, 0)
+            .list_pending_refs(10, 0, &store.resolution_snapshot(None).expect("snapshot"))
             .expect("queue")
             .refs
             .is_empty(),
@@ -181,7 +192,7 @@ fn call_target_files(store: &IndexStore, owner: &str) -> Vec<FileId> {
 /// resolves the row.
 fn pending_call_owner(store: &IndexStore, file: FileId, name: &str) -> String {
     store
-        .list_pending_refs(1000, 0)
+        .list_pending_refs(1000, 0, &store.resolution_snapshot(None).expect("snapshot"))
         .expect("queue")
         .refs
         .iter()
@@ -200,7 +211,7 @@ fn pending_call_owner(store: &IndexStore, file: FileId, name: &str) -> String {
 /// order, captured before a sweep resolves the rows.
 fn pending_call_owners(store: &IndexStore, file: FileId, name: &str) -> Vec<(usize, String)> {
     let mut calls: Vec<(usize, String)> = store
-        .list_pending_refs(1000, 0)
+        .list_pending_refs(1000, 0, &store.resolution_snapshot(None).expect("snapshot"))
         .expect("queue")
         .refs
         .iter()
@@ -224,7 +235,7 @@ fn pending_call_owners(store: &IndexStore, file: FileId, name: &str) -> Vec<(usi
 /// before a sweep resolves the row.
 fn pending_receiver_call_owner(store: &IndexStore, file: FileId, receiver: &str) -> String {
     store
-        .list_pending_refs(1000, 0)
+        .list_pending_refs(1000, 0, &store.resolution_snapshot(None).expect("snapshot"))
         .expect("queue")
         .refs
         .iter()
@@ -290,7 +301,7 @@ fn sweep_resolves_relative_alias_specifiers_per_importing_directory() {
     assert_eq!(sweep.failed, 0, "nothing terminates: {sweep:?}");
     assert!(
         store
-            .list_pending_refs(10, 0)
+            .list_pending_refs(10, 0, &store.resolution_snapshot(None).expect("snapshot"))
             .expect("queue")
             .refs
             .is_empty(),
@@ -315,7 +326,9 @@ fn sweep_fails_bare_package_import_from_real_extraction() {
     assert_eq!(sweep.failed, 1, "the package import terminates: {sweep:?}");
     // The call through the imported binding has no workspace definition, so it
     // stays queued; only the import itself terminates.
-    let page = store.list_pending_refs(10, 0).expect("queue");
+    let page = store
+        .list_pending_refs(10, 0, &store.resolution_snapshot(None).expect("snapshot"))
+        .expect("queue");
     assert!(
         page.refs
             .iter()
@@ -363,7 +376,9 @@ fn sweep_binds_qualified_calls_only_when_the_receiver_spells_the_indexed_scope()
         "only receivers the breadcrumb reproduces bind: {sweep:?}"
     );
     assert_eq!(sweep.resolved, 3, "three of the four calls bind: {sweep:?}");
-    let page = store.list_pending_refs(10, 0).expect("queue");
+    let page = store
+        .list_pending_refs(10, 0, &store.resolution_snapshot(None).expect("snapshot"))
+        .expect("queue");
     assert_eq!(page.refs.len(), 1, "one call stays pending: {page:?}");
     assert_eq!(page.refs[0].reference.ref_name, "find");
     assert_eq!(
@@ -446,7 +461,7 @@ fn sweep_binds_python_cls_receiver_to_the_enclosing_class() {
     );
     assert!(
         store
-            .list_pending_refs(10, 0)
+            .list_pending_refs(10, 0, &store.resolution_snapshot(None).expect("snapshot"))
             .expect("queue")
             .refs
             .is_empty(),
@@ -466,7 +481,14 @@ fn sweep_keeps_python_module_import_pending_until_its_module_is_indexed() {
     let first = resolve_pending(&store, None).expect("sweep");
     assert_eq!(first.failed, 0, "an in-workspace module path stays queued");
     assert_eq!(first.resolved, 0, "the module is not indexed yet");
-    assert_eq!(store.list_pending_refs(10, 0).expect("queue").refs.len(), 1);
+    assert_eq!(
+        store
+            .list_pending_refs(10, 0, &store.resolution_snapshot(None).expect("snapshot"))
+            .expect("queue")
+            .refs
+            .len(),
+        1
+    );
 
     index_source(&store, "pkg/math.py", "def math():\n  return 1\n");
     let second = resolve_pending(&store, None).expect("sweep");
@@ -474,7 +496,7 @@ fn sweep_keeps_python_module_import_pending_until_its_module_is_indexed() {
     assert_eq!(second.resolved, 1, "the import binds to the module file");
     assert!(
         store
-            .list_pending_refs(10, 0)
+            .list_pending_refs(10, 0, &store.resolution_snapshot(None).expect("snapshot"))
             .expect("queue")
             .refs
             .is_empty(),
@@ -525,6 +547,93 @@ fn sweep_prefers_the_nearest_override_over_the_base_declaration() {
         vec![base],
         "super() still binds the base declaration"
     );
+}
+
+#[test]
+fn sweep_preserves_declaration_padded_inheritance_writeback() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    let base = index_source(&store, "base.ts", "export class Part { layout() {} }\n");
+    index_source(&store, "other.ts", "export class Part {}\n");
+    index_source_with_graph(
+        &store,
+        "child.ts",
+        "import { Part } from './base';\nexport class Child extends Part {\n  run() { super.layout(); }\n}\n",
+        |graph| {
+            assert_eq!(graph.pending_refs.len(), 3, "import, base, and call");
+            let reference = |kind| {
+                graph
+                    .pending_refs
+                    .iter()
+                    .find(|reference| reference.ref_kind == kind)
+                    .expect("extracted reference")
+                    .clone()
+            };
+            let import = reference(GraphEdgeKind::Imports);
+            let inheritance = reference(GraphEdgeKind::Extends);
+            let call = reference(GraphEdgeKind::Calls);
+            // Import + 998 declarations + inheritance fills the first page.
+            // Removing declarations puts the call before inheritance writeback,
+            // where the two Part candidates prevent receiver resolution.
+            let mut refs = vec![import];
+            refs.extend((0..998).map(|i| crate::domain::PendingRef {
+                ref_kind: GraphEdgeKind::Declares,
+                ref_name: format!("binding-{i}"),
+                ..inheritance.clone()
+            }));
+            refs.push(inheritance);
+            refs.push(call);
+            graph.pending_refs = refs;
+        },
+    );
+    let snapshot = store.resolution_snapshot(None).expect("snapshot");
+    let before = store.list_pending_refs(1024, 0, &snapshot).expect("queue");
+    let call = before
+        .refs
+        .iter()
+        .find(|row| row.reference.ref_kind == GraphEdgeKind::Calls)
+        .expect("pending super call");
+    let owner = call.reference.owner_id.clone();
+    let signal = CancellationToken::new();
+    signal.cancel();
+    assert_eq!(
+        resolve_pending(&store, Some(&signal))
+            .expect_err("cancelled")
+            .code(),
+        EngineError::CANCELLED
+    );
+    assert_eq!(
+        store
+            .list_pending_refs(1024, 0, &snapshot)
+            .expect("untouched queue"),
+        before
+    );
+
+    let sweep = resolve_pending(&store, None).expect("single sweep after cancellation");
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![base],
+        "the imported base's member binds in one sweep: {sweep:?}"
+    );
+    assert_eq!(sweep.scanned, 1001);
+    assert_eq!(sweep.resolved, 3);
+    assert_eq!(sweep.file_scoped, 1);
+    let remaining = store
+        .list_pending_refs(1024, 0, &snapshot)
+        .expect("binding evidence");
+    assert_eq!(remaining.refs.len(), 998);
+    assert!(
+        remaining.refs.iter().all(
+            |row| row.reference.ref_kind == GraphEdgeKind::Declares && row.candidates.is_none()
+        )
+    );
+    assert_eq!(
+        resolve_pending(&store, None)
+            .expect("repeat sweep")
+            .resolved,
+        0
+    );
+    assert_eq!(call_target_files(&store, &owner), vec![base]);
 }
 
 #[test]
@@ -633,7 +742,7 @@ fn sweep_keeps_an_equal_arity_overload_pending_when_the_parameter_types_differ()
     );
     assert!(
         store
-            .list_pending_refs(10, 0)
+            .list_pending_refs(10, 0, &store.resolution_snapshot(None).expect("snapshot"))
             .expect("queue")
             .refs
             .iter()
@@ -728,7 +837,7 @@ fn sweep_keeps_a_qualifier_parenthesis_out_of_the_parameter_list() {
     );
     assert!(
         store
-            .list_pending_refs(10, 0)
+            .list_pending_refs(10, 0, &store.resolution_snapshot(None).expect("snapshot"))
             .expect("queue")
             .refs
             .iter()
@@ -793,7 +902,7 @@ fn sweep_keeps_an_unnamed_user_defined_parameter_distinct() {
     );
     assert!(
         store
-            .list_pending_refs(10, 0)
+            .list_pending_refs(10, 0, &store.resolution_snapshot(None).expect("snapshot"))
             .expect("queue")
             .refs
             .iter()
@@ -871,7 +980,11 @@ fn sweep_stops_before_writing_back_when_the_pass_is_cancelled() {
         .expect_err("a cancelled pass must not drain the queue");
     assert_eq!(error.code(), EngineError::CANCELLED);
     assert_eq!(
-        store.list_pending_refs(10, 0).expect("queue").refs.len(),
+        store
+            .list_pending_refs(10, 0, &store.resolution_snapshot(None).expect("snapshot"))
+            .expect("queue")
+            .refs
+            .len(),
         2,
         "the import and its call stay queued for a later pass"
     );
@@ -995,7 +1108,7 @@ fn sweep_keeps_java_on_demand_import_pending() {
     );
     assert!(
         store
-            .list_pending_refs(10, 0)
+            .list_pending_refs(10, 0, &store.resolution_snapshot(None).expect("snapshot"))
             .expect("queue")
             .refs
             .iter()
@@ -1030,7 +1143,7 @@ fn sweep_keeps_a_java_import_of_another_package_pending() {
     );
     assert!(
         store
-            .list_pending_refs(10, 0)
+            .list_pending_refs(10, 0, &store.resolution_snapshot(None).expect("snapshot"))
             .expect("queue")
             .refs
             .iter()
@@ -1090,7 +1203,7 @@ fn sweep_keeps_a_java_import_pending_when_the_directory_looks_like_the_package()
     );
     assert!(
         store
-            .list_pending_refs(10, 0)
+            .list_pending_refs(10, 0, &store.resolution_snapshot(None).expect("snapshot"))
             .expect("queue")
             .refs
             .iter()
@@ -1214,7 +1327,7 @@ fn incremental_requeue_revives_failed_import() {
     );
     assert!(
         store
-            .list_pending_refs(10, 0)
+            .list_pending_refs(10, 0, &store.resolution_snapshot(None).expect("snapshot"))
             .expect("queue")
             .refs
             .iter()
@@ -1232,7 +1345,7 @@ fn incremental_requeue_revives_failed_import() {
     );
     assert!(
         store
-            .list_pending_refs(10, 0)
+            .list_pending_refs(10, 0, &store.resolution_snapshot(None).expect("snapshot"))
             .expect("queue")
             .refs
             .iter()
@@ -1280,7 +1393,7 @@ fn sweep_keeps_an_untyped_receiver_call_pending_when_the_member_name_is_unique()
     );
     assert!(
         store
-            .list_pending_refs(10, 0)
+            .list_pending_refs(10, 0, &store.resolution_snapshot(None).expect("snapshot"))
             .expect("queue")
             .refs
             .iter()
@@ -1364,7 +1477,7 @@ fn sweep_keeps_an_untyped_receiver_call_pending_when_several_definitions_exist()
     );
     assert!(
         store
-            .list_pending_refs(10, 0)
+            .list_pending_refs(10, 0, &store.resolution_snapshot(None).expect("snapshot"))
             .expect("queue")
             .refs
             .iter()
@@ -1534,7 +1647,7 @@ fn sweep_keeps_a_call_pending_when_the_only_candidate_is_out_of_scope() {
     );
     assert!(
         store
-            .list_pending_refs(100, 0)
+            .list_pending_refs(100, 0, &store.resolution_snapshot(None).expect("snapshot"))
             .expect("queue")
             .refs
             .iter()

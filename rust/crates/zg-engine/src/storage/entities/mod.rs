@@ -114,16 +114,17 @@ impl Entities {
         Ok(owners)
     }
 
-    /// Every entity that carries code metadata, projected as `(entity_id,
-    /// file_id, metadata)` for the resolver's workspace snapshot. Canonical
-    /// bodies and fragments stay unread. The scan is long on a large
-    /// workspace, so `signal` interrupts it between documents: the caller
-    /// discards the partial projection instead of scanning past a cancelled
-    /// pass.
+    /// Every entity projected as `(entity_id, file_id, metadata)` for the
+    /// resolver's workspace snapshot, with `None` metadata for entities that
+    /// carry no code metadata: ownership must cover every endpoint, while the
+    /// name index reads only the metadata-bearing ones. Canonical bodies and
+    /// fragments stay unread. The scan is long on a large workspace, so
+    /// `signal` interrupts it between documents: the caller discards the
+    /// partial projection instead of scanning past a cancelled pass.
     pub(super) fn list_symbol_projection(
         &self,
         signal: Option<&CancellationToken>,
-    ) -> EngineResult<Vec<(String, FileId, CodeMetadata)>> {
+    ) -> EngineResult<Vec<(String, FileId, Option<CodeMetadata>)>> {
         let iterator = native(
             self.collection
                 .iter_with_options(Some(&["entity_id", "file_id", "metadata"]), false),
@@ -139,9 +140,11 @@ impl Entities {
             if doc_key(&doc)? != id {
                 return Err(corrupt("entity identity differs from its index fields"));
             }
-            if let Some(EntityMetadata::Code(metadata)) = decode_metadata(&doc)? {
-                projection.push((id, FileId::new(u32_field(&doc, "file_id")?), metadata));
-            }
+            let metadata = match decode_metadata(&doc)? {
+                Some(EntityMetadata::Code(metadata)) => Some(metadata),
+                _ => None,
+            };
+            projection.push((id, FileId::new(u32_field(&doc, "file_id")?), metadata));
         }
         Ok(projection)
     }
