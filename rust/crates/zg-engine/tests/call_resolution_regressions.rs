@@ -918,6 +918,93 @@ async fn java_wildcard_imports_respect_package_and_explicit_import_precedence() 
 }
 
 #[tokio::test]
+async fn rust_relationship_queries_match_declared_file_modules() {
+    for (root, module, child, other, orphan, leaf) in [
+        (
+            "lib.rs",
+            "foo/mod.rs",
+            "foo/child.rs",
+            "bar.rs",
+            "orphan.rs",
+            "inline/leaf.rs",
+        ),
+        (
+            "crates/app/src/lib.rs",
+            "crates/app/src/foo.rs",
+            "crates/app/src/foo/child.rs",
+            "crates/app/src/bar.rs",
+            "crates/app/src/orphan.rs",
+            "crates/app/src/inline/leaf.rs",
+        ),
+    ] {
+        let path = |source: &str| source.split('/').collect::<std::path::PathBuf>();
+        let empty = |name: &str, file: &str| {
+            json!([
+                {"name":name,"filePath":path(file),"edges":[]}
+            ])
+        };
+        let mut queries: Vec<_> = ["foo::callee", "::foo::callee", "crate::foo::callee"]
+            .into_iter()
+            .map(|symbol| Query {
+                operation: "callers",
+                symbol,
+                expected: json!([{"name":"callee","filePath":path(module),"startLine":1,"edges":[
+                    {"symbol":{"name":"invoke","filePath":path(module)},"line":2}
+                ]}]),
+                ..Query::default()
+            })
+            .collect();
+        queries.extend(
+            [
+                (
+                    "foo::invoke",
+                    json!([
+                        {"name":"invoke","filePath":path(module),"edges":[
+                            {"symbol":{"name":"callee","filePath":path(module)},"line":2}
+                        ]}
+                    ]),
+                ),
+                (
+                    "callee",
+                    json!([
+                        {"name":"callee","filePath":path(module),"edges":[]},
+                        {"name":"callee","filePath":path(other),"edges":[]},
+                        {"name":"callee","filePath":path(orphan),"edges":[]}
+                    ]),
+                ),
+                ("bar::callee", empty("callee", other)),
+                ("foo::nested::inside", empty("nested::inside", module)),
+                ("foo::Worker::run", empty("Worker::run", module)),
+                ("Worker::run", empty("Worker::run", module)),
+                ("foo::child::deep", empty("deep", child)),
+                ("inline::leaf::deep", empty("deep", leaf)),
+                ("orphan::callee", json!([])),
+                ("wrong::foo::callee", json!([])),
+            ]
+            .into_iter()
+            .map(|(symbol, expected)| Query {
+                operation: "callees",
+                symbol,
+                expected,
+                ..Query::default()
+            }),
+        );
+        check_case(Case {
+            name:"rust_relationship_queries_match_declared_file_modules",
+            files:vec![
+                SourceFile { path:root, source:"mod foo; mod bar;\nmod inline { mod leaf; }\nmod orphan {}\n" },
+                SourceFile { path:module, source:"pub fn callee() {}\npub fn invoke() { callee(); }\npub mod nested { pub fn inside() {} }\npub struct Worker;\nimpl Worker { pub fn run(&self) {} }\nmod child;\n" },
+                SourceFile { path:child, source:"pub fn deep() {}\n" },
+                SourceFile { path:other, source:"pub fn callee() {}\n" },
+                SourceFile { path:orphan, source:"pub fn callee() {}\n" },
+                SourceFile { path:leaf, source:"pub fn deep() {}\n" },
+            ],
+            queries,
+        }).await;
+    }
+}
+
+#[tokio::test]
 async fn rust_split_impls_resolve_relative_modules_within_each_cargo_crate() {
     check_case(Case {
         name:"rust_split_impls_resolve_relative_modules_within_each_cargo_crate",
