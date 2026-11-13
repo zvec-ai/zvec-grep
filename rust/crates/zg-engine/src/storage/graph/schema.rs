@@ -2,13 +2,32 @@ use rusqlite::{Connection, TransactionBehavior};
 
 use super::{Error, Result};
 
-// Unsupported databases require an index rebuild; no schema migration is provided.
-// Version compatibility belongs to the workspace manifest, which rebuilds the whole
-// index when the index version changes; this database only proves ownership.
+// The workspace manifest gates the base index format. Optional graph storage
+// independently proves ownership and the columns its readers and writers require.
+// Incompatible graph databases require an explicit rebuild; no migration is provided.
 // The edges table carries both the walk-time edges and the resolver's data plane
 // (ambiguity candidates, reference language and name tail); names, ownership and
 // paths stay canonical in zvec.
 pub(crate) const APPLICATION_ID: i64 = 0x5a47_5250;
+
+const EDGE_COLUMNS: &[(&str, &str)] = &[
+    ("id", "INTEGER"),
+    ("file_id", "INTEGER"),
+    ("source", "TEXT"),
+    ("target", "TEXT"),
+    ("kind", "TEXT"),
+    ("status", "TEXT"),
+    ("reference_name", "TEXT"),
+    ("receiver_name", "TEXT"),
+    ("arity", "INTEGER"),
+    ("line", "INTEGER"),
+    ("col", "INTEGER"),
+    ("candidates", "TEXT"),
+    ("language", "TEXT"),
+    ("name_tail", "TEXT"),
+    ("provenance", "TEXT"),
+    ("metadata", "TEXT"),
+];
 
 pub(crate) fn validate(connection: &Connection) -> Result<()> {
     let application_id: i64 =
@@ -24,13 +43,26 @@ pub(crate) fn validate(connection: &Connection) -> Result<()> {
     if edges != 1 {
         return Err(Error::IncompleteSchema);
     }
+    let mut statement = connection.prepare("PRAGMA table_info(edges)")?;
+    let columns = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !EDGE_COLUMNS.iter().all(|&(name, sql_type)| {
+        columns.iter().any(|(actual_name, actual_type)| {
+            actual_name == name && actual_type.eq_ignore_ascii_case(sql_type)
+        })
+    }) {
+        return Err(Error::IncompleteSchema);
+    }
     Ok(())
 }
 
-pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
+pub(crate) fn initialize(connection: &mut Connection, allow_create: bool) -> Result<()> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let application_id: i64 = tx.query_row("PRAGMA application_id", [], |row| row.get(0))?;
-    if application_id == 0 {
+    if application_id == 0 && allow_create {
         let objects: i64 = tx.query_row(
             "SELECT count(*) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'",
             [],
@@ -92,9 +124,8 @@ CREATE TABLE edges (
 
 // Created on every writable open, not only when the table is: an index is
 // derived data, so a database built by an older binary gains the ones added
-// since without a rebuild. A database whose columns predate one of these
-// indexes fails here with `no such column`, which is the same rebuild signal
-// the first read of that column would have produced.
+// since without a rebuild. Required columns are validated before any additions,
+// including columns that these indexes do not use.
 const INDEXES: &str = "
 CREATE INDEX IF NOT EXISTS edges_file ON edges(file_id);
 CREATE INDEX IF NOT EXISTS edges_source_kind ON edges(source, kind);

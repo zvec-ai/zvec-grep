@@ -530,53 +530,129 @@ fn graph_and_entities_reopen_together_and_read_only_handles_reject_writes() {
 }
 
 #[test]
-fn missing_graph_is_created_without_rebuilding_indexed_files() {
+fn unavailable_graph_preserves_canonical_reads_and_rejects_writes_without_recreating_it() {
+    for corruption in ["missing", "invalid", "incompatible"] {
+        let temporary = tempfile::tempdir().expect("workspace");
+        let home = temporary.path();
+        let store = open(home, false);
+        let source = snapshot(&store, "source.rs", &["orchard"]);
+        write(&store, &source);
+        store.finalize_writes().expect("finalize canonical data");
+        store.close().expect("close writer");
+        let graph_dir = home.join("graph");
+        let path = graph_dir.join("graph.sqlite");
+        fs::remove_file(&path).expect("remove graph");
+        match corruption {
+            "missing" => {}
+            "invalid" => fs::write(&path, b"not a SQLite database").expect("invalid graph"),
+            "incompatible" => {
+                let old = Connection::open(&path).expect("old graph");
+                old.execute_batch(
+                    "PRAGMA application_id = 1514623568; \
+                     CREATE TABLE edges (id INTEGER PRIMARY KEY);",
+                )
+                .expect("incompatible edges schema");
+                old.close().expect("close old graph");
+            }
+            _ => unreachable!(),
+        }
+        let original = fs::read(&path).ok();
+        let schema = fs::read(home.join("schema.json")).expect("storage schema");
+
+        let reader = open(home, true);
+        assert!(!reader.graph_enabled());
+        let error = reader
+            .read_snapshot(|view: &ReadView<'_>| view.ensure_graph())
+            .expect_err("graph operations require rebuild");
+        assert!(
+            error
+                .help()
+                .expect("rebuild guidance")
+                .contains("zg --index --rebuild --graph")
+        );
+        if corruption == "missing" {
+            assert_eq!(error.code(), EngineError::NOT_FOUND);
+        }
+        assert_eq!(stored_entities(&reader, &source.entities).len(), 1);
+        assert_eq!(
+            reader
+                .search_fts("orchard", 10, None)
+                .expect("text search")
+                .len(),
+            1
+        );
+        assert_eq!(
+            reader
+                .search_vector("fixture/graph", &[1.0, 0.0, 0.0], 10, None)
+                .expect("vector search")
+                .len(),
+            1
+        );
+        assert!(
+            reader.list_files().expect("canonical records")[0]
+                .index_status()
+                .is_indexed()
+        );
+        reader.close().expect("close reader");
+
+        let error = IndexStore::open(options(home, false, true))
+            .err()
+            .expect("existing graph writer requires rebuild");
+        assert!(
+            error
+                .help()
+                .expect("rebuild guidance")
+                .contains("zg --index --rebuild --graph")
+        );
+        assert_eq!(fs::read(&path).ok(), original);
+        assert_eq!(
+            fs::read(home.join("schema.json")).expect("preserved schema"),
+            schema
+        );
+        assert_eq!(
+            fs::read_dir(&graph_dir)
+                .expect("no new graph files")
+                .count(),
+            usize::from(original.is_some())
+        );
+
+        let writer =
+            IndexStore::open(options(home, false, false)).expect("ignore unavailable graph");
+        assert_eq!(stored_entities(&writer, &source.entities).len(), 1);
+        let replacement = snapshot(&writer, "source.rs", &["vineyard"]);
+        writer
+            .replace_file(
+                &replacement.file,
+                &replacement.entities,
+                &replacement.fragments,
+            )
+            .expect("write canonical data without graph");
+        writer.close().expect("close writer without graph");
+        assert_eq!(fs::read(&path).ok(), original);
+    }
+}
+
+#[test]
+fn valid_empty_graph_reopens_for_reads_and_incremental_writes() {
     let temporary = tempfile::tempdir().expect("workspace");
     let store = open(temporary.path(), false);
     let source = snapshot(&store, "source.rs", &["canonical record"]);
     write(&store, &source);
     store.close().expect("close writer");
-    let path = temporary.path().join("graph/graph.sqlite");
-    fs::remove_file(&path).expect("simulate pre-graph index");
 
     let reader = open(temporary.path(), true);
-    assert!(
-        reader
-            .read(|state| {
-                Ok(matches!(&state.graph, Err(error) if error.code == EngineError::NOT_FOUND))
-            })
-            .expect("missing graph")
-    );
+    assert!(reader.graph_enabled());
+    assert!(read_graph(&reader, |graph| graph
+        .is_empty()
+        .expect("valid empty graph")));
     assert_eq!(stored_entities(&reader, &source.entities).len(), 1);
-    assert!(
-        reader.list_files().expect("canonical records")[0]
-            .index_status()
-            .is_indexed()
-    );
-    assert!(!path.exists());
     reader.close().expect("close reader");
-    assert!(!path.exists());
 
     let writer = open(temporary.path(), false);
-    assert!(path.exists());
-    assert_eq!(stored_entities(&writer, &source.entities).len(), 1);
-    assert!(
-        writer.list_files().expect("existing records")[0]
-            .index_status()
-            .is_indexed()
-    );
-    assert!(
-        writer
-            .read(|state| {
-                state
-                    .graph
-                    .as_ref()
-                    .expect("writer graph")
-                    .is_empty()
-                    .map_err(graph_error)
-            })
-            .expect("empty graph")
-    );
+    assert!(writer.graph_enabled());
+    assert!(read_graph(&writer, |graph| graph
+        .is_empty()
+        .expect("valid empty graph")));
     let replacement = snapshot(&writer, "source.rs", &["updated record"]);
     write(&writer, &replacement);
     assert!(stored_entities(&writer, &source.entities).is_empty());
@@ -585,7 +661,7 @@ fn missing_graph_is_created_without_rebuilding_indexed_files() {
         .delete_file(replacement.file.id())
         .expect("incremental deletion");
     assert!(writer.list_files().expect("deleted records").is_empty());
-    writer.close().expect("close upgraded writer");
+    writer.close().expect("close writer");
 }
 
 #[test]

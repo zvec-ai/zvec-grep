@@ -1,5 +1,7 @@
 //! Open the indexed workspace and read a consistent relationship snapshot off the async workers.
 
+use std::path::Path;
+
 use crate::{
     EngineError, EngineResult,
     api::relationships::{Direction, RelationshipOptions, RelationshipResult},
@@ -40,7 +42,11 @@ pub(crate) async fn query(
         .descriptor()
         .is_some_and(IndexDescriptor::graph_indexing)
     {
-        return Err(EngineError::unsupported("graph support is disabled"));
+        return Err(workspace_error(
+            EngineError::unsupported("graph support is disabled")
+                .with_help("Rebuild the index with `zg --index --rebuild --graph`."),
+            &source_root,
+        ));
     }
     let source = acquire_read_source(
         &source_root,
@@ -58,6 +64,7 @@ pub(crate) async fn query(
     let result = tokio::task::spawn_blocking(move || {
         let run = |storage: &IndexStore| {
             query_symbols(storage, &name, scope.as_deref(), &request, direction)
+                .map_err(|error| workspace_error(error, &source_root))
         };
         let _lock = match source {
             ReadSource::Writer { lease, .. } => return run(&lease.session.storage),
@@ -95,6 +102,18 @@ pub(crate) async fn query(
     })??;
     wait.check_cancelled()?;
     Ok(result)
+}
+
+fn workspace_error(error: EngineError, root: &Path) -> EngineError {
+    let help = error
+        .help()
+        .map(|help| format!("{help} Run this command in workspace '{}'.", root.display()));
+    let error = if let Some(help) = help {
+        error.with_help(help)
+    } else {
+        error
+    };
+    error.with_workspace_root(root)
 }
 
 fn missing_index() -> EngineError {

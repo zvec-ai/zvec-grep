@@ -1222,7 +1222,7 @@ mod tests {
             &source_root,
             layout,
             crate::domain::ScanRules::default(),
-            Some(crate::workspace::CURRENT_INDEX_VERSION),
+            crate::workspace::CURRENT_INDEX_VERSION,
             Some(uuid::Uuid::new_v4().to_string()),
             1,
             1,

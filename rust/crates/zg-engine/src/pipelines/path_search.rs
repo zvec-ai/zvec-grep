@@ -307,7 +307,7 @@ mod tests {
             &root,
             layout,
             scan,
-            None,
+            crate::workspace::CURRENT_INDEX_VERSION,
             None,
             0,
             0,

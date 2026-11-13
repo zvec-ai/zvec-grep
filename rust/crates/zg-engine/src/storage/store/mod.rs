@@ -170,35 +170,39 @@ impl IndexStore {
                 "workspace storage is already open",
             ));
         }
-        let (lock, schema) = prepare_storage(&path, options)?;
+        let (lock, schema, new_storage) = prepare_storage(&path, options)?;
         let optimize_marker = path.join("optimize.pending");
         let needs_optimize = file_exists(&optimize_marker)?;
+        let graph_path = path.join("graph").join("graph.sqlite");
+        let graph = if graph_enabled {
+            let mode = if read_only {
+                OpenMode::ReadOnly
+            } else if new_storage {
+                OpenMode::Create
+            } else {
+                OpenMode::ReadWrite
+            };
+            let graph = open_graph(&graph_path, mode);
+            if read_only {
+                // Graph failures do not prevent canonical text/vector reads.
+                graph
+            } else {
+                // Existing files will skip extraction when unchanged, so an empty
+                // replacement graph cannot restore their missing relationships.
+                let graph = graph?;
+                if new_storage {
+                    sync_directory(&path.join("graph"))?;
+                }
+                Ok(graph)
+            }
+        } else {
+            Err(graph_disabled())
+        }
+        .map_err(EngineError::into_report);
         let files = Files::open(&path, read_only)?;
         let directories = Directories::open(&path, read_only)?;
         let entities = Entities::open(&path, read_only)?;
         let fragments = Fragments::open(&path, &schema, read_only)?;
-        let graph_path = path.join("graph").join("graph.sqlite");
-        let graph = if !graph_enabled {
-            Err(graph_disabled())
-        } else if read_only {
-            match fs::metadata(&graph_path) {
-                Ok(_) => {
-                    SqliteGraphStorage::open(&graph_path, OpenMode::ReadOnly).map_err(graph_error)
-                }
-                // Pre-graph indexes remain readable without creating SQLite in a reader.
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(graph_missing()),
-                Err(error) => Err(io_error("inspect workspace graph", &graph_path, &error)),
-            }
-        } else {
-            // An index built before its workspace asked for a graph still owns
-            // a valid canonical index; creating the empty database on first use
-            // keeps that build usable instead of forcing a rebuild.
-            let graph =
-                SqliteGraphStorage::open(&graph_path, OpenMode::ReadWrite).map_err(graph_error)?;
-            sync_directory(&path.join("graph"))?;
-            Ok(graph)
-        }
-        .map_err(EngineError::into_report);
         if !read_only {
             directories.load()?;
         }
@@ -626,12 +630,26 @@ fn invalidation_entity_ids(state: &StoreState, file_id: FileId) -> EngineResult<
 
 fn graph_disabled() -> EngineError {
     EngineError::unsupported("graph support is disabled")
+        .with_help("Rebuild the index with `zg --index --rebuild --graph`.")
 }
 
 fn graph_missing() -> EngineError {
     EngineError::not_found(
         "workspace graph is missing; this index has no persisted relationship data",
     )
+}
+
+fn open_graph(path: &Path, mode: OpenMode) -> EngineResult<SqliteGraphStorage> {
+    let graph = if mode == OpenMode::Create {
+        SqliteGraphStorage::open(path, mode).map_err(graph_error)
+    } else {
+        match fs::metadata(path) {
+            Ok(_) => SqliteGraphStorage::open(path, mode).map_err(graph_error),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(graph_missing()),
+            Err(error) => Err(io_error("inspect workspace graph", path, &error)),
+        }
+    };
+    graph.map_err(|error| error.with_help("Rebuild the index with `zg --index --rebuild --graph`."))
 }
 
 fn graph_error(error: graph::Error) -> EngineError {
@@ -760,10 +778,11 @@ fn validate_vector(vector: &[f32], schema: &EmbeddingModelInfo) -> EngineResult<
     Ok(())
 }
 
+/// Returns the model schema and whether this call initialized an empty store.
 fn load_schema(
     path: &Path,
     options: WorkspaceIndexStorageOptions,
-) -> EngineResult<Vec<EmbeddingModelInfo>> {
+) -> EngineResult<(Vec<EmbeddingModelInfo>, bool)> {
     let descriptor = path.join("schema.json");
     if file_exists(&descriptor)? {
         let schema = read_json::<SchemaRecord>(&descriptor)
@@ -806,7 +825,7 @@ fn load_schema(
                 )));
             }
         }
-        return Ok(schema);
+        return Ok((schema, false));
     }
     if fs::read_dir(path)
         .map_err(|error| io_error("inspect storage directory", path, &error))?
@@ -833,7 +852,7 @@ fn load_schema(
         &descriptor,
         &serde_json::to_vec(&SchemaRecord::new(&embeddings)).map_err(|error| json_error(&error))?,
     )?;
-    Ok(embeddings)
+    Ok((embeddings, true))
 }
 
 fn registry() -> EngineResult<MutexGuard<'static, HashMap<PathBuf, Weak<SharedStore>>>> {
@@ -855,9 +874,10 @@ fn lock_state(shared: &SharedStore) -> EngineResult<MutexGuard<'_, StoreState>> 
 fn prepare_storage(
     path: &Path,
     options: WorkspaceIndexStorageOptions,
-) -> EngineResult<(File, Vec<EmbeddingModelInfo>)> {
+) -> EngineResult<(File, Vec<EmbeddingModelInfo>, bool)> {
     let lock = acquire_storage_lock(path, options.is_read_only())?;
-    Ok((lock, load_schema(path, options)?))
+    let (schema, new_storage) = load_schema(path, options)?;
+    Ok((lock, schema, new_storage))
 }
 
 fn acquire_storage_lock(home: &Path, shared: bool) -> EngineResult<File> {

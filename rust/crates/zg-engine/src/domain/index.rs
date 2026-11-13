@@ -61,6 +61,8 @@ impl<'de> Deserialize<'de> for IndexDescriptor {
             embedding_routes: BTreeMap<ContentKind, EmbeddingModelInfo>,
             #[serde(default, deserialize_with = "deserialize_unique_map")]
             embedding_configs: BTreeMap<String, ModelConfig<EncryptedApiKey>>,
+            // Released v2 indexes predate the optional code graph.
+            #[serde(default)]
             graph_indexing: bool,
         }
 
@@ -368,16 +370,24 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_requires_the_graph_setting() {
+    fn legacy_descriptor_defaults_to_indexing_without_a_graph() {
         let encoded =
             serde_json::to_string(&IndexState::Enabled(Box::new(descriptor()))).expect("encode");
         assert!(encoded.contains("\"graphIndexing\":false"));
 
         let incomplete = encoded.replace(",\"graphIndexing\":false", "");
         assert_ne!(incomplete, encoded);
+        let restored = serde_json::from_str::<IndexState>(&incomplete).expect("v2 descriptor");
+        let restored = restored.descriptor().expect("enabled index");
+        assert!(!restored.graph_indexing());
+        restored
+            .ensure_index_compatible(&descriptor())
+            .expect("existing v2 index remains compatible");
         assert!(
-            serde_json::from_str::<IndexState>(&incomplete).is_err(),
-            "a descriptor must state whether the build carries a graph"
+            serde_json::from_str::<IndexState>(
+                &encoded.replace("\"graphIndexing\":false", "\"graphIndexing\":null")
+            )
+            .is_err()
         );
     }
 

@@ -57,7 +57,7 @@ impl Fixture {
             root,
             self.layout.clone(),
             crate::domain::ScanRules::default(),
-            Some(CURRENT_INDEX_VERSION),
+            CURRENT_INDEX_VERSION,
             Some(uuid::Uuid::new_v4().to_string()),
             1,
             1,
@@ -564,13 +564,7 @@ async fn indexed_queries_reuse_storage_but_resolve_the_current_manifest() {
             manifest.source_root(),
             manifest.layout().clone(),
             manifest.scan().clone(),
-            if matches!(index, crate::domain::IndexState::Enabled(_)) {
-                manifest
-                    .index_version()
-                    .or(Some(crate::workspace::CURRENT_INDEX_VERSION))
-            } else {
-                None
-            },
+            manifest.index_version(),
             if matches!(index, crate::domain::IndexState::Enabled(_)) {
                 manifest.storage_generation().map(str::to_owned)
             } else {

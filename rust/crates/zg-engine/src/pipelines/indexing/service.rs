@@ -156,7 +156,11 @@ impl WorkspaceIndexService {
             previous
                 .ensure_index_compatible(&descriptor)
                 .map_err(|error| {
-                    error.with_help("Rebuild the index with `zg --index --rebuild`.")
+                    error.with_help(if descriptor.graph_indexing() {
+                        "Rebuild the index with `zg --index --rebuild --graph`."
+                    } else {
+                        "Rebuild the index with `zg --index --rebuild`."
+                    })
                 })?;
         }
         let mut workspace = index_workspace_state(
@@ -223,6 +227,16 @@ impl WorkspaceIndexService {
                 .is_some_and(IndexDescriptor::graph_indexing),
             storage_path: storage_path.to_path_buf(),
             embeddings: models.iter().map(|model| model.info().clone()).collect(),
+        })
+        .map_err(|mut error| {
+            if let Some(help) = error.help() {
+                let help = format!(
+                    "{help} Run this command in workspace '{}'.",
+                    workspace.source_root().display()
+                );
+                error = error.with_help(help);
+            }
+            error.with_workspace_root(workspace.source_root())
         })?;
         let writer = self.writers.register(
             crate::pipelines::indexed_search::writer::WriterSession::new(
@@ -567,7 +581,7 @@ fn index_workspace_state(
         source_root,
         layout.clone(),
         scan,
-        Some(CURRENT_INDEX_VERSION),
+        CURRENT_INDEX_VERSION,
         Some(generation),
         active.map_or(now, Workspace::created_epoch_ms),
         now,
@@ -1072,7 +1086,7 @@ mod tests {
             previous.source_root(),
             previous.layout().clone(),
             previous.scan().clone(),
-            Some(super::CURRENT_INDEX_VERSION - 1),
+            super::CURRENT_INDEX_VERSION - 1,
             previous.storage_generation().map(str::to_owned),
             previous.created_epoch_ms(),
             previous.updated_epoch_ms(),
@@ -1163,14 +1177,17 @@ mod tests {
 
     #[test]
     fn rejects_incompatible_index_versions() {
-        crate::workspace::manifest::require_current_index_version(Some(
-            super::CURRENT_INDEX_VERSION,
-        ))
-        .expect("current index");
-        for version in [None, Some(0), Some(1), Some(2), Some(5), Some(u32::MAX)] {
+        crate::workspace::manifest::require_current_index_version(super::CURRENT_INDEX_VERSION)
+            .expect("current index");
+        for version in [
+            0,
+            super::CURRENT_INDEX_VERSION - 1,
+            super::CURRENT_INDEX_VERSION + 1,
+            u32::MAX,
+        ] {
             assert_ne!(
                 version,
-                Some(super::CURRENT_INDEX_VERSION),
+                super::CURRENT_INDEX_VERSION,
                 "samples must stay incompatible with the current version"
             );
             let error = crate::workspace::manifest::require_current_index_version(version)
@@ -1199,7 +1216,7 @@ mod tests {
             }
             .apply(&crate::domain::ScanRules::default())
             .expect("scan rules"),
-            None,
+            super::CURRENT_INDEX_VERSION,
             None,
             0,
             0,
@@ -1984,11 +2001,16 @@ mod tests {
                         )
                         .await;
                     if graph_enabled {
-                        assert!(result.expect("enabled graph read").matches.is_empty());
+                        let result = result.expect("enabled graph read");
+                        assert!(result.matches.is_empty());
+                        assert!(result.suggestions.is_empty());
                     } else {
-                        assert_eq!(
-                            result.expect_err("disabled graph read").code(),
-                            crate::EngineError::UNSUPPORTED
+                        let error = result.expect_err("disabled graph read");
+                        assert_eq!(error.code(), crate::EngineError::UNSUPPORTED);
+                        assert!(
+                            error
+                                .help()
+                                .is_some_and(|help| help.contains("zg --index --rebuild --graph"))
                         );
                     }
                 }
@@ -2461,12 +2483,9 @@ mod tests {
             "{}",
             error.message()
         );
-        assert!(
-            error
-                .help()
-                .is_some_and(|help| help.contains("zg --index --rebuild")),
-            "{:?}",
-            error.help()
+        assert_eq!(
+            error.help(),
+            Some("Rebuild the index with `zg --index --rebuild --graph`.")
         );
         let rejected = published(&layout);
         assert!(
@@ -2517,6 +2536,10 @@ mod tests {
             error.message().contains("stores the code graph"),
             "{}",
             error.message()
+        );
+        assert_eq!(
+            error.help(),
+            Some("Rebuild the index with `zg --index --rebuild`.")
         );
         let still_enabled = published(&layout);
         assert!(
@@ -3054,7 +3077,7 @@ mod tests {
         )
         .expect("manifest read")
         .expect("manifest");
-        assert_eq!(rebuilt.index_version(), Some(super::CURRENT_INDEX_VERSION));
+        assert_eq!(rebuilt.index_version(), super::CURRENT_INDEX_VERSION);
         assert_eq!(rebuilt.source_root(), manifest.source_root());
         assert_eq!(rebuilt.scan(), manifest.scan());
         assert_eq!(

@@ -261,7 +261,7 @@ impl result::WorkspaceIndexInfo {
                 .index()
                 .descriptor()
                 .map(|index| (&index.fts()).into()),
-            index_version: workspace.index_version(),
+            index_version: Some(workspace.index_version()),
             created_epoch_ms: workspace.created_epoch_ms(),
             updated_epoch_ms: workspace.updated_epoch_ms(),
         }

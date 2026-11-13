@@ -915,7 +915,7 @@ mod tests {
                 root,
                 WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout"),
                 crate::domain::ScanRules::default(),
-                Some(crate::workspace::CURRENT_INDEX_VERSION),
+                crate::workspace::CURRENT_INDEX_VERSION,
                 Some(generation.clone()),
                 0,
                 0,
