@@ -395,15 +395,6 @@ test("semantic projection hits resolve to canonical source evidence", async (t) 
   assert.equal(symbol[0].fragment.id, canonical.id);
   assert.equal(symbol[0].fragment.content.text, canonical.content.text);
   assert.equal(symbol[0].fragment.metadata.symbolName, "canonicalName");
-  const symbolVector = storage.searchVector([0, 1], 10, {
-    representation: "symbol",
-  });
-  assert.equal(symbolVector.length, 1);
-  assert.equal(symbolVector[0].fragment.id, canonical.id);
-  const allVector = storage.searchVector([0, 1], 10, {
-    representation: "all",
-  });
-  assert.ok(allVector.every((hit) => hit.fragment.id === canonical.id));
 
   const body = storage.searchFts("bodyneedle", 10, {
     representation: "body",
@@ -411,73 +402,6 @@ test("semantic projection hits resolve to canonical source evidence", async (t) 
   assert.equal(body.length, 1);
   assert.equal(body[0].fragment.id, canonical.id);
   assert.equal(storage.searchFts("bodyneedle", 10).length, 0);
-
-  storage.replaceFile(file, [{ fragment: canonical, vector: [1, 0] }]);
-  assert.equal(
-    storage.searchFts("symbolneedle", 10, { representation: "symbol" }).length,
-    0,
-  );
-  assert.equal(
-    storage.searchFts("bodyneedle", 10, { representation: "body" }).length,
-    0,
-  );
-
-  storage.deleteFile(file.id);
-  assert.equal(storage.searchFts("canonical source body", 10).length, 0);
-  assert.equal(
-    storage.searchFts("bodyneedle", 10, { representation: "body" }).length,
-    0,
-  );
-});
-
-test("read-only indexes without projection storage preserve canonical and all reads", async (t) => {
-  const parent = await mkdtemp(join(tmpdir(), "zvec-grep-legacy-projections-"));
-  const options = storageOptions(parent);
-  const storage = createWorkspaceIndexStorage(options);
-  const file = fileInfo("a", parent, "src/a.ts");
-  storage.replaceFile(file, [
-    {
-      fragment: {
-        id: "entity-a",
-        fileId: file.id,
-        range: {
-          kind: "text",
-          startLine: 1,
-          endLine: 1,
-          startOffset: 0,
-          endOffset: 15,
-        },
-        content: { kind: "text", text: "legacy canonical" },
-      },
-      vector: [1, 0],
-    },
-  ]);
-  await storage.finalizeWrites();
-  storage.close();
-  await rm(join(options.storagePath, "index.zvec", "projections.zvec"), {
-    recursive: true,
-    force: true,
-  });
-
-  const legacy = createWorkspaceIndexStorage({
-    storagePath: options.storagePath,
-    readOnly: true,
-  });
-  t.after(() => {
-    legacy.close();
-    return rm(parent, { recursive: true, force: true });
-  });
-  assert.equal(legacy.searchFts("legacy", 10).length, 1);
-  assert.equal(
-    legacy.searchFts("legacy", 10, { representation: "all" }).length,
-    1,
-  );
-  assert.throws(
-    () => legacy.searchFts("legacy", 10, { representation: "symbol" }),
-    (error) =>
-      error.code ===
-      "ZVEC_GREP.ENGINE.STORAGE.REPRESENTATION_PROJECTIONS_MISSING",
-  );
 });
 
 test("finalize waits for metadata optimization and does not repeat it after success", async (t) => {

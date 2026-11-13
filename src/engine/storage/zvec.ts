@@ -97,12 +97,10 @@ type StoredEntityFragment = {
 class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
   readonly readOnly: boolean;
   private readonly collection: ZVecCollection;
-  private readonly projectionCollection: ZVecCollection | null;
   private readonly files: ZvecFileMetaStore;
   private readonly filesById = new Map<string, FileRecord>();
   private readonly filesByAbsolutePath = new Map<string, FileRecord>();
   private readonly supportsRepresentationProjections: boolean;
-  private readonly hasRepresentationField: boolean;
   private needsOptimize = false;
 
   constructor(options: WorkspaceIndexStorageOptions) {
@@ -115,18 +113,14 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     }
 
     this.files = new ZvecFileMetaStore(paths.filesPath, readOnly);
-    let openedCollection: ZVecCollection | undefined;
-    let openedProjectionCollection: ZVecCollection | null | undefined;
     try {
       for (const file of this.files.list()) {
         this.rememberFile(file);
       }
 
       const zvecPath = paths.indexPath;
-      const existingCollection = existsSync(zvecPath);
-      let collection: ZVecCollection;
-      if (existingCollection) {
-        collection = openZvecCollection(zvecPath, readOnly, "open", () =>
+      if (existsSync(zvecPath)) {
+        this.collection = openZvecCollection(zvecPath, readOnly, "open", () =>
           ZVecOpen(zvecPath, { readOnly }),
         );
       } else if (readOnly) {
@@ -135,67 +129,17 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
           context: `path=${zvecPath}`,
         });
       } else {
-        collection = openZvecCollection(zvecPath, readOnly, "create", () =>
+        this.collection = openZvecCollection(zvecPath, readOnly, "create", () =>
           ZVecCreateAndOpen(zvecPath, createSchema(options.embedding)),
         );
       }
-      this.collection = collection;
-      openedCollection = collection;
-      this.hasRepresentationField = collection.schema
+      this.supportsRepresentationProjections = this.collection.schema
         .fields()
         .some((field) => field.name === "representation");
-      const projectionPath = paths.projectionPath;
-      if (existsSync(projectionPath)) {
-        this.projectionCollection = openZvecCollection(
-          projectionPath,
-          readOnly,
-          "open",
-          () => ZVecOpen(projectionPath, { readOnly }),
-        );
-      } else if (!readOnly && !existingCollection) {
-        this.projectionCollection = openZvecCollection(
-          projectionPath,
-          readOnly,
-          "create",
-          () =>
-            ZVecCreateAndOpen(
-              projectionPath,
-              createSchema(options.embedding, "zvec_grep_projections"),
-            ),
-        );
-      } else {
-        this.projectionCollection = null;
-      }
-      openedProjectionCollection = this.projectionCollection;
-      if (
-        this.projectionCollection &&
-        !this.projectionCollection.schema
-          .fields()
-          .some((field) => field.name === "representation")
-      ) {
-        throw new EngineError(
-          "Semantic projection collection has an incompatible schema; rebuild it",
-          {
-            code: "ZVEC_GREP.ENGINE.STORAGE.REPRESENTATION_PROJECTIONS_MISSING",
-          },
-        );
-      }
-      this.supportsRepresentationProjections =
-        this.projectionCollection !== null;
     } catch (error) {
       // Opening the entity collection can fail after metadata acquired its lock.
       try {
         this.files.close();
-      } catch {
-        // Preserve the initialization error after attempting cleanup.
-      }
-      try {
-        openedProjectionCollection?.closeSync();
-      } catch {
-        // Preserve the initialization error after attempting cleanup.
-      }
-      try {
-        openedCollection?.closeSync();
       } catch {
         // Preserve the initialization error after attempting cleanup.
       }
@@ -287,12 +231,6 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
       .filter(({ representation }) => representation === undefined)
       .map(({ fragment }) => fragment);
     validateFragmentGroups(file.id, fragments);
-    if (
-      entries.some(({ representation }) => representation !== undefined) &&
-      !this.supportsRepresentationProjections
-    ) {
-      throw representationProjectionsMissingError();
-    }
     this.markFileDirty(file);
     this.deleteFileDocuments(file.id);
 
@@ -310,10 +248,11 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     };
 
     if (entries.length > 0) {
-      const canonicalDocs: ZVecDocInput[] = [];
-      const projectionDocs: ZVecDocInput[] = [];
-      entries.forEach(
-        ({ fragment, vector, representation, searchText }, index): void => {
+      const docs = entries.map(
+        (
+          { fragment, vector, representation, searchText },
+          index,
+        ): ZVecDocInput => {
           const entityId = publicEntityId(fragment);
           const storedFragment = representation
             ? { ...fragment, group: entityId }
@@ -322,7 +261,7 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
             ? projectionDocumentId(entityId, representation)
             : fragment.id;
 
-          const doc = {
+          return {
             id: documentId,
             vectors: {
               [ENTITY_VECTOR_FIELD]: [...vector],
@@ -335,14 +274,10 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
               searchText,
             ),
           };
-          (representation ? projectionDocs : canonicalDocs).push(doc);
         },
       );
 
-      this.upsertDocs(file.id, this.collection, canonicalDocs);
-      if (this.projectionCollection) {
-        this.upsertDocs(file.id, this.projectionCollection, projectionDocs);
-      }
+      this.upsertDocs(file.id, docs);
 
       this.needsOptimize = true;
     }
@@ -351,17 +286,10 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     this.persistFile(indexedFile);
   }
 
-  private upsertDocs(
-    fileId: string,
-    collection: ZVecCollection,
-    docs: readonly ZVecDocInput[],
-  ): void {
-    if (docs.length === 0) {
-      return;
-    }
+  private upsertDocs(fileId: string, docs: readonly ZVecDocInput[]): void {
     for (let start = 0; start < docs.length; start += ZVEC_UPSERT_BATCH_SIZE) {
       const batch = docs.slice(start, start + ZVEC_UPSERT_BATCH_SIZE);
-      const statuses = collection.upsertSync(batch);
+      const statuses = this.collection.upsertSync(batch);
       const failed = statuses.find((status) => !status.ok);
 
       if (failed) {
@@ -408,13 +336,11 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     limit: number,
     filter?: StorageSearchFilter,
   ): StorageSearchHit[] {
-    const collection = this.collectionForSearch(filter?.representation);
     const zvecFilter = buildFilter(
       filter,
       this.supportsRepresentationProjections,
-      this.hasRepresentationField,
     );
-    const docs = collection.querySync({
+    const docs = this.collection.querySync({
       fieldName: ENTITY_TEXT_FIELD,
       fts: { matchString: query },
       ...(zvecFilter ? { filter: zvecFilter } : {}),
@@ -430,13 +356,11 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     limit: number,
     filter?: StorageSearchFilter,
   ): StorageSearchHit[] {
-    const collection = this.collectionForSearch(filter?.representation);
     const zvecFilter = buildFilter(
       filter,
       this.supportsRepresentationProjections,
-      this.hasRepresentationField,
     );
-    const docs = collection.querySync({
+    const docs = this.collection.querySync({
       fieldName: ENTITY_VECTOR_FIELD,
       vector: [...vector],
       ...(zvecFilter ? { filter: zvecFilter } : {}),
@@ -451,9 +375,6 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     this.assertWritable("finalizeWrites");
     if (this.needsOptimize) {
       await this.collection.optimize();
-      if (this.projectionCollection) {
-        await this.projectionCollection.optimize();
-      }
       this.needsOptimize = false;
     }
     await this.files.finalizeWrites();
@@ -464,11 +385,7 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     try {
       this.files.close();
     } finally {
-      try {
-        this.collection.closeSync();
-      } finally {
-        this.projectionCollection?.closeSync();
-      }
+      this.collection.closeSync();
     }
   }
 
@@ -573,23 +490,7 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
     this.collection.deleteByFilterSync(
       `file_id = ${quoteFilterString(fileId)}`,
     );
-    this.projectionCollection?.deleteByFilterSync(
-      `file_id = ${quoteFilterString(fileId)}`,
-    );
     this.needsOptimize = true;
-  }
-
-  private collectionForSearch(
-    representation: StorageSearchFilter["representation"],
-  ): ZVecCollection {
-    if (representation !== undefined && representation !== "all") {
-      if (!this.projectionCollection) {
-        throw representationProjectionsMissingError();
-      }
-      return this.projectionCollection;
-    }
-
-    return this.collection;
   }
 
   private persistFile(file: FileRecord): void {
@@ -1051,10 +952,9 @@ function sleepSync(ms: number): void {
 
 function createSchema(
   embedding: WorkspaceIndexEmbeddingSchema,
-  name = "zvec_grep_entities",
 ): ZVecCollectionSchema {
   return new ZVecCollectionSchema({
-    name,
+    name: "zvec_grep_entities",
     fields: [
       indexedStringField("group", true),
       indexedStringField("file_id"),
@@ -1467,10 +1367,11 @@ function assertZvecStatus(
 function buildFilter(
   filter: StorageSearchFilter | undefined,
   supportsRepresentationProjections: boolean,
-  hasRepresentationField: boolean,
 ): string | undefined {
   if (!filter) {
-    return hasRepresentationField ? `representation = 'all'` : undefined;
+    return supportsRepresentationProjections
+      ? `representation = 'all'`
+      : undefined;
   }
 
   const clauses: string[] = [];
@@ -1493,15 +1394,18 @@ function buildFilter(
 
   if (filter.representation !== undefined) {
     if (filter.representation !== "all" && !supportsRepresentationProjections) {
-      throw representationProjectionsMissingError();
+      throw new EngineError(
+        "Semantic representation projections are unavailable in this index; rebuild it",
+        {
+          code: "ZVEC_GREP.ENGINE.STORAGE.REPRESENTATION_PROJECTIONS_MISSING",
+        },
+      );
     }
-    if (hasRepresentationField) {
+    if (supportsRepresentationProjections) {
       clauses.push(
         `representation = ${quoteFilterString(filter.representation)}`,
       );
     }
-  } else if (hasRepresentationField) {
-    clauses.push(`representation = 'all'`);
   }
 
   return clauses.length > 0 ? clauses.join(" AND ") : undefined;
@@ -1512,15 +1416,6 @@ function projectionDocumentId(
   representation: "symbol" | "body" | "document",
 ): string {
   return sha256Text(`semantic-projection\0${entityId}\0${representation}`);
-}
-
-function representationProjectionsMissingError(): EngineError {
-  return new EngineError(
-    "Semantic representation projections are unavailable in this index; rebuild it",
-    {
-      code: "ZVEC_GREP.ENGINE.STORAGE.REPRESENTATION_PROJECTIONS_MISSING",
-    },
-  );
 }
 
 function buildNonEmptyInFilter(
