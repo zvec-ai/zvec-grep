@@ -91,29 +91,15 @@ test("CLI argument parser handles command, provider, path, and rg options", () =
     "--semantic-features",
     JSON.stringify({
       semantic_features_version: 1,
-      representation: "symbol",
-      token_sketch: "trace",
-      graph_rerank: "shadow",
-      graph_edge_confidence: "strong",
-      graph_expansion: "off",
       trace: "full",
     }),
     "query text",
   ]);
-  assert.equal(
-    semanticFeatures.options.semanticFeatures?.representation,
-    "symbol",
-  );
   assert.equal(semanticFeatures.options.semanticFeatures?.trace, "full");
   assert.deepEqual(
     parseArgs(["--semantic-features", "{}", "query"]).options.semanticFeatures,
     {
       semantic_features_version: 1,
-      representation: "all",
-      token_sketch: "off",
-      graph_rerank: "off",
-      graph_edge_confidence: "strong",
-      graph_expansion: "off",
       trace: "off",
     },
   );
@@ -122,8 +108,7 @@ test("CLI argument parser handles command, provider, path, and rg options", () =
     /requires valid JSON/,
   );
   assert.throws(
-    () =>
-      parseArgs(["--semantic-features", '{"graph_rerank":"invalid"}', "query"]),
+    () => parseArgs(["--semantic-features", '{"unexpected":true}', "query"]),
     /--semantic-features is invalid/,
   );
   assert.throws(
@@ -203,20 +188,10 @@ test("semantic feature schema is strict and legacy trace remains compatible", ()
   assert.deepEqual(
     semanticFeaturesInputSchema.parse({
       semantic_features_version: 1,
-      representation: "symbol",
-      token_sketch: "off",
-      graph_rerank: "shadow",
-      graph_edge_confidence: "strong",
-      graph_expansion: "off",
       trace: "full",
     }),
     {
       semantic_features_version: 1,
-      representation: "symbol",
-      token_sketch: "off",
-      graph_rerank: "shadow",
-      graph_edge_confidence: "strong",
-      graph_expansion: "off",
       trace: "full",
     },
   );
@@ -230,13 +205,6 @@ test("semantic feature schema is strict and legacy trace remains compatible", ()
   assert.throws(
     () =>
       semanticFeaturesInputSchema.parse({
-        graph_rerank: "invalid",
-      }),
-    /Invalid option/,
-  );
-  assert.throws(
-    () =>
-      semanticFeaturesInputSchema.parse({
         unexpected: true,
       }),
     /Unrecognized key/,
@@ -244,11 +212,6 @@ test("semantic feature schema is strict and legacy trace remains compatible", ()
 
   const featureConfig = {
     semantic_features_version: 1,
-    representation: "symbol",
-    token_sketch: "off",
-    graph_rerank: "shadow",
-    graph_edge_confidence: "strong",
-    graph_expansion: "off",
     trace: "off",
   };
   assert.deepEqual(

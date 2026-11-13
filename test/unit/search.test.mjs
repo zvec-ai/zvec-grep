@@ -357,11 +357,6 @@ test("semantic full traces are bounded, provenance-bearing, deterministic, and b
   const fixture = createFixture();
   const semanticFeatures = {
     semantic_features_version: 1,
-    representation: "all",
-    token_sketch: "trace",
-    graph_rerank: "shadow",
-    graph_edge_confidence: "strong",
-    graph_expansion: "off",
     trace: "full",
   };
   const plan = {
@@ -406,15 +401,10 @@ test("semantic full traces are bounded, provenance-bearing, deterministic, and b
   assert.equal(JSON.stringify(first.trace).includes("export function"), false);
 });
 
-test("semantic feature validation rejects unsupported versions and enum values", async () => {
+test("semantic feature validation rejects unsupported versions and trace values", async () => {
   const fixture = createFixture();
   const base = {
     semantic_features_version: 1,
-    representation: "all",
-    token_sketch: "off",
-    graph_rerank: "off",
-    graph_edge_confidence: "strong",
-    graph_expansion: "off",
     trace: "off",
   };
   await assert.rejects(
@@ -431,11 +421,11 @@ test("semantic feature validation rejects unsupported versions and enum values",
     searchWorkspaceIndex(
       {
         routes: [{ mode: "fts", query: "AlphaSymbol" }],
-        semanticFeatures: { ...base, graph_rerank: "invalid" },
+        semanticFeatures: { ...base, trace: "invalid" },
       },
       fixture.context,
     ),
-    /Unsupported semantic feature value/,
+    /Unsupported diagnostic trace value/,
   );
 });
 

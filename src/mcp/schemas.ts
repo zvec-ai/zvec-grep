@@ -55,18 +55,11 @@ export const absoluteRootSchema = z
 export const semanticFeaturesInputSchema = z
   .object({
     semantic_features_version: z.literal(1).default(1),
-    representation: z
-      .enum(["symbol", "body", "document", "all"])
-      .default("all"),
-    token_sketch: z.enum(["off", "trace", "rerank"]).default("off"),
-    graph_rerank: z.enum(["off", "shadow", "on"]).default("off"),
-    graph_edge_confidence: z.enum(["syntax", "strong"]).default("strong"),
-    graph_expansion: z.enum(["off", "related"]).default("off"),
     trace: z.enum(["off", "summary", "full"]).default("off"),
   })
   .strict()
   .describe(
-    "Versioned opt-in semantic retrieval controls. Omit to preserve the current search behavior.",
+    "Versioned opt-in retrieval diagnostics. Omit to preserve the current search behavior.",
   );
 
 const embeddingSearchRuntimeFields = {
@@ -431,7 +424,7 @@ const semanticTraceCandidateSchema = z.object({
   entity_id: z.string(),
   fts_rank: z.number().int().positive().optional(),
   vector_rank: z.number().int().positive().optional(),
-  representation: z.enum(["symbol", "body", "document", "all"]),
+  representation: z.literal("all"),
   features: z.object({
     name_overlap: z.number().finite(),
     token_sketch: z.number().finite(),

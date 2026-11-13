@@ -365,27 +365,11 @@ function normalizeSemanticFeatures(
     });
   }
 
-  const enums: Array<
-    [
-      keyof Omit<SemanticFeatures, "semantic_features_version">,
-      readonly string[],
-    ]
-  > = [
-    ["representation", ["symbol", "body", "document", "all"]],
-    ["token_sketch", ["off", "trace", "rerank"]],
-    ["graph_rerank", ["off", "shadow", "on"]],
-    ["graph_edge_confidence", ["syntax", "strong"]],
-    ["graph_expansion", ["off", "related"]],
-    ["trace", ["off", "summary", "full"]],
-  ];
-  for (const [field, allowed] of enums) {
-    const actual = value[field];
-    if (typeof actual !== "string" || !allowed.includes(actual)) {
-      throw new EngineError("Unsupported semantic feature value", {
-        code: "ZVEC_GREP.ENGINE.SEARCH.INVALID_SEMANTIC_FEATURE",
-        context: `field=${field} value=${String(actual)}`,
-      });
-    }
+  if (!["off", "summary", "full"].includes(value.trace)) {
+    throw new EngineError("Unsupported diagnostic trace value", {
+      code: "ZVEC_GREP.ENGINE.SEARCH.INVALID_SEMANTIC_TRACE",
+      context: `trace=${String(value.trace)}`,
+    });
   }
 
   return { ...value };
@@ -1336,7 +1320,7 @@ function candidateToTrace(
   };
 
   if (semanticFeatures) {
-    const diagnostic = candidateDiagnostic(candidate, semanticFeatures);
+    const diagnostic = candidateDiagnostic(candidate);
     trace.representation = diagnostic.representation;
     trace.features = diagnostic.features;
     trace.contributions = diagnostic.contributions;
@@ -1352,15 +1336,11 @@ type CandidateDiagnostic = {
   contributions: SearchTraceContributions;
 };
 
-function candidateDiagnostic(
-  candidate: Candidate,
-  features: SemanticFeatures,
-): CandidateDiagnostic {
-  // E0 records the signal without changing the baseline score. Token sketches
-  // and graph signals stay zero until their index/query implementations land.
+function candidateDiagnostic(candidate: Candidate): CandidateDiagnostic {
+  // E0 records the baseline signals without changing the baseline score.
   const nameOverlap = nameOverlapForCandidate(candidate);
   return {
-    representation: features.representation,
+    representation: "all",
     features: {
       nameOverlap,
       tokenSketch: 0,
@@ -1377,9 +1357,8 @@ function candidateDiagnostic(
 
 function candidateToTraceCandidate(
   candidate: Candidate,
-  features: SemanticFeatures,
 ): SemanticSearchTraceCandidate {
-  const diagnostic = candidateDiagnostic(candidate, features);
+  const diagnostic = candidateDiagnostic(candidate);
   const ftsRank = bestRecallRank(candidate, "fts");
   const vectorRank = bestRecallRank(candidate, "vector");
   return {
@@ -1511,7 +1490,7 @@ function buildSemanticSearchTrace(input: {
     feature_config: input.features,
     artifacts,
     candidates: candidatePool.map((candidate) =>
-      candidateToTraceCandidate(candidate, input.features),
+      candidateToTraceCandidate(candidate),
     ),
     candidate_count: input.candidates.length,
     candidates_truncated: input.candidates.length > candidatePool.length,

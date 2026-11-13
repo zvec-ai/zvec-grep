@@ -299,30 +299,16 @@ export type SearchMatchedBy = "fts" | "vector" | "fts+vector";
 
 export const SEMANTIC_FEATURES_VERSION = 1 as const;
 
-export type SemanticRepresentation = "symbol" | "body" | "document" | "all";
-export type SemanticTokenSketch = "off" | "trace" | "rerank";
-export type SemanticGraphRerank = "off" | "shadow" | "on";
-export type SemanticGraphEdgeConfidence = "syntax" | "strong";
-export type SemanticGraphExpansion = "off" | "related";
+export type SemanticRepresentation = "all";
 export type SemanticTraceMode = "off" | "summary" | "full";
 
 export type SemanticFeatures = {
   semantic_features_version: typeof SEMANTIC_FEATURES_VERSION;
-  representation: SemanticRepresentation;
-  token_sketch: SemanticTokenSketch;
-  graph_rerank: SemanticGraphRerank;
-  graph_edge_confidence: SemanticGraphEdgeConfidence;
-  graph_expansion: SemanticGraphExpansion;
   trace: SemanticTraceMode;
 };
 
 export const DEFAULT_SEMANTIC_FEATURES: SemanticFeatures = {
   semantic_features_version: SEMANTIC_FEATURES_VERSION,
-  representation: "all",
-  token_sketch: "off",
-  graph_rerank: "off",
-  graph_edge_confidence: "strong",
-  graph_expansion: "off",
   trace: "off",
 };
 
