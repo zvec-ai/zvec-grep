@@ -930,9 +930,9 @@ smoke test with:
 npm run test:package
 ```
 
-The build uses the published `zvec-rust` and `zvec-rust-build` 0.8.0 crates,
+The build uses the published `zvec-rust` and `zvec-rust-build` 0.8.1 crates,
 without a local wrapper patch. Their bundled native library tracks upstream zvec
-at [`8397071`](https://github.com/alibaba/zvec/commit/8397071d815cd842be2068339e00a94e69f069d1).
+at [`30d662d`](https://github.com/alibaba/zvec/commit/30d662db4d2467937d843443074b34743bcc9baa).
 The Cargo build stages the shared library beside the executable. Local and
 release npm packages place the executable in `bin/` and runtime libraries in
 `lib/`. The engine uses zvec's embedded Jieba dictionary without external
@@ -1165,7 +1165,7 @@ cached separately; both shared libraries are included in the npm payload.
 The Intel release targets macOS 14 and later.
 
 Windows ARM64 builds and tests natively on `windows-11-arm` with ARM64 Node,
-Rust, and MSVC. zvec-rust 0.8.0 automatically downloads its Windows ARM64
+Rust, and MSVC. zvec-rust 0.8.1 automatically downloads its Windows ARM64
 prebuilt SDK and stages `zvec_c_api.dll` for packaging; no local zvec source
 build is needed. ONNX Runtime uses the SHA-256-pinned official 1.21.0 DirectML NuGet runtime
 and the matching Microsoft.AI.DirectML 1.15.4 DLL, selected for ARM64. llama-cpp-rs selects the
