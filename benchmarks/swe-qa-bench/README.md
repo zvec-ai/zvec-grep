@@ -41,6 +41,8 @@ and `repro-3` selection are retained. `requests:45` and `sympy:37` add upstream
 caller scenarios, bringing the suite to **22 tasks**. Questions and Gold come
 unchanged from SWE-QA-Bench revision
 `c13deac7a0d99b0ca2e593e004c4739475785b08`.
+Retrieval-only SWE-QA20 stays frozen at twenty tasks; its source check compares
+those pinned records and answer hashes while retaining historical file digests.
 
 Earlier caller-only diagnostics observed callers in 4/4 `requests:45` and 2/4
 `sympy:37` trials across [direct](https://github.com/zhanglei1949/zvec-grep/actions/runs/43386788153)
