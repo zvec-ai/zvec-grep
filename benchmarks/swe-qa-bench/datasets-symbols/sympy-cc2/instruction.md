@@ -1,0 +1,1 @@
+Which functions does _get_func_order in sympy/solvers/ode/systems.py call directly? Distinguish the project function from Python built-ins, and give call-site line numbers and how the returned values are combined.

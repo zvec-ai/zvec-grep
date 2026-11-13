@@ -16,6 +16,7 @@ from .collect import collect_pair
 from .judge import judge_pairs
 from .selection import CI_SCOPES, matrix_outputs
 from .validation import validate_assets
+from .validation_symbols import validate_symbol_assets
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -31,6 +32,11 @@ def _parser() -> argparse.ArgumentParser:
     validate.add_argument("--selection", type=Path, required=True)
     validate.add_argument("--references", type=Path, required=True)
     validate.add_argument("--dataset", type=Path, required=True)
+
+    symbols = commands.add_parser("validate-symbols", help="validate the five symbol-anchored probes")
+    symbols.add_argument("--selection", type=Path, required=True)
+    symbols.add_argument("--references", type=Path, required=True)
+    symbols.add_argument("--dataset", type=Path, required=True)
 
     matrix = commands.add_parser("matrix", help="select the locked CI task scope")
     matrix.add_argument("--selection", type=Path, required=True)
@@ -67,8 +73,9 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        if args.command == "validate":
-            result = validate_assets(
+        if args.command in ("validate", "validate-symbols"):
+            validator = validate_symbol_assets if args.command == "validate-symbols" else validate_assets
+            result = validator(
                 selection_path=args.selection,
                 references_path=args.references,
                 dataset_path=args.dataset,

@@ -191,6 +191,8 @@ class TaskReportAttemptTests(unittest.TestCase):
             {**self.env, "SWE_QA_MODEL_BASE_URL": "https://other.example/v1"}
         )
         self.assertNotEqual(changed["configuration"], self.identity["configuration"])
+        symbols = run_identity({**self.env, "BENCH_TASK_SET": "caller-callee-symbols"})
+        self.assertNotEqual(symbols["configuration"], self.identity["configuration"])
         remote_env = {
             **self.env,
             "BENCH_EMBEDDING_RUNTIME": "remote",

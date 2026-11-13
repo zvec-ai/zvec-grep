@@ -1,0 +1,24 @@
+version = "1.0"
+
+[metadata]
+benchmark = "peng-weihan/SWE-QA-Bench"
+benchmark_revision = "c13deac7a0d99b0ca2e593e004c4739475785b08"
+task_id = "sympy:cc2"
+index_base = 0
+role = "task"
+scenario = "anchor"
+category = "where"
+question_type = "where"
+provenance = "self-authored"
+question_hash = "58526aa4d5df364b851fce9f0ca01c5391dfe7db224a91ed8706c160b7e4f205"
+repository = "sympy/sympy"
+repository_commit = "3c817ed8ab551d71e36907ce869afe5e4ca789ff"
+
+[verifier]
+timeout_sec = 60.0
+
+[agent]
+timeout_sec = 1800.0
+
+[environment]
+build_timeout_sec = 1200.0

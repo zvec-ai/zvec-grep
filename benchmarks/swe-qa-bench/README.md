@@ -4,6 +4,13 @@
 
 # SWE-QA benchmark
 
+An opt-in [caller/callee symbol-probe suite](docs/symbol-probes.md) adds five
+self-authored questions on pinned Requests, Matplotlib and Sympy repositories.
+Select `task_set=caller-callee-symbols` with `scope=smoke|all-full` in Actions,
+or run `zg-bench run caller-callee-symbols` locally. It reuses the paired
+execution/judge pipeline, enables graph indexing for zvec-grep and keeps its
+judge-only references separate from the original QA20 dataset.
+
 This benchmark measures how `zvec-grep` affects an agent's ability to answer
 repository-level software-engineering questions. The published comparison uses
 the same Claude Code agent, Claude Opus 5 model, task prompt, repository commit,
