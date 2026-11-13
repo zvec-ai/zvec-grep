@@ -177,12 +177,18 @@ fn normalize_member_access(callee: &str) -> String {
 fn call_arity_of(node: Node<'_>) -> Option<usize> {
     let arguments = node
         .child_by_field_name("arguments")
-        .or_else(|| node.child_by_field_name("argument_list"))?;
+        .or_else(|| node.child_by_field_name("argument_list"))
+        .or_else(|| {
+            node.child_by_field_name("value")
+                .filter(|_| node.kind() == "compound_literal_expression")
+        })?;
     let mut cursor = arguments.walk();
     Some(
         arguments
             .named_children(&mut cursor)
-            .filter(|child| child.kind() != "," && !child.kind().ends_with("_comment"))
+            .filter(|child| {
+                !matches!(child.kind(), "," | "comment") && !child.kind().ends_with("_comment")
+            })
             .count(),
     )
 }
@@ -274,10 +280,12 @@ fn visit_for_calls(
     // A call node still descends below: `outer(inner())` and `factory().run()`
     // reach their inner calls only through its subtree, and the declaration
     // walk never comes back for them.
-    if let Some((target, ty)) = java_constructor_target(node, source) {
-        let name = ty.rsplit('.').next().unwrap_or(&ty);
-        let raw = if node.kind() == "object_creation_expression" {
+    if let Some((target, ty)) = constructor_target(node, source) {
+        let name = ty.rsplit([':', '.']).next().unwrap_or(&ty);
+        let raw = if matches!(node.kind(), "object_creation_expression" | "new_expression") {
             format!("new {}", node_text(target, source))
+        } else if node.kind() == "compound_literal_expression" {
+            format!("{ty}{{}}")
         } else {
             node_text(target, source).to_owned()
         };
@@ -357,12 +365,32 @@ fn visit_for_calls(
     }
 }
 
-/// Java construction names a type, while this/super name the enclosing or
-/// direct base constructor. Other grammars' creation nodes keep their rules.
-fn java_constructor_target<'tree>(
+/// Keep C++ constructions pending until explicit constructors are considered.
+fn cpp_constructor_target<'tree>(
     node: Node<'tree>,
     source: &[u8],
 ) -> Option<(Node<'tree>, String)> {
+    if !matches!(
+        node.kind(),
+        "new_expression" | "compound_literal_expression"
+    ) || node.child_by_field_name("declarator").is_some()
+    {
+        return None;
+    }
+    let ty = node.child_by_field_name("type")?;
+    // C compound literals use type_descriptor; primitive/array initialization
+    // has no user-defined constructor, and templates need additional evidence.
+    if !matches!(ty.kind(), "type_identifier" | "qualified_identifier") {
+        return None;
+    }
+    Some((ty, node_text(ty, source).to_owned()))
+}
+
+/// Java this/super address constructors; C compound literals are not calls.
+fn constructor_target<'tree>(node: Node<'tree>, source: &[u8]) -> Option<(Node<'tree>, String)> {
+    if let Some(target) = cpp_constructor_target(node, source) {
+        return Some(target);
+    }
     match node.kind() {
         "object_creation_expression" => {
             let ty = node.child_by_field_name("type")?;
@@ -430,7 +458,7 @@ pub(crate) fn scan_binding_declarations(
     }
     if matches!(
         format,
-        FileFormat::TypeScript | FileFormat::JavaScript | FileFormat::Go
+        FileFormat::TypeScript | FileFormat::JavaScript | FileFormat::Go | FileFormat::Cpp
     ) && let Some((_, ty)) = function_return_of(entity_node, source, format)
     {
         context.add_declare_binding(
@@ -521,7 +549,8 @@ fn visit_for_bindings(
             node.start_position().column,
         );
     }
-    if let Some((name, bound_type)) = declaration_binding_of(node, source, format, context) {
+    let binding = declaration_binding_of(node, owner_index, source, format, context);
+    if let Some((name, bound_type)) = binding {
         if format == FileFormat::TypeScript
             && node.kind() == "required_parameter"
             && node_text(node, source)
@@ -562,6 +591,24 @@ fn collect_binding(
     format: FileFormat,
     context: &mut WalkContext,
 ) {
+    if format == FileFormat::Cpp {
+        let mut scope = node;
+        while !matches!(
+            scope.kind(),
+            "compound_statement" | "function_definition" | "for_range_loop" | "for_statement"
+        ) {
+            let Some(parent) = scope.parent() else { break };
+            scope = parent;
+        }
+        if node.kind() == "for_range_loop" {
+            if let Some(body) = node.child_by_field_name("body") {
+                add_binding_in_scope(body, Some(body), owner_index, name, ty, context);
+            }
+        } else {
+            add_binding_in_scope(node, Some(scope), owner_index, name, ty, context);
+        }
+        return;
+    }
     if format == FileFormat::Java {
         if node.kind() == "enhanced_for_statement" {
             // The loop variable is not in scope in the iterable expression.
@@ -912,6 +959,7 @@ fn collect_object_bindings(node: Node<'_>, owner: usize, source: &[u8], context:
 /// shape one of the per-language readers recognizes.
 fn declaration_binding_of(
     node: Node<'_>,
+    owner_index: usize,
     source: &[u8],
     format: FileFormat,
     context: &WalkContext,
@@ -921,7 +969,7 @@ fn declaration_binding_of(
         FileFormat::Python => python_binding_of(node, source, context),
         FileFormat::Rust => rust_binding_of(node, source, context),
         FileFormat::Go => go_binding_of(node, source, context),
-        FileFormat::Cpp => cpp_binding_of(node, source, context),
+        FileFormat::Cpp => cpp_binding_of(node, owner_index, source, context),
         FileFormat::C => c_binding_of(node, source),
         FileFormat::TypeScript => ts_binding_of(node, source),
         FileFormat::JavaScript => js_binding_of(node, source),
@@ -948,6 +996,9 @@ pub(crate) fn scan_return_types(
         collect_javascript_binding_scopes(root, source, context);
     }
     visit_for_return_types(root, source, format, context);
+    if format == FileFormat::Cpp {
+        collect_cpp_type_aliases(root, source, &[], context);
+    }
     let script_scope = match format {
         FileFormat::JavaScript => Some(if has_javascript_module_syntax(root, source) {
             "module"
@@ -1001,6 +1052,139 @@ pub(crate) fn scan_return_types(
             context,
             Some(&boundary),
         );
+    }
+}
+
+/// C++ type aliases belong to their declaring namespace/class, including using
+/// declarations that do not produce a searchable entity. Keep them in the
+/// existing file-owned declaration evidence rather than adding an index table.
+fn collect_cpp_type_aliases(
+    node: Node<'_>,
+    source: &[u8],
+    scopes: &[String],
+    context: &mut WalkContext,
+) {
+    if node.kind() == "template_declaration" {
+        collect_cpp_template_parameters(node, source, scopes, context);
+    }
+    if matches!(node.kind(), "function_definition" | "lambda_expression") {
+        return;
+    }
+    let alias = match node.kind() {
+        "alias_declaration" => node
+            .child_by_field_name("name")
+            .zip(node.child_by_field_name("type"))
+            .map(|(name, ty)| {
+                (
+                    node_text(name, source).to_owned(),
+                    node_text(ty, source).to_owned(),
+                )
+            }),
+        "using_declaration"
+            if !node_text(node, source)
+                .split_whitespace()
+                .take(2)
+                .eq(["using", "namespace"]) =>
+        {
+            named_children(node)
+                .into_iter()
+                .find(|child| child.kind() == "qualified_identifier")
+                .map(|target| {
+                    let target = node_text(target, source).to_owned();
+                    (
+                        target.rsplit("::").next().unwrap_or(&target).to_owned(),
+                        target,
+                    )
+                })
+        }
+        _ => None,
+    };
+    if let Some((name, target)) = alias {
+        let name = scopes
+            .iter()
+            .map(String::as_str)
+            .chain([name.as_str()])
+            .collect::<Vec<_>>()
+            .join("::");
+        context.add_declare_binding(
+            super::FILE_SCOPE_INDEX,
+            &name,
+            &target,
+            node.start_position().row + 1,
+            node.start_position().column,
+        );
+    }
+    let mut scopes = scopes.to_vec();
+    if matches!(
+        node.kind(),
+        "namespace_definition" | "class_specifier" | "struct_specifier"
+    ) && let Some(name) = node.child_by_field_name("name")
+    {
+        scopes.push(node_text(name, source).to_owned());
+    }
+    for child in named_children(node) {
+        collect_cpp_type_aliases(child, source, &scopes, context);
+    }
+}
+
+/// Unbound template parameters shadow workspace names; erasing class arguments
+/// must never turn T into an unrelated project class named T.
+fn collect_cpp_template_parameters(
+    node: Node<'_>,
+    source: &[u8],
+    scopes: &[String],
+    context: &mut WalkContext,
+) {
+    let Some(parameters) = node.child_by_field_name("parameters") else {
+        return;
+    };
+    let Some(declaration) = named_children(node).into_iter().rev().find(|child| {
+        matches!(
+            child.kind(),
+            "class_specifier"
+                | "struct_specifier"
+                | "function_definition"
+                | "alias_declaration"
+                | "declaration"
+        )
+    }) else {
+        return;
+    };
+    let name = declaration.child_by_field_name("name").or_else(|| {
+        let mut declarator = declaration.child_by_field_name("declarator")?;
+        while let Some(inner) = declarator.child_by_field_name("declarator") {
+            declarator = inner;
+        }
+        Some(declarator)
+    });
+    let Some(name) = name else { return };
+    let owner = scopes
+        .iter()
+        .map(String::as_str)
+        .chain([node_text(name, source)])
+        .collect::<Vec<_>>()
+        .join("::");
+    for parameter in named_children(parameters) {
+        if !matches!(
+            parameter.kind(),
+            "type_parameter_declaration"
+                | "optional_type_parameter_declaration"
+                | "variadic_type_parameter_declaration"
+        ) {
+            continue;
+        }
+        if let Some(name) = parameter
+            .child_by_field_name("name")
+            .or_else(|| parameter.named_child(0))
+        {
+            context.add_declare_binding(
+                super::FILE_SCOPE_INDEX,
+                &format!("{owner}::{}", node_text(name, source)),
+                "?",
+                parameter.start_position().row + 1,
+                parameter.start_position().column,
+            );
+        }
     }
 }
 
@@ -1169,12 +1353,15 @@ fn go_return_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
 }
 
 fn cpp_return_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
-    if node.kind() != "function_definition" {
+    if !matches!(
+        node.kind(),
+        "function_definition" | "declaration" | "field_declaration"
+    ) {
         return None;
     }
     let type_node = node.child_by_field_name("type")?;
-    let type_name = type_name_of(type_node, source)?;
-    if type_name == "void" {
+    let mut type_name = node_text(type_node, source).to_owned();
+    if type_node.kind() == "primitive_type" {
         return None;
     }
     // The function name sits under the declarator chain: the function
@@ -1185,9 +1372,18 @@ fn cpp_return_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
         declarator.kind(),
         "function_declarator" | "pointer_declarator" | "reference_declarator" | "array_declarator"
     ) {
+        if declarator.kind() == "pointer_declarator" {
+            type_name.push('*');
+        }
+        if declarator.kind() == "reference_declarator" {
+            type_name.push('&');
+        }
         declarator = declarator.child_by_field_name("declarator")?;
     }
-    if declarator.kind() != "identifier" {
+    if !matches!(
+        declarator.kind(),
+        "identifier" | "field_identifier" | "qualified_identifier"
+    ) {
         return None;
     }
     Some((node_text(declarator, source).to_owned(), type_name))
@@ -1522,6 +1718,7 @@ fn go_initializer_type(node: Node<'_>, source: &[u8], context: &WalkContext) -> 
 
 fn cpp_binding_of(
     node: Node<'_>,
+    owner_index: usize,
     source: &[u8],
     context: &WalkContext,
 ) -> Option<(String, String)> {
@@ -1531,45 +1728,113 @@ fn cpp_binding_of(
         // call binds the registered factory's return type.
         "declaration" => {
             let declared = node.child_by_field_name("type")?;
-            if declared.kind() != "placeholder_type_specifier" {
-                return None;
-            }
             let declarator = node.child_by_field_name("declarator")?;
-            if declarator.kind() != "init_declarator" {
+            // Tree-sitter can parse `Pointer value(raw)` as a prototype. A
+            // parameter-shaped token already bound as a value proves this is
+            // direct initialization; an empty list remains a function declaration.
+            if declarator.kind() == "function_declarator"
+                && declared.kind() != "placeholder_type_specifier"
+            {
+                let parameters = named_children(declarator.child_by_field_name("parameters")?);
+                if !parameters.is_empty()
+                    && parameters.iter().all(|parameter| {
+                        parameter.child_by_field_name("declarator").is_none()
+                            && parameter.child_by_field_name("type").is_some_and(|ty| {
+                                context.name_edges.iter().rev().any(|edge| {
+                                    edge.ref_kind == GraphEdgeKind::Declares
+                                        && edge.owner_index == owner_index
+                                        && edge.ref_name == node_text(ty, source)
+                                        && (edge.line, edge.column)
+                                            < (
+                                                node.start_position().row + 1,
+                                                node.start_position().column,
+                                            )
+                                        && edge.scope_end.is_none_or(|end| {
+                                            (
+                                                node.start_position().row + 1,
+                                                node.start_position().column,
+                                            ) < end
+                                        })
+                                })
+                            })
+                    })
+                {
+                    return Some((
+                        peel_declarator_name(
+                            declarator.child_by_field_name("declarator")?,
+                            source,
+                        )?,
+                        node_text(declared, source).to_owned(),
+                    ));
+                }
                 return None;
             }
-            let name = declarator.child_by_field_name("declarator")?;
+            let name = if declarator.kind() == "init_declarator" {
+                declarator.child_by_field_name("declarator")?
+            } else {
+                declarator
+            };
+            let name = peel_declarator_name(name, source)?;
+            if declared.kind() != "placeholder_type_specifier" {
+                return Some((name, cpp_declared_type(declared, declarator, source)));
+            }
             let value = declarator.child_by_field_name("value")?;
             let type_node = match value.kind() {
                 "new_expression" | "compound_literal_expression" => {
                     value.child_by_field_name("type")?
                 }
-                "call_expression" => {
-                    let function = value.child_by_field_name("function")?;
-                    if function.kind() != "identifier" {
-                        return None;
-                    }
-                    let type_name = context.factory_return_of(node_text(function, source))?;
-                    return Some((node_text(name, source).to_owned(), type_name.to_owned()));
+                "call_expression" | "identifier" => {
+                    return Some((name, format!("decltype({})", node_text(value, source))));
                 }
                 _ => return None,
             };
             Some((
-                node_text(name, source).to_owned(),
-                node_text(type_node, source).to_owned(),
+                name,
+                format!(
+                    "{}{}",
+                    node_text(type_node, source),
+                    if value.kind() == "new_expression" {
+                        "*"
+                    } else {
+                        ""
+                    }
+                ),
             ))
         }
         // `void m(Left &a)`: the parameter name sits under the reference
         // declarator wrapper.
-        "parameter_declaration" => {
+        "parameter_declaration" | "for_range_loop" => {
             let type_node = node.child_by_field_name("type")?;
             let declarator = node.child_by_field_name("declarator")?;
-            let type_name = type_name_of(type_node, source)?;
+            if type_node.kind() == "placeholder_type_specifier" {
+                return None;
+            }
             let name = peel_declarator_name(declarator, source)?;
-            Some((name, type_name))
+            Some((name, cpp_declared_type(type_node, declarator, source)))
         }
         _ => None,
     }
+}
+
+fn cpp_declared_type(ty: Node<'_>, declarator: Node<'_>, source: &[u8]) -> String {
+    let mut ty = node_text(ty, source).to_owned();
+    let mut declarator = declarator;
+    loop {
+        if declarator.kind() == "pointer_declarator" {
+            ty.push('*');
+        }
+        if declarator.kind() == "reference_declarator" {
+            ty.push('&');
+        }
+        let Some(inner) = declarator
+            .child_by_field_name("declarator")
+            .or_else(|| declarator.named_child(0))
+        else {
+            break;
+        };
+        declarator = inner;
+    }
+    ty
 }
 
 /// Nullability does not change the target of a member call that executes.
@@ -2367,7 +2632,7 @@ mod tests {
                 &tree_sitter_cpp::LANGUAGE.into(),
                 "void m() { auto x = new X(); x->foo(); }",
             ),
-            vec![("x".to_owned(), "X".to_owned(), 1)]
+            vec![("x".to_owned(), "X*".to_owned(), 1)]
         );
         assert_eq!(
             bindings(
@@ -2411,8 +2676,8 @@ mod tests {
                 "void m(Left &a, Right &b) { a.run(); }",
             ),
             vec![
-                ("a".to_owned(), "Left".to_owned(), 1),
-                ("b".to_owned(), "Right".to_owned(), 1),
+                ("a".to_owned(), "Left&".to_owned(), 1),
+                ("b".to_owned(), "Right&".to_owned(), 1),
             ]
         );
         assert_eq!(
@@ -2517,7 +2782,7 @@ mod tests {
                 &tree_sitter_cpp::LANGUAGE.into(),
                 "X makeX() {\n    return X{};\n}\nvoid caller() {\n    auto x = makeX();\n}\n",
             ),
-            vec![("x".to_owned(), "X".to_owned(), 5)]
+            vec![("x".to_owned(), "decltype(makeX())".to_owned(), 5)]
         );
 
         // Untyped languages infer from the body's `return` constructions.

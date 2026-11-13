@@ -15,6 +15,7 @@
 //! and [`IndexStore::apply_resolutions`] writes each batch atomically.
 
 mod bindings;
+mod cpp_types;
 mod module_config;
 mod rust_types;
 
@@ -245,6 +246,7 @@ struct RuleCaches {
     declared_bindings: HashMap<String, Vec<DeclaredBinding>>,
     import_references: HashMap<u32, Arc<[ImportReference]>>,
     rust_types: rust_types::TypeCache,
+    cpp_types: cpp_types::TypeCache,
     javascript_imports: HashMap<u32, Arc<[bindings::JavascriptImport]>>,
 }
 
@@ -296,6 +298,12 @@ fn classify(
         return Ok(Outcome::Deferred);
     }
     if let Some(outcome) = bindings::resolve_java_constructor(store, snapshot, stored, caches)? {
+        return Ok(outcome);
+    }
+    if let Some(outcome) = cpp_types::resolve_constructor(store, snapshot, stored, caches)? {
+        return Ok(outcome);
+    }
+    if let Some(outcome) = cpp_types::resolve_receiver(store, snapshot, stored, caches)? {
         return Ok(outcome);
     }
     if stored.reference.ref_kind == GraphEdgeKind::Calls
@@ -728,6 +736,34 @@ fn resolve_lexical_binding(
             },
             rule: Rule::Unique,
         }),
+        _ if stored.language == "cpp" && stored.reference.ref_kind == GraphEdgeKind::Calls => {
+            let nearest = lexical.iter().map(|hit| hit.qualified_name.len()).max()?;
+            let nearest: Vec<_> = lexical
+                .into_iter()
+                .filter(|hit| hit.qualified_name.len() == nearest)
+                .collect();
+            Some(
+                stored
+                    .reference
+                    .arity
+                    .and_then(|arity| unique_arity_match(nearest.iter().copied(), arity))
+                    .map_or_else(
+                        || {
+                            Outcome::Ambiguous(
+                                nearest.iter().map(|hit| hit.entity_id.clone()).collect(),
+                            )
+                        },
+                        |hit| Outcome::Resolved {
+                            resolution: Resolution {
+                                ref_id: stored.id,
+                                target_id: hit.entity_id.clone(),
+                                provenance: EdgeProvenance::ArityBound,
+                            },
+                            rule: Rule::ArityBound,
+                        },
+                    ),
+            )
+        }
         _ => Some(Outcome::Ambiguous(
             lexical.iter().map(|hit| hit.entity_id.clone()).collect(),
         )),
@@ -1574,7 +1610,7 @@ fn resolve_receiver_typed(
     caches: &mut RuleCaches,
 ) -> crate::EngineResult<Option<Resolution>> {
     let reference = &stored.reference;
-    if reference.ref_kind != GraphEdgeKind::Calls {
+    if reference.ref_kind != GraphEdgeKind::Calls || stored.language == "cpp" {
         return Ok(None);
     }
     if matches!(

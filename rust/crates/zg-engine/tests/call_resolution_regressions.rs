@@ -918,6 +918,124 @@ async fn java_wildcard_imports_respect_package_and_explicit_import_precedence() 
 }
 
 #[tokio::test]
+async fn cpp_type_aliases_and_explicit_ranges_preserve_lexical_scope() {
+    check_case(Case {
+        name:"cpp_type_aliases_and_explicit_ranges_preserve_lexical_scope",
+        files:vec![SourceFile { path:"types.h",source:"#include <vector>\nstruct Item { void run() {} };\nnamespace api { struct Item { void run() {} }; }\nnamespace other { struct Item { void run() {} }; }\nusing Root = ::api::Item;\nvoid aliases(Root& value) { value.run(); }\nnamespace scoped {\nusing api::Item;\nvoid invoke(Item& value, std::vector<::other::Item>& items) {\n  value.run();\n  { ::other::Item value; value.run(); }\n  value.run();\n  for (::other::Item& value : items) { value.run(); }\n  value.run();\n}\n}\n" }],
+        queries:vec![
+            Query { operation:"callees",symbol:"aliases",expected:json!([{"name":"aliases","edges":[{"symbol":{"name":"api::Item::run"},"line":6}]}]),..Query::default() },
+            Query { operation:"callees",symbol:"scoped::invoke",expected:json!([{"name":"scoped::invoke","edges":[
+                {"symbol":{"name":"api::Item::run"},"line":10},
+                {"symbol":{"name":"other::Item::run"},"line":11},
+                {"symbol":{"name":"api::Item::run"},"line":12},
+                {"symbol":{"name":"other::Item::run"},"line":13},
+                {"symbol":{"name":"api::Item::run"},"line":14}
+            ]}]),..Query::default() },
+        ],
+    }).await;
+}
+
+#[tokio::test]
+async fn cpp_smart_pointers_keep_element_and_return_type_origins() {
+    check_case(Case {
+        name:"cpp_smart_pointers_keep_element_and_return_type_origins",
+        files:vec![SourceFile { path:"smart.h",source:"#include <memory>\nstruct Item { void go() {} };\nstruct T { void go() {} };\nnamespace real {\nstruct Item { void go() {} };\nstruct Source { Item* begin() { return nullptr; } };\ntemplate<class T> struct Box { void run() {} };\n}\nnamespace decoy { struct Cache { void reset() {} }; struct Box { void run() {} }; }\nvoid pointers(real::Source source, real::Item* raw) {\n  std::unique_ptr<real::Item> p(raw);\n  p->go();\n  p.reset();\n  auto next = source.begin();\n  next->go();\n  auto boxed = real::Box<int>();\n  boxed.run();\n}\ntemplate<typename T> void unknown(std::unique_ptr<T>& p) { p->go(); }\n" }],
+        queries:vec![
+            Query { operation:"callees",symbol:"pointers",expected:json!([{"name":"pointers","edges":[
+                {"symbol":{"name":"real::Item::go"},"line":12},
+                {"symbol":{"name":"real::Source::begin"},"line":14},
+                {"symbol":{"name":"real::Item::go"},"line":15},
+                {"symbol":{"name":"real::Box::run"},"line":17}
+            ]}]),..Query::default() },
+            Query { operation:"callees",symbol:"unknown",expected:json!([{"name":"unknown","edges":[]}]),..Query::default() },
+        ],
+    }).await;
+}
+
+#[tokio::test]
+async fn cpp_constructions_choose_explicit_constructors_without_guessing_aggregates() {
+    check_case(Case {
+        name:"cpp_constructions_choose_explicit_constructors_without_guessing_aggregates",
+        files:vec![
+            SourceFile { path:"construct.cpp",source:"struct X {\n    X() {}\n    X(int) {}\n};\nstruct Y { Y(int) {} Y(double) {} };\nstruct Plain { int value; };\nvoid invoke() {\n    new X();\n    auto x = X{1};\n    auto y = X{/* empty */};\n}\nvoid ambiguous() { new Y(1); }\nvoid aggregate() { auto value = Plain{1}; }\n" },
+            SourceFile { path:"X.java",source:"class X { X(String value) {} }\n" },
+        ],
+        queries:vec![
+            Query { operation:"callees",symbol:"invoke",expected:json!([
+                {"name":"invoke","edges":[
+                    {"symbol":{"name":"X::X","startLine":2},"line":8},
+                    {"symbol":{"name":"X::X","startLine":3},"line":9},
+                    {"symbol":{"name":"X::X","startLine":2},"line":10}
+                ]}
+            ]),..Query::default() },
+            Query { operation:"callers",symbol:"X::X",file:Some("construct.cpp"),expected:json!([
+                {"name":"X::X","startLine":2,"edges":[{"symbol":{"name":"invoke"},"line":8},{"symbol":{"name":"invoke"},"line":10}]},
+                {"name":"X::X","startLine":3,"edges":[{"symbol":{"name":"invoke"},"line":9}]}
+            ]) },
+            Query { operation:"callees",symbol:"ambiguous",expected:json!([{"name":"ambiguous","edges":[]}]),..Query::default() },
+            Query { operation:"callees",symbol:"aggregate",expected:json!([{"name":"aggregate","edges":[]}]),..Query::default() },
+        ],
+    }).await;
+}
+
+#[tokio::test]
+async fn cpp_qualified_receivers_use_indexed_types_and_absolute_namespace_paths() {
+    for (header, indexed) in [("types.hpp", true), ("descriptor.pb.h", false)] {
+        let edges = |target: &str| {
+            if indexed {
+                json!([{"symbol":{"name":target}}])
+            } else {
+                json!([])
+            }
+        };
+        check_case(Case {
+            name:"cpp_qualified_receivers_use_indexed_types_and_absolute_namespace_paths",
+            files:vec![
+                SourceFile { path:header,source:"namespace google { namespace protobuf { class FileDescriptorProto { public: void Clear() {} }; } }\nnamespace app { namespace google { namespace protobuf { class FileDescriptorProto { public: void Clear() {} }; } } }\n" },
+                SourceFile { path:"use.cpp",source:"namespace google { namespace protobuf { void Reset(google::protobuf::FileDescriptorProto& x) { x.Clear(); } } }\nnamespace app {\nvoid Absolute(::google::protobuf::FileDescriptorProto& x) { x.Clear(); }\nvoid Relative(google::protobuf::FileDescriptorProto& x) { x.Clear(); }\n}\n" },
+            ],
+            queries:vec![
+                Query { operation:"callees",symbol:"google::protobuf::Reset",expected:json!([{"name":"google::protobuf::Reset","edges":edges("google::protobuf::FileDescriptorProto::Clear")}]),..Query::default() },
+                Query { operation:"callees",symbol:"app::Absolute",expected:json!([{"name":"app::Absolute","edges":edges("google::protobuf::FileDescriptorProto::Clear")}]),..Query::default() },
+                Query { operation:"callees",symbol:"app::Relative",expected:json!([{"name":"app::Relative","edges":edges("app::google::protobuf::FileDescriptorProto::Clear")}]),..Query::default() },
+            ],
+        }).await;
+    }
+}
+
+#[tokio::test]
+async fn cpp_prototypes_and_arity_resolution_respect_lexical_hiding() {
+    check_case(Case {
+        name:"cpp_prototypes_and_arity_resolution_respect_lexical_hiding",
+        files:vec![SourceFile { path:"arity.cpp",source:"class Widget { public: void paint(); };\nWidget make();\nvoid send(int) {}\nvoid send(int, int) {}\nvoid invoke() { auto w = make(); w.paint(); send(/* comment */ 1, 2); }\nnamespace inner { void send(int) {} void invoke() { send(1, 2); } }\n" }],
+        queries:vec![
+            Query { operation:"callees",symbol:"::invoke",expected:json!([
+                {"name":"invoke","edges":[{"symbol":{"name":"make"}},{"symbol":{"name":"Widget::paint"}},{"symbol":{"name":"send","startLine":4}}]}
+            ]),..Query::default() },
+            Query { operation:"callees",symbol:"inner::invoke",expected:json!([{"name":"inner::invoke","edges":[]}]),..Query::default() },
+        ],
+    }).await;
+}
+
+#[tokio::test]
+async fn cpp_namespace_initializers_own_calls_without_expanding_local_variables() {
+    check_case(Case {
+        name:"cpp_namespace_initializers_own_calls_without_expanding_local_variables",
+        files:vec![SourceFile { path:"initializers.cpp",source:"int target() { return 0; }\nint first = target();\nvoid invoke() { int local = target(); }\nnamespace ns { int second = target(); }\nint plain = 1;\nint pass(int (*fn)()) { return 0; }\nauto callback = pass([] { return target(); });\n" }],
+        queries:vec![
+            Query { operation:"callers",symbol:"target",expected:json!([
+                {"name":"target","edges":[{"symbol":{"name":"first"},"line":2},{"symbol":{"name":"invoke"},"line":3},{"symbol":{"name":"ns::second"},"line":4}]}
+            ]),..Query::default() },
+            Query { operation:"callees",symbol:"first",expected:json!([{"name":"first","edges":[{"symbol":{"name":"target"}}]}]),..Query::default() },
+            Query { operation:"callees",symbol:"ns::second",expected:json!([{"name":"ns::second","edges":[{"symbol":{"name":"target"}}]}]),..Query::default() },
+            Query { operation:"callees",symbol:"local",expected:json!([]),..Query::default() },
+            Query { operation:"callees",symbol:"plain",expected:json!([]),..Query::default() },
+            Query { operation:"callees",symbol:"callback",expected:json!([]),..Query::default() },
+        ],
+    }).await;
+}
+
+#[tokio::test]
 async fn rust_relationship_queries_match_declared_file_modules() {
     for (root, module, child, other, orphan, leaf) in [
         (
