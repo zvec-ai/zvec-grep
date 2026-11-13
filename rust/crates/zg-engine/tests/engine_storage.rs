@@ -99,16 +99,24 @@ async fn extensionless_scripts_preserve_outline_language_across_reopen() -> Test
             "node-tool",
             "#!/usr/bin/env node\nclass Probe {\n    outline_probe() { return stored_call(); }\n}\n",
         ),
+        (
+            "uv-tool",
+            "#!/usr/bin/env -S uv run --script\n# /// script\n# requires-python = \">=3.12\"\n# dependencies = []\n# ///\nclass Probe:\n    def outline_probe(self):\n        return stored_call()\n",
+        ),
+        (
+            "uv-options-tool",
+            "#!/usr/bin/env -S uv run --no-project --python 3.12 --with requests --script\nclass Probe:\n    def outline_probe(self):\n        return stored_call()\n",
+        ),
     ] {
         fs::write(root.join("bin").join(name), source)?;
     }
     let engine = ZvecGrep::new();
     let indexed = engine.index(index_options(root)).await?;
-    assert_eq!((indexed.files_added, indexed.files_failed), (2, 0));
+    assert_eq!((indexed.files_added, indexed.files_failed), (4, 0));
     engine.close();
 
     // Both language and outline must describe stored source, not current files.
-    for name in ["python-tool", "node-tool"] {
+    for name in ["python-tool", "node-tool", "uv-tool", "uv-options-tool"] {
         fs::write(root.join("bin").join(name), "#!/bin/sh\necho changed\n")?;
     }
     let engine = ZvecGrep::new();
@@ -121,11 +129,16 @@ async fn extensionless_scripts_preserve_outline_language_across_reopen() -> Test
             }],
             auto_update: false,
             allow_remote: true,
-            limit: Some(10),
+            limit: Some(20),
             ..ContextOptions::default()
         })
         .await?;
-    for (name, language) in [("python-tool", "python"), ("node-tool", "javascript")] {
+    for (name, language) in [
+        ("python-tool", "python"),
+        ("node-tool", "javascript"),
+        ("uv-tool", "python"),
+        ("uv-options-tool", "python"),
+    ] {
         for (kind, symbol, summary) in [
             (SymbolType::Function, "outline_probe", "calls: stored_call"),
             (SymbolType::Class, "Probe", "members:"),

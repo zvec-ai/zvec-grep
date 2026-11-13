@@ -1,3 +1,5 @@
+use std::str::SplitAsciiWhitespace;
+
 use crate::utils::decode_text;
 
 use super::FileFormat;
@@ -28,18 +30,66 @@ fn shebang(text: &str, complete: bool) -> Option<FileFormat> {
     let mut words = line.strip_prefix("#!")?.split_ascii_whitespace();
     let executable = words.next()?.rsplit('/').next()?;
     if executable != "env" {
-        return interpreter(executable);
+        return command_format(executable, words);
     }
     while let Some(word) = words.next() {
         match word {
-            "--" => return interpreter(words.next()?.rsplit('/').next()?),
+            "--" => return command_format(words.next()?, words),
             "-S" | "--split-string" | "-i" | "--ignore-environment" => {}
             word if word.contains('=') && !word.starts_with('-') => {}
             word if word.starts_with('-') => return None,
-            command => return interpreter(command.rsplit('/').next()?),
+            command => return command_format(command, words),
         }
     }
     None
+}
+
+fn command_format(name: &str, words: SplitAsciiWhitespace<'_>) -> Option<FileFormat> {
+    match name.rsplit('/').next()? {
+        "uv" => uv_script(words),
+        name => interpreter(name),
+    }
+}
+
+fn uv_script(mut words: SplitAsciiWhitespace<'_>) -> Option<FileFormat> {
+    // uv can also run non-Python commands; require explicit script execution.
+    if words.next()? != "run" {
+        return None;
+    }
+    let mut script = false;
+    while let Some(word) = words.next() {
+        let (option, inline_value) = word
+            .split_once('=')
+            .map_or((word, None), |(option, value)| (option, Some(value)));
+        match option {
+            "--script" | "-s" if inline_value.is_none() => script = true,
+            "--no-project" | "--isolated" | "--no-sync" | "--locked" | "--frozen" | "--offline"
+            | "--no-config" | "--no-cache" | "-n" | "--quiet" | "-q" | "--verbose" | "-v"
+                if inline_value.is_none() => {}
+            "--project"
+            | "--directory"
+            | "--cache-dir"
+            | "--python"
+            | "-p"
+            | "--with"
+            | "--with-requirements"
+            | "--with-editable" => {
+                // Consume values rather than mistaking them for script flags.
+                let value = inline_value.or_else(|| words.next())?;
+                if value.is_empty() || value.starts_with('-') {
+                    return None;
+                }
+            }
+            "--" if inline_value.is_none() => {
+                if words.next().is_some() {
+                    return None;
+                }
+                break;
+            }
+            _ => return None,
+        }
+    }
+    script.then_some(FileFormat::Python)
 }
 
 fn interpreter(name: &str) -> Option<FileFormat> {
