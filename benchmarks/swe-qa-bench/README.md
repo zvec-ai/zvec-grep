@@ -18,7 +18,7 @@ time.
 
 ## Benchmark definition
 
-This benchmark uses a pinned 23-task subset of
+This benchmark uses a pinned 22-task subset of
 [`peng-weihan/SWE-QA-Bench`](https://github.com/peng-weihan/SWE-QA-Bench).
 The benchmark inputs are locked in this directory:
 
@@ -38,19 +38,15 @@ hashes, and reference isolation before model-backed runs.
 
 The original twenty questions, references, repository commits, smoke selection
 and `repro-3` selection are retained. `requests:45` and `sympy:37` add upstream
-caller scenarios. The third addition is selected from these fixed callee candidates,
-in order: `pytest:46`, then `scikit-learn:38`; the first qualifying candidate is kept.
-Questions and Gold come unchanged from SWE-QA-Bench revision
+caller scenarios, bringing the suite to **22 tasks**. Questions and Gold come
+unchanged from SWE-QA-Bench revision
 `c13deac7a0d99b0ca2e593e004c4739475785b08`.
 
-The first candidate, `pytest:46`, completed all ten trials in
-[run 43401631120](https://github.com/zhanglei1949/zvec-grep/actions/runs/43401631120)
-with zero callees calls in five ZG trials, so it was not admitted.
-The remaining candidate is `scikit-learn:38`, pinned to commit
-`adb1ae76d798e822984d4e312c90c6ca8f01a3df`. Source review and an AST check confirm
-`_SetOutputMixin.__init_subclass__` calls `_wrap_method_output` at
-`sklearn/utils/_set_output.py:386`, which wraps tuple element zero via
-`_wrap_data_with_container` at line 320. Its natural-call admission is pending.
+Earlier caller-only diagnostics observed callers in 4/4 `requests:45` and 2/4
+`sympy:37` trials across [direct](https://github.com/zhanglei1949/zvec-grep/actions/runs/43386788153)
+and [flow](https://github.com/zhanglei1949/zvec-grep/actions/runs/43386815338).
+Those used different guidance; their quality results are not a baseline/ZG
+comparison. That experimental framework is not included here.
 
 This suite enables graph indexing for the ZG profile. Graph mode is recorded in
 setup and index-seed identity, so a text-only seed cannot satisfy a graph run.
@@ -58,23 +54,49 @@ Default zg search/callers/callees tools and guidance are retained; delegated
 agents explicitly receive zg permissions. No question or instruction requires
 a tool call. Index preparation remains separate from agent time.
 
-The existing workflow's `callees` scope selects only the callee candidate.
-Before model trials it indexes the entire pinned repository and verifies a
-source-checked outgoing edge through real MCP. It then runs baseline/ZG five
-times each with the existing sampling, budget, judge and exception retry policy.
-At most two candidates are tested (twenty nominal trials); absent tool calls,
-empty results and low scores never trigger reruns or prompt tuning. Admission
-requires a completed paired run and at least one voluntary, successful ZG
-callees call returning a source-verified edge. Every trial is retained when
-checking adoption, including rows excluded by the normal summary sensitivity filter.
 The recursive `opencode-session-snapshot.json` retains each zg call's session,
 part/call identifiers, arguments, output, error and timing in `zg_state`.
 
-The callee candidate is provisional until that gate passes. If neither candidate
-qualifies, the change remains a draft with only the two caller additions (22
-tasks); unqualified candidate data and the temporary scope are removed. Raw
-preflight records, recursive sessions and screening scripts live in Actions
-artifacts and the ignored `runs/suite-relationships-20261113/` directory.
+Callee admission tested `pytest:46`, then `scikit-learn:38`, with five baseline
+and five ZG trials each, OpenCode `1.18.4`, `custom-openai/glm-5.2`, local
+`potion-code-16m-v2`, and the existing sampling, budget, judge and retry policy.
+Source reading, AST checks, full-repository graph indexing and real MCP verified
+the intended outgoing edges before model trials. Admission required at least
+one voluntary successful callees call returning a source-verified nonempty edge.
+There was no forced call, prompt tuning, or rerun for zero calls or low scores.
+
+| Candidate | ZG callees adoption | ZG search/callers/callees calls | Mean judge baseline / ZG | Diagnostic run |
+| --- | ---: | ---: | ---: | --- |
+| `pytest:46` | 0/5 | 9 / 0 / 0 | 97.0 / 98.2 | [43401631120](https://github.com/zhanglei1949/zvec-grep/actions/runs/43401631120) |
+| `scikit-learn:38` | 0/5 | 5 / 0 / 0 | 87.6 / 88.6 | [43404162157](https://github.com/zhanglei1949/zvec-grep/actions/runs/43404162157) |
+
+All 20 trials and 20 judgements completed, without Harbor retries or missing
+snapshots; all sessions were roots. All zero-call trials remain in these counts,
+including one ZG trial with no zg calls at all. Traces show search/grep followed
+by source reading; no relationship tool was selected. The real preflights and
+pinned OpenCode main/general/explore MCP contract verify availability separately.
+The sklearn preflight also exposed two false-positive edges: built-in `set()`
+calls at `_set_output.py:368/376` resolved to unrelated `at::set`. They are not
+source-verified evidence; the intended helper edge at line 386 was correct.
+
+Neither candidate met admission. The change remains **Draft**, with 22 tasks;
+callee coverage is still unverified. Unqualified candidate data, the temporary
+`callees` scope and its preflight helper are absent from the final suite.
+No full-suite run was launched. These screening results establish coverage,
+not causal quality gains.
+
+Both pilots used Rust `2825dcfac0ad283baadeacd3e7be1aa408137339`, package SHA256
+`2ff97afe30e8bcfc2a853e233d38990e4aa966d9f329402aa36488ac55a4757b`.
+Their frozen harness commits are respectively
+`60099fd2527d80fb649b799a9d3b14832022d2c3` and
+`d8f85bdbba483ea2b0c23641d5fe5cbaa77f7ac3`.
+Preparation-only [cancelled build](https://github.com/zhanglei1949/zvec-grep/actions/runs/43399987193)
+and [SSE parsing failure](https://github.com/zhanglei1949/zvec-grep/actions/runs/43400449686)
+consumed no model trials. Raw records, source checks, per-trial audits and scripts
+are in ignored `runs/suite-relationships-20261113/`. Retrieve preserved artifacts
+with `gh run download <run-id> -R zhanglei1949/zvec-grep -D <ignored-directory>`;
+`swe-qa-pair-*` contains recursive snapshots, `swe-qa-callees-preflight-*` contains
+real MCP evidence, and task/aggregate reports retain every score and metric.
 
 ## Published protocol
 
@@ -165,7 +187,7 @@ identifies tasks excluded by the input-token condition.
 This is a sensitivity filter, not evidence that excluded data is invalid. All
 selected tasks still execute and must complete their required trials and judge
 calls; filtering cannot turn an incomplete benchmark into a successful one.
-For `all-full`, each round runs 23 tasks × 2 profiles × 5 trials. An
+For `all-full`, each round runs 22 tasks × 2 profiles × 5 trials. An
 otherwise complete run with no tasks left after filtering may still succeed.
 
 ## GitHub Actions
@@ -190,7 +212,7 @@ runs path-scoped Python and shared Node regression tests on pull requests and
 `main` pushes. It does not read model credentials, build a candidate, or run
 Harbor/model trials.
 
-`workflow_dispatch` defaults to `repro-3` (3 tasks); `all-full` (23 tasks) and
+`workflow_dispatch` defaults to `repro-3` (3 tasks); `all-full` (22 tasks) and
 `smoke` (5 tasks) remain available. `candidate_ref` defaults to `main` and
 selects the Rust source branch, tag, or commit to build as the candidate npm
 package; the harness checkout and candidate source are separate. Its `model` input defaults to
@@ -238,7 +260,7 @@ UTF-16/32 data. The ignore-file digest is part of the local index-seed identity;
 any other indexing failure remains fatal and visible in the task result. This
 setting belongs to the suite and is not inherited by other runner suites.
 
-The full run contains 23 tasks × 2 profiles × 5 trials = 230 independent
+The full run contains 22 tasks × 2 profiles × 5 trials = 220 independent
 trials. CI passes `--max-retries 2`: an exception, including an agent timeout,
 can trigger at most two additional attempts of the same trial. API usage-limit
 errors are not retried. Successful trials and low scores are not retried, and

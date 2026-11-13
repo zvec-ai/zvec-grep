@@ -34,4 +34,3 @@ tiers:
       - conan-27
       - requests-45
       - sympy-37
-      - scikit-learn-38

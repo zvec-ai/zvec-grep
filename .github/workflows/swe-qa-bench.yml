@@ -32,7 +32,7 @@ on:
         default: main
         type: string
       scope:
-        description: Run the variability trio, full selection, smoke, or the callee case
+        description: Run the variability trio, full selection, or smoke
         required: true
         default: repro-3
         type: choice
@@ -40,7 +40,6 @@ on:
           - repro-3
           - all-full
           - smoke
-          - callees
       model:
         description: Use this model for both execution and self-judging
         required: true
@@ -201,38 +200,6 @@ jobs:
             --zvec-grep-package "$RUNNER_TEMP/package/candidate.tgz" \
             --job-name preflight \
             --dry-run
-      - name: Verify the callee case with real graph indexing and MCP before model trials
-        if: inputs.scope == 'callees'
-        env:
-          XDG_CONFIG_HOME: ${{ runner.temp }}/callees-config
-        run: |
-          set -euo pipefail
-          evidence="$RUNNER_TEMP/callees-preflight"
-          mkdir -p "$evidence"
-          selection=benchmarks/swe-qa-bench/zg_bench/swe_qa/data/selection.json
-          task_id="$(jq -er '.gate.callees_tasks[0]' "$selection")"
-          repo="$(jq -er --arg id "$task_id" '.tasks[] | select(.task_id == $id) | .repository_url' "$selection")"
-          commit="$(jq -er --arg id "$task_id" '.tasks[] | select(.task_id == $id) | .repository_commit' "$selection")"
-          root="$RUNNER_TEMP/callees-source"
-          git init "$root"
-          git -C "$root" fetch --depth=1 "$repo" "$commit"
-          git -C "$root" checkout --detach FETCH_HEAD
-          test "$(git -C "$root" rev-parse HEAD)" = "$commit"
-          npm install --prefix "$RUNNER_TEMP/callees-package" "$RUNNER_TEMP/package/candidate.tgz"
-          binary="$RUNNER_TEMP/callees-package/node_modules/.bin/zg"
-          cp benchmarks/swe-qa-bench/zg_bench/swe_qa/data/index.ignore "$root/.zg-bench-index.ignore"
-          model="$(jq -er '.embedding_models.local' benchmarks/swe-qa-bench/ci-config.json)"
-          (cd "$root" && "$binary" --index --embedding "$model" --graph --ignore-file .zg-bench-index.ignore) > "$evidence/index.log" 2>&1
-          "$binary" --install --target opencode --mcp-transport http --yes > "$evidence/install.log" 2>&1
-          node benchmarks/swe-qa-bench/zg_bench/preflight_callees.mjs "$root" \
-            '_SetOutputMixin::__init_subclass__' '_wrap_method_output  sklearn/utils/_set_output.py:311' \
-            'call at sklearn/utils/_set_output.py:386:' "$evidence/query.json"
-      - name: Preserve callee preflight evidence
-        if: always() && steps.authorize.outcome == 'success' && inputs.scope == 'callees'
-        uses: actions/upload-artifact@v7
-        with:
-          name: swe-qa-callees-preflight-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/callees-preflight/
 
   package-candidate:
     name: Build selected Rust candidate

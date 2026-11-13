@@ -177,14 +177,6 @@ def validate_assets(
         raise SweQaError(
             "selection gate.category_tasks must list all non-smoke tasks in order"
         )
-    callees_tasks = gate.get("callees_tasks")
-    if (
-        not isinstance(callees_tasks, list)
-        or len(callees_tasks) != 1
-        or not isinstance(callees_tasks[0], str)
-        or callees_tasks[0] not in ids
-    ):
-        raise SweQaError("selection gate.callees_tasks must name one selected task")
 
     if not dataset_path.is_dir():
         raise SweQaError(f"Harbor dataset does not exist: {dataset_path}")

@@ -42,22 +42,16 @@ class AutoSelectionValidationTests(unittest.TestCase):
 
         self.assertEqual(result["auto_task_count"], 5)
         self.assertEqual(tuple(result["auto_task_ids"]), EXPECTED_AUTO_TASK_IDS)
-        self.assertEqual(result["task_count"], 23)
-        self.assertEqual(result["category_counts"], {"what": 5, "where": 8, "how": 5, "why": 5})
+        self.assertEqual(result["task_count"], 22)
+        self.assertEqual(
+            result["category_counts"], {"what": 5, "where": 7, "how": 5, "why": 5}
+        )
 
     def test_full_selection_requires_the_declared_count(self) -> None:
         selection = json.loads(SELECTION_PATH.read_text())
         selection["tasks"].pop()
-        with self.assertRaisesRegex(SweQaError, "exactly 23 tasks"):
+        with self.assertRaisesRegex(SweQaError, "exactly 22 tasks"):
             self._validate_selection(selection)
-
-    def test_callee_scope_rejects_missing_or_unknown_members(self) -> None:
-        for tasks in ([], ["missing:0"], ["requests:45", "requests:45"]):
-            with self.subTest(tasks=tasks):
-                selection = json.loads(SELECTION_PATH.read_text())
-                selection["gate"]["callees_tasks"] = tasks
-                with self.assertRaisesRegex(SweQaError, "callees_tasks"):
-                    self._validate_selection(selection)
 
     def test_auto_selection_requires_exact_task_count(self) -> None:
         selection = json.loads(SELECTION_PATH.read_text(encoding="utf-8"))

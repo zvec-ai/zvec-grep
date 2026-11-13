@@ -34,9 +34,11 @@ class ValidationTests(unittest.TestCase):
         )
 
         self.assertTrue(result["valid"])
-        self.assertEqual(result["task_count"], 23)
-        callee_tasks = tuple(json.loads(SELECTION_PATH.read_text())["gate"]["callees_tasks"])
-        self.assertEqual(tuple(result["task_ids"]), EXPECTED_TASK_IDS + ("requests:45", "sympy:37") + callee_tasks)
+        self.assertEqual(result["task_count"], 22)
+        self.assertEqual(
+            tuple(result["task_ids"]),
+            EXPECTED_TASK_IDS + ("requests:45", "sympy:37"),
+        )
         self.assertTrue(result["references_are_judge_only"])
 
     def test_reference_answer_leak_in_dataset_is_rejected(self) -> None:

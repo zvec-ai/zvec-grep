@@ -398,10 +398,16 @@ class InstallZvecGrepTests(unittest.IsolatedAsyncioTestCase):
             await plain.setup(_FakeEnvironment(root / "plain"))
             graph = _SetupHarness(seed, graph_index=True)
             await graph.setup(_FakeEnvironment(root / "graph"))
-            self.assertNotEqual(plain.setup_metadata["index_seed_key"], graph.setup_metadata["index_seed_key"])
+            self.assertNotEqual(
+                plain.setup_metadata["index_seed_key"],
+                graph.setup_metadata["index_seed_key"],
+            )
             self.assertFalse(graph.setup_metadata["index_seed_restored"])
             self.assertTrue(graph.setup_metadata["index_seed_identity"]["graph_index"])
-            self.assertTrue(any(command.startswith("zg --index ") and " --graph" in command for command in graph.agent_commands))
+            self.assertTrue(any(
+                command.startswith("zg --index ") and " --graph" in command
+                for command in graph.agent_commands
+            ))
             hit = _SetupHarness(seed, graph_index=True)
             await hit.setup(_FakeEnvironment(root / "hit"))
             self.assertTrue(hit.setup_metadata["index_seed_restored"])
