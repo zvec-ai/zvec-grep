@@ -220,13 +220,20 @@ impl WorkspaceIndexService {
         } else {
             workspace.layout().index_dir()
         };
+        let descriptor = workspace
+            .index()
+            .descriptor()
+            .ok_or_else(|| EngineError::internal("index workspace has no descriptor"))?;
+        let mut embeddings = Vec::with_capacity(1 + descriptor.embedding_routes().len());
+        embeddings.push(descriptor.default_embedding_model().clone());
+        embeddings.extend(descriptor.embedding_routes().values().cloned());
         let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
             graph_enabled: workspace
                 .index()
                 .descriptor()
                 .is_some_and(IndexDescriptor::graph_indexing),
             storage_path: storage_path.to_path_buf(),
-            embeddings: models.iter().map(|model| model.info().clone()).collect(),
+            embeddings,
         })
         .map_err(|mut error| {
             if let Some(help) = error.help() {
@@ -650,8 +657,18 @@ fn acquire_index_models(
     graph_indexing: bool,
 ) -> Result<IndexModels, EngineError> {
     let model = acquire_model(models, existing, options)?;
+    let model_reference = model.info().model().reference();
+    let vector_index_quantization = resolve_vector_index_quantization(
+        existing,
+        &model_reference,
+        options.vector_index_quantization,
+    );
+    let model_info = model
+        .info()
+        .clone()
+        .with_vector_index_quantization(vector_index_quantization);
     let descriptor = IndexDescriptor::new(
-        model.info().clone(),
+        model_info,
         std::collections::BTreeMap::new(),
         std::collections::BTreeMap::new(),
         graph_indexing,
@@ -670,6 +687,25 @@ fn acquire_index_models(
         runtimes: vec![model],
         descriptor,
     })
+}
+
+fn resolve_vector_index_quantization(
+    existing: Option<&Workspace>,
+    model_reference: &str,
+    requested: Option<crate::domain::VectorIndexQuantization>,
+) -> crate::domain::VectorIndexQuantization {
+    requested
+        .or_else(|| {
+            existing
+                .and_then(|workspace| workspace.index().descriptor())
+                .and_then(|descriptor| {
+                    std::iter::once(descriptor.default_embedding_model())
+                        .chain(descriptor.embedding_routes().values())
+                        .find(|embedding| embedding.model().reference() == model_reference)
+                        .map(|embedding| embedding.vector_index_quantization())
+                })
+        })
+        .unwrap_or_default()
 }
 
 fn acquire_model(
@@ -952,7 +988,10 @@ fn epoch_millis() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
 
     use tempfile::tempdir;
 
@@ -964,7 +1003,12 @@ mod tests {
             },
             info::InfoOptions,
         },
-        domain::{IndexDescriptor, IndexState, Workspace, WorkspaceLayout, model::Device},
+        domain::{
+            Content, ContentKind, IndexDescriptor, IndexState, VectorIndexQuantization, Workspace,
+            WorkspaceLayout,
+            model::{Device, EmbeddingMetric, EmbeddingModelInfo, EmbeddingResult, ModelInfo},
+        },
+        models::{EmbeddingModel, EmbeddingOptions, ModelError},
     };
 
     use super::{ModelRuntimeManager, WorkspaceIndexService};
@@ -1243,6 +1287,178 @@ mod tests {
             super::resolve_scan(Some(manifest.scan()), &options).expect("scan rules"),
             crate::domain::ScanRules::default()
         );
+    }
+
+    #[test]
+    fn binary_sign_quantization_preserves_omission_and_defaults_for_other_models() {
+        use std::collections::BTreeMap;
+
+        use crate::domain::{
+            ContentKind, FTS_CONFIG, VectorIndexQuantization,
+            model::{EmbeddingMetric, EmbeddingModelInfo, ModelInfo},
+        };
+
+        let directory = tempdir().expect("workspace");
+        let model = EmbeddingModelInfo::new(
+            ModelInfo::new(
+                "local",
+                "potion-code-16m-v2",
+                [ContentKind::Text, ContentKind::Code],
+                16,
+            )
+            .expect("model"),
+            256,
+            EmbeddingMetric::Cosine,
+            None,
+            None,
+        )
+        .expect("embedding")
+        .with_vector_index_quantization(VectorIndexQuantization::BinarySign);
+        let descriptor =
+            IndexDescriptor::new(model, BTreeMap::new(), BTreeMap::new(), false, FTS_CONFIG)
+                .expect("index descriptor");
+        let workspace = Workspace::new(
+            directory.path(),
+            WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout"),
+            crate::domain::ScanRules::default(),
+            super::CURRENT_INDEX_VERSION,
+            Some("00000000-0000-0000-0000-000000000001".to_owned()),
+            0,
+            0,
+            IndexState::Enabled(Box::new(descriptor)),
+        )
+        .expect("workspace");
+
+        assert_eq!(
+            super::resolve_vector_index_quantization(
+                Some(&workspace),
+                "local/potion-code-16m-v2",
+                None,
+            ),
+            VectorIndexQuantization::BinarySign,
+        );
+        assert_eq!(
+            super::resolve_vector_index_quantization(Some(&workspace), "local/another-model", None,),
+            VectorIndexQuantization::Fp16,
+        );
+        assert_eq!(
+            super::resolve_vector_index_quantization(
+                Some(&workspace),
+                "local/potion-code-16m-v2",
+                Some(VectorIndexQuantization::Fp16),
+            ),
+            VectorIndexQuantization::Fp16,
+        );
+    }
+
+    struct LocalIndexFixtureModel {
+        info: EmbeddingModelInfo,
+        vector: Vec<f32>,
+    }
+
+    #[async_trait::async_trait]
+    impl EmbeddingModel for LocalIndexFixtureModel {
+        fn info(&self) -> &EmbeddingModelInfo {
+            &self.info
+        }
+
+        async fn embed(
+            &self,
+            inputs: &[Vec<Content>],
+            _options: EmbeddingOptions,
+        ) -> Result<EmbeddingResult, ModelError> {
+            Ok(EmbeddingResult {
+                vectors: inputs.iter().map(|_| self.vector.clone()).collect(),
+                truncated: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    async fn binary_sign_rebuilds_and_searches_a_disposable_local_workspace() {
+        let directory = tempdir().expect("disposable local workspace");
+        let source = directory.path().join("fixture.rs");
+        std::fs::write(&source, "pub fn local_index_fixture() { let x = 1; }\n")
+            .expect("local source");
+
+        let model_reference = "local/potion-code-16m-v2";
+        let mut vector = vec![0.01_f32; 256];
+        vector[0] = 1.0;
+        let model_info = EmbeddingModelInfo::new(
+            ModelInfo::new(
+                "local",
+                "potion-code-16m-v2",
+                [ContentKind::Text, ContentKind::Code],
+                16,
+            )
+            .expect("fixture model"),
+            256,
+            EmbeddingMetric::Cosine,
+            Some(1024),
+            None,
+        )
+        .expect("fixture embedding model");
+        let fixture_vector = vector.clone();
+        let models = ModelRuntimeManager::with_factory_for_test({
+            let model_info = model_info.clone();
+            move |_requested, _config, _compute, _sessions| {
+                let model: Arc<dyn EmbeddingModel> = Arc::new(LocalIndexFixtureModel {
+                    info: model_info.clone(),
+                    vector: fixture_vector.clone(),
+                });
+                Ok(model)
+            }
+        });
+        let result = WorkspaceIndexService::new()
+            .index(
+                &models,
+                IndexOptions {
+                    root: Some(directory.path().to_path_buf()),
+                    rebuild: true,
+                    embedding: Some(EmbeddingModelSpec {
+                        reference: model_reference.to_owned(),
+                        revision: None,
+                        cache_dir: None,
+                        endpoint: None,
+                        device: Device::Cpu,
+                    }),
+                    vector_index_quantization: Some(VectorIndexQuantization::BinarySign),
+                    ..IndexOptions::default()
+                },
+            )
+            .await
+            .expect("build disposable binary-sign index locally");
+        assert_eq!(result.files_added, 1);
+
+        let layout =
+            WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("workspace layout");
+        let workspace = super::read_workspace_manifest(directory.path(), &layout)
+            .expect("read local manifest")
+            .expect("published local index");
+        assert_eq!(
+            workspace
+                .index()
+                .descriptor()
+                .expect("index descriptor")
+                .default_embedding_model()
+                .vector_index_quantization(),
+            VectorIndexQuantization::BinarySign
+        );
+
+        let storage = crate::storage::IndexStore::open(
+            crate::storage::types::WorkspaceIndexStorageOptions::ReadOnly {
+                storage_path: layout.index_dir().to_path_buf(),
+                graph_enabled: false,
+            },
+        )
+        .expect("reopen disposable local index");
+        let hits = storage
+            .search_vector(model_reference, &vector, 5, None)
+            .expect("search local binary-sign index");
+        assert!(!hits.is_empty());
+        storage.close().expect("close disposable index");
+        models.close();
     }
 
     #[tokio::test]

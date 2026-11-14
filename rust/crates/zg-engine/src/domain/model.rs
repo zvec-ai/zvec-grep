@@ -95,6 +95,7 @@ pub(crate) use embedding::EmbeddingMetric;
 pub(crate) use embedding::EmbeddingModelInfo;
 pub(crate) use embedding::EmbeddingPurpose;
 pub(crate) use embedding::EmbeddingResult;
+pub use embedding::VectorIndexQuantization;
 
 mod reranking;
 #[allow(unused_imports)] // Reserved for the first reranking backend.

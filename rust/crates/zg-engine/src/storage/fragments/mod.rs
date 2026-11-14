@@ -27,15 +27,20 @@ use crate::{
     domain::{
         CodeMetadata, DirectoryId, Entity, EntityFragment, EntityId, EntityMetadata, FTS_CONFIG,
         FileId, FileRecord, FragmentId, IndexField, SourcePath,
-        model::{EmbeddingMetric, EmbeddingModelInfo},
+        model::{EmbeddingMetric, EmbeddingModelInfo, VectorIndexQuantization},
     },
     utils::sha256_hex_parts,
 };
 
 const MAX_TOP_K: usize = 100_000;
+const BINARY_SCAN_BUCKETS: u32 = u16::MAX as u32 + 1;
+const BINARY_SCAN_TARGET_HITS: usize = 5_000;
+const BINARY_SCAN_MAX_INITIAL_RANGES: usize = 256;
+const BINARY_SCAN_PAGE_SIZE: usize = 10_000;
 
 pub(super) struct Fragments {
     indexes: BTreeMap<String, Collection>,
+    embeddings: BTreeMap<String, EmbeddingModelInfo>,
 }
 
 impl Fragments {
@@ -45,6 +50,7 @@ impl Fragments {
         read_only: bool,
     ) -> EngineResult<Self> {
         let mut indexes = BTreeMap::new();
+        let mut stored_embeddings = BTreeMap::new();
         for embedding in embeddings {
             let dimension = u32::try_from(embedding.dimension())
                 .ok()
@@ -62,17 +68,22 @@ impl Fragments {
             let name = fragment_collection_name(embedding);
             let collection = open_collection(
                 &root.join(&name),
-                &fragments_schema(dimension, metric)?,
+                &fragments_schema(dimension, metric, embedding.vector_index_quantization())?,
                 read_only,
             )?;
+            let model_reference = embedding.model().reference();
             if indexes
-                .insert(embedding.model().reference(), collection)
+                .insert(model_reference.clone(), collection)
                 .is_some()
             {
                 return Err(EngineError::invalid_argument("duplicate embedding model"));
             }
+            stored_embeddings.insert(model_reference, embedding.clone());
         }
-        Ok(Self { indexes })
+        Ok(Self {
+            indexes,
+            embeddings: stored_embeddings,
+        })
     }
 
     /// Encode the entire replacement before any stored rows are changed.
@@ -81,6 +92,7 @@ impl Fragments {
         entities: &[Entity],
         entries: &[IndexedFragment],
         directories: &[DirectoryId],
+        embeddings: &BTreeMap<String, EmbeddingModelInfo>,
     ) -> EngineResult<BTreeMap<String, Vec<Doc>>> {
         let owners = entities
             .iter()
@@ -110,15 +122,46 @@ impl Fragments {
             let fragment = fragments.get(&entry.fragment_id).ok_or_else(|| {
                 EngineError::invalid_argument("search projection references a missing fragment")
             })?;
+            let embedding = embeddings.get(&entry.model).ok_or_else(|| {
+                EngineError::invalid_argument("search projection references an unknown model")
+            })?;
+            if entry.vector.len() != embedding.dimension() {
+                return Err(EngineError::invalid_argument(format!(
+                    "embedding vector has {} values; model {} requires {}",
+                    entry.vector.len(),
+                    entry.model,
+                    embedding.dimension()
+                )));
+            }
             let mut doc = fragment_doc(owner, fragment, file, directories, fields)?;
             native(
                 doc.add_string("text", &index_text(&entry.fts_text)),
                 "encode searchable text",
             )?;
-            native(
-                zg_zvec_fp16::add_embedding(&mut doc, "embedding", &entry.vector),
-                "encode embedding vector",
-            )?;
+            match embedding.vector_index_quantization() {
+                VectorIndexQuantization::Fp16 => native(
+                    zg_zvec_fp16::add_embedding(&mut doc, "embedding", &entry.vector),
+                    "encode embedding vector",
+                )?,
+                VectorIndexQuantization::BinarySign => {
+                    let (packed, scale) = encode_sign_vector(&entry.vector)?;
+                    native(
+                        doc.add_binary("embedding", &packed),
+                        "encode packed sign embedding",
+                    )?;
+                    native(
+                        doc.add_f32("embedding_scale", scale),
+                        "encode embedding scale",
+                    )?;
+                    native(
+                        doc.add_u32(
+                            "vector_scan_bucket",
+                            vector_scan_bucket(entry.fragment_id.as_str())?,
+                        ),
+                        "encode vector scan bucket",
+                    )?;
+                }
+            }
             projections
                 .entry(entry.model.clone())
                 .or_default()
@@ -132,6 +175,10 @@ impl Fragments {
             write_docs(self.index(model)?, docs, "write model fragments")?;
         }
         Ok(())
+    }
+
+    pub(super) fn embedding_models(&self) -> &BTreeMap<String, EmbeddingModelInfo> {
+        &self.embeddings
     }
 
     pub(super) fn validate_ownership(
@@ -278,8 +325,15 @@ impl Fragments {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let requested_top_k = top_k(limit)?;
+        let embedding = self.embeddings.get(model).ok_or_else(|| {
+            EngineError::invalid_argument(format!("unknown embedding model {model:?}"))
+        })?;
+        if embedding.vector_index_quantization() == VectorIndexQuantization::BinarySign {
+            return self.search_binary_sign(index, embedding, vector, limit, filter);
+        }
         let mut request = native(
-            zg_zvec_fp16::embedding_query("embedding", vector, top_k(limit)?),
+            zg_zvec_fp16::embedding_query("embedding", vector, requested_top_k),
             "create vector query",
         )?;
         configure_query(
@@ -291,6 +345,142 @@ impl Fragments {
             .into_iter()
             .map(|doc| decode_search_hit(&doc, StorageSearchPath::Vector))
             .collect()
+    }
+
+    fn search_binary_sign(
+        &self,
+        index: &Collection,
+        embedding: &EmbeddingModelInfo,
+        query: &[f32],
+        limit: usize,
+        filter: Option<&str>,
+    ) -> EngineResult<Vec<StorageSearchHit>> {
+        if query.len() != embedding.dimension() || query.iter().any(|value| !value.is_finite()) {
+            return Err(EngineError::invalid_argument(
+                "binary-sign query has an invalid dimension or non-finite value",
+            ));
+        }
+        if embedding.metric() == EmbeddingMetric::Cosine && query.iter().all(|value| *value == 0.0)
+        {
+            return Err(EngineError::invalid_argument(
+                "cosine query vector must not be zero",
+            ));
+        }
+
+        let stats = native(index.stats(), "inspect binary-vector collection")?;
+        let document_count = usize::try_from(stats.doc_count)
+            .map_err(|_| EngineError::storage_failure("binary vector count exceeds usize"))?;
+        if document_count == 0 {
+            return Ok(Vec::new());
+        }
+        let initial_ranges = document_count
+            .div_ceil(BINARY_SCAN_TARGET_HITS)
+            .clamp(1, BINARY_SCAN_MAX_INITIAL_RANGES);
+        let bucket_width = usize::try_from(BINARY_SCAN_BUCKETS)
+            .expect("bucket count fits usize")
+            .div_ceil(initial_ranges);
+        let mut hits = Vec::with_capacity(limit.min(document_count));
+        for start in (0..BINARY_SCAN_BUCKETS).step_by(bucket_width) {
+            let end = start
+                .saturating_add(u32::try_from(bucket_width).unwrap_or(u32::MAX))
+                .min(BINARY_SCAN_BUCKETS);
+            self.scan_binary_sign_range(
+                index, embedding, query, limit, filter, start, end, &mut hits,
+            )?;
+        }
+        sort_search_hits(&mut hits);
+        hits.truncate(limit);
+        Ok(hits)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn scan_binary_sign_range(
+        &self,
+        index: &Collection,
+        embedding: &EmbeddingModelInfo,
+        query: &[f32],
+        limit: usize,
+        filter: Option<&str>,
+        bucket_start: u32,
+        bucket_end: u32,
+        top_hits: &mut Vec<StorageSearchHit>,
+    ) -> EngineResult<()> {
+        let bucket_filter =
+            format!("vector_scan_bucket >= {bucket_start} AND vector_scan_bucket < {bucket_end}");
+        let filter = filter.map_or_else(
+            || bucket_filter.clone(),
+            |filter| format!("({filter}) AND ({bucket_filter})"),
+        );
+        let mut request = native(
+            SearchQuery::scalar(
+                i32::try_from(BINARY_SCAN_PAGE_SIZE + 1)
+                    .map_err(|_| EngineError::internal("binary scan page size exceeds i32"))?,
+            ),
+            "create binary-vector scan query",
+        )?;
+        configure_query(
+            &mut request,
+            Some(&filter),
+            &[
+                "document_id",
+                "entity_id",
+                "file_id",
+                "embedding",
+                "embedding_scale",
+            ],
+        )?;
+        let documents = native(index.query(&request), "scan packed sign vectors")?;
+        if documents.len() > BINARY_SCAN_PAGE_SIZE {
+            if bucket_end.saturating_sub(bucket_start) <= 1 {
+                return Err(EngineError::unsupported(
+                    "binary vector scan bucket exceeds its bounded page size",
+                ));
+            }
+            let midpoint = bucket_start + (bucket_end - bucket_start) / 2;
+            self.scan_binary_sign_range(
+                index,
+                embedding,
+                query,
+                limit,
+                Some(&filter),
+                bucket_start,
+                midpoint,
+                top_hits,
+            )?;
+            return self.scan_binary_sign_range(
+                index,
+                embedding,
+                query,
+                limit,
+                Some(&filter),
+                midpoint,
+                bucket_end,
+                top_hits,
+            );
+        }
+
+        let mut range_hits = Vec::with_capacity(documents.len());
+        for document in documents {
+            let packed = native(document.get_binary("embedding"), "read packed sign vector")?
+                .ok_or_else(|| corrupt("binary vector document is missing its packed embedding"))?;
+            let scale = native(
+                document.get_f32("embedding_scale"),
+                "read sign-vector scale",
+            )?
+            .ok_or_else(|| corrupt("binary vector document is missing its embedding scale"))?;
+            let score = binary_sign_score(query, &packed, scale, embedding.metric())?;
+            range_hits.push(decode_search_hit_with_score(
+                &document,
+                StorageSearchPath::Vector,
+                score,
+            )?);
+        }
+        sort_search_hits(&mut range_hits);
+        range_hits.truncate(limit);
+        top_hits.extend(range_hits);
+        sort_search_hits(top_hits);
+        top_hits.truncate(limit);
+        Ok(())
     }
 
     fn index(&self, model: &str) -> EngineResult<&Collection> {
@@ -346,7 +536,11 @@ fn retrieval_schema(name: &str) -> EngineResult<CollectionSchema> {
     Ok(schema)
 }
 
-fn fragments_schema(dimension: u32, metric: MetricType) -> EngineResult<CollectionSchema> {
+fn fragments_schema(
+    dimension: u32,
+    metric: MetricType,
+    vector_index_quantization: VectorIndexQuantization,
+) -> EngineResult<CollectionSchema> {
     let mut schema = retrieval_schema("fragments")?;
     let mut text = native(
         FieldSchema::new("text", DataType::String, false, 0),
@@ -361,19 +555,135 @@ fn fragments_schema(dimension: u32, metric: MetricType) -> EngineResult<Collecti
     )?;
     native(schema.add_field(&text), "add full-text field")?;
 
-    let mut vector = native(
-        FieldSchema::new("embedding", DataType::VectorFp16, false, dimension),
-        "define vector field",
-    )?;
-    native(
-        vector.set_index_params(&native(
-            IndexParams::hnsw(metric, 50, 500),
-            "define vector index",
-        )?),
-        "attach vector index",
-    )?;
-    native(schema.add_field(&vector), "add vector field")?;
+    match vector_index_quantization {
+        VectorIndexQuantization::Fp16 => {
+            let mut vector = native(
+                FieldSchema::new("embedding", DataType::VectorFp16, false, dimension),
+                "define vector field",
+            )?;
+            native(
+                vector.set_index_params(&native(
+                    IndexParams::hnsw(metric, 50, 500),
+                    "define vector index",
+                )?),
+                "attach vector index",
+            )?;
+            native(schema.add_field(&vector), "add vector field")?;
+        }
+        VectorIndexQuantization::BinarySign => {
+            let embedding = native(
+                FieldSchema::new("embedding", DataType::Binary, false, 0),
+                "define packed sign field",
+            )?;
+            native(schema.add_field(&embedding), "add packed sign field")?;
+
+            let scale = native(
+                FieldSchema::new("embedding_scale", DataType::Float, false, 0),
+                "define sign-vector scale field",
+            )?;
+            native(schema.add_field(&scale), "add sign-vector scale field")?;
+
+            let mut bucket = native(
+                FieldSchema::new("vector_scan_bucket", DataType::Uint32, false, 0),
+                "define vector scan bucket field",
+            )?;
+            native(
+                bucket.set_index_params(&native(
+                    IndexParams::invert(true, false),
+                    "define vector scan bucket index",
+                )?),
+                "attach vector scan bucket index",
+            )?;
+            native(schema.add_field(&bucket), "add vector scan bucket field")?;
+        }
+    }
     Ok(schema)
+}
+
+fn encode_sign_vector(vector: &[f32]) -> EngineResult<(Vec<u8>, f32)> {
+    if vector.is_empty() || vector.iter().any(|value| !value.is_finite()) {
+        return Err(EngineError::invalid_argument(
+            "binary-sign document vector must be non-empty and finite",
+        ));
+    }
+    let mut packed = vec![0_u8; vector.len().div_ceil(u8::BITS as usize)];
+    let mut absolute_sum = 0.0_f64;
+    for (dimension, value) in vector.iter().enumerate() {
+        absolute_sum += f64::from(value.abs());
+        if *value >= 0.0 {
+            packed[dimension / u8::BITS as usize] |= 1_u8 << (dimension % u8::BITS as usize);
+        }
+    }
+    let scale = (absolute_sum / vector.len() as f64) as f32;
+    Ok((packed, scale))
+}
+
+fn vector_scan_bucket(fragment_id: &str) -> EngineResult<u32> {
+    let hash = sha256_hex_parts([b"vector-scan-bucket", fragment_id.as_bytes()]);
+    let prefix = hash
+        .get(..4)
+        .ok_or_else(|| EngineError::internal("binary vector bucket hash is too short"))?;
+    u16::from_str_radix(prefix, 16)
+        .map(u32::from)
+        .map_err(|error| EngineError::internal(format!("decode vector scan bucket: {error}")))
+}
+
+fn binary_sign_score(
+    query: &[f32],
+    packed: &[u8],
+    scale: f32,
+    metric: EmbeddingMetric,
+) -> EngineResult<f64> {
+    if !scale.is_finite() || scale < 0.0 {
+        return Err(corrupt("binary embedding scale is invalid"));
+    }
+    let expected_bytes = query.len().div_ceil(u8::BITS as usize);
+    if packed.len() != expected_bytes {
+        return Err(corrupt(format!(
+            "packed sign embedding has {} bytes; expected {expected_bytes}",
+            packed.len()
+        )));
+    }
+    let mut dot = 0.0_f64;
+    let mut query_norm_squared = 0.0_f64;
+    for (dimension, value) in query.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(EngineError::invalid_argument(
+                "binary-sign query contains a non-finite value",
+            ));
+        }
+        let value = f64::from(*value);
+        query_norm_squared += value * value;
+        let positive =
+            packed[dimension / u8::BITS as usize] & (1_u8 << (dimension % u8::BITS as usize)) != 0;
+        dot += value * if positive { 1.0 } else { -1.0 };
+    }
+    match metric {
+        EmbeddingMetric::Cosine => {
+            if query_norm_squared == 0.0 || scale == 0.0 {
+                Ok(0.0)
+            } else {
+                Ok(dot / (query_norm_squared.sqrt() * (query.len() as f64).sqrt()))
+            }
+        }
+        EmbeddingMetric::DotProduct => Ok(dot * f64::from(scale)),
+        EmbeddingMetric::Euclidean => {
+            let scale = f64::from(scale);
+            let distance_squared = (query_norm_squared + query.len() as f64 * scale * scale
+                - 2.0 * scale * dot)
+                .max(0.0);
+            Ok(-distance_squared.sqrt())
+        }
+    }
+}
+
+fn sort_search_hits(hits: &mut [StorageSearchHit]) {
+    hits.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.document_id.cmp(&right.document_id))
+    });
 }
 
 fn identity_doc(entity: &Entity, fragment: &EntityFragment) -> EngineResult<Doc> {
@@ -413,6 +723,14 @@ fn fragment_doc(
 }
 
 fn decode_search_hit(doc: &Doc, path: StorageSearchPath) -> EngineResult<StorageSearchHit> {
+    decode_search_hit_with_score(doc, path, f64::from(doc.get_score()))
+}
+
+fn decode_search_hit_with_score(
+    doc: &Doc,
+    path: StorageSearchPath,
+    score: f64,
+) -> EngineResult<StorageSearchHit> {
     let document_id = FragmentId::from_string(string_field(doc, "document_id")?);
     let entity_id = EntityId::from_string(string_field(doc, "entity_id")?);
     if doc_key(doc)? != document_id.as_str() {
@@ -425,7 +743,7 @@ fn decode_search_hit(doc: &Doc, path: StorageSearchPath) -> EngineResult<Storage
         entity_id,
         file_id: FileId::new(u32_field(doc, "file_id")?),
         path,
-        score: f64::from(doc.get_score()),
+        score,
     })
 }
 

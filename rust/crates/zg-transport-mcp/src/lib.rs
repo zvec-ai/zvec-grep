@@ -47,7 +47,7 @@ use zg_engine::{
             },
         },
         index::{
-            IndexOptions,
+            IndexOptions, VectorIndexQuantization,
             options::{
                 Device, EmbeddingModelSpec, GlobRule, ScanRules, ScanRulesUpdate,
                 deserialize_optional_update,
@@ -979,6 +979,8 @@ pub struct IndexInput {
     /// Persist graph indexing; omitted keeps the saved setting. Changes require rebuild.
     #[schemars(extend("type" = "boolean"))]
     pub graph_indexing: Option<bool>,
+    /// Vector-index compression; omitted keeps the saved setting. Changes require rebuild.
+    pub vector_index_quantization: Option<VectorIndexQuantizationInput>,
     /// Absolute workspace root visible to the daemon.
     #[schemars(length(min = 1, max = 1024))]
     pub root: String,
@@ -1038,6 +1040,22 @@ pub struct IndexInput {
     /// Wait for the submitted index job to finish.
     #[schemars(extend("type" = "boolean"))]
     pub wait: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum VectorIndexQuantizationInput {
+    Fp16,
+    BinarySign,
+}
+
+impl From<VectorIndexQuantizationInput> for VectorIndexQuantization {
+    fn from(value: VectorIndexQuantizationInput) -> Self {
+        match value {
+            VectorIndexQuantizationInput::Fp16 => Self::Fp16,
+            VectorIndexQuantizationInput::BinarySign => Self::BinarySign,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -1884,6 +1902,7 @@ impl IndexInput {
                 root: Some(root),
                 rebuild: self.rebuild.unwrap_or(false),
                 graph_indexing: self.graph_indexing,
+                vector_index_quantization: self.vector_index_quantization.map(Into::into),
                 reset_paths: self.reset_paths.unwrap_or(false),
                 scan,
                 embedding,
@@ -1905,6 +1924,7 @@ impl IndexInput {
             || self.embedding.is_some()
             || self.rebuild.is_some()
             || self.graph_indexing.is_some()
+            || self.vector_index_quantization.is_some()
             || self.reset_paths.is_some()
             || self.included_formats.is_some()
             || self.excluded_formats.is_some()
@@ -2591,7 +2611,7 @@ mod tests {
     use super::{
         AGENT_TOOL_NAME, FULL_TOOL_NAMES, FreshnessInput, IndexInput, IndexToolRequest,
         QueryListInput, RgInput, SearchInput, ServerStatusProvider, ServerStatusSnapshot,
-        ZvecGrepMcpServer, error_result,
+        VectorIndexQuantization, ZvecGrepMcpServer, error_result,
     };
 
     struct FixedStatus;
@@ -3551,6 +3571,11 @@ mod tests {
             serde_json::to_value(schemars::schema_for!(IndexInput)).expect("index input schema");
         assert!(schema["properties"].get("embedding").is_some());
         assert!(schema["properties"].get("embeddingRoutes").is_none());
+        assert!(
+            schema["properties"]
+                .get("vectorIndexQuantization")
+                .is_some()
+        );
         assert!(schema["properties"].get("includeHidden").is_some());
         assert!(schema["properties"].get("hidden").is_none());
         assert!(schema["properties"].get("useDefaultIgnores").is_some());
@@ -3570,6 +3595,25 @@ mod tests {
                 panic!("index");
             };
             assert_eq!(options.graph_indexing, value);
+        }
+
+        for (value, expected) in [
+            (None, None),
+            (Some("fp16"), Some(VectorIndexQuantization::Fp16)),
+            (
+                Some("binary_sign"),
+                Some(VectorIndexQuantization::BinarySign),
+            ),
+        ] {
+            let parsed: IndexInput = serde_json::from_value(serde_json::json!({
+                "root": test_root(), "vectorIndexQuantization": value
+            }))
+            .expect("vector-index quantization");
+            let IndexToolRequest::Index { options, .. } = parsed.into_request().expect("index")
+            else {
+                panic!("index");
+            };
+            assert_eq!(options.vector_index_quantization, expected);
         }
 
         let parsed: IndexInput = serde_json::from_value(serde_json::json!({
@@ -4112,6 +4156,7 @@ mod tests {
     fn index_input() -> IndexInput {
         IndexInput {
             graph_indexing: None,
+            vector_index_quantization: None,
             root: test_root().display().to_string(),
             api_key: None,
             device: None,

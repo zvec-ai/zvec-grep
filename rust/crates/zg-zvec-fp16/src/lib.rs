@@ -171,7 +171,8 @@ mod tests {
     use super::{add_embedding, decode_embedding, embedding_query, f16};
 
     fn initialize() {
-        zvec_rust::initialize(None).expect("initialize zvec");
+        static INITIALIZE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        INITIALIZE.get_or_init(|| zvec_rust::initialize(None).expect("initialize zvec"));
     }
 
     #[test]

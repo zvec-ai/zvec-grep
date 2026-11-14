@@ -54,7 +54,7 @@ use zg_engine::api::{
     },
     files::FilesOptions,
     index::{
-        IndexOptions,
+        IndexOptions, VectorIndexQuantization,
         options::{Device, EmbeddingModelSpec, GlobRule, ScanRulesUpdate},
     },
     info::InfoOptions,
@@ -286,6 +286,21 @@ pub enum DeviceArg {
     Metal,
     Vulkan,
     Cuda,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum VectorIndexQuantizationArg {
+    Fp16,
+    BinarySign,
+}
+
+impl From<VectorIndexQuantizationArg> for VectorIndexQuantization {
+    fn from(value: VectorIndexQuantizationArg) -> Self {
+        match value {
+            VectorIndexQuantizationArg::Fp16 => Self::Fp16,
+            VectorIndexQuantizationArg::BinarySign => Self::BinarySign,
+        }
+    }
 }
 
 impl From<DeviceArg> for Device {
@@ -592,6 +607,9 @@ pub struct IndexArgs {
     /// Persist graph indexing; changing an existing index requires --rebuild.
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub graph: Option<bool>,
+    /// Vector-index encoding; changing an existing setting requires --rebuild.
+    #[arg(long = "vector-index-quantization", value_enum)]
+    pub vector_index_quantization: Option<VectorIndexQuantizationArg>,
     pub root: Option<PathBuf>,
     #[arg(long)]
     pub mode: Option<ClientMode>,
@@ -1662,6 +1680,7 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
             root: Some(root),
             rebuild: args.rebuild,
             graph_indexing: args.graph,
+            vector_index_quantization: args.vector_index_quantization.map(Into::into),
             reset_paths: args.reset_paths,
             scan,
             embedding,
@@ -1834,7 +1853,8 @@ pub fn parse_modified_time(value: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, CliPlan, FileFormat, IndexOperation, QueryFilter, parse_byte_size, parse_modified_time,
+        Cli, CliPlan, FileFormat, IndexOperation, QueryFilter, VectorIndexQuantization,
+        parse_byte_size, parse_modified_time,
     };
     use std::{ffi::OsString, path::PathBuf};
 
@@ -3570,6 +3590,32 @@ mod tests {
                 };
                 assert_eq!(request.queries, [expected]);
             }
+        }
+    }
+
+    #[test]
+    fn vector_index_quantization_preserves_explicit_values_and_omission() {
+        for (flags, expected) in [
+            (vec![], None),
+            (
+                vec!["--vector-index-quantization", "fp16"],
+                Some(VectorIndexQuantization::Fp16),
+            ),
+            (
+                vec!["--vector-index-quantization", "binary-sign"],
+                Some(VectorIndexQuantization::BinarySign),
+            ),
+        ] {
+            let cli = Cli::try_parse_from(["zg", "--index"].into_iter().chain(flags))
+                .expect("vector-index quantization");
+            let CliPlan::Index {
+                operation: IndexOperation::Build(options),
+                ..
+            } = cli.into_plan(std::env::temp_dir()).expect("index plan")
+            else {
+                panic!("index");
+            };
+            assert_eq!(options.vector_index_quantization, expected);
         }
     }
 

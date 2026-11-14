@@ -174,6 +174,21 @@ impl ModelRuntimeManager {
         Self::with_policy(Arc::new(factory), CachePolicy::default())
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_factory_for_test(
+        factory: impl Fn(
+            &str,
+            ModelConfig,
+            ModelComputeRuntime,
+            usize,
+        ) -> Result<Arc<dyn EmbeddingModel>, ModelError>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self::with_factory(factory)
+    }
+
     fn with_policy(factory: Arc<ModelFactory>, policy: CachePolicy) -> Self {
         let compute_runtime = ModelComputeRuntime::shared();
         // Freeze process compute settings before a daemon accepts requests, but
