@@ -15,6 +15,9 @@ mod runtime;
 mod stdio;
 mod workspace_runtime;
 
+#[cfg(test)]
+mod embedding_defaults_tests;
+
 use std::{
     fmt,
     net::SocketAddr,
@@ -201,8 +204,20 @@ pub async fn execute_command(
     command: zg_daemon_protocol::DaemonCommand,
 ) -> Result<zg_daemon_protocol::DaemonReply, DaemonError> {
     let url = admin_url(home, "execute").await?;
-    let body = serde_json::to_vec(&command)?;
-    let reply = http_client::post_json(&url, body).await?;
+    if let zg_daemon_protocol::DaemonCommand::Index(request)
+    | zg_daemon_protocol::DaemonCommand::IndexAuthorization(request) = &command
+    {
+        ensure_embedding_default_support(&url, request).await?;
+    }
+    execute_at(&url, &command).await
+}
+
+async fn execute_at(
+    url: &str,
+    command: &zg_daemon_protocol::DaemonCommand,
+) -> Result<zg_daemon_protocol::DaemonReply, DaemonError> {
+    let body = serde_json::to_vec(command)?;
+    let reply = http_client::post_json(url, body).await?;
     match serde_json::from_slice::<zg_daemon_protocol::ExecutionResult>(&reply)? {
         zg_daemon_protocol::ExecutionResult::Success(reply) => Ok(reply),
         zg_daemon_protocol::ExecutionResult::Failure(error) => Err(DaemonError::Remote {
@@ -210,6 +225,34 @@ pub async fn execute_command(
             retryable: error.retryable,
         }),
     }
+}
+
+async fn ensure_embedding_default_support(
+    url: &str,
+    request: &zg_engine::api::index::IndexOptions,
+) -> Result<(), DaemonError> {
+    let Some(default) = &request.embedding_default else {
+        return Ok(());
+    };
+    // Probe with the original v2 setup request before sending its optional
+    // indexing extension. Older v2 daemons reject unknown request fields.
+    let reply = execute_at(
+        url,
+        &zg_daemon_protocol::DaemonCommand::IndexSetup(
+            zg_engine::api::index::setup::IndexSetupOptions {
+                preferred_model: Some(default.model.clone()),
+                ..Default::default()
+            },
+        ),
+    )
+    .await?;
+    if matches!(reply, zg_daemon_protocol::DaemonReply::IndexSetup(setup) if setup.supports_embedding_defaults)
+    {
+        return Ok(());
+    }
+    Err(DaemonError::McpBridge(
+        "The running daemon does not support caller embedding defaults. Restart it with the updated zg binary (`zg --server off`, then `zg --server on`) and retry; no indexing request was sent.".into(),
+    ))
 }
 
 /// Executes an index operation while forwarding live progress snapshots.
@@ -220,6 +263,9 @@ pub async fn index_with_progress(
     request: zg_engine::api::index::IndexOptions,
     reporter: &zg_engine::api::index::progress::IndexProgressReporter,
 ) -> Result<zg_engine::api::index::IndexResult, DaemonError> {
+    if request.embedding_default.is_some() {
+        ensure_embedding_default_support(&admin_url(home, "execute").await?, &request).await?;
+    }
     let url = admin_url(home, "index").await?;
     let result = http_client::post_index_stream(
         &url,

@@ -305,6 +305,8 @@ fn model_and_authorization_forms_follow_the_negotiated_protocol() {
             download_bytes: None,
         }],
         default_model: Some("qwen/text-embedding-v4".into()),
+        supports_embedding_defaults: true,
+        selection: None,
     };
     let model = Phase::Model {
         root: root.clone(),

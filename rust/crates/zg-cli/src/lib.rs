@@ -2,6 +2,7 @@
 
 mod authorization;
 mod diagnostics;
+mod embedding;
 mod highlight;
 mod install;
 mod jsonc;

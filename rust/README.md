@@ -27,6 +27,24 @@ that smoke test for local differential validation.
 Existing indexes must be rebuilt when switching embedding models, even when
 their vector dimensions match. The legacy TypeScript catalog is unchanged.
 
+New indexes without `--embedding`, `ZVEC_GREP_EMBEDDING`, or a configured default
+select Potion Code for code-heavy workspaces and Bekko for text-heavy workspaces.
+The shared engine analyzes only files admitted by the index's scan rules and
+supported text formats. Each file contributes at most 64 KiB of its size; data,
+configuration, and ambiguous code/document formats are counted separately.
+A code or text share of at least 60% identifies the dominant scene. Mixed
+workspaces use the larger share; ties and absent evidence use Potion Code.
+Explicit indexing explains the selection on stderr. First-search setup shows
+the same analysis and preselects the recommendation unless a configured model
+takes precedence, regardless of download status. Direct and Server CLI modes resolve
+the caller's default through the shared engine, keeping it distinct from an explicit
+model. The engine chooses again after acquiring the writer lock: an index published
+while the request was queued takes precedence over the caller's default. MCP performs
+the same analysis inside the daemon. Workspace analysis inputs for model setup stay
+in-process; its v2 request shape is unchanged.
+Compatible existing indexes retain their stored model, including during
+`--rebuild` without `--embedding`; supply a model explicitly to switch it.
+
 Run the development commands below from `rust/` (`cd rust` from the repository
 root). See the [contributor guide](CONTRIBUTING.md) for checks and conventions.
 
@@ -363,8 +381,15 @@ It rotates at 10 MiB and keeps five numbered backups by default. The global
 are written to `<home>/daemon/bootstrap.log`.
 
 The instance record at `<home>/daemon/instance.lock` carries
-`daemonProtocolVersion: 1`. Status checks and daemon-backed CLI requests reject
-live legacy daemons without this field, including Node.js daemons; `auto` mode
+`daemonProtocolVersion: 2`. Existing v2 requests remain compatible. Setup replies
+advertise `supports_embedding_defaults`; clients check it before sending the optional
+`embedding_default` indexing/authorization field. A daemon without this capability
+receives only the original read-only setup request, and the client asks for a restart
+before submitting indexing. Explicit model requests and requests without a caller
+default retain their original shape. Update the daemon to enable the new policy for
+MCP and caller defaults. Status checks and daemon-backed
+CLI requests reject live legacy daemons without this field or with version 1,
+including Node.js daemons; `auto` mode
 does not silently fall back to direct execution. Run `zg --server on` with the
 same home and any required token file to stop the legacy daemon and start Rust.
 The stdio bootstrap performs the same replacement automatically. Concurrent
@@ -659,7 +684,7 @@ The required field changes the internal daemon reply contract. Native ripgrep
 type filters apply to queries; persisted scan rules support path globs and file
 formats using the same filename rules as indexed queries. The daemon wire
 distinguishes complete ordered glob replacement from case-category updates.
-The instance record uses `daemonProtocolVersion: 1`; see the daemon migration
+The instance record uses `daemonProtocolVersion: 2`; see the daemon migration
 notes above when replacing older resident processes. Replies without
 `content_range` are rejected during deserialization. Direct and server rendering
 consume the same engine contract.

@@ -60,6 +60,7 @@ fn index_progress(progress: ModelProgress, concurrency: usize) -> IndexProgress 
             downloaded_bytes,
             total_bytes,
             message,
+            selection: None,
         }),
     }
 }

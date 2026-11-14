@@ -24,6 +24,9 @@ use tokio::{
 #[path = "support/terminal.rs"]
 mod terminal;
 
+#[path = "implicit_index/embedding_policy.rs"]
+mod embedding_policy;
+
 struct Fixture {
     root: TempDir,
     user: TempDir,

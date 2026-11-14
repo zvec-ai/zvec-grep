@@ -687,28 +687,8 @@ async fn ensure_query_index(
             zg_cli::output_path(&info.root).display()
         )).into());
     }
-    let options = zg_engine::api::index::setup::IndexSetupOptions {
-        model_cache: request.model_cache.clone(),
-        preferred_model: std::env::var("ZVEC_GREP_EMBEDDING")
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty()),
-        credential_available: request
-            .api_key
-            .as_ref()
-            .is_some_and(|key| !key.trim().is_empty()),
-    };
     let engine = ZvecGrep::new();
-    let setup = if let Some(home) = &server_home {
-        let DaemonReply::IndexSetup(setup) =
-            zg_daemon::execute_command(home, DaemonCommand::IndexSetup(options)).await?
-        else {
-            return Err(protocol_mismatch("index_setup"));
-        };
-        setup
-    } else {
-        engine.index_setup(options).await?
-    };
+    let setup = query_index_setup(&engine, request, &info.root, server_home.as_deref()).await?;
     let mut index_request = select_query_index(
         request,
         &info.root,
@@ -752,6 +732,42 @@ async fn ensure_query_index(
     let result = result?;
     zg_cli::write_index_with_options(io::stderr().lock(), &info.root, &result, None, output, ansi)?;
     Ok(true)
+}
+
+async fn query_index_setup(
+    engine: &ZvecGrep,
+    request: &ContextOptions,
+    root: &Path,
+    server_home: Option<&Path>,
+) -> Result<zg_engine::api::index::setup::IndexSetup, Box<dyn Error>> {
+    let options = zg_engine::api::index::setup::IndexSetupOptions {
+        root: Some(root.to_owned()),
+        model_cache: request.model_cache.clone(),
+        credential_available: request
+            .api_key
+            .as_ref()
+            .is_some_and(|key| !key.trim().is_empty()),
+        signal: request.signal.clone(),
+        ..Default::default()
+    };
+    // Analyze in the calling process; the v2 daemon request stays catalog-only.
+    let local_setup = engine.index_setup(options.clone()).await?;
+    let Some(home) = server_home else {
+        return Ok(local_setup);
+    };
+    let DaemonReply::IndexSetup(mut setup) = zg_daemon::execute_command(
+        home,
+        DaemonCommand::IndexSetup(zg_engine::api::index::setup::IndexSetupOptions {
+            preferred_model: local_setup.default_model.clone(),
+            ..options
+        }),
+    )
+    .await?
+    else {
+        return Err(protocol_mismatch("index_setup"));
+    };
+    setup.selection = local_setup.selection;
+    Ok(setup)
 }
 
 async fn select_query_index(
@@ -1031,6 +1047,7 @@ async fn execute_index(
     let server = use_server(mode, home).await?;
     match operation {
         IndexOperation::Build(mut request) => {
+            resolve_cli_index_embedding(&mut request).await?;
             authorize_index(&mut request, server, home).await?;
             let progress = zg_cli::IndexProgressDisplay::new(
                 io::stderr(),
@@ -1113,6 +1130,30 @@ async fn execute_index(
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+#[path = "embedding_policy_tests.rs"]
+mod embedding_policy_tests;
+
+async fn resolve_cli_index_embedding(
+    request: &mut zg_engine::api::index::IndexOptions,
+) -> Result<(), Box<dyn Error>> {
+    use zg_engine::api::index::embedding::EmbeddingSelectionSource;
+
+    if request.embedding.is_some() {
+        return Ok(());
+    }
+    let engine = ZvecGrep::new();
+    let selection = engine.resolve_index_embedding(request.clone()).await;
+    engine.close();
+    let selection = selection?;
+    if selection.source != EmbeddingSelectionSource::ExistingIndex {
+        // Keep defaults distinct from explicit overrides. Another writer may
+        // publish an index after preflight; its saved model must still win.
+        request.embedding_default = Some(selection);
+    }
+    Ok(())
 }
 
 async fn authorize_index(

@@ -1,21 +1,38 @@
 use crate::{
     EngineError,
-    api::index::setup::{EmbeddingChoice, IndexSetup, IndexSetupOptions},
-    config,
-    models::{
-        EmbeddingCatalogEntry, ResolveEmbeddingReferenceOptions, list_embedding_models,
-        model_is_cached, resolve_embedding_reference,
+    api::index::{
+        IndexOptions,
+        options::EmbeddingModelSpec,
+        setup::{EmbeddingChoice, IndexSetup, IndexSetupOptions},
     },
+    config,
+    models::{EmbeddingCatalogEntry, list_embedding_models, model_is_cached},
 };
 
-pub(crate) async fn index_setup(options: IndexSetupOptions) -> Result<IndexSetup, EngineError> {
+use super::embedding_policy;
+
+pub(crate) async fn index_setup(mut options: IndexSetupOptions) -> Result<IndexSetup, EngineError> {
     let config = config::read()?;
-    let default_model = resolve_embedding_reference(ResolveEmbeddingReferenceOptions {
-        explicit: options.preferred_model,
-        global_default: config::string(&config, &["defaults", "embedding"]),
+    let request = IndexOptions {
+        embedding: options.preferred_model.map(|reference| EmbeddingModelSpec {
+            reference,
+            revision: None,
+            cache_dir: None,
+            endpoint: None,
+            device: crate::domain::model::Device::Auto,
+        }),
+        signal: options.signal,
         ..Default::default()
-    })
-    .map_err(crate::models::ModelError::into_engine_error)?;
+    };
+    let selection = if let Some(root) = options.root {
+        let root = crate::utils::resolve_directory(Some(&root))?;
+        options.scan.normalize_ignore_paths(&root)?;
+        let scan = options.scan.apply(&crate::domain::ScanRules::default())?;
+        Some(embedding_policy::select(&root, &scan, None, &request).await?)
+    } else {
+        embedding_policy::configured_selection(None, &request)?
+    };
+    let default_model = selection.as_ref().map(|selection| selection.model.clone());
     if default_model.as_deref().is_some_and(|reference| {
         crate::models::get_embedding_model_catalog_entry(reference).is_none()
     }) {
@@ -54,24 +71,32 @@ pub(crate) async fn index_setup(options: IndexSetupOptions) -> Result<IndexSetup
                 .map(|download| download.artifacts.iter().map(|a| a.size).sum()),
         });
     }
-    sort_choices(&mut models, default_model.as_deref());
+    let recommended = selection
+        .as_ref()
+        .and_then(|selection| selection.analysis.as_ref())
+        .map_or(embedding_policy::CODE_MODEL, |analysis| {
+            analysis.recommended_model.as_str()
+        });
+    sort_choices(&mut models, default_model.as_deref(), recommended);
     Ok(IndexSetup {
         models,
         default_model,
+        supports_embedding_defaults: true,
+        selection,
     })
 }
 
-fn sort_choices(models: &mut [EmbeddingChoice], default: Option<&str>) {
+fn sort_choices(models: &mut [EmbeddingChoice], default: Option<&str>, recommended: &str) {
     models.sort_by_key(|model| {
         (
             !model.local,
+            Some(model.reference.as_str()) != default,
+            model.reference != recommended,
             if model.local {
                 !model.downloaded
             } else {
                 !model.configured
             },
-            Some(model.reference.as_str()) != default,
-            model.reference != "local/potion-code-16m-v2",
         )
     });
 }
@@ -92,27 +117,29 @@ mod tests {
     }
 
     #[test]
-    fn each_tab_prioritizes_cached_or_configured_models_before_defaults() {
+    fn each_tab_prioritizes_defaults_and_recommendations_before_cached_models() {
         let mut models = vec![
             choice("remote/default", false, false, false),
             choice("local/default", true, false, false),
             choice("local/cached", true, true, false),
+            choice("local/recommended", true, false, false),
             choice("remote/configured", false, false, true),
         ];
-        sort_choices(&mut models, Some("local/default"));
+        sort_choices(&mut models, Some("local/default"), "local/recommended");
         assert_eq!(
             models
                 .iter()
                 .map(|m| m.reference.as_str())
                 .collect::<Vec<_>>(),
             [
-                "local/cached",
                 "local/default",
+                "local/recommended",
+                "local/cached",
                 "remote/configured",
                 "remote/default"
             ]
         );
-        assert!(!models[2].available());
+        assert!(!models[3].available());
         assert!(models[0].available());
     }
 }
