@@ -43,6 +43,7 @@ export type WorkspaceIndexStorageOptions =
       storagePath: string;
       readOnly: false;
       embedding: WorkspaceIndexEmbeddingSchema;
+      ftsTokenizer?: string;
     };
 
 export interface WorkspaceIndexStorage {

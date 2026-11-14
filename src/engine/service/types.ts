@@ -36,6 +36,8 @@ export type ZvecGrepIndexOptions = {
   root?: string;
   rootPaths?: readonly (string | RootPath)[];
   rebuild?: boolean;
+  /** FTS analyzer baked into a collection this run creates; an existing one keeps its own until --rebuild. */
+  ftsTokenizer?: string;
   resetPaths?: boolean;
   includePaths?: readonly string[];
   excludePaths?: readonly string[];

@@ -336,6 +336,10 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       options.home = readOptionValue(commandArgs, ++index, arg);
     } else if (arg === "--embedding") {
       options.embedding = readOptionValue(commandArgs, ++index, arg);
+    } else if (arg === "--fts-tokenizer") {
+      options.ftsTokenizer = parseFtsTokenizer(
+        readOptionValue(commandArgs, ++index, arg),
+      );
     } else if (arg === "--model-cache") {
       options.modelCacheDir = readOptionValue(commandArgs, ++index, arg);
     } else if (arg === "--device") {
@@ -990,6 +994,9 @@ function validateCliShape(
   if (options.rebuild && command !== "index") {
     throw new Error("--rebuild can only be used with zg --index");
   }
+  if (options.ftsTokenizer !== undefined && command !== "index") {
+    throw new Error("--fts-tokenizer can only be used with zg --index");
+  }
   if (options.resetPaths && command !== "index") {
     throw new Error("--reset-paths can only be used with zg --index");
   }
@@ -999,6 +1006,7 @@ function validateCliShape(
       options.resetPaths ||
       options.home ||
       options.embedding ||
+      options.ftsTokenizer ||
       options.modelCacheDir ||
       options.device !== undefined ||
       options.apiKey ||
@@ -1071,6 +1079,22 @@ function allowRemoteValueError(): Error {
       "For persistent authorization, use:",
       "  zg --auth grant --capability embedding --scope workspace",
     ].join("\n"),
+  );
+}
+
+const FTS_TOKENIZER_NAMES = new Set([
+  "standard",
+  "jieba",
+  "ngram",
+  "whitespace",
+]);
+
+function parseFtsTokenizer(value: string): string {
+  if (FTS_TOKENIZER_NAMES.has(value)) {
+    return value;
+  }
+  throw new Error(
+    `--fts-tokenizer must be one of ${[...FTS_TOKENIZER_NAMES].join(", ")}`,
   );
 }
 

@@ -189,6 +189,12 @@ export const zvecGrepIndexInputSchema = z.object({
     .boolean()
     .optional()
     .describe("Replace the index root-path configuration."),
+  ftsTokenizer: z
+    .enum(["standard", "jieba", "ngram", "whitespace"])
+    .optional()
+    .describe(
+      "Text analyzer baked into a newly created index. Default standard (Unicode word boundaries); use jieba for CJK corpora, ngram or whitespace for specific cases. An existing index keeps the analyzer it was created with until it is rebuilt.",
+    ),
   globs: pathFilterInputSchema.describe(
     "Ordered case-sensitive rg-style glob rules for indexed files.",
   ),

@@ -242,6 +242,7 @@ async function runIndex(parsed: ParsedArgs): Promise<void> {
           {
             root: rootPath.absolutePath,
             embedding: parsed.options.embedding,
+            ftsTokenizer: parsed.options.ftsTokenizer,
             apiKey: parsed.options.apiKey,
             endpoint: parsed.options.endpoint,
             device: parsed.options.device,
@@ -424,6 +425,17 @@ async function runDirectIndex(
     const authorizationResolution = plan
       ? await authorizeCliPlan(plan, parsed.options)
       : {};
+    if (
+      parsed.options.ftsTokenizer !== undefined &&
+      parsed.options.rebuild !== true &&
+      infoBefore.workspaceIndex !== undefined
+    ) {
+      // The analyzer is fixed when the collection is created: an existing
+      // index keeps its own, so name that instead of ignoring the flag.
+      process.stderr.write(
+        "note: --fts-tokenizer applies when the index is created; this workspace keeps its current analyzer until zg --index --rebuild.\n",
+      );
+    }
     printIndexPathFilterTip(parsed.options);
     const result = await withRemoteEmbeddingOperationPermit(
       authorizationResolution.authorization,
@@ -432,6 +444,7 @@ async function runDirectIndex(
           root: rootPath.absolutePath,
           rootPaths: explicitRoot ? [rootPath] : undefined,
           rebuild: parsed.options.rebuild,
+          ftsTokenizer: parsed.options.ftsTokenizer,
           resetPaths: parsed.options.resetPaths,
           globs: parsed.options.globs,
           insensitiveGlobs: parsed.options.insensitiveGlobs,
