@@ -1498,6 +1498,7 @@ fn runtime_key_separates_resource_affecting_options_without_storing_api_keys() {
             api_key: Some("secret-a".to_owned()),
             endpoint: Some("https://example.test/a".to_owned()),
             cache_dir: Some(PathBuf::from("/cache/a")),
+            http: None,
             device: Some(Device::Cpu),
         },
     );
@@ -1507,6 +1508,7 @@ fn runtime_key_separates_resource_affecting_options_without_storing_api_keys() {
             api_key: Some("secret-a".to_owned()),
             endpoint: Some("https://example.test/a".to_owned()),
             cache_dir: Some(PathBuf::from("/cache/a")),
+            http: None,
             device: Some(Device::Cpu),
         },
     );
@@ -1516,6 +1518,7 @@ fn runtime_key_separates_resource_affecting_options_without_storing_api_keys() {
             api_key: Some("secret-b".to_owned()),
             endpoint: Some("https://example.test/a".to_owned()),
             cache_dir: Some(PathBuf::from("/cache/a")),
+            http: None,
             device: Some(Device::Cpu),
         },
     );
@@ -1524,4 +1527,41 @@ fn runtime_key_separates_resource_affecting_options_without_storing_api_keys() {
     assert!(base != different);
     assert_eq!(base.api_key_fingerprint, same.api_key_fingerprint);
     assert_ne!(base.api_key_fingerprint, different.api_key_fingerprint);
+}
+
+#[test]
+fn http_runtime_cache_tracks_the_entire_descriptor() {
+    let manager = ModelRuntimeManager::new();
+    let original: ModelConfig = serde_json::from_value(serde_json::json!({
+        "endpoint": "https://example.test/v1/embeddings",
+        "http": {"model": "served-model", "dimension": 3, "maxInputTokens": 128, "auth": "none"}
+    }))
+    .expect("valid test fixture");
+    let acquire = |options: ModelConfig| {
+        manager
+            .acquire(ModelRuntimeRequest::new("http/cache", options, None))
+            .expect("valid test fixture")
+    };
+    let first = acquire(original.clone());
+    let same = acquire(original.clone());
+    assert!(Arc::ptr_eq(&first.entry, &same.entry));
+    for (field, value) in [
+        ("model", serde_json::json!("different-model")),
+        ("dimension", serde_json::json!(4)),
+        ("metric", serde_json::json!("dot_product")),
+        ("maxInputTokens", serde_json::json!(256)),
+        ("maxBatchSize", serde_json::json!(2)),
+        ("timeoutMs", serde_json::json!(1000)),
+        ("queryPrefix", serde_json::json!("query: ")),
+        ("documentPrefix", serde_json::json!("document: ")),
+        ("sendDimensions", serde_json::json!(true)),
+        ("sendEncodingFormat", serde_json::json!(true)),
+        ("singleInput", serde_json::json!(true)),
+    ] {
+        let mut changed = serde_json::to_value(&original).expect("valid test fixture");
+        changed["http"][field] = value;
+        let changed = acquire(serde_json::from_value(changed).expect("valid test fixture"));
+        assert!(!Arc::ptr_eq(&first.entry, &changed.entry), "{field}");
+    }
+    manager.close();
 }

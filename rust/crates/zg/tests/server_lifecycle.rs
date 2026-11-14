@@ -1,3 +1,5 @@
+#[path = "server_lifecycle/http_models.rs"]
+mod http_models;
 #[path = "server_lifecycle/mcp_parity.rs"]
 mod mcp_parity;
 #[path = "server_lifecycle/relationships.rs"]
@@ -1824,6 +1826,14 @@ impl EmbeddingServer {
     }
 
     fn start_with_failure_status(failure_status: u16) -> std::io::Result<Self> {
+        Self::start_with_handler(move |stream, fail| {
+            respond_embedding(stream, fail, failure_status)
+        })
+    }
+
+    fn start_with_handler(
+        handler: impl Fn(TcpStream, bool) -> std::io::Result<()> + Send + 'static,
+    ) -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -1839,10 +1849,9 @@ impl EmbeddingServer {
                         break;
                     }
                     requests.fetch_add(1, Ordering::SeqCst);
-                    respond_embedding(
+                    handler(
                         stream.expect("mock embedding connection"),
                         fail.load(Ordering::Acquire),
-                        failure_status,
                     )
                     .expect("mock embedding response");
                 }
@@ -1871,14 +1880,11 @@ impl Drop for EmbeddingServer {
     }
 }
 
-fn respond_embedding(
-    mut stream: TcpStream,
-    fail: bool,
-    failure_status: u16,
-) -> std::io::Result<()> {
+fn read_embedding_request(stream: &TcpStream) -> std::io::Result<(String, serde_json::Value)> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
+    let mut headers = String::new();
     let mut content_length = None;
     loop {
         let mut line = String::new();
@@ -1891,9 +1897,19 @@ fn respond_embedding(
         if let Some(length) = line.to_ascii_lowercase().strip_prefix("content-length:") {
             content_length = Some(length.trim().parse::<usize>().expect("content length"));
         }
+        headers.push_str(&line);
     }
     let mut body = vec![0; content_length.expect("request body length")];
     reader.read_exact(&mut body)?;
+    Ok((headers, serde_json::from_slice(&body)?))
+}
+
+fn respond_embedding(
+    mut stream: TcpStream,
+    fail: bool,
+    failure_status: u16,
+) -> std::io::Result<()> {
+    let (_, request) = read_embedding_request(&stream)?;
     if fail {
         return write!(
             stream,
@@ -1905,7 +1921,6 @@ fn respond_embedding(
             }
         );
     }
-    let request: serde_json::Value = serde_json::from_slice(&body)?;
     let dimension = usize::try_from(request["dimensions"].as_u64().expect("dimension"))
         .expect("usize dimension");
     let mut vector = vec![0.0_f32; dimension];
@@ -1917,7 +1932,14 @@ fn respond_embedding(
         .enumerate()
         .map(|(index, _)| json!({ "index": index, "embedding": vector }))
         .collect::<Vec<_>>();
-    let response = serde_json::to_vec(&json!({ "data": data }))?;
+    write_embedding_response(&mut stream, &json!({ "data": data }))
+}
+
+fn write_embedding_response(
+    stream: &mut TcpStream,
+    response: &serde_json::Value,
+) -> std::io::Result<()> {
+    let response = serde_json::to_vec(response)?;
     write!(
         stream,
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",

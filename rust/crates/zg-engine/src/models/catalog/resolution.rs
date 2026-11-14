@@ -47,6 +47,7 @@ pub fn resolve_embedding_reference(
 
     if let Some(reference) = &environment_reference
         && get_embedding_model_catalog_entry(reference).is_none()
+        && !reference.starts_with("http/")
     {
         return Err(ModelError::new(
             crate::EngineError::INVALID_ARGUMENT,

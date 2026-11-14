@@ -305,6 +305,22 @@ fn search_model_request(
             "--device is only supported for local embedding models",
         ));
     }
+    if let Some(http) = crate::config::resolve_http_model(
+        &config,
+        &reference,
+        Some(&runtime),
+        options.endpoint.as_deref(),
+        false,
+    )? {
+        crate::authorization::require_with_targets(
+            workspace.source_root(),
+            &reference,
+            http.endpoint.as_deref().expect("resolved HTTP endpoint"),
+            options.allow_remote,
+            &options.authorized_remote,
+        )?;
+        return Ok(ModelRuntimeRequest::new(reference, http, None));
+    }
     let endpoint = if local {
         None
     } else {
@@ -333,6 +349,7 @@ fn search_model_request(
     Ok(ModelRuntimeRequest::new(
         reference.clone(),
         ModelConfig {
+            http: None,
             api_key: (!local)
                 .then(|| {
                     options
