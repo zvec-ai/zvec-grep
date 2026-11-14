@@ -311,6 +311,7 @@ class ZvecGrepService implements ZvecGrep {
             const workspaceIndex = new WorkspaceIndex(manifest, {
               mode: "write",
               embeddingModel,
+              ftsTokenizer: options.ftsTokenizer,
             });
             writeWorkspaceManifest(location.home, manifest);
 

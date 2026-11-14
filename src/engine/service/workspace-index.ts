@@ -29,6 +29,7 @@ import { CURRENT_INDEX_VERSION } from "../types.js";
 export type WorkspaceIndexOptions = {
   mode: "read" | "write";
   embeddingModel?: EmbeddingModel;
+  ftsTokenizer?: string;
 };
 
 export class WorkspaceIndex {
@@ -53,6 +54,7 @@ export class WorkspaceIndex {
         storagePath: info.path,
         readOnly: false,
         embedding: this.embedding,
+        ftsTokenizer: options.ftsTokenizer,
       });
     } else {
       this.storage = createWorkspaceIndexStorage({

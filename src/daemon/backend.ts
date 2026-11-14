@@ -826,6 +826,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
             service!.index({
               root: runtime.canonicalRoot,
               rebuild: input.rebuild,
+              ftsTokenizer: input.ftsTokenizer,
               resetPaths: input.resetPaths,
               globs: normalizePlainStringList(input.globs),
               insensitiveGlobs: normalizePlainStringList(
@@ -1403,6 +1404,7 @@ function assertDropOnlyInput(input: ZvecGrepIndexInput): void {
     [input.device !== undefined, "device"],
     [input.rebuild !== undefined, "rebuild"],
     [input.resetPaths !== undefined, "resetPaths"],
+    [input.ftsTokenizer !== undefined, "ftsTokenizer"],
     [input.globs !== undefined, "globs"],
     [input.insensitiveGlobs !== undefined, "insensitiveGlobs"],
     [input.fileTypes !== undefined, "fileTypes"],
