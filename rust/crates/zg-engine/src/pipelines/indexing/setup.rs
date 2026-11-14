@@ -33,9 +33,10 @@ pub(crate) async fn index_setup(mut options: IndexSetupOptions) -> Result<IndexS
         embedding_policy::configured_selection(None, &request)?
     };
     let default_model = selection.as_ref().map(|selection| selection.model.clone());
-    if default_model.as_deref().is_some_and(|reference| {
-        crate::models::get_embedding_model_catalog_entry(reference).is_none()
-    }) {
+    if let Some(reference) = default_model.as_deref()
+        && crate::models::get_embedding_model_catalog_entry(reference).is_none()
+        && config::http_model(&config, reference)?.is_none()
+    {
         return Err(EngineError::invalid_argument(
             "Unsupported default embedding model; run zg --help models",
         ));
@@ -70,6 +71,31 @@ pub(crate) async fn index_setup(mut options: IndexSetupOptions) -> Result<IndexS
             download_bytes: download
                 .map(|download| download.artifacts.iter().map(|a| a.size).sum()),
         });
+    }
+    if let Some(configured) = config["models"].as_object() {
+        for reference in configured
+            .keys()
+            .filter(|reference| reference.starts_with("http/"))
+        {
+            let runtime = config::http_model(&config, reference)?.expect("configured model");
+            let descriptor = runtime.http.expect("validated descriptor");
+            let credential_available = match descriptor.auth {
+                crate::domain::model::HttpAuth::None => true,
+                crate::domain::model::HttpAuth::Bearer => descriptor
+                    .api_key_env
+                    .as_deref()
+                    .and_then(|name| std::env::var(name).ok())
+                    .is_some_and(|value| !value.trim().is_empty()),
+            };
+            models.push(EmbeddingChoice {
+                reference: reference.clone(),
+                local: false,
+                downloaded: false,
+                configured: true,
+                credential_available,
+                download_bytes: None,
+            });
+        }
     }
     let recommended = selection
         .as_ref()
