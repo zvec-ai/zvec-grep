@@ -424,6 +424,107 @@ fn unmatched_paths_detect_readable_text_and_extensionless_shebang_scripts() {
 }
 
 #[test]
+fn uv_script_shebangs_detect_python() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("uvscript");
+    for header in [
+        "#!/usr/bin/env -S uv run --script",
+        "#!/usr/bin/env --split-string uv run --script",
+        "#!/usr/bin/env -i UV_OFFLINE=1 -S uv run --script",
+        "#!/usr/bin/env -S -- /usr/local/bin/uv run --script",
+        "#!/usr/local/bin/uv run --script",
+        "#!/usr/bin/env -S uv run -s",
+        "#!/usr/bin/env -S uv run --no-project --python 3.12 --with requests --script",
+        "#!/usr/bin/env -S uv run --script --project ./project --python=3.12 --with=requests",
+        "#!/usr/bin/env -S uv run --with requests --with rich -p 3.12 -s",
+        "#!/usr/bin/env -S uv run --with-requirements requirements.txt --with-editable ./lib --script",
+        "#!/usr/bin/env -S uv run --directory ./project --cache-dir ./cache --offline --script",
+        "#!/usr/bin/env -S uv run --isolated --no-sync --locked --frozen --no-config --script",
+        "#!/usr/bin/env -S uv run -q --verbose --no-cache --script",
+        "#!/usr/bin/env -S uv run --script --",
+    ] {
+        let source = format!(
+            "{header}\n# /// script\n# requires-python = \">=3.12\"\n# dependencies = []\n# ///\nprint('hi')\n"
+        );
+        fs::write(&path, source).expect("write uv script");
+        assert_eq!(
+            FileFormat::from_path(&path).expect("content hint"),
+            [Python],
+            "{header}"
+        );
+    }
+}
+
+#[test]
+fn uv_launchers_require_unambiguous_script_mode() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("uvscript");
+    for command in [
+        "uv",
+        "uv run",
+        "uv run python",
+        "uv run bash",
+        "uv run bash --script",
+        "uv run -- python --script",
+        "uv run --script -- other-script",
+        "uv tool run --script",
+        "uv pip --script",
+        "uvx run --script",
+        "pipx run --script",
+        "poetry run --script",
+        "uv run --with --script",
+        "uv run --with=--script",
+        "uv run --project --script",
+        "uv run --python --script",
+        "uv run --script --with",
+        "uv run --script --with=",
+        "uv run --script --unknown value",
+        "uv run --script --module module",
+        "uv run --script --help",
+        "uv run --script=false",
+        "uv run --no-project=true --script",
+    ] {
+        let source = format!("#!/usr/bin/env -S {command}\nprint('hi')\n");
+        fs::write(&path, source).expect("write launcher sample");
+        assert_eq!(
+            FileFormat::from_path(&path).expect("content hint"),
+            [Text],
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn uv_script_detection_preserves_content_probe_boundaries() {
+    let directory = tempdir().expect("temporary directory");
+    let header = "#!/usr/bin/env -S uv run --script";
+    for (name, source, expected) in [
+        ("script", header.to_owned(), Python),
+        (
+            "script",
+            format!("\u{feff}{header}\r\nprint('hi')\r\n"),
+            Python,
+        ),
+        ("script.custom", format!("{header}\nprint('hi')\n"), Text),
+        ("script.sh", format!("{header}\nprint('hi')\n"), Shell),
+        ("script", format!("text\n{header}\nprint('hi')\n"), Text),
+        (
+            "script",
+            format!("{header}{}\nprint('hi')\n", " ".repeat(HEADER_BYTES)),
+            Text,
+        ),
+    ] {
+        let path = directory.path().join(name);
+        fs::write(&path, source).expect("write uv script sample");
+        assert_eq!(
+            FileFormat::from_path(&path).expect("content hint"),
+            [expected],
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn catalog_ambiguity_does_not_probe_content() {
     let directory = tempdir().expect("temporary directory");
     for (name, expected) in [
