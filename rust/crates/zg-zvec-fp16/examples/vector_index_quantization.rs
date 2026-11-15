@@ -17,10 +17,14 @@ use zvec_rust::{
     MetricType, SearchQuery,
 };
 
+// Keep setup, timing boundaries, and reporting together for the benchmark.
+#[allow(clippy::too_many_lines)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    const BATCH: usize = 128;
+
     zvec_rust::initialize(None)?;
     let args = env::args().skip(1).collect::<Vec<_>>();
-    let mode = args.first().map(String::as_str).unwrap_or("binary-sign");
+    let mode = args.first().map_or("binary-sign", String::as_str);
     if mode != "fp16" && mode != "rabitq" && mode != "binary-sign" {
         return Err("mode must be fp16, rabitq, or binary-sign".into());
     }
@@ -29,6 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if count < 2 || dimension == 0 || !dimension.is_multiple_of(32) {
         return Err("count must be >= 2 and dimension a positive multiple of 32".into());
     }
+    let schema_dimension = u32::try_from(dimension)?;
 
     let directory = tempdir()?;
     let collection_path = directory.path().join("vectors");
@@ -41,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             schema = schema.add_vector_field(
                 "embedding",
                 DataType::VectorFp16,
-                dimension as u32,
+                schema_dimension,
                 IndexParams::hnsw(MetricType::Cosine, 50, 500)?,
             );
         }
@@ -49,7 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             schema = schema.add_vector_field(
                 "embedding",
                 DataType::VectorFp32,
-                dimension as u32,
+                schema_dimension,
                 IndexParams::ivf_rabitq(MetricType::Cosine, 1, 7, 0)?,
             );
         }
@@ -100,7 +105,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(exact_scores);
 
     let build_started = Instant::now();
-    const BATCH: usize = 128;
     for start in (0..count).step_by(BATCH) {
         let end = (start + BATCH).min(count);
         let mut docs = Vec::with_capacity(end - start);
@@ -112,7 +116,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "fp16" => add_embedding(&mut doc, "embedding", &vector)?,
                 "rabitq" => doc.add_vector_f32("embedding", &vector)?,
                 "binary-sign" => {
-                    let (packed, scale) = encode_sign_vector(&vector);
+                    let (packed, scale) = encode_sign_vector(&vector)?;
                     doc.add_binary("embedding", &packed)?;
                     doc.add_f32("embedding_scale", scale)?;
                     doc.add_u32("vector_scan_bucket", vector_scan_bucket(id)?)?;
@@ -196,6 +200,8 @@ fn document_vector(id: usize, dimension: usize) -> Vec<f32> {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
+            // Preserve the original f32 rounding and deterministic PRNG output.
+            #[allow(clippy::cast_precision_loss)]
             let magnitude = 0.001 + ((state >> 32) as u32) as f32 / u32::MAX as f32 * 0.1;
             if state & 1 == 0 {
                 -magnitude
@@ -213,6 +219,8 @@ fn query_vector(dimension: usize) -> Vec<f32> {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
+            // Preserve the original f32 rounding and deterministic PRNG output.
+            #[allow(clippy::cast_precision_loss)]
             let magnitude = 0.001 + ((state >> 32) as u32) as f32 / u32::MAX as f32 * 0.1;
             if state & 0x1_0000 != 0 {
                 magnitude
@@ -240,7 +248,8 @@ fn cosine_similarity(left: &[f32], right: &[f32]) -> f64 {
     dot / (left_norm * right_norm).sqrt()
 }
 
-fn encode_sign_vector(vector: &[f32]) -> (Vec<u8>, f32) {
+fn encode_sign_vector(vector: &[f32]) -> Result<(Vec<u8>, f32), Box<dyn std::error::Error>> {
+    let dimension = f64::from(u32::try_from(vector.len())?);
     let mut packed = vec![0_u8; vector.len().div_ceil(u8::BITS as usize)];
     let mut absolute_sum = 0.0_f64;
     for (dimension, value) in vector.iter().enumerate() {
@@ -249,7 +258,10 @@ fn encode_sign_vector(vector: &[f32]) -> (Vec<u8>, f32) {
             packed[dimension / u8::BITS as usize] |= 1_u8 << (dimension % u8::BITS as usize);
         }
     }
-    (packed, (absolute_sum / vector.len() as f64) as f32)
+    // The stored scale is an f32; retain the original f64 accumulation and rounding.
+    #[allow(clippy::cast_possible_truncation)]
+    let scale = (absolute_sum / dimension) as f32;
+    Ok((packed, scale))
 }
 
 fn vector_scan_bucket(id: usize) -> Result<u32, Box<dyn std::error::Error>> {
@@ -263,6 +275,7 @@ fn binary_sign_search(
     count: usize,
 ) -> Result<Vec<(usize, f64)>, Box<dyn std::error::Error>> {
     let mut scores = Vec::with_capacity(count);
+    let dimension = f64::from(u32::try_from(query.len())?);
     for document in collection.iter_with_options(Some(&["embedding", "embedding_scale"]), false)? {
         let document = document?;
         let key = document.get_pk().ok_or("document has no primary key")?;
@@ -297,7 +310,7 @@ fn binary_sign_search(
         let score = if scale == 0.0 || query_norm == 0.0 {
             0.0
         } else {
-            query_dot / (query_norm * (query.len() as f64).sqrt())
+            query_dot / (query_norm * dimension.sqrt())
         };
         scores.push((id, score));
     }
@@ -339,7 +352,7 @@ fn linux_memory_bytes() -> io::Result<(Option<u64>, Option<u64>)> {
                 _ => {}
             }
         }
-        return Ok((rss.map(|kib| kib * 1024), pss.map(|kib| kib * 1024)));
+        Ok((rss.map(|kib| kib * 1024), pss.map(|kib| kib * 1024)))
     }
     #[cfg(not(target_os = "linux"))]
     {

@@ -112,6 +112,7 @@ impl SchemaRecord {
     }
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip_serializing_if receives a reference.
 fn is_false(value: &bool) -> bool {
     !*value
 }

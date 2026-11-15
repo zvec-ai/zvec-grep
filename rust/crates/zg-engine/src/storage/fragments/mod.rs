@@ -330,7 +330,7 @@ impl Fragments {
             EngineError::invalid_argument(format!("unknown embedding model {model:?}"))
         })?;
         if embedding.vector_index_quantization() == VectorIndexQuantization::BinarySign {
-            return self.search_binary_sign(index, embedding, vector, limit, filter);
+            return Self::search_binary_sign(index, embedding, vector, limit, filter);
         }
         let mut request = native(
             zg_zvec_fp16::embedding_query("embedding", vector, requested_top_k),
@@ -348,7 +348,6 @@ impl Fragments {
     }
 
     fn search_binary_sign(
-        &self,
         index: &Collection,
         embedding: &EmbeddingModelInfo,
         query: &[f32],
@@ -384,7 +383,7 @@ impl Fragments {
             let end = start
                 .saturating_add(u32::try_from(bucket_width).unwrap_or(u32::MAX))
                 .min(BINARY_SCAN_BUCKETS);
-            self.scan_binary_sign_range(
+            Self::scan_binary_sign_range(
                 index, embedding, query, limit, filter, start, end, &mut hits,
             )?;
         }
@@ -395,7 +394,6 @@ impl Fragments {
 
     #[allow(clippy::too_many_arguments)]
     fn scan_binary_sign_range(
-        &self,
         index: &Collection,
         embedding: &EmbeddingModelInfo,
         query: &[f32],
@@ -437,7 +435,7 @@ impl Fragments {
                 ));
             }
             let midpoint = bucket_start + (bucket_end - bucket_start) / 2;
-            self.scan_binary_sign_range(
+            Self::scan_binary_sign_range(
                 index,
                 embedding,
                 query,
@@ -447,7 +445,7 @@ impl Fragments {
                 midpoint,
                 top_hits,
             )?;
-            return self.scan_binary_sign_range(
+            return Self::scan_binary_sign_range(
                 index,
                 embedding,
                 query,
@@ -600,6 +598,7 @@ fn fragments_schema(
     Ok(schema)
 }
 
+#[allow(clippy::cast_possible_truncation)] // The mean of finite f32 magnitudes fits in f32.
 fn encode_sign_vector(vector: &[f32]) -> EngineResult<(Vec<u8>, f32)> {
     if vector.is_empty() || vector.iter().any(|value| !value.is_finite()) {
         return Err(EngineError::invalid_argument(
@@ -614,7 +613,9 @@ fn encode_sign_vector(vector: &[f32]) -> EngineResult<(Vec<u8>, f32)> {
             packed[dimension / u8::BITS as usize] |= 1_u8 << (dimension % u8::BITS as usize);
         }
     }
-    let scale = (absolute_sum / vector.len() as f64) as f32;
+    let dimensions = u32::try_from(vector.len())
+        .map_err(|_| EngineError::invalid_argument("binary vector dimension exceeds u32"))?;
+    let scale = (absolute_sum / f64::from(dimensions)) as f32;
     Ok((packed, scale))
 }
 
@@ -646,6 +647,10 @@ fn binary_sign_score(
     }
     let mut dot = 0.0_f64;
     let mut query_norm_squared = 0.0_f64;
+    let dimensions = f64::from(
+        u32::try_from(query.len())
+            .map_err(|_| EngineError::invalid_argument("binary query dimension exceeds u32"))?,
+    );
     for (dimension, value) in query.iter().enumerate() {
         if !value.is_finite() {
             return Err(EngineError::invalid_argument(
@@ -663,15 +668,14 @@ fn binary_sign_score(
             if query_norm_squared == 0.0 || scale == 0.0 {
                 Ok(0.0)
             } else {
-                Ok(dot / (query_norm_squared.sqrt() * (query.len() as f64).sqrt()))
+                Ok(dot / (query_norm_squared.sqrt() * dimensions.sqrt()))
             }
         }
         EmbeddingMetric::DotProduct => Ok(dot * f64::from(scale)),
         EmbeddingMetric::Euclidean => {
             let scale = f64::from(scale);
-            let distance_squared = (query_norm_squared + query.len() as f64 * scale * scale
-                - 2.0 * scale * dot)
-                .max(0.0);
+            let distance_squared =
+                (query_norm_squared + dimensions * scale * scale - 2.0 * scale * dot).max(0.0);
             Ok(-distance_squared.sqrt())
         }
     }
@@ -1030,3 +1034,6 @@ pub(super) fn validate_projections(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+mod metis_cache_bench;

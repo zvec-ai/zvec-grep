@@ -153,6 +153,7 @@ pub enum VectorIndexQuantization {
     BinarySign,
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip_serializing_if receives a reference.
 fn is_default_vector_index_quantization(quantization: &VectorIndexQuantization) -> bool {
     *quantization == VectorIndexQuantization::Fp16
 }

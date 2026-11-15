@@ -702,7 +702,7 @@ fn resolve_vector_index_quantization(
                     std::iter::once(descriptor.default_embedding_model())
                         .chain(descriptor.embedding_routes().values())
                         .find(|embedding| embedding.model().reference() == model_reference)
-                        .map(|embedding| embedding.vector_index_quantization())
+                        .map(crate::domain::EmbeddingModelInfo::vector_index_quantization)
                 })
         })
         .unwrap_or_default()

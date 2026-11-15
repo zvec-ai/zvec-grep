@@ -44,9 +44,13 @@ embeddings remain floating point. Search scores float queries against the
 reconstructed sign vectors, not with Hamming distance, and currently scans the
 packed vectors rather than using HNSW. For 1,024 dimensions, the vector payload
 is 132 bytes (128 packed bytes plus a 4-byte scale), versus 2,048 bytes for
-FP16. This reduces vector payload size, but trades away embedding detail and
-uses a scan; measure retrieval quality, index size, and latency before adopting
-it for a large workspace. Use a disposable workspace for initial testing.
+FP16. For vectors whose components are already exactly ±0.03125, as in the
+Metis representation used by VS Code, sign packing plus the scale is lossless;
+for general float embeddings it discards per-component magnitude. Even for a
+lossless encoding, results can differ from FP16 HNSW due to approximate search
+or query rounding. This mode scans all matching documents, so measure index
+size, memory, latency, and retrieval behavior before adopting it for a large
+workspace. Use a disposable workspace for initial testing.
 
 Run the development commands below from `rust/` (`cd rust` from the repository
 root). See the [contributor guide](CONTRIBUTING.md) for checks and conventions.

@@ -1663,9 +1663,10 @@ fn colliding_model_collection_names_are_rejected_before_opening_storage() {
 }
 
 #[test]
+#[allow(clippy::items_after_statements)] // Local stand-in intentionally models the old schema.
 fn binary_sign_storage_schema_is_explicit_and_legacy_readers_reject_it() {
     let binary = schema().with_vector_index_quantization(VectorIndexQuantization::BinarySign);
-    let value = serde_json::to_value(SchemaRecord::new(&[binary.clone()]))
+    let value = serde_json::to_value(SchemaRecord::new(std::slice::from_ref(&binary)))
         .expect("binary-sign schema JSON");
     assert_eq!(value["binary_sign_storage"], true);
 
