@@ -130,16 +130,16 @@ CREATE TABLE edges (
 const INDEXES: &str = "
 CREATE INDEX IF NOT EXISTS edges_file ON edges(file_id);
 CREATE INDEX IF NOT EXISTS edges_source_kind ON edges(source, kind);
-CREATE INDEX IF NOT EXISTS edges_target_kind ON edges(target, kind);
+-- Pending/failed references have no target; incoming queries and
+-- invalidation probe non-NULL endpoints only.
+CREATE INDEX IF NOT EXISTS edges_target_kind ON edges(target, kind) WHERE target IS NOT NULL;
 -- Index only the pending queue so resolved queries use the endpoint indexes.
 CREATE INDEX IF NOT EXISTS edges_pending_id ON edges(id) WHERE status = 'pending';
--- The incremental requeue probes this column by value on every pass. The
--- partial predicate repeats the probe's `reference_name IS NOT NULL` verbatim,
--- because SQLite only considers a partial index when the query implies its
--- predicate; it also leaves out `contains` edges and the `file_local` rows that
--- the CHECK constraint pins to a NULL `reference_name`.
+-- Only completed references are requeued by name. Pending rows already await
+-- resolution, and declares rows only carry binding evidence. Do not index
+-- either until a reference resolves or fails. The predicate matches requeue.
 CREATE INDEX IF NOT EXISTS edges_name_tail ON edges(name_tail)
-    WHERE reference_name IS NOT NULL;
+    WHERE reference_name IS NOT NULL AND status IN ('resolved', 'failed');
 ";
 
 // Evidence a pass recorded but has not requeued yet. It lives in the database

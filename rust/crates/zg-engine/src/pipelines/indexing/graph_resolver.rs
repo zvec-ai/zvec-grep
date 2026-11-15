@@ -252,6 +252,9 @@ struct RuleCaches {
     candidate_formats: HashMap<u32, Option<Vec<FileFormat>>>,
     importing_files: HashMap<u32, Vec<u32>>,
     module_paths: HashMap<(String, String), bool>,
+    /// Missing-module checks against this sweep's fixed path snapshot. Relative
+    /// script imports also depend on their directory; Python lookups do not.
+    missing_modules: HashMap<(String, String, String), bool>,
     alias_bindings: HashMap<u32, Vec<AliasBinding>>,
     alias_targets: HashMap<(String, String), Option<u32>>,
     /// Names one file's import statements bind locally, with the specifier
@@ -1104,6 +1107,12 @@ fn prefer_definitions<T: Borrow<NameIndexEntry>>(hits: Vec<T>) -> Vec<T> {
     /// One definition's evidence: its counted parameters and the normalized
     /// parameter list that tells its overload apart.
     type Evidence = (Option<u32>, Option<String>);
+    // Without a bodyless declaration there is nothing to supersede. Most
+    // names only have definitions; avoid rebuilding their parameter map for
+    // every reference to the same name.
+    if !hits.iter().any(|hit| hit.borrow().is_declaration) {
+        return hits;
+    }
     let mut defined: HashMap<String, Vec<Evidence>> = HashMap::new();
     for hit in &hits {
         let hit: &NameIndexEntry = hit.borrow();
@@ -1807,10 +1816,22 @@ fn import_names_a_missing_module(
     if matched.is_empty() {
         return Ok(false);
     }
-    if matched
-        .iter()
-        .any(|binding| !module_missing(snapshot, stored, &binding.specifier))
-    {
+    let directory = if stored.language == "python" {
+        ""
+    } else {
+        snapshot.file_path(stored.file_id).map_or("", importing_dir)
+    };
+    if matched.iter().any(|binding| {
+        let key = (
+            stored.language.clone(),
+            directory.to_owned(),
+            binding.specifier.clone(),
+        );
+        !*caches
+            .missing_modules
+            .entry(key)
+            .or_insert_with(|| module_missing(snapshot, stored, &binding.specifier))
+    }) {
         return Ok(false);
     }
     Ok(true)

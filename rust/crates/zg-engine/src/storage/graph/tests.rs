@@ -1883,3 +1883,43 @@ fn pending_call_names_lists_only_bare_pending_calls() {
         vec!["TRACE".to_owned()]
     );
 }
+
+#[test]
+fn relationship_reads_and_invalidation_use_their_indexes() {
+    let db = SqliteGraphStorage::in_memory().expect("graph");
+    for (sql, index) in [
+        (
+            "SELECT source FROM edges WHERE target = 'target' AND status = 'resolved'",
+            "edges_target_kind",
+        ),
+        (
+            "SELECT source FROM edges WHERE (source = 'target' OR target = 'target') AND status = 'resolved'",
+            "edges_target_kind",
+        ),
+        (
+            "UPDATE edges SET status = 'pending', target = NULL, provenance = NULL
+         WHERE target IN ('target', 'other') AND file_id <> 1 AND reference_name IS NOT NULL",
+            "edges_target_kind",
+        ),
+        (
+            "UPDATE edges SET status = 'pending', target = NULL, provenance = NULL
+         WHERE status IN ('resolved', 'failed') AND reference_name IS NOT NULL
+           AND name_tail IN (SELECT name FROM zg_stale_names WHERE kind = 0)",
+            "edges_name_tail",
+        ),
+    ] {
+        let mut statement = db
+            .connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("plan");
+        let details = statement
+            .query_map([], |row| row.get::<_, String>(3))
+            .expect("steps")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("details");
+        assert!(
+            details.iter().any(|step| step.contains(index)),
+            "{sql}: {details:?}"
+        );
+    }
+}

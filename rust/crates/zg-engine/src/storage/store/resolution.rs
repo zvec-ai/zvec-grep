@@ -38,6 +38,10 @@ use crate::{
 #[derive(Default)]
 pub(crate) struct ResolutionSnapshot {
     names: HashMap<String, Vec<NameIndexEntry>>,
+    /// Names with any hidden candidate. The workspace writer freezes file
+    /// visibility for this snapshot; checking every candidate on every lookup
+    /// makes common names cost references × definitions instead of one check.
+    hidden_names: HashSet<String>,
     records: HashMap<String, EntityRecord>,
     /// Owning file of every entity, metadata-bearing or not: writeback
     /// visibility must answer for any endpoint, not only named symbols.
@@ -56,10 +60,7 @@ impl ResolutionSnapshot {
         let Some(candidates) = self.names.get(name) else {
             return Some(&[]);
         };
-        candidates
-            .iter()
-            .all(|candidate| self.paths.indexed.contains(&candidate.file_id))
-            .then_some(candidates.as_slice())
+        (!self.hidden_names.contains(name)).then_some(candidates.as_slice())
     }
 
     /// The name-index record of one entity, when it has a symbol name.
@@ -135,7 +136,6 @@ impl ResolutionSnapshot {
             path == &file[1..]
                 || path.ends_with(&file)
                 || path == &package[1..]
-                || path.ends_with(&package)
                 || path.contains(&package)
         })
     }
@@ -585,9 +585,20 @@ impl IndexStore {
         self.read(|state| {
             let paths = PathIndex::read(state)?;
             let symbols = SymbolIndex::read(state, signal)?;
+            let hidden_names = symbols
+                .names
+                .iter()
+                .filter(|(_, candidates)| {
+                    candidates
+                        .iter()
+                        .any(|candidate| !paths.indexed.contains(&candidate.file_id))
+                })
+                .map(|(name, _)| name.clone())
+                .collect();
             let imports = import_scopes(state, &symbols.owners, &paths.indexed)?;
             Ok(ResolutionSnapshot {
                 names: symbols.names,
+                hidden_names,
                 records: symbols.records,
                 owners: symbols.owners,
                 paths,

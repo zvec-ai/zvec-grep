@@ -203,6 +203,63 @@ fn member_call(store: &IndexStore, snapshot: &ResolutionSnapshot, owner: &str) -
 }
 
 #[test]
+fn missing_modules_cache_respects_directories_and_snapshot_lifetime() {
+    use crate::pipelines::indexing::graph_resolver::import_names_a_missing_module;
+
+    let directory = tempfile::tempdir().expect("fixture");
+    let store = open(directory.path());
+    for (path, source) in [
+        ("left/dep.ts", "export function run() {}\n"),
+        ("lib/service.py", "def run(): pass\n"),
+        (
+            "left/use.ts",
+            "import { run } from './dep'; export function leftCaller() { run(); }\n",
+        ),
+        (
+            "right/use.ts",
+            "import { run } from './dep'; export function rightCaller() { run(); }\n",
+        ),
+        (
+            "left/use.py",
+            "from service import run\ndef left_python(): run()\n",
+        ),
+        (
+            "right/use.py",
+            "from service import run\ndef right_python(): run()\n",
+        ),
+    ] {
+        index_source(&store, path, source);
+    }
+    let snapshot = store.resolution_snapshot(None).expect("snapshot");
+    let mut caches = RuleCaches::default();
+    for _ in 0..2 {
+        for (caller, missing) in [
+            ("leftCaller", false),
+            ("rightCaller", true),
+            ("left_python", false),
+            ("right_python", false),
+        ] {
+            let reference = member_call(&store, &snapshot, caller);
+            assert_eq!(
+                import_names_a_missing_module(&store, &snapshot, &reference, &mut caches)
+                    .expect("check import module"),
+                missing,
+                "{caller}"
+            );
+        }
+        assert_eq!(caches.missing_modules.len(), 3);
+    }
+
+    index_source(&store, "right/dep.ts", "export function run() {}\n");
+    let snapshot = store.resolution_snapshot(None).expect("new snapshot");
+    let reference = member_call(&store, &snapshot, "rightCaller");
+    assert!(
+        !import_names_a_missing_module(&store, &snapshot, &reference, &mut RuleCaches::default(),)
+            .expect("new sweep sees the added module")
+    );
+}
+
+#[test]
 fn materialized_types_keep_factory_origin_and_require_explicit_await() {
     let directory = tempfile::tempdir().expect("fixture");
     let store = open(directory.path());

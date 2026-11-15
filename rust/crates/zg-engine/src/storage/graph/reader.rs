@@ -97,7 +97,7 @@ impl SqliteGraphStorage {
     /// # Errors
     /// Propagates SQLite errors and invalid stored metadata.
     pub(crate) fn import_references(&self, file_id: u32) -> Result<Vec<ImportReference>> {
-        let mut statement = self.connection.prepare(
+        let mut statement = self.connection.prepare_cached(
             "SELECT reference_name, metadata FROM edges
              WHERE file_id = ?1 AND kind = 'imports' ORDER BY id",
         )?;
@@ -121,7 +121,7 @@ impl SqliteGraphStorage {
     /// Propagates SQLite errors.
     pub(crate) fn declared_bindings(&self, owner_id: &str) -> Result<Vec<DeclaredBinding>> {
         nonempty(owner_id)?;
-        let mut statement = self.connection.prepare(
+        let mut statement = self.connection.prepare_cached(
             "SELECT reference_name, metadata, line, col FROM edges
              WHERE source = ?1 AND kind = 'declares' ORDER BY line, id",
         )?;
@@ -167,7 +167,7 @@ impl SqliteGraphStorage {
     /// Propagates SQLite errors.
     pub(crate) fn inheritance_bases(&self, entity_id: &str) -> Result<(Vec<String>, Vec<String>)> {
         nonempty(entity_id)?;
-        let mut statement = self.connection.prepare(
+        let mut statement = self.connection.prepare_cached(
             "SELECT target, reference_name, status FROM edges
              WHERE source = ?1 AND kind IN ('extends', 'implements') ORDER BY id",
         )?;
@@ -232,7 +232,7 @@ impl SqliteGraphStorage {
     ) -> Result<Vec<crate::domain::PreprocessorDirective>> {
         let mut statement = self
             .connection
-            .prepare("SELECT directives FROM zg_file_preprocessor WHERE file_id = ?1")?;
+            .prepare_cached("SELECT directives FROM zg_file_preprocessor WHERE file_id = ?1")?;
         let rows = statement.query_map([file_id], |row| row.get::<_, String>(0))?;
         let mut directives = Vec::new();
         for row in rows {
@@ -250,7 +250,7 @@ impl SqliteGraphStorage {
     /// # Errors
     /// Propagates SQLite errors.
     pub(crate) fn pending_call_names(&self, file_id: u32) -> Result<Vec<String>> {
-        let mut statement = self.connection.prepare(
+        let mut statement = self.connection.prepare_cached(
             "SELECT DISTINCT name_tail FROM edges
              WHERE file_id = ?1 AND kind = 'calls' AND reference_name IS NOT NULL
                AND receiver_name IS NULL AND status = 'pending'",
