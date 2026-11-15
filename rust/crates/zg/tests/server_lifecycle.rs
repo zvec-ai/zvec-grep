@@ -2057,3 +2057,146 @@ fn token_file_protects_daemon_requests_and_is_forwarded_to_child() -> Result<(),
     guard.active = false;
     Ok(())
 }
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn daemon_binary_sign_rebuild_survives_incremental_update_and_restart() -> Result<(), Box<dyn Error>>
+{
+    let _permit = server_test_permit();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
+    let home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+    let embedding = EmbeddingServer::start()?;
+    let endpoint = format!("http://{}/embeddings", embedding.address);
+    // Remove inherited provider, proxy, configuration and cache settings. The only
+    // embedding endpoint in this test is the synthetic loopback HTTP server.
+    let isolate = |command: &mut Command| {
+        command
+            .env_clear()
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join("config"))
+            .env("XDG_CACHE_HOME", home.path().join("cache"))
+            .env("XDG_DATA_HOME", home.path().join("data"))
+            .env("TMPDIR", home.path())
+            .env("PATH", "/usr/bin:/bin")
+            .env("USER", "zg-test-user")
+            .env("USERNAME", "zg-test-user")
+            .env("ZVEC_GREP_HOME", home.path())
+            .env("ZVEC_GREP_API_KEY", "local-test-key");
+        if let Some(path) = std::env::var_os("LD_LIBRARY_PATH") {
+            command.env("LD_LIBRARY_PATH", path);
+        }
+    };
+    let run = |args: &[&str]| -> Result<Output, std::io::Error> {
+        let mut command = Command::new(&binary);
+        isolate(&mut command);
+        command.current_dir(workspace.path()).args(args).output()
+    };
+    let source = workspace.path().join("source.txt");
+    std::fs::write(&source, "orchard synthetic documentation\n")?;
+    assert_command_success(&run(&[
+        "--index",
+        "--mode",
+        "direct",
+        "--allow-remote",
+        "--embedding",
+        "qwen/text-embedding-v4",
+        "--endpoint",
+        &endpoint,
+        "--vector-index-quantization",
+        "fp16",
+        "--glob",
+        "*.txt",
+        "--hidden",
+        "--max-depth",
+        "3",
+    ])?);
+    let manifest_path = workspace.path().join(".zvec-grep/manifest.json");
+    let schema_path = workspace.path().join(".zvec-grep/index/schema.json");
+    let read_json = |path: &Path| -> Result<serde_json::Value, Box<dyn Error>> {
+        Ok(serde_json::from_slice(&std::fs::read(path)?)?)
+    };
+    let initial = read_json(&manifest_path)?;
+    let initial_schema = read_json(&schema_path)?;
+    assert!(
+        initial["index"]["descriptor"]["defaultEmbeddingModel"]["vectorIndexQuantization"]
+            .is_null()
+    );
+    assert!(initial_schema["binary_sign_storage"].is_null());
+    let scan = initial["scan"].clone();
+    assert_eq!(scan["include_hidden"], true);
+    assert_eq!(scan["max_depth"], 3);
+    assert!(
+        !scan["globs"]
+            .as_array()
+            .ok_or("missing scan globs")?
+            .is_empty()
+    );
+    assert!(embedding.requests.load(Ordering::SeqCst) > 0);
+
+    assert_command_success(&run(&[
+        "--auth",
+        "grant",
+        path_text(workspace.path())?,
+        "--capability",
+        "embedding",
+        "--scope",
+        "workspace",
+        "--embedding",
+        "qwen/text-embedding-v4",
+        "--endpoint",
+        &endpoint,
+    ])?);
+    let (mut guard, _) = start_server(&binary, &home, "full", None, |command| isolate(command))?;
+    assert_command_success(&run(&[
+        "--index",
+        "--mode",
+        "server",
+        "--rebuild",
+        "--vector-index-quantization",
+        "binary-sign",
+    ])?);
+    let check_binary = || -> Result<serde_json::Value, Box<dyn Error>> {
+        let manifest = read_json(&manifest_path)?;
+        let schema = read_json(&schema_path)?;
+        assert_eq!(manifest["scan"], scan);
+        assert_eq!(
+            manifest["index"]["descriptor"]["defaultEmbeddingModel"]["vectorIndexQuantization"],
+            "binary_sign"
+        );
+        assert_eq!(schema["binary_sign_storage"], true);
+        assert_eq!(
+            schema["embeddings"][0]["vectorIndexQuantization"],
+            "binary_sign"
+        );
+        Ok(manifest)
+    };
+    let rebuilt = check_binary()?;
+    assert_ne!(initial["storageGeneration"], rebuilt["storageGeneration"]);
+    let before_update = embedding.requests.load(Ordering::SeqCst);
+    std::fs::write(&source, "vineyard synthetic documentation\n")?;
+    assert_command_success(&run(&["--index", "--mode", "server"])?);
+    let updated = check_binary()?;
+    assert_eq!(rebuilt["storageGeneration"], updated["storageGeneration"]);
+    assert!(embedding.requests.load(Ordering::SeqCst) > before_update);
+    assert_command_success(&guard.stop()?);
+
+    let (mut restarted, _) =
+        start_server(&binary, &home, "full", None, |command| isolate(command))?;
+    check_binary()?;
+    let before_search = embedding.requests.load(Ordering::SeqCst);
+    let result = run(&["vineyard", "--mode", "server", "--refresh", "off"])?;
+    assert_command_success(&result);
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        stdout.contains("source.txt") && stdout.contains("vineyard"),
+        "{stdout}"
+    );
+    assert!(
+        embedding.requests.load(Ordering::SeqCst) > before_search,
+        "semantic query must use the synthetic embedding server"
+    );
+    check_binary()?;
+    assert_command_success(&restarted.stop()?);
+    Ok(())
+}
