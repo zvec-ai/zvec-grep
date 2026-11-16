@@ -497,11 +497,16 @@ fn configure_webgpu(
 fn configure_cuda(
     builder: ort::session::builder::SessionBuilder,
 ) -> Result<ort::session::builder::SessionBuilder, ModelError> {
-    builder
-        .with_execution_providers([ort::ep::CUDA::default().build().error_on_failure()])
-        .map_err(|error| {
-            ModelError::internal("Unable to configure CUDA ONNX embedding model").with_cause(error)
-        })
+    // ORT must initialize the shared provider bridge before loading CUDA. Arm
+    // shutdown after this attempt, even if registration failed after dlopen.
+    let configured =
+        builder.with_execution_providers([ort::ep::CUDA::default().build().error_on_failure()]);
+    let shutdown = super::native_runtime::retain_cuda_for_shutdown();
+    let builder = configured.map_err(|error| {
+        ModelError::internal("Unable to configure CUDA ONNX embedding model").with_cause(error)
+    })?;
+    shutdown?;
+    Ok(builder)
 }
 
 #[cfg(not(feature = "cuda"))]
@@ -896,3 +901,6 @@ mod session;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "cuda"))]
+mod cuda_shutdown_tests;
