@@ -54,7 +54,15 @@ import {
   ConcurrentTiming,
   TimingCollector,
 } from "../../dist/engine/utils/timing.js";
-import { contextOptionsFromRgInput } from "../../dist/mcp/input-normalization.js";
+import {
+  contextOptionsFromRgInput,
+  normalizeSearchInput,
+} from "../../dist/mcp/input-normalization.js";
+import { contextOptions } from "../../dist/cli/commands.js";
+import {
+  semanticFeaturesInputSchema,
+  zvecGrepSearchInputSchema,
+} from "../../dist/mcp/schemas.js";
 
 test("CLI argument parser handles command, provider, path, and rg options", () => {
   const parsed = parseArgs([
@@ -78,6 +86,35 @@ test("CLI argument parser handles command, provider, path, and rg options", () =
   assert.equal(parsed.options.limit, 7);
   assert.deepEqual(parsed.options.globs, ["src/**", "test/**", "!dist/**"]);
   assert.equal(typeof parsed.options.modifiedAfter, "number");
+
+  const semanticFeatures = parseArgs([
+    "--semantic-features",
+    JSON.stringify({
+      semantic_features_version: 1,
+      trace: "full",
+    }),
+    "query text",
+  ]);
+  assert.equal(semanticFeatures.options.semanticFeatures?.trace, "full");
+  assert.deepEqual(
+    parseArgs(["--semantic-features", "{}", "query"]).options.semanticFeatures,
+    {
+      semantic_features_version: 1,
+      trace: "off",
+    },
+  );
+  assert.throws(
+    () => parseArgs(["--semantic-features", "not-json", "query"]),
+    /requires valid JSON/,
+  );
+  assert.throws(
+    () => parseArgs(["--semantic-features", '{"unexpected":true}', "query"]),
+    /--semantic-features is invalid/,
+  );
+  assert.throws(
+    () => parseArgs(["--semantic-features", "{}", "--index"]),
+    /can only be used for search/,
+  );
 
   const index = parseArgs([
     "--index",
@@ -130,6 +167,63 @@ test("CLI argument parser handles command, provider, path, and rg options", () =
   assert.equal(rg.options.rgOptions?.beforeContext, 2);
   assert.equal(rg.options.rgOptions?.afterContext, 2);
   assert.deepEqual(rg.options.globs, ["*.ts"]);
+});
+
+test("semantic feature schema is strict and legacy trace remains compatible", () => {
+  const legacy = normalizeSearchInput(
+    zvecGrepSearchInputSchema.parse({
+      root: "/repo",
+      query: "legacy trace",
+      trace: true,
+    }),
+  );
+  assert.equal(legacy.semanticFeatures?.semantic_features_version, 1);
+  assert.equal(legacy.semanticFeatures?.trace, "summary");
+
+  const absent = normalizeSearchInput(
+    zvecGrepSearchInputSchema.parse({ root: "/repo", query: "plain" }),
+  );
+  assert.equal(absent.semanticFeatures, undefined);
+
+  assert.deepEqual(
+    semanticFeaturesInputSchema.parse({
+      semantic_features_version: 1,
+      trace: "full",
+    }),
+    {
+      semantic_features_version: 1,
+      trace: "full",
+    },
+  );
+  assert.throws(
+    () =>
+      semanticFeaturesInputSchema.parse({
+        semantic_features_version: 2,
+      }),
+    /Invalid input/,
+  );
+  assert.throws(
+    () =>
+      semanticFeaturesInputSchema.parse({
+        unexpected: true,
+      }),
+    /Unrecognized key/,
+  );
+
+  const featureConfig = {
+    semantic_features_version: 1,
+    trace: "off",
+  };
+  assert.deepEqual(
+    contextOptions({ refresh: "off", semanticFeatures: featureConfig }, [
+      "query",
+    ]).semanticFeatures,
+    featureConfig,
+  );
+  assert.equal(
+    contextOptions({ refresh: "off" }, ["query"]).semanticFeatures,
+    undefined,
+  );
 });
 
 test("CLI index concurrency is accepted only for indexing", () => {

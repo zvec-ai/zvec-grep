@@ -52,6 +52,16 @@ export const absoluteRootSchema = z
   .refine((root) => isAbsolute(root), "root must be an absolute path.")
   .describe("Absolute workspace root visible to the daemon.");
 
+export const semanticFeaturesInputSchema = z
+  .object({
+    semantic_features_version: z.literal(1).default(1),
+    trace: z.enum(["off", "summary", "full"]).default("off"),
+  })
+  .strict()
+  .describe(
+    "Versioned opt-in retrieval diagnostics. Omit to preserve the current search behavior.",
+  );
+
 const embeddingSearchRuntimeFields = {
   apiKey: z
     .string()
@@ -159,6 +169,7 @@ const searchFields = {
     .boolean()
     .optional()
     .describe("Include per-hit search trace in structured output."),
+  semantic_features: semanticFeaturesInputSchema.optional(),
 };
 
 export const zvecGrepIndexInputSchema = z.object({
@@ -398,6 +409,75 @@ const contextGroupResultSchema = z.object({
   role: z.enum(["primary", "supplemental"]),
   items: z.array(contextItemSchema),
 });
+
+const semanticTraceGraphEvidenceSchema = z.object({
+  edge: z.string(),
+  source: z.string(),
+  target: z.string(),
+  resolution: z.string(),
+  producer: z.string(),
+  producer_context_sha256: z.string(),
+  confidence: z.enum(["definite", "syntax"]),
+});
+
+const semanticTraceCandidateSchema = z.object({
+  entity_id: z.string(),
+  fts_rank: z.number().int().positive().optional(),
+  vector_rank: z.number().int().positive().optional(),
+  representation: z.literal("all"),
+  features: z.object({
+    name_overlap: z.number().finite(),
+    token_sketch: z.number().finite(),
+    graph: z.number().finite(),
+  }),
+  contributions: z.object({
+    base_hybrid: z.number().finite(),
+    name_overlap: z.number().finite(),
+    token_sketch: z.number().finite(),
+    graph: z.number().finite(),
+  }),
+  final_score: z.number().finite(),
+  graph_evidence: z.array(semanticTraceGraphEvidenceSchema).max(200),
+});
+
+const semanticSearchTraceSchema = z.object({
+  schema_version: z.literal(1),
+  generation_id: z.string(),
+  source_digest: z.string(),
+  source_selection_digest: z.string(),
+  source_files: z.number().int().nonnegative(),
+  source_bytes: z.number().int().nonnegative(),
+  feature_config: semanticFeaturesInputSchema,
+  artifacts: z.object({
+    index_sha256: z.string(),
+    graph_generation_id: z.string().nullable(),
+    graph_artifact_sha256: z.string().nullable(),
+    graph_publication_sha256: z.string().nullable(),
+    embedding_model: z.string(),
+    embedding_schema: z.string(),
+  }),
+  candidates: z.array(semanticTraceCandidateSchema).max(100),
+  candidate_count: z.number().int().nonnegative(),
+  candidates_truncated: z.boolean(),
+  graph: z.object({
+    binding: z.enum(["bound", "unbound"]),
+    generation_id: z.string().nullable(),
+    artifact_sha256: z.string().nullable(),
+    publication_sha256: z.string().nullable(),
+    seed_ids: z.array(z.string()),
+    eligible_edges: z.number().int().nonnegative(),
+    excluded_edges: z.object({
+      unresolved: z.number().int().nonnegative(),
+      ambiguous: z.number().int().nonnegative(),
+      stale: z.number().int().nonnegative(),
+    }),
+  }),
+  expansion: z.object({
+    enabled: z.boolean(),
+    related_count: z.number().int().nonnegative(),
+    items: z.array(z.unknown()).max(20),
+  }),
+});
 const searchResultSchema = z.object({
   query: z.string(),
   root: z.string(),
@@ -441,6 +521,7 @@ const searchResultSchema = z.object({
   }),
   items: z.array(contextItemSchema),
   groupResults: z.array(contextGroupResultSchema).optional(),
+  trace: semanticSearchTraceSchema.optional(),
 });
 
 export const zvecGrepIndexOutputSchema = z.object({
@@ -626,5 +707,6 @@ export type ZvecGrepIndexStatusInput = z.infer<
   typeof zvecGrepIndexStatusInputSchema
 >;
 export type ZvecGrepRgInput = z.infer<typeof zvecGrepRgInputSchema>;
+export type SemanticFeaturesInput = z.infer<typeof semanticFeaturesInputSchema>;
 export type StringListInput = z.infer<typeof stringListInputSchema>;
 export type TimeInput = z.infer<typeof timeInputSchema>;
