@@ -1,4 +1,4 @@
-//! Process-level ownership and reuse of embedding model runtimes.
+//! Process-level ownership and reuse of model runtimes.
 
 use std::{
     collections::{HashMap, hash_map::DefaultHasher},
@@ -22,7 +22,8 @@ use crate::domain::{
     model::{Device, EmbeddingModelInfo, EmbeddingResult, ModelConfig},
 };
 use crate::models::{
-    backends::create_embedding_model,
+    backends::{create_embedding_model, create_layout_model},
+    layout::{LayoutImage, LayoutModel, LayoutModelConfig, LayoutOptions, LayoutRegion},
     spi::{
         EmbeddingConcurrencyDefaults, EmbeddingModel, EmbeddingOptions, EmbeddingPrepareOptions,
         ModelError, ModelExecutionStats, ModelProgressReporter,
@@ -80,7 +81,7 @@ impl CachedRuntime {
     fn evictable_since(&self) -> Option<Instant> {
         self.idle_since.filter(|_| {
             self.entry.leases.load(Ordering::Acquire) == 0
-                && self.entry.runtime.active_embeddings.load(Ordering::Acquire) == 0
+                && self.entry.runtime.active_operations.load(Ordering::Acquire) == 0
         })
     }
 }
@@ -91,10 +92,53 @@ struct ModelRuntimeEntry {
 }
 
 struct ModelRuntime {
-    model: Arc<dyn EmbeddingModel>,
-    active_embeddings: AtomicUsize,
-    // llama.cpp callers with the same budget share admission across all leases.
+    model: RuntimeModel,
+    active_operations: AtomicUsize,
+    // Native callers with the same budget share admission across all leases.
     batch_permits: Option<Arc<Semaphore>>,
+}
+
+enum RuntimeModel {
+    Embedding(Arc<dyn EmbeddingModel>),
+    Layout(Arc<dyn LayoutModel>),
+}
+
+impl RuntimeModel {
+    fn embedding(&self) -> &Arc<dyn EmbeddingModel> {
+        let Self::Embedding(model) = self else {
+            unreachable!("embedding lease owns an embedding backend");
+        };
+        model
+    }
+
+    fn operation_limits(
+        &self,
+        reference: &str,
+        requested: Option<usize>,
+        local_limit: Option<usize>,
+    ) -> (usize, usize) {
+        let Self::Embedding(model) = self else {
+            return (1, 1);
+        };
+        let requested = resolve_embedding_concurrency(
+            local_runtime_limit(reference, requested).or(requested),
+            model.concurrency_defaults(),
+        );
+        let concurrency = model.execution_concurrency(requested).max(1);
+        let admission = if local_limit.is_some() {
+            batch_concurrency(reference, local_limit).unwrap_or(concurrency)
+        } else {
+            model.admission_concurrency(concurrency)
+        }
+        .clamp(1, Semaphore::MAX_PERMITS);
+        (concurrency, admission)
+    }
+}
+
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum ModelTask {
+    Embedding,
+    Layout,
 }
 
 /// Configuration that determines whether two callers may share one model.
@@ -120,6 +164,7 @@ impl ModelRuntimeRequest {
 
 #[derive(Clone, Eq, Hash, PartialEq)]
 struct ModelRuntimeKey {
+    task: ModelTask,
     reference: String,
     api_key_fingerprint: Option<u64>,
     endpoint: Option<String>,
@@ -129,12 +174,23 @@ struct ModelRuntimeKey {
     ort_sessions: Option<usize>,
 }
 
-/// A counted handle to a shared model runtime.
+/// Embedding operations on a counted runtime handle.
 pub(crate) struct ModelRuntimeLease {
+    inner: RuntimeLease,
+}
+
+/// Task-independent runtime ownership and admission. It exposes no model methods.
+struct RuntimeLease {
     key: ModelRuntimeKey,
     entry: Arc<ModelRuntimeEntry>,
     manager: Weak<ManagerInner>,
     operation: Arc<OperationConcurrency>,
+}
+
+/// Layout inference shares runtime ownership and admission with embedding,
+/// while exposing only the page-image/region contract.
+pub(crate) struct LayoutRuntimeLease {
+    inner: RuntimeLease,
 }
 
 struct OperationConcurrency {
@@ -219,6 +275,32 @@ impl ModelRuntimeManager {
         &self,
         request: ModelRuntimeRequest,
     ) -> Result<ModelRuntimeLease, ModelError> {
+        self.acquire_for_task(request, ModelTask::Embedding)
+            .map(|inner| ModelRuntimeLease { inner })
+    }
+
+    pub(crate) fn acquire_layout(
+        &self,
+        config: LayoutModelConfig,
+    ) -> Result<LayoutRuntimeLease, ModelError> {
+        let request = ModelRuntimeRequest::new(
+            crate::models::catalog::layout::PP_S_REFERENCE,
+            ModelConfig {
+                cache_dir: config.cache_dir,
+                device: Some(Device::Cpu),
+                ..ModelConfig::default()
+            },
+            Some(1),
+        );
+        self.acquire_for_task(request, ModelTask::Layout)
+            .map(|inner| LayoutRuntimeLease { inner })
+    }
+
+    fn acquire_for_task(
+        &self,
+        request: ModelRuntimeRequest,
+        task: ModelTask,
+    ) -> Result<RuntimeLease, ModelError> {
         let ModelRuntimeRequest {
             reference,
             options,
@@ -226,6 +308,10 @@ impl ModelRuntimeManager {
         } = request;
         validate_embedding_concurrency(embedding_concurrency)?;
         let mut key = ModelRuntimeKey::for_request(&reference, &options, embedding_concurrency);
+        key.task = task;
+        if task == ModelTask::Layout {
+            key.local_limit = Some(1);
+        }
         // Declare retired handles before the guard so even an error releases the
         // manager lock before running native model destructors.
         let mut retired = Vec::new();
@@ -250,16 +336,25 @@ impl ModelRuntimeManager {
             // Model construction is intentionally performed while holding the
             // short-lived manager lock. Backends load heavy resources lazily,
             // so this guarantees a single instance without blocking on I/O.
-            let model = (self.inner.factory)(
-                &reference,
-                options,
-                self.inner.compute_runtime.clone(),
-                key.ort_sessions.unwrap_or(1),
-            )?;
+            let model = match task {
+                ModelTask::Embedding => RuntimeModel::Embedding((self.inner.factory)(
+                    &reference,
+                    options,
+                    self.inner.compute_runtime.clone(),
+                    key.ort_sessions.unwrap_or(1),
+                )?),
+                ModelTask::Layout => RuntimeModel::Layout(create_layout_model(
+                    &reference,
+                    LayoutModelConfig {
+                        cache_dir: options.cache_dir,
+                    },
+                    self.inner.compute_runtime.clone(),
+                )?),
+            };
             let entry = Arc::new(ModelRuntimeEntry {
                 runtime: Arc::new(ModelRuntime {
                     model,
-                    active_embeddings: AtomicUsize::new(0),
+                    active_operations: AtomicUsize::new(0),
                     batch_permits: key.local_limit.is_some().then(|| {
                         Arc::new(Semaphore::new(
                             batch_concurrency(&reference, key.local_limit).unwrap_or(1),
@@ -277,17 +372,11 @@ impl ModelRuntimeManager {
             );
             entry
         };
-        let requested = resolve_embedding_concurrency(
-            local_runtime_limit(&reference, embedding_concurrency).or(embedding_concurrency),
-            entry.runtime.model.concurrency_defaults(),
+        let (concurrency, admission) = entry.runtime.model.operation_limits(
+            &reference,
+            embedding_concurrency,
+            key.local_limit,
         );
-        let concurrency = entry.runtime.model.execution_concurrency(requested).max(1);
-        let admission = if key.local_limit.is_some() {
-            batch_concurrency(&reference, key.local_limit).unwrap_or(concurrency)
-        } else {
-            entry.runtime.model.admission_concurrency(concurrency)
-        }
-        .clamp(1, Semaphore::MAX_PERMITS);
         if embedding_concurrency.is_some_and(|value| value != concurrency) {
             tracing::info!(
                 model = reference,
@@ -303,7 +392,7 @@ impl ModelRuntimeManager {
             // Preserve the requested budget without overflowing Tokio's permit counter.
             Arc::new(Semaphore::new(admission))
         });
-        let lease = ModelRuntimeLease {
+        let lease = RuntimeLease {
             key,
             entry,
             manager: Arc::downgrade(&self.inner),
@@ -343,11 +432,12 @@ impl ModelRuntimeManager {
             active_embeddings: state
                 .entries
                 .values()
+                .filter(|cached| matches!(cached.entry.runtime.model, RuntimeModel::Embedding(_)))
                 .map(|cached| {
                     cached
                         .entry
                         .runtime
-                        .active_embeddings
+                        .active_operations
                         .load(Ordering::Acquire)
                 })
                 .sum(),
@@ -378,9 +468,14 @@ impl ManagerState {
         for (key, idle_since) in candidates {
             if !self.closed
                 && now.saturating_duration_since(idle_since) < policy.idle_timeout
-                && self.entries.len() <= policy.capacity
+                && self
+                    .entries
+                    .keys()
+                    .filter(|candidate| candidate.task == key.task)
+                    .count()
+                    <= policy.capacity
             {
-                break;
+                continue;
             }
             if let Some(cached) = self.entries.remove(&key) {
                 retired.push(cached.entry);
@@ -477,43 +572,52 @@ impl fmt::Debug for ModelRuntimeManager {
 impl ModelRuntimeLease {
     /// Endpoint supplied when acquiring this runtime, after caller-side resolution.
     pub(crate) fn configured_endpoint(&self) -> Option<&str> {
-        self.key.endpoint.as_deref()
+        self.inner.key.endpoint.as_deref()
+    }
+
+    pub(crate) fn configured_cache_directory(&self) -> Option<&std::path::Path> {
+        self.inner.key.model_cache_dir.as_deref()
     }
 
     pub(crate) fn matches_query_request(&self, request: &ModelRuntimeRequest) -> bool {
         // Queries may borrow writer storage while using a separate native budget.
         let mut key = ModelRuntimeKey::new(&request.reference, &request.options);
-        key.local_limit = self.key.local_limit;
-        key.ort_sessions = self.key.ort_sessions;
-        self.key == key
+        key.local_limit = self.inner.key.local_limit;
+        key.ort_sessions = self.inner.key.ort_sessions;
+        self.inner.key == key
     }
 
     pub(crate) fn concurrency_defaults(&self) -> EmbeddingConcurrencyDefaults {
-        self.entry.runtime.model.concurrency_defaults()
+        self.inner
+            .entry
+            .runtime
+            .model
+            .embedding()
+            .concurrency_defaults()
     }
 
     pub(crate) fn execution_concurrency(&self) -> usize {
-        self.operation.limit
+        self.inner.operation.limit
     }
 
     pub(crate) fn admission_concurrency(&self) -> usize {
-        self.operation.admission
+        self.inner.operation.admission
     }
 
     pub(crate) fn execution_stats(&self) -> Option<ModelExecutionStats> {
-        self.entry.runtime.model.execution_stats()
+        self.inner.entry.runtime.model.embedding().execution_stats()
     }
 
     pub(crate) fn index_batch_concurrency(&self, requested: Option<usize>) -> Option<usize> {
-        if is_transformers(&self.key.reference) {
+        if is_transformers(&self.inner.key.reference) {
             Some(self.admission_concurrency())
         } else {
-            batch_concurrency(&self.key.reference, requested)
+            batch_concurrency(&self.inner.key.reference, requested)
         }
     }
 
     pub(crate) fn info(&self) -> &EmbeddingModelInfo {
-        self.entry.runtime.model.info()
+        self.inner.entry.runtime.model.embedding().info()
     }
 
     pub(crate) async fn prepare(
@@ -521,14 +625,14 @@ impl ModelRuntimeLease {
         mut options: EmbeddingPrepareOptions,
         progress: Option<ModelProgressReporter>,
     ) -> Result<(), ModelError> {
-        options.execution_lease = Some(Arc::new(ActiveEmbeddingGuard::new(
-            Arc::clone(&self.entry.runtime),
-            self.manager.clone(),
+        options.execution_lease = Some(Arc::new(ActiveOperationGuard::new(
+            Arc::clone(&self.inner.entry.runtime),
+            self.inner.manager.clone(),
             None,
         )));
         if let Some(reporter) = progress {
             let model_progress = options.on_progress.take();
-            let concurrency = self.operation.limit;
+            let concurrency = self.inner.operation.limit;
             options.on_progress = Some(Arc::new(move |progress| {
                 if let Some(model_progress) = &model_progress {
                     model_progress(progress.clone());
@@ -536,9 +640,15 @@ impl ModelRuntimeLease {
                 reporter.report(progress, concurrency);
             }));
         }
-        self.entry.runtime.model.prepare(options).await?;
+        self.inner
+            .entry
+            .runtime
+            .model
+            .embedding()
+            .prepare(options)
+            .await?;
         tracing::debug!(
-            model = self.key.reference,
+            model = self.inner.key.reference,
             execution_concurrency = self.execution_concurrency(),
             admission_concurrency = self.admission_concurrency(),
             stats = ?self.execution_stats(),
@@ -554,18 +664,19 @@ impl ModelRuntimeLease {
         progress: Option<ModelProgressReporter>,
     ) -> Result<EmbeddingResult, ModelError> {
         let permit = self
+            .inner
             .acquire_operation_permit(options.signal.as_ref())
             .await?;
-        options.execution_lease = Some(Arc::new(ActiveEmbeddingGuard::new(
-            Arc::clone(&self.entry.runtime),
-            self.manager.clone(),
+        options.execution_lease = Some(Arc::new(ActiveOperationGuard::new(
+            Arc::clone(&self.inner.entry.runtime),
+            self.inner.manager.clone(),
             Some(permit),
         )));
         options.execution_concurrency = self.execution_concurrency();
-        options.execution_scope = Some(Arc::clone(&self.operation.scope));
+        options.execution_scope = Some(Arc::clone(&self.inner.operation.scope));
         if let Some(reporter) = progress {
             let model_progress = options.on_progress.take();
-            let operation = Arc::clone(&self.operation);
+            let operation = Arc::clone(&self.inner.operation);
             options.on_progress = Some(Arc::new(move |progress| {
                 if let Some(model_progress) = &model_progress {
                     model_progress(progress.clone());
@@ -573,9 +684,17 @@ impl ModelRuntimeLease {
                 reporter.report(progress, operation.limit);
             }));
         }
-        self.entry.runtime.model.embed(inputs, options).await
+        self.inner
+            .entry
+            .runtime
+            .model
+            .embedding()
+            .embed(inputs, options)
+            .await
     }
+}
 
+impl RuntimeLease {
     async fn acquire_operation_permit(
         &self,
         signal: Option<&CancellationToken>,
@@ -585,13 +704,13 @@ impl ModelRuntimeLease {
                 biased;
                 () = signal.cancelled() => {
                     Err(ModelError::cancelled(
-                        "Embedding was cancelled while waiting for compute capacity",
+                        "Model execution was cancelled while waiting for compute capacity",
                     ))
                 }
                 permit = Arc::clone(&self.operation.permits).acquire_owned() => {
                     permit.map_err(|error| {
                         ModelError::internal(
-                            "embedding concurrency limiter closed unexpectedly",
+                            "model concurrency limiter closed unexpectedly",
                         )
                             .with_cause(error)
                     })
@@ -602,14 +721,14 @@ impl ModelRuntimeLease {
                 .acquire_owned()
                 .await
                 .map_err(|error| {
-                    ModelError::internal("embedding concurrency limiter closed unexpectedly")
+                    ModelError::internal("model concurrency limiter closed unexpectedly")
                         .with_cause(error)
                 })
         }
     }
 }
 
-impl Drop for ModelRuntimeLease {
+impl Drop for RuntimeLease {
     fn drop(&mut self) {
         let Some(manager) = self.manager.upgrade() else {
             let previous = self.entry.leases.fetch_sub(1, Ordering::AcqRel);
@@ -636,19 +755,54 @@ impl Drop for ModelRuntimeLease {
     }
 }
 
-struct ActiveEmbeddingGuard {
+impl LayoutRuntimeLease {
+    fn model(&self) -> &Arc<dyn LayoutModel> {
+        let RuntimeModel::Layout(model) = &self.inner.entry.runtime.model else {
+            unreachable!("layout lease owns a layout backend");
+        };
+        model
+    }
+
+    pub(crate) async fn prepare(&self, mut options: LayoutOptions) -> Result<(), ModelError> {
+        options.execution_lease = Some(Arc::new(ActiveOperationGuard::new(
+            Arc::clone(&self.inner.entry.runtime),
+            self.inner.manager.clone(),
+            None,
+        )));
+        self.model().prepare(options).await
+    }
+
+    pub(crate) async fn detect(
+        &self,
+        image: LayoutImage,
+        mut options: LayoutOptions,
+    ) -> Result<Vec<LayoutRegion>, ModelError> {
+        let permit = self
+            .inner
+            .acquire_operation_permit(options.signal.as_ref())
+            .await?;
+        options.execution_lease = Some(Arc::new(ActiveOperationGuard::new(
+            Arc::clone(&self.inner.entry.runtime),
+            self.inner.manager.clone(),
+            Some(permit),
+        )));
+        self.model().detect(image, options).await
+    }
+}
+
+struct ActiveOperationGuard {
     runtime: Arc<ModelRuntime>,
     manager: Weak<ManagerInner>,
     _permit: Option<OwnedSemaphorePermit>,
 }
 
-impl ActiveEmbeddingGuard {
+impl ActiveOperationGuard {
     fn new(
         runtime: Arc<ModelRuntime>,
         manager: Weak<ManagerInner>,
         permit: Option<OwnedSemaphorePermit>,
     ) -> Self {
-        runtime.active_embeddings.fetch_add(1, Ordering::AcqRel);
+        runtime.active_operations.fetch_add(1, Ordering::AcqRel);
         Self {
             runtime,
             manager,
@@ -657,10 +811,10 @@ impl ActiveEmbeddingGuard {
     }
 }
 
-impl Drop for ActiveEmbeddingGuard {
+impl Drop for ActiveOperationGuard {
     fn drop(&mut self) {
         self.runtime
-            .active_embeddings
+            .active_operations
             .fetch_sub(1, Ordering::AcqRel);
         if let Some(manager) = self.manager.upgrade() {
             let retired = {
@@ -677,6 +831,7 @@ impl Drop for ActiveEmbeddingGuard {
 impl ModelRuntimeKey {
     fn new(reference: &str, options: &ModelConfig) -> Self {
         Self {
+            task: ModelTask::Embedding,
             reference: reference.to_owned(),
             api_key_fingerprint: options.api_key.as_deref().map(secret_fingerprint),
             endpoint: options.endpoint.clone(),

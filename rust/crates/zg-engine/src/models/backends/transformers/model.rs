@@ -415,7 +415,7 @@ fn load_session(
     path: &Path,
     provider: TransformersExecutionProvider,
 ) -> Result<Session, ModelError> {
-    let builder = Session::builder(&super::native_runtime::initialize()?)
+    let builder = Session::builder(&crate::models::runtime::onnx::initialize()?)
         .map_err(|error| {
             ModelError::internal("Unable to configure ONNX embedding model").with_cause(error)
         })?
@@ -501,7 +501,7 @@ fn configure_cuda(
     // shutdown after this attempt, even if registration failed after dlopen.
     let configured =
         builder.with_execution_providers([ort::ep::CUDA::default().build().error_on_failure()]);
-    let shutdown = super::native_runtime::retain_cuda_for_shutdown();
+    let shutdown = crate::models::runtime::onnx::retain_cuda_for_shutdown();
     let builder = configured.map_err(|error| {
         ModelError::internal("Unable to configure CUDA ONNX embedding model").with_cause(error)
     })?;

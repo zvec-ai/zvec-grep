@@ -1,0 +1,22 @@
+[package]
+name = "zg-pdfium"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+liteparse-pdfium.workspace = true
+liteparse-pdfium-sys.workspace = true
+
+# Only this small bitmap allocation boundary needs unsafe code. The engine
+# retains its workspace-wide prohibition; parsing/assembly belongs to LiteParse.
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"

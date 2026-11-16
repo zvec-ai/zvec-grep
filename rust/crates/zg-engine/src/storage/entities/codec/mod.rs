@@ -8,7 +8,7 @@ use crate::{
     EngineError, EngineResult,
     domain::{
         ByteRange, Content, Entity, EntityFragment, EntityId, EntityMetadata, FileFormat, FileId,
-        FragmentId, ImageContent, Range, TextRange,
+        FragmentId, ImageContent, PdfSourceMap, Range, TextRange,
     },
 };
 
@@ -53,7 +53,7 @@ impl<'a> From<&'a Entity> for EntityRecord<'a> {
                 .iter()
                 .map(|fragment| FragmentRecord {
                     id: fragment.id.as_str().into(),
-                    range: fragment.range.into(),
+                    range: fragment.range.clone().into(),
                 })
                 .collect(),
         }
@@ -131,6 +131,9 @@ fn decode_content(content: ContentRecord<'_>) -> EngineResult<Content> {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum RangeRecord {
     Full,
+    Pdf {
+        source: std::sync::Arc<PdfSourceMap>,
+    },
     Text {
         start_line: usize,
         end_line: usize,
@@ -149,6 +152,7 @@ impl From<Range> for RangeRecord {
     fn from(range: Range) -> Self {
         match range {
             Range::Full => Self::Full,
+            Range::Pdf(source) => Self::Pdf { source },
             Range::Text(range) => Self::Text {
                 start_line: range.start_line(),
                 end_line: range.end_line(),
@@ -171,6 +175,7 @@ impl TryFrom<RangeRecord> for Range {
     fn try_from(range: RangeRecord) -> EngineResult<Self> {
         Ok(match range {
             RangeRecord::Full => Self::Full,
+            RangeRecord::Pdf { source } => Self::Pdf(source),
             RangeRecord::Text {
                 start_line,
                 end_line,

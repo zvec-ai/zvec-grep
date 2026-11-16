@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use zg_engine::api::{
     context::{
         ContextResult,
-        result::{ContextCoverage, ContextItem, EmptyReason},
+        result::{ContentRange, ContextCoverage, ContextItem, EmptyReason},
     },
     files::FilesResult,
 };
@@ -77,6 +77,27 @@ fn source(items: &[&ContextItem]) -> Vec<String> {
     let mut numbered: BTreeMap<usize, (bool, String)> = BTreeMap::new();
     let mut unnumbered = Vec::new();
     for item in items {
+        if let ContentRange::Pdf { pages, .. } = &item.range {
+            unnumbered.push(format!(
+                "pages: {}",
+                pages
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+            unnumbered.push("kind: text/native".to_owned());
+            if item.status == zg_engine::api::context::result::ContextItemStatus::PossiblyStale {
+                unnumbered.push("status: possibly_stale".to_owned());
+            }
+            for (index, (_, text)) in item.visible_content().enumerate() {
+                if index > 0 {
+                    unnumbered.push("  …".to_owned());
+                }
+                unnumbered.extend(text.trim_end().lines().map(|line| format!("  {line}")));
+            }
+            continue;
+        }
         let matched = item.excerpt_range.as_ref().unwrap_or(&item.range);
         // A trailing newline is not an extra source line in rg's line-oriented output.
         for (offset, text) in item.content.lines().enumerate() {
@@ -213,6 +234,37 @@ mod tests {
                 "src/sample.ts\n  10-\tbefore\n  11:\tneedle\n  12-\tafter"
             );
         }
+    }
+
+    #[test]
+    fn pdf_rg_shows_matched_pages_and_omits_unselected_context() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../compat/mcp/rg-presentation.json"))
+                .expect("fixtures");
+        let mut result: ContextResult =
+            serde_json::from_value(fixture["cases"][0]["result"].clone()).expect("result");
+        result.items.truncate(1);
+        result.coverage = ContextCoverage::RgExhaustive;
+        let item = &mut result.items[0];
+        item.relative_path = "manual.pdf".into();
+        item.content = "first needle\nnot selected\nsecond needle\n".into();
+        let range = |pages, start, end| ContentRange::Pdf {
+            pages,
+            start_byte_offset: start,
+            end_byte_offset: end,
+        };
+        item.range = range(vec![2, 4], 0, item.content.len());
+        item.content_range = range(vec![2, 3, 4], 0, item.content.len());
+        item.content_windows = vec![
+            range(vec![2], 0, 13),
+            range(vec![4], 26, item.content.len()),
+        ];
+        item.status = zg_engine::api::context::result::ContextItemStatus::Fresh;
+        item.match_ranges.clear();
+        assert_eq!(
+            format(&result),
+            "manual.pdf\n  pages: 2,4\n  kind: text/native\n    first needle\n    …\n    second needle"
+        );
     }
 
     #[test]

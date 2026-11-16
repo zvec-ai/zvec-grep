@@ -3,6 +3,7 @@
 // Model definitions and selection.
 mod catalog;
 mod error;
+pub(crate) mod layout;
 mod spi;
 
 // Runtime, artifacts, and concrete backends.

@@ -54,6 +54,8 @@ pub(crate) struct LexicalSearchReply {
     pub root: PathBuf,
     pub coverage: LexicalCoverage,
     pub matches: Vec<LexicalMatch>,
+    /// Sources whose searchable text must be read from indexed entities.
+    pub extracted_paths: Vec<PathBuf>,
     pub diagnostics: LexicalDiagnostics,
 }
 

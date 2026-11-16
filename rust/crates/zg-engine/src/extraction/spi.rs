@@ -15,15 +15,23 @@ pub(crate) struct ImageSource {
     pub content: ImageContent,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum SourceKind {
     Text,
+    Pdf,
     Image(FileFormat),
 }
 
 pub(crate) enum Source<'source> {
     Text(&'source TextSource),
     Image(&'source ImageSource),
+    Pdf(&'source super::pdf::PdfMarkdownSource),
+}
+
+impl<'source> From<&'source super::pdf::PdfMarkdownSource> for Source<'source> {
+    fn from(source: &'source super::pdf::PdfMarkdownSource) -> Self {
+        Self::Pdf(source)
+    }
 }
 
 impl<'source> From<&'source TextSource> for Source<'source> {

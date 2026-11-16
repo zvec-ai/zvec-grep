@@ -210,11 +210,19 @@ impl WorkspaceIndexService {
             options.changes.clear();
             prepare_build(&workspace)?;
         }
+        let extractor = crate::extraction::ExtractionService::new(
+            models.clone(),
+            acquired
+                .first()
+                .and_then(ModelRuntimeLease::configured_cache_directory)
+                .map(Path::to_path_buf),
+        );
         let result = self
             .run_index(
                 &workspace,
                 rebuilding,
                 acquired,
+                extractor,
                 &options,
                 Arc::clone(&home_lock),
             )
@@ -245,6 +253,7 @@ impl WorkspaceIndexService {
         workspace: &Workspace,
         rebuilding: bool,
         models: Vec<ModelRuntimeLease>,
+        extractor: crate::extraction::ExtractionService,
         options: &IndexOptions,
         home_lock: Arc<LockGuard>,
     ) -> Result<(IndexResult, Option<IndexProgress>), EngineError> {
@@ -304,6 +313,7 @@ impl WorkspaceIndexService {
             workspace,
             storage: &writer.session.storage,
             scanner: &self.scanner,
+            extractor: &extractor,
             embedding_models: &embedding_models,
             embedding_concurrency: options.embedding_concurrency,
             on_progress: pipeline_progress,

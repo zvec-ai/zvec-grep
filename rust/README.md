@@ -583,6 +583,39 @@ Like managed content search, recursive discovery skips `.git` and `.zvec-grep`;
 explicit file inputs are still listed.
 This is a CLI entry point; the MCP rg tool retains its content-search contract.
 
+## PDF search
+
+PDF indexing uses LiteParse for native text and structure, with PP-DocLayout-S
+filtering figure text and protecting native tables. It reuses Markdown entity
+extraction and the existing model cache. The matching PDFium library is bundled;
+users need no Python, PDF viewer, or system PDFium installation.
+
+Run `zg --index`, then `zg "How does recovery work?" -t pdf` or
+`zg --rg -F "recovery" -t pdf`. PDF rg searches the indexed entity text, retaining
+literal/regex, case, context and file-filter behavior within each entity. A PDF
+without a usable extraction index produces an error directing you to index it;
+raw PDF bytes and metadata are never searched as a fallback.
+
+Results show the file, physical `pages` (one-based), `kind: text/native`, and text.
+Query pages cover the whole entity; rg pages cover the actual matches, excluding
+context-only pages. The default `--preview short` follows Markdown preview rules.
+`full` returns the complete PDF entity; `detail` also groups boxes under `Page N:`
+within `Boxes`. Each page includes its `width` and `height`; each box includes
+`x`, `y`, `width`, and `height`. These are LiteParse's original floating-point
+values in top-left, 72-DPI page coordinates (points), without normalization,
+clipping, or quantization. Separate regions are retained without exposing block
+identifiers. Text-to-page/block provenance is preserved. For a scaled preview,
+scale x/width by displayed width ÷ page width and y/height by displayed height ÷ page height.
+
+A file either commits its complete extraction or fails. Other files continue
+indexing, and failures identify the file. PDFs with no searchable native text
+produce a warning and zero entities. OCR, image understanding, precise table or
+formula reconstruction, `--read`, and `--show` are outside this release.
+
+The index format is now version 5. Existing incompatible indexes require
+`zg --index --rebuild`; preserve any explicit embedding selection when rebuilding.
+PDFs unchanged since indexing reuse their saved entities and provenance.
+
 ## Remote embedding authorization
 
 In an interactive terminal, `zg --index` prompts before sending data to an

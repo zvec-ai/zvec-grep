@@ -41,6 +41,7 @@ require_needed() {
 
 for pattern in \
   'lib/libzvec_c_api.so' \
+  'lib/libpdfium.so' \
   'lib/libllama.so*' \
   'lib/libggml.so*' \
   'lib/libggml-base.so*' \

@@ -138,6 +138,8 @@ jobs:
         run: |
           python3 scripts/test-prepare-onnxruntime.py
           python3 scripts/test-check-glibc.py
+      - name: Test LiteParse PDFium staging
+        run: python3 scripts/test-prepare-pdfium.py
       - name: Test npm packaging
         run: node --test scripts/npm-*.test.mjs npm/meta/install.test.cjs
 
@@ -241,12 +243,14 @@ jobs:
           key: rust-ci-v3-test-cuda-${{ matrix.platform }}-${{ hashFiles('rust/Cargo.toml', 'rust/Cargo.lock', 'rust/rust-toolchain.toml', 'rust/scripts/cuda/cuda-builder.Dockerfile', '.github/workflows/rust-ci.yml') }}-${{ needs.source.outputs.sha }}
           restore-keys: |
             rust-ci-v3-test-cuda-${{ matrix.platform }}-${{ hashFiles('rust/Cargo.toml', 'rust/Cargo.lock', 'rust/rust-toolchain.toml', 'rust/scripts/cuda/cuda-builder.Dockerfile', '.github/workflows/rust-ci.yml') }}-
-      - name: Restore the three real models
+      - name: Restore real embedding and layout models
         uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/zvec-grep-model-cache
-          key: rust-real-models-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust/crates/zg-engine/src/models/catalog/**', 'rust/Cargo.lock') }}
+          key: rust-real-models-v3-${{ matrix.cuda && 'cuda' || 'default' }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust/crates/zg-engine/src/models/catalog/**', 'rust/Cargo.lock') }}
+          # Seed the expanded cache from existing embedding downloads.
           restore-keys: |
+            rust-real-models-v3-${{ matrix.cuda && 'cuda' || 'default' }}-${{ runner.os }}-${{ runner.arch }}-
             rust-real-models-v2-${{ runner.os }}-${{ runner.arch }}-
       - name: Compile and run Linux CUDA workspace tests
         if: matrix.cuda && runner.os == 'Linux'
@@ -323,6 +327,25 @@ jobs:
           # Direct file output also avoids PowerShell 5's UTF-16 redirection.
           with pathlib.Path("target/ci-tests.json").open("w", encoding="utf-8") as output:
               subprocess.run(command, stdout=output, check=True)
+      - name: Verify real PDF and PP-S with the compiled CLI
+        if: ${{ !matrix.cuda }}
+        timeout-minutes: 10
+        shell: python
+        run: |
+          import os, pathlib, shutil, subprocess, sys, tempfile
+          # Reuse the CLI and runtimes emitted by the workspace test build.
+          # Run before the test harness adds build-tree library search paths.
+          with tempfile.TemporaryDirectory(prefix="zg-pdf-ci-") as temporary:
+              bundle = pathlib.Path(temporary)
+              (bundle / "bin").mkdir()
+              binary = "zg.exe" if os.name == "nt" else "zg"
+              shutil.copy2(pathlib.Path("target/debug") / binary, bundle / "bin" / binary)
+              subprocess.run(["node", "--input-type=module", "-e",
+                  "import { stageZvecRuntime } from './scripts/npm-package-core.mjs'; await stageZvecRuntime('target/debug', process.argv[1], process.platform);",
+                  str(bundle / "lib")], check=True)
+              subprocess.run([sys.executable, "scripts/pdf-package-smoke.py", "--bundle", str(bundle),
+                  "--model-cache", os.environ["ZVEC_GREP_MODEL_CACHE"],
+                  "--logs", "model-logs/pdf"], check=True)
       - name: Prepare native library lookup for the compiled executables
         if: ${{ !matrix.cuda || runner.os != 'Linux' }}
         shell: python
@@ -719,8 +742,9 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ runner.temp }}/zvec-grep-model-cache
-          key: rust-real-models-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust/crates/zg-engine/src/models/catalog/**', 'rust/Cargo.lock') }}
+          key: rust-real-models-v3-cuda-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust/crates/zg-engine/src/models/catalog/**', 'rust/Cargo.lock') }}
           restore-keys: |
+            rust-real-models-v3-cuda-${{ runner.os }}-${{ runner.arch }}-
             rust-real-models-v2-${{ runner.os }}-${{ runner.arch }}-
       - name: Download the original Cargo CLI output
         uses: actions/download-artifact@v8

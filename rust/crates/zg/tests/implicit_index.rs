@@ -7,7 +7,7 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde_json::json;
@@ -91,20 +91,46 @@ impl Fixture {
     }
 
     fn assert_model(&self, mode: &str, reference: &str) {
-        let output = self.success(&[
-            "--status",
-            "--mode",
-            mode,
-            "--check-ready",
-            "--color",
-            "never",
-        ]);
+        let output = self.status_after_index(mode);
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert_ready_coverage(&stdout);
         assert!(
             stdout.contains(&format!("  Embedding   {reference}")),
             "{stdout}"
         );
+    }
+
+    fn status_after_index(&self, mode: &str) -> Output {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let output = self
+                .command(&[
+                    "--status",
+                    "--mode",
+                    mode,
+                    "--check-ready",
+                    "--color",
+                    "never",
+                ])
+                .output()
+                .expect("workspace status");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // As in server_lifecycle, watcher jobs can invalidate a status scan.
+            // Retry only this server state; other errors and assertions stay strict.
+            let unknown = mode == "server"
+                && output.status.code() == Some(1)
+                && stdout.lines().next() == Some("  Coverage    Unavailable (status unknown)")
+                && stderr.trim() == "Error: workspace index is not ready";
+            if !unknown {
+                return success(output);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "server status remained unknown after indexing\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }
 
@@ -791,12 +817,12 @@ fn incompatible_index_errors_are_actionable_without_rebuilding_existing_data() {
             assert!(stderr.contains("zg --index --rebuild"), "{stderr}");
             if presentation == "debug" {
                 assert!(stderr.contains("unsupported index version 1"), "{stderr}");
-                assert!(stderr.contains("expected 2"), "{stderr}");
+                assert!(stderr.contains("expected 5"), "{stderr}");
                 assert!(stderr.contains("Error location:"), "{stderr}");
             } else {
                 for internal_detail in [
                     "unsupported index version",
-                    "expected 2",
+                    "expected 5",
                     "manifest.json",
                     "Error location:",
                     "ZG.ENGINE.",
@@ -1030,7 +1056,7 @@ fn disabled_workspace_is_not_rebuilt_from_a_nested_query_directory() {
                 "recordedUsername": std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).ok(),
             },
             "scan": {},
-            "indexVersion": 2,
+            "indexVersion": 5,
             "createdTime": 0,
             "updatedTime": 0,
             "index": { "state": "disabled" }

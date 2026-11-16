@@ -62,11 +62,11 @@ An index is created on the first indexing run and updated as files are added, ch
 
 ### Search
 
-Indexed search combines full-text and vector retrieval to return relevant source snippets, refreshing the index as needed by default. Query filters narrow results without changing the workspace's scanning rules. Direct text search reads source files without requiring an index.
+Indexed search combines full-text and vector retrieval to return relevant source snippets, refreshing the index as needed by default. Query filters narrow results without changing the workspace's scanning rules. Direct text search reads ordinary source files without requiring an index. PDF literal search uses indexed extracted text and reports the physical pages containing the matches.
 
 ### Vector storage
 
-Embedding vectors are stored as IEEE binary16. The engine keeps embeddings and query vectors as `f32` until they are narrowed for the FP16 field. `indexVersion` remains 2. Existing FP32 indexes require an explicit rebuild with `zg --index --rebuild` before use.
+Embedding vectors are stored as IEEE binary16. The engine keeps embeddings and query vectors as `f32` until they are narrowed for the FP16 field. `indexVersion` is 5, including raw PDF rectangles and page dimensions. Older indexes require an explicit rebuild with `zg --index --rebuild` before use.
 
 ### Embedding models
 
@@ -79,9 +79,11 @@ Each workspace uses an embedding model for semantic search. Local models run on 
 | [API](src/api/mod.rs) and [service](src/service.rs) | Public options and results; operation dispatch behind `ZvecGrep`. |
 | [Domain](src/domain/README.md) | defines shared data types for workspaces, sources, content, entities, and metadata. |
 | [File selection](src/file_selection/README.md) | Scan/watch policies and query filters. |
-| [Extraction](src/extraction/mod.rs) and [lexical search](src/lexical/mod.rs) | Source-preserving extraction and direct ripgrep search. |
+| [Extraction](src/extraction/mod.rs) and [lexical search](src/lexical/mod.rs) | File preparation, source-preserving extraction, and direct ripgrep search. |
 | [Pipelines](src/pipelines/README.md) | Indexing, indexed retrieval, and direct search; [ranking](src/pipelines/indexed_search/ranking/README.md) combines retrieval evidence. |
-| [Models](src/models/mod.rs) | Model catalogs, embedding backends, downloads, and reusable runtimes. |
+| [Models](src/models/mod.rs) | Model catalogs, embedding and layout backends, downloads, and reusable runtimes. |
 | [Storage](src/storage/mod.rs) and [workspace](src/workspace/README.md) | Collection schemas and operations; workspace discovery, manifests, locks, and publication. |
 | [Authorization](src/authorization.rs) and [config](src/config.rs) | Remote-service consent and configuration resolution. |
 | [Errors](src/error.rs) and [utilities](src/utils/mod.rs) | Diagnostics and shared text, encoding, hashing, and filesystem helpers. |
+
+Extraction owns format conversion, dependency failures, and document warnings. Indexing consumes prepared text and source maps, then chooses chunk budgets and stores entities. Query and literal search share source-coordinate projection; CLI and MCP render those results independently. Embedding and layout leases share runtime ownership and admission without exposing each other's operations.
