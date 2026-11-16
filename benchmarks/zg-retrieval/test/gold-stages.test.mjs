@@ -87,7 +87,7 @@ test("keeps missing traces and ambiguous Entity ranges unknown", () => {
   assert.equal(mismatch.targets[1].coverage.selected, null);
 });
 
-test("stage summary compares top-ten losses with same-file decay off and on", () => {
+test("stage summary shows coverage at every stage", () => {
   const observed = fixture();
   observed.capture.files[path].a.static_rank = 2;
   const summary = summarizeGoldStages([
@@ -101,8 +101,8 @@ test("stage summary compares top-ten losses with same-file decay off and on", ()
     "| Gold covered by index | N/A | — | 3/3 |",
     "| Gold recalled by FTS | N/A | — | 2/3 |",
     "| Gold recalled by Vector | — | — | 2/3 |",
-    "| Gold lost at top 10 (same-file decay off) | N/A | — | 0 |",
-    "| Gold lost at top 10 (same-file decay on) | N/A | — | 1 |",
+    "| Top 10 coverage (same-file decay off) | N/A | — | 2/3 |",
+    "| Top 10 coverage (same-file decay on, actual) | N/A | — | 1/3 |",
   ]);
 });
 

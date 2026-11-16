@@ -158,7 +158,7 @@ It sends the original public requests and records evidence in a private
 directory outside the corpus. Older candidates produce unobserved stages.
 
 Each suite's report shows index coverage, Gold recalled per route, and Gold
-losses at ten with same-file decay off and on. Both loss rows use the same
+covered at ten with same-file decay off and on. Both top-ten rows use the same
 loaded Entity pool, RRF scores and static rule scoring. File and Entity have
 separate tables.
 The coverage denominator counts Gold targets across all five calls, including
@@ -168,8 +168,8 @@ unresolved cases. Unresolved Gold stays in the per-call evidence. Quarry uses
 its verified File and Entity labels for diagnostics. Existing score tables
 keep their original denominators and aggregation.
 
-`gold-stages.json` contains the full stage breakdown, including Entity loading
-losses for troubleshooting.
+`gold-stages.json` contains stage coverage and losses, including Entity
+loading losses for troubleshooting.
 
 | Boundary | Evidence and reference for loss |
 | --- | --- |
