@@ -1,13 +1,13 @@
 use crate::{
     EngineError,
     domain::{Content, EntityMetadata, FileFormat, MarkdownMetadata, Range},
-    utils::{line_byte_offsets, text_range_from_offsets},
 };
 
 use super::{
     ChunkOptions, ExtractedEntity, TextSource, chunk_options_for_metadata,
     chunking::text_fragments,
     sectioning::{Heading, Section, split_sections},
+    source_map::{SourceMap, TextSourceMap},
     text::extract_plain_text_entities,
     validate_formats,
 };
@@ -25,8 +25,8 @@ pub(super) fn extract(
     validate_formats(&source.formats)?;
     let (max_chars, overlap_chars) = resolve_options(options)?;
     let lines = source.text.split('\n').collect::<Vec<_>>();
-    let line_offsets = line_byte_offsets(&source.text);
-    let headings = scan_headings(&lines, &line_offsets);
+    let source_map = TextSourceMap::new(&source.text);
+    let headings = scan_headings(&lines, source_map.line_starts());
     if headings.is_empty() {
         return Ok(extract_plain_text_entities(
             source,
@@ -41,13 +41,9 @@ pub(super) fn extract(
             let metadata = markdown_metadata(&section);
             let (content_max, content_overlap) =
                 chunk_options_for_metadata(max_chars, overlap_chars, Some(&metadata));
-            let range = text_range_from_offsets(
-                &source.text,
-                &line_offsets,
-                section.range.start,
-                section.range.end,
-            )
-            .expect("section coordinates refer to source text");
+            let range = source_map
+                .map_range(section.range)
+                .expect("section coordinates refer to source text");
             let content = crate::utils::slice_text(
                 &source.text,
                 range.start_byte_offset(),
@@ -292,8 +288,13 @@ mod tests {
                     }
                     outputs.push(extraction_snapshot(&entities, maximum));
                 }
+                // Workspace builds enable serde_json's preserve_order through
+                // the CLI. Canonicalize objects so feature unification cannot
+                // change snapshots captured by an engine-only test build.
+                let mut snapshot = serde_json::to_value(outputs).expect("extraction snapshot");
+                snapshot.sort_all_objects();
                 snapshots.push(crate::utils::sha256_hex(
-                    &serde_json::to_vec(&outputs).expect("serialize extraction snapshot"),
+                    &serde_json::to_vec(&snapshot).expect("serialize extraction snapshot"),
                 ));
             }
         }

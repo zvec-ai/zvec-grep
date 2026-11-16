@@ -7,6 +7,7 @@ mod image;
 mod markdown;
 mod sectioning;
 mod service;
+mod source_map;
 mod spi;
 mod text;
 
