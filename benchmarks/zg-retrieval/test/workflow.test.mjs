@@ -71,7 +71,8 @@ test("Retrieval-only retains its reusable and manual candidate/embedding inputs"
   assert.match(dispatch, /^ {10}- remote$/m);
   assert.match(dispatch, /^ {6}local_model:$/m);
   assert.match(dispatch, /^ {6}a10_retry:\n[^\n]+\n {8}default: false\n {8}type: boolean$/m);
-  assert.equal((dispatch.match(/^ {6}[a-z0-9_]+:$/gm) ?? []).length, 4);
+  assert.match(dispatch, /^ {6}a10_gte_quarry_recovery:$/m);
+  assert.equal((dispatch.match(/^ {6}[a-z0-9_]+:$/gm) ?? []).length, 5);
   assert.match(jobs.authorize, /Validate local model override/);
   for (const name of ["sweqa", "beir", "duretrieval", "quarry", "results"]) {
     assert.match(

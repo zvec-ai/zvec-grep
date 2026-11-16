@@ -43,6 +43,10 @@ on:
         description: Retry the outstanding PR 385 local-model suites on the NVIDIA A10 runner
         default: false
         type: boolean
+      a10_gte_quarry_recovery:
+        description: Run the two GTE indexes that exceeded A10 memory using the batch-size-one candidate
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -51,7 +55,7 @@ env:
   RETRIEVAL_EMBEDDING: ${{ inputs.embedding }}
 
 concurrency:
-  group: retrieval-only-${{ github.ref }}-${{ inputs.candidate_ref }}-${{ inputs.embedding }}-${{ inputs.a10_retry && 'a10' || inputs.artifact_prefix || 'retrieval' }}
+  group: retrieval-only-${{ github.ref }}-${{ inputs.candidate_ref }}-${{ inputs.embedding }}-${{ inputs.a10_gte_quarry_recovery && 'a10-gte-quarry' || inputs.a10_retry && 'a10' || inputs.artifact_prefix || 'retrieval' }}
   cancel-in-progress: true
 
 jobs:
@@ -72,11 +76,12 @@ jobs:
         env:
           CANDIDATE_REF: ${{ inputs.candidate_ref }}
           LOCAL_MODEL: ${{ inputs.local_model }}
+          EXPECTED_CANDIDATE: ${{ inputs.a10_gte_quarry_recovery && '92e392b0102e509d829f321c81bd21f84ebdfe3a' || 'e2b07a6cd5d11c728839f2182decf7077ae3b1f9' }}
         run: |
           test "$GITHUB_EVENT_NAME" = workflow_dispatch
           test "$RETRIEVAL_EMBEDDING" = local
           test -z "$LOCAL_MODEL"
-          test "$CANDIDATE_REF" = e2b07a6cd5d11c728839f2182decf7077ae3b1f9
+          test "$CANDIDATE_REF" = "$EXPECTED_CANDIDATE"
       - name: Validate local model override
         if: inputs.local_model != ''
         env:
@@ -478,7 +483,7 @@ jobs:
           "$RUNNER_TEMP/retrieval-python/bin/python" -m pip --version
 
   a10-retry:
-    name: A10 / ${{ matrix.model }} / ${{ matrix.suite }}
+    name: A10 / ${{ matrix.model }} / ${{ matrix.suite }}${{ matrix.shard && format(' / {0}', matrix.shard) || '' }}
     if: github.event_name == 'workflow_dispatch' && inputs.a10_retry
     needs: [authorize, package-candidate, a10-platform]
     runs-on: gpu-linux-a10
@@ -487,22 +492,30 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        include:
-          - { model: all-minilm-l6-v2, suite: quarry }
-          - { model: gte-modernbert-base, suite: beir }
-          - { model: gte-modernbert-base, suite: sweqa }
-          - { model: gte-modernbert-base, suite: quarry }
-          - { model: gte-modernbert-base, suite: duretrieval }
-          - { model: jina-embeddings-v2-base-code, suite: quarry }
-          - { model: jina-embeddings-v2-base-code, suite: duretrieval }
-          - { model: nomic-embed-text-v1.5, suite: sweqa }
-          - { model: nomic-embed-text-v1.5, suite: quarry }
-          - { model: nomic-embed-text-v1.5, suite: duretrieval }
+        include: >-
+          ${{ fromJSON(inputs.a10_gte_quarry_recovery &&
+          '[
+            {"model":"gte-modernbert-base","suite":"quarry","shard":"task-15","task":"84bc9bce482cf60e8d6333b1fc0e4dcf08e5c7e6-1::q1"},
+            {"model":"gte-modernbert-base","suite":"quarry","shard":"task-17","task":"59b3f72a598129bb7a8903c31c099125a2ae4768-1::q1"}
+          ]' ||
+          '[
+            {"model":"all-minilm-l6-v2","suite":"quarry"},
+            {"model":"gte-modernbert-base","suite":"beir"},
+            {"model":"gte-modernbert-base","suite":"sweqa"},
+            {"model":"gte-modernbert-base","suite":"quarry"},
+            {"model":"gte-modernbert-base","suite":"duretrieval"},
+            {"model":"jina-embeddings-v2-base-code","suite":"quarry"},
+            {"model":"jina-embeddings-v2-base-code","suite":"duretrieval"},
+            {"model":"nomic-embed-text-v1.5","suite":"sweqa"},
+            {"model":"nomic-embed-text-v1.5","suite":"quarry"},
+            {"model":"nomic-embed-text-v1.5","suite":"duretrieval"}
+          ]') }}
     env:
       RETRIEVAL_LOCAL_MODEL: local/${{ matrix.model }}
       RETRIEVAL_LOCAL_DEVICE: cuda
       CANDIDATE_COMMIT: ${{ needs.package-candidate.outputs.candidate-commit }}
       RETRIEVAL_SUITE: ${{ matrix.suite }}
+      RETRIEVAL_TASK: ${{ matrix.task }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -584,6 +597,9 @@ jobs:
               node benchmarks/zg-retrieval/expansion/run.mjs "${common[@]}" --suite "$RETRIEVAL_SUITE"
               ;;
             quarry)
+              if [[ -n "$RETRIEVAL_TASK" ]]; then
+                common+=(--task "$RETRIEVAL_TASK")
+              fi
               node benchmarks/zg-retrieval/expansion/run.mjs "${common[@]}" --suite "$RETRIEVAL_SUITE"
               ;;
           esac
@@ -597,7 +613,7 @@ jobs:
         if: ${{ always() && steps.access.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
-          name: a10-${{ matrix.model }}-${{ matrix.suite }}-report
+          name: a10-${{ matrix.model }}-${{ matrix.suite }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}-report
           path: |
             ${{ runner.temp }}/gpu.csv
             ${{ runner.temp }}/a10-results/report.json
@@ -609,7 +625,7 @@ jobs:
         if: ${{ always() && steps.access.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
-          name: a10-${{ matrix.model }}-${{ matrix.suite }}-evidence
+          name: a10-${{ matrix.model }}-${{ matrix.suite }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}-evidence
           path: |
             ${{ runner.temp }}/a10-results/
             !${{ runner.temp }}/a10-results/consumer/**
