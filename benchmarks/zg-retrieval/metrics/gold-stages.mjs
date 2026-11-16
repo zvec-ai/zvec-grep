@@ -87,12 +87,26 @@ function validateCapture(capture, paths, mode, items, useBytes, sourceOffsets) {
       const observed = location(path, entry.loaded_range, sourceOffsets[path] ?? 0);
       assert.ok(item && item.rank === entry.final_rank && !seen.has(item.rank), "invalid selected rank");
       assert.equal(item.path, path, "engine and public result paths differ");
+      let omitsTrailingNewline = false;
       if (item.range?.kind === "text" && observed.range) {
         assert.equal(item.range.start_line, observed.range.start_line, "engine and public start lines differ");
-        assert.equal(item.range.end_line, observed.range.end_line, "engine and public end lines differ");
+        // Compact MCP headers use the last covered line. The canonical range
+        // can end at column zero on the next line after an LF or CRLF.
+        omitsTrailingNewline = entry.loaded_range.text.end.byte_column === 0 &&
+          item.range.end_line === observed.range.end_line - 1;
+        assert.equal(
+          item.range.end_line + Number(omitsTrailingNewline),
+          observed.range.end_line,
+          "engine and public end lines differ",
+        );
       }
       if (useBytes && item.source_bytes) {
-        assert.deepEqual(item.source_bytes, observed.source_bytes, "engine and public byte ranges differ");
+        assert.equal(item.source_bytes.start_byte, observed.source_bytes?.start_byte, "engine and public start bytes differ");
+        const endDifference = observed.source_bytes.end_byte - item.source_bytes.end_byte;
+        assert.ok(
+          omitsTrailingNewline ? endDifference === 1 || endDifference === 2 : endDifference === 0,
+          "engine and public end bytes differ",
+        );
       }
       seen.add(item.rank);
     }

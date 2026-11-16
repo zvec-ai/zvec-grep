@@ -161,6 +161,20 @@ test("maps indexed offsets to frozen source bytes for a verified UTF-8 BOM", () 
   assert.equal(scored.targets[1].ranks.selected, 5);
 });
 
+test("the compact public range may omit the final line separator", () => {
+  const observed = fixture();
+  const end = observed.capture.files[path].a.loaded_range.text.end;
+  Object.assign(end, { line: 3, byte_column: 0, byte_offset: 23 });
+  assert.equal(scoreGoldStages(observed).state, "observed");
+  end.byte_offset = 24;
+  assert.equal(scoreGoldStages(observed).state, "observed");
+  end.byte_offset = 25;
+  assert.equal(scoreGoldStages(observed).state, "invalid");
+  end.byte_offset = 23;
+  end.byte_column = 1;
+  assert.equal(scoreGoldStages(observed).state, "invalid");
+});
+
 test("binds capture bytes to the call and disables capture after a transport failure", async () => {
   const root = await mkdtemp(join(tmpdir(), "zg-gold-stages-"));
   try {
