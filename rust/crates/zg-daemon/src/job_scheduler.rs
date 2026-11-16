@@ -198,18 +198,16 @@ impl IndexJobScheduler {
             // Once another caller relies on a job, request cancellation must not stop it.
             active.shared.store(true, Ordering::Release);
             let active_snapshot = lock(&active.snapshot).clone();
-            // A graph switch is a saved configuration change: a job that already
-            // started under the other value cannot apply it, so the request needs
-            // its own job instead of being absorbed by the active one.
-            let graph_setting_request = {
+            // A running job cannot apply an explicit setting it did not claim.
+            let setting_request = {
                 let current = lock(&active.options);
-                changes_graph_setting(current.as_ref(), &options)
+                changes_index_settings(current.as_ref(), &options)
             };
             let needs_followup = reason == JobReason::Watch
                 || active_snapshot.reason == JobReason::Watch
                 || options.rebuild
                 || has_selection_update(&options)
-                || graph_setting_request;
+                || setting_request;
             if needs_followup && active_snapshot.state == JobState::Queued {
                 let queued_full_manual = active_snapshot.reason == JobReason::Manual
                     && reason == JobReason::Watch
@@ -602,6 +600,10 @@ fn merge_options(current: &mut Option<IndexOptions>, mut incoming: IndexOptions)
     // explicit value wins, including false, and omission keeps the earlier one.
     merge_update(&mut current.graph_indexing, incoming.graph_indexing.take());
     merge_update(
+        &mut current.vector_index_quantization,
+        incoming.vector_index_quantization.take(),
+    );
+    merge_update(
         &mut current.scan.included_formats,
         incoming.scan.included_formats.take(),
     );
@@ -760,6 +762,13 @@ fn changes_graph_setting(current: Option<&IndexOptions>, incoming: &IndexOptions
     incoming.graph_indexing.is_some_and(|requested| {
         current.and_then(|current| current.graph_indexing) != Some(requested)
     })
+}
+
+fn changes_index_settings(current: Option<&IndexOptions>, incoming: &IndexOptions) -> bool {
+    changes_graph_setting(current, incoming)
+        || incoming.vector_index_quantization.is_some_and(|requested| {
+            current.and_then(|current| current.vector_index_quantization) != Some(requested)
+        })
 }
 
 fn merge_update<T>(current: &mut Option<T>, incoming: Option<T>) {
@@ -1924,6 +1933,122 @@ mod tests {
             }
             scheduler.shutdown().await;
         }
+    }
+
+    #[tokio::test]
+    async fn vector_setting_survives_queued_and_running_job_coalescing() {
+        use zg_engine::api::index::VectorIndexQuantization;
+
+        for queued in [false, true] {
+            let executor = Arc::new(RecordingExecutor {
+                calls: Mutex::new(Vec::new()),
+                started: Notify::new(),
+                releases: tokio::sync::Semaphore::new(0),
+            });
+            let scheduler = IndexJobScheduler::new(
+                executor.clone(),
+                SchedulerConfig {
+                    concurrency: 1,
+                    queue_capacity: 8,
+                },
+            );
+            if queued {
+                scheduler
+                    .submit(
+                        PathBuf::from("/blocker"),
+                        IndexOptions::default(),
+                        JobReason::Manual,
+                    )
+                    .expect("occupy worker");
+                executor.started.notified().await;
+            }
+            let root = PathBuf::from("/workspace");
+            let first = scheduler
+                .submit(root.clone(), IndexOptions::default(), JobReason::Manual)
+                .expect("initial job");
+            if !queued {
+                executor.started.notified().await;
+            }
+            let selected = scheduler
+                .submit(
+                    root.clone(),
+                    IndexOptions {
+                        vector_index_quantization: Some(VectorIndexQuantization::BinarySign),
+                        ..IndexOptions::default()
+                    },
+                    JobReason::Manual,
+                )
+                .expect("select binary sign");
+            assert_eq!(selected.job.id == first.job.id, queued);
+            let merged = scheduler
+                .submit(
+                    root.clone(),
+                    IndexOptions {
+                        rebuild: true,
+                        ..IndexOptions::default()
+                    },
+                    JobReason::Manual,
+                )
+                .expect("merge rebuild");
+            assert_eq!(merged.job.id, selected.job.id);
+            scheduler
+                .submit(
+                    root,
+                    IndexOptions {
+                        changes: vec![WorkspaceChange::Rescan],
+                        ..IndexOptions::default()
+                    },
+                    JobReason::Watch,
+                )
+                .expect("merge watch omission");
+            executor.releases.add_permits(1);
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                executor.started.notified(),
+            )
+            .await
+            .expect("selected job starts");
+            executor.releases.add_permits(1);
+            scheduler
+                .wait(selected.job.id)
+                .await
+                .expect("selected job completes");
+            {
+                let calls = executor.calls.lock().expect("recorded calls");
+                let applied = calls.last().expect("selected execution");
+                assert!(applied.rebuild);
+                assert_eq!(
+                    applied.vector_index_quantization,
+                    Some(VectorIndexQuantization::BinarySign)
+                );
+            }
+            scheduler.shutdown().await;
+        }
+    }
+
+    #[test]
+    fn vector_setting_merge_keeps_omissions_and_replaces_explicit_values() {
+        use zg_engine::api::index::VectorIndexQuantization;
+        let mut pending = Some(IndexOptions {
+            vector_index_quantization: Some(VectorIndexQuantization::BinarySign),
+            ..IndexOptions::default()
+        });
+        super::merge_options(&mut pending, IndexOptions::default());
+        assert_eq!(
+            pending.as_ref().expect("pending").vector_index_quantization,
+            Some(VectorIndexQuantization::BinarySign)
+        );
+        super::merge_options(
+            &mut pending,
+            IndexOptions {
+                vector_index_quantization: Some(VectorIndexQuantization::Fp16),
+                ..IndexOptions::default()
+            },
+        );
+        assert_eq!(
+            pending.expect("pending").vector_index_quantization,
+            Some(VectorIndexQuantization::Fp16)
+        );
     }
 
     #[test]

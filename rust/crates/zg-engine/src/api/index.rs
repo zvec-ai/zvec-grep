@@ -1,5 +1,6 @@
 //! Types used by [`crate::ZvecGrep::index`].
 
+pub use crate::domain::VectorIndexQuantization;
 pub use options::IndexOptions;
 pub use result::IndexResult;
 
@@ -34,6 +35,10 @@ pub mod options {
         /// index stays untouched.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub graph_indexing: Option<bool>,
+        /// Select the persisted vector index quantizer. Omission keeps the saved
+        /// choice; changing it requires `rebuild`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub vector_index_quantization: Option<super::VectorIndexQuantization>,
         /// Automatic refreshes require an existing enabled index instead of creating one.
         /// This admission policy is runtime-only and never accepted from transport requests.
         #[serde(skip)]
@@ -789,7 +794,7 @@ pub mod result {
 mod tests {
     use tokio_util::sync::CancellationToken;
 
-    use super::{IndexOptions, progress::IndexProgressReporter};
+    use super::{IndexOptions, VectorIndexQuantization, progress::IndexProgressReporter};
 
     #[test]
     fn index_progress_reporter_is_runtime_only() {
@@ -808,6 +813,22 @@ mod tests {
         assert!(decoded.on_progress.is_none());
         assert!(decoded.signal.is_none());
         assert_eq!(decoded.root, request.root);
+    }
+
+    #[test]
+    fn vector_index_quantization_is_optional_and_round_trips() {
+        let default = serde_json::to_value(IndexOptions::default()).expect("default options");
+        assert!(default.get("vector_index_quantization").is_none());
+
+        let mut requested = default;
+        requested["vector_index_quantization"] = serde_json::json!("binary_sign");
+        let options: IndexOptions = serde_json::from_value(requested).expect("binary-sign request");
+        assert_eq!(
+            options.vector_index_quantization,
+            Some(VectorIndexQuantization::BinarySign)
+        );
+        let encoded = serde_json::to_value(options).expect("serialize quantization");
+        assert_eq!(encoded["vector_index_quantization"], "binary_sign");
     }
 
     #[test]

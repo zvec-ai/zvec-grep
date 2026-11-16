@@ -1373,6 +1373,7 @@ fn index_template(options: &IndexOptions) -> IndexOptions {
     template.changes.clear();
     template.scan = ScanRulesUpdate::default();
     template.graph_indexing = None;
+    template.vector_index_quantization = None;
     template.embedding = None;
     template
 }
@@ -1496,6 +1497,25 @@ mod tests {
         assert!(template.endpoint.is_none());
         assert!(template.embedding.is_none());
         assert!(template.device.is_none());
+    }
+
+    #[test]
+    fn watch_template_omits_old_vector_mode_for_published_settings() {
+        use zg_engine::api::index::VectorIndexQuantization;
+
+        for mode in [
+            VectorIndexQuantization::Fp16,
+            VectorIndexQuantization::BinarySign,
+        ] {
+            let template = super::index_template(&IndexOptions {
+                rebuild: true,
+                vector_index_quantization: Some(mode),
+                ..IndexOptions::default()
+            });
+            assert!(!template.rebuild);
+            // The engine resolves omission from the current published descriptor.
+            assert_eq!(template.vector_index_quantization, None);
+        }
     }
 
     #[derive(Default)]
@@ -2070,6 +2090,7 @@ mod tests {
 
     #[tokio::test]
     async fn successful_index_starts_one_watcher_and_changes_submit_a_narrow_job() {
+        use zg_engine::api::index::VectorIndexQuantization;
         let workspace = tempdir().expect("workspace should be created");
         let canonical_root = std::fs::canonicalize(workspace.path()).expect("root should resolve");
         let executor = Arc::new(RecordingExecutor::default());
@@ -2090,6 +2111,7 @@ mod tests {
                 IndexOptions {
                     root: Some(workspace.path().to_path_buf()),
                     embedding_concurrency: Some(8),
+                    vector_index_quantization: Some(VectorIndexQuantization::BinarySign),
                     ..IndexOptions::default()
                 },
                 true,
@@ -2137,7 +2159,12 @@ mod tests {
         {
             let calls = executor.calls.lock().expect("calls should be readable");
             assert_eq!(calls[0].embedding_concurrency, Some(8));
+            assert_eq!(
+                calls[0].vector_index_quantization,
+                Some(VectorIndexQuantization::BinarySign)
+            );
             assert_eq!(calls[1].embedding_concurrency, None);
+            assert_eq!(calls[1].vector_index_quantization, None);
             assert_eq!(
                 calls[1].changes,
                 [IndexChange::Upsert(PathBuf::from("src/lib.rs"))]

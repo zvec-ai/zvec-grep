@@ -262,7 +262,7 @@ impl IndexDescriptor {
             }
             index
                 .embedding
-                .ensure_index_compatible(&other_index.embedding)?;
+                .ensure_storage_compatible(&other_index.embedding)?;
         }
         if self.graph_indexing != other.graph_indexing {
             let existing = if self.graph_indexing {

@@ -54,6 +54,7 @@ pub(crate) use graph::PendingRefStatus;
 // Models.
 pub(crate) use model::EmbeddingMetric;
 pub(crate) use model::EmbeddingModelInfo;
+pub use model::VectorIndexQuantization;
 
 // Sources.
 pub(crate) use source::ByteRange;

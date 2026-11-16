@@ -27,6 +27,31 @@ that smoke test for local differential validation.
 Existing indexes must be rebuilt when switching embedding models, even when
 their vector dimensions match. The legacy TypeScript catalog is unchanged.
 
+## Vector-index quantization
+
+Vector indexing defaults to FP16. To try packed sign-bit document vectors on a
+new or rebuilt index, use:
+
+```sh
+zg --index --vector-index-quantization binary-sign
+zg --index --rebuild --vector-index-quantization binary-sign
+```
+
+The choice is saved in the workspace's embedding-index metadata. Omitted values
+preserve the saved choice; changing it requires `--rebuild`. `binary-sign`
+stores one sign bit per document-vector component plus a per-vector scale; query
+embeddings remain floating point. Search scores float queries against the
+reconstructed sign vectors, not with Hamming distance, and currently scans the
+packed vectors rather than using HNSW. For 1,024 dimensions, the vector payload
+is 132 bytes (128 packed bytes plus a 4-byte scale), versus 2,048 bytes for
+FP16. For vectors whose components are already exactly ±0.03125, as in the
+Metis representation used by VS Code, sign packing plus the scale is lossless;
+for general float embeddings it discards per-component magnitude. Even for a
+lossless encoding, results can differ from FP16 HNSW due to approximate search
+or query rounding. This mode scans all matching documents, so measure index
+size, memory, latency, and retrieval behavior before adopting it for a large
+workspace. Use a disposable workspace for initial testing.
+
 Run the development commands below from `rust/` (`cd rust` from the repository
 root). See the [contributor guide](CONTRIBUTING.md) for checks and conventions.
 

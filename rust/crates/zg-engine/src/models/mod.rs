@@ -20,6 +20,8 @@ pub(crate) use catalog::{ResolveEmbeddingReferenceOptions, resolve_embedding_ref
 pub(crate) use error::ModelError;
 pub(crate) use runtime::{ModelRuntimeLease, ModelRuntimeManager, ModelRuntimeRequest};
 pub(crate) use runtime::{batch_concurrency, resolve_index_concurrency};
+#[cfg(test)]
+pub(crate) use spi::EmbeddingModel;
 pub(crate) use spi::{
     EmbeddingConcurrencyDefaults, EmbeddingOptions, EmbeddingPrepareOptions, ModelProgressReporter,
 };

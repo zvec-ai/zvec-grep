@@ -536,6 +536,7 @@ const INDEX_HELP: &str = r"Usage:
 Index options:
   --rebuild                         Rebuild the existing index
   --graph[=true|false]               Enable or disable graph indexing; omitted keeps saved setting
+  --vector-index-quantization <mode> Use fp16 or binary-sign; changing it requires --rebuild
   --drop                            Permanently remove the workspace index
   --debug                           Print skipped-file diagnostics to stderr
   --mode <direct|server|auto>       Select indexing transport
@@ -543,6 +544,9 @@ Index options:
 
 Graph indexing defaults to disabled for new indexes. Changing it on an existing
 index requires --rebuild, for example: zg --index --rebuild --graph.
+
+Vector indexing defaults to fp16. binary-sign stores packed document signs and
+scores them against floating-point queries; changing the mode requires --rebuild.
 
 Dropping an index runs immediately without a confirmation prompt.
 

@@ -43,6 +43,27 @@ fn model() -> EmbeddingModelInfo {
     .expect("valid embedding metadata")
 }
 
+fn binary_sign_model() -> EmbeddingModelInfo {
+    EmbeddingModelInfo::new(
+        crate::domain::model::ModelInfo::new(
+            "fixture",
+            "fixture",
+            [
+                crate::domain::ContentKind::Text,
+                crate::domain::ContentKind::Code,
+            ],
+            32,
+        )
+        .expect("valid model metadata"),
+        64,
+        EmbeddingMetric::Cosine,
+        None,
+        None,
+    )
+    .expect("valid embedding metadata")
+    .with_vector_index_quantization(VectorIndexQuantization::BinarySign)
+}
+
 fn metadata_store(path: &Path) -> Fragments {
     super::super::zvec::initialize().expect("initialize zvec");
     Fragments::open(path, &[model()], false).expect("fragment storage")
@@ -62,8 +83,14 @@ fn write_fixture(
     } else {
         Vec::new()
     };
-    let docs =
-        Fragments::prepare(file, entities, entries, &directories).expect("prepare fragments");
+    let docs = Fragments::prepare(
+        file,
+        entities,
+        entries,
+        &directories,
+        store.embedding_models(),
+    )
+    .expect("prepare fragments");
     store.write(&docs).expect("write fragments");
 }
 
@@ -702,6 +729,75 @@ fn embeddings_round_trip_as_fp16_and_remain_searchable() {
 }
 
 #[test]
+fn binary_sign_scores_float_queries_with_each_supported_metric() {
+    let document = [2.0_f32, -1.0, 0.0];
+    let query = [1.0_f32, 1.0, -1.0];
+    let (packed, scale) = encode_sign_vector(&document).expect("encode signs");
+    assert_eq!(packed.len(), 1);
+    assert_eq!(scale.to_bits(), 1.0_f32.to_bits());
+
+    let cosine =
+        binary_sign_score(&query, &packed, scale, EmbeddingMetric::Cosine).expect("cosine score");
+    assert!((cosine - (-1.0 / 3.0)).abs() < 1e-12);
+    assert_eq!(
+        binary_sign_score(&query, &packed, scale, EmbeddingMetric::DotProduct)
+            .expect("dot-product score")
+            .to_bits(),
+        (-1.0_f64).to_bits()
+    );
+    let euclidean = binary_sign_score(&query, &packed, scale, EmbeddingMetric::Euclidean)
+        .expect("Euclidean score");
+    assert!((euclidean + 8.0_f64.sqrt()).abs() < 1e-12);
+}
+
+#[test]
+fn binary_sign_search_rejects_limits_above_the_shared_top_k_bound() {
+    let home = tempfile::tempdir().expect("disposable local index");
+    let store = Fragments::open(home.path(), &[binary_sign_model()], false)
+        .expect("create binary-sign fragment index");
+    let error = store
+        .search_vector("fixture/fixture", &[1.0; 64], MAX_TOP_K + 1, None)
+        .expect_err("binary-sign search must use the shared top-k bound");
+    assert_eq!(error.code(), EngineError::INVALID_ARGUMENT);
+}
+
+#[test]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn binary_sign_fragments_search_with_float_queries_and_reopen_from_a_local_index() {
+    let home = tempfile::tempdir().expect("disposable local index");
+    let binary_model = binary_sign_model();
+    let store = Fragments::open(home.path(), std::slice::from_ref(&binary_model), false)
+        .expect("create binary-sign fragment index");
+    let (source, entities, mut entries) = metadata_fragments(1, "binary-sign");
+
+    let mut query = vec![0.01_f32; 64];
+    query[0] = 1.0;
+    let mut high_weight_match = vec![-0.01_f32; 64];
+    high_weight_match[0] = 1.0;
+    let mut low_weight_match = vec![0.01_f32; 64];
+    low_weight_match[0] = -1.0;
+    entries[0].vector = high_weight_match;
+    entries[1].vector = low_weight_match;
+
+    write_fixture(&store, &source, &entities, &entries);
+    store.flush().expect("flush local index");
+    let hits = store
+        .search_vector("fixture/fixture", &query, 2, None)
+        .expect("float query against packed signs");
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0].document_id, entries[0].fragment_id.as_str());
+
+    drop(store);
+    let reopened =
+        Fragments::open(home.path(), &[binary_model], true).expect("reopen disposable local index");
+    let hits = reopened
+        .search_vector("fixture/fixture", &query, 2, None)
+        .expect("query reopened binary-sign index");
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0].document_id, entries[0].fragment_id.as_str());
+}
+
+#[test]
 fn empty_selection_lists_compile_to_false_without_native_in_syntax() {
     for filter in [
         StorageSearchFilter {
@@ -812,4 +908,149 @@ fn exact_symbol_lookup_collects_all_models_and_deduplicates_large_fragment_sets(
             .expect("case-sensitive lookup")
             .is_empty()
     );
+}
+
+#[test]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[allow(clippy::too_many_lines)] // Keep the full build, verification, filter, and reopen sequence together.
+fn binary_sign_metis_shaped_vectors_round_trip_and_rank_exhaustively() {
+    const DIM: usize = 1024;
+    const SCALE: f32 = 0.03125;
+    super::super::zvec::initialize().expect("initialize zvec");
+    let model = EmbeddingModelInfo::new(
+        crate::domain::model::ModelInfo::new(
+            "fixture",
+            "fixture",
+            [
+                crate::domain::ContentKind::Text,
+                crate::domain::ContentKind::Code,
+            ],
+            32,
+        )
+        .expect("model"),
+        DIM,
+        EmbeddingMetric::Cosine,
+        None,
+        None,
+    )
+    .expect("embedding model")
+    .with_vector_index_quantization(VectorIndexQuantization::BinarySign);
+    let home = tempfile::tempdir().expect("disposable index");
+    let store =
+        Fragments::open(home.path(), std::slice::from_ref(&model), false).expect("create index");
+    // Unequal float magnitudes make matching query signs insufficient for ranking.
+    let query: Vec<f32> = (0..DIM)
+        .map(|i| {
+            let magnitude = if i < 80 { 0.25 } else { 0.005 };
+            if i % 3 == 0 { -magnitude } else { magnitude }
+        })
+        .collect();
+    let mut documents = Vec::new();
+    for file_id in 1..=3 {
+        let (source, entities, mut entries) = metadata_fragments(file_id, "metis-shaped");
+        for (j, entry) in entries.iter_mut().enumerate() {
+            let variant = usize::try_from((file_id - 1) * 2).expect("bounded file id") + j;
+            entry.vector = (0..DIM)
+                .map(|i| {
+                    let sign = if (i * 13 + variant * 17) % 97 < (variant + 1) * 11 {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    if query[i] < 0.0 {
+                        -SCALE * sign
+                    } else {
+                        SCALE * sign
+                    }
+                })
+                .collect();
+            documents.push((
+                source.id(),
+                entry.fragment_id.as_str().to_owned(),
+                entry.vector.clone(),
+            ));
+        }
+        write_fixture(&store, &source, &entities, &entries);
+    }
+    store.flush().expect("flush index");
+    let verify = |store: &Fragments| {
+        let collection = store.collection("fixture/fixture").expect("collection");
+        let query_norm = query
+            .iter()
+            .map(|&x| f64::from(x).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let mut expected = Vec::new();
+        for (file_id, id, vector) in &documents {
+            let stored = fragment_document(collection, id);
+            let packed = stored
+                .get_binary("embedding")
+                .expect("packed field")
+                .expect("packed vector");
+            let scale = stored
+                .get_f32("embedding_scale")
+                .expect("scale field")
+                .expect("scale");
+            assert_eq!(packed.len(), DIM / 8);
+            assert_eq!(scale.to_bits(), SCALE.to_bits());
+            for (i, &original) in vector.iter().enumerate() {
+                let decoded = if packed[i / 8] & (1 << (i % 8)) != 0 {
+                    scale
+                } else {
+                    -scale
+                };
+                assert_eq!(decoded.to_bits(), original.to_bits(), "{id} dimension {i}");
+            }
+            let dot = query
+                .iter()
+                .zip(vector)
+                .map(|(&q, &d)| f64::from(q) * f64::from(d))
+                .sum::<f64>();
+            let doc_norm = vector
+                .iter()
+                .map(|&d| f64::from(d).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            let cosine = dot / (query_norm * doc_norm);
+            for (metric, reference) in [
+                (EmbeddingMetric::DotProduct, dot),
+                (EmbeddingMetric::Cosine, cosine),
+            ] {
+                let actual = binary_sign_score(&query, &packed, scale, metric).expect("sign score");
+                assert!(
+                    (actual - reference).abs() < 1e-12,
+                    "{id}: {actual} != {reference}"
+                );
+            }
+            expected.push((*file_id, id.clone(), cosine));
+        }
+        expected.sort_by(|a, b| b.2.total_cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
+        for file_ids in [None, Some(vec![FileId::new(2)])] {
+            let filter = StorageSearchFilter {
+                file_ids: file_ids.clone(),
+                ..Default::default()
+            };
+            let sql = build_filter(Some(&filter), &DIRECTORY_LOOKUP).expect("filter");
+            let hits = store
+                .search_vector("fixture/fixture", &query, 6, sql.as_deref())
+                .expect("search");
+            let selected: Vec<_> = expected
+                .iter()
+                .filter(|(id, _, _)| file_ids.as_ref().is_none_or(|ids| ids.contains(id)))
+                .collect();
+            assert_eq!(hits.len(), selected.len());
+            for (hit, (_, id, score)) in hits.iter().zip(selected) {
+                assert_eq!(&hit.document_id, id);
+                assert!((hit.score - score).abs() < 1e-12);
+            }
+            let top = store
+                .search_vector("fixture/fixture", &query, 1, sql.as_deref())
+                .expect("top one");
+            assert_eq!(top[0].document_id, hits[0].document_id);
+        }
+    };
+    verify(&store);
+    drop(store);
+    let reopened = Fragments::open(home.path(), &[model], true).expect("reopen disposable index");
+    verify(&reopened);
 }

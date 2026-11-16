@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     EngineError, EngineResult,
-    domain::{Entity, FileId, FileIndexStatus, FileRecord},
+    domain::{Entity, FileId, FileIndexStatus, FileRecord, VectorIndexQuantization},
     utils::{
         atomic_write as write_record, directory_exists, ensure_directory, file_exists,
         reject_symlink, sync_directory,
@@ -72,6 +72,8 @@ pub(crate) struct IndexStore {
 #[serde(deny_unknown_fields)]
 struct SchemaRecord {
     path_encoding: PathEncoding,
+    #[serde(default, skip_serializing_if = "is_false")]
+    binary_sign_storage: bool,
     embeddings: Vec<EmbeddingModelInfo>,
 }
 
@@ -85,11 +87,22 @@ impl SchemaRecord {
     fn new(embeddings: &[EmbeddingModelInfo]) -> Self {
         Self {
             path_encoding: PathEncoding::Components,
+            binary_sign_storage: embeddings.iter().any(|embedding| {
+                embedding.vector_index_quantization() == VectorIndexQuantization::BinarySign
+            }),
             embeddings: embeddings.to_vec(),
         }
     }
 
     fn embeddings(self) -> EngineResult<Vec<EmbeddingModelInfo>> {
+        let has_binary_sign_storage = self.embeddings.iter().any(|embedding| {
+            embedding.vector_index_quantization() == VectorIndexQuantization::BinarySign
+        });
+        if self.binary_sign_storage != has_binary_sign_storage {
+            return Err(EngineError::storage_failure(
+                "binary-sign storage marker does not match embedding metadata",
+            ));
+        }
         validate_models(&self.embeddings).map_err(|error| {
             EngineError::storage_failure(format!(
                 "invalid stored embedding model information: {error}"
@@ -97,6 +110,11 @@ impl SchemaRecord {
         })?;
         Ok(self.embeddings)
     }
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip_serializing_if receives a reference.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn validate_models(embeddings: &[EmbeddingModelInfo]) -> EngineResult<()> {
@@ -618,7 +636,13 @@ fn replace_file(
     let directories = state.directories.ensure(file.relative_path())?;
     // Encode every projection before removing any of the previous file's data.
     let entity_docs = Entities::prepare(entities)?;
-    let fragment_docs = Fragments::prepare(file, entities, entries, &directories)?;
+    let fragment_docs = Fragments::prepare(
+        file,
+        entities,
+        entries,
+        &directories,
+        state.fragments.embedding_models(),
+    )?;
     let old_ids = invalidation_entity_ids(state, file.id())?;
     let mut unfinished = file.clone();
     unfinished.set_index_status(FileIndexStatus::NotIndexed)?;
@@ -842,7 +866,7 @@ fn load_schema(
                             "embedding model set changed; rebuild the index",
                         )
                     })?;
-                stored.ensure_index_compatible(current).map_err(|error| {
+                stored.ensure_storage_compatible(current).map_err(|error| {
                     error.with_help("Rebuild the index with `zg --index --rebuild`.")
                 })?;
             }
