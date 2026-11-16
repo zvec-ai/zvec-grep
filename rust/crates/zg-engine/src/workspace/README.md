@@ -31,5 +31,12 @@ cached separately.
   First builds and rebuilds prepare an index in `temp/` and publish it after
   storage closes. Interrupted publication can be recovered; a failed rebuild
   before the manifest commits preserves the previous index.
+- **Native recovery.** If an interrupted incremental write leaves zvec WAL
+  records, the first storage reader closes its partial handles, takes the
+  exclusive storage lock, and replays and flushes the existing collections.
+  The caller retains its workspace read lock to prevent index publication.
+  Storage returns to shared, read-only access before serving the request.
+  Search, status, and automatic refresh checks use this same recovery path;
+  unrelated storage failures remain errors.
 - **Compatibility.** `indexVersion` determines index compatibility.
   Incompatible indexes must be rebuilt.
