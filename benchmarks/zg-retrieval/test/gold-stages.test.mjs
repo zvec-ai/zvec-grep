@@ -54,7 +54,7 @@ function fixture() {
   return { capture, pair, items, taskId: "task", mode: "hybrid", repetition: 1, qualification: "diagnostic", useBytes: true };
 }
 
-test("measures full pools, real route ranks, and three cutoffs on the same loaded pool", () => {
+test("measures full pools, route ranks, and top ten with and without same-file decay", () => {
   const scored = scoreGoldStages(fixture());
   assert.equal(scored.state, "observed");
   const [file, first, second, third] = scored.targets;
@@ -64,14 +64,12 @@ test("measures full pools, real route ranks, and three cutoffs on the same loade
   assert.equal(second.coverage.index, true);
   assert.equal(second.coverage.vector, false);
   assert.equal(second.coverage.static_top10, true);
-  assert.equal(second.coverage.rrf_top10, false);
   assert.equal(second.ranks.selected, "miss");
   assert.equal(third.coverage.fused, true);
   assert.equal(third.coverage.loaded, false);
   const entity = summarizeGoldStages([scored]).groups.find(({ level }) => level === "entity");
   assert.equal(entity.targets, 3);
   assert.deepEqual(entity.stages.loaded, { covered: 2, unknown: 0, lost: 1, loss_unknown: 0 });
-  assert.equal(entity.stages.rrf_top10.lost, 1);
   assert.equal(entity.stages.static_top10.lost, 1);
   assert.equal(entity.stages.actual_top10.lost, 1);
 });
@@ -89,11 +87,9 @@ test("keeps missing traces and ambiguous Entity ranges unknown", () => {
   assert.equal(mismatch.targets[1].coverage.selected, null);
 });
 
-test("stage summary shows index coverage, recall, and both top-ten losses", () => {
+test("stage summary compares top-ten losses with same-file decay off and on", () => {
   const observed = fixture();
-  const second = observed.capture.files[path].b;
-  second.rrf_rank = 3;
-  second.loaded_rrf_rank = 3;
+  observed.capture.files[path].a.static_rank = 2;
   const summary = summarizeGoldStages([
     scoreGoldStages(observed),
     scoreGoldStages({ ...fixture(), mode: "fts", capture: null }),
@@ -105,8 +101,8 @@ test("stage summary shows index coverage, recall, and both top-ten losses", () =
     "| Gold covered by index | N/A | — | 3/3 |",
     "| Gold recalled by FTS | N/A | — | 2/3 |",
     "| Gold recalled by Vector | — | — | 2/3 |",
-    "| Gold lost at RRF top 10 (diagnostic) | N/A | — | 0 |",
-    "| Gold lost at same-file decay top 10 (actual) | N/A | — | 1 |",
+    "| Gold lost at top 10 (same-file decay off) | N/A | — | 0 |",
+    "| Gold lost at top 10 (same-file decay on) | N/A | — | 1 |",
   ]);
 });
 

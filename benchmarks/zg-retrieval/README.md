@@ -158,8 +158,9 @@ It sends the original public requests and records evidence in a private
 directory outside the corpus. Older candidates produce unobserved stages.
 
 Each suite's report shows index coverage, Gold recalled per route, and Gold
-losses at the diagnostic RRF top ten and actual same-file decay top ten. Both
-loss rows use the same loaded Entity pool. File and Entity have separate tables.
+losses at ten with same-file decay off and on. Both loss rows use the same
+loaded Entity pool, RRF scores and static rule scoring. File and Entity have
+separate tables.
 The coverage denominator counts Gold targets across all five calls, including
 unknowns.
 SWE-QA20 uses its QA File labels here and separates formal, diagnostic and
@@ -168,7 +169,7 @@ its verified File and Entity labels for diagnostics. Existing score tables
 keep their original denominators and aggregation.
 
 `gold-stages.json` contains the full stage breakdown, including Entity loading
-losses for troubleshooting, and the diagnostic cutoffs.
+losses for troubleshooting.
 
 | Boundary | Evidence and reference for loss |
 | --- | --- |
@@ -176,7 +177,7 @@ losses for troubleshooting, and the diagnostic cutoffs.
 | FTS / Vector / recall union | Owners of actual returned Fragments across adaptive recall attempts. Compare each route and the union with the index. The best rank is the minimum rank observed for that owner on that route. Hybrid reports both routes. |
 | Entity merge / RRF fusion / Entity load | Compare each complete pool with its predecessor. A missing canonical owner or an ambiguous range makes Entity coverage unknown where it could affect a hit. |
 | Final selection | Compare the actual selected results with the loaded pool. |
-| RRF order / static score / same-file decay @10 | Compare all three orders with the same loaded pool. The first two cutoffs are diagnostic. Actual selection uses the native greedy same-file decay and stops at 10, so loaded but unselected Gold has no actual final rank. |
+| Same-file decay off / on @10 | With decay off, rank by static score and take the first ten as a diagnostic. With decay on, use the actual results of the native greedy selection. Both loss counts use the loaded pool as their baseline. |
 
 The shared matcher preserves same-file full containment. SWE-QA20 follows its
 line-based score and Quarry uses its verified UTF-8 byte ranges, adding back

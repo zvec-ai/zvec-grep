@@ -13,7 +13,6 @@ const GOLD_STAGES = [
   ["fused", "merged"],
   ["loaded", "fused"],
   ["selected", "loaded"],
-  ["rrf_top10", "loaded"],
   ["static_top10", "loaded"],
   ["actual_top10", "loaded"],
 ];
@@ -112,7 +111,6 @@ function scoreTarget(capture, target, level, useBytes, sourceOffset) {
     fused: bestRank(canonical, at("rrf_rank")),
     loaded: bestRank(loaded, at("loaded_rrf_rank")),
     selected: bestRank(loaded, at("final_rank")),
-    rrf_top10: bestRank(loaded, at("loaded_rrf_rank"), LIMIT),
     static_top10: bestRank(loaded, at("static_rank"), LIMIT),
     actual_top10: bestRank(loaded, at("final_rank"), LIMIT),
     static: bestRank(loaded, at("static_rank")),
