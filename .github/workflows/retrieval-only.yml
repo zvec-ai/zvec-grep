@@ -127,22 +127,14 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/retrieval-authorize
         id: access
-      - name: Ensure the CUDA packager can set runtime library paths
-        if: inputs.a10_retry
-        run: |
-          if ! command -v patchelf >/dev/null; then
-            sudo apt-get update -qq
-            sudo apt-get install -y --no-install-recommends patchelf
-          fi
       - name: Build and verify the selected Rust package
         id: rust-candidate
         uses: ./.github/actions/rust-candidate-package
-        env:
-          LLAMA_CPP_BUILD_MODE: ${{ inputs.a10_retry && 'prebuilt' || 'auto' }}
         with:
           candidate_repository: ${{ inputs.candidate_repository || (inputs.candidate_ref == 'main' && 'zvec-ai/zvec-grep' || github.repository) }}
           candidate_ref: ${{ inputs.candidate_ref }}
-          cache_namespace: ${{ inputs.a10_retry && 'retrieval-rust-cuda' || 'retrieval-rust' }}
+          cache_namespace: ${{ inputs.a10_retry && 'retrieval-rust-cuda-manylinux228' || 'retrieval-rust' }}
+          portable_cuda: ${{ inputs.a10_retry && 'true' || 'false' }}
       - uses: actions/upload-artifact@v7
         with:
           name: package-${{ inputs.artifact_prefix || 'retrieval' }}-candidate
@@ -459,10 +451,36 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  a10-platform:
+    name: Verify A10 runner and portable Python
+    if: github.event_name == 'workflow_dispatch' && inputs.a10_retry
+    needs: authorize
+    runs-on: gpu-linux-a10
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.authorize.outputs.harness-commit }}
+          persist-credentials: false
+      - uses: ./.github/actions/retrieval-authorize
+        id: access
+      - name: Check the runner GPU and system library version
+        run: |
+          getconf GNU_LIBC_VERSION
+          nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv | tee "$RUNNER_TEMP/gpu.csv"
+          grep -Eq '(^|[[:space:]])A10,' "$RUNNER_TEMP/gpu.csv"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: false
+      - name: Verify standalone Python on the runner
+        run: |
+          uv venv --seed --python 3.12 "$RUNNER_TEMP/retrieval-python"
+          "$RUNNER_TEMP/retrieval-python/bin/python" -m pip --version
+
   a10-retry:
     name: A10 / ${{ matrix.model }} / ${{ matrix.suite }}
     if: github.event_name == 'workflow_dispatch' && inputs.a10_retry
-    needs: [authorize, package-candidate]
+    needs: [authorize, package-candidate, a10-platform]
     runs-on: gpu-linux-a10
     timeout-minutes: 360
     strategy:
@@ -495,13 +513,18 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
       - name: Verify the NVIDIA A10
         run: |
+          getconf GNU_LIBC_VERSION
           nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv | tee "$RUNNER_TEMP/gpu.csv"
           grep -Eq '(^|[[:space:]])A10,' "$RUNNER_TEMP/gpu.csv"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: false
+      - name: Prepare portable Python 3.12
+        run: |
+          uv venv --seed --python 3.12 "$RUNNER_TEMP/retrieval-python"
+          echo "$RUNNER_TEMP/retrieval-python/bin" >> "$GITHUB_PATH"
       - name: Restore ONNX CUDA runtime libraries
         id: cuda-libraries
         uses: actions/cache/restore@v5

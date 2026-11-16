@@ -98,6 +98,7 @@ test("Retrieval-only retains its reusable and manual candidate/embedding inputs"
     "beir",
     "duretrieval",
     "quarry",
+    "a10-platform",
     "a10-retry",
     "results",
   ]);
@@ -282,6 +283,7 @@ test("the selected workflow ref is frozen once for every downstream job", () => 
     "beir",
     "duretrieval",
     "quarry",
+    "a10-platform",
     "a10-retry",
     "results",
   ])
@@ -300,7 +302,8 @@ test("the selected source is built from rust/ and exact-commit package caching b
     /candidate_repository: \$\{\{ inputs\.candidate_repository \|\| \(inputs\.candidate_ref == 'main' && 'zvec-ai\/zvec-grep' \|\| github\.repository\) \}\}/,
   );
   assert.match(job, /candidate_ref: \$\{\{ inputs\.candidate_ref \}\}/);
-  assert.match(job, /cache_namespace: .*inputs\.a10_retry && 'retrieval-rust-cuda' \|\| 'retrieval-rust'/);
+  assert.match(job, /cache_namespace: .*inputs\.a10_retry && 'retrieval-rust-cuda-manylinux228' \|\| 'retrieval-rust'/);
+  assert.match(job, /portable_cuda: .*inputs\.a10_retry && 'true' \|\| 'false'/);
   assert.match(
     job,
     /candidate-commit: \$\{\{ steps\.rust-candidate\.outputs\.commit \}\}/,
@@ -339,7 +342,7 @@ test("the selected source is built from rust/ and exact-commit package caching b
 });
 
 test("every independently rerunnable job checks benchmark access before doing work", () => {
-  assert.equal(Object.keys(jobs).length, 9);
+  assert.equal(Object.keys(jobs).length, 10);
   assert.ok(jobs.results && jobs.sweqa && jobs.authorize);
   for (const [name, job] of Object.entries(jobs)) {
     const entries = steps(job);

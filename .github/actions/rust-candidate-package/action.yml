@@ -10,6 +10,9 @@ inputs:
   cache_namespace:
     description: Benchmark-specific cache prefix.
     required: true
+  portable_cuda:
+    description: Package CUDA on Linux x64 with the manylinux 2.28 release builder.
+    default: "false"
 outputs:
   commit:
     description: Immutable candidate source commit.
@@ -45,17 +48,45 @@ runs:
     # stay in PR-scoped caches that other PRs never restore while each one
     # still costs about 400 MB of the repository cache quota.
     - name: Install the candidate's pinned Rust toolchain
-      if: steps.rust-package-cache.outputs.cache-hit != 'true'
+      if: steps.rust-package-cache.outputs.cache-hit != 'true' && inputs.portable_cuda != 'true'
       shell: bash
       working-directory: candidate/rust
       run: rustup show active-toolchain
     - name: Build and pack the selected Rust candidate
-      if: steps.rust-package-cache.outputs.cache-hit != 'true'
+      if: steps.rust-package-cache.outputs.cache-hit != 'true' && inputs.portable_cuda != 'true'
       shell: bash
       working-directory: candidate/rust
       run: |
         npm ci
         npm run pack:local
+    - name: Build and pack the native CUDA candidate for glibc 2.28
+      if: steps.rust-package-cache.outputs.cache-hit != 'true' && inputs.portable_cuda == 'true'
+      shell: bash
+      working-directory: candidate/rust
+      env:
+        BUILD_IMAGE: quay.io/pypa/manylinux_2_28_x86_64:2026.03.01-1@sha256:d5f19b5957cf25df7ac15465924cafe2358754a187e510af386bf9596598a372
+      run: |
+        rust_version="$(awk -F '"' '/^channel = / {print $2}' rust-toolchain.toml)"
+        node_root="$(dirname "$(dirname "$(realpath "$(command -v node)")")")"
+        test -x "$node_root/bin/npm"
+        docker build --platform linux/amd64 --file scripts/release-builder.Dockerfile \
+          --build-arg BUILD_IMAGE="$BUILD_IMAGE" --build-arg RUST_VERSION="$rust_version" \
+          --tag retrieval-candidate-builder .
+        docker run --rm --platform linux/amd64 \
+          --volume "$PWD:/work/rust" --volume "$node_root:/host-node:ro" \
+          --env LLAMA_CPP_BUILD_MODE=prebuilt \
+          retrieval-candidate-builder bash -euo pipefail -c '
+            export PATH="/host-node/bin:$PATH"
+            test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.28"
+            npm ci
+            npm run pack:local
+            python3 scripts/check-glibc.py target/cuda/release/zg-cuda --max 2.28
+          '
+    - name: Record the compiled package identity
+      if: steps.rust-package-cache.outputs.cache-hit != 'true'
+      shell: bash
+      working-directory: candidate/rust
+      run: |
         mapfile -t packages < <(find dist/npm -maxdepth 1 -type f -name '*.tgz' -print)
         if [ "${#packages[@]}" -ne 1 ]; then
           echo "Expected one local Rust npm package, found ${#packages[@]}" >&2
