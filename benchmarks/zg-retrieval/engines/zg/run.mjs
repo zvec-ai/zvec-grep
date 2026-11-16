@@ -402,7 +402,9 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
       throw error;
     }
     if (!embedding.remote && protocol.device === "cuda")
-      assertCudaEvidence(indexed.stderr);
+      assertCudaEvidence(indexed.stderr, {
+        requireGraphPlacement: process.env.ZVEC_GREP_REQUIRE_CUDA !== "1",
+      });
     if (embedding.remote)
       await runCandidate(candidate, embedding.grantArguments(root), {
         env,

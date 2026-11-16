@@ -247,6 +247,9 @@ test("the four suites run in independent jobs using one candidate package", asyn
   assert.match(jobs["a10-retry"], /ZVEC_GREP_REQUIRE_CUDA: .*inputs\.a10_strict_retry && '1'/);
   assert.match(jobs["a10-retry"], /ZVEC_GREP_CUDA_MAX_BATCH_SIZE: .*matrix\.batch_size/);
   assert.equal(jobs["a10-retry"].match(/"batch_size":"1"/g)?.length, 2);
+  assert.match(jobs["a10-retry"], /ORT_LOG: .*inputs\.a10_strict_retry && 'warning'/);
+  const probe = steps(jobs["a10-retry"]).find((step) => step.includes("Prove the packaged model"));
+  assert.match(probe, /ORT_LOG: verbose/);
   const runner = steps(jobs.sweqa).find((entry) =>
     entry.includes("node benchmarks/zg-retrieval/run.mjs"),
   );

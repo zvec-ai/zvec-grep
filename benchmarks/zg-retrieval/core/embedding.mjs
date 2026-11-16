@@ -46,11 +46,15 @@ export function localEmbeddingDevice(configuredDevice) {
   return override;
 }
 
-export function assertCudaEvidence(stderr) {
+export function assertCudaEvidence(stderr, { requireGraphPlacement = true } = {}) {
   assert.doesNotMatch(stderr, /fall(?:ing)? back to CPU/i, "CUDA fell back to CPU");
   assert.ok(
-    stderr.includes("Transformers ONNX cuda embedding execution provider selected") &&
-      /placed on \[CUDAExecutionProvider\]\. Number of nodes: [1-9]\d*/.test(stderr),
+    stderr.includes("Transformers ONNX cuda embedding execution provider selected"),
+    "ONNX did not select the CUDA execution provider",
+  );
+  if (requireGraphPlacement) assert.match(
+    stderr,
+    /placed on \[CUDAExecutionProvider\]\. Number of nodes: [1-9]\d*/,
     "no ONNX CUDA graph-placement evidence; see the index log",
   );
 }

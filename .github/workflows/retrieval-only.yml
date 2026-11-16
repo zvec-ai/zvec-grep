@@ -495,9 +495,8 @@ jobs:
         include: >-
           ${{ fromJSON(inputs.a10_strict_retry &&
           '[
-            {"model":"gte-modernbert-base","suite":"quarry","shard":"task-15","task":"84bc9bce482cf60e8d6333b1fc0e4dcf08e5c7e6-1::q1","batch_size":"1"},
             {"model":"gte-modernbert-base","suite":"quarry","shard":"task-17","task":"59b3f72a598129bb7a8903c31c099125a2ae4768-1::q1","batch_size":"1"},
-            {"model":"gte-modernbert-base","suite":"duretrieval"},
+            {"model":"gte-modernbert-base","suite":"duretrieval","batch_size":"1"},
             {"model":"jina-embeddings-v2-base-code","suite":"quarry"},
             {"model":"jina-embeddings-v2-base-code","suite":"duretrieval"},
             {"model":"nomic-embed-text-v1.5","suite":"sweqa"},
@@ -524,8 +523,8 @@ jobs:
       RETRIEVAL_TASK: ${{ matrix.task }}
       ZVEC_GREP_REQUIRE_CUDA: ${{ inputs.a10_strict_retry && '1' || '' }}
       ZVEC_GREP_CUDA_MAX_BATCH_SIZE: ${{ matrix.batch_size }}
-      ORT_LOG: verbose
-      RUST_LOG: warn,zg=debug,zg_engine=debug,ort=trace
+      ORT_LOG: ${{ inputs.a10_strict_retry && 'warning' || 'verbose' }}
+      RUST_LOG: ${{ inputs.a10_strict_retry && 'warn,zg=info,zg_engine=info,ort=warn' || 'warn,zg=debug,zg_engine=debug,ort=trace' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -541,6 +540,7 @@ jobs:
           getconf GNU_LIBC_VERSION
           nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv | tee "$RUNNER_TEMP/gpu.csv"
           grep -Eq '(^|[[:space:]])A10,' "$RUNNER_TEMP/gpu.csv"
+          printf 'require_cuda=%s\nmax_batch_size=%s\n' "$ZVEC_GREP_REQUIRE_CUDA" "$ZVEC_GREP_CUDA_MAX_BATCH_SIZE" > "$RUNNER_TEMP/a10-settings.txt"
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: false
@@ -588,6 +588,9 @@ jobs:
           key: retrieval-a10-${{ matrix.model }}-v1-${{ runner.os }}-${{ runner.arch }}
       - name: Prove the packaged model indexes and queries on CUDA
         if: inputs.a10_strict_retry
+        env:
+          ORT_LOG: verbose
+          RUST_LOG: warn,zg=debug,zg_engine=debug,ort=trace
         shell: bash
         run: |
           probe="$RUNNER_TEMP/a10-probe"
@@ -663,6 +666,7 @@ jobs:
           name: a10-${{ matrix.model }}-${{ matrix.suite }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}-report
           path: |
             ${{ runner.temp }}/gpu.csv
+            ${{ runner.temp }}/a10-settings.txt
             ${{ runner.temp }}/a10-probe/logs/
             ${{ runner.temp }}/a10-results/report.json
             ${{ runner.temp }}/a10-results/report.md

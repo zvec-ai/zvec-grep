@@ -437,7 +437,10 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
     } finally {
       report.index_seconds[group.id] = (performance.now() - indexStart) / 1000;
     }
-    if (device === "cuda") assertCudaEvidence(indexed.stderr);
+    if (device === "cuda")
+      assertCudaEvidence(indexed.stderr, {
+        requireGraphPlacement: process.env.ZVEC_GREP_REQUIRE_CUDA !== "1",
+      });
     if (embedding.remote)
       await run(candidate.cli, embedding.grantArguments(root), {
         cwd: root,

@@ -1,11 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  assertCudaEvidence,
   embeddingModel,
   embeddingRuntime,
   REMOTE_EMBEDDING_MODEL,
 } from "../core/embedding.mjs";
 import { loadSuite } from "../core/suite.mjs";
+
+test("CUDA probes require graph placement and strict index logs require the provider", () => {
+  const provider = "Transformers ONNX cuda embedding execution provider selected";
+  const placement = "placed on [CUDAExecutionProvider]. Number of nodes: 12";
+  assert.doesNotThrow(() => assertCudaEvidence(provider + "\n" + placement));
+  assert.throws(() => assertCudaEvidence(provider), /graph-placement evidence/);
+  assert.doesNotThrow(() => assertCudaEvidence(provider, { requireGraphPlacement: false }));
+  assert.throws(() => assertCudaEvidence(placement, { requireGraphPlacement: false }), /did not select/);
+  assert.throws(() => assertCudaEvidence(provider + "\nfalling back to CPU", { requireGraphPlacement: false }), /fell back to CPU/);
+});
 
 test("embedding profile keeps the configured local model or selects Qwen remotely", () => {
   assert.equal(
