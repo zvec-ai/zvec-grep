@@ -6,7 +6,6 @@ const REPORT_ROWS = [
   ["index", "Gold covered by index", "coverage"],
   ["fts", "Gold recalled by FTS", "coverage"],
   ["vector", "Gold recalled by Vector", "coverage"],
-  ["loaded", "Gold lost during Entity loading", "loss"],
   ["selected", "Gold lost at final top 10", "loss"],
 ];
 
@@ -34,7 +33,7 @@ export function goldStagesMarkdown(summary) {
     "",
     `Verified captures: **${summary.observed_calls}/${summary.calls}** planned calls. Invalid captures: **${summary.invalid_calls}**.`,
     "",
-    "Coverage sums Gold targets across all five calls. Loading losses start from the fused pool. Final losses start from the loaded pool. N/A means unknown, and — means the route did not run.",
+    "Coverage sums Gold targets across all five calls. Final losses are measured against the loaded pool. N/A means unknown, and — means the route did not run.",
     "",
     "See `gold-stages.json` for all stages, diagnostic cutoffs, and per-target ranks.",
     "",

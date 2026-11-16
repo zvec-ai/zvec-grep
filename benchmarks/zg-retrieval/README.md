@@ -158,7 +158,7 @@ It sends the original public requests and records evidence in a private
 directory outside the corpus. Older candidates produce unobserved stages.
 
 Each suite's report shows index coverage, Gold recalled per route, and Gold
-lost during Entity loading and final selection. It shows separate tables for
+lost at final selection. It shows separate tables for
 File and Entity. The coverage denominator counts Gold targets across all five
 calls, including unknowns.
 SWE-QA20 uses its QA File labels here and separates formal, diagnostic and
@@ -166,7 +166,8 @@ unresolved cases. Unresolved Gold stays in the per-call evidence. Quarry uses
 its verified File and Entity labels for diagnostics. Existing score tables
 keep their original denominators and aggregation.
 
-`gold-stages.json` contains the full stage breakdown and diagnostic cutoffs.
+`gold-stages.json` contains the full stage breakdown, including Entity loading
+losses for troubleshooting, and the diagnostic cutoffs.
 
 | Boundary | Evidence and reference for loss |
 | --- | --- |

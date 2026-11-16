@@ -89,7 +89,7 @@ test("keeps missing traces and ambiguous Entity ranges unknown", () => {
   assert.equal(mismatch.targets[1].coverage.selected, null);
 });
 
-test("stage summary shows coverage for recall and only losses for candidate removal", () => {
+test("stage summary shows index coverage, recall, and final losses", () => {
   const summary = summarizeGoldStages([
     scoreGoldStages(fixture()),
     scoreGoldStages({ ...fixture(), mode: "fts", capture: null }),
@@ -101,7 +101,6 @@ test("stage summary shows coverage for recall and only losses for candidate remo
     "| Gold covered by index | N/A | — | 3/3 |",
     "| Gold recalled by FTS | N/A | — | 2/3 |",
     "| Gold recalled by Vector | — | — | 2/3 |",
-    "| Gold lost during Entity loading | N/A | — | 1 |",
     "| Gold lost at final top 10 | N/A | — | 1 |",
   ]);
 });
