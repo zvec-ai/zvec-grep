@@ -28,8 +28,10 @@ import {
 
 const MODES = ["hybrid", "fts", "vector"];
 const identity = (repository, commit) => ({ repository, commit });
-const GOLD_STAGE_SUITES = [
+const SUITE_TITLES = [
   ["sweqa", "SWE-QA20"],
+  ["beir", "BEIR"],
+  ["duretrieval", "DuRetrieval"],
   ["quarry", "Quarry"],
 ];
 
@@ -39,7 +41,7 @@ export function validateCandidateGoldStages(summaries = {}) {
     "Invalid candidate Gold stage summaries",
   );
   return Object.fromEntries(
-    GOLD_STAGE_SUITES.filter(([suite]) => Object.hasOwn(summaries, suite)).map(
+    SUITE_TITLES.filter(([suite]) => Object.hasOwn(summaries, suite)).map(
       ([suite]) => [suite, validateGoldStageSummary(summaries[suite])],
     ),
   );
@@ -191,12 +193,10 @@ export function compareCombinedResults(baseline, candidate, metadata) {
       rows.push(row);
     }
   }
-  const goldStages = validateCandidateGoldStages({
-    ...(candidate.sweqa.gold_stages ? { sweqa: candidate.sweqa.gold_stages } : {}),
-    ...(candidate.pilots.quarry.report?.gold_stages
-      ? { quarry: candidate.pilots.quarry.report.gold_stages }
-      : {}),
-  });
+  const goldStages = validateCandidateGoldStages(Object.fromEntries([
+    ["sweqa", candidate.sweqa.gold_stages],
+    ...PILOT_NAMES.map((name) => [name, candidate.pilots[name].report?.gold_stages]),
+  ].filter(([, summary]) => summary)));
   return {
     schema_version: 1,
     kind: "retrieval-version-comparison",
@@ -325,12 +325,7 @@ export function markdownVersionComparison(result) {
       mrr_at_10: "file_mrr_at_10",
       ndcg_at_10: "ndcg_at_10",
     };
-    for (const [suite, title] of [
-      ["sweqa", "SWE-QA20"],
-      ["beir", "BEIR"],
-      ["duretrieval", "DuRetrieval"],
-      ["quarry", "Quarry"],
-    ]) {
+    for (const [suite, title] of SUITE_TITLES) {
       const qa = suite === "sweqa" && hasQa;
       const pilotQa = result.rows.some(
         (row) => row.suite === suite && row.entity_diagnostic,
@@ -393,7 +388,7 @@ export function markdownVersionComparison(result) {
             .replace(/[\r\n]+/g, " ")}`,
       ),
     );
-  for (const [suite, title] of GOLD_STAGE_SUITES) {
+  for (const [suite, title] of SUITE_TITLES) {
     const summary = result.candidate_gold_stages?.[suite];
     if (!summary) continue;
     lines.push(

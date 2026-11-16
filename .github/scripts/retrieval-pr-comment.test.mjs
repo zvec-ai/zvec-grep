@@ -266,10 +266,14 @@ test("the publisher renders validated candidate Gold coverage in a collapsed sec
       },
     })),
   };
-  const payload = { ...report, candidate_gold_stages: { quarry: stageSummary } };
+  const payload = { ...report, candidate_gold_stages: Object.fromEntries(
+    Object.keys(models).map((suite) => [suite, stageSummary]),
+  ) };
   await x.write("comparison/summary.json", payload);
   await publish(x);
   const { body } = x.messages()[0][1];
+  assert.equal((body.match(/<details>/g) ?? []).length, 4);
+  assert.equal((body.match(/#### (File|Entity) Gold/g) ?? []).length, 8);
   const [coverage] = body.match(/<details>\n<summary>Quarry: Candidate Gold coverage by stage<\/summary>[\s\S]*?<\/details>/);
   assert.match(coverage, /#### File Gold/);
   assert.match(coverage, /#### Entity Gold/);

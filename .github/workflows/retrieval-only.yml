@@ -39,7 +39,7 @@ on:
           - local
           - remote
       gold_stages:
-        description: Capture Gold coverage at search stages in SWE-QA20 and Quarry
+        description: Capture Gold coverage at search stages in all four suites
         type: boolean
         default: false
 
@@ -252,7 +252,8 @@ jobs:
             --package "$RUNNER_TEMP/package/candidate.tgz" \
             --output "$RUNNER_TEMP/beir" \
             --model-cache "$RUNNER_TEMP/beir-model-cache" \
-            --candidate-commit "${{ needs.package-candidate.outputs.candidate-commit }}"
+            --candidate-commit "${{ needs.package-candidate.outputs.candidate-commit }}" \
+            ${{ inputs.gold_stages && '--gold-stages' || '' }}
       - name: Publish BEIR results for this job
         if: ${{ always() && steps.access.outcome == 'success' }}
         run: |
@@ -269,6 +270,7 @@ jobs:
           path: |
             ${{ runner.temp }}/beir/report.json
             ${{ runner.temp }}/beir/report.md
+            ${{ runner.temp }}/beir/gold-stages.json
           if-no-files-found: warn
           retention-days: 14
       - name: Preserve BEIR public evidence
@@ -328,7 +330,8 @@ jobs:
             --package "$RUNNER_TEMP/package/candidate.tgz" \
             --output "$RUNNER_TEMP/duretrieval" \
             --model-cache "$RUNNER_TEMP/duretrieval-model-cache" \
-            --candidate-commit "${{ needs.package-candidate.outputs.candidate-commit }}"
+            --candidate-commit "${{ needs.package-candidate.outputs.candidate-commit }}" \
+            ${{ inputs.gold_stages && '--gold-stages' || '' }}
       - name: Publish DuRetrieval results for this job
         if: ${{ always() && steps.access.outcome == 'success' }}
         run: |
@@ -345,6 +348,7 @@ jobs:
           path: |
             ${{ runner.temp }}/duretrieval/report.json
             ${{ runner.temp }}/duretrieval/report.md
+            ${{ runner.temp }}/duretrieval/gold-stages.json
           if-no-files-found: warn
           retention-days: 14
       - name: Preserve DuRetrieval public evidence

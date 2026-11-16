@@ -257,6 +257,11 @@ function metricsFromRanks(targets, found, unknown, ndcg) {
   return result;
 }
 
+// A group completes at its latest member rank. The first complete group wins.
+export function evidenceCompletionRank(groups, memberRank) {
+  return Math.min(...groups.map((group) => Math.max(...group.map(memberRank))));
+}
+
 function evidenceSetMetrics(items, targets, entityByteRanges, ndcg) {
   const members = [];
   const alternatives = targets.map((target, targetIndex) => {
@@ -317,19 +322,11 @@ function evidenceSetMetrics(items, targets, entityByteRanges, ndcg) {
   const found = new Map(),
     uncertain = new Map();
   for (const [index, target] of targets.entries()) {
-    // AND within a set: completion is its latest required member.
-    // OR across alternatives: the earliest complete set determines the rank.
     const completion = (includePossible) =>
-      Math.min(
-        ...alternatives[index].map((set) =>
-          Math.max(
-            ...set.map((id) =>
-              Math.min(
-                definite.get(id) ?? Infinity,
-                includePossible ? (possible.get(id) ?? Infinity) : Infinity,
-              ),
-            ),
-          ),
+      evidenceCompletionRank(alternatives[index], (id) =>
+        Math.min(
+          definite.get(id) ?? Infinity,
+          includePossible ? (possible.get(id) ?? Infinity) : Infinity,
         ),
       );
     const knownRank = completion(false),

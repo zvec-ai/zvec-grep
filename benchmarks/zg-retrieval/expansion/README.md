@@ -92,8 +92,9 @@ original query/qrel records are checked in.
 
 ## Gold and scoring
 
-Quarry supports the opt-in [Gold stage diagnostic](../README.md#gold-coverage-by-retrieval-stage).
-Run `node benchmarks/zg-retrieval/expansion/run.mjs --suite quarry --package CANDIDATE.tgz --output NEW_DIR --gold-stages`.
+All three pilots support the opt-in [Gold stage diagnostic](../README.md#gold-coverage-by-retrieval-stage).
+Add `--gold-stages` to the local `expansion/run.mjs` command with `--suite beir`,
+`--suite duretrieval`, or `--suite quarry`.
 
 | Suite | File Gold | Entity Gold |
 | --- | --- | --- |

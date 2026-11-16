@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { goldPaths } from "../core/gold-stage-capture.mjs";
-import { entityMatch } from "./entities.mjs";
+import { entityMatch, evidenceCompletionRank } from "./entities.mjs";
 
 const LIMIT = 10;
 
@@ -32,7 +32,7 @@ function location(path, range, sourceOffset) {
   };
 }
 
-function bestRank(matches, getRank, limit = Infinity) {
+function spanRanks(matches, getRank, limit) {
   let best = Infinity;
   let possible = Infinity;
   for (const { entry, match } of matches) {
@@ -41,6 +41,15 @@ function bestRank(matches, getRank, limit = Infinity) {
     if (match === null) possible = Math.min(rank, possible);
     else best = Math.min(rank, best);
   }
+  return { best, possible };
+}
+
+function bestRank(groups, getRank, limit = Infinity) {
+  const ranks = groups.map((group) => group.map((matches) =>
+    spanRanks(matches, getRank, limit),
+  ));
+  const best = evidenceCompletionRank(ranks, (rank) => rank.best);
+  const possible = evidenceCompletionRank(ranks, (rank) => Math.min(rank.best, rank.possible));
   return {
     covered: best < Infinity ? true : possible < Infinity ? null : false,
     rank: possible < best ? "unobserved" : best < Infinity ? best : "miss",
@@ -93,10 +102,17 @@ function validateCapture(capture, paths, mode, items, useBytes, sourceOffsets) {
 
 function scoreTarget(capture, target, level, useBytes, sourceOffset) {
   const entries = Object.values(capture.files[target.path] ?? {});
-  const matches = (field) => entries.map((entry) => ({
-    entry,
-    match: matchTarget(target.path, entry[field], target, level, useBytes, sourceOffset),
-  }));
+  const groups = level === "entity" && target.evidence_sets
+    ? target.evidence_sets.map(({ spans }) => spans.map((span) => ({
+        ...span, path: target.path, id: target.id,
+      })))
+    : [[target]];
+  const matches = (field) => groups.map((spans) => spans.map((span) =>
+    entries.map((entry) => ({
+      entry,
+      match: matchTarget(target.path, entry[field], span, level, useBytes, sourceOffset),
+    })),
+  ));
   const canonical = matches("range");
   const loaded = matches("loaded_range");
   const at = (field) => (entry) => entry[field];

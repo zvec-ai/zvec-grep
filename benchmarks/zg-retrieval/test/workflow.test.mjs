@@ -235,12 +235,10 @@ test("the four suites run in independent jobs using one candidate package", asyn
   );
   assert.ok(runner);
   assert.doesNotMatch(runner, /--(?:modes|preview)\b|RETRIEVAL_MODES|inputs\.(?!gold_stages\b)/);
-  for (const suite of ["sweqa", "quarry"]) {
+  for (const suite of ["sweqa", "beir", "duretrieval", "quarry"]) {
     assert.match(jobs[suite], /inputs\.gold_stages && '--gold-stages'/);
     assert.match(jobs[suite], /gold-stages\.json/);
   }
-  for (const suite of ["beir", "duretrieval"])
-    assert.doesNotMatch(jobs[suite], /--gold-stages/);
   assert.doesNotMatch(runner, /--repository\b/);
   assert.match(jobs["quality-contract"], /uses: actions\/setup-python@/);
   assert.match(jobs.sweqa, /needs: \[authorize, package-candidate\]/);

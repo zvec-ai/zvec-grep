@@ -87,6 +87,44 @@ test("keeps missing traces and ambiguous Entity ranges unknown", () => {
   assert.equal(mismatch.targets[1].coverage.selected, null);
 });
 
+test("SciFact Gold completes an alternative evidence group within each stage", () => {
+  const observed = fixture();
+  const [first, second, third] = pair.entity_targets;
+  observed.pair = {
+    ...pair,
+    entity_targets: [{
+      id: "scifact-document",
+      path,
+      evidence_sets: [
+        { id: "both", spans: [first, second] },
+        { id: "alternative", spans: [third] },
+      ],
+    }],
+  };
+  const { a, c } = observed.capture.files[path];
+  a.static_rank = 2;
+  const score = () => scoreGoldStages(observed).targets[1];
+  const complete = score();
+  assert.equal(complete.ranks.fts, 200);
+  assert.equal(complete.ranks.vector, 16);
+  assert.equal(complete.ranks.fused, 11);
+  assert.equal(complete.coverage.static_top10, true);
+  assert.equal(complete.coverage.actual_top10, false);
+
+  // In this replay the required spans arrive through different routes.
+  a.recall = { vector: 5 };
+  c.recall = {};
+  const split = score();
+  assert.equal(split.coverage.fts, false);
+  assert.equal(split.coverage.vector, false);
+  assert.equal(split.coverage.recall, true);
+  a.range = null;
+  assert.equal(score().coverage.recall, null);
+
+  observed.pair.entity_targets = [];
+  assert.deepEqual(scoreGoldStages(observed).targets.map(({ level }) => level), ["file"]);
+});
+
 test("stage summary shows coverage at every stage", () => {
   const observed = fixture();
   observed.capture.files[path].a.static_rank = 2;

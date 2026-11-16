@@ -643,7 +643,6 @@ export async function main(args = process.argv.slice(2)) {
     "requires --suite, --package and --output",
   );
   const pilot = await loadPilot(values.suite);
-  assert.ok(!values["gold-stages"] || values.suite === "quarry", "stage diagnostics are available for the Quarry code suite");
   const output = resolve(values.output);
   await mkdir(output, { recursive: false });
   const options = {

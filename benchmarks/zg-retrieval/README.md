@@ -151,13 +151,13 @@ Evidence retention is 14 days. After a shared candidate build, SWE-QA20, BEIR, D
 ### Gold coverage by retrieval stage
 
 Enable `gold_stages` in the manual workflow, or add `--gold-stages` to the
-local SWE-QA20 runner and the expansion runner with `--suite quarry`. Use a
+local SWE-QA20 or expansion runner. Use a
 candidate built with stage capture support. The optional capture uses the
 same five calls, frozen source and QA labels, adaptive recall and `limit: 10`.
 It sends the original public requests and records evidence in a private
 directory outside the corpus. Older candidates produce unobserved stages.
-PR comparisons enable capture on the candidate and show the SWE-QA20 and
-Quarry candidate tables in collapsed sections of the English PR result comment.
+PR comparisons enable capture on the candidate. The English PR result comment
+shows a collapsed section with File and Entity Gold tables for each suite.
 
 Each suite's report shows index coverage, Gold recalled per route, and Gold
 covered at ten with same-file decay off and on. Both top-ten rows use the same
@@ -166,9 +166,10 @@ separate tables.
 The coverage denominator counts Gold targets across all five calls, including
 unknowns.
 SWE-QA20 uses its QA File labels here and separates formal, diagnostic and
-unresolved cases. Unresolved Gold stays in the per-call evidence. Quarry uses
-its verified File and Entity labels for diagnostics. Existing score tables
-keep their original denominators and aggregation.
+unresolved cases. Unresolved Gold stays in the per-call evidence. The pilot
+suites use their verified File and Entity labels for diagnostics. A pilot call
+with File Gold alone contributes to File coverage. Existing score tables keep
+their original denominators and aggregation.
 
 `gold-stages.json` contains stage coverage and losses, including Entity
 loading losses for troubleshooting.
@@ -182,8 +183,10 @@ loading losses for troubleshooting.
 | Same-file decay off / on @10 | With decay off, rank by static score and take the first ten as a diagnostic. With decay on, use the actual results of the native greedy selection. Both loss counts use the loaded pool as their baseline. |
 
 The shared matcher preserves same-file full containment. SWE-QA20 follows its
-line-based score and Quarry uses its verified UTF-8 byte ranges, adding back
-any UTF-8 BOM that the index decoder stripped. `gold-stages.json`
+line-based score. The pilots use verified UTF-8 byte ranges, adding back any
+UTF-8 BOM that the index decoder stripped. For SciFact, all required spans in
+one accepted evidence group must be covered within the same stage. The rank
+is the earliest position that completes any group. `gold-stages.json`
 keeps every call's Gold IDs, known ranks, misses, unobserved values, recall depths
 and pool sizes. Its `loaded` rank is the RRF order within the surviving loaded
 pool, while `fused` is the original rank across the full fusion pool. The report

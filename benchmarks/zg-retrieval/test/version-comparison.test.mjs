@@ -195,14 +195,20 @@ test("comparison carries candidate stage coverage into the collapsed PR tables",
       ),
     }],
   };
-  before.sweqa.gold_stages = summary;
-  after.pilots.quarry.report.gold_stages = summary;
+  before.pilots.quarry.report.gold_stages = { ...summary, observed_calls: 0 };
+  after.sweqa.gold_stages = summary;
+  for (const pilot of Object.values(after.pilots)) pilot.report.gold_stages = summary;
   const comparison = compareCombinedResults(before, after, metadata);
-  assert.deepEqual(comparison.candidate_gold_stages, { quarry: summary });
+  assert.deepEqual(comparison.candidate_gold_stages, {
+    sweqa: summary, beir: summary, duretrieval: summary, quarry: summary,
+  });
   const markdown = markdownVersionComparison(comparison);
-  assert.match(markdown, /<details>\n<summary>Quarry: Candidate Gold coverage by stage<\/summary>/);
+  assert.deepEqual(
+    [...markdown.matchAll(/<details>\n<summary>([^<]+): Candidate Gold coverage by stage<\/summary>/g)]
+      .map((match) => match[1]),
+    ["SWE-QA20", "BEIR", "DuRetrieval", "Quarry"],
+  );
   assert.match(markdown, /\| Same-file decay off \| — \| — \| 3\/5 \|/);
-  assert.doesNotMatch(markdown, /<summary>SWE-QA20: Candidate Gold coverage/);
 });
 
 test("model budgets propagate to each dataset without changing retrieval metrics", () => {
