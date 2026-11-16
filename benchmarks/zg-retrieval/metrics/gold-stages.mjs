@@ -18,7 +18,7 @@ export const GOLD_STAGES = [
   ["actual_top10", "Same-file decay @10", "loaded"],
 ];
 
-function location(path, range) {
+function location(path, range, sourceOffset) {
   return {
     path,
     range: range?.text ? {
@@ -27,8 +27,8 @@ function location(path, range) {
       end_line: range.text.end.line,
     } : null,
     source_bytes: range?.text ? {
-      start_byte: range.text.start.byte_offset,
-      end_byte: range.text.end.byte_offset,
+      start_byte: range.text.start.byte_offset + sourceOffset,
+      end_byte: range.text.end.byte_offset + sourceOffset,
     } : null,
   };
 }
@@ -48,9 +48,9 @@ function bestRank(matches, getRank, limit = Infinity) {
   };
 }
 
-function matchTarget(path, range, target, level, useBytes) {
+function matchTarget(path, range, target, level, useBytes, sourceOffset) {
   if (level === "file") return path === target.path;
-  const { hits, possible } = entityMatch(location(path, range), [target], useBytes);
+  const { hits, possible } = entityMatch(location(path, range, sourceOffset), [target], useBytes);
   return hits.length > 0 ? true : possible.length > 0 ? null : false;
 }
 
@@ -60,7 +60,7 @@ function applicable(mode) {
   );
 }
 
-function validateCapture(capture, paths, mode, items, useBytes) {
+function validateCapture(capture, paths, mode, items, useBytes, sourceOffsets) {
   assert.equal(capture.version, 1, "unknown stage capture version");
   assert.equal(capture.limit, LIMIT, "unexpected retrieval limit");
   const routes = mode === "hybrid" ? ["fts", "vector"] : [mode];
@@ -76,7 +76,7 @@ function validateCapture(capture, paths, mode, items, useBytes) {
     for (const entry of Object.values(entries)) {
       if (entry.final_rank === null) continue;
       const item = items[entry.final_rank - 1];
-      const observed = location(path, entry.loaded_range);
+      const observed = location(path, entry.loaded_range, sourceOffsets[path] ?? 0);
       assert.ok(item && item.rank === entry.final_rank && !seen.has(item.rank), "invalid selected rank");
       assert.equal(item.path, path, "engine and public result paths differ");
       if (item.range?.kind === "text" && observed.range) {
@@ -92,11 +92,11 @@ function validateCapture(capture, paths, mode, items, useBytes) {
   assert.ok(items.every((item) => !paths.has(item.path) || seen.has(item.rank)), "watched public result missing from capture");
 }
 
-function scoreTarget(capture, target, level, useBytes) {
+function scoreTarget(capture, target, level, useBytes, sourceOffset) {
   const entries = Object.values(capture.files[target.path] ?? {});
   const matches = (field) => entries.map((entry) => ({
     entry,
-    match: matchTarget(target.path, entry[field], target, level, useBytes),
+    match: matchTarget(target.path, entry[field], target, level, useBytes, sourceOffset),
   }));
   const canonical = matches("range");
   const loaded = matches("loaded_range");
@@ -119,19 +119,21 @@ function scoreTarget(capture, target, level, useBytes) {
   };
 }
 
-export function scoreGoldStages({ capture, pair, items, taskId, mode, repetition, qualification, useBytes = false }) {
+export function scoreGoldStages({ capture, pair, items, taskId, mode, repetition, qualification, useBytes = false, sourceOffsets = {} }) {
   let state = capture ? (capture.index_observed ? "observed" : "index_unobserved") : "unobserved";
   let error;
   if (capture) {
     try {
-      validateCapture(capture, new Set(goldPaths(pair)), mode, items, useBytes);
+      validateCapture(capture, new Set(goldPaths(pair)), mode, items, useBytes, sourceOffsets);
     } catch (failure) {
       state = "invalid";
       error = failure.message;
     }
   }
   const targets = ["file", "entity"].flatMap((level) => pair[`${level}_targets`].map((target) => {
-    const stages = state === "observed" ? scoreTarget(capture, target, level, useBytes) : {};
+    const stages = state === "observed"
+      ? scoreTarget(capture, target, level, useBytes, sourceOffsets[target.path] ?? 0)
+      : {};
     const coverage = Object.fromEntries(applicable(mode).map(([key]) => [key, stages[key]?.covered ?? null]));
     const ranks = Object.fromEntries([
       ...applicable(mode).filter(([key]) => ["fts", "vector", "fused", "loaded", "selected"].includes(key)).map(([key]) => key),

@@ -76,6 +76,11 @@ function invalidate(score, reason) {
   };
 }
 
+function goldStageQualification(pair) {
+  const { status } = qaEligibility(pair);
+  return status === "scored" ? "formal" : status;
+}
+
 export async function aggregate(directory, { expectedTasks } = {}) {
   directory = resolve(directory);
   const suite = await loadSuite();
@@ -84,7 +89,7 @@ export async function aggregate(directory, { expectedTasks } = {}) {
   const errors = [],
     observations = [],
     manifests = [];
-  const goldStageCalls = [];
+  const goldStageCalls = new Map();
   const runDirectories = await findRuns(directory);
   const seen = new Set();
   for (const runDirectory of runDirectories) {
@@ -397,18 +402,17 @@ export async function aggregate(directory, { expectedTasks } = {}) {
       if (callInvalid.length) score = invalidate(score, callInvalid.join("; "));
       if (manifest.gold_stages) {
         const pair = suite.qa_pairs[call.task_id];
-        const { status } = qaEligibility(pair);
         const capture = score.execution_status === "success"
           ? await readGoldStages(runDirectory, call.gold_stage_capture)
           : null;
-        goldStageCalls.push(scoreGoldStages({
+        goldStageCalls.set(`${call.task_id}/${call.mode}/${call.repetition}`, scoreGoldStages({
           capture,
           pair,
           items: score.items ?? [],
           taskId: call.task_id,
           mode: call.mode,
           repetition: call.repetition,
-          qualification: status === "scored" ? "formal" : status,
+          qualification: goldStageQualification(pair),
         }));
       }
       observations.push({
@@ -646,8 +650,21 @@ export async function aggregate(directory, { expectedTasks } = {}) {
     repositories: manifests,
     tasks: quality,
   };
-  if (manifests.some(({ gold_stages }) => gold_stages))
-    report.gold_stages = await writeGoldStages(directory, goldStageCalls);
+  if (manifests.some(({ gold_stages }) => gold_stages)) {
+    const calls = [];
+    for (const taskId of expected) {
+      const pair = suite.qa_pairs[taskId];
+      const qualification = goldStageQualification(pair);
+      for (const mode of suite.protocol.modes) {
+        for (let repetition = 1; repetition <= suite.protocol.repetitions; repetition++) {
+          calls.push(goldStageCalls.get(`${taskId}/${mode}/${repetition}`) ?? scoreGoldStages({
+            capture: null, pair, items: [], taskId, mode, repetition, qualification,
+          }));
+        }
+      }
+    }
+    report.gold_stages = await writeGoldStages(directory, calls);
+  }
   await writeFile(
     join(directory, "scores.jsonl"),
     observations.map((row) => JSON.stringify(row)).join("\n") + "\n",

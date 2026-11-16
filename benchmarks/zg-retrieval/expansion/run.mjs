@@ -19,7 +19,7 @@ import {
 } from "../metrics/repetitions.mjs";
 import { summarizeQaRetrieval } from "../metrics/entities.mjs";
 import { QA_ENTITY_METRICS, qaPercentCell } from "../reports/zg.mjs";
-import { pilotQaTargets, summarizePilotEntity, verifyPilotGoldSources } from "./gold.mjs";
+import { indexedSourceOffsets, pilotQaTargets, summarizePilotEntity, verifyPilotGoldSources } from "./gold.mjs";
 import {
   locateFullEntity,
   parseVisibleResponse,
@@ -344,6 +344,10 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
   await mkdir(evidence, { recursive: true });
   const root = resolve(group.root);
   const goldSources = await verifyPilotGoldSources(pilot.gold, group);
+  if (options.goldStages) {
+    const offsets = indexedSourceOffsets(goldSources);
+    if (Object.keys(offsets).length) report.gold_stage_source_offsets[group.id] = offsets;
+  }
   const indexTimeoutMs = pilot.config.indexTimeoutMinutes * 60_000;
   const home = join(evidence, "runtime-home");
   const opencode = join(evidence, "opencode.json");
@@ -668,6 +672,7 @@ export async function main(args = process.argv.slice(2)) {
     rows: [],
     failures: [],
     index_seconds: {},
+    ...(options.goldStages ? { gold_stage_source_offsets: {} } : {}),
     index_counts: summarizeIndexCounts(
       pilotCorpusIds(pilot).map((id) => ({
         id,
@@ -767,6 +772,7 @@ export async function main(args = process.argv.slice(2)) {
           repetition,
           qualification: "diagnostic",
           useBytes: true,
+          sourceOffsets: report.gold_stage_source_offsets[row.corpus_id],
         }));
       }
     }

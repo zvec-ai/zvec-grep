@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { goldStageSession, readGoldStages } from "../core/gold-stage-capture.mjs";
+import { indexedSourceOffsets } from "../expansion/gold.mjs";
 import { scoreGoldStages, summarizeGoldStages } from "../metrics/gold-stages.mjs";
 
 const path = "code.go";
@@ -85,6 +86,23 @@ test("keeps missing traces and ambiguous Entity ranges unknown", () => {
   const mismatch = scoreGoldStages(evidence);
   assert.equal(mismatch.state, "invalid");
   assert.equal(mismatch.targets[1].coverage.selected, null);
+});
+
+test("maps indexed offsets to frozen source bytes for a verified UTF-8 BOM", () => {
+  const evidence = fixture();
+  evidence.pair = { ...pair, entity_targets: pair.entity_targets.map((target) => ({
+    ...target, start_byte: target.start_byte + 3, end_byte: target.end_byte + 3,
+  })) };
+  evidence.items[4].source_bytes = { start_byte: 4, end_byte: 25 };
+  evidence.sourceOffsets = indexedSourceOffsets(new Map([
+    [path, { bytes: Buffer.from("\uFEFFpackage example") }],
+    ["plain.go", { bytes: Buffer.from("package example") }],
+  ]));
+  assert.deepEqual(evidence.sourceOffsets, { [path]: 3 });
+  const scored = scoreGoldStages(evidence);
+  assert.equal(scored.state, "observed");
+  assert.equal(scored.targets[1].coverage.index, true);
+  assert.equal(scored.targets[1].ranks.selected, 5);
 });
 
 test("binds capture bytes to the call and disables capture after a transport failure", async () => {

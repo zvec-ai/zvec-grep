@@ -173,7 +173,8 @@ keep their original denominators and aggregation.
 | RRF order / static score / same-file decay @10 | Compare all three orders with the same loaded pool. The first two cutoffs are diagnostic. Actual selection uses the native greedy same-file decay and stops at 10, so loaded but unselected Gold has no actual final rank. |
 
 The shared matcher preserves same-file full containment. SWE-QA20 follows its
-line-based score and Quarry uses its verified UTF-8 byte ranges. `gold-stages.json`
+line-based score and Quarry uses its verified UTF-8 byte ranges, adding back
+any UTF-8 BOM that the index decoder stripped. `gold-stages.json`
 keeps every call's Gold IDs, known ranks, misses, unobserved values, recall depths
 and pool sizes. Its `loaded` rank is the RRF order within the surviving loaded
 pool, while `fused` is the original rank across the full fusion pool. The report
