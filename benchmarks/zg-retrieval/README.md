@@ -154,10 +154,26 @@ Enable `gold_stages` in the manual workflow, or add `--gold-stages` to the
 local SWE-QA20 or expansion runner. Use a
 candidate built with stage capture support. The optional capture uses the
 same five calls, frozen source and QA labels, adaptive recall and `limit: 10`.
-It sends the original public requests and records evidence in a private
-directory outside the corpus. Older candidates produce unobserved stages.
+It sends the original public requests and receives stage data in response
+metadata. Older candidates produce unobserved stages.
 PR comparisons enable capture on the candidate. The English PR result comment
 shows a collapsed section with File and Entity Gold tables for each suite.
+
+The runner sets `ZG_TRACE_STAGES=1` and `ZG_TRACE_PATHS` before starting its
+isolated daemon. `ZG_TRACE_PATHS` is a JSON array of repository-relative paths:
+the union of watched files for that repository or corpus group. It contains no
+Gold labels or target coordinates. The engine looks up these paths directly by
+`path_key`, records stages in memory, and returns a capture array in MCP
+`_meta.zg_stage_trace`. Each capture has a `group_id` identifying its search
+group. CLI diagnostics use one `[ZG_STAGE]` JSON line per group on stderr,
+emitted by the CLI client; ordinary search output is unchanged.
+For daemon-backed queries, set these variables before starting the daemon;
+changing only the client environment does not reconfigure an existing daemon.
+
+ZG does not read control files or write trace files. The benchmark reads each
+capture from the response, scores it in memory, and can retain it in the existing
+raw MCP evidence. It writes the final `gold-stages.json` report outside the
+searchable corpus. Capture and report storage belong to the benchmark.
 
 Each suite's report shows index coverage, Gold recalled per route, and Gold
 covered at ten with same-file decay off and on. Both top-ten rows use the same
@@ -191,11 +207,14 @@ keeps every call's Gold IDs, known ranks, misses, unobserved values, recall dept
 and pool sizes. Its `loaded` rank is the RRF order within the surviving loaded
 pool, while `fused` is the original rank across the full fusion pool. The report
 checks selected Gold-file paths and coordinates against the public response.
-Raw captures contain Gold-file coordinates and ranks, with overall pool counts.
+Raw captures contain watched-file coordinates and ranks, with overall pool counts.
 They carry no query text, snippet text, vectors or model credentials.
 
 The JSON records mean index-read time for observed calls. Enabled MCP latency
-also includes capture bookkeeping, an extra static-order sort and sidecar I/O.
+also includes capture bookkeeping, an extra static-order sort, and metadata
+serialization and transfer. Candidate diagnostics are enabled independently of
+the baseline, so these timings are not a comparison of normal search speed.
+Measure performance separately with capture disabled on both versions.
 
 SWE-QA20 ZG reports use **schema 7**, with `preview: "full"`, three `modes`, and one quality row per question/mode. Its section uses the **schema 5** overview with fixed `zg-hybrid`, `zg-fts`, `zg-vector` rows; the combined page uses schema 1. The SWE-QA20 overview records coverage, failed task IDs/modes/reasons, the frozen harness commit and selected candidate ref/commit. Quality rows retain all five public result lists and measurement observations so validators can recompute the case mean, ranking stability, output size and latency. The representative fifth-call `file_retrieval` and `ndcg` fields remain for evidence; `quality_mean` supplies headline quality.
 

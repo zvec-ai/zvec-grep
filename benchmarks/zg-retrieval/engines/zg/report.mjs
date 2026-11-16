@@ -28,7 +28,7 @@ import {
   summarizeRepeatedQuality,
 } from "../../metrics/repetitions.mjs";
 import { markdownReport } from "../../reports/zg.mjs";
-import { readGoldStages } from "../../core/gold-stage-capture.mjs";
+import { readStageTrace } from "../../core/gold-stage-capture.mjs";
 import { scoreGoldStages } from "../../metrics/gold-stages.mjs";
 import { writeGoldStages } from "../../reports/gold-stages.mjs";
 import { summarizeIndexCounts } from "../../core/index-counts.mjs";
@@ -362,6 +362,7 @@ export async function aggregate(directory, { expectedTasks } = {}) {
         callInvalid.push("incorrect quality repetition");
       if (call.harness_error) callInvalid.push(call.harness_error);
       let score;
+      let stageCapture = null;
       let visibleOutputBytes = null;
       try {
         assert.equal(
@@ -377,6 +378,7 @@ export async function aggregate(directory, { expectedTasks } = {}) {
           "raw response changed since capture",
         );
         const response = await readJson(path);
+        stageCapture = readStageTrace(response);
         if (
           Array.isArray(response?.content) &&
           response.content.every(
@@ -402,18 +404,20 @@ export async function aggregate(directory, { expectedTasks } = {}) {
       if (callInvalid.length) score = invalidate(score, callInvalid.join("; "));
       if (manifest.gold_stages) {
         const pair = suite.qa_pairs[call.task_id];
-        const capture = score.execution_status === "success"
-          ? await readGoldStages(runDirectory, call.gold_stage_capture)
-          : null;
-        goldStageCalls.set(`${call.task_id}/${call.mode}/${call.repetition}`, scoreGoldStages({
-          capture,
-          pair,
-          items: score.items ?? [],
-          taskId: call.task_id,
-          mode: call.mode,
-          repetition: call.repetition,
-          qualification: goldStageQualification(pair),
-        }));
+        const capture =
+          score.execution_status === "success" ? stageCapture : null;
+        goldStageCalls.set(
+          `${call.task_id}/${call.mode}/${call.repetition}`,
+          scoreGoldStages({
+            capture,
+            pair,
+            items: score.items ?? [],
+            taskId: call.task_id,
+            mode: call.mode,
+            repetition: call.repetition,
+            qualification: goldStageQualification(pair),
+          }),
+        );
       }
       observations.push({
         ...call,
@@ -656,10 +660,23 @@ export async function aggregate(directory, { expectedTasks } = {}) {
       const pair = suite.qa_pairs[taskId];
       const qualification = goldStageQualification(pair);
       for (const mode of suite.protocol.modes) {
-        for (let repetition = 1; repetition <= suite.protocol.repetitions; repetition++) {
-          calls.push(goldStageCalls.get(`${taskId}/${mode}/${repetition}`) ?? scoreGoldStages({
-            capture: null, pair, items: [], taskId, mode, repetition, qualification,
-          }));
+        for (
+          let repetition = 1;
+          repetition <= suite.protocol.repetitions;
+          repetition++
+        ) {
+          calls.push(
+            goldStageCalls.get(`${taskId}/${mode}/${repetition}`) ??
+              scoreGoldStages({
+                capture: null,
+                pair,
+                items: [],
+                taskId,
+                mode,
+                repetition,
+                qualification,
+              }),
+          );
         }
       }
     }

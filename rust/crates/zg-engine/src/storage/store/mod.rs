@@ -326,10 +326,7 @@ impl IndexStore {
     ) -> EngineResult<Vec<IndexedSourceFile>> {
         self.read(|state| {
             let mut watched = Vec::new();
-            for (id, path) in state.files.list_paths()? {
-                if !paths.contains(&path) {
-                    continue;
-                }
+            for (id, path) in state.files.lookup_paths(paths)? {
                 let ids = state.entities.list_ids_for_file(id)?;
                 let ids = ids
                     .into_iter()

@@ -6,8 +6,8 @@ mod support;
 use std::{cmp::Ordering, collections::HashMap};
 
 use super::{
-    gold_stages::GoldStages,
     pipeline::{ResolvedSearchRoute, SearchHit},
+    stage_trace::StageTraceCollector,
 };
 use crate::{
     api::context::{options::QueryFilter, result::SearchRankingTrace},
@@ -71,7 +71,7 @@ pub(super) fn rank(
     filter: &QueryFilter,
     maximum_rrf: f64,
     limit: usize,
-    gold: Option<&mut GoldStages>,
+    observation: Option<&mut StageTraceCollector>,
 ) -> Vec<SearchHit> {
     rank_with_policy(
         hits,
@@ -80,7 +80,7 @@ pub(super) fn rank(
         maximum_rrf,
         limit,
         Policy::CURRENT,
-        gold,
+        observation,
     )
 }
 
@@ -91,7 +91,7 @@ fn rank_with_policy(
     maximum_rrf: f64,
     limit: usize,
     policy: Policy,
-    gold: Option<&mut GoldStages>,
+    observation: Option<&mut StageTraceCollector>,
 ) -> Vec<SearchHit> {
     if hits.is_empty() || limit == 0 {
         return Vec::new();
@@ -143,11 +143,11 @@ fn rank_with_policy(
     if policy.support_weight > 0.0 {
         support::apply(&mut scored, policy.support_weight);
     }
-    if let Some(gold) = gold {
+    if let Some(observation) = observation {
         let mut order = scored.iter().collect::<Vec<_>>();
         order.sort_by(|a, b| compare(a, b, a.static_score, b.static_score));
         for (index, item) in order.into_iter().enumerate() {
-            gold.static_rank(&item.hit, index + 1);
+            observation.static_rank(&item.hit, index + 1);
         }
     }
     select(scored, &query, limit, policy)

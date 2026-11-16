@@ -1,15 +1,11 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { writeJson } from "../core/io.mjs";
-import { summarizeGoldStages } from "../metrics/gold-stages.mjs";
+import { GOLD_STAGES, summarizeGoldStages } from "../metrics/gold-stages.mjs";
 
-const REPORT_ROWS = [
-  ["index", "Gold covered by index"],
-  ["fts", "Gold recalled by FTS"],
-  ["vector", "Gold recalled by Vector"],
-  ["static_top10", "Same-file decay off"],
-  ["actual_top10", "Same-file decay on (actual)"],
-];
+const REPORT_ROWS = GOLD_STAGES.filter(({ label }) => label).map(
+  ({ id, label }) => [id, label],
+);
 const MODES = ["fts", "vector", "hybrid"];
 const LEVELS = ["file", "entity"];
 const QUALIFICATIONS = ["formal", "diagnostic"];
@@ -30,30 +26,48 @@ export function validateGoldStageSummary(summary) {
     countWithin(invalid_calls, calls - observed_calls),
     "Invalid failed Gold stage call count",
   );
-  assert.ok(Array.isArray(groups) && groups.length <= 12, "Invalid Gold stage groups");
+  assert.ok(
+    Array.isArray(groups) && groups.length <= 12,
+    "Invalid Gold stage groups",
+  );
   const seen = new Set();
-  const validated = groups.map(({ qualification, level, mode, targets, stages }) => {
-    assert.ok(
-      QUALIFICATIONS.includes(qualification) && LEVELS.includes(level) && MODES.includes(mode),
-      "Invalid Gold stage group",
-    );
-    const group = `${qualification}/${level}/${mode}`;
-    assert.ok(!seen.has(group), "Duplicate Gold stage group");
-    seen.add(group);
-    assert.ok(countWithin(targets), "Invalid Gold stage target count");
-    const coverage = {};
-    for (const [key] of REPORT_ROWS) {
-      if ((key === "fts" && mode === "vector") || (key === "vector" && mode === "fts")) continue;
-      const { covered, unknown } = stages?.[key] ?? {};
+  const validated = groups.map(
+    ({ qualification, level, mode, targets, stages }) => {
       assert.ok(
-        countWithin(covered, targets) && countWithin(unknown, targets - covered),
-        "Invalid Gold stage coverage",
+        QUALIFICATIONS.includes(qualification) &&
+          LEVELS.includes(level) &&
+          MODES.includes(mode),
+        "Invalid Gold stage group",
       );
-      coverage[key] = { covered, unknown };
-    }
-    return { qualification, level, mode, targets, stages: coverage };
-  });
-  return { version: 1, calls, observed_calls, invalid_calls, groups: validated };
+      const group = `${qualification}/${level}/${mode}`;
+      assert.ok(!seen.has(group), "Duplicate Gold stage group");
+      seen.add(group);
+      assert.ok(countWithin(targets), "Invalid Gold stage target count");
+      const coverage = {};
+      for (const [key] of REPORT_ROWS) {
+        if (
+          (key === "fts" && mode === "vector") ||
+          (key === "vector" && mode === "fts")
+        )
+          continue;
+        const { covered, unknown } = stages?.[key] ?? {};
+        assert.ok(
+          countWithin(covered, targets) &&
+            countWithin(unknown, targets - covered),
+          "Invalid Gold stage coverage",
+        );
+        coverage[key] = { covered, unknown };
+      }
+      return { qualification, level, mode, targets, stages: coverage };
+    },
+  );
+  return {
+    version: 1,
+    calls,
+    observed_calls,
+    invalid_calls,
+    groups: validated,
+  };
 }
 
 export async function writeGoldStages(directory, calls) {
@@ -81,11 +95,15 @@ export function goldStagesMarkdown(summary, { heading = true } = {}) {
     "Each row shows Gold coverage across all five calls. The decay rows use the same loaded candidates, RRF scores, static scores, and 10-result limit. Decay on uses the actual results. N/A means unknown, and — means the route did not run.",
     "",
     "See `gold-stages.json` for all stages and per-target ranks.",
+    "Diagnostic MCP latency includes stage capture, serialization and transfer; compare normal search latency with capture disabled on both versions.",
     "",
   ];
   for (const qualification of QUALIFICATIONS) {
     for (const level of LEVELS) {
-      const groups = summary.groups.filter((group) => group.qualification === qualification && group.level === level);
+      const groups = summary.groups.filter(
+        (group) =>
+          group.qualification === qualification && group.level === level,
+      );
       if (!groups.length) continue;
       lines.push(
         `#### ${level === "file" ? "File" : "Entity"} Gold (${qualification})`,
@@ -95,7 +113,10 @@ export function goldStagesMarkdown(summary, { heading = true } = {}) {
       );
       for (const [key, name] of REPORT_ROWS) {
         const cells = MODES.map((mode) =>
-          stageCell(groups.find((item) => item.mode === mode), key),
+          stageCell(
+            groups.find((item) => item.mode === mode),
+            key,
+          ),
         );
         lines.push(`| ${name} | ${cells.join(" | ")} |`);
       }

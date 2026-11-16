@@ -18,7 +18,7 @@ pub(crate) trait SearchStorage: Send + Sync {
     fn load_search_hits(&self, hits: &[StorageSearchHit]) -> EngineResult<StoredSearchData>;
     fn indexed_sources(&self, _paths: &HashSet<PathBuf>) -> EngineResult<Vec<IndexedSourceFile>> {
         Err(EngineError::unsupported(
-            "Gold stage index observation unavailable",
+            "stage index observation unavailable",
         ))
     }
     fn search_fts(

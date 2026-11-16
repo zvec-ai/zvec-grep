@@ -1,144 +1,73 @@
-//! Private sidecar for the Retrieval-only benchmark's isolated daemon.
+//! Request-local stage collection; no persistence or benchmark scoring.
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    env, fs,
+    env,
+    ffi::OsStr,
     path::PathBuf,
     time::Instant,
 };
-
-use serde::{Deserialize, Serialize};
 
 use super::{
     pipeline::{ResolvedSearchRoute, SearchHit},
     storage::SearchStorage,
 };
 use crate::{
-    api::context::options::ContextRouteMode,
-    domain::{EntityId, FileId, Range},
+    api::context::stage_trace::{
+        CandidateStages, ObservedEntity, RecallAttempt, StagePoolSizes, StageRecall, StageTrace,
+    },
+    domain::{EntityId, FileId},
     storage::types::StorageSearchHit,
-    utils::atomic_write,
 };
 
-#[derive(Deserialize)]
-struct Request {
-    id: u32,
-    query: String,
-    mode: String,
-    paths: HashSet<PathBuf>,
-}
-
-#[derive(Default, Serialize)]
-struct CandidateStages {
-    recall: BTreeMap<String, usize>,
-    merged: bool,
-    rrf_rank: Option<usize>,
-    loaded_rrf_rank: Option<usize>,
-    loaded_range: Option<Range>,
-    static_rank: Option<usize>,
-    final_rank: Option<usize>,
-}
-
-#[derive(Serialize)]
-struct ObservedEntity {
-    range: Option<Range>,
-    searchable: bool,
-    #[serde(flatten)]
-    stages: CandidateStages,
-}
-
-impl ObservedEntity {
-    fn new(range: Option<Range>, searchable: bool) -> Self {
-        Self {
-            range,
-            searchable,
-            stages: CandidateStages::default(),
-        }
+pub(super) fn configured_paths() -> Option<HashSet<PathBuf>> {
+    let enabled = env::var_os("ZG_TRACE_STAGES");
+    if enabled.as_deref() != Some(OsStr::new("1")) {
+        return None;
     }
+    parse_paths(env::var_os("ZG_TRACE_PATHS").as_deref())
 }
 
-#[derive(Serialize)]
-struct RecallAttempt {
-    depth: usize,
-    returned_fragments: usize,
+fn parse_paths(paths: Option<&OsStr>) -> Option<HashSet<PathBuf>> {
+    paths.map_or_else(
+        || Some(HashSet::new()),
+        |paths| serde_json::from_str(paths.to_str()?).ok(),
+    )
 }
 
-#[derive(Default, Serialize)]
-struct Recall {
-    attempts: Vec<RecallAttempt>,
-    unique_fragments: usize,
-    #[serde(skip)]
-    fragments: HashSet<String>,
-}
-
-#[derive(Default, Serialize)]
-struct PoolSizes {
-    merged: usize,
-    fused: usize,
-    loaded: usize,
-    selected: usize,
-}
-
-#[derive(Serialize)]
-struct Capture {
-    version: u32,
-    id: u32,
-    limit: usize,
-    index_observed: bool,
-    index_read_ms: f64,
-    routes: BTreeMap<String, Recall>,
-    sizes: PoolSizes,
-    files: BTreeMap<String, BTreeMap<String, ObservedEntity>>,
-}
-
-pub(super) struct GoldStages {
-    directory: PathBuf,
+pub(super) struct StageTraceCollector {
     paths: HashMap<FileId, String>,
-    capture: Capture,
+    fragments: BTreeMap<String, HashSet<String>>,
+    capture: StageTrace,
 }
 
-impl GoldStages {
+impl StageTraceCollector {
     pub(super) fn begin(
         routes: &[ResolvedSearchRoute],
         limit: usize,
-        prefer_symbol: bool,
+        watched: &HashSet<PathBuf>,
         storage: &dyn SearchStorage,
-    ) -> Option<Self> {
-        let directory = PathBuf::from(env::var_os("ZG_RETRIEVAL_GOLD_STAGE_DIR")?);
-        let request: Request =
-            serde_json::from_slice(&fs::read(directory.join("request.json")).ok()?).ok()?;
-        let fts = routes
-            .iter()
-            .filter(|route| route.mode == ContextRouteMode::Fts)
-            .count();
-        let vector = routes.len() - fts;
-        let mode = match (fts, vector) {
-            (1, 0) => "fts",
-            (0, 1) => "vector",
-            (1, 1) => "hybrid",
-            _ => return None,
-        };
-        if limit != 10
-            || prefer_symbol
-            || request.mode != mode
-            || routes
-                .iter()
-                .any(|route| route.query != request.query.trim())
-        {
-            return None;
-        }
+    ) -> Self {
         let started = Instant::now();
-        let indexed = storage.indexed_sources(&request.paths);
-        let mut capture = Capture {
+        let indexed = storage.indexed_sources(watched);
+        let index_read_ms = started.elapsed().as_secs_f64() * 1_000.0;
+        let mut watched_paths = watched
+            .iter()
+            .filter_map(|path| path.to_str())
+            .map(|path| path.replace(std::path::MAIN_SEPARATOR, "/"))
+            .collect::<Vec<_>>();
+        watched_paths.sort();
+        let mut capture = StageTrace {
             version: 1,
-            id: request.id,
+            group_id: String::new(),
             limit,
+            watched_paths,
             index_observed: indexed.is_ok(),
-            index_read_ms: started.elapsed().as_secs_f64() * 1_000.0,
+            index_read_ms,
             routes: routes
                 .iter()
-                .map(|route| (route.id.clone(), Recall::default()))
+                .map(|route| (route.id.clone(), StageRecall::default()))
                 .collect(),
-            sizes: PoolSizes::default(),
+            sizes: StagePoolSizes::default(),
             files: BTreeMap::new(),
         };
         let mut paths = HashMap::new();
@@ -161,11 +90,11 @@ impl GoldStages {
                     .collect(),
             );
         }
-        Some(Self {
-            directory,
+        Self {
             paths,
+            fragments: BTreeMap::new(),
             capture,
-        })
+        }
     }
 
     fn stages(&mut self, file: FileId, id: &EntityId) -> Option<&mut CandidateStages> {
@@ -183,10 +112,9 @@ impl GoldStages {
             depth,
             returned_fragments: hits.len(),
         });
-        recall
-            .fragments
-            .extend(hits.iter().map(|hit| hit.document_id.clone()));
-        recall.unique_fragments = recall.fragments.len();
+        let fragments = self.fragments.entry(route.to_owned()).or_default();
+        fragments.extend(hits.iter().map(|hit| hit.document_id.clone()));
+        recall.unique_fragments = fragments.len();
         for (position, hit) in hits.iter().enumerate() {
             if let Some(stages) = self.stages(hit.file_id, &hit.entity_id) {
                 let best = stages
@@ -229,7 +157,7 @@ impl GoldStages {
         for (position, hit) in hits.iter().enumerate() {
             if let Some(stages) = self.stages(hit.file.id(), hit.entity.id()) {
                 stages.loaded_rrf_rank = Some(position + 1);
-                stages.loaded_range = Some(hit.entity.source_range());
+                stages.loaded_range = Some(hit.entity.source_range().into());
             }
         }
     }
@@ -240,20 +168,29 @@ impl GoldStages {
         }
     }
 
-    pub(super) fn finish(mut self, hits: &[SearchHit]) {
+    pub(super) fn finish(mut self, hits: &[SearchHit]) -> StageTrace {
         self.capture.sizes.selected = hits.len();
         for hit in hits {
             if let Some(stages) = self.stages(hit.file.id(), hit.entity.id()) {
                 stages.final_rank = Some(hit.rank);
             }
         }
-        if let Ok(bytes) = serde_json::to_vec(&self.capture) {
-            let _ = atomic_write(
-                &self
-                    .directory
-                    .join(format!("capture-{}.json", self.capture.id)),
-                &bytes,
-            );
-        }
+        self.capture
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watched_paths_are_optional_and_require_a_json_array() {
+        assert_eq!(parse_paths(None), Some(HashSet::new()));
+        assert_eq!(
+            parse_paths(Some(OsStr::new(r#"["src/a.rs","src/b.rs","src/a.rs"]"#))),
+            Some(["src/a.rs", "src/b.rs"].map(PathBuf::from).into())
+        );
+        assert!(parse_paths(Some(OsStr::new("not json"))).is_none());
+        assert!(parse_paths(Some(OsStr::new(r#"{"path":"src/a.rs"}"#))).is_none());
     }
 }

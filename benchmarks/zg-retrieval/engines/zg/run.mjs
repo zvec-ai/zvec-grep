@@ -29,7 +29,7 @@ import {
   inside,
 } from "../../core/lib.mjs";
 import { embeddingRuntime } from "../../core/embedding.mjs";
-import { goldStageSession } from "../../core/gold-stage-capture.mjs";
+import { stageTraceEnvironment } from "../../core/gold-stage-capture.mjs";
 import { aggregate } from "./report.mjs";
 import { NativeIndexProductError, snapshotIndex } from "./snapshot.mjs";
 
@@ -436,12 +436,17 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
       pathToFileURL(require.resolve("@modelcontextprotocol/client/stdio")).href
     );
     client = new Client({ name: "zg-retrieval-only", version: "1.0.0" });
-    const goldStages = await goldStageSession(output, options.goldStages);
     transport = new StdioClientTransport({
       command: command[0],
       args: command.slice(1),
       cwd: root,
-      env: { ...env, ...goldStages?.env },
+      env: {
+        ...env,
+        ...stageTraceEnvironment(
+          options.goldStages,
+          tasks.map((task) => suite.qa_pairs[task.task_id]),
+        ),
+      },
       stderr: "pipe",
     });
     let mcpStderr = "";
@@ -530,7 +535,6 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
     phase = "replay";
     for (const [index, call] of planned.entries()) {
       const args = requestArguments(call.task, root, call.mode, protocol);
-      const stageId = await goldStages?.before(call.task.query, call.mode, suite.qa_pairs[call.task.task_id]);
       const start = performance.now();
       let response, error;
       try {
@@ -555,7 +559,6 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
         transport_error: error ?? null,
         raw_path: `raw/${call.task.task_slug}-${call.mode}-${call.preview}-${call.repetition}.json`,
       };
-      if (goldStages) record.gold_stage_capture = await goldStages.after(stageId, error);
       await writeJson(join(output, record.raw_path), response);
       record.raw_sha256 = await fileHash(join(output, record.raw_path));
       await appendFile(

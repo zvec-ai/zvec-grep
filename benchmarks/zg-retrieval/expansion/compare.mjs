@@ -17,6 +17,7 @@ import {
   PILOT_FILE_RECALL_METRICS,
   PILOT_NAMES,
   PILOT_QA_SCORING,
+  PILOT_SUITES,
 } from "./config.mjs";
 import { compareReports } from "../reports/compare.mjs";
 import { QUALITY_METRICS } from "../reports/ci.mjs";
@@ -30,9 +31,7 @@ const MODES = ["hybrid", "fts", "vector"];
 const identity = (repository, commit) => ({ repository, commit });
 const SUITE_TITLES = [
   ["sweqa", "SWE-QA20"],
-  ["beir", "BEIR"],
-  ["duretrieval", "DuRetrieval"],
-  ["quarry", "Quarry"],
+  ...PILOT_NAMES.map((name) => [name, PILOT_SUITES[name].report.comparison]),
 ];
 
 export function validateCandidateGoldStages(summaries = {}) {
@@ -193,10 +192,17 @@ export function compareCombinedResults(baseline, candidate, metadata) {
       rows.push(row);
     }
   }
-  const goldStages = validateCandidateGoldStages(Object.fromEntries([
-    ["sweqa", candidate.sweqa.gold_stages],
-    ...PILOT_NAMES.map((name) => [name, candidate.pilots[name].report?.gold_stages]),
-  ].filter(([, summary]) => summary)));
+  const goldStages = validateCandidateGoldStages(
+    Object.fromEntries(
+      [
+        ["sweqa", candidate.sweqa.gold_stages],
+        ...PILOT_NAMES.map((name) => [
+          name,
+          candidate.pilots[name].report?.gold_stages,
+        ]),
+      ].filter(([, summary]) => summary),
+    ),
+  );
   return {
     schema_version: 1,
     kind: "retrieval-version-comparison",
@@ -213,7 +219,9 @@ export function compareCombinedResults(baseline, candidate, metadata) {
     harness_commit: baseline.harness_commit,
     index_counts: indexCounts,
     index_settings: indexSettings,
-    ...(Object.keys(goldStages).length ? { candidate_gold_stages: goldStages } : {}),
+    ...(Object.keys(goldStages).length
+      ? { candidate_gold_stages: goldStages }
+      : {}),
     rows,
     errors: [],
   };

@@ -16,7 +16,9 @@ import { QA_SCORING } from "../core/suite.mjs";
 import { summarizeIndexSettings } from "../core/index-settings.mjs";
 import {
   PILOT_FILE_RECALL_METRICS,
+  PILOT_NAMES,
   PILOT_QA_SCORING,
+  PILOT_SUITES,
 } from "../expansion/config.mjs";
 
 const baseSha = "a".repeat(40),
@@ -57,7 +59,7 @@ function result(commit, value = 0.5) {
       rows,
     },
     pilots: Object.fromEntries(
-      ["beir", "duretrieval", "quarry"].map((name) => [
+      PILOT_NAMES.map((name) => [
         name,
         {
           status: "success",
@@ -186,29 +188,78 @@ test("comparison carries candidate stage coverage into the collapsed PR tables",
     calls: 5,
     observed_calls: 5,
     invalid_calls: 0,
-    groups: [{
-      qualification: "diagnostic", level: "file", mode: "hybrid", targets: 5,
-      stages: Object.fromEntries(
-        ["index", "fts", "vector", "static_top10", "actual_top10"].map(
-          (key) => [key, { covered: key === "static_top10" ? 3 : 5, unknown: 0 }],
+    groups: [
+      {
+        qualification: "diagnostic",
+        level: "file",
+        mode: "hybrid",
+        targets: 5,
+        stages: Object.fromEntries(
+          ["index", "fts", "vector", "static_top10", "actual_top10"].map(
+            (key) => [
+              key,
+              { covered: key === "static_top10" ? 3 : 5, unknown: 0 },
+            ],
+          ),
         ),
-      ),
-    }],
+      },
+    ],
   };
   before.pilots.quarry.report.gold_stages = { ...summary, observed_calls: 0 };
   after.sweqa.gold_stages = summary;
-  for (const pilot of Object.values(after.pilots)) pilot.report.gold_stages = summary;
+  for (const pilot of Object.values(after.pilots))
+    pilot.report.gold_stages = summary;
   const comparison = compareCombinedResults(before, after, metadata);
-  assert.deepEqual(comparison.candidate_gold_stages, {
-    sweqa: summary, beir: summary, duretrieval: summary, quarry: summary,
-  });
+  assert.deepEqual(
+    comparison.candidate_gold_stages,
+    Object.fromEntries(
+      ["sweqa", ...PILOT_NAMES].map((name) => [name, summary]),
+    ),
+  );
   const markdown = markdownVersionComparison(comparison);
   assert.deepEqual(
-    [...markdown.matchAll(/<details>\n<summary>([^<]+): Candidate Gold coverage by stage<\/summary>/g)]
-      .map((match) => match[1]),
-    ["SWE-QA20", "BEIR", "DuRetrieval", "Quarry"],
+    [
+      ...markdown.matchAll(
+        /<details>\n<summary>([^<]+): Candidate Gold coverage by stage<\/summary>/g,
+      ),
+    ].map((match) => match[1]),
+    [
+      "SWE-QA20",
+      ...PILOT_NAMES.map((name) => PILOT_SUITES[name].report.comparison),
+    ],
   );
   assert.match(markdown, /\| Same-file decay off \| — \| — \| 3\/5 \|/);
+});
+
+test("a newly registered suite retains stage coverage and its trusted report title", async () => {
+  const name = "new-pilot";
+  PILOT_SUITES[name] = { report: { comparison: "New pilot" } };
+  PILOT_NAMES.push(name);
+  try {
+    // Load the comparator as it would start after the registry was extended.
+    const extended = await import("../expansion/compare.mjs?new-suite-test");
+    const before = result(baseSha);
+    const after = result(headSha);
+    const summary = {
+      version: 1,
+      calls: 5,
+      observed_calls: 0,
+      invalid_calls: 0,
+      groups: [],
+    };
+    after.pilots[name].report.gold_stages = summary;
+    const comparison = extended.compareCombinedResults(before, after, metadata);
+    assert.deepEqual(comparison.candidate_gold_stages[name], summary);
+    const markdown = extended.markdownVersionComparison(comparison);
+    assert.match(markdown, /^### New pilot$/m);
+    assert.match(
+      markdown,
+      /<summary>New pilot: Candidate Gold coverage by stage<\/summary>/,
+    );
+  } finally {
+    PILOT_NAMES.pop();
+    delete PILOT_SUITES[name];
+  }
 });
 
 test("model budgets propagate to each dataset without changing retrieval metrics", () => {
