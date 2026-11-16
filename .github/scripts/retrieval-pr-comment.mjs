@@ -387,7 +387,9 @@ export function validateComparison(report, request) {
     ...(report.index_settings === undefined
       ? {}
       : { index_settings: indexSettings }),
-    ...(Object.keys(goldStages).length ? { candidate_gold_stages: goldStages } : {}),
+    ...(Object.keys(goldStages).length
+      ? { candidate_gold_stages: goldStages }
+      : {}),
     rows,
     errors: [],
   };

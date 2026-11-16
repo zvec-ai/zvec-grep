@@ -259,11 +259,15 @@ export function pilotQaTargets(entry) {
 /** ZG strips a UTF-8 BOM before indexing; pilot Gold counts its on-disk bytes. */
 export function indexedSourceOffsets(files) {
   const bom = Buffer.from([0xef, 0xbb, 0xbf]);
-  return Object.fromEntries([...files]
-    .filter(([, { bytes }]) => bytes.subarray(0, bom.length).equals(bom))
-    .map(([path]) => [path, bom.length]));
+  return Object.fromEntries(
+    [...files]
+      .filter(([, { bytes }]) => bytes.subarray(0, bom.length).equals(bom))
+      .map(([path]) => [path, bom.length]),
+  );
 }
 
 export function summarizePilotEntity(calls, entry) {
-  return summarizeDiagnosticRetrieval(calls, pilotQaTargets(entry), { entityByteRanges: true });
+  return summarizeDiagnosticRetrieval(calls, pilotQaTargets(entry), {
+    entityByteRanges: true,
+  });
 }
