@@ -178,6 +178,33 @@ test("indexed corpus counts compare once per suite and preserve unknown totals",
   assert.throws(() => compareCombinedResults(before, after, metadata));
 });
 
+test("comparison carries candidate stage coverage into the collapsed PR tables", () => {
+  const before = result(baseSha);
+  const after = result(headSha);
+  const summary = {
+    version: 1,
+    calls: 5,
+    observed_calls: 5,
+    invalid_calls: 0,
+    groups: [{
+      qualification: "diagnostic", level: "file", mode: "hybrid", targets: 5,
+      stages: Object.fromEntries(
+        ["index", "fts", "vector", "static_top10", "actual_top10"].map(
+          (key) => [key, { covered: key === "static_top10" ? 3 : 5, unknown: 0 }],
+        ),
+      ),
+    }],
+  };
+  before.sweqa.gold_stages = summary;
+  after.pilots.quarry.report.gold_stages = summary;
+  const comparison = compareCombinedResults(before, after, metadata);
+  assert.deepEqual(comparison.candidate_gold_stages, { quarry: summary });
+  const markdown = markdownVersionComparison(comparison);
+  assert.match(markdown, /<details>\n<summary>Quarry: Candidate Gold coverage by stage<\/summary>/);
+  assert.match(markdown, /\| Same-file decay off \| — \| — \| 3\/5 \|/);
+  assert.doesNotMatch(markdown, /<summary>SWE-QA20: Candidate Gold coverage/);
+});
+
 test("model budgets propagate to each dataset without changing retrieval metrics", () => {
   const before = result(baseSha),
     after = result(headSha);

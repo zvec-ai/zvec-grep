@@ -17,6 +17,9 @@ on:
       artifact_prefix:
         default: retrieval
         type: string
+      gold_stages:
+        default: false
+        type: boolean
     secrets:
       QWEN_EMBEDDING_API_KEY:
         required: false

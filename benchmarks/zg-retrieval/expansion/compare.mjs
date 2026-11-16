@@ -6,6 +6,10 @@ import { parseArgs } from "node:util";
 import { loadSuite } from "../core/lib.mjs";
 import { validateIndexCounts } from "../core/index-counts.mjs";
 import { validateIndexSettings } from "../core/index-settings.mjs";
+import {
+  goldStagesMarkdown,
+  validateGoldStageSummary,
+} from "../reports/gold-stages.mjs";
 import { indexSettingsComparisonMarkdown } from "../reports/index-settings.mjs";
 import { QA_SCORING } from "../core/suite.mjs";
 import { buildCombined } from "./combined.mjs";
@@ -24,6 +28,22 @@ import {
 
 const MODES = ["hybrid", "fts", "vector"];
 const identity = (repository, commit) => ({ repository, commit });
+const GOLD_STAGE_SUITES = [
+  ["sweqa", "SWE-QA20"],
+  ["quarry", "Quarry"],
+];
+
+export function validateCandidateGoldStages(summaries = {}) {
+  assert.ok(
+    summaries && typeof summaries === "object" && !Array.isArray(summaries),
+    "Invalid candidate Gold stage summaries",
+  );
+  return Object.fromEntries(
+    GOLD_STAGE_SUITES.filter(([suite]) => Object.hasOwn(summaries, suite)).map(
+      ([suite]) => [suite, validateGoldStageSummary(summaries[suite])],
+    ),
+  );
+}
 
 export const QA_DIAGNOSTICS = {
   file: {
@@ -171,6 +191,12 @@ export function compareCombinedResults(baseline, candidate, metadata) {
       rows.push(row);
     }
   }
+  const goldStages = validateCandidateGoldStages({
+    ...(candidate.sweqa.gold_stages ? { sweqa: candidate.sweqa.gold_stages } : {}),
+    ...(candidate.pilots.quarry.report?.gold_stages
+      ? { quarry: candidate.pilots.quarry.report.gold_stages }
+      : {}),
+  });
   return {
     schema_version: 1,
     kind: "retrieval-version-comparison",
@@ -187,6 +213,7 @@ export function compareCombinedResults(baseline, candidate, metadata) {
     harness_commit: baseline.harness_commit,
     index_counts: indexCounts,
     index_settings: indexSettings,
+    ...(Object.keys(goldStages).length ? { candidate_gold_stages: goldStages } : {}),
     rows,
     errors: [],
   };
@@ -366,6 +393,17 @@ export function markdownVersionComparison(result) {
             .replace(/[\r\n]+/g, " ")}`,
       ),
     );
+  for (const [suite, title] of GOLD_STAGE_SUITES) {
+    const summary = result.candidate_gold_stages?.[suite];
+    if (!summary) continue;
+    lines.push(
+      "",
+      "<details>",
+      `<summary>${title}: Candidate Gold coverage by stage</summary>`,
+      ...goldStagesMarkdown(summary, { heading: false }),
+      "</details>",
+    );
+  }
   if (result.run_url)
     lines.push("", `[Full reports and per-call evidence](${result.run_url})`);
   return `${lines.join("\n")}\n`;

@@ -101,8 +101,8 @@ test("stage summary shows coverage at every stage", () => {
     "| Gold covered by index | N/A | — | 3/3 |",
     "| Gold recalled by FTS | N/A | — | 2/3 |",
     "| Gold recalled by Vector | — | — | 2/3 |",
-    "| Top 10 coverage (same-file decay off) | N/A | — | 2/3 |",
-    "| Top 10 coverage (same-file decay on, actual) | N/A | — | 1/3 |",
+    "| Same-file decay off | N/A | — | 2/3 |",
+    "| Same-file decay on (actual) | N/A | — | 1/3 |",
   ]);
 });
 

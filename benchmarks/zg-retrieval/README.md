@@ -156,6 +156,8 @@ candidate built with stage capture support. The optional capture uses the
 same five calls, frozen source and QA labels, adaptive recall and `limit: 10`.
 It sends the original public requests and records evidence in a private
 directory outside the corpus. Older candidates produce unobserved stages.
+PR comparisons enable capture on the candidate and show the SWE-QA20 and
+Quarry candidate tables in collapsed sections of the English PR result comment.
 
 Each suite's report shows index coverage, Gold recalled per route, and Gold
 covered at ten with same-file decay off and on. Both top-ten rows use the same

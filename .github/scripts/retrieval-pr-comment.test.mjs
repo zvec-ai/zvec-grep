@@ -246,6 +246,42 @@ test("the publisher labels validated full preview without relabeling historical 
     );
 });
 
+test("the publisher renders validated candidate Gold coverage in a collapsed section", async (t) => {
+  const x = await fixture(t);
+  const stageSummary = {
+    version: 1,
+    calls: 10,
+    observed_calls: 5,
+    invalid_calls: 0,
+    groups: ["file", "entity"].map((level) => ({
+      qualification: "diagnostic",
+      level,
+      mode: "fts",
+      targets: 5,
+      stages: {
+        index: { covered: 5, unknown: 0 },
+        fts: { covered: 4, unknown: 1 },
+        static_top10: { covered: 2, unknown: 0 },
+        actual_top10: { covered: 0, unknown: 5 },
+      },
+    })),
+  };
+  const payload = { ...report, candidate_gold_stages: { quarry: stageSummary } };
+  await x.write("comparison/summary.json", payload);
+  await publish(x);
+  const { body } = x.messages()[0][1];
+  const [coverage] = body.match(/<details>\n<summary>Quarry: Candidate Gold coverage by stage<\/summary>[\s\S]*?<\/details>/);
+  assert.match(coverage, /#### File Gold/);
+  assert.match(coverage, /#### Entity Gold/);
+  assert.match(coverage, /\| Gold recalled by FTS \| 4\/5 \(1 unknown\) \| — \| — \|/);
+  assert.match(coverage, /\| Same-file decay off \| 2\/5 \| — \| — \|/);
+  assert.match(coverage, /\| Same-file decay on \(actual\) \| N\/A \| — \| — \|/);
+  assert.doesNotMatch(coverage, /Top 10 coverage/);
+
+  stageSummary.groups[0].stages.index.covered = "untrusted text";
+  assert.throws(() => validateComparison(payload, request), /Invalid Gold stage coverage/);
+});
+
 test("the publisher validates corpus totals and renders each suite once", async (t) => {
   const x = await fixture(t);
   const counts = countsFor("beir");

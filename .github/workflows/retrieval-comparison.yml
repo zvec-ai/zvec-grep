@@ -35,6 +35,7 @@ jobs:
       candidate_repository: ${{ inputs.candidate_repository }}
       embedding: local
       artifact_prefix: retrieval-head
+      gold_stages: true
 
   compare:
     needs: [baseline, candidate]

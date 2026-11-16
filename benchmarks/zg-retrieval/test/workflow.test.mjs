@@ -72,6 +72,8 @@ test("Retrieval-only retains its reusable and manual candidate/embedding inputs"
   const goldStages = block(dispatch, "gold_stages", 6);
   assert.match(goldStages, /^ {8}type: boolean$/m);
   assert.match(goldStages, /^ {8}default: false$/m);
+  const reusableGoldStages = block(block(workflow, "workflow_call", 2), "gold_stages", 6);
+  assert.match(reusableGoldStages, /^ {8}type: boolean$/m);
   assert.equal((dispatch.match(/^ {6}[a-z_]+:$/gm) ?? []).length, 3);
   const files = await readdir(new URL(".github/workflows/", repository));
   assert.deepEqual(
@@ -166,6 +168,8 @@ test("version comparison keeps artifact namespaces separate and uses local model
     comparisonWorkflow,
     /secrets:|secrets\.|: write|swe-qa-bench/,
   );
+  assert.match(block(comparisonWorkflow, "candidate", 2), /^ {6}gold_stages: true$/m);
+  assert.doesNotMatch(block(comparisonWorkflow, "baseline", 2), /gold_stages:/);
   const compare = block(comparisonWorkflow, "compare", 2);
   assert.match(compare, /if: always\(\) && !cancelled\(\)/);
   assert.match(compare, /name: retrieval-base-results/);
