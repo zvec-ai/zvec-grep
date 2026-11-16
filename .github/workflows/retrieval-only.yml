@@ -541,7 +541,6 @@ jobs:
           path: ${{ runner.temp }}/a10-model-cache
           key: retrieval-a10-${{ matrix.model }}-v1-${{ runner.os }}-${{ runner.arch }}
       - name: Run the frozen Retrieval-only suite with CUDA
-        id: evaluate
         env:
           ORT_LOG: verbose
           RUST_LOG: warn,zg=debug,zg_engine=debug,ort=trace
@@ -591,6 +590,8 @@ jobs:
           path: |
             ${{ runner.temp }}/a10-results/
             !${{ runner.temp }}/a10-results/consumer/**
+            !${{ runner.temp }}/a10-results/corpus/**
+            !${{ runner.temp }}/a10-results/source/**
             !${{ runner.temp }}/a10-results/**/runtime-home/**
           if-no-files-found: warn
           overwrite: true

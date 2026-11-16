@@ -347,7 +347,10 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
   await mkdir(evidence, { recursive: true });
   const root = resolve(group.root);
   const goldSources = await verifyPilotGoldSources(pilot.gold, group);
-  const indexTimeoutMs = pilot.config.indexTimeoutMinutes * 60_000;
+  const indexTimeoutMinutes = device === "cuda"
+    ? Math.max(120, pilot.config.indexTimeoutMinutes)
+    : pilot.config.indexTimeoutMinutes;
+  const indexTimeoutMs = indexTimeoutMinutes * 60_000;
   const home = join(evidence, "runtime-home");
   const opencode = join(evidence, "opencode.json");
   await mkdir(home, { recursive: true });
