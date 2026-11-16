@@ -5,6 +5,7 @@ mod code;
 mod graph;
 mod image;
 mod markdown;
+mod sectioning;
 mod service;
 mod spi;
 mod text;
