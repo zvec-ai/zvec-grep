@@ -158,6 +158,10 @@ It sends the original public requests and receives stage data in response
 metadata. Older candidates produce unobserved stages.
 PR comparisons enable capture on the candidate. The English PR result comment
 shows a collapsed section with File and Entity Gold tables for each suite.
+Incomplete capture is also reported above the collapsed sections. Missing
+metadata stays unobserved; metadata with an invalid shape, group or payload is
+counted as invalid with its reason in the per-call report. Diagnostic failures
+leave stage coverage unknown and do not invalidate otherwise valid search scores.
 
 The runner sets `ZG_TRACE_STAGES=1` and `ZG_TRACE_PATHS` before starting its
 isolated daemon. `ZG_TRACE_PATHS` is a JSON array of repository-relative paths:
@@ -199,7 +203,13 @@ loading losses for troubleshooting.
 | Same-file decay off / on @10 | With decay off, rank by static score and take the first ten as a diagnostic. With decay on, use the actual results of the native greedy selection. Both loss counts use the loaded pool as their baseline. |
 
 The shared matcher preserves same-file full containment. SWE-QA20 follows its
-line-based score. The pilots use verified UTF-8 byte ranges, adding back any
+line-based score. Stage text ranges use Rust's half-open coordinates: a nonempty
+range ending at column zero covers through the previous line; an empty range
+keeps its source position. This matches public result headers and avoids counting
+the following Gold line as covered. Previously generated stage reports could
+overcount this boundary; retain them and rescore their raw metadata into a new
+report when needed. Public retrieval scoring and Gold labels are unchanged.
+The pilots use verified UTF-8 byte ranges, adding back any
 UTF-8 BOM that the index decoder stripped. For SciFact, all required spans in
 one accepted evidence group must be covered within the same stage. The rank
 is the earliest position that completes any group. `gold-stages.json`

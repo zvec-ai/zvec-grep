@@ -5,6 +5,7 @@ import {
   readStageTrace,
 } from "../core/gold-stage-capture.mjs";
 import { indexedSourceOffsets } from "../expansion/gold.mjs";
+import { entityMatch } from "../metrics/entities.mjs";
 import {
   scoreGoldStages,
   summarizeGoldStages,
@@ -268,6 +269,74 @@ test("the compact public range may omit the final line separator", () => {
   assert.equal(scoreGoldStages(observed).state, "invalid");
 });
 
+test("half-open stage ranges do not claim the following Gold line", () => {
+  const observed = fixture();
+  observed.useBytes = false;
+  const covered = { id: "covered", path, start_line: 3, end_line: 4 };
+  const missing = { id: "missing", path, start_line: 3, end_line: 5 };
+  const boundary = { id: "boundary", path, start_line: 4, end_line: 4 };
+  observed.pair = {
+    file_targets: [],
+    entity_targets: [covered, missing, boundary],
+  };
+  const range = text(3, 5, 4, 8);
+  range.text.end.byte_column = 0;
+  Object.assign(observed.capture.files[path].a, {
+    range,
+    loaded_range: range,
+    static_rank: 5,
+  });
+  observed.items[4].range = { kind: "text", start_line: 3, end_line: 4 };
+  const scored = scoreGoldStages(observed);
+  assert.equal(scored.state, "observed");
+  assert.ok(
+    Object.values(scored.targets[0].coverage).every((value) => value === true),
+  );
+  assert.ok(
+    Object.values(scored.targets[1].coverage).every((value) => value === false),
+  );
+  assert.ok(
+    Object.values(scored.targets[2].coverage).every((value) => value === null),
+  );
+  assert.deepEqual(entityMatch(observed.items[4], [covered, missing], false), {
+    hits: ["covered"],
+    possible: [],
+  });
+});
+
+test("stage line ranges match public LF, CRLF, UTF-8 and empty-range boundaries", () => {
+  // [description, start line, end line, start byte, end byte, end column, public last line]
+  const cases = [
+    ["LF", 1, 2, 0, 2, 0, 1],
+    ["CRLF", 1, 2, 0, 3, 0, 1],
+    ["no newline", 1, 1, 0, 1, 1, 1],
+    ["nonzero last column", 1, 2, 0, 3, 1, 2],
+    ["empty file", 1, 1, 0, 0, 0, 1],
+    ["empty range at EOF", 2, 2, 2, 2, 0, 2],
+    ["covered blank line", 1, 3, 0, 3, 0, 2],
+    ["UTF-8 followed by LF", 1, 2, 0, 4, 0, 1],
+  ];
+  for (const [name, first, last, start, end, column, publicLast] of cases) {
+    const observed = fixture();
+    observed.useBytes = false;
+    observed.pair = { file_targets: pair.file_targets, entity_targets: [] };
+    const range = text(first, last, start, end);
+    range.text.end.byte_column = column;
+    Object.assign(observed.capture.files[path].a, {
+      range,
+      loaded_range: range,
+    });
+    observed.items[4].range = {
+      kind: "text",
+      start_line: first,
+      end_line: publicLast,
+    };
+    const scored = scoreGoldStages(observed);
+    assert.equal(scored.state, "observed", name);
+    assert.equal(scored.targets[0].coverage.actual_top10, true, name);
+  }
+});
+
 test("configures session-wide paths without sending Gold labels or using files", () => {
   const extra = {
     file_targets: [],
@@ -288,18 +357,85 @@ test("receives traces from the matching MCP response without carrying state acro
   const response = { content: [], _meta: { zg_stage_trace: [capture] } };
   assert.deepEqual(readStageTrace(response), capture);
   assert.equal(readStageTrace({ content: [] }), null);
+  assert.equal(readStageTrace({ _meta: {} }), null);
   assert.equal(readStageTrace({ ...response, isError: true }), null);
-  assert.equal(
-    readStageTrace({ _meta: { zg_stage_trace: [capture, capture] } }),
-    null,
-  );
-  assert.equal(
-    readStageTrace({
-      _meta: { zg_stage_trace: [{ ...capture, group_id: "Q2" }] },
-    }),
-    null,
-  );
   assert.deepEqual(readStageTrace(response), capture);
+});
+
+test("distinguishes absent metadata from malformed metadata without failing search scoring", () => {
+  const observed = fixture();
+  const missing = scoreGoldStages({
+    ...observed,
+    capture: readStageTrace({ content: [] }),
+  });
+  assert.equal(missing.state, "unobserved");
+  assert.equal(summarizeGoldStages([missing]).invalid_calls, 0);
+  for (const [metadata, reason] of [
+    [null, /must be an array/],
+    [{}, /must be an array/],
+    ["invalid", /must be an array/],
+    [[], /expected one/],
+    [[observed.capture, observed.capture], /expected one/],
+    [[{ ...observed.capture, group_id: "Q2" }], /expected Q1/],
+    [[null], /expected Q1/],
+  ]) {
+    const capture = readStageTrace({
+      content: [],
+      _meta: { zg_stage_trace: metadata },
+    });
+    assert.ok(capture instanceof Error);
+    const scored = scoreGoldStages({ ...observed, capture });
+    assert.equal(scored.state, "invalid");
+    assert.match(scored.error, reason);
+    assert.ok(
+      scored.targets.every(({ coverage }) =>
+        Object.values(coverage).every((value) => value === null),
+      ),
+    );
+    const summary = summarizeGoldStages([scored]);
+    assert.equal(summary.observed_calls, 0);
+    assert.equal(summary.invalid_calls, 1);
+  }
+  assert.equal(scoreGoldStages(observed).state, "observed");
+});
+
+test("malformed capture payloads become invalid without retaining partial target scores", () => {
+  for (const corrupt of [
+    (capture) => {
+      capture.version = 99;
+    },
+    (capture) => {
+      delete capture.index_observed;
+    },
+    (capture) => {
+      delete capture.files[path].b.recall;
+    },
+    // Unselected ranges are read only while scoring, after capture validation.
+    (capture) => {
+      capture.files[path].b.range = { text: { start: {} } };
+    },
+  ]) {
+    const observed = fixture();
+    corrupt(observed.capture);
+    const capture = readStageTrace({
+      _meta: { zg_stage_trace: [observed.capture] },
+    });
+    const scored = scoreGoldStages({ ...observed, capture });
+    assert.equal(scored.state, "invalid");
+    assert.ok(scored.error);
+    assert.ok(
+      scored.targets.every(({ coverage }) =>
+        Object.values(coverage).every((value) => value === null),
+      ),
+    );
+    assert.ok(
+      scored.targets.every(({ ranks }) =>
+        Object.values(ranks).every((value) => value === "unobserved"),
+      ),
+    );
+    assert.equal(summarizeGoldStages([scored]).invalid_calls, 1);
+  }
+  assert.equal(scoreGoldStages(fixture()).state, "observed");
 });
 
 test("distinguishes an unobserved Gold path from an observed path missing in the index", () => {

@@ -29,19 +29,27 @@ export const GOLD_STAGES = [
 ];
 
 function location(path, range, sourceOffset) {
+  const text = range?.text;
   return {
     path,
-    range: range?.text
+    range: text
       ? {
           kind: "text",
-          start_line: range.text.start.line,
-          end_line: range.text.end.line,
+          start_line: text.start.line,
+          // Rust ranges are half-open; public line spans include the last
+          // covered line. Empty ranges keep their source position, even at EOF.
+          end_line:
+            text.end.line -
+            Number(
+              text.end.byte_column === 0 &&
+                text.start.byte_offset < text.end.byte_offset,
+            ),
         }
       : null,
-    source_bytes: range?.text
+    source_bytes: text
       ? {
-          start_byte: range.text.start.byte_offset + sourceOffset,
-          end_byte: range.text.end.byte_offset + sourceOffset,
+          start_byte: text.start.byte_offset + sourceOffset,
+          end_byte: text.end.byte_offset + sourceOffset,
         }
       : null,
   };
@@ -99,6 +107,11 @@ function applicable(mode) {
 function validateCapture(capture, paths, mode, items, useBytes, sourceOffsets) {
   assert.equal(capture.version, 1, "unknown stage capture version");
   assert.equal(capture.limit, LIMIT, "unexpected retrieval limit");
+  assert.equal(
+    typeof capture.index_observed,
+    "boolean",
+    "invalid index observation flag",
+  );
   const routes = mode === "hybrid" ? ["fts", "vector"] : [mode];
   assert.deepEqual(
     Object.keys(capture.routes).sort(),
@@ -159,10 +172,9 @@ function validateCapture(capture, paths, mode, items, useBytes, sourceOffsets) {
         // Compact MCP headers use the last covered line. The canonical range
         // can end at column zero on the next line after an LF or CRLF.
         omitsTrailingNewline =
-          entry.loaded_range.text.end.byte_column === 0 &&
-          item.range.end_line === observed.range.end_line - 1;
+          observed.range.end_line < entry.loaded_range.text.end.line;
         assert.equal(
-          item.range.end_line + Number(omitsTrailingNewline),
+          item.range.end_line,
           observed.range.end_line,
           "engine and public end lines differ",
         );
@@ -252,14 +264,20 @@ export function scoreGoldStages({
   useBytes = false,
   sourceOffsets = {},
 }) {
-  let state = capture
-    ? capture.index_observed
-      ? "observed"
-      : "index_unobserved"
-    : "unobserved";
+  let state =
+    capture != null
+      ? capture.index_observed
+        ? "observed"
+        : "index_unobserved"
+      : "unobserved";
   let error;
-  if (capture) {
+  const targetEntries = ["file", "entity"].flatMap((level) =>
+    pair[`${level}_targets`].map((target) => ({ level, target })),
+  );
+  let targetStages = [];
+  if (capture != null) {
     try {
+      if (capture instanceof Error) throw capture;
       validateCapture(
         capture,
         new Set(goldPaths(pair)),
@@ -268,44 +286,43 @@ export function scoreGoldStages({
         useBytes,
         sourceOffsets,
       );
+      if (state === "observed")
+        targetStages = targetEntries.map(({ level, target }) =>
+          scoreTarget(
+            capture,
+            target,
+            level,
+            useBytes,
+            sourceOffsets[target.path] ?? 0,
+          ),
+        );
     } catch (failure) {
       state = "invalid";
       error = failure.message;
     }
   }
-  const targets = ["file", "entity"].flatMap((level) =>
-    pair[`${level}_targets`].map((target) => {
-      const stages =
-        state === "observed"
-          ? scoreTarget(
-              capture,
-              target,
-              level,
-              useBytes,
-              sourceOffsets[target.path] ?? 0,
-            )
-          : {};
-      const coverage = Object.fromEntries(
-        applicable(mode).map(({ id }) => [id, stages[id]?.covered ?? null]),
-      );
-      const ranks = Object.fromEntries(
-        [
-          ...applicable(mode)
-            .filter(({ ranked }) => ranked)
-            .map(({ id }) => id),
-          "static",
-        ].map((key) => [key, stages[key]?.rank ?? "unobserved"]),
-      );
-      return {
-        level,
-        id: target.id,
-        path: target.path,
-        symbol: target.symbol,
-        coverage,
-        ranks,
-      };
-    }),
-  );
+  const targets = targetEntries.map(({ level, target }, index) => {
+    const stages = targetStages[index] ?? {};
+    const coverage = Object.fromEntries(
+      applicable(mode).map(({ id }) => [id, stages[id]?.covered ?? null]),
+    );
+    const ranks = Object.fromEntries(
+      [
+        ...applicable(mode)
+          .filter(({ ranked }) => ranked)
+          .map(({ id }) => id),
+        "static",
+      ].map((key) => [key, stages[key]?.rank ?? "unobserved"]),
+    );
+    return {
+      level,
+      id: target.id,
+      path: target.path,
+      symbol: target.symbol,
+      coverage,
+      ranks,
+    };
+  });
   return {
     task_id: taskId,
     mode,

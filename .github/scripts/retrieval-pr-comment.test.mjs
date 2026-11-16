@@ -292,6 +292,10 @@ test("the publisher renders validated candidate Gold coverage in a collapsed sec
     /\| Same-file decay on \(actual\) \| N\/A \| — \| — \|/,
   );
   assert.doesNotMatch(coverage, /Top 10 coverage/);
+  assert.match(
+    body.replace(/<details>[\s\S]*?<\/details>/g, ""),
+    /\*\*Quarry\*\*: ⚠️ Stage capture incomplete: \*\*5\/10\*\* verified, \*\*0\*\* invalid, \*\*5\*\* unobserved/,
+  );
 
   stageSummary.groups[0].stages.index.covered = "untrusted text";
   assert.throws(
@@ -299,6 +303,52 @@ test("the publisher renders validated candidate Gold coverage in a collapsed sec
     /Invalid Gold stage coverage/,
   );
 });
+
+for (const [label, observed, invalid, unobserved] of [
+  ["complete", 5, 0, 0],
+  ["unobserved", 0, 0, 5],
+  ["invalid", 0, 5, 0],
+]) {
+  test(`the publisher preserves ${label} capture counts and derives only trusted warning text`, async (t) => {
+    const x = await fixture(t);
+    const summary = {
+      version: 1,
+      calls: 5,
+      observed_calls: observed,
+      invalid_calls: invalid,
+      groups: [],
+    };
+    const payload = {
+      ...report,
+      candidate_gold_stages: {
+        sweqa: { ...summary, warning: "untrusted stage error <script>" },
+      },
+    };
+    const validated = validateComparison(payload, request);
+    assert.equal(validated.status, "success");
+    assert.deepEqual(validated.candidate_gold_stages.sweqa, summary);
+    await x.write("comparison/summary.json", payload);
+    await publish(x);
+    const { body } = x.messages()[0][1];
+    const visible = body.replace(/<details>[\s\S]*?<\/details>/g, "");
+    assert.match(visible, /✅ Complete/);
+    assert.doesNotMatch(body, /untrusted stage error|<script>/);
+    if (observed === 5) {
+      assert.doesNotMatch(body, /Stage capture incomplete/);
+    } else {
+      assert.ok(
+        visible.includes(
+          `**SWE-QA20**: ⚠️ Stage capture incomplete: **0/5** verified, **${invalid}** invalid, **${unobserved}** unobserved.`,
+        ),
+      );
+    }
+    payload.candidate_gold_stages.sweqa.observed_calls = "untrusted count";
+    assert.throws(
+      () => validateComparison(payload, request),
+      /Invalid observed Gold stage call count/,
+    );
+  });
+}
 
 test("the publisher validates corpus totals and renders each suite once", async (t) => {
   const x = await fixture(t);

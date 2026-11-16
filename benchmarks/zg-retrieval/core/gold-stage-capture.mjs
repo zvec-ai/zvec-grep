@@ -17,14 +17,18 @@ export function stageTraceEnvironment(enabled, pairs = []) {
 
 // MCP already binds this metadata to its request. No control files, sequence
 // numbers or separate capture files are needed. Frozen suites use one group.
+// Return malformed metadata as an Error value for the diagnostic scorer; do not
+// throw here and invalidate an otherwise valid public search response.
 export function readStageTrace(response) {
   if (response?.isError) return null;
-  const traces = response?._meta?.zg_stage_trace;
-  if (
-    !Array.isArray(traces) ||
-    traces.length !== 1 ||
-    traces[0]?.group_id !== "Q1"
-  )
-    return null;
+  const metadata = response?._meta;
+  if (!metadata || !Object.hasOwn(metadata, "zg_stage_trace")) return null;
+  const traces = metadata.zg_stage_trace;
+  if (!Array.isArray(traces))
+    return new Error("stage metadata must be an array");
+  if (traces.length !== 1)
+    return new Error("expected one stage capture for Q1");
+  if (traces[0]?.group_id !== "Q1")
+    return new Error("unexpected stage capture group; expected Q1");
   return traces[0];
 }

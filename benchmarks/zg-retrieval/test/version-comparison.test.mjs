@@ -11,6 +11,7 @@ import {
   markdownVersionComparison,
 } from "../expansion/compare.mjs";
 import { QUALITY_METRICS } from "../reports/ci.mjs";
+import { goldStagesMarkdown } from "../reports/gold-stages.mjs";
 import { QA_ENTITY_METRICS } from "../reports/zg.mjs";
 import { QA_SCORING } from "../core/suite.mjs";
 import { summarizeIndexSettings } from "../core/index-settings.mjs";
@@ -82,6 +83,7 @@ test("all suites and modes retain exact deltas and render compact baseline-to-ca
   assert.equal(comparison.rows[0].metrics.file_hit_at_1.delta, -0.25);
   assert.equal(comparison.rows[3].metrics.file_hit_at_1.delta, 0.25);
   const markdown = markdownVersionComparison(comparison);
+  assert.doesNotMatch(markdown, /Stage capture incomplete/);
   assert.deepEqual(
     [...markdown.matchAll(/^### (.+)$/gm)].map((match) => match[1]),
     ["SWE-QA20", "BEIR", "DuRetrieval", "Quarry"],
@@ -229,7 +231,59 @@ test("comparison carries candidate stage coverage into the collapsed PR tables",
     ],
   );
   assert.match(markdown, /\| Same-file decay off \| — \| — \| 3\/5 \|/);
+  assert.doesNotMatch(markdown, /Stage capture incomplete/);
+  assert.doesNotMatch(
+    goldStagesMarkdown(summary).join("\n"),
+    /Stage capture incomplete/,
+  );
 });
+
+for (const [label, invalid, unobserved] of [
+  ["unobserved", 0, 5],
+  ["invalid", 5, 0],
+]) {
+  test(`all ${label} captures warn outside the collapsed tables without invalidating quality`, () => {
+    const before = result(baseSha);
+    const after = result(headSha);
+    const quality = compareCombinedResults(before, after, metadata);
+    const summary = {
+      version: 1,
+      calls: 5,
+      observed_calls: 0,
+      invalid_calls: invalid,
+      groups: [
+        {
+          qualification: "diagnostic",
+          level: "file",
+          mode: "fts",
+          targets: 5,
+          stages: Object.fromEntries(
+            ["index", "fts", "static_top10", "actual_top10"].map((key) => [
+              key,
+              { covered: 0, unknown: 5 },
+            ]),
+          ),
+        },
+      ],
+    };
+    after.sweqa.gold_stages = summary;
+    const comparison = compareCombinedResults(before, after, metadata);
+    assert.equal(comparison.status, "success");
+    assert.deepEqual(comparison.errors, []);
+    assert.deepEqual(comparison.rows, quality.rows);
+    const markdown = markdownVersionComparison(comparison);
+    const visible = markdown.replace(/<details>[\s\S]*?<\/details>/g, "");
+    const warning = `⚠️ Stage capture incomplete: **0/5** verified, **${invalid}** invalid, **${unobserved}** unobserved.`;
+    assert.match(visible, /✅ Complete/);
+    assert.ok(visible.includes(`**SWE-QA20**: ${warning}`));
+    assert.equal(markdown.split("Stage capture incomplete").length, 2);
+    assert.match(markdown, /\| Gold recalled by FTS \| N\/A \| — \| — \|/);
+    const report = goldStagesMarkdown(summary).join("\n");
+    assert.ok(report.includes(warning));
+    assert.match(report, /Unverified stage coverage is unknown/);
+    assert.match(report, /\| Gold recalled by FTS \| N\/A \| — \| — \|/);
+  });
+}
 
 test("a newly registered suite retains stage coverage and its trusted report title", async () => {
   const name = "new-pilot";

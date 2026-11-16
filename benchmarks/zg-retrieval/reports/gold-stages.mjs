@@ -85,11 +85,23 @@ function stageCell(group, key) {
   return unknown ? `${value} (${unknown} unknown)` : value;
 }
 
-export function goldStagesMarkdown(summary, { heading = true } = {}) {
+export function goldStageCaptureWarning(summary) {
+  if (!summary || summary.observed_calls === summary.calls) return null;
+  const { calls, observed_calls, invalid_calls } = summary;
+  const unobserved = calls - observed_calls - invalid_calls;
+  return `⚠️ Stage capture incomplete: **${observed_calls}/${calls}** verified, **${invalid_calls}** invalid, **${unobserved}** unobserved. Unverified stage coverage is unknown. Retrieval quality results are reported separately.`;
+}
+
+export function goldStagesMarkdown(
+  summary,
+  { heading = true, warning = true } = {},
+) {
   if (!summary) return [];
+  const captureWarning = warning && goldStageCaptureWarning(summary);
   const lines = [
     "",
     ...(heading ? ["### Gold coverage by retrieval stage", ""] : []),
+    ...(captureWarning ? [captureWarning, ""] : []),
     `Verified captures: **${summary.observed_calls}/${summary.calls}** planned calls. Invalid captures: **${summary.invalid_calls}**.`,
     "",
     "Each row shows Gold coverage across all five calls. The decay rows use the same loaded candidates, RRF scores, static scores, and 10-result limit. Decay on uses the actual results. N/A means unknown, and — means the route did not run.",

@@ -7,6 +7,7 @@ import { loadSuite } from "../core/lib.mjs";
 import { validateIndexCounts } from "../core/index-counts.mjs";
 import { validateIndexSettings } from "../core/index-settings.mjs";
 import {
+  goldStageCaptureWarning,
   goldStagesMarkdown,
   validateGoldStageSummary,
 } from "../reports/gold-stages.mjs";
@@ -323,6 +324,12 @@ export function markdownVersionComparison(result) {
     "Indexed corpus totals count each independently built index once; modes and repetitions do not multiply them. N/A means the count was not recorded.",
     "ZG input limits are per embedding input, not measured token use. Fragment length and overlap budgets use UTF-16 units, before metadata allowance. Missing settings are N/A.",
   ];
+  for (const [suite, title] of SUITE_TITLES) {
+    const warning = goldStageCaptureWarning(
+      result.candidate_gold_stages?.[suite],
+    );
+    if (warning) lines.push("", `**${title}**: ${warning}`);
+  }
   if (result.preview === "full")
     lines.push("", 'Both versions explicitly request `preview: "full"`.');
   if (result.rows.length) {
@@ -403,7 +410,7 @@ export function markdownVersionComparison(result) {
       "",
       "<details>",
       `<summary>${title}: Candidate Gold coverage by stage</summary>`,
-      ...goldStagesMarkdown(summary, { heading: false }),
+      ...goldStagesMarkdown(summary, { heading: false, warning: false }),
       "</details>",
     );
   }
