@@ -87,10 +87,13 @@ fn authorization_for_manifest(
     workspace_root: &Path,
     existing: Option<&Workspace>,
 ) -> Result<Option<IndexAuthorization>, EngineError> {
-    let model = crate::pipelines::indexing::service::embedding_reference(
-        existing,
-        options.embedding.as_ref(),
-    )?;
+    let Some(selection) =
+        crate::pipelines::indexing::embedding_policy::configured_selection(existing, options)?
+    else {
+        // Scene-based defaults only select local models and need no remote grant.
+        return Ok(None);
+    };
+    let model = selection.model;
     if options.allow_remote || model.starts_with("local/") {
         return Ok(None);
     }

@@ -607,16 +607,22 @@ Workspaces are identified by their root paths; different roots may share a direc
 
 This version indexes text only with one embedding model per workspace.
 For a new index, zg --index uses --embedding, then ZVEC_GREP_EMBEDDING, then
-the configured default, falling back to local/potion-code-16m-v2.
+the configured default, then a workspace recommendation: local/potion-code-16m-v2
+for code or local/bekko-256-int8 for text. Analysis uses index scan rules and
+file sizes capped at 64 KiB per file. Data/configuration and ambiguous formats
+do not affect the code/text ratio. Ties or insufficient evidence use Potion Code.
+When --embedding is omitted, stderr explains the analysis and selected model.
 Interactive searches prompt to select an embedding model before creating a
-missing index. Local and remote models have separate tabs; downloaded local
-models and configured remote models appear first. Use arrows or Tab to switch,
+missing index and display the same workspace analysis. Local and remote models
+have separate tabs; the configured preference and recommendation appear before
+other downloaded local or configured remote models. Use arrows or Tab to switch,
 Enter to confirm, and Esc to exit. Remote models require data authorization.
 CLI searches wait for the complete index, including in --mode server.
 Non-interactive searches never create an index; run zg --index first.
 Model changes require --rebuild. Failed files are recorded; successful files
-remain searchable after a rebuild. Compatible indexes reuse their stored model.
-Rebuilding an incompatible index uses --embedding or the configured default;
+remain searchable after a rebuild. Compatible indexes reuse their stored model,
+including --rebuild without --embedding. Rebuilding an incompatible index uses
+--embedding, environment, configured default, or the workspace recommendation;
 provide desired scan rules again.
 
 Environment:
