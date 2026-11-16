@@ -4,7 +4,7 @@
   "corpus_documents": 100001,
   "split": "dev",
   "selection": "sorted original dev query IDs at floor(i*N/10), i=0..9",
-  "model": "local/potion-multilingual-128m",
+  "model": "local/bekko-256-int8",
   "source": {
     "query_count": 2000,
     "qrel_count": 9839,

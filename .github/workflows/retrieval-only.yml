@@ -227,12 +227,12 @@ jobs:
           cache-dependency-path: benchmarks/zg-retrieval/expansion/requirements-beir.txt
       - name: Install the pinned BEIR Parquet reader
         run: python -m pip install --requirement benchmarks/zg-retrieval/expansion/requirements-beir.txt
-      - name: Cache the multilingual model
+      - name: Cache the Bekko model
         if: inputs.embedding == 'local'
         uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/beir-model-cache
-          key: retrieval-potion-multilingual-128m-v1-${{ runner.os }}-${{ runner.arch }}
+          key: retrieval-bekko-256-int8-v1-${{ runner.os }}-${{ runner.arch }}
       - name: Run BEIR retrieval suite
         env:
           ZVEC_GREP_API_KEY: ${{ secrets.QWEN_EMBEDDING_API_KEY }}
@@ -303,12 +303,12 @@ jobs:
           cache-dependency-path: benchmarks/zg-retrieval/expansion/requirements-duretrieval.txt
       - name: Install the pinned Parquet reader
         run: python -m pip install --requirement benchmarks/zg-retrieval/expansion/requirements-duretrieval.txt
-      - name: Cache the multilingual model
+      - name: Cache the Bekko model
         if: inputs.embedding == 'local'
         uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/duretrieval-model-cache
-          key: retrieval-potion-multilingual-128m-v1-${{ runner.os }}-${{ runner.arch }}
+          key: retrieval-bekko-256-int8-v1-${{ runner.os }}-${{ runner.arch }}
       - name: Run DuRetrieval pilot
         env:
           ZVEC_GREP_API_KEY: ${{ secrets.QWEN_EMBEDDING_API_KEY }}

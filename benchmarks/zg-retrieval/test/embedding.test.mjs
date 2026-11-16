@@ -13,7 +13,7 @@ test("embedding profile keeps the configured local model or selects Qwen remotel
     "local/potion-code-16m-v2",
   );
   assert.equal(
-    embeddingModel("local/potion-multilingual-128m", "remote"),
+    embeddingModel("local/bekko-256-int8", "remote"),
     REMOTE_EMBEDDING_MODEL,
   );
   assert.throws(
