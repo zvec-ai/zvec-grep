@@ -84,17 +84,6 @@ job publishes its own aggregate metrics and
 per-question results, including failed questions. The final `Retrieval results`
 job publishes one page with all four suite sections, even if a suite fails.
 
-The BEIR and DuRetrieval local model changed from
-`local/potion-multilingual-128m` to `local/bekko-256-int8`. Their active data
-locks record the new model, and Gold manifests update only the source-lock
-hash binding; queries, corpora, relevance labels, Entity targets, and scoring
-rules are unchanged. The historical ten-query SciFact lock remains unchanged.
-Keep earlier Potion results with their matching harness. For version comparisons,
-rerun both candidates with the same Bekko harness and fresh indexes; saved
-Potion responses cannot be rescored into Bekko retrieval results. Validate the
-registry, lock bindings, and scoring contracts with
-`node --test benchmarks/zg-retrieval/test/*.test.mjs` from the repository root.
-
 BEIR and DuRetrieval's Parquet readers are pinned in separate requirements
 files and installed only in their CI jobs. A local run needs the corresponding
 dependency before invoking `expansion/run.mjs`. Downloaded source data and

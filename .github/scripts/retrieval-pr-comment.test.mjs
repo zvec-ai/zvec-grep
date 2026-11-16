@@ -35,8 +35,8 @@ const request = {
 };
 const models = {
   sweqa: "local/potion-code-16m-v2",
-  beir: "local/potion-multilingual-128m",
-  duretrieval: "local/potion-multilingual-128m",
+  beir: "local/bekko-256-int8",
+  duretrieval: "local/bekko-256-int8",
   quarry: "local/potion-code-16m-v2",
 };
 const readTrustedJson = async (path) =>
