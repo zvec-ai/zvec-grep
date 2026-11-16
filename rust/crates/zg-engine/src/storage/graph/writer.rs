@@ -84,8 +84,23 @@ impl SqliteGraphStorage {
         // every save.
         let hierarchy_changed = inheritance_changed(&tx, file_id, graph)?;
         tx.execute("DELETE FROM edges WHERE file_id = ?", [file_id])?;
+        // The directives describe the file's preprocessor state, so they are
+        // replaced with the rows: a file that stops being C/C++ leaves none
+        // behind, and one that keeps its directives rewrites them.
+        if graph.directives.is_empty() {
+            tx.execute(
+                "DELETE FROM zg_file_preprocessor WHERE file_id = ?",
+                [file_id],
+            )?;
+        } else {
+            tx.execute(
+                "INSERT INTO zg_file_preprocessor (file_id, directives) VALUES (?1, ?2)
+                 ON CONFLICT(file_id) DO UPDATE SET directives = excluded.directives",
+                params![file_id, serde_json::to_string(&graph.directives)?],
+            )?;
+        }
         {
-            let mut insert = tx.prepare(
+            let mut insert = tx.prepare_cached(
                 "INSERT INTO edges
                 (file_id, kind, source, target, line, col, provenance, metadata, status)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'resolved')",
@@ -102,7 +117,7 @@ impl SqliteGraphStorage {
                     serde_json::to_string(&edge.metadata)?
                 ])?;
             }
-            let mut insert = tx.prepare("INSERT INTO edges
+            let mut insert = tx.prepare_cached("INSERT INTO edges
                 (file_id, source, reference_name, receiver_name, kind, arity, line, col, language, name_tail, status, metadata)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)")?;
             for reference in &graph.pending_refs {
@@ -226,7 +241,7 @@ fn inheritance_edges(
     tx: &rusqlite::Transaction<'_>,
     file_id: u32,
 ) -> Result<Vec<(String, String, String)>> {
-    let mut statement = tx.prepare(
+    let mut statement = tx.prepare_cached(
         "SELECT kind, source, COALESCE(reference_name, target), metadata FROM edges
          WHERE file_id = ?1 AND kind IN ('extends', 'implements')",
     )?;
@@ -309,7 +324,7 @@ fn import_evidence(graph: &FileGraphResult) -> Vec<String> {
 /// half on both sides. Rows without one are `file_local` imports resolved
 /// during the walk, which never bound a name from another module.
 fn import_bindings(tx: &rusqlite::Transaction<'_>, file_id: u32) -> Result<Vec<String>> {
-    let mut statement = tx.prepare(
+    let mut statement = tx.prepare_cached(
         "SELECT reference_name FROM edges
          WHERE file_id = ?1 AND kind = 'imports' AND reference_name IS NOT NULL",
     )?;

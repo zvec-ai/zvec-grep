@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "embedding_policy.rs"]
+mod embedding_policy;
+
 fn modern_post(
     port: u16,
     method: &str,

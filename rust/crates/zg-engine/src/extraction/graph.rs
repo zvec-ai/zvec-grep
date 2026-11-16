@@ -30,19 +30,22 @@
 
 mod collector;
 mod partition;
+mod preprocessor;
 mod vocabulary;
 
 pub(crate) use collector::{
-    collect_import_edge, collect_inheritance_edges, is_call_scan_barrier, is_import_node,
-    is_unreported_call, scan_binding_declarations, scan_call_edges, scan_return_types,
+    alias_target_of, collect_import_edge, collect_inheritance_edges, is_call_scan_barrier,
+    is_import_node, is_unreported_call, scan_binding_declarations, scan_call_edges,
+    scan_return_types,
 };
 pub(crate) use partition::{PartitionedGraph, partition_walk};
 #[cfg(test)]
 pub(crate) use partition::{PendingNameRef, ResolvedNameEdge};
+pub(crate) use preprocessor::scan_preprocessor;
 
 use std::collections::{HashMap, HashSet};
 
-use crate::domain::GraphEdgeKind;
+use crate::domain::{GraphEdgeKind, PreprocessorDirective};
 
 /// Owner index standing in for file scope. Import references belong to the
 /// file, not to any entity; the TypeScript original passes the file ID here.
@@ -80,10 +83,58 @@ pub(crate) struct NameEdge {
     /// Declared type of the bound name for `Declares` edges
     /// (`var x = new X()` → `Some("X")`).
     pub bound_type: Option<String>,
+    /// Last line the binding stays in effect, for a name a loop scopes
+    /// (`for (Widget w : ws)`): past that line the name means what the rest of
+    /// the body says it means. `None` keeps the binding until the body ends.
+    pub bound_until: Option<usize>,
+    /// Exclusive end of a branch/loop-local binding, in source coordinates.
+    pub scope_end: Option<(usize, usize)>,
     /// Argument count at the call site, when the reference is a call.
     pub arity: Option<usize>,
+    /// Where the call stands relative to building a value. A type is a
+    /// legitimate call target at a construction site even though a type is not
+    /// callable in general, and the two forms differ: a language with a
+    /// separate constructor entity builds `new X()` through it.
+    pub constructs: Constructs,
     pub line: usize,
     pub column: usize,
+}
+
+/// The construction forms a call site can take.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum Constructs {
+    /// An ordinary call.
+    #[default]
+    None,
+    /// A call whose result initializes a value: `auto w = Widget(1)`,
+    /// `x = Widget(1)`. The named type is the target where the language mints
+    /// no separate constructor entity.
+    Value,
+    /// A `new X()` site. Every language here builds through the constructor,
+    /// so a C/C++ type name is not what the source reaches.
+    New,
+}
+
+impl Constructs {
+    /// Whether the site builds a value at all.
+    pub(crate) fn is_some(self) -> bool {
+        self != Self::None
+    }
+
+    /// The metadata spelling the resolver reads back.
+    pub(crate) fn as_str(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Value => Some("value"),
+            Self::New => Some("new"),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct BindingScope {
+    bytes: std::ops::Range<usize>,
+    end: Option<(usize, usize)>,
 }
 
 /// Mutable state carried through a single AST walk.
@@ -102,11 +153,32 @@ pub(crate) struct WalkContext {
     /// innermost-scope shadow table: a call inside `outer` that names
     /// `work` binds the nested `outer::work` before any file-level name.
     scoped_symbols: HashMap<usize, HashMap<String, usize>>,
+    /// Names each entity takes for itself without necessarily binding them to
+    /// an indexable target: parameters, and locals whose type the index cannot
+    /// spell. A bare call through such a name reaches the local value, never
+    /// the file-level symbol of the same name.
+    shadowed_names: HashMap<usize, HashSet<String>>,
+    /// Names a class body imports from another scope (`using First<T>::Run;`).
+    /// A bare call of such a name inside that class reaches the imported
+    /// member, so the file's own namesake cannot answer it.
+    borrowed_names: HashMap<usize, HashSet<String>>,
+    /// Names a declaration makes another spelling of an existing value
+    /// (`const dispatch = send`): a bare call through the bound name reaches
+    /// the aliased one. Grouped by owner like the shadow table, and keyed
+    /// [`FILE_SCOPE_INDEX`] for a declaration written at the file's top level,
+    /// which every body of the file can see.
+    value_aliases: HashMap<(usize, String), String>,
     seen_name_edges: HashSet<(GraphEdgeKind, usize, Option<String>, String, usize, usize)>,
     /// Factory return types this file spells: `Some` answers a bare-call
     /// initializer (`x = makeX()`), `None` marks a name registered with two
     /// different types whose factory answer is ambiguous.
     return_types: HashMap<String, Option<String>>,
+    /// C/C++ preprocessor directives in source order. The resolver replays
+    /// them to decide whether a call site's name was already a macro.
+    preprocessor: Vec<PreprocessorDirective>,
+    /// Declaration scopes for assignment lookup, prepared once from the AST.
+    /// This is walk-only state; only the existing `scope_end` travels with edges.
+    binding_scopes: HashMap<String, Vec<BindingScope>>,
     entity_counter: usize,
     /// False when the workspace does not keep a graph: every collector
     /// returns immediately and no buffer is ever filled.
@@ -138,8 +210,13 @@ impl WalkContext {
             symbols: HashMap::new(),
             file_symbols: HashMap::new(),
             scoped_symbols: HashMap::new(),
+            shadowed_names: HashMap::new(),
+            borrowed_names: HashMap::new(),
+            value_aliases: HashMap::new(),
             seen_name_edges: HashSet::new(),
             return_types: HashMap::new(),
+            preprocessor: Vec::new(),
+            binding_scopes: HashMap::new(),
             entity_counter: 0,
             collecting,
         }
@@ -148,6 +225,13 @@ impl WalkContext {
     /// False when this walk records no graph state.
     pub(crate) fn is_collecting(&self) -> bool {
         self.collecting
+    }
+
+    /// Records the file's preprocessor directives, in source order.
+    pub(crate) fn register_preprocessor(&mut self, directives: Vec<PreprocessorDirective>) {
+        if self.collecting {
+            self.preprocessor = directives;
+        }
     }
 
     /// Allocates the next per-file entity ordinal. Ordinals follow walk order,
@@ -211,6 +295,47 @@ impl WalkContext {
             .entry(owner)
             .or_default()
             .insert(name.to_owned(), index);
+    }
+
+    /// Records that `owner`'s body takes `name` for a local value or
+    /// parameter. The name is taken whether or not the local's type is
+    /// known: a parameter annotated `() => void` hides an imported function
+    /// of the same name just as surely as a typed one does.
+    pub(crate) fn register_shadowed_name(&mut self, owner: usize, name: &str) {
+        if !self.collecting || name.is_empty() {
+            return;
+        }
+        self.shadowed_names
+            .entry(owner)
+            .or_default()
+            .insert(name.to_owned());
+    }
+
+    /// Records that `owner`'s class body imports `name` from another scope
+    /// (`using First<T>::Run;`). A bare call of that name written in the
+    /// class's bodies reaches the imported member, so the file's own namesake
+    /// cannot answer it.
+    pub(crate) fn register_borrowed_name(&mut self, owner: usize, name: &str) {
+        if !self.collecting || name.is_empty() {
+            return;
+        }
+        self.borrowed_names
+            .entry(owner)
+            .or_default()
+            .insert(name.to_owned());
+    }
+
+    /// Records that `owner` declares `name` as another spelling of `target`
+    /// (`const dispatch = send`). Kept apart from the type bindings: a value
+    /// alias answers "which function does this call reach", while a bound type
+    /// answers "which class does this receiver hold", and one rule must never
+    /// read the other's evidence as its own.
+    pub(crate) fn register_value_alias(&mut self, owner: usize, name: &str, target: &str) {
+        if !self.collecting || name.is_empty() || target.is_empty() {
+            return;
+        }
+        self.value_aliases
+            .insert((owner, name.to_owned()), target.to_owned());
     }
 
     #[allow(dead_code)]
@@ -297,6 +422,57 @@ impl WalkContext {
         line: usize,
         column: usize,
     ) {
+        self.add_call_site(
+            owner_index,
+            ref_name,
+            receiver_name,
+            raw_text,
+            arity,
+            line,
+            column,
+            Constructs::None,
+        );
+    }
+
+    /// Buffers a call that constructs a value (`new X()`, `auto x = X(1)`).
+    /// The construction site is the one place a type name is a correct call
+    /// target, so the form travels with the reference to the resolver.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_construction_edge(
+        &mut self,
+        owner_index: usize,
+        ref_name: &str,
+        receiver_name: Option<&str>,
+        raw_text: Option<&str>,
+        arity: Option<usize>,
+        line: usize,
+        column: usize,
+        constructs: Constructs,
+    ) {
+        self.add_call_site(
+            owner_index,
+            ref_name,
+            receiver_name,
+            raw_text,
+            arity,
+            line,
+            column,
+            constructs,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_call_site(
+        &mut self,
+        owner_index: usize,
+        ref_name: &str,
+        receiver_name: Option<&str>,
+        raw_text: Option<&str>,
+        arity: Option<usize>,
+        line: usize,
+        column: usize,
+        constructs: Constructs,
+    ) {
         self.add_name_edge(NameEdge {
             ref_kind: GraphEdgeKind::Calls,
             owner_index,
@@ -304,7 +480,10 @@ impl WalkContext {
             receiver_name: receiver_name.map(str::to_owned),
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
+            bound_until: None,
+            scope_end: None,
             arity,
+            constructs,
             line,
             column,
         });
@@ -314,7 +493,8 @@ impl WalkContext {
     /// `caller(Left a)`): the owner declares that `name`'s receiver type is
     /// `bound_type`. Always pending — the type entity may live in another
     /// file — and consumed by the resolver when a call names `name` as its
-    /// receiver at or after this line.
+    /// receiver at or after this line. `until` bounds the binding to the
+    /// statement that scopes it (`for (Widget w : ws)`).
     pub(crate) fn add_declare_binding(
         &mut self,
         owner_index: usize,
@@ -322,6 +502,7 @@ impl WalkContext {
         bound_type: &str,
         line: usize,
         column: usize,
+        until: Option<usize>,
     ) {
         if !self.collecting {
             return;
@@ -337,10 +518,55 @@ impl WalkContext {
             receiver_name: None,
             raw_text: None,
             bound_type: Some(bound_type.to_owned()),
+            bound_until: until,
+            scope_end: None,
             arity: None,
+            constructs: Constructs::None,
             line,
             column,
         });
+    }
+
+    pub(crate) fn add_scoped_binding(
+        &mut self,
+        owner: usize,
+        name: &str,
+        ty: &str,
+        start: (usize, usize),
+        end: (usize, usize),
+    ) {
+        if !self.collecting {
+            return;
+        }
+        self.add_declare_binding(owner, name, ty, start.0, start.1, None);
+        if let Some(binding) = self.name_edges.last_mut() {
+            binding.scope_end = Some(end);
+        }
+    }
+
+    pub(super) fn register_binding_scope(
+        &mut self,
+        name: &str,
+        bytes: std::ops::Range<usize>,
+        end: Option<(usize, usize)>,
+    ) {
+        if !self.collecting {
+            return;
+        }
+        self.binding_scopes
+            .entry(name.to_owned())
+            .or_default()
+            .push(BindingScope { bytes, end });
+    }
+
+    pub(super) fn assignment_scope_end(&self, name: &str, at: usize) -> Option<(usize, usize)> {
+        let root = name.split('.').next().unwrap_or(name);
+        self.binding_scopes
+            .get(root)?
+            .iter()
+            .filter(|scope| scope.bytes.contains(&at))
+            .min_by_key(|scope| scope.bytes.end - scope.bytes.start)
+            .and_then(|scope| scope.end)
     }
 
     /// Registers one function's factory return type: the signature's
@@ -381,7 +607,10 @@ impl WalkContext {
             receiver_name: None,
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
+            bound_until: None,
+            scope_end: None,
             arity: None,
+            constructs: Constructs::None,
             line,
             column,
         });
@@ -408,7 +637,10 @@ impl WalkContext {
             receiver_name: None,
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
+            bound_until: None,
+            scope_end: None,
             arity: None,
+            constructs: Constructs::None,
             line,
             column,
         });
@@ -532,7 +764,10 @@ mod tests {
                 receiver_name: Some("dog".to_owned()),
                 raw_text: Some("dog.bark()".to_owned()),
                 bound_type: None,
+                bound_until: None,
+                scope_end: None,
                 arity: Some(2),
+                constructs: Constructs::None,
                 line: 7,
                 column: 11,
             }

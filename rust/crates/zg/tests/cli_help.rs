@@ -118,7 +118,16 @@ fn index_help_uses_root_paths_without_workspace_names() {
 fn index_help_distinguishes_explicit_indexing_from_automatic_search_indexing() {
     let help = stdout(&["--help", "index"]);
     assert!(
-        help.contains("falling back to local/potion-code-16m-v2"),
+        help.contains("workspace recommendation: local/potion-code-16m-v2"),
+        "{help}"
+    );
+    assert!(help.contains("local/bekko-256-int8 for text"), "{help}");
+    assert!(
+        help.contains("file sizes capped at 64 KiB per file"),
+        "{help}"
+    );
+    assert!(
+        help.contains("including --rebuild without --embedding"),
         "{help}"
     );
     assert!(

@@ -16,7 +16,7 @@ zvec-rust.workspace = true
 tempfile.workspace = true
 
 # Copied from the workspace so this crate can allow the zvec C calls below.
-# zvec-rust 0.8.0 exposes `DataType::VectorFp16` but no safe writer or query
+# zvec-rust 0.8.1 exposes `DataType::VectorFp16` but no safe writer or query
 # constructor. Every other crate keeps the workspace `unsafe_code = "forbid"`.
 [lints.rust]
 unsafe_code = "allow"

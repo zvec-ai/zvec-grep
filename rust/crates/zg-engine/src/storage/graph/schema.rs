@@ -81,6 +81,7 @@ pub(crate) fn initialize(connection: &mut Connection, allow_create: bool) -> Res
     // loses the index acceleration; the next writable open catches up.
     tx.execute_batch(INDEXES)?;
     tx.execute_batch(INVALIDATION)?;
+    tx.execute_batch(PREPROCESSOR)?;
     tx.commit()?;
     Ok(())
 }
@@ -129,16 +130,16 @@ CREATE TABLE edges (
 const INDEXES: &str = "
 CREATE INDEX IF NOT EXISTS edges_file ON edges(file_id);
 CREATE INDEX IF NOT EXISTS edges_source_kind ON edges(source, kind);
-CREATE INDEX IF NOT EXISTS edges_target_kind ON edges(target, kind);
+-- Pending/failed references have no target; incoming queries and
+-- invalidation probe non-NULL endpoints only.
+CREATE INDEX IF NOT EXISTS edges_target_kind ON edges(target, kind) WHERE target IS NOT NULL;
 -- Index only the pending queue so resolved queries use the endpoint indexes.
 CREATE INDEX IF NOT EXISTS edges_pending_id ON edges(id) WHERE status = 'pending';
--- The incremental requeue probes this column by value on every pass. The
--- partial predicate repeats the probe's `reference_name IS NOT NULL` verbatim,
--- because SQLite only considers a partial index when the query implies its
--- predicate; it also leaves out `contains` edges and the `file_local` rows that
--- the CHECK constraint pins to a NULL `reference_name`.
+-- Only completed references are requeued by name. Pending rows already await
+-- resolution, and declares rows only carry binding evidence. Do not index
+-- either until a reference resolves or fails. The predicate matches requeue.
 CREATE INDEX IF NOT EXISTS edges_name_tail ON edges(name_tail)
-    WHERE reference_name IS NOT NULL;
+    WHERE reference_name IS NOT NULL AND status IN ('resolved', 'failed');
 ";
 
 // Evidence a pass recorded but has not requeued yet. It lives in the database
@@ -151,5 +152,18 @@ CREATE TABLE IF NOT EXISTS zg_stale_names (
     kind INTEGER NOT NULL CHECK (kind IN (0, 1)),
     name TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (kind, name)
+) STRICT;
+";
+
+// The directives a C/C++ file spells, in source order. The resolver replays
+// them to learn whether a call site's name was already a macro, which needs the
+// conditional branches and their guards, not just the imports the edge table
+// already holds. Created on every writable open like the invalidation table, so
+// a database built without it gains it without a rebuild.
+const PREPROCESSOR: &str = "
+CREATE TABLE IF NOT EXISTS zg_file_preprocessor (
+    file_id INTEGER PRIMARY KEY CHECK (file_id BETWEEN 0 AND 4294967295),
+    directives TEXT NOT NULL
+        CHECK (json_valid(directives) AND json_type(directives) = 'array')
 ) STRICT;
 ";

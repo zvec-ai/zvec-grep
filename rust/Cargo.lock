@@ -1711,6 +1711,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonc-parser"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ecded084f9b9a718d39668a42657c32253663d1f6afb3fbb9134f0305f73f48"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "jsonschema"
 version = "0.60.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4529,7 +4538,7 @@ dependencies = [
 
 [[package]]
 name = "zg"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "cc",
  "clap",
@@ -4554,7 +4563,7 @@ dependencies = [
 
 [[package]]
 name = "zg-cli"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "chrono",
  "clap",
@@ -4576,7 +4585,7 @@ dependencies = [
 
 [[package]]
 name = "zg-daemon"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -4606,7 +4615,7 @@ dependencies = [
 
 [[package]]
 name = "zg-daemon-protocol"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4615,7 +4624,7 @@ dependencies = [
 
 [[package]]
 name = "zg-engine"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4633,6 +4642,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "ignore",
+ "jsonc-parser",
  "llama-cpp-2",
  "ort",
  "rayon",
@@ -4672,7 +4682,7 @@ dependencies = [
 
 [[package]]
 name = "zg-engine-macros"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4681,7 +4691,7 @@ dependencies = [
 
 [[package]]
 name = "zg-host-native"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "notify",
@@ -4695,7 +4705,7 @@ dependencies = [
 
 [[package]]
 name = "zg-llama-native"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "libloading 0.8.9",
  "llama-cpp-sys-2",
@@ -4704,7 +4714,7 @@ dependencies = [
 
 [[package]]
 name = "zg-testkit"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4716,7 +4726,7 @@ dependencies = [
 
 [[package]]
 name = "zg-transport-mcp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4739,7 +4749,7 @@ dependencies = [
 
 [[package]]
 name = "zg-zvec-fp16"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "half",
  "tempfile",
@@ -4760,21 +4770,21 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zvec-rust"
-version = "0.8.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ec11541f1f506b528060104d7951b0c4341a5edd98d61e67f28165c19ce707c"
+checksum = "2c784dd95b03b840c9607c9716191d81f709ffc0645eaadee4e0a442b910ee74"
 dependencies = [
  "zvec-rust-sys",
 ]
 
 [[package]]
 name = "zvec-rust-build"
-version = "0.8.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d46d4af74a8a8b8184734e9bd9d81963ccf37e377ae27e7e3d83f8e3d4d83b5"
+checksum = "f3a43ee0256377c10d2f2be9cdfbed413f14ced72b68b45faebcec205bd603a8"
 
 [[package]]
 name = "zvec-rust-sys"
-version = "0.8.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfd2c31dcadd477a0f6f68865c06f49fd425b26cb04477861abf865461ddb048"
+checksum = "48ce89deadf702d2402c84960cd400faf56c62fca5212ef2d2cbceef026c37ee"

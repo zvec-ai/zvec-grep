@@ -36,6 +36,7 @@ pub use metadata::EntityMetadata;
 pub(crate) use metadata::IndexField;
 pub use metadata::Language;
 pub use metadata::MarkdownMetadata;
+pub use metadata::MemberAlias;
 pub use metadata::SymbolType;
 // Visibility has no consumers yet.
 #[allow(unused_imports)]
@@ -50,6 +51,8 @@ pub(crate) use graph::FileGraphResult;
 pub use graph::GraphEdgeKind;
 pub(crate) use graph::PendingRef;
 pub(crate) use graph::PendingRefStatus;
+pub(crate) use graph::PreprocessorDirective;
+pub(crate) use graph::PreprocessorKind;
 
 // Models.
 pub(crate) use model::EmbeddingMetric;
