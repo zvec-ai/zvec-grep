@@ -6,6 +6,7 @@ import test from "node:test";
 import { goldStageSession, readGoldStages } from "../core/gold-stage-capture.mjs";
 import { indexedSourceOffsets } from "../expansion/gold.mjs";
 import { scoreGoldStages, summarizeGoldStages } from "../metrics/gold-stages.mjs";
+import { goldStagesMarkdown } from "../reports/gold-stages.mjs";
 
 const path = "code.go";
 const pair = {
@@ -86,6 +87,23 @@ test("keeps missing traces and ambiguous Entity ranges unknown", () => {
   const mismatch = scoreGoldStages(evidence);
   assert.equal(mismatch.state, "invalid");
   assert.equal(mismatch.targets[1].coverage.selected, null);
+});
+
+test("stage summary shows coverage for recall and only losses for candidate removal", () => {
+  const summary = summarizeGoldStages([
+    scoreGoldStages(fixture()),
+    scoreGoldStages({ ...fixture(), mode: "fts", capture: null }),
+  ]);
+  const lines = goldStagesMarkdown(summary);
+  const entityStart = lines.indexOf("#### Entity Gold (diagnostic)");
+  assert.ok(lines.includes("#### File Gold (diagnostic)"));
+  assert.deepEqual(lines.slice(entityStart + 4, -1), [
+    "| Gold covered by index | N/A | — | 3/3 |",
+    "| Gold recalled by FTS | N/A | — | 2/3 |",
+    "| Gold recalled by Vector | — | — | 2/3 |",
+    "| Gold lost during Entity loading | N/A | — | 1 |",
+    "| Gold lost at final top 10 | N/A | — | 1 |",
+  ]);
 });
 
 test("maps indexed offsets to frozen source bytes for a verified UTF-8 BOM", () => {

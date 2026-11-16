@@ -157,12 +157,16 @@ same five calls, frozen source and QA labels, adaptive recall and `limit: 10`.
 It sends the original public requests and records evidence in a private
 directory outside the corpus. Older candidates produce unobserved stages.
 
-Each suite's report shows File and Entity coverage and losses by mode. The
-denominator is the number of Gold targets across calls, including unknowns.
+Each suite's report shows index coverage, Gold recalled per route, and Gold
+lost during Entity loading and final selection. It shows separate tables for
+File and Entity. The coverage denominator counts Gold targets across all five
+calls, including unknowns.
 SWE-QA20 uses its QA File labels here and separates formal, diagnostic and
 unresolved cases. Unresolved Gold stays in the per-call evidence. Quarry uses
 its verified File and Entity labels for diagnostics. Existing score tables
 keep their original denominators and aggregation.
+
+`gold-stages.json` contains the full stage breakdown and diagnostic cutoffs.
 
 | Boundary | Evidence and reference for loss |
 | --- | --- |
@@ -182,7 +186,7 @@ checks selected Gold-file paths and coordinates against the public response.
 Raw captures contain Gold-file coordinates and ranks, with overall pool counts.
 They carry no query text, snippet text, vectors or model credentials.
 
-The report records mean index-read time for observed calls. Enabled MCP latency
+The JSON records mean index-read time for observed calls. Enabled MCP latency
 also includes capture bookkeeping, an extra static-order sort and sidecar I/O.
 
 SWE-QA20 ZG reports use **schema 7**, with `preview: "full"`, three `modes`, and one quality row per question/mode. Its section uses the **schema 5** overview with fixed `zg-hybrid`, `zg-fts`, `zg-vector` rows; the combined page uses schema 1. The SWE-QA20 overview records coverage, failed task IDs/modes/reasons, the frozen harness commit and selected candidate ref/commit. Quality rows retain all five public result lists and measurement observations so validators can recompute the case mean, ranking stability, output size and latency. The representative fifth-call `file_retrieval` and `ndcg` fields remain for evidence; `quality_mean` supplies headline quality.

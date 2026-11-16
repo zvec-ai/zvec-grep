@@ -4,18 +4,18 @@ import { entityMatch } from "./entities.mjs";
 
 const LIMIT = 10;
 
-export const GOLD_STAGES = [
-  ["index", "Indexed", null],
-  ["fts", "FTS Fragment recall", "index"],
-  ["vector", "Vector Fragment recall", "index"],
-  ["recall", "Recall union", "index"],
-  ["merged", "Entity merge", "recall"],
-  ["fused", "RRF fusion", "merged"],
-  ["loaded", "Entity load", "fused"],
-  ["selected", "Final selection", "loaded"],
-  ["rrf_top10", "RRF order @10", "loaded"],
-  ["static_top10", "Static score @10", "loaded"],
-  ["actual_top10", "Same-file decay @10", "loaded"],
+const GOLD_STAGES = [
+  ["index", null],
+  ["fts", "index"],
+  ["vector", "index"],
+  ["recall", "index"],
+  ["merged", "recall"],
+  ["fused", "merged"],
+  ["loaded", "fused"],
+  ["selected", "loaded"],
+  ["rrf_top10", "loaded"],
+  ["static_top10", "loaded"],
+  ["actual_top10", "loaded"],
 ];
 
 function location(path, range, sourceOffset) {
@@ -158,7 +158,7 @@ export function summarizeGoldStages(calls) {
       if (!selected.length) continue;
       for (const level of ["file", "entity"]) {
         const targets = selected.flatMap((row) => row.targets.filter((target) => target.level === level));
-        const stages = Object.fromEntries(applicable(mode).map(([key, , baseline]) => {
+        const stages = Object.fromEntries(applicable(mode).map(([key, baseline]) => {
           const covered = targets.filter(({ coverage }) => coverage[key] === true).length;
           const unknown = targets.filter(({ coverage }) => coverage[key] === null).length;
           const lost = baseline === null ? null : targets.filter(({ coverage }) =>

@@ -1,11 +1,29 @@
 import { join } from "node:path";
 import { writeJson } from "../core/io.mjs";
-import { GOLD_STAGES, summarizeGoldStages } from "../metrics/gold-stages.mjs";
+import { summarizeGoldStages } from "../metrics/gold-stages.mjs";
+
+const REPORT_ROWS = [
+  ["index", "Gold covered by index", "coverage"],
+  ["fts", "Gold recalled by FTS", "coverage"],
+  ["vector", "Gold recalled by Vector", "coverage"],
+  ["loaded", "Gold lost during Entity loading", "loss"],
+  ["selected", "Gold lost at final top 10", "loss"],
+];
 
 export async function writeGoldStages(directory, calls) {
   const summary = summarizeGoldStages(calls);
   await writeJson(join(directory, "gold-stages.json"), { summary, calls });
   return summary;
+}
+
+function stageCell(group, key, metric) {
+  const entry = group?.stages[key];
+  if (!entry) return "—";
+  const isLoss = metric === "loss";
+  const unknown = isLoss ? entry.loss_unknown : entry.unknown;
+  if (unknown === group.targets) return "N/A";
+  const value = isLoss ? entry.lost : `${entry.covered}/${group.targets}`;
+  return unknown ? `${value} (${unknown} unknown)` : String(value);
 }
 
 export function goldStagesMarkdown(summary) {
@@ -14,16 +32,13 @@ export function goldStagesMarkdown(summary) {
     "",
     "### Gold coverage by retrieval stage",
     "",
-    `Verified captures: **${summary.observed_calls}/${summary.calls}** planned calls. Invalid captures: **${summary.invalid_calls}**. See \`gold-stages.json\` for per-call Gold IDs, ranks, pool sizes and recall attempts.`,
+    `Verified captures: **${summary.observed_calls}/${summary.calls}** planned calls. Invalid captures: **${summary.invalid_calls}**.`,
     "",
-    "Coverage counts Gold targets across all five calls. The denominator includes unobserved targets. A loss counts a target covered by the named reference stage that is missing at the current stage. Counts in parentheses are unobserved coverage or unverified losses. ‘N/A’ means all evidence for that cell is unknown. Formal and diagnostic labels are reported separately.",
+    "Coverage sums Gold targets across all five calls. Loading losses start from the fused pool. Final losses start from the loaded pool. N/A means unknown, and — means the route did not run.",
     "",
-    "The three @10 rows use the same loaded Entity pool. RRF order keeps the relative fusion order of loaded Entities. RRF and static-score cutoffs are diagnostic comparisons. Final selection uses the actual same-file decay and request limit.",
+    "See `gold-stages.json` for all stages, diagnostic cutoffs, and per-target ranks.",
     "",
   ];
-  if (summary.mean_index_read_ms !== null)
-    lines.push(`Mean watched-file index read: **${summary.mean_index_read_ms.toFixed(2)} ms/call**. MCP latency also includes capture bookkeeping, sorting and writing.`, "");
-  const label = new Map(GOLD_STAGES.map(([key, name]) => [key, name]));
   for (const qualification of ["formal", "diagnostic"]) {
     for (const level of ["file", "entity"]) {
       const groups = summary.groups.filter((group) => group.qualification === qualification && group.level === level);
@@ -31,20 +46,14 @@ export function goldStagesMarkdown(summary) {
       lines.push(
         `#### ${level === "file" ? "File" : "Entity"} Gold (${qualification})`,
         "",
-        "| Stage | Loss reference | FTS covered / Gold; lost | Vector covered / Gold; lost | Hybrid covered / Gold; lost |",
-        "| --- | --- | --- | --- | --- |",
+        "| Stage | FTS | Vector | Hybrid |",
+        "| --- | ---: | ---: | ---: |",
       );
-      for (const [key, name, baseline] of GOLD_STAGES) {
-        const cells = ["fts", "vector", "hybrid"].map((mode) => {
-          const group = groups.find((item) => item.mode === mode);
-          const entry = group?.stages[key];
-          if (!entry) return "—";
-          const { covered, unknown, lost, loss_unknown: lossUnknown } = entry;
-          if (unknown === group.targets) return `N/A (${unknown}/${group.targets})`;
-          const coverage = `${covered}/${group.targets}${unknown ? ` (${unknown})` : ""}`;
-          return lost === null ? coverage : `${coverage}; ${lost}${lossUnknown ? ` (${lossUnknown})` : ""}`;
-        });
-        lines.push(`| ${name} | ${label.get(baseline) ?? "—"} | ${cells.join(" | ")} |`);
+      for (const [key, name, metric] of REPORT_ROWS) {
+        const cells = ["fts", "vector", "hybrid"].map((mode) =>
+          stageCell(groups.find((item) => item.mode === mode), key, metric),
+        );
+        lines.push(`| ${name} | ${cells.join(" | ")} |`);
       }
       lines.push("");
     }
