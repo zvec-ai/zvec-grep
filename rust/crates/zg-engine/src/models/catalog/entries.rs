@@ -530,7 +530,7 @@ const CATALOG: [EmbeddingCatalogEntry; 15] = [
         query_prefix: None,
         document_prefix: None,
         max_input_tokens: 8_192,
-        max_batch_size: 1,
+        max_batch_size: 2,
     }),
     EmbeddingCatalogEntry::Transformers(TransformersConfig {
         reference: "local/nomic-embed-text-v1.5",

@@ -24,6 +24,7 @@ pub(super) struct SessionOwner {
     factory: Arc<Factory>,
     shared: Arc<Shared>,
     requested: TransformersExecutionProvider,
+    require_cuda: bool,
 }
 
 type Factory = dyn Fn(usize) -> Result<Box<dyn Runner>, ModelError> + Send + Sync;
@@ -144,6 +145,14 @@ impl SessionOwner {
         signal: Option<&CancellationToken>,
     ) -> Result<Self, ModelError> {
         let requested = resolve_execution_provider(device);
+        let require_cuda =
+            std::env::var_os("ZVEC_GREP_REQUIRE_CUDA").is_some_and(|value| value == "1");
+        if require_cuda && requested != TransformersExecutionProvider::Cuda {
+            return Err(ModelError::unsupported(
+                "CUDA embedding is required but the selected ONNX provider is not CUDA",
+            )
+            .shared());
+        }
         if cfg!(target_os = "macos") && device == Some(Device::Metal) {
             let warning = "Metal was requested for the Transformers ONNX model, but the available CoreML path regresses throughput and memory; using ORT CPU instead.";
             if !reporter.warning(warning) {
@@ -168,7 +177,8 @@ impl SessionOwner {
             state.ensure_session()?;
             Ok(Box::new(state))
         });
-        let owner = Self::new(requested, shared, factory);
+        let mut owner = Self::new(requested, shared, factory);
+        owner.require_cuda = require_cuda;
         owner.initialize_with_fallback(signal, reporter)?;
         tracing::info!(
             provider = owner.provider().name(),
@@ -187,6 +197,11 @@ impl SessionOwner {
     ) -> Result<(), ModelError> {
         if let Err(error) = self.initialize(signal) {
             check_cancelled(signal)?;
+            if self.require_cuda && error.code() != crate::EngineError::CANCELLED {
+                return Err(error
+                    .wrap("Required CUDA embedding initialization failed", None)
+                    .shared());
+            }
             if self.requested == TransformersExecutionProvider::Cpu
                 || error.code() == crate::EngineError::CANCELLED
             {
@@ -236,6 +251,7 @@ impl SessionOwner {
             factory,
             shared,
             requested,
+            require_cuda: false,
         }
     }
 
@@ -386,6 +402,11 @@ impl SessionOwner {
             )
             .await?;
         match completed.result {
+            Err(error) if self.require_cuda && error.code() != crate::EngineError::CANCELLED => {
+                Err(error
+                    .wrap("Required CUDA embedding inference failed", None)
+                    .shared())
+            }
             Err(error)
                 if completed.retry_on_cpu && error.code() != crate::EngineError::CANCELLED =>
             {

@@ -160,6 +160,41 @@ fn operation(concurrency: usize) -> EmbeddingOptions {
     }
 }
 
+#[tokio::test]
+async fn required_cuda_inference_failure_is_terminal_and_keeps_the_cuda_pool() {
+    let (mut owner, mut starts, fail) = owner(TransformersExecutionProvider::Cuda);
+    Arc::get_mut(&mut owner)
+        .expect("uncalled owner")
+        .require_cuda = true;
+    fail.store(true, Ordering::Release);
+    let task = start(&owner, operation(1));
+    let run = starts.recv().await.expect("CUDA inference started");
+    assert!(!run.force_cpu);
+    run.release.send(()).expect("finish failing CUDA inference");
+    let error = tokio::select! {
+        result = task => match result.expect("inference task") {
+            Err(error) => error,
+            Ok(_) => panic!("required CUDA inference unexpectedly succeeded"),
+        },
+        second = starts.recv() => {
+            second.expect("unexpected inference").release.send(()).expect("finish unexpected inference");
+            panic!("strict CUDA inference must not retry on CPU");
+        }
+    };
+    assert!(error.should_fail_fast());
+    assert!(!error.is_retryable());
+    assert_eq!(owner.provider(), TransformersExecutionProvider::Cuda);
+    assert_eq!(owner.stats().pool_fallbacks, 0);
+
+    let next = start(&owner, operation(1));
+    let run = starts.recv().await.expect("later CUDA inference started");
+    assert!(!run.force_cpu);
+    run.release
+        .send(())
+        .expect("finish successful CUDA inference");
+    assert!(next.await.expect("inference task").is_ok());
+}
+
 #[test]
 fn independent_operations_share_capacity_without_sharing_their_execution_limit() {
     for provider in [
@@ -919,6 +954,35 @@ fn initializing_owner(
         }))
     });
     SessionOwner::new(provider, shared, factory)
+}
+
+#[test]
+fn required_cuda_initialization_does_not_start_a_cpu_pool() {
+    let mut owner = initializing_owner(TransformersExecutionProvider::Cuda, |lane, fallback| {
+        assert_eq!(
+            lane, 0,
+            "initialization must stop at the first failed session"
+        );
+        assert!(
+            !fallback,
+            "strict CUDA initialization must not create a CPU session"
+        );
+        Err(ModelError::internal("injected CUDA initialization failure"))
+    });
+    owner.require_cuda = true;
+    let reporter = ModelDownloadProgressReporter::new("fixture", None, []);
+    let signal = CancellationToken::new();
+    signal.cancel();
+    let cancelled = owner
+        .initialize_with_fallback(Some(&signal), &reporter)
+        .expect_err("cancellation must stop CUDA initialization");
+    assert_eq!(cancelled.code(), crate::EngineError::CANCELLED);
+    let error = owner
+        .initialize_with_fallback(None, &reporter)
+        .expect_err("CUDA initialization failure must be terminal");
+    assert!(error.should_fail_fast());
+    assert_eq!(owner.provider(), TransformersExecutionProvider::Cuda);
+    assert_eq!(owner.stats().session_count, 0);
 }
 
 #[test]

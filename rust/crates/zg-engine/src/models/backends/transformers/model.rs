@@ -81,11 +81,17 @@ struct PreparedBatch {
 
 impl TransformersEmbeddingModel {
     pub(crate) fn new(
-        entry: TransformersConfig,
+        mut entry: TransformersConfig,
         options: ModelConfig,
         compute_runtime: ModelComputeRuntime,
         session_count: usize,
     ) -> Self {
+        let provider = resolve_execution_provider(options.device);
+        entry.max_batch_size = policy::batch_size(
+            provider,
+            entry.max_batch_size,
+            env::var("ZVEC_GREP_CUDA_MAX_BATCH_SIZE").ok().as_deref(),
+        );
         let model_cache_dir = options
             .cache_dir
             .or_else(|| env::var_os("ZVEC_GREP_MODEL_CACHE").map(PathBuf::from))
@@ -115,10 +121,7 @@ impl TransformersEmbeddingModel {
             client: ArtifactHttpClient::new(),
             state: Arc::new(StdMutex::new(None)),
             loading: Arc::new(Mutex::new(())),
-            session_count: policy::pool_size(
-                resolve_execution_provider(options.device),
-                session_count.max(1),
-            ),
+            session_count: policy::pool_size(provider, session_count.max(1)),
             last_execution_budget: StdMutex::new(None),
         }
     }

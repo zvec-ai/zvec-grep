@@ -1,5 +1,20 @@
 //! Fixed execution pools and bounded request admission.
+use std::num::NonZeroUsize;
+
 use super::TransformersExecutionProvider;
+
+pub(super) fn batch_size(
+    provider: TransformersExecutionProvider,
+    catalog_limit: usize,
+    override_limit: Option<&str>,
+) -> usize {
+    if provider != TransformersExecutionProvider::Cuda {
+        return catalog_limit;
+    }
+    override_limit
+        .and_then(|value| value.parse::<NonZeroUsize>().ok())
+        .map_or(catalog_limit, |limit| catalog_limit.min(limit.get()))
+}
 
 pub(super) fn pool_size(provider: TransformersExecutionProvider, configured: usize) -> usize {
     match provider {
