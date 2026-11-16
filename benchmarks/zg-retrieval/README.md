@@ -158,9 +158,10 @@ It sends the original public requests and records evidence in a private
 directory outside the corpus. Older candidates produce unobserved stages.
 
 Each suite's report shows index coverage, Gold recalled per route, and Gold
-lost at final selection. It shows separate tables for
-File and Entity. The coverage denominator counts Gold targets across all five
-calls, including unknowns.
+losses at the diagnostic RRF top ten and actual same-file decay top ten. Both
+loss rows use the same loaded Entity pool. File and Entity have separate tables.
+The coverage denominator counts Gold targets across all five calls, including
+unknowns.
 SWE-QA20 uses its QA File labels here and separates formal, diagnostic and
 unresolved cases. Unresolved Gold stays in the per-call evidence. Quarry uses
 its verified File and Entity labels for diagnostics. Existing score tables

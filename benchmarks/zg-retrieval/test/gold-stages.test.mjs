@@ -89,9 +89,13 @@ test("keeps missing traces and ambiguous Entity ranges unknown", () => {
   assert.equal(mismatch.targets[1].coverage.selected, null);
 });
 
-test("stage summary shows index coverage, recall, and final losses", () => {
+test("stage summary shows index coverage, recall, and both top-ten losses", () => {
+  const observed = fixture();
+  const second = observed.capture.files[path].b;
+  second.rrf_rank = 3;
+  second.loaded_rrf_rank = 3;
   const summary = summarizeGoldStages([
-    scoreGoldStages(fixture()),
+    scoreGoldStages(observed),
     scoreGoldStages({ ...fixture(), mode: "fts", capture: null }),
   ]);
   const lines = goldStagesMarkdown(summary);
@@ -101,7 +105,8 @@ test("stage summary shows index coverage, recall, and final losses", () => {
     "| Gold covered by index | N/A | — | 3/3 |",
     "| Gold recalled by FTS | N/A | — | 2/3 |",
     "| Gold recalled by Vector | — | — | 2/3 |",
-    "| Gold lost at final top 10 | N/A | — | 1 |",
+    "| Gold lost at RRF top 10 (diagnostic) | N/A | — | 0 |",
+    "| Gold lost at same-file decay top 10 (actual) | N/A | — | 1 |",
   ]);
 });
 

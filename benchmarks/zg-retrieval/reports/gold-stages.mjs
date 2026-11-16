@@ -6,7 +6,8 @@ const REPORT_ROWS = [
   ["index", "Gold covered by index", "coverage"],
   ["fts", "Gold recalled by FTS", "coverage"],
   ["vector", "Gold recalled by Vector", "coverage"],
-  ["selected", "Gold lost at final top 10", "loss"],
+  ["rrf_top10", "Gold lost at RRF top 10 (diagnostic)", "loss"],
+  ["actual_top10", "Gold lost at same-file decay top 10 (actual)", "loss"],
 ];
 
 export async function writeGoldStages(directory, calls) {
@@ -33,7 +34,7 @@ export function goldStagesMarkdown(summary) {
     "",
     `Verified captures: **${summary.observed_calls}/${summary.calls}** planned calls. Invalid captures: **${summary.invalid_calls}**.`,
     "",
-    "Coverage sums Gold targets across all five calls. Final losses are measured against the loaded pool. N/A means unknown, and — means the route did not run.",
+    "Coverage sums Gold targets across all five calls. Both top-10 loss rows use the same loaded pool. RRF uses the fusion order, and same-file decay uses the actual results. N/A means unknown, and — means the route did not run.",
     "",
     "See `gold-stages.json` for all stages, diagnostic cutoffs, and per-target ranks.",
     "",
