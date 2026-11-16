@@ -20,6 +20,8 @@ use crate::{
 
 use super::*;
 
+mod wal_recovery;
+
 struct Fixture {
     _directory: tempfile::TempDir,
     layout: WorkspaceLayout,
@@ -109,7 +111,16 @@ fn schema() -> EmbeddingModelInfo {
 }
 
 fn write_text(layout: &WorkspaceLayout, storage_home: &Path, text: &str) {
-    let _lock = acquire_workspace_lock(layout, LockMode::Exclusive, "test.write")
+    let (_lock, storage) = write_unclosed_text(layout, storage_home, text);
+    storage.close().expect("close storage");
+}
+
+fn write_unclosed_text(
+    layout: &WorkspaceLayout,
+    storage_home: &Path,
+    text: &str,
+) -> (LockGuard, IndexStore) {
+    let lock = acquire_workspace_lock(layout, LockMode::Exclusive, "test.write")
         .expect("writer drains cache");
     let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
         graph_enabled: false,
@@ -169,7 +180,7 @@ fn write_text(layout: &WorkspaceLayout, storage_home: &Path, text: &str) {
             }],
         )
         .expect("replace indexed text");
-    storage.close().expect("close storage");
+    (lock, storage)
 }
 
 fn cache() -> ReadSessionCache {

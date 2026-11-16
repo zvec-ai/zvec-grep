@@ -29,7 +29,7 @@ use super::{
         IndexedFragment, StorageSearchFilter, StorageSearchHit, StoredEntity, StoredFileAttributes,
         StoredSearchData, WorkspaceIndexStorageOptions,
     },
-    zvec::{corrupt, initialize},
+    zvec::{WAL_RECOVERY_REQUIRED, corrupt, initialize, recover_collection},
 };
 use crate::domain::FileGraphResult;
 use crate::domain::model::EmbeddingModelInfo;
@@ -170,7 +170,7 @@ impl IndexStore {
                 "workspace storage is already open",
             ));
         }
-        let (lock, schema, new_storage) = prepare_storage(&path, options)?;
+        let (mut lock, mut schema, new_storage) = prepare_storage(&path, options.clone())?;
         let optimize_marker = path.join("optimize.pending");
         let needs_optimize = file_exists(&optimize_marker)?;
         let graph_path = path.join("graph").join("graph.sqlite");
@@ -199,10 +199,15 @@ impl IndexStore {
             Err(graph_disabled())
         }
         .map_err(EngineError::into_report);
-        let files = Files::open(&path, read_only)?;
-        let directories = Directories::open(&path, read_only)?;
-        let entities = Entities::open(&path, read_only)?;
-        let fragments = Fragments::open(&path, &schema, read_only)?;
+        let tables = open_tables(&path, &schema, read_only);
+        let (files, directories, entities, fragments) = match tables {
+            Err(error) if read_only && error.code() == WAL_RECOVERY_REQUIRED => {
+                // open_tables has dropped every partial native reader.
+                (lock, schema) = recover_wal(&path, options, lock)?;
+                open_tables(&path, &schema, true)?
+            }
+            result => result?,
+        };
         if !read_only {
             directories.load()?;
         }
@@ -527,6 +532,38 @@ impl IndexStore {
     }
 }
 
+fn open_tables(
+    path: &Path,
+    schema: &[EmbeddingModelInfo],
+    read_only: bool,
+) -> EngineResult<(Files, Directories, Entities, Fragments)> {
+    Ok((
+        Files::open(path, read_only)?,
+        Directories::open(path, read_only)?,
+        Entities::open(path, read_only)?,
+        Fragments::open(path, schema, read_only)?,
+    ))
+}
+
+fn recover_wal(
+    path: &Path,
+    options: WorkspaceIndexStorageOptions,
+    shared_lock: File,
+) -> EngineResult<(File, Vec<EmbeddingModelInfo>)> {
+    // Keep the caller's workspace read lock to prevent publication, but release
+    // shared storage access before taking the exclusive recovery lock.
+    drop(shared_lock);
+    let recovery_lock = acquire_storage_lock(path, false)?;
+    let (schema, _) = load_schema(path, options.clone())?;
+    for name in collection_names(&schema) {
+        recover_collection(&path.join(name))?;
+    }
+    drop(recovery_lock);
+    // Do not retain an exclusive lock in a long-lived cached read session.
+    let (lock, schema, _) = prepare_storage(path, options)?;
+    Ok((lock, schema))
+}
+
 fn optimize_collections(
     operations: [&(dyn Fn() -> EngineResult<()> + Sync); 4],
 ) -> EngineResult<()> {
@@ -810,14 +847,7 @@ fn load_schema(
                 })?;
             }
         }
-        for collection in [
-            "files".to_owned(),
-            "directories".to_owned(),
-            "entities".to_owned(),
-        ]
-        .into_iter()
-        .chain(schema.iter().map(fragments::fragment_collection_name))
-        {
+        for collection in collection_names(&schema) {
             let collection_path = path.join(&collection);
             if !directory_exists(&collection_path)? {
                 return Err(EngineError::storage_failure(format!(
@@ -853,6 +883,16 @@ fn load_schema(
         &serde_json::to_vec(&SchemaRecord::new(&embeddings)).map_err(|error| json_error(&error))?,
     )?;
     Ok((embeddings, true))
+}
+
+fn collection_names(schema: &[EmbeddingModelInfo]) -> impl Iterator<Item = String> + '_ {
+    [
+        "files".to_owned(),
+        "directories".to_owned(),
+        "entities".to_owned(),
+    ]
+    .into_iter()
+    .chain(schema.iter().map(fragments::fragment_collection_name))
 }
 
 fn registry() -> EngineResult<MutexGuard<'static, HashMap<PathBuf, Weak<SharedStore>>>> {
