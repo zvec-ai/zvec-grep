@@ -300,6 +300,7 @@ impl WorkspaceIndexService {
             }
             match super::graph_resolver::resolve_pending(
                 &writer.session.storage,
+                Some(workspace.source_root()),
                 options.signal.as_ref(),
             ) {
                 Ok(sweep) => tracing::debug!(sweep = ?sweep, "graph resolution sweep"),

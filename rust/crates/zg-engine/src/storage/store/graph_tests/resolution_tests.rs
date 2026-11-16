@@ -14,6 +14,12 @@ fn target_metadata(index: usize) -> CodeMetadata {
         is_exported: false,
         is_declaration: false,
         package: None,
+        has_internal_linkage: false,
+        declares_type: false,
+        alias_of: None,
+        object_members: Vec::new(),
+        overwritten_by: None,
+        exported_as: Vec::new(),
     }
 }
 
@@ -278,4 +284,79 @@ fn pending_pages_preserve_cursor_and_writeback_checks_both_endpoints() {
     assert!(reader.list_pending_refs(1, 0, &snapshot).is_err());
     assert!(reader.apply_resolutions(&[], &snapshot).is_err());
     reader.close().expect("close reader");
+}
+
+#[test]
+fn candidate_visibility_is_frozen_per_snapshot_and_refreshes_for_the_next_one() {
+    let temporary = tempfile::tempdir().expect("workspace");
+    let store = open(temporary.path(), false);
+    for (path, text) in [("first.rs", "first"), ("second.rs", "second")] {
+        let mut source = snapshot(&store, path, &[text]);
+        let entity = &source.entities[0];
+        source.entities[0] = Entity::new(
+            entity.id().clone(),
+            entity.file_id(),
+            entity.source_range(),
+            entity.content().clone(),
+            Some(EntityMetadata::Code(target_metadata(0))),
+            entity.fragments().to_vec(),
+        )
+        .expect("same-name candidate");
+        write(&store, &source);
+    }
+    let published = store.list_files().expect("files").remove(1);
+    let original = store.resolution_snapshot(None).expect("original snapshot");
+    assert_eq!(
+        original
+            .lookup_candidates("target'quoted")
+            .expect("two visible candidates")
+            .len(),
+        2
+    );
+    assert!(
+        original
+            .lookup_candidates("missing")
+            .expect("missing name")
+            .is_empty()
+    );
+    for status in [
+        FileIndexStatus::NotIndexed,
+        FileIndexStatus::Deleting,
+        FileIndexStatus::Failed {
+            error: "fixture".into(),
+        },
+    ] {
+        let mut hidden = published.clone();
+        hidden.set_index_status(status).expect("status");
+        store
+            .write(|state| state.files.put(&hidden, &[]))
+            .expect("hide one candidate");
+        assert!(
+            store
+                .resolution_snapshot(None)
+                .expect("hidden snapshot")
+                .lookup_candidates("target'quoted")
+                .is_none(),
+            "one hidden candidate prevents a false unique match"
+        );
+        assert_eq!(
+            original
+                .lookup_candidates("target'quoted")
+                .expect("frozen visibility")
+                .len(),
+            2
+        );
+    }
+    store
+        .write(|state| state.files.put(&published, &[]))
+        .expect("republish");
+    assert_eq!(
+        store
+            .resolution_snapshot(None)
+            .expect("new snapshot")
+            .lookup_candidates("target'quoted")
+            .expect("visible again")
+            .len(),
+        2
+    );
 }

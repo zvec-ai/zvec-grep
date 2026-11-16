@@ -1104,6 +1104,7 @@ mod output_tests {
             is_exported: false,
             is_declaration: false,
             package: None,
+            ..CodeMetadata::default()
         }));
         for source in [ContextSource::Index, ContextSource::Rg] {
             result.source = source;
@@ -1465,6 +1466,7 @@ mod output_tests {
                 is_exported: false,
                 is_declaration: false,
                 package: None,
+                ..CodeMetadata::default()
             }));
             let mut buffer = Vec::new();
             write_item_preview(
