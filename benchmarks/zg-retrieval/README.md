@@ -148,6 +148,42 @@ JSON and full reports, separate from QA Gold.
 
 Evidence retention is 14 days. After a shared candidate build, SWE-QA20, BEIR, DuRetrieval and Quarry run as four independent suite jobs. Each suite publishes its own aggregate metrics and a per-question table even if an individual question fails. The final results job publishes the combined page. Missing artifacts and failed upstream jobs remain explicit in the overview.
 
+### Gold coverage by retrieval stage
+
+Enable `gold_stages` in the manual workflow, or add `--gold-stages` to the
+local SWE-QA20 runner and the expansion runner with `--suite quarry`. Use a
+candidate built with stage capture support. The optional capture uses the
+same five calls, frozen source and QA labels, adaptive recall and `limit: 10`.
+It sends the original public requests and records evidence in a private
+directory outside the corpus. Older candidates produce unobserved stages.
+
+Each suite's report shows File and Entity coverage and losses by mode. The
+denominator is the number of Gold targets across calls, including unknowns.
+SWE-QA20 uses its QA File labels here and separates formal, diagnostic and
+unresolved cases. Unresolved Gold stays in the per-call evidence. Quarry uses
+its verified File and Entity labels for diagnostics. Existing score tables
+keep their original denominators and aggregation.
+
+| Boundary | Evidence and reference for loss |
+| --- | --- |
+| Index | Same-path canonical Entities with at least one live search projection. A file is searchable if it has any such Entity. |
+| FTS / Vector / recall union | Owners of actual returned Fragments across adaptive recall attempts. Compare each route and the union with the index. The best rank is the minimum rank observed for that owner on that route. Hybrid reports both routes. |
+| Entity merge / RRF fusion / Entity load | Compare each complete pool with its predecessor. A missing canonical owner or an ambiguous range makes Entity coverage unknown where it could affect a hit. |
+| Final selection | Compare the actual selected results with the loaded pool. |
+| RRF order / static score / same-file decay @10 | Compare all three orders with the same loaded pool. The first two cutoffs are diagnostic. Actual selection uses the native greedy same-file decay and stops at 10, so loaded but unselected Gold has no actual final rank. |
+
+The shared matcher preserves same-file full containment. SWE-QA20 follows its
+line-based score and Quarry uses its verified UTF-8 byte ranges. `gold-stages.json`
+keeps every call's Gold IDs, known ranks, misses, unobserved values, recall depths
+and pool sizes. Its `loaded` rank is the RRF order within the surviving loaded
+pool, while `fused` is the original rank across the full fusion pool. The report
+checks selected Gold-file paths and coordinates against the public response.
+Raw captures contain Gold-file coordinates and ranks, with overall pool counts.
+They carry no query text, snippet text, vectors or model credentials.
+
+The report records mean index-read time for observed calls. Enabled MCP latency
+also includes capture bookkeeping, an extra static-order sort and sidecar I/O.
+
 SWE-QA20 ZG reports use **schema 7**, with `preview: "full"`, three `modes`, and one quality row per question/mode. Its section uses the **schema 5** overview with fixed `zg-hybrid`, `zg-fts`, `zg-vector` rows; the combined page uses schema 1. The SWE-QA20 overview records coverage, failed task IDs/modes/reasons, the frozen harness commit and selected candidate ref/commit. Quality rows retain all five public result lists and measurement observations so validators can recompute the case mean, ranking stability, output size and latency. The representative fifth-call `file_retrieval` and `ndcg` fields remain for evidence; `quality_mean` supplies headline quality.
 
 The protocol ID is `sweqa20-zg-rust-three-modes-mcp-full-v8`. The comparator accepts schema 7 reports with matching protocol, frozen inputs, explicit full preview and all three modes. Keep earlier v7 default-short results and use their matching scorer checkout to review them. They are not full-preview results; replaying saved evidence is not a new retrieval run.

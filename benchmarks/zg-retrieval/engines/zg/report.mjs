@@ -28,10 +28,14 @@ import {
   summarizeRepeatedQuality,
 } from "../../metrics/repetitions.mjs";
 import { markdownReport } from "../../reports/zg.mjs";
+import { readGoldStages } from "../../core/gold-stage-capture.mjs";
+import { scoreGoldStages } from "../../metrics/gold-stages.mjs";
+import { writeGoldStages } from "../../reports/gold-stages.mjs";
 import { summarizeIndexCounts } from "../../core/index-counts.mjs";
 import { summarizeIndexSettings } from "../../core/index-settings.mjs";
 import {
   publicQaItems,
+  qaEligibility,
   scoreQaRetrieval,
   summarizeRepeatedQaRetrieval,
   summarizeQaRetrieval,
@@ -80,6 +84,7 @@ export async function aggregate(directory, { expectedTasks } = {}) {
   const errors = [],
     observations = [],
     manifests = [];
+  const goldStageCalls = [];
   const runDirectories = await findRuns(directory);
   const seen = new Set();
   for (const runDirectory of runDirectories) {
@@ -390,6 +395,22 @@ export async function aggregate(directory, { expectedTasks } = {}) {
         callInvalid.push(error.message);
       }
       if (callInvalid.length) score = invalidate(score, callInvalid.join("; "));
+      if (manifest.gold_stages) {
+        const pair = suite.qa_pairs[call.task_id];
+        const { status } = qaEligibility(pair);
+        const capture = score.execution_status === "success"
+          ? await readGoldStages(runDirectory, call.gold_stage_capture)
+          : null;
+        goldStageCalls.push(scoreGoldStages({
+          capture,
+          pair,
+          items: score.items ?? [],
+          taskId: call.task_id,
+          mode: call.mode,
+          repetition: call.repetition,
+          qualification: status === "scored" ? "formal" : status,
+        }));
+      }
       observations.push({
         ...call,
         ...score,
@@ -625,6 +646,8 @@ export async function aggregate(directory, { expectedTasks } = {}) {
     repositories: manifests,
     tasks: quality,
   };
+  if (manifests.some(({ gold_stages }) => gold_stages))
+    report.gold_stages = await writeGoldStages(directory, goldStageCalls);
   await writeFile(
     join(directory, "scores.jsonl"),
     observations.map((row) => JSON.stringify(row)).join("\n") + "\n",

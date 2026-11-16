@@ -3,9 +3,12 @@ mod paths;
 mod query;
 mod support;
 
-use std::collections::HashMap;
+use std::{cmp::Ordering, collections::HashMap};
 
-use super::pipeline::{ResolvedSearchRoute, SearchHit};
+use super::{
+    gold_stages::GoldStages,
+    pipeline::{ResolvedSearchRoute, SearchHit},
+};
 use crate::{
     api::context::{options::QueryFilter, result::SearchRankingTrace},
     domain::{EntityMetadata, FileId},
@@ -68,8 +71,17 @@ pub(super) fn rank(
     filter: &QueryFilter,
     maximum_rrf: f64,
     limit: usize,
+    gold: Option<&mut GoldStages>,
 ) -> Vec<SearchHit> {
-    rank_with_policy(hits, routes, filter, maximum_rrf, limit, Policy::CURRENT)
+    rank_with_policy(
+        hits,
+        routes,
+        filter,
+        maximum_rrf,
+        limit,
+        Policy::CURRENT,
+        gold,
+    )
 }
 
 fn rank_with_policy(
@@ -79,6 +91,7 @@ fn rank_with_policy(
     maximum_rrf: f64,
     limit: usize,
     policy: Policy,
+    gold: Option<&mut GoldStages>,
 ) -> Vec<SearchHit> {
     if hits.is_empty() || limit == 0 {
         return Vec::new();
@@ -130,7 +143,21 @@ fn rank_with_policy(
     if policy.support_weight > 0.0 {
         support::apply(&mut scored, policy.support_weight);
     }
+    if let Some(gold) = gold {
+        let mut order = scored.iter().collect::<Vec<_>>();
+        order.sort_by(|a, b| compare(a, b, a.static_score, b.static_score));
+        for (index, item) in order.into_iter().enumerate() {
+            gold.static_rank(&item.hit, index + 1);
+        }
+    }
     select(scored, &query, limit, policy)
+}
+
+fn compare(a: &Scored, b: &Scored, a_score: f64, b_score: f64) -> Ordering {
+    b_score
+        .total_cmp(&a_score)
+        .then_with(|| a.hit.rank.cmp(&b.hit.rank))
+        .then_with(|| a.hit.entity.id().as_str().cmp(b.hit.entity.id().as_str()))
 }
 
 fn select(
@@ -159,12 +186,7 @@ fn select(
         let best = scored
             .iter()
             .enumerate()
-            .min_by(|(_, a), (_, b)| {
-                effective(b)
-                    .total_cmp(&effective(a))
-                    .then_with(|| a.hit.rank.cmp(&b.hit.rank))
-                    .then_with(|| a.hit.entity.id().as_str().cmp(b.hit.entity.id().as_str()))
-            })
+            .min_by(|(_, a), (_, b)| compare(a, b, effective(a), effective(b)))
             .map_or(0, |(index, _)| index);
         let mut item = scored.swap_remove(best);
         let count = selected_per_file.entry(item.hit.file.id()).or_default();

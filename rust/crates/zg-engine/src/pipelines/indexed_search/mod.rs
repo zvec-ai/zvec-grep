@@ -2,6 +2,7 @@
 
 pub(crate) mod context;
 pub(super) mod format_filter;
+mod gold_stages;
 pub(super) mod path_filter;
 mod pipeline;
 mod ranking;

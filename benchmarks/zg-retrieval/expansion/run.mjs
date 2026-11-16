@@ -8,6 +8,9 @@ import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { fileHash, run, writeJson } from "../core/io.mjs";
 import { embeddingRuntime } from "../core/embedding.mjs";
+import { goldStageSession, readGoldStages } from "../core/gold-stage-capture.mjs";
+import { scoreGoldStages } from "../metrics/gold-stages.mjs";
+import { goldStagesMarkdown, writeGoldStages } from "../reports/gold-stages.mjs";
 import { scoreFileRetrieval } from "../metrics/files.mjs";
 import { scoreNdcg } from "../metrics/ndcg.mjs";
 import {
@@ -16,7 +19,7 @@ import {
 } from "../metrics/repetitions.mjs";
 import { summarizeQaRetrieval } from "../metrics/entities.mjs";
 import { QA_ENTITY_METRICS, qaPercentCell } from "../reports/zg.mjs";
-import { summarizePilotEntity, verifyPilotGoldSources } from "./gold.mjs";
+import { pilotQaTargets, summarizePilotEntity, verifyPilotGoldSources } from "./gold.mjs";
 import {
   locateFullEntity,
   parseVisibleResponse,
@@ -313,6 +316,7 @@ export function markdownPilotReport(report) {
         `- \`${String(failure.task_id).replaceAll("`", "")}\`: ${String(failure.reason).replaceAll(/\r?\n/g, " ")}`,
       );
   }
+  lines.push(...goldStagesMarkdown(report.gold_stages));
   return `${lines.join("\n")}\n`;
 }
 
@@ -450,11 +454,12 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
         group.expectedIndexedFiles,
         `${pilot.name} corpus was not fully indexed`,
       );
+    const stages = await goldStageSession(evidence, options.goldStages);
     const transport = new mcp.StdioClientTransport({
       command: command[0],
       args: command.slice(1),
       cwd: root,
-      env,
+      env: { ...env, ...stages?.env },
       stderr: "pipe",
     });
     client = new mcp.Client({ name: "zg-retrieval-pilots", version: "1.0.0" });
@@ -467,6 +472,7 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
     assertFullPreviewSchema(search.inputSchema);
     for (const mode of pilot.modes) {
       for (const task of group.tasks) {
+        const pair = stages ? pilotQaTargets(pilot.gold.tasks[task.id]) : null;
         const row = {
           task_id: task.id,
           mode,
@@ -480,9 +486,11 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
         groupRows.push(row);
         for (let repetition = 1; repetition <= REPETITIONS; repetition++) {
           const args = searchArguments(task, root, mode);
+          const stageId = await stages?.before(task.query, mode, pair);
           const started = performance.now();
           let response;
           let error = null;
+          let transportError = false;
           let parsedItems = null;
           try {
             response = await client.callTool(
@@ -510,12 +518,14 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
             }
           } catch (failure) {
             error = failure.message;
+            transportError = response == null;
             response ??= {
               isError: true,
               content: [{ type: "text", text: error }],
             };
           }
           const latency = performance.now() - started;
+          const stageCapture = await stages?.after(stageId, transportError);
           const raw = join(
             evidence,
             "raw",
@@ -532,6 +542,7 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
             items: parsedItems,
             raw_sha256: await fileHash(raw),
             error,
+            ...(stages ? { gold_stage_capture: stageCapture } : {}),
           });
           if (error)
             report.failures.push({
@@ -619,6 +630,7 @@ export async function main(args = process.argv.slice(2)) {
       package: { type: "string" },
       output: { type: "string" },
       "model-cache": { type: "string" },
+      "gold-stages": { type: "boolean", default: false },
       "candidate-commit": { type: "string", default: "unrecorded" },
     },
   });
@@ -627,10 +639,12 @@ export async function main(args = process.argv.slice(2)) {
     "requires --suite, --package and --output",
   );
   const pilot = await loadPilot(values.suite);
+  assert.ok(!values["gold-stages"] || values.suite === "quarry", "stage diagnostics are available for the Quarry code suite");
   const output = resolve(values.output);
   await mkdir(output, { recursive: false });
   const options = {
     output,
+    goldStages: values["gold-stages"],
     modelCache: resolve(values["model-cache"] ?? join(output, "model-cache")),
   };
   await mkdir(options.modelCache, { recursive: true });
@@ -735,6 +749,29 @@ export async function main(args = process.argv.slice(2)) {
     console.error(`${pilot.name}: ${error.stack}`);
   }
   fillMissingRows(pilot, report);
+  if (options.goldStages) {
+    const calls = [];
+    for (const row of report.rows) {
+      const pair = pilotQaTargets(pilot.gold.tasks[row.task_id]);
+      for (let repetition = 1; repetition <= REPETITIONS; repetition++) {
+        const call = row.calls.find((item) => item.repetition === repetition);
+        const capture = row.group_integrity === "verified" && call?.status === "success"
+          ? await readGoldStages(join(output, "evidence", row.corpus_id), call.gold_stage_capture)
+          : null;
+        calls.push(scoreGoldStages({
+          capture,
+          pair,
+          items: call?.items ?? [],
+          taskId: row.task_id,
+          mode: row.mode,
+          repetition,
+          qualification: "diagnostic",
+          useBytes: true,
+        }));
+      }
+    }
+    report.gold_stages = await writeGoldStages(output, calls);
+  }
   await writeReport(output, report, pilot);
   console.log(`Report: ${join(output, "report.md")}`);
   if (report.status !== "success") process.exitCode = 1;

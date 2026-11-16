@@ -152,7 +152,7 @@ function validateItems(items) {
   }
 }
 
-function entityMatch(item, targets, entityByteRanges) {
+export function entityMatch(item, targets, entityByteRanges) {
   const sameFile = targets.filter((target) => target.path === item.path);
   if (item.range?.kind !== "text")
     return { hits: [], possible: sameFile.map((target) => target.id) };
@@ -346,7 +346,7 @@ function evidenceSetMetrics(items, targets, entityByteRanges, ndcg) {
   return metricsFromRanks(targets, found, unknown, ndcg);
 }
 
-function eligibility(pair) {
+export function qaEligibility(pair) {
   if (!pair)
     return {
       status: "unavailable",
@@ -377,7 +377,7 @@ function eligibility(pair) {
 
 /** Score only public evidence. Diagnostic labels never authorize formal totals. */
 export function scoreQaRetrieval(items, pair, options) {
-  return scoreRetrieval(items, pair, eligibility(pair), options);
+  return scoreRetrieval(items, pair, qaEligibility(pair), options);
 }
 
 function scoreRetrieval(
@@ -448,7 +448,7 @@ export function publicQaItems(items) {
 
 /** A metric receives one question vote only when all five observations are known. */
 export function summarizeRepeatedQaRetrieval(calls, pair, options) {
-  return summarizeRepeatedRetrieval(calls, pair, eligibility(pair), options);
+  return summarizeRepeatedRetrieval(calls, pair, qaEligibility(pair), options);
 }
 
 /** Pilot labels support diagnostics only; they do not assert a QA review. */

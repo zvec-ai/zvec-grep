@@ -69,7 +69,10 @@ test("Retrieval-only retains its reusable and manual candidate/embedding inputs"
   assert.match(dispatch, /^ {8}type: choice$/m);
   assert.match(dispatch, /^ {10}- local$/m);
   assert.match(dispatch, /^ {10}- remote$/m);
-  assert.equal((dispatch.match(/^ {6}[a-z_]+:$/gm) ?? []).length, 2);
+  const goldStages = block(dispatch, "gold_stages", 6);
+  assert.match(goldStages, /^ {8}type: boolean$/m);
+  assert.match(goldStages, /^ {8}default: false$/m);
+  assert.equal((dispatch.match(/^ {6}[a-z_]+:$/gm) ?? []).length, 3);
   const files = await readdir(new URL(".github/workflows/", repository));
   assert.deepEqual(
     files.filter((file) => /^retrieval.*\.ya?ml$/.test(file)).sort(),
@@ -227,7 +230,13 @@ test("the four suites run in independent jobs using one candidate package", asyn
     entry.includes("node benchmarks/zg-retrieval/run.mjs"),
   );
   assert.ok(runner);
-  assert.doesNotMatch(runner, /--(?:modes|preview)\b|RETRIEVAL_MODES|inputs\./);
+  assert.doesNotMatch(runner, /--(?:modes|preview)\b|RETRIEVAL_MODES|inputs\.(?!gold_stages\b)/);
+  for (const suite of ["sweqa", "quarry"]) {
+    assert.match(jobs[suite], /inputs\.gold_stages && '--gold-stages'/);
+    assert.match(jobs[suite], /gold-stages\.json/);
+  }
+  for (const suite of ["beir", "duretrieval"])
+    assert.doesNotMatch(jobs[suite], /--gold-stages/);
   assert.doesNotMatch(runner, /--repository\b/);
   assert.match(jobs["quality-contract"], /uses: actions\/setup-python@/);
   assert.match(jobs.sweqa, /needs: \[authorize, package-candidate\]/);

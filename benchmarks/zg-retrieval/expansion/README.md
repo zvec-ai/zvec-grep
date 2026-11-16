@@ -92,6 +92,9 @@ original query/qrel records are checked in.
 
 ## Gold and scoring
 
+Quarry supports the opt-in [Gold stage diagnostic](../README.md#gold-coverage-by-retrieval-stage).
+Run `node benchmarks/zg-retrieval/expansion/run.mjs --suite quarry --package CANDIDATE.tgz --output NEW_DIR --gold-stages`.
+
 | Suite | File Gold | Entity Gold |
 | --- | --- | --- |
 | BEIR | Original positive document qrels | Original SciFact evidence sentences where available, LLM-annotated evidence spans for NFCorpus and FiQA, and the paired ArguAna argument body |

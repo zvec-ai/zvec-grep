@@ -246,16 +246,16 @@ export async function verifyPilotGoldSources(gold, group) {
   return files;
 }
 
+export function pilotQaTargets(entry) {
+  return {
+    file_targets: entry.files.map((file) => ({ ...file, id: file.path })),
+    entity_targets: entry.targets.map((target) => ({
+      ...target,
+      id: target.source_id,
+    })),
+  };
+}
+
 export function summarizePilotEntity(calls, entry) {
-  return summarizeDiagnosticRetrieval(
-    calls,
-    {
-      file_targets: entry.files.map((file) => ({ ...file, id: file.path })),
-      entity_targets: entry.targets.map((target) => ({
-        ...target,
-        id: target.source_id,
-      })),
-    },
-    { entityByteRanges: true },
-  );
+  return summarizeDiagnosticRetrieval(calls, pilotQaTargets(entry), { entityByteRanges: true });
 }

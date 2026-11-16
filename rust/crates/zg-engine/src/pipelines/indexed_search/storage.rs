@@ -1,12 +1,12 @@
 //! Read operations used by indexed search, independently of indexing writes.
 
-use std::path::PathBuf;
+use std::{collections::HashSet, path::PathBuf};
 
 use crate::{
-    EngineResult,
+    EngineError, EngineResult,
     domain::FileId,
     storage::{
-        IndexStore,
+        IndexStore, IndexedSourceFile,
         types::{StorageSearchFilter, StorageSearchHit, StoredFileAttributes, StoredSearchData},
     },
 };
@@ -16,6 +16,11 @@ pub(crate) trait SearchStorage: Send + Sync {
     fn list_file_attributes(&self) -> EngineResult<Vec<StoredFileAttributes>>;
     fn has_non_unicode_file_names(&self) -> EngineResult<bool>;
     fn load_search_hits(&self, hits: &[StorageSearchHit]) -> EngineResult<StoredSearchData>;
+    fn indexed_sources(&self, _paths: &HashSet<PathBuf>) -> EngineResult<Vec<IndexedSourceFile>> {
+        Err(EngineError::unsupported(
+            "Gold stage index observation unavailable",
+        ))
+    }
     fn search_fts(
         &self,
         query: &str,
@@ -46,6 +51,10 @@ impl SearchStorage for IndexStore {
 
     fn load_search_hits(&self, hits: &[StorageSearchHit]) -> EngineResult<StoredSearchData> {
         self.load_search_hits(hits)
+    }
+
+    fn indexed_sources(&self, paths: &HashSet<PathBuf>) -> EngineResult<Vec<IndexedSourceFile>> {
+        self.indexed_sources(paths)
     }
 
     fn search_fts(

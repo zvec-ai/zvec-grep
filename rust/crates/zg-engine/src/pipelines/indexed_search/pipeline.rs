@@ -27,6 +27,7 @@ use crate::{
 
 use super::{
     format_filter::{compile_format_filter, matches_file_name},
+    gold_stages::GoldStages,
     path_filter::{all, resolve_glob_filter},
 };
 
@@ -201,6 +202,7 @@ pub(crate) async fn search_workspace_index(
     };
     let embedding_duration = embedding_started.elapsed();
 
+    let mut gold = GoldStages::begin(&routes, limit, plan.prefer_symbol, storage);
     let recall_started = Instant::now();
     let mut candidates = HashMap::new();
     if has_searchable_files && limit > 0 {
@@ -212,25 +214,51 @@ pub(crate) async fn search_workspace_index(
             limit,
             storage,
             &mut candidates,
+            gold.as_mut(),
         )?;
     }
     let recall_duration = recall_started.elapsed();
+    if let Some(gold) = gold.as_mut() {
+        gold.merged(
+            candidates.len(),
+            candidates.values().map(|c| (c.file_id, &c.id)),
+        );
+    }
 
     let fusion_started = Instant::now();
     let fused = fuse_candidates(candidates);
     let fusion_duration = fusion_started.elapsed();
+    if let Some(gold) = gold.as_mut() {
+        gold.fused(
+            fused.len(),
+            fused.iter().map(|c| (c.file_id, &c.id, c.rank)),
+        );
+    }
 
     let load_started = Instant::now();
     // Every recalled entity must be eligible for structural boosts before cutoff.
     let hits = load_candidates(fused, limit, plan.trace, storage)?;
     let load_duration = load_started.elapsed();
+    if let Some(gold) = gold.as_mut() {
+        gold.loaded(&hits);
+    }
     let ranking_started = Instant::now();
     let maximum_rrf = build_recall_routes(&routes, filter.as_ref(), plan.prefer_symbol)
         .iter()
         .map(|_| 1.0 / (RRF_K + 1.0))
         .sum();
-    let hits = super::ranking::rank(hits, &routes, &plan.filter, maximum_rrf, limit);
+    let hits = super::ranking::rank(
+        hits,
+        &routes,
+        &plan.filter,
+        maximum_rrf,
+        limit,
+        gold.as_mut(),
+    );
     let ranking_duration = ranking_started.elapsed();
+    if let Some(gold) = gold {
+        gold.finish(&hits);
+    }
 
     Ok(SearchPlanResult {
         routes,
@@ -349,6 +377,7 @@ fn collect_adaptive_recall(
     limit: usize,
     storage: &dyn SearchStorage,
     candidates: &mut HashMap<EntityId, Candidate>,
+    mut gold: Option<&mut GoldStages>,
 ) -> Result<(), EngineError> {
     let recall_routes = build_recall_routes(routes, filter, prefer_symbol);
     let target = (limit * RECALL_TARGET_FACTOR).max(RECALL_MIN_TARGET_CANDIDATES);
@@ -375,6 +404,9 @@ fn collect_adaptive_recall(
                     )?,
             };
             saturated |= hits.len() >= depth;
+            if let Some(gold) = gold.as_deref_mut() {
+                gold.recall(&route.route.id, depth, &hits);
+            }
             add_recall_hits(candidates, &hits, &route.route)?;
         }
         if candidates.len() >= target || !saturated || depth >= RECALL_MAX_DEPTH {

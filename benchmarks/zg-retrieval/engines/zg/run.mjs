@@ -29,6 +29,7 @@ import {
   inside,
 } from "../../core/lib.mjs";
 import { embeddingRuntime } from "../../core/embedding.mjs";
+import { goldStageSession } from "../../core/gold-stage-capture.mjs";
 import { aggregate } from "./report.mjs";
 import { NativeIndexProductError, snapshotIndex } from "./snapshot.mjs";
 
@@ -272,6 +273,7 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
     modes,
     preview: protocol.preview,
     planned_calls: planned.length,
+    ...(options.goldStages ? { gold_stages: true } : {}),
     invalid_reasons: [],
     preparation_status: "pending",
     stage_availability: "pending",
@@ -434,11 +436,12 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
       pathToFileURL(require.resolve("@modelcontextprotocol/client/stdio")).href
     );
     client = new Client({ name: "zg-retrieval-only", version: "1.0.0" });
+    const goldStages = await goldStageSession(output, options.goldStages);
     transport = new StdioClientTransport({
       command: command[0],
       args: command.slice(1),
       cwd: root,
-      env,
+      env: { ...env, ...goldStages?.env },
       stderr: "pipe",
     });
     let mcpStderr = "";
@@ -527,6 +530,7 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
     phase = "replay";
     for (const [index, call] of planned.entries()) {
       const args = requestArguments(call.task, root, call.mode, protocol);
+      const stageId = await goldStages?.before(call.task.query, call.mode, suite.qa_pairs[call.task.task_id]);
       const start = performance.now();
       let response, error;
       try {
@@ -551,6 +555,7 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
         transport_error: error ?? null,
         raw_path: `raw/${call.task.task_slug}-${call.mode}-${call.preview}-${call.repetition}.json`,
       };
+      if (goldStages) record.gold_stage_capture = await goldStages.after(stageId, error);
       await writeJson(join(output, record.raw_path), response);
       record.raw_sha256 = await fileHash(join(output, record.raw_path));
       await appendFile(
@@ -685,6 +690,7 @@ export async function main(args = process.argv.slice(2)) {
       repository: { type: "string" },
       tasks: { type: "string" },
       "model-cache": { type: "string" },
+      "gold-stages": { type: "boolean", default: false },
       "candidate-commit": { type: "string", default: "unrecorded" },
     },
   });
@@ -714,6 +720,7 @@ export async function main(args = process.argv.slice(2)) {
       values["model-cache"] ?? join(values.output, "model-cache"),
     ),
     candidateCommit: values["candidate-commit"],
+    goldStages: values["gold-stages"],
     runId: new Date().toISOString(),
   };
   await mkdir(options.output, { recursive: false }); // Never overwrite a prior run.

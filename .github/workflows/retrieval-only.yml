@@ -35,6 +35,10 @@ on:
         options:
           - local
           - remote
+      gold_stages:
+        description: Capture Gold coverage at search stages in SWE-QA20 and Quarry
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -157,7 +161,8 @@ jobs:
             --output "$RUNNER_TEMP/sweqa" \
             --corpus "$RUNNER_TEMP/corpus" \
             --model-cache "$RUNNER_TEMP/model-cache" \
-            --candidate-commit "${{ needs.package-candidate.outputs.candidate-commit }}"
+            --candidate-commit "${{ needs.package-candidate.outputs.candidate-commit }}" \
+            ${{ inputs.gold_stages && '--gold-stages' || '' }}
       - name: Build the SWE-QA20 conclusion report
         if: ${{ always() && steps.access.outcome == 'success' }}
         run: |
@@ -183,6 +188,7 @@ jobs:
             ${{ runner.temp }}/sweqa/summary.json
             ${{ runner.temp }}/sweqa/summary.md
             ${{ runner.temp }}/sweqa/scores.jsonl
+            ${{ runner.temp }}/sweqa/gold-stages.json
           if-no-files-found: warn
           retention-days: 14
       - name: Preserve SWE-QA20 public evidence
@@ -388,7 +394,8 @@ jobs:
             --package "$RUNNER_TEMP/package/candidate.tgz" \
             --output "$RUNNER_TEMP/quarry" \
             --model-cache "$RUNNER_TEMP/quarry-model-cache" \
-            --candidate-commit "${{ needs.package-candidate.outputs.candidate-commit }}"
+            --candidate-commit "${{ needs.package-candidate.outputs.candidate-commit }}" \
+            ${{ inputs.gold_stages && '--gold-stages' || '' }}
       - name: Publish Quarry results for this job
         if: ${{ always() && steps.access.outcome == 'success' }}
         run: |
@@ -405,6 +412,7 @@ jobs:
           path: |
             ${{ runner.temp }}/quarry/report.json
             ${{ runner.temp }}/quarry/report.md
+            ${{ runner.temp }}/quarry/gold-stages.json
           if-no-files-found: warn
           retention-days: 14
       - name: Preserve Quarry public evidence
