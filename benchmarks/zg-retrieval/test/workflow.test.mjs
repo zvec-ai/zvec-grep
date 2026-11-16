@@ -71,7 +71,7 @@ test("Retrieval-only retains its reusable and manual candidate/embedding inputs"
   assert.match(dispatch, /^ {10}- remote$/m);
   assert.match(dispatch, /^ {6}local_model:$/m);
   assert.match(dispatch, /^ {6}a10_retry:\n[^\n]+\n {8}default: false\n {8}type: boolean$/m);
-  assert.match(dispatch, /^ {6}a10_gte_quarry_recovery:$/m);
+  assert.match(dispatch, /^ {6}a10_strict_retry:$/m);
   assert.equal((dispatch.match(/^ {6}[a-z0-9_]+:$/gm) ?? []).length, 5);
   assert.match(jobs.authorize, /Validate local model override/);
   for (const name of ["sweqa", "beir", "duretrieval", "quarry", "results"]) {
@@ -244,6 +244,9 @@ test("the four suites run in independent jobs using one candidate package", asyn
   assert.match(jobs["a10-retry"], /github.event_name == 'workflow_dispatch' && inputs.a10_retry/);
   assert.match(jobs["a10-retry"], /RETRIEVAL_LOCAL_DEVICE: cuda/);
   assert.match(jobs["a10-retry"], /max-parallel: 1/);
+  assert.match(jobs["a10-retry"], /ZVEC_GREP_REQUIRE_CUDA: .*inputs\.a10_strict_retry && '1'/);
+  assert.match(jobs["a10-retry"], /ZVEC_GREP_CUDA_MAX_BATCH_SIZE: .*matrix\.batch_size/);
+  assert.equal(jobs["a10-retry"].match(/"batch_size":"1"/g)?.length, 2);
   const runner = steps(jobs.sweqa).find((entry) =>
     entry.includes("node benchmarks/zg-retrieval/run.mjs"),
   );
