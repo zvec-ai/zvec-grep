@@ -39,6 +39,22 @@ export function embeddingModel(
   return profile === "remote" ? REMOTE_EMBEDDING_MODEL : configuredModel;
 }
 
+export function localEmbeddingDevice(configuredDevice) {
+  const override = process.env.RETRIEVAL_LOCAL_DEVICE;
+  if (!override) return configuredDevice;
+  assert.equal(override, "cuda", "unsupported local benchmark device override");
+  return override;
+}
+
+export function assertCudaEvidence(stderr) {
+  assert.doesNotMatch(stderr, /fall(?:ing)? back to CPU/i, "CUDA fell back to CPU");
+  assert.ok(
+    stderr.includes("Transformers ONNX cuda embedding execution provider selected") &&
+      /placed on \[CUDAExecutionProvider\]\. Number of nodes: [1-9]\d*/.test(stderr),
+    "no ONNX CUDA graph-placement evidence; see the index log",
+  );
+}
+
 /** Remote benchmark runs require an explicit destination and a credential. */
 export function embeddingRuntime(model, environment = process.env) {
   if (!model.startsWith("qwen/"))

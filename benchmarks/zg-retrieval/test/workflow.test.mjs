@@ -70,7 +70,8 @@ test("Retrieval-only retains its reusable and manual candidate/embedding inputs"
   assert.match(dispatch, /^ {10}- local$/m);
   assert.match(dispatch, /^ {10}- remote$/m);
   assert.match(dispatch, /^ {6}local_model:$/m);
-  assert.equal((dispatch.match(/^ {6}[a-z_]+:$/gm) ?? []).length, 3);
+  assert.match(dispatch, /^ {6}a10_retry:\n[^\n]+\n {8}default: false\n {8}type: boolean$/m);
+  assert.equal((dispatch.match(/^ {6}[a-z0-9_]+:$/gm) ?? []).length, 4);
   assert.match(jobs.authorize, /Validate local model override/);
   for (const name of ["sweqa", "beir", "duretrieval", "quarry", "results"]) {
     assert.match(
@@ -97,9 +98,12 @@ test("Retrieval-only retains its reusable and manual candidate/embedding inputs"
     "beir",
     "duretrieval",
     "quarry",
+    "a10-retry",
     "results",
   ]);
-  assert.doesNotMatch(workflow, /setup-node|node-version|NODE_VERSION/);
+  for (const [name, job] of Object.entries(jobs))
+    if (name !== "a10-retry")
+      assert.doesNotMatch(job, /setup-node|node-version|NODE_VERSION/);
 });
 
 test("PR updates run Retrieval-only at the fork head SHA with local embedding and no forwarded secrets", () => {
@@ -230,8 +234,14 @@ test("the four suites run in independent jobs using one candidate package", asyn
     new Set(lock.repositories.map((repo) => repo.repository)).size,
     11,
   );
-  assert.equal(Object.keys(jobs).length, 8);
-  assert.doesNotMatch(workflow, /strategy:|fromJSON\(/);
+  for (const name of ["sweqa", "beir", "duretrieval", "quarry"]) {
+    assert.doesNotMatch(jobs[name], /strategy:|fromJSON\(/);
+    assert.match(jobs[name], /if: .* !inputs\.a10_retry /);
+  }
+  assert.match(jobs["a10-retry"], /runs-on: gpu-linux-a10/);
+  assert.match(jobs["a10-retry"], /github.event_name == 'workflow_dispatch' && inputs.a10_retry/);
+  assert.match(jobs["a10-retry"], /RETRIEVAL_LOCAL_DEVICE: cuda/);
+  assert.match(jobs["a10-retry"], /max-parallel: 1/);
   const runner = steps(jobs.sweqa).find((entry) =>
     entry.includes("node benchmarks/zg-retrieval/run.mjs"),
   );
@@ -272,6 +282,7 @@ test("the selected workflow ref is frozen once for every downstream job", () => 
     "beir",
     "duretrieval",
     "quarry",
+    "a10-retry",
     "results",
   ])
     assert.match(
@@ -289,7 +300,7 @@ test("the selected source is built from rust/ and exact-commit package caching b
     /candidate_repository: \$\{\{ inputs\.candidate_repository \|\| \(inputs\.candidate_ref == 'main' && 'zvec-ai\/zvec-grep' \|\| github\.repository\) \}\}/,
   );
   assert.match(job, /candidate_ref: \$\{\{ inputs\.candidate_ref \}\}/);
-  assert.match(job, /cache_namespace: retrieval-rust/);
+  assert.match(job, /cache_namespace: .*inputs\.a10_retry && 'retrieval-rust-cuda' \|\| 'retrieval-rust'/);
   assert.match(
     job,
     /candidate-commit: \$\{\{ steps\.rust-candidate\.outputs\.commit \}\}/,
@@ -328,7 +339,7 @@ test("the selected source is built from rust/ and exact-commit package caching b
 });
 
 test("every independently rerunnable job checks benchmark access before doing work", () => {
-  assert.equal(Object.keys(jobs).length, 8);
+  assert.equal(Object.keys(jobs).length, 9);
   assert.ok(jobs.results && jobs.sweqa && jobs.authorize);
   for (const [name, job] of Object.entries(jobs)) {
     const entries = steps(job);
@@ -409,11 +420,13 @@ test("one final page combines all suite reports after successful or failed jobs"
   assert.match(overviewArtifact, /retrieval-results\/summary\.md/);
   assert.match(overviewArtifact, /retrieval-results\/summary\.json/);
   assert.doesNotMatch(overviewArtifact, /comparison/);
-  const publishers = Object.entries(jobs).flatMap(([name, job]) =>
-    steps(job)
-      .filter((entry) => entry.includes("$GITHUB_STEP_SUMMARY"))
-      .map((entry) => ({ name, entry })),
-  );
+  const publishers = Object.entries(jobs)
+    .filter(([name]) => name !== "a10-retry")
+    .flatMap(([name, job]) =>
+      steps(job)
+        .filter((entry) => entry.includes("$GITHUB_STEP_SUMMARY"))
+        .map((entry) => ({ name, entry })),
+    );
   assert.equal(publishers.length, 5);
   assert.deepEqual(
     publishers.map((entry) => entry.name),

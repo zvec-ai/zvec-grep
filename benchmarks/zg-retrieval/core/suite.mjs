@@ -3,7 +3,7 @@ import { readFile, realpath } from "node:fs/promises";
 import { dirname, join, resolve, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readJson, sha256, objectHash, inside, fileHash } from "./io.mjs";
-import { embeddingModel } from "./embedding.mjs";
+import { embeddingModel, localEmbeddingDevice } from "./embedding.mjs";
 import { validateQaPair } from "../metrics/entities.mjs";
 
 export const suiteDirectory = resolve(
@@ -33,6 +33,8 @@ export async function loadSuite({
   assert.equal(protocol.limit, 10);
   assert.equal(protocol.call_order, "mode-task-repetition");
   protocol.model = embeddingModel(protocol.model, embedding);
+  if (embedding === "local")
+    protocol.device = localEmbeddingDevice(protocol.device);
   assert.equal(
     lock.tasks.length,
     20,

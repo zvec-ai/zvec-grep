@@ -1,6 +1,6 @@
 name: Retrieval-only
 
-run-name: Retrieval-only · ${{ inputs.embedding }} embedding${{ inputs.local_model && format(' · {0}', inputs.local_model) || '' }} · harness ${{ github.ref_name }} · candidate ${{ inputs.candidate_ref }}
+run-name: Retrieval-only · ${{ inputs.a10_retry && 'PR 385 A10 retry' || format('{0} embedding', inputs.embedding) }}${{ inputs.local_model && format(' · {0}', inputs.local_model) || '' }} · harness ${{ github.ref_name }} · candidate ${{ inputs.candidate_ref }}
 
 on:
   workflow_call:
@@ -39,6 +39,10 @@ on:
         description: Explicit local model for the PR 385 embedding matrix
         required: false
         type: string
+      a10_retry:
+        description: Retry the outstanding PR 385 local-model suites on the NVIDIA A10 runner
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -47,7 +51,7 @@ env:
   RETRIEVAL_EMBEDDING: ${{ inputs.embedding }}
 
 concurrency:
-  group: retrieval-only-${{ github.ref }}-${{ inputs.candidate_ref }}-${{ inputs.embedding }}-${{ inputs.artifact_prefix || 'retrieval' }}
+  group: retrieval-only-${{ github.ref }}-${{ inputs.candidate_ref }}-${{ inputs.embedding }}-${{ inputs.a10_retry && 'a10' || inputs.artifact_prefix || 'retrieval' }}
   cancel-in-progress: true
 
 jobs:
@@ -63,6 +67,16 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/retrieval-authorize
         id: access
+      - name: Validate the A10 replay
+        if: inputs.a10_retry
+        env:
+          CANDIDATE_REF: ${{ inputs.candidate_ref }}
+          LOCAL_MODEL: ${{ inputs.local_model }}
+        run: |
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$RETRIEVAL_EMBEDDING" = local
+          test -z "$LOCAL_MODEL"
+          test "$CANDIDATE_REF" = e2b07a6cd5d11c728839f2182decf7077ae3b1f9
       - name: Validate local model override
         if: inputs.local_model != ''
         env:
@@ -113,13 +127,22 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/retrieval-authorize
         id: access
+      - name: Ensure the CUDA packager can set runtime library paths
+        if: inputs.a10_retry
+        run: |
+          if ! command -v patchelf >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends patchelf
+          fi
       - name: Build and verify the selected Rust package
         id: rust-candidate
         uses: ./.github/actions/rust-candidate-package
+        env:
+          LLAMA_CPP_BUILD_MODE: ${{ inputs.a10_retry && 'prebuilt' || 'auto' }}
         with:
           candidate_repository: ${{ inputs.candidate_repository || (inputs.candidate_ref == 'main' && 'zvec-ai/zvec-grep' || github.repository) }}
           candidate_ref: ${{ inputs.candidate_ref }}
-          cache_namespace: retrieval-rust
+          cache_namespace: ${{ inputs.a10_retry && 'retrieval-rust-cuda' || 'retrieval-rust' }}
       - uses: actions/upload-artifact@v7
         with:
           name: package-${{ inputs.artifact_prefix || 'retrieval' }}-candidate
@@ -130,6 +153,7 @@ jobs:
 
   sweqa:
     name: SWE-QA20 (20 questions)
+    if: ${{ !inputs.a10_retry }}
     env:
       RETRIEVAL_EMBEDDING: ${{ inputs.embedding }}
       RETRIEVAL_LOCAL_MODEL: ${{ inputs.local_model }}
@@ -210,6 +234,7 @@ jobs:
 
   beir:
     name: BEIR / four datasets (20 queries)
+    if: ${{ !inputs.a10_retry }}
     env:
       RETRIEVAL_EMBEDDING: ${{ inputs.embedding }}
       RETRIEVAL_LOCAL_MODEL: ${{ inputs.local_model }}
@@ -287,6 +312,7 @@ jobs:
 
   duretrieval:
     name: DuRetrieval / Chinese web search (10 queries)
+    if: ${{ !inputs.a10_retry }}
     env:
       RETRIEVAL_EMBEDDING: ${{ inputs.embedding }}
       RETRIEVAL_LOCAL_MODEL: ${{ inputs.local_model }}
@@ -364,6 +390,7 @@ jobs:
 
   quarry:
     name: Quarry / eight languages (20 queries)
+    if: ${{ !inputs.a10_retry }}
     env:
       RETRIEVAL_EMBEDDING: ${{ inputs.embedding }}
       RETRIEVAL_LOCAL_MODEL: ${{ inputs.local_model }}
@@ -432,12 +459,149 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  a10-retry:
+    name: A10 / ${{ matrix.model }} / ${{ matrix.suite }}
+    if: github.event_name == 'workflow_dispatch' && inputs.a10_retry
+    needs: [authorize, package-candidate]
+    runs-on: gpu-linux-a10
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - { model: all-minilm-l6-v2, suite: quarry }
+          - { model: gte-modernbert-base, suite: beir }
+          - { model: gte-modernbert-base, suite: sweqa }
+          - { model: gte-modernbert-base, suite: quarry }
+          - { model: gte-modernbert-base, suite: duretrieval }
+          - { model: jina-embeddings-v2-base-code, suite: quarry }
+          - { model: jina-embeddings-v2-base-code, suite: duretrieval }
+          - { model: nomic-embed-text-v1.5, suite: sweqa }
+          - { model: nomic-embed-text-v1.5, suite: quarry }
+          - { model: nomic-embed-text-v1.5, suite: duretrieval }
+    env:
+      RETRIEVAL_LOCAL_MODEL: local/${{ matrix.model }}
+      RETRIEVAL_LOCAL_DEVICE: cuda
+      CANDIDATE_COMMIT: ${{ needs.package-candidate.outputs.candidate-commit }}
+      RETRIEVAL_SUITE: ${{ matrix.suite }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.authorize.outputs.harness-commit }}
+          persist-credentials: false
+      - uses: ./.github/actions/retrieval-authorize
+        id: access
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Verify the NVIDIA A10
+        run: |
+          nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv | tee "$RUNNER_TEMP/gpu.csv"
+          grep -Eq '(^|[[:space:]])A10,' "$RUNNER_TEMP/gpu.csv"
+      - name: Restore ONNX CUDA runtime libraries
+        id: cuda-libraries
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ runner.temp }}/retrieval-cuda-runtime
+          key: retrieval-cuda-runtime-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/scripts/retrieval-a10-runtime.txt') }}
+      - name: Install ONNX CUDA runtime libraries
+        if: steps.cuda-libraries.outputs.cache-hit != 'true'
+        run: |
+          python -m pip install --no-deps --require-hashes \
+            --target "$RUNNER_TEMP/retrieval-cuda-runtime" \
+            --requirement .github/scripts/retrieval-a10-runtime.txt
+      - name: Cache installed CUDA libraries
+        if: steps.cuda-libraries.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ runner.temp }}/retrieval-cuda-runtime
+          key: ${{ steps.cuda-libraries.outputs.cache-primary-key }}
+      - name: Configure ONNX CUDA library lookup
+        run: |
+          libraries="$(find "$RUNNER_TEMP/retrieval-cuda-runtime/nvidia" -type d -name lib | sort | paste -sd:)"
+          test -n "$libraries"
+          echo "LD_LIBRARY_PATH=$libraries${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v8
+        with:
+          name: package-retrieval-candidate
+          path: ${{ runner.temp }}/package
+      - name: Verify the candidate and CUDA package variant
+        run: |
+          node benchmarks/shared/rust-package-cache.mjs verify \
+            --directory "$RUNNER_TEMP/package" \
+            --commit "$CANDIDATE_COMMIT"
+          tar -xOf "$RUNNER_TEMP/package/candidate.tgz" package/package.json |
+            node -e 'const assert = require("node:assert/strict"); assert.equal(JSON.parse(require("node:fs").readFileSync(0)).zvecGrep.variant, "cuda")'
+      - uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/a10-model-cache
+          key: retrieval-a10-${{ matrix.model }}-v1-${{ runner.os }}-${{ runner.arch }}
+      - name: Run the frozen Retrieval-only suite with CUDA
+        id: evaluate
+        env:
+          ORT_LOG: verbose
+          RUST_LOG: warn,zg=debug,zg_engine=debug,ort=trace
+        shell: bash
+        run: |
+          common=(
+            --package "$RUNNER_TEMP/package/candidate.tgz"
+            --output "$RUNNER_TEMP/a10-results"
+            --model-cache "$RUNNER_TEMP/a10-model-cache"
+            --candidate-commit "$CANDIDATE_COMMIT"
+          )
+          case "$RETRIEVAL_SUITE" in
+            sweqa)
+              node benchmarks/zg-retrieval/run.mjs "${common[@]}" --corpus "$RUNNER_TEMP/a10-corpus"
+              ;;
+            beir|duretrieval)
+              python -m pip install --requirement "benchmarks/zg-retrieval/expansion/requirements-$RETRIEVAL_SUITE.txt"
+              node benchmarks/zg-retrieval/expansion/run.mjs "${common[@]}" --suite "$RETRIEVAL_SUITE"
+              ;;
+            quarry)
+              node benchmarks/zg-retrieval/expansion/run.mjs "${common[@]}" --suite "$RETRIEVAL_SUITE"
+              ;;
+          esac
+      - name: Publish suite report
+        if: ${{ always() && steps.access.outcome == 'success' }}
+        run: |
+          if [ -f "$RUNNER_TEMP/a10-results/report.md" ]; then
+            cat "$RUNNER_TEMP/a10-results/report.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Preserve the report
+        if: ${{ always() && steps.access.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: a10-${{ matrix.model }}-${{ matrix.suite }}-report
+          path: |
+            ${{ runner.temp }}/gpu.csv
+            ${{ runner.temp }}/a10-results/report.json
+            ${{ runner.temp }}/a10-results/report.md
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 30
+      - name: Preserve per-query and CUDA evidence
+        if: ${{ always() && steps.access.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: a10-${{ matrix.model }}-${{ matrix.suite }}-evidence
+          path: |
+            ${{ runner.temp }}/a10-results/
+            !${{ runner.temp }}/a10-results/consumer/**
+            !${{ runner.temp }}/a10-results/**/runtime-home/**
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 14
+
   results:
     name: Retrieval results
     env:
       RETRIEVAL_EMBEDDING: ${{ inputs.embedding }}
       RETRIEVAL_LOCAL_MODEL: ${{ inputs.local_model }}
-    if: ${{ always() && needs.authorize.result == 'success' }}
+    if: ${{ always() && !inputs.a10_retry && needs.authorize.result == 'success' }}
     needs:
       [
         authorize,

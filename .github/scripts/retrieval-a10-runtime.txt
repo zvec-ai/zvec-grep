@@ -1,0 +1,7 @@
+nvidia-cuda-runtime-cu12==12.8.90 --hash=sha256:adade8dcbd0edf427b7204d480d6066d33902cab2a4707dcfc48a2d0fd44ab90
+nvidia-cublas-cu12==12.8.4.1 --hash=sha256:8ac4e771d5a348c551b2a426eda6193c19aa630236b418086020df5ba9667142
+nvidia-cudnn-cu12==9.17.1.4 --hash=sha256:b5083ced291edb2baf8eab09951c6bc58b79b2023c4ec885657a63acdf51d0bd
+nvidia-curand-cu12==10.3.9.90 --hash=sha256:b32331d4f4df5d6eefa0554c565b626c7216f87a06a4f56fab27c3b68a830ec9
+nvidia-cufft-cu12==11.3.3.83 --hash=sha256:4d2dd21ec0b88cf61b62e6b43564355e5222e4a3fb394cac0db101f2dd0d4f74
+nvidia-cuda-nvrtc-cu12==12.8.93 --hash=sha256:a7756528852ef889772a84c6cd89d41dfa74667e24cca16bb31f8f061e3e9994
+nvidia-nvjitlink-cu12==12.8.93 --hash=sha256:81ff63371a7ebd6e6451970684f916be2eab07321b73c9d244dc2b4da7f73b88

@@ -7,7 +7,11 @@ import { performance } from "node:perf_hooks";
 import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { fileHash, run, writeJson } from "../core/io.mjs";
-import { embeddingRuntime } from "../core/embedding.mjs";
+import {
+  assertCudaEvidence,
+  embeddingRuntime,
+  localEmbeddingDevice,
+} from "../core/embedding.mjs";
 import { scoreFileRetrieval } from "../metrics/files.mjs";
 import { scoreNdcg } from "../metrics/ndcg.mjs";
 import {
@@ -335,6 +339,9 @@ async function writeReport(output, report, pilot) {
 
 async function runGroup(pilot, group, candidate, options, report, mcp) {
   const embedding = embeddingRuntime(pilot.model);
+  const device = embedding.remote ? null : options.device;
+  if (device === "cuda")
+    console.log(`${pilot.name}/${group.id}: building a fresh CUDA index`);
   const groupRows = [];
   const evidence = join(options.output, "evidence", group.id);
   await mkdir(evidence, { recursive: true });
@@ -351,7 +358,7 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
       embedding: pilot.model,
       modelCacheDir: options.modelCache,
     },
-    models: embedding.remote ? {} : { [pilot.model]: { device: "cpu" } },
+    models: embedding.remote ? {} : { [pilot.model]: { device } },
   });
   const env = {
     ...process.env,
@@ -360,7 +367,7 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
     OPENCODE_CONFIG: opencode,
     ZVEC_GREP_HOME: join(home, ".zvec-grep"),
     ZVEC_GREP_MODEL_CACHE: options.modelCache,
-    ...(!embedding.remote ? { ZVEC_GREP_DEVICE: "cpu" } : {}),
+    ...(!embedding.remote ? { ZVEC_GREP_DEVICE: device } : {}),
     NO_COLOR: "1",
     FORCE_COLOR: "0",
     PATH: `${join(candidate.consumer, "node_modules/.bin")}${delimiter}${process.env.PATH ?? ""}`,
@@ -390,8 +397,9 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
     );
     await run(candidate.cli, ["--server", "off"], { cwd: root, env });
     const indexStart = performance.now();
+    let indexed;
     try {
-      const indexed = await run(
+      indexed = await run(
         candidate.cli,
         [
           "--index",
@@ -402,7 +410,7 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
           pilot.model,
           "--model-cache",
           options.modelCache,
-          ...(!embedding.remote ? ["--device", "cpu"] : []),
+          ...(!embedding.remote ? ["--device", device] : []),
           ...embedding.indexArguments,
           "--max-filesize",
           "1000000",
@@ -426,6 +434,7 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
     } finally {
       report.index_seconds[group.id] = (performance.now() - indexStart) / 1000;
     }
+    if (device === "cuda") assertCudaEvidence(indexed.stderr);
     if (embedding.remote)
       await run(candidate.cli, embedding.grantArguments(root), {
         cwd: root,
@@ -632,6 +641,7 @@ export async function main(args = process.argv.slice(2)) {
   const options = {
     output,
     modelCache: resolve(values["model-cache"] ?? join(output, "model-cache")),
+    device: localEmbeddingDevice("cpu"),
   };
   await mkdir(options.modelCache, { recursive: true });
   const report = {
@@ -649,6 +659,7 @@ export async function main(args = process.argv.slice(2)) {
       platform: platform(),
       architecture: arch(),
       cpus: cpus().length,
+      ...(options.device === "cuda" ? { embedding_device: options.device } : {}),
     },
     started_at: new Date().toISOString(),
     rows: [],

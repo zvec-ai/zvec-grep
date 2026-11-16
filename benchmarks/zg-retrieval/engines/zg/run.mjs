@@ -28,7 +28,7 @@ import {
   repositorySlug,
   inside,
 } from "../../core/lib.mjs";
-import { embeddingRuntime } from "../../core/embedding.mjs";
+import { assertCudaEvidence, embeddingRuntime } from "../../core/embedding.mjs";
 import { aggregate } from "./report.mjs";
 import { NativeIndexProductError, snapshotIndex } from "./snapshot.mjs";
 
@@ -365,8 +365,9 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
     phase = "index";
     console.log(`${repo.repository}: building a fresh index`);
     const started = performance.now();
+    let indexed;
     try {
-      const indexed = await runCandidate(
+      indexed = await runCandidate(
         candidate,
         [
           "--index",
@@ -382,7 +383,11 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
           ...indexSelectionArguments(protocol),
           "--debug",
         ],
-        { env, cwd: root, timeout: 2_400_000 },
+        {
+          env,
+          cwd: root,
+          timeout: protocol.device === "cuda" ? 7_200_000 : 2_400_000,
+        },
       );
       manifest.index_seconds = (performance.now() - started) / 1000;
       manifest.index_timing_scope =
@@ -396,6 +401,8 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
       );
       throw error;
     }
+    if (!embedding.remote && protocol.device === "cuda")
+      assertCudaEvidence(indexed.stderr);
     if (embedding.remote)
       await runCandidate(candidate, embedding.grantArguments(root), {
         env,
