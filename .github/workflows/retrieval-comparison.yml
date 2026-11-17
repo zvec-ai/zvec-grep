@@ -27,6 +27,7 @@ jobs:
       candidate_repository: ${{ inputs.baseline_repository }}
       embedding: local
       artifact_prefix: retrieval-base
+      gold_stages: true
 
   candidate:
     uses: ./.github/workflows/retrieval-only.yml

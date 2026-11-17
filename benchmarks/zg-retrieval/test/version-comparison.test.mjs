@@ -182,7 +182,7 @@ test("indexed corpus counts compare once per suite and preserve unknown totals",
   assert.throws(() => compareCombinedResults(before, after, metadata));
 });
 
-test("comparison carries candidate stage coverage into the collapsed PR tables", () => {
+test("comparison carries both stage summaries and renders equal, increased and decreased coverage", () => {
   const before = result(baseSha);
   const after = result(headSha);
   const summary = {
@@ -205,22 +205,29 @@ test("comparison carries candidate stage coverage into the collapsed PR tables",
       },
     ],
   };
-  before.pilots.quarry.report.gold_stages = { ...summary, observed_calls: 0 };
-  after.sweqa.gold_stages = summary;
-  for (const pilot of Object.values(after.pilots))
-    pilot.report.gold_stages = summary;
+  before.sweqa.gold_stages = structuredClone(summary);
+  after.sweqa.gold_stages = structuredClone(summary);
+  after.sweqa.gold_stages.groups[0].stages.rrf_top10.covered = 4;
+  after.sweqa.gold_stages.groups[0].stages.actual_top10.covered = 2;
+  for (const result of [before, after])
+    for (const pilot of Object.values(result.pilots))
+      pilot.report.gold_stages = structuredClone(summary);
   const comparison = compareCombinedResults(before, after, metadata);
   assert.deepEqual(
-    comparison.candidate_gold_stages,
+    comparison.baseline_gold_stages,
     Object.fromEntries(
       ["sweqa", ...PILOT_NAMES].map((name) => [name, summary]),
     ),
+  );
+  assert.deepEqual(
+    comparison.candidate_gold_stages.sweqa,
+    after.sweqa.gold_stages,
   );
   const markdown = markdownVersionComparison(comparison);
   assert.deepEqual(
     [
       ...markdown.matchAll(
-        /<details>\n<summary>([^<]+): Candidate Gold coverage by stage<\/summary>/g,
+        /<details>\n<summary>([^<]+): Gold coverage by stage \(baseline → candidate\)<\/summary>/g,
       ),
     ].map((match) => match[1]),
     [
@@ -228,10 +235,18 @@ test("comparison carries candidate stage coverage into the collapsed PR tables",
       ...PILOT_NAMES.map((name) => PILOT_SUITES[name].report.comparison),
     ],
   );
-  assert.match(markdown, /\| Before rule ranking \(RRF\) \| — \| — \| 3\/5 \|/);
+  assert.match(markdown, /\| Gold covered by index \| N\/A \| N\/A \| 5\/5 \|/);
   assert.match(
     markdown,
-    /\| After rule ranking \(actual\) \| — \| — \| 5\/5 \|/,
+    /\| Before rule ranking \(RRF\) \| N\/A \| N\/A \| 3\/5 → 4\/5 \|/,
+  );
+  assert.match(
+    markdown,
+    /\| After rule ranking \(actual\) \| N\/A \| N\/A \| 5\/5 → 2\/5 \|/,
+  );
+  assert.match(
+    markdown,
+    /\| Before rule ranking \(RRF\) \| N\/A \| N\/A \| 3\/5 \|/,
   );
   assert.doesNotMatch(
     markdown,
@@ -251,6 +266,54 @@ test("comparison carries candidate stage coverage into the collapsed PR tables",
   assert.throws(
     () => compareCombinedResults(before, after, metadata),
     /Invalid Gold stage coverage/,
+  );
+  after.sweqa.gold_stages = summary;
+  before.sweqa.gold_stages = legacy;
+  assert.throws(
+    () => compareCombinedResults(before, after, metadata),
+    /Invalid Gold stage coverage/,
+  );
+});
+
+test("baseline-only stage evidence remains visible without borrowing candidate values", () => {
+  const before = result(baseSha);
+  const after = result(headSha);
+  const quality = compareCombinedResults(before, after, metadata);
+  before.pilots.beir.report.gold_stages = {
+    version: 1,
+    calls: 5,
+    observed_calls: 5,
+    invalid_calls: 0,
+    groups: [
+      {
+        qualification: "diagnostic",
+        level: "file",
+        mode: "fts",
+        targets: 5,
+        stages: Object.fromEntries(
+          ["index", "fts", "rrf_top10", "actual_top10"].map((key) => [
+            key,
+            { covered: 3, unknown: 0 },
+          ]),
+        ),
+      },
+    ],
+  };
+  const comparison = compareCombinedResults(before, after, metadata);
+  assert.deepEqual(comparison.rows, quality.rows);
+  assert.equal(comparison.candidate_gold_stages, undefined);
+  const markdown = markdownVersionComparison(comparison);
+  assert.match(
+    markdown,
+    /BEIR: Gold coverage by stage \(baseline → candidate\)/,
+  );
+  assert.match(
+    markdown,
+    /\| Gold recalled by FTS \| 3\/5 → N\/A \| — \| N\/A \|/,
+  );
+  assert.match(
+    markdown,
+    /\*\*BEIR \/ Candidate\*\*: ⚠️ Stage capture unavailable/,
   );
 });
 
@@ -291,9 +354,13 @@ for (const [label, invalid, unobserved] of [
     const visible = markdown.replace(/<details>[\s\S]*?<\/details>/g, "");
     const warning = `⚠️ Stage capture incomplete: **0/5** verified, **${invalid}** invalid, **${unobserved}** unobserved.`;
     assert.match(visible, /✅ Complete/);
-    assert.ok(visible.includes(`**SWE-QA20**: ${warning}`));
+    assert.ok(visible.includes(`**SWE-QA20 / Candidate**: ${warning}`));
+    assert.match(
+      visible,
+      /\*\*SWE-QA20 \/ Baseline\*\*: ⚠️ Stage capture unavailable/,
+    );
     assert.equal(markdown.split("Stage capture incomplete").length, 2);
-    assert.match(markdown, /\| Gold recalled by FTS \| N\/A \| — \| — \|/);
+    assert.match(markdown, /\| Gold recalled by FTS \| N\/A \| — \| N\/A \|/);
     const report = goldStagesMarkdown(summary).join("\n");
     assert.ok(report.includes(warning));
     assert.match(report, /Unverified stage coverage is unknown/);
@@ -324,7 +391,7 @@ test("a newly registered suite retains stage coverage and its trusted report tit
     assert.match(markdown, /^### New pilot$/m);
     assert.match(
       markdown,
-      /<summary>New pilot: Candidate Gold coverage by stage<\/summary>/,
+      /<summary>New pilot: Gold coverage by stage \(baseline → candidate\)<\/summary>/,
     );
   } finally {
     PILOT_NAMES.pop();

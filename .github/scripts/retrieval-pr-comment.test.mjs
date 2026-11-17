@@ -246,7 +246,7 @@ test("the publisher labels validated full preview without relabeling historical 
     );
 });
 
-test("the publisher renders validated candidate Gold coverage in a collapsed section", async (t) => {
+test("the publisher renders equal baseline and candidate Gold coverage once in a collapsed section", async (t) => {
   const x = await fixture(t);
   const stageSummary = {
     version: 1,
@@ -269,6 +269,9 @@ test("the publisher renders validated candidate Gold coverage in a collapsed sec
   };
   const payload = {
     ...report,
+    baseline_gold_stages: Object.fromEntries(
+      Object.keys(models).map((suite) => [suite, stageSummary]),
+    ),
     candidate_gold_stages: Object.fromEntries(
       Object.keys(models).map((suite) => [suite, stageSummary]),
     ),
@@ -279,32 +282,135 @@ test("the publisher renders validated candidate Gold coverage in a collapsed sec
   assert.equal((body.match(/<details>/g) ?? []).length, 4);
   assert.equal((body.match(/#### (File|Entity) Gold/g) ?? []).length, 8);
   const [coverage] = body.match(
-    /<details>\n<summary>Quarry: Candidate Gold coverage by stage<\/summary>[\s\S]*?<\/details>/,
+    /<details>\n<summary>Quarry: Gold coverage by stage \(baseline → candidate\)<\/summary>[\s\S]*?<\/details>/,
   );
   assert.match(coverage, /#### File Gold/);
   assert.match(coverage, /#### Entity Gold/);
   assert.match(
     coverage,
-    /\| Gold recalled by FTS \| 4\/5 \(1 unknown\) \| — \| — \|/,
+    /\| Gold recalled by FTS \| 4\/5 \(1 unknown\) \| — \| N\/A \|/,
   );
-  assert.match(coverage, /\| Before rule ranking \(RRF\) \| 2\/5 \| — \| — \|/);
   assert.match(
     coverage,
-    /\| After rule ranking \(actual\) \| N\/A \| — \| — \|/,
+    /\| Before rule ranking \(RRF\) \| 2\/5 \| N\/A \| N\/A \|/,
+  );
+  assert.match(
+    coverage,
+    /\| After rule ranking \(actual\) \| N\/A \| N\/A \| N\/A \|/,
   );
   assert.doesNotMatch(
     coverage,
     /Top ?10|Same-file decay|Rule ranking (?:off|on)/,
   );
-  assert.match(
-    body.replace(/<details>[\s\S]*?<\/details>/g, ""),
-    /\*\*Quarry\*\*: ⚠️ Stage capture incomplete: \*\*5\/10\*\* verified, \*\*0\*\* invalid, \*\*5\*\* unobserved/,
-  );
+  for (const side of ["Baseline", "Candidate"])
+    assert.ok(
+      body
+        .replace(/<details>[\s\S]*?<\/details>/g, "")
+        .includes(
+          `**Quarry / ${side}**: ⚠️ Stage capture incomplete: **5/10** verified, **0** invalid, **5** unobserved`,
+        ),
+    );
 
   stageSummary.groups[0].stages.index.covered = "untrusted text";
   assert.throws(
     () => validateComparison(payload, request),
     /Invalid Gold stage coverage/,
+  );
+});
+
+for (const [label, baseline, candidate, expected] of [
+  ["changed", 2, 4, "2/5 → 4/5"],
+  ["baseline missing", null, 4, "N/A → 4/5"],
+  ["candidate missing", 2, null, "2/5 → N/A"],
+]) {
+  test(`the publisher renders ${label} stage coverage without filling in an absent side`, async (t) => {
+    const x = await fixture(t);
+    const payload = { ...report };
+    for (const [side, covered] of [
+      ["baseline", baseline],
+      ["candidate", candidate],
+    ]) {
+      if (covered === null) continue;
+      payload[`${side}_gold_stages`] = {
+        quarry: {
+          version: 1,
+          calls: 5,
+          observed_calls: 5,
+          invalid_calls: 0,
+          groups: ["file", "entity"].map((level) => ({
+            qualification: "diagnostic",
+            level,
+            mode: "hybrid",
+            targets: 5,
+            stages: Object.fromEntries(
+              ["index", "fts", "vector", "rrf_top10", "actual_top10"].map(
+                (key) => [key, { covered, unknown: 0 }],
+              ),
+            ),
+          })),
+        },
+      };
+    }
+    const validated = validateComparison(payload, request);
+    for (const side of ["baseline", "candidate"])
+      assert.deepEqual(
+        validated[`${side}_gold_stages`],
+        payload[`${side}_gold_stages`],
+      );
+    await x.write("comparison/summary.json", payload);
+    await publish(x);
+    const { body } = x.messages()[0][1];
+    assert.match(body, /✅ Complete/);
+    assert.match(
+      body,
+      /<summary>Quarry: Gold coverage by stage \(baseline → candidate\)<\/summary>/,
+    );
+    for (const row of [
+      "Before rule ranking (RRF)",
+      "After rule ranking (actual)",
+    ])
+      assert.equal(
+        body.split(`| ${row} | N/A | N/A | ${expected} |`).length,
+        3,
+      );
+    const visible = body.replace(/<details>[\s\S]*?<\/details>/g, "");
+    for (const [side, covered] of [
+      ["Baseline", baseline],
+      ["Candidate", candidate],
+    ]) {
+      const warning = `**Quarry / ${side}**: ⚠️ Stage capture unavailable. Coverage is N/A.`;
+      assert.equal(visible.includes(warning), covered === null);
+    }
+  });
+}
+
+test("invalid baseline stage data cannot publish candidate-only success or untrusted text", async (t) => {
+  const x = await fixture(t);
+  const summary = {
+    version: 1,
+    calls: 5,
+    observed_calls: 5,
+    invalid_calls: 0,
+    groups: [],
+  };
+  const payload = {
+    ...report,
+    baseline_gold_stages: {
+      quarry: { ...summary, observed_calls: "untrusted baseline <script>" },
+    },
+    candidate_gold_stages: { quarry: summary },
+  };
+  assert.throws(
+    () => validateComparison(payload, request),
+    /Invalid observed Gold stage call count/,
+  );
+  await x.write("comparison/summary.json", payload);
+  await publish(x);
+  const { body } = x.messages()[0][1];
+  assert.match(body, /Failed \/ incomplete/);
+  assert.doesNotMatch(
+    body,
+    /✅ Complete|Gold coverage by stage|untrusted baseline|<script>/,
   );
 });
 
@@ -362,13 +468,17 @@ for (const [label, observed, invalid, unobserved] of [
     };
     const payload = {
       ...report,
+      baseline_gold_stages: {
+        sweqa: { ...summary, warning: "untrusted stage error <script>" },
+      },
       candidate_gold_stages: {
         sweqa: { ...summary, warning: "untrusted stage error <script>" },
       },
     };
     const validated = validateComparison(payload, request);
     assert.equal(validated.status, "success");
-    assert.deepEqual(validated.candidate_gold_stages.sweqa, summary);
+    for (const side of ["baseline", "candidate"])
+      assert.deepEqual(validated[`${side}_gold_stages`].sweqa, summary);
     await x.write("comparison/summary.json", payload);
     await publish(x);
     const { body } = x.messages()[0][1];
@@ -378,11 +488,12 @@ for (const [label, observed, invalid, unobserved] of [
     if (observed === 5) {
       assert.doesNotMatch(body, /Stage capture incomplete/);
     } else {
-      assert.ok(
-        visible.includes(
-          `**SWE-QA20**: ⚠️ Stage capture incomplete: **0/5** verified, **${invalid}** invalid, **${unobserved}** unobserved.`,
-        ),
-      );
+      for (const side of ["Baseline", "Candidate"])
+        assert.ok(
+          visible.includes(
+            `**SWE-QA20 / ${side}**: ⚠️ Stage capture incomplete: **0/5** verified, **${invalid}** invalid, **${unobserved}** unobserved.`,
+          ),
+        );
     }
     payload.candidate_gold_stages.sweqa.observed_calls = "untrusted count";
     assert.throws(
@@ -789,11 +900,53 @@ test("missing, malformed or invalid comparison artifacts publish incomplete with
   assert.match(x.messages()[0][1].body, /Failed \/ incomplete/);
 });
 
+test("a valid two-sided stage report above 128 KiB can publish within the 256 KiB limit", async (t) => {
+  const x = await fixture(t);
+  const baseline = {
+    version: 1,
+    calls: 5,
+    observed_calls: 5,
+    invalid_calls: 0,
+    groups: [
+      {
+        qualification: "diagnostic",
+        level: "file",
+        mode: "fts",
+        targets: 5,
+        stages: Object.fromEntries(
+          ["index", "fts", "rrf_top10", "actual_top10"].map((key) => [
+            key,
+            { covered: 2, unknown: 0 },
+          ]),
+        ),
+      },
+    ],
+  };
+  const candidate = structuredClone(baseline);
+  candidate.groups[0].stages.rrf_top10.covered = 4;
+  // JSON whitespace exercises the byte limit without pretending to be run evidence.
+  const contents = JSON.stringify({
+    ...report,
+    baseline_gold_stages: { quarry: baseline },
+    candidate_gold_stages: { quarry: candidate },
+  }).padEnd(128 * 1024 + 1, " ");
+  assert.ok(Buffer.byteLength(contents) > 128 * 1024);
+  assert.ok(Buffer.byteLength(contents) < 256 * 1024);
+  await writeFile(join(x.directory, "comparison/summary.json"), contents);
+  await publish(x);
+  const { body } = x.messages()[0][1];
+  assert.match(body, /✅ Complete/);
+  assert.match(
+    body,
+    /\| Before rule ranking \(RRF\) \| 2\/5 → 4\/5 \| N\/A \| N\/A \|/,
+  );
+});
+
 test("oversized report data is withheld instead of being loaded into a PR comment", async (t) => {
   const x = await fixture(t);
   await writeFile(
     join(x.directory, "comparison/summary.json"),
-    " ".repeat(128 * 1024 + 1),
+    JSON.stringify(report).padEnd(256 * 1024 + 1, " "),
   );
   await publish(x);
   assert.match(x.messages()[0][1].body, /Failed \/ incomplete/);

@@ -156,9 +156,13 @@ candidate built with stage capture support. The optional capture uses the
 same five calls, frozen source and QA labels, adaptive recall and `limit: 10`.
 It sends the original public requests and receives stage data in response
 metadata. Older candidates produce unobserved stages.
-PR comparisons enable capture on the candidate. The English PR result comment
-shows a collapsed section with File and Entity Gold tables for each suite.
-Incomplete capture is also reported above the collapsed sections. Missing
+PR comparisons enable capture on both baseline and candidate. The English PR
+result comment shows a collapsed section with File and Entity Gold tables for
+each suite. Equal coverage cells appear once; changes show baseline → candidate,
+including denominator or partial-unknown changes. Missing data on either side
+stays N/A; a route not used in that mode is —. Existing candidate-only artifacts
+can still be rendered with an unavailable baseline, never copied or scored as zero.
+Incomplete or unavailable capture is reported by side above the collapsed sections. Missing
 metadata stays unobserved; metadata with an invalid shape, group or payload is
 counted as invalid with its reason in the per-call report. Diagnostic failures
 leave stage coverage unknown and do not invalidate otherwise valid search scores.
@@ -231,8 +235,9 @@ They carry no query text, snippet text, vectors or model credentials.
 
 The JSON records mean index-read time for observed calls. Enabled MCP latency
 also includes capture bookkeeping, an extra static-order sort, and metadata
-serialization and transfer. Candidate diagnostics are enabled independently of
-the baseline, so these timings are not a comparison of normal search speed.
+serialization and transfer. PR comparisons request diagnostics on both versions;
+older binaries may not support them. These timings measure diagnostic execution,
+not normal search speed.
 Measure performance separately with capture disabled on both versions.
 
 SWE-QA20 ZG reports use **schema 7**, with `preview: "full"`, three `modes`, and one quality row per question/mode. Its section uses the **schema 5** overview with fixed `zg-hybrid`, `zg-fts`, `zg-vector` rows; the combined page uses schema 1. The SWE-QA20 overview records coverage, failed task IDs/modes/reasons, the frozen harness commit and selected candidate ref/commit. Quality rows retain all five public result lists and measurement observations so validators can recompute the case mean, ranking stability, output size and latency. The representative fifth-call `file_retrieval` and `ndcg` fields remain for evidence; `quality_mean` supplies headline quality.

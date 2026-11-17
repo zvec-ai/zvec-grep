@@ -76,13 +76,24 @@ export async function writeGoldStages(directory, calls) {
   return summary;
 }
 
-function stageCell(group, key) {
+function stageCell(group, key, missing = "—") {
   const entry = group?.stages[key];
-  if (!entry) return "—";
+  if (!entry) return missing;
   const { covered, unknown } = entry;
   if (unknown === group.targets) return "N/A";
   const value = `${covered}/${group.targets}`;
   return unknown ? `${value} (${unknown} unknown)` : value;
+}
+
+function comparisonCell(baseline, candidate, key, mode) {
+  if (
+    (key === "fts" && mode === "vector") ||
+    (key === "vector" && mode === "fts")
+  )
+    return "—";
+  const before = stageCell(baseline, key, "N/A");
+  const after = stageCell(candidate, key, "N/A");
+  return before === after ? after : `${before} → ${after}`;
 }
 
 export function goldStageCaptureWarning(summary) {
@@ -94,10 +105,12 @@ export function goldStageCaptureWarning(summary) {
 
 export function goldStagesMarkdown(
   summary,
-  { heading = true, warning = true } = {},
+  { baseline, heading = true, warning = true } = {},
 ) {
-  if (!summary) return [];
-  validateGoldStageSummary(summary);
+  if (!summary && !baseline) return [];
+  if (summary) validateGoldStageSummary(summary);
+  if (baseline) validateGoldStageSummary(baseline);
+  const comparing = baseline !== undefined;
   const captureWarning = warning && goldStageCaptureWarning(summary);
   const lines = [
     "",
@@ -106,11 +119,15 @@ export function goldStagesMarkdown(
   ];
   for (const qualification of QUALIFICATIONS) {
     for (const level of LEVELS) {
-      const groups = summary.groups.filter(
+      const groups = (summary?.groups ?? []).filter(
         (group) =>
           group.qualification === qualification && group.level === level,
       );
-      if (!groups.length) continue;
+      const previousGroups = (baseline?.groups ?? []).filter(
+        (group) =>
+          group.qualification === qualification && group.level === level,
+      );
+      if (!groups.length && !previousGroups.length) continue;
       lines.push(
         `#### ${level === "file" ? "File" : "Entity"} Gold (${qualification})`,
         "",
@@ -118,12 +135,17 @@ export function goldStagesMarkdown(
         "| --- | ---: | ---: | ---: |",
       );
       for (const [key, name] of REPORT_ROWS) {
-        const cells = MODES.map((mode) =>
-          stageCell(
-            groups.find((item) => item.mode === mode),
-            key,
-          ),
-        );
+        const cells = MODES.map((mode) => {
+          const group = groups.find((item) => item.mode === mode);
+          return comparing
+            ? comparisonCell(
+                previousGroups.find((item) => item.mode === mode),
+                group,
+                key,
+                mode,
+              )
+            : stageCell(group, key);
+        });
         lines.push(`| ${name} | ${cells.join(" | ")} |`);
       }
       lines.push("");

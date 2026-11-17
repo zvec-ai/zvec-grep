@@ -35,10 +35,10 @@ const SUITE_TITLES = [
   ...PILOT_NAMES.map((name) => [name, PILOT_SUITES[name].report.comparison]),
 ];
 
-export function validateCandidateGoldStages(summaries = {}) {
+export function validateGoldStageSummaries(summaries = {}) {
   assert.ok(
     summaries && typeof summaries === "object" && !Array.isArray(summaries),
-    "Invalid candidate Gold stage summaries",
+    "Invalid Gold stage summaries",
   );
   return Object.fromEntries(
     SUITE_TITLES.filter(([suite]) => Object.hasOwn(summaries, suite)).map(
@@ -193,17 +193,20 @@ export function compareCombinedResults(baseline, candidate, metadata) {
       rows.push(row);
     }
   }
-  const goldStages = validateCandidateGoldStages(
-    Object.fromEntries(
-      [
-        ["sweqa", candidate.sweqa.gold_stages],
-        ...PILOT_NAMES.map((name) => [
-          name,
-          candidate.pilots[name].report?.gold_stages,
-        ]),
-      ].filter(([, summary]) => summary),
-    ),
-  );
+  const stageSummaries = (report) =>
+    validateGoldStageSummaries(
+      Object.fromEntries(
+        [
+          ["sweqa", report.sweqa.gold_stages],
+          ...PILOT_NAMES.map((name) => [
+            name,
+            report.pilots[name].report?.gold_stages,
+          ]),
+        ].filter(([, summary]) => summary),
+      ),
+    );
+  const baselineGoldStages = stageSummaries(baseline);
+  const candidateGoldStages = stageSummaries(candidate);
   return {
     schema_version: 1,
     kind: "retrieval-version-comparison",
@@ -220,8 +223,11 @@ export function compareCombinedResults(baseline, candidate, metadata) {
     harness_commit: baseline.harness_commit,
     index_counts: indexCounts,
     index_settings: indexSettings,
-    ...(Object.keys(goldStages).length
-      ? { candidate_gold_stages: goldStages }
+    ...(Object.keys(baselineGoldStages).length
+      ? { baseline_gold_stages: baselineGoldStages }
+      : {}),
+    ...(Object.keys(candidateGoldStages).length
+      ? { candidate_gold_stages: candidateGoldStages }
       : {}),
     rows,
     errors: [],
@@ -320,15 +326,26 @@ export function markdownVersionComparison(result) {
     "",
     `**${result.status === "success" ? "✅ Complete" : "❌ Failed / incomplete"}** · Baseline ${version("baseline")} · Candidate ${version("candidate")}`,
     "",
-    "Scores are percentages. Different values show **baseline → candidate**; identical values are shown once. Both versions use the same queries, Gold and local embedding models, with five calls per question and mode.",
+    "Quality scores are percentages. Different values show **baseline → candidate**; identical values are shown once. Both versions use the same queries, Gold and local embedding models, with five calls per question and mode.",
     "Indexed corpus totals count each independently built index once; modes and repetitions do not multiply them. N/A means the count was not recorded.",
     "ZG input limits are per embedding input, not measured token use. Fragment length and overlap budgets use UTF-16 units, before metadata allowance. Missing settings are N/A.",
   ];
   for (const [suite, title] of SUITE_TITLES) {
-    const warning = goldStageCaptureWarning(
-      result.candidate_gold_stages?.[suite],
-    );
-    if (warning) lines.push("", `**${title}**: ${warning}`);
+    if (
+      !result.baseline_gold_stages?.[suite] &&
+      !result.candidate_gold_stages?.[suite]
+    )
+      continue;
+    for (const [side, label] of [
+      ["baseline", "Baseline"],
+      ["candidate", "Candidate"],
+    ]) {
+      const summary = result[`${side}_gold_stages`]?.[suite];
+      const warning = summary
+        ? goldStageCaptureWarning(summary)
+        : "⚠️ Stage capture unavailable. Coverage is N/A.";
+      if (warning) lines.push("", `**${title} / ${label}**: ${warning}`);
+    }
   }
   if (result.preview === "full")
     lines.push("", 'Both versions explicitly request `preview: "full"`.');
@@ -404,13 +421,18 @@ export function markdownVersionComparison(result) {
       ),
     );
   for (const [suite, title] of SUITE_TITLES) {
+    const baseline = result.baseline_gold_stages?.[suite];
     const summary = result.candidate_gold_stages?.[suite];
-    if (!summary) continue;
+    if (!baseline && !summary) continue;
     lines.push(
       "",
       "<details>",
-      `<summary>${title}: Candidate Gold coverage by stage</summary>`,
-      ...goldStagesMarkdown(summary, { heading: false, warning: false }),
+      `<summary>${title}: Gold coverage by stage (baseline → candidate)</summary>`,
+      ...goldStagesMarkdown(summary, {
+        baseline: baseline ?? null,
+        heading: false,
+        warning: false,
+      }),
       "</details>",
     );
   }

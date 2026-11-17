@@ -289,6 +289,125 @@ test("stage summary shows coverage at every stage", () => {
   ]);
 });
 
+function comparisonSummary({
+  qualification = "diagnostic",
+  level = "file",
+  mode = "hybrid",
+  targets = 5,
+  covered = 3,
+  unknown = 0,
+} = {}) {
+  return {
+    version: 1,
+    calls: 5,
+    observed_calls: 5,
+    invalid_calls: 0,
+    groups: [
+      {
+        qualification,
+        level,
+        mode,
+        targets,
+        stages: Object.fromEntries(
+          ["index", "fts", "vector", "rrf_top10", "actual_top10"].map((key) => [
+            key,
+            { covered, unknown },
+          ]),
+        ),
+      },
+    ],
+  };
+}
+
+test("stage comparisons collapse equal values and show increases and decreases", () => {
+  const baseline = comparisonSummary();
+  const candidate = comparisonSummary();
+  candidate.groups[0].stages.fts.covered = 4;
+  candidate.groups[0].stages.vector.covered = 2;
+  const lines = goldStagesMarkdown(candidate, {
+    baseline,
+    heading: false,
+    warning: false,
+  });
+  assert.ok(lines.includes("| Gold covered by index | N/A | N/A | 3/5 |"));
+  assert.ok(lines.includes("| Gold recalled by FTS | N/A | — | 3/5 → 4/5 |"));
+  assert.ok(
+    lines.includes("| Gold recalled by Vector | — | N/A | 3/5 → 2/5 |"),
+  );
+  assert.ok(lines.includes("| Before rule ranking (RRF) | N/A | N/A | 3/5 |"));
+  assert.ok(
+    lines.includes("| After rule ranking (actual) | N/A | N/A | 3/5 |"),
+  );
+  assert.ok(!lines.includes("### Gold coverage by retrieval stage"));
+  assert.equal(lines[1], "#### File Gold (diagnostic)");
+});
+
+test("stage comparisons preserve denominator and partial unknown changes", () => {
+  for (const [before, after, expected] of [
+    [{ targets: 5 }, { targets: 6 }, "3/5 → 3/6"],
+    [{ unknown: 1 }, { unknown: 2 }, "3/5 (1 unknown) → 3/5 (2 unknown)"],
+    [{ covered: 0, unknown: 5 }, { covered: 0 }, "N/A → 0/5"],
+    [{ covered: 0 }, { covered: 0, unknown: 5 }, "0/5 → N/A"],
+    [{ covered: 0, unknown: 5 }, { targets: 6, covered: 0, unknown: 6 }, "N/A"],
+  ]) {
+    const lines = goldStagesMarkdown(comparisonSummary(after), {
+      baseline: comparisonSummary(before),
+    });
+    assert.ok(
+      lines.includes(`| Gold covered by index | N/A | N/A | ${expected} |`),
+    );
+  }
+});
+
+test("stage comparisons retain either available side without treating missing as zero", () => {
+  const summary = comparisonSummary({ mode: "fts", covered: 0 });
+  const candidateOnly = goldStagesMarkdown(summary, { baseline: null });
+  assert.ok(
+    candidateOnly.includes("| Gold covered by index | N/A → 0/5 | N/A | N/A |"),
+  );
+  assert.ok(
+    candidateOnly.includes("| Gold recalled by Vector | — | N/A | N/A |"),
+  );
+  const baselineOnly = goldStagesMarkdown(null, { baseline: summary });
+  assert.ok(
+    baselineOnly.includes("| Gold covered by index | 0/5 → N/A | N/A | N/A |"),
+  );
+  assert.ok(
+    baselineOnly.includes("| Gold recalled by FTS | 0/5 → N/A | — | N/A |"),
+  );
+  assert.deepEqual(goldStagesMarkdown(null, { baseline: null }), []);
+  assert.deepEqual(goldStagesMarkdown(null), []);
+  assert.ok(
+    goldStagesMarkdown(summary).includes(
+      "| Gold covered by index | 0/5 | — | — |",
+    ),
+  );
+});
+
+test("stage comparisons include baseline-only and candidate-only groups", () => {
+  const baseline = comparisonSummary({ qualification: "formal", mode: "fts" });
+  const candidate = comparisonSummary({ level: "entity", mode: "vector" });
+  const lines = goldStagesMarkdown(candidate, { baseline });
+  const fileStart = lines.indexOf("#### File Gold (formal)");
+  const entityStart = lines.indexOf("#### Entity Gold (diagnostic)");
+  assert.ok(fileStart >= 0 && entityStart > fileStart);
+  assert.ok(
+    lines
+      .slice(fileStart, entityStart)
+      .includes("| Gold covered by index | 3/5 → N/A | N/A | N/A |"),
+  );
+  assert.ok(
+    lines
+      .slice(entityStart)
+      .includes("| Gold covered by index | N/A | N/A → 3/5 | N/A |"),
+  );
+  assert.ok(
+    lines
+      .slice(entityStart)
+      .includes("| Gold recalled by FTS | N/A | — | N/A |"),
+  );
+});
+
 test("the standalone report rejects legacy static-only coverage", () => {
   const summary = summarizeGoldStages([scoreGoldStages(fixture())]);
   for (const { stages } of summary.groups) {
@@ -297,6 +416,14 @@ test("the standalone report rejects legacy static-only coverage", () => {
   }
   assert.throws(
     () => goldStagesMarkdown(summary),
+    /Invalid Gold stage coverage/,
+  );
+  assert.throws(
+    () => goldStagesMarkdown(comparisonSummary(), { baseline: summary }),
+    /Invalid Gold stage coverage/,
+  );
+  assert.throws(
+    () => goldStagesMarkdown(summary, { baseline: comparisonSummary() }),
     /Invalid Gold stage coverage/,
   );
 });

@@ -167,16 +167,12 @@ test("version comparison keeps artifact namespaces separate and uses local model
     assert.match(source, /uses: \.\/\.github\/workflows\/retrieval-only\.yml/);
     assert.match(source, /embedding: local/);
     assert.ok(source.includes(`artifact_prefix: ${prefix}`));
+    assert.match(source, /^ {6}gold_stages: true$/m);
   }
   assert.doesNotMatch(
     comparisonWorkflow,
     /secrets:|secrets\.|: write|swe-qa-bench/,
   );
-  assert.match(
-    block(comparisonWorkflow, "candidate", 2),
-    /^ {6}gold_stages: true$/m,
-  );
-  assert.doesNotMatch(block(comparisonWorkflow, "baseline", 2), /gold_stages:/);
   const compare = block(comparisonWorkflow, "compare", 2);
   assert.match(compare, /if: always\(\) && !cancelled\(\)/);
   assert.match(compare, /name: retrieval-base-results/);
