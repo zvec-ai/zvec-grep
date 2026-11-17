@@ -1,4 +1,4 @@
-//! Layout inference contracts, independent of PDF parsing and text assembly.
+//! Backend-neutral layout contracts, independent of PDF parsing and text assembly.
 
 use std::{path::PathBuf, sync::Arc};
 

@@ -19,10 +19,8 @@ use crate::models::{
         ResolveArtifacts, default_model_cache, resolve_model_artifacts,
     },
     catalog::layout::{PP_S_ARTIFACTS, PP_S_REFERENCE, PP_S_SOURCE},
-    layout::{
-        LayoutImage, LayoutKind, LayoutModel, LayoutModelConfig, LayoutOptions, LayoutRegion,
-    },
     runtime::{ModelComputeRuntime, onnx},
+    spi::{LayoutImage, LayoutKind, LayoutModel, LayoutModelConfig, LayoutOptions, LayoutRegion},
 };
 
 pub(crate) struct PpDocLayoutModel {

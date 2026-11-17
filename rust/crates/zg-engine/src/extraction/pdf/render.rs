@@ -3,7 +3,7 @@ use super::{
     assembly, filter,
     service::{PdfExtractionError, check},
 };
-use crate::{EngineError, models::layout::LayoutImage};
+use crate::{EngineError, models::LayoutImage};
 use liteparse::{
     stages,
     types::{OutlineTarget, Page},

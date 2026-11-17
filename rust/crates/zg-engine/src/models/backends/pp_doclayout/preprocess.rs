@@ -6,7 +6,7 @@
     clippy::cast_possible_wrap,
     reason = "Image dimensions are validated below 64 MiB; resize quantization deliberately reproduces the reference arithmetic"
 )]
-use crate::models::{ModelError, layout::LayoutImage};
+use crate::models::spi::{LayoutImage, ModelError};
 use std::collections::HashMap;
 pub(super) const SIDE: usize = 480;
 

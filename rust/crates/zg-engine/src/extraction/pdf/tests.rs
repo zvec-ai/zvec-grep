@@ -4,10 +4,8 @@ use crate::domain::{EntityMetadata, PdfBlock, PdfSourcePart, SourcePath};
 #[tokio::test]
 async fn pdf_conversion_honors_cancellation_before_native_work() {
     let models = crate::models::ModelRuntimeManager::new();
-    let service = PdfExtractionService::new(
-        models.clone(),
-        crate::models::layout::LayoutModelConfig::default(),
-    );
+    let service =
+        PdfExtractionService::new(models.clone(), crate::models::LayoutModelConfig::default());
     let signal = tokio_util::sync::CancellationToken::new();
     signal.cancel();
     let result = service
@@ -31,10 +29,8 @@ async fn pdf_conversion_honors_cancellation_before_native_work() {
 #[tokio::test]
 async fn pdf_corruption_does_not_download_or_load_models() {
     let models = crate::models::ModelRuntimeManager::new();
-    let service = PdfExtractionService::new(
-        models.clone(),
-        crate::models::layout::LayoutModelConfig::default(),
-    );
+    let service =
+        PdfExtractionService::new(models.clone(), crate::models::LayoutModelConfig::default());
     let result = service
         .convert(
             SourcePath::new("invalid.pdf").expect("valid test fixture"),
@@ -59,7 +55,7 @@ async fn pdf_native_layout_smoke() {
     let models = crate::models::ModelRuntimeManager::new();
     let service = PdfExtractionService::new(
         models.clone(),
-        crate::models::layout::LayoutModelConfig {
+        crate::models::LayoutModelConfig {
             cache_dir: std::env::var_os("ZG_PDF_MODEL_CACHE").map(std::path::PathBuf::from),
         },
     );

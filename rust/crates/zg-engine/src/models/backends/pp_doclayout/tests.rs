@@ -2,7 +2,7 @@ use super::{
     model::decode,
     preprocess::{SIDE, preprocess},
 };
-use crate::models::layout::{LayoutImage, LayoutKind};
+use crate::models::spi::{LayoutImage, LayoutKind};
 
 #[test]
 fn pp_s_handles_constant_rgb_and_invalid_dimensions() {

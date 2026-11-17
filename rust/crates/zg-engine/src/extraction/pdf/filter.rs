@@ -1,5 +1,5 @@
 //! Filter figure text while preserving native tables and page backgrounds.
-use crate::models::layout::LayoutKind;
+use crate::models::LayoutKind;
 use liteparse::types::{Page, Rect};
 
 #[derive(Clone, Copy)]

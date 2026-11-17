@@ -7,7 +7,7 @@ use super::{
 use crate::{
     EngineError, ErrorReport,
     domain::{FileFormat, SourcePath, model::ModelProgress},
-    models::{ModelRuntimeManager, layout::LayoutModelConfig},
+    models::{LayoutModelConfig, ModelRuntimeManager},
     utils::decode_index_text,
 };
 use async_trait::async_trait;

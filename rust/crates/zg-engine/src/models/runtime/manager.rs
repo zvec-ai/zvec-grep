@@ -23,10 +23,10 @@ use crate::domain::{
 };
 use crate::models::{
     backends::{create_embedding_model, create_layout_model},
-    layout::{LayoutImage, LayoutModel, LayoutModelConfig, LayoutOptions, LayoutRegion},
     spi::{
         EmbeddingConcurrencyDefaults, EmbeddingModel, EmbeddingOptions, EmbeddingPrepareOptions,
-        ModelError, ModelExecutionStats, ModelProgressReporter,
+        LayoutImage, LayoutModel, LayoutModelConfig, LayoutOptions, LayoutRegion, ModelError,
+        ModelExecutionStats, ModelProgressReporter,
     },
 };
 

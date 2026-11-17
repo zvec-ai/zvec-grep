@@ -2,10 +2,7 @@ use super::{PdfMarkdownSource, assembly, filter, render};
 use crate::{
     EngineError,
     domain::{SourcePath, model::ModelProgress},
-    models::{
-        ModelError, ModelRuntimeManager,
-        layout::{LayoutModelConfig, LayoutOptions},
-    },
+    models::{LayoutModelConfig, LayoutOptions, ModelError, ModelRuntimeManager},
 };
 use async_trait::async_trait;
 use std::{sync::Arc, time::Instant};
