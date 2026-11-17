@@ -23,12 +23,12 @@ export const GOLD_STAGES = [
   {
     id: "rrf_top10",
     parent: "loaded",
-    label: "Top 10 before rule ranking (RRF)",
+    label: "Before rule ranking (RRF)",
   },
   {
     id: "actual_top10",
     parent: "loaded",
-    label: "Top 10 after rule ranking (actual)",
+    label: "After rule ranking (actual)",
   },
 ];
 

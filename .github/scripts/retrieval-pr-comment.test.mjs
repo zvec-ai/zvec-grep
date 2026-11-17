@@ -287,17 +287,14 @@ test("the publisher renders validated candidate Gold coverage in a collapsed sec
     coverage,
     /\| Gold recalled by FTS \| 4\/5 \(1 unknown\) \| — \| — \|/,
   );
+  assert.match(coverage, /\| Before rule ranking \(RRF\) \| 2\/5 \| — \| — \|/);
   assert.match(
     coverage,
-    /\| Top 10 before rule ranking \(RRF\) \| 2\/5 \| — \| — \|/,
-  );
-  assert.match(
-    coverage,
-    /\| Top 10 after rule ranking \(actual\) \| N\/A \| — \| — \|/,
+    /\| After rule ranking \(actual\) \| N\/A \| — \| — \|/,
   );
   assert.doesNotMatch(
     coverage,
-    /Top 10 coverage|Same-file decay|Rule ranking (?:off|on)/,
+    /Top ?10|Same-file decay|Rule ranking (?:off|on)/,
   );
   assert.match(
     body.replace(/<details>[\s\S]*?<\/details>/g, ""),
@@ -346,10 +343,7 @@ test("the publisher rejects legacy static-only coverage instead of relabeling it
   await publish(x);
   const { body } = x.messages()[0][1];
   assert.match(body, /Failed \/ incomplete/);
-  assert.doesNotMatch(
-    body,
-    /✅ Complete|Top 10 (?:before|after) rule ranking|Rule ranking|Same-file decay/,
-  );
+  assert.doesNotMatch(body, /✅ Complete|rule ranking|Same-file decay/i);
 });
 
 for (const [label, observed, invalid, unobserved] of [

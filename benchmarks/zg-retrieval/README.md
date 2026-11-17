@@ -180,11 +180,12 @@ raw MCP evidence. It writes the final `gold-stages.json` report outside the
 searchable corpus. Capture and report storage belong to the benchmark.
 
 Each suite's report shows index coverage, Gold recalled per route, and Gold
-covered at ten before and after rule ranking (static rules plus same-file decay).
-Both top-ten rows use the same loaded Entity pool. **Top 10 before rule ranking
-(RRF)** uses its RRF order (`loaded_rrf_rank <= 10`), before either rule.
-**Top 10 after rule ranking (actual)** uses the final results (`final_rank <= 10`).
-Coverage is measured within each Top 10, not across the entire candidate pool.
+covered within Top K before and after rule ranking (static rules plus same-file
+decay). K is the query limit, fixed at 10 in the current protocol. Both ranking
+rows use the same loaded Entity pool. **Before rule ranking (RRF)** uses its RRF
+order (`loaded_rrf_rank <= K`), before either rule. **After rule ranking (actual)**
+uses the final results (`final_rank <= K`). Rule ranking acts on the full loaded
+pool. Coverage is measured within each Top K, not across the entire candidate pool.
 These are observations from the same query. File and Entity have separate tables.
 The `rrf_top10` field replaces the earlier `static_top10` comparison, which kept
 static rules enabled. Old summaries must be rescored from saved captures before
@@ -208,7 +209,7 @@ loading losses for troubleshooting.
 | FTS / Vector / recall union | Owners of actual returned Fragments across adaptive recall attempts. Compare each route and the union with the index. The best rank is the minimum rank observed for that owner on that route. Hybrid reports both routes. |
 | Entity merge / RRF fusion / Entity load | Compare each complete pool with its predecessor. A missing canonical owner or an ambiguous range makes Entity coverage unknown where it could affect a hit. |
 | Final selection | Compare the actual selected results with the loaded pool. |
-| Top 10 before / after rule ranking | Before takes the RRF Top 10 from the loaded pool, excluding static rules and same-file decay. After uses the actual Top 10 after both. Before uses loaded ranks, not pre-loading fusion ranks; both loss counts use the loaded pool as their baseline. |
+| Before / after rule ranking | Before takes the RRF Top K from the loaded pool, excluding static rules and same-file decay. After applies both rules to the full pool and uses the actual Top K. Before uses loaded ranks, not pre-loading fusion ranks; both loss counts use the loaded pool as their baseline. |
 
 The shared matcher preserves same-file full containment. SWE-QA20 follows its
 line-based score. Stage text ranges use Rust's half-open coordinates: a nonempty

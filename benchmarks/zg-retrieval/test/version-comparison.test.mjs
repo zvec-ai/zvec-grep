@@ -228,15 +228,15 @@ test("comparison carries candidate stage coverage into the collapsed PR tables",
       ...PILOT_NAMES.map((name) => PILOT_SUITES[name].report.comparison),
     ],
   );
+  assert.match(markdown, /\| Before rule ranking \(RRF\) \| — \| — \| 3\/5 \|/);
   assert.match(
     markdown,
-    /\| Top 10 before rule ranking \(RRF\) \| — \| — \| 3\/5 \|/,
+    /\| After rule ranking \(actual\) \| — \| — \| 5\/5 \|/,
   );
-  assert.match(
+  assert.doesNotMatch(
     markdown,
-    /\| Top 10 after rule ranking \(actual\) \| — \| — \| 5\/5 \|/,
+    /Same-file decay|Rule ranking (?:off|on)|Top ?10 (?:before|after) rule ranking/,
   );
-  assert.doesNotMatch(markdown, /Same-file decay|Rule ranking (?:off|on)/);
   assert.doesNotMatch(markdown, /Stage capture incomplete/);
   assert.doesNotMatch(
     goldStagesMarkdown(summary).join("\n"),
