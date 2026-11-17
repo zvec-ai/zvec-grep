@@ -271,6 +271,9 @@ jobs:
             --env LLAMA_CPP_BUILD_MODE=prebuilt --env LLAMA_CPP_RUNTIME_CACHE=/work/rust/target/llama-runtimes \
             --env RUST_BACKTRACE --env CARGO_TERM_COLOR --env SOURCE_SHA \
             zvec-grep-cuda-ci bash -euo pipefail -c '
+              # Docker does not populate USER. Workspace preferences and
+              # persistent authorization require the actual container username.
+              export USER="$(id -un)"
               cargo nextest --version
               python3 scripts/cuda/runtime.py --reset-cargo-cli target/debug
               cargo build --locked --features cuda --message-format=json > target/cargo-cli.json
