@@ -1331,7 +1331,13 @@ public partial class Worker : IWorker {
         for (left, right) in plain.fragments.iter().zip(&graph.fragments) {
             assert_source_backed(&source, left);
             assert_eq!(left.content, right.content);
-            assert_eq!(left.metadata, right.metadata);
+            assert_eq!(left.source_range, right.source_range);
+            assert_eq!(left.fragments, right.fragments);
+            assert_eq!(
+                graph_facts_cleared(test_metadata(left)),
+                graph_facts_cleared(test_metadata(right)),
+                "retrieval metadata"
+            );
         }
         for (name, arity) in [("Run", 2), ("Empty", 0)] {
             let Some(EntityMetadata::Code(metadata)) = test_metadata(named(&plain.fragments, name))
