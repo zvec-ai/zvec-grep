@@ -151,6 +151,13 @@ retained as `real-model-evidence-<platform>-<cuda|default>` for CPU build/test
 jobs and `real-model-evidence-<platform>-gpu` for GPU jobs, including on failure.
 Any failed model case or CUDA evidence assertion fails the platform job.
 
+Both GPU jobs also run `cached_minilm_cuda_sessions_exit_cleanly` in fresh
+subprocesses. It checks failed CUDA model loads, recovery/reload, cancellation,
+and two actual CUDA sessions per pool, including the final process exit status.
+Linux repeats with heap perturbation and disabled tcache, and runs the parent
+and its children under Valgrind Memcheck with an error exit code. This catches
+invalid accesses during ORT/provider shutdown even when inference passes.
+
 Both GPU jobs then explicitly run the ignored C5 tests from those same compiled
 test binaries, each in a fresh process: `cached_embeddinggemma_uses_cuda` verifies
 CPU inference followed by CUDA inference in one process, while

@@ -84,36 +84,36 @@ pub struct CodeMetadata {
     /// unnamed namespace, or a file-scope `static` one. Such an entity has a
     /// name in its own translation unit only, so a reference from another
     /// file that matches it by name matched a different declaration.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub has_internal_linkage: bool,
     /// True for the entity that introduces a type's name (a class, struct,
     /// interface, enum, or trait declaration). An `impl` block carries the
     /// implemented type's name too, so a name index cannot tell the type from
     /// its implementation without this fact; the resolver needs it to name the
     /// one class a member call belongs to.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub declares_type: bool,
     /// Name this symbol is another spelling of, when its initializer is a bare
     /// name (`export const dispatch = send`). A call through the symbol reaches
     /// the aliased one, so an import that binds this symbol must follow the
     /// alias rather than settle on it.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alias_of: Option<String>,
     /// Properties an object literal initializer binds, in the literal's own
     /// order, with a later property replacing an earlier one of its key
     /// (`{ run() {}, run: right }` states `run -> right`). A member call on
     /// this symbol reaches the value its key last named.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub object_members: Vec<MemberAlias>,
     /// Value a later property of the same key replaces this declaration with
     /// (`{ run() {}, run: right }` states `right` on the method's entity). A
     /// call through that key reaches the replacement, not this declaration.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overwritten_by: Option<String>,
     /// Names an `export { local as exported }` clause republishes this
     /// declaration under. The clause is a statement of its own, so this is the
     /// only evidence that the exported name reaches this declaration.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exported_as: Vec<String>,
 }
 
@@ -227,4 +227,67 @@ pub struct MarkdownMetadata {
 
 impl IndexedMetadata for MarkdownMetadata {
     const INDEX_FIELDS: &'static [IndexField] = &[];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CodeMetadata, MemberAlias, SymbolType};
+
+    /// The facts only the resolver reads. Retrieval never looks at them, so
+    /// storing a default for each of them would cost every record the fields of
+    /// the few files that use them.
+    const GRAPH_FACTS: [&str; 6] = [
+        "has_internal_linkage",
+        "declares_type",
+        "alias_of",
+        "object_members",
+        "overwritten_by",
+        "exported_as",
+    ];
+
+    #[test]
+    fn graph_facts_are_stored_only_when_set() {
+        let plain = serde_json::to_value(CodeMetadata::default()).expect("encode metadata");
+        for field in GRAPH_FACTS {
+            assert!(
+                plain.get(field).is_none(),
+                "{field} is omitted while it holds its default"
+            );
+        }
+
+        // A record written before the fields existed decodes to the defaults.
+        let older: CodeMetadata = serde_json::from_value(serde_json::json!({"symbol_name": "run"}))
+            .expect("decode an older record");
+        assert_eq!(
+            older,
+            CodeMetadata {
+                symbol_name: Some("run".to_owned()),
+                ..CodeMetadata::default()
+            }
+        );
+
+        let stated = CodeMetadata {
+            symbol_type: Some(SymbolType::Value),
+            symbol_name: Some("api".to_owned()),
+            has_internal_linkage: true,
+            declares_type: true,
+            alias_of: Some("send".to_owned()),
+            object_members: vec![MemberAlias {
+                name: "run".to_owned(),
+                target: "right".to_owned(),
+            }],
+            overwritten_by: Some("right".to_owned()),
+            exported_as: vec!["publicApi".to_owned()],
+            ..CodeMetadata::default()
+        };
+        let encoded = serde_json::to_value(&stated).expect("encode stated metadata");
+        for field in GRAPH_FACTS {
+            assert!(encoded.get(field).is_some(), "{field} is stored when set");
+        }
+        assert_eq!(
+            serde_json::from_value::<CodeMetadata>(encoded).expect("decode stated metadata"),
+            stated,
+            "a stored fact survives the round trip"
+        );
+    }
 }

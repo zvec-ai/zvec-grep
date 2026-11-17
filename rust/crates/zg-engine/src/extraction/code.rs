@@ -14,8 +14,8 @@ use crate::{
 };
 
 use self::adapter::{
-    LanguageAdapter, declares_type, named_children, object_member_aliases, overwritten_by,
-    php_declaration, resolve_adapter, text,
+    LanguageAdapter, ObjectLiteral, declares_type, named_children, php_declaration,
+    resolve_adapter, text,
 };
 use super::graph::{
     WalkContext, alias_target_of, collect_import_edge, collect_inheritance_edges, is_import_node,
@@ -119,12 +119,20 @@ fn extract_code(
     };
     // Factory return types register before the entity walk so a bare-call
     // initializer binds its factory even when the factory is spelled after
-    // the caller in this file.
-    scan_return_types(tree.root_node(), bytes, code_format, &mut graph_context);
-    // Directives describe the file rather than any entity, so they are read
-    // once from the root: the resolver replays them to decide whether a call
-    // site's name was already a macro in that translation unit.
-    graph_context.register_preprocessor(scan_preprocessor(tree.root_node(), bytes, code_format));
+    // the caller in this file. The scans below only feed the graph, so a walk
+    // that records nothing skips them instead of computing dropped results —
+    // and does not pay their recursion on the source's syntax tree.
+    if graph_context.is_collecting() {
+        scan_return_types(tree.root_node(), bytes, code_format, &mut graph_context);
+        // Directives describe the file rather than any entity, so they are read
+        // once from the root: the resolver replays them to decide whether a call
+        // site's name was already a macro in that translation unit.
+        graph_context.register_preprocessor(scan_preprocessor(
+            tree.root_node(),
+            bytes,
+            code_format,
+        ));
+    }
     walk_code_node(
         tree.root_node(),
         adapter,
@@ -136,11 +144,36 @@ fn extract_code(
     );
     // `export { realImpl as aliasName }` renames a declaration from a
     // statement of its own, so the walk cannot see it from the declaration.
-    attach_export_aliases(tree.root_node(), bytes, code_format, &mut entities);
+    // The names it attaches serve import binding, which only the graph reads.
+    if graph_context.is_collecting() {
+        attach_export_aliases(tree.root_node(), bytes, code_format, &mut entities);
+    }
 
+    Ok(assemble_output(
+        source,
+        &tree,
+        &entities,
+        graph_context,
+        code_format,
+        (max_chars, overlap_chars),
+    ))
+}
+
+/// Turns the walked entities into what retrieval indexes and the resolver
+/// stores: their fragments in walk order, the gaps between them, and the
+/// partitioned graph. Both consume the same walk, which is why the entity set
+/// never depends on the graph setting.
+fn assemble_output(
+    source: &TextSource,
+    tree: &tree_sitter::Tree,
+    entities: &[CodeEntity<'_>],
+    graph_context: WalkContext,
+    code_format: FileFormat,
+    (max_chars, overlap_chars): (usize, usize),
+) -> ExtractionOutput {
     let mut output = Vec::new();
     let mut entity_heads = Vec::with_capacity(entities.len());
-    for entity in &entities {
+    for entity in entities {
         // Fragments are appended contiguously in walk order, so the output
         // length before each append is that entity's head fragment index.
         entity_heads.push(output.len());
@@ -149,7 +182,7 @@ fn extract_code(
     // Anonymous retrieval chunks follow the symbols, preserving graph ordinals.
     append_code_gaps(
         source,
-        &entities,
+        entities,
         tree.root_node(),
         code_format,
         max_chars,
@@ -166,21 +199,20 @@ fn extract_code(
             .is_collecting()
             .then(|| partition_walk(graph_context, entity_heads))
             .filter(|graph| !graph.directives.is_empty());
-        Ok(ExtractionOutput {
+        return ExtractionOutput {
             fragments: fallback(source, max_chars, overlap_chars),
             graph: partitioned,
-        })
-    } else {
-        // The symbol table is complete now, so partitioning resolves forward
-        // references as readily as backward ones. A walk that recorded nothing
-        // produces no graph at all, so assembly skips it.
-        let partitioned = graph_context
-            .is_collecting()
-            .then(|| partition_walk(graph_context, entity_heads));
-        Ok(ExtractionOutput {
-            fragments: output,
-            graph: partitioned,
-        })
+        };
+    }
+    // The symbol table is complete now, so partitioning resolves forward
+    // references as readily as backward ones. A walk that recorded nothing
+    // produces no graph at all, so assembly skips it.
+    let partitioned = graph_context
+        .is_collecting()
+        .then(|| partition_walk(graph_context, entity_heads));
+    ExtractionOutput {
+        fragments: output,
+        graph: partitioned,
     }
 }
 
@@ -302,6 +334,15 @@ fn walk_entity_node<'tree>(
     let start_index = out.len();
     let mut first_entity_index = None;
     let mut scope_entity_index = None;
+    // The facts below describe references the resolver follows, and nothing
+    // retrieval reads, so a walk that records no graph leaves them at their
+    // defaults instead of scanning for them.
+    let collecting = graph_context.is_collecting();
+    // A declaration that spells an object literal states every member's value
+    // once; each entity the declaration produces reads that single scan.
+    let object_literal = collecting
+        .then(|| ObjectLiteral::read(child, source))
+        .flatten();
     for entity in adapter.resolve_entities(child, source) {
         let entity_index = graph_context.next_entity_index();
         first_entity_index.get_or_insert(entity_index);
@@ -323,13 +364,25 @@ fn walk_entity_node<'tree>(
         );
         // The alias belongs to this entity's own name, so it is read before the
         // name moves into the record.
-        let alias_of = alias_target_of(entity, source, format)
+        let alias_of = collecting
+            .then(|| alias_target_of(entity, source, format))
+            .flatten()
             .filter(|(aliased, _)| name.as_deref() == Some(aliased.as_str()))
             .map(|(_, target)| target);
-        let object_members = object_member_aliases(entity, source)
-            .into_iter()
-            .map(|(name, target)| MemberAlias { name, target })
-            .collect();
+        let object_members = object_literal
+            .as_ref()
+            .filter(|literal| literal.declares(entity))
+            .map(|literal| {
+                literal
+                    .aliases()
+                    .iter()
+                    .map(|(name, target)| MemberAlias {
+                        name: name.clone(),
+                        target: target.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         out.push(CodeEntity {
             node: entity,
             language: adapter.language(),
@@ -343,11 +396,13 @@ fn walk_entity_node<'tree>(
             format,
             is_declaration: adapter.is_declaration(entity),
             package: java_package(entity, source, format),
-            has_internal_linkage: adapter.has_internal_linkage(entity, source),
-            declares_type: declares_type(entity),
+            has_internal_linkage: collecting && adapter.has_internal_linkage(entity, source),
+            declares_type: collecting && declares_type(entity),
             alias_of,
             object_members,
-            overwritten_by: overwritten_by(entity, source),
+            overwritten_by: object_literal
+                .as_ref()
+                .and_then(|literal| literal.overwritten_by(entity, source)),
             exported_as: Vec::new(),
         });
     }
@@ -613,7 +668,9 @@ fn append_entity(
 
 // PHP and C# retain all code outside declarations. JS/TS also needs the bodies of
 // callbacks with no symbol owner: excluding their local variables must not
-// remove their contents from retrieval. Existing entities remain authoritative.
+// remove their contents from retrieval. C/C++ keeps the text no entity bounded
+// — a file whose only entity owns a call still has to answer for the constants,
+// macros and includes beside it. Existing entities remain authoritative.
 fn append_code_gaps(
     source: &TextSource,
     entities: &[CodeEntity<'_>],
@@ -626,7 +683,12 @@ fn append_code_gaps(
     if output.is_empty()
         || !matches!(
             format,
-            FileFormat::CSharp | FileFormat::Php | FileFormat::JavaScript | FileFormat::TypeScript
+            FileFormat::C
+                | FileFormat::Cpp
+                | FileFormat::CSharp
+                | FileFormat::JavaScript
+                | FileFormat::Php
+                | FileFormat::TypeScript
         )
     {
         return;
@@ -666,6 +728,10 @@ fn append_code_gaps(
     }
     gaps.push((offset, source.text.len()));
 
+    // A JS/TS gap is a statement of a body no entity owns; only callbacks
+    // carry contents worth searching, and indexing the rest would duplicate
+    // the statements between declarations. C/C++, C# and PHP gaps are the whole
+    // uncovered text, so they are taken as they are.
     if matches!(format, FileFormat::JavaScript | FileFormat::TypeScript) {
         let mut callbacks = Vec::new();
         collect_uncovered_callbacks(root, &gaps, &mut callbacks);
@@ -1028,8 +1094,8 @@ mod tests {
     use std::collections::HashSet;
 
     use crate::domain::{
-        CodeMetadata, Content, EntityMetadata, FileFormat, Language as CodeLanguage, Range,
-        SymbolType, TextRange,
+        CodeMetadata, Content, EntityMetadata, FileFormat, Language as CodeLanguage, MemberAlias,
+        Range, SymbolType, TextRange,
     };
 
     use super::super::{test_content, test_metadata};
@@ -1521,7 +1587,12 @@ public partial class Worker : IWorker {
             ]
             .join("\n"),
         );
-        let fragments = extract(&source, ChunkOptions::default()).expect("php extraction");
+        // The indexing walk computes every fact retrieval and the resolver
+        // read; only the graph-free search walk leaves the resolver's own
+        // facts at their defaults.
+        let fragments = extract_for_indexing(&source, ChunkOptions::default())
+            .expect("php extraction")
+            .fragments;
         let expected: [(&str, SymbolType, &str, &str, Option<&str>); 16] = [
             (
                 "ChargerInterface",
@@ -2068,6 +2139,22 @@ public partial class Worker : IWorker {
         ));
     }
 
+    /// Retrieval and the resolver read different facts: the graph-free walk
+    /// keeps every entity and its text, and leaves the resolver's own facts at
+    /// their defaults instead of computing what it would drop.
+    fn graph_facts_cleared(metadata: Option<&EntityMetadata>) -> Option<EntityMetadata> {
+        let mut metadata = metadata.cloned()?;
+        if let EntityMetadata::Code(code) = &mut metadata {
+            code.has_internal_linkage = false;
+            code.declares_type = false;
+            code.alias_of = None;
+            code.object_members.clear();
+            code.overwritten_by = None;
+            code.exported_as.clear();
+        }
+        Some(metadata)
+    }
+
     #[test]
     fn skipping_graph_collection_keeps_every_entity() {
         let source = test_source(
@@ -2088,8 +2175,179 @@ public partial class Worker : IWorker {
             "a graph-free workspace must not collect one"
         );
         assert_eq!(
-            without.fragments, with_graph.fragments,
-            "the indexed content must not depend on the graph setting"
+            without.fragments.len(),
+            with_graph.fragments.len(),
+            "the entity set must not depend on the graph setting"
+        );
+        for (without, with_graph) in without.fragments.iter().zip(&with_graph.fragments) {
+            assert_eq!(without.content, with_graph.content, "indexed text");
+            assert_eq!(without.source_range, with_graph.source_range, "text range");
+            assert_eq!(
+                graph_facts_cleared(test_metadata(without)),
+                graph_facts_cleared(test_metadata(with_graph)),
+                "retrieval metadata"
+            );
+        }
+        assert!(
+            without.fragments.iter().all(|fragment| matches!(
+                test_metadata(fragment),
+                Some(EntityMetadata::Code(CodeMetadata {
+                    has_internal_linkage: false,
+                    declares_type: false,
+                    alias_of: None,
+                    object_members,
+                    overwritten_by: None,
+                    exported_as,
+                    ..
+                })) if object_members.is_empty() && exported_as.is_empty()
+            )),
+            "a graph-free walk leaves the resolver's facts at their defaults"
+        );
+        // The graph-setting must not change the facts the resolver reads either.
+        assert!(
+            with_graph.fragments.iter().any(|fragment| matches!(
+                test_metadata(fragment),
+                Some(EntityMetadata::Code(CodeMetadata {
+                    declares_type: true,
+                    ..
+                }))
+            )),
+            "the struct introduces its type's name"
+        );
+    }
+
+    #[test]
+    fn unused_initializer_entities_keep_the_files_other_text_searchable() {
+        // `ready` owns the initializer's call, so the walk emits it as an
+        // entity. The file used to fall back to its whole text; the entities
+        // alone would drop the constant beside them from retrieval.
+        let source = test_source(
+            FileFormat::Cpp,
+            "marker.cpp",
+            concat!(
+                "#include \"api.h\"\n",
+                "const char *marker = \"needle\";\n",
+                "int ready = initialize();\n",
+            ),
+        );
+        for fragments in [
+            extract_for_indexing(&source, ChunkOptions::default())
+                .expect("graph extraction")
+                .fragments,
+            crate::extraction::extract_without_graph(&source, ChunkOptions::default())
+                .expect("graph-free extraction")
+                .fragments,
+        ] {
+            assert!(
+                fragments.iter().any(|fragment| matches!(
+                    &fragment.content,
+                    Content::Code(content) if content.contains("needle")
+                )),
+                "the constant stays searchable beside the initializer entity"
+            );
+            assert!(
+                fragments.iter().any(|fragment| matches!(
+                    &fragment.content,
+                    Content::Code(content) if content.contains("#include \"api.h\"")
+                )),
+                "the include stays searchable"
+            );
+            assert!(
+                fragments.iter().any(|fragment| matches!(
+                    test_metadata(fragment),
+                    Some(EntityMetadata::Code(CodeMetadata {
+                        symbol_name: Some(name),
+                        ..
+                    })) if name == "ready"
+                )),
+                "the initializer stays an entity"
+            );
+        }
+    }
+
+    #[test]
+    fn a_local_objects_properties_do_not_shadow_the_files_own_function() {
+        // The property is no workspace-level symbol, so its bare name must not
+        // enter the enclosing body's local table: `run()` calls the file's
+        // function, not the object's property.
+        let source = test_source(
+            FileFormat::JavaScript,
+            "shadow.js",
+            concat!(
+                "function run() {}\n",
+                "function outer() {\n",
+                "  const local = { run: () => {} };\n",
+                "  run();\n",
+                "}\n",
+            ),
+        );
+        let extracted =
+            extract_for_indexing(&source, ChunkOptions::default()).expect("graph extraction");
+        assert!(
+            !extracted.fragments.iter().any(|fragment| matches!(
+                test_metadata(fragment),
+                Some(EntityMetadata::Code(CodeMetadata {
+                    symbol_name: Some(name),
+                    scope: Some(scope),
+                    ..
+                })) if name == "run" && scope.contains("local")
+            )),
+            "a local object's property is not an entity"
+        );
+        let graph = extracted.graph.expect("code sources carry a graph");
+        let calls = graph
+            .resolved
+            .iter()
+            .filter(|edge| edge.ref_name == "run" && edge.receiver_name.is_none())
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 1, "the bare call is the outer body's only one");
+        assert_ne!(
+            calls[0].target_index, calls[0].source_index,
+            "the call must not bind the property that overwrote its name"
+        );
+    }
+
+    #[test]
+    fn object_literal_members_keep_last_property_wins_at_scale() {
+        // Every key but the last is overwritten by a later property of its
+        // name: one scan of the literal answers all of them.
+        use std::fmt::Write as _;
+
+        let mut literal = String::from("export const api = {\n");
+        for index in 0..600 {
+            write!(
+                literal,
+                "  run{index}: first{index},\n  run{index}: second{index},\n"
+            )
+            .expect("append to a string");
+        }
+        literal.push_str("};\nfunction second0() {}\nfunction first0() {}\n");
+        let source = test_source(FileFormat::TypeScript, "scale.ts", &literal);
+        let extracted =
+            extract_for_indexing(&source, ChunkOptions::default()).expect("graph extraction");
+        let metadata = extracted
+            .fragments
+            .iter()
+            .filter_map(test_metadata)
+            .find_map(|metadata| match metadata {
+                EntityMetadata::Code(code) if code.symbol_name.as_deref() == Some("api") => {
+                    Some(code)
+                }
+                _ => None,
+            })
+            .expect("the object stays an entity");
+        assert_eq!(
+            metadata.object_members.len(),
+            600,
+            "one alias per key, the later property of each name replacing the earlier"
+        );
+        assert_eq!(
+            metadata.object_members[0],
+            MemberAlias {
+                name: "run0".to_owned(),
+                target: "second0".to_owned(),
+            },
+            "the later property of a key states the member's value"
         );
     }
 

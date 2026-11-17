@@ -4687,6 +4687,7 @@ dependencies = [
  "zg-engine-macros",
  "zg-host-native",
  "zg-llama-native",
+ "zg-ort-native",
  "zg-zvec-fp16",
  "zvec-rust",
 ]
@@ -4721,6 +4722,14 @@ dependencies = [
  "libloading 0.8.9",
  "llama-cpp-sys-2",
  "tempfile",
+]
+
+[[package]]
+name = "zg-ort-native"
+version = "0.3.1"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

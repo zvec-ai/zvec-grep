@@ -370,7 +370,8 @@ async fn unknown_extensions_are_indexed_and_searchable_as_text() -> TestResult {
         fs::write(root.join(name), content)?;
     }
     fs::write(root.join("binary.bsl"), [0, 1, 2, 255])?;
-    fs::write(root.join("nul.bsl"), b"orchardguide\0binary")?;
+    // NUL is a Windows device name even with a file extension.
+    fs::write(root.join("embedded-nul.bsl"), b"orchardguide\0binary")?;
     fs::write(root.join("empty.bsl"), "")?;
     let expected = sources
         .map(|(name, _)| PathBuf::from(name))
