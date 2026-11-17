@@ -261,7 +261,8 @@ test("the publisher renders validated candidate Gold coverage in a collapsed sec
       stages: {
         index: { covered: 5, unknown: 0 },
         fts: { covered: 4, unknown: 1 },
-        static_top10: { covered: 2, unknown: 0 },
+        rrf_top10: { covered: 2, unknown: 0 },
+        static_top10: { covered: 5, unknown: 0 },
         actual_top10: { covered: 0, unknown: 5 },
       },
     })),
@@ -286,12 +287,12 @@ test("the publisher renders validated candidate Gold coverage in a collapsed sec
     coverage,
     /\| Gold recalled by FTS \| 4\/5 \(1 unknown\) \| — \| — \|/,
   );
-  assert.match(coverage, /\| Same-file decay off \| 2\/5 \| — \| — \|/);
   assert.match(
     coverage,
-    /\| Same-file decay on \(actual\) \| N\/A \| — \| — \|/,
+    /\| Rule ranking off \(RRF Top 10\) \| 2\/5 \| — \| — \|/,
   );
-  assert.doesNotMatch(coverage, /Top 10 coverage/);
+  assert.match(coverage, /\| Rule ranking on \(actual\) \| N\/A \| — \| — \|/);
+  assert.doesNotMatch(coverage, /Top 10 coverage|Same-file decay/);
   assert.match(
     body.replace(/<details>[\s\S]*?<\/details>/g, ""),
     /\*\*Quarry\*\*: ⚠️ Stage capture incomplete: \*\*5\/10\*\* verified, \*\*0\*\* invalid, \*\*5\*\* unobserved/,
@@ -302,6 +303,44 @@ test("the publisher renders validated candidate Gold coverage in a collapsed sec
     () => validateComparison(payload, request),
     /Invalid Gold stage coverage/,
   );
+});
+
+test("the publisher rejects legacy static-only coverage instead of relabeling it as RRF", async (t) => {
+  const x = await fixture(t);
+  const payload = {
+    ...report,
+    candidate_gold_stages: {
+      quarry: {
+        version: 1,
+        calls: 5,
+        observed_calls: 5,
+        invalid_calls: 0,
+        groups: [
+          {
+            qualification: "diagnostic",
+            level: "file",
+            mode: "fts",
+            targets: 5,
+            stages: Object.fromEntries(
+              ["index", "fts", "static_top10", "actual_top10"].map((key) => [
+                key,
+                { covered: 5, unknown: 0 },
+              ]),
+            ),
+          },
+        ],
+      },
+    },
+  };
+  assert.throws(
+    () => validateComparison(payload, request),
+    /Invalid Gold stage coverage/,
+  );
+  await x.write("comparison/summary.json", payload);
+  await publish(x);
+  const { body } = x.messages()[0][1];
+  assert.match(body, /Failed \/ incomplete/);
+  assert.doesNotMatch(body, /✅ Complete|Rule ranking|Same-file decay/);
 });
 
 for (const [label, observed, invalid, unobserved] of [

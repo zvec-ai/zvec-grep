@@ -197,12 +197,10 @@ test("comparison carries candidate stage coverage into the collapsed PR tables",
         mode: "hybrid",
         targets: 5,
         stages: Object.fromEntries(
-          ["index", "fts", "vector", "static_top10", "actual_top10"].map(
-            (key) => [
-              key,
-              { covered: key === "static_top10" ? 3 : 5, unknown: 0 },
-            ],
-          ),
+          ["index", "fts", "vector", "rrf_top10", "actual_top10"].map((key) => [
+            key,
+            { covered: key === "rrf_top10" ? 3 : 5, unknown: 0 },
+          ]),
         ),
       },
     ],
@@ -230,11 +228,26 @@ test("comparison carries candidate stage coverage into the collapsed PR tables",
       ...PILOT_NAMES.map((name) => PILOT_SUITES[name].report.comparison),
     ],
   );
-  assert.match(markdown, /\| Same-file decay off \| — \| — \| 3\/5 \|/);
+  assert.match(
+    markdown,
+    /\| Rule ranking off \(RRF Top 10\) \| — \| — \| 3\/5 \|/,
+  );
+  assert.match(markdown, /\| Rule ranking on \(actual\) \| — \| — \| 5\/5 \|/);
+  assert.doesNotMatch(markdown, /Same-file decay/);
   assert.doesNotMatch(markdown, /Stage capture incomplete/);
   assert.doesNotMatch(
     goldStagesMarkdown(summary).join("\n"),
     /Stage capture incomplete/,
+  );
+
+  const legacy = structuredClone(summary);
+  const stages = legacy.groups[0].stages;
+  stages.static_top10 = stages.rrf_top10;
+  delete stages.rrf_top10;
+  after.sweqa.gold_stages = legacy;
+  assert.throws(
+    () => compareCombinedResults(before, after, metadata),
+    /Invalid Gold stage coverage/,
   );
 });
 
@@ -258,7 +271,7 @@ for (const [label, invalid, unobserved] of [
           mode: "fts",
           targets: 5,
           stages: Object.fromEntries(
-            ["index", "fts", "static_top10", "actual_top10"].map((key) => [
+            ["index", "fts", "rrf_top10", "actual_top10"].map((key) => [
               key,
               { covered: 0, unknown: 5 },
             ]),

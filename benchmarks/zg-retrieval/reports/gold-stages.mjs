@@ -97,6 +97,7 @@ export function goldStagesMarkdown(
   { heading = true, warning = true } = {},
 ) {
   if (!summary) return [];
+  validateGoldStageSummary(summary);
   const captureWarning = warning && goldStageCaptureWarning(summary);
   const lines = [
     "",
@@ -104,7 +105,7 @@ export function goldStagesMarkdown(
     ...(captureWarning ? [captureWarning, ""] : []),
     `Verified captures: **${summary.observed_calls}/${summary.calls}** planned calls. Invalid captures: **${summary.invalid_calls}**.`,
     "",
-    "Each row shows Gold coverage across all five calls. The decay rows use the same loaded candidates, RRF scores, static scores, and 10-result limit. Decay on uses the actual results. N/A means unknown, and — means the route did not run.",
+    "Each row shows Gold coverage across all five calls. Rule ranking off takes the RRF Top 10 from the same loaded candidate pool, before static rules and same-file decay. Rule ranking on uses the actual Top 10 after both. These are observations from one query, not separate runs with a query switch. N/A means unknown, and — means the route did not run.",
     "",
     "See `gold-stages.json` for all stages and per-target ranks.",
     "Diagnostic MCP latency includes stage capture, serialization and transfer; compare normal search latency with capture disabled on both versions.",

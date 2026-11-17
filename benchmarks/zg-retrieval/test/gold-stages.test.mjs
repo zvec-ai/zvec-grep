@@ -122,7 +122,7 @@ function fixture() {
   };
 }
 
-test("measures full pools, route ranks, and top ten with and without same-file decay", () => {
+test("compares loaded RRF and actual top ten without applying static rules to off", () => {
   const scored = scoreGoldStages(fixture());
   assert.equal(scored.state, "observed");
   const [file, first, second, third] = scored.targets;
@@ -135,10 +135,12 @@ test("measures full pools, route ranks, and top ten with and without same-file d
     selected: 5,
     static: 11,
   });
-  assert.equal(first.coverage.static_top10, false);
+  assert.equal(first.coverage.rrf_top10, true);
+  assert.equal(first.coverage.actual_top10, true);
   assert.equal(second.coverage.index, true);
   assert.equal(second.coverage.vector, false);
-  assert.equal(second.coverage.static_top10, true);
+  assert.equal(second.coverage.rrf_top10, false);
+  assert.equal(second.coverage.actual_top10, false);
   assert.equal(second.ranks.selected, "miss");
   assert.equal(third.coverage.fused, true);
   assert.equal(third.coverage.loaded, false);
@@ -152,8 +154,61 @@ test("measures full pools, route ranks, and top ten with and without same-file d
     lost: 1,
     loss_unknown: 0,
   });
-  assert.equal(entity.stages.static_top10.lost, 1);
+  assert.equal(entity.stages.rrf_top10.lost, 1);
   assert.equal(entity.stages.actual_top10.lost, 1);
+});
+
+test("off uses the loaded pool's RRF cutoff, excluding unloaded fusion hits", () => {
+  const observed = fixture();
+  const { a, b, c } = observed.capture.files[path];
+  Object.assign(a, { rrf_rank: 11, loaded_rrf_rank: 10 });
+  Object.assign(b, { rrf_rank: 12, loaded_rrf_rank: 11 });
+  c.rrf_rank = 1;
+  const scored = scoreGoldStages(observed);
+  assert.equal(scored.state, "observed");
+  const [file, first, second, third] = scored.targets;
+  assert.equal(file.coverage.rrf_top10, true);
+  assert.equal(first.ranks.fused, 11);
+  assert.equal(first.ranks.loaded, 10);
+  assert.equal(first.ranks.static, 11);
+  assert.equal(first.coverage.rrf_top10, true);
+  assert.equal(second.ranks.loaded, 11);
+  assert.equal(second.ranks.static, 1);
+  assert.equal(second.coverage.rrf_top10, false);
+  assert.equal(third.ranks.fused, 1);
+  assert.equal(third.coverage.rrf_top10, false);
+  assert.deepEqual(
+    scored.targets.map(({ coverage }) => coverage.actual_top10),
+    scoreGoldStages(fixture()).targets.map(
+      ({ coverage }) => coverage.actual_top10,
+    ),
+  );
+});
+
+test("keeps native loaded ranks when several Entities share a Gold file", () => {
+  const observed = fixture();
+  observed.capture.sizes = { merged: 13, fused: 13, loaded: 12, selected: 10 };
+  const { a, b, c } = observed.capture.files[path];
+  Object.assign(a, { rrf_rank: 12, loaded_rrf_rank: 11, static_rank: 2 });
+  Object.assign(b, { rrf_rank: 13, loaded_rrf_rank: 12 });
+  c.rrf_rank = 1;
+  const scored = scoreGoldStages(observed);
+  assert.equal(scored.state, "observed");
+  assert.equal(scored.targets[0].coverage.rrf_top10, false);
+  assert.equal(scored.targets[0].coverage.actual_top10, true);
+  assert.equal(scored.targets[1].coverage.rrf_top10, false);
+  assert.equal(scored.targets[1].coverage.actual_top10, true);
+});
+
+test("off preserves unknown Entity coverage only inside the RRF Top 10", () => {
+  const observed = fixture();
+  observed.useBytes = false;
+  observed.capture.files[path].b.loaded_rrf_rank = 10;
+  const scored = scoreGoldStages(observed);
+  assert.equal(scored.state, "observed");
+  assert.equal(scored.targets[2].coverage.rrf_top10, null);
+  observed.capture.files[path].b.loaded_rrf_rank = 11;
+  assert.equal(scoreGoldStages(observed).targets[2].coverage.rrf_top10, false);
 });
 
 test("keeps missing traces and ambiguous Entity ranges unknown", () => {
@@ -185,15 +240,18 @@ test("SciFact Gold completes an alternative evidence group within each stage", (
       },
     ],
   };
-  const { a, c } = observed.capture.files[path];
+  const { a, b, c } = observed.capture.files[path];
   a.static_rank = 2;
   const score = () => scoreGoldStages(observed).targets[1];
   const complete = score();
   assert.equal(complete.ranks.fts, 200);
   assert.equal(complete.ranks.vector, 16);
   assert.equal(complete.ranks.fused, 11);
-  assert.equal(complete.coverage.static_top10, true);
+  assert.equal(complete.coverage.rrf_top10, false);
   assert.equal(complete.coverage.actual_top10, false);
+  b.loaded_rrf_rank = 10;
+  assert.equal(score().coverage.rrf_top10, true);
+  assert.equal(score().coverage.actual_top10, false);
 
   // In this replay the required spans arrive through different routes.
   a.recall = { vector: 5 };
@@ -226,9 +284,21 @@ test("stage summary shows coverage at every stage", () => {
     "| Gold covered by index | N/A | — | 3/3 |",
     "| Gold recalled by FTS | N/A | — | 2/3 |",
     "| Gold recalled by Vector | — | — | 2/3 |",
-    "| Same-file decay off | N/A | — | 2/3 |",
-    "| Same-file decay on (actual) | N/A | — | 1/3 |",
+    "| Rule ranking off (RRF Top 10) | N/A | — | 1/3 |",
+    "| Rule ranking on (actual) | N/A | — | 1/3 |",
   ]);
+});
+
+test("the standalone report rejects legacy static-only coverage", () => {
+  const summary = summarizeGoldStages([scoreGoldStages(fixture())]);
+  for (const { stages } of summary.groups) {
+    stages.static_top10 = stages.rrf_top10;
+    delete stages.rrf_top10;
+  }
+  assert.throws(
+    () => goldStagesMarkdown(summary),
+    /Invalid Gold stage coverage/,
+  );
 });
 
 test("maps indexed offsets to frozen source bytes for a verified UTF-8 BOM", () => {

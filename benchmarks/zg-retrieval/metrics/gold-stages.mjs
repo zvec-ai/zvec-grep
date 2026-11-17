@@ -20,11 +20,11 @@ export const GOLD_STAGES = [
   { id: "fused", parent: "merged", ranked: true },
   { id: "loaded", parent: "fused", ranked: true },
   { id: "selected", parent: "loaded", ranked: true },
-  { id: "static_top10", parent: "loaded", label: "Same-file decay off" },
+  { id: "rrf_top10", parent: "loaded", label: "Rule ranking off (RRF Top 10)" },
   {
     id: "actual_top10",
     parent: "loaded",
-    label: "Same-file decay on (actual)",
+    label: "Rule ranking on (actual)",
   },
 ];
 
@@ -247,7 +247,7 @@ function scoreTarget(capture, target, level, useBytes, sourceOffset) {
     fused: bestRank(canonical, at("rrf_rank")),
     loaded: bestRank(loaded, at("loaded_rrf_rank")),
     selected: bestRank(loaded, at("final_rank")),
-    static_top10: bestRank(loaded, at("static_rank"), LIMIT),
+    rrf_top10: bestRank(loaded, at("loaded_rrf_rank"), LIMIT),
     actual_top10: bestRank(loaded, at("final_rank"), LIMIT),
     static: bestRank(loaded, at("static_rank")),
   };

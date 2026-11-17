@@ -180,9 +180,16 @@ raw MCP evidence. It writes the final `gold-stages.json` report outside the
 searchable corpus. Capture and report storage belong to the benchmark.
 
 Each suite's report shows index coverage, Gold recalled per route, and Gold
-covered at ten with same-file decay off and on. Both top-ten rows use the same
-loaded Entity pool, RRF scores and static rule scoring. File and Entity have
-separate tables.
+covered at ten before and after rule ranking (static rules plus same-file decay).
+Both top-ten rows use the same loaded Entity pool. Off uses its RRF order
+(`loaded_rrf_rank <= 10`), before either rule; on uses the actual final results
+(`final_rank <= 10`). These are observations from the same query, not separate
+runs with a query switch. File and Entity have separate tables.
+The `rrf_top10` field replaces the earlier `static_top10` comparison, which kept
+static rules enabled. Old summaries must be rescored from saved captures before
+using the new labels; renaming their fields is not sufficient. Static ranks
+remain in per-target evidence. Keep the original artifacts and identify the
+scorer commit when publishing rescored results.
 The coverage denominator counts Gold targets across all five calls, including
 unknowns.
 SWE-QA20 uses its QA File labels here and separates formal, diagnostic and
@@ -200,7 +207,7 @@ loading losses for troubleshooting.
 | FTS / Vector / recall union | Owners of actual returned Fragments across adaptive recall attempts. Compare each route and the union with the index. The best rank is the minimum rank observed for that owner on that route. Hybrid reports both routes. |
 | Entity merge / RRF fusion / Entity load | Compare each complete pool with its predecessor. A missing canonical owner or an ambiguous range makes Entity coverage unknown where it could affect a hit. |
 | Final selection | Compare the actual selected results with the loaded pool. |
-| Same-file decay off / on @10 | With decay off, rank by static score and take the first ten as a diagnostic. With decay on, use the actual results of the native greedy selection. Both loss counts use the loaded pool as their baseline. |
+| Rule ranking off / on @10 | Off takes the RRF Top 10 from the loaded pool, excluding static rules and same-file decay. On uses the actual results after both. Off uses loaded ranks, not pre-loading fusion ranks; both loss counts use the loaded pool as their baseline. |
 
 The shared matcher preserves same-file full containment. SWE-QA20 follows its
 line-based score. Stage text ranges use Rust's half-open coordinates: a nonempty
