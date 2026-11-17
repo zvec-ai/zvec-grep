@@ -289,6 +289,102 @@ test("stage summary shows coverage at every stage", () => {
   ]);
 });
 
+test("five repeated calls count each task's Gold once without changing call health", () => {
+  const calls = Array.from({ length: 5 }, (_, i) =>
+    scoreGoldStages({ ...fixture(), repetition: i + 1 }),
+  );
+  const original = structuredClone(calls);
+  const summary = summarizeGoldStages(calls);
+  assert.equal(summary.version, 2);
+  assert.equal(summary.calls, 5);
+  assert.equal(summary.observed_calls, 5);
+  assert.equal(summary.invalid_calls, 0);
+  const entity = summary.groups.find(({ level }) => level === "entity");
+  assert.equal(entity.targets, 3);
+  assert.equal(entity.stages.index.covered, 3);
+  assert.equal(entity.stages.actual_top10.covered, 1);
+  assert.equal(entity.stages.actual_top10.lost, 1);
+  assert.ok(
+    goldStagesMarkdown(summary).includes(
+      "| After rule ranking (actual) | — | — | 1/3 |",
+    ),
+  );
+  assert.deepEqual(calls, original);
+});
+
+test("coverage averages per task before summing, regardless of repetition count", () => {
+  const calls = [];
+  for (const [taskId, repetitions, covered] of [
+    ["first", 2, false],
+    ["second", 5, true],
+  ]) {
+    for (let repetition = 1; repetition <= repetitions; repetition++) {
+      const scored = scoreGoldStages({
+        ...fixture(),
+        taskId,
+        repetition,
+        pair:
+          taskId === "second"
+            ? { ...pair, entity_targets: pair.entity_targets.slice(0, 2) }
+            : pair,
+      });
+      for (const target of scored.targets)
+        target.coverage.actual_top10 = covered;
+      calls.push(scored);
+    }
+  }
+  const summary = summarizeGoldStages(calls.reverse());
+  const entity = summary.groups.find(({ level }) => level === "entity");
+  assert.equal(summary.calls, 7);
+  // The same Gold IDs occur in two different questions and count for each.
+  assert.equal(entity.targets, 5);
+  assert.equal(entity.stages.actual_top10.covered, 2);
+});
+
+test("varying repeats retain fractional coverage, loss and unknown observations", () => {
+  const calls = Array.from({ length: 5 }, (_, i) => {
+    const scored = scoreGoldStages({
+      ...fixture(),
+      repetition: i + 1,
+      ...(i === 4 ? { capture: null } : {}),
+    });
+    if (i === 2 || i === 3)
+      for (const target of scored.targets) target.coverage.actual_top10 = false;
+    return scored;
+  });
+  const summary = summarizeGoldStages(calls);
+  const entity = summary.groups.find(({ level }) => level === "entity");
+  assert.equal(summary.calls, 5);
+  assert.equal(summary.observed_calls, 4);
+  assert.equal(entity.targets, 3);
+  assert.deepEqual(entity.stages.actual_top10, {
+    covered: 0.4,
+    unknown: 0.6,
+    lost: 1.2,
+    loss_unknown: 0.6,
+  });
+  assert.ok(
+    goldStagesMarkdown(summary).includes(
+      "| After rule ranking (actual) | — | — | 0.4/3 (0.6 unknown) |",
+    ),
+  );
+  assert.match(goldStagesMarkdown(summary).join("\n"), /4\/5\*\* verified/);
+});
+
+test("aggregation rejects duplicate repeats or changing Gold instead of averaging them", () => {
+  const first = scoreGoldStages(fixture());
+  assert.throws(
+    () => summarizeGoldStages([first, structuredClone(first)]),
+    /Duplicate Gold stage repetition/,
+  );
+  const next = scoreGoldStages({ ...fixture(), repetition: 2 });
+  next.targets.pop();
+  assert.throws(
+    () => summarizeGoldStages([first, next]),
+    /Gold targets changed between repetitions/,
+  );
+});
+
 function comparisonSummary({
   qualification = "diagnostic",
   level = "file",
@@ -298,7 +394,7 @@ function comparisonSummary({
   unknown = 0,
 } = {}) {
   return {
-    version: 1,
+    version: 2,
     calls: 5,
     observed_calls: 5,
     invalid_calls: 0,
@@ -357,6 +453,38 @@ test("stage comparisons preserve denominator and partial unknown changes", () =>
       lines.includes(`| Gold covered by index | N/A | N/A | ${expected} |`),
     );
   }
+});
+
+test("stage tables validate means and suppress floating-point display noise", () => {
+  const summary = comparisonSummary({ covered: 0.1 + 0.2, unknown: 0.4 });
+  assert.ok(
+    goldStagesMarkdown(summary).includes(
+      "| Gold covered by index | — | — | 0.3/5 (0.4 unknown) |",
+    ),
+  );
+  for (const covered of [-0.1, 5.1, NaN, Infinity, "2.4"])
+    assert.throws(
+      () => goldStagesMarkdown(comparisonSummary({ covered })),
+      /Invalid Gold stage coverage/,
+    );
+  assert.throws(
+    () => goldStagesMarkdown(comparisonSummary({ covered: 4.8, unknown: 0.4 })),
+    /Invalid Gold stage coverage/,
+  );
+  assert.throws(
+    () => goldStagesMarkdown(comparisonSummary({ targets: 5.5 })),
+    /Invalid Gold stage target count/,
+  );
+});
+
+test("old accumulated summaries require rebuilding from their per-call evidence", () => {
+  const legacy = { ...comparisonSummary(), version: 1 };
+  for (const render of [
+    () => goldStagesMarkdown(legacy),
+    () => goldStagesMarkdown(legacy, { baseline: comparisonSummary() }),
+    () => goldStagesMarkdown(comparisonSummary(), { baseline: legacy }),
+  ])
+    assert.throws(render, /rebuild from per-call evidence/);
 });
 
 test("stage comparisons retain either available side without treating missing as zero", () => {

@@ -196,8 +196,15 @@ static rules enabled. Old summaries must be rescored from saved captures before
 using the new labels; renaming their fields is not sufficient. Static ranks
 remain in per-target evidence. Keep the original artifacts and identify the
 scorer commit when publishing rescored results.
-The coverage denominator counts Gold targets across all five calls, including
-unknowns.
+Stage summaries use schema 2: each task contributes its Gold targets once to
+the denominator. Covered, unknown and lost counts are averaged across that
+task's repetitions, then summed across tasks. For example, five identical calls
+covering 45 of 88 targets display **45/88**, not 225/440. Varying repetitions can
+produce fractional counts, displayed to at most six decimal places. Missing or
+invalid captures contribute unknown coverage, not misses or fewer targets.
+Call health counts still count every invocation, and all per-call evidence is
+retained. Schema 1 summaries accumulated target-call counts; rebuild them from
+their saved calls rather than dividing totals by a presumed repetition count.
 SWE-QA20 uses its QA File labels here and separates formal, diagnostic and
 unresolved cases. Unresolved Gold stays in the per-call evidence. The pilot
 suites use their verified File and Entity labels for diagnostics. A pilot call

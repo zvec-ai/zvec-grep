@@ -186,7 +186,7 @@ test("comparison carries both stage summaries and renders equal, increased and d
   const before = result(baseSha);
   const after = result(headSha);
   const summary = {
-    version: 1,
+    version: 2,
     calls: 5,
     observed_calls: 5,
     invalid_calls: 0,
@@ -273,6 +273,69 @@ test("comparison carries both stage summaries and renders equal, increased and d
     () => compareCombinedResults(before, after, metadata),
     /Invalid Gold stage coverage/,
   );
+  for (const oldSide of ["baseline", "candidate"]) {
+    before.sweqa.gold_stages = {
+      ...summary,
+      version: oldSide === "baseline" ? 1 : 2,
+    };
+    after.sweqa.gold_stages = {
+      ...summary,
+      version: oldSide === "candidate" ? 1 : 2,
+    };
+    assert.throws(
+      () => compareCombinedResults(before, after, metadata),
+      /rebuild from per-call evidence/i,
+    );
+  }
+});
+
+test("fractional stage means compare without changing quality rows or target totals", () => {
+  const before = result(baseSha);
+  const after = result(headSha);
+  const quality = compareCombinedResults(before, after, metadata);
+  const summary = {
+    version: 2,
+    calls: 5,
+    observed_calls: 5,
+    invalid_calls: 0,
+    groups: [
+      {
+        qualification: "diagnostic",
+        level: "entity",
+        mode: "hybrid",
+        targets: 2,
+        stages: {
+          index: { covered: 2, unknown: 0 },
+          fts: { covered: 0.2, unknown: 0.4 },
+          vector: { covered: 1, unknown: 0 },
+          rrf_top10: { covered: 1.2, unknown: 0 },
+          actual_top10: { covered: 0.6, unknown: 0.2 },
+        },
+      },
+    ],
+  };
+  before.sweqa.gold_stages = summary;
+  after.sweqa.gold_stages = structuredClone(summary);
+  after.sweqa.gold_stages.groups[0].stages.rrf_top10.covered = 1.4;
+  after.sweqa.gold_stages.groups[0].stages.actual_top10.covered = 0.8;
+  const comparison = compareCombinedResults(before, after, metadata);
+  assert.deepEqual(comparison.rows, quality.rows);
+  assert.equal(comparison.status, "success");
+  assert.equal(comparison.baseline_gold_stages.sweqa.calls, 5);
+  assert.equal(comparison.baseline_gold_stages.sweqa.groups[0].targets, 2);
+  const markdown = markdownVersionComparison(comparison);
+  assert.match(
+    markdown,
+    /\| Gold recalled by FTS \| N\/A \| — \| 0\.2\/2 \(0\.4 unknown\) \|/,
+  );
+  assert.match(
+    markdown,
+    /\| Before rule ranking \(RRF\) \| N\/A \| N\/A \| 1\.2\/2 → 1\.4\/2 \|/,
+  );
+  assert.match(
+    markdown,
+    /\| After rule ranking \(actual\) \| N\/A \| N\/A \| 0\.6\/2 \(0\.2 unknown\) → 0\.8\/2 \(0\.2 unknown\) \|/,
+  );
 });
 
 test("baseline-only stage evidence remains visible without borrowing candidate values", () => {
@@ -280,7 +343,7 @@ test("baseline-only stage evidence remains visible without borrowing candidate v
   const after = result(headSha);
   const quality = compareCombinedResults(before, after, metadata);
   before.pilots.beir.report.gold_stages = {
-    version: 1,
+    version: 2,
     calls: 5,
     observed_calls: 5,
     invalid_calls: 0,
@@ -326,7 +389,7 @@ for (const [label, invalid, unobserved] of [
     const after = result(headSha);
     const quality = compareCombinedResults(before, after, metadata);
     const summary = {
-      version: 1,
+      version: 2,
       calls: 5,
       observed_calls: 0,
       invalid_calls: invalid,
@@ -378,7 +441,7 @@ test("a newly registered suite retains stage coverage and its trusted report tit
     const before = result(baseSha);
     const after = result(headSha);
     const summary = {
-      version: 1,
+      version: 2,
       calls: 5,
       observed_calls: 0,
       invalid_calls: 0,

@@ -249,7 +249,7 @@ test("the publisher labels validated full preview without relabeling historical 
 test("the publisher renders equal baseline and candidate Gold coverage once in a collapsed section", async (t) => {
   const x = await fixture(t);
   const stageSummary = {
-    version: 1,
+    version: 2,
     calls: 10,
     observed_calls: 5,
     invalid_calls: 0,
@@ -320,6 +320,7 @@ test("the publisher renders equal baseline and candidate Gold coverage once in a
 
 for (const [label, baseline, candidate, expected] of [
   ["changed", 2, 4, "2/5 → 4/5"],
+  ["fractional", 1.2, 2.4, "1.2/5 → 2.4/5"],
   ["baseline missing", null, 4, "N/A → 4/5"],
   ["candidate missing", 2, null, "2/5 → N/A"],
 ]) {
@@ -333,7 +334,7 @@ for (const [label, baseline, candidate, expected] of [
       if (covered === null) continue;
       payload[`${side}_gold_stages`] = {
         quarry: {
-          version: 1,
+          version: 2,
           calls: 5,
           observed_calls: 5,
           invalid_calls: 0,
@@ -352,6 +353,7 @@ for (const [label, baseline, candidate, expected] of [
       };
     }
     const validated = validateComparison(payload, request);
+    assert.deepEqual(validated.rows, validateComparison(report, request).rows);
     for (const side of ["baseline", "candidate"])
       assert.deepEqual(
         validated[`${side}_gold_stages`],
@@ -387,7 +389,7 @@ for (const [label, baseline, candidate, expected] of [
 test("invalid baseline stage data cannot publish candidate-only success or untrusted text", async (t) => {
   const x = await fixture(t);
   const summary = {
-    version: 1,
+    version: 2,
     calls: 5,
     observed_calls: 5,
     invalid_calls: 0,
@@ -414,13 +416,41 @@ test("invalid baseline stage data cannot publish candidate-only success or untru
   );
 });
 
+for (const oldSide of ["baseline", "candidate"]) {
+  test(`the publisher rejects version 1 ${oldSide} stage counts until rebuilt`, async (t) => {
+    const x = await fixture(t);
+    const summary = {
+      version: 2,
+      calls: 5,
+      observed_calls: 5,
+      invalid_calls: 0,
+      groups: [],
+    };
+    const payload = {
+      ...report,
+      baseline_gold_stages: { quarry: { ...summary } },
+      candidate_gold_stages: { quarry: { ...summary } },
+    };
+    payload[`${oldSide}_gold_stages`].quarry.version = 1;
+    assert.throws(
+      () => validateComparison(payload, request),
+      /rebuild from per-call evidence/i,
+    );
+    await x.write("comparison/summary.json", payload);
+    await publish(x);
+    const { body } = x.messages()[0][1];
+    assert.match(body, /Failed \/ incomplete/);
+    assert.doesNotMatch(body, /✅ Complete|Gold coverage by stage/);
+  });
+}
+
 test("the publisher rejects legacy static-only coverage instead of relabeling it as RRF", async (t) => {
   const x = await fixture(t);
   const payload = {
     ...report,
     candidate_gold_stages: {
       quarry: {
-        version: 1,
+        version: 2,
         calls: 5,
         observed_calls: 5,
         invalid_calls: 0,
@@ -460,7 +490,7 @@ for (const [label, observed, invalid, unobserved] of [
   test(`the publisher preserves ${label} capture counts and derives only trusted warning text`, async (t) => {
     const x = await fixture(t);
     const summary = {
-      version: 1,
+      version: 2,
       calls: 5,
       observed_calls: observed,
       invalid_calls: invalid,
@@ -903,7 +933,7 @@ test("missing, malformed or invalid comparison artifacts publish incomplete with
 test("a valid two-sided stage report above 128 KiB can publish within the 256 KiB limit", async (t) => {
   const x = await fixture(t);
   const baseline = {
-    version: 1,
+    version: 2,
     calls: 5,
     observed_calls: 5,
     invalid_calls: 0,

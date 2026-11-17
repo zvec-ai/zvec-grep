@@ -12,10 +12,17 @@ const QUALIFICATIONS = ["formal", "diagnostic"];
 
 const countWithin = (count, maximum = Number.MAX_SAFE_INTEGER) =>
   Number.isSafeInteger(count) && count >= 0 && count <= maximum;
+const meanWithin = (count, maximum) =>
+  Number.isFinite(count) && count >= 0 && count <= maximum + 1e-9;
+const displayCount = (count) => Number(count.toFixed(6));
 
 // Only fixed labels and numeric counts from the artifact reach PR comments.
 export function validateGoldStageSummary(summary) {
-  assert.equal(summary?.version, 1, "Unsupported Gold stage summary");
+  assert.equal(
+    summary?.version,
+    2,
+    "Unsupported Gold stage summary; rebuild from per-call evidence",
+  );
   const { calls, observed_calls, invalid_calls, groups } = summary;
   assert.ok(countWithin(calls), "Invalid Gold stage call count");
   assert.ok(
@@ -52,8 +59,8 @@ export function validateGoldStageSummary(summary) {
           continue;
         const { covered, unknown } = stages?.[key] ?? {};
         assert.ok(
-          countWithin(covered, targets) &&
-            countWithin(unknown, targets - covered),
+          meanWithin(covered, targets) &&
+            meanWithin(unknown, targets - covered),
           "Invalid Gold stage coverage",
         );
         coverage[key] = { covered, unknown };
@@ -62,7 +69,7 @@ export function validateGoldStageSummary(summary) {
     },
   );
   return {
-    version: 1,
+    version: 2,
     calls,
     observed_calls,
     invalid_calls,
@@ -81,8 +88,8 @@ function stageCell(group, key, missing = "—") {
   if (!entry) return missing;
   const { covered, unknown } = entry;
   if (unknown === group.targets) return "N/A";
-  const value = `${covered}/${group.targets}`;
-  return unknown ? `${value} (${unknown} unknown)` : value;
+  const value = `${displayCount(covered)}/${group.targets}`;
+  return unknown ? `${value} (${displayCount(unknown)} unknown)` : value;
 }
 
 function comparisonCell(baseline, candidate, key, mode) {

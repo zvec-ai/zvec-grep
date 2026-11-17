@@ -349,33 +349,63 @@ export function summarizeGoldStages(calls) {
         (row) => row.mode === mode && row.qualification === qualification,
       );
       if (!selected.length) continue;
-      for (const level of ["file", "entity"]) {
-        const targets = selected.flatMap((row) =>
-          row.targets.filter((target) => target.level === level),
+      const byTask = new Map();
+      for (const row of selected) {
+        const repetitions = byTask.get(row.task_id) ?? [];
+        assert.ok(
+          !repetitions.some(({ repetition }) => repetition === row.repetition),
+          "Duplicate Gold stage repetition",
         );
+        repetitions.push(row);
+        byTask.set(row.task_id, repetitions);
+      }
+      for (const level of ["file", "entity"]) {
+        const tasks = [...byTask.values()].map((rows) =>
+          rows.map((row) =>
+            row.targets.filter((target) => target.level === level),
+          ),
+        );
+        for (const repetitions of tasks) {
+          const ids = repetitions[0].map(({ id }) => id).sort();
+          for (const targets of repetitions)
+            assert.deepEqual(
+              targets.map(({ id }) => id).sort(),
+              ids,
+              "Gold targets changed between repetitions",
+            );
+        }
+        // Each task contributes its Gold once. Repeated calls estimate its
+        // mean coverage, including unobserved calls supplied by the runner.
+        const meanCount = (matches) =>
+          tasks.reduce(
+            (total, repetitions) =>
+              total +
+              repetitions.reduce(
+                (sum, targets) => sum + targets.filter(matches).length,
+                0,
+              ) /
+                repetitions.length,
+            0,
+          );
         const stages = Object.fromEntries(
           applicable(mode).map(({ id: key, parent: baseline }) => {
-            const covered = targets.filter(
-              ({ coverage }) => coverage[key] === true,
-            ).length;
-            const unknown = targets.filter(
-              ({ coverage }) => coverage[key] === null,
-            ).length;
+            const covered = meanCount(({ coverage }) => coverage[key] === true);
+            const unknown = meanCount(({ coverage }) => coverage[key] === null);
             const lost =
               baseline === null
                 ? null
-                : targets.filter(
+                : meanCount(
                     ({ coverage }) =>
                       coverage[baseline] === true && coverage[key] === false,
-                  ).length;
+                  );
             const lossUnknown =
               baseline === null
                 ? null
-                : targets.filter(
+                : meanCount(
                     ({ coverage }) =>
                       (coverage[baseline] === null && coverage[key] !== true) ||
                       (coverage[baseline] === true && coverage[key] === null),
-                  ).length;
+                  );
             return [key, { covered, unknown, lost, loss_unknown: lossUnknown }];
           }),
         );
@@ -384,7 +414,10 @@ export function summarizeGoldStages(calls) {
           mode,
           level,
           calls: selected.length,
-          targets: targets.length,
+          targets: tasks.reduce(
+            (sum, repetitions) => sum + repetitions[0].length,
+            0,
+          ),
           stages,
         });
       }
@@ -393,7 +426,7 @@ export function summarizeGoldStages(calls) {
   const captured = calls.filter(({ state }) => state === "observed");
   const indexRead = captured.map(({ index_read_ms }) => index_read_ms);
   return {
-    version: 1,
+    version: 2,
     calls: calls.length,
     observed_calls: captured.length,
     invalid_calls: calls.filter(({ state }) => state === "invalid").length,
