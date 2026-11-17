@@ -612,7 +612,7 @@ indexing, and failures identify the file. PDFs with no searchable native text
 produce a warning and zero entities. OCR, image understanding, precise table or
 formula reconstruction, `--read`, and `--show` are outside this release.
 
-The index format is now version 5. Existing incompatible indexes require
+The index format is now version 3. Existing incompatible indexes require
 `zg --index --rebuild`; preserve any explicit embedding selection when rebuilding.
 PDFs unchanged since indexing reuse their saved entities and provenance.
 
