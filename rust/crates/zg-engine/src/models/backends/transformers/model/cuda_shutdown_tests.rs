@@ -16,8 +16,10 @@ fn cached_minilm_cuda_sessions_exit_cleanly() {
     );
 }
 
+// For manual runs, point ZVEC_GREP_TEST_CPU_ORT at a CPU-only core beside both
+// CUDA provider libraries, with their dependencies on the system loader path.
 #[test]
-#[ignore = "requires CUDA dependencies, ZVEC_GREP_TEST_CPU_ORT and pinned MiniLM cache; run by Rust CUDA CI"]
+#[ignore = "requires mixed CPU/CUDA ORT fixture and ZVEC_GREP_TEST_MODEL_CACHE with pinned MiniLM"]
 fn cpu_core_rejects_cuda_without_loading_provider() {
     run_shutdown_scenarios(
         concat!(
