@@ -13,6 +13,8 @@ use crate::models::spi::ModelError;
 // then release it before the C++ globals initialized by loading the library.
 static RUNTIME: OnceLock<Result<(), String>> = OnceLock::new();
 static ENVIRONMENT: Mutex<Option<Environment>> = Mutex::new(None);
+#[cfg(feature = "cuda")]
+static CUDA_SHUTDOWN_REGISTERED: Mutex<bool> = Mutex::new(false);
 
 extern "C" fn release_environment() {
     // Do not log or panic from a C exit callback. Sessions keep their own clones.
@@ -24,6 +26,15 @@ extern "C" fn release_environment() {
 }
 
 pub(super) fn initialize() -> Result<Environment, ModelError> {
+    initialize_runtime()?;
+    ENVIRONMENT
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+        .ok_or_else(|| ModelError::internal("ONNX Runtime has shut down"))
+}
+
+fn initialize_runtime() -> Result<(), ModelError> {
     RUNTIME.get_or_init(|| {
         let path = runtime_path(
             env::var_os("ORT_DYLIB_PATH").map(PathBuf::from),
@@ -45,23 +56,47 @@ pub(super) fn initialize() -> Result<Environment, ModelError> {
             .build()
             .map_err(|error| format!("{}: {error}", path.display()))?;
         *ENVIRONMENT.lock().unwrap_or_else(PoisonError::into_inner) = Some(environment);
-        // Register after dlopen/CreateEnv, not in a static .fini_array: callbacks
-        // run in reverse registration order, ahead of ORT's C++ destructors.
+        // This covers the core library. CUDA is loaded lazily and needs a later
+        // callback, registered after native provider registration is attempted.
         if !shutdown_hooks::add_shutdown_hook(release_environment) {
             release_environment();
             return Err("Unable to register ONNX Runtime shutdown".to_owned());
         }
         tracing::debug!(path = %path.display(), "Packaged ONNX Runtime initialized");
         Ok(())
-    }).as_ref().map_err(|error| {
+    }).as_ref().copied().map_err(|error| {
         ModelError::internal("Unable to load packaged ONNX Runtime; keep it under ../lib relative to zg or set ORT_DYLIB_PATH")
             .with_cause(error)
-    })?;
-    ENVIRONMENT
+    })
+}
+
+#[cfg(feature = "cuda")]
+pub(super) fn retain_cuda_for_shutdown() -> Result<bool, ModelError> {
+    initialize_runtime()?;
+    let mut loaded = CUDA_SHUTDOWN_REGISTERED
         .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone()
-        .ok_or_else(|| ModelError::internal("ONNX Runtime has shut down"))
+        .unwrap_or_else(PoisonError::into_inner);
+    if *loaded {
+        return Ok(true);
+    }
+    // Registration can fail before ORT initializes its provider bridge (e.g.
+    // with a CPU-only core). Never first-load CUDA here: its constructors would
+    // dereference the uninitialized bridge. Retain the actual loaded module,
+    // even when the system loader found it outside the core library's directory.
+    if !zg_ort_native::retain_loaded_cuda_provider() {
+        return Ok(false); // A later registration attempt may load it successfully.
+    }
+    // CUDA's global destructors are now registered. Register our callback after
+    // them so ReleaseEnv/Shutdown runs first (atexit is LIFO), including after a
+    // partially failed registration or model load. Keep one reference per process.
+    if !shutdown_hooks::add_shutdown_hook(release_environment) {
+        release_environment();
+        return Err(ModelError::internal(
+            "Unable to register ONNX CUDA shutdown",
+        ));
+    }
+    *loaded = true;
+    Ok(true)
 }
 
 #[cfg(target_os = "windows")]
