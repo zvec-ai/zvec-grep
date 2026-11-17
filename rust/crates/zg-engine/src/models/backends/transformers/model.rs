@@ -505,7 +505,11 @@ fn configure_cuda(
     let builder = configured.map_err(|error| {
         ModelError::internal("Unable to configure CUDA ONNX embedding model").with_cause(error)
     })?;
-    shutdown?;
+    if !shutdown? {
+        return Err(ModelError::internal(
+            "Unable to retain the registered ONNX CUDA provider for shutdown",
+        ));
+    }
     Ok(builder)
 }
 

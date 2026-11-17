@@ -11,7 +11,7 @@ use crate::models::spi::ModelError;
 
 // ORT permits one environment per process. Keep it across model eviction/reload,
 // then release it before the C++ globals initialized by loading the library.
-static RUNTIME: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+static RUNTIME: OnceLock<Result<(), String>> = OnceLock::new();
 static ENVIRONMENT: Mutex<Option<Environment>> = Mutex::new(None);
 #[cfg(feature = "cuda")]
 static CUDA_SHUTDOWN_REGISTERED: Mutex<bool> = Mutex::new(false);
@@ -34,14 +34,13 @@ pub(super) fn initialize() -> Result<Environment, ModelError> {
         .ok_or_else(|| ModelError::internal("ONNX Runtime has shut down"))
 }
 
-fn initialize_runtime() -> Result<&'static PathBuf, ModelError> {
+fn initialize_runtime() -> Result<(), ModelError> {
     RUNTIME.get_or_init(|| {
         let path = runtime_path(
             env::var_os("ORT_DYLIB_PATH").map(PathBuf::from),
             env::var_os("ZVEC_GREP_NATIVE_LIB_DIR").map(PathBuf::from),
             env::current_exe().ok(),
         )?;
-        let path = resolve_library_path(path);
         #[cfg(target_os = "windows")]
         preload_directml(&path)?;
         // Load the explicitly selected library before calling any ORT APIs,
@@ -64,39 +63,32 @@ fn initialize_runtime() -> Result<&'static PathBuf, ModelError> {
             return Err("Unable to register ONNX Runtime shutdown".to_owned());
         }
         tracing::debug!(path = %path.display(), "Packaged ONNX Runtime initialized");
-        Ok(path)
-    }).as_ref().map_err(|error| {
+        Ok(())
+    }).as_ref().copied().map_err(|error| {
         ModelError::internal("Unable to load packaged ONNX Runtime; keep it under ../lib relative to zg or set ORT_DYLIB_PATH")
             .with_cause(error)
     })
 }
 
 #[cfg(feature = "cuda")]
-pub(super) fn retain_cuda_for_shutdown() -> Result<(), ModelError> {
-    let runtime = initialize_runtime()?;
+pub(super) fn retain_cuda_for_shutdown() -> Result<bool, ModelError> {
+    initialize_runtime()?;
     let mut loaded = CUDA_SHUTDOWN_REGISTERED
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     if *loaded {
-        return Ok(());
+        return Ok(true);
     }
-    let filename = if cfg!(target_os = "windows") {
-        "onnxruntime_providers_cuda.dll"
-    } else {
-        "libonnxruntime_providers_cuda.so"
-    };
-    let provider = runtime.with_file_name(filename);
-    // ORT has now initialized its shared bridge and attempted to load CUDA.
-    // Retain the provider, including after a partially failed registration.
-    // Loading it registers its C++ global destructors. Register our
-    // callback afterwards so ReleaseEnv/Shutdown runs first (atexit is LIFO),
-    // including when provider registration or model loading subsequently fails.
-    // Keep one loader reference per process, like the core ORT/DirectML handles.
-    // Failed loads remain retryable and explicit CPU never loads this library.
-    ort::util::preload_dylib(&provider).map_err(|error| {
-        ModelError::internal("Unable to load ONNX CUDA provider")
-            .with_cause(format!("{}: {error}", provider.display()))
-    })?;
+    // Registration can fail before ORT initializes its provider bridge (e.g.
+    // with a CPU-only core). Never first-load CUDA here: its constructors would
+    // dereference the uninitialized bridge. Retain the actual loaded module,
+    // even when the system loader found it outside the core library's directory.
+    if !zg_ort_native::retain_loaded_cuda_provider() {
+        return Ok(false); // A later registration attempt may load it successfully.
+    }
+    // CUDA's global destructors are now registered. Register our callback after
+    // them so ReleaseEnv/Shutdown runs first (atexit is LIFO), including after a
+    // partially failed registration or model load. Keep one reference per process.
     if !shutdown_hooks::add_shutdown_hook(release_environment) {
         release_environment();
         return Err(ModelError::internal(
@@ -104,21 +96,7 @@ pub(super) fn retain_cuda_for_shutdown() -> Result<(), ModelError> {
         ));
     }
     *loaded = true;
-    Ok(())
-}
-
-fn resolve_library_path(path: PathBuf) -> PathBuf {
-    // Match ort::init_from's executable-relative lookup before selecting any
-    // sibling provider. Retain its cwd/system-loader fallback for overrides.
-    if path.is_relative() {
-        env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(|parent| parent.join(&path)))
-            .filter(|candidate| candidate.exists())
-            .unwrap_or(path)
-    } else {
-        path
-    }
+    Ok(true)
 }
 
 #[cfg(target_os = "windows")]

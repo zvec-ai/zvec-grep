@@ -127,7 +127,7 @@ jobs:
       - name: Check packages independently
         shell: bash
         run: |
-          for package in zg-engine zg-daemon-protocol zg-cli zg-host-native zg-testkit zg-transport-mcp zg-daemon zg zg-zvec-fp16; do
+          for package in zg-engine zg-daemon-protocol zg-cli zg-host-native zg-ort-native zg-testkit zg-transport-mcp zg-daemon zg zg-zvec-fp16; do
             cargo check --locked --package "${package}" --all-targets
           done
       - name: Run Clippy
@@ -779,22 +779,43 @@ jobs:
           from e2e import verify_windows_cuda_plugin
           verify_windows_cuda_plugin(pathlib.Path("target/cuda-tests/lib/ggml-cuda.dll").resolve(),
                                      13, pathlib.Path("model-logs/windows-loader"))
+      - name: Prepare a CPU ORT core beside CUDA providers for early-failure regression
+        shell: python
+        run: |
+          import os, pathlib, shutil, subprocess, sys
+          destination = pathlib.Path("target/ort-cpu").resolve()
+          target = "x86_64-pc-windows-msvc" if os.name == "nt" else "x86_64-unknown-linux-gnu"
+          subprocess.run([sys.executable, "scripts/prepare-onnxruntime.py", "--target", target,
+                          "--cache-dir", "target/ort-prebuilt", "--destination", str(destination)], check=True)
+          # Leave real CUDA dependencies available. The regression must reject
+          # first-loading the provider, not pass because a DLL happens to be missing.
+          for source in pathlib.Path("target/cuda-tests/lib").glob("*onnxruntime_providers_*"):
+              output = destination / source.name
+              if not output.exists():
+                  try:
+                      os.link(source, output)
+                  except OSError:
+                      shutil.copy2(source, output)
       - name: Verify CUDA models, long inputs and C5 using CPU-built tests without Cargo
         shell: python
         run: |
           import os, pathlib, re, subprocess, sys
           sys.path.insert(0, "scripts/cuda")
-          from e2e import cuda_evidence
+          from e2e import cpu_evidence, cuda_evidence
           windows = os.name == "nt"
           bundle = pathlib.Path("target/cuda-tests").resolve()
           runtime_root = str(bundle) if windows else "/gpu-tests"
           native = f"{runtime_root}/lib"
+          cpu_ort = str(pathlib.Path("target/ort-cpu").resolve()) if windows else "/ort-cpu"
           models = os.environ["ZVEC_GREP_MODEL_CACHE"] if windows else "/model-cache"
           smoke = "models::tests::real_model_smoke::selected_local_model_downloads_loads_and_embeds"
           cases = [
               ("cuda-onnx", "zg_engine", smoke, "local/all-minilm-l6-v2", "onnx"),
               ("cuda-onnx-shutdown", "zg_engine",
                "models::backends::transformers::model::cuda_shutdown_tests::cached_minilm_cuda_sessions_exit_cleanly",
+               None, "onnx"),
+              ("cuda-onnx-early-failure", "zg_engine",
+               "models::backends::transformers::model::cuda_shutdown_tests::cpu_core_rejects_cuda_without_loading_provider",
                None, "onnx"),
               ("cuda-gguf", "zg_engine", smoke, "local/embeddinggemma-300m", "gguf"),
               # The preceding smoke prepares the cache. Run the regression in a
@@ -815,6 +836,7 @@ jobs:
                   "ZVEC_GREP_NATIVE_LIB_DIR": native, "ZVEC_GREP_MODEL_CACHE": models,
                   "ZVEC_GREP_TEST_MODEL_CACHE": models, "RUST_BACKTRACE": "1", "ORT_LOG": "verbose",
                   "ORT_DYLIB_PATH": f"{native}/" + ("onnxruntime.dll" if windows else "libonnxruntime.so.1"),
+                  "ZVEC_GREP_TEST_CPU_ORT": f"{cpu_ort}/" + ("onnxruntime.dll" if windows else "libonnxruntime.so.1"),
               }
               if model:
                   variables.update(ZVEC_GREP_SMOKE_DEVICE="cuda", ZVEC_GREP_SMOKE_MODEL=model)
@@ -833,6 +855,7 @@ jobs:
                   command = [
                       "docker", "run", "--rm", "--gpus", "all", "--platform", "linux/amd64",
                       "--volume", f"{bundle}:/gpu-tests:ro",
+                      "--volume", f"{pathlib.Path('target/ort-cpu').resolve()}:/ort-cpu:ro",
                       "--volume", f"{os.environ['ZVEC_GREP_MODEL_CACHE']}:/model-cache",
                       "--env", "DEBIAN_FRONTEND=noninteractive",
                       *[argument for key, value in variables.items() for argument in ("--env", f"{key}={value}")],
@@ -848,7 +871,7 @@ jobs:
                       'mode="$1"; shift; if [ "$mode" = shutdown ]; then '
                       'exec timeout 900 valgrind --trace-children=yes --leak-check=no --undef-value-errors=no '
                       '--error-exitcode=77 "$@"; fi; exec timeout 900 "$@"',
-                      "gpu-test", "shutdown" if name == "cuda-onnx-shutdown" else "model" if model else "c5", *command,
+                      "gpu-test", "shutdown" if name in ("cuda-onnx-shutdown", "cuda-onnx-early-failure") else "model" if model else "c5", *command,
                   ]
               log_path = logs / f"{name}.log"
               try:
@@ -858,7 +881,10 @@ jobs:
                   output = log_path.read_text(encoding="utf-8", errors="replace")
                   if not re.search(r"test result: ok\. 1 passed; 0 failed;", output):
                       raise RuntimeError("Expected exactly one passing test, not an empty or skipped selection")
-                  if backend:
+                  if name == "cuda-onnx-early-failure":
+                      for line in cpu_evidence(output, "onnx", "default"):
+                          print(line)
+                  elif backend:
                       for line in cuda_evidence(output, backend, "13.1"):
                           print(line)
               except (OSError, subprocess.SubprocessError, RuntimeError) as error:
