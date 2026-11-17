@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use tree_sitter::Node;
 
 use crate::domain::{FileFormat, Language, SymbolType};
@@ -645,47 +647,103 @@ pub(super) fn named_children(node: Node<'_>) -> Vec<Node<'_>> {
     node.named_children(&mut cursor).collect()
 }
 
-/// Property names an object literal binds to another value, in the order the
-/// literal states them.
+/// The properties one object literal spells, read once for the declaration
+/// that initializes it and every member entity the declaration produces.
 ///
-/// `export const api = { run() {}, run: right }` answers `[("run", "right")]`:
-/// the later property overwrites the earlier one, so a call through `api.run`
-/// reaches `right` and never the method the same key described first. A
-/// property whose value is not a bare name — a method, a shorthand, a nested
-/// literal — states no value the index can follow, but it still overwrites the
-/// earlier binding of its key.
-///
-/// Only a literal the initializer spells directly counts. A wrapper that hands
-/// the literal back unchanged (`({...})`, `Object.freeze({...})`) is peeled;
-/// anything else is left alone, because the properties of a value some call
-/// built are that call's business.
-pub(super) fn object_member_aliases(node: Node<'_>, source: &[u8]) -> Vec<(String, String)> {
-    let Some(literal) = initialized_object_literal(node, source) else {
-        return Vec::new();
-    };
-    let mut members: Vec<(String, String)> = Vec::new();
-    for property in named_children(literal) {
-        let key = match property.kind() {
-            "pair" => property.child_by_field_name("key"),
-            "method_definition" => property.child_by_field_name("name"),
-            // `{ run }` states the name alone; it holds the function of that
-            // name, which the name index already answers.
-            "shorthand_property_identifier" => Some(property),
-            // A spread contributes keys this literal cannot enumerate.
-            _ => None,
-        };
-        let Some(name) = key.and_then(|key| property_key(key, source)) else {
-            continue;
-        };
-        members.retain(|(existing, _)| *existing != name);
-        let value = property.child_by_field_name("value");
-        if property.kind() == "pair"
-            && let Some(value) = value.filter(|value| value.kind() == "identifier")
-        {
-            members.push((name, text(value, source).to_owned()));
+/// Both facts a literal states — the value each key binds, and the property
+/// that states each key last — come from the same children, so a literal with
+/// many members is scanned once instead of once per member.
+pub(super) struct ObjectLiteral<'tree> {
+    /// The `variable_declarator` the literal initializes: the one entity that
+    /// carries the literal's member aliases.
+    declaration: Node<'tree>,
+    /// Property names the literal binds to another value, in the order of the
+    /// property that states each key last.
+    ///
+    /// `export const api = { run() {}, run: right }` answers `[("run",
+    /// "right")]`: the later property overwrites the earlier one, so a call
+    /// through `api.run` reaches `right` and never the method the same key
+    /// described first. A property whose value is not a bare name — a method,
+    /// a shorthand, a nested literal — states no value the index can follow,
+    /// but it still overwrites the earlier binding of its key.
+    aliases: Vec<(String, String)>,
+    /// The last `pair` that assigns each key: where it starts, and the bare
+    /// name its value spells when the value is one. A later property of the
+    /// same key replaces the member it supersedes with this value.
+    assignments: HashMap<String, (usize, Option<String>)>,
+}
+
+impl<'tree> ObjectLiteral<'tree> {
+    /// Reads the literal `declaration` initializes, or nothing when its
+    /// initializer is no literal.
+    ///
+    /// Only a literal the initializer spells directly counts. A wrapper that
+    /// hands the literal back unchanged (`({...})`, `Object.freeze({...})`) is
+    /// peeled; anything else is left alone, because the properties of a value
+    /// some call built are that call's business.
+    pub(super) fn read(declaration: Node<'tree>, source: &[u8]) -> Option<Self> {
+        let literal = initialized_object_literal(declaration, source)?;
+        let mut stated: HashMap<String, (usize, Option<String>)> = HashMap::new();
+        let mut assignments: HashMap<String, (usize, Option<String>)> = HashMap::new();
+        for property in named_children(literal) {
+            let Some(name) = member_key(property, source) else {
+                continue;
+            };
+            // Only a `pair` whose value is a bare name states a value the
+            // index can follow; every other property states its key alone.
+            let value = (property.kind() == "pair")
+                .then(|| property.child_by_field_name("value"))
+                .flatten()
+                .filter(|value| value.kind() == "identifier")
+                .map(|value| text(value, source).to_owned());
+            if property.kind() == "pair" {
+                assignments.insert(name.clone(), (property.start_byte(), value.clone()));
+            }
+            stated.insert(name, (property.start_byte(), value));
         }
+        // The last property of a key decides what the key names, so the
+        // aliases follow the position of that property rather than the
+        // position the key was first written at.
+        let mut stated = stated.into_iter().collect::<Vec<_>>();
+        stated.sort_unstable_by_key(|(_, (start, _))| *start);
+        let aliases = stated
+            .into_iter()
+            .filter_map(|(name, (_, value))| value.map(|value| (name, value)))
+            .collect();
+        Some(Self {
+            declaration,
+            aliases,
+            assignments,
+        })
     }
-    members
+
+    /// Property names the literal binds to another value, the last property of
+    /// each key deciding both the value and the order.
+    pub(super) fn aliases(&self) -> &[(String, String)] {
+        &self.aliases
+    }
+
+    /// Whether `node` is the declaration this literal initializes, the one
+    /// entity that carries the literal's member aliases.
+    pub(super) fn declares(&self, node: Node<'_>) -> bool {
+        self.declaration.id() == node.id()
+    }
+
+    /// The value a later property of the same key replaces `node` with.
+    ///
+    /// `{ run() {}, run: right }` indexes the method as `api::run`, yet the
+    /// literal's own last assignment to `run` is `right`: a call through
+    /// `api.run` reaches `right`, and the method the key described first is
+    /// unreachable through it. Only a later assignment answers; a later method
+    /// or literal is a declaration of its own, not a value this key forwards to.
+    pub(super) fn overwritten_by(&self, node: Node<'_>, source: &[u8]) -> Option<String> {
+        let name = member_key(node, source)?;
+        let (start, value) = self.assignments.get(&name)?;
+        if *start <= node.start_byte() {
+            return None;
+        }
+        value.clone()
+    }
 }
 
 /// The object literal a declaration's initializer spells, after peeling the
@@ -716,40 +774,20 @@ fn initialized_object_literal<'tree>(node: Node<'tree>, source: &[u8]) -> Option
     }
 }
 
-/// The value a later property of the same key replaces this declaration with.
+/// The name a property or an object member states.
 ///
-/// `{ run() {}, run: right }` indexes the method as `api::run`, yet the
-/// literal's own last property of `run` is `right`: a call through `api.run`
-/// reaches `right`, and the method the key described first is unreachable
-/// through it. Only a later property whose value is a bare name answers;
-/// a later method or literal is a declaration of its own, not a value this
-/// key forwards to.
-pub(super) fn overwritten_by(node: Node<'_>, source: &[u8]) -> Option<String> {
-    let literal = node
-        .parent()
-        .filter(|parent| matches!(parent.kind(), "object" | "object_expression"))?;
-    let name = match node.kind() {
-        "method_definition" => field_text(node, "name", source)?,
-        "pair" => property_key(node.child_by_field_name("key")?, source)?,
+/// A shorthand states its name alone — `{ run }` holds the function of that
+/// name, which the name index already answers — and every other spelling
+/// carries the name in a key or a name field.
+fn member_key(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let key = match node.kind() {
+        "pair" => node.child_by_field_name("key")?,
+        "method_definition" => node.child_by_field_name("name")?,
+        "shorthand_property_identifier" => node,
+        // A spread contributes keys this literal cannot enumerate.
         _ => return None,
     };
-    let mut replacement = None;
-    for property in named_children(literal) {
-        if property.start_byte() <= node.start_byte() || property.kind() != "pair" {
-            continue;
-        }
-        let Some(key) = property.child_by_field_name("key") else {
-            continue;
-        };
-        if property_key(key, source).as_deref() != Some(name.as_str()) {
-            continue;
-        }
-        replacement = property
-            .child_by_field_name("value")
-            .filter(|value| value.kind() == "identifier")
-            .map(|value| text(value, source).to_owned());
-    }
-    replacement
+    property_key(key, source)
 }
 
 /// The name a property key spells. Computed keys and keys that are not written
@@ -1014,7 +1052,13 @@ fn should_index_javascript_typescript_entity(node: Node<'_>) -> bool {
         return false;
     }
     if node.kind() == "pair" {
-        return has_function_value(node) && exported_object_variable(node).is_some();
+        // The object a local declares is no workspace-level symbol, so neither
+        // are its members: an entity emitted here would carry the member's
+        // bare name into the enclosing body, and a call to the file's own
+        // function of that name would bind to the local's property instead.
+        return has_function_value(node)
+            && exported_object_variable(node)
+                .is_some_and(|variable| !inside_function_declaration(variable));
     }
     if !matches!(
         node.kind(),

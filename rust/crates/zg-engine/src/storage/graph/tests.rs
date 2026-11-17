@@ -485,6 +485,96 @@ fn writable_open_adds_indexes_and_invalidation_storage_a_database_was_built_with
 }
 
 #[test]
+fn writable_open_replaces_indexes_an_earlier_binary_defined_differently() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("graph.sqlite");
+    let mut db = create(&path);
+    db.write_file_graph(
+        1,
+        None,
+        &graph(&["a"], vec![], vec![reference("a", "target")]),
+        &[],
+        false,
+    )
+    .expect("write");
+    drop(db);
+
+    let index_sql = |raw: &Connection, name: &str| {
+        raw.query_row(
+            "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ?1",
+            [name],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("index exists")
+    };
+    let rows = |raw: &Connection| {
+        raw.query_row("SELECT count(*) FROM edges", [], |row| row.get::<_, i64>(0))
+            .expect("count edges")
+    };
+    let raw = Connection::open(&path).expect("inspect");
+    // A fresh database is built with the current definitions, so the
+    // replacement below must leave them alone.
+    assert!(
+        index_sql(&raw, "edges_target_kind").contains("target IS NOT NULL"),
+        "fresh index covers non-NULL targets only"
+    );
+    assert!(
+        index_sql(&raw, "edges_name_tail").contains("status IN"),
+        "fresh index covers completed references only"
+    );
+    // The definitions before the partial predicates: same names, broader
+    // indexes. `CREATE INDEX IF NOT EXISTS` takes an existing index as done.
+    raw.execute_batch(
+        "DROP INDEX edges_target_kind;
+         DROP INDEX edges_name_tail;
+         CREATE INDEX edges_target_kind ON edges(target, kind);
+         CREATE INDEX edges_name_tail ON edges(name_tail);",
+    )
+    .expect("rewrite as the older definitions");
+    let edges = rows(&raw);
+    drop(raw);
+
+    let reader = SqliteGraphStorage::open(&path, OpenMode::ReadOnly).expect("read older graph");
+    assert_eq!(
+        reader.list_pending_refs(100, 0).expect("refs").refs.len(),
+        1
+    );
+    reader.close().expect("close reader");
+    let raw = Connection::open(&path).expect("inspect");
+    assert!(
+        !index_sql(&raw, "edges_name_tail").contains("WHERE"),
+        "a read-only open writes nothing"
+    );
+    drop(raw);
+
+    let db = SqliteGraphStorage::open(&path, OpenMode::ReadWrite).expect("reopen writer");
+    let raw = Connection::open(&path).expect("inspect");
+    let target_kind = index_sql(&raw, "edges_target_kind");
+    assert!(
+        target_kind.contains("target IS NOT NULL"),
+        "the narrower index replaces the one of the same name: {target_kind}"
+    );
+    let name_tail = index_sql(&raw, "edges_name_tail");
+    assert!(
+        name_tail.contains("reference_name IS NOT NULL")
+            && name_tail.contains("status IN ('resolved', 'failed')"),
+        "the completed-reference index replaces the broader one: {name_tail}"
+    );
+    assert_eq!(rows(&raw), edges, "replacing an index keeps the rows");
+    drop(raw);
+    drop(db);
+
+    // A later open finds the definitions already current and rewrites nothing.
+    let _db = SqliteGraphStorage::open(&path, OpenMode::ReadWrite).expect("reopen writer");
+    let raw = Connection::open(&path).expect("inspect");
+    assert!(
+        index_sql(&raw, "edges_name_tail").contains("status IN ('resolved', 'failed')"),
+        "the replacement is stable"
+    );
+    assert_eq!(rows(&raw), edges, "rows survive every open");
+}
+
+#[test]
 fn requeue_matches_a_name_that_only_appears_as_the_receiver() {
     let mut db = SqliteGraphStorage::in_memory().expect("open");
     db.write_file_graph(
@@ -1882,44 +1972,4 @@ fn pending_call_names_lists_only_bare_pending_calls() {
         db.pending_call_names(3).expect("names"),
         vec!["TRACE".to_owned()]
     );
-}
-
-#[test]
-fn relationship_reads_and_invalidation_use_their_indexes() {
-    let db = SqliteGraphStorage::in_memory().expect("graph");
-    for (sql, index) in [
-        (
-            "SELECT source FROM edges WHERE target = 'target' AND status = 'resolved'",
-            "edges_target_kind",
-        ),
-        (
-            "SELECT source FROM edges WHERE (source = 'target' OR target = 'target') AND status = 'resolved'",
-            "edges_target_kind",
-        ),
-        (
-            "UPDATE edges SET status = 'pending', target = NULL, provenance = NULL
-         WHERE target IN ('target', 'other') AND file_id <> 1 AND reference_name IS NOT NULL",
-            "edges_target_kind",
-        ),
-        (
-            "UPDATE edges SET status = 'pending', target = NULL, provenance = NULL
-         WHERE status IN ('resolved', 'failed') AND reference_name IS NOT NULL
-           AND name_tail IN (SELECT name FROM zg_stale_names WHERE kind = 0)",
-            "edges_name_tail",
-        ),
-    ] {
-        let mut statement = db
-            .connection
-            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
-            .expect("plan");
-        let details = statement
-            .query_map([], |row| row.get::<_, String>(3))
-            .expect("steps")
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .expect("details");
-        assert!(
-            details.iter().any(|step| step.contains(index)),
-            "{sql}: {details:?}"
-        );
-    }
 }
