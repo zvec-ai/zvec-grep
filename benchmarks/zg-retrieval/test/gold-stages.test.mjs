@@ -284,8 +284,8 @@ test("stage summary shows coverage at every stage", () => {
     "| Gold covered by index | N/A | — | 3/3 |",
     "| Gold recalled by FTS | N/A | — | 2/3 |",
     "| Gold recalled by Vector | — | — | 2/3 |",
-    "| Rule ranking off (RRF Top 10) | N/A | — | 1/3 |",
-    "| Rule ranking on (actual) | N/A | — | 1/3 |",
+    "| Top 10 before rule ranking (RRF) | N/A | — | 1/3 |",
+    "| Top 10 after rule ranking (actual) | N/A | — | 1/3 |",
   ]);
 });
 

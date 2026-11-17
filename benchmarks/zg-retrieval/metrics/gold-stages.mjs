@@ -20,11 +20,15 @@ export const GOLD_STAGES = [
   { id: "fused", parent: "merged", ranked: true },
   { id: "loaded", parent: "fused", ranked: true },
   { id: "selected", parent: "loaded", ranked: true },
-  { id: "rrf_top10", parent: "loaded", label: "Rule ranking off (RRF Top 10)" },
+  {
+    id: "rrf_top10",
+    parent: "loaded",
+    label: "Top 10 before rule ranking (RRF)",
+  },
   {
     id: "actual_top10",
     parent: "loaded",
-    label: "Rule ranking on (actual)",
+    label: "Top 10 after rule ranking (actual)",
   },
 ];
 

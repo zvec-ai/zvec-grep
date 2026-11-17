@@ -289,10 +289,16 @@ test("the publisher renders validated candidate Gold coverage in a collapsed sec
   );
   assert.match(
     coverage,
-    /\| Rule ranking off \(RRF Top 10\) \| 2\/5 \| — \| — \|/,
+    /\| Top 10 before rule ranking \(RRF\) \| 2\/5 \| — \| — \|/,
   );
-  assert.match(coverage, /\| Rule ranking on \(actual\) \| N\/A \| — \| — \|/);
-  assert.doesNotMatch(coverage, /Top 10 coverage|Same-file decay/);
+  assert.match(
+    coverage,
+    /\| Top 10 after rule ranking \(actual\) \| N\/A \| — \| — \|/,
+  );
+  assert.doesNotMatch(
+    coverage,
+    /Top 10 coverage|Same-file decay|Rule ranking (?:off|on)/,
+  );
   assert.match(
     body.replace(/<details>[\s\S]*?<\/details>/g, ""),
     /\*\*Quarry\*\*: ⚠️ Stage capture incomplete: \*\*5\/10\*\* verified, \*\*0\*\* invalid, \*\*5\*\* unobserved/,
@@ -340,7 +346,10 @@ test("the publisher rejects legacy static-only coverage instead of relabeling it
   await publish(x);
   const { body } = x.messages()[0][1];
   assert.match(body, /Failed \/ incomplete/);
-  assert.doesNotMatch(body, /✅ Complete|Rule ranking|Same-file decay/);
+  assert.doesNotMatch(
+    body,
+    /✅ Complete|Top 10 (?:before|after) rule ranking|Rule ranking|Same-file decay/,
+  );
 });
 
 for (const [label, observed, invalid, unobserved] of [

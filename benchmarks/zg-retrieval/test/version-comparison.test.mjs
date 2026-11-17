@@ -230,10 +230,13 @@ test("comparison carries candidate stage coverage into the collapsed PR tables",
   );
   assert.match(
     markdown,
-    /\| Rule ranking off \(RRF Top 10\) \| — \| — \| 3\/5 \|/,
+    /\| Top 10 before rule ranking \(RRF\) \| — \| — \| 3\/5 \|/,
   );
-  assert.match(markdown, /\| Rule ranking on \(actual\) \| — \| — \| 5\/5 \|/);
-  assert.doesNotMatch(markdown, /Same-file decay/);
+  assert.match(
+    markdown,
+    /\| Top 10 after rule ranking \(actual\) \| — \| — \| 5\/5 \|/,
+  );
+  assert.doesNotMatch(markdown, /Same-file decay|Rule ranking (?:off|on)/);
   assert.doesNotMatch(markdown, /Stage capture incomplete/);
   assert.doesNotMatch(
     goldStagesMarkdown(summary).join("\n"),
