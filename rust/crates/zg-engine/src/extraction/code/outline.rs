@@ -56,7 +56,11 @@ pub(crate) fn code_outline(
     let wrapped_source;
     if matches!(
         format,
-        FileFormat::Java | FileFormat::JavaScript | FileFormat::Php | FileFormat::TypeScript
+        FileFormat::CSharp
+            | FileFormat::Java
+            | FileFormat::JavaScript
+            | FileFormat::Php
+            | FileFormat::TypeScript
     ) && metadata.symbol_type == Some(SymbolType::Function)
         && !has_complete_entity(
             tree.root_node(),
@@ -176,6 +180,7 @@ fn outline_format(path: &Path, language: Option<Language>) -> Option<FileFormat>
         return Some(match language {
             Language::C => FileFormat::C,
             Language::Cpp => FileFormat::Cpp,
+            Language::CSharp => FileFormat::CSharp,
             Language::Go => FileFormat::Go,
             Language::Java => FileFormat::Java,
             Language::JavaScript => FileFormat::JavaScript,
@@ -269,6 +274,7 @@ fn collect_calls(root: Node<'_>, source: &[u8], calls: &mut Vec<String>) {
                 | "function_call_expression"
                 | "member_call_expression"
                 | "method_invocation"
+                | "invocation_expression"
                 | "nullsafe_member_call_expression"
                 | "object_creation_expression"
                 | "new_expression"
@@ -783,6 +789,42 @@ mod tests {
             PHP_OPEN_TAG.len(),
             Some("charge"),
         ));
+    }
+
+    #[test]
+    fn stored_csharp_entities_have_structural_outlines() {
+        for (name, source, calls) in [
+            (
+                "Run",
+                "public void Run() { Log.Write(); Tick(); }",
+                "calls: Log.Write, Tick",
+            ),
+            ("Worker", "public Worker() { Init(); }", "calls: Init"),
+            (
+                "Compute",
+                "public int Compute() => Calculate();",
+                "calls: Calculate",
+            ),
+        ] {
+            let outline = code_outline(
+                Path::new("Worker.cs"),
+                &Content::Code(source.into()),
+                Some(&metadata(SymbolType::Function, name)),
+            )
+            .expect("C# method outline");
+            assert!(outline.ends_with(calls), "{outline}");
+        }
+        let mut meta = metadata(SymbolType::Class, "Worker");
+        let EntityMetadata::Code(code) = &mut meta else {
+            panic!("code metadata")
+        };
+        code.language = Some(Language::CSharp);
+        let outline = code_outline(Path::new("stored"), &Content::Code(
+            "public class Worker { public int Count => Calculate(); public void Run() { Tick(); } }".into()),
+            Some(&meta)).expect("C# type outline");
+        assert!(outline.contains("members:"), "{outline}");
+        assert!(outline.contains("public int Count"), "{outline}");
+        assert!(outline.contains("public void Run()"), "{outline}");
     }
 
     #[test]

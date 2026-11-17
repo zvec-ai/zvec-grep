@@ -28,6 +28,7 @@ pub(super) const COMMON_CALL_TYPES: &[&str] = &[
     "nullsafe_member_call_expression",
     "scoped_call_expression",
     "invocation",
+    "invocation_expression",
     "object_creation_expression",
     "new_expression",
     "constructor_invocation",

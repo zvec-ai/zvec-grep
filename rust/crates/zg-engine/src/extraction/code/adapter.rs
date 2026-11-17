@@ -2,6 +2,8 @@ use tree_sitter::Node;
 
 use crate::domain::{FileFormat, Language, SymbolType};
 
+mod csharp;
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct LanguageAdapter {
     kind: Language,
@@ -197,6 +199,7 @@ pub(super) fn resolve_adapter(format: FileFormat) -> Option<&'static LanguageAda
     match format {
         FileFormat::C => Some(&C),
         FileFormat::Cpp => Some(&CPP),
+        FileFormat::CSharp => Some(&csharp::ADAPTER),
         FileFormat::Go => Some(&GO),
         FileFormat::Java => Some(&JAVA),
         FileFormat::JavaScript => Some(&JAVASCRIPT),
@@ -242,6 +245,9 @@ impl LanguageAdapter {
         if self.kind == Language::Php {
             return resolve_php_entities(node);
         }
+        if self.kind == Language::CSharp {
+            return csharp::resolve_entities(node);
+        }
         vec![node]
     }
 
@@ -266,6 +272,7 @@ impl LanguageAdapter {
                 .and_then(|specifier| extract_c_family_name(specifier, source))
                 .or_else(|| extract_c_family_name(node, source)),
             Language::Go => field_text(node, "name", source),
+            Language::CSharp => csharp::extract_name(node, source),
             Language::Java
                 if matches!(node.kind(), "field_declaration" | "constant_declaration") =>
             {
@@ -351,6 +358,7 @@ impl LanguageAdapter {
             Language::Cpp if cpp_initializer_entity(node) => Some(SymbolType::Value),
             Language::C | Language::Cpp => classify_c_family(node),
             Language::Go => classify_go(node),
+            Language::CSharp => csharp::classify(node),
             Language::Java if node.kind() == "field_declaration" => Some(SymbolType::Value),
             Language::JavaScript | Language::TypeScript => classify_javascript_typescript(node),
             Language::Php => classify_php(node),
@@ -368,6 +376,7 @@ impl LanguageAdapter {
                 extract_generic_signature(definition, source)
             }
             Language::Php => extract_php_signature(node, source),
+            Language::CSharp => csharp::extract_signature(node, source),
             _ => extract_generic_signature(node, source),
         }
     }
@@ -375,6 +384,8 @@ impl LanguageAdapter {
     pub(super) fn extract_doc(self, node: Node<'_>, source: &[u8]) -> Option<String> {
         let node = if self.kind == Language::Php {
             php_declaration(node)
+        } else if self.kind == Language::CSharp {
+            csharp::declaration(node)
         } else {
             node
         };
@@ -459,6 +470,9 @@ impl LanguageAdapter {
     /// `self`/`cls`, Go's separate receiver field). Non-function entities
     /// yield `None`.
     pub(super) fn extract_arity(self, node: Node<'_>, source: &[u8]) -> Option<usize> {
+        if self.kind == Language::CSharp && self.classify(node) != Some(SymbolType::Function) {
+            return None;
+        }
         if matches!(self.kind, Language::C | Language::Cpp) && !is_c_function_type(node.kind()) {
             // C aggregates nest function declarators for their pointer fields;
             // the aggregate itself declares no parameters.
@@ -486,6 +500,16 @@ impl LanguageAdapter {
             None => find_descendant_by_kind(target, "function_declarator")?
                 .child_by_field_name("parameters")?,
         };
+        if self.kind == Language::CSharp {
+            // A `params` parameter exposes its type and name directly on the list.
+            return Some(
+                named_children(parameters)
+                    .into_iter()
+                    .filter(|parameter| parameter.kind() == "parameter")
+                    .count()
+                    + usize::from(parameters.child_by_field_name("name").is_some()),
+            );
+        }
         Some(
             named_children(parameters)
                 .into_iter()
@@ -608,6 +632,7 @@ pub(super) fn declares_type(node: Node<'_>) -> bool {
             | "enum_specifier"
             | "interface_declaration"
             | "record_declaration"
+            | "struct_declaration"
             | "struct_item"
             | "struct_specifier"
             | "trait_item"
@@ -1390,9 +1415,10 @@ fn append_signature(
         {
             out.push_str("{}");
         } else {
-            append_signature(child, source, child.end_byte(), true, out);
+            // A requested prefix can end inside a nested declaration (C# fields).
+            append_signature(child, source, child.end_byte().min(end_byte), true, out);
         }
-        offset = child.end_byte();
+        offset = child.end_byte().min(end_byte);
     }
     out.push_str(std::str::from_utf8(&source[offset..end_byte]).unwrap_or_default());
 }

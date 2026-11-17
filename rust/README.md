@@ -7,6 +7,18 @@ everyday use. This page covers implementation behavior, native builds, and
 packaging. The repository root retains the legacy TypeScript implementation and
 its separate checks.
 
+C# files (`.cs` and `.csx`) use the upstream MIT-licensed
+[`tree-sitter-c-sharp` 0.23.5](https://docs.rs/tree-sitter-c-sharp/0.23.5/)
+grammar through its Rust binding, alongside the existing Tree-sitter 0.27 runtime.
+The shared engine extracts namespaces, classes, structs, records, interfaces,
+enums, delegates, methods, constructors, operators, properties, fields and events,
+with signatures, documentation and scopes. File-scoped namespaces, local functions,
+and top-level script content are preserved. Stored entities support structural
+outlines and ordinary call collection in both Direct and Server modes.
+This is syntax-based extraction: C# namespace imports, inheritance resolution and
+Roslyn-style type inference are not implemented. Existing files need reindexing
+to gain structured C# metadata. The legacy TypeScript implementation is unchanged.
+
 The Rust catalog includes `local/bekko-256-int8`.
 Select it with `zg --index --embedding local/bekko-256-int8 --device cpu`.
 Mean pooling and the 256-dimensional normalized output remain FP32.
