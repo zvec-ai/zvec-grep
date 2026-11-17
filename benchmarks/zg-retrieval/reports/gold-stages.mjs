@@ -103,13 +103,6 @@ export function goldStagesMarkdown(
     "",
     ...(heading ? ["### Gold coverage by retrieval stage", ""] : []),
     ...(captureWarning ? [captureWarning, ""] : []),
-    `Verified captures: **${summary.observed_calls}/${summary.calls}** planned calls. Invalid captures: **${summary.invalid_calls}**.`,
-    "",
-    "Each row shows Gold coverage across all five calls. FTS and Vector rows cover their full recall pools. Both ranking rows measure coverage within Top K from the same loaded candidate pool; K is the query limit (currently 10). Before uses RRF order; after uses the actual results after applying static rules and same-file decay to the full pool. N/A means unknown, and — means the route did not run.",
-    "",
-    "See `gold-stages.json` for all stages and per-target ranks.",
-    "Diagnostic MCP latency includes stage capture, serialization and transfer; compare normal search latency with capture disabled on both versions.",
-    "",
   ];
   for (const qualification of QUALIFICATIONS) {
     for (const level of LEVELS) {
