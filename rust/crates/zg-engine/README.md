@@ -66,7 +66,7 @@ Indexed search combines full-text and vector retrieval to return relevant source
 
 ### Vector storage
 
-Embedding vectors are stored as IEEE binary16. The engine keeps embeddings and query vectors as `f32` until they are narrowed for the FP16 field. `indexVersion` is 5, including raw PDF rectangles and page dimensions. Older indexes require an explicit rebuild with `zg --index --rebuild` before use.
+Embedding vectors are stored as IEEE binary16. The engine keeps embeddings and query vectors as `f32` until they are narrowed for the FP16 field. `indexVersion` is 3, adding PDF provenance with raw rectangles and page dimensions. Older indexes, including version 2, require an explicit rebuild with `zg --index --rebuild` before use.
 
 ### Embedding models
 
