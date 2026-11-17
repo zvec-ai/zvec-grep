@@ -15,11 +15,15 @@ use crate::{
 };
 use std::{collections::BTreeMap, fs, sync::Arc};
 
+fn fixture_with_pages(texts: &[&[(u32, &str)]]) -> tempfile::TempDir {
+    fixture_with_files(texts, &["manual.pdf"])
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "One persisted fixture includes canonical entities and intentionally unrelated FTS projections"
 )]
-fn fixture_with_pages(texts: &[&[(u32, &str)]]) -> tempfile::TempDir {
+fn fixture_with_files(texts: &[&[(u32, &str)]], names: &[&str]) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("workspace");
     let root = dir.path();
     let layout = WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout");
@@ -38,86 +42,82 @@ fn fixture_with_pages(texts: &[&[(u32, &str)]]) -> tempfile::TempDir {
         embeddings: vec![schema.clone()],
     })
     .expect("store");
-    fs::write(
-        root.join("manual.pdf"),
-        "%PDF-1.7\n<xmp>metadata-only</xmp>",
-    )
-    .expect("raw PDF");
     fs::write(root.join("a.md"), "Recovery wait is 5 minutes.\n").expect("ordinary text");
-    let id = store
-        .resolve_file_ids(&[PathBuf::from("manual.pdf")])
-        .expect("id")[0];
-    let file = FileRecord::new(
-        id,
-        SourcePath::new("manual.pdf").expect("path"),
-        FileSnapshot {
-            size_bytes: 32,
-            modified_epoch_ms: None,
-            content_hash: Some("fixture".into()),
-        },
-        FileIndexStatus::NotIndexed,
-    )
-    .expect("file");
-    let mut start = 0;
-    let mut entities = Vec::new();
-    let mut fragments = Vec::new();
-    for (index, blocks) in texts.iter().enumerate() {
-        let mut text = String::new();
-        let mut parts = Vec::new();
-        for (block_index, (page, block_text)) in blocks.iter().enumerate() {
-            let start = text.len();
-            text.push_str(block_text);
-            parts.push(PdfSourcePart {
-                range: start..text.trim_end_matches('\n').len(),
-                block: PdfBlock {
-                    page: *page,
-                    id: u32::try_from(block_index + 1).expect("block ID"),
-                    page_width: 612.0,
-                    page_height: 792.0,
-                    bbox: Some(crate::domain::PdfRect {
-                        x: 10.125,
-                        y: 20.0625,
-                        width: 40.5,
-                        height: 8.75,
-                    }),
-                },
+    for name in names {
+        fs::write(root.join(name), "%PDF-1.7\n<xmp>metadata-only</xmp>").expect("raw PDF");
+        let id = store.resolve_file_ids(&[PathBuf::from(name)]).expect("id")[0];
+        let file = FileRecord::new(
+            id,
+            SourcePath::new(*name).expect("path"),
+            FileSnapshot {
+                size_bytes: 32,
+                modified_epoch_ms: None,
+                content_hash: Some("fixture".into()),
+            },
+            FileIndexStatus::NotIndexed,
+        )
+        .expect("file");
+        let mut start = 0;
+        let mut entities = Vec::new();
+        let mut fragments = Vec::new();
+        for (index, blocks) in texts.iter().enumerate() {
+            let mut text = String::new();
+            let mut parts = Vec::new();
+            for (block_index, (page, block_text)) in blocks.iter().enumerate() {
+                let start = text.len();
+                text.push_str(block_text);
+                parts.push(PdfSourcePart {
+                    range: start..text.trim_end_matches('\n').len(),
+                    block: PdfBlock {
+                        page: *page,
+                        id: u32::try_from(block_index + 1).expect("block ID"),
+                        page_width: 612.0,
+                        page_height: 792.0,
+                        bbox: Some(crate::domain::PdfRect {
+                            x: 10.125,
+                            y: 20.0625,
+                            width: 40.5,
+                            height: 8.75,
+                        }),
+                    },
+                });
+            }
+            let range = Range::Pdf(Arc::new(PdfSourceMap {
+                markdown_start: start,
+                text_len: text.len(),
+                parts,
+            }));
+            let text_len = text.len();
+            let content = Content::Text(text);
+            let entity_id = EntityId::new(id, &content, &range).expect("entity id");
+            let fragment_id = FragmentId::new(&entity_id, 0);
+            entities.push(
+                Entity::new(
+                    entity_id.clone(),
+                    id,
+                    range,
+                    content,
+                    None,
+                    vec![EntityFragment {
+                        id: fragment_id.clone(),
+                        range: Range::Full,
+                    }],
+                )
+                .expect("entity"),
+            );
+            fragments.push(IndexedFragment {
+                entity_id,
+                fragment_id,
+                model: schema.model().reference(),
+                vector: vec![1.0, 0.0, 0.0],
+                fts_text: format!("unrelated search projection {index}"),
             });
+            start += text_len + 2;
         }
-        let range = Range::Pdf(Arc::new(PdfSourceMap {
-            markdown_start: start,
-            text_len: text.len(),
-            parts,
-        }));
-        let text_len = text.len();
-        let content = Content::Text(text);
-        let entity_id = EntityId::new(id, &content, &range).expect("entity id");
-        let fragment_id = FragmentId::new(&entity_id, 0);
-        entities.push(
-            Entity::new(
-                entity_id.clone(),
-                id,
-                range,
-                content,
-                None,
-                vec![EntityFragment {
-                    id: fragment_id.clone(),
-                    range: Range::Full,
-                }],
-            )
-            .expect("entity"),
-        );
-        fragments.push(IndexedFragment {
-            entity_id,
-            fragment_id,
-            model: schema.model().reference(),
-            vector: vec![1.0, 0.0, 0.0],
-            fts_text: format!("unrelated search projection {index}"),
-        });
-        start += text_len + 2;
+        store
+            .replace_file(&file, &entities, &fragments)
+            .expect("store entities");
     }
-    store
-        .replace_file(&file, &entities, &fragments)
-        .expect("store entities");
     store.close().expect("close");
     let workspace = Workspace::new(
         root,
@@ -155,6 +155,34 @@ fn options(root: &Path, query: &str) -> ContextOptions {
         file_types: vec!["pdf".into()],
         limit: None,
         ..ContextOptions::default()
+    }
+}
+
+#[tokio::test]
+async fn pdf_rg_stop_on_nonmatch_is_file_scoped_across_entities() {
+    let cases: &[&[&[(u32, &str)]]] = &[
+        &[&[(1, "prefix\nhit first\ngap\n")], &[(2, "hit hidden\n")]],
+        &[&[(1, "hit first\n")], &[(2, "gap\nhit hidden\n")]],
+    ];
+    for texts in cases {
+        let dir = fixture_with_files(texts, &["first.pdf", "second.pdf"]);
+        let service = DirectSearchService::new();
+        let mut request = options(dir.path(), "hit");
+        request.rg_options.stop_on_nonmatch = true;
+        request.rg_options.after_context = 1;
+        let result = service.context(request).await.expect("PDF query");
+        assert_eq!(result.items.len(), 2);
+        for name in ["first.pdf", "second.pdf"] {
+            let item = result
+                .items
+                .iter()
+                .find(|item| item.relative_path == Path::new(name))
+                .expect("each file has its own matching state");
+            assert!(item.content.contains("hit first"));
+            assert!(!item.content.contains("hit hidden"));
+            assert_eq!(item.match_ranges.len(), 1);
+            assert!(matches!(&item.range, ContentRange::Pdf { pages, .. } if pages == &[1]));
+        }
     }
 }
 

@@ -22,25 +22,10 @@ fn runtime() -> Result<stages::Library, PdfExtractionError> {
     static LOADED: OnceLock<Result<(), String>> = OnceLock::new();
     LOADED
         .get_or_init(|| {
-            let name = if cfg!(target_os = "macos") {
-                "libpdfium.dylib"
-            } else if cfg!(windows) {
-                "pdfium.dll"
-            } else {
-                "libpdfium.so"
-            };
-            // Prefer the installed sibling runtime, never an unrelated build cache.
-            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            let directory = exe.parent().ok_or("Executable has no parent")?;
-            let candidates = [
-                directory.join(name),
-                directory.join("../lib").join(name),
-                directory.join("..").join(name),
-            ];
-            let path = std::env::var_os("PDFIUM_LIB_PATH")
-                .map(|dir| PathBuf::from(dir).join(name))
-                .or_else(|| candidates.into_iter().find(|p| p.is_file()))
-                .ok_or_else(|| format!("Missing packaged {name}"))?;
+            let path = runtime_path(
+                std::env::var_os("PDFIUM_LIB_PATH").map(PathBuf::from),
+                &std::env::current_exe().map_err(|e| e.to_string())?,
+            )?;
             zg_pdfium::load(&path)
         })
         .as_ref()
@@ -54,6 +39,34 @@ fn runtime() -> Result<stages::Library, PdfExtractionError> {
             "Cannot initialize LiteParse PDFium: {e}"
         )))
     })
+}
+
+fn runtime_path(
+    explicit: Option<PathBuf>,
+    executable: &std::path::Path,
+) -> Result<PathBuf, String> {
+    let name = if cfg!(target_os = "macos") {
+        "libpdfium.dylib"
+    } else if cfg!(windows) {
+        "pdfium.dll"
+    } else {
+        "libpdfium.so"
+    };
+    if let Some(directory) = explicit {
+        return Ok(directory.join(name));
+    }
+    // macOS can report npm's global bin/zg symlink. Locate libraries relative
+    // to the real executable, as the ORT loader does, not the global prefix.
+    let executable = executable.canonicalize().map_err(|e| e.to_string())?;
+    let directory = executable.parent().ok_or("Executable has no parent")?;
+    [
+        directory.join(name),
+        directory.join("../lib").join(name),
+        directory.join("..").join(name),
+    ]
+    .into_iter()
+    .find(|p| p.is_file())
+    .ok_or_else(|| format!("Missing packaged {name}"))
 }
 
 pub(super) fn document_error(e: impl std::fmt::Display) -> PdfExtractionError {
@@ -152,3 +165,7 @@ fn dimensions(width: f64, height: f64) -> (i32, i32) {
         (height * scale).ceil().clamp(1.0, 1600.0) as i32,
     )
 }
+
+#[cfg(test)]
+#[path = "render_tests.rs"]
+mod tests;

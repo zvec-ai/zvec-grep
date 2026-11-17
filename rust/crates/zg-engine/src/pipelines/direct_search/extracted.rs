@@ -6,7 +6,10 @@ use crate::{
         MatchedBy,
     },
     domain::{Content, Entity, FileRecord, IndexDescriptor},
-    lexical::{extracted::ExtractedMatcher, types::LexicalSearchRequest},
+    lexical::{
+        extracted::{ExtractedFileState, ExtractedMatcher},
+        types::LexicalSearchRequest,
+    },
     pipelines::{
         indexed_search::writer::WriterContexts,
         read_access::{ReadSource, acquire_read_source},
@@ -75,12 +78,15 @@ pub(super) async fn search(
                     entities.sort_by_key(|entity| {
                         entity.source_range().byte_offsets().map(|(start, _)| start)
                     });
-                    let mut count = 0;
+                    let mut state = ExtractedFileState::default();
                     for entity in entities {
                         if let Some(item) =
-                            search_entity(&matcher, &request, &path, &file, &entity, &mut count)?
+                            search_entity(&matcher, &request, &path, &file, &entity, &mut state)?
                         {
                             items.push(item);
+                        }
+                        if state.stopped {
+                            break;
                         }
                     }
                 }
@@ -128,14 +134,14 @@ fn search_entity(
     path: &Path,
     file: &FileRecord,
     entity: &Entity,
-    count: &mut usize,
+    state: &mut ExtractedFileState,
 ) -> EngineResult<Option<ContextItem>> {
     let (Content::Text(text) | Content::Code(text)) = entity.content() else {
         return Ok(None);
     };
     let source = entity.source_range();
     let project = |span| ContentRange::project_text(&source, text, span);
-    let hits = matcher.search(text, count)?;
+    let hits = matcher.search(text, state)?;
     if hits.is_empty() {
         return Ok(None);
     }

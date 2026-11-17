@@ -304,6 +304,7 @@ jobs:
               python3 scripts/cuda/e2e.py "$cpu_mode" --bundle "$bundle" \
                 --model-cache /model-cache --logs /work/cpu-logs
               python3 scripts/pdf-package-smoke.py --bundle "$bundle" \
+                --npm-prefix dist/npm/release/artifact-smoke/prefix \
                 --model-cache /model-cache --logs /work/cpu-logs/pdf
             '
       - name: Install and exercise the downloaded artifacts without Windows CUDA libraries
@@ -336,6 +337,7 @@ jobs:
           prefix = pathlib.Path("dist/npm/release/artifact-smoke/prefix")
           modules = prefix / ("node_modules" if os.name == "nt" else "lib/node_modules")
           subprocess.run([sys.executable, "scripts/pdf-package-smoke.py", "--bundle", str(modules / "@zvec/zvec-grep"),
+                          "--npm-prefix", str(prefix),
                           "--model-cache", str(pathlib.Path(os.environ["RUNNER_TEMP"]) / "zvec-grep-model-cache"),
                           "--logs", "../cpu-logs/pdf"], check=True)
       - name: Retain CPU artifact execution evidence

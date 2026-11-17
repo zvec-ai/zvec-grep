@@ -54,6 +54,7 @@ def fixture(path, pages):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundle", type=Path, required=True)
+    parser.add_argument("--npm-prefix", type=Path, help="Exercise the installed npm entry instead of the package binary")
     parser.add_argument("--model-cache", type=Path, required=True)
     parser.add_argument("--logs", type=Path, required=True)
     parser.add_argument("--sample", type=Path, help="Optional local copy of the pinned TraceMonkey PDF")
@@ -63,6 +64,21 @@ def main():
     bundle = args.bundle.resolve()
     binary = next((p for p in [bundle / "bin/zg.exe", bundle / "bin/zg"] if p.is_file()), None)
     check(binary is not None, f"No installed zg under {bundle}")
+    command_prefix = [str(binary)]
+    entry = str(binary)
+    if args.npm_prefix:
+        # Reuse the release harness's actual npm entry (including the Windows
+        # PowerShell shim). Do not resolve the entry symlink before execution.
+        helper = Path(__file__).with_name("npm-installed-cli.mjs").resolve().as_uri()
+        invocation = json.loads(subprocess.check_output([
+            "node", "--input-type=module", "-e",
+            "const {installedCliInvocation}=await import(process.argv[1]);"
+            "console.log(JSON.stringify(installedCliInvocation(process.argv[2], [])));",
+            helper, str(args.npm_prefix.absolute()),
+        ], text=True, encoding="utf-8", timeout=30))
+        entry = invocation["entry"]
+        check(Path(entry).is_file(), f"Missing installed npm entry: {entry}")
+        command_prefix = [invocation["command"], *invocation["args"]]
     library = "libpdfium.dylib" if platform.system() == "Darwin" else "pdfium.dll" if platform.system() == "Windows" else "libpdfium.so"
     check((bundle / "lib" / library).is_file(), "Missing bundled LiteParse PDFium")
     check((bundle / "lib/licenses/pdfium-ThirdPartyNotices.txt").is_file(), "Missing PDFium notices")
@@ -77,7 +93,7 @@ def main():
     home.mkdir(exist_ok=True)
     env.update(HOME=str(home), USERPROFILE=str(home), XDG_CONFIG_HOME=str(home / "config"),
                ZVEC_GREP_MODEL_CACHE=str(cache), ZVEC_GREP_DEVICE="cpu", ZVEC_GREP_MODE="direct")
-    report = {"passed": False, "platform": platform.platform(), "binary": str(binary),
+    report = {"passed": False, "platform": platform.platform(), "binary": str(binary), "entry": entry,
               "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
               "sample": {"url": SAMPLE_URL, "sha256": SAMPLE_SHA, "pages": 14}, "commands": []}
     with tempfile.TemporaryDirectory(prefix="zg-pdf-package-") as temporary:
@@ -87,7 +103,7 @@ def main():
 
         def execute(label, arguments, codes=(0,)):
             started = time.perf_counter()
-            command = [str(binary), *arguments, "--mode", "direct", "--color", "never"]
+            command = [*command_prefix, *arguments, "--mode", "direct", "--color", "never"]
             child = subprocess.run(command, cwd=workspace, env=env, text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=300)
             elapsed = time.perf_counter() - started
             (logs / f"{label}.stdout").write_text(child.stdout, encoding="utf-8")
