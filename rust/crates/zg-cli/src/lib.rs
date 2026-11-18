@@ -211,7 +211,7 @@ pub struct FtsArgs {
     /// Expand a built-in or user-defined FTS language preset before explicit overrides.
     #[arg(long = "fts-lang", value_name = "NAME")]
     pub lang: Option<String>,
-    #[arg(long = "fts-tokenizer", value_parser = ["jieba", "standard", "ngram", "whitespace"])]
+    #[arg(long = "fts-tokenizer", value_name = "NAME")]
     pub tokenizer: Option<String>,
     /// Ordered comma-separated filters; an empty string disables all filters.
     #[arg(long = "fts-filter", value_name = "FILTERS")]
@@ -3386,7 +3386,7 @@ mod tests {
             let cli = Cli::try_parse_from([
                 "zg",
                 "--fts-tokenizer",
-                "standard",
+                "native-tokenizer",
                 "--index",
                 "--mode",
                 mode,
@@ -3405,7 +3405,7 @@ mod tests {
             else {
                 panic!("index");
             };
-            assert_eq!(request.fts.tokenizer.as_deref(), Some("standard"));
+            assert_eq!(request.fts.tokenizer.as_deref(), Some("native-tokenizer"));
             assert_eq!(request.fts.filters, Some(vec![]));
             assert_eq!(request.fts.extra_params, Some(serde_json::Map::new()));
         }

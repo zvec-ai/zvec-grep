@@ -556,8 +556,12 @@ fn update_at(path: &Path, changes: Value) -> Result<(), EngineError> {
     {
         fts.remove("extraParams");
     }
+    let sets_fts = changes.pointer("/defaults/fts").is_some();
     merge(&mut value, changes);
     let value = parse_global_config(&value)?;
+    if sets_fts {
+        crate::storage::validate_fts(&fts_from_config(&value)?)?;
+    }
     let bytes = serde_json::to_vec_pretty(&value)
         .map_err(|error| EngineError::internal(error.to_string()))?;
     atomic_write(path, &bytes)?;

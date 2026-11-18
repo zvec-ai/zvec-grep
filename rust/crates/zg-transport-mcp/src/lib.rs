@@ -977,9 +977,8 @@ pub struct IndexInput {
     #[schemars(length(min = 1, max = 64))]
     pub fts_lang: Option<String>,
     /// Full-text tokenizer for this workspace. Omitted keeps saved analysis or global defaults; the built-in default is jieba. Changes require rebuild.
-    #[schemars(extend("type" = "string", "enum" = ["jieba", "standard", "ngram", "whitespace"]))]
     pub fts_tokenizer: Option<String>,
-    /// Ordered full-text filters replacing the saved list: `lowercase`, `ascii_folding`, `stemmer`. An empty list disables filters.
+    /// Ordered native full-text filter names replacing the saved list. An empty list disables filters.
     pub fts_filters: Option<Vec<String>>,
     /// Extra full-text analysis parameters replacing the saved object. Use an empty object to clear parameters.
     pub fts_extra_params: Option<serde_json::Map<String, serde_json::Value>>,

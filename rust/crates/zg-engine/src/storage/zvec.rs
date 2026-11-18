@@ -26,6 +26,23 @@ pub(super) fn initialize() -> EngineResult<()> {
     }
 }
 
+pub(super) fn fts_params(fts: &crate::domain::FtsConfig) -> EngineResult<IndexParams> {
+    fts.validate()?;
+    let filters: Vec<_> = fts.filters.iter().map(String::as_str).collect();
+    let extra = serde_json::to_string(&fts.extra_params)
+        .map_err(|error| EngineError::internal(error.to_string()))?;
+    IndexParams::fts(Some(&fts.tokenizer), Some(&filters), Some(&extra)).map_err(|error| {
+        EngineError::invalid_argument(format!("invalid FTS configuration: {error}"))
+    })
+}
+
+pub(crate) fn validate_fts(fts: &crate::domain::FtsConfig) -> EngineResult<()> {
+    initialize()?;
+    zg_zvec_fp16::validate_text_index(&fts_params(fts)?).map_err(|error| {
+        EngineError::invalid_argument(format!("invalid FTS configuration: {error}"))
+    })
+}
+
 pub(super) fn open_collection(
     path: &Path,
     schema: &CollectionSchema,

@@ -375,7 +375,7 @@ mod tests {
             serde_json::from_value(encoded.clone()).expect("custom analysis");
         assert_eq!(serde_json::to_value(&custom).expect("serialize"), encoded);
         assert!(legacy.ensure_index_compatible(&custom).is_err());
-        encoded["fts"]["tokenizer"] = serde_json::json!("invalid");
+        encoded["fts"]["tokenizer"] = serde_json::json!("");
         assert!(serde_json::from_value::<IndexDescriptor>(encoded).is_err());
     }
 
