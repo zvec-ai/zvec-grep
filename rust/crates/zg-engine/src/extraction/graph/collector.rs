@@ -5,6 +5,8 @@
 //! owning entity without a second full parse. Mirrors the TypeScript
 //! `src/engine/extraction/graph/edge-collector.ts` implementation.
 
+use std::collections::HashMap;
+
 use tree_sitter::Node;
 
 use crate::domain::{FileFormat, GraphEdgeKind};
@@ -578,6 +580,9 @@ pub(crate) fn scan_binding_declarations(
         );
     }
     visit_for_bindings(entity_node, owner_index, source, format, context, boundary);
+    if format == FileFormat::Python && entity_node.kind() == "class_definition" {
+        collect_python_self_members(entity_node, owner_index, source, context);
+    }
 }
 
 fn visit_for_bindings(
@@ -668,6 +673,164 @@ fn visit_for_bindings(
         }
         visit_for_bindings(child, owner_index, source, format, context, boundary);
     }
+}
+
+/// Records what a Python class's `self.<member> = <value>` assignments state
+/// about the member.
+///
+/// A Python class body states its attributes by assigning them on `self` from
+/// inside a method, so the member a call reads through `self` — the
+/// `self.fontset.render_glyph(…)` of a sibling method — is only known by
+/// walking the methods. The binding belongs to the class: every method of the
+/// class and of a subclass that inherits it reads the same member. The value
+/// is read where it is written, so `self.fontset = fontset` takes the
+/// parameter's annotation and `self.fontset = state.fontset` steps through the
+/// member the parameter's own type states.
+fn collect_python_self_members(
+    class_node: Node<'_>,
+    owner_index: usize,
+    source: &[u8],
+    context: &mut WalkContext,
+) {
+    let annotated = HashMap::new();
+    for child in named_children(class_node) {
+        visit_python_self_members(child, owner_index, source, context, &annotated);
+    }
+}
+
+fn visit_python_self_members(
+    node: Node<'_>,
+    owner_index: usize,
+    source: &[u8],
+    context: &mut WalkContext,
+    annotated: &HashMap<String, String>,
+) {
+    // A nested class states `self` for its own members, not for this class's.
+    if node.kind() == "class_definition" {
+        return;
+    }
+    // A method's parameters shadow the annotations around it and stay in
+    // effect for everything it writes, closures included.
+    let scoped;
+    let annotated = if node.kind() == "function_definition" {
+        scoped = python_annotated_parameters(node, source, annotated);
+        &scoped
+    } else {
+        annotated
+    };
+    if node.kind() == "assignment"
+        && let Some((name, bound_type)) =
+            python_self_member_binding(node, source, context, annotated)
+    {
+        context.add_declare_binding(
+            owner_index,
+            &name,
+            &bound_type,
+            node.start_position().row + 1,
+            node.start_position().column,
+            None,
+        );
+    }
+    for child in named_children(node) {
+        visit_python_self_members(child, owner_index, source, context, annotated);
+    }
+}
+
+/// The annotated parameters of one function, on top of the annotations the
+/// enclosing scopes already state.
+fn python_annotated_parameters(
+    function: Node<'_>,
+    source: &[u8],
+    outer: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut names = outer.clone();
+    let Some(parameters) = function.child_by_field_name("parameters") else {
+        return names;
+    };
+    for parameter in named_children(parameters) {
+        if let Some((name, bound_type)) = python_parameter_binding_of(parameter, source) {
+            names.insert(name, bound_type);
+        }
+    }
+    names
+}
+
+/// The `(member, type)` pair a Python `self.<member> = <value>` assignment
+/// states, when the member and the value name something the resolver can read.
+fn python_self_member_binding(
+    node: Node<'_>,
+    source: &[u8],
+    context: &WalkContext,
+    annotated: &HashMap<String, String>,
+) -> Option<(String, String)> {
+    let left = node.child_by_field_name("left")?;
+    if left.kind() != "attribute" {
+        return None;
+    }
+    let object = left.child_by_field_name("object")?;
+    if object.kind() != "identifier" || !matches!(node_text(object, source), "self" | "cls") {
+        return None;
+    }
+    let member = left
+        .child_by_field_name("attribute")
+        .filter(|member| member.kind() == "identifier")?;
+    // `self.fontset: Fonts = …` states the type beside the name.
+    let bound_type = node
+        .child_by_field_name("type")
+        .and_then(|ty| python_annotation_name(ty, source))
+        .or_else(|| {
+            python_value_type(
+                node.child_by_field_name("right")?,
+                source,
+                context,
+                annotated,
+            )
+        })?;
+    Some((node_text(member, source).to_owned(), bound_type))
+}
+
+/// The type name a Python value expression states: what a bare call builds,
+/// what an annotated name of this body holds, and — for a member read — the
+/// member of the type that base names.
+fn python_value_type(
+    node: Node<'_>,
+    source: &[u8],
+    context: &WalkContext,
+    annotated: &HashMap<String, String>,
+) -> Option<String> {
+    match node.kind() {
+        "call" => {
+            let function = node.child_by_field_name("function")?;
+            if function.kind() != "identifier" {
+                return None;
+            }
+            let callee = node_text(function, source);
+            Some(
+                context
+                    .factory_return_of(callee)
+                    .unwrap_or(callee)
+                    .to_owned(),
+            )
+        }
+        "identifier" => annotated.get(node_text(node, source)).cloned(),
+        "attribute" => {
+            let object = node.child_by_field_name("object")?;
+            let member = node
+                .child_by_field_name("attribute")
+                .filter(|member| member.kind() == "identifier")?;
+            let base = python_value_type(object, source, context, annotated)?;
+            Some(python_member_step(&base, node_text(member, source)))
+        }
+        _ => None,
+    }
+}
+
+/// The step a member read spells for the resolver: the member's type is what
+/// the base type states for that name. A value read at extraction time cannot
+/// be looked up across declarations, so the step is stated and the resolver
+/// reads it (`member_of:(ParserState,fontset)`).
+fn python_member_step(base: &str, member: &str) -> String {
+    format!("member_of:({base},{member})")
 }
 
 /// Records the bindings a TypeScript or JavaScript statement states without
@@ -2027,6 +2190,12 @@ fn python_binding_of(
     source: &[u8],
     context: &WalkContext,
 ) -> Option<(String, String)> {
+    // `def f(index: Index)`: the annotation states the type the receiver
+    // holds for the whole body, so `index.create_variables()` reaches the
+    // interface the parameter declares rather than staying unbound.
+    if let Some(binding) = python_parameter_binding_of(node, source) {
+        return Some(binding);
+    }
     if node.kind() != "assignment" {
         return None;
     }
@@ -2049,6 +2218,85 @@ fn python_binding_of(
     let callee = node_text(function, source);
     let bound_type = context.factory_return_of(callee).unwrap_or(callee);
     Some((node_text(left, source).to_owned(), bound_type.to_owned()))
+}
+
+/// The `(name, annotation)` pair a Python parameter states.
+///
+/// `def f(index: Index)` and `def f(index: Index = None)` both annotate the
+/// name the body calls through; `*args: int` and `**kwargs: int` are not
+/// receivers, so their patterns carry no binding.
+fn python_parameter_binding_of(node: Node<'_>, source: &[u8]) -> Option<(String, String)> {
+    if !matches!(node.kind(), "typed_parameter" | "typed_default_parameter") {
+        return None;
+    }
+    let name = node
+        .child_by_field_name("name")
+        .or_else(|| node.named_child(0))
+        .filter(|name| name.kind() == "identifier")?;
+    let annotation = python_annotation_name(node.child_by_field_name("type")?, source)?;
+    Some((node_text(name, source).to_owned(), annotation))
+}
+
+/// The type name an annotation spells, when it names one the resolver can look
+/// up: a plain name, a quoted forward reference, or the value type of a union
+/// or an optional wrapper. A container (`list[Node]`) states its elements
+/// rather than the value a member call reads through, and a dotted spelling
+/// (`np.ndarray`) names a module the binding cannot place.
+fn python_annotation_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        // An annotation is wrapped in a `type` node stating what it declares,
+        // and a wrapper spells its shape the same way one level in: the
+        // argument of `Optional[…]` and the first arm of a `Union[…]`.
+        "type" | "type_parameter" | "tuple" => python_annotation_name(node.named_child(0)?, source),
+        "identifier" => Some(node_text(node, source).to_owned()),
+        "string" => {
+            let text = node_text(node, source);
+            let unquoted = text.trim_matches(['"', '\'']).trim();
+            is_plain_identifier(unquoted).then(|| unquoted.to_owned())
+        }
+        // `Client | None` states the value's own type first; a second arm
+        // states another shape a call may read, not a narrower one.
+        "binary_operator" | "union_type" => python_annotation_name(
+            node.child_by_field_name("left")
+                .or_else(|| node.named_child(0))?,
+            source,
+        ),
+        // `Optional[Client]` holds a value of that type; `list[Client]` is a
+        // container whose own members answer, so only the wrappers that stand
+        // for the value itself are read through.
+        "generic_type" => python_wrapped_annotation(
+            node_text(node.named_child(0)?, source),
+            node.named_child(1)?,
+            source,
+        ),
+        "subscript" => python_wrapped_annotation(
+            node_text(node.child_by_field_name("value")?, source),
+            node.child_by_field_name("subscript")?,
+            source,
+        ),
+        _ => None,
+    }
+}
+
+/// The value type a wrapper stands for, when the wrapper holds one value:
+/// `Optional[Client]`, `Union[Client, None]` and `Annotated[Client, …]` all
+/// answer `Client`, while a container answers nothing.
+fn python_wrapped_annotation(wrapper: &str, argument: Node<'_>, source: &[u8]) -> Option<String> {
+    let wrapper = wrapper.rsplit('.').next().unwrap_or_default();
+    if !matches!(wrapper, "Optional" | "Union" | "Annotated") {
+        return None;
+    }
+    python_annotation_name(argument, source)
+}
+
+/// Whether `text` is one identifier: `Index` binds, `a.b` and `list[Node]`
+/// do not.
+fn is_plain_identifier(text: &str) -> bool {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_alphabetic() || first == '_') && chars.all(|ch| ch.is_alphanumeric() || ch == '_')
 }
 
 fn rust_binding_of(
@@ -3487,6 +3735,137 @@ mod tests {
             vec![
                 ("a".to_owned(), "Left".to_owned(), 1),
                 ("b".to_owned(), "Right".to_owned(), 1),
+            ]
+        );
+        // Python annotates the parameter rather than the name beside it. A
+        // generic states the container and a dotted spelling the module, so
+        // neither binds the receiver a body calls through.
+        assert_eq!(
+            bindings(
+                FileFormat::Python,
+                &tree_sitter_python::LANGUAGE.into(),
+                "def m(index: Index, other: 'Right' = None):\n    index.create_variables()\n",
+            ),
+            vec![
+                ("index".to_owned(), "Index".to_owned(), 1),
+                ("other".to_owned(), "Right".to_owned(), 1),
+            ]
+        );
+        assert_eq!(
+            bindings(
+                FileFormat::Python,
+                &tree_sitter_python::LANGUAGE.into(),
+                "def m(items: list[Node], mod: np.ndarray):\n    items.clear()\n",
+            ),
+            Vec::new()
+        );
+        // A value that may be absent still holds the type a member call reads
+        // through: the optional wrapper and the union's first arm state it.
+        assert_eq!(
+            bindings(
+                FileFormat::Python,
+                &tree_sitter_python::LANGUAGE.into(),
+                "def m(c: Optional[Client], d: Client | None = None, e: list[Node]):\n    c.send()\n",
+            ),
+            vec![
+                ("c".to_owned(), "Client".to_owned(), 1),
+                ("d".to_owned(), "Client".to_owned(), 1),
+            ]
+        );
+        // A wrapper written through its module spells the same type.
+        assert_eq!(
+            bindings(
+                FileFormat::Python,
+                &tree_sitter_python::LANGUAGE.into(),
+                "def m(c: typing.Optional[Client]):\n    c.send()\n",
+            ),
+            vec![("c".to_owned(), "Client".to_owned(), 1)]
+        );
+    }
+
+    /// The names a Python class's methods bind on `self`, as `(name, type,
+    /// line)`: the class the source declares as `class_name`.
+    fn python_self_bindings(source: &str, class_name: &str) -> Vec<(String, String, usize)> {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_python::LANGUAGE.into())
+            .expect("grammar loads");
+        let tree = parser.parse(source, None).expect("parses");
+        let mut pending = vec![tree.root_node()];
+        let mut class_node = None;
+        while let Some(node) = pending.pop() {
+            if node.kind() == "class_definition"
+                && node
+                    .child_by_field_name("name")
+                    .is_some_and(|name| node_text(name, source.as_bytes()) == class_name)
+            {
+                class_node = Some(node);
+                break;
+            }
+            pending.extend(named_children(node));
+        }
+        let class_node = class_node.expect("class found");
+        let mut context = WalkContext::new();
+        let owner = context.next_entity_index();
+        // The class scan skips the method subtrees its members own, exactly as
+        // the production walk bounds it.
+        let boundary = |node: Node<'_>| {
+            matches!(
+                node.kind(),
+                "function_definition" | "decorated_definition" | "class_definition"
+            )
+        };
+        scan_binding_declarations(
+            class_node,
+            owner,
+            source.as_bytes(),
+            FileFormat::Python,
+            &mut context,
+            Some(&boundary),
+        );
+        context
+            .name_edges()
+            .iter()
+            .map(|edge| {
+                (
+                    edge.ref_name.clone(),
+                    edge.bound_type.clone().expect("bound type"),
+                    edge.line,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn collects_python_self_member_bindings() {
+        let source = "\
+class ParserState:
+    def __init__(self, fontset: Fonts):
+        self.fontset = fontset
+        self._dpi = 72
+
+class Char:
+    def __init__(self, c: str, state: ParserState):
+        self.c = c
+        self.fontset = state.fontset
+";
+        // The parameter's annotation states the member, and a value the
+        // annotation cannot spell stays unbound.
+        assert_eq!(
+            python_self_bindings(source, "ParserState"),
+            vec![("fontset".to_owned(), "Fonts".to_owned(), 3)]
+        );
+        // A member read states the step the resolver reads: the member of
+        // the type another class states.
+        assert_eq!(
+            python_self_bindings(source, "Char"),
+            vec![
+                ("c".to_owned(), "str".to_owned(), 8),
+                (
+                    "fontset".to_owned(),
+                    "member_of:(ParserState,fontset)".to_owned(),
+                    9
+                ),
             ]
         );
     }
