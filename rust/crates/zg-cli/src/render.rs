@@ -536,6 +536,7 @@ const INDEX_HELP: &str = r"Usage:
 Index options:
   --rebuild                         Rebuild the existing index
   --graph[=true|false]               Enable or disable graph indexing; omitted keeps saved setting
+  --fts-lang <name>                  Expand an FTS language preset; explicit FTS fields override it
   --fts-tokenizer <name>             jieba (default), standard, ngram, or whitespace
   --fts-filter <filters>             Ordered comma-separated lowercase, ascii_folding, stemmer; empty clears
   --fts-extra-params <json>           JSON object of analysis parameters; {} clears
@@ -555,6 +556,13 @@ Existing indexes retain their saved analysis, including during --rebuild without
 FTS options. Changing any saved setting requires --rebuild. Supplied filters and
 extra parameters replace the complete list/object. Indexing and querying use the
 same saved analysis; zg --status reports the effective configuration.
+
+Language presets: zh uses jieba + lowercase; other built-in languages, including
+en/de/fr/es/pt/ru, use standard + lowercase and the corresponding stemmer.
+List effective presets with zg --config fts langs.
+~/.zvec-grep/fts-languages.json can replace or add complete presets. CLI presets
+are expanded before direct/server dispatch. Editing mappings does not change
+saved analysis; use --rebuild --fts-lang <name> to apply an updated preset.
 
 Embedding options:
   --embedding <model>               Single text embedding model for this workspace
@@ -668,7 +676,8 @@ Output:
 const CONFIG_HELP: &str = r"Usage:
   zg --config provider set <provider> --api-key <key>
   zg --config model set <model> [--endpoint <url> | --device <device>] [--default]
-  zg --config fts set [--fts-tokenizer <name>] [--fts-filter <filters>] [--fts-extra-params <json>]
+  zg --config fts set [--fts-lang <name>] [--fts-tokenizer <name>] [--fts-filter <filters>] [--fts-extra-params <json>]
+  zg --config fts langs
 
 Provider options:
   --api-key <key>                   Default API key for the provider
@@ -684,6 +693,7 @@ Each workspace uses one model for text content. Existing indexes continue to
 use their stored model.
 
 FTS options:
+  --fts-lang <name>                  Built-in language or user-defined preset; list with fts langs
   --fts-tokenizer <name>             jieba (default), standard, ngram, whitespace
   --fts-filter <filters>             Ordered lowercase, ascii_folding, stemmer; empty clears
   --fts-extra-params <json>           Parameter object, e.g. stemmer_lang or cut_mode; {} clears
@@ -693,6 +703,13 @@ the previous value; omitted fields are preserved. FTS defaults apply only to new
 workspace indexes. Existing indexes retain their analysis, including during an
 ordinary rebuild. Use zg --index --rebuild with FTS options to change it.
 These defaults are saved under defaults.fts (tokenizer, filters, extraParams).
+
+Language presets are expanded before explicit FTS fields are applied. zh uses
+jieba + lowercase; other built-in languages, including en/de/fr/es/pt/ru, use
+standard + lowercase and a language-specific stemmer.
+~/.zvec-grep/fts-languages.json can replace or add complete presets.
+zg --config fts langs lists effective settings and sources. Mapping edits take
+effect on the next explicit --fts-lang selection; saved defaults stay unchanged.
 
 Global configuration is stored in ~/.zvec-grep/config.json.";
 
