@@ -174,6 +174,10 @@ pub(crate) struct WalkContext {
     /// innermost-scope shadow table: a call inside `outer` that names
     /// `work` binds the nested `outer::work` before any file-level name.
     scoped_symbols: HashMap<usize, HashMap<String, usize>>,
+    /// Rust modules. A module's items are in bare scope for every body written
+    /// inside it, so its table answers a bare call before the file's own
+    /// namesake does; an outer module's items need `super::` and never answer.
+    module_scopes: HashSet<usize>,
     /// Names each entity takes for itself without necessarily binding them to
     /// an indexable target: parameters, and locals whose type the index cannot
     /// spell. A bare call through such a name reaches the local value, never
@@ -231,6 +235,7 @@ impl WalkContext {
             symbols: HashMap::new(),
             file_symbols: HashMap::new(),
             scoped_symbols: HashMap::new(),
+            module_scopes: HashSet::new(),
             shadowed_names: HashMap::new(),
             borrowed_names: HashMap::new(),
             value_aliases: HashMap::new(),
@@ -316,6 +321,17 @@ impl WalkContext {
             .entry(owner)
             .or_default()
             .insert(name.to_owned(), index);
+    }
+
+    /// Records that `index` is a Rust module (`mod m { .. }`): the items it
+    /// declares directly are in bare scope for every body written inside it,
+    /// so partition reads its table before the file's own. An `impl`, a trait
+    /// and a class body are not modules — their members need a receiver.
+    pub(crate) fn register_module_scope(&mut self, index: usize) {
+        if !self.collecting {
+            return;
+        }
+        self.module_scopes.insert(index);
     }
 
     /// Records that `owner`'s body takes `name` for a local value or

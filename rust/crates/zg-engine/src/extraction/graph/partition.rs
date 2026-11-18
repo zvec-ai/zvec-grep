@@ -178,6 +178,7 @@ pub(crate) fn partition_walk(
         symbols,
         file_symbols,
         scoped_symbols,
+        module_scopes,
         shadowed_names,
         borrowed_names,
         value_aliases,
@@ -243,9 +244,11 @@ pub(crate) fn partition_walk(
             InFileTables {
                 symbols: &symbols,
                 scoped_symbols: &scoped_symbols,
+                module_scopes: &module_scopes,
                 file_symbols: &file_symbols,
                 aliases: &aliases,
                 value_aliases: &value_aliases,
+                enclosing: &enclosing,
             },
         );
         match resolved_target {
@@ -306,14 +309,45 @@ fn borrowed_by_enclosing_class(
     false
 }
 
+/// The entity the nearest module around `owner` declares under `name`, or
+/// `None` when that module does not declare it: a bare call inside
+/// `mod storage` reads `storage`'s own table, and never an outer module's —
+/// reaching those needs `super::`. Scopes that are not modules (an `impl`, a
+/// function) are skipped, because their items are not in bare scope.
+fn enclosing_module_symbol(
+    owner: usize,
+    name: &str,
+    enclosing: &HashMap<usize, usize>,
+    module_scopes: &HashSet<usize>,
+    scoped_symbols: &HashMap<usize, HashMap<String, usize>>,
+) -> Option<usize> {
+    let mut current = owner;
+    // The file node is not an entity, so the walk ends where containment does.
+    for _ in 0..64 {
+        let parent = *enclosing.get(&current)?;
+        if module_scopes.contains(&parent) {
+            return scoped_symbols
+                .get(&parent)
+                .and_then(|names| names.get(name))
+                .copied();
+        }
+        current = parent;
+    }
+    None
+}
+
 /// The file's own name tables, as one reference reads them.
 #[derive(Clone, Copy)]
 struct InFileTables<'a> {
     symbols: &'a HashMap<String, Vec<usize>>,
     scoped_symbols: &'a HashMap<usize, HashMap<String, usize>>,
+    module_scopes: &'a HashSet<usize>,
     file_symbols: &'a HashMap<String, Vec<usize>>,
     aliases: &'a HashMap<(usize, String), Vec<NameEdge>>,
     value_aliases: &'a HashMap<(usize, String), String>,
+    /// Containment, target ordinal → containing ordinal: the chain a module
+    /// lookup climbs.
+    enclosing: &'a HashMap<usize, usize>,
 }
 
 /// The entity one name reference binds to inside its own file, or `None` when
@@ -323,9 +357,11 @@ fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> 
     let InFileTables {
         symbols,
         scoped_symbols,
+        module_scopes,
         file_symbols,
         aliases,
         value_aliases,
+        enclosing,
     } = tables;
     match edge.ref_kind {
         // Containment is emitted as a resolved edge during the walk, so it
@@ -347,11 +383,12 @@ fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> 
         // (a module-level `const dispatch = send` is visible to every body in
         // the file, whatever its order), its owner's local name table (the
         // nested spelling an entity declares in its body shadows any file-level
-        // name inside it), then the file-level table. Members and nested
-        // definitions stay out of that last table: a top-level `caller()`
-        // naming `run` does not see `A::run` just because the file declares it
-        // once. Without better evidence the reference stays pending for the
-        // cross-file resolver, which also weighs imports.
+        // name inside it), the module around the owner (`mod storage`'s `save`
+        // answers its `flush`, not the file's namesake), then the file-level
+        // table. Members and nested definitions stay out of that last table: a
+        // top-level `caller()` naming `run` does not see `A::run` just because
+        // the file declares it once. Without better evidence the reference stays
+        // pending for the cross-file resolver, which also weighs imports.
         GraphEdgeKind::Calls => {
             let value_alias = || {
                 value_aliases
@@ -384,6 +421,22 @@ fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> 
                         .get(&edge.owner_index)
                         .and_then(|locals| locals.get(&edge.ref_name))
                         .copied()
+                        .or_else(|| {
+                            // A parameter or an untyped local of that name in
+                            // the owner's own body is the value the call
+                            // reaches; no enclosing module may answer it.
+                            (!shadowed)
+                                .then(|| {
+                                    enclosing_module_symbol(
+                                        edge.owner_index,
+                                        &edge.ref_name,
+                                        enclosing,
+                                        module_scopes,
+                                        scoped_symbols,
+                                    )
+                                })
+                                .flatten()
+                        })
                         .or_else(|| {
                             (!shadowed)
                                 .then(|| unique_symbol(file_symbols, &edge.ref_name))
@@ -530,6 +583,96 @@ mod tests {
         );
         assert_eq!(graph.pending.len(), 1);
         assert_eq!(graph.pending[0].ref_name, "run");
+    }
+
+    #[test]
+    fn module_local_definitions_answer_bare_calls_before_the_file_scope() {
+        // `mod storage { fn save() {} fn flush() { save() } }` beside a
+        // top-level `save`: `save()` inside `flush` reaches the module's own
+        // definition, and the top-level one keeps only the callers that name it
+        // from the file scope.
+        let mut context = WalkContext::new();
+        let normalize = context.next_entity_index();
+        context.register_symbol(Some("normalize"), normalize);
+        let file_save = context.next_entity_index();
+        context.register_symbol(Some("save"), file_save);
+        let import_record = context.next_entity_index();
+        context.register_symbol(Some("import_record"), import_record);
+        let export_record = context.next_entity_index();
+        context.register_symbol(Some("export_record"), export_record);
+        let storage = context.next_entity_index();
+        context.register_symbol(Some("storage"), storage);
+        context.register_module_scope(storage);
+        context.push_scope(storage);
+        let module_save = context.next_entity_index();
+        context.register_symbol(Some("save"), module_save);
+        context.register_scoped_symbol(Some("save"), module_save);
+        context.add_contains_edge(module_save, 14, 4);
+        let flush = context.next_entity_index();
+        context.register_symbol(Some("flush"), flush);
+        context.register_scoped_symbol(Some("flush"), flush);
+        context.add_contains_edge(flush, 16, 4);
+        context.pop_scope();
+
+        context.add_call_edge(import_record, "save", None, None, Some(1), 6, 43);
+        context.add_call_edge(export_record, "save", None, None, Some(1), 8, 43);
+        context.add_call_edge(flush, "save", None, None, Some(1), 16, 39);
+
+        let graph = partition_walk(context, (0..7).collect());
+        let calls: Vec<(usize, usize)> = graph
+            .resolved
+            .iter()
+            .filter(|edge| edge.ref_kind == GraphEdgeKind::Calls)
+            .map(|edge| (edge.source_index, edge.target_index))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                (import_record, file_save),
+                (export_record, file_save),
+                (flush, module_save),
+            ],
+            "the module's own `save` answers `flush`; the file-level one keeps only its callers"
+        );
+        assert!(graph.pending.is_empty());
+    }
+
+    #[test]
+    fn outer_modules_do_not_answer_bare_calls_in_inner_modules() {
+        // `mod outer { fn save() {} mod inner { fn flush() { save() } } }`: an
+        // outer module's items need `super::`, so `inner`'s missing `save` must
+        // not fall through to `outer::save` — the resolver's evidence decides,
+        // not a name the call cannot reach.
+        let mut context = WalkContext::new();
+        let outer = context.next_entity_index();
+        context.register_symbol(Some("outer"), outer);
+        context.register_module_scope(outer);
+        context.push_scope(outer);
+        let outer_save = context.next_entity_index();
+        context.register_symbol(Some("save"), outer_save);
+        context.register_scoped_symbol(Some("save"), outer_save);
+        let inner = context.next_entity_index();
+        context.register_symbol(Some("inner"), inner);
+        context.register_scoped_symbol(Some("inner"), inner);
+        context.add_contains_edge(inner, 2, 4);
+        context.register_module_scope(inner);
+        context.push_scope(inner);
+        let flush = context.next_entity_index();
+        context.register_symbol(Some("flush"), flush);
+        context.register_scoped_symbol(Some("flush"), flush);
+        context.add_contains_edge(flush, 3, 8);
+        context.pop_scope();
+        context.pop_scope();
+
+        context.add_call_edge(flush, "save", None, None, Some(0), 3, 20);
+
+        let graph = partition_walk(context, (0..4).collect());
+        assert!(
+            graph.resolved.is_empty(),
+            "an outer module's function must not answer a bare call in an inner module"
+        );
+        assert_eq!(graph.pending.len(), 1);
+        assert_eq!(graph.pending[0].ref_name, "save");
     }
 
     #[test]
