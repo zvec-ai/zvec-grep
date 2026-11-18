@@ -49,6 +49,35 @@ fn metadata_store(path: &Path) -> Fragments {
 }
 
 #[test]
+fn fts_language_presets_work_with_the_native_analyzer_and_stem_english_by_default() {
+    super::super::zvec::initialize().expect("initialize zvec");
+    for preset in crate::config::fts_languages::builtins().into_values() {
+        let root = tempfile::tempdir().expect("storage");
+        let store = Fragments::open(root.path(), &[model()], &preset.config, false)
+            .unwrap_or_else(|error| panic!("{}: {error}", preset.name));
+        let (file, entities, mut entries) = metadata_fragments(1, "fixture");
+        entries.truncate(1);
+        entries[0].fts_text = "running".into();
+        write_fixture(&store, &file, &entities, &entries);
+        store.flush().expect("flush");
+        drop(store);
+        let reopened = Fragments::open(root.path(), &[model()], &preset.config, true)
+            .unwrap_or_else(|error| panic!("reopen {}: {error}", preset.name));
+        let query = if preset.name == "en" {
+            "runs"
+        } else {
+            "running"
+        };
+        assert_eq!(
+            reopened.search_fts(query, 10, None).expect("query").len(),
+            1,
+            "{}",
+            preset.name
+        );
+    }
+}
+
+#[test]
 fn configured_fts_analysis_controls_real_queries_and_survives_reopening() {
     super::super::zvec::initialize().expect("initialize zvec");
     let cases = [

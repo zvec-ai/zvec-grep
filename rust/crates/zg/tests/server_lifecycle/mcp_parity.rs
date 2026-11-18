@@ -3,6 +3,9 @@ use super::*;
 #[path = "embedding_policy.rs"]
 mod embedding_policy;
 
+#[path = "fts_languages.rs"]
+mod fts_languages;
+
 fn modern_post(
     port: u16,
     method: &str,

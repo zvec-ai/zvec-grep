@@ -1,5 +1,7 @@
 //! Shared per-user global configuration for CLI and resident execution.
 
+pub mod fts_languages;
+
 use crate::{
     EngineError,
     api::index::{FtsConfig, FtsConfigUpdate},

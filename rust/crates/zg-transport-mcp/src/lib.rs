@@ -976,6 +976,9 @@ pub struct SearchInput {
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct IndexInput {
+    /// FTS language preset from built-ins or the server user's `fts-languages.json`. Explicit FTS fields override it; changes require rebuild.
+    #[schemars(length(min = 1, max = 64))]
+    pub fts_lang: Option<String>,
     /// Full-text tokenizer for this workspace. Omitted keeps saved analysis or global defaults; the built-in default is jieba. Changes require rebuild.
     #[schemars(extend("type" = "string", "enum" = ["jieba", "standard", "ngram", "whitespace"]))]
     pub fts_tokenizer: Option<String>,
@@ -1891,11 +1894,15 @@ impl IndexInput {
                 root: Some(root),
                 rebuild: self.rebuild.unwrap_or(false),
                 graph_indexing: self.graph_indexing,
-                fts: zg_engine::api::index::FtsConfigUpdate {
-                    tokenizer: self.fts_tokenizer,
-                    filters: self.fts_filters,
-                    extra_params: self.fts_extra_params,
-                },
+                fts: zg_engine::config::fts_languages::resolve(
+                    self.fts_lang.as_deref(),
+                    zg_engine::api::index::FtsConfigUpdate {
+                        tokenizer: self.fts_tokenizer,
+                        filters: self.fts_filters,
+                        extra_params: self.fts_extra_params,
+                    },
+                )
+                .map_err(|error| error.to_string())?,
                 reset_paths: self.reset_paths.unwrap_or(false),
                 scan,
                 embedding,
@@ -1917,6 +1924,7 @@ impl IndexInput {
             || self.embedding.is_some()
             || self.rebuild.is_some()
             || self.graph_indexing.is_some()
+            || self.fts_lang.is_some()
             || self.fts_tokenizer.is_some()
             || self.fts_filters.is_some()
             || self.fts_extra_params.is_some()
@@ -3639,6 +3647,20 @@ mod tests {
             let parsed: IndexInput = serde_json::from_value(drop).expect("drop input");
             assert!(parsed.into_request().is_err(), "{field}");
         }
+        let parsed: IndexInput = serde_json::from_value(serde_json::json!({
+            "root": test_root(), "drop": true, "ftsLang": "unknown"
+        }))
+        .expect("preset with drop");
+        let Err(error) = parsed.into_request() else {
+            panic!("preset cannot apply to drop");
+        };
+        assert!(error.contains("drop: true"));
+        assert!(
+            serde_json::from_value::<SearchInput>(serde_json::json!({
+                "root": test_root(), "fts": "needle", "ftsLang": "ru"
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -4148,6 +4170,7 @@ mod tests {
     fn index_input() -> IndexInput {
         IndexInput {
             graph_indexing: None,
+            fts_lang: None,
             fts_tokenizer: None,
             fts_filters: None,
             fts_extra_params: None,
