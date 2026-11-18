@@ -2855,6 +2855,12 @@ fn receiver_path_type(
         return Ok(step_type(marker, &inner_type));
     }
     if let Some(bound) = declared_receiver_type(store, snapshot, stored, receiver, caches)? {
+        // A member read the extraction could not type states the type stating
+        // it: `member_of:(ParserState,fontset)` is what `ParserState` says
+        // `fontset` holds.
+        if member_step(&bound).is_some() {
+            return resolve_member_steps(store, snapshot, stored, bound, caches, depth);
+        }
         // A loop or a placeholder declaration binds what the range or path it
         // was taken from holds, which is only known once that is read.
         if let Some((marker, inner)) = step_marker(&bound) {
@@ -2870,6 +2876,17 @@ fn receiver_path_type(
         // decides what the name itself denotes.
         return Ok(Some(bound));
     }
+    // `self` and `cls` hold the enclosing class: a member read through them is
+    // a member that class or one of its bases states.
+    if is_self_receiver(&stored.language, receiver) {
+        return Ok(snapshot
+            .entity_record(&stored.reference.owner_id)
+            .and_then(|owner| {
+                enclosing_scopes(&owner.qualified_name)
+                    .first()
+                    .map(|scope| (*scope).to_owned())
+            }));
+    }
     let Some((base, member)) = receiver.rsplit_once('.') else {
         return Ok(None);
     };
@@ -2877,7 +2894,53 @@ fn receiver_path_type(
     else {
         return Ok(None);
     };
-    member_of_type(store, snapshot, stored, &base_type, member, caches, depth)
+    let Some(bound) = member_of_type(store, snapshot, stored, &base_type, member, caches, depth)?
+    else {
+        return Ok(None);
+    };
+    resolve_member_steps(store, snapshot, stored, bound, caches, depth)
+}
+
+/// The type a member read denotes, one step at a time.
+///
+/// The extraction states a member read it cannot look up as
+/// `member_of:(<type>,<member>)`; the member's own type may step again
+/// (`self.fontset = self.state.fontset`), so the steps are read until the
+/// type is one the member rule can search.
+///
+/// # Errors
+/// Propagates graph storage failures of the member reads.
+fn resolve_member_steps(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    bound: String,
+    caches: &mut RuleCaches,
+    depth: usize,
+) -> crate::EngineResult<Option<String>> {
+    let mut bound = bound;
+    let mut depth = depth;
+    loop {
+        let Some((base, member)) = member_step(&bound) else {
+            return Ok(Some(bound));
+        };
+        if depth > MAX_TYPE_STEPS {
+            return Ok(None);
+        }
+        let Some(next) = member_of_type(store, snapshot, stored, base, member, caches, depth)?
+        else {
+            return Ok(None);
+        };
+        bound = next;
+        depth += 1;
+    }
+}
+
+/// The `(<type>,<member>)` a member step states, when the binding names one.
+fn member_step(text: &str) -> Option<(&str, &str)> {
+    text.strip_prefix("member_of:(")?
+        .strip_suffix(')')?
+        .rsplit_once(',')
 }
 
 /// The type the call site's own body or enclosing class states for one name.
