@@ -547,6 +547,14 @@ fn classify_names(
             rule: Rule::Receiver,
         });
     }
+    if let Some(resolution) = resolve_implicit_this_member(store, snapshot, stored, caches)? {
+        // A bare call written in a class body reads the class's own members
+        // through the implicit `this` before the namespaces around it.
+        return Ok(Outcome::Resolved {
+            resolution,
+            rule: Rule::Receiver,
+        });
+    }
     if let Some(resolution) = resolve_object_member(store, snapshot, stored, caches)? {
         // The receiver is an object literal whose own property table says
         // which value this key holds; the method of that name was replaced by
@@ -2439,10 +2447,37 @@ fn bind_nearest_member(
         match found.as_slice() {
             [] => {}
             [hit] => return Some(member_resolution(stored, hit)),
-            _ => return None,
+            _ => return choose_overload(stored, &found),
         }
     }
     None
+}
+
+/// Narrows several same-named members of one scope — a C++ overload set — to
+/// the one whose parameter count the call site matches.
+///
+/// The count is the only evidence this rule reads, so two overloads that both
+/// accept the call stay unbound rather than letting the walk pick one. A
+/// language without overloads keeps the conservative answer: several members
+/// of one name there are a rebinding, not a set to choose from.
+fn choose_overload(stored: &StoredPendingRef, found: &[&NameIndexEntry]) -> Option<Resolution> {
+    if stored.reference.ref_kind != GraphEdgeKind::Calls
+        || !matches!(stored.language.as_str(), "c" | "cpp")
+    {
+        return None;
+    }
+    let arity = stored
+        .reference
+        .arity
+        .and_then(|arity| u32::try_from(arity).ok());
+    let mut matching = found
+        .iter()
+        .filter(|hit| compatible_arity(arity, hit.arity));
+    let hit = matching.next()?;
+    if matching.next().is_some() {
+        return None;
+    }
+    Some(member_resolution(stored, hit))
 }
 
 /// Binds a member call across the hierarchy `caller` heads, reading `scopes`
@@ -2679,6 +2714,61 @@ fn resolve_receiver_typed(
     ))
 }
 
+/// A bare call written inside a class body reaches that class's own member
+/// through the implicit `this`.
+///
+/// `v2()` in `S0::v1` is `this->v2()`: the enclosing class answers before its
+/// bases, and both answer before the namespaces around them. The rule reads
+/// the candidate list before the bare-name gates discard members, because a
+/// member is exactly what those gates cannot address; a name no class in the
+/// caller's hierarchy declares falls through to them unchanged.
+///
+/// The using-declaration rule runs first: a name one of those declarations
+/// brings in is a member of the class itself, which outranks anything the
+/// hierarchy walk would find under the same spelling.
+///
+/// # Errors
+/// Propagates graph storage failures of the inheritance walk.
+fn resolve_implicit_this_member(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    _caches: &mut RuleCaches,
+) -> crate::EngineResult<Option<Resolution>> {
+    let reference = &stored.reference;
+    if reference.ref_kind != GraphEdgeKind::Calls
+        || reference.receiver_name.is_some()
+        || !matches!(stored.language.as_str(), "c" | "cpp")
+    {
+        return Ok(None);
+    }
+    // A call site outside any class scope has no implicit `this`; one owned by
+    // a namespace function (`ns::helper`) has no class to read first either,
+    // which the hierarchy walk below answers by finding no scope.
+    if snapshot
+        .entity_record(&reference.owner_id)
+        .is_none_or(|owner| !owner.qualified_name.contains("::"))
+    {
+        return Ok(None);
+    }
+    let Some(candidates) = snapshot.lookup_candidates(&stored.name_tail) else {
+        return Ok(None);
+    };
+    let callable: Vec<&NameIndexEntry> = candidates
+        .iter()
+        .filter(|hit| is_callable_symbol(hit))
+        .collect();
+    if callable.is_empty() {
+        return Ok(None);
+    }
+    Ok(bind_nearest_member(
+        snapshot,
+        stored,
+        &callable,
+        &owner_class_scopes(store, snapshot, stored)?,
+    ))
+}
+
 /// A bare call a using-declaration of the owner's class brings into scope.
 ///
 /// `using First<T>::Run;` states that a bare `Run()` written in the class's
@@ -2762,6 +2852,16 @@ fn resolve_undeclared_type_member(
         return None;
     }
     let head = type_head(&pointee_type(bound_type));
+    // Nobody may add declarations to `std`, so a member read through a
+    // standard-library type belongs to the library whatever the workspace
+    // happens to declare: `saved_key_.clear()` on a `std::string` is not
+    // `leveldb::Slice::clear`, and `Statistics::load` is not
+    // `std::atomic<bool>::load`. Generated types are the case this rule serves,
+    // and they never spell `std`.
+    let head = head.strip_prefix("::").unwrap_or(&head);
+    if head == "std" || head.starts_with("std::") {
+        return None;
+    }
     let tail = head.rsplit("::").next()?;
     // The index answers `Some([])` for a name nothing declares; `None` is a
     // snapshot that still hides some of it, which is not evidence of absence.
@@ -4136,6 +4236,28 @@ fn imported_binding_target<'a>(
     })
 }
 
+/// The one candidate an unqualified base clause names inside `class_scope`:
+/// the class is read in the scope enclosing the derived class first, so
+/// `u::Z1: Z0` names `u::Z0` even while a `Z0` outside `u` shares the spelling.
+/// A qualified clause, or several classes in that scope, keeps the hierarchy
+/// unknown.
+fn enclosing_scope_hit<'a>(
+    class_scope: &str,
+    lookup: &str,
+    candidates: &[&'a NameIndexEntry],
+) -> Option<&'a NameIndexEntry> {
+    if lookup.contains("::") {
+        return None;
+    }
+    let (parent, _) = class_scope.rsplit_once("::")?;
+    let qualified = format!("{parent}::{lookup}");
+    let mut matching = candidates
+        .iter()
+        .filter(|hit| hit.qualified_name == qualified);
+    let hit = *matching.next()?;
+    matching.next().is_none().then_some(hit)
+}
+
 /// Appends every base class reachable from `root` through extends/implements
 /// edges, nearest first: the direct bases before their own bases, so reading
 /// `scopes` in order walks the hierarchy by distance from `root` — the order
@@ -4193,7 +4315,15 @@ fn collect_base_scopes(
                         .iter()
                         .collect::<Vec<_>>(),
                 );
-                if let [hit] = candidates.as_slice() {
+                let hit = match candidates.as_slice() {
+                    [] => None,
+                    [hit] => Some(*hit),
+                    // A namesake elsewhere in the workspace must not hide the
+                    // base: an unqualified clause is read in the scope that
+                    // encloses the derived class.
+                    _ => enclosing_scope_hit(&scope.name, &lookup, &candidates),
+                };
+                if let Some(hit) = hit {
                     declared.push(hit.entity_id.clone());
                 }
             }

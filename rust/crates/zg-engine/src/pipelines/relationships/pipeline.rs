@@ -16,7 +16,8 @@ use crate::{
         SymbolDefinition, SymbolRelationships,
     },
     domain::{
-        Entity, EntityId, EntityMetadata, FileEdge, FileRecord, GraphEdgeKind, Language, Range,
+        CodeMetadata, Entity, EntityId, EntityMetadata, FileEdge, FileRecord, GraphEdgeKind,
+        Language, Range,
     },
     pipelines::indexed_search::path_filter::resolve_glob_filter,
     storage::{
@@ -161,7 +162,7 @@ fn check_cancelled(signal: Option<&CancellationToken>) -> EngineResult<()> {
     Ok(())
 }
 
-/// Drops the pure declarations among equally named definitions.
+/// Drops the pure declarations a definition of the same symbol supersedes.
 ///
 /// A C++ member is a prototype in the header and a bounded body in the
 /// implementation file, so the workspace holds two entities under one name.
@@ -171,21 +172,46 @@ fn check_cancelled(signal: Option<&CancellationToken>) -> EngineResult<()> {
 /// and leaves the prototype out. A workspace that holds only the declaration
 /// still answers, since that is the one known location.
 ///
-/// The name is the symbol, not the statement: an in-class prototype and the
-/// out-of-class body written in one file are one implementation, and reporting
-/// them apart would answer one implementation twice.
+/// The qualified name is the symbol, not the statement: an in-class prototype
+/// and the out-of-class body written in one file are one implementation, and
+/// reporting them apart would answer one implementation twice. The scope
+/// belongs to that spelling: a pure virtual `S0::v5` and the `S2::v5` that
+/// overrides it name different members, so the base declaration stays an
+/// answer of its own even while a body of the same bare name exists.
 fn prefer_definitions(definitions: Vec<StoredEntity>) -> Vec<StoredEntity> {
-    let is_declaration = |stored: &StoredEntity| {
-        matches!(
-            stored.entity.metadata(),
-            Some(EntityMetadata::Code(metadata)) if metadata.is_declaration
-        )
-    };
-    let has_body = definitions.iter().any(|stored| !is_declaration(stored));
+    let defined: HashSet<_> = definitions
+        .iter()
+        .filter(|stored| !is_declaration(stored))
+        .filter_map(qualified_symbol)
+        .collect();
     definitions
         .into_iter()
-        .filter(|stored| !has_body || !is_declaration(stored))
+        .filter(|stored| {
+            !is_declaration(stored)
+                || qualified_symbol(stored).is_none_or(|symbol| !defined.contains(&symbol))
+        })
         .collect()
+}
+
+fn code_metadata(stored: &StoredEntity) -> Option<&CodeMetadata> {
+    match stored.entity.metadata() {
+        Some(EntityMetadata::Code(metadata)) => Some(metadata),
+        _ => None,
+    }
+}
+
+fn is_declaration(stored: &StoredEntity) -> bool {
+    code_metadata(stored).is_some_and(|metadata| metadata.is_declaration)
+}
+
+fn qualified_symbol(stored: &StoredEntity) -> Option<String> {
+    code_metadata(stored).map(|metadata| {
+        let name = metadata.symbol_name.as_deref().unwrap_or_default();
+        metadata
+            .scope
+            .as_deref()
+            .map_or_else(|| name.to_owned(), |scope| format!("{scope}::{name}"))
+    })
 }
 
 fn collect_match(
