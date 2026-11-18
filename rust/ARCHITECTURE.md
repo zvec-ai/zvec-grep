@@ -1,5 +1,8 @@
 # Rust architecture
 
+See the [documentation map](docs/README.md) for runtime contracts and operational
+guides. This page owns the application and crate boundaries.
+
 ## Public application boundary
 
 [`ZvecGrep`](crates/zg-engine/src/lib.rs) is the reusable engine entry point.
@@ -60,6 +63,9 @@ and recoverable index publication under `.zvec-grep/`. See the
 relocation, and authorization behavior.
 
 ## Resource ownership
+
+Detailed cache, locking and workspace lifetime rules live in
+[engine and workspace lifecycle](docs/runtime/engine.md).
 
 The engine owns a private model runtime manager. Matching model configuration
 and concurrency settings reuse cached runtimes and their loaded resources.

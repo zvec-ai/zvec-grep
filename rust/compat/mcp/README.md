@@ -6,7 +6,10 @@ The cases cover both preview modes, long and Unicode lines, CRLF and trailing
 blank lines, matched windows, half-open Rust ranges, query groups, selection
 reasons, optional outlines, metadata, stale results and empty results.
 
-Regenerate from the repository root after intentional Node.js contract changes:
+## Regenerating the legacy baseline
+
+The following commands depend on the legacy TypeScript implementation. Run from
+the repository root while that implementation is available:
 
 ```sh
 npm run build
@@ -18,6 +21,8 @@ Node.js representation. It obtains expected text through an actual MCP client
 and handler. Fixtures store relative paths and no credentials or volatile IDs.
 Review regenerated text instead of accepting output changes automatically.
 
+## Rust regression coverage
+
 Rust loads the cases through `zg-testkit`. Tests compare exact text and exercise
 the actual public tool handler in `agent` and `full`, checking default/short/full
 preview and identical requests to the engine. No Node.js process is needed to
@@ -28,6 +33,8 @@ cargo test --manifest-path rust/Cargo.toml -p zg-transport-mcp
 ```
 
 Configure the native library path as for the other Rust workspace tests.
+
+## Input and presentation contracts
 
 Optional numeric and boolean tool inputs advertise scalar JSON Schema types,
 matching Node.js, with optionality expressed by omission from `required`.
@@ -41,14 +48,18 @@ numeric constraints, optionality, and the distinction between absence and reset.
 
 Freshness requires observed file-change evidence and is independent of index
 provenance or background activity. The remaining Node.js difference is covered
-under `mcp-observed-file-change-freshness` in `allowed-differences.toml`.
+under `mcp-observed-file-change-freshness` in
+[allowed-differences.toml](../allowed-differences.toml).
 
 Fixtures explicitly declare the source range of each item's content; the capture
 script does not infer it from text length. Node.js still uses a line-count heuristic
 in its formatter. Rust follows the engine's `content_range` instead, including when
 an EOF fragment retains a final empty line. Separate regression cases cover that
 known oracle bug, whole-entity content, and both preview modes under
-`engine-content-source-coordinates` in `allowed-differences.toml`.
+`engine-content-source-coordinates` in
+[allowed-differences.toml](../allowed-differences.toml).
+
+## Managed rg fixtures
 
 `rg-presentation.json` captures eight responses from the real Node MCP rg handler:
 context, long unbounded output, explicit head truncation, empty results, symbols,
@@ -57,7 +68,10 @@ with `node rust/scripts/capture-mcp-rg-presentation.mjs` after `npm run build`.
 `rg_format::tests::captured_rg_presentation_uses_plain_matches` compares source
 lines and context. Symbol cases intentionally omit the captured Node headers:
 Rust rg searches return plain matches without structural parsing. This difference
-is recorded under `managed-rg-plain-text` in `allowed-differences.toml`.
+is recorded under `managed-rg-plain-text` in
+[allowed-differences.toml](../allowed-differences.toml).
+
+## Transport coverage
 
 The regular `cargo test --workspace --all-targets` entry point also runs:
 
@@ -71,5 +85,6 @@ The regular `cargo test --workspace --all-targets` entry point also runs:
 
 These tests are part of the existing Linux/Windows/macOS Rust CI matrix. They use
 local HTTP fixtures, temporary roots and mock embedding responses; no global
-workspace registration is needed. Deferred MCP-01 remains separate: these focused cases do
-not claim to be a complete snapshot of every public Node schema and response.
+workspace registration is needed. Captured cases cover selected compatibility
+contracts; the native regression tests also exercise current behavior beyond
+the legacy snapshots.
