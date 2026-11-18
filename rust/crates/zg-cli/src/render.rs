@@ -537,8 +537,8 @@ Index options:
   --rebuild                         Rebuild the existing index
   --graph[=true|false]               Enable or disable graph indexing; omitted keeps saved setting
   --fts-lang <name>                  Expand an FTS language preset; explicit FTS fields override it
-  --fts-tokenizer <name>             jieba (default), standard, ngram, or whitespace
-  --fts-filter <filters>             Ordered comma-separated lowercase, ascii_folding, stemmer; empty clears
+  --fts-tokenizer <name>             Native tokenizer name (default: jieba)
+  --fts-filter <filters>             Ordered comma-separated native filter names; empty clears
   --fts-extra-params <json>           JSON object of analysis parameters; {} clears
   --drop                            Permanently remove the workspace index
   --debug                           Print skipped-file diagnostics to stderr
@@ -694,8 +694,8 @@ use their stored model.
 
 FTS options:
   --fts-lang <name>                  Built-in language or user-defined preset; list with fts langs
-  --fts-tokenizer <name>             jieba (default), standard, ngram, whitespace
-  --fts-filter <filters>             Ordered lowercase, ascii_folding, stemmer; empty clears
+  --fts-tokenizer <name>             Native tokenizer name (default: jieba)
+  --fts-filter <filters>             Ordered comma-separated native filter names; empty clears
   --fts-extra-params <json>           Parameter object, e.g. stemmer_lang or cut_mode; {} clears
 
 At least one FTS option is required. Supplied lists and parameter objects replace

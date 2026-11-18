@@ -102,13 +102,14 @@ fn fts_languages_explicit_fields_replace_preset_fields_including_empty_values() 
         }
         assert!(encoded.get("lang").is_none());
     }
-    let invalid = FtsConfigUpdate {
+    let override_filters = FtsConfigUpdate {
         filters: Some(vec![]),
         ..FtsConfigUpdate::default()
     };
-    assert!(
-        resolve_at(&path, "ru", &invalid).is_err(),
-        "stemmer_lang requires its filter"
+    let resolved = resolve_at(&path, "ru", &override_filters).expect("preserve native options");
+    assert_eq!(
+        resolved.extra_params.expect("parameters")["stemmer_lang"],
+        "russian"
     );
     let omitted = FtsConfigUpdate {
         tokenizer: Some("whitespace".into()),
@@ -126,8 +127,8 @@ fn fts_languages_invalid_files_do_not_fall_back_to_builtins() {
         r#"{"version":2,"languages":{}}"#,
         r#"{"version":1,"languages":{},"unknown":true}"#,
         r#"{"version":1,"languages":{"en":{"tokenizer":"standard","filters":[]}}}"#,
-        r#"{"version":1,"languages":{"en":{"tokenizer":"unknown","filters":[],"extraParams":{}}}}"#,
-        r#"{"version":1,"languages":{"en":{"tokenizer":"standard","filters":[],"extraParams":{"stemmer_lang":"russian"}}}}"#,
+        r#"{"version":1,"languages":{"en":{"tokenizer":"","filters":[],"extraParams":{}}}}"#,
+        r#"{"version":1,"languages":{"en":{"tokenizer":"standard","filters":[""],"extraParams":{}}}}"#,
         r#"{"version":1,"languages":{"RU":{"tokenizer":"standard","filters":[],"extraParams":{}}}}"#,
         r#"{"version":1,"languages":{"":{"tokenizer":"standard","filters":[],"extraParams":{}}}}"#,
         r#"{"version":1,"languages":{"en":{"tokenizer":"standard","filters":[],"extraParams":{}},"en":{"tokenizer":"jieba","filters":[],"extraParams":{}}}}"#,

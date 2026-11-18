@@ -352,20 +352,13 @@ fn fragments_schema(
     metric: MetricType,
     fts: &FtsConfig,
 ) -> EngineResult<CollectionSchema> {
-    fts.validate()?;
-    let filters = fts.filters.iter().map(String::as_str).collect::<Vec<_>>();
-    let extra_params = serde_json::to_string(&fts.extra_params)
-        .map_err(|error| EngineError::internal(error.to_string()))?;
     let mut schema = retrieval_schema("fragments")?;
     let mut text = native(
         FieldSchema::new("text", DataType::String, false, 0),
         "define full-text field",
     )?;
     native(
-        text.set_index_params(&native(
-            IndexParams::fts(Some(&fts.tokenizer), Some(&filters), Some(&extra_params)),
-            "define full-text index",
-        )?),
+        text.set_index_params(&super::zvec::fts_params(fts)?),
         "attach full-text index",
     )?;
     native(schema.add_field(&text), "add full-text field")?;

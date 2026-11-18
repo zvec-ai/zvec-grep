@@ -126,6 +126,9 @@ impl WorkspaceIndexService {
             None => crate::config::fts_defaults()?,
         };
         let fts = options.fts.apply(&base_fts)?;
+        if options.rebuild || previous_fts.is_none() || !options.fts.is_empty() {
+            crate::storage::validate_fts(&fts)?;
+        }
         if !options.rebuild
             && previous_fts
                 .as_ref()

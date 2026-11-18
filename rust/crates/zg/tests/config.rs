@@ -287,11 +287,11 @@ fn fts_global_configuration_replaces_lists_and_parameter_objects() {
         "fts",
         "set",
         "--fts-extra-params",
-        r#"{"stemmer_lang":"english"}"#,
+        r#"{"stemmer_lang":"en","extension":{"values":[1,2]}}"#,
     ]);
     assert_eq!(
         read()["defaults"]["fts"]["extraParams"],
-        json!({"stemmer_lang": "english"})
+        json!({"stemmer_lang": "en", "extension": {"values": [1, 2]}})
     );
     fixture.success(&[
         "--config",
@@ -313,7 +313,7 @@ fn fts_global_configuration_replaces_lists_and_parameter_objects() {
             "fts",
             "set",
             "--fts-extra-params",
-            r#"{"cut_mode":"search"}"#,
+            r#"{"max_token_length":0}"#,
         ],
     ] {
         assert!(!fixture.run(&args).status.success(), "{args:?}");
@@ -396,6 +396,17 @@ fn fts_workspace_settings_have_the_same_lifecycle_in_direct_and_server_modes() {
         );
 
         let saved = fs::read(&manifest_path).expect("manifest bytes");
+        let invalid = fixture.run(&[
+            "--index",
+            "--mode",
+            mode,
+            "--rebuild",
+            "--fts-tokenizer",
+            "unknown-tokenizer",
+        ]);
+        assert!(!invalid.status.success());
+        assert!(String::from_utf8_lossy(&invalid.stderr).contains("unknown-tokenizer"));
+        assert_eq!(fs::read(&manifest_path).expect("preserved manifest"), saved);
         let rejected = fixture.run(&[
             "--index",
             "--mode",

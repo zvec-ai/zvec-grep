@@ -209,6 +209,7 @@ impl IndexJobScheduler {
                 || active_snapshot.reason == JobReason::Watch
                 || options.rebuild
                 || has_selection_update(&options)
+                || !options.fts.is_empty()
                 || graph_setting_request;
             if needs_followup && active_snapshot.state == JobState::Queued {
                 let queued_full_manual = active_snapshot.reason == JobReason::Manual
@@ -601,6 +602,12 @@ fn merge_options(current: &mut Option<IndexOptions>, mut incoming: IndexOptions)
     // A saved configuration switch follows the same rule as scan updates: an
     // explicit value wins, including false, and omission keeps the earlier one.
     merge_update(&mut current.graph_indexing, incoming.graph_indexing.take());
+    merge_update(&mut current.fts.tokenizer, incoming.fts.tokenizer.take());
+    merge_update(&mut current.fts.filters, incoming.fts.filters.take());
+    merge_update(
+        &mut current.fts.extra_params,
+        incoming.fts.extra_params.take(),
+    );
     merge_update(
         &mut current.scan.included_formats,
         incoming.scan.included_formats.take(),
@@ -1833,6 +1840,74 @@ mod tests {
             }
             scheduler.shutdown().await;
         }
+    }
+
+    #[tokio::test]
+    async fn fts_options_run_after_an_active_job_and_merge_into_its_queued_successor() {
+        use zg_engine::api::index::FtsConfigUpdate;
+
+        let executor = Arc::new(RecordingExecutor {
+            calls: Mutex::new(Vec::new()),
+            started: Notify::new(),
+            releases: tokio::sync::Semaphore::new(0),
+        });
+        let scheduler = IndexJobScheduler::new(executor.clone(), SchedulerConfig::default());
+        let root = PathBuf::from("/workspace");
+        let submit = |fts, rebuild| {
+            scheduler
+                .submit(
+                    root.clone(),
+                    IndexOptions {
+                        fts,
+                        rebuild,
+                        ..Default::default()
+                    },
+                    JobReason::Manual,
+                )
+                .expect("submit job")
+        };
+        let running = submit(FtsConfigUpdate::default(), false);
+        executor.started.notified().await;
+        let pending = submit(
+            FtsConfigUpdate {
+                filters: Some(vec!["stemmer".into()]),
+                extra_params: Some(serde_json::Map::from_iter([(
+                    "stemmer_lang".into(),
+                    "russian".into(),
+                )])),
+                ..Default::default()
+            },
+            false,
+        );
+        assert_ne!(pending.job.id, running.job.id);
+        let replacing = submit(
+            FtsConfigUpdate {
+                tokenizer: Some("standard".into()),
+                ..Default::default()
+            },
+            true,
+        );
+        let clearing = submit(
+            FtsConfigUpdate {
+                filters: Some(Vec::new()),
+                extra_params: Some(serde_json::Map::new()),
+                ..Default::default()
+            },
+            false,
+        );
+        assert_eq!(replacing.job.id, pending.job.id);
+        assert_eq!(clearing.job.id, pending.job.id);
+        executor.releases.add_permits(2);
+        scheduler
+            .wait(pending.job.id)
+            .await
+            .expect("follow-up completes");
+        let calls = executor.calls.lock().expect("calls");
+        assert_eq!(calls.len(), 2);
+        assert!(calls[1].rebuild);
+        assert_eq!(calls[1].fts.tokenizer.as_deref(), Some("standard"));
+        assert_eq!(calls[1].fts.filters, Some(Vec::new()));
+        assert_eq!(calls[1].fts.extra_params, Some(serde_json::Map::new()));
     }
 
     #[tokio::test]

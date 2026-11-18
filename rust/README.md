@@ -147,7 +147,7 @@ Each user entry replaces the complete named preset; all three fields are
 required. Other built-ins remain available. Names use 1-64 lowercase ASCII
 letters, digits, hyphens, or underscores, starting with a letter. Selection
 ignores surrounding whitespace and ASCII case. Duplicate names, unknown fields,
-unsupported versions, and invalid analysis configurations are errors, with no
+unsupported versions, and malformed entries are errors, with no
 fallback to built-ins when an existing override file is invalid. A missing file
 uses the built-ins. Custom mappings can combine only the supported native
 tokenizers, filters, and parameters; they do not install new analyzers.
@@ -161,7 +161,7 @@ run `zg --index --rebuild --fts-lang ru-docs` to apply it to an index, or repeat
 resolved three fields are persisted; the preset name is not saved.
 
 Explicit low-level fields override the selected preset, with whole-list/object
-replacement. For example, disabling the Russian stemmer requires both
+replacement. To disable Russian stemming and clear its saved parameters, use
 `--fts-filter lowercase` and `--fts-extra-params '{}'`. To add a token-length
 limit while retaining Russian stemming, supply the complete parameter object:
 `--fts-extra-params '{"stemmer_lang":"russian","max_token_length":512}'`.
@@ -174,14 +174,17 @@ using the MCP server user's file through the same resolver. Remote MCP users
 must configure mappings on the server. Low-level MCP fields override the preset
 with the same semantics as CLI options. Presets are not query or drop options.
 
-Supported tokenizers are `jieba`, `standard`, `ngram`, and `whitespace`.
-Supported filters are `lowercase`, `ascii_folding`, and `stemmer`, applied in order.
+Native tokenizer examples include `jieba`, `standard`, `ngram`, and `whitespace`.
+Native filter examples include `lowercase`, `ascii_folding`, and `stemmer`, applied in order.
 `standard` avoids the reported whitespace and accented-word false matches from
 Jieba, but changes Chinese word matching to character-based analysis. Stemming
 enabled by a preset or explicit filters can change exact-word precision. Source
 previews and embedding inputs are unaffected by these settings.
 
-Extra parameters are validated against the selected analysis:
+zg passes tokenizer and filter names, stemmer languages, and the JSON parameter
+object to the installed zvec library. zvec validates the effective analyzer
+before saving FTS defaults or changing an index. Individual analyzers may ignore
+parameters they do not use. Examples from the bundled library include:
 
 | Parameter | Applies to | Values |
 | --- | --- | --- |
@@ -191,13 +194,6 @@ Extra parameters are validated against the selected analysis:
 | `cut_mode` | `jieba` | `search` (native default), `mix`, `full`, `hmm` |
 | `jieba_dict_dir`, `user_dict_path` | `jieba` | Absolute paths visible to the process running the index |
 | `stemmer_lang` | `stemmer` filter | Canonical Snowball language name; native default `english` |
-
-Accepted stemmer names are `arabic`, `armenian`, `basque`, `catalan`, `czech`,
-`danish`, `dutch`, `dutch_porter`, `english`, `esperanto`, `estonian`, `finnish`,
-`french`, `german`, `greek`, `hindi`, `hungarian`, `indonesian`, `irish`, `italian`,
-`lithuanian`, `nepali`, `norwegian`, `persian`, `polish`, `porter`, `portuguese`,
-`romanian`, `russian`, `serbian`, `sesotho`, `spanish`, `swedish`, `tamil`,
-`turkish`, and `yiddish`.
 
 Run the development commands below from `rust/` (`cd rust` from the repository
 root). See the [contributor guide](CONTRIBUTING.md) for checks and conventions.
