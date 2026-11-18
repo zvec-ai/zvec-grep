@@ -580,8 +580,26 @@ pub(crate) fn scan_binding_declarations(
         );
     }
     visit_for_bindings(entity_node, owner_index, source, format, context, boundary);
-    if format == FileFormat::Python && entity_node.kind() == "class_definition" {
-        collect_python_self_members(entity_node, owner_index, source, context);
+    // A decorated class reaches this scan as its wrapper, whose body is the
+    // class's: a decorator that returns the class unchanged must not hide the
+    // instance members its methods state.
+    if format == FileFormat::Python
+        && let Some(class) =
+            python_inner_definition(entity_node).filter(|inner| inner.kind() == "class_definition")
+    {
+        collect_python_self_members(class, owner_index, source, context);
+    }
+}
+
+/// The definition a Python declaration states. A decorator wraps the class or
+/// function it decorates, and the wrapper's own body is that definition's.
+fn python_inner_definition(node: Node<'_>) -> Option<Node<'_>> {
+    match node.kind() {
+        "class_definition" | "function_definition" => Some(node),
+        "decorated_definition" => named_children(node)
+            .into_iter()
+            .find(|child| matches!(child.kind(), "class_definition" | "function_definition")),
+        _ => None,
     }
 }
 
@@ -692,9 +710,41 @@ fn collect_python_self_members(
     source: &[u8],
     context: &mut WalkContext,
 ) {
-    let annotated = HashMap::new();
-    for child in named_children(class_node) {
-        visit_python_self_members(child, owner_index, source, context, &annotated);
+    let class_name = class_node
+        .child_by_field_name("name")
+        .map(|name| node_text(name, source).to_owned());
+    // The methods sit in the class body beside the bindings the class states
+    // outside them, so the body is the level that holds both.
+    let Some(class_body) = class_node.child_by_field_name("body") else {
+        return;
+    };
+    // Bindings the class body states outside a method hold for every method.
+    let mut annotated = HashMap::new();
+    for child in named_children(class_body) {
+        let Some(inner) = python_inner_definition(child) else {
+            visit_python_self_members(child, owner_index, source, context, &mut annotated);
+            continue;
+        };
+        // A nested class states `self` for its own members.
+        if inner.kind() != "function_definition" {
+            continue;
+        }
+        let mut method = python_annotated_parameters(inner, source, &annotated);
+        // `self` and `cls` name the instance the method is written on, so a
+        // value read through them states a member of this class
+        // (`self.state.fontset`). A parameter that annotates the name keeps
+        // its own type, and a nested function that declares it again states
+        // its own receiver instead of this one.
+        if let Some(class_name) = &class_name {
+            for name in ["self", "cls"] {
+                if python_declares_parameter(inner, name, source) && !method.contains_key(name) {
+                    method.insert(name.to_owned(), class_name.clone());
+                }
+            }
+        }
+        for body in named_children(inner) {
+            visit_python_self_members(body, owner_index, source, context, &mut method);
+        }
     }
 }
 
@@ -703,33 +753,38 @@ fn visit_python_self_members(
     owner_index: usize,
     source: &[u8],
     context: &mut WalkContext,
-    annotated: &HashMap<String, String>,
+    annotated: &mut HashMap<String, String>,
 ) {
-    // A nested class states `self` for its own members, not for this class's.
-    if node.kind() == "class_definition" {
+    if let Some(inner) = python_inner_definition(node) {
+        // A nested class states `self` for its own members, not for this
+        // class's.
+        if inner.kind() == "class_definition" {
+            return;
+        }
+        // A nested function's parameters shadow the bindings around it and
+        // stay in effect for everything it writes, closures included.
+        let mut scoped = python_annotated_parameters(inner, source, annotated);
+        for child in named_children(inner) {
+            visit_python_self_members(child, owner_index, source, context, &mut scoped);
+        }
         return;
     }
-    // A method's parameters shadow the annotations around it and stay in
-    // effect for everything it writes, closures included.
-    let scoped;
-    let annotated = if node.kind() == "function_definition" {
-        scoped = python_annotated_parameters(node, source, annotated);
-        &scoped
-    } else {
-        annotated
-    };
-    if node.kind() == "assignment"
-        && let Some((name, bound_type)) =
+    if node.kind() == "assignment" {
+        if let Some((name, bound_type)) =
             python_self_member_binding(node, source, context, annotated)
-    {
-        context.add_declare_binding(
-            owner_index,
-            &name,
-            &bound_type,
-            node.start_position().row + 1,
-            node.start_position().column,
-            None,
-        );
+        {
+            context.add_declare_binding(
+                owner_index,
+                &name,
+                &bound_type,
+                node.start_position().row + 1,
+                node.start_position().column,
+                None,
+            );
+        }
+        // The member above reads the name where it is written, and anything
+        // after this line reads what the assignment left in it.
+        rebind_python_value(node, source, context, annotated);
     }
     for child in named_children(node) {
         visit_python_self_members(child, owner_index, source, context, annotated);
@@ -738,6 +793,11 @@ fn visit_python_self_members(
 
 /// The annotated parameters of one function, on top of the annotations the
 /// enclosing scopes already state.
+///
+/// Every parameter the function declares takes its name back from the enclosing
+/// body, whether or not it states a type: `def configure(client): …` nested in
+/// `def __init__(self, client: Client)` shadows the outer annotation, and
+/// `*args`/`**kwargs` bind a name the body holds no receiver in.
 fn python_annotated_parameters(
     function: Node<'_>,
     source: &[u8],
@@ -748,11 +808,70 @@ fn python_annotated_parameters(
         return names;
     };
     for parameter in named_children(parameters) {
+        let Some(name) = python_parameter_name(parameter, source) else {
+            continue;
+        };
+        names.remove(name);
         if let Some((name, bound_type)) = python_parameter_binding_of(parameter, source) {
             names.insert(name, bound_type);
         }
     }
     names
+}
+
+/// The name a parameter binds, in every form Python spells one: `name`,
+/// `name: Type`, `name=default`, `*args` and `**kwargs`.
+fn python_parameter_name<'a>(parameter: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
+    // A bare parameter is its own name; an annotated or defaulted one wraps it.
+    let name = match parameter.kind() {
+        "identifier" => parameter,
+        _ => parameter
+            .child_by_field_name("name")
+            .or_else(|| parameter.named_child(0))?,
+    };
+    let name = match name.kind() {
+        // `*args` and `**kwargs` wrap the name they bind.
+        "list_splat_pattern" | "dictionary_splat_pattern" => name.named_child(0)?,
+        _ => name,
+    };
+    (name.kind() == "identifier").then(|| node_text(name, source))
+}
+
+/// Whether `function` declares a parameter spelled `name`, in any form.
+fn python_declares_parameter(function: Node<'_>, name: &str, source: &[u8]) -> bool {
+    function
+        .child_by_field_name("parameters")
+        .is_some_and(|parameters| {
+            named_children(parameters)
+                .into_iter()
+                .any(|parameter| python_parameter_name(parameter, source) == Some(name))
+        })
+}
+
+/// A Python body that writes a plain name states what the name holds from that
+/// point on. An annotation describes the parameter only until the body rebinds
+/// it (`client = AlternateClient()`), and a value the index cannot place leaves
+/// the name unbound rather than keeping the type the parameter declared.
+fn rebind_python_value(
+    node: Node<'_>,
+    source: &[u8],
+    context: &WalkContext,
+    annotated: &mut HashMap<String, String>,
+) {
+    let Some(left) = node
+        .child_by_field_name("left")
+        .filter(|left| left.kind() == "identifier")
+    else {
+        return;
+    };
+    let name = node_text(left, source).to_owned();
+    let bound = node
+        .child_by_field_name("right")
+        .and_then(|right| python_value_type(right, source, context, annotated));
+    match bound {
+        Some(bound) => annotated.insert(name, bound),
+        None => annotated.remove(&name),
+    };
 }
 
 /// The `(member, type)` pair a Python `self.<member> = <value>` assignment
@@ -2254,13 +2373,10 @@ fn python_annotation_name(node: Node<'_>, source: &[u8]) -> Option<String> {
             let unquoted = text.trim_matches(['"', '\'']).trim();
             is_plain_identifier(unquoted).then(|| unquoted.to_owned())
         }
-        // `Client | None` states the value's own type first; a second arm
-        // states another shape a call may read, not a narrower one.
-        "binary_operator" | "union_type" => python_annotation_name(
-            node.child_by_field_name("left")
-                .or_else(|| node.named_child(0))?,
-            source,
-        ),
+        // `Client | None` states the value's own type beside the absence of a
+        // value, but `Left | Right` states two shapes a call may read through:
+        // only arms that agree leave the name holding one type.
+        "binary_operator" | "union_type" => python_union_annotation(node, source),
         // `Optional[Client]` holds a value of that type; `list[Client]` is a
         // container whose own members answer, so only the wrappers that stand
         // for the value itself are read through.
@@ -2286,7 +2402,72 @@ fn python_wrapped_annotation(wrapper: &str, argument: Node<'_>, source: &[u8]) -
     if !matches!(wrapper, "Optional" | "Union" | "Annotated") {
         return None;
     }
-    python_annotation_name(argument, source)
+    // `Union[Left, Right]` states one type per argument; `Optional` and
+    // `Annotated` state the value's type first and metadata after it.
+    let arguments: Vec<Node<'_>> = match argument.kind() {
+        "type_parameter" | "tuple" => named_children(argument),
+        _ => vec![argument],
+    };
+    match wrapper {
+        "Union" => python_agreed_arm_type(&arguments, source),
+        _ => arguments
+            .first()
+            .and_then(|first| python_annotation_name(*first, source)),
+    }
+}
+
+/// The one type a union annotation denotes.
+///
+/// `Client | None` states the value's type beside the absence of a value, so
+/// the arms that name one must agree; `Left | Right` names two shapes a call
+/// may read through, and picking the arm the source happens to write first
+/// would make the graph depend on the order the annotation is spelled in.
+fn python_union_annotation(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut arms = Vec::new();
+    python_union_arms(node, &mut arms);
+    python_agreed_arm_type(&arms, source)
+}
+
+/// The one type a set of union arms denotes: the arms that name a type must
+/// agree, and `None` states the absence of a value rather than a type.
+fn python_agreed_arm_type(arms: &[Node<'_>], source: &[u8]) -> Option<String> {
+    let mut inferred: Option<String> = None;
+    for arm in arms {
+        let Some(name) = python_annotation_name(*arm, source) else {
+            continue;
+        };
+        // `None` states that the arm holds no value, not a type a call reaches.
+        if name == "None" {
+            continue;
+        }
+        match &inferred {
+            Some(previous) if previous != &name => return None,
+            Some(_) => {}
+            None => inferred = Some(name),
+        }
+    }
+    inferred
+}
+
+/// The arms a union annotation states, left to right: `A | B | C` nests as
+/// `(A | B) | C`, and a `Union[…]` argument list states them as arguments.
+fn python_union_arms<'tree>(node: Node<'tree>, arms: &mut Vec<Node<'tree>>) {
+    if matches!(node.kind(), "binary_operator" | "union_type") {
+        if let Some(left) = node
+            .child_by_field_name("left")
+            .or_else(|| node.named_child(0))
+        {
+            python_union_arms(left, arms);
+        }
+        if let Some(right) = node
+            .child_by_field_name("right")
+            .or_else(|| node.named_child(1))
+        {
+            python_union_arms(right, arms);
+        }
+        return;
+    }
+    arms.push(node);
 }
 
 /// Whether `text` is one identifier: `Index` binds, `a.b` and `list[Node]`
@@ -3867,6 +4048,158 @@ class Char:
                     9
                 ),
             ]
+        );
+    }
+
+    /// The names a Python declaration binds on `self` when the scan starts
+    /// where the entity walk starts: a decorated class arrives as the wrapper
+    /// its decorator forms, not as the class.
+    fn python_decorated_self_bindings(source: &str) -> Vec<(String, String, usize)> {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_python::LANGUAGE.into())
+            .expect("grammar loads");
+        let tree = parser.parse(source, None).expect("parses");
+        let declaration = named_children(tree.root_node())
+            .into_iter()
+            .find(|child| child.kind() == "decorated_definition")
+            .expect("decorated declaration");
+        let mut context = WalkContext::new();
+        let owner = context.next_entity_index();
+        let boundary = |node: Node<'_>| {
+            matches!(
+                node.kind(),
+                "function_definition" | "decorated_definition" | "class_definition"
+            )
+        };
+        scan_binding_declarations(
+            declaration,
+            owner,
+            source.as_bytes(),
+            FileFormat::Python,
+            &mut context,
+            Some(&boundary),
+        );
+        context
+            .name_edges()
+            .iter()
+            .map(|edge| {
+                (
+                    edge.ref_name.clone(),
+                    edge.bound_type.clone().expect("bound type"),
+                    edge.line,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn collects_self_members_of_a_decorated_class() {
+        let source = "\
+@dataclass
+class Char:
+    def __init__(self, fontset: Fonts):
+        self.fontset = fontset
+";
+        // The decorator wraps the class rather than replacing what its
+        // methods state about `self`.
+        assert_eq!(
+            python_decorated_self_bindings(source),
+            vec![("fontset".to_owned(), "Fonts".to_owned(), 4)]
+        );
+    }
+
+    #[test]
+    fn nested_python_parameters_shadow_their_outer_annotations() {
+        let source = "\
+class Char:
+    def run(self, index: Index):
+        def helper(index, *args, **kwargs):
+            self.raw = index.raw
+            self.args = args.raw
+        self.block = index.block
+";
+        // The inner `index` states no type, and `*args`/`**kwargs` bind names
+        // the body holds no receiver in: the outer annotation still holds for
+        // the outer body, and neither inner name reads through `Index`.
+        assert_eq!(
+            python_self_bindings(source, "Char"),
+            vec![("block".to_owned(), "member_of:(Index,block)".to_owned(), 6)]
+        );
+    }
+
+    #[test]
+    fn rebinding_a_python_parameter_drops_its_annotation() {
+        let source = "\
+class Char:
+    def run(self, client: Client):
+        client = AlternateClient()
+        self.rebound = client.state
+        client = registry['client']
+        self.unplaced = client.state
+";
+        // The assignment states what the name holds from that line on, and a
+        // value the index cannot place leaves the name without a type.
+        assert_eq!(
+            python_self_bindings(source, "Char"),
+            vec![(
+                "rebound".to_owned(),
+                "member_of:(AlternateClient,state)".to_owned(),
+                4
+            )]
+        );
+    }
+
+    #[test]
+    fn self_carries_the_declaring_class_into_member_reads() {
+        let source = "\
+class Char:
+    def __init__(self):
+        self.state = ParserState()
+
+    def render(self):
+        self.fontset = self.state.fontset
+";
+        // `self` holds the class the method is written on, so the member read
+        // is a step through that class's own member.
+        assert_eq!(
+            python_self_bindings(source, "Char"),
+            vec![
+                ("state".to_owned(), "ParserState".to_owned(), 3),
+                (
+                    "fontset".to_owned(),
+                    "member_of:(member_of:(Char,state),fontset)".to_owned(),
+                    6
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn python_union_annotations_need_agreeing_arms() {
+        let python = || tree_sitter_python::LANGUAGE.into();
+        // The absence of a value does not narrow the type the other arm
+        // states, in either spelling.
+        assert_eq!(
+            bindings(
+                FileFormat::Python,
+                &python(),
+                "def m(a: Right | None, b: Union[Right, None]):\n    a.go()\n",
+            ),
+            vec![
+                ("a".to_owned(), "Right".to_owned(), 1),
+                ("b".to_owned(), "Right".to_owned(), 1),
+            ]
+        );
+        // Two shapes a call may read through leave the name without a type,
+        // whichever arm the annotation writes first.
+        assert_eq!(
+            bindings(
+                FileFormat::Python,
+                &python(),
+                "def m(a: Left | Right, b: Union[Left, Right], c: Right | Left):\n    a.go()\n",
+            ),
+            Vec::new()
         );
     }
 
