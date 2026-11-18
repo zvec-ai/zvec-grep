@@ -8,6 +8,105 @@ use support::{EmbeddingServer, configure_remote_model, index_options};
 use zg_engine::{ZvecGrep, api::relationships::RelationshipOptions};
 
 #[tokio::test]
+async fn python_parameter_annotations_navigate_to_the_imported_contract() {
+    check_case(Case {
+        name: "python_parameter_annotations_navigate_to_the_imported_contract",
+        files: vec![
+            SourceFile {
+                path: "contracts.py",
+                source: "class Index:\n    def create_variables(self): return {}\nclass PandasIndex(Index):\n    def create_variables(self): return {}\n",
+            },
+            SourceFile {
+                path: "unrelated.py",
+                source: "class Index:\n    def create_variables(self): return {}\n",
+            },
+            SourceFile {
+                path: "local.py",
+                source: "class Index:\n    def create_variables(self): return {}\ndef local(index: Index):\n    return index.create_variables()\n",
+            },
+            SourceFile {
+                path: "consumer.py",
+                source: "from contracts import Index, Index as DeclaredIndex, PandasIndex\nimport contracts as api\ndef annotated(index: Index):\n    return index.create_variables()\ndef aliased(index: DeclaredIndex):\n    return index.create_variables()\ndef defaulted(index: DeclaredIndex = None):\n    return index.create_variables()\ndef forward(index: 'DeclaredIndex'):\n    return index.create_variables()\ndef qualified(index: api.Index):\n    return index.create_variables()\ndef untyped(index):\n    return index.create_variables()\ndef variadic(*index: Index):\n    return index.create_variables()\ndef union(index: Index | PandasIndex):\n    return index.create_variables()\n",
+            },
+        ],
+        queries: vec![
+            Query {
+                operation: "callers",
+                symbol: "Index::create_variables",
+                file: Some("contracts.py"),
+                expected: json!([{"name": "Index::create_variables", "edges": [
+                    {"symbol": {"name": "annotated"}, "line": 4},
+                    {"symbol": {"name": "aliased"}, "line": 6},
+                    {"symbol": {"name": "defaulted"}, "line": 8},
+                    {"symbol": {"name": "forward"}, "line": 10},
+                    {"symbol": {"name": "qualified"}, "line": 12}
+                ]}]),
+            },
+            Query {
+                operation: "callers",
+                symbol: "Index::create_variables",
+                file: Some("unrelated.py"),
+                expected: json!([{"name": "Index::create_variables", "edges": []}]),
+            },
+            Query {
+                operation: "callers",
+                symbol: "PandasIndex::create_variables",
+                expected: json!([{"name": "PandasIndex::create_variables", "edges": []}]),
+                ..Query::default()
+            },
+            Query {
+                operation: "callees",
+                symbol: "local",
+                expected: json!([{"name": "local", "edges": [
+                    {"symbol": {"name": "Index::create_variables", "filePath": "local.py"}, "line": 4}
+                ]}]),
+                ..Query::default()
+            },
+        ],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn python_parameter_types_follow_relative_imports_and_preserve_missing_imports() {
+    check_case(Case {
+        name: "python_parameter_types_follow_relative_imports_and_preserve_missing_imports",
+        files: vec![
+            SourceFile {
+                path: "pkg/contracts.py",
+                source: "class Index:\n    def create_variables(self): return {}\nclass ChildIndex(Index):\n    pass\n",
+            },
+            SourceFile {
+                path: "unrelated.py",
+                source: "class Index:\n    def create_variables(self): return {}\n",
+            },
+            SourceFile {
+                path: "pkg/consumer.py",
+                source: "from .contracts import Index as Contract, ChildIndex\nfrom .missing import Index as Missing\ndef relative(index: Contract):\n    return index.create_variables()\ndef inherited(index: ChildIndex):\n    return index.create_variables()\ndef missing(index: Missing):\n    return index.create_variables()\n",
+            },
+        ],
+        queries: vec![
+            Query {
+                operation: "callers",
+                symbol: "Index::create_variables",
+                file: Some("pkg/contracts.py"),
+                expected: json!([{"name": "Index::create_variables", "edges": [
+                    {"symbol": {"name": "relative"}, "line": 4},
+                    {"symbol": {"name": "inherited"}, "line": 6}
+                ]}]),
+            },
+            Query {
+                operation: "callees",
+                symbol: "missing",
+                expected: json!([{"name": "missing", "edges": []}]),
+                ..Query::default()
+            },
+        ],
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn go_narrowed_receiver_does_not_escape_its_branch_or_loop() {
     check_case(Case {
         name: "go_narrowed_receiver_does_not_escape_its_branch_or_loop",

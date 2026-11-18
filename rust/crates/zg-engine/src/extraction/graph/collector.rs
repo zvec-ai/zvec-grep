@@ -2027,6 +2027,23 @@ fn python_binding_of(
     source: &[u8],
     context: &WalkContext,
 ) -> Option<(String, String)> {
+    if matches!(node.kind(), "typed_parameter" | "typed_default_parameter") {
+        let name = node
+            .child_by_field_name("name")
+            .or_else(|| node.named_child(0))?;
+        // `*args: T` describes each argument, not the tuple `args` itself.
+        if name.kind() != "identifier" {
+            return None;
+        }
+        let annotation = node.child_by_field_name("type")?;
+        let ty = node_text(annotation, source).trim_matches(['\'', '"']);
+        // Keep simple names, qualified names and quoted forward references.
+        // Union and generic annotations do not establish one receiver type.
+        return ty
+            .split('.')
+            .all(is_identifier_like)
+            .then(|| (node_text(name, source).to_owned(), ty.to_owned()));
+    }
     if node.kind() != "assignment" {
         return None;
     }

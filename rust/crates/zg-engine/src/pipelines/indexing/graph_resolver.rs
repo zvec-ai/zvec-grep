@@ -19,6 +19,7 @@
 mod bindings;
 mod cpp_types;
 mod module_config;
+mod python_types;
 mod rust_types;
 
 use std::borrow::Borrow;
@@ -3297,6 +3298,9 @@ fn type_root_scope(
     type_text: &str,
     caches: &mut RuleCaches,
 ) -> crate::EngineResult<Option<ClassScope>> {
+    if stored.language == "python" {
+        return python_types::scope(store, snapshot, stored, type_text, caches);
+    }
     type_root_scope_in(store, snapshot, stored, type_text, caches, 0)
 }
 
@@ -3987,9 +3991,10 @@ fn collect_base_scopes(
             let Some(base) = snapshot.entity_record(&base_id) else {
                 continue;
             };
+            let declared_in = snapshot.visible_file_id(&base_id);
             let scope = ClassScope {
                 entity: Some(base_id),
-                ..ClassScope::at(snapshot, base.qualified_name.clone(), None)
+                ..ClassScope::at(snapshot, base.qualified_name.clone(), declared_in)
             };
             let key = scope.entity.clone().unwrap_or_else(|| scope.name.clone());
             if visited.insert(key) {
