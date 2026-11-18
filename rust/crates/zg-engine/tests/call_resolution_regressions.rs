@@ -1228,3 +1228,56 @@ async fn rust_glob_imports_respect_local_types_and_explicit_imports() {
         }).await;
     }
 }
+
+// A decorated class reaches the binding scan as its decorator's wrapper, and a
+// member one method writes is read by the methods beside it: the step is
+// stated as `member_of:(<type>,<member>)` and the resolver walks it.
+#[tokio::test]
+async fn python_self_member_chain_reaches_the_decorated_class_member() {
+    check_case(Case {
+        name: "python_self_member_chain_reaches_the_decorated_class_member",
+        files: vec![SourceFile {
+            path: "shapes.py",
+            source: "class Fonts:\n    def render_glyph(self):\n        return 1\n\n@dataclass\nclass ParserState:\n    def __init__(self, fontset: Fonts):\n        self.fontset = fontset\n\n@dataclass\nclass Char:\n    def __init__(self, state: ParserState):\n        self.inner = state.fontset\n\n    def render(self):\n        return self.inner.render_glyph()\n",
+        }],
+        queries: vec![
+            Query {
+                operation: "callees",
+                symbol: "render",
+                expected: json!([{"name": "Char::render", "edges": [
+                    {"symbol": {"name": "Fonts::render_glyph"}, "line": 16}
+                ]}]),
+                ..Query::default()
+            },
+            Query {
+                operation: "callers",
+                symbol: "render_glyph",
+                expected: json!([{"name": "Fonts::render_glyph", "edges": [
+                    {"symbol": {"name": "Char::render"}}
+                ]}]),
+                ..Query::default()
+            },
+        ],
+    })
+    .await;
+}
+
+// A bare name of a Python body is the parameter the body declares, not the
+// class member another method stated under the same name.
+#[tokio::test]
+async fn python_bare_parameter_does_not_read_the_class_member() {
+    check_case(Case {
+        name: "python_bare_parameter_does_not_read_the_class_member",
+        files: vec![SourceFile {
+            path: "parser.py",
+            source: "class Index:\n    def create_variables(self):\n        return 1\n\nclass Parser:\n    def __init__(self):\n        self.index = Index()\n\n    def run(self, index):\n        return index.create_variables()\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "run",
+            expected: json!([{"name": "Parser::run", "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
