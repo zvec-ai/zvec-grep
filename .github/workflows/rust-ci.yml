@@ -139,7 +139,7 @@ jobs:
           python3 scripts/test-prepare-onnxruntime.py
           python3 scripts/test-check-glibc.py
       - name: Test npm packaging
-        run: node --test scripts/npm-*.test.mjs npm/meta/install.test.cjs
+        run: node --test scripts/npm-*.test.mjs scripts/standalone-*.test.mjs npm/meta/install.test.cjs
 
   test:
     name: rust test (${{ matrix.os }}${{ matrix.cuda && ', CUDA build on CPU' || '' }})
@@ -167,7 +167,7 @@ jobs:
         with:
           node-version: 24
       - name: Test installed npm command lifecycle on this OS
-        run: node --test scripts/npm-installed-cli.test.mjs
+        run: node --test scripts/npm-installed-cli.test.mjs scripts/standalone-installer.test.mjs
       - name: Use a short Windows Cargo home
         if: runner.os == 'Windows'
         shell: python
