@@ -45,6 +45,73 @@ in-process; its v2 request shape is unchanged.
 Compatible existing indexes retain their stored model, including during
 `--rebuild` without `--embedding`; supply a model explicitly to switch it.
 
+Full-text analysis is configurable per workspace. The built-in defaults remain
+`jieba`, filters `["lowercase"]`, and an empty extra-parameter object. Configure
+defaults for new indexes, or override individual fields for one workspace:
+
+```sh
+zg --config fts set --fts-tokenizer standard --fts-filter lowercase
+zg --index /path/to/russian-docs --fts-tokenizer standard \
+  --fts-filter lowercase,stemmer --fts-extra-params '{"stemmer_lang":"russian"}'
+```
+
+Global defaults are stored under `defaults.fts` in `~/.zvec-grep/config.json`:
+
+```json
+{
+  "version": 1,
+  "defaults": {
+    "fts": {
+      "tokenizer": "standard",
+      "filters": ["lowercase", "stemmer"],
+      "extraParams": {"stemmer_lang": "russian"}
+    }
+  }
+}
+```
+
+For a new index, explicit fields override global defaults and then built-in
+defaults. Existing indexes retain their saved analysis for queries, automatic
+refreshes, incremental updates, and ordinary `--rebuild`. Changing a saved setting
+requires both the explicit FTS option and `--rebuild`. Updating global defaults
+does not change existing indexes. `zg --status` reports the saved analysis.
+Historical indexes without analysis metadata use `jieba + lowercase`.
+New analysis metadata is read by this version; older versions may require an
+upgrade to open indexes written by this version.
+
+`--fts-filter` takes an ordered comma-separated list; `--fts-filter ''` disables
+all filters. `--fts-extra-params` takes a JSON object. Each supplied list/object
+replaces the complete previous value; use `'{}'` to clear extra parameters.
+Omitted fields retain their base value. When switching tokenizers, clear or
+replace parameters that no longer apply. Both CLI modes and MCP use the same
+validation and persistence. MCP index inputs are `ftsTokenizer`, `ftsFilters`
+(an array), and `ftsExtraParams` (an object); they are not query or drop options.
+
+Supported tokenizers are `jieba`, `standard`, `ngram`, and `whitespace`.
+Supported filters are `lowercase`, `ascii_folding`, and `stemmer`, applied in order.
+`standard` avoids the reported whitespace and accented-word false matches from
+Jieba, but changes Chinese word matching to character-based analysis. Stemming
+is opt-in and can change exact-word precision. Source previews and embedding
+inputs are unaffected by these settings.
+
+Extra parameters are validated against the selected analysis:
+
+| Parameter | Applies to | Values |
+| --- | --- | --- |
+| `max_token_length` | `standard` | Integer from 1 to 1,048,576 |
+| `ngram_min`, `ngram_max` | `ngram` | Positive uint32 integers, default 2; min <= max and max - min <= 1 |
+| `token_chars` | `ngram` | Array of `letter`, `digit`, `whitespace`, `punctuation`, `symbol` |
+| `cut_mode` | `jieba` | `search` (native default), `mix`, `full`, `hmm` |
+| `jieba_dict_dir`, `user_dict_path` | `jieba` | Absolute paths visible to the process running the index |
+| `stemmer_lang` | `stemmer` filter | Canonical Snowball language name; native default `english` |
+
+Accepted stemmer names are `arabic`, `armenian`, `basque`, `catalan`, `czech`,
+`danish`, `dutch`, `dutch_porter`, `english`, `esperanto`, `estonian`, `finnish`,
+`french`, `german`, `greek`, `hindi`, `hungarian`, `indonesian`, `irish`, `italian`,
+`lithuanian`, `nepali`, `norwegian`, `persian`, `polish`, `porter`, `portuguese`,
+`romanian`, `russian`, `serbian`, `sesotho`, `spanish`, `swedish`, `tamil`,
+`turkish`, and `yiddish`.
+
 Run the development commands below from `rust/` (`cd rust` from the repository
 root). See the [contributor guide](CONTRIBUTING.md) for checks and conventions.
 

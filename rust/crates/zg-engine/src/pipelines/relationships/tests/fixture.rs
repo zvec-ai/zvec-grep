@@ -25,14 +25,21 @@ impl Fixture {
             1,
             1,
             IndexState::Enabled(Box::new(
-                IndexDescriptor::new(schema(), BTreeMap::new(), BTreeMap::new(), true, FTS_CONFIG)
-                    .expect("index descriptor"),
+                IndexDescriptor::new(
+                    schema(),
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    true,
+                    FtsConfig::default(),
+                )
+                .expect("index descriptor"),
             )),
         )
         .expect("workspace");
         let storage_home = layout.index_dir().to_path_buf();
         fs::create_dir_all(&storage_home).expect("generation");
         let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+            fts: crate::domain::FtsConfig::default(),
             graph_enabled: true,
             storage_path: storage_home.clone(),
             embeddings: vec![schema()],
@@ -90,6 +97,7 @@ impl Fixture {
 
     pub(super) fn open_store(&self) -> IndexStore {
         IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+            fts: crate::domain::FtsConfig::default(),
             graph_enabled: true,
             storage_path: self.storage_home().to_owned(),
             embeddings: vec![schema()],

@@ -346,6 +346,7 @@ mod tests {
                 policy: WorkspaceIndexPolicy::Enabled,
                 embedding: None,
                 fts: Some(zg_engine::api::info::result::WorkspaceIndexFts {
+                    extra_params: serde_json::Map::new(),
                     tokenizer: "jieba".into(),
                     filters: vec!["lowercase".into()],
                 }),

@@ -371,7 +371,7 @@ Relationships:
 Management:
   --index        Build, rebuild, or drop the workspace index
   --status       Show workspace and index status
-  --config       Configure provider credentials and embedding model defaults
+  --config       Configure provider credentials, embedding models, and FTS defaults
   --auth         Manage Workspace Remote Embedding authorization
   --server       Start, stop, inspect, or run the shared MCP server
   --install      Install agent integrations
@@ -536,6 +536,9 @@ const INDEX_HELP: &str = r"Usage:
 Index options:
   --rebuild                         Rebuild the existing index
   --graph[=true|false]               Enable or disable graph indexing; omitted keeps saved setting
+  --fts-tokenizer <name>             jieba (default), standard, ngram, or whitespace
+  --fts-filter <filters>             Ordered comma-separated lowercase, ascii_folding, stemmer; empty clears
+  --fts-extra-params <json>           JSON object of analysis parameters; {} clears
   --drop                            Permanently remove the workspace index
   --debug                           Print skipped-file diagnostics to stderr
   --mode <direct|server|auto>       Select indexing transport
@@ -545,6 +548,13 @@ Graph indexing defaults to disabled for new indexes. Changing it on an existing
 index requires --rebuild, for example: zg --index --rebuild --graph.
 
 Dropping an index runs immediately without a confirmation prompt.
+
+FTS settings apply to the whole workspace index. New indexes use explicit options,
+then global FTS defaults, then jieba + lowercase with no extra parameters.
+Existing indexes retain their saved analysis, including during --rebuild without
+FTS options. Changing any saved setting requires --rebuild. Supplied filters and
+extra parameters replace the complete list/object. Indexing and querying use the
+same saved analysis; zg --status reports the effective configuration.
 
 Embedding options:
   --embedding <model>               Single text embedding model for this workspace
@@ -658,6 +668,7 @@ Output:
 const CONFIG_HELP: &str = r"Usage:
   zg --config provider set <provider> --api-key <key>
   zg --config model set <model> [--endpoint <url> | --device <device>] [--default]
+  zg --config fts set [--fts-tokenizer <name>] [--fts-filter <filters>] [--fts-extra-params <json>]
 
 Provider options:
   --api-key <key>                   Default API key for the provider
@@ -671,6 +682,17 @@ Remote models support --endpoint; local models support --device. At least one
 model option is required. --default may be used alone or with a runtime option.
 Each workspace uses one model for text content. Existing indexes continue to
 use their stored model.
+
+FTS options:
+  --fts-tokenizer <name>             jieba (default), standard, ngram, whitespace
+  --fts-filter <filters>             Ordered lowercase, ascii_folding, stemmer; empty clears
+  --fts-extra-params <json>           Parameter object, e.g. stemmer_lang or cut_mode; {} clears
+
+At least one FTS option is required. Supplied lists and parameter objects replace
+the previous value; omitted fields are preserved. FTS defaults apply only to new
+workspace indexes. Existing indexes retain their analysis, including during an
+ordinary rebuild. Use zg --index --rebuild with FTS options to change it.
+These defaults are saved under defaults.fts (tokenizer, filters, extraParams).
 
 Global configuration is stored in ~/.zvec-grep/config.json.";
 

@@ -1258,7 +1258,7 @@ mod tests {
                         },
                     )]),
                     false,
-                    crate::domain::FTS_CONFIG,
+                    crate::domain::FtsConfig::default(),
                 )
                 .expect("index descriptor"),
             )),

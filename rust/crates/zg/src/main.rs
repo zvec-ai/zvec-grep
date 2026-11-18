@@ -346,8 +346,14 @@ async fn execute_plan(plan: CliPlan) -> Result<ExitCode, Box<dyn Error>> {
 }
 
 fn execute_config(args: zg_cli::ConfigArgs) -> Result<(), Box<dyn Error>> {
-    use zg_cli::{ConfigAction, ModelAction, ProviderAction};
+    use zg_cli::{ConfigAction, FtsAction, ModelAction, ProviderAction};
     let (label, reference, path) = match args.action {
+        ConfigAction::Fts {
+            action: FtsAction::Set(args),
+        } => {
+            let path = zg_engine::config::set_fts(&args.into_update())?;
+            ("FTS", "defaults for new indexes".to_owned(), path)
+        }
         ConfigAction::Provider {
             action: ProviderAction::Set { reference, api_key },
         } => {

@@ -111,7 +111,7 @@ pub enum CommandLine {
     Status(StatusArgs),
     /// Manage the resident MCP daemon.
     Server(ServerArgs),
-    /// Configure provider credentials and model defaults.
+    /// Configure provider credentials, model defaults, and full-text analysis.
     Config(ConfigArgs),
     /// Manage workspace Remote Embedding authorization.
     Auth(AuthArgs),
@@ -162,6 +162,11 @@ pub struct ConfigArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigAction {
+    /// Configure full-text analysis defaults for new workspace indexes.
+    Fts {
+        #[command(subcommand)]
+        action: FtsAction,
+    },
     Provider {
         #[command(subcommand)]
         action: ProviderAction,
@@ -192,6 +197,54 @@ pub enum ModelAction {
         #[arg(long = "default")]
         default_model: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FtsAction {
+    Set(FtsArgs),
+}
+
+#[derive(Debug, Default, Args)]
+pub struct FtsArgs {
+    #[arg(long = "fts-tokenizer", value_parser = ["jieba", "standard", "ngram", "whitespace"])]
+    pub tokenizer: Option<String>,
+    /// Ordered comma-separated filters; an empty string disables all filters.
+    #[arg(long = "fts-filter", value_name = "FILTERS")]
+    pub filters: Option<String>,
+    /// JSON object replacing all extra analysis parameters; {} clears them.
+    #[arg(long = "fts-extra-params", value_name = "JSON", value_parser = parse_fts_extra_params)]
+    pub extra_params: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+impl FtsArgs {
+    fn is_empty(&self) -> bool {
+        self.tokenizer.is_none() && self.filters.is_none() && self.extra_params.is_none()
+    }
+
+    #[must_use]
+    pub fn into_update(self) -> zg_engine::api::index::FtsConfigUpdate {
+        zg_engine::api::index::FtsConfigUpdate {
+            tokenizer: self.tokenizer,
+            filters: self.filters.map(|filters| {
+                if filters.is_empty() {
+                    Vec::new()
+                } else {
+                    filters
+                        .split(',')
+                        .map(|value| value.trim().to_owned())
+                        .collect()
+                }
+            }),
+            extra_params: self.extra_params,
+        }
+    }
+}
+
+fn parse_fts_extra_params(
+    value: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    serde_json::from_str(value)
+        .map_err(|error| format!("--fts-extra-params must be a JSON object: {error}"))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -624,6 +677,8 @@ pub use zg_engine::api::relationships::Direction;
 #[derive(Debug, Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct IndexArgs {
+    #[command(flatten)]
+    pub fts: FtsArgs,
     /// Persist graph indexing; changing an existing index requires --rebuild.
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub graph: Option<bool>,
@@ -1106,6 +1161,9 @@ fn management_option_with_value(text: &str) -> bool {
     matches!(
         text,
         "--embedding"
+            | "--fts-tokenizer"
+            | "--fts-filter"
+            | "--fts-extra-params"
             | "--endpoint"
             | "--embedding-concurrency"
             | "--listen"
@@ -1653,6 +1711,7 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
             || args.graph.is_some()
             || args.reset_paths
             || args.embedding.is_some()
+            || !args.fts.is_empty()
             || args.model_cache.is_some()
             || args.device.is_some()
             || args.api_key.is_some()
@@ -1704,6 +1763,7 @@ fn index_plan(mut args: IndexArgs, current_dir: &Path) -> Result<CliPlan, CliErr
             root: Some(root),
             rebuild: args.rebuild,
             graph_indexing: args.graph,
+            fts: args.fts.into_update(),
             reset_paths: args.reset_paths,
             scan,
             embedding,
@@ -3301,6 +3361,57 @@ mod tests {
                     };
                     assert_eq!(request.embedding_concurrency, Some(value));
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn fts_index_options_preserve_empty_overrides_in_all_modes() {
+        for mode in ["direct", "server", "auto"] {
+            let cli = Cli::try_parse_from([
+                "zg",
+                "--fts-tokenizer",
+                "standard",
+                "--index",
+                "--mode",
+                mode,
+                "--fts-filter",
+                "",
+                "--fts-extra-params",
+                "{}",
+            ])
+            .expect("FTS arguments before and after index");
+            let CliPlan::Index {
+                operation: IndexOperation::Build(request),
+                ..
+            } = cli
+                .into_plan(std::env::current_dir().expect("working directory"))
+                .expect("plan")
+            else {
+                panic!("index");
+            };
+            assert_eq!(request.fts.tokenizer.as_deref(), Some("standard"));
+            assert_eq!(request.fts.filters, Some(vec![]));
+            assert_eq!(request.fts.extra_params, Some(serde_json::Map::new()));
+        }
+        let cli = Cli::try_parse_from(["zg", "--index", "--drop", "--fts-filter", ""])
+            .expect("drop syntax");
+        assert!(
+            cli.into_plan(std::env::current_dir().expect("working directory"))
+                .is_err()
+        );
+        for query in [vec!["query"], vec!["--rg", "query"]] {
+            for (option, value) in [
+                ("--fts-tokenizer", "standard"),
+                ("--fts-filter", ""),
+                ("--fts-extra-params", "{}"),
+            ] {
+                let error =
+                    Cli::try_parse_from([vec!["zg"], query.clone(), vec![option, value]].concat())
+                        .expect("query arguments")
+                        .into_plan(std::env::current_dir().expect("working directory"))
+                        .expect_err("index options cannot change query analysis");
+                assert!(error.to_string().contains(option), "{error}");
             }
         }
     }
