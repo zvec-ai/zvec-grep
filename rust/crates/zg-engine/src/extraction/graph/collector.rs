@@ -621,6 +621,15 @@ fn visit_for_bindings(
         // function the body calls by that name.
         context.register_shadowed_name(owner_index, &name);
     }
+    if format == FileFormat::Rust && node.kind() == "use_declaration" {
+        // `use crate::other::save;` binds `save` in this body alone, so the
+        // body's `save()` reaches that import rather than the module's own
+        // function of the name. Where the import points is the resolver's
+        // question, so the call stays pending here.
+        for name in rust_use_bindings(node, source) {
+            context.register_import_binding(owner_index, &name);
+        }
+    }
     let line = node.start_position().row + 1;
     let column = node.start_position().column;
     if let Some((name, target)) = alias {
@@ -3464,6 +3473,47 @@ fn descendants_within(node: Node<'_>, max_depth: usize) -> Vec<Node<'_>> {
         found.extend(descendants_within(child, max_depth - 1));
     }
     found
+}
+
+/// The spellings a Rust `use` declaration binds in the body that writes it:
+/// `use crate::other::save;` binds `save`, `use crate::other::save as write;`
+/// binds `write`, and a brace group binds one name per clause. A glob
+/// (`use super::*;`) states no spelling this reader can place.
+fn rust_use_bindings(node: Node<'_>, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    for clause in rust_use_clause(node_text(node, source)).split([',', '{', '}']) {
+        let clause = clause.trim().trim_end_matches(';').trim();
+        let words: Vec<&str> = clause.split_whitespace().collect();
+        let name = match words.as_slice() {
+            // `crate::other::save as write` binds the alias.
+            [.., "as", alias] => *alias,
+            _ => words.last().copied().unwrap_or_default(),
+        };
+        // A path keeps its last segment; a glob or an empty clause names
+        // nothing.
+        let name = name.rsplit("::").next().unwrap_or(name);
+        let name = name.strip_prefix("r#").unwrap_or(name);
+        if !name.is_empty() && name.chars().all(|ch| ch.is_alphanumeric() || ch == '_') {
+            names.push(name.to_owned());
+        }
+    }
+    names
+}
+
+/// The clauses of a `use` declaration, with any `pub` / `pub(crate)` /
+/// `pub(in path)` visibility before the keyword dropped:
+/// `pub(crate) use a::b as c;` yields `a::b as c;`.
+fn rust_use_clause(text: &str) -> &str {
+    for (index, keyword) in text.match_indices("use") {
+        let before = text[..index].chars().next_back();
+        let after = text[index + keyword.len()..].chars().next();
+        if before.is_none_or(|ch| ch.is_whitespace() || ch == ')')
+            && after.is_some_and(char::is_whitespace)
+        {
+            return &text[index + keyword.len()..];
+        }
+    }
+    text
 }
 
 /// Reduces a normalized `use` declaration to its module path: drops a leading

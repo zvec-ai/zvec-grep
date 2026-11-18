@@ -356,12 +356,20 @@ fn walk_entity_node<'tree>(
         if !adapter.is_declaration(entity) {
             graph_context.register_symbol(name.as_deref(), entity_index);
             graph_context.register_scoped_symbol(name.as_deref(), entity_index);
-            // A Rust module puts the items it declares in bare scope for every
-            // body inside it, unlike a class, whose members need a receiver.
-            // Other languages reach a namespace through the resolver's scope
-            // rules, where a type's members are searched before the namespace.
-            if format == FileFormat::Rust && symbol_type == Some(SymbolType::Module) {
-                graph_context.register_module_scope(entity_index);
+            // A module puts the items it declares in bare scope for every body
+            // inside it, and a function does the same for the bodies nested in
+            // it (`fn outer() { fn save() {} }` answers `inner`'s `save()`),
+            // unlike a class, whose members need a receiver. Other languages
+            // reach a namespace through the resolver's scope rules, where a
+            // type's members are searched before the namespace.
+            if format == FileFormat::Rust {
+                match symbol_type {
+                    Some(SymbolType::Module) => graph_context.register_module_scope(entity_index),
+                    Some(SymbolType::Function) => {
+                        graph_context.register_function_scope(entity_index);
+                    }
+                    _ => {}
+                }
             }
         }
         graph_context.add_contains_edge(
@@ -3801,6 +3809,136 @@ public class Service {
             calls,
             vec![(1, 0), (2, 1), (3, 1), (6, 5)],
             "`flush` reaches the module's own `save`, not the file-level namesake"
+        );
+    }
+
+    #[test]
+    fn nested_function_items_answer_the_bare_calls_of_their_bodies() {
+        use crate::domain::GraphEdgeKind;
+
+        // A function's items are in bare scope for the bodies nested in it:
+        // `inner`'s `save()` reaches `outer::save`. The module around them
+        // declares a `save` of its own, and the nearer function item wins
+        // before the walk accepts that module's answer.
+        let source = test_source(
+            FileFormat::Rust,
+            "lib.rs",
+            concat!(
+                "pub fn save(value: i32) -> i32 { value }\n",
+                "\n",
+                "pub mod m {\n",
+                "    pub fn save(value: i32) -> i32 { value * 2 }\n",
+                "\n",
+                "    pub fn outer(value: i32) -> i32 {\n",
+                "        fn save(value: i32) -> i32 { value + 1 }\n",
+                "\n",
+                "        fn inner() -> i32 { save(1) }\n",
+                "\n",
+                "        inner() + save(value)\n",
+                "    }\n",
+                "}\n",
+            ),
+        );
+        let extracted = extract_for_indexing(&source, ChunkOptions::default()).expect("extracts");
+        let graph = extracted.graph.expect("code walk produces a graph");
+
+        // Walk order: save 0, m 1, m::save 2, m::outer 3, outer::save 4,
+        // outer::inner 5.
+        let calls: Vec<(usize, usize)> = graph
+            .resolved
+            .iter()
+            .filter(|edge| edge.ref_kind == GraphEdgeKind::Calls)
+            .map(|edge| (edge.source_index, edge.target_index))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![(3, 5), (3, 4), (5, 4)],
+            "`inner` reaches the item its enclosing function declares"
+        );
+    }
+
+    #[test]
+    fn a_module_beside_a_function_of_the_same_name_keeps_the_call_on_the_function() {
+        use crate::domain::GraphEdgeKind;
+
+        // Rust keeps the type and value namespaces apart, so `mod save` may sit
+        // beside `fn save`. A bare `save()` is a call, and only the function
+        // answers it whatever order the two are declared in.
+        let source = test_source(
+            FileFormat::Rust,
+            "lib.rs",
+            concat!(
+                "pub fn save(value: i32) -> i32 { value }\n",
+                "\n",
+                "pub mod m {\n",
+                "    pub fn save(value: i32) -> i32 { value * 2 }\n",
+                "\n",
+                "    pub mod save {}\n",
+                "\n",
+                "    pub fn flush() -> i32 { save(1) }\n",
+                "}\n",
+            ),
+        );
+        let extracted = extract_for_indexing(&source, ChunkOptions::default()).expect("extracts");
+        let graph = extracted.graph.expect("code walk produces a graph");
+
+        // Walk order: save 0, m 1, m::save 2, m::save (module) 3, m::flush 4.
+        let calls: Vec<(usize, usize)> = graph
+            .resolved
+            .iter()
+            .filter(|edge| edge.ref_kind == GraphEdgeKind::Calls)
+            .map(|edge| (edge.source_index, edge.target_index))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![(4, 2)],
+            "`flush` calls the module's function, not the same-named module"
+        );
+    }
+
+    #[test]
+    fn a_local_use_declaration_keeps_its_call_pending() {
+        use crate::domain::GraphEdgeKind;
+
+        // `use crate::other::save;` inside `flush` binds the spelling nearer
+        // than the module's own `save`: which function the import names is the
+        // resolver's question, so the call must not bind the module's namesake.
+        let source = test_source(
+            FileFormat::Rust,
+            "lib.rs",
+            concat!(
+                "pub mod m {\n",
+                "    pub fn save(value: i32) -> i32 { value }\n",
+                "\n",
+                "    pub fn flush(value: i32) -> i32 {\n",
+                "        use crate::other::save;\n",
+                "\n",
+                "        save(value)\n",
+                "    }\n",
+                "}\n",
+            ),
+        );
+        let extracted = extract_for_indexing(&source, ChunkOptions::default()).expect("extracts");
+        let graph = extracted.graph.expect("code walk produces a graph");
+
+        // Walk order: m 0, m::save 1, m::flush 2.
+        assert!(
+            graph
+                .resolved
+                .iter()
+                .all(|edge| edge.ref_kind != GraphEdgeKind::Calls),
+            "the imported name must not bind the module's own `save`"
+        );
+        let pending: Vec<(usize, &str)> = graph
+            .pending
+            .iter()
+            .filter(|edge| edge.ref_kind == GraphEdgeKind::Calls)
+            .map(|edge| (edge.owner_index, edge.ref_name.as_str()))
+            .collect();
+        assert_eq!(
+            pending,
+            vec![(2, "save")],
+            "the call waits for the resolver's reading of the import"
         );
     }
 

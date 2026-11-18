@@ -173,11 +173,23 @@ pub(crate) struct WalkContext {
     /// Symbols each containing entity declares directly in its body, the
     /// innermost-scope shadow table: a call inside `outer` that names
     /// `work` binds the nested `outer::work` before any file-level name.
-    scoped_symbols: HashMap<usize, HashMap<String, usize>>,
+    /// A spelling lists every entity registered under it in walk order, because
+    /// Rust keeps the type and value namespaces apart: `fn save` beside
+    /// `mod save` is legal, and only the function answers a bare call.
+    scoped_symbols: HashMap<usize, HashMap<String, Vec<usize>>>,
     /// Rust modules. A module's items are in bare scope for every body written
     /// inside it, so its table answers a bare call before the file's own
     /// namesake does; an outer module's items need `super::` and never answer.
     module_scopes: HashSet<usize>,
+    /// Rust functions. A function's items are in bare scope for the bodies
+    /// nested inside it (`fn outer() { fn save() {} fn inner() { save() } }`),
+    /// so partition reads its table while climbing towards the module.
+    function_scopes: HashSet<usize>,
+    /// Names a `use` declaration binds in the body that writes it. Rust scopes
+    /// an import to that body, so a name a function imports is nearer than the
+    /// module's item of the same name: `use crate::other::save;` inside `flush`
+    /// makes its `save()` the imported one, which only the resolver can place.
+    import_bindings: HashMap<usize, HashSet<String>>,
     /// Names each entity takes for itself without necessarily binding them to
     /// an indexable target: parameters, and locals whose type the index cannot
     /// spell. A bare call through such a name reaches the local value, never
@@ -236,6 +248,8 @@ impl WalkContext {
             file_symbols: HashMap::new(),
             scoped_symbols: HashMap::new(),
             module_scopes: HashSet::new(),
+            function_scopes: HashSet::new(),
+            import_bindings: HashMap::new(),
             shadowed_names: HashMap::new(),
             borrowed_names: HashMap::new(),
             value_aliases: HashMap::new(),
@@ -320,7 +334,9 @@ impl WalkContext {
         self.scoped_symbols
             .entry(owner)
             .or_default()
-            .insert(name.to_owned(), index);
+            .entry(name.to_owned())
+            .or_default()
+            .push(index);
     }
 
     /// Records that `index` is a Rust module (`mod m { .. }`): the items it
@@ -332,6 +348,30 @@ impl WalkContext {
             return;
         }
         self.module_scopes.insert(index);
+    }
+
+    /// Records that `index` is a Rust function: the items its body declares
+    /// (`fn outer() { fn save() {} }`) are in bare scope for the bodies nested
+    /// inside it, so partition reads that table while climbing towards the
+    /// module. Method items stay out unless the walk reports them here.
+    pub(crate) fn register_function_scope(&mut self, index: usize) {
+        if !self.collecting {
+            return;
+        }
+        self.function_scopes.insert(index);
+    }
+
+    /// Records that a `use` declaration in `owner`'s body binds `name` there.
+    /// Rust scopes the import to that body, so partition lets the nearer
+    /// spelling keep the call pending instead of handing it to a module item.
+    pub(crate) fn register_import_binding(&mut self, owner: usize, name: &str) {
+        if !self.collecting || name.is_empty() {
+            return;
+        }
+        self.import_bindings
+            .entry(owner)
+            .or_default()
+            .insert(name.to_owned());
     }
 
     /// Records that `owner`'s body takes `name` for a local value or
@@ -378,7 +418,7 @@ impl WalkContext {
     #[allow(dead_code)]
     /// The per-entity local name tables partition consults before the
     /// file-level one.
-    pub(crate) fn scoped_symbols(&self) -> &HashMap<usize, HashMap<String, usize>> {
+    pub(crate) fn scoped_symbols(&self) -> &HashMap<usize, HashMap<String, Vec<usize>>> {
         &self.scoped_symbols
     }
 

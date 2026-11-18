@@ -179,6 +179,8 @@ pub(crate) fn partition_walk(
         file_symbols,
         scoped_symbols,
         module_scopes,
+        function_scopes,
+        import_bindings,
         shadowed_names,
         borrowed_names,
         value_aliases,
@@ -219,32 +221,15 @@ pub(crate) fn partition_walk(
                 continue;
             }
         }
-        // A bare name the owner's body already took for itself is not the
-        // file's name: `invoke(dispatch: () => void)` reaching `dispatch()`
-        // calls the parameter, never an imported function some alias table
-        // happens to spell. Only the owner's own tables may answer it, and a
-        // name no table can place stays pending instead of falling back.
-        let shadowed = edge.receiver_name.is_none()
-            && shadowed_names
-                .get(&edge.owner_index)
-                .is_some_and(|names| names.contains(&edge.ref_name));
-        // A name one of the classes around the owner imports
-        // (`using First<T>::Run;`) is that class's member, not the file's
-        // namesake: the cross-file resolver decides which member it reaches.
-        let borrowed = edge.receiver_name.is_none()
-            && borrowed_by_enclosing_class(
-                edge.owner_index,
-                &edge.ref_name,
-                &enclosing,
-                &borrowed_names,
-            );
         let resolved_target = in_file_target(
             &edge,
-            shadowed || borrowed,
+            shadowed_at_site(&edge, &enclosing, &shadowed_names, &borrowed_names),
             InFileTables {
                 symbols: &symbols,
                 scoped_symbols: &scoped_symbols,
                 module_scopes: &module_scopes,
+                function_scopes: &function_scopes,
+                import_bindings: &import_bindings,
                 file_symbols: &file_symbols,
                 aliases: &aliases,
                 value_aliases: &value_aliases,
@@ -283,6 +268,30 @@ pub(crate) fn partition_walk(
     partitioned
 }
 
+/// Whether the name a call spells is already taken nearer than the file's own
+/// table, so no enclosing item scope may answer it.
+///
+/// A bare name the owner's body took for itself is not the file's name:
+/// `invoke(dispatch: () => void)` reaching `dispatch()` calls the parameter,
+/// never an imported function some alias table happens to spell. A name one of
+/// the classes around the owner imports (`using First<T>::Run;`) is that
+/// class's member rather than the file's namesake, and the cross-file resolver
+/// decides which member it reaches.
+fn shadowed_at_site(
+    edge: &NameEdge,
+    enclosing: &HashMap<usize, usize>,
+    shadowed_names: &HashMap<usize, HashSet<String>>,
+    borrowed_names: &HashMap<usize, HashSet<String>>,
+) -> bool {
+    if edge.receiver_name.is_some() {
+        return false;
+    }
+    shadowed_names
+        .get(&edge.owner_index)
+        .is_some_and(|names| names.contains(&edge.ref_name))
+        || borrowed_by_enclosing_class(edge.owner_index, &edge.ref_name, enclosing, borrowed_names)
+}
+
 /// Whether one of the entities around `owner` imports `name` from another
 /// scope: a class body's `using First<T>::Run;` answers `Run()` in the
 /// methods written in that class, so the file's own namesake is not the call.
@@ -309,39 +318,92 @@ fn borrowed_by_enclosing_class(
     false
 }
 
-/// The entity the nearest module around `owner` declares under `name`, or
-/// `None` when that module does not declare it: a bare call inside
-/// `mod storage` reads `storage`'s own table, and never an outer module's —
-/// reaching those needs `super::`. Scopes that are not modules (an `impl`, a
-/// function) are skipped, because their items are not in bare scope.
-fn enclosing_module_symbol(
+/// The entity a bare call reaches among the ones one body declares under one
+/// spelling. Rust keeps the type and value namespaces apart, so a later
+/// `mod save` never takes the call away from `fn save`: a module is not a
+/// value, and a spelling only a module holds leaves the call pending.
+fn local_target(declared: &[usize], module_scopes: &HashSet<usize>) -> Option<usize> {
+    declared
+        .iter()
+        .rev()
+        .copied()
+        .find(|index| !module_scopes.contains(index))
+}
+
+/// What the item scopes around one bare call say about the name it spells.
+enum BareName {
+    /// No enclosing body or module binds the name, so the file's own table and
+    /// the cross-file resolver still get their say.
+    Unbound,
+    /// A `use` written in one of the enclosing bodies binds the name: the call
+    /// reaches what that import names, which only the resolver can read.
+    Imported,
+    /// An item scope declares the spelling. `Some` is the entity a bare call
+    /// reaches; `None` means only a module holds it — a module is not a value —
+    /// so the call stays pending instead of climbing to an outer scope.
+    Declared(Option<usize>),
+}
+
+/// What the modules and function bodies around `owner` say about `name`.
+///
+/// Bare scope holds a module's items for every body written inside it, and a
+/// function's items for the bodies nested in it: `mod storage` answers its
+/// `flush`, and `fn outer` answers the `save()` its nested `inner` writes. An
+/// outer module never answers — reaching it needs `super::` — and an `impl`, a
+/// trait or a class body is skipped, because its members need a receiver. A
+/// `use` written in one of those bodies is nearer than the items: it binds the
+/// spelling for the calls that see it, and where it points is the resolver's
+/// question.
+fn enclosing_bare_name(
     owner: usize,
     name: &str,
     enclosing: &HashMap<usize, usize>,
     module_scopes: &HashSet<usize>,
-    scoped_symbols: &HashMap<usize, HashMap<String, usize>>,
-) -> Option<usize> {
+    function_scopes: &HashSet<usize>,
+    scoped_symbols: &HashMap<usize, HashMap<String, Vec<usize>>>,
+    import_bindings: &HashMap<usize, HashSet<String>>,
+) -> BareName {
     let mut current = owner;
     // The file node is not an entity, so the walk ends where containment does.
     for _ in 0..64 {
-        let parent = *enclosing.get(&current)?;
-        if module_scopes.contains(&parent) {
-            return scoped_symbols
-                .get(&parent)
-                .and_then(|names| names.get(name))
-                .copied();
+        if import_bindings
+            .get(&current)
+            .is_some_and(|names| names.contains(name))
+        {
+            return BareName::Imported;
         }
+        let module = module_scopes.contains(&current);
+        if module || function_scopes.contains(&current) {
+            if let Some(declared) = scoped_symbols
+                .get(&current)
+                .and_then(|names| names.get(name))
+            {
+                return BareName::Declared(local_target(declared, module_scopes));
+            }
+            if module {
+                // The nearest module ends the walk: the items of the modules
+                // around it need `super::`. The file's own table is still read,
+                // because a glob import (`use super::*;`) states what an inner
+                // module sees of it.
+                return BareName::Unbound;
+            }
+        }
+        let Some(&parent) = enclosing.get(&current) else {
+            return BareName::Unbound;
+        };
         current = parent;
     }
-    None
+    BareName::Unbound
 }
 
 /// The file's own name tables, as one reference reads them.
 #[derive(Clone, Copy)]
 struct InFileTables<'a> {
     symbols: &'a HashMap<String, Vec<usize>>,
-    scoped_symbols: &'a HashMap<usize, HashMap<String, usize>>,
+    scoped_symbols: &'a HashMap<usize, HashMap<String, Vec<usize>>>,
     module_scopes: &'a HashSet<usize>,
+    function_scopes: &'a HashSet<usize>,
+    import_bindings: &'a HashMap<usize, HashSet<String>>,
     file_symbols: &'a HashMap<String, Vec<usize>>,
     aliases: &'a HashMap<(usize, String), Vec<NameEdge>>,
     value_aliases: &'a HashMap<(usize, String), String>,
@@ -358,6 +420,8 @@ fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> 
         symbols,
         scoped_symbols,
         module_scopes,
+        function_scopes,
+        import_bindings,
         file_symbols,
         aliases,
         value_aliases,
@@ -383,12 +447,14 @@ fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> 
         // (a module-level `const dispatch = send` is visible to every body in
         // the file, whatever its order), its owner's local name table (the
         // nested spelling an entity declares in its body shadows any file-level
-        // name inside it), the module around the owner (`mod storage`'s `save`
-        // answers its `flush`, not the file's namesake), then the file-level
-        // table. Members and nested definitions stay out of that last table: a
-        // top-level `caller()` naming `run` does not see `A::run` just because
-        // the file declares it once. Without better evidence the reference stays
-        // pending for the cross-file resolver, which also weighs imports.
+        // name inside it), then the item scopes around the owner — the module's
+        // own `save` answers its `flush`, and a nested `fn save` answers the
+        // bodies inside the function that declares it — and finally the
+        // file-level table. Members and nested definitions stay out of that
+        // last table: a top-level `caller()` naming `run` does not see `A::run`
+        // just because the file declares it once. Without better evidence the
+        // reference stays pending for the cross-file resolver, which also
+        // weighs imports.
         GraphEdgeKind::Calls => {
             let value_alias = || {
                 value_aliases
@@ -420,27 +486,27 @@ fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> 
                     None => scoped_symbols
                         .get(&edge.owner_index)
                         .and_then(|locals| locals.get(&edge.ref_name))
-                        .copied()
+                        .and_then(|declared| local_target(declared, module_scopes))
                         .or_else(|| {
                             // A parameter or an untyped local of that name in
                             // the owner's own body is the value the call
-                            // reaches; no enclosing module may answer it.
-                            (!shadowed)
-                                .then(|| {
-                                    enclosing_module_symbol(
-                                        edge.owner_index,
-                                        &edge.ref_name,
-                                        enclosing,
-                                        module_scopes,
-                                        scoped_symbols,
-                                    )
-                                })
-                                .flatten()
-                        })
-                        .or_else(|| {
-                            (!shadowed)
-                                .then(|| unique_symbol(file_symbols, &edge.ref_name))
-                                .flatten()
+                            // reaches; no enclosing scope may answer it.
+                            if shadowed {
+                                return None;
+                            }
+                            match enclosing_bare_name(
+                                edge.owner_index,
+                                &edge.ref_name,
+                                enclosing,
+                                module_scopes,
+                                function_scopes,
+                                scoped_symbols,
+                                import_bindings,
+                            ) {
+                                BareName::Declared(target) => target,
+                                BareName::Imported => None,
+                                BareName::Unbound => unique_symbol(file_symbols, &edge.ref_name),
+                            }
                         }),
                 },
             }
