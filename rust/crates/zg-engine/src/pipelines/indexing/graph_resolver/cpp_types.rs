@@ -275,7 +275,16 @@ fn named_type(
         match hits.as_slice() {
             [] => {}
             [hit] => return Ok(Some(Type::Class((*hit).clone()))),
-            _ => return Ok(None),
+            _ => {
+                // One qualified name, two declarations: the reference reaches
+                // the class its translation unit includes, and only that one.
+                let visible =
+                    super::unit_hits(store, snapshot, caches, "cpp", context.file, &hits)?;
+                return match visible.as_slice() {
+                    [hit] => Ok(Some(Type::Class((*hit).clone()))),
+                    _ => Ok(None),
+                };
+            }
         }
     }
     if matches!(name, "std::unique_ptr" | "std::shared_ptr") && arguments.len() == 1 {
@@ -375,6 +384,8 @@ fn class_for_member(ty: &Type, arrow: bool) -> Option<&NameIndexEntry> {
 fn member(
     store: &IndexStore,
     snapshot: &ResolutionSnapshot,
+    caches: &mut RuleCaches,
+    context: &Context,
     owner: &NameIndexEntry,
     name: &str,
     arity: Option<usize>,
@@ -411,7 +422,20 @@ fn member(
         let hit = match declarations.as_slice() {
             [] => continue,
             [hit] => Some(*hit),
-            _ => arity.and_then(|arity| unique_arity_match(declarations.into_iter(), arity)),
+            _ => {
+                // A member belongs to the class body the unit read, so a
+                // same-named member of a namesake class in a file the unit
+                // never pulls in is not what the call reaches.
+                let visible =
+                    super::unit_hits(store, snapshot, caches, "cpp", context.file, &declarations)?;
+                match visible.as_slice() {
+                    [hit] => Some(*hit),
+                    [] => {
+                        arity.and_then(|arity| unique_arity_match(declarations.into_iter(), arity))
+                    }
+                    _ => arity.and_then(|arity| unique_arity_match(visible.into_iter(), arity)),
+                }
+            }
         };
         if scope.name == owner.qualified_name || !branched {
             return Ok(hit.cloned());
@@ -519,7 +543,7 @@ fn expression_type(
                 let Some(name) = function.child_by_field_name("field") else {
                     return Ok(None);
                 };
-                return match member(store, snapshot, owner, text(name), arity)? {
+                return match member(store, snapshot, caches, context, owner, text(name), arity)? {
                     Some(function) => {
                         return_type(store, snapshot, caches, &function, remaining - 1)
                     }
@@ -626,6 +650,8 @@ pub(super) fn resolve_receiver(
     let target = member(
         store,
         snapshot,
+        caches,
+        &context,
         owner,
         &stored.name_tail,
         stored.reference.arity,

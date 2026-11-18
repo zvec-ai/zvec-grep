@@ -833,6 +833,40 @@ fn include_closure(
     Ok(reachable)
 }
 
+/// The candidates the translation unit of `file` can see: the file itself and
+/// everything its include chain reaches.
+///
+/// A C++ unit reads a class through the headers it includes, so two files
+/// declaring one qualified name are two classes: the one the unit never pulls
+/// in (a benchmark tool's namesake beside the header's class, say) is not what
+/// its calls reach.
+///
+/// # Errors
+/// Propagates graph storage failures of the include-chain read.
+fn unit_hits<'a>(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    caches: &mut RuleCaches,
+    language: &str,
+    file: u32,
+    hits: &[&'a NameIndexEntry],
+) -> crate::EngineResult<Vec<&'a NameIndexEntry>> {
+    if hits.len() < 2 {
+        return Ok(hits.to_vec());
+    }
+    if let Entry::Vacant(entry) = caches.include_closures.entry(file) {
+        entry.insert(include_closure(store, snapshot, language, file)?);
+    }
+    let Some(closure) = caches.include_closures.get(&file) else {
+        return Ok(hits.to_vec());
+    };
+    Ok(hits
+        .iter()
+        .filter(|hit| hit.file_id == file || closure.contains(&hit.file_id))
+        .copied()
+        .collect())
+}
+
 /// Narrows the candidates to the ones declared in a scope enclosing the
 /// reference, when any are.
 ///
@@ -3342,6 +3376,44 @@ fn unit_spelled_hits<'a>(
     Ok(if visible.is_empty() { hits } else { visible })
 }
 
+/// The candidates the reference's translation unit can see.
+///
+/// A C++ unit sees a type through the headers it includes, so two files
+/// declaring one qualified name are two classes: the one the unit never pulls
+/// in (a benchmark tool's namesake beside the header's class, say) is not what
+/// its calls reach. Only the included files and the unit's own stay candidates;
+/// a unit that includes none of them — a header reached through a build-system
+/// path the index cannot follow — keeps the candidates whole rather than
+/// losing the answer.
+///
+/// # Errors
+/// Propagates graph storage failures of the include-chain read.
+fn unit_visible_hits<'a>(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    hits: Vec<&'a NameIndexEntry>,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Vec<&'a NameIndexEntry>> {
+    if !matches!(stored.language.as_str(), "c" | "cpp") || hits.len() < 2 {
+        return Ok(hits);
+    }
+    let visible = unit_hits(
+        store,
+        snapshot,
+        caches,
+        &stored.language,
+        stored.file_id,
+        &hits,
+    )?;
+    // Narrowing to nothing states no evidence either way, and narrowing nothing
+    // is no narrowing at all.
+    if visible.is_empty() || visible.len() == hits.len() {
+        return Ok(hits);
+    }
+    Ok(visible)
+}
+
 /// The binding name extraction records for a `using namespace` directive.
 const USING_NAMESPACE_BINDING: &str = "[[cpp_using_namespace]]";
 
@@ -3668,6 +3740,9 @@ fn type_root_scope_in(
                 Some(nested) => nested,
                 None => enclosing_scope_hits(snapshot, stored, hits),
             };
+            // Two files may spell one class name; the unit's own includes say
+            // which of them its calls reach.
+            let hits = unit_visible_hits(store, snapshot, stored, hits, caches)?;
             Some(unit_spelled_hits(
                 store, snapshot, stored, &head, hits, caches,
             )?)

@@ -1429,6 +1429,112 @@ fn sweep_keeps_a_std_member_call_pending_over_a_workspace_namesake() {
 }
 
 #[test]
+fn sweep_binds_a_parameter_receiver_to_the_class_its_unit_includes() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    index_source(
+        &store,
+        "cache/cache_bench_tool.cc",
+        concat!(
+            "namespace rocksdb {\n",
+            "class SharedState {\n",
+            " public:\n",
+            "  int* GetMutex() { return nullptr; }\n",
+            "};\n",
+            "}  // namespace rocksdb\n",
+        ),
+    );
+    let header = index_source(
+        &store,
+        "db_stress_tool/db_stress_shared_state.h",
+        concat!(
+            "namespace rocksdb {\n",
+            "class SharedState {\n",
+            " public:\n",
+            "  int* GetMutex() { return nullptr; }\n",
+            "};\n",
+            "}  // namespace rocksdb\n",
+        ),
+    );
+    let caller = index_source(
+        &store,
+        "db_stress_tool/db_stress_common.cc",
+        concat!(
+            "#include \"db_stress_tool/db_stress_shared_state.h\"\n",
+            "namespace rocksdb {\n",
+            "void Lock(SharedState* shared) {\n",
+            "  shared->GetMutex();\n",
+            "}\n",
+            "}  // namespace rocksdb\n",
+        ),
+    );
+
+    let owner = pending_receiver_call_owner(&store, caller, "shared");
+    resolve_pending(&store, None, None).expect("sweep");
+    // Two files declare `rocksdb::SharedState`, and the unit reads one of them:
+    // the namesake the `#include` never pulls in is a different class, so it
+    // must not compete for the member call.
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![header],
+        "the class the unit includes answers the member call"
+    );
+}
+
+#[test]
+fn sweep_binds_a_unit_variable_member_to_the_class_its_unit_includes() {
+    let home = tempfile::tempdir().expect("workspace");
+    let store = open(home.path());
+    index_source(
+        &store,
+        "cache/cache_bench_tool.cc",
+        concat!(
+            "namespace rocksdb {\n",
+            "class SharedState {\n",
+            " public:\n",
+            "  int* GetMutex() { return nullptr; }\n",
+            "};\n",
+            "}  // namespace rocksdb\n",
+        ),
+    );
+    let header = index_source(
+        &store,
+        "db_stress_tool/db_stress_shared_state.h",
+        concat!(
+            "namespace rocksdb {\n",
+            "class SharedState {\n",
+            " public:\n",
+            "  int* GetMutex() { return nullptr; }\n",
+            "};\n",
+            "}  // namespace rocksdb\n",
+        ),
+    );
+    let caller = index_source(
+        &store,
+        "db_stress_tool/db_stress_common.cc",
+        concat!(
+            "#include \"db_stress_tool/db_stress_shared_state.h\"\n",
+            "namespace rocksdb {\n",
+            "SharedState* shared_state = nullptr;\n",
+            "void LockShared() {\n",
+            "  shared_state->GetMutex();\n",
+            "}\n",
+            "}  // namespace rocksdb\n",
+        ),
+    );
+
+    let owner = pending_receiver_call_owner(&store, caller, "shared_state");
+    resolve_pending(&store, None, None).expect("sweep");
+    // A namespace-scope variable states its type for the whole unit, which is
+    // the same include boundary: the header's class is the one it holds.
+    assert_eq!(
+        call_target_files(&store, &owner),
+        vec![header],
+        "the unit's own include decides which class the variable holds"
+    );
+}
+
+#[test]
 fn sweep_keeps_an_untyped_receiver_call_pending_when_the_member_name_is_unique() {
     let home = tempfile::tempdir().expect("workspace");
     let store = open(home.path());
