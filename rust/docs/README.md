@@ -4,33 +4,25 @@ These documents describe the current native implementation. Start with the
 [workspace README](../README.md) or the [contributor guide](../CONTRIBUTING.md).
 End-user tutorials live on [zvec.org](https://zvec.org/en/docs/zvec-grep/).
 
-## Runtime contracts
-
-| Document | Scope |
-| --- | --- |
-| [CLI behavior](runtime/cli.md) | Query parsing, previews, first-index setup, status, path lookup, lexical search and call graphs |
-| [Embedding models](runtime/models.md) | Model selection, backend concurrency and artifact downloads |
-| [Engine and workspace lifecycle](runtime/engine.md) | Shared resources, read/write coordination, index publication and relocation |
-| [Daemon and MCP](runtime/mcp.md) | Protocol compatibility, freshness, tool inputs, progress and cancellation |
-| [Remote embedding authorization](runtime/authorization.md) | Credentials, workspace consent and protocol continuation |
-| [Agent integration and upgrades](runtime/integrations.md) | Managed client configuration and supported launcher migration |
-
 ## Development and delivery
 
 | Document | Scope |
 | --- | --- |
 | [Contributing](../CONTRIBUTING.md) | Development workflow, API conventions and ordinary checks |
 | [Architecture](../ARCHITECTURE.md) | Public boundaries, dependency direction and crate responsibilities |
-| [Native builds](development/building.md) | Toolchains, native SDKs, ONNX Runtime, CUDA and local installation |
-| [Validation](development/validation.md) | CI coverage, real-model checks and platform validation |
-| [Releasing](development/releasing.md) | Collecting, inspecting, publishing and promoting artifacts |
+| [Native builds](development/building.md) | Platform prerequisites, first Cargo build, executable paths and optional CUDA |
+| [Validation](development/validation.md) | Which checks to run and where to find failure evidence |
+| [Releasing](development/releasing.md) | Native installer candidates, verification and GitHub Release publication |
 | [Migration checklist](migration.md) | Remaining dependencies before removing the old implementation and moving this workspace |
 
 ## Documentation kept with its owner
 
 | Location | Purpose |
 | --- | --- |
-| [Engine](../crates/zg-engine/README.md) | Public API usage and navigation to domain, file selection, pipelines, models, storage and workspace internals |
+| [Engine](../crates/zg-engine/README.md) | Public API, model/resource ownership, authorization and internal module navigation |
+| [Workspace](../crates/zg-engine/src/workspace/README.md) | Persistence, read/write coordination, relocation and consent records |
+| [Daemon](../crates/zg-daemon/README.md) | Resident resources, refresh, job lifetime and execution-mode differences |
+| [MCP transport](../crates/zg-transport-mcp/README.md) | Tool boundaries, setup, consent, progress and cancellation |
 | [Native host](../crates/zg-host-native/README.md) | Scanner and watcher contracts |
 | [Compatibility fixtures](../compat/README.md) and [MCP fixtures](../compat/mcp/README.md) | Test data, regeneration and accepted differences |
 | [npm distribution](../npm/README.md) | Package layout, runtime support and installation policy |
@@ -42,8 +34,11 @@ End-user tutorials live on [zvec.org](https://zvec.org/en/docs/zvec-grep/).
 
 ## Scope and maintenance
 
-- Keep the workspace README short; put each detailed contract or procedure in
-  its owning document and link to it from other topics.
+- Keep the workspace README short. Put build, validation and release procedures
+  under `docs/development/`; keep design constraints with the responsible module.
+- Keep user-facing command and integration instructions in the user documentation
+  and CLI help. Do not maintain a second option reference or a prose inventory of
+  implementation constants in this repository.
 - Keep crate/module READMEs beside the code. Keep package READMEs, fixture
   instructions, benchmark prompts, datasets and result reports beside their
   consumers; they are not general development notes.

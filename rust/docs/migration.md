@@ -14,7 +14,6 @@ CONTRIBUTING.md
 ARCHITECTURE.md
 docs/
   README.md
-  runtime/
   development/
   migration.md
 crates/                   # Keep module documentation next to the code.

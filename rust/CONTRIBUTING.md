@@ -15,7 +15,7 @@ cargo run -p zg -- --rg needle .
 ```
 
 See [native builds](docs/development/building.md) for prerequisites, native
-SDKs and local installation.
+SDKs and step-by-step Cargo build instructions.
 
 The workspace pins its Rust toolchain in `rust-toolchain.toml`. Lexical search
 uses embedded `grep` and `ignore` crates, so a system `rg` executable is not
@@ -92,9 +92,9 @@ packaging and installer tests. For broader packaging regression coverage, run:
 node --test scripts/npm-*.test.mjs scripts/standalone-*.test.mjs npm/meta/install.test.cjs
 ```
 
-Use [runtime validation](docs/development/validation.md) for real-model, CUDA,
-Windows runner and release checks. Use [releasing](docs/development/releasing.md)
-for candidate and publication commands.
+Use [validation](docs/development/validation.md) to select local or CI checks
+and find failure evidence. Use [releasing](docs/development/releasing.md) for
+standalone installer candidates and GitHub Release publication.
 
 ## Documentation
 

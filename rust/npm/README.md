@@ -253,12 +253,64 @@ extraction uses system `tar`; local archives need no network. Development and
 package tests use the Node version required by the workspace's
 [package.json](../package.json), independently of published installation compatibility.
 
+## Local packaging
+
+These scripts require Node.js 20+ and npm in addition to the
+[native build prerequisites](../docs/development/building.md). Run them from `rust/`:
+
+```sh
+npm run build
+npm run install:local
+zg --version
+```
+
+The install links the active npm global prefix to `dist/npm/zvec-grep-local`;
+rerun it after cleaning `dist/`. Use `npm run pack:local` for a self-contained
+local tarball without installation, or `npm run test:package` for an isolated
+install smoke test. Generated packages live under `dist/npm/`.
+
+The build/pack/install scripts prefer CUDA on Linux/Windows x64. In default
+`auto` mode, no `nvcc` on PATH selects a CPU-only build. Use `--cpu-only` to
+request CPU explicitly, or prebuilt mode for a CUDA-capable x64 package:
+
+```sh
+npm run build -- --cpu-only
+# CUDA-capable x64 package without nvcc (PowerShell: set $env:LLAMA_CPP_BUILD_MODE):
+LLAMA_CPP_BUILD_MODE=prebuilt npm run build
+```
+
+`--no-build` reuses the last successful build; `--prefix <path>` selects an
+isolated npm prefix for installation or smoke testing. Manual CPU packaging
+rejects directories containing stale CUDA libraries. Use a fresh target
+directory or an audited CUDA bundle instead of mixing payloads.
+
+The release commands prepare intermediate native packages used by both
+distribution channels:
+
+| Command | Result |
+| --- | --- |
+| `npm run release:verify` | Check platform/release configuration |
+| `npm run release:pack` | Build and pack the current platform |
+| `npm run release:cpu` | Build an explicitly CPU-only local package |
+| `npm run release:collect -- --targets darwin-arm64` | Collect a validation-only subset, including the meta package and `release.json`; change the target to match your packages |
+| `npm run release:collect` | Collect the complete platform/component set |
+| `npm run release:artifact-smoke` | Install and verify collected packages on the matching host without rebuilding |
+
+Collected tarballs and `release.json` live under `dist/npm/release/tarballs/`.
+Collection verifies exact versions and hashes and rejects missing or extra
+tarballs. For CUDA targets it requires every component, even when testing CPU
+installation. `--expect-cpu` checks for zero CUDA downloads on CPU hosts;
+`--accelerator auto --expect-cuda` requires CUDA installation on GPU hosts.
+Pass smoke options after `--` when using npm scripts.
+
+For native GitHub Release archives, continue with the
+[standalone release guide](../docs/development/releasing.md).
+
 ## Publication policy
 
-The [release guide](../docs/development/releasing.md) owns commands for building,
-collecting, inspecting and publishing candidates. The
-[validation guide](../docs/development/validation.md) owns CPU/GPU, registry and
-platform checks. Keep those procedures there instead of duplicating them here.
+The [release guide](../docs/development/releasing.md) describes the shared
+workflow through standalone GitHub Release publication. Use
+[validation](../docs/development/validation.md) to select local or CI checks.
 
 Release order:
 

@@ -64,8 +64,9 @@ relocation, and authorization behavior.
 
 ## Resource ownership
 
-Detailed cache, locking and workspace lifetime rules live in
-[engine and workspace lifecycle](docs/runtime/engine.md).
+Resource lifetime is documented with the [engine](crates/zg-engine/README.md#resource-ownership),
+[workspace](crates/zg-engine/src/workspace/README.md#read-and-write-coordination)
+and [daemon](crates/zg-daemon/README.md).
 
 The engine owns a private model runtime manager. Matching model configuration
 and concurrency settings reuse cached runtimes and their loaded resources.

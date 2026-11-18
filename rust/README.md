@@ -9,7 +9,7 @@ contains the legacy TypeScript implementation.
 - [User documentation](https://zvec.org/en/docs/zvec-grep/): installation and everyday use.
 - [Standalone installation](standalone/README.md): native bundles without Node/npm.
 - [npm installation](npm/meta/README.md): native packages distributed through npm.
-- [Agent integration](docs/runtime/integrations.md): configuration and launcher upgrades.
+- [Agent integration](https://zvec.org/en/docs/zvec-grep/agents/): client configuration.
 
 ## Develop
 
@@ -21,7 +21,7 @@ cargo run -p zg -- --rg needle .
 ```
 
 Use the pinned Rust toolchain, platform build prerequisites, Python 3 and curl.
-See [native builds](docs/development/building.md) for SDKs, CUDA and local packages.
+See [native builds](docs/development/building.md) for platform prerequisites, Cargo commands and optional CUDA.
 
 ```sh
 bash scripts/check.sh
@@ -36,10 +36,8 @@ The [contributor guide](CONTRIBUTING.md) lists individual checks and conventions
 | --- | --- |
 | Complete documentation map | [Documentation index](docs/README.md) |
 | Architecture and crate boundaries | [Architecture](ARCHITECTURE.md) |
-| CLI search, previews and setup | [CLI behavior](docs/runtime/cli.md) |
 | Engine API and internal modules | [Engine guide](crates/zg-engine/README.md) |
-| Models, concurrency and downloads | [Embedding models](docs/runtime/models.md) |
-| Daemon, MCP and remote consent | [MCP](docs/runtime/mcp.md), [authorization](docs/runtime/authorization.md) |
+| Daemon and MCP ownership | [Daemon](crates/zg-daemon/README.md), [MCP transport](crates/zg-transport-mcp/README.md) |
 | CI and real-runtime checks | [Validation](docs/development/validation.md) |
 | Native packaging and publication | [Releasing](docs/development/releasing.md) |
 | Compatibility fixtures | [Compatibility](compat/README.md) |

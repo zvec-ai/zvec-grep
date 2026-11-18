@@ -12,3 +12,8 @@ Source files remain untouched. Files are extracted into entities that carry cont
 1. **Entity** combines content, source references, and metadata into a logical search unit.
 1. **Model** defines model identity, configuration, and execution progress.
 1. **Index** defines embedding model routing, per-content-kind retrieval tables, and full-text configuration.
+
+Each entity owns one complete source content object. Text fragments reference
+that content through UTF-8 byte ranges instead of duplicating it. Source
+coordinates are derived from the corresponding content range; presentation must
+not infer source positions from rendered line counts.

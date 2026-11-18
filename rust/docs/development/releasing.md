@@ -1,132 +1,114 @@
-# Packaging and releasing
+# Release the standalone installers
 
-Run local commands from the workspace directory, currently `rust/`.
-The [npm distribution contract](../../npm/README.md) owns package layout,
-platform support and installer policy. [Validation](validation.md) owns the
-CPU/GPU and registry gates. [Standalone installation](../../standalone/README.md)
-covers native bundles and release assets.
+This guide covers the native archives consumed by
+[install.sh](../../standalone/install.sh) and
+[install.ps1](../../standalone/install.ps1). Run local commands from `rust/`.
 
-## Prepare local candidates
+The installers **do not require Node.js or npm on the user's machine**.
+Unix uses a POSIX shell, curl or wget, tar and a SHA-256 utility; Windows uses
+PowerShell and .NET. The downloaded native executable owns installation,
+activation and recovery.
 
-Validate the release manifest and build the current platform dry-run packages:
+The maintainer toolchain still uses Node.js and npm to build and collect native
+packages. Standalone archives are assembled from those verified payloads.
+Changing the distribution entry point does not remove that build dependency.
 
-```sh
-npm run release:verify
-npm run release:pack
-```
+## 1. Produce a candidate without publishing
 
-Use `npm run release:cpu` for an explicitly CPU-only package.
-Generated release tarballs live in `dist/npm/release/tarballs/`.
-
-CI can package a previously built target artifact without rebuilding it:
-
-```sh
-node scripts/npm-release.mjs pack-platform \
-  --target linux-x64-gnu \
-  --binary /path/to/zg \
-  --lib-dir /path/to/runtime-libs \
-  --no-build
-```
-
-The runtime library directory must include zvec's shared library. Without
-`--lib-dir`, runtime libraries are read from the binary's directory.
-This entry point is CPU-only and applies the same mixed-directory check as
-local `pack --no-build`, including when `--binary` or `--lib-dir` is explicit.
-
-For a complete audited CUDA bundle, preserve its `bin/` and `lib/` layout:
+Use [rust-publish.yml](../../../.github/workflows/rust-publish.yml).
+Replace `OWNER/REPO` with the repository containing `your-branch`, and choose
+the target matching your test machine:
 
 ```sh
-node scripts/npm-release.mjs pack-platform \
-  --target linux-x64-gnu \
-  --bundle-dir target/release/zg-cuda \
-  --no-build
+gh workflow run rust-publish.yml --repo OWNER/REPO --ref your-branch \
+  -f publish=false -f cuda=false -f platform=darwin-arm64
 ```
 
-Bundle mode accepts only regular files under `bin/` and `lib/`; `bin/`
-contains exactly the target executable. It cannot be combined with
-`--binary`, `--lib-dir`, or `--cpu-only`. All payload files are checksummed.
+Other targets are listed in [platforms.json](../../npm/platforms.json).
+`platform=all` builds all six targets. `cuda=true` adds GPU verification;
+`publish=false` keeps the run unpublished. A single-platform candidate cannot
+be promoted to a complete release.
 
-## Collect and inspect exact artifacts
-
-`release:platform` creates native packages; `release:collect` packs the meta
-package and records exact tarball hashes in `release.json`. Collection requires
-the full platform/component set unless `--targets` explicitly requests a
-validation-only subset:
+Wait for the selected build and verification jobs, then find the run ID and
+download the metadata plus your platform's archives:
 
 ```sh
-npm run release:collect -- --targets linux-x64-gnu
-npm run release:artifact-smoke
+gh run list --repo OWNER/REPO --workflow rust-publish.yml --branch your-branch
+gh run download RUN_ID --repo OWNER/REPO \
+  --pattern 'rust-standalone-*-metadata' \
+  --pattern 'rust-standalone-*-darwin-arm64' \
+  --dir dist/standalone
 ```
 
-Run smoke checks on the matching host platform. `release:smoke` is an alias for
-`release:artifact-smoke`. Both install collected bytes in an isolated npm
-prefix and verify the CLI/daemon without compiling or repacking.
-`-- --accelerator auto --expect-cuda` requires working CUDA installation;
-`--expect-cpu` requires no CUDA requests or installation on a CPU host.
-A failed local rebuild invalidates `native-build.json`; `--no-build` refuses
-reuse until a build completes.
+Use a fresh download directory for each candidate. Change both the platform
+input and artifact pattern when testing another target.
 
-`release:collect` rejects missing or extra tarballs. Even a partial candidate's
-meta package locks all six platform versions. `--output-dir <path>` keeps
-inspection artifacts separate from the default release directory.
-Each compressed tarball has a 180 MiB budget enforced at packing, collection
-and publication preflight.
+## 2. Inspect and test the installer artifacts
 
-## Validate in CI
+`dist/standalone/` contains:
 
-The release workflow is manually dispatched. Choose `all` or one native
-target from [platforms.json](../../npm/platforms.json):
+| Artifact | Purpose |
+| --- | --- |
+| `install.sh`, `install.ps1` | User-facing installers |
+| `manifest.tsv` | Version, source commit, release tag, archive names, sizes and hashes |
+| `SHA256SUMS` | Checksums for archives and installer metadata |
+| `zvec-grep-<version>-<target>-<accelerator>.tar.gz` or `.zip` | Complete native runtime; Windows uses ZIP |
+
+A complete release has six CPU archives and two additional CUDA archives for
+Linux/Windows x64. Users download the archive for their platform and selected
+accelerator; the installer does not fetch npm packages or compile code.
+
+Run the installer smoke suite on the matching host:
 
 ```sh
-gh workflow run rust-publish.yml --ref <branch> \
-  -f publish=false -f cuda=false -f platform=linux-x64-gnu
+node scripts/standalone-smoke.mjs --directory dist/standalone
 ```
 
-Set `cuda=true,publish=false` to include GPU validation. All selected builds
-run in parallel; concurrency groups are scoped to branch and platform selection,
-and newer runs do not cancel an in-progress run in the same group.
-See [validation](validation.md#package-validation) for required checks and evidence.
+The Node-based test harness serves the candidate through a local test server,
+runs install/upgrade/recovery/uninstall cases in isolated directories, and
+removes Node/npm from the installer's PATH. Results and command logs are written
+under `dist/standalone-smoke/`. See [validation](validation.md) for other checks.
 
-All-platform runs retain `rust-release-<version>`; subset runs retain
-`rust-candidate-<version>` with `partial: true`. Artifacts contain selected
-native/component tarballs, the exact-version meta tarball, `SHA256SUMS`,
-`release.json` with the source commit, and platform-specific installation
-commands. Follow those commands to inspect a candidate locally. Artifacts are
-retained for 14 days. A downloadable candidate alone does not prove runtime
-validation succeeded.
+## 3. Assemble archives locally when needed
 
-## Publish and promote
-
-Update the version in [Cargo.toml](../../Cargo.toml). Package versions come from
-Cargo, not the tag name. `publish=true` requires `platform=all`.
-`rust-canary` permits `main` or a tag; `latest` requires a tag.
+If you already have collected native tarballs and their `release.json`, use:
 
 ```sh
-gh workflow run rust-publish.yml --ref main -f publish=true
-gh workflow run rust-publish.yml --ref <tag> -f publish=true -f dist_tag=latest
+node scripts/standalone-release.mjs \
+  --tarball-dir dist/npm/release/tarballs \
+  --output-dir dist/standalone
 ```
 
-The selected ref must contain the intended workflow and version changes.
-Every publication first uses `rust-canary`: runtime components, base native
-packages, then the meta package. `latest` is a separate promotion after the
-entire registry validation matrix passes. Ordinary build/pack commands neither
-publish nor move tags.
+This verifies and assembles existing payloads; it does not compile or publish.
+It preserves licenses and notices and emits the same installer artifacts as CI.
+Plain Cargo output is not sufficient input. The
+[npm package guide](../../npm/README.md#local-packaging) documents preparation
+of the intermediate packages.
 
-An already published version is reusable only when its tarball integrity matches
-the collected candidate. `release:publish` supports retrying a partial
-publication without replacing an existing version; `release:promote` moves tags
-only for an identical published release.
+## 4. Publish a stable GitHub Release
 
-Configure npm trusted publishing for all 15 packages with both **Allow npm
-publish** and **Allow npm dist-tag**, or supply an eligible `NPM_TOKEN`.
-Publication/promotion use npm 11.21.0 for OIDC dist-tag support. The release
-workflow must have `id-token: write`, but that alone does not grant npm tag
-permission. See [publication policy](../../npm/README.md#publication-policy).
+Update the version in [Cargo.toml](../../Cargo.toml), then create and push the
+matching `vX.Y.Z` tag. Standalone publication requires a stable version, all
+platforms, and the exact verified source tag/commit in `zvec-ai/zvec-grep`:
 
-## Standalone releases
+```sh
+gh workflow run rust-publish.yml --repo zvec-ai/zvec-grep --ref vX.Y.Z \
+  -f publish=true -f platform=all -f dist_tag=latest
+```
 
-`npm run release:standalone` assembles complete bundles from verified npm
-payloads. `npm run release:standalone-smoke` validates the installers.
-The workflow publishes standalone GitHub Release assets after the native
-release gates; see the [standalone release workflow](../../standalone/README.md#release-workflow)
-for manifests, installers and recovery behavior.
+The current workflow first completes native CPU/GPU checks, standalone installer
+checks, npm publication and registry verification. Standalone publication waits
+for successful npm `latest` promotion; there is no standalone-only publishing
+mode yet. The existing [npm publication permissions](../../npm/README.md#publication-policy)
+are therefore still required.
+
+The publisher uploads to a draft GitHub Release, verifies the complete asset
+inventory against GitHub's sizes and hashes, and publishes only after validation.
+Retries accept identical published assets without replacing them. Creating a
+Git tag or uploading an incomplete candidate does not make a working installer
+endpoint.
+
+After publication, users run the scripts in
+[install and upgrade](../../standalone/README.md#install-and-upgrade).
+Re-running an installer upgrades the installation; an explicit version selects
+that release. The scripts install published archives, not the current checkout.
