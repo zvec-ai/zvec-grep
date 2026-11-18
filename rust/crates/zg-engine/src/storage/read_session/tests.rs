@@ -69,7 +69,7 @@ impl Fixture {
                     std::collections::BTreeMap::new(),
                     std::collections::BTreeMap::new(),
                     false,
-                    crate::domain::FTS_CONFIG,
+                    crate::domain::FtsConfig::default(),
                 )
                 .expect("index descriptor"),
             )),
@@ -123,6 +123,7 @@ fn write_unclosed_text(
     let lock = acquire_workspace_lock(layout, LockMode::Exclusive, "test.write")
         .expect("writer drains cache");
     let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        fts: crate::domain::FtsConfig::default(),
         graph_enabled: false,
         storage_path: storage_home.to_path_buf(),
         embeddings: vec![schema()],

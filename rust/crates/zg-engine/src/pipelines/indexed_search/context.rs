@@ -914,7 +914,7 @@ mod tests {
                 std::collections::BTreeMap::new(),
                 std::collections::BTreeMap::new(),
                 false,
-                crate::domain::FTS_CONFIG,
+                crate::domain::FtsConfig::default(),
             )
             .expect("index descriptor"),
         ));

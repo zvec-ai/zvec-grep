@@ -8,7 +8,7 @@ use crate::{
     api::relationships::{Direction, RelationshipOptions, RelationshipResult},
     domain::{
         CodeMetadata, Content, ContentKind, Entity, EntityFragment, EntityId, EntityMetadata,
-        FTS_CONFIG, FileIndexStatus, FileRecord, FileSnapshot, FragmentId, IndexDescriptor,
+        FileIndexStatus, FileRecord, FileSnapshot, FragmentId, FtsConfig, IndexDescriptor,
         IndexState, Range, ScanRules, SourcePath, SymbolType, TextRange, Workspace,
         WorkspaceLayout,
         model::{EmbeddingMetric, EmbeddingModelInfo, ModelInfo},

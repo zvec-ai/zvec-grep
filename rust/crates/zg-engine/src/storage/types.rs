@@ -22,6 +22,7 @@ pub(crate) enum WorkspaceIndexStorageOptions {
         storage_path: PathBuf,
         graph_enabled: bool,
         embeddings: Vec<EmbeddingModelInfo>,
+        fts: crate::domain::FtsConfig,
     },
 }
 

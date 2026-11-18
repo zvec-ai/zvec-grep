@@ -166,11 +166,19 @@ fn write_embedding(
     let fts = index.and_then(|index| index.fts.as_ref()).map_or_else(
         || "Not configured".into(),
         |fts| {
-            format!(
+            let mut description = format!(
                 "tokenizer={} filters={}",
                 human_text(&fts.tokenizer, terminal),
                 human_text(&fts.filters.join(", "), terminal)
-            )
+            );
+            if !fts.extra_params.is_empty() {
+                description.push_str(" extra_params=");
+                description.push_str(&human_text(
+                    &serde_json::Value::Object(fts.extra_params.clone()).to_string(),
+                    terminal,
+                ));
+            }
+            description
         },
     );
     write_status_field(writer, theme, "FTS", &[fts])
@@ -266,6 +274,7 @@ mod tests {
                     input_budget: None,
                 }),
                 fts: Some(WorkspaceIndexFts {
+                    extra_params: serde_json::Map::new(),
                     tokenizer: "jieba".into(),
                     filters: vec!["lowercase".into()],
                 }),

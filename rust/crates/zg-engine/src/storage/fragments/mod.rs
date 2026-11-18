@@ -25,8 +25,8 @@ use super::{
 use crate::{
     EngineError, EngineResult,
     domain::{
-        CodeMetadata, DirectoryId, Entity, EntityFragment, EntityId, EntityMetadata, FTS_CONFIG,
-        FileId, FileRecord, FragmentId, IndexField, SourcePath,
+        CodeMetadata, DirectoryId, Entity, EntityFragment, EntityId, EntityMetadata, FileId,
+        FileRecord, FragmentId, FtsConfig, IndexField, SourcePath,
         model::{EmbeddingMetric, EmbeddingModelInfo},
     },
     utils::sha256_hex_parts,
@@ -42,6 +42,7 @@ impl Fragments {
     pub(super) fn open(
         root: &Path,
         embeddings: &[EmbeddingModelInfo],
+        fts: &FtsConfig,
         read_only: bool,
     ) -> EngineResult<Self> {
         let mut indexes = BTreeMap::new();
@@ -62,7 +63,7 @@ impl Fragments {
             let name = fragment_collection_name(embedding);
             let collection = open_collection(
                 &root.join(&name),
-                &fragments_schema(dimension, metric)?,
+                &fragments_schema(dimension, metric, fts)?,
                 read_only,
             )?;
             if indexes
@@ -362,7 +363,15 @@ fn retrieval_schema(name: &str) -> EngineResult<CollectionSchema> {
     Ok(schema)
 }
 
-fn fragments_schema(dimension: u32, metric: MetricType) -> EngineResult<CollectionSchema> {
+fn fragments_schema(
+    dimension: u32,
+    metric: MetricType,
+    fts: &FtsConfig,
+) -> EngineResult<CollectionSchema> {
+    fts.validate()?;
+    let filters = fts.filters.iter().map(String::as_str).collect::<Vec<_>>();
+    let extra_params = serde_json::to_string(&fts.extra_params)
+        .map_err(|error| EngineError::internal(error.to_string()))?;
     let mut schema = retrieval_schema("fragments")?;
     let mut text = native(
         FieldSchema::new("text", DataType::String, false, 0),
@@ -370,7 +379,7 @@ fn fragments_schema(dimension: u32, metric: MetricType) -> EngineResult<Collecti
     )?;
     native(
         text.set_index_params(&native(
-            IndexParams::fts(Some(FTS_CONFIG.tokenizer), Some(FTS_CONFIG.filters), None),
+            IndexParams::fts(Some(&fts.tokenizer), Some(&filters), Some(&extra_params)),
             "define full-text index",
         )?),
         "attach full-text index",
