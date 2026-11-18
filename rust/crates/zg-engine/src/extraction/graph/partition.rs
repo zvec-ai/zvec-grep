@@ -41,7 +41,7 @@ pub(crate) struct ResolvedNameEdge {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PendingNameRef {
     pub ref_kind: GraphEdgeKind,
-    /// Entity ordinal owning the reference; [`FILE_SCOPE_INDEX`] for imports.
+    /// Entity ordinal owning the reference; [`FILE_SCOPE_INDEX`] at module scope.
     pub owner_index: usize,
     pub ref_name: String,
     pub receiver_name: Option<String>,
@@ -112,7 +112,7 @@ fn alias_table(name_edges: &[NameEdge]) -> HashMap<(usize, String), Vec<NameEdge
 fn alias_at<'a>(
     aliases: &'a HashMap<(usize, String), Vec<NameEdge>>,
     edge: &NameEdge,
-) -> Option<&'a str> {
+) -> Option<&'a NameEdge> {
     let position = (edge.line, edge.column);
     let local = aliases
         .get(&(edge.owner_index, edge.ref_name.clone()))
@@ -122,13 +122,11 @@ fn alias_at<'a>(
                     && binding.scope_end.is_none_or(|end| position < end)
             })
         });
-    local
-        .or_else(|| {
-            aliases
-                .get(&(super::FILE_SCOPE_INDEX, edge.ref_name.clone()))
-                .and_then(|bindings| bindings.last())
-        })
-        .and_then(|binding| binding.bound_type.as_deref())
+    local.or_else(|| {
+        aliases
+            .get(&(super::FILE_SCOPE_INDEX, edge.ref_name.clone()))
+            .and_then(|bindings| bindings.last())
+    })
 }
 
 /// Whether a binding states a value this file can place. `?` marks a
@@ -351,8 +349,16 @@ fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> 
             // name is not the answer: the resolver reads the declared binding
             // at the call's position and can still tell a parameter, a nested
             // definition or a later reassignment apart from the file's name.
-            Some(bound) if !states_a_placeable_value(bound) => None,
-            Some(bound) => unique_symbol(symbols, bound),
+            Some(binding)
+                if binding.receiver_only
+                    || !binding
+                        .bound_type
+                        .as_deref()
+                        .is_some_and(states_a_placeable_value) =>
+            {
+                None
+            }
+            Some(binding) => unique_symbol(symbols, binding.bound_type.as_deref()?),
             None => {
                 let value_alias = value_aliases
                     .get(&(edge.owner_index, edge.ref_name.clone()))
@@ -458,7 +464,7 @@ mod tests {
     #[test]
     fn imports_and_missing_names_stay_pending() {
         let mut context = context_with_entities(1);
-        context.add_import_edge("./utils.js", None, 1, 0);
+        context.add_import_edge(FILE_SCOPE_INDEX, "./utils.js", None, 1, 0);
         context.add_call_edge(0, "nowhere", None, None, None, 3, 8);
         let graph = partition_walk(context, vec![0]);
         assert!(graph.resolved.is_empty());

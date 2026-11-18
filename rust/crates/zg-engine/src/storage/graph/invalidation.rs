@@ -118,12 +118,12 @@ impl SqliteGraphStorage {
             )?;
         }
         if hierarchy_changed && !overflow {
-            // `bind_nearest_member` stamps every hierarchy-bound member call
-            // `file_scoped`; a row without a receiver never read the chain, so
-            // it stays bound and out of this sweep.
+            // Imported typed receivers depend on both module paths and the
+            // hierarchy. Preserve path invalidation without losing this one.
+            // A row without a receiver never read the hierarchy.
             requeued += tx.execute(
                 "UPDATE edges SET status = 'pending', target = NULL, provenance = NULL, candidates = NULL
-                 WHERE status = 'resolved' AND provenance = 'file_scoped' AND receiver_name IS NOT NULL",
+                 WHERE status = 'resolved' AND provenance IN ('file_scoped', 'import_scoped') AND receiver_name IS NOT NULL",
                 [],
             )?;
         }

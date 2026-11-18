@@ -2655,8 +2655,18 @@ fn resolve_receiver_typed(
     // spelling is read: a holder answers as what it holds, an iterator member
     // as the element it walks, and a member type a class states by name as what
     // that name denotes.
-    let root = type_root_scope(store, snapshot, stored, &bound_type, caches)?;
+    let (root, imported) = if stored.language == "python" {
+        python_types::scope(store, snapshot, stored, &bound_type, caches)?
+    } else {
+        (
+            type_root_scope(store, snapshot, stored, &bound_type, caches)?,
+            false,
+        )
+    };
     let Some(root) = root else {
+        if stored.language == "python" {
+            return Ok(None);
+        }
         // A type the workspace never declares still names a member when the
         // workspace declares exactly one by that name.
         return Ok(resolve_undeclared_type_member(
@@ -2669,14 +2679,14 @@ fn resolve_receiver_typed(
     let mut scopes = vec![root.clone()];
     let branched =
         collect_base_scopes(store, snapshot, &root, &mut scopes, &mut HashSet::new(), 8)?;
-    Ok(bind_hierarchy_member(
-        snapshot,
-        stored,
-        hits,
-        Some(&root),
-        &scopes,
-        branched,
-    ))
+    let mut resolution =
+        bind_hierarchy_member(snapshot, stored, hits, Some(&root), &scopes, branched);
+    if imported && let Some(resolution) = &mut resolution {
+        // ImportScoped is also revisited on hierarchy changes: the receiver
+        // depends on both its module identity and the inherited declaration.
+        resolution.provenance = EdgeProvenance::ImportScoped;
+    }
+    Ok(resolution)
 }
 
 /// A bare call a using-declaration of the owner's class brings into scope.
@@ -3299,7 +3309,8 @@ fn type_root_scope(
     caches: &mut RuleCaches,
 ) -> crate::EngineResult<Option<ClassScope>> {
     if stored.language == "python" {
-        return python_types::scope(store, snapshot, stored, type_text, caches);
+        return python_types::scope(store, snapshot, stored, type_text, caches)
+            .map(|(scope, _)| scope);
     }
     type_root_scope_in(store, snapshot, stored, type_text, caches, 0)
 }

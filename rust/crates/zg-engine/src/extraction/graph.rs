@@ -47,8 +47,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::domain::{GraphEdgeKind, PreprocessorDirective};
 
-/// Owner index standing in for file scope. Import references belong to the
-/// file, not to any entity; the TypeScript original passes the file ID here.
+/// Owner index standing in for file scope. Most imports belong to the file;
+/// Python imports can instead belong to a lexical entity.
 /// The partition step maps this sentinel onto the file node's ID. Never
 /// allocated by [`WalkContext::next_entity_index`].
 pub(crate) const FILE_SCOPE_INDEX: usize = usize::MAX;
@@ -72,7 +72,7 @@ pub(crate) struct WalkEdge {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct NameEdge {
     pub ref_kind: GraphEdgeKind,
-    /// Entity index owning the reference ([`FILE_SCOPE_INDEX`] for imports).
+    /// Entity index owning the reference ([`FILE_SCOPE_INDEX`] at module scope).
     pub owner_index: usize,
     /// Short name of the referenced symbol (last segment for `a.b()`).
     pub ref_name: String,
@@ -83,6 +83,9 @@ pub(crate) struct NameEdge {
     /// Declared type of the bound name for `Declares` edges
     /// (`var x = new X()` → `Some("X")`).
     pub bound_type: Option<String>,
+    /// Walk-only receiver evidence, never a callable value alias. The stored
+    /// Declares edge already identifies the receiver's type for the resolver.
+    pub receiver_only: bool,
     /// Last line the binding stays in effect, for a name a loop scopes
     /// (`for (Widget w : ws)`): past that line the name means what the rest of
     /// the body says it means. `None` keeps the binding until the body ends.
@@ -480,6 +483,7 @@ impl WalkContext {
             receiver_name: receiver_name.map(str::to_owned),
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
+            receiver_only: false,
             bound_until: None,
             scope_end: None,
             arity,
@@ -518,6 +522,7 @@ impl WalkContext {
             receiver_name: None,
             raw_text: None,
             bound_type: Some(bound_type.to_owned()),
+            receiver_only: false,
             bound_until: until,
             scope_end: None,
             arity: None,
@@ -591,10 +596,11 @@ impl WalkContext {
         self.return_types.get(name)?.as_deref()
     }
 
-    /// Convenience wrapper for buffered import references. The owner is the
-    /// file scope: imports belong to the file, not to any entity.
+    /// Buffers an import in its lexical owner. Most languages import at file
+    /// scope; Python also permits imports local to a function or class.
     pub(crate) fn add_import_edge(
         &mut self,
+        owner_index: usize,
         module_path: &str,
         raw_text: Option<&str>,
         line: usize,
@@ -602,11 +608,12 @@ impl WalkContext {
     ) {
         self.add_name_edge(NameEdge {
             ref_kind: GraphEdgeKind::Imports,
-            owner_index: FILE_SCOPE_INDEX,
+            owner_index,
             ref_name: module_path.to_owned(),
             receiver_name: None,
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
+            receiver_only: false,
             bound_until: None,
             scope_end: None,
             arity: None,
@@ -637,6 +644,7 @@ impl WalkContext {
             receiver_name: None,
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
+            receiver_only: false,
             bound_until: None,
             scope_end: None,
             arity: None,
@@ -750,7 +758,13 @@ mod tests {
             7,
             11,
         );
-        context.add_import_edge("./utils.js", Some("import './utils.js'"), 1, 0);
+        context.add_import_edge(
+            FILE_SCOPE_INDEX,
+            "./utils.js",
+            Some("import './utils.js'"),
+            1,
+            0,
+        );
         context.add_inheritance_edge(GraphEdgeKind::Extends, owner, "Animal", None, 2, 5);
         context.add_inheritance_edge(GraphEdgeKind::Implements, owner, "Runnable", None, 2, 5);
 
@@ -764,6 +778,7 @@ mod tests {
                 receiver_name: Some("dog".to_owned()),
                 raw_text: Some("dog.bark()".to_owned()),
                 bound_type: None,
+                receiver_only: false,
                 bound_until: None,
                 scope_end: None,
                 arity: Some(2),

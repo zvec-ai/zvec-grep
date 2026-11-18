@@ -470,6 +470,43 @@ fn sweep_binds_python_cls_receiver_to_the_enclosing_class() {
 }
 
 #[test]
+fn python_annotation_revisits_an_import_when_an_empty_package_appears() {
+    let directory = tempfile::tempdir().expect("workspace");
+    let store = open(directory.path());
+    let target = index_source(
+        &store,
+        "contracts.py",
+        "class Index:\n    def run(self): pass\n",
+    );
+    let caller = index_source(
+        &store,
+        "use.py",
+        "from contracts import Index\ndef use(index: Index):\n    index.run()\n",
+    );
+    let owner = pending_call_owner(&store, caller, "run");
+    store
+        .requeue_stale_resolutions()
+        .expect("initial invalidation");
+    resolve_pending(&store, None, None).expect("initial resolution");
+    assert_eq!(call_target_files(&store, &owner), [target]);
+
+    // The production scanner skips zero-byte files. Store this empty module
+    // directly to verify path invalidation independently of source admission.
+    let package = index_source(&store, "contracts/__init__.py", "");
+    store
+        .requeue_stale_resolutions()
+        .expect("new package invalidation");
+    resolve_pending(&store, None, None).expect("new package resolution");
+    assert!(call_target_files(&store, &owner).is_empty());
+    store.delete_file(package).expect("remove package");
+    store
+        .requeue_stale_resolutions()
+        .expect("package deletion invalidation");
+    resolve_pending(&store, None, None).expect("module restored");
+    assert_eq!(call_target_files(&store, &owner), [target]);
+}
+
+#[test]
 fn sweep_keeps_python_module_import_pending_until_its_module_is_indexed() {
     let home = tempfile::tempdir().expect("workspace");
     let store = open(home.path());

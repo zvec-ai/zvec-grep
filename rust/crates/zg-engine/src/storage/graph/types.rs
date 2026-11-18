@@ -89,11 +89,15 @@ pub(crate) struct EntityRecord {
     pub is_declaration: bool,
 }
 
-/// One import statement of a file as the resolver sees it: the extracted
+/// One module imported by a statement as the resolver sees it: the extracted
 /// module specifier plus the statement text, which carries the `as` alias
 /// bindings the specifier alone loses.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ImportReference {
+    /// Lexical owner, using the existing edge source (a file or entity ID).
+    pub owner_id: String,
+    /// One-based line and zero-based column of the import statement.
+    pub position: (u32, u32),
     /// Module specifier from extraction (`./left`, `declare`, `left::work`).
     pub specifier: String,
     /// Import statement text as written in the source.

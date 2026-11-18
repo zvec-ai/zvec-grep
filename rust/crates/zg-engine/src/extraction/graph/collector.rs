@@ -659,6 +659,15 @@ fn visit_for_bindings(
         } else {
             let until = binding_scope_end(node);
             context.add_declare_binding(owner_index, &name, &bound_type, line, column, until);
+            if format == FileFormat::Python
+                && let Some(binding) = context.name_edges.last_mut()
+            {
+                // An annotation or constructed instance states a receiver
+                // type, not that calling the variable constructs this class.
+                binding.receiver_only = node
+                    .child_by_field_name("right")
+                    .is_none_or(|value| value.kind() != "identifier");
+            }
         }
         return;
     }
@@ -713,6 +722,7 @@ fn collect_ts_js_statement_bindings(
         && path.kind() == "string"
     {
         context.add_import_edge(
+            FILE_SCOPE_INDEX,
             &normalize_module_path(node_text(path, source)),
             Some(node_text(node, source)),
             node.start_position().row + 1,
@@ -2047,24 +2057,30 @@ fn python_binding_of(
     if node.kind() != "assignment" {
         return None;
     }
-    // `x = X()`: the call's bare function name is the constructed type —
-    // unless that name is a registered factory, whose return type binds
-    // instead (`x = make_x()`). Attribute calls (`x = mod.X()`) and
-    // non-call initializers carry no locally spellable type.
+    // A bare or qualified constructor/factory replaces the receiver type.
+    // Identifier assignments retain value aliases; all other values replace
+    // earlier type evidence with an unknown binding.
     let left = node.child_by_field_name("left")?;
     if left.kind() != "identifier" {
         return None;
     }
     let right = node.child_by_field_name("right")?;
-    if right.kind() != "call" {
-        return None;
+    if right.kind() == "identifier" {
+        return Some((
+            node_text(left, source).to_owned(),
+            node_text(right, source).to_owned(),
+        ));
     }
-    let function = right.child_by_field_name("function")?;
-    if function.kind() != "identifier" {
-        return None;
-    }
-    let callee = node_text(function, source);
-    let bound_type = context.factory_return_of(callee).unwrap_or(callee);
+    let callee = (right.kind() == "call")
+        .then(|| right.child_by_field_name("function"))
+        .flatten()
+        .filter(|function| matches!(function.kind(), "identifier" | "attribute"))
+        .map(|function| node_text(function, source));
+    // Every assignment replaces earlier evidence, including `None`, an
+    // unreadable expression, or a constructor qualified through an import.
+    let bound_type = callee.map_or("?", |callee| {
+        context.factory_return_of(callee).unwrap_or(callee)
+    });
     Some((node_text(left, source).to_owned(), bound_type.to_owned()))
 }
 
@@ -2956,8 +2972,8 @@ pub(crate) fn is_import_node(node: Node<'_>, format: FileFormat) -> bool {
         && (node.kind() != "export_statement" || node.child_by_field_name("source").is_some())
 }
 
-/// Buffers an `imports` reference for an import declaration node. The owner
-/// is the file scope: imports belong to the file, not to any entity.
+/// Buffers import references, retaining Python's lexical owner and every
+/// module in a comma-separated import statement.
 pub(crate) fn collect_import_edge(
     node: Node<'_>,
     source: &[u8],
@@ -2971,10 +2987,30 @@ pub(crate) fn collect_import_edge(
         // Visit each import_spec so grouped imports retain their own alias.
         return;
     }
+    let owner = if format == FileFormat::Python {
+        context.current_scope_index().unwrap_or(FILE_SCOPE_INDEX)
+    } else {
+        FILE_SCOPE_INDEX
+    };
+    if format == FileFormat::Python && node.kind() == "import_statement" {
+        let mut cursor = node.walk();
+        for module in node.children_by_field_name("name", &mut cursor) {
+            let path = module.child_by_field_name("name").unwrap_or(module);
+            context.add_import_edge(
+                owner,
+                node_text(path, source),
+                Some(node_text(node, source)),
+                module.start_position().row + 1,
+                module.start_position().column,
+            );
+        }
+        return;
+    }
     let Some(path) = module_path_of(node, source, format) else {
         return;
     };
     context.add_import_edge(
+        owner,
         &path,
         Some(node_text(node, source)),
         node.start_position().row + 1,

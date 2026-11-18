@@ -13,6 +13,8 @@ fn java_wildcards_keep_working_with_legacy_import_paths() {
         ("com.a.Foo", Some("import com.a.Foo /* * */;"), None),
     ] {
         let import = ImportReference {
+            owner_id: "f1".into(),
+            position: (1, 0),
             specifier: specifier.into(),
             raw_text: raw.map(str::to_owned),
         };
@@ -68,6 +70,8 @@ fn import_names_follow_syntax_instead_of_text_separators() {
         caches.import_references.insert(
             1,
             Arc::from([ImportReference {
+                owner_id: "f1".into(),
+                position: (1, 0),
                 specifier: "./api".into(),
                 raw_text: Some(raw.into()),
             }]),
@@ -90,6 +94,8 @@ fn import_names_follow_syntax_instead_of_text_separators() {
         caches.import_references.insert(
             1,
             Arc::from([ImportReference {
+                owner_id: "f1".into(),
+                position: (1, 0),
                 specifier: "./api".into(),
                 raw_text: raw.map(str::to_owned),
             }]),
@@ -177,6 +183,8 @@ fn go_import_directory_uses_aliases_and_the_nearest_module_boundary() {
         caches.import_references.insert(
             file,
             Arc::from([ImportReference {
+                owner_id: format!("f{file}"),
+                position: (1, 0),
                 specifier: specifier.into(),
                 raw_text: Some(raw.into()),
             }]),
