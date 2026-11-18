@@ -129,6 +129,17 @@ Initial preparation requires network access and sufficient disk space for the
 downloaded data, materialized corpus, and index.
 
 Subsequent runs reuse completed download, corpus, and index stages.
+If an initial index build is interrupted or fails, rerun `zg-bench prepare`
+(or `zg-bench prepare --yes` non-interactively). Matching saved inputs allow
+file-level continuation: files already committed by `zg` are skipped.
+Changed inputs and older partial indexes without a saved build record require
+rebuilding. An interrupted rebuild is also rebuilt conservatively, because the
+old index may not yet have been replaced.
+
+Each attempt keeps separate logs under `artifacts/logs/`. Build time accumulates
+recorded attempt durations, excluding the time between attempts. A hard kill may
+prevent recording the last duration; `build_time_complete` in `state/index.json`
+is then false, and the reported build time is a lower bound.
 
 ## Run
 
