@@ -317,6 +317,24 @@ struct CodeEntity<'tree> {
     exported_as: Vec<String>,
 }
 
+/// Whether a Rust item spells a name the value namespace does not hold, so a
+/// bare call never reaches it.
+///
+/// `impl save` names the type it implements, which is a scope rather than a
+/// value, and a trait, type alias, enum, union and a named-field struct each
+/// declare a type without a constructible value. A tuple struct and a unit
+/// struct do declare a constructor, so they stay candidates: `struct save(i32)`
+/// beside `fn save` is a conflict rustc rejects.
+fn rust_type_namespace_only(node: Node<'_>) -> bool {
+    match node.kind() {
+        "impl_item" | "trait_item" | "type_item" | "enum_item" | "union_item" => true,
+        "struct_item" => node
+            .child_by_field_name("body")
+            .is_some_and(|body| body.kind() == "field_declaration_list"),
+        _ => false,
+    }
+}
+
 // A node's entities and their scans share one index sequence and one
 // boundary; splitting the entity branch from the scope descent keeps both in
 // one place for the walk and for the types a body declares.
@@ -368,23 +386,10 @@ fn walk_entity_node<'tree>(
                     Some(SymbolType::Function) => {
                         graph_context.register_function_scope(entity_index);
                     }
-                    // A trait, a type alias and an enum hold their spelling in
-                    // the type namespace only: `trait save` beside `fn save` is
-                    // legal, and only the function answers a bare `save()`.
-                    Some(SymbolType::Interface | SymbolType::Alias | SymbolType::Enum) => {
-                        graph_context.register_type_namespace_item(entity_index);
-                    }
-                    // A struct with named fields declares no constructor, so
-                    // its spelling lives in the type namespace too: `struct
-                    // save { .. }` beside `fn save` is legal, and only the
-                    // function answers a bare `save()`. A tuple struct and a
-                    // unit struct do declare a constructor value, so they stay
-                    // candidates for a bare call.
-                    Some(SymbolType::Class)
-                        if entity
-                            .child_by_field_name("body")
-                            .is_some_and(|body| body.kind() == "field_declaration_list") =>
-                    {
+                    // Only a value answers a bare call. Every other item that
+                    // spells a name in this position keeps it in the type
+                    // namespace; the helper lists them by AST shape.
+                    _ if rust_type_namespace_only(entity) => {
                         graph_context.register_type_namespace_item(entity_index);
                     }
                     _ => {}
