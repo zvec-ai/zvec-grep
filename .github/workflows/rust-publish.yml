@@ -125,7 +125,7 @@ jobs:
           fi
       - name: Test package selection and installation
         working-directory: rust
-        run: node --test scripts/npm-*.test.mjs npm/meta/install.test.cjs
+        run: node --test scripts/npm-*.test.mjs scripts/standalone-*.test.mjs npm/meta/install.test.cjs
 
   build:
     name: Build ${{ matrix.target }}
@@ -182,10 +182,21 @@ jobs:
         with:
           name: rust-verification-${{ needs.source.outputs.version }}
           path: rust/dist/npm/release/tarballs
-      - name: Verify CPU bootstrap, npm rebuild and GGUF/ONNX CUDA inference
+      - name: Download standalone packages for the GPU target
+        # Standalone packages use the same compiled core, verified through their own installer.
+        uses: actions/download-artifact@v8
+        with:
+          name: rust-standalone-${{ needs.source.outputs.version }}-${{ matrix.target }}
+          path: rust/dist/standalone
+      - uses: actions/download-artifact@v8
+        with:
+          name: rust-standalone-${{ needs.source.outputs.version }}-metadata
+          path: rust/dist/standalone
+      - name: Verify npm and standalone CUDA installation and inference
         uses: ./.github/actions/cuda-cli-e2e
         with:
           target: ${{ matrix.target }}
+          standalone_directory: rust/dist/standalone
 
   collect:
     name: Collect selected downloadable packages
@@ -215,6 +226,73 @@ jobs:
         run: |
           rustup show active-toolchain
           npm run release:collect -- --targets "$BUILD_TARGETS"
+      - name: Assemble complete standalone bundles from the verified npm payloads
+        run: npm run release:standalone
+      - name: Upload standalone metadata and installers
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-standalone-${{ needs.source.outputs.version }}-metadata
+          path: |
+            rust/dist/standalone/manifest.tsv
+            rust/dist/standalone/SHA256SUMS
+            rust/dist/standalone/install.sh
+            rust/dist/standalone/install.ps1
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload standalone darwin-arm64
+        if: contains(needs.source.outputs.targets, 'darwin-arm64')
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-standalone-${{ needs.source.outputs.version }}-darwin-arm64
+          path: rust/dist/standalone/*-darwin-arm64-*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Upload standalone darwin-x64
+        if: contains(needs.source.outputs.targets, 'darwin-x64')
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-standalone-${{ needs.source.outputs.version }}-darwin-x64
+          path: rust/dist/standalone/*-darwin-x64-*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Upload standalone linux-x64-gnu
+        if: contains(needs.source.outputs.targets, 'linux-x64-gnu')
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-standalone-${{ needs.source.outputs.version }}-linux-x64-gnu
+          path: rust/dist/standalone/*-linux-x64-gnu-*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Upload standalone linux-arm64-gnu
+        if: contains(needs.source.outputs.targets, 'linux-arm64-gnu')
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-standalone-${{ needs.source.outputs.version }}-linux-arm64-gnu
+          path: rust/dist/standalone/*-linux-arm64-gnu-*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Upload standalone win32-x64-msvc
+        if: contains(needs.source.outputs.targets, 'win32-x64-msvc')
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-standalone-${{ needs.source.outputs.version }}-win32-x64-msvc
+          path: rust/dist/standalone/*-win32-x64-msvc-*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Upload standalone win32-arm64-msvc
+        if: contains(needs.source.outputs.targets, 'win32-arm64-msvc')
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-standalone-${{ needs.source.outputs.version }}-win32-arm64-msvc
+          path: rust/dist/standalone/*-win32-arm64-msvc-*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
       - name: Upload selected packages and download instructions
         uses: actions/upload-artifact@v7
         with:
@@ -336,6 +414,48 @@ jobs:
             cpu-logs/
             rust/dist/npm/release/artifact-smoke/installation.json
             rust/dist/npm/release/artifact-smoke/cpu-downloads.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  standalone-smoke:
+    name: Verify standalone installation and upgrade (${{ matrix.target }})
+    needs: [source, collect]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.source.outputs.cpu_matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: rust-standalone-${{ needs.source.outputs.version }}-${{ matrix.target }}
+          path: rust/dist/standalone
+      - uses: actions/download-artifact@v8
+        with:
+          name: rust-standalone-${{ needs.source.outputs.version }}-metadata
+          path: rust/dist/standalone
+      - name: Test native installers with Node and npm absent from PATH
+        working-directory: rust
+        run: npm run release:standalone-smoke
+      - name: Retain standalone installation evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: standalone-evidence-${{ matrix.target }}
+          path: |
+            rust/dist/standalone-smoke/results.json
+            rust/dist/standalone-smoke/commands.json
+            rust/dist/standalone-smoke/home/.zvec-grep/daemon/logs/
+            rust/dist/standalone-smoke/安装 with spaces/.zvec-grep/daemon/logs/
           if-no-files-found: warn
           retention-days: 7
 
@@ -479,3 +599,34 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm run release:promote
+
+  standalone-publish:
+    name: Publish verified standalone assets to GitHub Releases
+    concurrency:
+      group: standalone-latest
+      cancel-in-progress: false
+    if: >-
+      ${{ !cancelled() && github.repository == 'zvec-ai/zvec-grep' && inputs.publish &&
+          inputs.dist_tag == 'latest' && needs.promote.result == 'success' &&
+          needs.standalone-smoke.result == 'success' && needs.artifact-gpu-smoke.result == 'success' }}
+    needs: [source, promote, standalone-smoke, artifact-gpu-smoke]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: rust-standalone-${{ needs.source.outputs.version }}-*
+          merge-multiple: true
+          path: rust/dist/standalone
+      - name: Upload to draft, verify GitHub asset hashes, then publish Latest
+        working-directory: rust
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/standalone-publish.mjs

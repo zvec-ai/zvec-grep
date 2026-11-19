@@ -1,4 +1,4 @@
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 use super::{Error, Result};
 
@@ -80,10 +80,51 @@ pub(crate) fn initialize(connection: &mut Connection, allow_create: bool) -> Res
     // the ones it was built without. A read-only open cannot write and only
     // loses the index acceleration; the next writable open catches up.
     tx.execute_batch(INDEXES)?;
+    // An index whose definition changed keeps its name, so the addition above
+    // left the older definition in place; the definitions that differ from the
+    // ones below are replaced here instead of waiting for a rebuild.
+    replace_stale_indexes(&tx)?;
     tx.execute_batch(INVALIDATION)?;
     tx.execute_batch(PREPROCESSOR)?;
     tx.commit()?;
     Ok(())
+}
+
+/// Replaces the indexes an earlier binary created with a broader definition.
+///
+/// `CREATE INDEX IF NOT EXISTS` takes an existing index of the name as done, so
+/// a definition that grew a predicate (`WHERE target IS NOT NULL`, a narrower
+/// `name_tail` partial) would otherwise only apply to new or rebuilt databases.
+/// The comparison is textual, which is enough: the statement is this file's own
+/// and only its predicate ever changes.
+fn replace_stale_indexes(connection: &Connection) -> Result<()> {
+    for (name, definition) in REPLACED_INDEXES {
+        let recorded: Option<String> = connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if recorded.is_none_or(|recorded| normalized(&recorded) == *definition) {
+            continue;
+        }
+        connection.execute_batch(&format!("DROP INDEX {name};"))?;
+        connection.execute_batch(definition)?;
+    }
+    Ok(())
+}
+
+/// The statement text with its whitespace and `IF NOT EXISTS` removed, so the
+/// one-line definition this file states compares equal to a definition an older
+/// binary wrote over several lines.
+fn normalized(sql: &str) -> String {
+    let collapsed = sql
+        .replace("IF NOT EXISTS ", "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    collapsed.trim_end_matches(';').to_owned()
 }
 
 // Direct local edges and references share one table. Resolution fills the target
@@ -126,7 +167,9 @@ CREATE TABLE edges (
 // Created on every writable open, not only when the table is: an index is
 // derived data, so a database built by an older binary gains the ones added
 // since without a rebuild. Required columns are validated before any additions,
-// including columns that these indexes do not use.
+// including columns that these indexes do not use. A definition that changes
+// under an existing name is listed in REPLACED_INDEXES; adding one here alone
+// would leave the older definition in the databases that already have it.
 const INDEXES: &str = "
 CREATE INDEX IF NOT EXISTS edges_file ON edges(file_id);
 CREATE INDEX IF NOT EXISTS edges_source_kind ON edges(source, kind);
@@ -141,6 +184,21 @@ CREATE INDEX IF NOT EXISTS edges_pending_id ON edges(id) WHERE status = 'pending
 CREATE INDEX IF NOT EXISTS edges_name_tail ON edges(name_tail)
     WHERE reference_name IS NOT NULL AND status IN ('resolved', 'failed');
 ";
+
+/// Indexes whose definition an earlier binary did not write this way, keyed by
+/// the name that definition was created under. Each entry repeats the current
+/// definition exactly (see [`INDEXES`] for why it differs from the older one).
+const REPLACED_INDEXES: &[(&str, &str)] = &[
+    (
+        "edges_target_kind",
+        "CREATE INDEX edges_target_kind ON edges(target, kind) WHERE target IS NOT NULL",
+    ),
+    (
+        "edges_name_tail",
+        "CREATE INDEX edges_name_tail ON edges(name_tail) \
+         WHERE reference_name IS NOT NULL AND status IN ('resolved', 'failed')",
+    ),
+];
 
 // Evidence a pass recorded but has not requeued yet. It lives in the database
 // rather than in memory so that a pass which publishes files and then fails or
