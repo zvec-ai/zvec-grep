@@ -1,280 +1,98 @@
 # ZG Retrieval-only benchmark
 
-The workflow measures **zg-hybrid, zg-fts and zg-vector** on four independent suites. The original SWE-QA20 suite uses 20 unchanged questions and 11 pinned repositories from [Actions run 35206585943](https://github.com/Cuiyus/zvec-grep/actions/runs/35206585943). The exploratory suites contain 20 original BEIR queries across four datasets, ten DuRetrieval queries and 20 original Quarry queries across eight languages; see the [pilot design](expansion/README.md). Each mode calls the Rust public MCP search endpoint directly with `preview: "full"`. No answering agent, query rewriting, subquery generation or LLM judge participates. See the [SWE-QA20 design](./zg-retrieval-only-sweqa20-design.md) for its frozen protocol and scoring details.
+Compare FTS, Vector and Hybrid search on four frozen suites. Each request uses the original question through the Rust public MCP search interface; there is no answering agent, query rewriting or LLM judge.
 
-## Run CI and read the result
+## Run
 
-The [Retrieval-only workflow](../../.github/workflows/retrieval-only.yml) supports manual runs and reuse by the [PR version comparison](../../.github/workflows/retrieval-comparison.yml). For a manual single-version run, select **Retrieval-only → Run workflow**. Use GitHub's workflow-ref selector to choose the benchmark harness (`main` for the latest merged harness), then set `candidate_ref` to the branch, tag or commit containing the `rust/` workspace to compile. It defaults to `main`. The `embedding` choice defaults to `local`, which preserves each suite's configured local model. Select `remote` to run every suite with `qwen/qwen3.7-text-embedding`; this requires the repository secret `QWEN_EMBEDDING_API_KEY` and variable `QWEN_EMBEDDING_ENDPOINT`. Every run includes all three modes.
-
-PR creation, reopening and new commits automatically compare the frozen PR base and head through all four suites. An authorized `@zg-bench` PR comment requests the same comparison and posts its table. Both versions use the same harness and local models, with separate fresh indexes; neither receives remote embedding credentials. e2e is skipped by default. Comparison cells show percentages: identical baseline/candidate values appear once; differences use baseline → candidate. The JSON retains exact scores and deltas. Missing or invalid results make the comparison incomplete rather than zero. The default-branch [result publisher](../../.github/workflows/retrieval-pr-comment.yml) creates or updates one English PR comment with the table and run link, including for fork PRs. It skips cancelled or outdated runs, keeps benchmark execution read-only, and becomes active after its workflow is merged into the default branch. The `retrieval-comparison` artifact and Actions summary also retain the result; `retrieval-base-*` and `retrieval-head-*` retain the underlying reports. See [benchmark setup](../README.md).
-
-For a manual paired comparison without a PR comment, select **Retrieval-only PR → Run workflow** and supply full `baseline_sha` / `candidate_sha` commit identities and their `baseline_repository` / `candidate_repository` (`owner/name`). This uses the same local-only comparison and does not run e2e. Manual runs require maintain/admin access.
-
-The workflow freezes the selected harness ref to a full commit, checks out the candidate separately, resolves it to another full commit SHA, and builds `candidate/rust/`. The packed native package cache is keyed by operating system, architecture and that exact candidate commit. A hit skips Rust compilation and packaging. On a miss, a second Cargo cache can reuse registry data and `rust/target` objects before `npm run pack:local` creates the candidate tarball. Node.js version is not part of candidate selection, package-cache identity or report identity.
-
-Manual and comment runs require the original actor and current re-run actor to have the repository **maintain or admin** role; execution jobs check both, including partial re-runs. Automatic PR runs instead require the supported PR event and local embedding, with read-only permissions and no model secrets. These in-workflow checks apply to the checked-in workflow. Contributors who can modify the workflow or its local authorization action on another branch can bypass that check; a permission boundary against those contributors requires repository- or organization-level Actions execution policies.
-
-The **Retrieval results** job publishes one page with a suite overview and a separate three-mode table for SWE-QA20, BEIR, DuRetrieval and Quarry. All four suite jobs also publish their own aggregate and per-question tables as soon as each job finishes. In the SWE-QA20 section, the three rows are:
-
-| Arm | Public MCP search input | Presentation |
-| --- | --- | --- |
-| zg-hybrid | `query: originalQuestion` | `preview: "full"` |
-| zg-fts | `fts: [originalQuestion]` | `preview: "full"` |
-| zg-vector | `vector: [originalQuestion]` | `preview: "full"` |
-
-Every request explicitly uses `preview: "full"`, `limit: 10`, `autoUpdate: false`, `freshness: eventual` and `preferSymbol: false`. FTS and vector requests omit `query` and the other route. Full preview displays each retrieved Entity's complete content; short preview displays excerpts. This presentation choice does not change Entity Recall, native chunking, aggregation or ranking.
-
-The public response parser requires the MCP `freshness:` header and accepts both the legacy MCP body and the CLI compact body. Compact output does not expose per-hit route labels, so unavailable routes remain `null`; the parser never invents route evidence from the requested mode. Route validation still rejects any reported label that conflicts with the requested mode. Global CLI freshness and indexing diagnostics remain visible evidence before the compact body; legacy trailing diagnostics are also supported.
-
-| Column | Meaning / aggregation |
+| Entry point | What to select |
 | --- | --- |
-| File Hit@1 | Mean of each question/mode's five binary rank-1 observations |
-| File Hit@5 | Mean of each question/mode's five binary Top-5 observations |
-| File Hit@10 | Mean of each question/mode's five binary Top-10 observations |
-| File MRR@10 | Mean of five `1 / first matching native rank` observations per question/mode; Top-10 misses are zero |
-| nDCG@10 | Mean of five binary discounted-gain observations per question/mode, then repository macro average across 11 repositories |
-| Stable Top 10 | Count of question/mode cases whose five ordered public result locations match exactly |
-| Mean output (KiB) | Mean public MCP text UTF-8 bytes / 1024, using successful fifth calls only; not model tokens |
-| Avg RT / P50 RT (ms) | Mean and median of all successful MCP search calls, including five repetitions; excludes indexing |
+| PR comparison | Opening, reopening or updating a PR compares its pinned base and head automatically. An authorized `@zg-bench` comment also requests a comparison. |
+| [Manual single-version run](../../.github/workflows/retrieval-only.yml) | **Retrieval-only → Run workflow**. The workflow ref selects the harness; `candidate_ref` selects the Rust candidate and defaults to `main`. Enable `gold_stages` for traces. |
+| [Manual paired comparison](../../.github/workflows/retrieval-pr.yml) | **Retrieval-only PR → Run workflow**. Supply full `baseline_sha` / `candidate_sha` and `baseline_repository` / `candidate_repository` (`owner/name`). This does not post a PR comment. |
 
-Each repository uses one fresh index and one MCP session. Modes run in the fixed order **hybrid → fts → vector**; each original question is called five consecutive times within each mode. All five calls supply quality and stability observations; only the fifth supplies output size. A complete run contains **300 calls and 60 question/mode quality summaries**, with **20 questions, 20 output samples and 100 latency samples per mode** when all calls succeed. Repetitions are not independent questions.
+All runs include all three modes. Paired runs use the same harness and configured local models, build separate fresh indexes, and enable stage capture on both versions. They do not run answering-agent E2E tests or receive remote model credentials.
 
-Isolated public-response format failures still fail CI, but the overview displays diagnostic scores from validated questions with explicit question/repository coverage and a failed-task table. Invalid evidence is excluded, never counted as a miss or a zero. Protocol, identity, missing-call and other integrity errors still withhold all aggregates. Product failures with valid evidence retain zero quality credit and fail operational integrity; failed calls are excluded from output and latency measurements. Quality scores have no arbitrary pass threshold. Fixed mode order and shared runtime/model caches mean latency is an observation under this protocol, not a controlled comparison of cold-start or mode execution speed.
+Manual and comment runs require maintain/admin access for both the original actor and the re-run actor. See [benchmark setup](../README.md) for repository configuration. The [PR result publisher](../../.github/workflows/retrieval-pr-comment.yml) must be merged into the default branch before it can update comments; it ignores cancelled or outdated runs.
 
-## Dataset and scoring
+## Read the results
 
-Frozen inputs are `data/source.lock.json`, `data/queries.jsonl`, `configs/protocol.json`, and `gold/files-v1.json`. The questions and 39 relevant-file targets are unchanged. Targets are unique accepted paths projected from AI-reviewed source annotations; bridge-only paths do not earn credit. They are partial positives, not independent human ground truth or complete answer evidence. The [metric rationale](./zg-retrieval-metric-review.md) explains how to interpret the scores and their limits.
+The PR comment shows File/Entity quality tables and a **download link to `retrieval-trace.html`**. Download the HTML and open it locally: it is a single file, not a ZIP, and needs no server or external resources. It contains suite summaries, original questions, per-question FTS/Vector/Hybrid Recall, Gold IDs and stage ranks.
 
-All five quality metrics use the same file labels and normalized-path matching. Native ranks are preserved: repeated file chunks consume positions and are never collapsed or renumbered. Source declarations, outlines and response length cannot alter these quality scores. File Hit/RR/MRR use contract `sweqa-file-hit-rr-v1`.
+**Artifacts expire after 14 days.** Save the reports and raw evidence if you need a longer-lived comparison.
 
-`metrics/ndcg.mjs` uses first-target rank, binary gain and target-count IDCG. It is checked against a byte-identical pinned Python scoring reference, with its MIT attribution preserved in [`test/fixtures/ndcg-reference/`](test/fixtures/ndcg-reference/). The reference is used only by unit tests. The benchmark runs only ZG.
-
-Questions, labels and reports remain outside indexed source checkouts. Indexing applies the frozen code-extension and size policy while retaining ZG's native ignore rules. Repository indexes are never cached; model downloads and compiled candidate packages may be cached. Corpus and model inventories plus the Rust CLI's public aggregate index status are checked before and after retrieval. Model identity includes artifact contents but excludes only the runtime-generated `.zvec-grep-artifacts-<24hex>.complete` cache marker, whose machine-specific timestamps do not identify model weights.
-
-Index audits prefer the structured `Status diagnostics` snapshot on stderr from
-`zg --status --check-ready --debug`. It preserves exact source bytes, entity
-counts and readiness independently of the compact human layout. Historical
-candidates without that snapshot retain the legacy status parser; missing audit
-fields are never inferred from a coverage bar. Raw stdout and stderr are retained.
-
-Each suite also reports indexed Entity and Fragment totals, with a per-index
-breakdown in `index_counts.corpora`. Count each independently built index once,
-without multiplying by queries, modes or repetitions. BEIR's three ArguAna
-indexes exclude different query documents; Quarry indexes each preimage
-separately, so these totals include content shared across indexes. Baseline and
-candidate counts are shown separately when different. Missing counts are N/A,
-never zero or a partial sum. Older candidates do not expose Fragment totals.
-Snapshot schema 3 records `entities` and `fragments` separately; schema 2's
-`fragments` field was an Entity-count alias and must not be used as a Fragment
-count. The benchmark explicitly runs `zg --status --debug` before and after
-each index's retrieval batch. Each invocation reads the counts once, outside
-search timing. Ordinary status, MCP status, and search freshness checks do not
-scan Fragments. Counts do not affect scoring.
-
-The same debug status records the indexed embedding model's configured input-token
-limit and normal/dense Fragment length and overlap budgets. Reports show these
-beside each dataset's counts. Budgets use UTF-16 units, before the metadata
-allowance; they are not actual fragment sizes or measured token consumption.
-The current rule uses 1.85 units/token for normal content, 1 for dense content,
-and 15% overlap, rounding down. Values come from the public status response;
-older versions without these fields display N/A. No extra retrieval or status
-call is made. Settings must remain unchanged across the run.
-
-Rust candidates are built through the [shared package Action](../../.github/actions/rust-candidate-package/action.yml); its [manifest utility](../shared/rust-package-cache.mjs) binds each tarball to the exact source commit and package bytes. SWE-QA uses the same packaging path while retaining its own evaluation protocol.
-
-### QA pairs and File / Entity diagnostics
-
-The [QA dataset](gold/qa-pairs.md) adds the same 20 original questions with
-65 reviewed File targets and 114 Entity targets. Its source locations and
-declarations are tied to the pinned repositories, independently of ZG's parser.
-Seventeen cases permit diagnostic scoring; three have unresolved question
-interpretations. This dataset version reports diagnostic scores against the
-recorded targets. Recall does not imply exhaustive coverage of all relevant
-code in the repositories. Gold updates must state their annotation scope and
-be applied to both sides of a comparison.
-
-The normal runner and report commands also compute these metrics from the same
-five public responses per question and mode:
-
-- File Hit@1/5/10, Recall@1/5/10, MRR@10 and nDCG@10 against the new QA labels.
-- The same metrics for Entity: within the pinned source file, the retrieved
-  Entity's `content` must contain a Gold target's full source range. One result
-  may cover several targets; each target counts once at its first native rank.
-  Partial overlap is a miss. Preview length affects display and information
-  density, not these scores.
-
-MCP source ranges identify the retrieved Entity before preview formatting. If
-line numbers cannot establish a single-line boundary, the affected score remains
-unknown. Entity nDCG credits every distinct covered target at its first rank; its
-ideal score groups Gold targets by file, with larger groups first. See the
-[calculation](../docs/retrieval-only-qa-reference.md#ndcgk-calculation).
-File nDCG is unchanged.
-
-The QA section reports formal and diagnostic scores separately. Result tables
-show scores only; scored/eligible question counts stay in machine-readable
-reports and are not repeated beside tables. Unknown matches and failed calls do
-not become zeros. A repeated-run metric is withheld if any of its five
-observations is unknown. Both levels use equal question weights after averaging
-repeats.
-
-The existing File labels and aggregation remain unchanged.
-Its denominator differs from the new QA table. A QA diagnostic is not a formal
-Entity score or a claim that all answer evidence was found.
-
-Reports bind the QA dataset through `qa_gold`, retain per-call `qa_observations`,
-and expose `qa_retrieval` and `qa_quality_mean` beside the legacy fields.
-Validation recomputes these values from the saved public evidence and frozen QA
-labels. `qa_scoring: {version: 2, entity_match: "contains"}` identifies the updated
-rules. Keep historical scores and recompute both versions before comparing them
-under these rules; rescoring saved responses is not a new retrieval run.
-
-The final PR comparison has one table per suite. Each table contains
-File and Entity rows for fts, vector and hybrid, with Hit@1/5/10,
-Recall@1/5/10, MRR@10 and nDCG@10 columns.
-
-SWE-QA20 uses QA diagnostic scores. A shared cell means both versions have equal
-displayed scores. The three pilots keep their original File scores and add
-File Recall and [Entity diagnostics](expansion/README.md#gold-and-scoring).
-Unscored values appear as N/A. The original SWE-QA20 File scores remain in the
-JSON and full reports, separate from QA Gold.
-
-## Reports and artifacts
-
-- `retrieval-results`: the unified `summary.md` and machine-readable `summary.json`.
-- `retrieval-trace.html`: paired runs upload the standalone HTML directly, without a ZIP. Download it from the PR comment or Actions artifacts and open it locally; no server or external assets are required.
-- `retrieval-zg-report`: the SWE-QA20 suite conclusion (`summary.json` and `summary.md`), validated `report.json`, `report.md` and per-call `scores.jsonl`.
-- `retrieval-zg-evidence`: raw public requests/responses, installation evidence, corpus/model inventories and public index status for all 11 repositories.
-- `retrieval-beir-report`, `retrieval-duretrieval-report` and `retrieval-quarry-report`: independent pilot summaries with BEIR dataset and Quarry language coverage and scores.
-- `retrieval-beir-evidence`, `retrieval-duretrieval-evidence` and `retrieval-quarry-evidence`: pilot public requests/responses and index status.
-
-Evidence retention is 14 days. After a shared candidate build, SWE-QA20, BEIR, DuRetrieval and Quarry run as four independent suite jobs. Each suite publishes its own aggregate metrics and a per-question table even if an individual question fails. The final results job publishes the combined page. Missing artifacts and failed upstream jobs remain explicit in the overview.
-
-### Gold coverage by retrieval stage
-
-Enable `gold_stages` in the manual workflow, or add `--gold-stages` to the
-local SWE-QA20 or expansion runner. Use a
-candidate built with stage capture support. The optional capture uses the
-same five calls, frozen source and QA labels, adaptive recall and `limit: 10`.
-It sends the original public requests and receives stage data in response
-metadata. Older candidates produce unobserved stages.
-PR comparisons enable capture on both baseline and candidate. The English PR
-comment keeps quality scores and links the HTML artifact instead of embedding
-stage tables. The HTML contains all suites, File/Entity stage comparisons,
-original queries, per-question FTS/Vector/Hybrid Recall, and each call's Gold
-ranks and candidate-pool sizes. Choose Baseline or Candidate and a repetition
-for the detailed trace. The trace describes labeled Gold only, not every candidate.
-
-Equal coverage cells appear once; changes show baseline → candidate, including
-denominator or partial-unknown changes. Missing data stays N/A; an unused route
-is —. Capture warnings appear in the HTML. Missing Entity annotations are not
-zero scores. The comparison bundles each suite's `gold-stages.json` as
-`reports/{suite}-gold-stages.json` alongside its report, preserving raw calls.
-Missing or invalid stage evidence does not invalidate otherwise valid search scores.
-
-The runner sets `ZG_TRACE_STAGES=1` and `ZG_TRACE_PATHS` before starting its
-isolated daemon. `ZG_TRACE_PATHS` is a JSON array of repository-relative paths:
-the union of watched files for that repository or corpus group. It contains no
-Gold labels or target coordinates. The engine looks up these paths directly by
-`path_key`, records stages in memory, and returns a capture array in MCP
-`_meta.zg_stage_trace`. Each capture has a `group_id` identifying its search
-group. CLI diagnostics use one `[ZG_STAGE]` JSON line per group on stderr,
-emitted by the CLI client; ordinary search output is unchanged.
-For daemon-backed queries, set these variables before starting the daemon;
-changing only the client environment does not reconfigure an existing daemon.
-
-ZG does not read control files or write trace files. The benchmark reads each
-capture from the response, scores it in memory, and can retain it in the existing
-raw MCP evidence. It writes the final `gold-stages.json` report outside the
-searchable corpus. Capture and report storage belong to the benchmark.
-
-Each suite's report shows index coverage, Gold recalled per route, and Gold
-covered within Top K before and after rule ranking (static rules plus same-file
-decay). K is the query limit, fixed at 10 in the current protocol. Both ranking
-rows use the same loaded Entity pool. **Before rule ranking (RRF)** uses its RRF
-order (`loaded_rrf_rank <= K`), before either rule. **After rule ranking (actual)**
-uses the final results (`final_rank <= K`). Rule ranking acts on the full loaded
-pool. Coverage is measured within each Top K, not across the entire candidate pool.
-These are observations from the same query. File and Entity have separate tables.
-The `rrf_top10` field replaces the earlier `static_top10` comparison, which kept
-static rules enabled. Old summaries must be rescored from saved captures before
-using the new labels; renaming their fields is not sufficient. Static ranks
-remain in per-target evidence. Keep the original artifacts and identify the
-scorer commit when publishing rescored results.
-Stage summaries use schema 2: each task contributes its Gold targets once to
-the denominator. Covered, unknown and lost counts are averaged across that
-task's repetitions, then summed across tasks. For example, five identical calls
-covering 45 of 88 targets display **45/88**, not 225/440. Varying repetitions can
-produce fractional counts, displayed to at most six decimal places. Missing or
-invalid captures contribute unknown coverage, not misses or fewer targets.
-Call health counts still count every invocation, and all per-call evidence is
-retained. Schema 1 summaries accumulated target-call counts; rebuild them from
-their saved calls rather than dividing totals by a presumed repetition count.
-SWE-QA20 uses its QA File labels here and separates formal, diagnostic and
-unresolved cases. Unresolved Gold stays in the per-call evidence. The pilot
-suites use their verified File and Entity labels for diagnostics. A pilot call
-with File Gold alone contributes to File coverage. Existing score tables keep
-their original denominators and aggregation.
-
-`gold-stages.json` contains stage coverage and losses, including Entity
-loading losses for troubleshooting.
-
-| Boundary | Evidence and reference for loss |
+| Artifact | Contents |
 | --- | --- |
-| Index | Same-path canonical Entities with at least one live search projection. A file is searchable if it has any such Entity. |
-| FTS / Vector / recall union | Owners of actual returned Fragments across adaptive recall attempts. Compare each route and the union with the index. The best rank is the minimum rank observed for that owner on that route. Hybrid reports both routes. |
-| Entity merge / RRF fusion / Entity load | Compare each complete pool with its predecessor. A missing canonical owner or an ambiguous range makes Entity coverage unknown where it could affect a hit. |
-| Final selection | Compare the actual selected results with the loaded pool. |
-| Before / after rule ranking | Before takes the RRF Top K from the loaded pool, excluding static rules and same-file decay. After applies both rules to the full pool and uses the actual Top K. Before uses loaded ranks, not pre-loading fusion ranks; both loss counts use the loaded pool as their baseline. |
+| `retrieval-trace.html` | Interactive stage trace for paired runs; select suite, question, baseline/candidate and repetition. |
+| `retrieval-comparison` | Paired `summary.md` and `summary.json`; exact scores and deltas remain in JSON. |
+| `retrieval-results` | Single-version combined summary across all four suites. |
+| `retrieval-{zg,beir,duretrieval,quarry}-report` | Suite scores and per-question results. SWE-QA20 also retains `report.json`, `report.md` and `scores.jsonl`. |
+| `retrieval-{zg,beir,duretrieval,quarry}-evidence` | Public requests/responses, corpus/model inventories and index status. |
 
-The shared matcher preserves same-file full containment. SWE-QA20 follows its
-line-based score. Stage text ranges use Rust's half-open coordinates: a nonempty
-range ending at column zero covers through the previous line; an empty range
-keeps its source position. This matches public result headers and avoids counting
-the following Gold line as covered. Previously generated stage reports could
-overcount this boundary; retain them and rescore their raw metadata into a new
-report when needed. Public retrieval scoring and Gold labels are unchanged.
-The pilots use verified UTF-8 byte ranges, adding back any
-UTF-8 BOM that the index decoder stripped. For SciFact, all required spans in
-one accepted evidence group must be covered within the same stage. The rank
-is the earliest position that completes any group. `gold-stages.json`
-keeps every call's Gold IDs, known ranks, misses, unobserved values, recall depths
-and pool sizes. Its `loaded` rank is the RRF order within the surviving loaded
-pool, while `fused` is the original rank across the full fusion pool. The report
-checks selected Gold-file paths and coordinates against the public response.
-Raw captures contain watched-file coordinates and ranks, with overall pool counts.
-They carry no query text, snippet text, vectors or model credentials.
+Paired runs prefix underlying artifacts with `retrieval-base-` or `retrieval-head-`. Combined report bundles retain stage sidecars as `reports/{suite}-gold-stages.json`.
 
-The JSON records mean index-read time for observed calls. Enabled MCP latency
-also includes capture bookkeeping, an extra static-order sort, and metadata
-serialization and transfer. PR comparisons request diagnostics on both versions;
-older binaries may not support them. These timings measure diagnostic execution,
-not normal search speed.
-Measure performance separately with capture disabled on both versions.
+Equal comparison values appear once; changes show **baseline → candidate**. **N/A** means unavailable or unscored, never zero; **—** means a route did not run. Missing artifacts and failed questions remain visible. Invalid evidence fails CI even when a diagnostic partial table can be shown; quality scores have no arbitrary pass threshold.
 
-SWE-QA20 ZG reports use **schema 7**, with `preview: "full"`, three `modes`, and one quality row per question/mode. Its section uses the **schema 5** overview with fixed `zg-hybrid`, `zg-fts`, `zg-vector` rows; the combined page uses schema 1. The SWE-QA20 overview records coverage, failed task IDs/modes/reasons, the frozen harness commit and selected candidate ref/commit. Quality rows retain all five public result lists and measurement observations so validators can recompute the case mean, ranking stability, output size and latency. The representative fifth-call `file_retrieval` and `ndcg` fields remain for evidence; `quality_mean` supplies headline quality.
+## Protocol and scores
 
-The protocol ID is `sweqa20-zg-rust-three-modes-mcp-full-v8`. The comparator accepts schema 7 reports with matching protocol, frozen inputs, explicit full preview and all three modes. Keep earlier v7 default-short results and use their matching scorer checkout to review them. They are not full-preview results; replaying saved evidence is not a new retrieval run.
+| Suite | Original queries | Indexed corpus |
+| --- | ---: | --- |
+| SWE-QA20 | 20 | 11 pinned repositories |
+| BEIR | 20 | Four datasets; 75,128 unique documents |
+| DuRetrieval | 10 | 100,001 passages |
+| Quarry | 20 | 20 pinned preimages across eight languages |
 
-## Code structure
+| Mode | Public search input |
+| --- | --- |
+| Hybrid | `query: originalQuestion` |
+| FTS | `fts: [originalQuestion]` |
+| Vector | `vector: [originalQuestion]` |
 
-```text
-zg-retrieval/
-  *.mjs              Stable command-line entrypoints
-  core/              Frozen suite, corpus, I/O and shared response scoring
-  metrics/           File and Entity ranking, nDCG and operational measurements
-  engines/zg/        Runner, public response parser, snapshots and evidence audit
-  reports/           Validation, same-protocol comparisons and CI rendering
-  configs/           Frozen protocol
-  data/              Frozen questions and repository/source lock
-  gold/              Frozen relevance labels and annotation provenance
-  test/              Contract tests and pinned scoring reference
-```
+Requests use `preview: "full"`, `limit: 10`, `autoUpdate: false`, `freshness: eventual` and `preferSymbol: false`. Modes run **hybrid → fts → vector**, with **five calls per question/mode**. FTS and Vector omit `query` and the other route. Preview affects presentation, not native ranking or Entity matching.
 
-The runner captures public evidence; the aggregator reparses and audits it; metric functions score normalized results; report validators recompute quality and measurements before comparison or CI rendering. Metrics do not depend on engine implementations. Response presentation behavior remains covered by the product's MCP contract tests, rather than duplicate retrieval benchmark arms.
+| Report value | Counting rule |
+| --- | --- |
+| File/Entity Hit@1/5/10, Recall@1/5/10, MRR@10, nDCG@10 | Average five calls within each question, then give scored questions equal weight. PR SWE-QA20 rows use QA diagnostic labels; legacy File scores stay separate. |
+| Stable Top 10 | The five ordered public result locations match exactly. |
+| Mean output (KiB) | Public MCP text UTF-8 bytes / 1024, using successful fifth calls only. |
+| Avg / P50 RT (ms) | All successful search calls, excluding indexing. Fixed mode order and shared caches prevent interpreting this as a controlled speed comparison. |
+| Indexed Entities / Fragments | Sum each independently built index once, without multiplying by modes or repetitions. Missing counts remain N/A. |
 
-## Run locally
+Repeated chunks keep their native ranks. Entity matches require full containment of a Gold target in the same file; partial overlap is a miss. Unknown matches, missing annotations and parsing failures do not become zero scores. Gold and reports stay outside indexed sources. These development datasets diagnose retrieval regressions; their recorded positives do not establish exhaustive answer coverage.
 
-Use Node.js, Python 3, npm, Git, Rust and a platform supported by the packed product. Python is used only for the stdlib scoring oracle. The first retrieval run needs network access for repository checkouts, Rust dependencies and the embedding model. Run from the repository root:
+Frozen SWE-QA20 inputs are [the source lock](data/source.lock.json), [queries](data/queries.jsonl), [protocol](configs/protocol.json) and [Gold](gold/). Protocol `sweqa20-zg-rust-three-modes-mcp-full-v8` uses report schema 7. QA containment scoring is version 2. Compare matching protocols and Gold versions; legacy SWE-QA20 File nDCG retains its repository macro average.
+
+See [SWE-QA20 design](zg-retrieval-only-sweqa20-design.md), [pilot data and scoring](expansion/README.md), [QA labels](gold/qa-pairs.md) and [matching / nDCG reference](../docs/retrieval-only-qa-reference.md) for full definitions.
+
+## Gold coverage by retrieval stage
+
+PR comparisons enable capture automatically. For a single-version run, enable `gold_stages`; locally, pass `--gold-stages` to the SWE-QA20 or expansion runner. **The engine must support stage capture. Older binaries, including a baseline without that support, show N/A.** Missing stage data does not invalidate otherwise valid retrieval scores.
+
+| HTML row | Meaning |
+| --- | --- |
+| Gold covered by index | Gold has a searchable indexed Entity. |
+| Gold recalled by FTS / Vector | Coverage in the route's complete recall pool, across adaptive attempts. |
+| Before rule ranking (RRF) | Gold within Top K of the loaded candidate pool in RRF order. |
+| After rule ranking (actual) | Gold within the actual Top K after static rules and same-file decay. |
+
+Both ranking rows use the **same loaded pool**, with K = 10. Rules act on the full pool before selecting results. The HTML also shows candidate-pool sizes and per-call Gold ranks; complete intermediate Gold coverage remains in `gold-stages.json`.
+
+Stage counts average each question's five observations, then sum across questions. Each question's Gold enters the denominator **once**: five identical observations of 45/88 display **45/88**, not 225/440. Varying observations may produce fractional counts; unknown coverage remains explicit. Formal, diagnostic and ineligible Gold are kept separate.
+
+**Capture adds bookkeeping and metadata transfer to measured latency.** Compare normal search performance separately with capture disabled on both versions.
+
+<details>
+<summary>Capture transport and historical reports</summary>
+
+- The runner starts its isolated daemon with `ZG_TRACE_STAGES=1` and `ZG_TRACE_PATHS` (repository-relative watched paths, without Gold labels or target coordinates). Setting only the client environment does not reconfigure an existing daemon.
+- The engine looks up paths directly and returns captures in MCP `_meta.zg_stage_trace`; CLI capture uses `[ZG_STAGE]` records on stderr. ZG writes no diagnostic files. The benchmark retains `gold-stages.json` outside the searchable corpus.
+- Stage summary schema 2 counts Gold once per question. Schema 1 accumulated target-call counts; rebuild from saved calls instead of dividing by an assumed repeat count. The old `static_top10` field kept static rules enabled and cannot be relabeled as the current RRF comparison.
+- Keep historical artifacts and identify the scorer commit when rescoring. Earlier stage range handling could overcount a following line; the current scorer uses Rust's half-open coordinates. Pilots use verified UTF-8 byte ranges; SciFact requires a complete accepted evidence group. See the [stage scorer](metrics/gold-stages.mjs) and [matching reference](../docs/retrieval-only-qa-reference.md). Rescoring is not a new retrieval run.
+
+</details>
+
+## Run SWE-QA20 locally
+
+Use Node.js, npm, Git, Rust and a platform supported by the packed product. Python 3 is needed for the offline scoring-reference tests. The first run downloads repositories, build dependencies and model files. From the repository root:
 
 ```sh
 node --test benchmarks/zg-retrieval/test/*.test.mjs
@@ -288,23 +106,28 @@ node benchmarks/zg-retrieval/run.mjs \
   --output "$retrieval_work/results" \
   --corpus "$retrieval_work/corpus" \
   --model-cache "$retrieval_work/model-cache" \
-  --candidate-commit "$(git rev-parse HEAD)"
+  --candidate-commit "$(git rev-parse HEAD)" \
+  --gold-stages
 
 node benchmarks/zg-retrieval/report.mjs "$retrieval_work/results"
 ```
 
-Local commands use the configured local models by default. To reproduce the
-remote workflow choice, set `RETRIEVAL_EMBEDDING=remote` together with
-`ZVEC_GREP_API_KEY` and an HTTPS `ZVEC_GREP_ENDPOINT` before running the suite
-and report commands.
+`--package` accepts a tarball or a directory containing exactly one `.tgz`. Use a new output directory and fresh corpus; existing indexes are rejected. Model downloads and compiled packages may be cached, but corpus indexes are not reused. See [pilot local commands](expansion/README.md) for the other suites.
 
-`--package` accepts a tarball or a directory containing exactly one `.tgz`. The runner installs it in an isolated consumer. Use a new `--output` directory and fresh corpus checkout: output is never overwritten and an existing index is rejected. An external model-download cache may be reused.
+Add `--repository reflex-dev/reflex` or `--tasks reflex:6` for a subset smoke run. All three modes still execute; standalone `report.mjs` and CI require the complete 20-question suite.
 
-Add `--repository reflex-dev/reflex` or `--tasks reflex:6` for an explicitly labeled subset smoke run; all three modes still execute. Standalone `report.mjs` requires all 20 questions, and CI rejects subset reports. Modes and MCP presentation are fixed by the protocol, without selection flags.
+<details>
+<summary>Remote embedding</summary>
 
-## Offline replay and comparisons
+Manual CI runs can select `embedding: remote` to use `qwen/qwen3.7-text-embedding` for every suite. Configure repository secret `QWEN_EMBEDDING_API_KEY` and variable `QWEN_EMBEDDING_ENDPOINT`. Locally, set `RETRIEVAL_EMBEDDING=remote`, `ZVEC_GREP_API_KEY` and an HTTPS `ZVEC_GREP_ENDPOINT` before the runner and report commands.
 
-Download `retrieval-zg-evidence` into one directory, then recompute:
+Fresh corpus indexing dominates remote API load, even with few queries. BEIR builds six indexes (92,473 document files) because ArguAna excludes each selected query's own document; Quarry builds each preimage separately. Parallel suites and overlapping runs share provider quota. PR comparisons use local embedding.
+
+</details>
+
+## Replay saved evidence
+
+Download `retrieval-zg-evidence`, then use the matching scorer checkout:
 
 ```sh
 node benchmarks/zg-retrieval/report.mjs /absolute/path/to/downloaded-shards
@@ -314,25 +137,14 @@ node benchmarks/zg-retrieval/ci-report.mjs \
   --output /absolute/path/to/overview
 ```
 
-An isolated task/mode failure can produce a diagnostic partial overview while the command and CI still fail. Incompatible or globally invalid evidence produces no scores. Candidate source selection happens through `candidate_ref`; the harness comes from the workflow ref selected for that run.
+These commands rescore saved SWE-QA20 responses; they do not rerun retrieval. Preserve earlier results when changing Gold or scoring rules, and rescore both versions under the same rules.
 
-## Corpus size and remote embedding load
+## Code map
 
-Query counts are small, but every run builds fresh corpus indexes before searching:
-
-| Suite | Indexed corpus |
+| Directory | Responsibility |
 | --- | --- |
-| SWE-QA20 | Source files from 11 pinned repositories |
-| BEIR | 75,128 unique documents across SciFact (5,183), NFCorpus (3,633), ArguAna (8,674) and FiQA (57,638) |
-| DuRetrieval | 100,001 passages |
-| Quarry | 20 pinned repository preimages, filtered by each task's language |
-
-ArguAna needs a separate leave-one-out index for each of its three selected queries, so BEIR processes 92,473 document files across its six indexes. Source files can yield multiple embedding entities. Model downloads and compiled packages may be cached; corpus indexes and their document embeddings are not reused between runs or versions. Each of the 70 queries is also searched in three modes with five calls per mode.
-
-Manual remote runs start the four suite jobs independently. The Qwen text backend's default indexing policy starts at eight concurrent batches and can grow to twelve; Qwen3.7 text embedding accepts up to twenty inputs per batch. Separate runs for different candidates can overlap, with no account-wide token budget in this workflow. Large fresh indexes and overlapping batches can therefore exhaust a shared remote token rate limit even when there are few test queries. PR and comment version comparisons deliberately use local embedding.
-
-For Model Studio, `Allocated quota exceeded` indicates a token rate limit; [the provider documents TPM/TPS limits and account-wide aggregation](https://www.alibabacloud.com/help/en/model-studio/rate-limit). Remote capacity planning needs token-aware pacing across suite jobs and runs, in addition to limiting per-process concurrency. Reducing test query counts alone does not remove the indexing load.
-
-## Limits
-
-These public development questions support regression diagnosis, not broad generalization claims. A file hit does not establish that its returned snippet answers the question. Reports do not claim complete candidate/fusion histories or embedding inputs; a miss alone cannot identify the responsible stage. Answer correctness and agent token use require separate evaluations.
+| `core/`, `engines/zg/` | Frozen inputs, public requests/responses, runner and evidence audits |
+| `metrics/` | File/Entity matching, ranking scores and stage coverage |
+| `reports/` | Validation, comparisons and HTML rendering |
+| `expansion/` | Pilot configuration, corpus preparation and runners |
+| `configs/`, `data/`, `gold/` | Pinned protocol, source/query records and labels |
