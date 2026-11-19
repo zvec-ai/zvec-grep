@@ -1,7 +1,7 @@
 # Retrieval-only pilot suites
 
-These pilots reuse the Rust public MCP search route and the existing five
-file-level metrics. They run independently of the frozen SWE-QA20 suite.
+These pilots use the Rust public MCP search route. They run independently of
+the frozen SWE-QA20 suite and report File metrics and diagnostic Entity metrics.
 
 `config.mjs` is the editable registry for pilot suite metadata: lock filename,
 expected query count, embedding model, gold projection, report labels, optional
@@ -26,7 +26,7 @@ runner and combined report free of repeated suite-specific constants.
   tasks span Go, Python, Rust, JavaScript, TypeScript, Java, C# and C. Each
   exact preimage revision is indexed separately. Original `positive_units`
   remain in `data/quarry20.json`; file metrics project their unique paths.
-  This is a file-level pilot, not Quarry's official function-level recall.
+  The pilot uses ZG's containment rule for the function targets.
 - **DuRetrieval / Chinese web search dev:** ten original Chinese queries sampled
   at equal positions in the sorted dev-query IDs. All 100,001 passages in the
   pinned [C-MTEB DuRetrieval](https://huggingface.co/datasets/C-MTEB/DuRetrieval)
@@ -38,11 +38,12 @@ runner and combined report free of repeated suite-specific constants.
   subset, not a score on DuReader's original full 8.09-million-passage corpus.
 
 Each suite uses its own specified embedding model. The MCP requests use the
-same fixed mode order (hybrid, fts, vector), `limit: 10`, no agent, and five
-calls per query; all five results supply quality and stability, while the fifth
+same fixed mode order (hybrid, fts, vector), explicit `preview: "full"`,
+`limit: 10`, no agent, and five calls per query; all five results supply quality and stability, while the fifth
 supplies output size. Results
-include File Hit@1/5/10, File MRR@10, binary file nDCG@10, ordered Top-10
-stability, mean public output, and mean and median call latency. Each query/mode
+include Hit@1/5/10, Recall@1/5/10, MRR@10 and nDCG@10 at both levels.
+Reports also include ordered Top-10 stability, mean public output, and mean
+and median call latency. Each query/mode
 first averages its five call-level quality scores. Native result ranks are retained and repeat chunks
 consume ranks. BEIR and Quarry now have twenty queries each, with the original
 ten retained. The per-dataset and per-language rows show completed/planned
@@ -50,6 +51,24 @@ coverage and the same metrics as the overall pilot row; they do not change the
 existing per-query average. SWE-QA20 uses a repository macro average for its
 overall nDCG, while these pilots use a query average. Absolute scores across
 suites do not share a corpus or relevance definition.
+
+Indexed Entity and Fragment totals sum the independently built corpus indexes:
+six for BEIR, one for DuRetrieval and twenty for Quarry. Shared content across
+separate indexes is counted in each index; modes and repeated calls do not
+multiply counts. The JSON retains each index's counts. Missing counts remain
+N/A, including Fragment counts from older candidates that did not expose them.
+Counts come from explicit `zg --status --debug` calls before and after each
+index's retrieval batch, outside search timing. Each call reads the counts once;
+ordinary status, MCP status, and search freshness checks do not scan Fragments.
+The same response supplies the indexed model's input-token limit and normal/dense
+Fragment budgets. These are configured budgets in UTF-16 units before metadata
+allowance, not measured token use. Missing fields in older versions are N/A;
+see the [reporting rules](../README.md) for details.
+
+Full preview displays each retrieved Entity's complete content; short preview
+displays excerpts. Preserve earlier default-short artifacts and use their
+matching scorer for review.
+
 All four suites use the same public response parser. It tolerates one empty
 trailing source line immediately after a result's public range, matching the
 Rust MCP presentation of files ending in a newline. Nonempty or further
@@ -70,3 +89,69 @@ files and installed only in their CI jobs. A local run needs the corresponding
 dependency before invoking `expansion/run.mjs`. Downloaded source data and
 materialized corpus files are run-local inputs; only hashes and selected
 original query/qrel records are checked in.
+
+## Gold and scoring
+
+| Suite | File Gold | Entity Gold |
+| --- | --- | --- |
+| BEIR | Original positive document qrels | Original SciFact evidence sentences where available, LLM-annotated evidence spans for NFCorpus and FiQA, and the paired ArguAna argument body |
+| DuRetrieval | Original positive passage qrels | LLM-annotated answer spans within the published passages |
+| Quarry | Unique paths of original positive units | Original function ranges on the pinned preimage, with indentation and separators outside the function excluded |
+
+ZG's [Gold manifests](gold/) are assembled, annotated, and checked with LLM
+assistance against the pinned data above. Entity scores are diagnostic, not
+independently human-validated results.
+
+The manifests record original labels, source file and span checksums, and
+`unresolved` reasons for targets that cannot be established. Source locks bind
+the query, original labels and corpus version. This section defines annotation
+rules; manifest hashes and Git commits identify each generated Gold version.
+Unresolved targets do not enter Entity scoring. A case without any established
+Entity target remains unscored.
+
+BEIR writes a title and a blank line before the body. DuRetrieval writes the
+unchanged passage. The runner checks these materialized bytes before indexing.
+Gold and reports stay outside the searchable corpus.
+
+File Recall uses all original positive paths with the same ranking and
+aggregation rules as the existing File scores. Entity metrics are diagnostic.
+The scored targets cover the established evidence within the published positives.
+Recall uses these recorded targets as its denominator; no exhaustive review of
+the full corpus is required. Known gaps remain in `unresolved`. Some
+Quarry questions ask for declarations or parts of a code path beyond the
+published functions. The Entity scores measure coverage of those published
+functions.
+
+BEIR has 22 verified Entity targets. The cited abstracts for SciFact claims
+`1`, `268`, `552`, `702`, `830` and `975` do not establish the stated
+claim-specific evidence. These cases still count for File and are unscored at
+Entity level. DuRetrieval has 48 verified answer ranges. All ten questions have
+Entity Gold. Quarry keeps all 107 published positive functions.
+
+SciFact preserves every original evidence group: claim `436` accepts sentence
+`1` or `2`; `1274` accepts both `4` and `5`, or `7`. Claim `137` requires `7`
+and `9`, without requiring sentence `8`. These are zero-based source sentence
+indices, following the [official evidence rules](https://github.com/allenai/scifact/blob/master/doc/evaluation.md).
+Each document is one target. Complete any one group within the first K results;
+each member span must be fully contained in a returned Entity. The target's
+first-hit rank is the position completing its earliest group, and multiple
+complete alternatives still earn one target's credit.
+
+Each Gold span must be fully contained in one result from the same file.
+The runner aligns full MCP results to the verified source because the
+text header gives line numbers without columns. This distinguishes different
+chunks on the same line. Scores use the resulting byte coordinates. An
+ambiguous range remains unknown when it could affect a metric. Repeating a
+target does not add credit. Partial pieces of one span cannot be combined
+across results; separate spans in an evidence group can. See the
+[matching rules](../../docs/benchmark-gold-authoring-and-matching.md) for
+ranking, aggregation and missing evidence.
+
+Pilot report schema 3 binds the Gold and scoring rules and saves per-call
+source coordinates. Comparisons recheck both sides with the same Gold and rules.
+BEIR Gold schema 2 stores alternative groups and individual sentence spans.
+Pilot scoring version 2 recognizes complete groups; recalculate both versions
+under these rules rather than comparing them with earlier scores.
+Historical schema 2 reports retain their File metrics. To add Entity metrics to
+an older run, use its saved full responses and pinned source to verify the
+ranges, or rerun both versions. Record which method produced the scores.

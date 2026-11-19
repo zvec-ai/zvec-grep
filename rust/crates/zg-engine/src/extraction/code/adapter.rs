@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use tree_sitter::Node;
 
 use crate::domain::{FileFormat, Language, SymbolType};
@@ -41,6 +43,7 @@ const CPP: LanguageAdapter = LanguageAdapter {
         "class_specifier",
         "struct_specifier",
         "union_specifier",
+        "field_declaration",
     ],
 };
 const GO: LanguageAdapter = LanguageAdapter {
@@ -79,7 +82,10 @@ const JAVA: LanguageAdapter = LanguageAdapter {
 const JAVASCRIPT: LanguageAdapter = LanguageAdapter {
     kind: Language::JavaScript,
     entity_types: &[
+        "class",
+        "function_expression",
         "class_declaration",
+        "class_static_block",
         "field_definition",
         "function_declaration",
         "generator_function_declaration",
@@ -87,7 +93,36 @@ const JAVASCRIPT: LanguageAdapter = LanguageAdapter {
         "pair",
         "variable_declarator",
     ],
-    scope_types: &["class_declaration", "function_declaration"],
+    scope_types: &[
+        "method_definition",
+        "class",
+        "function_expression",
+        "class_declaration",
+        "class_static_block",
+        "function_declaration",
+    ],
+};
+const PHP: LanguageAdapter = LanguageAdapter {
+    kind: Language::Php,
+    entity_types: &[
+        "class_declaration",
+        "const_declaration",
+        "enum_case",
+        "enum_declaration",
+        "function_definition",
+        "interface_declaration",
+        "method_declaration",
+        "namespace_definition",
+        "property_declaration",
+        "trait_declaration",
+    ],
+    scope_types: &[
+        "class_declaration",
+        "enum_declaration",
+        "interface_declaration",
+        "namespace_definition",
+        "trait_declaration",
+    ],
 };
 const PYTHON: LanguageAdapter = LanguageAdapter {
     kind: Language::Python,
@@ -124,9 +159,12 @@ const RUST: LanguageAdapter = LanguageAdapter {
 const TYPESCRIPT: LanguageAdapter = LanguageAdapter {
     kind: Language::TypeScript,
     entity_types: &[
+        "class",
+        "function_expression",
         "abstract_class_declaration",
         "abstract_method_signature",
         "class_declaration",
+        "class_static_block",
         "enum_declaration",
         "field_definition",
         "function_declaration",
@@ -144,8 +182,13 @@ const TYPESCRIPT: LanguageAdapter = LanguageAdapter {
         "variable_declarator",
     ],
     scope_types: &[
+        "method_definition",
+        "class",
+        "function_expression",
+        "function_declaration",
         "abstract_class_declaration",
         "class_declaration",
+        "class_static_block",
         "internal_module",
         "interface_declaration",
         "module",
@@ -159,6 +202,7 @@ pub(super) fn resolve_adapter(format: FileFormat) -> Option<&'static LanguageAda
         FileFormat::Go => Some(&GO),
         FileFormat::Java => Some(&JAVA),
         FileFormat::JavaScript => Some(&JAVASCRIPT),
+        FileFormat::Php => Some(&PHP),
         FileFormat::Python => Some(&PYTHON),
         FileFormat::Rust => Some(&RUST),
         FileFormat::TypeScript => Some(&TYPESCRIPT),
@@ -187,16 +231,27 @@ impl LanguageAdapter {
         if matches!(self.kind, Language::JavaScript | Language::TypeScript)
             && node.kind() == "variable_declarator"
         {
-            let entities = exported_object_function_entities(node, source);
+            let mut entities = exported_object_function_entities(node, source);
             if !entities.is_empty() {
+                // Non-exported objects remain searchable values and own calls
+                // in non-function initializers, alongside their member entities.
+                if !self.is_exported(node, false) {
+                    entities.insert(0, node);
+                }
                 return entities;
             }
+        }
+        if self.kind == Language::Php {
+            return resolve_php_entities(node);
         }
         vec![node]
     }
 
     pub(super) fn enter_scope_node(self, node: Node<'_>) -> Node<'_> {
         match self.kind {
+            // A nested type's members belong to the type, whose own body is the
+            // scope the walk has to read.
+            Language::C | Language::Cpp => nested_type_specifier(node).unwrap_or(node),
             Language::Go => node.child_by_field_name("type").unwrap_or(node),
             Language::Python if node.kind() == "decorated_definition" => {
                 inner_python_definition(node)
@@ -209,7 +264,9 @@ impl LanguageAdapter {
 
     pub(super) fn extract_name(self, node: Node<'_>, source: &[u8]) -> Option<String> {
         match self.kind {
-            Language::C | Language::Cpp => extract_c_family_name(node, source),
+            Language::C | Language::Cpp => nested_type_specifier(node)
+                .and_then(|specifier| extract_c_family_name(specifier, source))
+                .or_else(|| extract_c_family_name(node, source)),
             Language::Go => field_text(node, "name", source),
             Language::Java
                 if matches!(node.kind(), "field_declaration" | "constant_declaration") =>
@@ -221,6 +278,7 @@ impl LanguageAdapter {
             Language::JavaScript | Language::TypeScript => {
                 extract_javascript_typescript_name(node, source)
             }
+            Language::Php => extract_php_name(node, source),
             Language::Python => {
                 if node.kind() == "decorated_definition" {
                     inner_python_definition(node)
@@ -292,10 +350,12 @@ impl LanguageAdapter {
 
     pub(super) fn classify(self, node: Node<'_>) -> Option<SymbolType> {
         match self.kind {
+            Language::Cpp if cpp_initializer_entity(node) => Some(SymbolType::Value),
             Language::C | Language::Cpp => classify_c_family(node),
             Language::Go => classify_go(node),
             Language::Java if node.kind() == "field_declaration" => Some(SymbolType::Value),
             Language::JavaScript | Language::TypeScript => classify_javascript_typescript(node),
+            Language::Php => classify_php(node),
             _ => classify_code_node(node),
         }
     }
@@ -309,11 +369,17 @@ impl LanguageAdapter {
                 let definition = inner_python_definition(node).unwrap_or(node);
                 extract_generic_signature(definition, source)
             }
+            Language::Php => extract_php_signature(node, source),
             _ => extract_generic_signature(node, source),
         }
     }
 
     pub(super) fn extract_doc(self, node: Node<'_>, source: &[u8]) -> Option<String> {
+        let node = if self.kind == Language::Php {
+            php_declaration(node)
+        } else {
+            node
+        };
         let mut documentation = extract_preceding_doc(node, source);
         let mut declaration = node;
         while let Some(parent) = declaration.parent().filter(|parent| match self.kind {
@@ -349,10 +415,19 @@ impl LanguageAdapter {
         match self.kind {
             // Only function-shaped declarations (`void f(int);`, in-class
             // member declarations, function-pointer variables) become
-            // entities; plain variable declarations stay unindexed.
+            // entities; plain variable declarations stay unindexed. A member
+            // that declares a nested type in place states that type, whose
+            // name — not the first function its body happens to hold — is the
+            // entity's.
             Language::C | Language::Cpp => {
-                !matches!(node.kind(), "declaration" | "field_declaration")
+                nested_type_specifier(node).is_some()
+                    || !matches!(node.kind(), "declaration" | "field_declaration")
                     || find_descendant_by_kind(node, "function_declarator").is_some()
+                    // A variable a namespace initializes with a call is the
+                    // caller of that call: the initializer runs at the unit's
+                    // scope, so the body around it — a function — is not the
+                    // one making the call. A local stays unindexed.
+                    || (self.kind == Language::Cpp && cpp_initializer_entity(node))
             }
             Language::JavaScript | Language::TypeScript => {
                 should_index_javascript_typescript_entity(node)
@@ -377,6 +452,8 @@ impl LanguageAdapter {
     pub(super) fn is_declaration(self, node: Node<'_>) -> bool {
         matches!(self.kind, Language::C | Language::Cpp)
             && matches!(node.kind(), "declaration" | "field_declaration")
+            && nested_type_specifier(node).is_none()
+            && !(self.kind == Language::Cpp && cpp_initializer_entity(node))
     }
 
     /// Counts a function-shaped entity's declared parameters, excluding the
@@ -449,8 +526,52 @@ impl LanguageAdapter {
         }
     }
 
+    /// Reports whether a C/C++ declaration has internal linkage, so that no
+    /// other translation unit can address it by name: it sits inside an
+    /// unnamed namespace, or it is a file-scope `static` declaration.
+    ///
+    /// A class member's `static` is not internal — it says the member belongs
+    /// to the type, not to the translation unit — so an enclosing class rules
+    /// out the storage-class reading. An unnamed namespace keeps its effect
+    /// inside a class: a class declared there, its members included, belongs
+    /// to the file too.
+    ///
+    /// Other languages report nothing: their visibility is a property of the
+    /// declaration (see [`Self::is_exported`]), not of a storage class.
+    pub(super) fn has_internal_linkage(self, node: Node<'_>, source: &[u8]) -> bool {
+        if !matches!(self.kind, Language::C | Language::Cpp) {
+            return false;
+        }
+        let mut inside_class = false;
+        let mut current = node;
+        while let Some(parent) = current.parent() {
+            match parent.kind() {
+                "class_specifier" | "struct_specifier" | "union_specifier" => inside_class = true,
+                "namespace_definition" if parent.child_by_field_name("name").is_none() => {
+                    return true;
+                }
+                "translation_unit" => break,
+                _ => {}
+            }
+            current = parent;
+        }
+        !inside_class && declares_static_storage(node, source)
+    }
+
     fn should_enter_scope(self, node: Node<'_>) -> bool {
         match self.kind {
+            // A member that declares a nested type opens that type's body as a
+            // scope; any other member declaration is a value of the enclosing
+            // class, not a scope of its own.
+            Language::C | Language::Cpp if node.kind() == "field_declaration" => {
+                nested_type_specifier(node).is_some()
+            }
+            // `export function() {}` names nothing at the export site, so its
+            // body is the scope the walk reads.
+            Language::JavaScript | Language::TypeScript if node.kind() == "function_expression" => {
+                node.parent()
+                    .is_some_and(|parent| parent.kind() == "export_statement")
+            }
             Language::Go if node.kind() == "type_spec" => node
                 .child_by_field_name("type")
                 .is_some_and(|kind| matches!(kind.kind(), "interface_type" | "struct_type")),
@@ -463,9 +584,236 @@ impl LanguageAdapter {
     }
 }
 
+/// Reports whether this node introduces a type's name — the declaration is the
+/// type itself rather than a scope that carries the type's name.
+///
+/// Rust's `impl` block makes the difference matter: it is a class-scoped
+/// entity named after the type it implements, so the name index holds several
+/// entities under one class name and cannot say which one declares the class.
+/// Every other language's type declaration stands alone, so this only ever
+/// separates an implementation from its type.
+pub(super) fn declares_type(node: Node<'_>) -> bool {
+    if node.kind() == "decorated_definition" {
+        return inner_python_definition(node).is_some_and(declares_type);
+    }
+    if nested_type_specifier(node).is_some() {
+        return true;
+    }
+    matches!(
+        node.kind(),
+        "abstract_class_declaration"
+            | "class_declaration"
+            | "class_definition"
+            | "class_specifier"
+            | "enum_declaration"
+            | "enum_item"
+            | "enum_specifier"
+            | "interface_declaration"
+            | "record_declaration"
+            | "struct_item"
+            | "struct_specifier"
+            | "trait_item"
+            | "type_spec"
+            | "union_item"
+            | "union_specifier"
+    )
+}
+
+/// The type a C++ member declares in place, when the member is a nested class
+/// rather than a value: `struct Iterator { ... };` written inside a class body
+/// parses as a `field_declaration` whose type is the struct specifier, and the
+/// specifier's own body is that type's scope.
+///
+/// A member that also declares a value (`struct Point { int x; } origin;`)
+/// declares a name of the enclosing class the type alone does not answer, so
+/// only a body the member gives no value for qualifies.
+fn nested_type_specifier(node: Node<'_>) -> Option<Node<'_>> {
+    if node.kind() != "field_declaration" || node.child_by_field_name("declarator").is_some() {
+        return None;
+    }
+    let type_node = node.child_by_field_name("type")?;
+    if !matches!(
+        type_node.kind(),
+        "struct_specifier" | "class_specifier" | "union_specifier" | "enum_specifier"
+    ) {
+        return None;
+    }
+    type_node.child_by_field_name("body")?;
+    Some(type_node)
+}
+
 pub(super) fn named_children(node: Node<'_>) -> Vec<Node<'_>> {
     let mut cursor = node.walk();
     node.named_children(&mut cursor).collect()
+}
+
+/// The properties one object literal spells, read once for the declaration
+/// that initializes it and every member entity the declaration produces.
+///
+/// Both facts a literal states — the value each key binds, and the property
+/// that states each key last — come from the same children, so a literal with
+/// many members is scanned once instead of once per member.
+pub(super) struct ObjectLiteral<'tree> {
+    /// The `variable_declarator` the literal initializes: the one entity that
+    /// carries the literal's member aliases.
+    declaration: Node<'tree>,
+    /// Property names the literal binds to another value, in the order of the
+    /// property that states each key last.
+    ///
+    /// `export const api = { run() {}, run: right }` answers `[("run",
+    /// "right")]`: the later property overwrites the earlier one, so a call
+    /// through `api.run` reaches `right` and never the method the same key
+    /// described first. A property whose value is not a bare name — a method,
+    /// a shorthand, a nested literal — states no value the index can follow,
+    /// but it still overwrites the earlier binding of its key.
+    aliases: Vec<(String, String)>,
+    /// The last `pair` that assigns each key: where it starts, and the bare
+    /// name its value spells when the value is one. A later property of the
+    /// same key replaces the member it supersedes with this value.
+    assignments: HashMap<String, (usize, Option<String>)>,
+}
+
+impl<'tree> ObjectLiteral<'tree> {
+    /// Reads the literal `declaration` initializes, or nothing when its
+    /// initializer is no literal.
+    ///
+    /// Only a literal the initializer spells directly counts. A wrapper that
+    /// hands the literal back unchanged (`({...})`, `Object.freeze({...})`) is
+    /// peeled; anything else is left alone, because the properties of a value
+    /// some call built are that call's business.
+    pub(super) fn read(declaration: Node<'tree>, source: &[u8]) -> Option<Self> {
+        let literal = initialized_object_literal(declaration, source)?;
+        let mut stated: HashMap<String, (usize, Option<String>)> = HashMap::new();
+        let mut assignments: HashMap<String, (usize, Option<String>)> = HashMap::new();
+        for property in named_children(literal) {
+            let Some(name) = member_key(property, source) else {
+                continue;
+            };
+            // Only a `pair` whose value is a bare name states a value the
+            // index can follow; every other property states its key alone.
+            let value = (property.kind() == "pair")
+                .then(|| property.child_by_field_name("value"))
+                .flatten()
+                .filter(|value| value.kind() == "identifier")
+                .map(|value| text(value, source).to_owned());
+            if property.kind() == "pair" {
+                assignments.insert(name.clone(), (property.start_byte(), value.clone()));
+            }
+            stated.insert(name, (property.start_byte(), value));
+        }
+        // The last property of a key decides what the key names, so the
+        // aliases follow the position of that property rather than the
+        // position the key was first written at.
+        let mut stated = stated.into_iter().collect::<Vec<_>>();
+        stated.sort_unstable_by_key(|(_, (start, _))| *start);
+        let aliases = stated
+            .into_iter()
+            .filter_map(|(name, (_, value))| value.map(|value| (name, value)))
+            .collect();
+        Some(Self {
+            declaration,
+            aliases,
+            assignments,
+        })
+    }
+
+    /// Property names the literal binds to another value, the last property of
+    /// each key deciding both the value and the order.
+    pub(super) fn aliases(&self) -> &[(String, String)] {
+        &self.aliases
+    }
+
+    /// Whether `node` is the declaration this literal initializes, the one
+    /// entity that carries the literal's member aliases.
+    pub(super) fn declares(&self, node: Node<'_>) -> bool {
+        self.declaration.id() == node.id()
+    }
+
+    /// The value a later property of the same key replaces `node` with.
+    ///
+    /// `{ run() {}, run: right }` indexes the method as `api::run`, yet the
+    /// literal's own last assignment to `run` is `right`: a call through
+    /// `api.run` reaches `right`, and the method the key described first is
+    /// unreachable through it. Only a later assignment answers; a later method
+    /// or literal is a declaration of its own, not a value this key forwards to.
+    pub(super) fn overwritten_by(&self, node: Node<'_>, source: &[u8]) -> Option<String> {
+        let name = member_key(node, source)?;
+        let (start, value) = self.assignments.get(&name)?;
+        if *start <= node.start_byte() {
+            return None;
+        }
+        value.clone()
+    }
+}
+
+/// The object literal a declaration's initializer spells, after peeling the
+/// wrappers that hand it back unchanged. `Object.freeze`/`Object.seal` are the
+/// two calls that do so; any other call names a value this index cannot open.
+fn initialized_object_literal<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Node<'tree>> {
+    if node.kind() != "variable_declarator" {
+        return None;
+    }
+    let mut value = node.child_by_field_name("value")?;
+    loop {
+        match value.kind() {
+            "parenthesized_expression" => value = value.named_child(0)?,
+            "object" => return Some(value),
+            "call_expression" => {
+                let function = value.child_by_field_name("function")?;
+                if !matches!(text(function, source), "Object.freeze" | "Object.seal") {
+                    return None;
+                }
+                let arguments = named_children(value.child_by_field_name("arguments")?);
+                let [argument] = arguments.as_slice() else {
+                    return None;
+                };
+                value = *argument;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// The name a property or an object member states.
+///
+/// A shorthand states its name alone — `{ run }` holds the function of that
+/// name, which the name index already answers — and every other spelling
+/// carries the name in a key or a name field.
+fn member_key(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let key = match node.kind() {
+        "pair" => node.child_by_field_name("key")?,
+        "method_definition" => node.child_by_field_name("name")?,
+        "shorthand_property_identifier" => node,
+        // A spread contributes keys this literal cannot enumerate.
+        _ => return None,
+    };
+    property_key(key, source)
+}
+
+/// The name a property key spells. Computed keys and keys that are not written
+/// as a name or a string state nothing a call can spell.
+fn property_key(key: Node<'_>, source: &[u8]) -> Option<String> {
+    match key.kind() {
+        "property_identifier"
+        | "shorthand_property_identifier"
+        | "shorthand_property_identifier_pattern" => Some(text(key, source).to_owned()),
+        "string" => Some(
+            text(key, source)
+                .trim_matches(|character| matches!(character, '"' | '\'' | '`'))
+                .to_owned(),
+        ),
+        _ => None,
+    }
+}
+
+/// Whether the declaration spells the `static` storage class on its own
+/// specifiers. Only the declaration's direct children are read: a `static`
+/// nested deeper belongs to a parameter or a local of the declaration, not to
+/// the declaration itself.
+fn declares_static_storage(node: Node<'_>, source: &[u8]) -> bool {
+    named_children(node).into_iter().any(|child| {
+        child.kind() == "storage_class_specifier" && text(child, source).trim() == "static"
+    })
 }
 
 pub(super) fn text<'source>(node: Node<'_>, source: &'source [u8]) -> &'source str {
@@ -505,6 +853,46 @@ fn name_field(node: Node<'_>, source: &[u8]) -> Option<String> {
     })
 }
 
+/// A direct namespace initializer needs a callable owner; local variables stay
+/// inside their enclosing function. Multi-declarator statements need splitting.
+fn cpp_initializer_entity(node: Node<'_>) -> bool {
+    if node.kind() != "declaration" {
+        return false;
+    }
+    let mut cursor = node.walk();
+    let declarators = node
+        .children_by_field_name("declarator", &mut cursor)
+        .collect::<Vec<_>>();
+    let [declarator] = declarators.as_slice() else {
+        return false;
+    };
+    if declarator.kind() != "init_declarator"
+        || !declarator
+            .child_by_field_name("value")
+            .is_some_and(|value| {
+                matches!(value.kind(), "call_expression" | "new_expression")
+                    && find_descendant_by_kind(value, "lambda_expression").is_none()
+            })
+    {
+        return false;
+    }
+    let mut parent = node.parent();
+    while let Some(node) = parent {
+        if matches!(
+            node.kind(),
+            "function_definition"
+                | "lambda_expression"
+                | "class_specifier"
+                | "struct_specifier"
+                | "union_specifier"
+        ) {
+            return false;
+        }
+        parent = node.parent();
+    }
+    true
+}
+
 fn is_c_function_type(kind: &str) -> bool {
     matches!(
         kind,
@@ -519,6 +907,15 @@ fn extract_c_family_name(node: Node<'_>, source: &[u8]) -> Option<String> {
     }
     if let Some(name) = node.child_by_field_name("name") {
         return Some(text(find_identifier_leaf(name).unwrap_or(name), source).to_owned());
+    }
+    // A variable initialized in place states its name in the declarator
+    // (`int caller = f();`). A function declaration already carried a `name`.
+    if node.kind() == "declaration"
+        && let Some(declarator) = node.child_by_field_name("declarator")
+        && declarator.kind() == "init_declarator"
+        && let Some(name) = find_identifier_leaf(declarator)
+    {
+        return Some(text(name, source).to_owned());
     }
     if node.kind() == "type_definition" {
         return node
@@ -603,6 +1000,9 @@ fn is_simple_c_identifier(value: &str) -> bool {
 
 fn classify_c_family(node: Node<'_>) -> Option<SymbolType> {
     match node.kind() {
+        "field_declaration" if nested_type_specifier(node).is_some() => {
+            nested_type_specifier(node).and_then(classify_c_family)
+        }
         "type_definition" => {
             let definition = node
                 .child_by_field_name("type")
@@ -630,7 +1030,8 @@ fn classify_go(node: Node<'_>) -> Option<SymbolType> {
         "type_spec" => match node.child_by_field_name("type").map(|item| item.kind()) {
             Some("interface_type") => Some(SymbolType::Interface),
             Some("struct_type") => Some(SymbolType::Class),
-            _ => None,
+            // Non-aggregate named types are searchable type definitions, not classes.
+            _ => Some(SymbolType::Alias),
         },
         "method_elem" | "method_spec" => Some(SymbolType::Function),
         _ => classify_code_node(node),
@@ -638,6 +1039,11 @@ fn classify_go(node: Node<'_>) -> Option<SymbolType> {
 }
 
 fn should_index_javascript_typescript_entity(node: Node<'_>) -> bool {
+    if node.kind() == "function_expression" {
+        return node
+            .parent()
+            .is_some_and(|parent| parent.kind() == "export_statement");
+    }
     if node.kind() == "method_definition"
         && node
             .parent()
@@ -646,7 +1052,13 @@ fn should_index_javascript_typescript_entity(node: Node<'_>) -> bool {
         return false;
     }
     if node.kind() == "pair" {
-        return has_function_value(node) && exported_object_variable(node).is_some();
+        // The object a local declares is no workspace-level symbol, so neither
+        // are its members: an entity emitted here would carry the member's
+        // bare name into the enclosing body, and a call to the file's own
+        // function of that name would bind to the local's property instead.
+        return has_function_value(node)
+            && exported_object_variable(node)
+                .is_some_and(|variable| !inside_function_declaration(variable));
     }
     if !matches!(
         node.kind(),
@@ -681,7 +1093,10 @@ fn should_index_javascript_typescript_entity(node: Node<'_>) -> bool {
 fn inside_function_declaration(node: Node<'_>) -> bool {
     let mut parent = node.parent();
     while let Some(current) = parent {
-        if current.kind() == "function_declaration" {
+        if matches!(
+            current.kind(),
+            "function_declaration" | "method_definition" | "function_expression" | "arrow_function"
+        ) {
             return true;
         }
         parent = current.parent();
@@ -711,8 +1126,7 @@ fn contains_function_value(node: Node<'_>) -> bool {
 }
 
 fn exported_object_function_entities<'tree>(node: Node<'tree>, _source: &[u8]) -> Vec<Node<'tree>> {
-    if node.kind() != "variable_declarator" || closest_ancestor(node, "export_statement").is_none()
-    {
+    if node.kind() != "variable_declarator" || inside_function_declaration(node) {
         return Vec::new();
     }
     let Some(value) = node.child_by_field_name("value") else {
@@ -731,12 +1145,11 @@ fn exported_object_function_entities<'tree>(node: Node<'tree>, _source: &[u8]) -
 }
 
 fn exported_object_variable(node: Node<'_>) -> Option<Node<'_>> {
-    let object =
-        closest_ancestor(node, "object").or_else(|| closest_ancestor(node, "object_expression"))?;
+    let object = node
+        .parent()
+        .filter(|parent| matches!(parent.kind(), "object" | "object_expression"))?;
     let variable = object.parent()?;
-    (variable.kind() == "variable_declarator"
-        && closest_ancestor(variable, "export_statement").is_some())
-    .then_some(variable)
+    (variable.kind() == "variable_declarator").then_some(variable)
 }
 
 fn exported_object_variable_name(node: Node<'_>, source: &[u8]) -> Option<String> {
@@ -745,14 +1158,32 @@ fn exported_object_variable_name(node: Node<'_>, source: &[u8]) -> Option<String
 }
 
 fn extract_javascript_typescript_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if node.kind() == "class_static_block" {
+        return Some("static {}".to_owned());
+    }
+    if node.kind() == "field_definition" {
+        return field_text(node, "property", source);
+    }
     if node.kind() == "pair" {
         return field_text(node, "key", source)
             .map(|value| value.trim_matches(['\'', '"', '`']).to_owned());
     }
-    name_field(node, source)
+    name_field(node, source).or_else(|| {
+        let parent = node.parent()?;
+        if node.kind() == "class" && parent.kind() == "variable_declarator" {
+            return field_text(parent, "name", source);
+        }
+        (parent.kind() == "export_statement" && text(parent, source).starts_with("export default"))
+            .then(|| "default".to_owned())
+    })
 }
 
 fn classify_javascript_typescript(node: Node<'_>) -> Option<SymbolType> {
+    match node.kind() {
+        "class" => return Some(SymbolType::Class),
+        "function_expression" | "class_static_block" => return Some(SymbolType::Function),
+        _ => {}
+    }
     if node.kind() == "pair"
         || matches!(
             node.kind(),
@@ -775,6 +1206,112 @@ fn inner_python_definition(node: Node<'_>) -> Option<Node<'_>> {
     named_children(node)
         .into_iter()
         .find(|child| matches!(child.kind(), "function_definition" | "class_definition"))
+}
+
+// PHP property and constant statements carry no name of their own and can
+// declare several elements, so those statements split per element. Promoted
+// constructor parameters declare properties from inside a method signature,
+// which the walk never enters, so they are surfaced beside their method.
+fn resolve_php_entities(node: Node<'_>) -> Vec<Node<'_>> {
+    if matches!(node.kind(), "const_declaration" | "property_declaration") {
+        let elements = named_children(node)
+            .into_iter()
+            .filter(|child| is_php_element(*child))
+            .collect::<Vec<_>>();
+        // A lone element keeps the whole statement, so its source range
+        // carries the modifiers and type, as Java fields do.
+        return if elements.len() > 1 {
+            elements
+        } else {
+            vec![node]
+        };
+    }
+    let mut entities = vec![node];
+    if let Some(parameters) = node.child_by_field_name("parameters") {
+        entities.extend(
+            named_children(parameters)
+                .into_iter()
+                .filter(|child| child.kind() == "property_promotion_parameter"),
+        );
+    }
+    entities
+}
+
+fn is_php_element(node: Node<'_>) -> bool {
+    matches!(node.kind(), "const_element" | "property_element")
+}
+
+// Elements share the modifiers, type and documentation of their statement.
+pub(super) fn php_declaration(node: Node<'_>) -> Node<'_> {
+    if is_php_element(node) {
+        node.parent().unwrap_or(node)
+    } else {
+        node
+    }
+}
+
+fn extract_php_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if matches!(node.kind(), "const_declaration" | "property_declaration") {
+        let element = named_children(node)
+            .into_iter()
+            .find(|child| is_php_element(*child))?;
+        return extract_php_name(element, source);
+    }
+    // Properties name a `variable_name`, whose inner `name` drops the `$`.
+    let name = node.child_by_field_name("name").or_else(|| {
+        named_children(node)
+            .into_iter()
+            .find(|child| child.kind() == "name")
+    })?;
+    // A by-reference promoted parameter wraps its `variable_name` in `by_ref`.
+    let name = if name.kind() == "by_ref" {
+        named_children(name)
+            .into_iter()
+            .find(|child| child.kind() == "variable_name")?
+    } else {
+        name
+    };
+    let name = if name.kind() == "variable_name" {
+        named_children(name)
+            .into_iter()
+            .find(|child| child.kind() == "name")?
+    } else {
+        name
+    };
+    Some(text(name, source).to_owned())
+}
+
+// A split element keeps the statement's modifiers and type but only its own
+// name and value, so siblings do not repeat each other's declarations.
+fn extract_php_signature(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if !is_php_element(node) {
+        return extract_generic_signature(node, source);
+    }
+    let statement = php_declaration(node);
+    let first_element = named_children(statement)
+        .into_iter()
+        .find(|child| is_php_element(*child))?;
+    let prefix = extract_signature_prefix(statement, source, first_element.start_byte());
+    let element = extract_generic_signature(node, source)?;
+    let prefix = prefix.trim();
+    Some(if prefix.is_empty() {
+        element
+    } else {
+        format!("{prefix} {element}")
+    })
+}
+
+fn classify_php(node: Node<'_>) -> Option<SymbolType> {
+    match node.kind() {
+        "const_declaration"
+        | "const_element"
+        | "enum_case"
+        | "property_declaration"
+        | "property_element"
+        | "property_promotion_parameter" => Some(SymbolType::Value),
+        "trait_declaration" => Some(SymbolType::Interface),
+        _ => classify_code_node(node),
+    }
 }
 
 fn extract_javascript_signature(node: Node<'_>, source: &[u8]) -> Option<String> {
@@ -850,6 +1387,7 @@ fn append_signature(
             | "inner_attribute_item"
             | "attribute_specifier"
             | "attribute_declaration"
+            | "attribute_list"
             | "annotation"
             | "marker_annotation"
             | "decorator"
@@ -858,19 +1396,24 @@ fn append_signature(
         out.push(' ');
         return;
     }
-    let body = node.child_by_field_name("body").or_else(|| {
-        named_children(node).into_iter().find(|child| {
-            matches!(
-                child.kind(),
-                "statement_block"
-                    | "compound_statement"
-                    | "block"
-                    | "class_body"
-                    | "declaration_list"
-                    | "field_declaration_list"
-            )
-        })
-    });
+    // PHP names a ternary's true branch `body`, but it is a value, not an implementation.
+    let body = node
+        .child_by_field_name("body")
+        .filter(|_| node.kind() != "conditional_expression")
+        .or_else(|| {
+            named_children(node).into_iter().find(|child| {
+                matches!(
+                    child.kind(),
+                    "statement_block"
+                        | "compound_statement"
+                        | "block"
+                        | "class_body"
+                        | "declaration_list"
+                        | "field_declaration_list"
+                        | "property_hook_list"
+                )
+            })
+        });
     let mut offset = node.start_byte();
     for child in named_children(node) {
         if child.start_byte() >= end_byte {
@@ -1076,16 +1619,6 @@ fn clean_comment_text(value: &str) -> String {
         .join("\n")
         .trim()
         .to_owned()
-}
-
-fn closest_ancestor<'tree>(mut node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
-    while let Some(parent) = node.parent() {
-        if parent.kind() == kind {
-            return Some(parent);
-        }
-        node = parent;
-    }
-    None
 }
 
 fn find_descendant_by_kind<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {

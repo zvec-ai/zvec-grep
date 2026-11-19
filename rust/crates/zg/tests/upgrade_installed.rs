@@ -88,6 +88,56 @@ fn backups(path: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+#[test]
+fn explicit_launcher_migrates_native_paths_and_legacy_launchers_idempotently() {
+    let fixture = Fixture::new();
+    let old = fixture.path("old install/bin/zg");
+    let path = fixture.write(".claude.json", &serde_json::to_string_pretty(&json!({
+        "mcpServers": {
+            "zvec-grep": { "command": old, "args": ["--server", "--stdio"], "env": { "CUSTOM": "preserved" } },
+            "legacy": { "command": "zg", "args": ["server", "--stdio"] },
+            "array": { "command": ["zg", "server", "--stdio"] },
+            "unrelated": { "command": "other", "args": [] }
+        }
+    })).expect("configuration"));
+    let launcher = Path::new(env!("CARGO_BIN_EXE_zg"));
+    let run = || {
+        fixture
+            .command()
+            .args(["--install", "--upgrade-installed", "--launcher"])
+            .arg(launcher)
+            .output()
+            .expect("upgrade")
+    };
+    success(&run());
+    let updated: Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("config")).expect("JSON");
+    assert_eq!(
+        updated["mcpServers"]["zvec-grep"]["command"],
+        launcher.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        updated["mcpServers"]["zvec-grep"]["env"]["CUSTOM"],
+        "preserved"
+    );
+    assert_eq!(updated["mcpServers"]["unrelated"]["command"], "other");
+    assert_eq!(
+        updated["mcpServers"]["legacy"]["command"],
+        launcher.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        updated["mcpServers"]["legacy"]["args"],
+        json!(["--server", "--stdio"])
+    );
+    assert_eq!(
+        updated["mcpServers"]["array"]["command"],
+        json!([launcher, "--server", "--stdio"])
+    );
+    assert_eq!(backups(&path).len(), 1);
+    success(&run());
+    assert_eq!(backups(&path).len(), 1);
+}
+
 fn read_json(path: &Path) -> Value {
     serde_json::from_str(&fs::read_to_string(path).expect("read")).expect("JSON")
 }
@@ -178,6 +228,53 @@ fn preview_and_repeated_runs_preserve_comments_and_make_exactly_one_backup() {
     assert!(success(&fixture.run(false)).contains("Upgraded: 0, compatible: 1"));
     assert_eq!(backups(&path), saved);
     assert_eq!(fs::read_to_string(&path).expect("unchanged"), expected);
+}
+
+#[test]
+fn cursor_jsonc_upgrade_preserves_comments_backups_and_directory_overrides() {
+    for directory in [".cursor", "custom cursor"] {
+        let fixture = Fixture::new();
+        let source = r#"{
+  // Keep user settings.
+  "theme": "dark",
+  "mcpServers": {
+    "zvec_grep": {
+      "command": "zg",
+      "args": ["server", /* Keep protocol. */ "--stdio"],
+      "env": {"CUSTOM": "preserved"}
+    },
+    "other": {"url": "https://example.test/mcp"}
+  }
+}
+"#;
+        let path = fixture.write(&format!("{directory}/mcp.json"), source);
+        let run = |dry_run| {
+            let mut command = fixture.command();
+            command.args(["--install", "--upgrade-installed"]);
+            if directory != ".cursor" {
+                command.env("CURSOR_CONFIG_DIR", fixture.path(directory));
+            }
+            if dry_run {
+                command.arg("--dry-run");
+            }
+            command.output().expect("run upgrade")
+        };
+
+        assert!(success(&run(true)).contains("Would upgrade: 1"));
+        assert_eq!(fs::read_to_string(&path).expect("preview"), source);
+        assert!(backups(&path).is_empty());
+
+        assert!(success(&run(false)).contains("Upgraded: 1"));
+        let expected = source.replace("\"server\"", "\"--server\"");
+        assert_eq!(fs::read_to_string(&path).expect("upgraded"), expected);
+        let saved = backups(&path);
+        assert_eq!(saved.len(), 1);
+        assert_eq!(fs::read_to_string(&saved[0]).expect("backup"), source);
+
+        assert!(success(&run(false)).contains("Upgraded: 0, compatible: 1"));
+        assert_eq!(fs::read_to_string(&path).expect("unchanged"), expected);
+        assert_eq!(backups(&path), saved);
+    }
 }
 
 #[test]
@@ -708,4 +805,30 @@ fn already_native_launchers_keep_custom_argument_spelling() {
     assert!(success(&fixture.run(false)).contains("Upgraded: 0, compatible: 1"));
     assert_eq!(fs::read_to_string(&path).expect("unchanged"), source);
     assert!(backups(&path).is_empty());
+}
+
+#[test]
+fn directory_dotenv_candidates_do_not_block_qwen_migration() {
+    let fixture = Fixture::new();
+    for path in [".env", ".qwen/.env"] {
+        fs::create_dir_all(fixture.path(path)).expect("dotenv directory");
+        fs::write(fixture.path(path).join("keep"), "user data").expect("directory content");
+    }
+    let original = r#"{"mcpServers":{"zvec_grep":{"command":"zg","args":["server","--stdio"],"env":{"CUSTOM":"keep"}}}}"#;
+    let config = fixture.write(".qwen/settings.json", original);
+    assert!(success(&fixture.run(true)).contains("Would upgrade: 1"));
+    assert_eq!(fs::read_to_string(&config).expect("preview"), original);
+    success(&fixture.run(false));
+    let updated: Value = serde_json::from_slice(&fs::read(config).expect("config")).expect("JSON");
+    assert_eq!(
+        updated["mcpServers"]["zvec_grep"]["args"],
+        json!(["--server", "--stdio"])
+    );
+    assert_eq!(updated["mcpServers"]["zvec_grep"]["env"]["CUSTOM"], "keep");
+    for path in [".env", ".qwen/.env"] {
+        assert_eq!(
+            fs::read_to_string(fixture.path(path).join("keep")).expect("preserved data"),
+            "user data"
+        );
+    }
 }

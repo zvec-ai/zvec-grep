@@ -41,6 +41,6 @@ pub(crate) struct ArtifactConfig {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ArtifactDownloadConfig {
     pub(crate) hugging_face: ArtifactSourceConfig,
-    pub(crate) model_scope: ArtifactSourceConfig,
+    pub(crate) model_scope: Option<ArtifactSourceConfig>,
     pub(crate) artifacts: &'static [ArtifactConfig],
 }

@@ -1,11 +1,15 @@
+use super::super::tests::test_resources;
 use super::super::{LlamaToken, should_fallback_to_cpu};
 use super::*;
 
 #[test]
-fn overlapping_operations_share_the_maximum_budget_instead_of_adding_it() {
-    let mut admission = ContextAdmission::default();
-    let first = admission.register(4);
-    let second = admission.register(4);
+fn overlapping_operations_share_the_fixed_capacity_instead_of_adding_budgets() {
+    let mut admission = ContextAdmission {
+        capacity: 4,
+        ..ContextAdmission::default()
+    };
+    let first = admission.register(4, None);
+    let second = admission.register(4, None);
     for id in [first, second, first, second] {
         assert!(admission.try_acquire(id));
     }
@@ -19,9 +23,12 @@ fn overlapping_operations_share_the_maximum_budget_instead_of_adding_it() {
 
 #[test]
 fn an_operation_cannot_borrow_another_operations_larger_limit() {
-    let mut admission = ContextAdmission::default();
-    let small = admission.register(1);
-    let large = admission.register(4);
+    let mut admission = ContextAdmission {
+        capacity: 4,
+        ..ContextAdmission::default()
+    };
+    let small = admission.register(1, None);
+    let large = admission.register(4, None);
     assert!(admission.try_acquire(small));
     assert!(!admission.try_acquire(small));
     for _ in 0..3 {
@@ -34,31 +41,37 @@ fn an_operation_cannot_borrow_another_operations_larger_limit() {
 }
 
 #[test]
-fn releasing_a_large_operation_applies_the_remaining_limit() {
-    let mut admission = ContextAdmission::default();
-    let large = admission.register(4);
-    let small = admission.register(1);
+fn releasing_an_operation_preserves_server_capacity() {
+    let mut admission = ContextAdmission {
+        capacity: 4,
+        ..ContextAdmission::default()
+    };
+    let large = admission.register(4, None);
+    let small = admission.register(1, None);
     assert!(admission.try_acquire(small));
     assert!(admission.try_acquire(large));
     admission.release(large);
     admission.unregister(large);
-    assert_eq!(admission.limit(), 1);
+    assert_eq!(admission.limit(), 4);
     assert!(!admission.try_acquire(small));
     admission.release(small);
     assert!(admission.try_acquire(small));
     admission.release(small);
     admission.unregister(small);
     assert_eq!(admission.in_flight, 0);
-    assert_eq!(admission.limit(), 0);
+    assert_eq!(admission.limit(), 4);
 }
 
 #[test]
 fn cancellation_and_failed_jobs_release_their_ownership_before_retry() {
-    let mut admission = ContextAdmission::default();
-    let cancelled = admission.register(2);
+    let mut admission = ContextAdmission {
+        capacity: 2,
+        ..ContextAdmission::default()
+    };
+    let cancelled = admission.register(2, None);
     assert!(admission.try_acquire(cancelled));
     assert!(admission.try_acquire(cancelled));
-    let waiting = admission.register(2);
+    let waiting = admission.register(2, None);
     assert!(!admission.try_acquire(waiting));
     // Cancellation keeps ownership until each already submitted job drains.
     admission.release(cancelled);
@@ -70,7 +83,7 @@ fn cancellation_and_failed_jobs_release_their_ownership_before_retry() {
     admission.release(waiting);
     admission.release(waiting);
     admission.unregister(waiting);
-    let retry = admission.register(2);
+    let retry = admission.register(2, None);
     assert!(admission.try_acquire(retry));
     assert!(admission.try_acquire(retry));
 }
@@ -86,23 +99,44 @@ fn idle_worker() -> Arc<LlamaContextWorker> {
 }
 
 #[test]
-fn warm_workers_survive_operation_gaps_and_lower_budgets_retire_only_idle_workers() {
+fn small_requests_keep_fixed_capacity_and_retire_only_failed_workers() {
     let mut state = LlamaContextPoolState {
         workers: (0..4).map(|_| idle_worker()).collect(),
-        ..LlamaContextPoolState::default()
+        admission: ContextAdmission {
+            capacity: 4,
+            ..ContextAdmission::default()
+        },
     };
+    state.admission.register(1, None);
     assert!(retire_idle_workers(&mut state).is_empty());
-    let busy = Arc::clone(&state.workers[3]);
-    busy.busy.store(true, Ordering::Release);
-    state.admission.register(1);
-    assert_eq!(retire_idle_workers(&mut state).len(), 3);
-    assert_eq!(state.workers.len(), 1);
-    assert!(Arc::ptr_eq(&state.workers[0], &busy));
-    busy.busy.store(false, Ordering::Release);
-    assert!(retire_idle_workers(&mut state).is_empty());
-    busy.failed.store(true, Ordering::Release);
+    state.workers[3].failed.store(true, Ordering::Release);
     assert_eq!(retire_idle_workers(&mut state).len(), 1);
-    assert!(state.workers.is_empty());
+    assert_eq!(state.workers.len(), 3);
+}
+
+#[test]
+fn batches_of_one_request_share_its_context_allowance() {
+    let mut admission = ContextAdmission {
+        capacity: 4,
+        ..ContextAdmission::default()
+    };
+    let scope = Arc::new(());
+    let first_batch = admission.register(1, Some(Arc::clone(&scope)));
+    let second_batch = admission.register(1, Some(scope));
+    assert_eq!(first_batch, second_batch);
+    assert!(admission.try_acquire(first_batch));
+    assert!(!admission.try_acquire(second_batch));
+    let other_request = admission.register(4, Some(Arc::new(())));
+    assert!(admission.try_acquire(other_request));
+    admission.unregister(second_batch);
+    assert!(!admission.try_acquire(first_batch));
+    admission.release(first_batch);
+    assert!(admission.try_acquire(first_batch));
+    admission.release(first_batch);
+    admission.unregister(first_batch);
+    admission.release(other_request);
+    admission.unregister(other_request);
+    assert!(admission.operations.is_empty());
 }
 
 #[test]
@@ -155,8 +189,12 @@ fn each_physical_job_sizes_qwen_kv_from_its_own_tokens() {
             tokens: vec![LlamaToken::new(7); length],
         })
         .collect::<Vec<_>>();
-    let budget = LlamaExecutionBudget::resolve("qwen3", LlamaExecutionBackend::OtherGpu, 4, 1)
-        .expect("packing-capable GPU budget");
+    let budget = LlamaExecutionBudget::resolve(
+        "qwen3",
+        LlamaExecutionBackend::OtherGpu,
+        4,
+        &test_resources(4),
+    );
     let execution = LlamaBatchExecution {
         architecture: "qwen3".to_owned(),
         context_size: 8_192,
@@ -207,8 +245,8 @@ fn cuda_keeps_whole_sequences_in_separate_jobs_without_reducing_context_budget()
             tokens: vec![LlamaToken::new(7); length],
         })
         .collect::<Vec<_>>();
-    let budget = LlamaExecutionBudget::resolve("qwen3", LlamaExecutionBackend::Cuda, 4, 1)
-        .expect("CUDA budget");
+    let budget =
+        LlamaExecutionBudget::resolve("qwen3", LlamaExecutionBackend::Cuda, 4, &test_resources(4));
     assert_eq!(budget.contexts, 4);
     let execution = LlamaBatchExecution {
         architecture: "qwen3".to_owned(),

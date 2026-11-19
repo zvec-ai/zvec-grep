@@ -24,6 +24,9 @@ use tokio::{
 #[path = "support/terminal.rs"]
 mod terminal;
 
+#[path = "implicit_index/embedding_policy.rs"]
+mod embedding_policy;
+
 struct Fixture {
     root: TempDir,
     user: TempDir,
@@ -352,6 +355,16 @@ fn closed_stdout_preserves_success_and_readiness_errors() {
             let output = with_closed_stdout(fixture.command(&args));
             assert_eq!(output.status.code(), Some(0), "{args:?}: {output:?}");
             assert!(output.stderr.is_empty(), "{args:?}: {output:?}");
+        }
+        // Graph indexing is disabled by default. A closed pipe must not hide
+        // this query error; successful relationship output uses a graph-enabled fixture.
+        for tool in ["--callers", "--callees"] {
+            let output = with_closed_stdout(fixture.command(&[tool, "foo", "--mode", mode]));
+            assert_eq!(output.status.code(), Some(1), "{tool} {mode}: {output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("graph support is disabled"),
+                "{tool} {mode}: {output:?}"
+            );
         }
     }
     fixture.success(&["--server", "off"]);
@@ -778,12 +791,12 @@ fn incompatible_index_errors_are_actionable_without_rebuilding_existing_data() {
             assert!(stderr.contains("zg --index --rebuild"), "{stderr}");
             if presentation == "debug" {
                 assert!(stderr.contains("unsupported index version 1"), "{stderr}");
-                assert!(stderr.contains("expected 3"), "{stderr}");
+                assert!(stderr.contains("expected 2"), "{stderr}");
                 assert!(stderr.contains("Error location:"), "{stderr}");
             } else {
                 for internal_detail in [
                     "unsupported index version",
-                    "expected 3",
+                    "expected 2",
                     "manifest.json",
                     "Error location:",
                     "ZG.ENGINE.",
@@ -1017,7 +1030,7 @@ fn disabled_workspace_is_not_rebuilt_from_a_nested_query_directory() {
                 "recordedUsername": std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).ok(),
             },
             "scan": {},
-            "indexVersion": null,
+            "indexVersion": 2,
             "createdTime": 0,
             "updatedTime": 0,
             "index": { "state": "disabled" }

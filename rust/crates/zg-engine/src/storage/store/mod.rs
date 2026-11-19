@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     EngineError, EngineResult,
-    domain::{Entity, FileId, FileIndexStatus, FileRecord},
+    domain::{Entity, EntityMetadata, FileId, FileIndexStatus, FileRecord, Language},
     utils::{
         atomic_write as write_record, directory_exists, ensure_directory, file_exists,
         reject_symlink, sync_directory,
@@ -29,7 +29,7 @@ use super::{
         IndexedFragment, StorageSearchFilter, StorageSearchHit, StoredEntity, StoredFileAttributes,
         StoredSearchData, WorkspaceIndexStorageOptions,
     },
-    zvec::{corrupt, initialize},
+    zvec::{WAL_RECOVERY_REQUIRED, corrupt, initialize, recover_collection},
 };
 use crate::domain::FileGraphResult;
 use crate::domain::model::EmbeddingModelInfo;
@@ -37,6 +37,7 @@ use crate::domain::model::EmbeddingModelInfo;
 mod read_view;
 mod resolution;
 pub(crate) use read_view::ReadView;
+pub(crate) use resolution::ResolutionSnapshot;
 
 type StoreRegistry = Mutex<HashMap<PathBuf, Weak<SharedStore>>>;
 static STORES: OnceLock<StoreRegistry> = OnceLock::new();
@@ -169,35 +170,44 @@ impl IndexStore {
                 "workspace storage is already open",
             ));
         }
-        let (lock, schema) = prepare_storage(&path, options)?;
+        let (mut lock, mut schema, new_storage) = prepare_storage(&path, options.clone())?;
         let optimize_marker = path.join("optimize.pending");
         let needs_optimize = file_exists(&optimize_marker)?;
-        let files = Files::open(&path, read_only)?;
-        let directories = Directories::open(&path, read_only)?;
-        let entities = Entities::open(&path, read_only)?;
-        let fragments = Fragments::open(&path, &schema, read_only)?;
         let graph_path = path.join("graph").join("graph.sqlite");
-        let graph = if !graph_enabled {
-            Err(graph_disabled())
-        } else if read_only {
-            match fs::metadata(&graph_path) {
-                Ok(_) => {
-                    SqliteGraphStorage::open(&graph_path, OpenMode::ReadOnly).map_err(graph_error)
+        let graph = if graph_enabled {
+            let mode = if read_only {
+                OpenMode::ReadOnly
+            } else if new_storage {
+                OpenMode::Create
+            } else {
+                OpenMode::ReadWrite
+            };
+            let graph = open_graph(&graph_path, mode);
+            if read_only {
+                // Graph failures do not prevent canonical text/vector reads.
+                graph
+            } else {
+                // Existing files will skip extraction when unchanged, so an empty
+                // replacement graph cannot restore their missing relationships.
+                let graph = graph?;
+                if new_storage {
+                    sync_directory(&path.join("graph"))?;
                 }
-                // Pre-graph indexes remain readable without creating SQLite in a reader.
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(graph_missing()),
-                Err(error) => Err(io_error("inspect workspace graph", &graph_path, &error)),
+                Ok(graph)
             }
         } else {
-            // An index built before its workspace asked for a graph still owns
-            // a valid canonical index; creating the empty database on first use
-            // keeps that build usable instead of forcing a rebuild.
-            let graph =
-                SqliteGraphStorage::open(&graph_path, OpenMode::ReadWrite).map_err(graph_error)?;
-            sync_directory(&path.join("graph"))?;
-            Ok(graph)
+            Err(graph_disabled())
         }
         .map_err(EngineError::into_report);
+        let tables = open_tables(&path, &schema, read_only);
+        let (files, directories, entities, fragments) = match tables {
+            Err(error) if read_only && error.code() == WAL_RECOVERY_REQUIRED => {
+                // open_tables has dropped every partial native reader.
+                (lock, schema) = recover_wal(&path, options, lock)?;
+                open_tables(&path, &schema, true)?
+            }
+            result => result?,
+        };
         if !read_only {
             directories.load()?;
         }
@@ -292,6 +302,10 @@ impl IndexStore {
 
     pub(crate) fn list_files(&self) -> EngineResult<Vec<FileRecord>> {
         self.read(|state| state.files.list())
+    }
+
+    pub(crate) fn count_fragments(&self) -> EngineResult<u64> {
+        self.read(|state| state.fragments.count())
     }
 
     pub(crate) fn list_file_paths(&self) -> EngineResult<Vec<(FileId, PathBuf)>> {
@@ -430,6 +444,30 @@ impl IndexStore {
         })
     }
 
+    /// Requeues references whose evidence changed during this pass.
+    ///
+    /// The resolution sweep only reads `pending` rows, so a resolved reference
+    /// never sees a changed candidate set or module path again unless a pass
+    /// explicitly requeues it. Endpoint invalidation covers references that
+    /// pointed at a replaced file; this covers the workspace-wide sets that
+    /// endpoint identity cannot express. The evidence lives in the graph
+    /// database, recorded with the file writes that produced it, so a pass that
+    /// fails or is cancelled before this call requeues on the next one. A pass
+    /// without graph storage has nothing to requeue.
+    ///
+    /// # Errors
+    /// Rejects SQLite failures. The caller degrades like a failed sweep: the
+    /// canonical index stays published, the stale resolutions survive, and the
+    /// evidence stays recorded.
+    pub(crate) fn requeue_stale_resolutions(&self) -> EngineResult<usize> {
+        self.write(|state| {
+            let Ok(graph) = state.graph.as_mut() else {
+                return Ok(0);
+            };
+            graph.requeue_stale_resolutions().map_err(graph_error)
+        })
+    }
+
     /// Build indexes and compact accepted writes when needed.
     pub(crate) fn finalize_writes(&self) -> EngineResult<()> {
         self.finalize_writes_with(|state| {
@@ -494,6 +532,38 @@ impl IndexStore {
     }
 }
 
+fn open_tables(
+    path: &Path,
+    schema: &[EmbeddingModelInfo],
+    read_only: bool,
+) -> EngineResult<(Files, Directories, Entities, Fragments)> {
+    Ok((
+        Files::open(path, read_only)?,
+        Directories::open(path, read_only)?,
+        Entities::open(path, read_only)?,
+        Fragments::open(path, schema, read_only)?,
+    ))
+}
+
+fn recover_wal(
+    path: &Path,
+    options: WorkspaceIndexStorageOptions,
+    shared_lock: File,
+) -> EngineResult<(File, Vec<EmbeddingModelInfo>)> {
+    // Keep the caller's workspace read lock to prevent publication, but release
+    // shared storage access before taking the exclusive recovery lock.
+    drop(shared_lock);
+    let recovery_lock = acquire_storage_lock(path, false)?;
+    let (schema, _) = load_schema(path, options.clone())?;
+    for name in collection_names(&schema) {
+        recover_collection(&path.join(name))?;
+    }
+    drop(recovery_lock);
+    // Do not retain an exclusive lock in a long-lived cached read session.
+    let (lock, schema, _) = prepare_storage(path, options)?;
+    Ok((lock, schema))
+}
+
 fn optimize_collections(
     operations: [&(dyn Fn() -> EngineResult<()> + Sync); 4],
 ) -> EngineResult<()> {
@@ -527,6 +597,23 @@ fn replace_file(
     state.files.validate(file)?;
     state.entities.validate_ownership(entities, file.id())?;
     state.fragments.validate_ownership(entries, file.id())?;
+    // Endpoint invalidation below only revisits references that pointed at this
+    // file's old entities. A file that enters or leaves the indexed set, or one
+    // that introduces a name another entity already uses, changes the
+    // workspace-wide sets resolution reads without touching those endpoints, so
+    // the graph records that evidence with the rows it can stale and the pass
+    // requeues them once before its sweep.
+    //
+    // Membership is what an import specifier reads, not record existence: the
+    // snapshot's path lookup skips `Failed` and `NotIndexed` records, so a path
+    // that failed one pass and succeeded the next enters the set while its
+    // record already exists — and one that breaks leaves it the same way.
+    let previous_indexed = state
+        .files
+        .fetch(&[file.id()])?
+        .remove(&file.id())
+        .is_some_and(|previous| previous.index_status().is_indexed());
+    let paths_changed = previous_indexed != file.index_status().is_indexed();
     state.needs_optimize = true;
     let directories = state.directories.ensure(file.relative_path())?;
     // Encode every projection before removing any of the previous file's data.
@@ -536,10 +623,34 @@ fn replace_file(
     let mut unfinished = file.clone();
     unfinished.set_index_status(FileIndexStatus::NotIndexed)?;
     state.files.put(&unfinished, &directories)?;
+    // The language labels this file's pending references for the resolver's
+    // language gate; the path itself stays canonical in zvec.
+    let relative_path = file
+        .relative_path()
+        .as_path()
+        .to_string_lossy()
+        .replace('\\', "/");
+    let formats = crate::domain::formats_for_path(std::path::Path::new(&relative_path));
+    // Shared extensions such as .h must use the grammar that produced the
+    // entities, rather than the first extension candidate (which can be C).
+    let language = entities
+        .iter()
+        .find_map(|entity| match entity.metadata() {
+            Some(EntityMetadata::Code(metadata)) => metadata.language.map(Language::as_str),
+            _ => None,
+        })
+        .or_else(|| formats.first().map(|format| format.as_str()))
+        .unwrap_or("unknown");
     // zvec writes are durable on success: record retry intent before advancing SQLite.
     if let Ok(storage) = state.graph.as_mut() {
         storage
-            .write_file_graph(file.id().get(), graph, &old_ids)
+            .write_file_graph(
+                file.id().get(),
+                Some(language),
+                graph,
+                &old_ids,
+                paths_changed,
+            )
             .map_err(graph_error)?;
     }
     state.fragments.delete_file(file.id())?;
@@ -564,12 +675,26 @@ fn invalidation_entity_ids(state: &StoreState, file_id: FileId) -> EngineResult<
 
 fn graph_disabled() -> EngineError {
     EngineError::unsupported("graph support is disabled")
+        .with_help("Rebuild the index with `zg --index --rebuild --graph`.")
 }
 
 fn graph_missing() -> EngineError {
     EngineError::not_found(
         "workspace graph is missing; this index has no persisted relationship data",
     )
+}
+
+fn open_graph(path: &Path, mode: OpenMode) -> EngineResult<SqliteGraphStorage> {
+    let graph = if mode == OpenMode::Create {
+        SqliteGraphStorage::open(path, mode).map_err(graph_error)
+    } else {
+        match fs::metadata(path) {
+            Ok(_) => SqliteGraphStorage::open(path, mode).map_err(graph_error),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(graph_missing()),
+            Err(error) => Err(io_error("inspect workspace graph", path, &error)),
+        }
+    };
+    graph.map_err(|error| error.with_help("Rebuild the index with `zg --index --rebuild --graph`."))
 }
 
 fn graph_error(error: graph::Error) -> EngineError {
@@ -698,10 +823,11 @@ fn validate_vector(vector: &[f32], schema: &EmbeddingModelInfo) -> EngineResult<
     Ok(())
 }
 
+/// Returns the model schema and whether this call initialized an empty store.
 fn load_schema(
     path: &Path,
     options: WorkspaceIndexStorageOptions,
-) -> EngineResult<Vec<EmbeddingModelInfo>> {
+) -> EngineResult<(Vec<EmbeddingModelInfo>, bool)> {
     let descriptor = path.join("schema.json");
     if file_exists(&descriptor)? {
         let schema = read_json::<SchemaRecord>(&descriptor)
@@ -729,14 +855,7 @@ fn load_schema(
                 })?;
             }
         }
-        for collection in [
-            "files".to_owned(),
-            "directories".to_owned(),
-            "entities".to_owned(),
-        ]
-        .into_iter()
-        .chain(schema.iter().map(fragments::fragment_collection_name))
-        {
+        for collection in collection_names(&schema) {
             let collection_path = path.join(&collection);
             if !directory_exists(&collection_path)? {
                 return Err(EngineError::storage_failure(format!(
@@ -744,7 +863,7 @@ fn load_schema(
                 )));
             }
         }
-        return Ok(schema);
+        return Ok((schema, false));
     }
     if fs::read_dir(path)
         .map_err(|error| io_error("inspect storage directory", path, &error))?
@@ -771,7 +890,17 @@ fn load_schema(
         &descriptor,
         &serde_json::to_vec(&SchemaRecord::new(&embeddings)).map_err(|error| json_error(&error))?,
     )?;
-    Ok(embeddings)
+    Ok((embeddings, true))
+}
+
+fn collection_names(schema: &[EmbeddingModelInfo]) -> impl Iterator<Item = String> + '_ {
+    [
+        "files".to_owned(),
+        "directories".to_owned(),
+        "entities".to_owned(),
+    ]
+    .into_iter()
+    .chain(schema.iter().map(fragments::fragment_collection_name))
 }
 
 fn registry() -> EngineResult<MutexGuard<'static, HashMap<PathBuf, Weak<SharedStore>>>> {
@@ -793,9 +922,10 @@ fn lock_state(shared: &SharedStore) -> EngineResult<MutexGuard<'_, StoreState>> 
 fn prepare_storage(
     path: &Path,
     options: WorkspaceIndexStorageOptions,
-) -> EngineResult<(File, Vec<EmbeddingModelInfo>)> {
+) -> EngineResult<(File, Vec<EmbeddingModelInfo>, bool)> {
     let lock = acquire_storage_lock(path, options.is_read_only())?;
-    Ok((lock, load_schema(path, options)?))
+    let (schema, new_storage) = load_schema(path, options)?;
+    Ok((lock, schema, new_storage))
 }
 
 fn acquire_storage_lock(home: &Path, shared: bool) -> EngineResult<File> {

@@ -53,6 +53,22 @@ Version needs section '.gnu.version_r' contains 1 entry:
                 with self.assertRaisesRegex(RuntimeError, "baseline exceeded"):
                     glibc.audit(root, (2, 38))
 
+    def test_glibc_2_28_accepts_the_baseline_and_rejects_2_29(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            library = Path(temporary) / "libllama.so"
+            library.write_bytes(b"\x7fELF")
+            with patch.object(glibc.subprocess, "check_output") as readelf, redirect_stdout(io.StringIO()):
+                readelf.return_value = "1: 0 0 FUNC GLOBAL DEFAULT UND statx@GLIBC_2.28 (2)"
+                glibc.audit(library, (2, 28))
+                for binding in ("GLOBAL", "WEAK"):
+                    readelf.return_value = f"""
+1: 0 0 FUNC {binding} DEFAULT UND exp@GLIBC_2.29 (2)
+Version needs section '.gnu.version_r' contains 1 entry:
+  0x0010: Name: GLIBC_2.29 Flags: none Version: 2
+"""
+                    with self.subTest(binding=binding), self.assertRaisesRegex(RuntimeError, "glibc 2.28 baseline exceeded"):
+                        glibc.audit(library, (2, 28))
+
     def test_unknown_mandatory_glibc_abi_cannot_silently_pass(self):
         with self.assertRaisesRegex(RuntimeError, "GLIBC_ABI_DT_RELR"):
             glibc.required_versions("""

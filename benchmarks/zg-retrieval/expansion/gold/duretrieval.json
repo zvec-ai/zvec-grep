@@ -1,0 +1,871 @@
+{
+  "schema_version": 1,
+  "suite": "duretrieval10",
+  "source_lock_sha256": "98ec3f3c27def4be5e10883cc7166d0147c6cd1ef260fe2d725c5c25f1331718",
+  "tasks": {
+    "0014452c4edd2dee9b40b0f78bfaf8e4": {
+      "files": [
+        {
+          "path": "docs/a2635150b429b5f2e7f6a19161e5cd48.md",
+          "sha256": "fe0d98896beb31c6a9a268b14479bd2aaa165fe3763c0dd676228d9d9420f9f4",
+          "bytes": 463
+        },
+        {
+          "path": "docs/6b1ab3ee329e26780b85c6b9d7a6802c.md",
+          "sha256": "85e1fa88615a36e77783f19742a43f436e1ddd433e8462c95b500efcff35ae1b",
+          "bytes": 245
+        },
+        {
+          "path": "docs/94575ac389d80de88128c3f1788d395b.md",
+          "sha256": "d0434a27f38efe7b819b83271371a71ab8ab8f949c3ea5fed61c4852e5a00c8a",
+          "bytes": 497
+        },
+        {
+          "path": "docs/1c37837640973fbe28c1035fb7dcac61.md",
+          "sha256": "413012ad1b3b490f9c7576113eb1c4fe9244fc96b412c8824454a6dbf12849d3",
+          "bytes": 983
+        },
+        {
+          "path": "docs/2e23a09ebd69974932d653b3d39b31c7.md",
+          "sha256": "7924f1fc0ba8c19059438227be188bf2f09296db3f5bf173ab5fbad023bf5396",
+          "bytes": 581
+        },
+        {
+          "path": "docs/373bbf909da9704d2973f2b0411cedf1.md",
+          "sha256": "ff46e71e7d18b9520fdb6673e64bd057c3fb8423b30122fc10997fd09d4c5e76",
+          "bytes": 525
+        },
+        {
+          "path": "docs/2d9f2b19a60b45ef24e4b265bbb05847.md",
+          "sha256": "e778a786326894f905a274b986948f110c64a71008da013ae8f9305b579040be",
+          "bytes": 97
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "a2635150b429b5f2e7f6a19161e5cd48",
+          "path": "docs/a2635150b429b5f2e7f6a19161e5cd48.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 42,
+          "end_byte": 117,
+          "sha256": "e3ad4bafe937fa4a1a6dd74cb3787a3ea818ccaffdc59aa9351d87d8d32eb128",
+          "reason": "States a mailing address in the original passage."
+        },
+        {
+          "source_id": "6b1ab3ee329e26780b85c6b9d7a6802c",
+          "path": "docs/6b1ab3ee329e26780b85c6b9d7a6802c.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 58,
+          "end_byte": 245,
+          "sha256": "3c7c766eea02bb7255d05b70707ab070843712676d8a1b47a9ed07b2133ef03a",
+          "reason": "States the location of the named school and describes nearby transit information."
+        }
+      ],
+      "unresolved": [
+        {
+          "source_id": "94575ac389d80de88128c3f1788d395b",
+          "reason": "The location refers to Jilin Business and Technology College, a different institution."
+        },
+        {
+          "source_id": "1c37837640973fbe28c1035fb7dcac61",
+          "reason": "The passage describes the merged Jilin Business and Technology College, a different institution."
+        },
+        {
+          "source_id": "2e23a09ebd69974932d653b3d39b31c7",
+          "reason": "The address is identified as a hospital in the transit directions."
+        },
+        {
+          "source_id": "373bbf909da9704d2973f2b0411cedf1",
+          "reason": "This passage discusses admission tiers rather than where the school is located."
+        },
+        {
+          "source_id": "2d9f2b19a60b45ef24e4b265bbb05847",
+          "reason": "The address is unattributed in the passage and cannot be tied to the named school."
+        }
+      ]
+    },
+    "19e484152df4c3f602952a2634d602f0": {
+      "files": [
+        {
+          "path": "docs/6246e54cf54dccc0214b57476c86ac70.md",
+          "sha256": "efe0ac9944fc40b9289e711d32d1e2f77f9378ebd760a1a4b1ef96d8cfc701bd",
+          "bytes": 147
+        },
+        {
+          "path": "docs/d2f5fa3df900eab40cb85a014db4558d.md",
+          "sha256": "23c77af66380dc7dcc0090174e793ac6500703b1449dc239fb9c66eb03f6c7ce",
+          "bytes": 236
+        },
+        {
+          "path": "docs/f8e544b94fbf5926b8f77eb671997ead.md",
+          "sha256": "ad983d9136051f2b0c412f68637094672f97df7c1477a6b3b27a2c8cf22c5fe5",
+          "bytes": 334
+        },
+        {
+          "path": "docs/9b633d059aeac9f922986ee9c019101b.md",
+          "sha256": "d5c02e607f7dfbef0d13a5557910e2ba6fb5c85f6ec95da16da9f841a303c117",
+          "bytes": 4106
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "6246e54cf54dccc0214b57476c86ac70",
+          "path": "docs/6246e54cf54dccc0214b57476c86ac70.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 0,
+          "end_byte": 147,
+          "sha256": "efe0ac9944fc40b9289e711d32d1e2f77f9378ebd760a1a4b1ef96d8cfc701bd",
+          "reason": "Gives the nominal thread designation and distinguishes series dimensions."
+        },
+        {
+          "source_id": "d2f5fa3df900eab40cb85a014db4558d",
+          "path": "docs/d2f5fa3df900eab40cb85a014db4558d.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 46,
+          "end_byte": 77,
+          "sha256": "fb63a9e9b45f61a8c16396d37bb4a646dc5c2e6836980a8cedeeef6de001562b",
+          "reason": "Identifies the nominal half-inch designation."
+        },
+        {
+          "source_id": "f8e544b94fbf5926b8f77eb671997ead",
+          "path": "docs/f8e544b94fbf5926b8f77eb671997ead.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 0,
+          "end_byte": 147,
+          "sha256": "6bb658ff78158848409c42bb0579313fa1d4d73b726cb05d20ce61d7b6b94945",
+          "reason": "The dimension table includes the row for the nominal half-inch size."
+        },
+        {
+          "source_id": "9b633d059aeac9f922986ee9c019101b",
+          "path": "docs/9b633d059aeac9f922986ee9c019101b.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 895,
+          "end_byte": 1189,
+          "sha256": "4980b8d0fa6ff2677eb7a6801445204b79c8432c2c2c1228c94456991e1c699f",
+          "reason": "The table pairs the nominal half-inch designation with listed dimensions."
+        }
+      ],
+      "unresolved": []
+    },
+    "32e61463165a6e7538fee4adec871bcc": {
+      "files": [
+        {
+          "path": "docs/1ee79887a724eaf5607b4b3456d63bec.md",
+          "sha256": "c38cfd59553ed763a277dee68be7e2d750f8938e0ee06c3d376217573531d109",
+          "bytes": 732
+        },
+        {
+          "path": "docs/466fe5dcb9916bda5439186a9bdabb18.md",
+          "sha256": "df45b500a95bef0482cd2d91b021e45db30104b0a4ffecd9e21cb0dbae0c68f3",
+          "bytes": 870
+        },
+        {
+          "path": "docs/c93a5267f141e4813a88e91e2f6db9d5.md",
+          "sha256": "b3d7df3a6b982e471877bef97cf3d84e96da0cad396fe4d79ef9ce69b9aa7cc0",
+          "bytes": 289
+        },
+        {
+          "path": "docs/1c4272b62045e7e365498f2511dcbe43.md",
+          "sha256": "5dd74a759fd477c394e6c840e812a5e887c1cc37526158e12313e2fe23ea622d",
+          "bytes": 1081
+        },
+        {
+          "path": "docs/bd778ba1fa8d1cb48c1af73e487cfca8.md",
+          "sha256": "91644b9b868750065af9e793c9377d25c0a21a9bfdc859ff410fe8fab3cd40e2",
+          "bytes": 838
+        },
+        {
+          "path": "docs/7d4eb05d2f95d7ae70244ebf3fc9c4e6.md",
+          "sha256": "d06338eb9ad818f7eab7bdb8c49c6faee158b39b271801d95fcbfcf7d1a93488",
+          "bytes": 993
+        },
+        {
+          "path": "docs/705502fb60c71e2a9e77cbd6ed3653ca.md",
+          "sha256": "d19fa3d31143bddaaa2af98eb099630fa8574bbd41c2e3d81e996d3c348df7c4",
+          "bytes": 650
+        },
+        {
+          "path": "docs/e6d240f4be2d25660846aee617cbedea.md",
+          "sha256": "aaf7384f16ce584ca1094d7faefee37f6adbcff9b208d6972338a946c452c815",
+          "bytes": 541
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "1ee79887a724eaf5607b4b3456d63bec",
+          "path": "docs/1ee79887a724eaf5607b4b3456d63bec.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 378,
+          "end_byte": 732,
+          "sha256": "6397b63f05912af16f71773058daadeb420de85acd0c6df3c3a2dbed9c511f10",
+          "reason": "The passage compares contraceptive categories in terms of reported side effects."
+        },
+        {
+          "source_id": "1c4272b62045e7e365498f2511dcbe43",
+          "path": "docs/1c4272b62045e7e365498f2511dcbe43.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 642,
+          "end_byte": 1003,
+          "sha256": "cb26f51d684f78df7a63c5a5cfed7b65d5a9219d44bc7a4295cefbd832d740ea",
+          "reason": "The passage explicitly compares the side-effect considerations of longer- and shorter-acting options."
+        },
+        {
+          "source_id": "bd778ba1fa8d1cb48c1af73e487cfca8",
+          "path": "docs/bd778ba1fa8d1cb48c1af73e487cfca8.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 0,
+          "end_byte": 388,
+          "sha256": "d968f9b51585a9c0b5299f5be8e82238b9fce8bf06b8572d08c8c40e59672951",
+          "reason": "The passage compares categories and discusses reported side effects."
+        },
+        {
+          "source_id": "7d4eb05d2f95d7ae70244ebf3fc9c4e6",
+          "path": "docs/7d4eb05d2f95d7ae70244ebf3fc9c4e6.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 720,
+          "end_byte": 993,
+          "sha256": "06bae6b8834d54f651856a71e8e242c7c3a162cf6b2da6177f95417a3e9af619",
+          "reason": "The passage compares side effects within its discussion of emergency options."
+        },
+        {
+          "source_id": "e6d240f4be2d25660846aee617cbedea",
+          "path": "docs/e6d240f4be2d25660846aee617cbedea.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 0,
+          "end_byte": 371,
+          "sha256": "55a8fe2772e15ef06d59ed4bb37a338dcc2b790ad8e31f1784b4184d0c5d30da",
+          "reason": "The passage explicitly compares two emergency products and their reported side effects."
+        }
+      ],
+      "unresolved": [
+        {
+          "source_id": "466fe5dcb9916bda5439186a9bdabb18",
+          "reason": "The passage describes efficacy and mechanisms without a comparison of side effects."
+        },
+        {
+          "source_id": "c93a5267f141e4813a88e91e2f6db9d5",
+          "reason": "The text is fragmented and does not establish a coherent side-effect comparison."
+        },
+        {
+          "source_id": "705502fb60c71e2a9e77cbd6ed3653ca",
+          "reason": "The passage lists availability and generic precautions without a comparative side-effect answer."
+        }
+      ]
+    },
+    "4f346a99714119ebfc3c29060835b66d": {
+      "files": [
+        {
+          "path": "docs/af48ff825fdfeb28f8f4927078e1e8c1.md",
+          "sha256": "08f2c6d94d05904b22370fd2908f042333c822a419c047f20dd44ae5a65074a1",
+          "bytes": 830
+        },
+        {
+          "path": "docs/0a72032de595c7846fc7d4c16826a491.md",
+          "sha256": "5eae62f273cff2f0262eb2ae6430671789fb43ecd3966b165b8d6891cc9eea36",
+          "bytes": 752
+        },
+        {
+          "path": "docs/39cc8d95fade447ba491557b7b4fd531.md",
+          "sha256": "7475b235ea83611818f95a852c8200cf06843b441fdb0673861523de9241fb6c",
+          "bytes": 440
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "af48ff825fdfeb28f8f4927078e1e8c1",
+          "path": "docs/af48ff825fdfeb28f8f4927078e1e8c1.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 0,
+          "end_byte": 190,
+          "sha256": "4ad9f9b1cdd6423091e79140b66bd3d2eedc582de37dfbc984ec86700ee2a541",
+          "reason": "Describes accepting a party invitation in the game."
+        },
+        {
+          "source_id": "0a72032de595c7846fc7d4c16826a491",
+          "path": "docs/0a72032de595c7846fc7d4c16826a491.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 540,
+          "end_byte": 702,
+          "sha256": "bc12d417d9dd8e64b9fe3ad1ec02abb7e1814a6b7c38b4d3523adb1790ec32f4",
+          "reason": "Describes selecting a player and sending a party invitation."
+        },
+        {
+          "source_id": "39cc8d95fade447ba491557b7b4fd531",
+          "path": "docs/39cc8d95fade447ba491557b7b4fd531.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 0,
+          "end_byte": 358,
+          "sha256": "10d0f100f27c32efb17ee129b02199da8da0b1c0da6f70b2f4b5e7bc266dd927",
+          "reason": "Describes creating or joining a party from the interface."
+        }
+      ],
+      "unresolved": []
+    },
+    "690e043ca5a2e780a8389ea7fc61262c": {
+      "files": [
+        {
+          "path": "docs/7a8e868ec758ee15bf55f35a86281e09.md",
+          "sha256": "bf2efc482f43dddeed196971953298f5df8b286692e389d2796e70c1ee71cacd",
+          "bytes": 141
+        },
+        {
+          "path": "docs/12c6587dafd291260409042782055e76.md",
+          "sha256": "ed946f29b900a7ed8aba394ade5463688f00d177333c092c91462d88bfc0d4fc",
+          "bytes": 786
+        },
+        {
+          "path": "docs/1f3ef059861959ccf9c43668e55e20a0.md",
+          "sha256": "7434981017066d115a6cecdccfb5b4b822c4103968e1a7c1ef2e3cf3cf9875e8",
+          "bytes": 610
+        },
+        {
+          "path": "docs/811aa5d87cffe0b546c7f4e72d3213c4.md",
+          "sha256": "6a660cfcabc2b912099899dcb25551e3117050d61a74b43f3e625a2bbb0cb68e",
+          "bytes": 900
+        },
+        {
+          "path": "docs/526fdbeb34af0dce6cebc545a14739a8.md",
+          "sha256": "ecbfce4395f7fa4a0c96cfcef55122a5d9bf336460977ff2cce1e36f776a69de",
+          "bytes": 476
+        },
+        {
+          "path": "docs/5493a126474e5f61ae71ca06732f2072.md",
+          "sha256": "d1c8914010cc834ac131c79c780393fa18063a3ea3bdd7dbd851a1cc90819e54",
+          "bytes": 1006
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "7a8e868ec758ee15bf55f35a86281e09",
+          "path": "docs/7a8e868ec758ee15bf55f35a86281e09.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 0,
+          "end_byte": 141,
+          "sha256": "bf2efc482f43dddeed196971953298f5df8b286692e389d2796e70c1ee71cacd",
+          "reason": "Compares the two vehicles along brand, price and practicality dimensions."
+        },
+        {
+          "source_id": "12c6587dafd291260409042782055e76",
+          "path": "docs/12c6587dafd291260409042782055e76.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 405,
+          "end_byte": 786,
+          "sha256": "54dbcced6bdf1e81c38665b16627fee751775b78cdf87d2137c3fa8046a52588",
+          "reason": "Summarizes the source's comparison of practicality and styling."
+        },
+        {
+          "source_id": "1f3ef059861959ccf9c43668e55e20a0",
+          "path": "docs/1f3ef059861959ccf9c43668e55e20a0.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 15,
+          "end_byte": 142,
+          "sha256": "8d3991d5608f54ae1d93000f17f850b18f6665d8e9bf9e4f1ad29bbad9f6c957",
+          "reason": "Provides a direct comparative account of driving the two models."
+        },
+        {
+          "source_id": "811aa5d87cffe0b546c7f4e72d3213c4",
+          "path": "docs/811aa5d87cffe0b546c7f4e72d3213c4.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 830,
+          "end_byte": 900,
+          "sha256": "546481e3846c873dd2a7ea121a5521f5b8ee3a675a9f325b1d4459548e99e4f6",
+          "reason": "States this source's comparison on exterior appearance."
+        },
+        {
+          "source_id": "526fdbeb34af0dce6cebc545a14739a8",
+          "path": "docs/526fdbeb34af0dce6cebc545a14739a8.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 0,
+          "end_byte": 476,
+          "sha256": "ecbfce4395f7fa4a0c96cfcef55122a5d9bf336460977ff2cce1e36f776a69de",
+          "reason": "Compares vehicle dimensions and equipment."
+        },
+        {
+          "source_id": "5493a126474e5f61ae71ca06732f2072",
+          "path": "docs/5493a126474e5f61ae71ca06732f2072.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 0,
+          "end_byte": 582,
+          "sha256": "08d2193262acbb19600c34a62bbc86634a0bf8bec8c385077a1788c6408aa56f",
+          "reason": "Compares rear space and explains how it affects the household-use choice."
+        }
+      ],
+      "unresolved": []
+    },
+    "86a62da02c553532d47e196f8fc36135": {
+      "files": [
+        {
+          "path": "docs/f383bf01de9fa86b620282e982b05257.md",
+          "sha256": "03613e1b972ca9dc45ad2ff0685d8d6402985fb2054a274bad1e117b9802bf49",
+          "bytes": 997
+        },
+        {
+          "path": "docs/1b774d8ed18ee7851bac100533991632.md",
+          "sha256": "1e9ff83b2e7ff66f8ca389bf77b3bd05a87d134f6ce4a1040a4541bd5c02e819",
+          "bytes": 1272
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "f383bf01de9fa86b620282e982b05257",
+          "path": "docs/f383bf01de9fa86b620282e982b05257.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 0,
+          "end_byte": 467,
+          "sha256": "cc797577fa1eb02d39d981f6cc55e543a4df7fc89fc6d9488f9a6e6190472513",
+          "reason": "Defines a handhole by its inspection purpose and size relative to a manhole."
+        },
+        {
+          "source_id": "1b774d8ed18ee7851bac100533991632",
+          "path": "docs/1b774d8ed18ee7851bac100533991632.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 0,
+          "end_byte": 673,
+          "sha256": "9ba256b858d35d4a3df6e0b14de5d2a909154d2c56217f996bb6ab4ae17a7e9f",
+          "reason": "Explains the access distinction and covers several engineering contexts."
+        }
+      ],
+      "unresolved": []
+    },
+    "9ea8ea2ff586af51520e0721681909c9": {
+      "files": [
+        {
+          "path": "docs/15f1dc4256dcd96ade698958dce01612.md",
+          "sha256": "d97dac8a928c5ed3660f734518e62598bce0f27c53dfef08def73f2be850c8cf",
+          "bytes": 8421
+        },
+        {
+          "path": "docs/30ffadba811b3a1919cc135ebc63db43.md",
+          "sha256": "f1aef2c70a5a0729bb3e8176d4b0a7b4f175f8fe1113229bdcc4549344918b25",
+          "bytes": 4527
+        },
+        {
+          "path": "docs/080d103640c9776b5bde5968ed227e1c.md",
+          "sha256": "9695f03693302c0bc9786fc21ba5b9ba9c8b27c681406be49207868166f0ade6",
+          "bytes": 633
+        },
+        {
+          "path": "docs/e7b70a167e62477e5337504b26b2abdd.md",
+          "sha256": "c40d4f310e56bfd47298b247174a73e7871f37d252f0fb605d994c275d6c2d21",
+          "bytes": 1629
+        },
+        {
+          "path": "docs/883379b8acfe91783ac4f3cc059073a4.md",
+          "sha256": "d45890d9a390a3125506f942f9fca5a758d9f7505d7a81381dd58f527bc8bd22",
+          "bytes": 800
+        },
+        {
+          "path": "docs/93f4d5edfb793c11677666824e98e1b7.md",
+          "sha256": "42107a4f3211eff7fb6f8dbe10d5dd7de438ba3541e62c3fecf9445f14ea7d99",
+          "bytes": 871
+        },
+        {
+          "path": "docs/a7672012968d15b37801b86a4cb3d6a7.md",
+          "sha256": "e1f5c7fe1bd36f473d482f5abf479861d8f46bc63885cacd2727cc86f6fd78d1",
+          "bytes": 376
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "15f1dc4256dcd96ade698958dce01612",
+          "path": "docs/15f1dc4256dcd96ade698958dce01612.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 5347,
+          "end_byte": 5544,
+          "sha256": "2310fc8726cf50e1fb3bee7fb78ea39197248c0bff995e58cabba916f6ce629f",
+          "reason": "Discusses potential causes and distinguishes persistent vomiting from an isolated event."
+        },
+        {
+          "source_id": "30ffadba811b3a1919cc135ebc63db43",
+          "path": "docs/30ffadba811b3a1919cc135ebc63db43.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 1765,
+          "end_byte": 1834,
+          "sha256": "a7a7c96c8dc0a17323348840f16e5b1953551c672086a68242dd416f89c52da6",
+          "reason": "The passage directs persistent concerns to a veterinary clinic."
+        },
+        {
+          "source_id": "080d103640c9776b5bde5968ed227e1c",
+          "path": "docs/080d103640c9776b5bde5968ed227e1c.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 30,
+          "end_byte": 633,
+          "sha256": "ec48ef71b23ae75ab0bb7fed04e4a368735d5c3d39da49dd1a8b08a50f93e17f",
+          "reason": "Discusses overeating and persistent symptoms in response to the query."
+        },
+        {
+          "source_id": "e7b70a167e62477e5337504b26b2abdd",
+          "path": "docs/e7b70a167e62477e5337504b26b2abdd.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 0,
+          "end_byte": 439,
+          "sha256": "44a5a420ab79527201a1da3f45a4141ce950898aa6dc575d074a2a4745f4b736",
+          "reason": "Discusses food intake as one possible cause of vomiting."
+        },
+        {
+          "source_id": "883379b8acfe91783ac4f3cc059073a4",
+          "path": "docs/883379b8acfe91783ac4f3cc059073a4.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 0,
+          "end_byte": 347,
+          "sha256": "ae21595eedac5525e5818dd0fe0a246b6e55efbec8da856e6a836222798e4744",
+          "reason": "Describes possible causes and notes that response depends on severity."
+        },
+        {
+          "source_id": "93f4d5edfb793c11677666824e98e1b7",
+          "path": "docs/93f4d5edfb793c11677666824e98e1b7.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 0,
+          "end_byte": 141,
+          "sha256": "dda5d0c349ef6afc06ae862ddaf3b42c1be47635f1f7ca520ff32ba1daf27688",
+          "reason": "Distinguishes a possible dietary cause from persistent symptoms needing assessment."
+        },
+        {
+          "source_id": "a7672012968d15b37801b86a4cb3d6a7",
+          "path": "docs/a7672012968d15b37801b86a4cb3d6a7.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 117,
+          "end_byte": 376,
+          "sha256": "34569d9031140cd030e2c334d7861febf429f7d41ea713a53e0b044a4a130af7",
+          "reason": "Describes one possible relationship between eating and vomiting."
+        }
+      ],
+      "unresolved": []
+    },
+    "b6c7f92a161053116e216da1e53f9be8": {
+      "files": [
+        {
+          "path": "docs/2d4c4811291c60f2f460c3dbbfc1d5d1.md",
+          "sha256": "78432710ace9ef8be35c475dce7cf33b901176e8ea89ce3463212652d2c9652e",
+          "bytes": 186
+        },
+        {
+          "path": "docs/ee674063a879bd2cf48225e92d8c2316.md",
+          "sha256": "ac5c06d5947227e7770e2b056f34d7292c847a9fcaa3c9fff70cd81f8b849e3a",
+          "bytes": 991
+        },
+        {
+          "path": "docs/a4387eb06227dc5c7249228968e18be6.md",
+          "sha256": "cd6f6b4ce5f5fd98339d790f06b06ca9beaa2e623fba8ecd9d28d3a7d97d0b99",
+          "bytes": 813
+        },
+        {
+          "path": "docs/f460f6e769f2cafb8d7f0da1e2c6c17f.md",
+          "sha256": "9d955fec9f6496bb667e4275818570aae3276398a404b2b66c4f0c83bef34e26",
+          "bytes": 283
+        },
+        {
+          "path": "docs/5e624a8f03645c50611d4a33a8fa2d99.md",
+          "sha256": "ac461bd096fbae1483495eaf0ab4741fb080e613d08c47a40081537dfa81a36f",
+          "bytes": 952
+        },
+        {
+          "path": "docs/8c57624ef217cb309d17829f42109e67.md",
+          "sha256": "72de18f4d2a1ba9aa11ad3b91fc2cf955d85b83de050c4841ae960360b71e5b6",
+          "bytes": 761
+        },
+        {
+          "path": "docs/55e0dbbe3955b8c937657804313fa714.md",
+          "sha256": "ca2ea505834eb599e8ea04c4770c7d54f5a7108f5e4d94808dbcd1c3c1ec0e91",
+          "bytes": 489
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "2d4c4811291c60f2f460c3dbbfc1d5d1",
+          "path": "docs/2d4c4811291c60f2f460c3dbbfc1d5d1.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 0,
+          "end_byte": 186,
+          "sha256": "78432710ace9ef8be35c475dce7cf33b901176e8ea89ce3463212652d2c9652e",
+          "reason": "Compares the brands on style and typical audiences."
+        },
+        {
+          "source_id": "ee674063a879bd2cf48225e92d8c2316",
+          "path": "docs/ee674063a879bd2cf48225e92d8c2316.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 0,
+          "end_byte": 484,
+          "sha256": "76a331bed011897ccc1d4e7d0fcdaddf6b38cc94f51c88282b1eb81e6c2df1e2",
+          "reason": "Describes product categories and features relevant to the Casio side of the comparison."
+        },
+        {
+          "source_id": "a4387eb06227dc5c7249228968e18be6",
+          "path": "docs/a4387eb06227dc5c7249228968e18be6.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 281,
+          "end_byte": 591,
+          "sha256": "21e525a6fe2774523b53de97f4e0031e807d50dd6a1c1da9187af121bf967c72",
+          "reason": "The passage compares the brands on price and watch types."
+        },
+        {
+          "source_id": "f460f6e769f2cafb8d7f0da1e2c6c17f",
+          "path": "docs/f460f6e769f2cafb8d7f0da1e2c6c17f.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 0,
+          "end_byte": 241,
+          "sha256": "b323b5c59e01a079743e8e0d745e6b77e3093643fdbc4f578cf7cf14265b313b",
+          "reason": "Compares the brands on dress and sport styling."
+        },
+        {
+          "source_id": "5e624a8f03645c50611d4a33a8fa2d99",
+          "path": "docs/5e624a8f03645c50611d4a33a8fa2d99.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 0,
+          "end_byte": 60,
+          "sha256": "200ff23f6a929fd5fb25d02539d8e47142642987e405cc25ba8a7dbf877c0c9f",
+          "reason": "States contrasting style and audience preferences for the two brands."
+        },
+        {
+          "source_id": "8c57624ef217cb309d17829f42109e67",
+          "path": "docs/8c57624ef217cb309d17829f42109e67.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 574,
+          "end_byte": 761,
+          "sha256": "081b4cf6c2ba77cc3cbbfb39913bbd019e79075a7e810ce769a079dbde0c0aad",
+          "reason": "Gives the source's comparative preference, distinguishing watch focus and price."
+        },
+        {
+          "source_id": "55e0dbbe3955b8c937657804313fa714",
+          "path": "docs/55e0dbbe3955b8c937657804313fa714.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 372,
+          "end_byte": 489,
+          "sha256": "381edb5daad5f49caa099007b23858a380566265c66a8bee4952ea624a33f282",
+          "reason": "Summarizes the contrasting styles and the source's choice criterion."
+        }
+      ],
+      "unresolved": []
+    },
+    "cf4da4e547e8da65ddb527074f0499dd": {
+      "files": [
+        {
+          "path": "docs/8c4c66d5929c960631cd4833e6c589f6.md",
+          "sha256": "e6612adf46fd75c923f5007e4988d8c7c26af0668ab43af90ca0a78f92d7905f",
+          "bytes": 1042
+        },
+        {
+          "path": "docs/fff250d48f9c37a6f49e1c45535b7e1f.md",
+          "sha256": "4f1ee5c2762bd4b4b96901c277455047a61bcc556ad214d3f77d6c77c2cb6420",
+          "bytes": 935
+        },
+        {
+          "path": "docs/aa043e34874b9201ef6ed8491d927267.md",
+          "sha256": "34a1b8b9c9630f1c58e4d28450df3775cb3a6f933d84a00e807ed0e50f8eb4a0",
+          "bytes": 838
+        },
+        {
+          "path": "docs/28e89969f22c905042ce78b2f2d568a9.md",
+          "sha256": "febe34c1af3825be3ea0773f76d4b97c87f320188fb15852c9f7de8edc6b5e1f",
+          "bytes": 843
+        },
+        {
+          "path": "docs/189f8fad0026110527792f7110263af3.md",
+          "sha256": "f207798872bdf6168cefa3c1a2ca8a959e01c201cbdb04f68e831b71d57949d3",
+          "bytes": 771
+        },
+        {
+          "path": "docs/f8095c6c28da68d94866aa6815eca06a.md",
+          "sha256": "107f977816bcd401890be4d987bef18c65f18c3eb68c85fc007f80c232971387",
+          "bytes": 963
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "8c4c66d5929c960631cd4833e6c589f6",
+          "path": "docs/8c4c66d5929c960631cd4833e6c589f6.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 817,
+          "end_byte": 1042,
+          "sha256": "5a31f0b429610197d1fd2ad8efe8e6ef73c416bbfbb5300d65af274606a282a8",
+          "reason": "Discusses normalization through the visibility and prevalence of the practice."
+        },
+        {
+          "source_id": "fff250d48f9c37a6f49e1c45535b7e1f",
+          "path": "docs/fff250d48f9c37a6f49e1c45535b7e1f.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 450,
+          "end_byte": 935,
+          "sha256": "dde99cf42966079ddf8b2d4c164751f9730068761d394b3b7e367502ffd86410",
+          "reason": "Qualifies sweeping claims and cites perceived links between appearance, employment and relationships."
+        },
+        {
+          "source_id": "aa043e34874b9201ef6ed8491d927267",
+          "path": "docs/aa043e34874b9201ef6ed8491d927267.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 410,
+          "end_byte": 838,
+          "sha256": "1240026b8623aa8a51e5eef64b54ce990fc847d18915d123e23d481cbfe5247c",
+          "reason": "The passage attributes demand to perceived social and career incentives."
+        },
+        {
+          "source_id": "28e89969f22c905042ce78b2f2d568a9",
+          "path": "docs/28e89969f22c905042ce78b2f2d568a9.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 663,
+          "end_byte": 843,
+          "sha256": "389cafd4164dd13a32b57865c31ed992daeab94955fe207743219f2e24ffce48",
+          "reason": "The passage discusses film and television as influences on appearance expectations."
+        },
+        {
+          "source_id": "189f8fad0026110527792f7110263af3",
+          "path": "docs/189f8fad0026110527792f7110263af3.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 327,
+          "end_byte": 771,
+          "sha256": "82e46f0bcb8f186fad626a0770e32e27d8a34bfdfb8591224a3d5f28d7211296",
+          "reason": "Describes marketing exposure and competition among clinics."
+        },
+        {
+          "source_id": "f8095c6c28da68d94866aa6815eca06a",
+          "path": "docs/f8095c6c28da68d94866aa6815eca06a.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 204,
+          "end_byte": 963,
+          "sha256": "a8603610e01c1810308862a4fb99c89db63becc6722d2aae00e866114dae3298",
+          "reason": "Distinguishes normalization from causation and describes the historical development of the industry."
+        }
+      ],
+      "unresolved": []
+    },
+    "e8221a1951cf82d67fa29bbd4ac9b367": {
+      "files": [
+        {
+          "path": "docs/fa7508362123611a8f29ed0a414437ba.md",
+          "sha256": "166bc046f32ac0a10a05b1d7e6138d9f378811c722fa3e1ab2309672ec340708",
+          "bytes": 816
+        },
+        {
+          "path": "docs/69902b16e9a238b1e0ad68f80eed4820.md",
+          "sha256": "3ab15eead82894aeea3dceb869cd8158f7a1ef348aec7f42a9980d8f3c4f3c3d",
+          "bytes": 305
+        },
+        {
+          "path": "docs/cfb3828d6b808d72762e74b05d0b1ddf.md",
+          "sha256": "c9a865ca5f9d0fb625a52b40b690d02ec7cf7b35ec7d5d0fd6364f9d24e36da8",
+          "bytes": 810
+        },
+        {
+          "path": "docs/e198d081f8394c7244d9e2ab3ddeef32.md",
+          "sha256": "bd2cebf818fb7b91d4551f92c2b1ecaefd142f555cdf4087acd3d9d08247bae9",
+          "bytes": 732
+        },
+        {
+          "path": "docs/13b78fdcbdabc90199aebe6bb6ad5a23.md",
+          "sha256": "e3d3f3a88eb913ad7a7f73c91c1e6e397fed910856087d2c81e9c4de99ac6037",
+          "bytes": 749
+        },
+        {
+          "path": "docs/519e79968252ccacac8e8c1d3f00e508.md",
+          "sha256": "1ce337ae012fa65dc437be2c4eb01d4b3241d090d9264a853603058ac614b124",
+          "bytes": 1093
+        }
+      ],
+      "targets": [
+        {
+          "source_id": "fa7508362123611a8f29ed0a414437ba",
+          "path": "docs/fa7508362123611a8f29ed0a414437ba.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 0,
+          "end_byte": 177,
+          "sha256": "6954ecfeede87e1fd3ef722bd6dbd7029709174a87b21420c9bd471d1a46f188",
+          "reason": "Defines the two damage categories and distinguishes stacking behavior."
+        },
+        {
+          "source_id": "69902b16e9a238b1e0ad68f80eed4820",
+          "path": "docs/69902b16e9a238b1e0ad68f80eed4820.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 0,
+          "end_byte": 305,
+          "sha256": "3ab15eead82894aeea3dceb869cd8158f7a1ef348aec7f42a9980d8f3c4f3c3d",
+          "reason": "Explains the distinction between added hits and increased damage."
+        },
+        {
+          "source_id": "cfb3828d6b808d72762e74b05d0b1ddf",
+          "path": "docs/cfb3828d6b808d72762e74b05d0b1ddf.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 0,
+          "end_byte": 275,
+          "sha256": "ccd54f2fc8ec5929d440e843c3cb77dd69f7472332eb32b6e4086fd7286ed62f",
+          "reason": "Defines both displayed damage types."
+        },
+        {
+          "source_id": "e198d081f8394c7244d9e2ab3ddeef32",
+          "path": "docs/e198d081f8394c7244d9e2ab3ddeef32.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 0,
+          "end_byte": 452,
+          "sha256": "c2fca2d75bd920ed77086b42e3fa23dd024704d1ceff9d366bac862dc8b5de9b",
+          "reason": "Defines both types using in-game descriptions and compares stacking."
+        },
+        {
+          "source_id": "13b78fdcbdabc90199aebe6bb6ad5a23",
+          "path": "docs/13b78fdcbdabc90199aebe6bb6ad5a23.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 66,
+          "end_byte": 261,
+          "sha256": "b0f4a146b2757783c2c1300a62a0b9a1e767b3912e1deca7e928db2fec1847cf",
+          "reason": "Explains the damage distinction and interaction between the two types."
+        },
+        {
+          "source_id": "519e79968252ccacac8e8c1d3f00e508",
+          "path": "docs/519e79968252ccacac8e8c1d3f00e508.md",
+          "start_line": 1,
+          "end_line": 1,
+          "start_byte": 64,
+          "end_byte": 255,
+          "sha256": "d80ed2046ac392f16fd00367b1bd8fed5b65dcf2b448a3fccb21b4de87935244",
+          "reason": "Explains the damage distinction and interaction between the two types."
+        }
+      ],
+      "unresolved": []
+    }
+  }
+}

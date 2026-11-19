@@ -21,8 +21,12 @@ pub(crate) use spi::ChunkOptions;
 pub(crate) use spi::{ExtractedEntity, ExtractedEntityFragment, ExtractionOutput};
 
 // Per-file graph support shared with the indexing pipeline.
+#[cfg(test)]
+pub(crate) use graph::Constructs;
 #[allow(unused_imports)]
 pub(crate) use graph::{FILE_SCOPE_INDEX, PartitionedGraph};
+#[cfg(test)]
+pub(crate) use graph::{PendingNameRef, ResolvedNameEdge};
 
 use crate::{
     EngineError,

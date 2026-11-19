@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { loadSuite, repositorySlug, run, validateGoldSources } from "./lib.mjs";
+import {
+  loadSuite,
+  repositorySlug,
+  run,
+  validateGoldSources,
+  validateQaGoldSources,
+} from "./lib.mjs";
 
 /** Validate frozen inputs and, optionally, existing source checkouts. Never fetch or build an index. */
 export async function main(args = process.argv.slice(2)) {
@@ -56,6 +62,7 @@ export async function main(args = process.argv.slice(2)) {
         (task) => task.repository === repo.repository,
       );
       await validateGoldSources(root, tasks, suite.gold);
+      await validateQaGoldSources(root, tasks, suite.qa_pairs);
       checked.push({
         repository: repo.repository,
         commit: head,
@@ -72,6 +79,13 @@ export async function main(args = process.argv.slice(2)) {
       .length,
     targets: entries.reduce((sum, entry) => sum + entry.targets.length, 0),
     ndcg_tasks: entries.filter((entry) => entry.ndcg.enabled).length,
+    qa_gold: suite.qa_gold,
+    qa_formal_tasks: Object.values(suite.qa_pairs).filter(
+      (entry) => entry.scoring_eligible,
+    ).length,
+    qa_diagnostic_tasks: Object.values(suite.qa_pairs).filter(
+      (entry) => entry.diagnostic_eligible,
+    ).length,
     source_validation: values.corpus ? "verified" : "not_requested",
     checked_sources: checked,
   };

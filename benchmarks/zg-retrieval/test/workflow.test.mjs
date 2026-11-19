@@ -208,7 +208,8 @@ test("the four suites run in independent jobs using one candidate package", asyn
     ),
   );
   assert.deepEqual(protocol.modes, ["hybrid", "fts", "vector"]);
-  assert.equal(protocol.preview, "mcp-default");
+  assert.equal(protocol.preview, "full");
+  assert.equal(protocol.request.preview, "full");
   const lock = JSON.parse(
     await readFile(
       new URL("benchmarks/zg-retrieval/data/source.lock.json", repository),

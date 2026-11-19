@@ -59,7 +59,7 @@ def audit(path, maximum, readelf="readelf"):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", type=Path)
-    parser.add_argument("--max", default="2.31")
+    parser.add_argument("--max", default="2.28")
     parser.add_argument("--readelf", default="readelf")
     args = parser.parse_args()
     audit(args.path, tuple(map(int, args.max.split("."))), args.readelf)

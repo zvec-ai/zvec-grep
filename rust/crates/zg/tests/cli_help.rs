@@ -44,6 +44,8 @@ fn command_help_and_topic_aliases_are_identical() {
 fn every_documented_help_topic_is_available() {
     for topic in [
         "search",
+        "callers",
+        "callees",
         "index",
         "status",
         "config",
@@ -116,7 +118,16 @@ fn index_help_uses_root_paths_without_workspace_names() {
 fn index_help_distinguishes_explicit_indexing_from_automatic_search_indexing() {
     let help = stdout(&["--help", "index"]);
     assert!(
-        help.contains("falling back to local/potion-code-16m-v2"),
+        help.contains("workspace recommendation: local/potion-code-16m-v2"),
+        "{help}"
+    );
+    assert!(help.contains("local/bekko-256-int8 for text"), "{help}");
+    assert!(
+        help.contains("file sizes capped at 64 KiB per file"),
+        "{help}"
+    );
+    assert!(
+        help.contains("including --rebuild without --embedding"),
         "{help}"
     );
     assert!(
@@ -149,5 +160,18 @@ fn unknown_help_topics_including_old_query_alias_are_user_errors() {
             String::from_utf8(output.stderr).expect("error should be UTF-8"),
             format!("Error: Unknown help topic: {topic}\n")
         );
+    }
+}
+
+#[test]
+fn relationship_help_explains_persisted_edges_and_limit() {
+    for command in ["callers", "callees"] {
+        let help = stdout(&[&format!("--{command}"), "--help"]);
+        assert_eq!(help, stdout(&["--help", command]));
+        assert!(help.contains("--limit <N>"));
+        assert!(help.contains("truncation notice"));
+        assert!(help.contains("readable text"));
+        assert!(help.contains("--color <auto|always|never>"));
+        assert!(help.contains("does not refresh or build"));
     }
 }

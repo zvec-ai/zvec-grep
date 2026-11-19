@@ -34,10 +34,6 @@ on:
         description: Optional reviewed source ref; empty uses the commit selected for this run
         type: string
         default: ""
-      ort_validation:
-        description: Validate all ONNX catalog models and compare 1.21/1.28 CPU throughput on Linux x64/ARM64
-        type: boolean
-        default: false
 
 permissions: {}
 
@@ -131,7 +127,7 @@ jobs:
       - name: Check packages independently
         shell: bash
         run: |
-          for package in zg-engine zg-daemon-protocol zg-cli zg-host-native zg-testkit zg-transport-mcp zg-daemon zg zg-zvec-fp16; do
+          for package in zg-engine zg-daemon-protocol zg-cli zg-host-native zg-ort-native zg-testkit zg-transport-mcp zg-daemon zg zg-zvec-fp16; do
             cargo check --locked --package "${package}" --all-targets
           done
       - name: Run Clippy
@@ -143,125 +139,7 @@ jobs:
           python3 scripts/test-prepare-onnxruntime.py
           python3 scripts/test-check-glibc.py
       - name: Test npm packaging
-        run: node --test scripts/npm-*.test.mjs npm/meta/install.test.cjs
-
-  ort-glibc:
-    name: ORT on glibc 2.31 (${{ matrix.target }})
-    needs: source
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-24.04
-            cuda: true
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
-            cuda: false
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.source.outputs.sha }}
-          persist-credentials: false
-      - uses: actions/cache@v5
-        with:
-          path: rust/target/ort-prebuilt
-          key: ort-1.21-${{ matrix.target }}-${{ hashFiles('rust/scripts/onnxruntime-distributions.json') }}
-      - name: Prepare and audit official CPU runtime
-        run: |
-          python3 scripts/prepare-onnxruntime.py --target ${{ matrix.target }} --cache-dir target/ort-prebuilt --destination target/ort-cpu
-          python3 scripts/check-glibc.py target/ort-cpu --max 2.31
-      - name: Load CPU runtime on glibc 2.31
-        run: |
-          docker run --rm --volume "$PWD:/work:ro" --workdir /work ubuntu:20.04 bash -euc '
-            apt-get update -qq
-            apt-get install -y --no-install-recommends python3 libstdc++6 >/dev/null
-            test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.31"
-            python3 scripts/check-onnxruntime.py target/ort-cpu/libonnxruntime.so.1
-          '
-      - name: Verify Vulkan does not require a custom ORT at build time
-        run: |
-          CARGO_MANIFEST_DIR="$PWD/crates/zg-engine" rustc --edition=2024 crates/zg-engine/build.rs -o target/ort-build-script
-          env -u ORT_DYLIB_PATH CARGO_FEATURE_VULKAN=1 CARGO_NET_OFFLINE=true \
-            TARGET=${{ matrix.target }} OUT_DIR="$PWD/target/ort-vulkan/debug/build/zg-engine/out" \
-            ZG_ORT_CACHE_DIR="$PWD/target/ort-prebuilt" target/ort-build-script
-      - name: Audit the CUDA 12 provider without requiring a GPU
-        if: matrix.cuda
-        run: |
-          python3 scripts/prepare-onnxruntime.py --target ${{ matrix.target }} --cuda --cache-dir target/ort-prebuilt --destination target/ort-cuda
-          python3 scripts/check-glibc.py target/ort-cuda --max 2.31
-
-  ort-models:
-    name: ONNX catalog and CPU runtime comparison (${{ matrix.target }})
-    if: github.event_name == 'workflow_dispatch' && inputs.ort_validation
-    needs: source
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-24.04
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
-    env:
-      LLAMA_CPP_BUILD_MODE: prebuilt
-      CARGO_BUILD_JOBS: "4"
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.source.outputs.sha }}
-          persist-credentials: false
-      - name: Install build dependencies and the pinned toolchain
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y clang libclang-dev cmake ninja-build pkg-config
-          rustup show active-toolchain
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
-        with:
-          prefix-key: rust-ort-models-v1-${{ matrix.target }}
-          workspaces: rust -> target
-      - name: Cache the pinned catalog graphs
-        uses: actions/cache@v5
-        with:
-          path: ${{ runner.temp }}/ort-catalog-models
-          key: ort-catalog-v1-${{ hashFiles('rust/crates/zg-engine/src/models/catalog/**') }}
-      - name: Build one release test binary for both runtimes
-        run: |
-          mkdir -p target
-          cargo test --release --locked -p zg-engine --lib --no-run --message-format=json > target/ort-tests.json
-      - name: Validate all ONNX models and compare q4 CPU throughput
-        shell: python
-        env:
-          MODEL_CACHE: ${{ runner.temp }}/ort-catalog-models
-          ORT_TARGET: ${{ matrix.target }}
-        run: |
-          import json, os, pathlib, subprocess, sys
-          records = [json.loads(line) for line in pathlib.Path("target/ort-tests.json").read_text().splitlines()]
-          binaries = [record["executable"] for record in records if record.get("reason") == "compiler-artifact"
-                      and record["target"]["name"] == "zg_engine" and record["profile"]["test"] and record.get("executable")]
-          assert len(binaries) == 1, binaries
-          subprocess.run([sys.executable, "scripts/validate-onnxruntime-models.py", "--test-binary", binaries[0],
-              "--cargo-messages", "target/ort-tests.json",
-              "--target", os.environ["ORT_TARGET"], "--model-cache", os.environ["MODEL_CACHE"],
-              "--output", "target/ort-model-validation"], check=True)
-      - name: Retain catalog and throughput evidence
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: ort-model-validation-${{ matrix.target }}
-          path: |
-            rust/target/ort-model-validation/*.log
-            rust/target/ort-model-validation/results.json
-          if-no-files-found: warn
-          retention-days: 14
+        run: node --test scripts/npm-*.test.mjs scripts/standalone-*.test.mjs npm/meta/install.test.cjs
 
   test:
     name: rust test (${{ matrix.os }}${{ matrix.cuda && ', CUDA build on CPU' || '' }})
@@ -289,7 +167,7 @@ jobs:
         with:
           node-version: 24
       - name: Test installed npm command lifecycle on this OS
-        run: node --test scripts/npm-installed-cli.test.mjs
+        run: node --test scripts/npm-installed-cli.test.mjs scripts/standalone-installer.test.mjs
       - name: Use a short Windows Cargo home
         if: runner.os == 'Windows'
         shell: python
@@ -393,6 +271,9 @@ jobs:
             --env LLAMA_CPP_BUILD_MODE=prebuilt --env LLAMA_CPP_RUNTIME_CACHE=/work/rust/target/llama-runtimes \
             --env RUST_BACKTRACE --env CARGO_TERM_COLOR --env SOURCE_SHA \
             zvec-grep-cuda-ci bash -euo pipefail -c '
+              # Docker does not populate USER. Workspace preferences and
+              # persistent authorization require the actual container username.
+              export USER="$(id -un)"
               cargo nextest --version
               python3 scripts/cuda/runtime.py --reset-cargo-cli target/debug
               cargo build --locked --features cuda --message-format=json > target/cargo-cli.json
@@ -531,6 +412,62 @@ jobs:
           assert len(binaries) == 1, f"Expected one zg-engine test executable: {binaries}"
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"path={binaries[0]}\n")
+      - name: Verify every local model from its configured live sources independently
+        if: ${{ !matrix.cuda && matrix.platform == 'linux' }}
+        shell: python
+        env:
+          MODEL_TEST_BINARY: ${{ steps.model-test.outputs.path }}
+        run: |
+          import json, os, pathlib, re, subprocess
+          # Each suite downloads every model configured for its selected source
+          # into its own fresh temporary cache, retaining the full local catalog.
+          # Reuse the CPU test executable; no inference or extra build is needed.
+          logs = pathlib.Path("model-logs")
+          logs.mkdir(exist_ok=True)
+          log_path = logs / "live-sources.log"
+          try:
+              with log_path.open("w", encoding="utf-8") as log:
+                  subprocess.run([os.environ["MODEL_TEST_BINARY"],
+                      "models::artifacts::downloader::tests::live_sources::",
+                      "--ignored", "--nocapture", "--test-threads=1"],
+                      stdout=log, stderr=subprocess.STDOUT, timeout=3600, check=True)
+              output = log_path.read_text(encoding="utf-8", errors="replace")
+              if not re.search(r"test result: ok\. 2 passed; 0 failed; 0 ignored;", output):
+                  raise RuntimeError("Expected exactly two passing live-source suites, with none skipped")
+              catalogs, supported, results = {}, {}, {}
+              for kind, payload in re.findall(r"LIVE_SOURCE_(CATALOG|RESULT)=(\{[^\n]+\})", output):
+                  record = json.loads(payload)
+                  source = record["source"]
+                  if kind == "CATALOG":
+                      if source in catalogs:
+                          raise RuntimeError(f"Duplicate live-source catalog: {source}")
+                      models = record["models"]
+                      if not models or len(models) != len(set(models)):
+                          raise RuntimeError(f"Empty or duplicate local model catalog: {source}")
+                      catalogs[source] = set(models)
+                      configured = record["supported_models"]
+                      if (not configured or len(configured) != len(set(configured))
+                              or not set(configured) <= catalogs[source]):
+                          raise RuntimeError(f"Invalid configured model catalog: {source}")
+                      supported[source] = set(configured)
+                  else:
+                      case = (source, record["model"])
+                      if case in results or record["status"] != "passed":
+                          raise RuntimeError(f"Duplicate or unsuccessful live-source case: {record}")
+                      results[case] = record
+              if set(catalogs) != {"huggingface", "modelscope"}:
+                  raise RuntimeError(f"Missing or unexpected live-source catalogs: {catalogs}")
+              if catalogs["huggingface"] != catalogs["modelscope"]:
+                  raise RuntimeError("Live-source suites must cover the same complete local catalog")
+              if supported["huggingface"] != catalogs["huggingface"]:
+                  raise RuntimeError("Every local model must be checked from Hugging Face")
+              expected = {(source, model) for source, models in supported.items() for model in models}
+              if set(results) != expected:
+                  raise RuntimeError(f"Live-source coverage mismatch: missing={expected - set(results)}, "
+                                     f"unexpected={set(results) - expected}")
+              print(f"Verified {len(results)} model/source cases across {len(catalogs['huggingface'])} local models")
+          finally:
+              print(log_path.read_text(encoding="utf-8", errors="replace"), flush=True)
       - name: Verify real models using the existing test binary
         if: ${{ !matrix.cuda || runner.os != 'Linux' }}
         shell: python
@@ -540,6 +477,7 @@ jobs:
           import os, pathlib, re, subprocess
           cases = [("cpu", "model2vec", "local/potion-code-16m-v2"),
                    ("cpu", "onnx", "local/all-minilm-l6-v2"),
+                   ("cpu", "bekko", "local/bekko-256-int8"),
                    ("cpu", "gguf", "local/embeddinggemma-300m"),
                    ("cpu", "gguf-long-input", "local/embeddinggemma-300m")]
           logs = pathlib.Path("model-logs")
@@ -618,6 +556,7 @@ jobs:
           for spec in \
             'cpu|model2vec|local/potion-code-16m-v2|zvec-grep-cuda-ci' \
             'cpu|onnx|local/all-minilm-l6-v2|zvec-grep-cuda-ci' \
+            'cpu|bekko|local/bekko-256-int8|zvec-grep-cuda-ci' \
             'cpu|gguf|local/embeddinggemma-300m|zvec-grep-cuda-ci' \
             'cpu|gguf-long-input|local/embeddinggemma-300m|zvec-grep-cuda-ci'; do
             IFS='|' read -r device backend model runtime_image <<< "$spec"
@@ -854,6 +793,9 @@ jobs:
           smoke = "models::tests::real_model_smoke::selected_local_model_downloads_loads_and_embeds"
           cases = [
               ("cuda-onnx", "zg_engine", smoke, "local/all-minilm-l6-v2", "onnx"),
+              ("cuda-onnx-shutdown", "zg_engine",
+               "models::backends::transformers::model::cuda_shutdown_tests::cached_minilm_cuda_sessions_exit_cleanly",
+               None, "onnx"),
               ("cuda-gguf", "zg_engine", smoke, "local/embeddinggemma-300m", "gguf"),
               # The preceding smoke prepares the cache. Run the regression in a
               # fresh process, with CUDA/offload evidence and no extra download.
@@ -886,7 +828,7 @@ jobs:
                          test, "--ignored", "--exact", "--nocapture"]
               if not windows:
                   image = ("nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04@sha256:ac55d124da4882b497f732d8dfd9a702d5447a5f29d08d56da6f64f0a1eb34bc"
-                           if name == "cuda-onnx" else
+                           if backend == "onnx" else
                            "nvidia/cuda:13.1.1-runtime-ubuntu24.04@sha256:12e26235ebe186000d71f8e457a9ad2aed6c0cb743a7935f0443bacef206aa34")
                   command = [
                       "docker", "run", "--rm", "--gpus", "all", "--platform", "linux/amd64",
@@ -898,11 +840,15 @@ jobs:
                       'export LD_LIBRARY_PATH="/gpu-tests/lib:${LD_LIBRARY_PATH:-}"; '
                       # The pinned image supplies CUDA. Restrict apt to Ubuntu
                       # sources so NVIDIA mirror syncs cannot block certificates.
-                      'if [ "$1" = model ]; then '
+                      'if [ "$1" = model ] || [ "$1" = shutdown ]; then '
                       'apt_options=(-o Dir::Etc::sourcelist=sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- -o APT::Update::Error-Mode=any -o Acquire::Retries=3); '
                       'apt-get "${apt_options[@]}" update -qq; '
-                      'apt-get "${apt_options[@]}" install --yes --no-install-recommends ca-certificates >/dev/null; fi; '
-                      'shift; exec timeout 900 "$@"', "gpu-test", "model" if model else "c5", *command,
+                      'packages=(ca-certificates); if [ "$1" = shutdown ]; then packages+=(valgrind); fi; '
+                      'apt-get "${apt_options[@]}" install --yes --no-install-recommends "${packages[@]}" >/dev/null; fi; '
+                      'mode="$1"; shift; if [ "$mode" = shutdown ]; then '
+                      'exec timeout 900 valgrind --trace-children=yes --leak-check=no --undef-value-errors=no '
+                      '--error-exitcode=77 "$@"; fi; exec timeout 900 "$@"',
+                      "gpu-test", "shutdown" if name == "cuda-onnx-shutdown" else "model" if model else "c5", *command,
                   ]
               log_path = logs / f"{name}.log"
               try:

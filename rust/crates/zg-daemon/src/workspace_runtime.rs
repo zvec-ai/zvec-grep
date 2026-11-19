@@ -25,6 +25,7 @@ use zg_engine::{
             options::{ScanRulesUpdate, WorkspaceChange as IndexChange},
         },
         info::{InfoOptions, InfoResult, result::IndexStatusSnapshot},
+        relationships::{Direction, RelationshipOptions, RelationshipResult},
     },
 };
 use zg_host_native::{
@@ -109,7 +110,10 @@ impl CachedIndexStatus {
         self.job = job;
         let snapshot = IndexStatusSnapshot {
             status: info.index_status(),
-            stats: info.status.clone(),
+            stats: info.status.clone().map(|mut stats| {
+                stats.fragments_indexed = None;
+                stats
+            }),
             checked_epoch_ms: u64::try_from(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -562,6 +566,7 @@ impl WorkspaceRuntimeManager {
             .info(InfoOptions {
                 root: options.root.clone(),
                 include_status: false,
+                include_counts: false,
             })
             .await?;
         let runtime = self.runtime(
@@ -579,6 +584,7 @@ impl WorkspaceRuntimeManager {
             .info(InfoOptions {
                 root: Some(metadata.root),
                 include_status: true,
+                include_counts: options.include_counts,
             })
             .await?;
         let current_job = self.job_for_root(&info.root).map(|job| (job.id, job.state));
@@ -962,6 +968,19 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
         WorkspaceRuntimeManager::info(self, engine, options).await
     }
 
+    async fn relationships(
+        &self,
+        engine: &ZvecGrep,
+        direction: Direction,
+        mut request: RelationshipOptions,
+    ) -> Result<RelationshipResult, EngineError> {
+        if request.signal.is_none() {
+            request.signal = Some(self.inner.shutdown.child_token());
+        }
+        let _activity = self.existing_activity(request.root.as_deref())?;
+        engine.relationships(direction, request).await
+    }
+
     async fn search(
         &self,
         engine: &ZvecGrep,
@@ -1039,6 +1058,7 @@ impl IndexOperationProvider for WorkspaceRuntimeManager {
                     .info(InfoOptions {
                         root: request.root.clone(),
                         include_status: false,
+                        include_counts: false,
                     })
                     .await
             })
@@ -1354,6 +1374,7 @@ fn index_template(options: &IndexOptions) -> IndexOptions {
     template.scan = ScanRulesUpdate::default();
     template.graph_indexing = None;
     template.embedding = None;
+    template.embedding_default = None;
     template
 }
 
@@ -1459,6 +1480,11 @@ mod tests {
             runtime_api_key: Some("temporary-key".into()),
             runtime_device: Some(Device::Auto),
             runtime_model_cache: Some("temporary-cache".into()),
+            embedding_default: Some(zg_engine::api::index::embedding::EmbeddingSelection {
+                model: "local/bekko-256-int8".into(),
+                source: zg_engine::api::index::embedding::EmbeddingSelectionSource::Automatic,
+                analysis: None,
+            }),
             embedding: Some(EmbeddingModelSpec {
                 reference: "local/potion-code-16m-v2".into(),
                 revision: None,
@@ -1475,6 +1501,7 @@ mod tests {
         assert!(template.api_key.is_none());
         assert!(template.endpoint.is_none());
         assert!(template.embedding.is_none());
+        assert!(template.embedding_default.is_none());
         assert!(template.device.is_none());
     }
 
@@ -1632,6 +1659,7 @@ mod tests {
         let stats = info.status.as_mut().expect("index status");
         stats.files_scanned = 1001;
         stats.files_unchanged = 1000;
+        stats.fragments_indexed = Some(2000);
         let epoch = cached.invalidate();
         assert!(cached.record(epoch, &info, None));
         cached.invalidate();
@@ -1642,6 +1670,11 @@ mod tests {
             .and_then(|baseline| baseline.stats.as_ref())
             .expect("completion baseline");
         assert_eq!((stats.files_unchanged, stats.files_scanned), (1000, 1001));
+        assert_eq!(stats.fragments_indexed, None);
+        assert_eq!(
+            info.status.expect("original response").fragments_indexed,
+            Some(2000)
+        );
     }
 
     #[test]
@@ -1674,6 +1707,7 @@ mod tests {
         let options = InfoOptions {
             root: Some(root.clone()),
             include_status: true,
+            include_counts: false,
         };
         assert!(IndexOperationProvider::runtime_snapshot(&manager, &root).is_none());
         let reply = manager
@@ -2238,7 +2272,8 @@ mod tests {
             engine
                 .info(InfoOptions {
                     root: Some(child.clone()),
-                    include_status: false
+                    include_status: false,
+                    include_counts: false,
                 })
                 .await
                 .expect("child info")
@@ -2327,6 +2362,7 @@ mod tests {
             .drop_index(InfoOptions {
                 root: Some(workspace.path().to_path_buf()),
                 include_status: false,
+                include_counts: false,
             })
             .await
             .expect("drop should complete");
@@ -2344,6 +2380,11 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_closes_all_watchers_and_rejects_later_jobs() {
+        use zg_engine::{
+            ZvecGrep,
+            api::relationships::{Direction, RelationshipOptions},
+        };
+        use zg_transport_mcp::IndexOperationProvider;
         let workspace = tempdir().expect("workspace should be created");
         let executor = Arc::new(RecordingExecutor::default());
         let (_sender, receiver) = mpsc::channel(1);
@@ -2367,7 +2408,23 @@ mod tests {
 
         assert_eq!(watchers.closes.load(Ordering::Acquire), 1);
         assert_eq!(manager.snapshot().active_runtimes, 0);
-        assert!(manager.submit_index(options, false).await.is_err());
+        assert!(manager.submit_index(options.clone(), false).await.is_err());
+        let engine = ZvecGrep::new();
+        for direction in [Direction::In, Direction::Out] {
+            let error = manager
+                .relationships(
+                    &engine,
+                    direction,
+                    RelationshipOptions {
+                        root: options.root.clone(),
+                        symbol: "run".into(),
+                        ..RelationshipOptions::default()
+                    },
+                )
+                .await
+                .expect_err("closed runtimes reject reads");
+            assert_eq!(error.code(), EngineError::RESOURCE_CLOSED);
+        }
     }
     #[tokio::test]
     async fn manual_updates_replace_the_watcher_once_without_replaying_configuration() {

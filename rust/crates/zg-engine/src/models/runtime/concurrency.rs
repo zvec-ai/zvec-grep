@@ -15,10 +15,17 @@ pub(crate) fn is_llama(reference: &str) -> bool {
     )
 }
 
-fn is_transformers(reference: &str) -> bool {
+pub(super) fn is_transformers(reference: &str) -> bool {
     matches!(
         get_embedding_model_catalog_entry(reference),
         Some(EmbeddingCatalogEntry::Transformers(_))
+    )
+}
+
+fn is_bekko(reference: &str) -> bool {
+    matches!(
+        get_embedding_model_catalog_entry(reference),
+        Some(EmbeddingCatalogEntry::Bekko(_))
     )
 }
 
@@ -73,24 +80,26 @@ fn resolve_override(
     Ok(None)
 }
 
-/// Transformer session budgets are fixed when their runtime is created.
-/// llama.cpp applies its execution budget per request, so callers with different
-/// budgets share the same model runtime and its backend-owned context pool.
+/// Budget normalization before backend-specific limits are known. Transformers
+/// resolve their default and hardware limit on the model, including its provider.
 pub(crate) fn local_runtime_limit(reference: &str, requested: Option<usize>) -> Option<usize> {
     if is_transformers(reference) {
+        requested.map(|value| value.max(1))
+    } else if is_bekko(reference) {
         Some(requested.unwrap_or(1).clamp(1, LOCAL_CONCURRENCY_CAP))
     } else {
         None
     }
 }
 
-/// Catalog-only fallback for backends without a device-specific admission policy.
-/// llama.cpp overrides this through `EmbeddingModel::batch_concurrency` once its
-/// configured device and context budget are known.
+/// Fallback before device-specific admission is available. llama.cpp applies
+/// fixed context capacity and per-operation limits inside its shared pool.
 pub(crate) fn batch_concurrency(reference: &str, requested: Option<usize>) -> Option<usize> {
     if is_llama(reference) {
-        Some(1)
+        Some(requested.unwrap_or(1).max(1))
     } else if is_transformers(reference) {
+        requested.map(|value| value.max(1))
+    } else if is_bekko(reference) {
         Some(requested.unwrap_or(1).clamp(1, LOCAL_CONCURRENCY_CAP))
     } else {
         requested

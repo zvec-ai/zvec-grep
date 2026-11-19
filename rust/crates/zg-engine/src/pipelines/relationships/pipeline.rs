@@ -1,21 +1,23 @@
-//! Match canonical symbols, read call edges, and assemble bounded result groups.
+//! Match canonical symbols, read selected edges, and assemble bounded result groups.
 
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
 };
 
-use super::storage::RelationshipStorage;
+use super::{rust_modules::RustModules, storage::RelationshipStorage};
 
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     EngineError, EngineResult,
     api::relationships::{
-        CallSite, MAX_SYMBOL_MATCHES, RelationshipOptions, RelationshipResult, SymbolDefinition,
-        SymbolRelationships,
+        MAX_SYMBOL_MATCHES, RelationshipEdge, RelationshipOptions, RelationshipResult,
+        SymbolDefinition, SymbolRelationships,
     },
-    domain::{Entity, EntityId, EntityMetadata, FileEdge, FileRecord, GraphEdgeKind, Range},
+    domain::{
+        Entity, EntityId, EntityMetadata, FileEdge, FileRecord, GraphEdgeKind, Language, Range,
+    },
     pipelines::indexed_search::path_filter::resolve_glob_filter,
     storage::{
         ReadView,
@@ -102,6 +104,7 @@ fn collect_relationships(
             Ok(definitions)
         }
     })?;
+    let definitions = prefer_definitions(definitions);
     let mut matches = Vec::new();
     for stored in &definitions {
         check_cancelled(options.signal.as_ref())?;
@@ -115,6 +118,7 @@ fn collect_relationships(
                 stored,
                 options.limit.unwrap_or(20),
                 direction,
+                options.kinds.as_deref(),
                 options.signal.as_ref(),
             )
         })? {
@@ -157,11 +161,39 @@ fn check_cancelled(signal: Option<&CancellationToken>) -> EngineResult<()> {
     Ok(())
 }
 
+/// Drops the pure declarations among equally named definitions.
+///
+/// A C++ member is a prototype in the header and a bounded body in the
+/// implementation file, so the workspace holds two entities under one name.
+/// A declaration states no calls of its own — its node would answer every edge
+/// list with an empty one — and the repository already treats it as the
+/// weaker location for name-based binding, so a query reports the definition
+/// and leaves the prototype out. A workspace that holds only the declaration
+/// still answers, since that is the one known location.
+///
+/// The name is the symbol, not the statement: an in-class prototype and the
+/// out-of-class body written in one file are one implementation, and reporting
+/// them apart would answer one implementation twice.
+fn prefer_definitions(definitions: Vec<StoredEntity>) -> Vec<StoredEntity> {
+    let is_declaration = |stored: &StoredEntity| {
+        matches!(
+            stored.entity.metadata(),
+            Some(EntityMetadata::Code(metadata)) if metadata.is_declaration
+        )
+    };
+    let has_body = definitions.iter().any(|stored| !is_declaration(stored));
+    definitions
+        .into_iter()
+        .filter(|stored| !has_body || !is_declaration(stored))
+        .collect()
+}
+
 fn collect_match(
     storage: &ReadView<'_>,
     stored: &StoredEntity,
     limit: usize,
     direction: Direction,
+    kinds: Option<&[GraphEdgeKind]>,
     signal: Option<&CancellationToken>,
 ) -> EngineResult<Option<SymbolRelationships>> {
     let id = stored.entity.id();
@@ -177,13 +209,13 @@ fn collect_match(
     let Some(symbol) = describe(stored) else {
         return Ok(None);
     };
-    // Cache only within this definition's snapshot, including recursive calls.
+    // Cache only within this definition's snapshot, including self-loops.
     let mut symbols = HashMap::from([(id.clone(), Some(symbol.clone()))]);
     let mut edges = neighborhood(
         storage,
         id.as_str(),
         direction,
-        Some(&[GraphEdgeKind::Calls]),
+        kinds,
         limit.saturating_add(1),
         signal,
     )?;
@@ -218,7 +250,15 @@ fn collect_match(
         edges: edges
             .into_iter()
             .zip(targets)
-            .map(|((edge, file_path), target)| CallSite {
+            .map(|((edge, file_path), target)| RelationshipEdge {
+                kind: edge.kind,
+                direction: if edge.source == edge.target {
+                    Direction::Both
+                } else if edge.source == id.as_str() {
+                    Direction::Out
+                } else {
+                    Direction::In
+                },
                 file_path,
                 symbol: symbols.get(&target).cloned().flatten(),
                 line: edge.line,
@@ -335,6 +375,7 @@ fn select_symbols(
     }
     let ids = storage.find_symbol_entity_ids(name, filter)?;
     let mut selected = Vec::new();
+    let mut modules = RustModules::default();
     'batches: for batch in ids.chunks(128) {
         let mut owners: HashMap<_, _> = storage
             .fetch_code_metadata(batch)?
@@ -343,21 +384,30 @@ fn select_symbols(
                 (metadata.symbol_name.as_deref() == Some(name)
                     && scope.is_none_or(|scope| {
                         metadata.scope.as_deref().unwrap_or("").replace('.', "::") == scope
+                            || metadata.language == Some(Language::Rust)
                     }))
-                .then_some((id, file_id))
+                .then_some((id, (file_id, metadata)))
             })
             .collect();
         let file_ids: Vec<_> = owners
             .values()
-            .copied()
+            .map(|(file_id, _)| *file_id)
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
         let files = storage.fetch_files(&file_ids)?;
         for id in batch {
-            if let Some(file) = owners.remove(id).and_then(|file_id| files.get(&file_id))
-                && file.index_status().is_indexed()
+            if let Some((file_id, metadata)) = owners.remove(id)
+                && let Some(file) = files
+                    .get(&file_id)
+                    .filter(|file| file.index_status().is_indexed())
             {
+                if let Some(scope) = scope
+                    && metadata.scope.as_deref().unwrap_or("").replace('.', "::") != scope
+                    && !modules.matches_scope(storage, file, &metadata, scope)?
+                {
+                    continue;
+                }
                 selected.push((id.clone(), file.clone()));
                 if selected.len() == limit {
                     break 'batches;

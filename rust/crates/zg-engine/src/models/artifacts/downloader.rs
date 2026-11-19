@@ -23,7 +23,8 @@ use super::identity::{CompleteFileStamp, complete_file_stamp, complete_file_stam
 use super::manifest::has_valid_complete_marker;
 use super::{
     cache_lock::CacheLock,
-    error::{ArtifactDownloadError, FailureKind, filesystem_error},
+    error::{ArtifactDownloadError, FailureKind, filesystem_error, network_error},
+    http_client::ArtifactHttpClient,
     identity::inspect_file_identity,
     manifest::{
         Manifest, validate_artifact, validate_snapshot, write_complete_marker,
@@ -40,7 +41,7 @@ use sysinfo::System;
 
 pub(crate) struct ResolveArtifacts<'a> {
     pub(crate) model: &'static str,
-    pub(crate) sources: [ArtifactSource; 2],
+    pub(crate) sources: Vec<ArtifactSource>,
     pub(crate) artifacts: &'static [ArtifactConfig],
     pub(crate) reporter: &'a ModelDownloadProgressReporter,
     pub(crate) signal: Option<&'a CancellationToken>,
@@ -52,7 +53,7 @@ pub(crate) struct ResolvedArtifacts {
 }
 
 pub(crate) async fn resolve_model_artifacts(
-    client: &reqwest::Client,
+    client: &ArtifactHttpClient,
     mut request: ResolveArtifacts<'_>,
 ) -> Result<ResolvedArtifacts, ModelError> {
     validate_request(&request).map_err(ArtifactDownloadError::into_model_error)?;
@@ -88,7 +89,7 @@ pub(crate) async fn resolve_model_artifacts(
                 if error.is_cancelled() {
                     return Err(error.into_model_error());
                 }
-                if index == 0 {
+                if index == 0 && request.sources.len() > 1 {
                     if !error.fallback_allowed() {
                         return Err(error.into_model_error());
                     }
@@ -115,10 +116,11 @@ pub(crate) async fn resolve_model_artifacts(
 }
 
 fn validate_request(request: &ResolveArtifacts<'_>) -> Result<(), ArtifactDownloadError> {
-    if request.model.trim().is_empty() || request.artifacts.is_empty() {
+    if request.model.trim().is_empty() || request.artifacts.is_empty() || request.sources.is_empty()
+    {
         return Err(ArtifactDownloadError::new(
             FailureKind::InvalidInput,
-            "model and artifacts must not be empty",
+            "model, artifacts and sources must not be empty",
         ));
     }
     let mut paths = std::collections::HashSet::new();
@@ -134,7 +136,9 @@ fn validate_request(request: &ResolveArtifacts<'_>) -> Result<(), ArtifactDownlo
             ));
         }
     }
-    if request.sources[0].kind == request.sources[1].kind {
+    if request.sources.len() > 2
+        || (request.sources.len() == 2 && request.sources[0].kind == request.sources[1].kind)
+    {
         return Err(ArtifactDownloadError::new(
             FailureKind::InvalidInput,
             format!(
@@ -197,7 +201,7 @@ fn resolved_result(
 }
 
 async fn download_source_snapshot(
-    client: &reqwest::Client,
+    client: &ArtifactHttpClient,
     request: &ResolveArtifacts<'_>,
     source: &ArtifactSource,
     manifest: &Manifest,
@@ -224,11 +228,33 @@ async fn download_source_snapshot(
     write_complete_marker(source, request.artifacts, manifest).await
 }
 
+async fn download_artifact(
+    client: &ArtifactHttpClient,
+    request: &ResolveArtifacts<'_>,
+    source: &ArtifactSource,
+    artifact: &ArtifactConfig,
+    lock: &CacheLock,
+) -> Result<(), ArtifactDownloadError> {
+    match download_artifact_attempt(client.default_client(), request, source, artifact, lock).await
+    {
+        Err(first) if first.ipv4_retry_allowed() => {
+            // A TCP connection can succeed over IPv6 and then fail during TLS or
+            // transfer. Happy Eyeballs no longer helps at that point. Retry the
+            // same artifact once over IPv4 before abandoning this source. Each
+            // attempt owns its partial file, so failed bytes are never reused.
+            download_artifact_attempt(client.ipv4_client(), request, source, artifact, lock)
+                .await
+                .map_err(|error| error.after_ipv4_retry(&first))
+        }
+        result => result,
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "the network stream, integrity check, and fenced publication form one transaction"
 )]
-async fn download_artifact(
+async fn download_artifact_attempt(
     client: &reqwest::Client,
     request: &ResolveArtifacts<'_>,
     source: &ArtifactSource,
@@ -275,12 +301,9 @@ async fn download_artifact(
         .at_artifact(artifact.path)
     })?
     .map_err(|error| {
-        ArtifactDownloadError::new(
-            FailureKind::Network,
-            format!("unable to request model artifact: {error}"),
-        )
-        .at_source(source.kind)
-        .at_artifact(artifact.path)
+        network_error("unable to request model artifact", error)
+            .at_source(source.kind)
+            .at_artifact(artifact.path)
     })?;
     if !response.status().is_success() {
         let status = response.status().as_u16();
@@ -328,12 +351,9 @@ async fn download_artifact(
         })?;
         let Some(chunk) = next else { break };
         let chunk = chunk.map_err(|error| {
-            ArtifactDownloadError::new(
-                FailureKind::Network,
-                format!("model download stream failed: {error}"),
-            )
-            .at_source(source.kind)
-            .at_artifact(artifact.path)
+            network_error("model download stream failed", error)
+                .at_source(source.kind)
+                .at_artifact(artifact.path)
         })?;
         file.write_all(&chunk).await.map_err(|error| {
             filesystem_error(
@@ -425,8 +445,10 @@ async fn wait_or_cancel<T>(
     signal: Option<&CancellationToken>,
     future: impl std::future::Future<Output = T>,
 ) -> Result<T, ArtifactDownloadError> {
+    check_cancelled(signal)?;
     if let Some(signal) = signal {
         tokio::select! {
+            biased;
             () = signal.cancelled() => Err(cancelled()),
             output = future => Ok(output),
         }

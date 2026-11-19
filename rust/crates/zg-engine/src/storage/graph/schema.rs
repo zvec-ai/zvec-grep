@@ -1,11 +1,33 @@
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 use super::{Error, Result};
 
-// Unsupported databases require an index rebuild; no schema migration is provided.
-// Version compatibility belongs to the workspace manifest, which rebuilds the whole
-// index when the index version changes; this database only proves ownership.
+// The workspace manifest gates the base index format. Optional graph storage
+// independently proves ownership and the columns its readers and writers require.
+// Incompatible graph databases require an explicit rebuild; no migration is provided.
+// The edges table carries both the walk-time edges and the resolver's data plane
+// (ambiguity candidates, reference language and name tail); names, ownership and
+// paths stay canonical in zvec.
 pub(crate) const APPLICATION_ID: i64 = 0x5a47_5250;
+
+const EDGE_COLUMNS: &[(&str, &str)] = &[
+    ("id", "INTEGER"),
+    ("file_id", "INTEGER"),
+    ("source", "TEXT"),
+    ("target", "TEXT"),
+    ("kind", "TEXT"),
+    ("status", "TEXT"),
+    ("reference_name", "TEXT"),
+    ("receiver_name", "TEXT"),
+    ("arity", "INTEGER"),
+    ("line", "INTEGER"),
+    ("col", "INTEGER"),
+    ("candidates", "TEXT"),
+    ("language", "TEXT"),
+    ("name_tail", "TEXT"),
+    ("provenance", "TEXT"),
+    ("metadata", "TEXT"),
+];
 
 pub(crate) fn validate(connection: &Connection) -> Result<()> {
     let application_id: i64 =
@@ -21,13 +43,26 @@ pub(crate) fn validate(connection: &Connection) -> Result<()> {
     if edges != 1 {
         return Err(Error::IncompleteSchema);
     }
+    let mut statement = connection.prepare("PRAGMA table_info(edges)")?;
+    let columns = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !EDGE_COLUMNS.iter().all(|&(name, sql_type)| {
+        columns.iter().any(|(actual_name, actual_type)| {
+            actual_name == name && actual_type.eq_ignore_ascii_case(sql_type)
+        })
+    }) {
+        return Err(Error::IncompleteSchema);
+    }
     Ok(())
 }
 
-pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
+pub(crate) fn initialize(connection: &mut Connection, allow_create: bool) -> Result<()> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let application_id: i64 = tx.query_row("PRAGMA application_id", [], |row| row.get(0))?;
-    if application_id == 0 {
+    if application_id == 0 && allow_create {
         let objects: i64 = tx.query_row(
             "SELECT count(*) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'",
             [],
@@ -41,13 +76,63 @@ pub(crate) fn initialize(connection: &mut Connection) -> Result<()> {
     } else {
         validate(&tx)?;
     }
+    // Indexes are additive, so an existing database keeps its rows and gains
+    // the ones it was built without. A read-only open cannot write and only
+    // loses the index acceleration; the next writable open catches up.
+    tx.execute_batch(INDEXES)?;
+    // An index whose definition changed keeps its name, so the addition above
+    // left the older definition in place; the definitions that differ from the
+    // ones below are replaced here instead of waiting for a rebuild.
+    replace_stale_indexes(&tx)?;
+    tx.execute_batch(INVALIDATION)?;
+    tx.execute_batch(PREPROCESSOR)?;
     tx.commit()?;
     Ok(())
 }
 
+/// Replaces the indexes an earlier binary created with a broader definition.
+///
+/// `CREATE INDEX IF NOT EXISTS` takes an existing index of the name as done, so
+/// a definition that grew a predicate (`WHERE target IS NOT NULL`, a narrower
+/// `name_tail` partial) would otherwise only apply to new or rebuilt databases.
+/// The comparison is textual, which is enough: the statement is this file's own
+/// and only its predicate ever changes.
+fn replace_stale_indexes(connection: &Connection) -> Result<()> {
+    for (name, definition) in REPLACED_INDEXES {
+        let recorded: Option<String> = connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if recorded.is_none_or(|recorded| normalized(&recorded) == *definition) {
+            continue;
+        }
+        connection.execute_batch(&format!("DROP INDEX {name};"))?;
+        connection.execute_batch(definition)?;
+    }
+    Ok(())
+}
+
+/// The statement text with its whitespace and `IF NOT EXISTS` removed, so the
+/// one-line definition this file states compares equal to a definition an older
+/// binary wrote over several lines.
+fn normalized(sql: &str) -> String {
+    let collapsed = sql
+        .replace("IF NOT EXISTS ", "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    collapsed.trim_end_matches(';').to_owned()
+}
+
 // Direct local edges and references share one table. Resolution fills the target
 // on the existing reference row; invalidation clears it and retains the evidence.
-// `failed` is reserved for resolver integration; no API currently sets it.
+// `failed` terminates import references whose specifier addresses modules
+// outside the workspace; they carry no target, so endpoint invalidation cannot
+// revive them. Rewriting the owning file re-enqueues them, and so does a later
+// pass that requeues the evidence they depended on.
 const SCHEMA: &str = "
 CREATE TABLE edges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,22 +146,82 @@ CREATE TABLE edges (
     arity INTEGER CHECK (arity >= 0),
     line INTEGER CHECK (line >= 1),
     col INTEGER CHECK (col >= 0),
-    provenance TEXT CHECK (provenance IN ('file_local', 'import_scoped', 'qualified_name_match', 'workspace_unique')),
+    candidates TEXT CHECK (candidates IS NULL OR (json_valid(candidates) AND json_type(candidates) = 'array')),
+    language TEXT NOT NULL DEFAULT 'unknown',
+    name_tail TEXT NOT NULL DEFAULT '',
+    provenance TEXT CHECK (provenance IN ('arity_bound', 'export_bound', 'file_local', 'file_scoped', 'import_bound', 'import_scoped', 'qualified_name_match', 'workspace_unique')),
     metadata TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata) AND json_type(metadata) = 'object'),
     CHECK ((status = 'resolved' AND target IS NOT NULL AND provenance IS NOT NULL)
         OR (status IN ('pending', 'failed') AND target IS NULL AND provenance IS NULL)),
     CHECK (
         (reference_name IS NULL AND status = 'resolved' AND provenance = 'file_local'
-            AND receiver_name IS NULL AND arity IS NULL)
+            AND receiver_name IS NULL AND arity IS NULL AND candidates IS NULL)
         OR
         (reference_name IS NOT NULL AND length(trim(reference_name)) > 0
             AND line IS NOT NULL AND col IS NOT NULL
             AND (provenance IS NULL OR provenance <> 'file_local'))
     )
 ) STRICT;
-CREATE INDEX edges_file ON edges(file_id);
-CREATE INDEX edges_source_kind ON edges(source, kind);
-CREATE INDEX edges_target_kind ON edges(target, kind);
+";
+
+// Created on every writable open, not only when the table is: an index is
+// derived data, so a database built by an older binary gains the ones added
+// since without a rebuild. Required columns are validated before any additions,
+// including columns that these indexes do not use. A definition that changes
+// under an existing name is listed in REPLACED_INDEXES; adding one here alone
+// would leave the older definition in the databases that already have it.
+const INDEXES: &str = "
+CREATE INDEX IF NOT EXISTS edges_file ON edges(file_id);
+CREATE INDEX IF NOT EXISTS edges_source_kind ON edges(source, kind);
+-- Pending/failed references have no target; incoming queries and
+-- invalidation probe non-NULL endpoints only.
+CREATE INDEX IF NOT EXISTS edges_target_kind ON edges(target, kind) WHERE target IS NOT NULL;
 -- Index only the pending queue so resolved queries use the endpoint indexes.
-CREATE INDEX edges_pending_id ON edges(id) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS edges_pending_id ON edges(id) WHERE status = 'pending';
+-- Only completed references are requeued by name. Pending rows already await
+-- resolution, and declares rows only carry binding evidence. Do not index
+-- either until a reference resolves or fails. The predicate matches requeue.
+CREATE INDEX IF NOT EXISTS edges_name_tail ON edges(name_tail)
+    WHERE reference_name IS NOT NULL AND status IN ('resolved', 'failed');
+";
+
+/// Indexes whose definition an earlier binary did not write this way, keyed by
+/// the name that definition was created under. Each entry repeats the current
+/// definition exactly (see [`INDEXES`] for why it differs from the older one).
+const REPLACED_INDEXES: &[(&str, &str)] = &[
+    (
+        "edges_target_kind",
+        "CREATE INDEX edges_target_kind ON edges(target, kind) WHERE target IS NOT NULL",
+    ),
+    (
+        "edges_name_tail",
+        "CREATE INDEX edges_name_tail ON edges(name_tail) \
+         WHERE reference_name IS NOT NULL AND status IN ('resolved', 'failed')",
+    ),
+];
+
+// Evidence a pass recorded but has not requeued yet. It lives in the database
+// rather than in memory so that a pass which publishes files and then fails or
+// is cancelled before its sweep still repairs those resolutions on the next
+// open. Created on every writable open like the indexes, so a database built
+// without the table gains it without a rebuild.
+const INVALIDATION: &str = "
+CREATE TABLE IF NOT EXISTS zg_stale_names (
+    kind INTEGER NOT NULL CHECK (kind IN (0, 1)),
+    name TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (kind, name)
+) STRICT;
+";
+
+// The directives a C/C++ file spells, in source order. The resolver replays
+// them to learn whether a call site's name was already a macro, which needs the
+// conditional branches and their guards, not just the imports the edge table
+// already holds. Created on every writable open like the invalidation table, so
+// a database built without it gains it without a rebuild.
+const PREPROCESSOR: &str = "
+CREATE TABLE IF NOT EXISTS zg_file_preprocessor (
+    file_id INTEGER PRIMARY KEY CHECK (file_id BETWEEN 0 AND 4294967295),
+    directives TEXT NOT NULL
+        CHECK (json_valid(directives) AND json_type(directives) = 'array')
+) STRICT;
 ";

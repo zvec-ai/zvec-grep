@@ -489,12 +489,14 @@ pub mod result {
         pub absolute_path: PathBuf,
         pub relative_path: PathBuf,
         pub range: ContentRange,
+        /// Exact matched evidence within the source; does not limit returned content.
         pub excerpt_range: Option<ContentRange>,
         /// Exact source coordinates of `content`, independent of the entity and matched ranges.
         pub content_range: ContentRange,
         /// Individual lexical matches in decoded source coordinates, independent of context lines.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub match_ranges: Vec<ContentRange>,
+        /// Complete stored entity for indexed hits; context window for lexical matches.
         pub content: String,
         /// Optional structural context supplied with the retrieved source.
         #[serde(default, skip_serializing_if = "Option::is_none")]

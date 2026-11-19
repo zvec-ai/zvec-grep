@@ -10,18 +10,23 @@ use std::{
 };
 
 #[cfg(target_os = "macos")]
-use std::{ffi::OsString, os::unix::process::CommandExt, process::Command};
+use std::ffi::OsString;
+#[cfg(unix)]
+use std::{os::unix::process::CommandExt, process::Command};
 
 use tokio::runtime::Builder;
 use tracing::debug;
 use tracing_subscriber::EnvFilter;
 use zg_cli::{
-    Cli, CliPlan, ClientMode, IndexOperation, InstallOutcome, McpInstallTransport, McpToolset,
-    ServerPlan, ServerStartArgs,
+    Cli, CliPlan, ClientMode, Direction, IndexOperation, InstallOutcome, McpInstallTransport,
+    McpToolset, ServerPlan, ServerStartArgs,
 };
 use zg_daemon::{DaemonStatus, ListenAddress, McpToolset as DaemonMcpToolset, ServerConfig};
 use zg_daemon_protocol::{DaemonCommand, DaemonReply};
-use zg_engine::{EngineError, ZvecGrep, api::context::ContextOptions};
+use zg_engine::{
+    EngineError, ZvecGrep,
+    api::{context::ContextOptions, relationships::RelationshipOptions},
+};
 
 static DAEMON_LOGGING: AtomicBool = AtomicBool::new(false);
 static OUTPUT_OPTIONS: OnceLock<zg_cli::OutputOptions> = OnceLock::new();
@@ -114,7 +119,21 @@ fn parse_cli() -> (Cli, Option<String>) {
     (cli, warning)
 }
 
+mod standalone;
+
 fn run() -> Result<ExitCode, Box<dyn Error>> {
+    #[cfg(unix)]
+    {
+        // Pin executable-relative resources before a later update changes a command symlink.
+        let executable = std::env::current_exe()?;
+        let resolved = executable.canonicalize()?;
+        if executable != resolved {
+            return Err(Command::new(resolved)
+                .args(std::env::args_os().skip(1))
+                .exec()
+                .into());
+        }
+    }
     let (cli, warning) = parse_cli();
     let _ = OUTPUT_OPTIONS.set(cli.output_options());
     let warn = || {
@@ -128,9 +147,14 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         }
     };
     let positional_warning = cli.positional_query_warning();
-    let plan = cli
+    let mut plan = cli
         .into_plan(std::env::current_dir()?)
         .inspect_err(|_| warn())?;
+    if let CliPlan::Install(args) = &mut plan
+        && args.launcher.is_none()
+    {
+        args.launcher = standalone::installed_launcher()?;
+    }
     match &plan {
         CliPlan::Help(topic) => {
             warn();
@@ -144,6 +168,13 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         }
         CliPlan::Install(args) if args.upgrade_installed => {
             zg_cli::execute_upgrade_installed(args)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        CliPlan::Standalone(args) => {
+            Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(standalone::execute(args))?;
             return Ok(ExitCode::SUCCESS);
         }
         _ => {}
@@ -172,14 +203,7 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         );
     }
 
-    // The grep walker owns its search threads; a Tokio worker pool would duplicate them.
-    let runtime = if lexical_only {
-        Builder::new_current_thread().enable_all().build()?
-    } else {
-        Builder::new_multi_thread().enable_all().build()?
-    };
-
-    let result = runtime.block_on(Box::pin(execute_plan(plan)));
+    let result = execute_plan_with_runtime(plan, lexical_only);
     if let Err(error) = &result
         && let Some(output) = error_presentation
         && let Some(report) = engine_error_report(error.as_ref())
@@ -192,6 +216,26 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
             zg_cli::stderr_supports_ansi(),
         )?;
         return Ok(ExitCode::FAILURE);
+    }
+    result
+}
+
+fn execute_plan_with_runtime(
+    plan: CliPlan,
+    lexical_only: bool,
+) -> Result<ExitCode, Box<dyn Error>> {
+    // The grep walker owns its search threads; a Tokio worker pool would duplicate them.
+    let runtime = if lexical_only {
+        Builder::new_current_thread().enable_all().build()?
+    } else {
+        Builder::new_multi_thread().enable_all().build()?
+    };
+    let stdio_bridge = matches!(&plan, CliPlan::Server(ServerPlan::Stdio(_)));
+    let result = runtime.block_on(Box::pin(execute_plan(plan)));
+    if stdio_bridge {
+        // Tokio's blocking stdin read cannot be cancelled. Once the relay ends,
+        // exit without waiting for a client that is itself waiting for our EOF.
+        runtime.shutdown_background();
     }
     result
 }
@@ -225,6 +269,13 @@ fn install_darwin_metal_residency_mitigation() -> io::Result<()> {
 async fn execute_plan(plan: CliPlan) -> Result<ExitCode, Box<dyn Error>> {
     match plan {
         CliPlan::Files { request, null } => return Ok(execute_files(*request, null).await),
+        CliPlan::Relationships {
+            direction,
+            color,
+            mode,
+            home,
+            request,
+        } => execute_relationships(direction, mode, home.as_deref(), request, color).await,
         CliPlan::Query {
             mode,
             home,
@@ -289,7 +340,7 @@ async fn execute_plan(plan: CliPlan) -> Result<ExitCode, Box<dyn Error>> {
         CliPlan::Server(plan) => execute_server_plan(plan).await,
         CliPlan::Install(args) => execute_install_plan(&args).await,
         CliPlan::Uninstall(args) => zg_cli::execute_uninstall(&args).map_err(Into::into),
-        CliPlan::Help(_) | CliPlan::Version => Ok(()),
+        CliPlan::Standalone(_) | CliPlan::Help(_) | CliPlan::Version => Ok(()),
     }?;
     Ok(ExitCode::SUCCESS)
 }
@@ -377,6 +428,20 @@ async fn execute_install_plan(args: &zg_cli::InstallArgs) -> Result<(), Box<dyn 
     } else {
         Some(start_installed_server(&outcome).await?)
     };
+    if let Some(status) = &status
+        && status.ready
+        && outcome.installed_claude()
+        && (outcome.transport == McpInstallTransport::Stdio
+            || status.server_url.as_deref() == Some(zg_cli::resolve_server_url()?.as_str()))
+    {
+        if status.compact_claude_instructions {
+            outcome.compact_claude_guidance()?;
+        } else {
+            report_warning(
+                "Kept the full Claude guidance. Restart the daemon with the updated zg, then rerun this install command to enable compact guidance.",
+            );
+        }
+    }
     if zg_cli::stdout_supports_ansi() {
         if let Some(status) = &status {
             write_server_status(status)?;
@@ -470,6 +535,46 @@ async fn start_installed_server(outcome: &InstallOutcome) -> Result<DaemonStatus
     };
     let executable = std::env::current_exe()?;
     Ok(zg_daemon::start_server(&executable, &config).await?)
+}
+
+async fn execute_relationships(
+    direction: Direction,
+    mode: ClientMode,
+    home: Option<&Path>,
+    request: RelationshipOptions,
+    color: zg_cli::ColorMode,
+) -> Result<(), Box<dyn Error>> {
+    let result = if use_server(mode, home).await? {
+        let home = zg_daemon::resolve_home(home.map(Path::to_owned))?;
+        let command = match direction {
+            Direction::In => DaemonCommand::Callers(request),
+            Direction::Out => DaemonCommand::Callees(request),
+            Direction::Both => {
+                return Err(EngineError::unsupported(
+                    "daemon relationship commands require a single direction",
+                )
+                .into());
+            }
+        };
+        match (direction, zg_daemon::execute_command(&home, command).await?) {
+            (Direction::In, DaemonReply::Callers(result))
+            | (Direction::Out, DaemonReply::Callees(result)) => result,
+            _ => return Err(protocol_mismatch("relationships")),
+        }
+    } else {
+        let engine = ZvecGrep::new();
+        let result = engine.relationships(direction, request).await;
+        engine.close();
+        result?
+    };
+    zg_cli::write_relationships(
+        zg_cli::stdout(),
+        &result,
+        direction,
+        color,
+        zg_cli::stdout_supports_ansi(),
+    )?;
+    Ok(())
 }
 
 async fn execute_request(
@@ -623,28 +728,8 @@ async fn ensure_query_index(
             zg_cli::output_path(&info.root).display()
         )).into());
     }
-    let options = zg_engine::api::index::setup::IndexSetupOptions {
-        model_cache: request.model_cache.clone(),
-        preferred_model: std::env::var("ZVEC_GREP_EMBEDDING")
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty()),
-        credential_available: request
-            .api_key
-            .as_ref()
-            .is_some_and(|key| !key.trim().is_empty()),
-    };
     let engine = ZvecGrep::new();
-    let setup = if let Some(home) = &server_home {
-        let DaemonReply::IndexSetup(setup) =
-            zg_daemon::execute_command(home, DaemonCommand::IndexSetup(options)).await?
-        else {
-            return Err(protocol_mismatch("index_setup"));
-        };
-        setup
-    } else {
-        engine.index_setup(options).await?
-    };
+    let setup = query_index_setup(&engine, request, &info.root, server_home.as_deref()).await?;
     let mut index_request = select_query_index(
         request,
         &info.root,
@@ -688,6 +773,42 @@ async fn ensure_query_index(
     let result = result?;
     zg_cli::write_index_with_options(io::stderr().lock(), &info.root, &result, None, output, ansi)?;
     Ok(true)
+}
+
+async fn query_index_setup(
+    engine: &ZvecGrep,
+    request: &ContextOptions,
+    root: &Path,
+    server_home: Option<&Path>,
+) -> Result<zg_engine::api::index::setup::IndexSetup, Box<dyn Error>> {
+    let options = zg_engine::api::index::setup::IndexSetupOptions {
+        root: Some(root.to_owned()),
+        model_cache: request.model_cache.clone(),
+        credential_available: request
+            .api_key
+            .as_ref()
+            .is_some_and(|key| !key.trim().is_empty()),
+        signal: request.signal.clone(),
+        ..Default::default()
+    };
+    // Analyze in the calling process; the v2 daemon request stays catalog-only.
+    let local_setup = engine.index_setup(options.clone()).await?;
+    let Some(home) = server_home else {
+        return Ok(local_setup);
+    };
+    let DaemonReply::IndexSetup(mut setup) = zg_daemon::execute_command(
+        home,
+        DaemonCommand::IndexSetup(zg_engine::api::index::setup::IndexSetupOptions {
+            preferred_model: local_setup.default_model.clone(),
+            ..options
+        }),
+    )
+    .await?
+    else {
+        return Err(protocol_mismatch("index_setup"));
+    };
+    setup.selection = local_setup.selection;
+    Ok(setup)
 }
 
 async fn select_query_index(
@@ -921,6 +1042,7 @@ async fn execute_direct_context(
             .info(zg_engine::api::info::InfoOptions {
                 root: Some(result.root.clone()),
                 include_status: true,
+                include_counts: false,
             })
             .await?;
         result.indexing = info
@@ -966,6 +1088,7 @@ async fn execute_index(
     let server = use_server(mode, home).await?;
     match operation {
         IndexOperation::Build(mut request) => {
+            resolve_cli_index_embedding(&mut request).await?;
             authorize_index(&mut request, server, home).await?;
             let progress = zg_cli::IndexProgressDisplay::new(
                 io::stderr(),
@@ -991,6 +1114,7 @@ async fn execute_index(
                 zg_engine::api::info::InfoOptions {
                     root: Some(root.clone()),
                     include_status: false,
+                    include_counts: false,
                 },
             )
             .await?;
@@ -1047,6 +1171,30 @@ async fn execute_index(
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+#[path = "embedding_policy_tests.rs"]
+mod embedding_policy_tests;
+
+async fn resolve_cli_index_embedding(
+    request: &mut zg_engine::api::index::IndexOptions,
+) -> Result<(), Box<dyn Error>> {
+    use zg_engine::api::index::embedding::EmbeddingSelectionSource;
+
+    if request.embedding.is_some() {
+        return Ok(());
+    }
+    let engine = ZvecGrep::new();
+    let selection = engine.resolve_index_embedding(request.clone()).await;
+    engine.close();
+    let selection = selection?;
+    if selection.source != EmbeddingSelectionSource::ExistingIndex {
+        // Keep defaults distinct from explicit overrides. Another writer may
+        // publish an index after preflight; its saved model must still win.
+        request.embedding_default = Some(selection);
+    }
+    Ok(())
 }
 
 async fn authorize_index(
@@ -1411,6 +1559,7 @@ mod status_diagnostics_tests {
                     model: "potion-code-16m-v2".into(),
                     dimension: 128,
                     metric: "cosine".into(),
+                    input_budget: None,
                 }),
                 fts: None,
                 index_version: Some(1),
@@ -1430,6 +1579,39 @@ mod status_diagnostics_tests {
         assert_eq!(
             actual,
             serde_json::json!({ "state": "ready", "info": &info })
+        );
+    }
+
+    #[test]
+    fn native_diagnostics_preserve_explicit_input_budgets_and_omit_absent_ones() {
+        let mut info = info();
+        let plain: serde_json::Value =
+            serde_json::from_str(&status_diagnostics(&info).expect("diagnostics")).expect("JSON");
+        assert!(
+            plain
+                .pointer("/info/workspace_index/embedding/input_budget")
+                .is_none()
+        );
+        let expected = serde_json::json!({
+            "max_input_tokens": 1024,
+            "unit": "utf16_code_units",
+            "rounding": "floor",
+            "overlap_percent": 15,
+            "normal": {"chars_per_100_tokens": 185, "max_length": 1894, "overlap": 284},
+            "dense": {"chars_per_100_tokens": 100, "max_length": 1024, "overlap": 153}
+        });
+        info.workspace_index
+            .as_mut()
+            .expect("workspace")
+            .embedding
+            .as_mut()
+            .expect("embedding")
+            .input_budget = Some(serde_json::from_value(expected.clone()).expect("input budget"));
+        let explicit: serde_json::Value =
+            serde_json::from_str(&status_diagnostics(&info).expect("diagnostics")).expect("JSON");
+        assert_eq!(
+            explicit["info"]["workspace_index"]["embedding"]["input_budget"],
+            expected
         );
     }
 

@@ -50,7 +50,7 @@ fn hit_with_fragment(source: &str, start: usize, end: usize) -> SearchHit {
 }
 
 #[test]
-fn byte_fragments_display_complete_boundary_lines() {
+fn byte_fragments_preserve_complete_entities_and_exact_evidence() {
     for newline in ["\n", "\r\n"] {
         for (line, selected) in [
             ("            node.name,", "e.name,"),
@@ -65,7 +65,7 @@ fn byte_fragments_display_complete_boundary_lines() {
             let end = start + selected.len();
             let hit = hit_with_fragment(&source, start, end);
             let target = super::context_item_target(&hit).expect("source fragment");
-            assert_eq!(target.content, format!("{line}{newline}"));
+            assert_eq!(target.content, source);
             let local = crate::utils::text_range_from_offsets(
                 &source,
                 &crate::utils::line_byte_offsets(&source),
@@ -74,8 +74,8 @@ fn byte_fragments_display_complete_boundary_lines() {
             )
             .expect("matched range");
             assert_eq!(target.excerpt_range, Some(Range::Text(local).into()));
-            assert_eq!(target.content_range.start_line(), Some(2));
-            assert_eq!(target.content_range.last_line(), Some(2));
+            assert_eq!(target.content_range.start_line(), Some(1));
+            assert_eq!(target.content_range.last_line(), Some(3));
             assert_eq!(hit.entity.content(), &Content::Code(source));
         }
     }
@@ -87,8 +87,15 @@ fn boundary_aligned_empty_and_invalid_fragments_are_preserved() {
     for (start, end) in [(0, 10), (10, 16), (16, 19), (0, 0), (12, 12), (19, 19)] {
         let hit = hit_with_fragment(source, start, end);
         let target = super::context_item_target(&hit).expect("valid fragment");
-        assert_eq!(target.content, source[start..end]);
-        assert_eq!(target.excerpt_range, Some(target.content_range));
+        assert_eq!(target.content, source);
+        let selected = crate::utils::text_range_from_offsets(
+            source,
+            &crate::utils::line_byte_offsets(source),
+            start,
+            end,
+        )
+        .expect("matched range");
+        assert_eq!(target.excerpt_range, Some(Range::Text(selected).into()));
     }
     for (start, end) in [(2, 12), (1, 11), (0, 999)] {
         let hit = hit_with_fragment(source, start, end);
@@ -100,7 +107,7 @@ fn boundary_aligned_empty_and_invalid_fragments_are_preserved() {
 }
 
 #[test]
-fn overlapping_python_fragments_are_displayed_as_source_lines() {
+fn overlapping_python_fragments_preserve_the_entire_entity() {
     use crate::{
         domain::FileFormat,
         extraction::{ChunkOptions, TextSource, extract_for_indexing},
@@ -120,7 +127,6 @@ fn overlapping_python_fragments_are_displayed_as_source_lines() {
         let Content::Code(text) = entity.content else {
             continue;
         };
-        let lines: Vec<_> = text.lines().collect();
         for fragment in entity.fragments {
             let Range::Byte(bytes) = fragment.range else {
                 continue;
@@ -137,12 +143,9 @@ fn overlapping_python_fragments_are_displayed_as_source_lines() {
             )
             .expect("fragment coordinates");
             partial_starts += usize::from(selected.start_byte_column() > 0);
-            let first = target.content_range.start_line().expect("first line");
-            let last = target.content_range.last_line().expect("last line");
-            assert_eq!(
-                target.content.lines().collect::<Vec<_>>(),
-                lines[first - 1..last]
-            );
+            assert_eq!(target.content, text);
+            assert_eq!(target.content_range.start_line(), Some(1));
+            assert_eq!(target.content_range.last_line(), Some(text.lines().count()));
             assert_eq!(target.excerpt_range, Some(Range::Text(selected).into()));
         }
     }

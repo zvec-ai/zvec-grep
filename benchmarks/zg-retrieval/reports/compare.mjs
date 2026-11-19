@@ -11,6 +11,7 @@ import {
 import { summarizeMeasurements } from "../metrics/measurements.mjs";
 import { summarizeNdcg } from "../metrics/summary.mjs";
 import { validateZgReport, ZG_MODES } from "./validation.mjs";
+import { loadSuite } from "../core/lib.mjs";
 
 const MODES = ZG_MODES;
 const HITS = ["hit_at_1", "hit_at_5", "hit_at_10"];
@@ -96,13 +97,19 @@ function reportIdentity(report) {
 }
 
 /** Compare validated quality rows; task ordering and cached aggregate summaries are not score inputs. */
-export function compareReports(baseline, candidate) {
-  const before = validateZgReport(baseline, "baseline");
-  const after = validateZgReport(candidate, "candidate");
+export function compareReports(baseline, candidate, { suite } = {}) {
+  const before = validateZgReport(baseline, "baseline", { suite });
+  const after = validateZgReport(candidate, "candidate", { suite });
   return compareValidatedReports(baseline, candidate, before, after);
 }
 
 function compareValidatedReports(baseline, candidate, before, after) {
+  assert.deepEqual(baseline.qa_gold, candidate.qa_gold, "incompatible QA Gold");
+  assert.deepEqual(
+    baseline.qa_scoring,
+    candidate.qa_scoring,
+    "incompatible QA scoring rules",
+  );
   assert.equal(
     baseline.preview,
     candidate.preview,
@@ -184,10 +191,16 @@ function compareValidatedReports(baseline, candidate, before, after) {
   return {
     schema_version: 5,
     file_retrieval_contract: FILE_RETRIEVAL_CONTRACT,
-    preview: "mcp-default",
+    preview: "full",
     quality_repetition: 5,
     quality_aggregation: "mean_of_five",
     suite: structuredClone(baseline.suite),
+    ...(baseline.qa_gold
+      ? {
+          qa_gold: structuredClone(baseline.qa_gold),
+          qa_scoring: structuredClone(baseline.qa_scoring),
+        }
+      : {}),
     scope: baseline.scope,
     expected_task_ids: [...baseline.expected_task_ids],
     task_order_policy:
@@ -257,7 +270,7 @@ export function markdownComparison(result) {
   const lines = [
     "# zg Retrieval-only version comparison",
     "",
-    `Scope: **${result.scope} / ${result.expected_task_ids.length} original questions**. All modes use the Rust public MCP default presentation. Quality averages five calls per query/mode. Delta is candidate minus baseline.`,
+    `Scope: **${result.scope} / ${result.expected_task_ids.length} original questions**. All modes use the Rust public MCP full presentation. Quality averages five calls per query/mode. Delta is candidate minus baseline.`,
     "",
     "Source, Gold, frozen accepted-file targets and protocol identities match; task/mode coverage and scoring eligibility are validated. All five metrics are recomputed from saved public result items. This is a report-only comparison with no quality threshold or causal attribution.",
     "",
@@ -312,7 +325,11 @@ export function markdownComparison(result) {
 export async function writeComparison(baselinePath, candidatePath, outputPath) {
   const paths = [resolve(baselinePath), resolve(candidatePath)];
   const bytes = await Promise.all(paths.map((path) => readFile(path)));
-  const result = compareReports(...bytes.map((raw) => JSON.parse(raw)));
+  const reports = bytes.map((raw) => JSON.parse(raw));
+  const options = reports.some((report) => report.qa_gold)
+    ? { suite: await loadSuite() }
+    : {};
+  const result = compareReports(...reports, options);
   result.inputs = Object.fromEntries(
     paths.map((path, i) => [
       i === 0 ? "baseline" : "candidate",

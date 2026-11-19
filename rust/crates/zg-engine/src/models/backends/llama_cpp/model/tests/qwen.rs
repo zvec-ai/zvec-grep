@@ -10,14 +10,18 @@ async fn cached_qwen3_cpu_batches_preserve_vectors_and_kv_isolation() {
 }
 
 #[tokio::test]
-#[ignore = "requires cached Qwen3 embedding; compares thread-budget reuse with fresh CPU contexts"]
-async fn cached_qwen3_cpu_thread_changes_match_fresh_contexts() {
+#[ignore = "requires cached Qwen3 embedding; compares context reuse at fixed threads with fresh CPU contexts"]
+async fn cached_qwen3_cpu_concurrency_changes_match_fresh_contexts() {
     let loaded = load_qwen_fixture(Device::Cpu).await;
     let mut input = qwen_batch_fixture(&loaded.model).remove(2);
     input.index = 0;
     for concurrency in [1, 2, 4, 8, 1] {
         let actual = qwen_infer(&loaded, vec![input.clone()], concurrency);
-        let fresh = LlamaContextPool::new(Arc::clone(&loaded.model), loaded.contexts.backend, 1);
+        let fresh = LlamaContextPool::new(
+            Arc::clone(&loaded.model),
+            loaded.contexts.backend,
+            test_resources(1),
+        );
         let expected = fresh
             .run(
                 PreparedLlamaBatch {
@@ -27,15 +31,16 @@ async fn cached_qwen3_cpu_thread_changes_match_fresh_contexts() {
                 QWEN_CONTEXT_SIZE,
                 concurrency,
                 None,
+                None,
             )
             .expect("fresh CPU context");
-        eprintln!("CPU thread-budget fresh/reused comparison C={concurrency}");
+        eprintln!("CPU fixed-thread fresh/reused comparison C={concurrency}");
         assert_embedding_close(&actual[0], &expected.vectors[0]);
     }
 }
 
 #[tokio::test]
-#[ignore = "requires cached Qwen3 embedding; CPU K=2 with C=2/4/8 and same-T reference"]
+#[ignore = "requires cached Qwen3 embedding; CPU context limit 2 with requests C=2/4/8 and fixed-thread reference"]
 async fn cached_qwen3_cpu_two_contexts_preserve_vectors_and_recover() {
     let loaded = load_qwen_fixture(Device::Cpu).await;
     assert_cpu_two_context_pool(
@@ -64,7 +69,7 @@ async fn load_qwen_fixture(device: Device) -> Arc<LoadedLlamaModel> {
     let cache = env::var_os("ZVEC_GREP_TEST_MODEL_CACHE")
         .map(PathBuf::from)
         .expect("ZVEC_GREP_TEST_MODEL_CACHE must point at the model cache");
-    let mut model = LlamaCppEmbeddingModel::new(
+    let model = LlamaCppEmbeddingModel::new(
         entry("local/qwen3-embedding-0.6b"),
         ModelConfig {
             cache_dir: Some(cache),
@@ -72,9 +77,12 @@ async fn load_qwen_fixture(device: Device) -> Arc<LoadedLlamaModel> {
             ..ModelConfig::default()
         },
         ModelComputeRuntime::shared(),
+        test_resources(8),
     );
-    model.cpu_contexts = Ok(1);
-    let loaded = model.ensure_loaded(None, None).await.expect("cached model");
+    let loaded = model
+        .ensure_loaded(None, None, None)
+        .await
+        .expect("cached model");
     assert_eq!(loaded.gpu, device != Device::Cpu);
     assert_eq!(
         loaded.contexts.backend,
@@ -134,6 +142,7 @@ fn qwen_infer(
             QWEN_CONTEXT_SIZE,
             concurrency,
             None,
+            None,
         )
         .expect("Qwen embedding inference");
     assert!(result.truncated.is_empty());
@@ -148,7 +157,11 @@ fn qwen_individual_reference(
     inputs: &[PreparedLlamaInput],
     concurrency: usize,
 ) -> Vec<Vec<f32>> {
-    let fresh = LlamaContextPool::new(Arc::clone(&loaded.model), loaded.contexts.backend, 1);
+    let fresh = LlamaContextPool::new(
+        Arc::clone(&loaded.model),
+        loaded.contexts.backend,
+        test_resources(1),
+    );
     inputs
         .iter()
         .map(|input| {
@@ -163,6 +176,7 @@ fn qwen_individual_reference(
                     },
                     QWEN_CONTEXT_SIZE,
                     concurrency,
+                    None,
                     None,
                 )
                 .expect("individual reference with matching CPU threads")
@@ -276,6 +290,7 @@ fn assert_qwen_failure_recovery(
                 },
                 QWEN_CONTEXT_SIZE,
                 4,
+                None,
                 Some(&cancelled),
             )
             .is_err()
@@ -294,6 +309,7 @@ fn assert_qwen_failure_recovery(
                 },
                 QWEN_CONTEXT_SIZE,
                 4,
+                None,
                 None,
             )
             .is_err()

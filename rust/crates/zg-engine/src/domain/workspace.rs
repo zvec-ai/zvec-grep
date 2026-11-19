@@ -16,8 +16,8 @@ pub(crate) struct Workspace {
     #[serde(skip)]
     layout: WorkspaceLayout,
     scan: ScanRules,
-    /// Storage format version used by the index.
-    index_version: Option<u32>,
+    /// Compatibility version of the persisted index metadata and storage.
+    index_version: u32,
     /// Identifies an index build for publication, recovery, and caching.
     storage_generation: Option<String>,
     #[serde(rename = "createdTime")]
@@ -33,7 +33,7 @@ impl Workspace {
         source_root: &Path,
         layout: WorkspaceLayout,
         scan: ScanRules,
-        index_version: Option<u32>,
+        index_version: u32,
         storage_generation: Option<String>,
         created_epoch_ms: u64,
         updated_epoch_ms: u64,
@@ -59,7 +59,7 @@ impl Workspace {
         source_root: SourceRoot,
         layout: WorkspaceLayout,
         scan: ScanRules,
-        index_version: Option<u32>,
+        index_version: u32,
         storage_generation: Option<String>,
         created_epoch_ms: u64,
         updated_epoch_ms: u64,
@@ -91,12 +91,6 @@ impl Workspace {
             )));
         }
         if self.index_enabled() {
-            if self.index_version.is_none() {
-                return Err(EngineError::invalid_argument(format!(
-                    "workspace {}: index is enabled but indexVersion is missing",
-                    self.source_root().display(),
-                )));
-            }
             let generation = self.storage_generation.as_deref().ok_or_else(|| {
                 EngineError::invalid_argument(format!(
                     "workspace {}: index is enabled but storageGeneration is missing",
@@ -109,9 +103,9 @@ impl Workspace {
                     self.source_root().display(),
                 ))
             })?;
-        } else if self.index_version.is_some() || self.storage_generation.is_some() {
+        } else if self.storage_generation.is_some() {
             return Err(EngineError::invalid_argument(format!(
-                "workspace {}: an unbuilt index cannot have indexVersion or storageGeneration",
+                "workspace {}: an unbuilt index cannot have storageGeneration",
                 self.source_root().display(),
             )));
         }
@@ -130,7 +124,7 @@ impl Workspace {
         &self.scan
     }
 
-    pub(crate) fn index_version(&self) -> Option<u32> {
+    pub(crate) fn index_version(&self) -> u32 {
         self.index_version
     }
 
@@ -559,7 +553,7 @@ mod tests {
             root,
             WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout"),
             scan,
-            Some(2),
+            crate::workspace::CURRENT_INDEX_VERSION,
             Some(uuid::Uuid::new_v4().to_string()),
             10,
             20,

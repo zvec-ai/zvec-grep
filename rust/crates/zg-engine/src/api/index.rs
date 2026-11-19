@@ -6,6 +6,9 @@ pub use result::IndexResult;
 /// Read-only model choices for interactive index creation.
 pub mod setup;
 
+/// Workspace analysis and the source of an embedding selection.
+pub mod embedding;
+
 /// Input types for [`crate::ZvecGrep::index`].
 pub mod options {
     use std::{
@@ -47,8 +50,16 @@ pub mod options {
         pub scan: ScanRulesUpdate,
         /// The single model used to embed text content in this workspace.
         pub embedding: Option<EmbeddingModelSpec>,
-        /// Index-only embedding concurrency: llama.cpp contexts, local inference
-        /// batches, or remote requests. Local native limits are capped at eight.
+        /// Caller-resolved default, used only if neither an explicit model nor
+        /// an existing index is present at writer admission. Daemon clients must
+        /// check setup capabilities before sending this optional v2 extension.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub embedding_default: Option<super::embedding::EmbeddingSelection>,
+        /// Index-only embedding concurrency: llama.cpp contexts (up to eight),
+        /// ORT CPU/CUDA sessions, or remote requests. Values must be positive.
+        /// ORT caps direct-mode sessions to available hardware concurrency.
+        /// Server requests only limit execution within the startup-configured
+        /// model pool; they never resize it or change the global ORT thread pool.
         /// Omitted values use `ZVEC_GREP_EMBEDDING_CONCURRENCY`, the legacy
         /// llama.cpp index override, then the backend default; never persisted.
         pub embedding_concurrency: Option<usize>,
@@ -709,6 +720,9 @@ pub mod progress {
 
     #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
     pub struct IndexEmbeddingProgress {
+        /// Retained across snapshots so transports cannot lose the selection explanation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub selection: Option<super::embedding::EmbeddingSelection>,
         pub concurrency: Option<usize>,
         pub max_concurrency: Option<usize>,
         pub retryable_failures: Option<usize>,

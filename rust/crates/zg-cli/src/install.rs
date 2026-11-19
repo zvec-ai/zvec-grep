@@ -23,8 +23,9 @@ use crate::{
 
 mod upgrade;
 pub use upgrade::{
-    IntegrationUpgradeEntryKind, IntegrationUpgradeSummary, execute_upgrade_installed,
-    write_integration_upgrade_entry, write_integration_upgrade_summary,
+    IntegrationLaunch, IntegrationUpgradeEntry, IntegrationUpgradeEntryKind,
+    IntegrationUpgradeReport, IntegrationUpgradeSummary, execute_upgrade_installed,
+    upgrade_installed, write_integration_upgrade_entry, write_integration_upgrade_summary,
 };
 
 const CONFIG_START: &str = "# ZVEC_GREP_START";
@@ -36,6 +37,8 @@ const GUIDANCE_END: &str = "<!-- ZVEC_GREP_END -->";
 const CLAUDE_PERMISSION: &str = "mcp__zvec_grep__*";
 const SEARCH_PERMISSION: &str = "mcp__zvec_grep__zvec_grep_search";
 const RG_PERMISSION: &str = "mcp__zvec_grep__zvec_grep_rg";
+const CALLERS_PERMISSION: &str = "mcp__zvec_grep__zvec_grep_callers";
+const CALLEES_PERMISSION: &str = "mcp__zvec_grep__zvec_grep_callees";
 // Persisted ownership markers stay stable across CLI grammar migrations.
 const QODER_DESCRIPTION: &str = "Managed by zg install";
 const QODER_OWNERSHIP_PREFIX: &str = "Managed by zg install; managed permissions=";
@@ -68,6 +71,30 @@ pub struct InstallOutcome {
     pub agent_labels: Vec<&'static str>,
     pub transport: McpInstallTransport,
     pub mcp_toolset: Option<McpToolset>,
+    claude_guidance: Option<PathBuf>,
+}
+
+impl InstallOutcome {
+    /// Shortens the managed guidance after startup confirms support in the connected server.
+    ///
+    /// # Errors
+    /// Returns an error when the guidance file cannot be updated.
+    pub fn compact_claude_guidance(&self) -> Result<(), InstallError> {
+        if let Some(path) = &self.claude_guidance {
+            write_claude_guidance(
+                path,
+                &format!(
+                    "{GUIDANCE_START}\n## zvec-grep\n\nFollow the connected zvec-grep MCP server instructions and the zvec_grep_search tool description for workspace retrieval, search routing, and index lifecycle.\n{GUIDANCE_END}"
+                ),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub const fn installed_claude(&self) -> bool {
+        self.claude_guidance.is_some()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -131,11 +158,30 @@ impl Agent {
 
 #[derive(Clone, Debug)]
 struct AgentOptions {
+    launcher: Option<PathBuf>,
     force: bool,
     transport: McpInstallTransport,
     toolset: Option<McpToolset>,
     timeout_seconds: u64,
     token_env: Option<String>,
+}
+
+impl AgentOptions {
+    fn command(&self) -> std::borrow::Cow<'_, str> {
+        self.launcher.as_ref().map_or_else(
+            || std::borrow::Cow::Borrowed("zg"),
+            |path| path.to_string_lossy(),
+        )
+    }
+
+    fn command_array(&self) -> Vec<String> {
+        let mut command: Vec<_> = stdio_command(self.toolset)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        command[0] = self.command().into_owned();
+        command
+    }
 }
 
 /// Installs the selected agent integrations and returns daemon startup choices.
@@ -158,10 +204,12 @@ pub fn execute_install(args: &InstallArgs) -> Result<InstallOutcome, InstallErro
             agent_labels: Vec::new(),
             transport: args.transport.unwrap_or_default(),
             mcp_toolset: args.mcp_toolset,
+            claude_guidance: None,
         });
     }
     let transport = resolve_transport(args.transport, args.yes)?;
     let options = AgentOptions {
+        launcher: args.launcher.clone(),
         force: args.force,
         transport,
         toolset: args.mcp_toolset,
@@ -186,6 +234,9 @@ pub fn execute_install(args: &InstallArgs) -> Result<InstallOutcome, InstallErro
         agent_labels: agents.iter().map(|agent| agent.label()).collect(),
         transport,
         mcp_toolset: args.mcp_toolset,
+        claude_guidance: agents
+            .contains(&Agent::Claude)
+            .then(|| claude_config_dir().join("CLAUDE.md")),
     })
 }
 
@@ -839,7 +890,7 @@ fn pi_server(
                 server.shift_remove(key);
             }
             server.insert("type".to_owned(), json!("stdio"));
-            server.insert("command".to_owned(), json!("zg"));
+            server.insert("command".to_owned(), json!(options.command()));
             server.insert("args".to_owned(), json!(stdio_args(options.toolset)));
         }
         McpInstallTransport::Http => {
@@ -903,7 +954,7 @@ fn install_pi(options: &AgentOptions) -> Result<AgentInstallResult, InstallError
         &guidance,
         GUIDANCE_START,
         GUIDANCE_END,
-        &guidance_block(SEARCH_PERMISSION, RG_PERMISSION, false, pi_host_notes()),
+        &guidance_block("mcp__zvec_grep__", false, pi_host_notes()),
         true,
         None,
         None,
@@ -977,7 +1028,7 @@ fn install_codex(options: &AgentOptions) -> Result<(), InstallError> {
         &guidance,
         GUIDANCE_START,
         GUIDANCE_END,
-        &guidance_block("zvec_grep_search", "zvec_grep_rg", false, ""),
+        &guidance_block("", false, ""),
         true,
         None,
         None,
@@ -1049,7 +1100,7 @@ fn install_grok_into(
         guidance,
         GUIDANCE_START,
         GUIDANCE_END,
-        &guidance_block("zvec_grep_search", "zvec_grep_rg", false, grok_host_notes()),
+        &guidance_block("zvec_grep__", false, grok_host_notes()),
         true,
         None,
         None,
@@ -1080,8 +1131,12 @@ fn uninstall_grok_from(config: &Path, guidance: &Path) -> Result<(), InstallErro
     Ok(())
 }
 
+fn claude_config_dir() -> PathBuf {
+    env_path("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home_dir().join(".claude"))
+}
+
 fn install_claude(options: &AgentOptions) -> Result<(), InstallError> {
-    let directory = env_path("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home_dir().join(".claude"));
+    let directory = claude_config_dir();
     let mcp_path = if env::var_os("CLAUDE_CONFIG_DIR").is_some() {
         directory.join(".claude.json")
     } else {
@@ -1115,7 +1170,7 @@ fn install_claude(options: &AgentOptions) -> Result<(), InstallError> {
     match options.transport {
         McpInstallTransport::Stdio => {
             server.insert("type".to_owned(), json!("stdio"));
-            server.insert("command".to_owned(), json!("zg"));
+            server.insert("command".to_owned(), json!(options.command()));
             server.insert("args".to_owned(), json!(stdio_args(options.toolset)));
         }
         McpInstallTransport::Http => {
@@ -1134,19 +1189,16 @@ fn install_claude(options: &AgentOptions) -> Result<(), InstallError> {
 
     let settings_path = directory.join("settings.json");
     update_claude_permission(&settings_path, true)?;
-    write_marked_file(
-        &directory.join("CLAUDE.md"),
-        GUIDANCE_START,
-        GUIDANCE_END,
-        &guidance_block("zvec_grep_search", "zvec_grep_rg", false, ""),
-        true,
-        None,
-        None,
-    )
+    // Keep the fallback available while startup may still reuse an older daemon.
+    write_claude_guidance(&directory.join("CLAUDE.md"), &guidance_block("", false, ""))
+}
+
+fn write_claude_guidance(path: &Path, block: &str) -> Result<(), InstallError> {
+    write_marked_file(path, GUIDANCE_START, GUIDANCE_END, block, true, None, None)
 }
 
 fn uninstall_claude() -> Result<(), InstallError> {
-    let directory = env_path("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home_dir().join(".claude"));
+    let directory = claude_config_dir();
     let mcp_path = if env::var_os("CLAUDE_CONFIG_DIR").is_some() {
         directory.join(".claude.json")
     } else {
@@ -1196,7 +1248,7 @@ fn install_opencode(options: &AgentOptions) -> Result<AgentInstallResult, Instal
     let path = config.path;
     let server = match options.transport {
         McpInstallTransport::Stdio => json!({
-            "type": "local", "command": stdio_command(options.toolset), "enabled": true,
+            "type": "local", "command": options.command_array(), "enabled": true,
             "timeout": options.timeout_seconds.saturating_mul(1000)
         }),
         McpInstallTransport::Http => {
@@ -1226,12 +1278,7 @@ fn install_opencode(options: &AgentOptions) -> Result<AgentInstallResult, Instal
             .join("AGENTS.md"),
         GUIDANCE_START,
         GUIDANCE_END,
-        &guidance_block(
-            "zvec_grep_zvec_grep_search",
-            "zvec_grep_zvec_grep_rg",
-            false,
-            "",
-        ),
+        &guidance_block("zvec_grep_", false, ""),
         true,
         None,
         None,
@@ -1270,7 +1317,9 @@ fn install_cursor(options: &AgentOptions) -> Result<(), InstallError> {
         .unwrap_or_else(|| home_dir().join(".cursor"))
         .join("mcp.json");
     let server = match options.transport {
-        McpInstallTransport::Stdio => json!({"command": "zg", "args": stdio_args(options.toolset)}),
+        McpInstallTransport::Stdio => {
+            json!({"command": options.command(), "args": stdio_args(options.toolset)})
+        }
         McpInstallTransport::Http => {
             let mut server = json!({"url": resolve_server_url()?});
             if let Some(token) = &options.token_env {
@@ -1279,14 +1328,20 @@ fn install_cursor(options: &AgentOptions) -> Result<(), InstallError> {
             server
         }
     };
-    install_strict_json_server(&path, "mcpServers", server, options.force, "Cursor")
+    update_jsonc_server(
+        &path,
+        &server,
+        options.force,
+        "Cursor",
+        is_managed_json_server,
+    )
 }
 
 fn uninstall_cursor() -> Result<(), InstallError> {
     let path = env_path("CURSOR_CONFIG_DIR")
         .unwrap_or_else(|| home_dir().join(".cursor"))
         .join("mcp.json");
-    remove_strict_json_server(&path, "mcpServers")
+    remove_jsonc_server(&path, "Cursor", is_managed_json_server)
 }
 
 fn install_qwen(options: &AgentOptions) -> Result<(), InstallError> {
@@ -1301,7 +1356,7 @@ fn install_qwen(options: &AgentOptions) -> Result<(), InstallError> {
         &home.join("QWEN.md"),
         GUIDANCE_START,
         GUIDANCE_END,
-        &guidance_block(SEARCH_PERMISSION, RG_PERMISSION, false, ""),
+        &guidance_block("mcp__zvec_grep__", false, ""),
         true,
         None,
         None,
@@ -1342,7 +1397,7 @@ fn install_qoder(options: &AgentOptions) -> Result<(), InstallError> {
         &home.join("AGENTS.md"),
         GUIDANCE_START,
         GUIDANCE_END,
-        &guidance_block(SEARCH_PERMISSION, RG_PERMISSION, true, ""),
+        &guidance_block("mcp__zvec_grep__", true, ""),
         true,
         None,
         None,
@@ -1382,7 +1437,7 @@ fn copilot_server(options: &AgentOptions) -> Result<Value, InstallError> {
     let timeout = options.timeout_seconds.saturating_mul(1000);
     let mut server = match options.transport {
         McpInstallTransport::Stdio => json!({
-            "type": "local", "command": "zg", "args": stdio_args(options.toolset),
+            "type": "local", "command": options.command(), "args": stdio_args(options.toolset),
             "tools": ["*"], "timeout": timeout
         }),
         McpInstallTransport::Http => json!({
@@ -1410,7 +1465,7 @@ fn install_copilot(options: &AgentOptions) -> Result<(), InstallError> {
         &copilot_cli_guidance_path(),
         GUIDANCE_START,
         GUIDANCE_END,
-        &guidance_block("zvec_grep_search", "zvec_grep_rg", false, ""),
+        &guidance_block("", false, ""),
         true,
         None,
         None,
@@ -1470,7 +1525,7 @@ fn vscode_config_paths() -> Vec<PathBuf> {
 fn vscode_server(options: &AgentOptions) -> Result<Value, InstallError> {
     Ok(match options.transport {
         McpInstallTransport::Stdio => json!({
-            "type": "stdio", "command": "zg", "args": stdio_args(options.toolset)
+            "type": "stdio", "command": options.command(), "args": stdio_args(options.toolset)
         }),
         McpInstallTransport::Http => {
             let mut server = json!({"type": "http", "url": resolve_server_url()?});
@@ -1528,7 +1583,7 @@ fn install_vscode(options: &AgentOptions) -> Result<AgentInstallResult, InstallE
         &guidance_path,
         GUIDANCE_START,
         GUIDANCE_END,
-        &guidance_block("zvec_grep_search", "zvec_grep_rg", false, ""),
+        &guidance_block("", false, ""),
         true,
         None,
         None,
@@ -1632,7 +1687,7 @@ fn qwen_server(options: &AgentOptions) -> Result<Value, InstallError> {
     let timeout = options.timeout_seconds.saturating_mul(1000);
     Ok(match options.transport {
         McpInstallTransport::Stdio => json!({
-            "command": "zg", "args": stdio_args(options.toolset), "timeout": timeout,
+            "command": options.command(), "args": stdio_args(options.toolset), "timeout": timeout,
             "alwaysLoadTools": true, "trust": true
         }),
         McpInstallTransport::Http => {
@@ -1652,7 +1707,7 @@ fn qoder_ide_server(options: &AgentOptions) -> Result<Value, InstallError> {
     let timeout = options.timeout_seconds.saturating_mul(1000);
     Ok(match options.transport {
         McpInstallTransport::Stdio => json!({
-            "command": env::current_exe()?.to_string_lossy(),
+            "command": options.launcher.clone().map_or_else(env::current_exe, Ok)?.to_string_lossy(),
             "args": stdio_args(options.toolset),
             "timeout": timeout,
             "description": QODER_DESCRIPTION
@@ -1693,7 +1748,8 @@ fn stdio_command(toolset: Option<McpToolset>) -> Vec<&'static str> {
 fn codex_block(options: &AgentOptions) -> Result<String, InstallError> {
     let connection = match options.transport {
         McpInstallTransport::Stdio => format!(
-            "command = \"zg\"\nargs = {}",
+            "command = {}\nargs = {}",
+            toml::Value::String(options.command().into_owned()),
             toml_string_array(&stdio_args(options.toolset))
         ),
         McpInstallTransport::Http => format!("url = \"{}\"", resolve_server_url()?),
@@ -1731,7 +1787,8 @@ fn grok_config_block(
 ) -> Result<String, InstallError> {
     let connection = match options.transport {
         McpInstallTransport::Stdio => format!(
-            "command = \"zg\"\nargs = {}\n# First-run daemon and local-model warmup can exceed Grok's 30s startup default.\nstartup_timeout_sec = 120",
+            "command = {}\nargs = {}\n# First-run daemon and local-model warmup can exceed Grok's 30s startup default.\nstartup_timeout_sec = 120",
+            toml::Value::String(options.command().into_owned()),
             toml_string_array(&stdio_args(options.toolset))
         ),
         McpInstallTransport::Http => {
@@ -1790,10 +1847,14 @@ fn has_grok_permission_table(existing: &str) -> bool {
 }
 
 fn grok_host_notes() -> &'static str {
-    "\n### Grok Build host notes\n- MCP tools are reached through `use_tool` with the catalog names `zvec_grep__zvec_grep_search` and `zvec_grep__zvec_grep_rg`; the unprefixed tool names below refer to the same tools.\n- When `zvec_grep_search` needs `remote_embedding_authorization`, respond to the elicitation card this host renders natively instead of looking for another approval mechanism.\n- In non-interactive sessions (`grok -p`, pipelines) the card cannot appear: stop and ask the user to run `zg --auth grant \"<absolute-root>\" --capability embedding --scope workspace` with the same absolute root used by the failed search, then retry the original search once. Never grant silently and never request credentials for this.\n"
+    "\n### Grok Build host notes\n- MCP tools are reached through `use_tool` with the catalog names `zvec_grep__zvec_grep_search`, `zvec_grep__zvec_grep_rg`, `zvec_grep__zvec_grep_callers`, and `zvec_grep__zvec_grep_callees`.\n- When `zvec_grep__zvec_grep_search` needs `remote_embedding_authorization`, respond to the elicitation card this host renders natively instead of looking for another approval mechanism.\n- In non-interactive sessions (`grok -p`, pipelines) the card cannot appear: stop and ask the user to run `zg --auth grant \"<absolute-root>\" --capability embedding --scope workspace` with the same absolute root used by the failed search, then retry the original search once. Never grant silently and never request credentials for this.\n"
 }
 
-fn guidance_block(search: &str, rg: &str, qoder_recovery: bool, host_notes: &str) -> String {
+fn guidance_block(prefix: &str, qoder_recovery: bool, host_notes: &str) -> String {
+    let search = format!("{prefix}zvec_grep_search");
+    let rg = format!("{prefix}zvec_grep_rg");
+    let incoming_calls = format!("{prefix}zvec_grep_callers");
+    let outgoing_calls = format!("{prefix}zvec_grep_callees");
     let exact =
         format!("`{rg}` when it is listed by the current host; otherwise native Grep or `rg`");
     let recovery = if qoder_recovery {
@@ -1804,7 +1865,7 @@ fn guidance_block(search: &str, rg: &str, qoder_recovery: bool, host_notes: &str
         String::new()
     };
     format!(
-        "{GUIDANCE_START}\n## zvec-grep\n{host_notes}\nChoose the evidence source before the retrieval mode.\n\n### Workspace evidence\n- Use the current workspace as the evidence source when the user asks about local material, prior context establishes it as relevant, or the question concerns how the current project works—even if the workspace is not mentioned explicitly.\n- A workspace may contain any mix of code, documents, configuration, and data.\n- Do not use workspace retrieval for unrelated open-world questions, current external facts, or web content that does not depend on local evidence.\n\n### Retrieval routing\n- When an exact word, phrase, name, date, identifier, filename, path, configuration key, error message, source fragment, literal, or regex is known and locating its occurrences is sufficient, use {exact}.\n- Use `{search}` when wording or location is unknown, or when the answer requires semantic, conceptual, fuzzy, or paraphrase discovery; relationships, chronology, causality, architecture, or data or control flow; or comparison or synthesis across files, sections, or documents.\n- For a mixed task with exact anchors that still requires relationships or cross-file synthesis, call `{search}` with the concept and anchors, then use {exact} for focused follow-up.\n- When no sufficient exact anchor is available and the user asks whether conceptually related material exists locally, make at most one focused `{search}` probe using the question plus distinctive names, dates, or terms. This probe does not apply to exact quotations, configuration keys, filenames, regexes, or exhaustive occurrence requests. Continue only when results are relevant; otherwise stop and report that the indexed workspace did not establish the answer.\n- Before broad file reads or delegating workspace discovery, use the appropriate search route. Do not delegate solely to locate material, and stop when the evidence is sufficient.\n\n### Search evidence\n- Search results include bounded source snippets. Treat a sufficient snippet as already-read evidence, and read a cited file only when a required detail falls outside the snippet.\n\n### Freshness and index lifecycle\n- Pass a daemon-visible absolute `root` on every zvec-grep workspace call.\n- Read `freshness` and `background_refresh` from search results without a status preflight.\n- When results are `served_from_current_index`, use them when sufficient instead of waiting for the background refresh.\n- If the index is missing but exact or regex lookup can answer the task, use {exact}.\n- Creating, rebuilding, or dropping a persistent index requires an explicit user request or authorization; never do so silently.{recovery}\n{GUIDANCE_END}"
+        "{GUIDANCE_START}\n## zvec-grep\n{host_notes}\nChoose the evidence source before the retrieval mode.\n\n### Workspace evidence\n- Use the current workspace as the evidence source when the user asks about local material, prior context establishes it as relevant, or the question concerns how the current project works—even if the workspace is not mentioned explicitly.\n- A workspace may contain any mix of code, documents, configuration, and data.\n- Do not use workspace retrieval for unrelated open-world questions, current external facts, or web content that does not depend on local evidence.\n\n### Retrieval routing\n- When an exact word, phrase, name, date, identifier, filename, path, configuration key, error message, source fragment, literal, or regex is known and locating its occurrences is sufficient, use {exact}.\n- For workspaces indexed with graph support, use `{incoming_calls}` or `{outgoing_calls}` for known symbols. Empty results do not prove absence. Enable graph indexing only with user authorization: `zg --index --graph` (add `--rebuild` for an existing index).\n- Use `{search}` when wording or location is unknown, or when the answer requires semantic, conceptual, fuzzy, or paraphrase discovery; relationships, chronology, causality, architecture, or data or control flow; or comparison or synthesis across files, sections, or documents.\n- For a mixed task with exact anchors that still requires relationships or cross-file synthesis, call `{search}` with the concept and anchors, then use {exact} for focused follow-up.\n- When no sufficient exact anchor is available and the user asks whether conceptually related material exists locally, make at most one focused `{search}` probe using the question plus distinctive names, dates, or terms. This probe does not apply to exact quotations, configuration keys, filenames, regexes, or exhaustive occurrence requests. Continue only when results are relevant; otherwise stop and report that the indexed workspace did not establish the answer.\n- Before broad file reads or delegating workspace discovery, use the appropriate search route. Do not delegate solely to locate material, and stop when the evidence is sufficient.\n\n### Search evidence\n- Search results include bounded source snippets. Treat a sufficient snippet as already-read evidence, and read a cited file only when a required detail falls outside the snippet.\n\n### Freshness and index lifecycle\n- Pass a daemon-visible absolute `root` on every zvec-grep workspace call.\n- Read `freshness` and `background_refresh` from search results without a status preflight.\n- When results are `served_from_current_index`, use them when sufficient instead of waiting for the background refresh.\n- If the index is missing but exact or regex lookup can answer the task, use {exact}.\n- Creating, rebuilding, or dropping a persistent index requires an explicit user request or authorization; never do so silently.{recovery}\n{GUIDANCE_END}"
     )
 }
 
@@ -1953,6 +2014,14 @@ fn update_claude_permission(path: &Path, grant: bool) -> Result<(), InstallError
     write_json_object(path, &root)
 }
 
+fn is_managed_command(command: &str) -> bool {
+    command == "zg"
+        || (Path::new(command).is_absolute()
+            && Path::new(command)
+                .file_name()
+                .is_some_and(|name| name == "zg" || name == "zg.exe"))
+}
+
 fn is_managed_json_server(value: &Value) -> bool {
     let Some(server) = value.as_object() else {
         return false;
@@ -1964,7 +2033,10 @@ fn is_managed_json_server(value: &Value) -> bool {
     {
         return true;
     }
-    if server.get("command").and_then(Value::as_str) == Some("zg")
+    if server
+        .get("command")
+        .and_then(Value::as_str)
+        .is_some_and(is_managed_command)
         && server.get("args").is_some_and(is_stdio_args)
     {
         return true;
@@ -1975,7 +2047,10 @@ fn is_managed_json_server(value: &Value) -> bool {
             .and_then(Value::as_array)
             .is_some_and(|command| {
                 (command.len() == 3 || command.len() == 5)
-                    && command.first().and_then(Value::as_str) == Some("zg")
+                    && command
+                        .first()
+                        .and_then(Value::as_str)
+                        .is_some_and(is_managed_command)
                     && is_stdio_args(&Value::Array(command[1..].to_vec()))
             })
 }
@@ -1988,7 +2063,10 @@ fn is_managed_qwen(value: &Value) -> bool {
         .get("httpUrl")
         .and_then(Value::as_str)
         .is_some_and(|url| resolve_server_url().is_ok_and(|managed| url == managed))
-        || (server.get("command").and_then(Value::as_str) == Some("zg")
+        || (server
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(is_managed_command)
             && server.get("args").is_some_and(is_stdio_args))
 }
 
@@ -2415,6 +2493,9 @@ fn resolve_qwen_home() -> Result<PathBuf, InstallError> {
         });
     }
     for path in [default.join(".env"), home_dir().join(".env")] {
+        if path.is_dir() {
+            continue;
+        }
         let source = read_if_exists(&path)?;
         if let Some(value) = parse_dotenv_value(&source, "QWEN_HOME") {
             return Ok(expand_home(&value));
@@ -2537,6 +2618,7 @@ fn update_jsonc_container(
         return Ok(());
     }
     let next = jsonc_set_path(&source, &[container, "zvec_grep"], server)?;
+    parse_jsonc_object_options(path, &next, label, allow_trailing_comma)?;
     atomic_write(path, &ensure_newline(next))
 }
 
@@ -2579,6 +2661,7 @@ fn remove_jsonc_container(
     };
     let next = jsonc_remove_path(&source, path_to_remove)?;
     if next != source {
+        parse_jsonc_object_options(path, &next, label, allow_trailing_comma)?;
         atomic_write(path, &ensure_newline(next))?;
     }
     Ok(())
@@ -2809,7 +2892,12 @@ fn update_qoder_cli(path: &Path, options: &AgentOptions) -> Result<(), InstallEr
     if current_managed {
         owned.extend(qoder_owned_permissions(current.unwrap_or(&Value::Null)));
     }
-    for permission in [SEARCH_PERMISSION, RG_PERMISSION] {
+    for permission in [
+        SEARCH_PERMISSION,
+        RG_PERMISSION,
+        CALLERS_PERMISSION,
+        CALLEES_PERMISSION,
+    ] {
         if !allow.iter().any(|value| value == permission) {
             owned.insert(permission.to_owned());
         }
@@ -2829,7 +2917,12 @@ fn update_qoder_cli(path: &Path, options: &AgentOptions) -> Result<(), InstallEr
     } else {
         Vec::new()
     };
-    for tool in ["zvec_grep_search", "zvec_grep_rg"] {
+    for tool in [
+        "zvec_grep_search",
+        "zvec_grep_rg",
+        "zvec_grep_callers",
+        "zvec_grep_callees",
+    ] {
         if !always.iter().any(|value| value == tool) {
             always.push(tool.to_owned());
         }
@@ -2838,7 +2931,7 @@ fn update_qoder_cli(path: &Path, options: &AgentOptions) -> Result<(), InstallEr
     let description = qoder_description(&owned);
     let mut server = match options.transport {
         McpInstallTransport::Stdio => {
-            json!({"command":"zg", "args":stdio_args(options.toolset), "timeout":timeout, "trust":true, "description":description, "alwaysAllow":always})
+            json!({"command":options.command(), "args":stdio_args(options.toolset), "timeout":timeout, "trust":true, "description":description, "alwaysAllow":always})
         }
         McpInstallTransport::Http => {
             json!({"type":"http", "url":resolve_server_url()?, "timeout":timeout, "trust":true, "description":description, "alwaysAllow":always})
@@ -2850,10 +2943,15 @@ fn update_qoder_cli(path: &Path, options: &AgentOptions) -> Result<(), InstallEr
         server["headers"] = json!({"Authorization":format!("Bearer ${{{token}}}")});
     }
     let mut next = jsonc_set_path(&source, &["mcpServers", "zvec_grep"], &server)?;
-    let missing = [SEARCH_PERMISSION, RG_PERMISSION]
-        .into_iter()
-        .filter(|permission| !allow.iter().any(|value| value == permission))
-        .collect::<Vec<_>>();
+    let missing = [
+        SEARCH_PERMISSION,
+        RG_PERMISSION,
+        CALLERS_PERMISSION,
+        CALLEES_PERMISSION,
+    ]
+    .into_iter()
+    .filter(|permission| !allow.iter().any(|value| value == permission))
+    .collect::<Vec<_>>();
     let has_allow_array = root
         .get("permissions")
         .and_then(Value::as_object)
@@ -2937,6 +3035,8 @@ fn qoder_owned_permissions(server: &Value) -> BTreeSet<String> {
         .filter_map(|tool| match tool {
             "zvec_grep_search" => Some(SEARCH_PERMISSION.to_owned()),
             "zvec_grep_rg" => Some(RG_PERMISSION.to_owned()),
+            "zvec_grep_callers" => Some(CALLERS_PERMISSION.to_owned()),
+            "zvec_grep_callees" => Some(CALLEES_PERMISSION.to_owned()),
             _ => None,
         })
         .collect()
@@ -2946,6 +3046,8 @@ fn qoder_description(owned: &BTreeSet<String>) -> String {
     let tools = [
         (SEARCH_PERMISSION, "zvec_grep_search"),
         (RG_PERMISSION, "zvec_grep_rg"),
+        (CALLERS_PERMISSION, "zvec_grep_callers"),
+        (CALLEES_PERMISSION, "zvec_grep_callees"),
     ]
     .into_iter()
     .filter(|(permission, _)| owned.contains(*permission))
@@ -2961,6 +3063,33 @@ fn qoder_description(owned: &BTreeSet<String>) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn fixed_launchers_are_escaped_in_generated_toml() {
+        let temporary = tempfile::tempdir().expect("fixture");
+        let launcher = temporary
+            .path()
+            .join("安装 with spaces")
+            .join(if cfg!(windows) { "zg.exe" } else { "zg" });
+        let options = AgentOptions {
+            launcher: Some(launcher.clone()),
+            force: false,
+            transport: McpInstallTransport::Stdio,
+            toolset: None,
+            timeout_seconds: 600,
+            token_env: None,
+        };
+        for source in [
+            codex_block(&options).expect("configuration"),
+            grok_config_block(&options, || unreachable!()).expect("configuration"),
+        ] {
+            let parsed: toml::Value = toml::from_str(&source).expect("valid TOML");
+            assert_eq!(
+                parsed["mcp_servers"]["zvec_grep"]["command"].as_str(),
+                launcher.to_str()
+            );
+        }
+    }
+
+    #[test]
     fn grok_aliases_and_numeric_target_resolve() {
         let agents =
             agents_from_tokens(&["grok-build".to_owned()], &BTreeSet::new()).expect("targets");
@@ -2975,6 +3104,7 @@ mod tests {
         let resolve = || Ok("http://127.0.0.1:7999/mcp".to_owned());
         let stdio = grok_config_block(
             &AgentOptions {
+                launcher: None,
                 force: false,
                 transport: McpInstallTransport::Stdio,
                 toolset: None,
@@ -2990,6 +3120,7 @@ mod tests {
         assert!(!stdio.contains("tool_timeout_sec"));
         let http = grok_config_block(
             &AgentOptions {
+                launcher: None,
                 force: false,
                 transport: McpInstallTransport::Http,
                 toolset: None,
@@ -3010,6 +3141,7 @@ mod tests {
     fn grok_config_block_propagates_url_resolution_errors() {
         let result = grok_config_block(
             &AgentOptions {
+                launcher: None,
                 force: false,
                 transport: McpInstallTransport::Http,
                 toolset: None,
@@ -3030,6 +3162,7 @@ mod tests {
         std::fs::write(&config, "user_key = 1\n").expect("write config");
         std::fs::write(&guidance, "user note\n").expect("write guidance");
         let options = AgentOptions {
+            launcher: None,
             force: false,
             transport: McpInstallTransport::Http,
             toolset: None,
@@ -3100,6 +3233,7 @@ mod tests {
             std::fs::create_dir_all(guidance.parent().expect("parent")).expect("rules dir");
             std::fs::write(&config, existing).expect("write config");
             let options = AgentOptions {
+                launcher: None,
                 force: false,
                 transport: McpInstallTransport::Stdio,
                 toolset: None,
@@ -3126,6 +3260,7 @@ mod tests {
         let guidance = dir.path().join("rules").join("zvec-grep.md");
         std::fs::create_dir_all(guidance.parent().expect("parent")).expect("rules dir");
         let options = AgentOptions {
+            launcher: None,
             force: false,
             transport: McpInstallTransport::Stdio,
             toolset: None,
@@ -3289,6 +3424,7 @@ mod tests {
         let guidance = dir.path().join("rules").join("zvec-grep.md");
         std::fs::create_dir_all(guidance.parent().expect("parent")).expect("rules dir");
         let options = AgentOptions {
+            launcher: None,
             force: false,
             transport: McpInstallTransport::Stdio,
             toolset: None,
@@ -3323,12 +3459,15 @@ mod tests {
 
     #[test]
     fn grok_guidance_includes_host_notes_preamble() {
-        let block = guidance_block("zvec_grep_search", "zvec_grep_rg", false, grok_host_notes());
+        let block = guidance_block("zvec_grep__", false, grok_host_notes());
         assert!(block.contains("### Grok Build host notes"));
         assert!(block.contains("zvec_grep__zvec_grep_search"));
+        assert!(
+            block.contains("use `zvec_grep__zvec_grep_callers` or `zvec_grep__zvec_grep_callees`")
+        );
         assert!(block.contains("zg --auth grant"));
         assert!(block.contains("Choose the evidence source before the retrieval mode."));
-        let plain = guidance_block("zvec_grep_search", "zvec_grep_rg", false, "");
+        let plain = guidance_block("", false, "");
         assert!(!plain.contains("Grok Build host notes"));
         assert!(
             plain.starts_with(
@@ -3547,6 +3686,28 @@ mod tests {
                 home.join("AppData/Local/Programs/Qoder/Qoder.exe"),
             ]
         );
+    }
+
+    #[test]
+    fn absolute_command_entries_remain_owned_after_installation() {
+        let temporary = tempfile::tempdir().expect("fixture");
+        let launcher = temporary
+            .path()
+            .join(if cfg!(windows) { "zg.exe" } else { "zg" });
+        let command = launcher.to_string_lossy();
+        assert!(is_managed_json_server(
+            &json!({"command": command, "args": ["--server", "--stdio"]})
+        ));
+        assert!(is_managed_json_server(
+            &json!({"type": "local", "command": [command, "--server", "--stdio"]})
+        ));
+        assert!(is_managed_qwen(
+            &json!({"command": command, "args": ["--server", "--stdio"]})
+        ));
+        assert!(!is_managed_json_server(
+            &json!({"command": command, "args": ["--version"]})
+        ));
+        assert!(!is_managed_command("relative/zg"));
     }
 
     #[test]

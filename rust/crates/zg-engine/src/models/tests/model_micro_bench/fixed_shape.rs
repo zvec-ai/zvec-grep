@@ -59,14 +59,20 @@ fn cycle_batches(inputs: usize, batch: usize) -> usize {
     inputs / a
 }
 
+fn embedding_options() -> EmbeddingOptions {
+    EmbeddingOptions {
+        purpose: EmbeddingPurpose::Document,
+        ..Default::default()
+    }
+}
+
 async fn warmup(model: &ModelRuntimeLease, data: &Data, workers: usize) -> Value {
     let shapes = cycle_batches(data.inputs.len(), data.batch);
     let waves = shapes.max(3);
     for wave in 0..waves {
         let input = batch(data, wave % shapes);
         let results =
-            join_all((0..workers).map(|_| model.embed(&input, EmbeddingOptions::default(), None)))
-                .await;
+            join_all((0..workers).map(|_| model.embed(&input, embedding_options(), None))).await;
         for result in results {
             result.expect("embedding warmup");
         }
@@ -117,10 +123,7 @@ impl Schedule {
 async fn request(model: &ModelRuntimeLease, data: &Data, origin: Instant, id: usize) -> Row {
     let selected = indices(id, data);
     let texts: Vec<_> = selected.iter().map(|&i| data.inputs[i].clone()).collect();
-    let options = EmbeddingOptions {
-        purpose: EmbeddingPurpose::Document,
-        ..Default::default()
-    };
+    let options = embedding_options();
     let started = Instant::now();
     let output = model.embed(&texts, options, None).await;
     let finished = Instant::now();
@@ -223,6 +226,25 @@ async fn local_model_shape() {
     let requested_batch = number("ZG_MODEL_BENCH_BATCH_SIZE", 1);
     let mut provenance = support::verify_artifacts(config.entry, &config.cache).await;
     let manager = ModelRuntimeManager::new();
+    let server_concurrency =
+        if std::env::var("ZG_MODEL_BENCH_RUNTIME_MODE").as_deref() == Ok("server") {
+            manager.enable_server_mode().expect("server model pools");
+            Some(
+                std::env::var("ZVEC_GREP_EMBEDDING_CONCURRENCY")
+                    .expect("server capacity")
+                    .parse::<usize>()
+                    .expect("positive server capacity"),
+            )
+        } else {
+            None
+        };
+    let runtime_mode = if server_concurrency.is_some() {
+        "server"
+    } else {
+        "direct"
+    };
+    let hardware_threads = std::thread::available_parallelism().map_or(1, usize::from);
+    let ort_thread_budget = crate::models::runtime::ort_config::thread_budget();
     let origin = Instant::now();
     phase("before_load", origin);
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -249,18 +271,35 @@ async fn local_model_shape() {
     )));
     provenance["input_template"] = json!("Document; deterministic whitespace-separated words");
     provenance["input_length_semantics"] = json!("nominal");
+    provenance["clients"] = json!(workers);
+    provenance["client_mode"] = json!(Config::client_mode());
+    provenance["runtime_mode"] = json!(runtime_mode);
+    provenance["server_concurrency"] = json!(server_concurrency);
+    provenance["ort_thread_budget"] = json!(ort_thread_budget);
+    provenance["call_latency_scope"] = json!(
+        "runtime entry before admission through completed result; input fixture cloning excluded"
+    );
     phase("warmup", origin);
     let warmup = warmup(&model, &data, workers).await;
+    let execution_before = model.execution_stats();
     phase("embedding", origin);
     let (rows, mut embedding) = measure(&model, &data, workers, origin).await;
     phase("between", origin);
+    embedding["execution"] =
+        support::execution_measurement(execution_before, model.execution_stats());
     embedding["warmup"] = warmup;
     emit_rows("embedding", &rows);
     println!(
         "ZG_BENCH_RESULT={}",
         json!({"schema_version":5,"protocol_pass":embedding["protocol_pass"],
             "provenance":provenance,"input_tokens":target,"batch_size":requested_batch,
+            "fixed_batch":true,
+            "clients":workers,"client_mode":Config::client_mode(),
+            "runtime_mode":runtime_mode,"server_concurrency":server_concurrency,
+            "ort_thread_budget":ort_thread_budget,"hardware_threads":hardware_threads,
             "embedding_concurrency":config.requested,"resolved_index_concurrency":config.index_limit,
+            "effective_execution_concurrency":model.execution_concurrency(),
+            "admission_concurrency":model.admission_concurrency(),
             "index_inflight_batches":workers,"requested_device":format!("{:?}",config.device).to_lowercase(),
             "load":{"cache_state":"fresh_process_filesystem_cache_warm_or_unspecified",
                 "acquire_ns":acquire_ns,"prepare_ns":prepare_ns,"total_ns":load_ns},

@@ -94,16 +94,15 @@ pub(crate) trait IndexEmbeddingRuntime: Send + Sync {
 
 #[async_trait]
 impl IndexEmbeddingRuntime for ModelRuntimeLease {
+    fn batch_concurrency(&self, requested: Option<usize>) -> Option<usize> {
+        self.index_batch_concurrency(requested)
+    }
     fn info(&self) -> &EmbeddingModelInfo {
         self.info()
     }
 
     fn concurrency_defaults(&self) -> EmbeddingConcurrencyDefaults {
         self.concurrency_defaults()
-    }
-
-    fn batch_concurrency(&self, requested: Option<usize>) -> Option<usize> {
-        self.batch_concurrency(requested)
     }
 
     async fn prepare(
@@ -271,6 +270,7 @@ pub(crate) async fn get_workspace_index_status(
             .iter()
             .map(|file| file.index_status().entity_count())
             .sum(),
+        fragments_indexed: None,
         indexed_size_bytes: indexed_files
             .iter()
             .map(|file| file.snapshot().size_bytes)
@@ -1206,7 +1206,7 @@ fn append_contents(output: &mut String, contents: &[Content]) {
     }
 }
 
-fn bind_entities(
+pub(super) fn bind_entities(
     file_id: FileId,
     extracted: Vec<ExtractedEntity>,
 ) -> Result<Vec<Entity>, EngineError> {
@@ -2053,7 +2053,7 @@ fn scanned_files(
     Ok(scanned)
 }
 
-fn default_file_size_limit(formats: &[FileFormat]) -> u64 {
+pub(super) fn default_file_size_limit(formats: &[FileFormat]) -> u64 {
     let has_category = |category| {
         formats
             .iter()
@@ -2264,7 +2264,10 @@ fn task_control(signal: Option<CancellationToken>) -> TaskControl {
     TaskControl::new(signal.unwrap_or_default())
 }
 
-fn throw_if_cancelled(signal: Option<&CancellationToken>) -> Result<(), EngineError> {
+/// Reports the pass's cancellation as the engine's cancellation error. Every
+/// phase that can run for a while — extraction batches, embedding queues, and
+/// the cross-file resolution sweep — calls this at its own boundaries.
+pub(crate) fn throw_if_cancelled(signal: Option<&CancellationToken>) -> Result<(), EngineError> {
     if signal.is_some_and(CancellationToken::is_cancelled) {
         Err(EngineError::cancelled("indexing was cancelled"))
     } else {
@@ -3033,7 +3036,7 @@ mod tests {
     }
 
     #[test]
-    fn index_batch_policy_uses_backend_admission_instead_of_thread_budget() {
+    fn index_batch_policy_uses_backend_admission() {
         let mut model = ConcurrentModel::new();
         model.batch_limit = Some(2);
         for requested in [None, Some(1), Some(8), Some(16)] {
@@ -3275,7 +3278,7 @@ mod tests {
             root,
             crate::domain::WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout"),
             crate::domain::ScanRules::default(),
-            Some(crate::workspace::CURRENT_INDEX_VERSION),
+            crate::workspace::CURRENT_INDEX_VERSION,
             Some(uuid::Uuid::new_v4().to_string()),
             1,
             1,
@@ -3819,6 +3822,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ordinary_status_does_not_count_stored_fragments() {
+        let directory = tempdir().expect("workspace");
+        let workspace = workspace(directory.path());
+        let scanner = NativeScanner::default();
+        let storage = MemoryStorage::default();
+        let empty = get_workspace_index_status(&workspace, &storage, &scanner, None, true)
+            .await
+            .expect("empty status");
+        assert_eq!(empty.files_scanned, 0);
+        assert_eq!(empty.entities_indexed, 0);
+        assert_eq!(empty.fragments_indexed, None);
+
+        std::fs::write(
+            directory.path().join("harvest.rs"),
+            format!("fn harvest() {{\n{}}}\n", "    let value = 1;\n".repeat(40)),
+        )
+        .expect("source");
+        let model = ConcurrentModel::new();
+        let context = IndexingContext {
+            workspace: &workspace,
+            storage: &storage,
+            scanner: &scanner,
+            embedding_models: &[&model],
+            embedding_concurrency: None,
+            on_progress: None,
+            signal: None,
+            changes: &[],
+        };
+        index_workspace(&context).await.expect("index source");
+        let stored = storage
+            .entries
+            .lock()
+            .expect("stored entries")
+            .values()
+            .map(Vec::len)
+            .sum::<usize>();
+        assert!(stored > 1, "one code entity must have multiple fragments");
+        let status = get_workspace_index_status(&workspace, &storage, &scanner, None, true)
+            .await
+            .expect("indexed status");
+        assert_eq!(status.files_unchanged, 1);
+        assert_eq!(status.entities_indexed, 1);
+        assert_eq!(status.fragments_indexed, None);
+    }
+
+    #[tokio::test]
     async fn unchanged_content_updates_snapshot_and_lightweight_status_skips_reads() {
         let directory = tempdir().expect("workspace");
         std::fs::write(directory.path().join("file.txt"), "unchanged source").expect("source");
@@ -3853,11 +3902,13 @@ mod tests {
             .await
             .expect("lightweight status");
         assert_eq!(light.files_modified, 1);
+        assert_eq!(light.fragments_indexed, None);
         assert_eq!(scanner.reads.load(Ordering::Acquire), reads);
         let detailed = get_workspace_index_status(&workspace, &storage, &scanner, None, true)
             .await
             .expect("detailed status");
         assert_eq!(detailed.files_modified, 0);
+        assert_eq!(detailed.fragments_indexed, None);
         assert_eq!(scanner.reads.load(Ordering::Acquire), reads + 1);
 
         let result = index_workspace(&context).await.expect("refresh snapshot");
@@ -3905,13 +3956,7 @@ mod tests {
                     workspace.source_root(),
                     workspace.layout().clone(),
                     workspace.scan().clone(),
-                    if matches!(index, crate::domain::IndexState::Enabled(_)) {
-                        workspace
-                            .index_version()
-                            .or(Some(crate::workspace::CURRENT_INDEX_VERSION))
-                    } else {
-                        None
-                    },
+                    workspace.index_version(),
                     if matches!(index, crate::domain::IndexState::Enabled(_)) {
                         workspace.storage_generation().map(str::to_owned)
                     } else {
@@ -3960,6 +4005,7 @@ mod tests {
             .await
             .expect("status");
         assert_eq!(status.files_added, 1);
+        assert_eq!(status.fragments_indexed, None);
         assert!(storage.identities.lock().expect("catalog").is_empty());
         let model = ConcurrentModel::new();
         let context = IndexingContext {
@@ -4124,6 +4170,7 @@ mod tests {
         assert_eq!(status.files_failed, 1);
         assert_eq!(status.indexed_size_bytes, 0);
         assert_eq!(status.entities_indexed, 0);
+        assert_eq!(status.fragments_indexed, None);
     }
 
     #[tokio::test]
@@ -4399,7 +4446,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn indexes_catalog_sources_and_shebang_scripts_only() {
+    async fn indexes_catalog_sources_readable_text_and_shebang_scripts() {
         let directory = tempdir().expect("temporary directory");
         std::fs::write(directory.path().join("readable"), "ordinary text 中文 😀").expect("text");
         std::fs::write(directory.path().join("known.txt"), "ordinary text 中文 😀")
@@ -4436,12 +4483,33 @@ mod tests {
         })
         .await
         .expect("index supported sources");
-        assert_eq!(result.files_added, 2);
+        assert_eq!(result.files_added, 4);
         let files = storage.list_files().expect("files");
-        assert_eq!(files.len(), 2);
+        assert_eq!(files.len(), 4);
         assert!(files.iter().all(|file| file.index_status().is_indexed()));
-        assert_eq!(storage.identities.lock().expect("catalog").len(), 2);
-        assert_eq!(result.skipped.len(), 5);
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.relative_path().to_path_buf())
+                .collect::<HashSet<_>>(),
+            ["readable", "known.txt", "script", "encoded"]
+                .into_iter()
+                .map(PathBuf::from)
+                .collect()
+        );
+        assert_eq!(storage.identities.lock().expect("catalog").len(), 4);
+        assert_eq!(result.skipped.len(), 3);
+        assert_eq!(
+            result
+                .skipped
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<HashSet<_>>(),
+            ["database", "unrecognized", "document.pdf"]
+                .into_iter()
+                .map(|name| workspace.source_root().join(name))
+                .collect()
+        );
     }
 
     #[tokio::test]
@@ -4657,7 +4725,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn large_unchanged_extensionless_text_is_skipped_after_classification() {
+    async fn large_unchanged_extensionless_text_is_retained_after_classification() {
         let directory = tempdir().expect("temporary directory");
         let workspace = workspace(directory.path());
         let size = MIN_DEFAULT_FILE_SIZE_BYTES + 1;
@@ -4695,9 +4763,15 @@ mod tests {
         )
         .await
         .expect("text classification");
-        assert!(scanned.is_empty());
-        assert_eq!(skipped[0].reason, SkippedFileReason::Unsupported);
-        assert_eq!(compute_diff(scanned, &[stored]).deleted.len(), 1);
+        assert_eq!(scanned.len(), 1);
+        assert!(skipped.is_empty());
+        assert_eq!(
+            scanned[0].formats.as_deref(),
+            Some([FileFormat::Text].as_slice())
+        );
+        let diff = compute_diff(scanned, &[stored]);
+        assert_eq!(diff.unchanged, 1);
+        assert!(diff.deleted.is_empty());
     }
 
     #[test]

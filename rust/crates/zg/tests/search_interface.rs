@@ -241,6 +241,7 @@ fn explicit_routes_continue_to_indexed_search() {
                 "recordedUsername": std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" }).ok(),
             },
             "scan": {},
+            "indexVersion": 2,
             "createdTime": 0,
             "updatedTime": 0,
             "index": { "state": "disabled" },

@@ -1,9 +1,42 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { markdownVersionComparison } from "../../benchmarks/zg-retrieval/expansion/compare.mjs";
+import {
+  QA_DIAGNOSTICS,
+  markdownVersionComparison,
+} from "../../benchmarks/zg-retrieval/expansion/compare.mjs";
 import { QUALITY_METRICS } from "../../benchmarks/zg-retrieval/reports/ci.mjs";
-import { PILOT_SUITES } from "../../benchmarks/zg-retrieval/expansion/config.mjs";
+import { QA_SCORING } from "../../benchmarks/zg-retrieval/core/suite.mjs";
+import { validateIndexCounts } from "../../benchmarks/zg-retrieval/core/index-counts.mjs";
+import { validateIndexSettings } from "../../benchmarks/zg-retrieval/core/index-settings.mjs";
+import { pilotCorpusIds } from "../../benchmarks/zg-retrieval/expansion/datasets.mjs";
+import {
+  PILOT_FILE_RECALL_METRICS,
+  PILOT_NAMES,
+  PILOT_QA_SCORING,
+  PILOT_SUITES,
+} from "../../benchmarks/zg-retrieval/expansion/config.mjs";
+
+// Read only the trusted checkout's frozen corpus definitions, never artifact paths.
+const trustedJson = (path) =>
+  JSON.parse(readFileSync(new URL(path, import.meta.url), "utf8"));
+const expectedCorpusIds = {
+  sweqa: trustedJson("../../benchmarks/zg-retrieval/data/source.lock.json")
+    .repositories.map(({ repository, commit }) => `${repository}@${commit}`)
+    .sort(),
+  ...Object.fromEntries(
+    PILOT_NAMES.map((name) => [
+      name,
+      pilotCorpusIds({
+        name,
+        lock: trustedJson(
+          `../../benchmarks/zg-retrieval/expansion/data/${PILOT_SUITES[name].lockFile}`,
+        ),
+      }).sort(),
+    ]),
+  ),
+};
 
 const marker = "<!-- zg-retrieval-pr -->";
 const versionMarker = (run) =>
@@ -81,8 +114,50 @@ function currentRequest(pr, request) {
   );
 }
 
+function validateDiagnostic(
+  group,
+  level,
+  { title, metrics, optionalMetrics = [] },
+  planned = 20,
+) {
+  if (group === null) return null;
+  const eligible = group?.eligible_tasks;
+  assert.ok(
+    Number.isSafeInteger(eligible) && eligible >= 0 && eligible <= planned,
+    `Invalid ${title} diagnostic eligible count`,
+  );
+  const scores = { metric_task_counts: {} };
+  for (const [, metric] of [...metrics, ...optionalMetrics]) {
+    const count = group[level]?.metric_task_counts?.[metric];
+    const score = group[level]?.[metric];
+    // Older comparisons carried only File Recall. Never fill extra QA metrics
+    // from the original File table, which uses different Gold and aggregation.
+    if (
+      optionalMetrics.some(([, name]) => name === metric) &&
+      score === undefined &&
+      count === undefined
+    )
+      continue;
+    assert.ok(
+      Number.isSafeInteger(count) && count >= 0 && count <= eligible,
+      `Invalid ${title} diagnostic scored count`,
+    );
+    assert.ok(
+      count === 0
+        ? score === null
+        : Number.isFinite(score) && score >= 0 && score <= 1,
+      `Invalid ${title} diagnostic score`,
+    );
+    scores[metric] = score;
+    scores.metric_task_counts[metric] = count;
+  }
+  return { eligible_tasks: eligible, [level]: scores };
+}
+
 export function validateComparison(report, request) {
   assert.equal(report.schema_version, 1, "Unsupported comparison schema");
+  if (report.preview !== undefined)
+    assert.equal(report.preview, "full", "Unsupported comparison preview");
   assert.equal(
     report.kind,
     "retrieval-version-comparison",
@@ -110,7 +185,113 @@ export function validateComparison(report, request) {
     Array.isArray(report.rows) && report.rows.length === 12,
     "Incomplete suite/mode coverage",
   );
+  const hasQa =
+    Object.hasOwn(report, "qa_scoring") ||
+    report.rows.some(
+      (row) =>
+        row?.suite === "sweqa" &&
+        (row.file_diagnostic || row.entity_diagnostic),
+    );
+  if (hasQa)
+    assert.deepEqual(
+      report.qa_scoring,
+      QA_SCORING,
+      "Unsupported QA scoring rules; rescore both versions",
+    );
+  const pilotQaGold = {};
+  if (
+    report.pilot_qa_gold !== undefined ||
+    report.pilot_qa_scoring !== undefined
+  ) {
+    assert.deepEqual(
+      report.pilot_qa_scoring,
+      PILOT_QA_SCORING,
+      "Unsupported pilot QA scoring rules",
+    );
+    const names = Object.keys(report.pilot_qa_gold ?? {});
+    assert.ok(
+      names.length && names.every((name) => PILOT_NAMES.includes(name)),
+      "Missing or unknown pilot Gold identity",
+    );
+    for (const name of names) {
+      const gold = report.pilot_qa_gold[name];
+      assert.equal(
+        gold?.id,
+        `${PILOT_SUITES[name].suite}-entity-v${PILOT_SUITES[name].goldVersion}`,
+      );
+      assert.match(
+        gold?.sha256 ?? "",
+        /^[a-f0-9]{64}$/,
+        "Invalid pilot Gold checksum",
+      );
+      pilotQaGold[name] = { id: gold.id, sha256: gold.sha256 };
+    }
+  }
   const rows = [];
+  const indexCounts = {};
+  if (report.index_counts !== undefined) {
+    assert.ok(
+      report.index_counts &&
+        typeof report.index_counts === "object" &&
+        !Array.isArray(report.index_counts),
+      "Invalid indexed corpus counts",
+    );
+    for (const suite of ["sweqa", ...PILOT_NAMES]) {
+      const pair = report.index_counts[suite];
+      assert.ok(
+        pair && typeof pair === "object" && !Array.isArray(pair),
+        "Missing indexed corpus comparison",
+      );
+      indexCounts[suite] = {};
+      for (const side of ["baseline", "candidate"]) {
+        const counts =
+          pair[side] === null ? null : validateIndexCounts(pair[side]);
+        if (counts)
+          assert.deepEqual(
+            counts.corpora.map(({ id }) => id).sort(),
+            expectedCorpusIds[suite],
+            `${suite}/${side}: indexed corpus coverage differs from the frozen suite`,
+          );
+        indexCounts[suite][side] = counts;
+      }
+    }
+  }
+  const indexSettings = {};
+  if (report.index_settings !== undefined) {
+    assert.ok(
+      report.index_settings &&
+        typeof report.index_settings === "object" &&
+        !Array.isArray(report.index_settings),
+      "Invalid index settings",
+    );
+    for (const suite of ["sweqa", ...PILOT_NAMES]) {
+      const pair = report.index_settings[suite];
+      assert.ok(
+        pair && typeof pair === "object" && !Array.isArray(pair),
+        "Missing index settings comparison",
+      );
+      indexSettings[suite] = {};
+      for (const side of ["baseline", "candidate"]) {
+        const settings =
+          pair[side] === null ? null : validateIndexSettings(pair[side]);
+        if (settings) {
+          assert.deepEqual(
+            settings.corpora.map(({ id }) => id).sort(),
+            expectedCorpusIds[suite],
+            `${suite}/${side}: index settings coverage differs from the frozen suite`,
+          );
+          const model =
+            suite === "sweqa"
+              ? "local/potion-code-16m-v2"
+              : PILOT_SUITES[suite].model;
+          for (const corpus of settings.corpora)
+            if (corpus.model !== null)
+              assert.equal(corpus.model, model, "Unexpected indexed model");
+        }
+        indexSettings[suite][side] = settings;
+      }
+    }
+  }
   for (const suite of ["sweqa", "beir", "duretrieval", "quarry"]) {
     for (const mode of ["hybrid", "fts", "vector"]) {
       const matches = report.rows.filter(
@@ -124,7 +305,11 @@ export function validateComparison(report, request) {
           : PILOT_SUITES[suite].model;
       assert.equal(row.model, model, "Unexpected embedding model");
       const metrics = {};
-      for (const metric of QUALITY_METRICS) {
+      const hasPilotQa = Object.hasOwn(pilotQaGold, suite);
+      for (const metric of [
+        ...QUALITY_METRICS,
+        ...(hasPilotQa ? PILOT_FILE_RECALL_METRICS : []),
+      ]) {
         const cell = row.metrics?.[metric];
         assert.ok(
           [cell?.baseline, cell?.candidate].every(
@@ -143,13 +328,48 @@ export function validateComparison(report, request) {
           delta,
         };
       }
-      rows.push({ suite, mode, model, metrics });
+      const validated = { suite, mode, model, metrics };
+      if (suite === "sweqa")
+        for (const [level, config] of Object.entries(QA_DIAGNOSTICS)) {
+          const field = `${level}_diagnostic`;
+          if (row[field] === undefined) continue;
+          validated[field] = {
+            baseline: validateDiagnostic(row[field]?.baseline, level, config),
+            candidate: validateDiagnostic(row[field]?.candidate, level, config),
+          };
+        }
+      if (hasPilotQa) {
+        assert.ok(row.entity_diagnostic, "Missing pilot Entity diagnostic");
+        validated.entity_diagnostic = {
+          baseline: validateDiagnostic(
+            row.entity_diagnostic.baseline,
+            "entity",
+            QA_DIAGNOSTICS.entity,
+            PILOT_SUITES[suite].taskCount,
+          ),
+          candidate: validateDiagnostic(
+            row.entity_diagnostic.candidate,
+            "entity",
+            QA_DIAGNOSTICS.entity,
+            PILOT_SUITES[suite].taskCount,
+          ),
+        };
+      }
+      rows.push(validated);
     }
   }
   // Whitelist data passed to the trusted renderer; artifact Markdown and URLs
   // are never published, interpreted as code, or used to choose the target PR.
   return {
     schema_version: 1,
+    ...(report.preview === "full" ? { preview: "full" } : {}),
+    ...(hasQa ? { qa_scoring: { ...QA_SCORING } } : {}),
+    ...(Object.keys(pilotQaGold).length
+      ? {
+          pilot_qa_gold: pilotQaGold,
+          pilot_qa_scoring: { ...PILOT_QA_SCORING },
+        }
+      : {}),
     kind: report.kind,
     status: "success",
     baseline: {
@@ -161,6 +381,10 @@ export function validateComparison(report, request) {
       commit: request.candidate.commit,
     },
     harness_commit: report.harness_commit,
+    ...(report.index_counts === undefined ? {} : { index_counts: indexCounts }),
+    ...(report.index_settings === undefined
+      ? {}
+      : { index_settings: indexSettings }),
     rows,
     errors: [],
   };

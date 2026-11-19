@@ -1,47 +1,48 @@
 use super::*;
 
-const FIXTURES: [(&str, &str, &str, Option<&str>); 7] = [
+const FIXTURES: [(&str, &str, &str, &[&str]); 7] = [
     (
         "component.vue",
         "<script lang=\"tsx\">\nfunction render() { return <Widget title={formatTitle()}>{renderBody()}</Widget>; }\n</script>\n",
         "render",
-        Some("calls: formatTitle, renderBody"),
+        &["calls: formatTitle, renderBody"],
     ),
     (
         "component.svelte",
         "<script lang=\"tsx\">\nclass View { render() { return <Widget title={formatTitle()}>{renderBody()}</Widget>; } }\n</script>\n",
         "render",
-        Some("calls: formatTitle, renderBody"),
+        &["calls: formatTitle, renderBody"],
     ),
     (
         "Builder.java",
         "class Builder { Builder() { init(); } }\n",
         "Builder",
-        Some("calls: init"),
+        &["calls: init"],
     ),
     (
         "store.js",
         "class Store { get(key) { function get() { nested(); } return load(key); } }\n",
         "get",
-        Some("calls: nested, load"),
+        // The method and its same-named nested function are separate entities.
+        &["calls: nested", "calls: nested, load"],
     ),
     (
         "reader.go",
         "package p\ntype Reader interface {\nRead()\nClose() error\n}\n",
         "Read",
-        None,
+        &[],
     ),
     (
         "reader.go",
         "package p\ntype Reader interface {\nRead()\nClose() error\n}\n",
         "Close",
-        None,
+        &[],
     ),
     (
         "consume.go",
         "package p\nfunc Consume() { Read(); Consume() }\n",
         "Consume",
-        Some("calls: Read, Consume"),
+        &["calls: Read, Consume"],
     ),
 ];
 
@@ -113,16 +114,13 @@ fn stored_outline_context_is_consistent_in_direct_and_server_modes() -> Result<(
             let text = String::from_utf8(output.stdout)?;
             assert!(text.contains(path), "{text}");
             assert!(text.contains(&format!("Symbol: {query}")), "{text}");
-            let calls = text
+            let mut calls = text
                 .lines()
                 .map(str::trim)
                 .filter(|line| line.starts_with("calls:"))
                 .collect::<Vec<_>>();
-            assert_eq!(
-                calls,
-                expected_calls.into_iter().collect::<Vec<_>>(),
-                "{path}, {mode}: {text}"
-            );
+            calls.sort_unstable();
+            assert_eq!(calls, expected_calls, "{path}, {mode}: {text}");
             outputs.push(text);
         }
         assert_eq!(outputs[0], outputs[1], "{path}");

@@ -13,6 +13,7 @@ use zvec_rust::{
 use crate::{EngineError, EngineResult, utils::directory_exists};
 
 pub(super) const WRITE_BATCH: usize = 1024;
+pub(super) const WAL_RECOVERY_REQUIRED: &str = "ZG.ENGINE.WAL_RECOVERY_REQUIRED";
 static INITIALIZED: OnceLock<Result<(), String>> = OnceLock::new();
 
 pub(super) fn initialize() -> EngineResult<()> {
@@ -38,10 +39,20 @@ pub(super) fn open_collection(
         "set collection access mode",
     )?;
     if exists {
-        native(
-            Collection::open(text, Some(&options)),
-            &format!("open collection {}", path.display()),
-        )
+        let result = Collection::open(text, Some(&options));
+        if let Err(error) = &result
+            && read_only
+            && error.code == zvec_rust::ErrorCode::FailedPrecondition
+            && error
+                .message
+                .starts_with("Collection requires WAL recovery;")
+        {
+            return Err(EngineError::new(
+                WAL_RECOVERY_REQUIRED,
+                format!("zvec open collection {}: {error}", path.display()),
+            ));
+        }
+        native(result, &format!("open collection {}", path.display()))
     } else if read_only {
         Err(EngineError::not_found(format!(
             "index collection does not exist: {}",
@@ -53,6 +64,24 @@ pub(super) fn open_collection(
             &format!("create collection {}", path.display()),
         )
     }
+}
+
+/// The caller holds the exclusive storage lock and has closed every reader.
+/// Open existing collections only: recovery must never create replacement data.
+pub(super) fn recover_collection(path: &Path) -> EngineResult<()> {
+    if !directory_exists(path)? {
+        return Err(corrupt(format!(
+            "index collection {} is missing",
+            path.display()
+        )));
+    }
+    let collection = native(
+        Collection::open(native_path(path)?, None),
+        &format!("recover collection {}", path.display()),
+    )?;
+    let flushed = native(collection.flush(), "flush recovered collection");
+    let closed = native(collection.try_close(), "close recovered collection");
+    flushed.and(closed)
 }
 
 fn native_path(path: &Path) -> EngineResult<&str> {

@@ -7,19 +7,32 @@ use serde::{Deserialize, Serialize};
 use super::metadata::SymbolType;
 use super::source::TextRange;
 
+/// Direction of a one-hop query relative to its endpoint.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    /// Edges targeting the queried endpoint.
+    In,
+    /// Edges originating from the queried endpoint.
+    Out,
+    /// Edges in either direction.
+    #[default]
+    Both,
+}
+
 /// Kinds produced by the extraction layer.
 ///
 /// Resolved edges and buffered name references share this vocabulary because
 /// they become rows of the same table: the pending queue stores the kind the
 /// resolved edge will carry. Resolution state is therefore structural, not a
-/// kind — a [`PendingRef`] has no target, a [`FileEdge`] requires one — and the
+/// kind — a `PendingRef` has no target, a `FileEdge` requires one — and the
 /// store keeps the same split in its `status` column.
 ///
 /// `Contains` comes only from containment, which is collected as a resolved
 /// edge during the walk, so a buffered name reference never carries it.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum GraphEdgeKind {
+pub enum GraphEdgeKind {
     Contains,
     Calls,
     Imports,
@@ -32,7 +45,18 @@ pub(crate) enum GraphEdgeKind {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum EdgeProvenance {
+    /// The winning candidate was the only one whose declared arity matched.
+    ArityBound,
+    /// The winning candidate was the only exported one.
+    ExportBound,
     FileLocal,
+    /// A call bound to a declaration the file's own evidence selects: by
+    /// receiver inference, through the enclosing instance's class hierarchy,
+    /// or as the file's lone indexed location of a bare name. The declaration
+    /// may live in another file when the hierarchy leads there.
+    FileScoped,
+    /// A bare name bound through the file's resolved import scope.
+    ImportBound,
     ImportScoped,
     /// The target was selected by a unique qualified-name match.
     QualifiedNameMatch,
@@ -104,11 +128,55 @@ pub(crate) struct FileGraphResult {
     pub nodes: Vec<FileGraphNode>,
     pub edges: Vec<FileEdge>,
     pub pending_refs: Vec<PendingRef>,
+    /// C/C++ preprocessor directives in source order, empty for every other
+    /// language. The resolver replays them to learn which names a translation
+    /// unit had already spelled as macros at a given line.
+    pub directives: Vec<PreprocessorDirective>,
+}
+
+/// One directive of a C/C++ translation unit, in the order the preprocessor
+/// reads it: the file's own directives with each conditional's branches and
+/// closing marker spelled out.
+///
+/// `#endif` is a token in the grammar rather than a node, so extraction
+/// synthesises the [`PreprocessorKind::Endif`] marker at the conditional's end:
+/// the replay needs the block boundaries, not just the openings.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct PreprocessorDirective {
+    pub kind: PreprocessorKind,
+    /// Macro the directive reads or writes: `#define`, `#undef`, `#ifdef`,
+    /// `#ifndef`, and the guard an `#elifdef` tests.
+    pub name: Option<String>,
+    /// Operand text: the include specifier (`./x.h`, `<string>`), a macro body,
+    /// or the whole `#if` condition.
+    pub value: Option<String>,
+    pub line: usize,
+}
+
+/// The directives a replay distinguishes.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PreprocessorKind {
+    Include,
+    Define,
+    Undef,
+    PragmaOnce,
+    /// `#if` with a condition expression in `value`.
+    If,
+    Ifdef,
+    Ifndef,
+    /// `#elif` with a condition expression in `value`.
+    Elif,
+    /// `#elifdef`/`#elifndef` guarded by `name`.
+    Elifdef,
+    Else,
+    Endif,
 }
 
 impl GraphEdgeKind {
-    #[allow(dead_code)]
-    pub(crate) const fn as_str(self) -> &'static str {
+    /// Stable serialized name of this relationship kind.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Contains => "contains",
             Self::Calls => "calls",
@@ -118,13 +186,28 @@ impl GraphEdgeKind {
             Self::Declares => "declares",
         }
     }
+
+    /// Whether this kind spells a base the owner inherits from.
+    #[must_use]
+    pub(crate) const fn spells_inheritance(self) -> bool {
+        matches!(self, Self::Extends | Self::Implements)
+    }
+
+    /// Whether this kind names a module a file binds names from.
+    #[must_use]
+    pub(crate) const fn spells_import(self) -> bool {
+        matches!(self, Self::Imports)
+    }
 }
 
 impl EdgeProvenance {
-    #[allow(dead_code)]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
+            Self::ArityBound => "arity_bound",
+            Self::ExportBound => "export_bound",
             Self::FileLocal => "file_local",
+            Self::FileScoped => "file_scoped",
+            Self::ImportBound => "import_bound",
             Self::ImportScoped => "import_scoped",
             Self::QualifiedNameMatch => "qualified_name_match",
             Self::WorkspaceUnique => "workspace_unique",

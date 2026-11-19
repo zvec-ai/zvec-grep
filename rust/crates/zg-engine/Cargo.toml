@@ -13,6 +13,7 @@ default = []
 # configurations require source toolchains. Runtime CPU fallback is unchanged.
 cuda = [
     "dep:zg-llama-native",
+    "dep:zg-ort-native",
     "llama-cpp-2/cuda",
     "llama-cpp-2/dynamic-backends",
     "ort/cuda",
@@ -30,8 +31,12 @@ globset.workspace = true
 grep.workspace = true
 half = "2.7.1"
 hex = "0.4.3"
+http.workspace = true
 ignore.workspace = true
 httpdate = "1.0.3"
+hyper.workspace = true
+hyper-util = { workspace = true, features = ["client-legacy", "client-proxy"] }
+jsonc-parser = { version = "0.34", features = ["serde"] }
 llama-cpp-2.workspace = true
 # Use the same pinned official runtime in Cargo tests and every native package.
 # API selection does not select the download version; build.rs owns that pin.
@@ -49,12 +54,14 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tokenizers = { version = "0.23.1", default-features = false, features = ["fancy-regex"] }
+tower-service = "0.3.3"
 tracing.workspace = true
 tree-sitter.workspace = true
 tree-sitter-c.workspace = true
 tree-sitter-cpp.workspace = true
 tree-sitter-go.workspace = true
 tree-sitter-java.workspace = true
+tree-sitter-php.workspace = true
 tree-sitter-javascript.workspace = true
 tree-sitter-python.workspace = true
 tree-sitter-rust.workspace = true
@@ -63,6 +70,7 @@ uuid.workspace = true
 zg-engine-macros = { path = "macros" }
 zg-host-native = { path = "../zg-host-native" }
 zg-llama-native = { path = "../zg-llama-native", optional = true }
+zg-ort-native = { path = "../zg-ort-native", optional = true }
 zg-zvec-fp16 = { path = "../zg-zvec-fp16" }
 zvec-rust.workspace = true
 

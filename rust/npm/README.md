@@ -1,5 +1,11 @@
 # npm distribution
 
+The same verified native payloads also produce complete archives for the
+[standalone GitHub Releases installers](../standalone/README.md). These installers
+do not require Node/npm on user machines and keep their installation state separate
+from npm. Re-run the standalone installer to upgrade; npm installations continue
+to use npm.
+
 The release layout has one small meta package, one base native package for each
 published target, and exact-version CUDA component packages for Linux/Windows
 x64. `platforms.json` is the single source of truth for package
@@ -130,10 +136,20 @@ Published target/backend support is:
 | --- | --- | --- |
 | macOS ARM64 | CPU + Metal | CPU (CoreML deliberately not selected) |
 | macOS x64 (14+) | CPU + Metal where available | CPU (CoreML deliberately not selected) |
-| Linux x64 glibc (Ubuntu 20.04 / glibc 2.31 baseline) | CPU + CUDA 13.1, CUDA 12.4 fallback | CPU + CUDA 12 |
-| Linux ARM64 glibc (Ubuntu 20.04 / glibc 2.31 baseline) | CPU | CPU |
+| Linux x64 glibc (glibc 2.28 baseline) | CPU + CUDA 13.1, CUDA 12.4 fallback | CPU + CUDA 12 |
+| Linux ARM64 glibc (glibc 2.28 baseline) | CPU | CPU |
 | Windows x64 | CPU + CUDA 13.1, CUDA 12.4 fallback | CPU + CUDA 12 |
 | Windows ARM64 | CPU | CPU + DirectML |
+
+Linux x64/ARM64 release builders use digest-pinned `manylinux_2_28`
+`2026.03.01-1` images. The executable and bundled libraries are audited against
+`GLIBC_2.28`; installed artifacts are exercised in clean AlmaLinux 8.10
+(glibc 2.28) containers, independently of the host runner's Ubuntu version.
+The Linux builds also check offline CPU ORT preparation by executing the real
+`zg-engine/build.rs` with `CARGO_FEATURE_VULKAN=1` and `CARGO_NET_OFFLINE=true`
+in a network-disabled builder, using cached official CPU ORT and no
+`ORT_DYLIB_PATH` or CUDA feature. This uses separate output, does not change
+release artifacts and is not a full Vulkan backend compilation.
 
 A deliberate CPU-only Windows build retains DirectML. The published Windows
 CUDA bundle uses the official ONNX Runtime 1.21.0 CUDA 12 provider and does not
@@ -255,7 +271,15 @@ artifact, then checks real installation, CLI startup, managed-rg and daemon IPC.
 The workflow runs only through manual dispatch and does not publish unless
 `publish` is enabled. The manual
 `platform` input defaults to `all`; each of the six target names can be selected
-individually.
+individually. For Linux ARM64 validation, run in the chosen repository (or add
+`--repo OWNER/REPO`):
+
+```sh
+gh workflow run rust-publish.yml -f publish=false -f cuda=false -f platform=linux-arm64-gnu
+```
+
+Replace the platform with `linux-x64-gnu` for Linux x64. Add `--ref BRANCH`
+to validate a specific branch instead of the repository's default branch.
 `publish=true` requires `platform=all`; a subset is a validation-only candidate,
 not a complete release. Manual runs with `publish=false, cuda=false` use ordinary CPU runners;
 they do not allocate GPUs or publish packages. All six package builds require
@@ -277,7 +301,7 @@ Intel macOS uses the official precompiled ORT 1.21.0 dylib. ORT is not built
 from source on any published target. The Intel release targets macOS 14 and later.
 
 Windows ARM64 uses `windows-11-arm` with ARM64 Node, Rust, and MSVC. It uses
-zvec-rust 0.8.0's automatically selected Windows ARM64 prebuilt SDK instead of
+zvec-rust 0.8.1's automatically selected Windows ARM64 prebuilt SDK instead of
 building zvec from source. The shared DLL is staged by zvec-rust-build and
 bundled in `@zvec/zvec-grep-win32-arm64-msvc`. ONNX Runtime uses the official
 ARM64 DirectML 1.21.0 NuGet runtime and Microsoft.AI.DirectML 1.15.4, with
@@ -312,11 +336,18 @@ or repacking. A loopback registry exposes only this run's CUDA archives and
 records requests. CPU installation must make zero CUDA metadata/tarball requests,
 leave the plugin cache empty and install no CUDA components; optional download
 failure followed by CPU fallback is not a pass. No public registry is used.
-They verify checksums, CLI startup and daemon IPC. Linux/Windows x64 also verify real
-GGUF/ONNX indexing and vector queries with
-explicit CPU selection and default CPU fallback, without CUDA host libraries.
+The `artifact-cpu-smoke` jobs verify checksums, CLI startup and daemon IPC.
+Both Linux targets use clean AlmaLinux 8.10 (glibc 2.28) containers and load the
+installed `libonnxruntime.so.1`, verifying ORT 1.21.0 and API 21. Linux/Windows
+x64 run `scripts/cuda/e2e.py --cpu-only` for real GGUF/ONNX indexing and vector
+queries with explicit CPU selection and default CPU fallback, without CUDA
+host libraries. Linux ARM64 uses `--explicit-cpu` for real GGUF/ONNX index/query
+checks; macOS and Windows ARM64 retain CLI/daemon-only artifact smoke coverage.
 These checks also run for unpublished candidates and must pass before npm
 publication; failures retain the candidate and `cpu-artifact-evidence-*` logs.
+They are release-workflow checks, not a separate ORT gate in ordinary PR CI.
+For local full-catalog ONNX/performance checks without a workflow entry point,
+see [ONNX Runtime distributions](../CONTRIBUTING.md#onnx-runtime-distributions).
 
 The package GPU jobs use the hosted T4 runners with CUDA runtime libraries,
 not Rust/C++/CUDA compiler setup. They verify the downloaded native package's
@@ -368,7 +399,7 @@ plugins. The hash-verified official ONNX Runtime CUDA 12 core/providers are
 shared-library sidecars. The Windows CUDA package supports CPU and NVIDIA CUDA,
 not DirectML; the non-CUDA Windows build retains its existing DirectML runtime.
 
-Explicit publication runs from a `rust-v<version>`-tagged commit on `main` and
+Explicit publication runs from a `v<version>`-tagged commit on `main` and
 uses npm provenance with trusted publishing or `NPM_TOKEN`. Native packages are
 published first and the meta package last, always under `rust-canary`. Selecting
 `latest` requests the separate promotion job; any registry smoke failure leaves

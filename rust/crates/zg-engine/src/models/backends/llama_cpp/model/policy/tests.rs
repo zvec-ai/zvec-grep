@@ -1,144 +1,72 @@
 use super::*;
-use LlamaExecutionBackend::{Cpu, Cuda, OtherGpu};
+use crate::models::runtime::llama_config::LlamaSettings;
 
 #[test]
-fn gpu_backend_classification_uses_actual_native_device_identity() {
+fn actual_gpu_device_selects_cuda_policy() {
     for (backend, name) in [("CUDA", "Tesla T4"), ("cuda", "NVIDIA GPU"), ("", "CUDA0")] {
-        assert_eq!(LlamaExecutionBackend::from_gpu_device(backend, name), Cuda);
-    }
-    for (backend, name) in [
-        ("Metal", "Apple M4"),
-        ("MTL", "MTL0"),
-        ("Vulkan", "NVIDIA GeForce RTX 4090"),
-        ("Vulkan", "Apple M4"),
-        ("SYCL", "Intel Arc"),
-    ] {
         assert_eq!(
             LlamaExecutionBackend::from_gpu_device(backend, name),
-            OtherGpu
+            LlamaExecutionBackend::Cuda
         );
     }
-    assert!(!Cpu.is_gpu());
-    assert!(Cuda.is_gpu());
-    assert!(OtherGpu.is_gpu());
+    for (backend, name) in [("Metal", "Apple M4"), ("Vulkan", "NVIDIA GPU")] {
+        assert_eq!(
+            LlamaExecutionBackend::from_gpu_device(backend, name),
+            LlamaExecutionBackend::OtherGpu
+        );
+    }
 }
 
 #[test]
-fn cpu_context_configuration_requires_a_positive_integer() {
-    assert_eq!(parse_cpu_contexts(None), Ok(1));
-    for (value, expected) in [("1", 1), (" 2 ", 2), ("24", 24)] {
-        assert_eq!(parse_cpu_contexts(Some(value)), Ok(expected));
+fn requests_limit_contexts_without_changing_fixed_threads_or_packing() {
+    let resources = LlamaSettings {
+        server_contexts: 4,
+        threads: None,
+        hardware_threads: 16,
     }
-    for value in [
-        "",
-        " ",
-        "0",
-        "-1",
-        "+2",
-        "1.5",
-        "many",
-        "9999999999999999999999999999999999",
+    .resources(4);
+    for backend in [
+        LlamaExecutionBackend::Cpu,
+        LlamaExecutionBackend::Cuda,
+        LlamaExecutionBackend::OtherGpu,
     ] {
-        assert!(parse_cpu_contexts(Some(value)).is_err(), "{value}");
-    }
-}
-
-#[test]
-fn cpu_budget_partitions_total_compute_threads_without_enabling_batching() {
-    for contexts in [1, 2, 3, 8] {
-        for threads in [1, 2, 4, 8, 24] {
-            for architecture in ["gemma-embedding", "qwen3"] {
+        for requested in [0, 1, 2, 4, 8, 24] {
+            for (architecture, tokens) in [
+                ("gemma-embedding", Some(128)),
+                ("qwen3", Some(256)),
+                ("unknown", None),
+            ] {
                 let budget =
-                    LlamaExecutionBudget::resolve(architecture, Cpu, contexts * threads, contexts)
-                        .expect("valid CPU thread partition");
-                assert_eq!(budget.contexts, contexts);
+                    LlamaExecutionBudget::resolve(architecture, backend, requested, &resources);
+                assert_eq!(budget.contexts, requested.clamp(1, 4));
+                assert_eq!(budget.threads, if backend.is_gpu() { 1 } else { 2 });
                 assert_eq!(
-                    usize::try_from(budget.threads).expect("positive threads"),
-                    threads
+                    budget.batch_tokens,
+                    if backend == LlamaExecutionBackend::OtherGpu {
+                        tokens
+                    } else {
+                        None
+                    }
                 );
-                assert_eq!(budget.batch_tokens, None);
             }
         }
     }
-    for (concurrency, contexts) in [(1, 2), (3, 2), (8, 3), (1, 0), (usize::MAX, 1)] {
-        let error = LlamaExecutionBudget::resolve("qwen3", Cpu, concurrency, contexts)
-            .expect_err("invalid CPU execution configuration");
-        assert_eq!(error.code(), crate::EngineError::INVALID_ARGUMENT);
-        assert!(error.should_fail_fast());
-    }
 }
 
 #[test]
-fn cpu_auto_aligns_to_configured_contexts_with_at_least_one_thread_each() {
-    for (available, contexts, expected) in [
-        (16, 1, 4),
-        (16, 2, 4),
-        (16, 3, 3),
-        (16, 8, 8),
-        (1, 2, 2),
-        (0, 1, 1),
-    ] {
-        assert_eq!(automatic_cpu_concurrency(available, contexts), expected);
+fn cpu_thread_override_does_not_increase_gpu_helper_threads() {
+    let resources = LlamaSettings {
+        server_contexts: 2,
+        threads: Some(3),
+        hardware_threads: 16,
     }
-    for contexts in [1, 2, 3, 8] {
-        let budget =
-            LlamaExecutionBudget::resolve("qwen3", Cpu, 0, contexts).expect("automatic CPU budget");
-        assert_eq!(budget.contexts, contexts);
-        assert_eq!(
-            usize::try_from(budget.threads).expect("threads") * contexts,
-            default_cpu_concurrency(contexts)
-        );
-    }
-}
-
-#[test]
-fn gpu_context_budget_preserves_backend_packing_policy_and_cpu_helper_threads() {
-    for (backend, gemma_packing, qwen_packing) in
-        [(Cuda, None, None), (OtherGpu, Some(128), Some(256))]
-    {
-        for count in [1, 2, 4, 8, 24, usize::MAX] {
-            let gemma = LlamaExecutionBudget::resolve("gemma-embedding", backend, count, 0)
-                .expect("GPU budget ignores CPU context configuration");
-            let qwen =
-                LlamaExecutionBudget::resolve("qwen3", backend, count, 3).expect("GPU budget");
-            assert_eq!((gemma.contexts, qwen.contexts), (count, count));
-            assert_eq!((gemma.threads, qwen.threads), (1, 1));
-            assert_eq!(gemma.batch_tokens, gemma_packing);
-            assert_eq!(qwen.batch_tokens, qwen_packing);
-        }
-        assert_eq!(
-            LlamaExecutionBudget::resolve("unknown", backend, 8, 1)
-                .expect("unknown architecture")
-                .batch_tokens,
-            None
-        );
-    }
-}
-
-#[test]
-fn automatic_budget_is_resolved_again_for_the_actual_fallback_device() {
-    for architecture in ["gemma-embedding", "qwen3"] {
-        for backend in [Cuda, OtherGpu] {
-            let gpu_default =
-                LlamaExecutionBudget::resolve(architecture, backend, 0, 1).expect("automatic GPU");
-            assert_eq!(
-                gpu_default,
-                LlamaExecutionBudget::resolve(architecture, backend, 1, 1).expect("explicit GPU")
-            );
-            assert!(LlamaExecutionBudget::resolve(architecture, backend, 1, 2).is_ok());
-        }
-        let cpu_default =
-            LlamaExecutionBudget::resolve(architecture, Cpu, 0, 1).expect("automatic CPU fallback");
-        let cpu_explicit =
-            LlamaExecutionBudget::resolve(architecture, Cpu, 1, 1).expect("explicit CPU fallback");
-        assert_eq!(
-            usize::try_from(cpu_default.threads).expect("threads"),
-            default_cpu_concurrency(1)
-        );
-        assert_eq!(cpu_explicit.threads, 1);
-        let error = LlamaExecutionBudget::resolve(architecture, Cpu, 1, 2)
-            .expect_err("incompatible CPU fallback budget");
-        assert!(error.should_fail_fast());
-        assert!(LlamaExecutionBudget::resolve(architecture, Cpu, 0, 2).is_ok());
-    }
+    .resources(2);
+    let cpu = LlamaExecutionBudget::resolve("qwen3", LlamaExecutionBackend::Cpu, 1, &resources);
+    let cuda = LlamaExecutionBudget::resolve("qwen3", LlamaExecutionBackend::Cuda, 1, &resources);
+    assert_eq!(cpu.threads, 3);
+    assert_eq!(cuda.threads, 1);
+    assert_eq!(
+        LlamaExecutionBudget::resolve("qwen3", LlamaExecutionBackend::Cpu, 8, &resources).contexts,
+        2
+    );
 }

@@ -4,10 +4,10 @@ use std::collections::{BTreeMap, VecDeque};
 use super::{
     Arc, AtomicBool, CancellationToken, Condvar, Duration, EmbeddingResult, LlamaBatchPlan,
     LlamaContextPool, LlamaContextProfile, LlamaContextWorker, LlamaExecutionBackend,
-    LlamaExecutionBudget, LlamaModel, LlamaWorkerJob, LlamaWorkerLease, LlamaWorkerMessage,
-    LlamaWorkerResponse, ModelError, Ordering, PoisonError, PreparedLlamaBatch, PreparedLlamaInput,
-    StdMutex, check_cancelled, llama_context_worker, llama_micro_batch_capacity, lock_llama_mutex,
-    mpsc, thread,
+    LlamaExecutionBudget, LlamaModel, LlamaResources, LlamaWorkerJob, LlamaWorkerLease,
+    LlamaWorkerMessage, LlamaWorkerResponse, ModelError, Ordering, PoisonError, PreparedLlamaBatch,
+    PreparedLlamaInput, StdMutex, check_cancelled, llama_context_worker,
+    llama_micro_batch_capacity, lock_llama_mutex, mpsc, thread,
 };
 
 #[derive(Default)]
@@ -19,22 +19,39 @@ pub(super) struct LlamaContextPoolState {
 #[derive(Default)]
 struct ContextAdmission {
     operations: BTreeMap<usize, OperationAdmission>,
+    capacity: usize,
     next_operation: usize,
     in_flight: usize,
 }
 
 struct OperationAdmission {
+    scope: Option<Arc<()>>,
+    registrations: usize,
     limit: usize,
     in_flight: usize,
 }
 
 impl ContextAdmission {
-    fn register(&mut self, limit: usize) -> usize {
+    fn register(&mut self, limit: usize, scope: Option<Arc<()>>) -> usize {
+        if let Some(scope) = &scope
+            && let Some((id, operation)) = self.operations.iter_mut().find(|(_, operation)| {
+                operation
+                    .scope
+                    .as_ref()
+                    .is_some_and(|active| Arc::ptr_eq(active, scope))
+            })
+        {
+            debug_assert_eq!(operation.limit, limit);
+            operation.registrations += 1;
+            return *id;
+        }
         let id = self.next_operation;
         self.next_operation = id.checked_add(1).expect("operation identity exhausted");
         self.operations.insert(
             id,
             OperationAdmission {
+                scope,
+                registrations: 1,
                 limit,
                 in_flight: 0,
             },
@@ -43,11 +60,7 @@ impl ContextAdmission {
     }
 
     fn limit(&self) -> usize {
-        self.operations
-            .values()
-            .map(|operation| operation.limit)
-            .max()
-            .unwrap_or(0)
+        self.capacity
     }
 
     fn can_acquire(&self, id: usize) -> bool {
@@ -78,11 +91,15 @@ impl ContextAdmission {
     }
 
     fn unregister(&mut self, id: usize) {
-        let operation = self.operations.remove(&id).expect("registered operation");
-        assert_eq!(
-            operation.in_flight, 0,
-            "native jobs must finish before operation release"
-        );
+        let operation = self.operations.get_mut(&id).expect("registered operation");
+        operation.registrations -= 1;
+        if operation.registrations == 0 {
+            assert_eq!(
+                operation.in_flight, 0,
+                "native jobs must finish before operation release"
+            );
+            self.operations.remove(&id);
+        }
     }
 }
 
@@ -232,13 +249,19 @@ impl LlamaContextPool {
     pub(super) fn new(
         model: Arc<LlamaModel>,
         backend: LlamaExecutionBackend,
-        cpu_contexts: usize,
+        resources: Arc<LlamaResources>,
     ) -> Self {
         Self {
             model,
             backend,
-            cpu_contexts,
-            state: StdMutex::new(LlamaContextPoolState::default()),
+            state: StdMutex::new(LlamaContextPoolState {
+                admission: ContextAdmission {
+                    capacity: resources.contexts,
+                    ..ContextAdmission::default()
+                },
+                ..LlamaContextPoolState::default()
+            }),
+            resources,
             changed: Condvar::new(),
             completion: Arc::new(CompletionSignal::default()),
         }
@@ -249,6 +272,7 @@ impl LlamaContextPool {
         prepared: PreparedLlamaBatch,
         context_size: u32,
         execution_concurrency: usize,
+        scope: Option<Arc<()>>,
         signal: Option<&CancellationToken>,
     ) -> Result<EmbeddingResult, ModelError> {
         check_cancelled(signal)?;
@@ -265,8 +289,8 @@ impl LlamaContextPool {
             &architecture,
             self.backend,
             execution_concurrency,
-            self.cpu_contexts,
-        )?;
+            &self.resources,
+        );
         let execution = LlamaBatchExecution {
             architecture,
             context_size,
@@ -275,7 +299,7 @@ impl LlamaContextPool {
         };
         let plan = LlamaBatchPlan::new(&inputs, context_size, budget.batch_tokens)?;
         let mut batches = VecDeque::from(plan.into_batches(inputs));
-        let operation = self.register_operation(budget.contexts);
+        let operation = self.register_operation(budget.contexts, scope);
         let completion = Arc::clone(&self.completion);
         // Declared after operation so unwinding drains jobs before unregistering.
         let mut pending = Vec::new();
@@ -391,9 +415,15 @@ impl LlamaContextPool {
         })
     }
 
-    pub(super) fn register_operation(&self, limit: usize) -> LlamaOperationLease<'_> {
+    pub(super) fn register_operation(
+        &self,
+        limit: usize,
+        scope: Option<Arc<()>>,
+    ) -> LlamaOperationLease<'_> {
         let mut state = lock_llama_mutex(&self.state);
-        let id = state.admission.register(limit);
+        let id = state
+            .admission
+            .register(limit.min(self.resources.contexts), scope);
         let retired = retire_idle_workers(&mut state);
         drop(state);
         shutdown_workers(retired);
@@ -469,10 +499,11 @@ impl LlamaContextPool {
 
     fn create_worker(&self) -> Result<Arc<LlamaContextWorker>, ModelError> {
         let model = Arc::clone(&self.model);
+        let resources = Arc::clone(&self.resources);
         let (sender, receiver) = mpsc::channel();
         let join = thread::Builder::new()
             .name("zg-llama-context".to_owned())
-            .spawn(move || llama_context_worker(&model, &receiver))
+            .spawn(move || llama_context_worker(&model, &receiver, &resources))
             .map_err(|error| {
                 ModelError::internal("Unable to create llama.cpp context worker").with_cause(error)
             })?;
@@ -524,7 +555,7 @@ impl Drop for LlamaOperationLease<'_> {
         let mut state = lock_llama_mutex(&self.pool.state);
         state.admission.unregister(self.id);
         // With no operation, retain the warm pool. Worker-local 30s idle expiry
-        // releases native buffers; a new lower budget retires surplus workers.
+        // releases native buffers. Request budgets never resize the fixed pool.
         let retired = retire_idle_workers(&mut state);
         drop(state);
         shutdown_workers(retired);

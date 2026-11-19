@@ -93,6 +93,10 @@ need a new full run. Expired artifacts also require rerunning the missing tasks.
 
 ## Benchmark developers: protocol and validation
 
+Follow the [benchmark working rules](AGENTS.md) when changing this directory.
+For retrieval labels and metrics, use the [QA pair authoring and matching guide](docs/benchmark-gold-authoring-and-matching.md)
+and its [field and scoring reference](docs/retrieval-only-qa-reference.md).
+
 ### Protocol and implementation
 
 Retrieval compares two product versions using the same frozen harness, inputs

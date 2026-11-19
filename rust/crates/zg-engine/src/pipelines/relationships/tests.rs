@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     EngineError, EngineRuntimeSnapshot, ZvecGrep,
-    api::relationships::{RelationshipDirection, RelationshipOptions, RelationshipResult},
+    api::relationships::{Direction, RelationshipOptions, RelationshipResult},
     domain::{
         CodeMetadata, Content, ContentKind, Entity, EntityFragment, EntityId, EntityMetadata,
         FTS_CONFIG, FileIndexStatus, FileRecord, FileSnapshot, FragmentId, IndexDescriptor,
@@ -30,6 +30,7 @@ use fixture::*;
 
 mod admission;
 mod fixture;
+mod kinds;
 mod lookup;
 mod snapshots;
 mod suggestions;

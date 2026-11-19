@@ -126,6 +126,63 @@ async fn assert_index_and_queries(
 }
 
 #[tokio::test]
+async fn unknown_text_respects_globs_and_filename_filters() -> TestResult {
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path();
+    let server = EmbeddingServer::start()?;
+    configure_remote_model(root, server.address)?;
+    write_sources(
+        root,
+        &[
+            ("module.bsl", "Сообщить(\"orchard\");\n"),
+            ("excluded.bsl", "orchard excluded source"),
+            ("large.bsl", &"orchard".repeat(32)),
+            ("note.txt", "orchard catalog text"),
+            ("other.custom", "orchard custom text"),
+        ],
+    )?;
+    fs::write(root.join("binary.bsl"), b"orchard\0binary")?;
+    let filter = QueryFilter {
+        globs: vec!["*.bsl".into(), "!excluded.bsl".into()],
+        ..QueryFilter::default()
+    };
+    let engine = ZvecGrep::new();
+    let indexed = engine
+        .index(IndexOptions {
+            scan: ScanRulesUpdate {
+                globs: Some(filter.globs.clone()),
+                max_file_size_bytes: Some(Some(64)),
+                ..ScanRulesUpdate::default()
+            },
+            ..index_options(root)
+        })
+        .await?;
+    assert_eq!((indexed.files_added, indexed.files_failed), (1, 0));
+    assert_eq!(indexed.skipped_counts["too_large"], 1);
+    assert_eq!(indexed.skipped_counts["unsupported"], 1);
+    assert_index_and_queries(&engine, root, &filter, &paths(&["module.bsl"])).await?;
+    for mode in [ContextRouteMode::Fts, ContextRouteMode::Vector] {
+        assert!(
+            search_paths(
+                &engine,
+                root,
+                mode,
+                QueryFilter {
+                    included_formats: vec![FileFormat::Text],
+                    ..QueryFilter::default()
+                }
+            )
+            .await?
+            .is_empty(),
+            "text fallback does not change filename-based filters"
+        );
+    }
+    engine.drop_index(info_options(root)).await?;
+    engine.close();
+    Ok(())
+}
+
+#[tokio::test]
 async fn ordered_globs_have_the_same_membership_during_indexing_and_both_query_routes() -> TestResult
 {
     let temporary = tempfile::tempdir()?;
@@ -615,19 +672,25 @@ async fn filename_formats_and_categories_filter_queries_without_limiting_indexin
             updated.files_deleted,
             updated.files_failed
         ),
-        (0, 1, 0)
+        (1, 0, 0)
     );
     let files = native_file_records(&info.index_path)?;
     assert!(
         files
             .iter()
-            .all(|file| stored_file_path(file) != Path::new("script"))
+            .any(|file| stored_file_path(file) == Path::new("script"))
     );
     assert_index_and_queries(
         &engine,
         root,
         &QueryFilter::default(),
-        &paths(&["page.html", "note.md", "settings.json", "source.rs"]),
+        &paths(&[
+            "script",
+            "page.html",
+            "note.md",
+            "settings.json",
+            "source.rs",
+        ]),
     )
     .await?;
     for mode in [ContextRouteMode::Fts, ContextRouteMode::Vector] {
@@ -685,7 +748,7 @@ async fn catalog_name_predicates_filter_both_native_search_routes() -> TestResul
     write_sources(root, &sources)?;
     let engine = ZvecGrep::new();
     let indexed = engine.index(index_options(root)).await?;
-    assert_eq!((indexed.files_added, indexed.files_failed), (5, 0));
+    assert_eq!((indexed.files_added, indexed.files_failed), (7, 0));
     for (name, _) in sources {
         fs::remove_file(root.join(name))?;
     }

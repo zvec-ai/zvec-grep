@@ -36,19 +36,23 @@ pub use metadata::EntityMetadata;
 pub(crate) use metadata::IndexField;
 pub use metadata::Language;
 pub use metadata::MarkdownMetadata;
+pub use metadata::MemberAlias;
 pub use metadata::SymbolType;
 // Visibility has no consumers yet.
 #[allow(unused_imports)]
 pub use metadata::Visibility;
 
 // Shared graph contracts for extraction and persistence.
+pub use graph::Direction;
 pub(crate) use graph::EdgeProvenance;
 pub(crate) use graph::FileEdge;
 pub(crate) use graph::FileGraphNode;
 pub(crate) use graph::FileGraphResult;
-pub(crate) use graph::GraphEdgeKind;
+pub use graph::GraphEdgeKind;
 pub(crate) use graph::PendingRef;
 pub(crate) use graph::PendingRefStatus;
+pub(crate) use graph::PreprocessorDirective;
+pub(crate) use graph::PreprocessorKind;
 
 // Models.
 pub(crate) use model::EmbeddingMetric;
@@ -67,9 +71,8 @@ pub(crate) use source::FileSnapshot;
 pub(crate) use source::Range;
 pub(crate) use source::SourcePath;
 pub(crate) use source::TextRange;
-// Consumed by the cross-file reference resolver; dormant until it lands.
-#[allow(unused_imports)]
-pub(crate) use source::formats_for_path;
+// Consumed by the cross-file reference resolver.
+pub(crate) use source::{formats_for_path, reference_compatible_with};
 
 // Workspaces.
 pub use workspace::ScanRules;

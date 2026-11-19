@@ -25,6 +25,13 @@ fn code(kind: SymbolType, name: &str, scope: Option<&str>) -> CodeMetadata {
         arity: None,
         is_exported: false,
         is_declaration: false,
+        package: None,
+        has_internal_linkage: false,
+        declares_type: false,
+        alias_of: None,
+        object_members: Vec::new(),
+        overwritten_by: None,
+        exported_as: Vec::new(),
     }
 }
 

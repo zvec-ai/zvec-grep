@@ -5,7 +5,19 @@ import { summarizeFileRetrieval } from "../metrics/files.mjs";
 import { loadSuite, readJson, writeJson } from "../core/lib.mjs";
 import { summarizeMeasurements } from "../metrics/measurements.mjs";
 import { summarizeNdcg } from "../metrics/summary.mjs";
+import { summarizeQaRetrieval } from "../metrics/entities.mjs";
 import { validateZgReport, ZG_MODES } from "./validation.mjs";
+import { qaRetrievalMarkdown } from "./zg.mjs";
+import { indexSettingsMarkdown } from "./index-settings.mjs";
+import {
+  summarizeIndexCounts,
+  validateIndexCounts,
+  indexCountsMarkdown,
+} from "../core/index-counts.mjs";
+import {
+  summarizeIndexSettings,
+  validateIndexSettings,
+} from "../core/index-settings.mjs";
 
 export const QUALITY_METRICS = Object.freeze([
   "file_hit_at_1",
@@ -15,7 +27,13 @@ export const QUALITY_METRICS = Object.freeze([
   "ndcg_at_10",
 ]);
 
-function resultRow(label, rows, expectedQuestions, expectedRepositories) {
+function resultRow(
+  label,
+  rows,
+  expectedQuestions,
+  expectedRepositories,
+  qaRows = rows,
+) {
   const file = summarizeFileRetrieval(rows);
   const ndcg = summarizeNdcg(rows);
   return {
@@ -51,6 +69,9 @@ function resultRow(label, rows, expectedQuestions, expectedRepositories) {
           rows.flatMap((row) => row.measurement_observations),
         )
       : null,
+    qa_retrieval: qaRows.some((row) => row.qa_quality_mean || row.qa_retrieval)
+      ? summarizeQaRetrieval(qaRows)
+      : null,
   };
 }
 
@@ -69,6 +90,7 @@ const unavailableRow = (
   metrics: null,
   ranking_repeatable_cases: 0,
   measurements: null,
+  qa_retrieval: null,
 });
 
 function failedTasks(checked) {
@@ -115,6 +137,8 @@ export async function buildCiSummary({
     errors = [];
   let failures = [];
   let tasks = [];
+  let indexCounts = summarizeIndexCounts([]);
+  let indexSettings = summarizeIndexSettings([]);
   try {
     assert.ok(zg, "missing ZG report");
     const checked = validateZgReport(zg, "ZG", {
@@ -131,6 +155,55 @@ export async function buildCiSummary({
       suite.lock.tasks.map((task) => task.task_id).sort(),
       "CI task selection differs from frozen suite",
     );
+    indexCounts = summarizeIndexCounts(
+      suite.lock.repositories.map((repo) => {
+        const id = `${repo.repository}@${repo.commit}`;
+        const manifest = zg.repositories.find(
+          (item) => item.repository === repo.repository,
+        );
+        const counts = manifest?.index_counts
+          ? validateIndexCounts(manifest.index_counts)
+          : null;
+        if (counts)
+          assert.deepEqual(
+            counts.corpora.map((entry) => entry.id),
+            [id],
+          );
+        return {
+          id,
+          entities: counts?.entities ?? null,
+          fragments: counts?.fragments ?? null,
+        };
+      }),
+    );
+    indexSettings = summarizeIndexSettings(
+      suite.lock.repositories.map((repo) => {
+        const id = `${repo.repository}@${repo.commit}`;
+        const manifest = zg.repositories.find(
+          (item) => item.repository === repo.repository,
+        );
+        const settings = manifest?.index_settings
+          ? validateIndexSettings(manifest.index_settings)
+          : null;
+        if (settings) {
+          assert.deepEqual(
+            settings.corpora.map((entry) => entry.id),
+            [id],
+          );
+          if (settings.model !== null)
+            assert.equal(
+              settings.model,
+              suite.protocol.model,
+              "indexed model differs from the configured suite model",
+            );
+        }
+        return {
+          id,
+          model: settings?.model ?? null,
+          input_budget: settings?.input_budget ?? null,
+        };
+      }),
+    );
     for (const mode of ZG_MODES)
       rows.push(
         resultRow(
@@ -138,6 +211,9 @@ export async function buildCiSummary({
           [...checked.rows.values()].filter((row) => row.mode === mode),
           suite.lock.tasks.length,
           suite.lock.repositories.length,
+          [...checked.rows.values(), ...checked.invalidRows].filter(
+            (row) => row.mode === mode,
+          ),
         ),
       );
     failures = failedTasks(checked);
@@ -171,6 +247,7 @@ export async function buildCiSummary({
           ranking_repeatable: row.ranking_repeatable,
           hit_at_10_calls: row.quality_mean?.hit_at_10_calls ?? null,
           measurements,
+          qa_quality_mean: row.qa_quality_mean ?? null,
         };
       })
       .sort(
@@ -212,7 +289,12 @@ export async function buildCiSummary({
     schema_version: 5,
     status: errors.length ? "failed" : "success",
     model: suite.protocol.model,
-    preview: "mcp-default",
+    preview: "full",
+    index_counts: indexCounts,
+    index_settings: indexSettings,
+    ...(rows.some((row) => row.qa_retrieval)
+      ? { qa_gold: suite.qa_gold, qa_scoring: suite.qa_scoring }
+      : {}),
     quality_metrics: QUALITY_METRICS,
     run_url: runUrl,
     harness_commit: harnessCommit,
@@ -238,7 +320,11 @@ export function markdownCiSummary(result) {
   const lines = [
     "# SWE-QA20 Retrieval-only results",
     "",
-    `**${status}** · 20 original questions · 11 pinned repositories · ZG hybrid / fts / vector · Rust MCP default presentation`,
+    `**${status}** · 20 original questions · 11 pinned repositories · ZG hybrid / fts / vector · Rust MCP full presentation`,
+    "",
+    indexCountsMarkdown(result.index_counts),
+    "",
+    indexSettingsMarkdown(result.index_settings, result.model),
     "",
     "| Arm | Status | Coverage | Stable Top 10 | File Hit@1 | File Hit@5 | File Hit@10 | File MRR@10 | nDCG@10 | Mean output (KiB) | Avg RT (ms) | P50 RT (ms) |",
     "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -260,7 +346,7 @@ export function markdownCiSummary(result) {
   }
   lines.push(
     "",
-    "All three arms use the Rust public MCP default presentation and five calls per question. No preview override is sent. Each question/mode averages its five call-level quality scores; Hit/MRR then average questions and nDCG@10 averages repositories. Stable Top 10 means the five ordered public result locations match. Invalid evidence is excluded, never converted to a zero. Product errors with valid evidence retain zero quality credit. Partial scores are diagnostic and are not directly comparable with complete 20-question scores. Finding a file does not establish sufficient answer evidence.",
+    "All three arms use the Rust public MCP full presentation and five calls per question. Every request explicitly sets preview to full. Each question/mode averages its five call-level quality scores; Hit/MRR then average questions and nDCG@10 averages repositories. Stable Top 10 means the five ordered public result locations match. Invalid evidence is excluded, never converted to a zero. Product errors with valid evidence retain zero quality credit. Partial scores are diagnostic and are not directly comparable with complete 20-question scores. Finding a file does not establish sufficient answer evidence.",
     "",
     "Output is the mean UTF-8 byte count of successful fifth-call responses (1 KiB = 1024 bytes, not model tokens). Avg RT and P50 RT use successful valid MCP search calls, excluding indexing. Failed and invalid calls are excluded from these measurements. A complete successful arm has 20 output samples and 100 latency samples. Index loading and fixed mode order affect latency; these are observations of this run, not a controlled speed comparison.",
     "",
@@ -270,6 +356,10 @@ export function markdownCiSummary(result) {
         (row) =>
           `- ${cell(row.label)}: ${row.measurements.output_sample_count} output samples; ${row.measurements.latency_sample_count} latency samples.`,
       ),
+    ...qaRetrievalMarkdown(
+      result.rows.map((row) => [row.label, row.qa_retrieval]),
+      result.rows[0]?.expected_questions,
+    ),
   );
   if (result.tasks?.length) {
     lines.push(

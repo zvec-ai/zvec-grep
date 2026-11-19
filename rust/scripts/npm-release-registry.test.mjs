@@ -121,6 +121,70 @@ test("registry metadata polling aborts an in-flight request at the shared deadli
   }), /timed out.*registry candidate is missing: @zvec\/zvec-grep@0.0.1/);
 });
 
+for (const [accept, label] of [
+  ["application/json", "full package metadata"],
+  ["application/vnd.npm.install-v1+json", "abbreviated package metadata"],
+]) {
+  const metadata = { dist: { integrity: entry.integrity } };
+  const ready = (url) => ({ ok: true, json: async () => url.endsWith(`/${entry.version}`)
+    ? metadata : { versions: { [entry.version]: metadata } } });
+
+  test(`registry metadata polling retries a missing ${label} without repeating verified documents`, async () => {
+    const requests = new Map();
+    await waitForPublishedPackages([entry], {
+      timeoutMs: 1_000, intervalMs: 0,
+      registryFetch: async (url, { headers }) => {
+        const format = headers?.accept ?? "version";
+        const count = (requests.get(format) ?? 0) + 1;
+        requests.set(format, count);
+        if (format !== "version") assert.equal(url, "https://registry.npmjs.org/@zvec%2fzvec-grep");
+        if (format === accept && count < 3) return { status: 404 };
+        return ready(url);
+      },
+    });
+    assert.equal(requests.get("version"), 1);
+    assert.equal(requests.get("application/json"), accept === "application/json" ? 3 : 1);
+    assert.equal(requests.get("application/vnd.npm.install-v1+json"), accept === "application/json" ? 1 : 3);
+  });
+
+  test(`registry metadata polling rejects corrupt or forbidden ${label} immediately`, async () => {
+    for (const [response, message] of [
+      [{ ok: true, json: async () => ({ versions: { [entry.version]: { dist: { integrity: "sha512-wrong" } } } }) }, /different bytes/],
+      [{ status: 403 }, /registry returned 403/],
+      [{ status: 503 }, /registry returned 503/],
+    ]) {
+      let rejectedRequests = 0;
+      await assert.rejects(waitForPublishedPackages([entry], {
+        timeoutMs: 1_000, intervalMs: 0,
+        registryFetch: async (url, { headers }) => {
+          if (headers?.accept !== accept) return ready(url);
+          rejectedRequests++;
+          return response;
+        },
+      }), message);
+      assert.equal(rejectedRequests, 1);
+    }
+  });
+
+  test(`registry metadata polling reports ${label} when its request exceeds the shared deadline`, async () => {
+    await assert.rejects(waitForPublishedPackages([entry], {
+      timeoutMs: 100,
+      registryFetch: async (url, { headers, signal }) => {
+        if (headers?.accept !== accept) return ready(url);
+        const timer = setTimeout(() => assert.fail("package request was not aborted"), 1_000);
+        try {
+          await new Promise((_, reject) => {
+            signal.throwIfAborted();
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+        } finally {
+          clearTimeout(timer);
+        }
+      },
+    }), new RegExp(`timed out.*${label}`));
+  });
+}
+
 async function releaseFixture(
   t,
   { includeCompliance = false, targets, mutateMetadata, mutateChecksums } = {},
@@ -329,10 +393,16 @@ test("verification metadata preserves collected bytes and supports registry smok
     release: JSON.parse(await readFile(join(destination, "release.json"), "utf8")),
     baseline: "0.2.2", prefixRoot,
     registryFetch: async (url) => {
-      const pkg = release.packages.find((pkg) => url.endsWith(`/${encodeURIComponent(pkg.name)}/${pkg.version}`));
+      const path = decodeURIComponent(new URL(url).pathname);
+      const pkg = release.packages.find((pkg) =>
+        path === `/${pkg.name}` || path === `/${pkg.name}/${pkg.version}`);
       assert.ok(pkg);
-      verifiedPackages++;
-      return { ok: true, json: async () => ({ dist: { integrity: pkg.integrity } }) };
+      const metadata = { dist: { integrity: pkg.integrity } };
+      if (path.endsWith(`/${pkg.version}`)) {
+        verifiedPackages++;
+        return { ok: true, json: async () => metadata };
+      }
+      return { ok: true, json: async () => ({ versions: { [pkg.version]: metadata } }) };
     },
     runNpm: (_, args) => {
       assert.ok(args.includes("--registry=https://registry.npmjs.org"));
@@ -634,6 +704,7 @@ for (const target of ["linux-x64-gnu", "win32-x64-msvc"]) {
     for (const file of cpuFiles) await writeFile(join(profile, file), `current CPU ${file}`);
     const separateBinary = join(root, platform.binary);
     await writeFile(separateBinary, "new CPU executable fixture, never executed");
+    if (windows) await writeFile(join(root, "zg-launcher.exe"), "native launcher fixture, never executed");
     const output = join(root, "release");
     const script = fileURLToPath(new URL("./npm-release.mjs", import.meta.url));
     const args = [script, "pack-platform", "--target", target, "--no-build", "--output-dir", output];
@@ -656,9 +727,10 @@ for (const target of ["linux-x64-gnu", "win32-x64-msvc"]) {
     const metadata = JSON.parse(await readFile(join(staged, "package.json"), "utf8"));
     assert.equal(metadata.zvecGrep.variant, "cpu");
     const checksums = JSON.parse(await readFile(join(staged, "checksums.json"), "utf8"));
-    const expected = [`bin/${platform.binary}`, ...cpuFiles.map((file) => `lib/${file}`)].sort();
+    const runtimeFiles = windows ? [...cpuFiles, "zg-launcher.exe"] : cpuFiles;
+    const expected = [`bin/${platform.binary}`, ...runtimeFiles.map((file) => `lib/${file}`)].sort();
     assert.deepEqual(Object.keys(checksums.files).sort(), expected);
-    assert.deepEqual((await readdir(join(staged, "lib"))).sort(), [...cpuFiles].sort());
+    assert.deepEqual((await readdir(join(staged, "lib"))).sort(), [...runtimeFiles].sort());
     const tarballs = await readdir(join(output, "tarballs"));
     assert.equal(tarballs.length, 1);
     const packedFiles = run("tar", ["-tzf", join(output, "tarballs", tarballs[0])], { capture: true })
@@ -673,6 +745,7 @@ for (const target of ["linux-x64-gnu", "win32-x64-msvc"]) {
     const bundle = join(root, "bundle");
     const files = [`bin/${platform.binary}`, `lib/${platform.os === "win32" ? "zvec_c_api.dll" : "libzvec_c_api.so"}`,
       "lib/licenses/onnxruntime-LICENSE",
+      ...(platform.os === "win32" ? ["lib/zg-launcher.exe"] : []),
       ...new Set(platform.components.map((c) => c.file))];
     for (const file of files) {
       await mkdir(join(bundle, file, ".."), { recursive: true });

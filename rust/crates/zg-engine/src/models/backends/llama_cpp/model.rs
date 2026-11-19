@@ -33,8 +33,8 @@ use crate::domain::model::{
 };
 use crate::models::{
     artifacts::{
-        ArtifactSource, LocalModelBackend, ModelDownloadProgressReporter, ResolveArtifacts,
-        default_model_cache, resolve_model_artifacts,
+        ArtifactHttpClient, ArtifactSource, LocalModelBackend, ModelDownloadProgressReporter,
+        ResolveArtifacts, default_model_cache, resolve_model_artifacts,
     },
     catalog::LlamaCppConfig,
     runtime::ModelComputeRuntime,
@@ -47,9 +47,8 @@ use crate::models::{
 mod batching;
 use batching::LlamaBatchPlan;
 mod policy;
-use policy::{
-    LlamaExecutionBackend, LlamaExecutionBudget, configured_cpu_contexts, default_cpu_concurrency,
-};
+use crate::models::runtime::llama_config::LlamaResources;
+use policy::{LlamaExecutionBackend, LlamaExecutionBudget};
 mod pool;
 use pool::{LlamaContextPoolState, LlamaResponseSender};
 
@@ -89,9 +88,9 @@ pub(crate) struct LlamaCppEmbeddingModel {
     info: EmbeddingModelInfo,
     model_cache_dir: PathBuf,
     device: Option<Device>,
-    cpu_contexts: Result<usize, String>,
+    resources: Arc<LlamaResources>,
     compute_runtime: ModelComputeRuntime,
-    client: reqwest::Client,
+    client: ArtifactHttpClient,
     state: Mutex<Option<Arc<LoadedLlamaModel>>>,
 }
 
@@ -105,7 +104,7 @@ struct LoadedLlamaModel {
 struct LlamaContextPool {
     model: Arc<LlamaModel>,
     backend: LlamaExecutionBackend,
-    cpu_contexts: usize,
+    resources: Arc<LlamaResources>,
     state: StdMutex<LlamaContextPoolState>,
     changed: Condvar,
     completion: Arc<pool::CompletionSignal>,
@@ -156,8 +155,9 @@ struct LlamaContextProfile {
 
 impl LlamaContextProfile {
     fn can_reuse_for(self, desired: Self) -> bool {
-        // Thread budgets are updated in place after acquiring the context.
-        self.context_size >= desired.context_size
+        // Thread configuration is fixed for this runtime.
+        self.threads == desired.threads
+            && self.context_size >= desired.context_size
             && self.batch_capacity >= desired.batch_capacity
             && self.micro_batch_capacity >= desired.micro_batch_capacity
             // A small query may reuse a larger physical-batch capacity.
@@ -179,6 +179,7 @@ impl LlamaCppEmbeddingModel {
         entry: LlamaCppConfig,
         options: ModelConfig,
         compute_runtime: ModelComputeRuntime,
+        resources: Arc<LlamaResources>,
     ) -> Self {
         let model_cache_dir = options
             .cache_dir
@@ -205,9 +206,9 @@ impl LlamaCppEmbeddingModel {
             .expect("valid embedding metadata"),
             model_cache_dir,
             device: options.device,
-            cpu_contexts: configured_cpu_contexts(),
+            resources,
             compute_runtime,
-            client: reqwest::Client::new(),
+            client: ArtifactHttpClient::new(),
             state: Mutex::new(None),
         }
     }
@@ -216,12 +217,16 @@ impl LlamaCppEmbeddingModel {
         &self,
         on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
         signal: Option<&CancellationToken>,
+        execution_lease: Option<Arc<dyn Send + Sync>>,
     ) -> Result<Arc<LoadedLlamaModel>, ModelError> {
         let mut state = self.state.lock().await;
         if let Some(model) = &*state {
             return Ok(Arc::clone(model));
         }
-        let model = Arc::new(self.load_model(on_progress, signal).await?);
+        let model = Arc::new(
+            self.load_model(on_progress, signal, execution_lease)
+                .await?,
+        );
         *state = Some(Arc::clone(&model));
         Ok(model)
     }
@@ -230,10 +235,8 @@ impl LlamaCppEmbeddingModel {
         &self,
         on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
         signal: Option<&CancellationToken>,
+        execution_lease: Option<Arc<dyn Send + Sync>>,
     ) -> Result<LoadedLlamaModel, ModelError> {
-        if matches!(resolve_device(self.device), None | Some(Device::Cpu)) {
-            self.cpu_context_count()?;
-        }
         let artifact = self
             .entry
             .download
@@ -246,24 +249,24 @@ impl LlamaCppEmbeddingModel {
             [artifact.path.to_owned()],
         );
         reporter.start();
-        let model_scope = self
-            .model_cache_dir
-            .join("modelscope")
-            .join("llama-cpp")
-            .join(self.entry.download.model_scope.repo.replace('/', "--"))
-            .join(self.entry.download.model_scope.revision);
+        let sources = std::iter::once(
+            ArtifactSource::hugging_face(
+                self.entry.download.hugging_face,
+                self.model_cache_dir.clone(),
+            )
+            .with_local_path(artifact.path, self.entry.cache_file),
+        )
+        .chain(
+            self.entry
+                .download
+                .fallback_source(&self.model_cache_dir, "llama-cpp"),
+        )
+        .collect();
         let resolved = resolve_model_artifacts(
             &self.client,
             ResolveArtifacts {
                 model: self.entry.reference,
-                sources: [
-                    ArtifactSource::hugging_face(
-                        self.entry.download.hugging_face,
-                        self.model_cache_dir.clone(),
-                    )
-                    .with_local_path(artifact.path, self.entry.cache_file),
-                    ArtifactSource::model_scope(self.entry.download.model_scope, model_scope),
-                ],
+                sources,
                 artifacts: self.entry.download.artifacts,
                 reporter: &reporter,
                 signal,
@@ -275,11 +278,14 @@ impl LlamaCppEmbeddingModel {
         })?;
         validate_gguf_file(&path, self.entry.uri).await?;
         let device = self.device;
-        let cpu_contexts = self.cpu_contexts.clone();
+        let resources = Arc::clone(&self.resources);
         let reporter_for_load = reporter.clone();
         let model = self
             .compute_runtime
-            .run(move || load_model_with_fallback(&path, device, &reporter_for_load, &cpu_contexts))
+            .run(move || {
+                let _lease = execution_lease;
+                load_model_with_fallback(&path, device, &reporter_for_load, resources)
+            })
             .await??;
         reporter.finish();
         Ok(model)
@@ -290,8 +296,9 @@ impl LlamaCppEmbeddingModel {
         failed: Arc<LoadedLlamaModel>,
         on_progress: Option<Arc<dyn Fn(ModelProgress) + Send + Sync>>,
         cause: &ModelError,
+        execution_lease: Option<Arc<dyn Send + Sync>>,
     ) -> Result<Arc<LoadedLlamaModel>, ModelError> {
-        let cpu_contexts = self.cpu_context_count()?;
+        let resources = Arc::clone(&self.resources);
         let mut state = self.state.lock().await;
         if let Some(current) = &*state
             && !Arc::ptr_eq(current, &failed)
@@ -308,21 +315,15 @@ impl LlamaCppEmbeddingModel {
         let loaded = Arc::new(
             self.compute_runtime
                 .run(move || {
+                    let _lease = execution_lease;
                     let registry = lock_backend_registry();
                     let backend = initialize_llama_backend(false, &registry)?;
-                    load_cpu_model(backend, &path, cpu_contexts)
+                    load_cpu_model(backend, &path, resources)
                 })
                 .await??,
         );
         *state = Some(Arc::clone(&loaded));
         Ok(loaded)
-    }
-
-    fn cpu_context_count(&self) -> Result<usize, ModelError> {
-        self.cpu_contexts
-            .as_ref()
-            .copied()
-            .map_err(|message| ModelError::invalid_argument(message.clone()).shared())
     }
 }
 
@@ -333,32 +334,25 @@ impl EmbeddingModel for LlamaCppEmbeddingModel {
     }
 
     fn concurrency_defaults(&self) -> EmbeddingConcurrencyDefaults {
-        // Keep automatic CPU inference distinct from an explicit one-thread
-        // request. GPU defaults to one context with independent token packing.
-        let initial = if matches!(resolve_device(self.device), None | Some(Device::Cpu)) {
-            default_cpu_concurrency(self.cpu_contexts.as_ref().copied().unwrap_or(1))
-        } else {
-            1
-        };
         EmbeddingConcurrencyDefaults {
-            initial,
-            maximum: initial,
+            initial: 1,
+            maximum: self.resources.contexts,
         }
+    }
+
+    fn execution_concurrency(&self, requested: usize) -> usize {
+        requested.max(1).min(self.resources.contexts)
     }
 
     async fn prepare(&self, options: EmbeddingPrepareOptions) -> Result<(), ModelError> {
-        self.ensure_loaded(options.on_progress, options.signal.as_ref())
-            .await
-            .map(|_| ())
-            .map_err(|error| embed_error(self.entry, error).shared())
-    }
-
-    fn batch_concurrency(&self, requested: Option<usize>) -> Option<usize> {
-        if matches!(resolve_device(self.device), None | Some(Device::Cpu)) {
-            Some(self.cpu_contexts.as_ref().copied().unwrap_or(1))
-        } else {
-            Some(requested.unwrap_or(1).max(1))
-        }
+        self.ensure_loaded(
+            options.on_progress,
+            options.signal.as_ref(),
+            options.execution_lease,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| embed_error(self.entry, error).shared())
     }
 
     async fn embed(
@@ -367,18 +361,13 @@ impl EmbeddingModel for LlamaCppEmbeddingModel {
         options: EmbeddingOptions,
     ) -> Result<EmbeddingResult, ModelError> {
         validate_inputs(&self.info, inputs)?;
-        if matches!(resolve_device(self.device), None | Some(Device::Cpu)) {
-            LlamaExecutionBudget::resolve(
-                "",
-                LlamaExecutionBackend::Cpu,
-                options.execution_concurrency,
-                self.cpu_context_count()?,
-            )
-            .map_err(|error| embed_error(self.entry, error))?;
-        }
         let on_progress = options.on_progress.clone();
         let model = self
-            .ensure_loaded(options.on_progress, options.signal.as_ref())
+            .ensure_loaded(
+                options.on_progress,
+                options.signal.as_ref(),
+                options.execution_lease.clone(),
+            )
             .await
             .map_err(|error| embed_error(self.entry, error))?;
         let purpose = options.purpose;
@@ -389,17 +378,23 @@ impl EmbeddingModel for LlamaCppEmbeddingModel {
         let entry = self.entry;
         let signal = options.signal;
         let execution_concurrency = options.execution_concurrency;
+        let scope = options.execution_scope;
+        let scope_for_first_attempt = scope.clone();
+        let execution_lease = options.execution_lease;
+        let lease_for_first_attempt = execution_lease.clone();
         let loaded = Arc::clone(&model);
         let texts_for_first_attempt = texts.clone();
         let signal_for_first_attempt = signal.clone();
         let first = self
             .compute_runtime
             .run(move || {
+                let _lease = lease_for_first_attempt;
                 embed_texts(
                     &loaded,
                     &texts_for_first_attempt,
                     entry,
                     execution_concurrency,
+                    scope_for_first_attempt,
                     signal_for_first_attempt.as_ref(),
                 )
             })
@@ -411,12 +406,20 @@ impl EmbeddingModel for LlamaCppEmbeddingModel {
                 // It must not replace the shared GPU runtime with a CPU model.
                 check_cancelled(signal.as_ref()).map_err(|error| embed_error(entry, error))?;
                 let cpu = self
-                    .fallback_to_cpu(model, on_progress, &error)
+                    .fallback_to_cpu(model, on_progress, &error, execution_lease.clone())
                     .await
                     .map_err(|fallback| embed_error(entry, fallback))?;
                 self.compute_runtime
                     .run(move || {
-                        embed_texts(&cpu, &texts, entry, execution_concurrency, signal.as_ref())
+                        let _lease = execution_lease;
+                        embed_texts(
+                            &cpu,
+                            &texts,
+                            entry,
+                            execution_concurrency,
+                            scope,
+                            signal.as_ref(),
+                        )
                     })
                     .await?
                     .map_err(|error| embed_error(entry, error))?
@@ -436,7 +439,7 @@ fn load_model_with_fallback(
     path: &Path,
     device: Option<Device>,
     reporter: &ModelDownloadProgressReporter,
-    cpu_contexts: &Result<usize, String>,
+    resources: Arc<LlamaResources>,
 ) -> Result<LoadedLlamaModel, ModelError> {
     let device = resolve_device(device);
     let wants_gpu = !matches!(device, None | Some(Device::Cpu));
@@ -444,7 +447,7 @@ fn load_model_with_fallback(
     let backend = initialize_llama_backend(wants_gpu, &registry)?;
     if wants_gpu {
         if let Some(selected) = select_gpu_device(device) {
-            match load_gpu_model(backend, path, &selected) {
+            match load_gpu_model(backend, path, &selected, Arc::clone(&resources)) {
                 Ok(model) => {
                     tracing::debug!(
                         requested_device = requested_device_name(device),
@@ -473,11 +476,7 @@ fn load_model_with_fallback(
         }
     }
 
-    let contexts = cpu_contexts
-        .as_ref()
-        .copied()
-        .map_err(|message| ModelError::invalid_argument(message.clone()).shared())?;
-    load_cpu_model(backend, path, contexts)
+    load_cpu_model(backend, path, resources)
 }
 
 const fn resolve_device(device: Option<Device>) -> Option<Device> {
@@ -492,6 +491,7 @@ fn load_gpu_model(
     backend: &LlamaBackend,
     path: &Path,
     device: &LlamaBackendDevice,
+    resources: Arc<LlamaResources>,
 ) -> Result<LoadedLlamaModel, ModelError> {
     let params = LlamaModelParams::default()
         .with_devices(&[device.index])
@@ -505,7 +505,7 @@ fn load_gpu_model(
                 model,
                 path,
                 LlamaExecutionBackend::from_gpu_device(&device.backend, &device.name),
-                1,
+                resources,
             )
         })
         .map_err(|error| {
@@ -517,11 +517,11 @@ fn load_gpu_model(
 fn load_cpu_model(
     backend: &LlamaBackend,
     path: &Path,
-    cpu_contexts: usize,
+    resources: Arc<LlamaResources>,
 ) -> Result<LoadedLlamaModel, ModelError> {
     let params = cpu_model_params()?;
     LlamaModel::load_from_file(backend, path, &params)
-        .map(|model| loaded_llama_model(model, path, LlamaExecutionBackend::Cpu, cpu_contexts))
+        .map(|model| loaded_llama_model(model, path, LlamaExecutionBackend::Cpu, resources))
         .map_err(|error| {
             ModelError::storage_failure("Unable to load llama.cpp embedding model")
                 .with_cause(error)
@@ -541,11 +541,11 @@ fn loaded_llama_model(
     model: LlamaModel,
     path: &Path,
     backend: LlamaExecutionBackend,
-    cpu_contexts: usize,
+    resources: Arc<LlamaResources>,
 ) -> LoadedLlamaModel {
     let model = Arc::new(model);
     LoadedLlamaModel {
-        contexts: LlamaContextPool::new(Arc::clone(&model), backend, cpu_contexts),
+        contexts: LlamaContextPool::new(Arc::clone(&model), backend, resources),
         model,
         model_path: path.to_path_buf(),
         gpu: backend.is_gpu(),
@@ -609,6 +609,7 @@ fn embed_texts(
     texts: &[String],
     entry: LlamaCppConfig,
     execution_concurrency: usize,
+    scope: Option<Arc<()>>,
     signal: Option<&CancellationToken>,
 ) -> Result<EmbeddingResult, ModelError> {
     check_cancelled(signal)?;
@@ -647,11 +648,16 @@ fn embed_texts(
         PreparedLlamaBatch { inputs, truncated },
         context_size_u32,
         execution_concurrency,
+        scope,
         signal,
     )
 }
 
-fn llama_context_worker(model: &LlamaModel, receiver: &mpsc::Receiver<LlamaWorkerMessage>) {
+fn llama_context_worker(
+    model: &LlamaModel,
+    receiver: &mpsc::Receiver<LlamaWorkerMessage>,
+    resources: &LlamaResources,
+) {
     let mut context = None;
     let mut profile = None;
     loop {
@@ -673,12 +679,18 @@ fn llama_context_worker(model: &LlamaModel, receiver: &mpsc::Receiver<LlamaWorke
             job.response.send(Err(error));
             continue;
         }
+        let _slot = match resources.acquire(job.signal.as_ref()) {
+            Ok(slot) => slot,
+            Err(error) => {
+                job.response.send(Err(error));
+                continue;
+            }
+        };
         let desired = job.profile;
         let reusable =
             profile.is_some_and(|current: LlamaContextProfile| current.can_reuse_for(desired));
         if !reusable {
-            // Release before growing; never retain two native contexts. Thread
-            // budget changes use the safe setter and retain all allocations.
+            // Release before growing; never retain two native contexts.
             context = None;
             profile = None;
             match create_llama_context(model, desired) {
@@ -691,12 +703,6 @@ fn llama_context_worker(model: &LlamaModel, receiver: &mpsc::Receiver<LlamaWorke
                     continue;
                 }
             }
-        }
-        if let (Some(context), Some(profile)) = (context.as_mut(), profile.as_mut())
-            && profile.threads != desired.threads
-        {
-            context.set_n_threads(desired.threads, desired.threads);
-            profile.threads = desired.threads;
         }
         if let Some(active) = profile {
             tracing::debug!(
