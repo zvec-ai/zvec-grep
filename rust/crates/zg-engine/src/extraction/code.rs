@@ -368,7 +368,25 @@ fn walk_entity_node<'tree>(
                     Some(SymbolType::Function) => {
                         graph_context.register_function_scope(entity_index);
                     }
+                    // A trait, a type alias and an enum hold their spelling in
+                    // the type namespace only: `trait save` beside `fn save` is
+                    // legal, and only the function answers a bare `save()`.
+                    Some(SymbolType::Interface | SymbolType::Alias | SymbolType::Enum) => {
+                        graph_context.register_type_namespace_item(entity_index);
+                    }
                     _ => {}
+                }
+                // The item's bare scope ends with the block that declares it:
+                // `{ fn save() {} } save()` written after that block reaches
+                // the enclosing spelling, not the one the closed block declared.
+                if let Some(block) = entity.parent() {
+                    let start = block.start_position();
+                    let end = block.end_position();
+                    graph_context.register_item_extent(
+                        entity_index,
+                        (start.row + 1, start.column),
+                        (end.row + 1, end.column),
+                    );
                 }
             }
         }

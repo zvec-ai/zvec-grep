@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::domain::{EdgeProvenance, GraphEdgeKind, PreprocessorDirective};
 
-use super::{Constructs, NameEdge, WalkContext, WalkEdge};
+use super::{Constructs, ItemExtent, NameEdge, WalkContext, WalkEdge};
 
 /// A name reference resolved against this file's own symbol table.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -174,6 +174,8 @@ pub(crate) fn partition_walk(
         scoped_symbols,
         module_scopes,
         function_scopes,
+        type_namespace_items,
+        item_extents,
         import_bindings,
         shadowed_names,
         borrowed_names,
@@ -223,6 +225,8 @@ pub(crate) fn partition_walk(
                 scoped_symbols: &scoped_symbols,
                 module_scopes: &module_scopes,
                 function_scopes: &function_scopes,
+                type_namespace_items: &type_namespace_items,
+                item_extents: &item_extents,
                 import_bindings: &import_bindings,
                 file_symbols: &file_symbols,
                 aliases: &aliases,
@@ -312,16 +316,49 @@ fn borrowed_by_enclosing_class(
     false
 }
 
+/// What one scope's name table says about the spelling of a bare call.
+enum LocalName {
+    /// A value-namespace item the call site can reach.
+    Value(usize),
+    /// Only the type namespace holds the spelling (`trait save`, `type save`,
+    /// `mod save`), and a bare call names a value.
+    TypeOnly,
+    /// A value-namespace item holds the spelling, but not one this call site
+    /// can see: the block that declared it had already closed.
+    Hidden,
+}
+
 /// The entity a bare call reaches among the ones one body declares under one
-/// spelling. Rust keeps the type and value namespaces apart, so a later
-/// `mod save` never takes the call away from `fn save`: a module is not a
-/// value, and a spelling only a module holds leaves the call pending.
-fn local_target(declared: &[usize], module_scopes: &HashSet<usize>) -> Option<usize> {
-    declared
-        .iter()
-        .rev()
-        .copied()
-        .find(|index| !module_scopes.contains(index))
+/// spelling.
+///
+/// Rust keeps the type and value namespaces apart, so a later `trait save`
+/// never takes the call away from `fn save`: a trait is not a value, and a
+/// spelling only the type namespace holds leaves the call pending. An item is
+/// in bare scope only inside the block that declares it, so a nested `fn save`
+/// whose block closed before the call site is no answer either.
+fn local_target(
+    declared: &[usize],
+    call: (usize, usize),
+    module_scopes: &HashSet<usize>,
+    type_namespace_items: &HashSet<usize>,
+    item_extents: &HashMap<usize, ItemExtent>,
+) -> LocalName {
+    let mut saw_value = false;
+    for &index in declared.iter().rev() {
+        if module_scopes.contains(&index) || type_namespace_items.contains(&index) {
+            continue;
+        }
+        saw_value = true;
+        match item_extents.get(&index) {
+            Some(extent) if !extent.contains(call.0, call.1) => {}
+            _ => return LocalName::Value(index),
+        }
+    }
+    if saw_value {
+        LocalName::Hidden
+    } else {
+        LocalName::TypeOnly
+    }
 }
 
 /// What the item scopes around one bare call say about the name it spells.
@@ -333,9 +370,30 @@ enum BareName {
     /// reaches what that import names, which only the resolver can read.
     Imported,
     /// An item scope declares the spelling. `Some` is the entity a bare call
-    /// reaches; `None` means only a module holds it — a module is not a value —
-    /// so the call stays pending instead of climbing to an outer scope.
+    /// reaches; `None` means only the type namespace holds it — a module, a
+    /// trait or a type alias is not a value — so the call stays pending
+    /// instead of climbing to an outer scope.
     Declared(Option<usize>),
+}
+
+/// The item-scope tables a bare call climbs through.
+#[derive(Clone, Copy)]
+struct ItemScopes<'a> {
+    /// Which entities are modules and which are function bodies: the two
+    /// scopes whose direct items answer a bare call.
+    module_scopes: &'a HashSet<usize>,
+    function_scopes: &'a HashSet<usize>,
+    /// Items whose spelling lives in the type namespace only.
+    type_namespace_items: &'a HashSet<usize>,
+    /// The block that directly contains each item, so a closed block's item
+    /// does not answer a call the enclosing scope should.
+    item_extents: &'a HashMap<usize, ItemExtent>,
+    /// The items each scope declares directly, by spelling.
+    scoped_symbols: &'a HashMap<usize, HashMap<String, Vec<usize>>>,
+    /// The names a `use` in each scope binds.
+    import_bindings: &'a HashMap<usize, HashSet<String>>,
+    /// Containment, target ordinal → containing ordinal.
+    enclosing: &'a HashMap<usize, usize>,
 }
 
 /// What the modules and function bodies around `owner` say about `name`.
@@ -351,12 +409,18 @@ enum BareName {
 fn enclosing_bare_name(
     owner: usize,
     name: &str,
-    enclosing: &HashMap<usize, usize>,
-    module_scopes: &HashSet<usize>,
-    function_scopes: &HashSet<usize>,
-    scoped_symbols: &HashMap<usize, HashMap<String, Vec<usize>>>,
-    import_bindings: &HashMap<usize, HashSet<String>>,
+    call: (usize, usize),
+    scopes: ItemScopes<'_>,
 ) -> BareName {
+    let ItemScopes {
+        module_scopes,
+        function_scopes,
+        type_namespace_items,
+        item_extents,
+        scoped_symbols,
+        import_bindings,
+        enclosing,
+    } = scopes;
     let mut current = owner;
     // The file node is not an entity, so the walk ends where containment does.
     for _ in 0..64 {
@@ -372,7 +436,24 @@ fn enclosing_bare_name(
                 .get(&current)
                 .and_then(|names| names.get(name))
             {
-                return BareName::Declared(local_target(declared, module_scopes));
+                match local_target(
+                    declared,
+                    call,
+                    module_scopes,
+                    type_namespace_items,
+                    item_extents,
+                ) {
+                    LocalName::Value(index) => return BareName::Declared(Some(index)),
+                    // Only the type namespace spells the name here. A module
+                    // ends the walk; a function body does not, because the
+                    // outer scope's value namespace is still in view.
+                    LocalName::TypeOnly if module => return BareName::Declared(None),
+                    // Either only the type namespace spells the name here, or
+                    // the value item's block closed before this call site: this
+                    // scope's spelling is not the answer either way, so the
+                    // climb continues towards the module.
+                    LocalName::TypeOnly | LocalName::Hidden => {}
+                }
             }
             if module {
                 // The nearest module ends the walk: the items of the modules
@@ -397,6 +478,8 @@ struct InFileTables<'a> {
     scoped_symbols: &'a HashMap<usize, HashMap<String, Vec<usize>>>,
     module_scopes: &'a HashSet<usize>,
     function_scopes: &'a HashSet<usize>,
+    type_namespace_items: &'a HashSet<usize>,
+    item_extents: &'a HashMap<usize, ItemExtent>,
     import_bindings: &'a HashMap<usize, HashSet<String>>,
     file_symbols: &'a HashMap<String, Vec<usize>>,
     aliases: &'a HashMap<(usize, String), Vec<NameEdge>>,
@@ -415,6 +498,8 @@ fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> 
         scoped_symbols,
         module_scopes,
         function_scopes,
+        type_namespace_items,
+        item_extents,
         import_bindings,
         file_symbols,
         aliases,
@@ -470,7 +555,18 @@ fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> 
                     None => scoped_symbols
                         .get(&edge.owner_index)
                         .and_then(|locals| locals.get(&edge.ref_name))
-                        .and_then(|declared| local_target(declared, module_scopes))
+                        .and_then(|declared| {
+                            match local_target(
+                                declared,
+                                (edge.line, edge.column),
+                                module_scopes,
+                                type_namespace_items,
+                                item_extents,
+                            ) {
+                                LocalName::Value(index) => Some(index),
+                                LocalName::TypeOnly | LocalName::Hidden => None,
+                            }
+                        })
                         .or_else(|| {
                             // A parameter or an untyped local of that name in
                             // the owner's own body is the value the call
@@ -481,11 +577,16 @@ fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> 
                             match enclosing_bare_name(
                                 edge.owner_index,
                                 &edge.ref_name,
-                                enclosing,
-                                module_scopes,
-                                function_scopes,
-                                scoped_symbols,
-                                import_bindings,
+                                (edge.line, edge.column),
+                                ItemScopes {
+                                    module_scopes,
+                                    function_scopes,
+                                    type_namespace_items,
+                                    item_extents,
+                                    scoped_symbols,
+                                    import_bindings,
+                                    enclosing,
+                                },
                             ) {
                                 BareName::Declared(target) => target,
                                 BareName::Imported => None,

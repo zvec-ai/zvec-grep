@@ -1228,3 +1228,43 @@ async fn rust_glob_imports_respect_local_types_and_explicit_imports() {
         }).await;
     }
 }
+
+#[tokio::test]
+async fn review_type_namespace_item_must_not_steal_function_call() {
+    // `pub trait save` shares `save`'s spelling but not its namespace: a bare
+    // call names a value, so only the function may answer it.
+    check_case(Case {
+        name: "review_type_namespace_item_must_not_steal_function_call",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() {}\n    pub trait save {}\n    pub fn flush() { save(); }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::flush",
+            expected: json!([{"name":"m::flush","edges":[{"symbol":{"name":"m::save","startLine":2}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn review_nested_block_item_must_not_leak_into_sibling_item() {
+    // The `save` inside the block ends with that block; the sibling `inner`
+    // written after it reaches the module's own `save`, not that one.
+    check_case(Case {
+        name: "review_nested_block_item_must_not_leak_into_sibling_item",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() -> i32 { 1 }\n    pub fn outer() -> i32 {\n        { fn save() -> i32 { 2 } }\n        fn inner() -> i32 { save() }\n        inner()\n    }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "inner",
+            expected: json!([{"name":"m::outer::inner","edges":[{"symbol":{"name":"m::save","startLine":2}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}

@@ -137,6 +137,25 @@ struct BindingScope {
     end: Option<(usize, usize)>,
 }
 
+/// The block that directly contains one item, as a source span.
+///
+/// Rust scopes a block-level `fn` to the block that declares it: every body
+/// inside that block sees it, whatever its order, while a sibling item written
+/// after the block reaches the enclosing scope's spelling instead. Positions
+/// follow the collector's convention: one-based lines, zero-based columns.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ItemExtent {
+    start: (usize, usize),
+    end: (usize, usize),
+}
+
+impl ItemExtent {
+    /// True when the call site `(line, column)` falls inside the block.
+    pub(crate) fn contains(self, line: usize, column: usize) -> bool {
+        (line, column) >= self.start && (line, column) <= self.end
+    }
+}
+
 /// Mutable state carried through a single AST walk.
 #[derive(Debug)]
 pub(crate) struct WalkContext {
@@ -164,6 +183,15 @@ pub(crate) struct WalkContext {
     /// nested inside it (`fn outer() { fn save() {} fn inner() { save() } }`),
     /// so partition reads its table while climbing towards the module.
     function_scopes: HashSet<usize>,
+    /// Rust items that hold a spelling in the type namespace only (`trait
+    /// save`, `type save = ..`, `enum save`). A bare call names a value, so
+    /// such a spelling never answers it: beside `fn save` the function keeps
+    /// the call, and a spelling only the type namespace holds stays pending.
+    type_namespace_items: HashSet<usize>,
+    /// The block that directly contains each Rust item. A function's item
+    /// table is nearer than the module's, but only while the block that
+    /// declares the item is still open at the call site.
+    item_extents: HashMap<usize, ItemExtent>,
     /// Names a `use` declaration binds in the body that writes it. Rust scopes
     /// an import to that body, so a name a function imports is nearer than the
     /// module's item of the same name: `use crate::other::save;` inside `flush`
@@ -228,6 +256,8 @@ impl WalkContext {
             scoped_symbols: HashMap::new(),
             module_scopes: HashSet::new(),
             function_scopes: HashSet::new(),
+            type_namespace_items: HashSet::new(),
+            item_extents: HashMap::new(),
             import_bindings: HashMap::new(),
             shadowed_names: HashMap::new(),
             borrowed_names: HashMap::new(),
@@ -338,6 +368,32 @@ impl WalkContext {
             return;
         }
         self.function_scopes.insert(index);
+    }
+
+    /// Records that `index` is a Rust item the value namespace does not hold
+    /// (`trait save`, `type save = ..`, `enum save`). Rust keeps the type and
+    /// value namespaces apart, so such a spelling never takes a bare call away
+    /// from a same-named function.
+    pub(crate) fn register_type_namespace_item(&mut self, index: usize) {
+        if !self.collecting {
+            return;
+        }
+        self.type_namespace_items.insert(index);
+    }
+
+    /// Records the block that directly contains `index`. Item scopes read it
+    /// to tell an item still in scope at a call site from one whose block has
+    /// already ended before the call.
+    pub(crate) fn register_item_extent(
+        &mut self,
+        index: usize,
+        start: (usize, usize),
+        end: (usize, usize),
+    ) {
+        if !self.collecting {
+            return;
+        }
+        self.item_extents.insert(index, ItemExtent { start, end });
     }
 
     /// Records that a `use` declaration in `owner`'s body binds `name` there.
