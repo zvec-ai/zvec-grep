@@ -8,8 +8,8 @@ const STALE_NAME: i64 = 0;
 /// kinds: the table already carried this `kind` when inheritance evidence was
 /// added, and a wider `CHECK` would not reach an existing database.
 const STALE_STRUCTURE: i64 = 1;
-/// A file entered or left the indexed set, which can reorder the module paths
-/// an import specifier reads.
+/// Import targets can change when a file enters or leaves the indexed set,
+/// or when a Python package initializer changes its exports.
 const STRUCTURE_PATHS: &str = "";
 /// A file joined or left an inheritance chain, which changes the member a
 /// receiver call resolves to without changing any name it spells.

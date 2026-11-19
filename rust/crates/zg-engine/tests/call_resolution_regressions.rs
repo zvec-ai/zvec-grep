@@ -186,6 +186,102 @@ async fn python_annotations_follow_non_first_module_imports() {
 }
 
 #[tokio::test]
+async fn python_call_targets_follow_package_exports_and_submodules() {
+    let files = vec![
+        SourceFile {
+            path: "pkg/__init__.py",
+            source: "from .foo import Foo, Foo as Public\nfrom . import foo as sub\n",
+        },
+        SourceFile {
+            path: "pkg/foo.py",
+            source: "class Foo:\n    def m(self): pass\n",
+        },
+        SourceFile {
+            path: "other.py",
+            source: "class Foo:\n    def m(self): pass\n",
+        },
+        SourceFile {
+            path: "facade/__init__.py",
+            source: "from pkg import Public as Exposed\nfrom cycle import Missing\n",
+        },
+        SourceFile {
+            path: "cycle/__init__.py",
+            source: "from facade import Missing\n",
+        },
+        SourceFile {
+            path: "consumer.py",
+            source: "\
+from pkg import Foo, Public, sub
+from facade import Exposed, Missing
+from pkg import foo as mod
+def annotated(x: Public): return x.m()
+def ordinary(x: Foo): return x.m()
+def forwarded(x: Exposed): return x.m()
+def cyclic(x: Missing): return x.m()
+def relative_submodule(): return sub.Foo()
+def shadowed(mod): return mod.Foo()
+def shadowed_alias(Public): return Public()
+def qualified(x: mod.Foo): return x.m()
+def construct(): return mod.Foo()
+def construct_export(): return Public()
+def assigned():
+    x = mod.Foo()
+    return x.m()
+",
+        },
+    ];
+    let queries = [
+        ("callers", "Foo::m", "pkg/foo.py", json!([
+            {"symbol":{"name":"annotated"}}, {"symbol":{"name":"ordinary"}}, {"symbol":{"name":"forwarded"}}, {"symbol":{"name":"qualified"}}, {"symbol":{"name":"assigned"}}
+        ])),
+        ("callers", "Foo", "pkg/foo.py", json!([
+            {"symbol":{"name":"construct"}}, {"symbol":{"name":"construct_export"}}, {"symbol":{"name":"relative_submodule"}}, {"symbol":{"name":"assigned"}}
+        ])),
+        ("callers", "Foo::m", "other.py", json!([])),
+        ("callers", "Foo", "other.py", json!([])),
+    ].map(|(operation, symbol, file, edges)| Query {
+        operation, symbol, file: Some(file), expected: json!([{"name": symbol, "edges": edges}])
+    });
+    check_case(Case {
+        name: "python_call_targets_follow_package_exports_and_submodules",
+        files,
+        queries: queries.into(),
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn python_receiver_assignment_uses_the_last_recorded_binding() {
+    check_case(Case {
+        name: "python_receiver_assignment_uses_the_last_recorded_binding",
+        files: vec![SourceFile {
+            path: "example.py",
+            source: "\
+class Foo:
+    def m(self): pass
+def annotated(y: Foo):
+    y.m()
+    x = y
+    x.m()
+def conditional(c):
+    if c: x = Foo()
+    else: x = None
+    x.m()
+def subscript(x: Foo, values):
+    x = values[0]
+    x.m()
+",
+        }],
+        queries: vec![Query {
+            operation: "callers",
+            symbol: "Foo::m",
+            expected: json!([{"name": "Foo::m", "edges": [{"symbol":{"name":"annotated"},"line":4}]}]),
+            ..Query::default()
+        }],
+    }).await;
+}
+
+#[tokio::test]
 async fn python_annotation_dependencies_refresh_like_a_rebuild() {
     let directory = tempfile::tempdir().expect("source workspace");
     let root = directory.path().canonicalize().expect("canonical root");
@@ -201,7 +297,9 @@ async fn python_annotation_dependencies_refresh_like_a_rebuild() {
         (1, Some("Second")),
         (2, None),
         (3, Some("First")),
-        (4, Some("Second")),
+        (4, Some("First")),
+        (5, Some("Second")),
+        (6, Some("Second")),
     ] {
         match step {
             0 => fs::write(
@@ -219,6 +317,8 @@ async fn python_annotation_dependencies_refresh_like_a_rebuild() {
                 &package,
                 "from bases import First\nclass Index(First): pass\n",
             ),
+            4 => fs::write(&package, "from bases import First as Index\n"),
+            5 => fs::write(&package, "from bases import Second as Index\n"),
             _ => fs::remove_file(&package),
         }
         .expect("change dependency");
@@ -230,7 +330,7 @@ async fn python_annotation_dependencies_refresh_like_a_rebuild() {
             if !options.rebuild {
                 options.changes = vec![match step {
                     1 => WorkspaceChange::Upsert("contracts.py".into()),
-                    4 => WorkspaceChange::Delete("contracts/__init__.py".into()),
+                    6 => WorkspaceChange::Delete("contracts/__init__.py".into()),
                     _ => WorkspaceChange::Upsert("contracts/__init__.py".into()),
                 }];
             }

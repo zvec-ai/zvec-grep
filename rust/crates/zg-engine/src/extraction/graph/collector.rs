@@ -2999,6 +2999,14 @@ pub(crate) fn collect_import_edge(
         return;
     }
     let owner = if format == FileFormat::Python {
+        let mut cursor = node.walk();
+        for entry in node.children_by_field_name("name", &mut cursor) {
+            let local = entry.child_by_field_name("alias").unwrap_or(entry);
+            // Plain `import a.b` binds the root package.
+            if let Some(root) = node_text(local, source).split('.').next() {
+                context.python_import_names.insert(root.to_owned());
+            }
+        }
         context.current_scope_index().unwrap_or(FILE_SCOPE_INDEX)
     } else {
         FILE_SCOPE_INDEX

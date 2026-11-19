@@ -407,6 +407,12 @@ fn classify(
         // later bare-name resolution. Defer instead.
         return Ok(Outcome::Deferred);
     }
+    if let Some(resolution) = python_types::imported_constructor(store, snapshot, stored, caches)? {
+        return Ok(Outcome::Resolved {
+            resolution,
+            rule: Rule::ImportBound,
+        });
+    }
     if let Some(resolution) = resolve_alias_bound(store, snapshot, stored, caches)? {
         // An `as` alias never names an indexed symbol itself, so the bare-name
         // lookup below would only park the call; the alias binding pins its

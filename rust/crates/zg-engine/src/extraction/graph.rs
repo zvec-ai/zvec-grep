@@ -161,6 +161,8 @@ pub(crate) struct WalkContext {
     /// spell. A bare call through such a name reaches the local value, never
     /// the file-level symbol of the same name.
     shadowed_names: HashMap<usize, HashSet<String>>,
+    /// Names introduced by explicit Python imports, including aliases.
+    python_import_names: HashSet<String>,
     /// Names a class body imports from another scope (`using First<T>::Run;`).
     /// A bare call of such a name inside that class reaches the imported
     /// member, so the file's own namesake cannot answer it.
@@ -214,6 +216,7 @@ impl WalkContext {
             file_symbols: HashMap::new(),
             scoped_symbols: HashMap::new(),
             shadowed_names: HashMap::new(),
+            python_import_names: HashSet::new(),
             borrowed_names: HashMap::new(),
             value_aliases: HashMap::new(),
             seen_name_edges: HashSet::new(),
