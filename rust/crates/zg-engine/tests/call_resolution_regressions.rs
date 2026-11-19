@@ -1353,3 +1353,43 @@ async fn followup_innermost_block_wins_regardless_of_declaration_order() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn review3_impl_block_must_not_steal_function_call() {
+    // `impl save` names the type it implements and is a scope, not a value, so
+    // the bare `save()` reaches the function declared beside it.
+    check_case(Case {
+        name: "review3_impl_block_must_not_steal_function_call",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() -> i32 { 1 }\n    pub struct save { pub value: i32 }\n    impl save {\n        pub fn value(&self) -> i32 { self.value }\n    }\n    pub fn flush() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::flush",
+            expected: json!([{"name":"m::flush","edges":[{"symbol":{"name":"m::save","startLine":2}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn review3_union_must_not_steal_function_call() {
+    // A union declares a type and no constructor, so its spelling lives in the
+    // type namespace and never answers a bare call.
+    check_case(Case {
+        name: "review3_union_must_not_steal_function_call",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() -> i32 { 1 }\n    pub union save { pub value: i32 }\n    pub fn flush() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::flush",
+            expected: json!([{"name":"m::flush","edges":[{"symbol":{"name":"m::save","startLine":2}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
