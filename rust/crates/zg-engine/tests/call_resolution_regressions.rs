@@ -1281,3 +1281,90 @@ async fn python_bare_parameter_does_not_read_the_class_member() {
     })
     .await;
 }
+
+// A member a body writes with a value the index cannot place no longer holds
+// what an earlier write stated, so the call through it stays undecided instead
+// of answering with the type the constructor's first line named.
+#[tokio::test]
+async fn python_unknown_member_write_invalidates_the_earlier_type() {
+    check_case(Case {
+        name: "python_unknown_member_write_invalidates_the_earlier_type",
+        files: vec![SourceFile {
+            path: "use.py",
+            source: "class Left:\n    def work(self):\n        return 'left'\n\nclass Right:\n    def work(self):\n        return 'right'\n\nclass Runner:\n    def __init__(self, client):\n        self.client = Left()\n        self.client = client\n\n    def run(self):\n        return self.client.work()\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "Runner::run",
+            expected: json!([{"name": "Runner::run", "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// `client: Left` states the parameter, and `client = clients[0]` takes it back:
+// the element a container holds is not the annotated type.
+#[tokio::test]
+async fn python_parameter_reassignment_invalidates_its_annotation() {
+    check_case(Case {
+        name: "python_parameter_reassignment_invalidates_its_annotation",
+        files: vec![SourceFile {
+            path: "use.py",
+            source: "class Left:\n    def work(self):\n        return 'left'\n\nclass Right:\n    def work(self):\n        return 'right'\n\ndef run(client: Left, clients):\n    client = clients[0]\n    return client.work()\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "run",
+            expected: json!([{"name": "run", "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// A union arm the reader cannot name (`right.Right` is a module) is no evidence
+// that the arm it can name is the only shape the value takes.
+#[tokio::test]
+async fn python_union_with_an_unreadable_arm_stays_undecided() {
+    check_case(Case {
+        name: "python_union_with_an_unreadable_arm_stays_undecided",
+        files: vec![
+            SourceFile {
+                path: "right.py",
+                source: "class Right:\n    def send(self):\n        return 'right'\n",
+            },
+            SourceFile {
+                path: "use.py",
+                source: "import right\nclass Left:\n    def send(self):\n        return 'left'\n\ndef run(client: Left | right.Right):\n    return client.send()\n",
+            },
+        ],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "run",
+            expected: json!([{"name": "run", "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// A subclass that writes the member without stating one type decides its own
+// answer; the base's member of the same name is a different declaration.
+#[tokio::test]
+async fn python_ambiguous_member_write_does_not_fall_back_to_a_base() {
+    check_case(Case {
+        name: "python_ambiguous_member_write_does_not_fall_back_to_a_base",
+        files: vec![SourceFile {
+            path: "use.py",
+            source: "class Left:\n    def work(self):\n        return 'left'\n\nclass Right:\n    def work(self):\n        return 'right'\n\nclass Other:\n    def work(self):\n        return 'other'\n\nclass Base:\n    def __init__(self):\n        self.client = Left()\n\nclass Child(Base):\n    def __init__(self):\n        self.client = Right()\n\n    def switch(self):\n        self.client = Other()\n\n    def run(self):\n        return self.client.work()\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "Child::run",
+            expected: json!([{"name": "Child::run", "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
