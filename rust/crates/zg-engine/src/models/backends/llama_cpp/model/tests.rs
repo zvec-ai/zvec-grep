@@ -82,6 +82,15 @@ fn user_concurrency_controls_cpu_threads_per_context() {
 }
 
 #[test]
+fn threads_override_accepts_only_positive_integers() {
+    assert_eq!(threads_override(Some("2")), Some(2));
+    assert_eq!(threads_override(Some(" 3 ")), Some(3));
+    for ignored in [None, Some(""), Some("0"), Some("two")] {
+        assert_eq!(threads_override(ignored), None);
+    }
+}
+
+#[test]
 fn context_pool_honors_user_limit_and_caps_at_eight() {
     assert_eq!(physical_context_worker_limit(true, 1), 1);
     assert_eq!(physical_context_worker_limit(true, 2), 2);
