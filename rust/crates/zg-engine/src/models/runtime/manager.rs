@@ -254,17 +254,9 @@ impl ModelRuntimeManager {
                 )
             }));
         }
-        let llama = if is_llama(&reference) {
-            let resources = state.server_llama.clone().unwrap_or_else(|| {
-                self.inner
-                    .llama_settings
-                    .resources(embedding_concurrency.unwrap_or(1))
-            });
-            key.llama_contexts = Some(resources.contexts);
-            Some(resources)
-        } else {
-            None
-        };
+        let llama =
+            is_llama(&reference).then(|| self.inner.llama_resources(&state, embedding_concurrency));
+        key.llama_contexts = llama.as_ref().map(|resources| resources.contexts);
         self.inner.start_maintenance(&mut state)?;
         retired.extend(state.retire_idle(self.inner.policy, Instant::now()));
 
@@ -432,6 +424,17 @@ impl ManagerState {
 }
 
 impl ManagerInner {
+    fn llama_resources(
+        &self,
+        state: &ManagerState,
+        requested: Option<usize>,
+    ) -> Arc<LlamaResources> {
+        state
+            .server_llama
+            .clone()
+            .unwrap_or_else(|| self.llama_settings.resources(requested.unwrap_or(1)))
+    }
+
     fn start_maintenance(self: &Arc<Self>, state: &mut ManagerState) -> Result<(), ModelError> {
         if state.maintenance.is_none() {
             let (sender, receiver) = mpsc::sync_channel(1);

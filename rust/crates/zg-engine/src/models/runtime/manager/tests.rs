@@ -1426,11 +1426,13 @@ fn llama_server_caps_requests_reuses_runtimes_and_shares_capacity_across_models(
         let recorded = Arc::clone(&recorded);
         move |reference, options, compute, sessions, llama| {
             let resources = Arc::clone(llama.as_ref().expect("llama resource configuration"));
-            recorded.lock().unwrap().push(resources);
+            recorded.lock().expect("recorded resources").push(resources);
             create_embedding_model(reference, Some(options), compute, sessions, llama)
         }
     });
-    Arc::get_mut(&mut manager.inner).unwrap().llama_settings = LlamaSettings {
+    Arc::get_mut(&mut manager.inner)
+        .expect("unshared manager")
+        .llama_settings = LlamaSettings {
         server_contexts: 4,
         threads: None,
         hardware_threads: 16,
@@ -1463,7 +1465,7 @@ fn llama_server_caps_requests_reuses_runtimes_and_shares_capacity_across_models(
             retained.push(first);
         }
     }
-    let resources = recorded.lock().unwrap();
+    let resources = recorded.lock().expect("recorded resources");
     assert_eq!(resources.len(), 4);
     for other in resources.iter() {
         assert!(Arc::ptr_eq(&resources[0], other));

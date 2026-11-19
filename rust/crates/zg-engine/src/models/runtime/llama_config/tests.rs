@@ -41,7 +41,7 @@ fn shared_slots_release_on_success_error_and_unwind() {
     let other_model = Arc::clone(&resources);
     let first = resources.acquire(None).expect("first model");
     let second = other_model.acquire(None).expect("second model");
-    assert_eq!(*resources.in_flight.lock().unwrap(), 2);
+    assert_eq!(*resources.in_flight.lock().expect("slot counter"), 2);
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     assert!(resources.acquire(Some(&cancelled)).is_err());
@@ -51,40 +51,44 @@ fn shared_slots_release_on_success_error_and_unwind() {
         Err(ModelError::internal("fixture failure"))
     })();
     assert!(result.is_err());
-    assert_eq!(*resources.in_flight.lock().unwrap(), 1);
+    assert_eq!(*resources.in_flight.lock().expect("slot counter"), 1);
     assert!(
         std::panic::catch_unwind(|| {
-            let _slot = resources.acquire(None).unwrap();
+            let _slot = resources.acquire(None).expect("available slot");
             panic!("fixture unwind");
         })
         .is_err()
     );
-    assert_eq!(*resources.in_flight.lock().unwrap(), 1);
+    assert_eq!(*resources.in_flight.lock().expect("slot counter"), 1);
     drop(second);
-    assert_eq!(*resources.in_flight.lock().unwrap(), 0);
+    assert_eq!(*resources.in_flight.lock().expect("slot counter"), 0);
 }
 
 #[test]
 fn cancelled_waiter_does_not_consume_a_slot() {
     let resources = settings(8, None).resources(1);
-    let occupied = resources.acquire(None).unwrap();
+    let occupied = resources.acquire(None).expect("available slot");
     let signal = CancellationToken::new();
     let (ready, waiting) = std::sync::mpsc::channel();
     std::thread::scope(|scope| {
         let resources = Arc::clone(&resources);
         let token = signal.clone();
         let waiter = scope.spawn(move || {
-            ready.send(()).unwrap();
+            ready.send(()).expect("waiting receiver");
             resources.acquire(Some(&token)).map(|_| ())
         });
-        waiting.recv().unwrap();
+        waiting.recv().expect("waiter started");
         signal.cancel();
         assert_eq!(
-            waiter.join().unwrap().unwrap_err().code(),
+            waiter
+                .join()
+                .expect("waiter thread")
+                .expect_err("cancelled waiter")
+                .code(),
             crate::EngineError::CANCELLED
         );
     });
-    assert_eq!(*resources.in_flight.lock().unwrap(), 1);
+    assert_eq!(*resources.in_flight.lock().expect("slot counter"), 1);
     drop(occupied);
     assert!(resources.acquire(None).is_ok());
 }
