@@ -540,7 +540,7 @@ assert command[command.index("-S") + 1] == str(source)
   inspect(String.raw`
 records = fallback.cargo_records(messages)
 build = next(r for r in records if r.get("reason") == "build-script-executed")
-output = pathlib.Path(build["out_dir"]).parent / "output"
+output = fallback.build_output(build)
 original = output.read_text(encoding="utf-8")
 def reject(expected):
     try:
