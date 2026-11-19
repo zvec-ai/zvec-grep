@@ -92,8 +92,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: retrieval-stage-trace
+          name: retrieval-trace.html
           path: ${{ runner.temp }}/retrieval-comparison/retrieval-trace.html
+          archive: false
           if-no-files-found: warn
           overwrite: true
           retention-days: 14

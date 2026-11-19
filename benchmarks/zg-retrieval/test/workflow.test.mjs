@@ -191,10 +191,11 @@ test("version comparison keeps artifact namespaces separate and uses local model
     /retrieval-trace\.html|path:.*retrieval-comparison\/$/m,
   );
   const trace = uploads.find((entry) =>
-    /name: retrieval-stage-trace\n/.test(entry),
+    /name: retrieval-trace\.html\n/.test(entry),
   );
   assert.match(trace, /if: always\(\)/);
   assert.match(trace, /path:.*retrieval-comparison\/retrieval-trace\.html/);
+  assert.match(trace, /^\s+archive: false$/m);
   assert.match(trace, /retention-days: 14/);
   assert.match(trace, /if-no-files-found: warn/);
   assert.match(workflow, /retrieval-results\/reports\//);

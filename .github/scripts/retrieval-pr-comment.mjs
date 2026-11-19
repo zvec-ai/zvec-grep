@@ -555,7 +555,7 @@ export async function publish({ github, context, core, directory }) {
       // Build the URL from GitHub metadata, never artifact-provided Markdown or URLs.
       traceArtifactId = artifacts.find(
         (artifact) =>
-          artifact.name === "retrieval-stage-trace" &&
+          artifact.name === "retrieval-trace.html" &&
           artifact.expired === false &&
           positiveInteger(artifact.id) &&
           artifact.workflow_run?.id === run.id &&

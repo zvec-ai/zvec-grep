@@ -141,7 +141,7 @@ JSON and full reports, separate from QA Gold.
 ## Reports and artifacts
 
 - `retrieval-results`: the unified `summary.md` and machine-readable `summary.json`.
-- `retrieval-stage-trace`: paired runs publish a standalone `retrieval-trace.html`. Download the ZIP from the PR comment or Actions artifacts, extract it, and open the HTML locally; no server or external assets are required.
+- `retrieval-trace.html`: paired runs upload the standalone HTML directly, without a ZIP. Download it from the PR comment or Actions artifacts and open it locally; no server or external assets are required.
 - `retrieval-zg-report`: the SWE-QA20 suite conclusion (`summary.json` and `summary.md`), validated `report.json`, `report.md` and per-call `scores.jsonl`.
 - `retrieval-zg-evidence`: raw public requests/responses, installation evidence, corpus/model inventories and public index status for all 11 repositories.
 - `retrieval-beir-report`, `retrieval-duretrieval-report` and `retrieval-quarry-report`: independent pilot summaries with BEIR dataset and Quarry language coverage and scores.

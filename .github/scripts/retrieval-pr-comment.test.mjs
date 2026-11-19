@@ -258,13 +258,19 @@ test("the publisher labels validated full preview without relabeling historical 
 
 const traceArtifact = {
   id: 456,
-  name: "retrieval-stage-trace",
+  name: "retrieval-trace.html",
   expired: false,
   workflow_run: { id: 123, head_sha: head },
 };
 
 test("the publisher links the triggering run's HTML artifact using only GitHub metadata", async (t) => {
   const x = await fixture(t);
+  // Older runs uploaded a ZIP under this name; never select it as direct HTML.
+  x.artifacts.push({
+    ...traceArtifact,
+    id: 455,
+    name: "retrieval-stage-trace",
+  });
   x.artifacts.push({
     ...traceArtifact,
     archive_download_url: "https://untrusted.example/trace.html",
@@ -281,6 +287,7 @@ test("the publisher links the triggering run's HTML artifact using only GitHub m
     /\[Download stage trace \(HTML\)\]\(https:\/\/github\.com\/Cuiyus\/zvec-grep\/actions\/runs\/123\/artifacts\/456\)/,
   );
   assert.doesNotMatch(body, /untrusted\.example|Gold coverage by stage/);
+  assert.doesNotMatch(body, /\/artifacts\/455/);
 });
 
 test("missing, expired, unrelated or invalid trace artifacts never produce a download link", async (t) => {
@@ -288,6 +295,7 @@ test("missing, expired, unrelated or invalid trace artifacts never produce a dow
     null,
     { ...traceArtifact, expired: true },
     { ...traceArtifact, name: "retrieval-comparison" },
+    { ...traceArtifact, name: "retrieval-stage-trace" },
     { ...traceArtifact, id: "456" },
     { ...traceArtifact, id: 0 },
     { ...traceArtifact, id: 1.5 },
