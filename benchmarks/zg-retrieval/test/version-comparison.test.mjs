@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,7 @@ import {
   compareCombinedResults,
   compareRuns,
   markdownVersionComparison,
+  readComparisonInput,
 } from "../expansion/compare.mjs";
 import { QUALITY_METRICS } from "../reports/ci.mjs";
 import { goldStagesMarkdown } from "../reports/gold-stages.mjs";
@@ -182,7 +183,7 @@ test("indexed corpus counts compare once per suite and preserve unknown totals",
   assert.throws(() => compareCombinedResults(before, after, metadata));
 });
 
-test("comparison carries both stage summaries and renders equal, increased and decreased coverage", () => {
+test("comparison retains stage evidence but links HTML instead of rendering stage tables", () => {
   const before = result(baseSha);
   const after = result(headSha);
   const summary = {
@@ -223,40 +224,19 @@ test("comparison carries both stage summaries and renders equal, increased and d
     comparison.candidate_gold_stages.sweqa,
     after.sweqa.gold_stages,
   );
-  const markdown = markdownVersionComparison(comparison);
-  assert.deepEqual(
-    [
-      ...markdown.matchAll(
-        /<details>\n<summary>([^<]+): Gold coverage by stage \(baseline → candidate\)<\/summary>/g,
-      ),
-    ].map((match) => match[1]),
-    [
-      "SWE-QA20",
-      ...PILOT_NAMES.map((name) => PILOT_SUITES[name].report.comparison),
-    ],
-  );
-  assert.match(markdown, /\| Gold covered by index \| N\/A \| N\/A \| 5\/5 \|/);
-  assert.match(
-    markdown,
-    /\| Before rule ranking \(RRF\) \| N\/A \| N\/A \| 3\/5 → 4\/5 \|/,
-  );
-  assert.match(
-    markdown,
-    /\| After rule ranking \(actual\) \| N\/A \| N\/A \| 5\/5 → 2\/5 \|/,
-  );
-  assert.match(
-    markdown,
-    /\| Before rule ranking \(RRF\) \| N\/A \| N\/A \| 3\/5 \|/,
-  );
+  const traceUrl = "https://github.com/upstream/zg/actions/runs/1/artifacts/2";
+  const markdown = markdownVersionComparison(comparison, { traceUrl });
+  assert.ok(markdown.includes(`[Download stage trace (HTML)](${traceUrl})`));
+  assert.equal((markdown.match(/Download stage trace/g) ?? []).length, 1);
   assert.doesNotMatch(
     markdown,
-    /Same-file decay|Rule ranking (?:off|on)|Top ?10 (?:before|after) rule ranking/,
+    /Gold coverage by stage|Gold covered by index|Before rule ranking|After rule ranking|Stage capture/,
   );
-  assert.doesNotMatch(markdown, /Stage capture incomplete/);
   assert.doesNotMatch(
-    goldStagesMarkdown(summary).join("\n"),
-    /Stage capture incomplete/,
+    markdownVersionComparison(comparison),
+    /Download stage trace/,
   );
+  assert.equal((markdown.match(/^\| Mode \| Level \|/gm) ?? []).length, 4);
 
   const legacy = structuredClone(summary);
   const stages = legacy.groups[0].stages;
@@ -323,18 +303,13 @@ test("fractional stage means compare without changing quality rows or target tot
   assert.equal(comparison.status, "success");
   assert.equal(comparison.baseline_gold_stages.sweqa.calls, 5);
   assert.equal(comparison.baseline_gold_stages.sweqa.groups[0].targets, 2);
-  const markdown = markdownVersionComparison(comparison);
-  assert.match(
-    markdown,
-    /\| Gold recalled by FTS \| N\/A \| — \| 0\.2\/2 \(0\.4 unknown\) \|/,
+  assert.deepEqual(
+    comparison.candidate_gold_stages.sweqa,
+    after.sweqa.gold_stages,
   );
-  assert.match(
-    markdown,
-    /\| Before rule ranking \(RRF\) \| N\/A \| N\/A \| 1\.2\/2 → 1\.4\/2 \|/,
-  );
-  assert.match(
-    markdown,
-    /\| After rule ranking \(actual\) \| N\/A \| N\/A \| 0\.6\/2 \(0\.2 unknown\) → 0\.8\/2 \(0\.2 unknown\) \|/,
+  assert.doesNotMatch(
+    markdownVersionComparison(comparison),
+    /Gold recalled by|Before rule ranking|After rule ranking/,
   );
 });
 
@@ -365,18 +340,13 @@ test("baseline-only stage evidence remains visible without borrowing candidate v
   const comparison = compareCombinedResults(before, after, metadata);
   assert.deepEqual(comparison.rows, quality.rows);
   assert.equal(comparison.candidate_gold_stages, undefined);
-  const markdown = markdownVersionComparison(comparison);
-  assert.match(
-    markdown,
-    /BEIR: Gold coverage by stage \(baseline → candidate\)/,
+  assert.deepEqual(
+    comparison.baseline_gold_stages.beir,
+    before.pilots.beir.report.gold_stages,
   );
-  assert.match(
-    markdown,
-    /\| Gold recalled by FTS \| 3\/5 → N\/A \| — \| N\/A \|/,
-  );
-  assert.match(
-    markdown,
-    /\*\*BEIR \/ Candidate\*\*: ⚠️ Stage capture unavailable/,
+  assert.doesNotMatch(
+    markdownVersionComparison(comparison),
+    /Gold coverage by stage|Stage capture/,
   );
 });
 
@@ -384,7 +354,7 @@ for (const [label, invalid, unobserved] of [
   ["unobserved", 0, 5],
   ["invalid", 5, 0],
 ]) {
-  test(`all ${label} captures warn outside the collapsed tables without invalidating quality`, () => {
+  test(`all ${label} captures stay in trace evidence without invalidating quality`, () => {
     const before = result(baseSha);
     const after = result(headSha);
     const quality = compareCombinedResults(before, after, metadata);
@@ -414,16 +384,10 @@ for (const [label, invalid, unobserved] of [
     assert.deepEqual(comparison.errors, []);
     assert.deepEqual(comparison.rows, quality.rows);
     const markdown = markdownVersionComparison(comparison);
-    const visible = markdown.replace(/<details>[\s\S]*?<\/details>/g, "");
     const warning = `⚠️ Stage capture incomplete: **0/5** verified, **${invalid}** invalid, **${unobserved}** unobserved.`;
-    assert.match(visible, /✅ Complete/);
-    assert.ok(visible.includes(`**SWE-QA20 / Candidate**: ${warning}`));
-    assert.match(
-      visible,
-      /\*\*SWE-QA20 \/ Baseline\*\*: ⚠️ Stage capture unavailable/,
-    );
-    assert.equal(markdown.split("Stage capture incomplete").length, 2);
-    assert.match(markdown, /\| Gold recalled by FTS \| N\/A \| — \| N\/A \|/);
+    assert.match(markdown, /✅ Complete/);
+    assert.doesNotMatch(markdown, /Stage capture|Gold recalled by/);
+    assert.deepEqual(comparison.candidate_gold_stages.sweqa, summary);
     const report = goldStagesMarkdown(summary).join("\n");
     assert.ok(report.includes(warning));
     assert.match(report, /Unverified stage coverage is unknown/);
@@ -452,10 +416,7 @@ test("a newly registered suite retains stage coverage and its trusted report tit
     assert.deepEqual(comparison.candidate_gold_stages[name], summary);
     const markdown = extended.markdownVersionComparison(comparison);
     assert.match(markdown, /^### New pilot$/m);
-    assert.match(
-      markdown,
-      /<summary>New pilot: Gold coverage by stage \(baseline → candidate\)<\/summary>/,
-    );
+    assert.doesNotMatch(markdown, /Gold coverage by stage/);
   } finally {
     PILOT_NAMES.pop();
     delete PILOT_SUITES[name];
@@ -738,6 +699,118 @@ test("missing artifacts still produce an explicitly incomplete comment report wi
     await readFile(join(directory, "summary.md"), "utf8"),
     /Missing or invalid results are not zero scores/,
   );
+  assert.match(
+    await readFile(join(directory, "retrieval-trace.html"), "utf8"),
+    /Comparison incomplete/,
+  );
+});
+
+test("combined artifacts retain per-call trace sidecars and tolerate older artifacts", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "zg-trace-artifacts-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const args = [];
+  const evidence = {
+    summary: { version: 2 },
+    calls: [{ task_id: "original", repetition: 5 }],
+  };
+  for (const name of ["zg", ...PILOT_NAMES]) {
+    const source = join(directory, name);
+    await mkdir(source);
+    await writeFile(join(source, "report.json"), "null\n");
+    if (name === "zg")
+      await writeFile(
+        join(source, "gold-stages.json"),
+        JSON.stringify(evidence),
+      );
+    args.push(`--${name}`, join(source, "report.json"));
+  }
+  const output = join(directory, "combined");
+  const child = spawnSync(
+    globalThis.process.execPath,
+    [
+      fileURLToPath(new URL("../expansion/combined.mjs", import.meta.url)),
+      ...args,
+      "--output",
+      output,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(child.status, 1, child.stderr); // Intentionally missing quality reports.
+  const read = await readComparisonInput(output);
+  assert.deepEqual(read.traces.zg, evidence);
+  assert.equal(read.traces.beir, null);
+  assert.equal(read.summary.status, "failed");
+  await writeFile(join(output, "reports", "beir-gold-stages.json"), "{");
+  const malformed = await readComparisonInput(output);
+  assert.ok(malformed.traces.beir.error);
+  assert.deepEqual(malformed.summary, read.summary);
+  await rm(join(directory, "zg", "gold-stages.json"));
+  const repeated = spawnSync(
+    globalThis.process.execPath,
+    [
+      fileURLToPath(new URL("../expansion/combined.mjs", import.meta.url)),
+      ...args,
+      "--output",
+      output,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(repeated.status, 1, repeated.stderr);
+  assert.equal((await readComparisonInput(output)).traces.zg, null);
+});
+
+test("rejected artifact identity cannot attribute stage evidence to the requested commits", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "zg-trace-identity-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const input = join(directory, "input");
+  await mkdir(join(input, "reports"), { recursive: true });
+  const summary = result(headSha);
+  summary.sweqa.gold_stages = {
+    version: 2,
+    calls: 5,
+    observed_calls: 5,
+    invalid_calls: 0,
+    groups: [],
+  };
+  await writeFile(join(input, "summary.json"), JSON.stringify(summary));
+  for (const name of ["zg", ...PILOT_NAMES])
+    await writeFile(join(input, "reports", `${name}.json`), "null\n");
+  const child = spawnSync(
+    globalThis.process.execPath,
+    [
+      fileURLToPath(new URL("../expansion/compare.mjs", import.meta.url)),
+      "--baseline",
+      input,
+      "--candidate",
+      input,
+      "--output",
+      directory,
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        ...globalThis.process.env,
+        RETRIEVAL_BASELINE_REPOSITORY: metadata.baseline.repository,
+        RETRIEVAL_BASELINE_COMMIT: baseSha,
+        RETRIEVAL_CANDIDATE_REPOSITORY: metadata.candidate.repository,
+        RETRIEVAL_CANDIDATE_COMMIT: headSha,
+      },
+    },
+  );
+  assert.equal(child.status, 1, child.stderr);
+  const comparison = JSON.parse(
+    await readFile(join(directory, "summary.json"), "utf8"),
+  );
+  assert.match(comparison.errors[0], /wrong artifact commit/);
+  const html = await readFile(join(directory, "retrieval-trace.html"), "utf8");
+  const data = JSON.parse(
+    html.match(
+      /<script type="application\/json" id="trace-data">([\s\S]*?)<\/script>/,
+    )[1],
+  );
+  for (const suite of data.suites)
+    for (const side of ["baseline", "candidate"])
+      assert.equal(suite[side].summary, null);
 });
 
 test("paired pilot reports render added scores only under the same Gold and scoring rules", () => {

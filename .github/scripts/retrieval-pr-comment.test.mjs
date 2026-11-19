@@ -134,12 +134,14 @@ async function fixture(t) {
   };
   const calls = [],
     comments = [],
+    artifacts = [],
     info = [];
   let prReads = 0;
-  const x = { context, directory, run, pr, calls, comments, info };
+  const x = { context, directory, run, pr, calls, comments, artifacts, info };
   x.github = {
     rest: {
       actions: {
+        listWorkflowRunArtifacts() {},
         async getWorkflowRun(input) {
           assert.equal(input.run_id, 123);
           return { data: run };
@@ -173,8 +175,16 @@ async function fixture(t) {
         },
       },
     },
-    async paginate(_method, input) {
+    async paginate(method, input) {
       calls.push(["list", input]);
+      if (method === x.github.rest.actions.listWorkflowRunArtifacts) {
+        assert.equal(input.run_id, run.id);
+        assert.equal(input.owner, context.repo.owner);
+        assert.equal(input.repo, context.repo.repo);
+        if (x.artifactError) throw x.artifactError;
+        return artifacts;
+      }
+      assert.equal(method, x.github.rest.issues.listComments);
       return comments;
     },
   };
@@ -246,7 +256,67 @@ test("the publisher labels validated full preview without relabeling historical 
     );
 });
 
-test("the publisher renders equal baseline and candidate Gold coverage once in a collapsed section", async (t) => {
+const traceArtifact = {
+  id: 456,
+  name: "retrieval-stage-trace",
+  expired: false,
+  workflow_run: { id: 123, head_sha: head },
+};
+
+test("the publisher links the triggering run's HTML artifact using only GitHub metadata", async (t) => {
+  const x = await fixture(t);
+  x.artifacts.push({
+    ...traceArtifact,
+    archive_download_url: "https://untrusted.example/trace.html",
+  });
+  await x.write("comparison/summary.json", {
+    ...report,
+    trace_url: "https://untrusted.example/report.html",
+    traceArtifactId: "[untrusted](https://untrusted.example)",
+  });
+  await publish(x);
+  const { body } = x.messages()[0][1];
+  assert.match(
+    body,
+    /\[Download stage trace \(HTML\)\]\(https:\/\/github\.com\/Cuiyus\/zvec-grep\/actions\/runs\/123\/artifacts\/456\)/,
+  );
+  assert.doesNotMatch(body, /untrusted\.example|Gold coverage by stage/);
+});
+
+test("missing, expired, unrelated or invalid trace artifacts never produce a download link", async (t) => {
+  for (const artifact of [
+    null,
+    { ...traceArtifact, expired: true },
+    { ...traceArtifact, name: "retrieval-comparison" },
+    { ...traceArtifact, id: "456" },
+    { ...traceArtifact, id: 0 },
+    { ...traceArtifact, id: 1.5 },
+    { ...traceArtifact, id: Number.MAX_SAFE_INTEGER + 1 },
+    { ...traceArtifact, workflow_run: { id: 122, head_sha: head } },
+    { ...traceArtifact, workflow_run: { id: 123, head_sha: base } },
+    { ...traceArtifact, workflow_run: undefined },
+  ]) {
+    const x = await fixture(t);
+    if (artifact) x.artifacts.push(artifact);
+    await publish(x);
+    const { body } = x.messages()[0][1];
+    assert.match(body, /✅ Complete/);
+    assert.doesNotMatch(body, /Download stage trace|\/artifacts\/456/);
+  }
+});
+
+test("an unavailable artifact listing preserves the validated quality comment", async (t) => {
+  const x = await fixture(t);
+  x.artifactError = new Error("artifact API unavailable");
+  await publish(x);
+  assert.match(x.messages()[0][1].body, /✅ Complete/);
+  assert.doesNotMatch(x.messages()[0][1].body, /Download stage trace/);
+  assert.ok(
+    x.info.some((message) => message.includes("omitting its download link")),
+  );
+});
+
+test("the publisher validates Gold coverage but leaves stage tables and warnings in the HTML", async (t) => {
   const x = await fixture(t);
   const stageSummary = {
     version: 2,
@@ -279,37 +349,11 @@ test("the publisher renders equal baseline and candidate Gold coverage once in a
   await x.write("comparison/summary.json", payload);
   await publish(x);
   const { body } = x.messages()[0][1];
-  assert.equal((body.match(/<details>/g) ?? []).length, 4);
-  assert.equal((body.match(/#### (File|Entity) Gold/g) ?? []).length, 8);
-  const [coverage] = body.match(
-    /<details>\n<summary>Quarry: Gold coverage by stage \(baseline → candidate\)<\/summary>[\s\S]*?<\/details>/,
-  );
-  assert.match(coverage, /#### File Gold/);
-  assert.match(coverage, /#### Entity Gold/);
-  assert.match(
-    coverage,
-    /\| Gold recalled by FTS \| 4\/5 \(1 unknown\) \| — \| N\/A \|/,
-  );
-  assert.match(
-    coverage,
-    /\| Before rule ranking \(RRF\) \| 2\/5 \| N\/A \| N\/A \|/,
-  );
-  assert.match(
-    coverage,
-    /\| After rule ranking \(actual\) \| N\/A \| N\/A \| N\/A \|/,
-  );
+  assert.match(body, /✅ Complete/);
   assert.doesNotMatch(
-    coverage,
-    /Top ?10|Same-file decay|Rule ranking (?:off|on)/,
+    body,
+    /<details>|Gold coverage by stage|#### (File|Entity) Gold|Before rule ranking|After rule ranking|Stage capture incomplete/,
   );
-  for (const side of ["Baseline", "Candidate"])
-    assert.ok(
-      body
-        .replace(/<details>[\s\S]*?<\/details>/g, "")
-        .includes(
-          `**Quarry / ${side}**: ⚠️ Stage capture incomplete: **5/10** verified, **0** invalid, **5** unobserved`,
-        ),
-    );
 
   stageSummary.groups[0].stages.index.covered = "untrusted text";
   assert.throws(
@@ -318,13 +362,13 @@ test("the publisher renders equal baseline and candidate Gold coverage once in a
   );
 });
 
-for (const [label, baseline, candidate, expected] of [
-  ["changed", 2, 4, "2/5 → 4/5"],
-  ["fractional", 1.2, 2.4, "1.2/5 → 2.4/5"],
-  ["baseline missing", null, 4, "N/A → 4/5"],
-  ["candidate missing", 2, null, "2/5 → N/A"],
+for (const [label, baseline, candidate] of [
+  ["changed", 2, 4],
+  ["fractional", 1.2, 2.4],
+  ["baseline missing", null, 4],
+  ["candidate missing", 2, null],
 ]) {
-  test(`the publisher renders ${label} stage coverage without filling in an absent side`, async (t) => {
+  test(`the publisher preserves ${label} stage data without embedding its tables`, async (t) => {
     const x = await fixture(t);
     const payload = { ...report };
     for (const [side, covered] of [
@@ -363,26 +407,10 @@ for (const [label, baseline, candidate, expected] of [
     await publish(x);
     const { body } = x.messages()[0][1];
     assert.match(body, /✅ Complete/);
-    assert.match(
+    assert.doesNotMatch(
       body,
-      /<summary>Quarry: Gold coverage by stage \(baseline → candidate\)<\/summary>/,
+      /Gold coverage by stage|Before rule ranking|After rule ranking|Stage capture unavailable/,
     );
-    for (const row of [
-      "Before rule ranking (RRF)",
-      "After rule ranking (actual)",
-    ])
-      assert.equal(
-        body.split(`| ${row} | N/A | N/A | ${expected} |`).length,
-        3,
-      );
-    const visible = body.replace(/<details>[\s\S]*?<\/details>/g, "");
-    for (const [side, covered] of [
-      ["Baseline", baseline],
-      ["Candidate", candidate],
-    ]) {
-      const warning = `**Quarry / ${side}**: ⚠️ Stage capture unavailable. Coverage is N/A.`;
-      assert.equal(visible.includes(warning), covered === null);
-    }
   });
 }
 
@@ -482,12 +510,12 @@ test("the publisher rejects legacy static-only coverage instead of relabeling it
   assert.doesNotMatch(body, /✅ Complete|rule ranking|Same-file decay/i);
 });
 
-for (const [label, observed, invalid, unobserved] of [
-  ["complete", 5, 0, 0],
-  ["unobserved", 0, 0, 5],
-  ["invalid", 0, 5, 0],
+for (const [label, observed, invalid] of [
+  ["complete", 5, 0],
+  ["unobserved", 0, 0],
+  ["invalid", 0, 5],
 ]) {
-  test(`the publisher preserves ${label} capture counts and derives only trusted warning text`, async (t) => {
+  test(`the publisher preserves ${label} capture counts without copying trace diagnostics into the comment`, async (t) => {
     const x = await fixture(t);
     const summary = {
       version: 2,
@@ -515,16 +543,10 @@ for (const [label, observed, invalid, unobserved] of [
     const visible = body.replace(/<details>[\s\S]*?<\/details>/g, "");
     assert.match(visible, /✅ Complete/);
     assert.doesNotMatch(body, /untrusted stage error|<script>/);
-    if (observed === 5) {
-      assert.doesNotMatch(body, /Stage capture incomplete/);
-    } else {
-      for (const side of ["Baseline", "Candidate"])
-        assert.ok(
-          visible.includes(
-            `**SWE-QA20 / ${side}**: ⚠️ Stage capture incomplete: **0/5** verified, **${invalid}** invalid, **${unobserved}** unobserved.`,
-          ),
-        );
-    }
+    assert.doesNotMatch(
+      body,
+      /Stage capture incomplete|Stage capture unavailable/,
+    );
     payload.candidate_gold_stages.sweqa.observed_calls = "untrusted count";
     assert.throws(
       () => validateComparison(payload, request),
@@ -966,10 +988,7 @@ test("a valid two-sided stage report above 128 KiB can publish within the 256 Ki
   await publish(x);
   const { body } = x.messages()[0][1];
   assert.match(body, /✅ Complete/);
-  assert.match(
-    body,
-    /\| Before rule ranking \(RRF\) \| 2\/5 → 4\/5 \| N\/A \| N\/A \|/,
-  );
+  assert.doesNotMatch(body, /Gold coverage by stage|Before rule ranking/);
 });
 
 test("oversized report data is withheld instead of being loaded into a PR comment", async (t) => {

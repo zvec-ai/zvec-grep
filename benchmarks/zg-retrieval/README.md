@@ -141,6 +141,7 @@ JSON and full reports, separate from QA Gold.
 ## Reports and artifacts
 
 - `retrieval-results`: the unified `summary.md` and machine-readable `summary.json`.
+- `retrieval-stage-trace`: paired runs publish a standalone `retrieval-trace.html`. Download the ZIP from the PR comment or Actions artifacts, extract it, and open the HTML locally; no server or external assets are required.
 - `retrieval-zg-report`: the SWE-QA20 suite conclusion (`summary.json` and `summary.md`), validated `report.json`, `report.md` and per-call `scores.jsonl`.
 - `retrieval-zg-evidence`: raw public requests/responses, installation evidence, corpus/model inventories and public index status for all 11 repositories.
 - `retrieval-beir-report`, `retrieval-duretrieval-report` and `retrieval-quarry-report`: independent pilot summaries with BEIR dataset and Quarry language coverage and scores.
@@ -157,15 +158,18 @@ same five calls, frozen source and QA labels, adaptive recall and `limit: 10`.
 It sends the original public requests and receives stage data in response
 metadata. Older candidates produce unobserved stages.
 PR comparisons enable capture on both baseline and candidate. The English PR
-result comment shows a collapsed section with File and Entity Gold tables for
-each suite. Equal coverage cells appear once; changes show baseline → candidate,
-including denominator or partial-unknown changes. Missing data on either side
-stays N/A; a route not used in that mode is —. Existing candidate-only artifacts
-can still be rendered with an unavailable baseline, never copied or scored as zero.
-Incomplete or unavailable capture is reported by side above the collapsed sections. Missing
-metadata stays unobserved; metadata with an invalid shape, group or payload is
-counted as invalid with its reason in the per-call report. Diagnostic failures
-leave stage coverage unknown and do not invalidate otherwise valid search scores.
+comment keeps quality scores and links the HTML artifact instead of embedding
+stage tables. The HTML contains all suites, File/Entity stage comparisons,
+original queries, per-question FTS/Vector/Hybrid Recall, and each call's Gold
+ranks and candidate-pool sizes. Choose Baseline or Candidate and a repetition
+for the detailed trace. The trace describes labeled Gold only, not every candidate.
+
+Equal coverage cells appear once; changes show baseline → candidate, including
+denominator or partial-unknown changes. Missing data stays N/A; an unused route
+is —. Capture warnings appear in the HTML. Missing Entity annotations are not
+zero scores. The comparison bundles each suite's `gold-stages.json` as
+`reports/{suite}-gold-stages.json` alongside its report, preserving raw calls.
+Missing or invalid stage evidence does not invalidate otherwise valid search scores.
 
 The runner sets `ZG_TRACE_STAGES=1` and `ZG_TRACE_PATHS` before starting its
 isolated daemon. `ZG_TRACE_PATHS` is a JSON array of repository-relative paths:

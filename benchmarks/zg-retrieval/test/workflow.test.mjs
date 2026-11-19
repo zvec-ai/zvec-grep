@@ -178,6 +178,25 @@ test("version comparison keeps artifact namespaces separate and uses local model
   assert.match(compare, /name: retrieval-base-results/);
   assert.match(compare, /name: retrieval-head-results/);
   assert.match(compare, /name: retrieval-comparison/);
+  const uploads = steps(compare).filter((entry) =>
+    entry.includes("uses: actions/upload-artifact@"),
+  );
+  const summary = uploads.find((entry) =>
+    /name: retrieval-comparison\n/.test(entry),
+  );
+  assert.match(summary, /retrieval-comparison\/summary\.json/);
+  assert.match(summary, /retrieval-comparison\/summary\.md/);
+  assert.doesNotMatch(
+    summary,
+    /retrieval-trace\.html|path:.*retrieval-comparison\/$/m,
+  );
+  const trace = uploads.find((entry) =>
+    /name: retrieval-stage-trace\n/.test(entry),
+  );
+  assert.match(trace, /if: always\(\)/);
+  assert.match(trace, /path:.*retrieval-comparison\/retrieval-trace\.html/);
+  assert.match(trace, /retention-days: 14/);
+  assert.match(trace, /if-no-files-found: warn/);
   assert.match(workflow, /retrieval-results\/reports\//);
 });
 
