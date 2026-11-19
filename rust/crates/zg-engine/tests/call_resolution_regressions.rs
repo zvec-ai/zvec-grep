@@ -1556,3 +1556,88 @@ async fn review_nested_block_item_must_not_leak_into_sibling_item() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn followup_named_field_struct_must_not_steal_value_call() {
+    // A struct with named fields declares no constructor value, so `struct
+    // save` beside `fn save` leaves the call to the function. A tuple struct
+    // or a unit struct does declare one, and those stay value candidates.
+    check_case(Case {
+        name: "followup_named_field_struct_must_not_steal_value_call",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() -> i32 { 1 }\n    pub struct save { pub value: i32 }\n    pub fn flush() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::flush",
+            expected: json!([{"name":"m::flush","edges":[{"symbol":{"name":"m::save","startLine":2}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn followup_innermost_block_must_win_over_later_outer_item() {
+    // Both the inner block and `outer`'s body hold a `save` in view at the
+    // call site. The block that lies inside the other is the nearer one, so
+    // the call leaves `outer` to the inner definition even though `outer`'s
+    // own `save` is written later in the text.
+    check_case(Case {
+        name: "followup_innermost_block_must_win_over_later_outer_item",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() -> i32 { 0 }\n    pub fn outer() -> i32 {\n        let result = {\n            fn save() -> i32 { 1 }\n            fn inner() -> i32 { save() }\n            inner()\n        };\n        fn save() -> i32 { 2 }\n        result\n    }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "inner",
+            expected: json!([{"name":"m::outer::inner","edges":[{"symbol":{"name":"m::outer::save","startLine":5}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn followup_block_end_position_is_exclusive() {
+    // Tree-sitter's `end_position` points one past the block's last byte, so
+    // a call written directly after the closing brace is outside that block
+    // and reaches the module's own `save`.
+    check_case(Case {
+        name: "followup_block_end_position_is_exclusive",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() -> i32 { 1 }\n    pub fn outer() -> i32 {\n        {fn save() -> i32 {2}}save()\n    }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::outer",
+            expected: json!([{"name":"m::outer","edges":[{"symbol":{"name":"m::save","startLine":2}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn followup_innermost_block_wins_regardless_of_declaration_order() {
+    // The same call with `outer`'s own `save` written before the inner block:
+    // the nearer block still answers it, so the innermost block decides the
+    // target and the two declarations keep their relative text order.
+    check_case(Case {
+        name: "followup_innermost_block_wins_regardless_of_declaration_order",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() -> i32 { 0 }\n    pub fn outer() -> i32 {\n        fn save() -> i32 { 2 }\n        let result = {\n            fn save() -> i32 { 1 }\n            fn inner() -> i32 { save() }\n            inner()\n        };\n        result\n    }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "inner",
+            expected: json!([{"name":"m::outer::inner","edges":[{"symbol":{"name":"m::outer::save","startLine":6}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
