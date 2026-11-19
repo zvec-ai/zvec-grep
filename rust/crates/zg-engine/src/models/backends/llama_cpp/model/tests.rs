@@ -82,6 +82,22 @@ fn user_concurrency_controls_cpu_threads_per_context() {
 }
 
 #[test]
+fn context_size_override_replaces_catalog_value_only_when_positive() {
+    let base = entry("local/qwen3-embedding-0.6b");
+    assert_eq!(base.context_size, 8_192);
+    assert_eq!(
+        with_context_size_override(base, Some("1024")).context_size,
+        1_024
+    );
+    for ignored in [None, Some(""), Some("0"), Some("-1"), Some("abc")] {
+        assert_eq!(
+            with_context_size_override(base, ignored).context_size,
+            8_192
+        );
+    }
+}
+
+#[test]
 fn context_pool_honors_user_limit_and_caps_at_eight() {
     assert_eq!(physical_context_worker_limit(true, 1), 1);
     assert_eq!(physical_context_worker_limit(true, 2), 2);
