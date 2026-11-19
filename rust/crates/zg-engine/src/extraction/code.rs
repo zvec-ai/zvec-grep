@@ -374,6 +374,19 @@ fn walk_entity_node<'tree>(
                     Some(SymbolType::Interface | SymbolType::Alias | SymbolType::Enum) => {
                         graph_context.register_type_namespace_item(entity_index);
                     }
+                    // A struct with named fields declares no constructor, so
+                    // its spelling lives in the type namespace too: `struct
+                    // save { .. }` beside `fn save` is legal, and only the
+                    // function answers a bare `save()`. A tuple struct and a
+                    // unit struct do declare a constructor value, so they stay
+                    // candidates for a bare call.
+                    Some(SymbolType::Class)
+                        if entity
+                            .child_by_field_name("body")
+                            .is_some_and(|body| body.kind() == "field_declaration_list") =>
+                    {
+                        graph_context.register_type_namespace_item(entity_index);
+                    }
                     _ => {}
                 }
                 // The item's bare scope ends with the block that declares it:

@@ -336,6 +336,10 @@ enum LocalName {
 /// spelling only the type namespace holds leaves the call pending. An item is
 /// in bare scope only inside the block that declares it, so a nested `fn save`
 /// whose block closed before the call site is no answer either.
+///
+/// Of the visible items the nearest wins: `{ fn save() {} fn inner() { save() } }`
+/// written inside `fn outer` that also declares a `save` reaches the block's
+/// own item, whichever of the two declarations comes later in the text.
 fn local_target(
     declared: &[usize],
     call: (usize, usize),
@@ -344,20 +348,31 @@ fn local_target(
     item_extents: &HashMap<usize, ItemExtent>,
 ) -> LocalName {
     let mut saw_value = false;
+    let mut visible: Option<(usize, Option<ItemExtent>)> = None;
     for &index in declared.iter().rev() {
         if module_scopes.contains(&index) || type_namespace_items.contains(&index) {
             continue;
         }
         saw_value = true;
-        match item_extents.get(&index) {
-            Some(extent) if !extent.contains(call.0, call.1) => {}
-            _ => return LocalName::Value(index),
+        let extent = item_extents.get(&index).copied();
+        if extent.is_some_and(|extent| !extent.contains(call.0, call.1)) {
+            continue;
+        }
+        match visible {
+            // Languages that record no block keep the walk's own order: the
+            // last registration under the spelling answers the call.
+            None => visible = Some((index, extent)),
+            Some((_, best)) => {
+                if extent.is_some_and(|extent| extent.is_nearer_than(best)) {
+                    visible = Some((index, extent));
+                }
+            }
         }
     }
-    if saw_value {
-        LocalName::Hidden
-    } else {
-        LocalName::TypeOnly
+    match visible {
+        Some((index, _)) => LocalName::Value(index),
+        None if saw_value => LocalName::Hidden,
+        None => LocalName::TypeOnly,
     }
 }
 

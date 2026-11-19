@@ -151,8 +151,25 @@ pub(crate) struct ItemExtent {
 
 impl ItemExtent {
     /// True when the call site `(line, column)` falls inside the block.
+    ///
+    /// The end is tree-sitter's `end_position`, the first position past the
+    /// block, so a call written directly after the closing brace is outside
+    /// it: `{ fn save() {} } save()` reaches the enclosing spelling.
     pub(crate) fn contains(self, line: usize, column: usize) -> bool {
-        (line, column) >= self.start && (line, column) <= self.end
+        (line, column) >= self.start && (line, column) < self.end
+    }
+
+    /// Whether this block is the inner of two blocks that both hold a site.
+    ///
+    /// Source blocks nest rather than overlap, so of two blocks holding the
+    /// same position the one that opens later lies inside the other and is
+    /// the nearer scope; text order between two items says nothing about
+    /// which of their blocks is nearer.
+    pub(crate) fn is_nearer_than(self, other: Option<Self>) -> bool {
+        let Some(other) = other else {
+            return true;
+        };
+        self.start > other.start || (self.start == other.start && self.end < other.end)
     }
 }
 
