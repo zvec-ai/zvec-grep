@@ -29,6 +29,10 @@ use crate::{
 
 const MAX_SYMBOL_SUGGESTIONS: usize = 5;
 const ENDPOINT_BATCH_SIZE: usize = 256;
+/// Inheritance is workspace data, so the override walk is bounded: a hierarchy
+/// deeper than this, or wider than this many bases, answers with what it read.
+const MAX_OVERRIDE_DEPTH: usize = 8;
+const MAX_OVERRIDE_BASES: usize = 32;
 
 pub(super) fn normalize(options: &RelationshipOptions) -> EngineResult<(String, Option<String>)> {
     options.validate()?;
@@ -245,6 +249,22 @@ fn collect_match(
         limit.saturating_add(1),
         signal,
     )?;
+    // A call through a base reference dispatches into the body that overrides
+    // the base member, so those callers answer for this definition too.
+    if direction == Direction::In && edges.len() <= limit {
+        let inherited = inherited_callers(
+            storage,
+            stored,
+            limit.saturating_add(1) - edges.len(),
+            kinds,
+            signal,
+        )?;
+        for (edge, file_path) in inherited {
+            if !edges.iter().any(|(seen, _)| same_call_site(seen, &edge)) {
+                edges.push((edge, file_path));
+            }
+        }
+    }
     let truncated = edges.len() > limit;
     edges.truncate(limit);
     let targets: Vec<_> = edges
@@ -292,6 +312,250 @@ fn collect_match(
             })
             .collect(),
     }))
+}
+
+/// A call through a base reference is stored at the base member the file can
+/// see, but it dispatches into the body that overrides it, so those callers
+/// answer for the overriding body too.
+fn inherited_callers(
+    storage: &ReadView<'_>,
+    stored: &StoredEntity,
+    limit: usize,
+    kinds: Option<&[GraphEdgeKind]>,
+    signal: Option<&CancellationToken>,
+) -> EngineResult<Vec<(FileEdge, PathBuf)>> {
+    if limit == 0 || !kinds.is_some_and(|kinds| kinds.contains(&GraphEdgeKind::Calls)) {
+        return Ok(Vec::new());
+    }
+    let mut edges = Vec::new();
+    for member in overridden_members(storage, stored, signal)? {
+        let Some(spare) = limit.checked_sub(edges.len()).filter(|spare| *spare > 0) else {
+            break;
+        };
+        edges.extend(neighborhood(
+            storage,
+            member.as_str(),
+            Direction::In,
+            Some(&[GraphEdgeKind::Calls]),
+            spare,
+            signal,
+        )?);
+    }
+    Ok(edges)
+}
+
+/// The members a body overrides: written in the scope of a class on its own
+/// base chain, spelled with the same name and parameters, and virtual there.
+///
+/// Only C++ binds a receiver to a base declaration that a derived body later
+/// overrides, so other languages have none. The walk is bounded because a
+/// hierarchy is workspace data, not a property of the query.
+fn overridden_members(
+    storage: &ReadView<'_>,
+    stored: &StoredEntity,
+    signal: Option<&CancellationToken>,
+) -> EngineResult<Vec<EntityId>> {
+    let Some(metadata) = code_metadata(stored) else {
+        return Ok(Vec::new());
+    };
+    if metadata.language != Some(Language::Cpp) {
+        return Ok(Vec::new());
+    }
+    // A scope-less symbol is free-standing: no class holds it and nothing dispatches to it.
+    let (Some(member), Some(scope)) = (
+        metadata
+            .symbol_name
+            .as_deref()
+            .filter(|name| !name.is_empty()),
+        metadata.scope.as_deref().filter(|scope| !scope.is_empty()),
+    ) else {
+        return Ok(Vec::new());
+    };
+    let classes = member_classes(storage, scope, stored.entity.id(), signal)?;
+    let bases = base_chain(storage, classes, signal)?;
+    if bases.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Each base's same-named member is where a call through that base is stored;
+    // a base that does not declare the member contributes nothing.
+    let base_metadata = storage.fetch_code_metadata(&bases)?;
+    let mut base_scopes: Vec<String> = Vec::new();
+    for base in &bases {
+        if let Some((_, metadata)) = base_metadata.get(base)
+            && let Some(scope) = qualified_metadata(metadata)
+            && !base_scopes.contains(&scope)
+        {
+            base_scopes.push(scope);
+        }
+    }
+    let mut candidates: Vec<EntityId> = Vec::new();
+    for scope in base_scopes {
+        check_cancelled(signal)?;
+        for (id, _) in select_symbols(storage, member, Some(&scope), None, MAX_SYMBOL_MATCHES)? {
+            if id.as_str() != stored.entity.id().as_str() && !candidates.contains(&id) {
+                candidates.push(id);
+            }
+        }
+    }
+    // A call dispatches only through a virtual base member: a non-virtual one
+    // is merely hidden by the same-named body, and the call stays the base's.
+    let declared = storage.fetch_code_metadata(&candidates)?;
+    Ok(candidates
+        .into_iter()
+        .filter(|id| {
+            declared
+                .get(id)
+                .is_some_and(|(_, base)| is_virtual(base) && same_arity(metadata.arity, base.arity))
+        })
+        .collect())
+}
+
+/// The class bodies a member's scope names. Two files may declare one qualified
+/// class; the body that holds the member names the bases it overrides, and the
+/// rest are namesakes.
+fn member_classes(
+    storage: &ReadView<'_>,
+    scope: &str,
+    member: &EntityId,
+    signal: Option<&CancellationToken>,
+) -> EngineResult<Vec<EntityId>> {
+    let (class_name, class_scope) = split_symbol(scope);
+    // A scope that names no class (`A::`) holds the member in no body.
+    if class_name.is_empty() {
+        return Ok(Vec::new());
+    }
+    let classes: Vec<_> = select_symbols(
+        storage,
+        &class_name,
+        class_scope.as_deref(),
+        None,
+        MAX_SYMBOL_MATCHES,
+    )?
+    .into_iter()
+    .map(|(id, _)| id)
+    .filter(|id| id.as_str() != member.as_str())
+    .collect();
+    if classes.len() <= 1 {
+        return Ok(classes);
+    }
+    let owning = containing_classes(storage, &classes, member, signal)?;
+    Ok(if owning.is_empty() { classes } else { owning })
+}
+
+/// Every base class reachable from `classes`, breadth first and bounded.
+fn base_chain(
+    storage: &ReadView<'_>,
+    classes: Vec<EntityId>,
+    signal: Option<&CancellationToken>,
+) -> EngineResult<Vec<EntityId>> {
+    let mut bases = Vec::new();
+    let mut visited = HashSet::new();
+    let mut frontier = classes;
+    for _ in 0..MAX_OVERRIDE_DEPTH {
+        check_cancelled(signal)?;
+        let mut level = Vec::new();
+        for class in &frontier {
+            for base in supertypes(storage, class, signal)? {
+                if visited.insert(base.clone()) {
+                    level.push(base);
+                }
+            }
+        }
+        if level.is_empty() {
+            break;
+        }
+        let spare = MAX_OVERRIDE_BASES.saturating_sub(bases.len());
+        bases.extend(level.iter().take(spare).cloned());
+        if bases.len() == MAX_OVERRIDE_BASES {
+            break;
+        }
+        frontier = level;
+    }
+    Ok(bases)
+}
+
+/// The class bodies among `classes` that declare `member`.
+fn containing_classes(
+    storage: &ReadView<'_>,
+    classes: &[EntityId],
+    member: &EntityId,
+    signal: Option<&CancellationToken>,
+) -> EngineResult<Vec<EntityId>> {
+    let mut owning = Vec::new();
+    for class in classes {
+        check_cancelled(signal)?;
+        let contains: Vec<FileEdge> = storage.neighborhood(
+            class.as_str(),
+            Direction::Out,
+            Some(&[GraphEdgeKind::Contains]),
+            |rows| rows.collect(),
+        )?;
+        if contains.iter().any(|edge| edge.target == member.as_str()) {
+            owning.push(class.clone());
+        }
+    }
+    Ok(owning)
+}
+
+/// The direct base classes of one class, in recorded order.
+fn supertypes(
+    storage: &ReadView<'_>,
+    class: &EntityId,
+    signal: Option<&CancellationToken>,
+) -> EngineResult<Vec<EntityId>> {
+    check_cancelled(signal)?;
+    let bases: Vec<FileEdge> = storage.neighborhood(
+        class.as_str(),
+        Direction::Out,
+        Some(&[GraphEdgeKind::Extends, GraphEdgeKind::Implements]),
+        |rows| rows.collect(),
+    )?;
+    Ok(bases
+        .into_iter()
+        .map(|edge| EntityId::from_string(edge.target))
+        .collect())
+}
+
+/// The qualified name of one stored symbol, as a scope spells it.
+fn qualified_metadata(metadata: &CodeMetadata) -> Option<String> {
+    let name = metadata
+        .symbol_name
+        .as_deref()
+        .filter(|name| !name.is_empty())?;
+    Some(
+        match metadata.scope.as_deref().filter(|scope| !scope.is_empty()) {
+            Some(scope) => format!("{scope}::{name}"),
+            None => name.to_owned(),
+        },
+    )
+}
+
+/// Whether one base member dispatches into a derived body. Extraction keeps the
+/// declaration syntax up to the body, so the specifier a base spells is the
+/// evidence that the same-named body under a derived class overrides it.
+fn is_virtual(metadata: &CodeMetadata) -> bool {
+    metadata.signature.as_deref().is_some_and(|signature| {
+        signature
+            .split(|character: char| !character.is_alphanumeric() && character != '_')
+            .any(|word| word == "virtual")
+    })
+}
+
+/// An override repeats the base member's parameters; a body of another arity
+/// only shares the name. Unknown counts never rule a member out.
+fn same_arity(derived: Option<usize>, base: Option<usize>) -> bool {
+    match (derived, base) {
+        (Some(derived), Some(base)) => derived == base,
+        _ => true,
+    }
+}
+
+/// One recorded call site, however many hierarchies report it.
+fn same_call_site(seen: &FileEdge, edge: &FileEdge) -> bool {
+    seen.source == edge.source
+        && seen.target == edge.target
+        && seen.line == edge.line
+        && seen.column == edge.column
 }
 
 fn describe(stored: &StoredEntity) -> Option<SymbolDefinition> {

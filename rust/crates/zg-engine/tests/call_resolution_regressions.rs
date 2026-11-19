@@ -1262,6 +1262,52 @@ async fn python_self_member_chain_reaches_the_decorated_class_member() {
     .await;
 }
 
+// A call through a base reference is stored at the base declaration the file
+// can see, and the overriding body answers for it too: clangd's
+// IncomingIncludeOverrides counts base calls among an override's callers.
+#[tokio::test]
+async fn cpp_virtual_call_answers_for_the_overriding_body() {
+    check_case(Case {
+        name: "cpp_virtual_call_answers_for_the_overriding_body",
+        files: vec![SourceFile {
+            path: "virtual.cc",
+            source: "void callee() {}\n\
+                     struct Interface {\n\
+                     virtual void Func() = 0;\n\
+                     };\n\
+                     struct Implementation : public Interface {\n\
+                     void Func() override {\n\
+                     callee();\n\
+                     }\n\
+                     };\n\
+                     void Test(Interface& cls) {\n\
+                     cls.Func();\n\
+                     }\n",
+        }],
+        queries: vec![
+            Query {
+                operation: "callers",
+                symbol: "Implementation::Func",
+                expected: json!([{
+                    "name": "Implementation::Func", "filePath": "virtual.cc", "startLine": 6,
+                    "edges": [{"symbol": {"name": "Test", "startLine": 10}, "line": 11}],
+                }]),
+                ..Query::default()
+            },
+            Query {
+                operation: "callees",
+                symbol: "Implementation::Func",
+                expected: json!([{
+                    "name": "Implementation::Func", "filePath": "virtual.cc", "startLine": 6,
+                    "edges": [{"symbol": {"name": "callee", "startLine": 1}, "line": 7}],
+                }]),
+                ..Query::default()
+            },
+        ],
+    })
+    .await;
+}
+
 // A bare name of a Python body is the parameter the body declares, not the
 // class member another method stated under the same name.
 #[tokio::test]
