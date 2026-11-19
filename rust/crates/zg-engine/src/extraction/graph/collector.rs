@@ -16,7 +16,7 @@ use super::vocabulary::{
     CALLEE_FIELDS, COMMON_CALL_TYPES, HeritageVocabulary, heritage_vocabulary_for,
     import_vocabulary_for,
 };
-use super::{Constructs, FILE_SCOPE_INDEX, WalkContext};
+use super::{Constructs, FILE_SCOPE_INDEX, PYTHON_UNBOUND_TYPE, WalkContext};
 
 const MAX_CALLEE_TEXT_CHARS: usize = 180;
 
@@ -613,6 +613,9 @@ fn visit_for_bindings(
 ) {
     let binding = declaration_binding_of(node, source, format, context);
     let alias = alias_target_of(node, source, format);
+    // `alias = target` names the value it holds, and the alias table carries
+    // that name; the initializer is read, so it states no absence below.
+    let states_an_alias = alias.is_some();
     let mut shadowed = Vec::new();
     shadowing_names_of(node, source, format, &mut shadowed);
     for name in shadowed {
@@ -685,6 +688,36 @@ fn visit_for_bindings(
         }
         return;
     }
+    if format == FileFormat::Python
+        && node.kind() == "assignment"
+        && let Some(left) = node
+            .child_by_field_name("left")
+            .filter(|left| left.kind() == "identifier")
+    {
+        let name = node_text(left, source);
+        // `client: Left = …` states the type beside the name, whatever value
+        // the body stores in it.
+        if let Some(bound) = node
+            .child_by_field_name("type")
+            .and_then(|ty| python_annotation_name(ty, source))
+        {
+            context.add_declare_binding(owner_index, name, &bound, line, column, None);
+            return;
+        }
+        // `client = clients[0]` states that the name no longer holds what the
+        // parameter declared. The index cannot place the value, so the name
+        // holds no type from this line on rather than keeping the annotation
+        // the parameter stated for the whole body. A value the walk did place
+        // (`alias = target`) is evidence of its own, read from the alias table.
+        if !states_an_alias
+            && node.child_by_field_name("right").is_none_or(|right| {
+                python_value_type(right, source, context, &HashMap::new()).is_none()
+            })
+        {
+            context.add_declare_binding(owner_index, name, PYTHON_UNBOUND_TYPE, line, column, None);
+        }
+        return;
+    }
     for child in named_children(node) {
         if boundary.is_some_and(|owns| owns(child)) {
             continue;
@@ -720,9 +753,10 @@ fn collect_python_self_members(
     };
     // Bindings the class body states outside a method hold for every method.
     let mut annotated = HashMap::new();
+    let scope = class_name.as_deref();
     for child in named_children(class_body) {
         let Some(inner) = python_inner_definition(child) else {
-            visit_python_self_members(child, owner_index, source, context, &mut annotated);
+            visit_python_self_members(child, owner_index, scope, source, context, &mut annotated);
             continue;
         };
         // A nested class states `self` for its own members.
@@ -743,7 +777,7 @@ fn collect_python_self_members(
             }
         }
         for body in named_children(inner) {
-            visit_python_self_members(body, owner_index, source, context, &mut method);
+            visit_python_self_members(body, owner_index, scope, source, context, &mut method);
         }
     }
 }
@@ -751,6 +785,7 @@ fn collect_python_self_members(
 fn visit_python_self_members(
     node: Node<'_>,
     owner_index: usize,
+    class_name: Option<&str>,
     source: &[u8],
     context: &mut WalkContext,
     annotated: &mut HashMap<String, String>,
@@ -765,29 +800,46 @@ fn visit_python_self_members(
         // stay in effect for everything it writes, closures included.
         let mut scoped = python_annotated_parameters(inner, source, annotated);
         for child in named_children(inner) {
-            visit_python_self_members(child, owner_index, source, context, &mut scoped);
+            visit_python_self_members(child, owner_index, class_name, source, context, &mut scoped);
         }
         return;
     }
     if node.kind() == "assignment" {
-        if let Some((name, bound_type)) =
-            python_self_member_binding(node, source, context, annotated)
-        {
-            context.add_declare_binding(
+        match python_self_member_binding(node, source, context, annotated, class_name) {
+            Some((name, bound_type)) => context.add_declare_binding(
                 owner_index,
                 &name,
                 &bound_type,
                 node.start_position().row + 1,
                 node.start_position().column,
                 None,
-            );
+            ),
+            // `self.client = client` stores a value the index cannot place, so
+            // the member no longer holds what an earlier write stated. The
+            // write is kept without a type rather than dropped: dropping it
+            // would leave the earlier type in effect, and a base class's
+            // member is not the answer for a name the class writes itself.
+            None => {
+                if let Some(member) = python_self_member_target(node, source, annotated, class_name)
+                    && !python_states_none(node.child_by_field_name("right"), source)
+                {
+                    context.add_declare_binding(
+                        owner_index,
+                        member,
+                        PYTHON_UNBOUND_TYPE,
+                        node.start_position().row + 1,
+                        node.start_position().column,
+                        None,
+                    );
+                }
+            }
         }
         // The member above reads the name where it is written, and anything
         // after this line reads what the assignment left in it.
         rebind_python_value(node, source, context, annotated);
     }
     for child in named_children(node) {
-        visit_python_self_members(child, owner_index, source, context, annotated);
+        visit_python_self_members(child, owner_index, class_name, source, context, annotated);
     }
 }
 
@@ -881,18 +933,9 @@ fn python_self_member_binding(
     source: &[u8],
     context: &WalkContext,
     annotated: &HashMap<String, String>,
+    class_name: Option<&str>,
 ) -> Option<(String, String)> {
-    let left = node.child_by_field_name("left")?;
-    if left.kind() != "attribute" {
-        return None;
-    }
-    let object = left.child_by_field_name("object")?;
-    if object.kind() != "identifier" || !matches!(node_text(object, source), "self" | "cls") {
-        return None;
-    }
-    let member = left
-        .child_by_field_name("attribute")
-        .filter(|member| member.kind() == "identifier")?;
+    let member = python_self_member_target(node, source, annotated, class_name)?;
     // `self.fontset: Fonts = …` states the type beside the name.
     let bound_type = node
         .child_by_field_name("type")
@@ -905,7 +948,47 @@ fn python_self_member_binding(
                 annotated,
             )
         })?;
-    Some((node_text(member, source).to_owned(), bound_type))
+    Some((member.to_owned(), bound_type))
+}
+
+/// The member a `self.<member> = <value>` assignment writes, when the receiver
+/// still names the instance of the class being walked.
+///
+/// A nested function that declares `self` again (`def unrelated(self)`) binds a
+/// receiver of its own: its writes state nothing about the enclosing class, and
+/// recording them would let one shadowing closure retype a member every sibling
+/// method reads.
+fn python_self_member_target<'tree>(
+    node: Node<'tree>,
+    source: &'tree [u8],
+    annotated: &HashMap<String, String>,
+    class_name: Option<&str>,
+) -> Option<&'tree str> {
+    let left = node.child_by_field_name("left")?;
+    if left.kind() != "attribute" {
+        return None;
+    }
+    let object = left.child_by_field_name("object")?;
+    if object.kind() != "identifier" {
+        return None;
+    }
+    let receiver = node_text(object, source);
+    if !matches!(receiver, "self" | "cls") {
+        return None;
+    }
+    if annotated.get(receiver).map(String::as_str) != class_name {
+        return None;
+    }
+    left.child_by_field_name("attribute")
+        .filter(|member| member.kind() == "identifier")
+        .map(|member| node_text(member, source))
+}
+
+/// Whether a value expression states the absence of a value (`None`). An
+/// initializer holding no value states no type to invalidate, so the write
+/// leaves the member as it was instead of making it undecided.
+fn python_states_none(node: Option<Node<'_>>, source: &[u8]) -> bool {
+    node.is_some_and(|node| python_none_annotation(node, source))
 }
 
 /// The type name a Python value expression states: what a bare call builds,
@@ -2433,13 +2516,15 @@ fn python_union_annotation(node: Node<'_>, source: &[u8]) -> Option<String> {
 fn python_agreed_arm_type(arms: &[Node<'_>], source: &[u8]) -> Option<String> {
     let mut inferred: Option<String> = None;
     for arm in arms {
-        let Some(name) = python_annotation_name(*arm, source) else {
-            continue;
-        };
         // `None` states that the arm holds no value, not a type a call reaches.
-        if name == "None" {
+        if python_none_annotation(*arm, source) {
             continue;
         }
+        // An arm this reader cannot name (`Left | right.Right`, a container)
+        // is not evidence that the arms it can name are the only shapes the
+        // value takes: the annotation stays undecided rather than shrinking to
+        // the arms that happen to be spelled out.
+        let name = python_annotation_name(*arm, source)?;
         match &inferred {
             Some(previous) if previous != &name => return None,
             Some(_) => {}
@@ -2447,6 +2532,20 @@ fn python_agreed_arm_type(arms: &[Node<'_>], source: &[u8]) -> Option<String> {
         }
     }
     inferred
+}
+
+/// Whether an annotation arm states the absence of a value rather than a type:
+/// `None` spells as its own node kind, as a name, and as a forward reference.
+fn python_none_annotation(node: Node<'_>, source: &[u8]) -> bool {
+    match node.kind() {
+        "type" | "type_parameter" => node
+            .named_child(0)
+            .is_some_and(|inner| python_none_annotation(inner, source)),
+        "none" => true,
+        "identifier" => node_text(node, source) == "None",
+        "string" => node_text(node, source).trim_matches(['"', '\'']).trim() == "None",
+        _ => false,
+    }
 }
 
 /// The arms a union annotation states, left to right: `A | B | C` nests as
@@ -4031,10 +4130,14 @@ class Char:
         self.fontset = state.fontset
 ";
         // The parameter's annotation states the member, and a value the
-        // annotation cannot spell stays unbound.
+        // annotation cannot spell is kept as a write without a type, so the
+        // member does not answer with a type an earlier write stated.
         assert_eq!(
             python_self_bindings(source, "ParserState"),
-            vec![("fontset".to_owned(), "Fonts".to_owned(), 3)]
+            vec![
+                ("fontset".to_owned(), "Fonts".to_owned(), 3),
+                ("_dpi".to_owned(), PYTHON_UNBOUND_TYPE.to_owned(), 4),
+            ]
         );
         // A member read states the step the resolver reads: the member of
         // the type another class states.
@@ -4124,7 +4227,11 @@ class Char:
         // the outer body, and neither inner name reads through `Index`.
         assert_eq!(
             python_self_bindings(source, "Char"),
-            vec![("block".to_owned(), "member_of:(Index,block)".to_owned(), 6)]
+            vec![
+                ("raw".to_owned(), PYTHON_UNBOUND_TYPE.to_owned(), 4),
+                ("args".to_owned(), PYTHON_UNBOUND_TYPE.to_owned(), 5),
+                ("block".to_owned(), "member_of:(Index,block)".to_owned(), 6),
+            ]
         );
     }
 
@@ -4142,11 +4249,14 @@ class Char:
         // value the index cannot place leaves the name without a type.
         assert_eq!(
             python_self_bindings(source, "Char"),
-            vec![(
-                "rebound".to_owned(),
-                "member_of:(AlternateClient,state)".to_owned(),
-                4
-            )]
+            vec![
+                (
+                    "rebound".to_owned(),
+                    "member_of:(AlternateClient,state)".to_owned(),
+                    4
+                ),
+                ("unplaced".to_owned(), PYTHON_UNBOUND_TYPE.to_owned(), 6),
+            ]
         );
     }
 
@@ -4198,6 +4308,16 @@ class Char:
                 FileFormat::Python,
                 &python(),
                 "def m(a: Left | Right, b: Union[Left, Right], c: Right | Left):\n    a.go()\n",
+            ),
+            Vec::new()
+        );
+        // An arm the reader cannot name (`right.Right` is a module the binding
+        // cannot place) does not narrow the union to the arm it can name.
+        assert_eq!(
+            bindings(
+                FileFormat::Python,
+                &python(),
+                "def m(a: Left | right.Right, b: right.Right | Left):\n    a.go()\n",
             ),
             Vec::new()
         );

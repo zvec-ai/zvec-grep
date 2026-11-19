@@ -53,6 +53,16 @@ use crate::domain::{GraphEdgeKind, PreprocessorDirective};
 /// allocated by [`WalkContext::next_entity_index`].
 pub(crate) const FILE_SCOPE_INDEX: usize = usize::MAX;
 
+/// The bound type extraction records for a Python name a body rebinds to a
+/// value the index cannot place (`client = clients[0]`, `self.client = client`).
+///
+/// The write shadows what an earlier declaration stated — a parameter's
+/// annotation, a member's previous assignment — so the name holds no type from
+/// that line on. The resolver reads the sentinel as "stated, but undecided":
+/// the answer is not the type the name no longer holds, and a base class's
+/// member is not the answer either.
+pub(crate) const PYTHON_UNBOUND_TYPE: &str = "[[python_unbound]]";
+
 /// An edge whose both endpoints are known at walk time. Only `contains`
 /// qualifies: the target entity is created during the same walk, so its index
 /// is available from the scope stack. Positions use one-based lines and

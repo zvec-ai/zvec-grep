@@ -36,6 +36,7 @@ use crate::domain::{
     EdgeProvenance, FileFormat, GraphEdgeKind, SymbolType, formats_for_path,
     reference_compatible_with,
 };
+use crate::extraction::PYTHON_UNBOUND_TYPE;
 use crate::storage::graph::{
     DeclaredBinding, ImportReference, NameIndexEntry, Resolution, StoredPendingRef,
 };
@@ -2998,8 +2999,12 @@ fn declared_receiver_type(
             .map(|binding| binding.bound_type.clone())
             .next_back() // bindings are line-ordered; the latest earlier one shadows
     };
-    if local.is_some() {
-        return Ok(local);
+    match local {
+        // The body rebound the name to a value the index cannot place, which
+        // shadows the annotation instead of leaving it in effect.
+        Some(bound) if bound == PYTHON_UNBOUND_TYPE => return Ok(None),
+        Some(bound) => return Ok(Some(bound)),
+        None => {}
     }
     if let Some(binding) = translation_unit_binding(store, snapshot, stored, receiver, caches)? {
         return Ok(Some(binding));
@@ -3015,27 +3020,52 @@ fn declared_receiver_type(
     member_type_of(store, snapshot, stored, receiver, caches)
 }
 
-/// The type one name holds according to `bindings`, in declaration order.
+/// What the bindings of one class state for a member name.
+///
+/// `Absent` and `Undecided` differ where inheritance reads them: a class that
+/// says nothing about a name answers with a base's member, while a class that
+/// writes the name without stating one type answers with nothing — the base's
+/// member is a different declaration, not what this class's write leaves there.
+#[derive(Debug, Eq, PartialEq)]
+enum MemberBinding {
+    /// No declaration of the class states the name.
+    Absent,
+    /// The class states the name, but not one type.
+    Undecided,
+    /// Every declaration of the class agrees on one type.
+    Known(String),
+}
+
+/// What `bindings` state for one name, in declaration order.
 ///
 /// Elsewhere the last declaration of a name replaces the earlier ones
 /// (`int x; double x;` is one binding at a time). Python states one member from
 /// the assignments of several methods, where source order is no order of
 /// execution: assignments that state different types leave the member undecided
-/// instead of choosing the one written last.
-fn member_binding_type(bindings: &[DeclaredBinding], name: &str, language: &str) -> Option<String> {
+/// instead of choosing the one written last, and a write the extraction could
+/// not type (the [`PYTHON_UNBOUND_TYPE`] sentinel) decides nothing either.
+fn member_binding_type(bindings: &[DeclaredBinding], name: &str, language: &str) -> MemberBinding {
     let mut found: Option<String> = None;
     for binding in bindings.iter().filter(|binding| binding.name == name) {
         if language != "python" {
             found = Some(binding.bound_type.clone());
             continue;
         }
+        if binding.bound_type == PYTHON_UNBOUND_TYPE {
+            return MemberBinding::Undecided;
+        }
         match &found {
-            Some(previous) if previous != &binding.bound_type => return None,
+            Some(previous) if previous != &binding.bound_type => {
+                return MemberBinding::Undecided;
+            }
             Some(_) => {}
             None => found = Some(binding.bound_type.clone()),
         }
     }
-    found
+    match found {
+        Some(bound) => MemberBinding::Known(bound),
+        None => MemberBinding::Absent,
+    }
 }
 
 /// The type the reference's translation unit states for one name outside every
@@ -3260,8 +3290,13 @@ fn member_type_of(
         // rebinding (`int x; double x;` is not C++, but macros can produce
         // it); the last declaration is the one in effect, except where the
         // language states the member from several places at once.
-        if let Some(bound) = member_binding_type(bindings, receiver, &stored.language) {
-            return Ok(Some(bound));
+        match member_binding_type(bindings, receiver, &stored.language) {
+            MemberBinding::Known(bound) => return Ok(Some(bound)),
+            // The class writes the member without stating one type; a base's
+            // member of the same name is a different declaration, and the
+            // class's own writes decide the answer.
+            MemberBinding::Undecided => return Ok(None),
+            MemberBinding::Absent => {}
         }
     }
     Ok(None)
@@ -3777,8 +3812,12 @@ fn member_of_type(
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => entry.insert(store.declared_bindings(entity)?),
         };
-        if let Some(bound) = member_binding_type(bindings, member, &stored.language) {
-            return Ok(Some(unwrap_binding_type(&bound)));
+        match member_binding_type(bindings, member, &stored.language) {
+            MemberBinding::Known(bound) => return Ok(Some(unwrap_binding_type(&bound))),
+            // The type writes this member without one type; the base's member
+            // states a different declaration.
+            MemberBinding::Undecided => return Ok(None),
+            MemberBinding::Absent => {}
         }
     }
     Ok(None)
@@ -4806,7 +4845,8 @@ mod language_gate_tests {
 
 #[cfg(test)]
 mod member_evidence_tests {
-    use super::{member_binding_type, member_step};
+    use super::{MemberBinding, member_binding_type, member_step};
+    use crate::extraction::PYTHON_UNBOUND_TYPE;
     use crate::storage::graph::DeclaredBinding;
 
     fn binding(name: &str, bound_type: &str) -> DeclaredBinding {
@@ -4839,18 +4879,47 @@ mod member_evidence_tests {
         // Two methods state the member, and source order across methods is no
         // order of execution: the later write may never run.
         let bindings = vec![binding("service", "Left"), binding("service", "Right")];
-        assert_eq!(member_binding_type(&bindings, "service", "python"), None);
+        assert_eq!(
+            member_binding_type(&bindings, "service", "python"),
+            MemberBinding::Undecided
+        );
         // The same type written twice is one answer.
         let bindings = vec![binding("service", "Left"), binding("service", "Left")];
         assert_eq!(
             member_binding_type(&bindings, "service", "python"),
-            Some("Left".to_owned())
+            MemberBinding::Known("Left".to_owned())
         );
         // Elsewhere the last declaration is the one in effect.
         let bindings = vec![binding("service", "Left"), binding("service", "Right")];
         assert_eq!(
             member_binding_type(&bindings, "service", "cpp"),
-            Some("Right".to_owned())
+            MemberBinding::Known("Right".to_owned())
+        );
+        // A class that says nothing about the name is answered by its bases.
+        assert_eq!(
+            member_binding_type(&[], "service", "python"),
+            MemberBinding::Absent
+        );
+    }
+
+    #[test]
+    fn python_member_written_without_a_type_stays_undecided() {
+        // `self.service = service` stores a value the extraction cannot place:
+        // the write keeps the name from answering with the earlier type.
+        let bindings = vec![
+            binding("service", "Left"),
+            binding("service", PYTHON_UNBOUND_TYPE),
+        ];
+        assert_eq!(
+            member_binding_type(&bindings, "service", "python"),
+            MemberBinding::Undecided
+        );
+        // The sentinel alone states the member without a type, which still
+        // stops an inherited type from answering.
+        let bindings = vec![binding("service", PYTHON_UNBOUND_TYPE)];
+        assert_eq!(
+            member_binding_type(&bindings, "service", "python"),
+            MemberBinding::Undecided
         );
     }
 }
