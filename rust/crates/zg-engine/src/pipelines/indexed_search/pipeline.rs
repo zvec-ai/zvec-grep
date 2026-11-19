@@ -44,6 +44,7 @@ pub(crate) struct SearchPlan {
     pub limit: Option<usize>,
     pub trace: bool,
     pub prefer_symbol: bool,
+    pub rule_ranking: bool,
     pub filter: QueryFilter,
 }
 
@@ -221,15 +222,16 @@ pub(crate) async fn search_workspace_index(
     let fusion_duration = fusion_started.elapsed();
 
     let load_started = Instant::now();
-    // Every recalled entity must be eligible for structural boosts before cutoff.
-    let hits = load_candidates(fused, limit, plan.trace, storage)?;
+    let mut hits = load_candidates(fused, limit, &plan, storage)?;
     let load_duration = load_started.elapsed();
     let ranking_started = Instant::now();
-    let maximum_rrf = build_recall_routes(&routes, filter.as_ref(), plan.prefer_symbol)
-        .iter()
-        .map(|_| 1.0 / (RRF_K + 1.0))
-        .sum();
-    let hits = super::ranking::rank(hits, &routes, &plan.filter, maximum_rrf, limit);
+    if plan.rule_ranking {
+        let maximum_rrf = build_recall_routes(&routes, filter.as_ref(), plan.prefer_symbol)
+            .iter()
+            .map(|_| 1.0 / (RRF_K + 1.0))
+            .sum();
+        hits = super::ranking::rank(hits, &routes, &plan.filter, maximum_rrf, limit);
+    }
     let ranking_duration = ranking_started.elapsed();
 
     Ok(SearchPlanResult {
@@ -533,24 +535,32 @@ fn fuse_candidates(candidates: HashMap<EntityId, Candidate>) -> Vec<Candidate> {
 fn load_candidates(
     candidates: Vec<Candidate>,
     limit: usize,
-    trace: bool,
+    plan: &SearchPlan,
     storage: &dyn SearchStorage,
 ) -> Result<Vec<SearchHit>, EngineError> {
-    if candidates.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut seen = HashSet::new();
-    let hits = candidates
-        .iter()
-        .flat_map(|candidate| &candidate.evidence)
-        .filter(|evidence| seen.insert(evidence.hit.document_id.clone()))
-        .map(|evidence| evidence.hit.clone())
-        .collect::<Vec<_>>();
-    let mut data = storage.load_search_hits(&hits)?;
-    let mut loaded = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        if let Some(hit) = candidate_to_hit(candidate, limit, trace, &mut data)? {
-            loaded.push(hit);
+    let target = if plan.rule_ranking {
+        candidates.len()
+    } else {
+        limit.min(candidates.len())
+    };
+    let mut loaded = Vec::with_capacity(target);
+    let mut candidates = candidates.into_iter();
+    // Load another batch only if an index update removed hits after recall.
+    while loaded.len() < target && !candidates.as_slice().is_empty() {
+        let count = (target - loaded.len()).min(candidates.len());
+        let mut seen = HashSet::new();
+        let hits = candidates.as_slice()[..count]
+            .iter()
+            .flat_map(|candidate| &candidate.evidence)
+            .filter(|evidence| seen.insert(evidence.hit.document_id.clone()))
+            .map(|evidence| evidence.hit.clone())
+            .collect::<Vec<_>>();
+        let mut data = storage.load_search_hits(&hits)?;
+        for candidate in candidates.by_ref().take(count) {
+            let rank = loaded.len() + 1;
+            if let Some(hit) = candidate_to_hit(candidate, rank, limit, plan.trace, &mut data)? {
+                loaded.push(hit);
+            }
         }
     }
     Ok(loaded)
@@ -558,6 +568,7 @@ fn load_candidates(
 
 fn candidate_to_hit(
     candidate: Candidate,
+    rank: usize,
     limit: usize,
     trace: bool,
     data: &mut StoredSearchData,
@@ -610,7 +621,7 @@ fn candidate_to_hit(
         entity: stored.entity,
         file: stored.file,
         evidence: loaded_evidence,
-        rank: candidate.rank,
+        rank,
         score: candidate.score,
         matched_by,
         trace: trace.then_some(SearchHitTrace {
@@ -622,7 +633,7 @@ fn candidate_to_hit(
                 forced: false,
             },
             final_selection: SearchFinalTrace {
-                returned_by_limit: candidate.rank <= limit,
+                returned_by_limit: rank <= limit,
                 cutoff_rank: limit,
             },
         }),
@@ -1133,6 +1144,7 @@ mod tests {
             query: "Vitest".to_owned(),
         }]);
         request.limit = Some(1);
+        request.rule_ranking = true;
         let root = tempfile::tempdir().expect("workspace");
         let result = search_workspace_index(root.path(), request, &storage, &[])
             .await
@@ -1290,6 +1302,7 @@ mod tests {
             },
         ]);
         plan.limit = Some(1);
+        plan.rule_ranking = true;
         plan.filter.excluded_formats = vec![FileFormat::Jpeg];
 
         let result = search_workspace_index(
@@ -1343,6 +1356,45 @@ mod tests {
         );
         assert!(batches[0].iter().any(|hit| hit.entity_id == discarded_id));
         assert_eq!(storage.filters.lock().expect("filters").len(), 4);
+    }
+
+    #[tokio::test]
+    async fn fusion_order_fills_the_limit_when_a_recalled_entity_disappears() {
+        let file = file(1, "src/lib.rs", 100);
+        let missing = entity(&file, "missing");
+        let next = entity(&file, "next");
+        let last = entity(&file, "last");
+        let mut storage = pushdown_storage();
+        storage.fts.insert(
+            "query".into(),
+            [&missing, &next, &last]
+                .into_iter()
+                .map(|item| hit(item, 0, StorageSearchPath::Fts, 1.0))
+                .collect(),
+        );
+        storage
+            .entities
+            .insert(next.entity.id().as_str().to_owned(), next.clone());
+        let mut plan = plan(vec![SearchRoute {
+            mode: SearchRouteMode::Fts,
+            query: "query".into(),
+        }]);
+        plan.limit = Some(1);
+        let result = search_workspace_index(Path::new("/workspace"), plan, &storage, &[])
+            .await
+            .expect("search");
+
+        assert_eq!(result.hits.len(), 1);
+        let hit = &result.hits[0];
+        assert_eq!(hit.entity.id(), next.entity.id());
+        assert_eq!(hit.rank, 1);
+        let trace = hit.trace.as_ref().expect("trace");
+        assert_eq!(trace.fusion.rank, 2);
+        assert!(trace.final_selection.returned_by_limit);
+        let batches = storage.load_batches.lock().expect("load batches");
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].len(), 1);
+        assert_eq!(batches[1].len(), 1);
     }
 
     #[tokio::test]
@@ -1411,7 +1463,7 @@ mod tests {
                 rank: 1,
             };
             let result =
-                super::candidate_to_hit(candidate, 1, false, &mut data).expect("partial load");
+                super::candidate_to_hit(candidate, 1, 1, false, &mut data).expect("partial load");
             if keep_fragment {
                 let result = result.expect("surviving evidence");
                 assert_eq!(result.evidence.len(), 1);
@@ -2268,6 +2320,7 @@ mod tests {
             limit: Some(10),
             trace: true,
             prefer_symbol: false,
+            rule_ranking: false,
             filter: QueryFilter::default(),
         }
     }
