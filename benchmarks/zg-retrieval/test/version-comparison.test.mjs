@@ -12,7 +12,6 @@ import {
   readComparisonInput,
 } from "../expansion/compare.mjs";
 import { QUALITY_METRICS } from "../reports/ci.mjs";
-import { goldStagesMarkdown } from "../reports/gold-stages.mjs";
 import { QA_ENTITY_METRICS } from "../reports/zg.mjs";
 import { QA_SCORING } from "../core/suite.mjs";
 import { summarizeIndexSettings } from "../core/index-settings.mjs";
@@ -183,47 +182,16 @@ test("indexed corpus counts compare once per suite and preserve unknown totals",
   assert.throws(() => compareCombinedResults(before, after, metadata));
 });
 
-test("comparison retains stage evidence but links HTML instead of rendering stage tables", () => {
+test("comparison links HTML without forwarding stage summaries to comments", () => {
   const before = result(baseSha);
   const after = result(headSha);
-  const summary = {
-    version: 2,
-    calls: 5,
-    observed_calls: 5,
-    invalid_calls: 0,
-    groups: [
-      {
-        qualification: "diagnostic",
-        level: "file",
-        mode: "hybrid",
-        targets: 5,
-        stages: Object.fromEntries(
-          ["index", "fts", "vector", "rrf_top10", "actual_top10"].map((key) => [
-            key,
-            { covered: key === "rrf_top10" ? 3 : 5, unknown: 0 },
-          ]),
-        ),
-      },
-    ],
-  };
-  before.sweqa.gold_stages = structuredClone(summary);
-  after.sweqa.gold_stages = structuredClone(summary);
-  after.sweqa.gold_stages.groups[0].stages.rrf_top10.covered = 4;
-  after.sweqa.gold_stages.groups[0].stages.actual_top10.covered = 2;
-  for (const result of [before, after])
-    for (const pilot of Object.values(result.pilots))
-      pilot.report.gold_stages = structuredClone(summary);
+  const quality = compareCombinedResults(before, after, metadata);
+  before.sweqa.gold_stages = { version: 1, groups: [] };
+  after.sweqa.gold_stages = { error: "unavailable stage evidence" };
+  for (const pilot of Object.values(after.pilots))
+    pilot.report.gold_stages = after.sweqa.gold_stages;
   const comparison = compareCombinedResults(before, after, metadata);
-  assert.deepEqual(
-    comparison.baseline_gold_stages,
-    Object.fromEntries(
-      ["sweqa", ...PILOT_NAMES].map((name) => [name, summary]),
-    ),
-  );
-  assert.deepEqual(
-    comparison.candidate_gold_stages.sweqa,
-    after.sweqa.gold_stages,
-  );
+  assert.deepEqual(comparison, quality);
   const traceUrl = "https://github.com/upstream/zg/actions/runs/1/artifacts/2";
   const markdown = markdownVersionComparison(comparison, { traceUrl });
   assert.ok(markdown.includes(`[Download stage trace (HTML)](${traceUrl})`));
@@ -237,165 +205,9 @@ test("comparison retains stage evidence but links HTML instead of rendering stag
     /Download stage trace/,
   );
   assert.equal((markdown.match(/^\| Mode \| Level \|/gm) ?? []).length, 4);
-
-  const legacy = structuredClone(summary);
-  const stages = legacy.groups[0].stages;
-  stages.static_top10 = stages.rrf_top10;
-  delete stages.rrf_top10;
-  after.sweqa.gold_stages = legacy;
-  assert.throws(
-    () => compareCombinedResults(before, after, metadata),
-    /Invalid Gold stage coverage/,
-  );
-  after.sweqa.gold_stages = summary;
-  before.sweqa.gold_stages = legacy;
-  assert.throws(
-    () => compareCombinedResults(before, after, metadata),
-    /Invalid Gold stage coverage/,
-  );
-  for (const oldSide of ["baseline", "candidate"]) {
-    before.sweqa.gold_stages = {
-      ...summary,
-      version: oldSide === "baseline" ? 1 : 2,
-    };
-    after.sweqa.gold_stages = {
-      ...summary,
-      version: oldSide === "candidate" ? 1 : 2,
-    };
-    assert.throws(
-      () => compareCombinedResults(before, after, metadata),
-      /rebuild from per-call evidence/i,
-    );
-  }
 });
 
-test("fractional stage means compare without changing quality rows or target totals", () => {
-  const before = result(baseSha);
-  const after = result(headSha);
-  const quality = compareCombinedResults(before, after, metadata);
-  const summary = {
-    version: 2,
-    calls: 5,
-    observed_calls: 5,
-    invalid_calls: 0,
-    groups: [
-      {
-        qualification: "diagnostic",
-        level: "entity",
-        mode: "hybrid",
-        targets: 2,
-        stages: {
-          index: { covered: 2, unknown: 0 },
-          fts: { covered: 0.2, unknown: 0.4 },
-          vector: { covered: 1, unknown: 0 },
-          rrf_top10: { covered: 1.2, unknown: 0 },
-          actual_top10: { covered: 0.6, unknown: 0.2 },
-        },
-      },
-    ],
-  };
-  before.sweqa.gold_stages = summary;
-  after.sweqa.gold_stages = structuredClone(summary);
-  after.sweqa.gold_stages.groups[0].stages.rrf_top10.covered = 1.4;
-  after.sweqa.gold_stages.groups[0].stages.actual_top10.covered = 0.8;
-  const comparison = compareCombinedResults(before, after, metadata);
-  assert.deepEqual(comparison.rows, quality.rows);
-  assert.equal(comparison.status, "success");
-  assert.equal(comparison.baseline_gold_stages.sweqa.calls, 5);
-  assert.equal(comparison.baseline_gold_stages.sweqa.groups[0].targets, 2);
-  assert.deepEqual(
-    comparison.candidate_gold_stages.sweqa,
-    after.sweqa.gold_stages,
-  );
-  assert.doesNotMatch(
-    markdownVersionComparison(comparison),
-    /Gold recalled by|Before rule ranking|After rule ranking/,
-  );
-});
-
-test("baseline-only stage evidence remains visible without borrowing candidate values", () => {
-  const before = result(baseSha);
-  const after = result(headSha);
-  const quality = compareCombinedResults(before, after, metadata);
-  before.pilots.beir.report.gold_stages = {
-    version: 2,
-    calls: 5,
-    observed_calls: 5,
-    invalid_calls: 0,
-    groups: [
-      {
-        qualification: "diagnostic",
-        level: "file",
-        mode: "fts",
-        targets: 5,
-        stages: Object.fromEntries(
-          ["index", "fts", "rrf_top10", "actual_top10"].map((key) => [
-            key,
-            { covered: 3, unknown: 0 },
-          ]),
-        ),
-      },
-    ],
-  };
-  const comparison = compareCombinedResults(before, after, metadata);
-  assert.deepEqual(comparison.rows, quality.rows);
-  assert.equal(comparison.candidate_gold_stages, undefined);
-  assert.deepEqual(
-    comparison.baseline_gold_stages.beir,
-    before.pilots.beir.report.gold_stages,
-  );
-  assert.doesNotMatch(
-    markdownVersionComparison(comparison),
-    /Gold coverage by stage|Stage capture/,
-  );
-});
-
-for (const [label, invalid, unobserved] of [
-  ["unobserved", 0, 5],
-  ["invalid", 5, 0],
-]) {
-  test(`all ${label} captures stay in trace evidence without invalidating quality`, () => {
-    const before = result(baseSha);
-    const after = result(headSha);
-    const quality = compareCombinedResults(before, after, metadata);
-    const summary = {
-      version: 2,
-      calls: 5,
-      observed_calls: 0,
-      invalid_calls: invalid,
-      groups: [
-        {
-          qualification: "diagnostic",
-          level: "file",
-          mode: "fts",
-          targets: 5,
-          stages: Object.fromEntries(
-            ["index", "fts", "rrf_top10", "actual_top10"].map((key) => [
-              key,
-              { covered: 0, unknown: 5 },
-            ]),
-          ),
-        },
-      ],
-    };
-    after.sweqa.gold_stages = summary;
-    const comparison = compareCombinedResults(before, after, metadata);
-    assert.equal(comparison.status, "success");
-    assert.deepEqual(comparison.errors, []);
-    assert.deepEqual(comparison.rows, quality.rows);
-    const markdown = markdownVersionComparison(comparison);
-    const warning = `⚠️ Stage capture incomplete: **0/5** verified, **${invalid}** invalid, **${unobserved}** unobserved.`;
-    assert.match(markdown, /✅ Complete/);
-    assert.doesNotMatch(markdown, /Stage capture|Gold recalled by/);
-    assert.deepEqual(comparison.candidate_gold_stages.sweqa, summary);
-    const report = goldStagesMarkdown(summary).join("\n");
-    assert.ok(report.includes(warning));
-    assert.match(report, /Unverified stage coverage is unknown/);
-    assert.match(report, /\| Gold recalled by FTS \| N\/A \| — \| — \|/);
-  });
-}
-
-test("a newly registered suite retains stage coverage and its trusted report title", async () => {
+test("a newly registered suite retains its trusted report title", async () => {
   const name = "new-pilot";
   PILOT_SUITES[name] = { report: { comparison: "New pilot" } };
   PILOT_NAMES.push(name);
@@ -404,16 +216,7 @@ test("a newly registered suite retains stage coverage and its trusted report tit
     const extended = await import("../expansion/compare.mjs?new-suite-test");
     const before = result(baseSha);
     const after = result(headSha);
-    const summary = {
-      version: 2,
-      calls: 5,
-      observed_calls: 0,
-      invalid_calls: 0,
-      groups: [],
-    };
-    after.pilots[name].report.gold_stages = summary;
     const comparison = extended.compareCombinedResults(before, after, metadata);
-    assert.deepEqual(comparison.candidate_gold_stages[name], summary);
     const markdown = extended.markdownVersionComparison(comparison);
     assert.match(markdown, /^### New pilot$/m);
     assert.doesNotMatch(markdown, /Gold coverage by stage/);

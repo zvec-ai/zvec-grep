@@ -6,7 +6,6 @@ import { parseArgs } from "node:util";
 import { loadSuite } from "../core/lib.mjs";
 import { validateIndexCounts } from "../core/index-counts.mjs";
 import { validateIndexSettings } from "../core/index-settings.mjs";
-import { validateGoldStageSummary } from "../reports/gold-stages.mjs";
 import { buildTraceData } from "../reports/trace-data.mjs";
 import { renderGoldTrace } from "../reports/trace-html.mjs";
 import { indexSettingsComparisonMarkdown } from "../reports/index-settings.mjs";
@@ -32,18 +31,6 @@ const SUITE_TITLES = [
   ["sweqa", "SWE-QA20"],
   ...PILOT_NAMES.map((name) => [name, PILOT_SUITES[name].report.comparison]),
 ];
-
-export function validateGoldStageSummaries(summaries = {}) {
-  assert.ok(
-    summaries && typeof summaries === "object" && !Array.isArray(summaries),
-    "Invalid Gold stage summaries",
-  );
-  return Object.fromEntries(
-    SUITE_TITLES.filter(([suite]) => Object.hasOwn(summaries, suite)).map(
-      ([suite]) => [suite, validateGoldStageSummary(summaries[suite])],
-    ),
-  );
-}
 
 export const QA_DIAGNOSTICS = {
   file: {
@@ -191,20 +178,6 @@ export function compareCombinedResults(baseline, candidate, metadata) {
       rows.push(row);
     }
   }
-  const stageSummaries = (report) =>
-    validateGoldStageSummaries(
-      Object.fromEntries(
-        [
-          ["sweqa", report.sweqa.gold_stages],
-          ...PILOT_NAMES.map((name) => [
-            name,
-            report.pilots[name].report?.gold_stages,
-          ]),
-        ].filter(([, summary]) => summary),
-      ),
-    );
-  const baselineGoldStages = stageSummaries(baseline);
-  const candidateGoldStages = stageSummaries(candidate);
   return {
     schema_version: 1,
     kind: "retrieval-version-comparison",
@@ -221,12 +194,6 @@ export function compareCombinedResults(baseline, candidate, metadata) {
     harness_commit: baseline.harness_commit,
     index_counts: indexCounts,
     index_settings: indexSettings,
-    ...(Object.keys(baselineGoldStages).length
-      ? { baseline_gold_stages: baselineGoldStages }
-      : {}),
-    ...(Object.keys(candidateGoldStages).length
-      ? { candidate_gold_stages: candidateGoldStages }
-      : {}),
     rows,
     errors: [],
   };

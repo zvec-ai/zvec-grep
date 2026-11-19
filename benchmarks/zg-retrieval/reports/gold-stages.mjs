@@ -16,7 +16,7 @@ const meanWithin = (count, maximum) =>
   Number.isFinite(count) && count >= 0 && count <= maximum + 1e-9;
 const displayCount = (count) => Number(count.toFixed(6));
 
-// Only fixed labels and numeric counts from the artifact reach PR comments.
+// Validate coverage before rendering stage reports.
 export function validateGoldStageSummary(summary) {
   assert.equal(
     summary?.version,
@@ -83,24 +83,13 @@ export async function writeGoldStages(directory, calls) {
   return summary;
 }
 
-function stageCell(group, key, missing = "—") {
+function stageCell(group, key) {
   const entry = group?.stages[key];
-  if (!entry) return missing;
+  if (!entry) return "—";
   const { covered, unknown } = entry;
   if (unknown === group.targets) return "N/A";
   const value = `${displayCount(covered)}/${group.targets}`;
   return unknown ? `${value} (${displayCount(unknown)} unknown)` : value;
-}
-
-function comparisonCell(baseline, candidate, key, mode) {
-  if (
-    (key === "fts" && mode === "vector") ||
-    (key === "vector" && mode === "fts")
-  )
-    return "—";
-  const before = stageCell(baseline, key, "N/A");
-  const after = stageCell(candidate, key, "N/A");
-  return before === after ? after : `${before} → ${after}`;
 }
 
 export function goldStageCaptureWarning(summary) {
@@ -110,31 +99,23 @@ export function goldStageCaptureWarning(summary) {
   return `⚠️ Stage capture incomplete: **${observed_calls}/${calls}** verified, **${invalid_calls}** invalid, **${unobserved}** unobserved. Unverified stage coverage is unknown. Retrieval quality results are reported separately.`;
 }
 
-export function goldStagesMarkdown(
-  summary,
-  { baseline, heading = true, warning = true } = {},
-) {
-  if (!summary && !baseline) return [];
-  if (summary) validateGoldStageSummary(summary);
-  if (baseline) validateGoldStageSummary(baseline);
-  const comparing = baseline !== undefined;
-  const captureWarning = warning && goldStageCaptureWarning(summary);
+export function goldStagesMarkdown(summary) {
+  if (!summary) return [];
+  validateGoldStageSummary(summary);
+  const captureWarning = goldStageCaptureWarning(summary);
   const lines = [
     "",
-    ...(heading ? ["### Gold coverage by retrieval stage", ""] : []),
+    "### Gold coverage by retrieval stage",
+    "",
     ...(captureWarning ? [captureWarning, ""] : []),
   ];
   for (const qualification of QUALIFICATIONS) {
     for (const level of LEVELS) {
-      const groups = (summary?.groups ?? []).filter(
+      const groups = summary.groups.filter(
         (group) =>
           group.qualification === qualification && group.level === level,
       );
-      const previousGroups = (baseline?.groups ?? []).filter(
-        (group) =>
-          group.qualification === qualification && group.level === level,
-      );
-      if (!groups.length && !previousGroups.length) continue;
+      if (!groups.length) continue;
       lines.push(
         `#### ${level === "file" ? "File" : "Entity"} Gold (${qualification})`,
         "",
@@ -144,14 +125,7 @@ export function goldStagesMarkdown(
       for (const [key, name] of REPORT_ROWS) {
         const cells = MODES.map((mode) => {
           const group = groups.find((item) => item.mode === mode);
-          return comparing
-            ? comparisonCell(
-                previousGroups.find((item) => item.mode === mode),
-                group,
-                key,
-                mode,
-              )
-            : stageCell(group, key);
+          return stageCell(group, key);
         });
         lines.push(`| ${name} | ${cells.join(" | ")} |`);
       }

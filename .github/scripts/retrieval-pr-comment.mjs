@@ -5,7 +5,6 @@ import { join } from "node:path";
 import {
   QA_DIAGNOSTICS,
   markdownVersionComparison,
-  validateGoldStageSummaries,
 } from "../../benchmarks/zg-retrieval/expansion/compare.mjs";
 import { QUALITY_METRICS } from "../../benchmarks/zg-retrieval/reports/ci.mjs";
 import { QA_SCORING } from "../../benchmarks/zg-retrieval/core/suite.mjs";
@@ -359,12 +358,6 @@ export function validateComparison(report, request) {
       rows.push(validated);
     }
   }
-  const baselineGoldStages = validateGoldStageSummaries(
-    report.baseline_gold_stages,
-  );
-  const candidateGoldStages = validateGoldStageSummaries(
-    report.candidate_gold_stages,
-  );
   // Whitelist data passed to the trusted renderer; artifact Markdown and URLs
   // are never published, interpreted as code, or used to choose the target PR.
   return {
@@ -392,12 +385,6 @@ export function validateComparison(report, request) {
     ...(report.index_settings === undefined
       ? {}
       : { index_settings: indexSettings }),
-    ...(Object.keys(baselineGoldStages).length
-      ? { baseline_gold_stages: baselineGoldStages }
-      : {}),
-    ...(Object.keys(candidateGoldStages).length
-      ? { candidate_gold_stages: candidateGoldStages }
-      : {}),
     rows,
     errors: [],
   };
