@@ -106,7 +106,6 @@ fn replay_rule_ablation() {
                 2.0 / 61.0,
                 10,
                 policy,
-                None,
             );
             let hits = hits.iter().map(|h| {
                 let original = &case.hits[h.entity.id().as_str().parse::<usize>().expect("candidate index")];

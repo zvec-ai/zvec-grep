@@ -428,7 +428,6 @@ mod tests {
         };
         ContextResult {
             query: "src/auth.ts".into(),
-            stage_traces: vec![],
             freshness: None,
             background_refresh: None,
             indexing: None,

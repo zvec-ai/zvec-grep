@@ -2,7 +2,7 @@ use super::storage::SearchStorage;
 
 use std::{
     collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::Path,
     time::Instant,
 };
 
@@ -16,7 +16,6 @@ use crate::{
             MatchedBy, SearchFinalTrace, SearchFusionTrace, SearchHitTrace, SearchRecallTrace,
             TimingEntry,
         },
-        stage_trace::StageTrace,
     },
     domain::{
         Content, Entity, EntityFragment, EntityId, FileId, FileRecord,
@@ -29,7 +28,6 @@ use crate::{
 use super::{
     format_filter::{compile_format_filter, matches_file_name},
     path_filter::{all, resolve_glob_filter},
-    stage_trace::{StageTraceCollector, configured_paths},
 };
 
 const DEFAULT_LIMIT: usize = 7;
@@ -77,7 +75,6 @@ pub(crate) struct SearchPlanResult {
     pub routes: Vec<ResolvedSearchRoute>,
     pub hits: Vec<SearchHit>,
     pub timings: Vec<TimingEntry>,
-    pub stage_trace: Option<StageTrace>,
 }
 
 #[async_trait]
@@ -172,23 +169,6 @@ pub(crate) async fn search_workspace_index(
     storage: &dyn SearchStorage,
     embedding_models: &[&dyn SearchEmbeddingRuntime],
 ) -> Result<SearchPlanResult, EngineError> {
-    search_with_stage_trace(
-        workspace_root,
-        plan,
-        storage,
-        embedding_models,
-        configured_paths().as_ref(),
-    )
-    .await
-}
-
-async fn search_with_stage_trace(
-    workspace_root: &Path,
-    plan: SearchPlan,
-    storage: &dyn SearchStorage,
-    embedding_models: &[&dyn SearchEmbeddingRuntime],
-    watched: Option<&HashSet<PathBuf>>,
-) -> Result<SearchPlanResult, EngineError> {
     if embedding_models.len() > 1 {
         return Err(EngineError::unsupported(
             "this version supports only one embedding model per workspace",
@@ -221,8 +201,6 @@ async fn search_with_stage_trace(
     };
     let embedding_duration = embedding_started.elapsed();
 
-    let mut observation =
-        watched.map(|paths| StageTraceCollector::begin(&routes, limit, paths, storage));
     let recall_started = Instant::now();
     let mut candidates = HashMap::new();
     if has_searchable_files && limit > 0 {
@@ -234,54 +212,29 @@ async fn search_with_stage_trace(
             limit,
             storage,
             &mut candidates,
-            observation.as_mut(),
         )?;
     }
     let recall_duration = recall_started.elapsed();
-    if let Some(observation) = observation.as_mut() {
-        observation.merged(
-            candidates.len(),
-            candidates.values().map(|c| (c.file_id, &c.id)),
-        );
-    }
 
     let fusion_started = Instant::now();
     let fused = fuse_candidates(candidates);
     let fusion_duration = fusion_started.elapsed();
-    if let Some(observation) = observation.as_mut() {
-        observation.fused(
-            fused.len(),
-            fused.iter().map(|c| (c.file_id, &c.id, c.rank)),
-        );
-    }
 
     let load_started = Instant::now();
     // Every recalled entity must be eligible for structural boosts before cutoff.
     let hits = load_candidates(fused, limit, plan.trace, storage)?;
     let load_duration = load_started.elapsed();
-    if let Some(observation) = observation.as_mut() {
-        observation.loaded(&hits);
-    }
     let ranking_started = Instant::now();
     let maximum_rrf = build_recall_routes(&routes, filter.as_ref(), plan.prefer_symbol)
         .iter()
         .map(|_| 1.0 / (RRF_K + 1.0))
         .sum();
-    let hits = super::ranking::rank(
-        hits,
-        &routes,
-        &plan.filter,
-        maximum_rrf,
-        limit,
-        observation.as_mut(),
-    );
+    let hits = super::ranking::rank(hits, &routes, &plan.filter, maximum_rrf, limit);
     let ranking_duration = ranking_started.elapsed();
-    let stage_trace = observation.map(|observation| observation.finish(&hits));
 
     Ok(SearchPlanResult {
         routes,
         hits,
-        stage_trace,
         timings: vec![
             timing("search_plan", plan_duration),
             timing("search_filter", filter_duration),
@@ -396,7 +349,6 @@ fn collect_adaptive_recall(
     limit: usize,
     storage: &dyn SearchStorage,
     candidates: &mut HashMap<EntityId, Candidate>,
-    mut observation: Option<&mut StageTraceCollector>,
 ) -> Result<(), EngineError> {
     let recall_routes = build_recall_routes(routes, filter, prefer_symbol);
     let target = (limit * RECALL_TARGET_FACTOR).max(RECALL_MIN_TARGET_CANDIDATES);
@@ -423,9 +375,6 @@ fn collect_adaptive_recall(
                     )?,
             };
             saturated |= hits.len() >= depth;
-            if let Some(observation) = observation.as_deref_mut() {
-                observation.recall(&route.route.id, depth, &hits);
-            }
             add_recall_hits(candidates, &hits, &route.route)?;
         }
         if candidates.len() >= target || !saturated || depth >= RECALL_MAX_DEPTH {
@@ -1023,33 +972,6 @@ mod tests {
     }
 
     impl SearchStorage for FixtureStorage {
-        fn indexed_sources(
-            &self,
-            paths: &HashSet<PathBuf>,
-        ) -> EngineResult<Vec<crate::storage::IndexedSourceFile>> {
-            Ok(self
-                .files
-                .iter()
-                .filter(|file| paths.contains(file.relative_path().as_path()))
-                .map(|file| crate::storage::IndexedSourceFile {
-                    id: file.id(),
-                    path: file.relative_path().to_path_buf(),
-                    entities: self
-                        .entities
-                        .values()
-                        .filter(|stored| stored.file.id() == file.id())
-                        .map(|stored| {
-                            (
-                                stored.entity.id().clone(),
-                                stored.entity.source_range(),
-                                true,
-                            )
-                        })
-                        .collect(),
-                })
-                .collect())
-        }
-
         fn list_file_attributes(&self) -> EngineResult<Vec<StoredFileAttributes>> {
             assert!(!self.paths_only, "name filters must only read paths");
             assert!(
@@ -1284,108 +1206,6 @@ mod tests {
             model.calls.lock().expect("query calls").as_slice(),
             &[vec!["alpha".to_owned()]]
         );
-    }
-
-    #[tokio::test]
-    async fn stage_observation_preserves_results_with_arbitrary_limits_and_routes() {
-        let first = file(1, "src/a.rs", 100);
-        let second = file(2, "src/b.rs", 100);
-        let entries = [
-            entity(&first, "first"),
-            entity(&first, "second"),
-            entity(&second, "third"),
-        ];
-        let mut storage = pushdown_storage();
-        storage.files = vec![first, second];
-        storage.fts.insert(
-            "Needle".to_owned(),
-            entries
-                .iter()
-                .map(|entry| hit(entry, 0, StorageSearchPath::Fts, 1.0))
-                .collect(),
-        );
-        storage.vector = entries
-            .iter()
-            .rev()
-            .map(|entry| hit(entry, 0, StorageSearchPath::Vector, 1.0))
-            .collect();
-        storage.entities = entries
-            .into_iter()
-            .map(|entry| (entry.entity.id().as_str().to_owned(), entry))
-            .collect();
-        let watched = [PathBuf::from("src/a.rs"), PathBuf::from("missing.rs")].into();
-        let model = FixtureModel::new();
-        for modes in [
-            vec![SearchRouteMode::Fts],
-            vec![SearchRouteMode::Vector],
-            vec![SearchRouteMode::Fts, SearchRouteMode::Vector],
-            vec![SearchRouteMode::Fts, SearchRouteMode::Fts],
-        ] {
-            for prefer_symbol in [false, true] {
-                let mut request = plan(
-                    modes
-                        .iter()
-                        .map(|mode| SearchRoute {
-                            mode: *mode,
-                            query: "Needle".to_owned(),
-                        })
-                        .collect(),
-                );
-                request.limit = Some(2);
-                request.prefer_symbol = prefer_symbol;
-                let off = super::search_with_stage_trace(
-                    Path::new("/workspace"),
-                    request.clone(),
-                    &storage,
-                    &[&model],
-                    None,
-                )
-                .await
-                .expect("ordinary search");
-                let on = super::search_with_stage_trace(
-                    Path::new("/workspace"),
-                    request,
-                    &storage,
-                    &[&model],
-                    Some(&watched),
-                )
-                .await
-                .expect("observed search");
-                let results = |result: &super::SearchPlanResult| {
-                    result.hits.iter().map(|hit| serde_json::json!({
-                    "id": hit.entity.id().as_str(), "rank": hit.rank, "score": hit.score,
-                    "matched_by": hit.matched_by, "trace": hit.trace,
-                })).collect::<Vec<_>>()
-                };
-                assert_eq!(results(&off), results(&on));
-                assert!(off.stage_trace.is_none());
-                let trace = on.stage_trace.expect("capture");
-                assert_eq!(trace.limit, 2);
-                assert_eq!(trace.watched_paths, ["missing.rs", "src/a.rs"]);
-                assert!(trace.index_observed);
-                assert_eq!(trace.sizes.selected, 2);
-                assert_eq!(trace.sizes.loaded, 3);
-                assert_eq!(trace.files.len(), 1);
-                assert!(
-                    trace.files["src/a.rs"]
-                        .values()
-                        .all(|entry| entry.stages.static_rank.is_some())
-                );
-                assert!(
-                    trace
-                        .routes
-                        .values()
-                        .all(|route| !route.attempts.is_empty())
-                );
-                let encoded = serde_json::to_value(&trace).expect("encode trace");
-                assert!(encoded.get("id").is_none());
-                assert_eq!(
-                    serde_json::from_value::<crate::api::context::stage_trace::StageTrace>(encoded)
-                        .expect("roundtrip"),
-                    trace
-                );
-            }
-        }
     }
 
     #[test]

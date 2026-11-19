@@ -643,7 +643,6 @@ async fn execute_context(
                 serde_json::to_string(&result.diagnostics)?
             );
         }
-        let _ = write_stage_traces(&result);
         return Ok(());
     }
     execute_direct_context(request, output).await
@@ -1030,18 +1029,6 @@ async fn execute_direct_context(
             "Diagnostics: {}",
             serde_json::to_string(&result.diagnostics)?
         );
-    }
-    let _ = write_stage_traces(&result);
-    Ok(())
-}
-
-fn write_stage_traces(result: &zg_engine::api::context::ContextResult) -> io::Result<()> {
-    if result.stage_traces.is_empty() {
-        return Ok(());
-    }
-    let mut stderr = io::stderr().lock();
-    for trace in &result.stage_traces {
-        writeln!(stderr, "[ZG_STAGE] {}", serde_json::to_string(trace)?)?;
     }
     Ok(())
 }
