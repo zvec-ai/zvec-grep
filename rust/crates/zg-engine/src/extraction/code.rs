@@ -2196,6 +2196,82 @@ mod tests {
     }
 
     #[test]
+    fn empty_brace_initializer_queues_no_nameless_construction() {
+        // `const Wallet& wallet = {}` spells no type at its initializer, yet
+        // error recovery keeps a zero-width `type_identifier` there. Reading
+        // that empty text as a type name queues a reference spelled `""`, and
+        // the graph write then rejects the file as a whole with
+        // "ID or reference name is empty".
+        use crate::domain::GraphEdgeKind;
+
+        let source = test_source(
+            FileFormat::Cpp,
+            "empty_initializer.cpp",
+            concat!(
+                "struct Wallet {\n",
+                "    int id;\n",
+                "};\n",
+                "int run(const Wallet& wallet = {}, int limit = 0) { return limit; }\n",
+            ),
+        );
+        let graph = extract_for_indexing(&source, ChunkOptions::default())
+            .expect("extraction")
+            .graph
+            .expect("code sources carry a graph");
+        let nameless: Vec<&str> = graph
+            .pending
+            .iter()
+            .filter(|reference| reference.ref_kind == GraphEdgeKind::Calls)
+            .map(|reference| reference.ref_name.as_str())
+            .filter(|name| name.trim().is_empty())
+            .collect();
+        assert!(
+            nameless.is_empty(),
+            "an empty brace initializer must queue no nameless call reference"
+        );
+    }
+
+    #[test]
+    fn recovery_declarator_binds_no_nameless_name() {
+        // An export macro between `class` and the class name leaves the body's
+        // statements in error recovery, and a call through a function pointer
+        // inside a nested type then leaves a zero-width declarator behind. A
+        // `declares` reference spelled `""` fails the whole file's graph write
+        // with "ID or reference name is empty".
+        use crate::domain::GraphEdgeKind;
+
+        let source = test_source(
+            FileFormat::Cpp,
+            "recovered_declarator.cpp",
+            concat!(
+                "class LEVELDB_EXPORT Iterator {\n",
+                " public:\n",
+                "  struct CleanupNode {\n",
+                "    void Run() {\n",
+                "      (*function)(arg1, arg2);\n",
+                "    }\n",
+                "  };\n",
+                "};\n",
+            ),
+        );
+        let graph = extract_for_indexing(&source, ChunkOptions::default())
+            .expect("extraction")
+            .graph
+            .expect("code sources carry a graph");
+        let nameless: Vec<&str> = graph
+            .pending
+            .iter()
+            .filter(|reference| reference.ref_kind == GraphEdgeKind::Declares)
+            .map(|reference| reference.ref_name.as_str())
+            .filter(|name| name.trim().is_empty())
+            .collect();
+        assert!(
+            nameless.is_empty(),
+            "a recovered declarator must bind no nameless declares reference"
+        );
+    }
+
+    #[test]
     fn php_member_and_static_calls_reach_the_graph() {
         // PHP names the method in its own field, so the receiver must be
         // rejoined. Code that runs nothing at the site (attribute arguments,
