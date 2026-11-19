@@ -282,6 +282,7 @@ struct RuleCaches {
     /// runs once per file per sweep.
     tu_macros: HashMap<u32, MacroTimeline>,
     import_references: HashMap<u32, Arc<[ImportReference]>>,
+    python_class_positions: HashMap<String, Option<(usize, usize)>>,
     rust_types: rust_types::TypeCache,
     cpp_types: cpp_types::TypeCache,
     javascript_imports: HashMap<u32, Arc<[bindings::JavascriptImport]>>,

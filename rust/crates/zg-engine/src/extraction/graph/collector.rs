@@ -662,6 +662,13 @@ fn visit_for_bindings(
             if format == FileFormat::Python
                 && let Some(binding) = context.name_edges.last_mut()
             {
+                // Preserve the annotation spelling to distinguish eager names
+                // from quoted forward references and constructor assignments.
+                if matches!(node.kind(), "typed_parameter" | "typed_default_parameter") {
+                    binding.raw_text = node
+                        .child_by_field_name("type")
+                        .map(|annotation| node_text(annotation, source).to_owned());
+                }
                 // An annotation or constructed instance states a receiver
                 // type, not that calling the variable constructs this class.
                 binding.receiver_only = node
@@ -2805,6 +2812,10 @@ fn strip_trailing_semicolons(value: &str) -> &str {
 
 /// Extracts the module path from an import node via grammar fields or text.
 pub(crate) fn module_path_of(node: Node<'_>, source: &[u8], format: FileFormat) -> Option<String> {
+    // The Python grammar makes __future__ a literal token without a module_name field.
+    if node.kind() == "future_import_statement" && format == FileFormat::Python {
+        return Some("__future__".into());
+    }
     if matches!(format, FileFormat::TypeScript | FileFormat::JavaScript)
         && let Some(clause) = named_children(node)
             .into_iter()

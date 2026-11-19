@@ -112,6 +112,8 @@ pub(crate) struct DeclaredBinding {
     pub name: String,
     /// Declared receiver type (`X`).
     pub bound_type: String,
+    /// Original annotation spelling for Python parameters, including quotes.
+    pub raw_text: Option<String>,
     /// One-based line of the declaring site; rebindings of the same name
     /// shadow earlier ones at later lines.
     pub line: u32,

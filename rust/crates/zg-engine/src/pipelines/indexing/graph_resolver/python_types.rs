@@ -4,7 +4,9 @@ use super::{
     ClassScope, IndexStore, NameIndexEntry, ResolutionSnapshot, RuleCaches, StoredPendingRef,
     binding_holds_at, import_target_file, is_type_scope, without_line_comments,
 };
-use crate::storage::graph::ImportReference;
+use crate::domain::{EntityId, Range};
+
+type Position = (usize, usize);
 
 /// The resolved type and whether its identity depends on an import path.
 pub(super) fn scope(
@@ -17,10 +19,101 @@ pub(super) fn scope(
     let Some(path) = snapshot.file_path(stored.file_id) else {
         return Ok((None, false));
     };
-    // Imports in the function body are not visible to an annotation on its
-    // signature. A later constructor assignment instead reads imports at the
-    // assignment site. The binding cache already holds this receiver evidence.
-    let position = caches
+    let imports = caches.imports(store, stored.file_id)?;
+    let site = lookup_site(snapshot, stored, ty, caches, &imports);
+    let file_scope = format!("f{}", stored.file_id);
+    let mut best = imports
+        .iter()
+        .filter_map(|import| {
+            let scope = if import.owner_id == file_scope {
+                None
+            } else {
+                Some(
+                    snapshot
+                        .entity_record(&import.owner_id)?
+                        .qualified_name
+                        .as_str(),
+                )
+            };
+            let depth = site.depth(snapshot, stored.file_id, scope)?;
+            let position = (import.position.0 as usize, import.position.1 as usize);
+            if !site.can_see(depth, position) {
+                return None;
+            }
+            let name = imported_name(import.raw_text.as_deref()?, &import.specifier, ty)?;
+            Some(((depth, position), Binding::Import(&import.specifier, name)))
+        })
+        .max_by_key(|(key, _)| *key);
+
+    let (root, suffix) = ty.split_once('.').unwrap_or((ty, ""));
+    let Some(classes) = snapshot.lookup_candidates(root) else {
+        return Ok((None, false));
+    };
+    for class in classes
+        .iter()
+        .filter(|hit| hit.file_id == stored.file_id && hit.symbol_type.is_some_and(is_type_scope))
+    {
+        let scope = class
+            .qualified_name
+            .rsplit_once("::")
+            .map(|(scope, _)| scope);
+        // Skip unrelated lexical scopes before loading a declaration position.
+        let Some(depth) = site.depth(snapshot, stored.file_id, scope) else {
+            continue;
+        };
+        let Some(position) = class_position(store, caches, &class.entity_id)? else {
+            continue;
+        };
+        if site.can_see(depth, position)
+            && best
+                .as_ref()
+                .is_none_or(|(previous, _)| (depth, position) > *previous)
+        {
+            best = Some(((depth, position), Binding::Local(class)));
+        }
+    }
+    let (target, imported) = match best.map(|(_, binding)| binding) {
+        Some(Binding::Local(class)) if suffix.is_empty() => (Some(class), false),
+        Some(Binding::Local(class)) => {
+            let qualified = format!("{}::{}", class.qualified_name, suffix.replace('.', "::"));
+            (type_in_file(snapshot, class.file_id, &qualified), false)
+        }
+        Some(Binding::Import(specifier, name)) => {
+            let target = import_target_file(snapshot, "python", path, specifier)
+                .and_then(|file| type_in_file(snapshot, file, &name.replace('.', "::")));
+            (target, true)
+        }
+        None => (None, false),
+    };
+    Ok((
+        target.map(|hit| ClassScope {
+            name: hit.qualified_name.clone(),
+            declared_in: Some(hit.file_id),
+            entity: Some(hit.entity_id.clone()),
+        }),
+        imported,
+    ))
+}
+
+enum Binding<'a> {
+    Local(&'a NameIndexEntry),
+    Import(&'a str, String),
+}
+
+struct LookupSite<'a> {
+    scope: Option<&'a str>,
+    position: Position,
+    eager: bool,
+}
+
+fn lookup_site<'a>(
+    snapshot: &'a ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    ty: &str,
+    caches: &RuleCaches,
+    imports: &[crate::storage::graph::ImportReference],
+) -> LookupSite<'a> {
+    let binding = caches
         .declared_bindings
         .get(&stored.reference.owner_id)
         .and_then(|bindings| {
@@ -29,103 +122,104 @@ pub(super) fn scope(
                     && binding.bound_type == ty
                     && binding_holds_at(binding, stored.reference.line)
             })
-        })
-        .map_or(
-            (stored.reference.line, stored.reference.column),
-            |binding| (binding.line as usize, binding.column as usize),
-        );
-    let mut imported = false;
-    let mut import_depth = 0;
-    let mut candidates: Vec<&NameIndexEntry> = Vec::new();
-    for reference in caches.imports(store, stored.file_id)?.iter() {
-        let Some(depth) = visible_import_depth(snapshot, stored, reference, position) else {
-            continue;
-        };
-        let Some(statement) = reference.raw_text.as_deref() else {
-            continue;
-        };
-        let Some(name) = imported_name(statement, &reference.specifier, ty) else {
-            continue;
-        };
-        if imported && depth < import_depth {
-            continue;
+        });
+    let site = binding.map_or(
+        (stored.reference.line, stored.reference.column),
+        |binding| (binding.line as usize, binding.column as usize),
+    );
+    // Constructors in function bodies and postponed annotations can use module
+    // names bound after the function was defined. Function-local imports still
+    // have to precede the site, including for annotations on nested functions.
+    let annotation = binding.and_then(|binding| binding.raw_text.as_deref());
+    let eager = annotation.is_some_and(|text| !text.starts_with(['\'', '"']))
+        && !imports.iter().any(|import| {
+            import.specifier == "__future__"
+                && import
+                    .raw_text
+                    .as_deref()
+                    .is_some_and(|text| imported_name(text, "__future__", "annotations").is_some())
+        });
+    let owner = snapshot
+        .entity_record(&stored.reference.owner_id)
+        .map(|owner| owner.qualified_name.as_str());
+    let scope = if annotation.is_some() {
+        owner.and_then(|name| name.rsplit_once("::").map(|(parent, _)| parent))
+    } else {
+        owner
+    };
+    LookupSite {
+        scope,
+        position: site,
+        eager,
+    }
+}
+
+impl LookupSite<'_> {
+    /// Class bodies supply names to their direct method signatures, but do
+    /// not form enclosing function scopes for code nested inside a method.
+    fn depth(
+        &self,
+        snapshot: &ResolutionSnapshot,
+        file: u32,
+        scope: Option<&str>,
+    ) -> Option<usize> {
+        let Some(scope) = scope else { return Some(0) };
+        let suffix = self.scope?.strip_prefix(scope)?;
+        if !suffix.is_empty()
+            && (!suffix.starts_with("::") || type_in_file(snapshot, file, scope).is_some())
+        {
+            return None;
         }
-        if depth > import_depth {
-            candidates.clear();
-        }
-        import_depth = depth;
-        imported = true;
-        let Some(file) = import_target_file(snapshot, "python", path, &reference.specifier) else {
-            continue;
-        };
-        let qualified = name.replace('.', "::");
-        let tail = qualified.rsplit("::").next().expect("type name");
-        let Some(hits) = snapshot.lookup_candidates(tail) else {
-            return Ok((None, true));
-        };
-        for hit in hits.iter().filter(|hit| {
+        Some(scope.split("::").count())
+    }
+
+    fn can_see(&self, depth: usize, position: Position) -> bool {
+        position <= self.position || (depth == 0 && !self.eager)
+    }
+}
+
+fn type_in_file<'a>(
+    snapshot: &'a ResolutionSnapshot,
+    file: u32,
+    qualified: &str,
+) -> Option<&'a NameIndexEntry> {
+    let mut hits = snapshot
+        .lookup_candidates(qualified.rsplit("::").next()?)?
+        .iter()
+        .filter(|hit| {
             hit.file_id == file
                 && hit.qualified_name == qualified
                 && hit.symbol_type.is_some_and(is_type_scope)
-        }) {
-            if !candidates
-                .iter()
-                .any(|known| known.entity_id == hit.entity_id)
-            {
-                candidates.push(hit);
-            }
-        }
-    }
-    if !imported {
-        let qualified = ty.replace('.', "::");
-        let tail = qualified.rsplit("::").next().expect("type name");
-        candidates = snapshot
-            .lookup_candidates(tail)
-            .into_iter()
-            .flatten()
-            .filter(|hit| {
-                hit.file_id == stored.file_id
-                    && hit.qualified_name == qualified
-                    && hit.symbol_type.is_some_and(is_type_scope)
-            })
-            .collect();
-        // Workspace uniqueness does not make a Python name visible here.
-        // Missing local declarations and imports must remain unresolved.
-    }
-    // The imported declaration is a static contract. An override in one of
-    // its subclasses does not identify the concrete receiver at runtime.
-    Ok((
-        match candidates.as_slice() {
-            [hit] => Some(ClassScope {
-                name: hit.qualified_name.clone(),
-                declared_in: Some(hit.file_id),
-                entity: Some(hit.entity_id.clone()),
-            }),
-            // A missing or ambiguous import must not fall back to a namesake.
-            _ => None,
-        },
-        imported,
-    ))
+        });
+    let hit = hits.next()?;
+    hits.next().is_none().then_some(hit)
 }
 
-/// Import scope is the existing edge source, not a second symbol table.
-/// Only the module or a lexical ancestor can supply the annotation's name.
-fn visible_import_depth(
-    snapshot: &ResolutionSnapshot,
-    stored: &StoredPendingRef,
-    import: &ImportReference,
-    position: (usize, usize),
-) -> Option<usize> {
-    if import.owner_id == format!("f{}", stored.file_id) {
-        return Some(0);
+/// Class positions already live in canonical entities. Read each relevant
+/// local class once per sweep and retain only its source coordinates.
+fn class_position(
+    store: &IndexStore,
+    caches: &mut RuleCaches,
+    id: &str,
+) -> crate::EngineResult<Option<Position>> {
+    if let Some(position) = caches.python_class_positions.get(id) {
+        return Ok(*position);
     }
-    if (import.position.0 as usize, import.position.1 as usize) > position {
-        return None;
-    }
-    let owner = snapshot.entity_record(&stored.reference.owner_id)?;
-    let scope = &snapshot.entity_record(&import.owner_id)?.qualified_name;
-    (owner.qualified_name == *scope || owner.qualified_name.starts_with(&format!("{scope}::")))
-        .then(|| scope.split("::").count())
+    let entity_id = EntityId::from_string(id.to_owned());
+    let position = store.read_snapshot(|view| {
+        Ok(view
+            .fetch_entities(std::slice::from_ref(&entity_id))?
+            .get(&entity_id)
+            .and_then(|entity| match entity.source_range() {
+                // Python binds the class name after its body finishes.
+                Range::Text(range) => Some((range.end_line(), range.end_byte_column())),
+                _ => None,
+            }))
+    })?;
+    caches
+        .python_class_positions
+        .insert(id.to_owned(), position);
+    Ok(position)
 }
 
 /// Read the spelling inside the module named by this import reference.
@@ -139,7 +233,7 @@ fn imported_name(statement: &str, specifier: &str, ty: &str) -> Option<String> {
         if module.trim() != specifier {
             return None;
         }
-        for entry in names.trim().trim_matches(['(', ')']).split(',') {
+        for entry in names.trim().trim_matches(['(', ')']).rsplit(',') {
             let (name, local) = import_entry(entry);
             if let Some(suffix) = type_suffix(ty, local) {
                 return Some(format!("{name}{suffix}"));

@@ -147,6 +147,10 @@ impl SqliteGraphStorage {
             Ok(DeclaredBinding {
                 name,
                 bound_type: bound_type.to_owned(),
+                raw_text: metadata
+                    .get("rawText")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
                 line: u32::try_from(line).unwrap_or_default(),
                 until,
                 column: u32::try_from(row.get::<_, i64>(3)?).unwrap_or_default(),

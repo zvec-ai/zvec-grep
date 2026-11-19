@@ -77,6 +77,100 @@ async fn python_annotation_names_respect_lexical_import_visibility() {
 }
 
 #[tokio::test]
+async fn python_annotations_use_the_last_visible_class_or_import() {
+    let index = "class Index:\n    def run(self): pass\n";
+    let files = vec![
+        SourceFile {
+            path: "a.py",
+            source: index,
+        },
+        SourceFile {
+            path: "b.py",
+            source: index,
+        },
+        SourceFile {
+            path: "ordered.py",
+            source: "\
+class Index:
+    def run(self): pass
+def before(x: Index): return x.run()
+from a import Index
+def first(x: Index): return x.run()
+from b import Index
+def second(x: Index): return x.run()
+from missing import Index
+def unknown(x: Index): return x.run()
+",
+        },
+        SourceFile {
+            path: "local.py",
+            source: "\
+from a import Index
+class Index:
+    def run(self): pass
+    def in_class(self, x: Index): return x.run()
+def local(x: Index): return x.run()
+def outer():
+    class Index:
+        def run(self): pass
+    def nested(x: Index): return x.run()
+class Container:
+    from b import Index
+    def method(self, x: Index): return x.run()
+    def factory(self):
+        def inner(x: Index): return x.run()
+",
+        },
+        SourceFile {
+            path: "forward.py",
+            source: "\
+def quoted(x: 'Index'): return x.run()
+from b import Index
+",
+        },
+        SourceFile {
+            path: "postponed.py",
+            source: "\
+from __future__ import annotations
+def postponed(x: Index): return x.run()
+from b import Index
+",
+        },
+    ];
+    let queries = [
+        ("before", Some(("ordered.py", "Index::run"))),
+        ("first", Some(("a.py", "Index::run"))),
+        ("second", Some(("b.py", "Index::run"))),
+        ("unknown", None),
+        ("local", Some(("local.py", "Index::run"))),
+        ("Index::in_class", Some(("a.py", "Index::run"))),
+        ("outer::nested", Some(("local.py", "outer::Index::run"))),
+        ("Container::method", Some(("b.py", "Index::run"))),
+        (
+            "Container::factory::inner",
+            Some(("local.py", "Index::run")),
+        ),
+        ("quoted", Some(("b.py", "Index::run"))),
+        ("postponed", Some(("b.py", "Index::run"))),
+    ]
+    .map(|(symbol, target)| {
+        let edges = target.map(|(path, name)| json!({"symbol": {"filePath": path, "name": name}}));
+        Query {
+            operation: "callees",
+            symbol,
+            expected: json!([{"name": symbol, "edges": edges.into_iter().collect::<Vec<_>>()}]),
+            ..Query::default()
+        }
+    });
+    check_case(Case {
+        name: "python_annotations_use_the_last_visible_class_or_import",
+        files,
+        queries: queries.into(),
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn python_annotations_follow_non_first_module_imports() {
     check_case(Case {
         name: "python_annotations_follow_non_first_module_imports",
