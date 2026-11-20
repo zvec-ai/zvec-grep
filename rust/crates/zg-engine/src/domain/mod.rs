@@ -68,9 +68,11 @@ pub(crate) use source::FileId;
 pub(crate) use source::FileIndexStatus;
 pub(crate) use source::FileRecord;
 pub(crate) use source::FileSnapshot;
+pub use source::PdfRect;
 pub(crate) use source::Range;
 pub(crate) use source::SourcePath;
 pub(crate) use source::TextRange;
+pub(crate) use source::{PdfBlock, PdfSourceMap, PdfSourcePart};
 // Consumed by the cross-file reference resolver.
 pub(crate) use source::{formats_for_path, reference_compatible_with};
 

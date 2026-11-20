@@ -11,6 +11,150 @@ use crate::domain::model::EmbeddingMetric;
 use super::*;
 use crate::domain::model::EmbeddingPurpose;
 
+#[test]
+fn layout_leases_share_sessions_without_evicting_the_embedding_slot() {
+    let cache = tempfile::tempdir().expect("isolated cache");
+    let manager =
+        ModelRuntimeManager::with_factory(|_, _, _, _| Ok(Arc::new(ConcurrentFixtureModel::new())));
+    let embedding = manager
+        .acquire(ModelRuntimeRequest::new(
+            "local/fixture",
+            ModelConfig::default(),
+            None,
+        ))
+        .expect("embedding");
+    let config = LayoutModelConfig {
+        cache_dir: Some(cache.path().to_owned()),
+    };
+    let first = manager.acquire_layout(config.clone()).expect("layout");
+    let second = manager.acquire_layout(config.clone()).expect("same layout");
+    assert!(Arc::ptr_eq(&first.inner.entry, &second.inner.entry));
+    assert!(!Arc::ptr_eq(&embedding.inner.entry, &first.inner.entry));
+    let weak = Arc::downgrade(&first.inner.entry);
+    drop(first);
+    drop(second);
+    drop(embedding);
+    assert!(
+        weak.upgrade().is_some(),
+        "one idle model per task is retained"
+    );
+    assert_eq!(manager.snapshot().cached_runtimes, 2);
+    let lease = manager.acquire_layout(config).expect("reuse");
+    assert!(Arc::ptr_eq(
+        &weak.upgrade().expect("cached"),
+        &lease.inner.entry
+    ));
+    manager.close();
+    drop(lease);
+    assert!(weak.upgrade().is_none());
+    assert!(
+        std::fs::read_dir(cache.path())
+            .expect("cache")
+            .next()
+            .is_none(),
+        "acquisition does not download or load models"
+    );
+}
+
+#[tokio::test]
+async fn layout_cancellation_and_failure_release_execution_ownership() {
+    let cache = tempfile::tempdir().expect("isolated cache");
+    let manager = ModelRuntimeManager::new();
+    let lease = manager
+        .acquire_layout(LayoutModelConfig {
+            cache_dir: Some(cache.path().to_owned()),
+        })
+        .expect("layout");
+    let signal = CancellationToken::new();
+    signal.cancel();
+    let error = lease
+        .prepare(LayoutOptions {
+            signal: Some(signal.clone()),
+            ..LayoutOptions::default()
+        })
+        .await
+        .expect_err("cancelled preparation");
+    assert_eq!(error.code(), crate::EngineError::CANCELLED);
+    let invalid = LayoutImage {
+        width: 0,
+        height: 0,
+        rgb: Arc::from([]),
+    };
+    let error = lease
+        .detect(invalid.clone(), LayoutOptions::default())
+        .await
+        .expect_err("invalid image");
+    assert_eq!(error.code(), crate::EngineError::INVALID_ARGUMENT);
+    let permit = lease
+        .inner
+        .acquire_operation_permit(None)
+        .await
+        .expect("permit");
+    let error = lease
+        .detect(
+            invalid,
+            LayoutOptions {
+                signal: Some(signal),
+                ..LayoutOptions::default()
+            },
+        )
+        .await
+        .expect_err("cancelled admission");
+    assert_eq!(error.code(), crate::EngineError::CANCELLED);
+    drop(permit);
+    assert_eq!(lease.inner.operation.permits.available_permits(), 1);
+    assert_eq!(
+        lease
+            .inner
+            .entry
+            .runtime
+            .active_operations
+            .load(Ordering::Acquire),
+        0
+    );
+    assert!(
+        std::fs::read_dir(cache.path())
+            .expect("cache")
+            .next()
+            .is_none()
+    );
+    manager.close();
+    drop(lease);
+    assert_eq!(manager.snapshot().cached_runtimes, 0);
+}
+
+#[tokio::test]
+async fn layout_native_completion_retires_runtime_after_last_caller() {
+    let cache = tempfile::tempdir().expect("isolated cache");
+    let manager = ModelRuntimeManager::new();
+    let lease = manager
+        .acquire_layout(LayoutModelConfig {
+            cache_dir: Some(cache.path().to_owned()),
+        })
+        .expect("layout");
+    let model = Arc::downgrade(lease.model());
+    let permits = Arc::clone(&lease.inner.operation.permits);
+    let permit = lease
+        .inner
+        .acquire_operation_permit(None)
+        .await
+        .expect("permit");
+    let native_work = ActiveOperationGuard::new(
+        Arc::clone(&lease.inner.entry.runtime),
+        lease.inner.manager.clone(),
+        Some(permit),
+    );
+    drop(lease);
+    manager.close();
+    assert_eq!(manager.snapshot().cached_runtimes, 1);
+    assert!(model.upgrade().is_some());
+    assert_eq!(permits.available_permits(), 0);
+    drop(native_work);
+    assert_eq!(manager.snapshot().cached_runtimes, 0);
+    assert!(model.upgrade().is_none());
+    assert_eq!(permits.available_permits(), 1);
+}
+
 struct ConcurrentFixtureModel {
     info: EmbeddingModelInfo,
     barrier: Barrier,
@@ -127,7 +271,7 @@ async fn native_work_retains_admission_and_runtime_after_caller_is_dropped() {
             Some(1),
         ))
         .expect("runtime");
-    let permits = Arc::clone(&lease.operation.permits);
+    let permits = Arc::clone(&lease.inner.operation.permits);
     let inputs = [vec![Content::Text("fixture".into())]];
     let mut pending = Box::pin(lease.embed(&inputs, EmbeddingOptions::default(), None));
     assert!(futures_util::poll!(&mut pending).is_pending());
@@ -163,7 +307,7 @@ async fn native_work_retains_admission_after_cancellation_or_failure_until_settl
                 Some(1),
             ))
             .expect("runtime");
-        let permits = Arc::clone(&lease.operation.permits);
+        let permits = Arc::clone(&lease.inner.operation.permits);
         let inputs = [vec![Content::Text("fixture".into())]];
         let signal = CancellationToken::new();
         let mut pending = Box::pin(lease.embed(
@@ -352,13 +496,13 @@ async fn prefetch_admission_is_independent_of_execution_and_releases_on_success(
     }
     assert_eq!(fixture.gated.started.load(Ordering::Acquire), 3);
     assert_eq!(manager.snapshot().active_embeddings, 3);
-    assert_eq!(lease.operation.permits.available_permits(), 0);
+    assert_eq!(lease.inner.operation.permits.available_permits(), 0);
     assert_eq!(*fixture.budgets.lock().expect("budget lock"), [1; 3]);
     let scopes = fixture.scopes.lock().expect("scope lock").clone();
     assert!(scopes.iter().all(|scope| {
         scope
             .as_ref()
-            .is_some_and(|scope| Arc::ptr_eq(scope, &lease.operation.scope))
+            .is_some_and(|scope| Arc::ptr_eq(scope, &lease.inner.operation.scope))
     }));
     let stats = lease.execution_stats().expect("backend statistics");
     assert_eq!(stats.actual_provider, "fixture");
@@ -371,7 +515,7 @@ async fn prefetch_admission_is_independent_of_execution_and_releases_on_success(
     }
     assert_eq!(fixture.gated.started.load(Ordering::Acquire), 4);
     assert_eq!(manager.snapshot().active_embeddings, 0);
-    assert_eq!(lease.operation.permits.available_permits(), 3);
+    assert_eq!(lease.inner.operation.permits.available_permits(), 3);
 }
 
 #[tokio::test]
@@ -385,7 +529,7 @@ async fn prefetch_cancellation_and_failure_release_admission_for_recovery() {
         ))
         .expect("prefetch runtime");
     let inputs = [vec![Content::Text("fixture".into())]];
-    let occupied = Arc::clone(&lease.operation.permits)
+    let occupied = Arc::clone(&lease.inner.operation.permits)
         .acquire_many_owned(3)
         .await
         .expect("occupy admission");
@@ -406,7 +550,7 @@ async fn prefetch_cancellation_and_failure_release_admission_for_recovery() {
     );
     drop(occupied);
     assert_eq!(fixture.gated.started.load(Ordering::Acquire), 0);
-    assert_eq!(lease.operation.permits.available_permits(), 3);
+    assert_eq!(lease.inner.operation.permits.available_permits(), 3);
 
     let error = lease
         .embed(
@@ -430,14 +574,14 @@ async fn prefetch_cancellation_and_failure_release_admission_for_recovery() {
             .is_err()
     );
     assert_eq!(manager.snapshot().active_embeddings, 0);
-    assert_eq!(lease.operation.permits.available_permits(), 3);
+    assert_eq!(lease.inner.operation.permits.available_permits(), 3);
     fixture.gated.release.add_permits(1);
     lease
         .embed(&inputs, EmbeddingOptions::default(), None)
         .await
         .expect("recovery after failure");
     assert_eq!(fixture.gated.started.load(Ordering::Acquire), 1);
-    assert_eq!(lease.operation.permits.available_permits(), 3);
+    assert_eq!(lease.inner.operation.permits.available_permits(), 3);
 }
 
 #[test]
@@ -473,10 +617,10 @@ async fn different_operation_budgets_share_model_but_keep_their_admission_and_ex
     };
     let first = acquire(1);
     let second = acquire(4);
-    assert!(Arc::ptr_eq(&first.entry, &second.entry));
+    assert!(Arc::ptr_eq(&first.inner.entry, &second.inner.entry));
     assert!(!Arc::ptr_eq(
-        &first.operation.permits,
-        &second.operation.permits
+        &first.inner.operation.permits,
+        &second.inner.operation.permits
     ));
     let inputs = [vec![Content::Text("fixture".into())]];
     let mut first_pending = Box::pin(first.embed(&inputs, EmbeddingOptions::default(), None));
@@ -489,18 +633,18 @@ async fn different_operation_budgets_share_model_but_keep_their_admission_and_ex
         scopes[0].as_ref().expect("first scope"),
         scopes[1].as_ref().expect("second scope")
     ));
-    assert_eq!(first.operation.permits.available_permits(), 2);
-    assert_eq!(second.operation.permits.available_permits(), 5);
+    assert_eq!(first.inner.operation.permits.available_permits(), 2);
+    assert_eq!(second.inner.operation.permits.available_permits(), 5);
     assert_eq!(manager.snapshot().cached_runtimes, 1);
     assert_eq!(manager.snapshot().active_embeddings, 2);
 
     drop(first_pending);
-    assert_eq!(first.operation.permits.available_permits(), 3);
-    assert_eq!(second.operation.permits.available_permits(), 5);
+    assert_eq!(first.inner.operation.permits.available_permits(), 3);
+    assert_eq!(second.inner.operation.permits.available_permits(), 5);
     assert_eq!(manager.snapshot().active_embeddings, 1);
     fixture.gated.release.add_permits(1);
     second_pending.await.expect("other operation finishes");
-    assert_eq!(second.operation.permits.available_permits(), 6);
+    assert_eq!(second.inner.operation.permits.available_permits(), 6);
     assert_eq!(manager.snapshot().active_embeddings, 0);
 }
 
@@ -589,7 +733,7 @@ fn idle_since(manager: &ModelRuntimeManager, reference: &str) -> Instant {
 fn idle_ttl_starts_at_final_release_and_reacquisition_resets_it() {
     let (manager, creations) = fixture_cache(CachePolicy::default());
     let first = acquire_fixture(&manager, "first");
-    let model = Arc::downgrade(&first.entry.runtime.model);
+    let model = Arc::downgrade(first.inner.entry.runtime.model.embedding());
     let second = acquire_fixture(&manager, "first");
     let ttl = manager.inner.policy.idle_timeout;
     reap_at(&manager, Instant::now() + ttl);
@@ -636,9 +780,9 @@ fn maintenance_waits_for_native_completion_instead_of_polling_its_idle_deadline(
             ..CachePolicy::default()
         });
         let lease = acquire_fixture(&manager, "native");
-        let model = Arc::downgrade(&lease.entry.runtime.model);
-        let work = ActiveEmbeddingGuard::new(
-            Arc::clone(&lease.entry.runtime),
+        let model = Arc::downgrade(lease.inner.entry.runtime.model.embedding());
+        let work = ActiveOperationGuard::new(
+            Arc::clone(&lease.inner.entry.runtime),
             Arc::downgrade(&manager.inner),
             None,
         );
@@ -689,9 +833,9 @@ fn maintenance_waits_for_native_completion_instead_of_polling_its_idle_deadline(
 fn capacity_is_soft_for_active_models_and_trims_on_acquisition_and_release() {
     let (manager, creations) = fixture_cache(CachePolicy::default());
     let first = acquire_fixture(&manager, "first");
-    let first_model = Arc::downgrade(&first.entry.runtime.model);
+    let first_model = Arc::downgrade(first.inner.entry.runtime.model.embedding());
     let second = acquire_fixture(&manager, "second");
-    let second_model = Arc::downgrade(&second.entry.runtime.model);
+    let second_model = Arc::downgrade(second.inner.entry.runtime.model.embedding());
     assert_eq!(manager.snapshot().cached_runtimes, 2);
     assert_eq!(manager.snapshot().active_leases, 2);
     drop(first);
@@ -719,10 +863,10 @@ fn capacity_retires_the_least_recently_used_idle_model() {
         ..CachePolicy::default()
     });
     let first = acquire_fixture(&manager, "first");
-    let first_model = Arc::downgrade(&first.entry.runtime.model);
+    let first_model = Arc::downgrade(first.inner.entry.runtime.model.embedding());
     drop(first);
     let second = acquire_fixture(&manager, "second");
-    let second_model = Arc::downgrade(&second.entry.runtime.model);
+    let second_model = Arc::downgrade(second.inner.entry.runtime.model.embedding());
     drop(second);
     let hit = acquire_fixture(&manager, "first");
     drop(hit);
@@ -750,7 +894,7 @@ fn shared_lease_owners_remain_protected_until_the_last_owner_releases() {
         // Writer sessions share their owning Arc with borrowed queries.
         let writer = Arc::new(acquire_fixture(&manager, "shared"));
         let borrower = Arc::clone(&writer);
-        let model = Arc::downgrade(&writer.entry.runtime.model);
+        let model = Arc::downgrade(writer.inner.entry.runtime.model.embedding());
         drop(writer);
         reap_at(&manager, Instant::now() + Duration::from_secs(3600));
         assert!(model.upgrade().is_some());
@@ -807,7 +951,7 @@ fn maintenance_expires_idle_models_without_another_request_or_tokio_runtime() {
         },
     );
     let lease = acquire_fixture(&manager, "first");
-    let model = Arc::downgrade(&lease.entry.runtime.model);
+    let model = Arc::downgrade(lease.inner.entry.runtime.model.embedding());
     assert!(
         observed.recv_timeout(Duration::from_millis(50)).is_err(),
         "active model survives its TTL"
@@ -884,7 +1028,7 @@ fn slow_model_disposal_does_not_hold_the_cache_lock() {
     acquisition.join().expect("acquisition thread");
     let first = eviction.join().expect("eviction thread");
     let second = result.expect("cache hit must not wait for disposal");
-    assert!(Arc::ptr_eq(&first.entry, &second.entry));
+    assert!(Arc::ptr_eq(&first.inner.entry, &second.inner.entry));
     drop((first, second));
     manager.close();
 }
@@ -906,7 +1050,7 @@ fn concurrent_final_releases_cannot_mark_new_leases_idle() {
         });
         reap_at(&manager, Instant::now() + Duration::from_secs(3600));
         let shared = acquire_fixture(&manager, "first");
-        assert!(Arc::ptr_eq(&replacement.entry, &shared.entry));
+        assert!(Arc::ptr_eq(&replacement.inner.entry, &shared.inner.entry));
         assert_eq!(manager.snapshot().active_leases, 2);
         drop((replacement, shared));
     }
@@ -998,7 +1142,10 @@ async fn reuses_one_runtime_and_allows_shared_concurrent_embeddings() {
     let second = second.expect("second runtime should be acquired");
 
     assert_eq!(creations.load(Ordering::Acquire), 1);
-    assert!(Arc::ptr_eq(&first.entry.runtime, &second.entry.runtime));
+    assert!(Arc::ptr_eq(
+        &first.inner.entry.runtime,
+        &second.inner.entry.runtime
+    ));
     assert_eq!(first.info().model().reference(), "local/fixture");
     assert_eq!(
         manager.snapshot(),
@@ -1146,7 +1293,7 @@ async fn native_batches_share_admission_across_independent_leases() {
             || ModelRuntimeRequest::new(reference, ModelConfig::default(), Some(requested));
         let first = manager.acquire(request()).expect("first operation");
         let second = manager.acquire(request()).expect("second operation");
-        assert!(Arc::ptr_eq(&first.entry, &second.entry));
+        assert!(Arc::ptr_eq(&first.inner.entry, &second.inner.entry));
         assert_eq!(first.admission_concurrency(), allowed);
         let inputs = [vec![Content::Text("fixture".into())]];
         let embeddings = async {
@@ -1162,10 +1309,10 @@ async fn native_batches_share_admission_across_independent_leases() {
                 tokio::task::yield_now().await;
             }
             assert_eq!(fixture.started.load(Ordering::Acquire), allowed);
-            assert_eq!(first.operation.permits.available_permits(), 0);
+            assert_eq!(first.inner.operation.permits.available_permits(), 0);
             assert!(Arc::ptr_eq(
-                &first.operation.permits,
-                &second.operation.permits
+                &first.inner.operation.permits,
+                &second.inner.operation.permits
             ));
             let cancelled = CancellationToken::new();
             cancelled.cancel();
@@ -1205,11 +1352,11 @@ fn ort_server_leases_share_one_runtime_across_budgets() {
     let other = manager
         .acquire(request(Some(4)))
         .expect("different index budget");
-    assert!(Arc::ptr_eq(&index.entry, &query.entry));
-    assert!(Arc::ptr_eq(&index.entry, &other.entry));
-    assert_eq!(index.operation.limit, 24);
-    assert_eq!(query.operation.limit, 1);
-    assert_eq!(other.operation.limit, 4);
+    assert!(Arc::ptr_eq(&index.inner.entry, &query.inner.entry));
+    assert!(Arc::ptr_eq(&index.inner.entry, &other.inner.entry));
+    assert_eq!(index.inner.operation.limit, 24);
+    assert_eq!(query.inner.operation.limit, 1);
+    assert_eq!(other.inner.operation.limit, 4);
     assert_eq!(creations.load(Ordering::Acquire), 1);
     drop(index);
     drop(query);
@@ -1355,13 +1502,13 @@ fn concurrency_policy_prefers_user_and_preserves_catalog_backend_defaults() {
         let lease = manager
             .acquire(ModelRuntimeRequest::new(reference, config.clone(), None))
             .expect("catalog model should be created without loading resources");
-        assert_eq!(lease.operation.limit, initial, "{reference}");
+        assert_eq!(lease.inner.operation.limit, initial, "{reference}");
         assert_eq!(lease.concurrency_defaults().maximum, maximum, "{reference}");
         let explicit = manager
             .acquire(ModelRuntimeRequest::new(reference, config, Some(24)))
             .expect("explicit concurrency");
         assert_eq!(
-            explicit.operation.limit,
+            explicit.inner.operation.limit,
             if reference == "local/embeddinggemma-300m" {
                 8
             } else {
@@ -1370,7 +1517,7 @@ fn concurrency_policy_prefers_user_and_preserves_catalog_backend_defaults() {
             "{reference}"
         );
         assert_eq!(
-            Arc::ptr_eq(&lease.entry, &explicit.entry),
+            Arc::ptr_eq(&lease.inner.entry, &explicit.inner.entry),
             reference != "local/embeddinggemma-300m"
         );
     }
@@ -1428,7 +1575,7 @@ fn transformer_server_pool_caps_requests_and_is_reused_without_loading_assets() 
                 Some(requested),
             ))
             .expect("acquire configured pool");
-        assert!(Arc::ptr_eq(&first.entry, &lease.entry));
+        assert!(Arc::ptr_eq(&first.inner.entry, &lease.inner.entry));
         assert_eq!(lease.execution_concurrency(), expected.min(capacity));
         assert_eq!(lease.concurrency_defaults().maximum, capacity);
     }
@@ -1483,7 +1630,7 @@ async fn large_remote_overrides_do_not_overflow_runtime_admission() {
         )
         .await
         .expect("admitted request");
-    assert_eq!(lease.operation.limit, usize::MAX);
+    assert_eq!(lease.inner.operation.limit, usize::MAX);
     assert_eq!(lease.admission_concurrency(), Semaphore::MAX_PERMITS);
     assert_eq!(manager.snapshot().active_embeddings, 0);
     drop(lease);

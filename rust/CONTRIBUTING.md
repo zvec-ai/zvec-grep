@@ -20,6 +20,13 @@ The workspace pins its Rust toolchain in `rust-toolchain.toml`. Lexical search
 uses embedded `grep` and `ignore` crates, so a system `rg` executable is not
 required for builds or tests.
 
+PDF extraction pins LiteParse and its matching PDFium bindings in `Cargo.toml`,
+with OCR dependencies disabled. The bindings download patched PDFium 8058 on the
+first build. Offline builds need the SDK cached, or `PDFIUM_LIB_PATH` and
+`PDFIUM_INCLUDE_PATH` set to its `lib/` and `include/` directories.
+`scripts/prepare-pdfium.py` stages the shared library and licenses for packaging.
+Installed binaries load the bundled copy for both extraction and page rendering.
+
 ## Engine changes
 
 Keep the application surface centered on `ZvecGrep`:

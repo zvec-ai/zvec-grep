@@ -334,7 +334,7 @@ mod tests {
                         usize::try_from(local.start_offset()).expect("fragment start"),
                         usize::try_from(local.end_offset()).expect("fragment end"),
                     ),
-                    Range::Text(_) => panic!("fragments must store byte offsets"),
+                    Range::Text(_) | Range::Pdf(_) => panic!("fragments must store byte offsets"),
                 };
                 assert!(start < end && end <= content.len());
                 assert!(content.is_char_boundary(start) && content.is_char_boundary(end));

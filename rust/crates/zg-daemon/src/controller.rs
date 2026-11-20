@@ -1149,15 +1149,38 @@ async fn remove_file_if_exists(path: &Path) -> Result<(), std::io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{future::Future, sync::mpsc, time::Duration};
 
     use tempfile::TempDir;
 
     use super::{
         DaemonInstanceRecord, InstanceLock, STARTUP_FILE, StartupLock, StartupRecord, daemon_dir,
-        hostname, instance_path, read_instance_record,
+        hostname, instance_path, read_instance_record, record_owner_alive,
     };
     use crate::{DaemonError, ServerConfig};
+
+    /// Occupy Tokio's only blocking worker until the test drops `resume`.
+    /// Publication uses synchronous file I/O; temporary-file cleanup cannot
+    /// complete until this gate is released. No scheduler timing is assumed.
+    fn with_paused_file_io<F: Future<Output = ()>>(test: impl FnOnce(mpsc::Sender<()>) -> F) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let (resume, wait) = mpsc::channel();
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let worker = tokio::task::spawn_blocking(move || {
+                started.send(()).expect("test waits for the worker");
+                // Dropping the sender also unblocks this worker if the test panics.
+                let _ = wait.recv();
+            });
+            ready.await.expect("blocking worker is occupied");
+            test(resume).await;
+            worker.await.expect("blocking worker exits");
+        });
+    }
 
     #[tokio::test]
     async fn instance_lock_replaces_an_incomplete_record_with_complete_states() {
@@ -1294,62 +1317,87 @@ mod tests {
         lock.release().await.expect("release instance lock");
     }
 
-    #[tokio::test]
-    async fn interleaved_instance_lock_acquisitions_admit_one_owner() {
-        let home = TempDir::new().expect("temp home");
-        let config = ServerConfig::new(
-            "127.0.0.1:7999".parse().expect("listen address"),
-            home.path().to_owned(),
-        );
+    #[test]
+    fn interleaved_instance_lock_acquisitions_admit_one_owner() {
+        with_paused_file_io(|resume| async move {
+            let home = TempDir::new().expect("temp home");
+            let config = ServerConfig::new(
+                "127.0.0.1:7999".parse().expect("listen address"),
+                home.path().to_owned(),
+            );
 
-        // Poll the first acquisition once so it publishes the lock file and
-        // parks on its temporary-file cleanup, then let the second one run.
-        let mut first = Box::pin(InstanceLock::acquire(&config));
-        let first_ready =
-            std::future::poll_fn(|cx| std::task::Poll::Ready(first.as_mut().poll(cx).is_ready()))
-                .await;
-        assert!(
-            !first_ready,
-            "first acquisition should park after publishing"
-        );
-        assert!(instance_path(home.path()).exists());
+            let mut first = Box::pin(InstanceLock::acquire(&config));
+            let first_poll =
+                std::future::poll_fn(|cx| std::task::Poll::Ready(first.as_mut().poll(cx))).await;
+            assert!(
+                first_poll.is_pending(),
+                "acquisition must wait for the paused cleanup: {:?}",
+                first_poll.map(|result| result.map(|_| ()))
+            );
+            assert!(instance_path(home.path()).exists());
 
-        let second = InstanceLock::acquire(&config).await;
-        assert!(
-            matches!(second, Err(DaemonError::AlreadyRunning { pid }) if pid == std::process::id())
-        );
-        let mut lock = first.await.expect("first owner keeps the lock");
-        lock.mark_ready().await.expect("owner keeps its lock");
+            // Allow file I/O, but leave the first acquisition unpolled. Its
+            // token must protect the published record before it returns a lock.
+            drop(resume);
+            let published = read_instance_record(home.path())
+                .await
+                .expect("published record")
+                .expect("published owner exists");
+            let second = InstanceLock::acquire(&config).await;
+            assert!(
+                matches!(second, Err(DaemonError::AlreadyRunning { pid }) if pid == std::process::id())
+            );
+            let mut lock = first.await.expect("first owner keeps the lock");
+            assert_eq!(lock.record.instance_token, published.instance_token);
+            lock.mark_ready().await.expect("owner keeps its lock");
 
-        lock.release().await.expect("release instance lock");
+            lock.release().await.expect("release instance lock");
+        });
     }
 
-    #[tokio::test]
-    async fn cancelled_instance_lock_acquisition_releases_its_token() {
-        let home = TempDir::new().expect("temp home");
-        let config = ServerConfig::new(
-            "127.0.0.1:7999".parse().expect("listen address"),
-            home.path().to_owned(),
-        );
+    #[test]
+    fn cancelled_instance_lock_acquisition_releases_its_token() {
+        with_paused_file_io(|resume| async move {
+            let home = TempDir::new().expect("temp home");
+            let config = ServerConfig::new(
+                "127.0.0.1:7999".parse().expect("listen address"),
+                home.path().to_owned(),
+            );
 
-        // Cancel an acquisition after it publishes the lock file. Its record
-        // stays behind under this PID, but the token must not stay held.
-        let mut cancelled = Box::pin(InstanceLock::acquire(&config));
-        let cancelled_ready = std::future::poll_fn(|cx| {
-            std::task::Poll::Ready(cancelled.as_mut().poll(cx).is_ready())
-        })
-        .await;
-        assert!(!cancelled_ready, "acquisition should park after publishing");
-        drop(cancelled);
-        let leftover = read_instance_record(home.path())
-            .await
-            .expect("leftover record")
-            .expect("leftover record exists");
+            let mut cancelled = Box::pin(InstanceLock::acquire(&config));
+            let first_poll =
+                std::future::poll_fn(|cx| std::task::Poll::Ready(cancelled.as_mut().poll(cx)))
+                    .await;
+            assert!(
+                first_poll.is_pending(),
+                "acquisition must wait for the paused cleanup: {:?}",
+                first_poll.map(|result| result.map(|_| ()))
+            );
+            assert!(instance_path(home.path()).exists());
+            drop(resume);
+            let leftover = read_instance_record(home.path())
+                .await
+                .expect("published record")
+                .expect("published record exists");
+            assert!(record_owner_alive(
+                &leftover.hostname,
+                leftover.pid,
+                leftover.instance_token
+            ));
+            // Leave the acquisition unpolled. Cancellation must unregister
+            // its token even if cleanup has already completed.
+            drop(cancelled);
+            assert!(!record_owner_alive(
+                &leftover.hostname,
+                leftover.pid,
+                leftover.instance_token
+            ));
 
-        let lock = InstanceLock::acquire(&config).await.expect("instance lock");
-        assert_ne!(lock.record.instance_token, leftover.instance_token);
+            let lock = InstanceLock::acquire(&config).await.expect("instance lock");
+            assert_ne!(lock.record.instance_token, leftover.instance_token);
 
-        lock.release().await.expect("release instance lock");
+            lock.release().await.expect("release instance lock");
+        });
     }
 
     #[tokio::test]

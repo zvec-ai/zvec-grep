@@ -31,9 +31,13 @@ pub(super) fn extract_for_indexing<'source>(
     let source = source.into();
     let source_text = match &source {
         Source::Text(source) => Some(source.text.as_str()),
-        Source::Image(_) => None,
+        Source::Image(_) | Source::Pdf(_) => None,
     };
     let output = match source {
+        Source::Pdf(source) => Ok(ExtractionOutput {
+            fragments: super::pdf::extract(source, options)?,
+            graph: None,
+        }),
         Source::Text(source) if is_code_source(&source.formats) => {
             code::extract_for_indexing(source, options, collect_graph)
         }
@@ -73,6 +77,9 @@ pub(super) fn extract_for_indexing<'source>(
 }
 
 pub(super) fn source_kind(formats: &[FileFormat]) -> Option<SourceKind> {
+    if formats.contains(&FileFormat::Pdf) {
+        return Some(SourceKind::Pdf);
+    }
     if let Some(format) = formats
         .iter()
         .find(|format| format.categories().contains(&FileCategory::Image))
@@ -248,7 +255,7 @@ mod tests {
             (FileFormat::Json, Some(SourceKind::Text)),
             (FileFormat::Png, Some(SourceKind::Image(FileFormat::Png))),
             (FileFormat::Svg, Some(SourceKind::Image(FileFormat::Svg))),
-            (FileFormat::Pdf, None),
+            (FileFormat::Pdf, Some(SourceKind::Pdf)),
             (FileFormat::Word, None),
             (FileFormat::Unknown, None),
             (FileFormat::Binary, None),

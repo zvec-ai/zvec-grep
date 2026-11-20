@@ -86,6 +86,18 @@ impl ReadView<'_> {
         self.state.entities.fetch_code_metadata(ids)
     }
 
+    /// Enumerate a file's complete entities without ranked-search limits.
+    pub(crate) fn entities_for_file(&self, file_id: FileId) -> EngineResult<Vec<Entity>> {
+        let ids = self
+            .state
+            .entities
+            .list_ids_for_file(file_id)?
+            .into_iter()
+            .map(EntityId::from_string)
+            .collect::<Vec<_>>();
+        Ok(self.state.entities.fetch(&ids)?.into_values().collect())
+    }
+
     pub(crate) fn fetch_entities(
         &self,
         ids: &[EntityId],

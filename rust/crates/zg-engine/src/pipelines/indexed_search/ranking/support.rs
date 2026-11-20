@@ -15,7 +15,7 @@ pub(super) fn apply(scored: &mut [Scored], weight: f64) {
             .is_none_or(|kind| kind == SymbolType::Value)
             || code.symbol_name.is_none()
             || (item.symbol_bonus == 0.0 && item.path_bonus == 0.0)
-            || interval(item.hit.entity.source_range()).is_none()
+            || interval(&item.hit.entity.source_range()).is_none()
         {
             continue;
         }
@@ -46,8 +46,8 @@ pub(super) fn apply(scored: &mut [Scored], weight: f64) {
             if names.contains(&name)
                 || selected.iter().any(|&other| {
                     overlaps(
-                        scored[index].hit.entity.source_range(),
-                        scored[other].hit.entity.source_range(),
+                        &scored[index].hit.entity.source_range(),
+                        &scored[other].hit.entity.source_range(),
                     )
                 })
             {
@@ -76,19 +76,11 @@ pub(super) fn apply(scored: &mut [Scored], weight: f64) {
     }
 }
 
-fn interval(range: Range) -> Option<(u64, u64)> {
-    match range {
-        Range::Byte(range) => Some((range.start_offset(), range.end_offset())),
-        Range::Text(range) => Some((
-            u64::try_from(range.start_byte_offset()).ok()?,
-            u64::try_from(range.end_byte_offset()).ok()?,
-        )),
-        Range::Full => None,
-    }
-    .filter(|(start, end)| start < end)
+fn interval(range: &Range) -> Option<(u64, u64)> {
+    range.byte_offsets().filter(|(start, end)| start < end)
 }
 
-fn overlaps(a: Range, b: Range) -> bool {
+fn overlaps(a: &Range, b: &Range) -> bool {
     match (interval(a), interval(b)) {
         (Some((a0, a1)), Some((b0, b1))) => a0 < b1 && b0 < a1,
         _ => true,
