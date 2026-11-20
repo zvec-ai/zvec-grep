@@ -696,10 +696,24 @@ fn acquire_index_models(
     graph_indexing: bool,
 ) -> Result<IndexModels, EngineError> {
     let model = acquire_model(models, existing, options)?;
+    let configs = model
+        .configured_http()
+        .map(|http| {
+            (
+                model.info().model().reference(),
+                ModelConfig {
+                    http: Some(http.clone()),
+                    endpoint: model.configured_endpoint().map(str::to_owned),
+                    ..Default::default()
+                },
+            )
+        })
+        .into_iter()
+        .collect();
     let descriptor = IndexDescriptor::new(
         model.info().clone(),
         std::collections::BTreeMap::new(),
-        std::collections::BTreeMap::new(),
+        configs,
         graph_indexing,
         crate::domain::FTS_CONFIG,
     )?;
@@ -718,6 +732,10 @@ fn acquire_index_models(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep model resolution, saved configuration, and consent in execution order"
+)]
 fn acquire_model(
     models: &ModelRuntimeManager,
     existing: Option<&Workspace>,
@@ -742,6 +760,35 @@ fn acquire_model(
     let existing_index = existing.and_then(|workspace| workspace.index().descriptor());
     let existing_runtime =
         existing_index.and_then(|index| index.embedding_configs().get(&reference));
+    let explicit_endpoint = options.endpoint.as_deref().or_else(|| {
+        options
+            .embedding
+            .as_ref()
+            .and_then(|embedding| embedding.endpoint.as_deref())
+    });
+    if let Some(http) = crate::config::resolve_http_model(
+        &config,
+        &reference,
+        existing_runtime,
+        explicit_endpoint,
+        options.rebuild,
+    )? {
+        let root = resolve_directory(options.root.as_deref())?;
+        crate::authorization::require_with_targets(
+            &root,
+            &reference,
+            http.endpoint.as_deref().expect("resolved HTTP endpoint"),
+            options.allow_remote,
+            &options.authorized_remote,
+        )?;
+        return models
+            .acquire(ModelRuntimeRequest::new(
+                reference,
+                http,
+                options.embedding_concurrency,
+            ))
+            .map_err(ModelError::into_engine_error);
+    }
     let requested_key = options
         .runtime_api_key
         .as_ref()
@@ -807,6 +854,7 @@ fn acquire_model(
         .acquire(ModelRuntimeRequest::new(
             reference.clone(),
             ModelConfig {
+                http: None,
                 api_key,
                 endpoint,
                 cache_dir: crate::config::model_cache(
@@ -896,6 +944,13 @@ fn saved_embedding_config(
                 .cloned()
         })
         .unwrap_or_default();
+    if let Some(http) = model.configured_http() {
+        return Ok(ModelConfig {
+            http: Some(http.clone()),
+            endpoint: model.configured_endpoint().map(str::to_owned),
+            ..Default::default()
+        });
+    }
     if model.info().model().provider() == "local" {
         stored.device = options
             .device

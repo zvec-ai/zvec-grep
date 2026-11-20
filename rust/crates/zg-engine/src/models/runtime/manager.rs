@@ -19,7 +19,7 @@ use super::compute::ModelComputeRuntime;
 use super::concurrency::{batch_concurrency, is_transformers, local_runtime_limit};
 use crate::domain::{
     Content,
-    model::{Device, EmbeddingModelInfo, EmbeddingResult, ModelConfig},
+    model::{Device, EmbeddingModelInfo, EmbeddingResult, HttpEmbeddingConfig, ModelConfig},
 };
 use crate::models::{
     backends::create_embedding_model,
@@ -123,6 +123,7 @@ struct ModelRuntimeKey {
     reference: String,
     api_key_fingerprint: Option<u64>,
     endpoint: Option<String>,
+    http: Option<HttpEmbeddingConfig>,
     model_cache_dir: Option<PathBuf>,
     device: Option<Device>,
     local_limit: Option<usize>,
@@ -480,6 +481,10 @@ impl ModelRuntimeLease {
         self.key.endpoint.as_deref()
     }
 
+    pub(crate) fn configured_http(&self) -> Option<&HttpEmbeddingConfig> {
+        self.key.http.as_ref()
+    }
+
     pub(crate) fn matches_query_request(&self, request: &ModelRuntimeRequest) -> bool {
         // Queries may borrow writer storage while using a separate native budget.
         let mut key = ModelRuntimeKey::new(&request.reference, &request.options);
@@ -680,6 +685,7 @@ impl ModelRuntimeKey {
             reference: reference.to_owned(),
             api_key_fingerprint: options.api_key.as_deref().map(secret_fingerprint),
             endpoint: options.endpoint.clone(),
+            http: options.http.clone(),
             model_cache_dir: options.cache_dir.clone(),
             device: options.device,
             local_limit: (!is_transformers(reference))

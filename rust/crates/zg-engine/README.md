@@ -72,6 +72,8 @@ Embedding vectors are stored as IEEE binary16. The engine keeps embeddings and q
 
 Each workspace uses an embedding model for semantic search. Local models run on your machine and may need an initial download; remote models send content or queries to an external service and require authorization. Changing the model or encountering an incompatible index format requires rebuilding the index.
 
+Runtime HTTP models use `http/<alias>` references from the global `models` configuration. Their `http` descriptor specifies the served model, vector shape, limits, authentication environment-variable reference, and query/document prefixes. The workspace saves this descriptor and the authorized endpoint for subsequent indexing and search; global edits do not silently change an existing index's embedding space. HTTP models retain the same content-transfer authorization and runtime concurrency/cancellation boundaries as built-in remote models. See the [embedding model guide](https://zvec.org/en/docs/zvec-grep/embedding-models/) for configuration.
+
 ## Modules
 
 | Module | Responsibility |
