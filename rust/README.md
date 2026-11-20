@@ -125,9 +125,37 @@ do not configure a separate query worker and are not persisted in workspace sett
 Direct and Server indexing use the same engine boundary; restart the Server after
 changing its inherited environment, while explicit CLI overrides need no restart.
 
-For llama.cpp, the limit controls contexts within a serialized batch and is capped
-at eight, defaulting to one. Transformers/ORT shares a bounded runtime between
-indexing and queries for the same model, cache and device:
+For llama.cpp, C is the concurrent context limit on CPU, Metal and CUDA:
+
+- Direct mode sizes the context pool from the operation's C (default 1).
+  Pools are local to that process; independent Direct processes do not share resources.
+- Server startup captures `ZVEC_GREP_LLAMA_SERVER_CONTEXTS` (default 1) as a
+  hard limit on executing llama.cpp contexts across all models and devices in
+  that Server. Requests retain the CLI/API > index environment > legacy > default
+  precedence above, then are capped to the Server limit. The effective value is
+  reported through progress/logging. Each operation's batches share its own C
+  allowance; different C values reuse the same model/device runtime. Omitted
+  request C defaults to 1 unless the index environment supplies another default.
+- `ZVEC_GREP_LLAMA_THREADS` sets **CPU threads per context**, for indexing and
+  queries. The default is `max(1, floor(available_logical_cpus / 2 / pool_capacity))`.
+  In Server mode, capacity is the startup limit, not an individual request's C;
+  requests never change thread configuration. GPU contexts always use one native
+  CPU helper thread, including when this CPU override is set. Invalid environment
+  values warn and use defaults. Restart the Server to change either setting.
+- The CPU compute budget is capacity times threads per context. With more contexts
+  than half the available CPUs, the one-thread minimum exceeds that half-CPU target.
+  This is not a limit on all process threads or an ORT-style shared compute pool.
+  Resident weights/KV across models are not bounded by the execution-slot limit.
+- Contexts share model weights, are created on demand, and release native buffers
+  after 30 idle seconds. Qwen KV capacity follows each job's token requirements,
+  preserving the catalog's maximum input length.
+- Gemma/Qwen sequences are packed internally on Metal, independently of C.
+  CPU and CUDA use one sequence per native job; CUDA packing remains disabled
+  because it failed the T4 embedding-equivalence checks. Cancellation/error paths
+  drain submitted work before returning its slots.
+
+Transformers/ORT shares a bounded runtime between indexing and queries for the
+same model, cache and device:
 
 - C controls the session count on both CPU and CUDA, defaulting to one and
   capped to available hardware concurrency. Direct indexing uses the explicit

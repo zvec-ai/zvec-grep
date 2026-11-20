@@ -118,7 +118,7 @@ async fn native_work_retains_admission_and_runtime_after_caller_is_dropped() {
     });
     let manager = ModelRuntimeManager::with_factory({
         let fixture = Arc::clone(&fixture);
-        move |_, _, _, _sessions| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
+        move |_, _, _, _sessions, _llama| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
     });
     let lease = manager
         .acquire(ModelRuntimeRequest::new(
@@ -154,7 +154,7 @@ async fn native_work_retains_admission_after_cancellation_or_failure_until_settl
         });
         let manager = ModelRuntimeManager::with_factory({
             let fixture = Arc::clone(&fixture);
-            move |_, _, _, _sessions| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
+            move |_, _, _, _sessions, _llama| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
         });
         let lease = manager
             .acquire(ModelRuntimeRequest::new(
@@ -320,7 +320,7 @@ fn prefetch_fixture() -> (ModelRuntimeManager, Arc<PrefetchFixtureModel>) {
     let fixture = Arc::new(PrefetchFixtureModel::new());
     let manager = ModelRuntimeManager::with_factory({
         let fixture = Arc::clone(&fixture);
-        move |_, _, _, _sessions| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
+        move |_, _, _, _sessions, _llama| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
     });
     manager.set_server_pool_capacity(4).expect("server pool");
     (manager, fixture)
@@ -554,7 +554,7 @@ fn fixture_cache(policy: CachePolicy) -> (ModelRuntimeManager, Arc<AtomicUsize>)
     let creations = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&creations);
     let manager = ModelRuntimeManager::with_policy(
-        Arc::new(move |_, _, _, _sessions| {
+        Arc::new(move |_, _, _, _sessions, _llama| {
             count.fetch_add(1, Ordering::AcqRel);
             Ok(Arc::new(ProgressFixtureModel::new()))
         }),
@@ -792,7 +792,7 @@ impl Drop for DisposalFixture {
 fn maintenance_expires_idle_models_without_another_request_or_tokio_runtime() {
     let (disposed, observed) = mpsc::channel();
     let manager = ModelRuntimeManager::with_policy(
-        Arc::new(move |_, _, _, _sessions| {
+        Arc::new(move |_, _, _, _sessions, _llama| {
             let disposed = disposed.clone();
             Ok(Arc::new(DisposalFixture {
                 inner: ProgressFixtureModel::new(),
@@ -824,7 +824,7 @@ fn maintenance_expires_idle_models_without_another_request_or_tokio_runtime() {
 #[test]
 fn dropping_the_manager_releases_idle_models_without_waiting_for_the_ttl() {
     let (disposed, observed) = mpsc::channel();
-    let manager = ModelRuntimeManager::with_factory(move |_, _, _, _sessions| {
+    let manager = ModelRuntimeManager::with_factory(move |_, _, _, _sessions, _llama| {
         let disposed = disposed.clone();
         Ok(Arc::new(DisposalFixture {
             inner: ProgressFixtureModel::new(),
@@ -850,7 +850,7 @@ fn slow_model_disposal_does_not_hold_the_cache_lock() {
     let (entered, observed) = mpsc::channel();
     let (release, wait_for_release) = mpsc::channel();
     let gate = Arc::new(Mutex::new(wait_for_release));
-    let manager = ModelRuntimeManager::with_factory(move |reference, _, _, _sessions| {
+    let manager = ModelRuntimeManager::with_factory(move |reference, _, _, _sessions, _llama| {
         let entered = entered.clone();
         let gate = Arc::clone(&gate);
         let blocks = reference == "first";
@@ -925,7 +925,7 @@ fn invalid_model_info_is_rejected_before_caching_or_leasing() {
     ] {
         let creations = Arc::new(AtomicUsize::new(0));
         let observed_creations = Arc::clone(&creations);
-        let manager = ModelRuntimeManager::with_factory(move |_, _, _, _sessions| {
+        let manager = ModelRuntimeManager::with_factory(move |_, _, _, _sessions, _llama| {
             let mut model = ConcurrentFixtureModel::new();
             if observed_creations.fetch_add(1, Ordering::AcqRel) == 0 {
                 let mut data = serde_json::to_value(&model.info).expect("metadata");
@@ -966,7 +966,7 @@ async fn reuses_one_runtime_and_allows_shared_concurrent_embeddings() {
     let manager = ModelRuntimeManager::with_factory({
         let creations = Arc::clone(&creations);
         let fixture = Arc::clone(&fixture);
-        move |_reference, _options, _compute, _sessions| {
+        move |_reference, _options, _compute, _sessions, _llama| {
             creations.fetch_add(1, Ordering::AcqRel);
             Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
         }
@@ -1062,10 +1062,11 @@ async fn forwards_preparation_progress_to_both_callbacks_with_effective_concurre
     use crate::domain::model::ModelProgress;
 
     let fixture = Arc::new(ProgressFixtureModel::new());
-    let manager =
-        ModelRuntimeManager::with_factory(move |_reference, _options, _compute, _sessions| {
+    let manager = ModelRuntimeManager::with_factory(
+        move |_reference, _options, _compute, _sessions, _llama| {
             Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
-        });
+        },
+    );
     let lease = manager
         .acquire(ModelRuntimeRequest::new(
             "local/fixture",
@@ -1136,11 +1137,11 @@ async fn forwards_preparation_progress_to_both_callbacks_with_effective_concurre
 
 #[tokio::test]
 async fn native_batches_share_admission_across_independent_leases() {
-    for (reference, requested, allowed) in [("local/embeddinggemma-300m", 8, 1)] {
+    for (reference, requested, allowed) in [("local/bekko-256-int8", 1, 1)] {
         let fixture = Arc::new(GatedFixtureModel::new());
         let manager = ModelRuntimeManager::with_factory({
             let fixture = Arc::clone(&fixture);
-            move |_, _, _, _sessions| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
+            move |_, _, _, _sessions, _llama| Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
         });
         let request =
             || ModelRuntimeRequest::new(reference, ModelConfig::default(), Some(requested));
@@ -1223,7 +1224,7 @@ async fn user_concurrency_limits_tasks_without_splitting_the_shared_runtime() {
     let fixture = Arc::new(GatedFixtureModel::new());
     let manager = ModelRuntimeManager::with_factory({
         let fixture = Arc::clone(&fixture);
-        move |_reference, _options, _compute, _sessions| {
+        move |_reference, _options, _compute, _sessions, _llama| {
             Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
         }
     });
@@ -1272,7 +1273,7 @@ async fn cancelled_task_does_not_wait_for_an_operation_permit() {
     let fixture = Arc::new(GatedFixtureModel::new());
     let manager = ModelRuntimeManager::with_factory({
         let fixture = Arc::clone(&fixture);
-        move |_reference, _options, _compute, _sessions| {
+        move |_reference, _options, _compute, _sessions, _llama| {
             Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
         }
     });
@@ -1316,7 +1317,7 @@ async fn cancelled_task_does_not_wait_for_an_operation_permit() {
 #[tokio::test]
 async fn dropping_an_embedding_future_releases_activity_but_keeps_its_model_lease() {
     let fixture = Arc::new(GatedFixtureModel::new());
-    let manager = ModelRuntimeManager::with_factory(move |_, _, _, _sessions| {
+    let manager = ModelRuntimeManager::with_factory(move |_, _, _, _sessions, _llama| {
         Ok(Arc::clone(&fixture) as Arc<dyn EmbeddingModel>)
     });
     let lease = acquire_fixture(&manager, "first");
@@ -1360,15 +1361,7 @@ fn concurrency_policy_prefers_user_and_preserves_catalog_backend_defaults() {
         let explicit = manager
             .acquire(ModelRuntimeRequest::new(reference, config, Some(24)))
             .expect("explicit concurrency");
-        assert_eq!(
-            explicit.operation.limit,
-            if reference == "local/embeddinggemma-300m" {
-                8
-            } else {
-                24
-            },
-            "{reference}"
-        );
+        assert_eq!(explicit.operation.limit, 24, "{reference}");
         assert_eq!(
             Arc::ptr_eq(&lease.entry, &explicit.entry),
             reference != "local/embeddinggemma-300m"
@@ -1398,6 +1391,86 @@ fn transformer_direct_pool_size_follows_requested_concurrency() {
             lease.concurrency_defaults().maximum,
             super::super::ort_config::session_count(requested)
         );
+    }
+}
+
+#[test]
+fn llama_direct_context_capacity_follows_c_on_cpu_and_cuda() {
+    let manager = ModelRuntimeManager::new();
+    for device in [Device::Cpu, Device::Cuda] {
+        for requested in [1, 2, 4, 8, 24] {
+            let lease = manager
+                .acquire(ModelRuntimeRequest::new(
+                    "local/embeddinggemma-300m",
+                    ModelConfig {
+                        device: Some(device),
+                        ..Default::default()
+                    },
+                    Some(requested),
+                ))
+                .expect("metadata only");
+            assert_eq!(lease.execution_concurrency(), requested);
+            assert_eq!(lease.concurrency_defaults().maximum, requested);
+            assert_eq!(
+                lease.index_batch_concurrency(Some(requested)),
+                Some(requested)
+            );
+        }
+    }
+}
+
+#[test]
+fn llama_server_caps_requests_reuses_runtimes_and_shares_capacity_across_models() {
+    let recorded = Arc::new(StdMutex::new(Vec::new()));
+    let mut manager = ModelRuntimeManager::with_factory({
+        let recorded = Arc::clone(&recorded);
+        move |reference, options, compute, sessions, llama| {
+            let resources = Arc::clone(llama.as_ref().expect("llama resource configuration"));
+            recorded.lock().expect("recorded resources").push(resources);
+            create_embedding_model(reference, Some(options), compute, sessions, llama)
+        }
+    });
+    Arc::get_mut(&mut manager.inner)
+        .expect("unshared manager")
+        .llama_settings = LlamaSettings {
+        server_contexts: 4,
+        threads: None,
+        hardware_threads: 16,
+    };
+    manager.enable_server_mode().expect("server startup");
+    let mut retained = Vec::new();
+    for device in [Device::Cpu, Device::Cuda] {
+        for reference in ["local/embeddinggemma-300m", "local/qwen3-embedding-0.6b"] {
+            let request = |c| {
+                ModelRuntimeRequest::new(
+                    reference,
+                    ModelConfig {
+                        device: Some(device),
+                        ..Default::default()
+                    },
+                    c,
+                )
+            };
+            let first = manager.acquire(request(None)).expect("default request");
+            for requested in [1, 2, 4, 8, usize::MAX] {
+                let next = manager.acquire(request(Some(requested))).expect("request");
+                assert!(Arc::ptr_eq(&first.entry, &next.entry));
+                assert_eq!(next.execution_concurrency(), requested.min(4));
+                assert_eq!(
+                    next.index_batch_concurrency(Some(requested)),
+                    Some(requested.min(4))
+                );
+                assert_eq!(next.concurrency_defaults().maximum, 4);
+            }
+            retained.push(first);
+        }
+    }
+    let resources = recorded.lock().expect("recorded resources");
+    assert_eq!(resources.len(), 4);
+    for other in resources.iter() {
+        assert!(Arc::ptr_eq(&resources[0], other));
+        assert_eq!(other.contexts, 4);
+        assert_eq!(other.cpu_threads, 2);
     }
 }
 
@@ -1443,11 +1516,12 @@ fn transformer_server_pool_caps_requests_and_is_reused_without_loading_assets() 
 fn rejects_zero_user_concurrency_before_constructing_a_runtime() {
     let creations = Arc::new(AtomicUsize::new(0));
     let captured = Arc::clone(&creations);
-    let manager =
-        ModelRuntimeManager::with_factory(move |_reference, _options, _compute, _sessions| {
+    let manager = ModelRuntimeManager::with_factory(
+        move |_reference, _options, _compute, _sessions, _llama| {
             captured.fetch_add(1, Ordering::AcqRel);
             Ok(Arc::new(ProgressFixtureModel::new()) as Arc<dyn EmbeddingModel>)
-        });
+        },
+    );
 
     for reference in ["local/fixture", "local/all-minilm-l6-v2"] {
         let error = manager
@@ -1465,9 +1539,10 @@ fn rejects_zero_user_concurrency_before_constructing_a_runtime() {
 
 #[tokio::test]
 async fn large_remote_overrides_do_not_overflow_runtime_admission() {
-    let manager = ModelRuntimeManager::with_factory(|_reference, _options, _compute, _sessions| {
-        Ok(Arc::new(ProgressFixtureModel::new()) as Arc<dyn EmbeddingModel>)
-    });
+    let manager =
+        ModelRuntimeManager::with_factory(|_reference, _options, _compute, _sessions, _llama| {
+            Ok(Arc::new(ProgressFixtureModel::new()) as Arc<dyn EmbeddingModel>)
+        });
     let lease = manager
         .acquire(ModelRuntimeRequest::new(
             "qwen/text-embedding-v4",

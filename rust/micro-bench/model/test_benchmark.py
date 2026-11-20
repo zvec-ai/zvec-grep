@@ -1,6 +1,7 @@
 """Core measurement math, failure accounting and resume checks; no model inference."""
 import copy
 import errno
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -311,6 +312,10 @@ class WorkflowTests(unittest.TestCase):
                 changed_length[changed_length.index("--lengths")+1] = "16"
                 for command in (base,changed_length+["--smoke"],base+["--smoke","--ort-thread-budget","2"]):
                     with patch.object(sys,"argv",command),self.assertRaisesRegex(RuntimeError,"configuration changed"):
+                        suite.main()
+                for name in ("ZVEC_GREP_LLAMA_THREADS", "ZVEC_GREP_LLAMA_SERVER_CONTEXTS"):
+                    changed = "2" if os.environ.get(name) != "2" else "1"
+                    with patch.dict(os.environ,{name:changed}),patch.object(sys,"argv",base+["--smoke"]),self.assertRaisesRegex(RuntimeError,"configuration changed"):
                         suite.main()
                 info["source_sha256"]["source"] = "changed"
                 with patch.object(sys,"argv",base+["--smoke"]),self.assertRaisesRegex(RuntimeError,"configuration changed"):

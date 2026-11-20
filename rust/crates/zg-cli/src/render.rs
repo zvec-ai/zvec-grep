@@ -563,7 +563,14 @@ Index embedding concurrency:
   Applies only to index construction and updates, including automatic indexing
   and refresh; query-vector inference keeps its own defaults. The CLI option
   is accepted only with --index and is never saved in workspace settings.
-  llama.cpp: context limit capped at 8, with serialized batches; defaults to 1.
+  llama.cpp: C is concurrent contexts on CPU/Metal/CUDA, default 1.
+    Direct pools use the operation's C. Server execution across all llama.cpp
+    models/devices is capped by ZVEC_GREP_LLAMA_SERVER_CONTEXTS (default 1).
+    Client C limits its own operation and cannot enlarge Server capacity.
+    ZVEC_GREP_LLAMA_THREADS fixes CPU threads per context. Default:
+    max(1, floor(available logical CPUs / 2 / pool capacity)). GPU contexts
+    use one CPU helper thread. Server capacity and thread settings require
+    restart; client C changes neither. Batch packing is managed internally.
   Transformers/ORT: C controls CPU/CUDA session count in direct mode (default 1),
     capped by available hardware concurrency. Server pools use the startup
     ZVEC_GREP_EMBEDDING_CONCURRENCY value; client C only limits execution within
@@ -967,6 +974,8 @@ State:
 Advanced:
   ZVEC_GREP_METAL_KEEP_RESIDENCY       Set to 1 to keep llama.cpp Metal residency enabled (advanced)
   ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM  Legacy index-only llama.cpp fallback after the index concurrency variable
+  ZVEC_GREP_LLAMA_THREADS            CPU compute threads per llama.cpp context
+  ZVEC_GREP_LLAMA_SERVER_CONTEXTS    Server-wide executing llama.cpp context limit (default 1)
   NO_COLOR                             Disable automatic terminal colors; --color overrides it
 
 Agent integration paths:

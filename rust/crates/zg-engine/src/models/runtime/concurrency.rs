@@ -85,18 +85,18 @@ fn resolve_override(
 pub(crate) fn local_runtime_limit(reference: &str, requested: Option<usize>) -> Option<usize> {
     if is_transformers(reference) {
         requested.map(|value| value.max(1))
-    } else if is_llama(reference) || is_bekko(reference) {
+    } else if is_bekko(reference) {
         Some(requested.unwrap_or(1).clamp(1, LOCAL_CONCURRENCY_CAP))
     } else {
         None
     }
 }
 
-/// llama.cpp parallelizes contexts within a single batch; never multiply them
-/// by allowing several batches to execute on the same cached model.
+/// Fallback before device-specific admission is available. llama.cpp applies
+/// fixed context capacity and per-operation limits inside its shared pool.
 pub(crate) fn batch_concurrency(reference: &str, requested: Option<usize>) -> Option<usize> {
     if is_llama(reference) {
-        Some(1)
+        Some(requested.unwrap_or(1).max(1))
     } else if is_transformers(reference) {
         requested.map(|value| value.max(1))
     } else if is_bekko(reference) {
