@@ -117,6 +117,26 @@ impl WorkspaceIndexService {
         );
         // Check the on-disk version before any recovery or storage mutation.
         let existing = load_index_workspace(&requested_root, &layout, &options)?;
+        let previous_fts = existing
+            .as_ref()
+            .and_then(|workspace| workspace.index().descriptor())
+            .map(IndexDescriptor::fts);
+        let base_fts = match &previous_fts {
+            Some(config) => config.clone(),
+            None => crate::config::fts_defaults()?,
+        };
+        let fts = options.fts.apply(&base_fts)?;
+        if options.rebuild || previous_fts.is_none() || !options.fts.is_empty() {
+            crate::storage::validate_fts(&fts)?;
+        }
+        if !options.rebuild
+            && previous_fts
+                .as_ref()
+                .is_some_and(|previous| previous != &fts)
+        {
+            return Err(EngineError::invalid_argument("existing index uses a different FTS configuration")
+                .with_help("Repeat the FTS options with `zg --index --rebuild` to change the workspace analysis."));
+        }
         // Validate selection before recovery, storage, or model mutations.
         options.scan.normalize_ignore_paths(&requested_root)?;
         let scan = resolve_scan(existing.as_ref().map(Workspace::scan), &options)?;
@@ -180,7 +200,7 @@ impl WorkspaceIndexService {
         let IndexModels {
             runtimes: acquired,
             descriptor,
-        } = acquire_index_models(models, existing.as_ref(), &options, graph_indexing)?;
+        } = acquire_index_models(models, existing.as_ref(), &options, graph_indexing, fts)?;
         if !rebuilding
             && let Some(previous) = existing
                 .as_ref()
@@ -260,6 +280,11 @@ impl WorkspaceIndexService {
                 .is_some_and(IndexDescriptor::graph_indexing),
             storage_path: storage_path.to_path_buf(),
             embeddings: models.iter().map(|model| model.info().clone()).collect(),
+            fts: workspace
+                .index()
+                .descriptor()
+                .expect("indexed workspace")
+                .fts(),
         })
         .map_err(|mut error| {
             if let Some(help) = error.help() {
@@ -694,6 +719,7 @@ fn acquire_index_models(
     existing: Option<&Workspace>,
     options: &IndexOptions,
     graph_indexing: bool,
+    fts: crate::domain::FtsConfig,
 ) -> Result<IndexModels, EngineError> {
     let model = acquire_model(models, existing, options)?;
     let descriptor = IndexDescriptor::new(
@@ -701,7 +727,7 @@ fn acquire_index_models(
         std::collections::BTreeMap::new(),
         std::collections::BTreeMap::new(),
         graph_indexing,
-        crate::domain::FTS_CONFIG,
+        fts,
     )?;
     if !descriptor
         .content_indexes()
@@ -1154,8 +1180,14 @@ mod tests {
             allow_remote: true,
             ..IndexOptions::default()
         };
-        let acquired =
-            super::acquire_index_models(&models, None, &options, false).expect("model metadata");
+        let acquired = super::acquire_index_models(
+            &models,
+            None,
+            &options,
+            false,
+            crate::domain::FtsConfig::default(),
+        )
+        .expect("model metadata");
         let workspace = super::index_workspace_state(
             directory.path(),
             &layout,

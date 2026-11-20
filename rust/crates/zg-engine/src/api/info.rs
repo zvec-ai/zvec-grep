@@ -204,6 +204,8 @@ pub mod result {
     pub struct WorkspaceIndexFts {
         pub tokenizer: String,
         pub filters: Vec<String>,
+        #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+        pub extra_params: serde_json::Map<String, serde_json::Value>,
     }
 
     /// A file that could not be indexed, recorded independently of successful files.
@@ -271,12 +273,9 @@ impl result::WorkspaceIndexInfo {
 impl From<&crate::domain::FtsConfig> for result::WorkspaceIndexFts {
     fn from(value: &crate::domain::FtsConfig) -> Self {
         Self {
-            tokenizer: value.tokenizer.to_owned(),
-            filters: value
-                .filters
-                .iter()
-                .map(|filter| (*filter).to_owned())
-                .collect(),
+            tokenizer: value.tokenizer.clone(),
+            filters: value.filters.clone(),
+            extra_params: value.extra_params.clone(),
         }
     }
 }

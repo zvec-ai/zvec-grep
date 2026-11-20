@@ -45,6 +45,156 @@ in-process; its v2 request shape is unchanged.
 Compatible existing indexes retain their stored model, including during
 `--rebuild` without `--embedding`; supply a model explicitly to switch it.
 
+Full-text analysis is configurable per workspace. The built-in defaults remain
+`jieba`, filters `["lowercase"]`, and an empty extra-parameter object. Configure
+defaults for new indexes, or override individual fields for one workspace:
+
+```sh
+zg --config fts set --fts-tokenizer standard --fts-filter lowercase
+zg --index /path/to/russian-docs --fts-tokenizer standard \
+  --fts-filter lowercase,stemmer --fts-extra-params '{"stemmer_lang":"russian"}'
+```
+
+Global defaults are stored under `defaults.fts` in `~/.zvec-grep/config.json`:
+
+```json
+{
+  "version": 1,
+  "defaults": {
+    "fts": {
+      "tokenizer": "standard",
+      "filters": ["lowercase", "stemmer"],
+      "extraParams": {"stemmer_lang": "russian"}
+    }
+  }
+}
+```
+
+For a new index, explicit fields override global defaults and then built-in
+defaults. Existing indexes retain their saved analysis for queries, automatic
+refreshes, incremental updates, and ordinary `--rebuild`. Changing a saved setting
+requires both the explicit FTS option and `--rebuild`. Updating global defaults
+does not change existing indexes. `zg --status` reports the saved analysis.
+Historical indexes without analysis metadata use `jieba + lowercase`.
+New analysis metadata is read by this version; older versions may require an
+upgrade to open indexes written by this version.
+
+`--fts-filter` takes an ordered comma-separated list; `--fts-filter ''` disables
+all filters. `--fts-extra-params` takes a JSON object. Each supplied list/object
+replaces the complete previous value; use `'{}'` to clear extra parameters.
+Omitted fields retain their base value. When switching tokenizers, clear or
+replace parameters that no longer apply. Both CLI modes and MCP use the same
+validation and persistence. MCP index inputs are `ftsTokenizer`, `ftsFilters`
+(an array), and `ftsExtraParams` (an object); they are not query or drop options.
+
+Select an FTS language preset with `--fts-lang`, while retaining the low-level
+options above for explicit overrides:
+
+```sh
+zg --config fts langs
+zg --config fts set --fts-lang ru
+zg --index /path/to/docs --rebuild --fts-lang zh
+```
+
+Examples of the built-in presets:
+
+| Preset | Tokenizer | Filters | Extra parameters |
+| --- | --- | --- | --- |
+| `zh` | `jieba` | `lowercase` | `{}` |
+| `en` | `standard` | `lowercase,stemmer` | `{"stemmer_lang":"english"}` |
+| `ru` | `standard` | `lowercase,stemmer` | `{"stemmer_lang":"russian"}` |
+| `nl` | `standard` | `lowercase,stemmer` | `{"stemmer_lang":"dutch"}` |
+| `de` | `standard` | `lowercase,stemmer` | `{"stemmer_lang":"german"}` |
+| `fr` | `standard` | `lowercase,stemmer` | `{"stemmer_lang":"french"}` |
+| `es` | `standard` | `lowercase,stemmer` | `{"stemmer_lang":"spanish"}` |
+| `pt` | `standard` | `lowercase,stemmer` | `{"stemmer_lang":"portuguese"}` |
+| `ar` | `standard` | `lowercase,stemmer` | `{"stemmer_lang":"arabic"}` |
+| `hi` | `standard` | `lowercase,stemmer` | `{"stemmer_lang":"hindi"}` |
+
+The full built-in set is `ar`, `ca`, `cs`, `da`, `de`, `el`, `en`, `eo`, `es`,
+`et`, `eu`, `fa`, `fi`, `fr`, `ga`, `hi`, `hu`, `hy`, `id`, `it`, `lt`, `ne`,
+`nl`, `no`, `pl`, `pt`, `ro`, `ru`, `sr`, `st`, `sv`, `ta`, `tr`, `yi`, and `zh`.
+All non-Chinese built-ins enable the corresponding canonical Snowball stemmer
+by default, including English. `zg --config fts langs` shows every mapping.
+
+These are document-search presets. There is no automatic language detection or per-document
+language routing. Omitting `--fts-lang` preserves the existing resolution rules;
+it does not select `zh` implicitly.
+
+To replace a built-in preset or add a custom name without changing code, create
+`fts-languages.json` beside the user's `config.json` (normally
+`~/.zvec-grep/fts-languages.json`):
+
+```json
+{
+  "version": 1,
+  "languages": {
+    "en": {
+      "tokenizer": "standard",
+      "filters": ["lowercase"],
+      "extraParams": {}
+    },
+    "ru-docs": {
+      "tokenizer": "standard",
+      "filters": ["lowercase", "stemmer"],
+      "extraParams": {"stemmer_lang": "russian", "max_token_length": 512}
+    }
+  }
+}
+```
+
+Each user entry replaces the complete named preset; all three fields are
+required. Other built-ins remain available. Names use 1-64 lowercase ASCII
+letters, digits, hyphens, or underscores, starting with a letter. Selection
+ignores surrounding whitespace and ASCII case. Duplicate names, unknown fields,
+unsupported versions, and malformed entries are errors, with no
+fallback to built-ins when an existing override file is invalid. A missing file
+uses the built-ins. Custom mappings can combine only the supported native
+tokenizers, filters, and parameters; they do not install new analyzers.
+
+`zg --config fts langs` lists the effective configuration and source for every
+preset. The file is read on each explicit preset selection or listing, so edits
+need no process restart. Ordinary queries, updates, and rebuilds do not read it.
+An edit changes neither existing indexes nor previously saved global defaults:
+run `zg --index --rebuild --fts-lang ru-docs` to apply it to an index, or repeat
+`zg --config fts set --fts-lang ru-docs` to update global defaults. Only the
+resolved three fields are persisted; the preset name is not saved.
+
+Explicit low-level fields override the selected preset, with whole-list/object
+replacement. To disable Russian stemming and clear its saved parameters, use
+`--fts-filter lowercase` and `--fts-extra-params '{}'`. To add a token-length
+limit while retaining Russian stemming, supply the complete parameter object:
+`--fts-extra-params '{"stemmer_lang":"russian","max_token_length":512}'`.
+The resulting configuration is validated and compared with the stored settings;
+selecting an equivalent preset needs no rebuild.
+
+The CLI expands presets using the caller's mapping file before direct/server
+dispatch and sends concrete FTS settings. MCP accepts `ftsLang` and expands it
+using the MCP server user's file through the same resolver. Remote MCP users
+must configure mappings on the server. Low-level MCP fields override the preset
+with the same semantics as CLI options. Presets are not query or drop options.
+
+Native tokenizer examples include `jieba`, `standard`, `ngram`, and `whitespace`.
+Native filter examples include `lowercase`, `ascii_folding`, and `stemmer`, applied in order.
+`standard` avoids the reported whitespace and accented-word false matches from
+Jieba, but changes Chinese word matching to character-based analysis. Stemming
+enabled by a preset or explicit filters can change exact-word precision. Source
+previews and embedding inputs are unaffected by these settings.
+
+zg passes tokenizer and filter names, stemmer languages, and the JSON parameter
+object to the installed zvec library. zvec validates the effective analyzer
+before saving FTS defaults or changing an index. Individual analyzers may ignore
+parameters they do not use. Examples from the bundled library include:
+
+| Parameter | Applies to | Values |
+| --- | --- | --- |
+| `max_token_length` | `standard` | Integer from 1 to 1,048,576 |
+| `ngram_min`, `ngram_max` | `ngram` | Positive uint32 integers, default 2; min <= max and max - min <= 1 |
+| `token_chars` | `ngram` | Array of `letter`, `digit`, `whitespace`, `punctuation`, `symbol` |
+| `cut_mode` | `jieba` | `search` (native default), `mix`, `full`, `hmm` |
+| `jieba_dict_dir`, `user_dict_path` | `jieba` | Absolute paths visible to the process running the index |
+| `stemmer_lang` | `stemmer` filter | Canonical Snowball language name; native default `english` |
+
 Run the development commands below from `rust/` (`cd rust` from the repository
 root). See the [contributor guide](CONTRIBUTING.md) for checks and conventions.
 

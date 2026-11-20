@@ -58,9 +58,429 @@ impl Fixture {
         )
         .expect("global config");
     }
+
+    fn write_languages(&self, languages: &serde_json::Value) {
+        let directory = self.user.path().join(".zvec-grep");
+        fs::create_dir_all(&directory).expect("config directory");
+        fs::write(
+            directory.join("fts-languages.json"),
+            json!({"version": 1, "languages": languages}).to_string(),
+        )
+        .expect("language mappings");
+    }
 }
 
 struct ServerCleanup<'a>(&'a Fixture);
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn fts_language_configuration_lists_sources_and_saves_only_expanded_values() {
+    let fixture = Fixture::new();
+    let builtins = fixture.success(&["--config", "fts", "langs"]);
+    let builtins = String::from_utf8_lossy(&builtins.stdout);
+    for name in ["en", "nl", "ru", "zh"] {
+        assert!(
+            builtins
+                .lines()
+                .any(|line| line.starts_with(&format!("{name}  ")) && line.contains("built-in")),
+            "{builtins}"
+        );
+    }
+    assert!(!fixture.user.path().join(".zvec-grep").exists());
+    let custom = json!({"tokenizer": "standard", "filters": ["lowercase", "stemmer"], "extraParams": {"stemmer_lang": "russian", "max_token_length": 512}});
+    fixture.write_languages(&json!({
+        "en": {"tokenizer": "standard", "filters": [], "extraParams": {}},
+        "ru-docs": custom
+    }));
+    let listing = fixture.success(&["--config", "fts", "langs"]);
+    let listing = String::from_utf8_lossy(&listing.stdout);
+    assert!(
+        listing.lines().any(|line| line.starts_with("en  ")
+            && line.contains("\"filters\":[]")
+            && line.contains("fts-languages.json")),
+        "{listing}"
+    );
+    assert!(
+        listing
+            .lines()
+            .any(|line| line.starts_with("ru-docs  ") && line.contains("512")),
+        "{listing}"
+    );
+    let path = fixture.user.path().join(".zvec-grep/config.json");
+    let defaults = || -> serde_json::Value {
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("config")).expect("JSON");
+        value["defaults"]["fts"].clone()
+    };
+    fixture.success(&["--config", "fts", "set", "--fts-lang", "ru-docs"]);
+    assert_eq!(defaults(), custom);
+    fixture.success(&["--config", "fts", "set", "--fts-lang", "zh"]);
+    assert_eq!(
+        defaults(),
+        json!({"tokenizer":"jieba","filters":["lowercase"],"extraParams":{}})
+    );
+    fixture.success(&[
+        "--config",
+        "fts",
+        "set",
+        "--fts-lang",
+        "ru",
+        "--fts-tokenizer",
+        "whitespace",
+        "--fts-filter",
+        "",
+        "--fts-extra-params",
+        "{}",
+    ]);
+    assert_eq!(
+        defaults(),
+        json!({"tokenizer":"whitespace","filters":[],"extraParams":{}})
+    );
+    fs::write(
+        fixture.user.path().join(".zvec-grep/fts-languages.json"),
+        "invalid JSON",
+    )
+    .expect("broken mapping");
+    let before = fs::read(&path).expect("config bytes");
+    for args in [
+        vec!["--config", "fts", "langs"],
+        vec!["--config", "fts", "set", "--fts-lang", "en"],
+    ] {
+        let result = fixture.run(&args);
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("fts-languages.json"));
+        assert_eq!(fs::read(&path).expect("unchanged config"), before);
+    }
+    fixture.success(&["--config", "fts", "set", "--fts-filter", "lowercase"]);
+    assert_eq!(defaults()["filters"], json!(["lowercase"]));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn fts_language_snapshots_are_stable_across_mapping_edits_in_both_modes() {
+    let russian = json!({"tokenizer":"standard","filters":["lowercase","stemmer"],"extraParams":{"stemmer_lang":"russian"}});
+    let whitespace = json!({"tokenizer":"whitespace","filters":[],"extraParams":{}});
+    for mode in ["direct", "server"] {
+        let fixture = Fixture::new();
+        let _cleanup = ServerCleanup(&fixture);
+        fixture.write_languages(&json!({"zh": whitespace, "ru-docs": russian}));
+        if mode == "server" {
+            fixture.success(&[
+                "--server",
+                "on",
+                "--listen",
+                &format!("127.0.0.1:{}", available_port()),
+            ]);
+        }
+        fixture.success(&[
+            "--index",
+            "--mode",
+            mode,
+            "--embedding",
+            "local/potion-code-16m-v2",
+        ]);
+        let path = fixture.root.path().join(".zvec-grep/manifest.json");
+        let analysis = || -> serde_json::Value {
+            let value: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).expect("manifest")).expect("JSON");
+            value["index"]["descriptor"]["fts"].clone()
+        };
+        assert_eq!(
+            analysis(),
+            json!({"tokenizer":"jieba","filters":["lowercase"],"extraParams":{}}),
+            "omission must not select the overridden zh preset"
+        );
+        let before = fs::read(&path).expect("manifest bytes");
+        let denied = fixture.run(&["--index", "--mode", mode, "--fts-lang", "ru-docs"]);
+        assert!(!denied.status.success());
+        assert!(String::from_utf8_lossy(&denied.stderr).contains("rebuild"));
+        assert_eq!(fs::read(&path).expect("unchanged manifest"), before);
+        fixture.success(&[
+            "--index",
+            "--mode",
+            mode,
+            "--rebuild",
+            "--fts-lang",
+            "ru-docs",
+        ]);
+        assert_eq!(analysis(), russian);
+        // Selecting the same effective configuration needs no rebuild.
+        fixture.success(&["--index", "--mode", mode, "--fts-lang", "ru-docs"]);
+        fixture.success(&["--config", "fts", "set", "--fts-lang", "ru-docs"]);
+        fixture.write_languages(&json!({"ru-docs": whitespace}));
+        let global: serde_json::Value = serde_json::from_slice(
+            &fs::read(fixture.user.path().join(".zvec-grep/config.json")).expect("defaults"),
+        )
+        .expect("JSON");
+        assert_eq!(
+            global["defaults"]["fts"], russian,
+            "mapping edits do not rewrite global snapshots"
+        );
+        fixture.success(&["--index", "--mode", mode]);
+        fixture.success(&["--index", "--mode", mode, "--rebuild"]);
+        assert_eq!(analysis(), russian);
+        let denied = fixture.run(&["--index", "--mode", mode, "--fts-lang", "ru-docs"]);
+        assert!(!denied.status.success());
+        fixture.success(&[
+            "--index",
+            "--mode",
+            mode,
+            "--rebuild",
+            "--fts-lang",
+            "ru-docs",
+        ]);
+        assert_eq!(analysis(), whitespace);
+        fixture.success(&["--config", "fts", "set", "--fts-lang", "ru-docs"]);
+        let global: serde_json::Value = serde_json::from_slice(
+            &fs::read(fixture.user.path().join(".zvec-grep/config.json")).expect("defaults"),
+        )
+        .expect("JSON");
+        assert_eq!(global["defaults"]["fts"], whitespace);
+        fs::write(
+            fixture.user.path().join(".zvec-grep/fts-languages.json"),
+            "invalid JSON",
+        )
+        .expect("broken mapping");
+        let query = fixture.run(&["--fts", "needle", "--mode", mode, "--refresh", "off"]);
+        assert!(
+            matches!(query.status.code(), Some(0 | 1)),
+            "{}",
+            String::from_utf8_lossy(&query.stderr)
+        );
+        fixture.success(&["--index", "--mode", mode, "--rebuild"]);
+        assert_eq!(analysis(), whitespace);
+        let before = fs::read(&path).expect("manifest bytes");
+        let invalid = fixture.run(&[
+            "--index",
+            "--mode",
+            mode,
+            "--rebuild",
+            "--fts-lang",
+            "ru-docs",
+        ]);
+        assert!(!invalid.status.success());
+        assert!(String::from_utf8_lossy(&invalid.stderr).contains("fts-languages.json"));
+        assert_eq!(fs::read(&path).expect("unchanged manifest"), before);
+    }
+}
+
+#[test]
+fn fts_global_configuration_replaces_lists_and_parameter_objects() {
+    let fixture = Fixture::new();
+    fixture.success(&[
+        "--config",
+        "fts",
+        "set",
+        "--fts-tokenizer",
+        "standard",
+        "--fts-filter",
+        "lowercase,stemmer",
+        "--fts-extra-params",
+        r#"{"stemmer_lang":"russian","max_token_length":100}"#,
+    ]);
+    let path = fixture.user.path().join(".zvec-grep/config.json");
+    let read = || -> serde_json::Value {
+        serde_json::from_slice(&fs::read(&path).expect("config")).expect("JSON")
+    };
+    fixture.success(&[
+        "--config",
+        "fts",
+        "set",
+        "--fts-extra-params",
+        r#"{"stemmer_lang":"en","extension":{"values":[1,2]}}"#,
+    ]);
+    assert_eq!(
+        read()["defaults"]["fts"]["extraParams"],
+        json!({"stemmer_lang": "en", "extension": {"values": [1, 2]}})
+    );
+    fixture.success(&[
+        "--config",
+        "fts",
+        "set",
+        "--fts-filter",
+        "",
+        "--fts-extra-params",
+        "{}",
+    ]);
+    let expected = json!({"tokenizer": "standard", "filters": [], "extraParams": {}});
+    assert_eq!(read()["defaults"]["fts"], expected);
+    for args in [
+        vec!["--config", "fts", "set"],
+        vec!["--config", "fts", "set", "--fts-filter", "unknown"],
+        vec!["--config", "fts", "set", "--fts-extra-params", "[]"],
+        vec![
+            "--config",
+            "fts",
+            "set",
+            "--fts-extra-params",
+            r#"{"max_token_length":0}"#,
+        ],
+    ] {
+        assert!(!fixture.run(&args).status.success(), "{args:?}");
+        assert_eq!(
+            read()["defaults"]["fts"],
+            expected,
+            "invalid update must not overwrite defaults"
+        );
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn fts_workspace_settings_have_the_same_lifecycle_in_direct_and_server_modes() {
+    for mode in ["direct", "server"] {
+        let fixture = Fixture::new();
+        let _cleanup = ServerCleanup(&fixture);
+        if mode == "server" {
+            fixture.success(&[
+                "--server",
+                "on",
+                "--listen",
+                &format!("127.0.0.1:{}", available_port()),
+            ]);
+        }
+        fixture.success(&[
+            "--config",
+            "fts",
+            "set",
+            "--fts-tokenizer",
+            "standard",
+            "--fts-filter",
+            "lowercase,stemmer",
+            "--fts-extra-params",
+            r#"{"stemmer_lang":"russian"}"#,
+        ]);
+        let manifest_path = fixture.root.path().join(".zvec-grep/manifest.json");
+        let manifest = || -> serde_json::Value {
+            serde_json::from_slice(&fs::read(&manifest_path).expect("manifest")).expect("JSON")
+        };
+        fixture.success(&[
+            "--index",
+            "--mode",
+            mode,
+            "--embedding",
+            "local/potion-code-16m-v2",
+        ]);
+        let initial = manifest();
+        let expected = json!({"tokenizer": "standard", "filters": ["lowercase", "stemmer"], "extraParams": {"stemmer_lang": "russian"}});
+        assert_eq!(initial["index"]["descriptor"]["fts"], expected);
+        let status = fixture.success(&["--status", "--mode", mode]);
+        let status = String::from_utf8_lossy(&status.stdout);
+        assert!(status.contains("tokenizer=standard"), "{status}");
+        assert!(status.contains("stemmer_lang"), "{status}");
+
+        // A running daemon reads updated global defaults for new workspaces,
+        // while both refresh and rebuild preserve an existing workspace's analysis.
+        fixture.success(&[
+            "--config",
+            "fts",
+            "set",
+            "--fts-tokenizer",
+            "whitespace",
+            "--fts-filter",
+            "",
+            "--fts-extra-params",
+            "{}",
+        ]);
+        fixture.success(&["--index", "--mode", mode]);
+        assert_eq!(manifest()["index"]["descriptor"]["fts"], expected);
+        assert_eq!(
+            manifest()["storageGeneration"],
+            initial["storageGeneration"]
+        );
+        fixture.success(&["--index", "--mode", mode, "--rebuild"]);
+        assert_eq!(manifest()["index"]["descriptor"]["fts"], expected);
+        assert_ne!(
+            manifest()["storageGeneration"],
+            initial["storageGeneration"]
+        );
+
+        let saved = fs::read(&manifest_path).expect("manifest bytes");
+        let invalid = fixture.run(&[
+            "--index",
+            "--mode",
+            mode,
+            "--rebuild",
+            "--fts-tokenizer",
+            "unknown-tokenizer",
+        ]);
+        assert!(!invalid.status.success());
+        assert!(String::from_utf8_lossy(&invalid.stderr).contains("unknown-tokenizer"));
+        assert_eq!(fs::read(&manifest_path).expect("preserved manifest"), saved);
+        let rejected = fixture.run(&[
+            "--index",
+            "--mode",
+            mode,
+            "--fts-tokenizer",
+            "whitespace",
+            "--fts-filter",
+            "",
+            "--fts-extra-params",
+            "{}",
+        ]);
+        assert!(!rejected.status.success());
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("rebuild"));
+        assert_eq!(fs::read(&manifest_path).expect("unchanged manifest"), saved);
+
+        fixture.success(&[
+            "--index",
+            "--mode",
+            mode,
+            "--rebuild",
+            "--fts-tokenizer",
+            "whitespace",
+            "--fts-filter",
+            "",
+            "--fts-extra-params",
+            "{}",
+        ]);
+        assert_eq!(
+            manifest()["index"]["descriptor"]["fts"],
+            json!({"tokenizer":"whitespace","filters":[],"extraParams":{}})
+        );
+
+        let other = fixture.root.path().join("other");
+        fs::create_dir(&other).expect("independent workspace");
+        let other_path = other.to_str().expect("workspace path");
+        fixture.success(&[
+            "--index",
+            other_path,
+            "--mode",
+            mode,
+            "--embedding",
+            "local/potion-code-16m-v2",
+        ]);
+        let read_other = || -> serde_json::Value {
+            serde_json::from_slice(
+                &fs::read(other.join(".zvec-grep/manifest.json")).expect("other manifest"),
+            )
+            .expect("JSON")
+        };
+        assert_eq!(
+            read_other()["index"]["descriptor"]["fts"]["tokenizer"],
+            "whitespace"
+        );
+        fixture.success(&[
+            "--index",
+            other_path,
+            "--mode",
+            mode,
+            "--rebuild",
+            "--fts-tokenizer",
+            "ngram",
+            "--fts-extra-params",
+            r#"{"ngram_min":2,"ngram_max":3}"#,
+        ]);
+        assert_eq!(
+            read_other()["index"]["descriptor"]["fts"]["tokenizer"],
+            "ngram"
+        );
+        assert_eq!(
+            manifest()["index"]["descriptor"]["fts"]["tokenizer"],
+            "whitespace"
+        );
+    }
+}
 
 impl Drop for ServerCleanup<'_> {
     fn drop(&mut self) {

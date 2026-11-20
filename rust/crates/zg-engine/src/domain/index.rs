@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{EngineError, EngineResult};
 
 use super::{
-    ContentKind,
+    ContentKind, FtsConfig,
     model::{EmbeddingModelInfo, EncryptedApiKey, ModelConfig},
 };
 
@@ -47,7 +47,6 @@ pub(crate) struct IndexDescriptor {
     embedding_routes: BTreeMap<ContentKind, EmbeddingModelInfo>,
     embedding_configs: BTreeMap<String, ModelConfig<EncryptedApiKey>>,
     graph_indexing: bool,
-    #[serde(skip)]
     fts: FtsConfig,
 }
 
@@ -64,6 +63,9 @@ impl<'de> Deserialize<'de> for IndexDescriptor {
             // Released v2 indexes predate the optional code graph.
             #[serde(default)]
             graph_indexing: bool,
+            // Released indexes without analysis metadata use the historical defaults.
+            #[serde(default)]
+            fts: FtsConfig,
         }
 
         let fields = Fields::deserialize(deserializer)?;
@@ -72,7 +74,7 @@ impl<'de> Deserialize<'de> for IndexDescriptor {
             fields.embedding_routes,
             fields.embedding_configs,
             fields.graph_indexing,
-            FTS_CONFIG,
+            fields.fts,
         )
         .map_err(serde::de::Error::custom)
     }
@@ -143,6 +145,7 @@ impl IndexDescriptor {
         graph_indexing: bool,
         fts: FtsConfig,
     ) -> EngineResult<Self> {
+        fts.validate()?;
         for (kind, embedding) in &embedding_routes {
             if !embedding.model().supports_content(*kind) {
                 return Err(EngineError::invalid_argument(format!(
@@ -207,7 +210,7 @@ impl IndexDescriptor {
     }
 
     pub(crate) fn fts(&self) -> FtsConfig {
-        self.fts
+        self.fts.clone()
     }
 
     /// An unsupported default yields no content index.
@@ -278,18 +281,6 @@ impl IndexDescriptor {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct FtsConfig {
-    pub tokenizer: &'static str,
-    pub filters: &'static [&'static str],
-}
-
-/// Fixed FTS configuration for the current physical index format.
-pub(crate) const FTS_CONFIG: FtsConfig = FtsConfig {
-    tokenizer: "jieba",
-    filters: &["lowercase"],
-};
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,7 +300,7 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             false,
-            FTS_CONFIG,
+            FtsConfig::default(),
         )
         .expect("index descriptor")
     }
@@ -329,7 +320,7 @@ mod tests {
                 serde_json::from_str::<IndexState>(&json).expect("decode index"),
                 state
             );
-            assert!(!json.contains("fts"));
+            assert_eq!(json.contains("fts"), state.descriptor().is_some());
         }
         for json in [
             r#"{"state":"enabled"}"#,
@@ -367,6 +358,25 @@ mod tests {
         published
             .ensure_index_compatible(&descriptor())
             .expect("matching graph setting");
+    }
+
+    #[test]
+    fn fts_descriptor_persists_analysis_and_reads_legacy_defaults() {
+        let mut encoded = serde_json::to_value(descriptor()).expect("descriptor JSON");
+        encoded.as_object_mut().expect("object").remove("fts");
+        let legacy: IndexDescriptor =
+            serde_json::from_value(encoded.clone()).expect("legacy descriptor");
+        assert_eq!(legacy.fts(), FtsConfig::default());
+        encoded["fts"] = serde_json::json!({
+            "tokenizer": "standard", "filters": ["lowercase", "stemmer"],
+            "extraParams": {"stemmer_lang": "russian"}
+        });
+        let custom: IndexDescriptor =
+            serde_json::from_value(encoded.clone()).expect("custom analysis");
+        assert_eq!(serde_json::to_value(&custom).expect("serialize"), encoded);
+        assert!(legacy.ensure_index_compatible(&custom).is_err());
+        encoded["fts"]["tokenizer"] = serde_json::json!("");
+        assert!(serde_json::from_value::<IndexDescriptor>(encoded).is_err());
     }
 
     #[test]

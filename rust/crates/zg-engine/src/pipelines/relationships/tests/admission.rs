@@ -281,6 +281,7 @@ async fn relationship_queries_never_borrow_unpublished_generations() {
         let storage_home = fixture.layout().staged_index_dir().to_path_buf();
         fs::create_dir_all(&storage_home).expect("rebuild directory");
         let storage = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+            fts: crate::domain::FtsConfig::default(),
             graph_enabled: false,
             storage_path: storage_home,
             embeddings: vec![schema()],
@@ -369,7 +370,7 @@ async fn disabled_workspaces_reject_old_graphs_before_read_admission() {
                 BTreeMap::new(),
                 BTreeMap::new(),
                 false,
-                FTS_CONFIG,
+                FtsConfig::default(),
             )
             .expect("graph-disabled descriptor"),
         )),

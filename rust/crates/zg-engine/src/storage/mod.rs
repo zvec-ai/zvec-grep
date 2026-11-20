@@ -12,3 +12,4 @@ pub(crate) mod types;
 mod zvec;
 
 pub(crate) use store::{IndexStore, ReadView, ResolutionSnapshot};
+pub(crate) use zvec::validate_fts;

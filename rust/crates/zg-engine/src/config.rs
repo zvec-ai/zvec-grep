@@ -1,7 +1,10 @@
 //! Shared per-user global configuration for CLI and resident execution.
 
+pub mod fts_languages;
+
 use crate::{
     EngineError,
+    api::index::{FtsConfig, FtsConfigUpdate},
     domain::model::Device,
     utils::{atomic_write, sync_directory},
 };
@@ -25,6 +28,36 @@ pub fn global_config_path() -> Result<PathBuf, EngineError> {
 
 pub(crate) fn read() -> Result<Value, EngineError> {
     read_at(&global_config_path()?)
+}
+
+/// Reads default full-text analysis for a newly created workspace index.
+/// # Errors
+/// Returns configuration I/O or validation errors.
+pub fn fts_defaults() -> Result<FtsConfig, EngineError> {
+    fts_from_config(&read()?)
+}
+
+fn fts_from_config(config: &Value) -> Result<FtsConfig, EngineError> {
+    let Some(value) = config.get("defaults").and_then(|value| value.get("fts")) else {
+        return Ok(FtsConfig::default());
+    };
+    let update: FtsConfigUpdate = serde_json::from_value(value.clone())
+        .map_err(|error| EngineError::invalid_argument(format!("invalid defaults.fts: {error}")))?;
+    update.apply(&FtsConfig::default())
+}
+
+/// Updates defaults for new indexes, retaining fields omitted by the caller.
+/// # Errors
+/// Returns configuration I/O or validation errors. Existing indexes are untouched.
+pub fn set_fts(update: &FtsConfigUpdate) -> Result<PathBuf, EngineError> {
+    if update.is_empty() {
+        return Err(EngineError::invalid_argument(
+            "at least one FTS option is required",
+        ));
+    }
+    let path = global_config_path()?;
+    update_at(&path, json!({"defaults": {"fts": update}}))?;
+    Ok(path)
 }
 
 /// Reads the configured client mode after validating the global configuration.
@@ -142,12 +175,20 @@ fn parse_global_config(value: &Value) -> Result<Value, EngineError> {
 }
 
 fn parse_defaults(fields: &Map<String, Value>) -> Result<Option<Value>, EngineError> {
-    check_known_fields(fields, &["embedding", "modelCacheDir"], "defaults")?;
+    check_known_fields(fields, &["embedding", "modelCacheDir", "fts"], "defaults")?;
     let mut parsed = Map::new();
     for name in ["embedding", "modelCacheDir"] {
         if let Some(value) = non_empty_string(fields, name, &format!("defaults.{name}"))? {
             parsed.insert(name.to_owned(), json!(value));
         }
+    }
+    if let Some(value) = fields.get("fts") {
+        let config = fts_from_config(&json!({"defaults": {"fts": value}}))?;
+        parsed.insert(
+            "fts".to_owned(),
+            serde_json::to_value(config)
+                .map_err(|error| EngineError::internal(error.to_string()))?,
+        );
     }
     Ok(non_empty_object(parsed))
 }
@@ -506,8 +547,21 @@ fn update_at(path: &Path, changes: Value) -> Result<(), EngineError> {
         "global-config.update",
     )?;
     let mut value = read_at(path)?;
+    // Analysis parameter objects replace the previous object, including {}.
+    // Other global configuration objects retain their existing merge semantics.
+    if changes.pointer("/defaults/fts/extraParams").is_some()
+        && let Some(fts) = value
+            .pointer_mut("/defaults/fts")
+            .and_then(Value::as_object_mut)
+    {
+        fts.remove("extraParams");
+    }
+    let sets_fts = changes.pointer("/defaults/fts").is_some();
     merge(&mut value, changes);
     let value = parse_global_config(&value)?;
+    if sets_fts {
+        crate::storage::validate_fts(&fts_from_config(&value)?)?;
+    }
     let bytes = serde_json::to_vec_pretty(&value)
         .map_err(|error| EngineError::internal(error.to_string()))?;
     atomic_write(path, &bytes)?;

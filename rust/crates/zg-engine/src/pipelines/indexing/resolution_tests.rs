@@ -26,6 +26,7 @@ const MODEL: &str = "fixture/fixture-model";
 
 pub(super) fn open(path: &std::path::Path) -> IndexStore {
     IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+        fts: crate::domain::FtsConfig::default(),
         storage_path: path.to_owned(),
         graph_enabled: true,
         embeddings: vec![

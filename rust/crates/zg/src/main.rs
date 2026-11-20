@@ -346,8 +346,32 @@ async fn execute_plan(plan: CliPlan) -> Result<ExitCode, Box<dyn Error>> {
 }
 
 fn execute_config(args: zg_cli::ConfigArgs) -> Result<(), Box<dyn Error>> {
-    use zg_cli::{ConfigAction, ModelAction, ProviderAction};
+    use zg_cli::{ConfigAction, FtsAction, ModelAction, ProviderAction};
     let (label, reference, path) = match args.action {
+        ConfigAction::Fts {
+            action: FtsAction::Set(args),
+        } => {
+            let path = zg_engine::config::set_fts(&args.into_update()?)?;
+            ("FTS", "defaults for new indexes".to_owned(), path)
+        }
+        ConfigAction::Fts {
+            action: FtsAction::Langs,
+        } => {
+            for preset in zg_engine::config::fts_languages::list()? {
+                let source = preset.source.as_deref().map_or_else(
+                    || "built-in".to_owned(),
+                    |path| path.to_string_lossy().into_owned(),
+                );
+                writeln!(
+                    zg_cli::stdout(),
+                    "{}  {}  source={}",
+                    preset.name,
+                    serde_json::to_string(&preset.config)?,
+                    serde_json::to_string(&source)?
+                )?;
+            }
+            return Ok(());
+        }
         ConfigAction::Provider {
             action: ProviderAction::Set { reference, api_key },
         } => {
