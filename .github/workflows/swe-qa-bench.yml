@@ -1,5 +1,5 @@
 name: SWE-QA Bench
-run-name: SWE-QA Bench / Rust ${{ inputs.candidate_ref || 'main' }} / ${{ inputs.model || 'glm-5.2' }} / ${{ inputs.embedding || 'local' }} embedding / ${{ inputs.scope || 'repro-3' }}
+run-name: SWE-QA Bench / ${{ inputs.task_set || 'qa20' }} / Rust ${{ inputs.candidate_ref || 'main' }} / ${{ inputs.model || 'glm-5.2' }} / ${{ inputs.embedding || 'local' }} embedding / ${{ inputs.scope || 'repro-3' }}
 
 on:
   workflow_call:
@@ -12,6 +12,9 @@ on:
         type: string
       scope:
         default: all-full
+        type: string
+      task_set:
+        default: qa20
         type: string
       model:
         default: glm-5.2
@@ -32,7 +35,7 @@ on:
         default: main
         type: string
       scope:
-        description: Run the low/medium/high variability trio, all 20 tasks, or smoke
+        description: Task scope (symbol probes support smoke or all-full)
         required: true
         default: repro-3
         type: choice
@@ -40,6 +43,11 @@ on:
           - repro-3
           - all-full
           - smoke
+      task_set:
+        description: Fixed QA20 questions or five self-authored symbol probes
+        default: qa20
+        type: choice
+        options: [qa20, caller-callee-symbols]
       model:
         description: Use this model for both execution and self-judging
         required: true
@@ -78,6 +86,10 @@ jobs:
       task-count: ${{ steps.task-matrix.outputs.count }}
       task_ids_json: ${{ steps.task-matrix.outputs.task_ids_json }}
       embedding-model: ${{ steps.embedding.outputs.model }}
+      suite: ${{ steps.task-set.outputs.suite }}
+      selection: ${{ steps.task-set.outputs.selection }}
+      references: ${{ steps.task-set.outputs.references }}
+      dataset: ${{ steps.task-set.outputs.dataset }}
     permissions:
       contents: read
     steps:
@@ -129,19 +141,48 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check uv==0.9.17
           uv sync --project benchmarks/swe-qa-bench --frozen
+      - name: Resolve the selected task set
+        id: task-set
+        env:
+          TASK_SET: ${{ inputs.task_set || 'qa20' }}
+          SCOPE: ${{ inputs.scope }}
+        run: |
+          set -euo pipefail
+          root=benchmarks/swe-qa-bench
+          case "$TASK_SET" in
+            qa20)
+              echo "suite=swe-qa-bench" >> "$GITHUB_OUTPUT"
+              echo "selection=$root/zg_bench/swe_qa/data/selection.json" >> "$GITHUB_OUTPUT"
+              echo "references=$root/zg_bench/swe_qa/data/references.json" >> "$GITHUB_OUTPUT"
+              echo "dataset=$root/datasets" >> "$GITHUB_OUTPUT"
+              echo "validator=validate" >> "$GITHUB_OUTPUT"
+              ;;
+            caller-callee-symbols)
+              if [[ "$SCOPE" != smoke && "$SCOPE" != all-full ]]; then
+                echo "::error::Symbol probes require scope=smoke or scope=all-full."
+                exit 1
+              fi
+              echo "suite=caller-callee-symbols" >> "$GITHUB_OUTPUT"
+              echo "selection=$root/zg_bench/swe_qa/data/selection-symbols.json" >> "$GITHUB_OUTPUT"
+              echo "references=$root/zg_bench/swe_qa/data/references-symbols.json" >> "$GITHUB_OUTPUT"
+              echo "dataset=$root/datasets-symbols" >> "$GITHUB_OUTPUT"
+              echo "validator=validate-symbols" >> "$GITHUB_OUTPUT"
+              ;;
+            *) echo "::error::Unknown task set: $TASK_SET"; exit 1 ;;
+          esac
       - name: Validate tasks, hashes, commits, and reference isolation
         run: >-
-          uv run --project benchmarks/swe-qa-bench python -m zg_bench.swe_qa validate
-          --selection benchmarks/swe-qa-bench/zg_bench/swe_qa/data/selection.json
-          --references benchmarks/swe-qa-bench/zg_bench/swe_qa/data/references.json
-          --dataset benchmarks/swe-qa-bench/datasets
+          uv run --project benchmarks/swe-qa-bench python -m zg_bench.swe_qa ${{ steps.task-set.outputs.validator }}
+          --selection "${{ steps.task-set.outputs.selection }}"
+          --references "${{ steps.task-set.outputs.references }}"
+          --dataset "${{ steps.task-set.outputs.dataset }}"
       - name: Build this run's task matrix from the locked selection
         id: task-matrix
         env:
           SCOPE: ${{ inputs.scope }}
         run: |
           uv run --project benchmarks/swe-qa-bench python -m zg_bench.swe_qa matrix \
-            --selection benchmarks/swe-qa-bench/zg_bench/swe_qa/data/selection.json \
+            --selection "${{ steps.task-set.outputs.selection }}" \
             --scope "$SCOPE" >> "$GITHUB_OUTPUT"
       - name: Resolve and validate the embedding runtime
         id: embedding
@@ -189,7 +230,7 @@ jobs:
             embedding_args+=(--embedding-endpoint "$ZVEC_GREP_ENDPOINT")
           fi
           uv run --project benchmarks/swe-qa-bench zg-bench run \
-            swe-qa-bench \
+            "${{ steps.task-set.outputs.suite }}" \
             --tier full \
             --agent opencode \
             --model "custom-openai/$SWE_QA_MODEL" \
@@ -271,7 +312,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ runner.temp }}/swe-qa-index-seed
-          key: swe-qa-zvec-index-seed-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.task }}-embedding-${{ inputs.embedding }}-rust-${{ needs.package-candidate.outputs.candidate-commit }}-bench-${{ hashFiles('benchmarks/swe-qa-bench/ci-config.json', 'benchmarks/swe-qa-bench/zg_bench/swe_qa/data/selection.json', 'benchmarks/swe-qa-bench/zg_bench/swe_qa/data/references.json', 'benchmarks/swe-qa-bench/zg_bench/swe_qa/data/index.ignore', format('benchmarks/swe-qa-bench/datasets/{0}/environment/Dockerfile', matrix.task), 'benchmarks/swe-qa-bench/pyproject.toml', 'benchmarks/swe-qa-bench/uv.lock', 'benchmarks/swe-qa-bench/suites/swe-qa-bench.yaml', 'benchmarks/swe-qa-bench/zg_bench/**/*.py') }}
+          key: swe-qa-zvec-index-seed-v3-${{ inputs.task_set || 'qa20' }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.task }}-embedding-${{ inputs.embedding }}-rust-${{ needs.package-candidate.outputs.candidate-commit }}-bench-${{ hashFiles('benchmarks/swe-qa-bench/ci-config.json', 'benchmarks/swe-qa-bench/zg_bench/swe_qa/data/*', format('{0}/{1}/environment/Dockerfile', needs.validate.outputs.dataset, matrix.task), 'benchmarks/swe-qa-bench/pyproject.toml', 'benchmarks/swe-qa-bench/uv.lock', 'benchmarks/swe-qa-bench/suites/*.yaml', 'benchmarks/swe-qa-bench/zg_bench/**/*.py') }}
       - name: Install locked dependencies
         run: |
           python -m pip install --disable-pip-version-check uv==0.9.17
@@ -303,7 +344,7 @@ jobs:
             embedding_args+=(--embedding-endpoint "$ZVEC_GREP_ENDPOINT")
           fi
           uv run --project benchmarks/swe-qa-bench zg-bench run \
-            swe-qa-bench \
+            "${{ needs.validate.outputs.suite }}" \
             --tier full \
             --task "$TASK_NAME" \
             --agent opencode \
@@ -328,7 +369,7 @@ jobs:
           set -euo pipefail
           uv run --project benchmarks/swe-qa-bench python -m zg_bench.swe_qa judge \
             --pairs-root "$RUNNER_TEMP/pair-${TASK_NAME}.json" \
-            --references benchmarks/swe-qa-bench/zg_bench/swe_qa/data/references.json \
+            --references "${{ needs.validate.outputs.references }}" \
             --model "$SWE_QA_MODEL" \
             --output-dir "$RUNNER_TEMP/swe-qa-task-report/${TASK_NAME}" \
             --expected "$TASK_NAME"
@@ -337,8 +378,9 @@ jobs:
           BENCH_CANDIDATE_COMMIT: ${{ needs.package-candidate.outputs.candidate-commit }}
           BENCH_CANDIDATE_REPOSITORY: ${{ inputs.candidate_repository || github.repository }}
           BENCH_HARNESS_COMMIT: ${{ github.workflow_sha }}
-          BENCH_PROTOCOL_HASH: ${{ hashFiles('.github/workflows/swe-qa-bench.yml', 'benchmarks/swe-qa-bench/ci-config.json', 'benchmarks/swe-qa-bench/pyproject.toml', 'benchmarks/swe-qa-bench/uv.lock', 'benchmarks/swe-qa-bench/zg_bench/**/*.py', 'benchmarks/swe-qa-bench/zg_bench/swe_qa/data/*', 'benchmarks/swe-qa-bench/suites/*', 'benchmarks/swe-qa-bench/datasets/**') }}
+          BENCH_PROTOCOL_HASH: ${{ hashFiles('.github/workflows/swe-qa-bench.yml', 'benchmarks/swe-qa-bench/ci-config.json', 'benchmarks/swe-qa-bench/pyproject.toml', 'benchmarks/swe-qa-bench/uv.lock', 'benchmarks/swe-qa-bench/zg_bench/**/*.py', 'benchmarks/swe-qa-bench/zg_bench/swe_qa/data/*', 'benchmarks/swe-qa-bench/suites/*', 'benchmarks/swe-qa-bench/datasets/**', 'benchmarks/swe-qa-bench/datasets-symbols/**') }}
           BENCH_SCOPE: ${{ inputs.scope }}
+          BENCH_TASK_SET: ${{ inputs.task_set || 'qa20' }}
           BENCH_EMBEDDING_RUNTIME: ${{ inputs.embedding }}
           BENCH_EMBEDDING_MODEL: ${{ needs.validate.outputs.embedding-model }}
           BENCH_EMBEDDING_ENDPOINT: ${{ inputs.embedding == 'remote' && vars.QWEN_EMBEDDING_ENDPOINT || '' }}

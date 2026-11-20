@@ -44,6 +44,7 @@ class ZvecGrepMixin:
         embedding_model: str = ZVEC_GREP_EMBEDDING,
         embedding_endpoint: str | None = ZVEC_GREP_EMBEDDING_ENDPOINT,
         index_ignore_file: str | None = None,
+        graph_index: bool = False,
         mcp_target: str | None = None,
         zvec_grep_package_sha256: str | None = None,
         extra_env: dict[str, str] | None = None,
@@ -67,6 +68,8 @@ class ZvecGrepMixin:
                 )
         if mcp_target is not None and not mcp_target.strip():
             raise ValueError("mcp_target must not be empty")
+        if not isinstance(graph_index, bool):
+            raise ValueError("graph_index must be a boolean")
         if zvec_grep_package_sha256 is not None and not re.fullmatch(
             r"[0-9a-f]{64}", zvec_grep_package_sha256
         ):
@@ -105,6 +108,7 @@ class ZvecGrepMixin:
             None if embedding_model.startswith("local/") else embedding_endpoint
         )
         self._index_ignore_file = resolved_index_ignore_file
+        self._graph_index = graph_index
         self._mcp_target = mcp_target
         self._zvec_grep_package_sha256 = zvec_grep_package_sha256
         self._api_key_source = api_key_source
@@ -131,6 +135,7 @@ class ZvecGrepMixin:
             "binding_package": self._zvec_binding_package,
             "embedding_model": self._embedding_model,
             "api_key_source": self._api_key_source,
+            "graph_index": self._graph_index,
         }
         if self._embedding_endpoint is not None:
             metadata["embedding_endpoint"] = self._embedding_endpoint
@@ -237,6 +242,7 @@ class ZvecGrepMixin:
                     environment,
                     command=self._index_command(
                         self._embedding_model,
+                        graph=self._graph_index,
                         ignore_file=(
                             _INDEX_IGNORE_TARGET
                             if self._index_ignore_file is not None
@@ -359,6 +365,7 @@ class ZvecGrepMixin:
             "binding_package": self._zvec_binding_package,
             "embedding_model": self._embedding_model,
             "index_ignore_sha256": self._index_ignore_sha256(),
+            "graph_index": self._graph_index,
             "platform": "linux/amd64",
             "workdir": workdir,
         }
@@ -750,9 +757,11 @@ class ZvecGrepMixin:
 
     @staticmethod
     def _index_command(
-        embedding_model: str, *, ignore_file: str | None = None
+        embedding_model: str, *, graph: bool = False, ignore_file: str | None = None
     ) -> str:
         command = f"zg --index --embedding {shlex.quote(embedding_model)}"
+        if graph:
+            command += " --graph"
         if ignore_file is not None:
             command += f" --ignore-file {shlex.quote(ignore_file)}"
         return command

@@ -56,6 +56,7 @@ def run_identity(env: Mapping[str, str]) -> dict[str, Any]:
     if config["embedding_models"].get(runtime) != env["BENCH_EMBEDDING_MODEL"]:
         raise SweQaError("embedding runtime/model disagrees with CI config")
     configuration = {
+        "task_set": env.get("BENCH_TASK_SET", "qa20"),
         "scope": env["BENCH_SCOPE"],
         "agent": "opencode",
         "model": env["SWE_QA_MODEL"],

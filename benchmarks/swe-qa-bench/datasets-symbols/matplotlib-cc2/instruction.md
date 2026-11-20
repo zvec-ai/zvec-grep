@@ -1,0 +1,1 @@
+Which functions or constructors does _process_plot_var_args._make_line in lib/matplotlib/axes/_base.py call directly? Give each target, its call-site line number, and the evaluation order of the nested calls.
