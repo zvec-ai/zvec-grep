@@ -1,9 +1,9 @@
-"""Trial means, aggregate filters, and equal-weight task summaries."""
+"""Raw trial evidence and fixed-tail score statistics."""
 
 from __future__ import annotations
 
-import math
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 from zg_bench.core.errors import SweQaError
 from zg_bench.core.protocol import (
@@ -18,9 +18,8 @@ from zg_bench.metrics.numbers import (
     mean_or_none,
     sum_or_none,
 )
+from zg_bench.metrics.task_screen import residual_dispersion, screen_tasks
 from zg_bench.metrics.usage import (
-    SESSION_USAGE_METRICS,
-    SESSION_USAGE_SCOPE,
     compatible_usage_scope,
     summarize_usage,
 )
@@ -71,140 +70,193 @@ def summarize_profile(trials: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def aggregate_cases(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
-    # Validate every case before filtering. An excluded task must not hide a
-    # mixture of legacy root-only and complete session-tree accounting.
-    usage_scope = compatible_usage_scope(
-        [
-            case["profiles"][profile]["metrics"]
-            for case in cases
-            for profile in PROFILE_NAMES
-        ]
+TRIM_POLICY = {
+    "method": "score_trim_min_max_once",
+    "group_by": ["model", "task_id", "profile"],
+    "trim_count_per_tail": 1,
+    "minimum_samples": 3,
+    "insufficient_samples": "retain_all",
+    "tie_breaker": "trial_index_then_original_position",
+    "passes": 1,
+    "selection_metric": "judge.total",
+    "aggregation": "equal_weight_task_means",
+}
+
+
+def _mean_metrics(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        **{
+            key: mean_or_none([row.get(key) for row in rows])
+            for key in (
+                "input_tokens",
+                "output_tokens",
+                "tool_calls",
+                "agent_wall_seconds",
+                "cost_usd",
+            )
+        },
+        **summarize_usage(rows, average=True),
+    }
+
+
+def profile_statistics(profile: dict[str, Any]) -> dict[str, Any]:
+    """Select once by score, then use the same retained trials for every metric.
+
+    Keep the original profile (including all judge calls and trial evidence)
+    intact. Legacy summary-only evidence cannot be screened retroactively.
+    """
+    trials = profile.get("trials")
+    if not trials:
+        raw = {"judge": profile["judge"]["total"], **profile["metrics"]}
+        return {
+            "raw": raw,
+            "filtered": dict(raw),
+            "dispersion": residual_dispersion(None),
+            "filter": {
+                "status": "unavailable_no_trial_evidence",
+                "original_count": None,
+                "retained_count": None,
+                "excluded_count": None,
+                "excluded_trials": [],
+            },
+        }
+    ranked = sorted(
+        enumerate(trials, start=1),
+        key=lambda item: (
+            item[1]["judge"]["total"],
+            item[1].get("trial_index", item[0]),
+            item[0],
+        ),
     )
-    included: list[dict[str, Any]] = []
-    excluded: list[dict[str, Any]] = []
-    for case in cases:
-        baseline_input = case["profiles"]["baseline"]["metrics"]["input_tokens"]
-        zvec_input = case["profiles"]["zvec-grep"]["metrics"]["input_tokens"]
-        if baseline_input == 0:
-            change = 0.0 if zvec_input == 0 else None
+    trimmed_positions = (
+        {ranked[0][0]: "low", ranked[-1][0]: "high"} if len(trials) >= 3 else {}
+    )
+    retained, excluded = [], []
+    retained_indexes = []
+    for position, trial in enumerate(trials, start=1):
+        score = trial["judge"]["total"]
+        trial_index = trial.get("trial_index", position)
+        if position not in trimmed_positions:
+            retained.append(trial)
+            retained_indexes.append(trial_index)
         else:
-            change = (zvec_input - baseline_input) / baseline_input * 100.0
-        baseline_judge = case["profiles"]["baseline"]["judge"]["total"]
-        zvec_judge = case["profiles"]["zvec-grep"]["judge"]["total"]
-        judge_delta = zvec_judge - baseline_judge
-        reasons = []
-        if change is None:
-            reasons.append("undefined_baseline")
-        elif change < -100.0 or change > 100.0:
-            reasons.append("input_token_change_outside_range")
-        # Profile means can introduce floating-point noise at exactly 10 points.
-        # Check both criteria so an overlap retains both reasons in the evidence.
-        if abs(judge_delta) > 10.0 and not math.isclose(
-            abs(judge_delta), 10.0, rel_tol=0.0, abs_tol=1e-9
-        ):
-            reasons.append("judge_delta_outside_range")
-        if reasons:
             excluded.append(
                 {
-                    "task_id": case["task_id"],
-                    "baseline_input_tokens": baseline_input,
-                    "zvec_grep_input_tokens": zvec_input,
-                    "change_pct": change,
-                    "baseline_judge": baseline_judge,
-                    "zvec_grep_judge": zvec_judge,
-                    "judge_delta": judge_delta,
-                    "reasons": reasons,
+                    "trial_index": trial_index,
+                    "trial_name": trial.get("trial_name"),
+                    "score": score,
+                    "direction": trimmed_positions[position],
                 }
             )
-        else:
-            included.append(case)
 
-    count = len(included)
-    profiles: dict[str, dict[str, Any]] = {}
-    for profile in PROFILE_NAMES:
-        profile_rows = [case["profiles"][profile] for case in included]
-        if not profile_rows:
-            # A single-task report can legitimately have no included tasks.
-            # Keep its raw case available for merging, but do not present zero
-            # usage or zero quality as a measurement of an empty population.
-            profiles[profile] = {
-                key: None
-                for key in (
-                    "judge",
-                    "input_tokens",
-                    "output_tokens",
-                    "tool_calls",
-                    "agent_wall_seconds",
-                    "cost_usd",
-                )
-            }
-            profiles[profile]["usage_scope"] = usage_scope
-            if usage_scope == SESSION_USAGE_SCOPE:
-                profiles[profile].update({key: None for key in SESSION_USAGE_METRICS})
-                profiles[profile]["session_usage"] = {
-                    "scope": usage_scope,
-                    "complete": True,
-                    **{
-                        part: {key: None for key in SESSION_USAGE_METRICS}
-                        for part in ("root", "descendants", "total")
-                    },
-                }
-            continue
-        profiles[profile] = {
-            "judge": sum(row["judge"]["total"] for row in profile_rows) / count,
-            "input_tokens": sum(row["metrics"]["input_tokens"] for row in profile_rows),
-            "output_tokens": sum_or_none(
-                [row["metrics"].get("output_tokens") for row in profile_rows]
-            ),
-            "tool_calls": sum(row["metrics"]["tool_calls"] for row in profile_rows),
-            "agent_wall_seconds": sum(
-                row["metrics"]["agent_wall_seconds"] for row in profile_rows
-            ),
-            "cost_usd": sum_or_none(
-                [row["metrics"]["cost_usd"] for row in profile_rows]
-            ),
-            **summarize_usage([row["metrics"] for row in profile_rows], average=False),
+    def summarize(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "judge": sum(row["judge"]["total"] for row in rows) / len(rows),
+            **_mean_metrics([row["metrics"] for row in rows]),
         }
-    # Efficiency percentages must describe the displayed aggregate sums, not
-    # an average of task percentages that can disagree even in direction.
-    if count:
-        comparison = compare_profiles(
-            profiles["baseline"],
-            profiles["zvec-grep"],
-            profiles["baseline"]["judge"],
-            profiles["zvec-grep"]["judge"],
-        )
-    else:
-        comparison = {key: None for key in COMPARISON_KEYS}
-    comparison_samples = {
-        key: count if value is not None else 0 for key, value in comparison.items()
-    }
+
     return {
-        "profiles": profiles,
-        "comparison": comparison,
-        "comparison_samples": comparison_samples,
-        "comparison_basis": "ratio_of_aggregate_profile_means",
+        "raw": summarize(trials),
+        "filtered": summarize(retained),
+        "dispersion": residual_dispersion(retained),
         "filter": {
-            "criteria": [
-                {
-                    "metric": "input_tokens",
-                    "comparison": "change_pct",
-                    "min": -100.0,
-                    "max": 100.0,
-                },
-                {
-                    "metric": "judge",
-                    "comparison": "delta",
-                    "min": -10.0,
-                    "max": 10.0,
-                    "unit": "points",
-                },
-            ],
-            "total_count": len(cases),
-            "included_count": count,
+            "status": "applied"
+            if trimmed_positions
+            else "unavailable_insufficient_trials",
+            "original_count": len(trials),
+            "retained_count": len(retained),
             "excluded_count": len(excluded),
-            "included_task_ids": [case["task_id"] for case in included],
-            "excluded_tasks": excluded,
+            "retained_trial_indexes": retained_indexes,
+            "excluded_trials": excluded,
         },
+    }
+
+
+def _comparison(profiles: dict[str, Any]) -> dict[str, Any]:
+    baseline, zvec = (profiles[name] for name in PROFILE_NAMES)
+    return compare_profiles(baseline, zvec, baseline["judge"], zvec["judge"])
+
+
+def aggregate_cases(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    # Validate every population, including trials later excluded by score.
+    compatible_usage_scope(
+        [
+            row["metrics"]
+            for case in cases
+            for profile in case["profiles"].values()
+            for row in [profile, *profile.get("trials", [])]
+        ]
+    )
+    tasks = [
+        {
+            "task_id": case["task_id"],
+            "profiles": {
+                name: profile_statistics(case["profiles"][name])
+                for name in PROFILE_NAMES
+            },
+        }
+        for case in cases
+    ]
+    for task in tasks:
+        task["comparison"] = _comparison(
+            {name: task["profiles"][name]["filtered"] for name in PROFILE_NAMES}
+        )
+
+    task_filter = screen_tasks(tasks)
+    for task in tasks:
+        task["task_filter"] = task_filter["task_decisions"][task["task_id"]]
+    retained_ids = set(task_filter["retained_task_ids"])
+    retained_tasks = [task for task in tasks if task["task_id"] in retained_ids]
+
+    def aggregate(view: str, selected: Sequence[dict[str, Any]]) -> dict[str, Any]:
+        profiles = {}
+        for name in PROFILE_NAMES:
+            rows = [task["profiles"][name][view] for task in selected]
+            if rows:
+                profiles[name] = {
+                    "judge": mean_or_none([row["judge"] for row in rows]),
+                    **_mean_metrics(rows),
+                }
+            else:
+                # Preserve the resource schema/scope while representing no estimates.
+                template = tasks[0]["profiles"][name][view]
+                profiles[name] = {
+                    key: value if key == "usage_scope" else None
+                    for key, value in template.items()
+                }
+        comparison = (
+            _comparison(profiles)
+            if selected
+            else {key: None for key in COMPARISON_KEYS}
+        )
+        return {
+            "profiles": profiles,
+            "comparison": comparison,
+            "comparison_samples": {
+                key: len(selected) if value is not None else 0
+                for key, value in comparison.items()
+            },
+        }
+
+    counts = {}
+    for name in PROFILE_NAMES:
+        filters = [task["profiles"][name]["filter"] for task in tasks]
+        counts[name] = {
+            key: sum_or_none([row[key] for row in filters])
+            for key in ("original_count", "retained_count", "excluded_count")
+        }
+        counts[name]["unscreened_task_ids"] = [
+            task["task_id"]
+            for task in tasks
+            if task["profiles"][name]["filter"]["status"] != "applied"
+        ]
+
+    return {
+        **aggregate("filtered", retained_tasks),
+        "raw": aggregate("raw", tasks),
+        "trimmed": aggregate("filtered", tasks),
+        "task_filter": task_filter,
+        "comparison_basis": "ratio_of_aggregate_profile_means",
+        "task_statistics": tasks,
+        "filter": {**TRIM_POLICY, "task_count": len(tasks), "profiles": counts},
     }

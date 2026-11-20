@@ -1,5 +1,5 @@
 {
-  "trials_per_profile": 5,
+  "trials_per_profile": 10,
   "max_retries": 2,
   "embedding_models": {
     "local": "local/potion-code-16m-v2",

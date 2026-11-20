@@ -48,7 +48,7 @@ class TaskReportAttemptTests(unittest.TestCase):
     def report(self, task: str, attempt: int, *, score: int = 80) -> Path:
         directory = self.root / "reports" / f"{task}-123-{attempt}"
         source = _judged_task_report(task)
-        _set_report_trial_judgements(source, baseline=[75] * 5, zvec=[score] * 5)
+        _set_report_trial_judgements(source, baseline=[75] * 10, zvec=[score] * 10)
         _write_json(directory / "report.json", source)
         stamp_report(directory, {**self.identity, "run_attempt": attempt})
         return directory
@@ -76,7 +76,7 @@ class TaskReportAttemptTests(unittest.TestCase):
         self.assertTrue(result["gate"]["passed"])
         self.assertEqual(result["gate"]["missing_tasks"], [])
         self.assertEqual(result["gate"]["valid_pairs"], 20)
-        self.assertEqual(result["gate"]["successful_judgements"], 200)
+        self.assertEqual(result["gate"]["successful_judgements"], 400)
         self.assertEqual(
             [row["attempt"] for row in selection["selected"]], [1] * 19 + [2]
         )
@@ -95,7 +95,7 @@ class TaskReportAttemptTests(unittest.TestCase):
         self.assertEqual(
             result["cases"][0]["profiles"]["zvec-grep"]["judge"]["total"], 90
         )
-        self.assertEqual(result["gate"]["successful_judgements"], 10)
+        self.assertEqual(result["gate"]["successful_judgements"], 20)
 
     def test_invalid_latest_report_keeps_earlier_valid_result(self):
         task = EXPECTED_TASK_IDS[0]
