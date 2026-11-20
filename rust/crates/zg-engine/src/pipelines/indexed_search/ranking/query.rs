@@ -15,7 +15,7 @@ pub(super) struct QueryFeatures {
     pub(super) dependencies: bool,
     pub(super) generated: bool,
     requested_kind: Option<SymbolType>,
-    pure_symbol: bool,
+    pub(super) pure_symbol: bool,
     implementations: bool,
 }
 
@@ -380,7 +380,7 @@ fn informative(s: &str) -> bool {
         )
 }
 
-fn tokens(s: &str) -> Vec<String> {
+pub(super) fn tokens(s: &str) -> Vec<String> {
     let chars = s.chars().collect::<Vec<_>>();
     let mut result = Vec::new();
     let mut word = String::new();
