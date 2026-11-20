@@ -41,7 +41,7 @@ pub(crate) struct ResolvedNameEdge {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PendingNameRef {
     pub ref_kind: GraphEdgeKind,
-    /// Entity ordinal owning the reference; [`FILE_SCOPE_INDEX`] for imports.
+    /// Entity ordinal owning the reference; [`FILE_SCOPE_INDEX`] at module scope.
     pub owner_index: usize,
     pub ref_name: String,
     pub receiver_name: Option<String>,
@@ -51,6 +51,8 @@ pub(crate) struct PendingNameRef {
     pub bound_type: Option<String>,
     /// Last line the bound name stays in effect, for a loop-scoped binding.
     pub bound_until: Option<usize>,
+    /// The call starts with an explicitly imported, lexically unshadowed Python name.
+    pub python_import_call: bool,
     /// Exclusive end of a branch/loop-local binding, in source coordinates.
     pub scope_end: Option<(usize, usize)>,
     pub arity: Option<usize>,
@@ -112,7 +114,7 @@ fn alias_table(name_edges: &[NameEdge]) -> HashMap<(usize, String), Vec<NameEdge
 fn alias_at<'a>(
     aliases: &'a HashMap<(usize, String), Vec<NameEdge>>,
     edge: &NameEdge,
-) -> Option<&'a str> {
+) -> Option<&'a NameEdge> {
     let position = (edge.line, edge.column);
     let local = aliases
         .get(&(edge.owner_index, edge.ref_name.clone()))
@@ -122,13 +124,11 @@ fn alias_at<'a>(
                     && binding.scope_end.is_none_or(|end| position < end)
             })
         });
-    local
-        .or_else(|| {
-            aliases
-                .get(&(super::FILE_SCOPE_INDEX, edge.ref_name.clone()))
-                .and_then(|bindings| bindings.last())
-        })
-        .and_then(|binding| binding.bound_type.as_deref())
+    local.or_else(|| {
+        aliases
+            .get(&(super::FILE_SCOPE_INDEX, edge.ref_name.clone()))
+            .and_then(|bindings| bindings.last())
+    })
 }
 
 /// Whether a binding states a value this file can place. `?` marks a
@@ -163,27 +163,14 @@ type RefSite = (GraphEdgeKind, usize, Option<String>, String, Option<usize>);
 /// `receiver.method` pair would be coincidental, so they stay pending.
 /// Imports never resolve in-file: their target is another file by definition.
 pub(crate) fn partition_walk(
-    context: WalkContext,
+    mut context: WalkContext,
     head_fragment_indices: Vec<usize>,
 ) -> PartitionedGraph {
-    let WalkContext {
-        resolved_edges,
-        name_edges,
-        symbols,
-        file_symbols,
-        scoped_symbols,
-        shadowed_names,
-        borrowed_names,
-        value_aliases,
-        preprocessor,
-        ..
-    } = context;
     let mut partitioned = PartitionedGraph {
-        contains: resolved_edges,
-        resolved: Vec::new(),
-        pending: Vec::new(),
+        contains: std::mem::take(&mut context.resolved_edges),
+        directives: std::mem::take(&mut context.preprocessor),
         head_fragment_indices,
-        directives: preprocessor,
+        ..PartitionedGraph::default()
     };
     // Containment is the only record of which entity sits inside which, so it
     // is what lets a call read the using-declarations of the classes above it.
@@ -192,6 +179,7 @@ pub(crate) fn partition_walk(
         .iter()
         .map(|edge| (edge.target_index, edge.source_index))
         .collect::<HashMap<usize, usize>>();
+    let name_edges = std::mem::take(&mut context.name_edges);
     let aliases = alias_table(&name_edges);
     let mut collapsed: HashSet<RefSite> = HashSet::new();
     for edge in name_edges {
@@ -218,7 +206,8 @@ pub(crate) fn partition_walk(
         // happens to spell. Only the owner's own tables may answer it, and a
         // name no table can place stays pending instead of falling back.
         let shadowed = edge.receiver_name.is_none()
-            && shadowed_names
+            && context
+                .shadowed_names
                 .get(&edge.owner_index)
                 .is_some_and(|names| names.contains(&edge.ref_name));
         // A name one of the classes around the owner imports
@@ -229,17 +218,18 @@ pub(crate) fn partition_walk(
                 edge.owner_index,
                 &edge.ref_name,
                 &enclosing,
-                &borrowed_names,
+                &context.borrowed_names,
             );
+        let python_import_call = context.is_python_import_call(&edge, &enclosing);
         let resolved_target = in_file_target(
             &edge,
             shadowed || borrowed,
             InFileTables {
-                symbols: &symbols,
-                scoped_symbols: &scoped_symbols,
-                file_symbols: &file_symbols,
+                symbols: &context.symbols,
+                scoped_symbols: &context.scoped_symbols,
+                file_symbols: &context.file_symbols,
                 aliases: &aliases,
-                value_aliases: &value_aliases,
+                value_aliases: &context.value_aliases,
             },
         );
         match resolved_target {
@@ -261,6 +251,7 @@ pub(crate) fn partition_walk(
                 ref_name: edge.ref_name,
                 receiver_name: edge.receiver_name,
                 raw_text: edge.raw_text,
+                python_import_call,
                 bound_type: edge.bound_type,
                 bound_until: edge.bound_until,
                 scope_end: edge.scope_end,
@@ -272,6 +263,38 @@ pub(crate) fn partition_walk(
         }
     }
     partitioned
+}
+
+impl WalkContext {
+    fn is_python_import_call(&self, edge: &NameEdge, enclosing: &HashMap<usize, usize>) -> bool {
+        if self.python_import_names.is_empty() || edge.ref_kind != GraphEdgeKind::Calls {
+            return false;
+        }
+        let Some(root) = edge
+            .raw_text
+            .as_deref()
+            .and_then(|text| text.split('.').next())
+        else {
+            return false;
+        };
+        if !self.python_import_names.contains(root) || self.file_symbols.contains_key(root) {
+            return false;
+        }
+        // A local or parameter in the caller or an enclosing function can
+        // shadow the module even when its runtime type is unknown.
+        !std::iter::successors(Some(edge.owner_index), |owner| {
+            enclosing.get(owner).copied()
+        })
+        .any(|owner| {
+            self.shadowed_names
+                .get(&owner)
+                .is_some_and(|names| names.contains(root))
+                || self
+                    .scoped_symbols
+                    .get(&owner)
+                    .is_some_and(|symbols| symbols.contains_key(root))
+        })
+    }
 }
 
 /// Whether one of the entities around `owner` imports `name` from another
@@ -351,8 +374,16 @@ fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> 
             // name is not the answer: the resolver reads the declared binding
             // at the call's position and can still tell a parameter, a nested
             // definition or a later reassignment apart from the file's name.
-            Some(bound) if !states_a_placeable_value(bound) => None,
-            Some(bound) => unique_symbol(symbols, bound),
+            Some(binding)
+                if binding.receiver_only
+                    || !binding
+                        .bound_type
+                        .as_deref()
+                        .is_some_and(states_a_placeable_value) =>
+            {
+                None
+            }
+            Some(binding) => unique_symbol(symbols, binding.bound_type.as_deref()?),
             None => {
                 let value_alias = value_aliases
                     .get(&(edge.owner_index, edge.ref_name.clone()))
@@ -458,7 +489,7 @@ mod tests {
     #[test]
     fn imports_and_missing_names_stay_pending() {
         let mut context = context_with_entities(1);
-        context.add_import_edge("./utils.js", None, 1, 0);
+        context.add_import_edge(FILE_SCOPE_INDEX, "./utils.js", None, 1, 0);
         context.add_call_edge(0, "nowhere", None, None, None, 3, 8);
         let graph = partition_walk(context, vec![0]);
         assert!(graph.resolved.is_empty());

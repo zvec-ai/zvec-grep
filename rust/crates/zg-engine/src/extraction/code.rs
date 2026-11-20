@@ -190,15 +190,16 @@ fn assemble_output(
         &mut output,
     );
     if output.is_empty() {
-        // A file that declares no entity the walk could bound still describes
-        // its translation units when it carries preprocessor directives — a
-        // header of nothing but `#define`s and `#include`s is exactly that, and
-        // the resolver needs those directives to read the includer's macro
-        // state. The graph is therefore kept when the scan recorded one.
+        // An import-only Python package initializer still defines its public
+        // names, just as a directive-only C header affects its includers.
         let partitioned = graph_context
             .is_collecting()
             .then(|| partition_walk(graph_context, entity_heads))
-            .filter(|graph| !graph.directives.is_empty());
+            .filter(|graph| {
+                !graph.directives.is_empty()
+                    || (source.relative_path.as_path().ends_with("__init__.py")
+                        && !graph.pending.is_empty())
+            });
         return ExtractionOutput {
             fragments: fallback(source, max_chars, overlap_chars),
             graph: partitioned,

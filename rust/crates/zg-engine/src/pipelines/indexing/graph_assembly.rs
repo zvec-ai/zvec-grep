@@ -127,6 +127,9 @@ fn file_pending_refs(
                 reference.arity,
                 reference.receiver_name.as_deref(),
             );
+            if reference.python_import_call {
+                metadata.insert("python_import_call".into(), serde_json::Value::Bool(true));
+            }
             if let Some(bound_type) = &reference.bound_type {
                 metadata.insert("type".to_owned(), serde_json::json!(bound_type));
             }
@@ -380,6 +383,7 @@ mod tests {
             scope_end: None,
             arity: None,
             constructs: Constructs::None,
+            python_import_call: false,
             line: 1,
             column: 20,
         });

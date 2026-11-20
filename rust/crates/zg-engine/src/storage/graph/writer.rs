@@ -25,7 +25,8 @@ impl SqliteGraphStorage {
     /// recorded in the same transaction and requeued once per pass through
     /// `IndexStore::requeue_stale_resolutions`.
     /// `paths_changed` reports that this write made the file appear or
-    /// disappear, which can reorder the preferred path variant of every import.
+    /// disappear, or rewrote a Python package initializer. Either change can
+    /// redirect a consumer to another module.
     /// A file whose extends/implements clauses change also stales every
     /// member call that resolved through that chain, which no symbol it owns
     /// names; so does a file that keeps its clauses while moving the import

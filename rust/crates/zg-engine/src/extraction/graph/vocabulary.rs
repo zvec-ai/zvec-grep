@@ -66,7 +66,11 @@ pub(super) fn import_vocabulary_for(format: FileFormat) -> Option<ImportVocabula
     let vocabulary = match format {
         FileFormat::TypeScript | FileFormat::JavaScript => JS_IMPORT_VOCABULARY,
         FileFormat::Python => ImportVocabulary {
-            import_types: &["import_statement", "import_from_statement"],
+            import_types: &[
+                "import_statement",
+                "import_from_statement",
+                "future_import_statement",
+            ],
             module_fields: &["module_name", "name"],
         },
         FileFormat::Go => ImportVocabulary {
