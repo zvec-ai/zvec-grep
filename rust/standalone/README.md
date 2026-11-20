@@ -272,6 +272,9 @@ in this first version; re-run the appropriate installer.
 
 ## Release workflow
 
+For maintainer commands, candidate validation and publication, see the
+[standalone release guide](../docs/development/releasing.md).
+
 `npm run release:standalone` assembles archives from the verified npm candidates,
 reuses their file/core/plugin checks, and preserves licenses and notices. Node
 and npm remain build-time tools. The output includes one `manifest.tsv`, both

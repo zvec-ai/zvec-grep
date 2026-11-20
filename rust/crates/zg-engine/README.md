@@ -62,7 +62,7 @@ An index is created on the first indexing run and updated as files are added, ch
 
 ### Search
 
-Indexed search combines full-text and vector retrieval to return relevant source snippets, refreshing the index as needed by default. Query filters narrow results without changing the workspace's scanning rules. Direct text search reads source files without requiring an index.
+Indexed search combines full-text and vector retrieval to return relevant source snippets. Index refresh follows the caller's policy; resident execution can schedule background refresh. Query filters narrow results without changing the workspace's scanning rules. Direct text search reads source files without requiring an index.
 
 ### Vector storage
 
@@ -71,6 +71,56 @@ Embedding vectors are stored as IEEE binary16. The engine keeps embeddings and q
 ### Embedding models
 
 Each workspace uses an embedding model for semantic search. Local models run on your machine and may need an initial download; remote models send content or queries to an external service and require authorization. Changing the model or encountering an incompatible index format requires rebuilding the index.
+
+Model selection runs at the shared engine boundary for Direct, Server and MCP.
+An existing compatible index keeps its stored model unless a replacement is
+explicitly requested. Resolve the final selection after acquiring the writer
+lock so an index published while a request was queued takes precedence over
+the caller's default.
+
+## Resource ownership
+
+Reuse one `ZvecGrep` across requests and workspaces. The engine owns model
+runtimes; compatible model configurations share loaded resources. Active leases
+keep those resources alive. `close()` retires cached resources while in-flight
+users retain ownership until completion.
+
+Model preparation is lazy, cancellable and shared. Empty or unchanged indexing
+work should not load models. Artifact acquisition verifies downloads before
+publication and cleans up partial files. Backends use the shared runtime and
+artifact layers rather than creating independent caches or schedulers.
+
+Concurrency limits belong to the resources they protect. In a resident ORT
+runtime, a request's concurrency limits its use of the existing pool; it must
+not resize the pool or change the shared thread configuration. Direct execution
+owns resources for one command; server settings inherited from the environment
+require a daemon restart to change resident capacity.
+
+The daemon enables cached index read sessions. In-process callers can opt in
+with `enable_read_session_cache()`. Cache entries are generation-specific;
+workspace metadata and effective model settings still resolve for each request.
+See [workspace coordination](src/workspace/README.md#read-and-write-coordination)
+for writer admission and publication rules.
+
+`IndexOptions::on_progress` is an in-process callback. It is omitted from
+serialized requests; transports carry progress events instead.
+
+## Remote authorization
+
+The public [authorization module](src/authorization.rs) supports consent
+preflight independently of engine operations. Inspecting or granting consent
+does not load models, open index storage or send remote requests.
+
+API credentials and permission to send data are separate. CLI, daemon and MCP
+check the same workspace grants for the effective destination on each operation;
+revocation affects new operations without restarting the daemon. Grant scope
+and credential persistence are described under
+[workspace consent](src/workspace/README.md#credentials-and-consent).
+
+Single-operation consent covers that operation and its synchronous refresh,
+not later watcher jobs. Background work needs consent covering its own scope.
+[MCP setup and consent](../zg-transport-mcp/README.md#setup-and-consent) preserve
+this boundary when setup submits a background build.
 
 ## Modules
 

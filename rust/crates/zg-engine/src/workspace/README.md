@@ -40,3 +40,47 @@ cached separately.
   unrelated storage failures remain errors.
 - **Compatibility.** `indexVersion` determines index compatibility.
   Incompatible indexes must be rebuilt.
+
+## Read and write coordination
+
+A cross-process writer-intent lock prevents new readers from overtaking a
+waiting writer. Writers retire cached read handles before opening writable
+storage. Lock waits are bounded and cancellable; cancelled or aborted waiters
+must release their admission state. Native open/close is coordinated per
+workspace so one cold workspace does not block unrelated cache hits.
+
+Within one engine, queries with `Off` or `Background` refresh may borrow an
+active incremental writer only when the effective model configuration matches.
+Publication waits for borrowed queries. `Wait` and synchronous auto-update
+queries never borrow partial writer state; a rebuild's replacement stays private
+until publication.
+
+Incomplete scans must not delete unseen files. Cancelled preparation preserves
+existing content, and content-identical updates refresh metadata without
+embedding again.
+
+## Settings and relocation
+
+Explicit index device and model-cache options become workspace defaults.
+Query overrides remain temporary and must not be written back by automatic
+refresh or retained by watchers. Moving a workspace may require overriding
+machine-specific preferences without rebuilding its content.
+
+Stored source paths and internal ignore-file references move with the workspace.
+Missing ignore files retain their saved references; invalid rules and other
+read errors remain errors. A move to a filesystem with filename collisions
+requires rebuilding against the destination's actual files.
+
+## Credentials and consent
+
+Explicit indexing API keys are encrypted in the manifest. Inherited environment
+or global credentials and query-only keys are not persisted.
+`credentials.key` must travel with the index; copying the workspace also copies
+access to its saved credentials.
+
+`authorization.json` records remote-service consent separately from credentials.
+A grant binds the canonical source root, username, model and endpoint. Changes
+to those values need matching consent; ordinary manifest updates must not
+rewrite the grant. These records are saved user decisions, not signed protection
+against deliberate local edits. The [authorization API](../authorization.rs)
+owns inspection, granting and revocation.
