@@ -1,0 +1,4 @@
+# Two fixed cases from ci.txt for workflow iteration, not aggregate quality claims.
+# Keep this selection fixed while stabilizing CI; run ci/full after it is ready.
+628
+241

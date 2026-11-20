@@ -9,16 +9,20 @@ corpus_split = "train"
 expected_corpus_documents = 100195
 
 [zvec_grep]
-embedding = "qwen/qwen3.7-text-embedding"
-embedding_concurrency = 60
+embedding = "local/potion-multilingual-128m"
+embedding_concurrency = 4
 max_filesize = "64M"
-device = "auto"
+device = "cpu"
 mcp_tool_timeout_seconds = 600
 server_port = 7999
 
 [run]
-model = "gpt-5.6-sol"
+model = "custom-openai/qwen3.8-max"
 reasoning_effort = "high"
-trials_per_case = 3
-infrastructure_retries = 2
+trials_per_case = 1
+infrastructure_retries = 0
 idle_timeout_seconds = 1800
+temperature = 0.0
+seed = 42
+max_output_tokens = 20000
+context_limit = 1000000
