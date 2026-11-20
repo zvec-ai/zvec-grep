@@ -251,6 +251,7 @@ fn context_from_lexical(
             }),
             structure,
             timings: Vec::new(),
+            ..ContextDiagnostics::default()
         },
     }
 }

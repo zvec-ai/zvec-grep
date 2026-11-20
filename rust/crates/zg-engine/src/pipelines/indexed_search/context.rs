@@ -1,5 +1,3 @@
-use super::storage::SearchStorage;
-
 use std::{collections::HashSet, fs, path::Path};
 
 use crate::{
@@ -15,12 +13,16 @@ use crate::{
             IndexRouteDiagnostics, MatchedBy,
         },
     },
-    domain::{Content, FileRecord, Range, Workspace},
+    domain::{Content, FileRecord, IndexDescriptor, Range, Workspace},
+    storage::IndexStore,
     utils::sha256_hex,
 };
 
-use super::pipeline::{
-    SearchEmbeddingRuntime, SearchHit, SearchPlan, SearchPlanResult, search_workspace_index,
+use super::{
+    graph_expand::GraphSearch,
+    pipeline::{
+        SearchEmbeddingRuntime, SearchHit, SearchPlan, SearchPlanResult, search_workspace_index,
+    },
 };
 
 const DEFAULT_CONTEXT_LIMIT: usize = 10;
@@ -132,7 +134,7 @@ pub(crate) fn normalize_context_request(
 pub(crate) async fn context_from_index(
     root: &Path,
     workspace: &Workspace,
-    storage: &dyn SearchStorage,
+    storage: &IndexStore,
     embedding_models: &[&dyn SearchEmbeddingRuntime],
     options: &ContextOptions,
     request: &NormalizedContextRequest,
@@ -156,6 +158,11 @@ pub(crate) async fn context_from_index(
         request.groups.clone()
     };
     let limit = context_group_limit(options.limit, groups.len());
+    let graph_enabled = options.graph_rerank == Some(true)
+        && workspace
+            .index()
+            .descriptor()
+            .is_some_and(IndexDescriptor::graph_indexing);
     let mut searches = Vec::with_capacity(groups.len());
     for group in &groups {
         searches.push(
@@ -170,6 +177,13 @@ pub(crate) async fn context_from_index(
                 },
                 storage,
                 embedding_models,
+                (graph_enabled && group.role == ContextQueryGroupRole::Primary).then_some(
+                    GraphSearch {
+                        storage,
+                        signal: options.signal.as_ref(),
+                        query: &group.query,
+                    },
+                ),
             )
             .await?,
         );
@@ -183,7 +197,7 @@ fn build_context_result(
     workspace: &Workspace,
     request: &NormalizedContextRequest,
     groups: &[NormalizedContextGroup],
-    searches: Vec<SearchPlanResult>,
+    mut searches: Vec<SearchPlanResult>,
 ) -> Result<ContextResult, EngineError> {
     let group_items = searches
         .iter()
@@ -204,6 +218,25 @@ fn build_context_result(
         .flat_map(|search| search.timings.iter().cloned())
         .collect();
     let hits_returned = items.len();
+    let search_trace = groups
+        .iter()
+        .zip(&mut searches)
+        .filter_map(|(group, search)| {
+            let mut trace = search.trace.take()?;
+            trace.group_id.clone_from(&group.id);
+            Some(trace)
+        })
+        .collect();
+    let graph_errors = groups
+        .iter()
+        .zip(&mut searches)
+        .filter_map(|(group, search)| {
+            search
+                .graph_error
+                .take()
+                .map(|error| format!("{}: {error}", group.id))
+        })
+        .collect();
 
     Ok(ContextResult {
         freshness: None,
@@ -253,6 +286,8 @@ fn build_context_result(
             rg: None,
             structure: None,
             timings,
+            search_trace,
+            graph_errors,
         },
     })
 }
@@ -699,6 +734,8 @@ mod tests {
             routes: Vec::new(),
             hits: vec![hit.clone()],
             timings: Vec::new(),
+            trace: None,
+            graph_error: None,
         };
         let request = normalize_context_request(&ContextOptions {
             query: Some("source".into()),
@@ -872,6 +909,8 @@ mod tests {
                 trace: None,
             }],
             timings: Vec::new(),
+            trace: None,
+            graph_error: None,
         };
         let request = normalize_context_request(&ContextOptions {
             query: Some("source".to_owned()),

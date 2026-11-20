@@ -9,11 +9,13 @@
 
 mod invalidation;
 mod pending;
+mod ranked;
 mod reader;
 mod schema;
 mod types;
 mod writer;
 
+pub(crate) use ranked::RankedHop;
 pub(crate) use reader::parse_file_endpoint;
 use rusqlite::{Connection, OpenFlags};
 use std::{path::Path, time::Duration};
