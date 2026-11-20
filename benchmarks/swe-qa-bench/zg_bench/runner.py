@@ -99,6 +99,7 @@ class BenchmarkSuite:
     tasks: tuple[str, ...] | None
     path: Path | None = None
     index_ignore_file: Path | None = None
+    graph_index: bool = False
 
 
 @dataclass(frozen=True)
@@ -221,6 +222,10 @@ def load_suite(
                 f"{index_ignore_file}"
             )
 
+    graph_index = root.get("graph_index", False)
+    if not isinstance(graph_index, bool):
+        raise SuiteConfigError("graph_index must be a boolean")
+
     return BenchmarkSuite(
         name=name,
         dataset=dataset,
@@ -228,6 +233,7 @@ def load_suite(
         tier=tier,
         tasks=tasks,
         index_ignore_file=index_ignore_file,
+        graph_index=graph_index,
     )
 
 
@@ -656,6 +662,8 @@ def build_harbor_command(
         )
         if suite.index_ignore_file is not None:
             agent_kwargs.append(f"index_ignore_file={suite.index_ignore_file}")
+        if suite.graph_index:
+            agent_kwargs.append("graph_index=true")
         if (
             embedding_endpoint is not None
             and not embedding_model.startswith("local/")

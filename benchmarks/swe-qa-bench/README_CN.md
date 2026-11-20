@@ -11,9 +11,11 @@
 
 索引构建单独测量，不计入 Agent 执行耗时。
 
+扩题、图索引和 callee 自然调用验收统一见 [英文说明](README.md#upstream-relationship-coverage-selection-revision-2)。
+
 ## Benchmark 定义
 
-本 benchmark 使用 [`peng-weihan/SWE-QA-Bench`](https://github.com/peng-weihan/SWE-QA-Bench) 中固定的 20 个任务子集。Benchmark 输入锁定在此目录中：
+本 benchmark 使用 [`peng-weihan/SWE-QA-Bench`](https://github.com/peng-weihan/SWE-QA-Bench) 中固定的 22 个任务子集。Benchmark 输入锁定在此目录中：
 
 - [`selection.json`](zg_bench/swe_qa/data/selection.json) 记录任务 ID、任务 slug、代码仓库 commit、资源哈希和 runner tier 成员关系。
 - [`references.json`](zg_bench/swe_qa/data/references.json) 包含独立评审器使用的隔离参考答案，Agent 无法访问该文件。
@@ -70,7 +72,7 @@ Aggregate 汇总放在最前面，先于任务明细。每轮 workflow 独立筛
 - 某项效率指标的汇总 baseline 分母为零时，变化率为 `N/A`。若没有任务保留，则 Aggregate 各项数值均为 `N/A`。
 - JSON 的 `cases` 及原始产物仍保留全部任务和子代理用量，包括被排除的任务。
 
-这是敏感性筛选，不能据此认定被排除的数据有误。所有选中任务仍须执行，并完成规定的 trial 和评审调用；筛选不能让未完成的 benchmark 通过。`all-full` 每轮仍运行 20 题 × 2 个 profile × 5 次。若任务均已完成，仅因筛选后没有剩余任务，工作流仍可成功。
+这是敏感性筛选，不能据此认定被排除的数据有误。所有选中任务仍须执行，并完成规定的 trial 和评审调用；筛选不能让未完成的 benchmark 通过。`all-full` 每轮仍运行 22 题 × 2 个 profile × 5 次。若任务均已完成，仅因筛选后没有剩余任务，工作流仍可成功。
 
 ## GitHub Actions
 
@@ -80,7 +82,7 @@ Aggregate 汇总放在最前面，先于任务明细。每轮 workflow 独立筛
 
 独立的 [SWE-QA Offline 工作流](../../.github/workflows/swe-qa-offline.yml) 会在相关路径的 PR 和 `main` push 上运行 Python 与共享 Node 回归测试。它不读取模型密钥、不构建 candidate，也不运行 Harbor 或模型 trial。
 
-`workflow_dispatch` 默认选择 `repro-3`（3 题），也可选择 `all-full`（20 题）或 `smoke`（5 题）。`candidate_ref` 默认是 `main`，指定要单独检出并打包的 Rust 源码分支、标签或提交；benchmark harness 与候选源码分开。`model` 输入默认是 `glm-5.2`，也可选择 `qwen3.8-max`；所选模型同时用于执行和评审。独立的 `embedding` 输入默认是 `local`，对应 `local/potion-code-16m-v2`；选择 `remote` 时使用与 Retrieval-only 工作流一致的 `qwen/qwen3.7-text-embedding`。
+`workflow_dispatch` 默认选择 `repro-3`（3 题），也可选择 `all-full`（22 题）或 `smoke`（5 题）。`candidate_ref` 默认是 `main`，指定要单独检出并打包的 Rust 源码分支、标签或提交；benchmark harness 与候选源码分开。`model` 输入默认是 `glm-5.2`，也可选择 `qwen3.8-max`；所选模型同时用于执行和评审。独立的 `embedding` 输入默认是 `local`，对应 `local/potion-code-16m-v2`；选择 `remote` 时使用与 Retrieval-only 工作流一致的 `qwen/qwen3.7-text-embedding`。
 
 `repro-3` 固定运行 3 题 × 2 个 profile × 5 次 = 30 个 trial，供小规模复现与迭代。任务按[运行 35206585943](https://github.com/Cuiyus/zvec-grep/actions/runs/35206585943) 中的调查路径和评分波动选取。下表范围均来自该轮最终成功的五次测试：
 
@@ -98,7 +100,7 @@ CI 的固定 trial 次数、失败重试上限及 local/remote Embedding 模型�
 
 SWE-QA suite 显式配置版本化的 [`index.ignore`](zg_bench/swe_qa/data/index.ignore)。其中只列出 3 个后缀为文本、实际内容为 PNG 或损坏 UTF-16/32 数据的固定 benchmark fixture。ignore 文件摘要会计入本地索引种子的身份；其他索引失败仍会使任务失败并出现在结果中。该设置属于 suite，其他 runner suite 不会继承。
 
-完整运行包含 20 题 × 2 个 profile × 5 次 = 200 个独立 trial。CI 通过 `--max-retries 2` 为异常失败（包括 Agent 超时）的 trial 最多额外重试 2 次；API 使用额度耗尽不重试。成功的 trial 和低分答案不重跑，重试次数不计入每组 5 次的样本数。本地运行默认不重试，可显式传入 `--max-retries` 开启。
+完整运行包含 22 题 × 2 个 profile × 5 次 = 220 个独立 trial。CI 通过 `--max-retries 2` 为异常失败（包括 Agent 超时）的 trial 最多额外重试 2 次；API 使用额度耗尽不重试。成功的 trial 和低分答案不重跑，重试次数不计入每组 5 次的样本数。本地运行默认不重试，可显式传入 `--max-retries` 开启。
 
 每次失败的日志和轨迹保存在 Harbor job 的 `.retry-history/` 下，并随原始证据上传；Job Summary 展示重试次数和最终错误数。报告中的 token、工具调用、耗时及费用仅统计每个 trial 最终成功的那次执行，不包含失败尝试的额外开销；这些开销可在归档证据中查看。用尽重试次数仍失败时，该任务保持失败。每个任务 job 的总时限为 6 小时，包含准备和重试时间。
 
@@ -241,7 +243,7 @@ zg-bench run swe-qa-bench \
 ```
 
 移除 `--dry-run` 即可执行 5 题 smoke run；将 `--tier smoke` 改为
-`--tier full` 可运行发布测试对应的 20 题配对 Agent 协议。Runner 会为
+`--tier full` 可运行当前完整配对 Agent 协议。Runner 会为
 Baseline 和 zvec-grep 同时固定 Claude Code `2.1.212`、Claude Opus 5、high
 推理强度和每个 profile USD 4.00 预算。Harbor 轨迹和 verifier 输出写入
 `runs/`；该命令不会自动重建发布结果中的 LLM Judge 与聚合报告。
