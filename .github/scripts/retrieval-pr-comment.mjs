@@ -390,7 +390,14 @@ export function validateComparison(report, request) {
   };
 }
 
-export function commentBody({ run, request, report, serverUrl, repository }) {
+export function commentBody({
+  run,
+  request,
+  report,
+  serverUrl,
+  repository,
+  traceArtifactId,
+}) {
   const runUrl = `${serverUrl}/${repository}/actions/runs/${run.id}/attempts/${run.run_attempt}`;
   let result;
   if (run.conclusion === "success") {
@@ -403,11 +410,14 @@ export function commentBody({ run, request, report, serverUrl, repository }) {
   const body = [marker, versionMarker(run), "## ZG Retrieval Benchmark", ""];
   if (result) {
     body.push(
-      markdownVersionComparison({
-        ...result,
-        server_url: serverUrl,
-        run_url: runUrl,
-      }),
+      markdownVersionComparison(
+        { ...result, server_url: serverUrl, run_url: runUrl },
+        {
+          traceUrl: positiveInteger(traceArtifactId)
+            ? `${serverUrl}/${repository}/actions/runs/${run.id}/artifacts/${traceArtifactId}`
+            : undefined,
+        },
+      ),
     );
   } else {
     const version = (side) => {
@@ -438,7 +448,7 @@ export function commentBody({ run, request, report, serverUrl, repository }) {
 async function readJson(path) {
   try {
     const info = await lstat(path);
-    if (!info.isFile() || info.size > 128 * 1024) return null;
+    if (!info.isFile() || info.size > 256 * 1024) return null;
     return JSON.parse(await readFile(path, "utf8"));
   } catch {
     return null;
@@ -522,12 +532,35 @@ export async function publish({ github, context, core, directory }) {
     core.info("A newer run already published this PR's results.");
     return;
   }
+  let traceArtifactId;
+  if (run.conclusion === "success") {
+    try {
+      const artifacts = await github.paginate(
+        github.rest.actions.listWorkflowRunArtifacts,
+        { ...context.repo, run_id: run.id, per_page: 100 },
+      );
+      // Build the URL from GitHub metadata, never artifact-provided Markdown or URLs.
+      traceArtifactId = artifacts.find(
+        (artifact) =>
+          artifact.name === "retrieval-trace.html" &&
+          artifact.expired === false &&
+          positiveInteger(artifact.id) &&
+          artifact.workflow_run?.id === run.id &&
+          artifact.workflow_run?.head_sha === run.head_sha,
+      )?.id;
+    } catch {
+      core.info(
+        "Stage trace artifact unavailable; omitting its download link.",
+      );
+    }
+  }
   const body = commentBody({
     run,
     request,
     report: await readJson(join(directory, "comparison/summary.json")),
     serverUrl: context.serverUrl,
     repository,
+    traceArtifactId,
   });
   // Recheck after reading artifacts/comments so a push during publication
   // cannot knowingly replace the current PR's result with an older version.
