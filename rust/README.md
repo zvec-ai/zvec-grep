@@ -64,6 +64,12 @@ positional query groups should switch to repeated `--hybrid` flags. Explicit
 `--hybrid`, `--fts`, and `--vector` queries stay separate. Direct and Server modes
 use the same parsing; managed `--rg` retains its pattern/path syntax.
 
+Indexed searches return results in reciprocal rank fusion (RRF) order within
+each query group by default. Set `ZVEC_GREP_ENABLE_RULE_RANKING=1` to enable
+static scoring rules and the penalty for repeated hits from the same file.
+For direct mode, set it on the `zg` command. For server and MCP searches,
+restart the server with the variable set. Existing indexes work in either mode.
+
 Multi-query indexed output labels each nonempty group with its original query
 and position, for example `-- query 2/3: socket timeout --`. Colored output uses
 a dim rule, a magenta label, and a bold query in the terminal's default foreground

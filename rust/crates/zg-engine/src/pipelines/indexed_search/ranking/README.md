@@ -1,8 +1,10 @@
 # Rule ranking
 
-Rule ranking scores the entire recalled entity pool before applying the result
-limit. It runs in the shared indexed-search engine, so direct, server, and MCP
-queries use the same policy.
+Indexed search uses reciprocal rank fusion (RRF) order and scores by default.
+With `ZVEC_GREP_ENABLE_RULE_RANKING=1`, the shared engine scores the entire
+recalled entity pool and applies same-file decay before the result limit.
+Set the variable on the direct CLI process or on the server handling CLI and MCP
+queries. All other values leave rule ranking disabled.
 
 The policy normalizes RRF by the maximum possible score for the enabled routes,
 adds bounded symbol/definition bonuses, and applies the minimum applicable path
@@ -43,19 +45,20 @@ ranges cannot supply support. The support term uses bounded base scores and
 the same path prior; it does not sum every fragment in a large file. It is an
 extra term after the static bonus cap.
 
-`score` is the rule selection score, not a probability. Trace preserves original
-`fusion` rank/score and includes optional `ranking` evidence: policy identifier,
-query features, name match/bonus, definition bonus, path roles/exemptions, static
-score, positive `path_bonus`, `file_support_bonus`, `file_support_count`, selected
-file count, diversity factor, and group-local final rank.
+With rule ranking enabled, `score` is the rule selection score. The trace
+preserves the original `fusion` rank and score. The optional `ranking` field
+records the policy identifier, query features, name match/bonus, definition
+bonus, path roles/exemptions, static score, positive `path_bonus`,
+`file_support_bonus`, `file_support_count`, selected file count, diversity
+factor, and group-local final rank.
 `path_overrides` lists roles exempted by query/scope, including those not present
 on a particular hit. Without trace, detailed explanation strings are not built.
 Serialized traces may omit `ranking`. Within a ranking trace, omitted
 `path_bonus`, `file_support_bonus`, and `file_support_count` fields default to zero.
 
-The loader batches the whole candidate pool, including entity content, before
-ranking and selection. Monitor both `load_results` and `ranking` timings to
-account for candidate loading and scoring costs. Ranking uses stored metadata
+With rule ranking enabled, the loader batches the whole candidate pool,
+including entity content, before ranking and selection. The `load_results`
+and `ranking` timings cover candidate loading and scoring. Ranking uses stored metadata
 without scanning source files or widening recall.
 
 The tests exercise definition promotion before the result limit, symbol roles,
