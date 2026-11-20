@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "suite": "beir20",
-  "source_lock_sha256": "8f1c15bfd8083eebe4f85f5b308fa1cc6c52ceffd08d6b573e8f62572b3023fe",
+  "source_lock_sha256": "d54fe93a2cb3e64348b0ad91e0f4d8a23660bcc111f843722e7cbc30be0d2064",
   "scifact_evidence": {
     "source": "https://scifact.s3-us-west-2.amazonaws.com/release/latest/data.tar.gz",
     "archive_sha256": "11c621288d41ac144d29b13b0f8503b3820b7d6e8b1f6ff24dff335c196d76be"
