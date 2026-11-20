@@ -36,6 +36,7 @@ use crate::domain::{
     EdgeProvenance, FileFormat, GraphEdgeKind, SymbolType, formats_for_path,
     reference_compatible_with,
 };
+use crate::extraction::PYTHON_UNBOUND_TYPE;
 use crate::storage::graph::{
     DeclaredBinding, ImportReference, NameIndexEntry, Resolution, StoredPendingRef,
 };
@@ -2855,6 +2856,12 @@ fn receiver_path_type(
         return Ok(step_type(marker, &inner_type));
     }
     if let Some(bound) = declared_receiver_type(store, snapshot, stored, receiver, caches)? {
+        // A member read the extraction could not type states the type stating
+        // it: `member_of:(ParserState,fontset)` is what `ParserState` says
+        // `fontset` holds.
+        if member_step(&bound).is_some() {
+            return resolve_member_steps(store, snapshot, stored, bound, caches, depth);
+        }
         // A loop or a placeholder declaration binds what the range or path it
         // was taken from holds, which is only known once that is read.
         if let Some((marker, inner)) = step_marker(&bound) {
@@ -2870,6 +2877,17 @@ fn receiver_path_type(
         // decides what the name itself denotes.
         return Ok(Some(bound));
     }
+    // `self` and `cls` hold the enclosing class: a member read through them is
+    // a member that class or one of its bases states.
+    if is_self_receiver(&stored.language, receiver) {
+        return Ok(snapshot
+            .entity_record(&stored.reference.owner_id)
+            .and_then(|owner| {
+                enclosing_scopes(&owner.qualified_name)
+                    .first()
+                    .map(|scope| (*scope).to_owned())
+            }));
+    }
     let Some((base, member)) = receiver.rsplit_once('.') else {
         return Ok(None);
     };
@@ -2877,7 +2895,85 @@ fn receiver_path_type(
     else {
         return Ok(None);
     };
-    member_of_type(store, snapshot, stored, &base_type, member, caches, depth)
+    let Some(bound) = member_of_type(store, snapshot, stored, &base_type, member, caches, depth)?
+    else {
+        return Ok(None);
+    };
+    resolve_member_steps(store, snapshot, stored, bound, caches, depth)
+}
+
+/// The type a member read denotes, one step at a time.
+///
+/// The extraction states a member read it cannot look up as
+/// `member_of:(<type>,<member>)`; the member's own type may step again
+/// (`self.fontset = self.state.fontset`), so the steps are read until the
+/// type is one the member rule can search.
+///
+/// # Errors
+/// Propagates graph storage failures of the member reads.
+fn resolve_member_steps(
+    store: &IndexStore,
+    snapshot: &ResolutionSnapshot,
+    stored: &StoredPendingRef,
+    bound: String,
+    caches: &mut RuleCaches,
+    depth: usize,
+) -> crate::EngineResult<Option<String>> {
+    let mut bound = bound;
+    let mut depth = depth;
+    loop {
+        let Some((base, member)) = member_step(&bound) else {
+            return Ok(Some(bound));
+        };
+        if depth > MAX_TYPE_STEPS {
+            return Ok(None);
+        }
+        // What the member is read from may state a step of its own
+        // (`member_of:(member_of:(ParserState,state),fontset)`): the type the
+        // outer member belongs to is only known once that step is read.
+        let base = match member_step(base) {
+            Some(_) => {
+                let Some(resolved) = resolve_member_steps(
+                    store,
+                    snapshot,
+                    stored,
+                    base.to_owned(),
+                    caches,
+                    depth + 1,
+                )?
+                else {
+                    return Ok(None);
+                };
+                resolved
+            }
+            None => base.to_owned(),
+        };
+        let Some(next) = member_of_type(store, snapshot, stored, &base, member, caches, depth)?
+        else {
+            return Ok(None);
+        };
+        bound = next;
+        depth += 1;
+    }
+}
+
+/// The `(<type>,<member>)` a member step states, when the binding names one.
+///
+/// The base may itself be a step (`self.fontset = self.state.fontset` states
+/// `member_of:(member_of:(ParserState,state),fontset)`), so the two parts are
+/// split at the comma that separates them at the step's own level.
+fn member_step(text: &str) -> Option<(&str, &str)> {
+    let inner = text.strip_prefix("member_of:(")?.strip_suffix(')')?;
+    let mut depth = 0usize;
+    for (index, ch) in inner.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => return Some((&inner[..index], &inner[index + 1..])),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The type the call site's own body or enclosing class states for one name.
@@ -2903,13 +2999,73 @@ fn declared_receiver_type(
             .map(|binding| binding.bound_type.clone())
             .next_back() // bindings are line-ordered; the latest earlier one shadows
     };
-    if local.is_some() {
-        return Ok(local);
+    match local {
+        // The body rebound the name to a value the index cannot place, which
+        // shadows the annotation instead of leaving it in effect.
+        Some(bound) if bound == PYTHON_UNBOUND_TYPE => return Ok(None),
+        Some(bound) => return Ok(Some(bound)),
+        None => {}
     }
     if let Some(binding) = translation_unit_binding(store, snapshot, stored, receiver, caches)? {
         return Ok(Some(binding));
     }
+    // A Python name the body does not declare is a module-level name, never an
+    // attribute of `self`: the language has no unqualified member lookup, so
+    // `def run(self, index): index.create_variables()` reads the parameter's
+    // own value even when the class states a member of that name. The class's
+    // member bindings answer member reads (`self.index.…`) only.
+    if stored.language == "python" {
+        return Ok(None);
+    }
     member_type_of(store, snapshot, stored, receiver, caches)
+}
+
+/// What the bindings of one class state for a member name.
+///
+/// `Absent` and `Undecided` differ where inheritance reads them: a class that
+/// says nothing about a name answers with a base's member, while a class that
+/// writes the name without stating one type answers with nothing — the base's
+/// member is a different declaration, not what this class's write leaves there.
+#[derive(Debug, Eq, PartialEq)]
+enum MemberBinding {
+    /// No declaration of the class states the name.
+    Absent,
+    /// The class states the name, but not one type.
+    Undecided,
+    /// Every declaration of the class agrees on one type.
+    Known(String),
+}
+
+/// What `bindings` state for one name, in declaration order.
+///
+/// Elsewhere the last declaration of a name replaces the earlier ones
+/// (`int x; double x;` is one binding at a time). Python states one member from
+/// the assignments of several methods, where source order is no order of
+/// execution: assignments that state different types leave the member undecided
+/// instead of choosing the one written last, and a write the extraction could
+/// not type (the [`PYTHON_UNBOUND_TYPE`] sentinel) decides nothing either.
+fn member_binding_type(bindings: &[DeclaredBinding], name: &str, language: &str) -> MemberBinding {
+    let mut found: Option<String> = None;
+    for binding in bindings.iter().filter(|binding| binding.name == name) {
+        if language != "python" {
+            found = Some(binding.bound_type.clone());
+            continue;
+        }
+        if binding.bound_type == PYTHON_UNBOUND_TYPE {
+            return MemberBinding::Undecided;
+        }
+        match &found {
+            Some(previous) if previous != &binding.bound_type => {
+                return MemberBinding::Undecided;
+            }
+            Some(_) => {}
+            None => found = Some(binding.bound_type.clone()),
+        }
+    }
+    match found {
+        Some(bound) => MemberBinding::Known(bound),
+        None => MemberBinding::Absent,
+    }
 }
 
 /// The type the reference's translation unit states for one name outside every
@@ -3132,14 +3288,15 @@ fn member_type_of(
         };
         // Several declarations of one member name inside one class are a
         // rebinding (`int x; double x;` is not C++, but macros can produce
-        // it); the last declaration is the one in effect.
-        if let Some(bound) = bindings
-            .iter()
-            .filter(|binding| binding.name == receiver)
-            .map(|binding| binding.bound_type.clone())
-            .next_back()
-        {
-            return Ok(Some(bound));
+        // it); the last declaration is the one in effect, except where the
+        // language states the member from several places at once.
+        match member_binding_type(bindings, receiver, &stored.language) {
+            MemberBinding::Known(bound) => return Ok(Some(bound)),
+            // The class writes the member without stating one type; a base's
+            // member of the same name is a different declaration, and the
+            // class's own writes decide the answer.
+            MemberBinding::Undecided => return Ok(None),
+            MemberBinding::Absent => {}
         }
     }
     Ok(None)
@@ -3655,13 +3812,12 @@ fn member_of_type(
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => entry.insert(store.declared_bindings(entity)?),
         };
-        if let Some(bound) = bindings
-            .iter()
-            .filter(|binding| binding.name == member)
-            .map(|binding| binding.bound_type.clone())
-            .next_back()
-        {
-            return Ok(Some(unwrap_binding_type(&bound)));
+        match member_binding_type(bindings, member, &stored.language) {
+            MemberBinding::Known(bound) => return Ok(Some(unwrap_binding_type(&bound))),
+            // The type writes this member without one type; the base's member
+            // states a different declaration.
+            MemberBinding::Undecided => return Ok(None),
+            MemberBinding::Absent => {}
         }
     }
     Ok(None)
@@ -4684,5 +4840,86 @@ mod language_gate_tests {
             Some(FileFormat::TypeScript),
             Some(&formats_for_path(Path::new("src/main.js")))
         ));
+    }
+}
+
+#[cfg(test)]
+mod member_evidence_tests {
+    use super::{MemberBinding, member_binding_type, member_step};
+    use crate::extraction::PYTHON_UNBOUND_TYPE;
+    use crate::storage::graph::DeclaredBinding;
+
+    fn binding(name: &str, bound_type: &str) -> DeclaredBinding {
+        DeclaredBinding {
+            name: name.to_owned(),
+            bound_type: bound_type.to_owned(),
+            line: 1,
+            until: None,
+            column: 0,
+            scope_end: None,
+        }
+    }
+
+    #[test]
+    fn nested_member_steps_split_at_their_own_level() {
+        assert_eq!(
+            member_step("member_of:(ParserState,fontset)"),
+            Some(("ParserState", "fontset"))
+        );
+        // A copied member states the member it was read from as its base.
+        assert_eq!(
+            member_step("member_of:(member_of:(ParserState,state),fontset)"),
+            Some(("member_of:(ParserState,state)", "fontset"))
+        );
+        assert_eq!(member_step("ParserState"), None);
+    }
+
+    #[test]
+    fn python_members_with_distinct_types_stay_undecided() {
+        // Two methods state the member, and source order across methods is no
+        // order of execution: the later write may never run.
+        let bindings = vec![binding("service", "Left"), binding("service", "Right")];
+        assert_eq!(
+            member_binding_type(&bindings, "service", "python"),
+            MemberBinding::Undecided
+        );
+        // The same type written twice is one answer.
+        let bindings = vec![binding("service", "Left"), binding("service", "Left")];
+        assert_eq!(
+            member_binding_type(&bindings, "service", "python"),
+            MemberBinding::Known("Left".to_owned())
+        );
+        // Elsewhere the last declaration is the one in effect.
+        let bindings = vec![binding("service", "Left"), binding("service", "Right")];
+        assert_eq!(
+            member_binding_type(&bindings, "service", "cpp"),
+            MemberBinding::Known("Right".to_owned())
+        );
+        // A class that says nothing about the name is answered by its bases.
+        assert_eq!(
+            member_binding_type(&[], "service", "python"),
+            MemberBinding::Absent
+        );
+    }
+
+    #[test]
+    fn python_member_written_without_a_type_stays_undecided() {
+        // `self.service = service` stores a value the extraction cannot place:
+        // the write keeps the name from answering with the earlier type.
+        let bindings = vec![
+            binding("service", "Left"),
+            binding("service", PYTHON_UNBOUND_TYPE),
+        ];
+        assert_eq!(
+            member_binding_type(&bindings, "service", "python"),
+            MemberBinding::Undecided
+        );
+        // The sentinel alone states the member without a type, which still
+        // stops an inherited type from answering.
+        let bindings = vec![binding("service", PYTHON_UNBOUND_TYPE)];
+        assert_eq!(
+            member_binding_type(&bindings, "service", "python"),
+            MemberBinding::Undecided
+        );
     }
 }
