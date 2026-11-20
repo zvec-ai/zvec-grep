@@ -84,6 +84,7 @@ pub(super) fn hit(
                 forced: false,
             },
             ranking: None,
+            graph_ranking: None,
             final_selection: SearchFinalTrace {
                 returned_by_limit: true,
                 cutoff_rank: 10,

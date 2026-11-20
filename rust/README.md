@@ -486,6 +486,34 @@ search. These queries do not load models or refresh the index.
 Graph extraction and resolution must have populated the index for call edges to
 be available; unresolved references are excluded from results.
 
+On graph-enabled indexes, `graphRerank: true` enables experimental graph-assisted
+ranking for primary hybrid query groups. It defaults to false and is independent
+of `trace`. Fused groups containing a primary hybrid query traverse the graph once;
+supplemental single-route groups keep ordinary retrieval.
+
+The traversal starts from all eligible code entities in the loaded FTS + vector
+pool, before ranking or cutoff. It follows resolved Calls, Extends, Contains,
+Imports, Implements and Declares edges in both directions for up to three hops.
+Prioritized exploration returns at most 1,500 adjacency records per group and
+retains up to 200 additional graph candidates. SQLite may inspect more rows to
+schedule those records; this limit does not bound all index work.
+
+The full ordinary pool is ranked with the existing rules, then its normalized
+reciprocal ranks are equally combined with graph propagation scores. Propagation
+starts from seed FTS + vector RRF scores over distinct undirected neighbors, using
+three steps weighted 1, 0.5 and 0.25. Scores are normalized over the ordinary pool
+and retained graph candidates. Returned items come from the ordinary pool and
+honor `limit`; graph-added entities influence scores but are not returned.
+
+With `trace: true`, MCP structured content includes `searchTrace` and stage
+`timings`. Trace records recall attempts, loaded candidates, graph witnesses and
+work counts. Each selected hit preserves ordinary rule scores in `ranking` and
+final graph-assisted scores in `graph_ranking`. The `graph_expand` timing includes
+priority preparation and index work; `graph_ranking` measures propagation and
+final selection. Without an eligible seed or graph-enabled index, ordinary ranking
+is preserved. Graph read failures are reported alongside ordinary results;
+cancellation aborts the request.
+
 This version indexes text and code with one embedding model per workspace. Choose
 it with `zg --index --embedding <model>` or set a default with
 `zg --config model set <model> --default`. Code, documents and structured text use

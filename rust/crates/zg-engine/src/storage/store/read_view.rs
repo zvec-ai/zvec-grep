@@ -1,6 +1,9 @@
 //! Storage read primitives, optionally grouped under one store lock.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 use super::{IndexStore, StoreState, graph_error};
 use crate::{
@@ -8,7 +11,7 @@ use crate::{
     domain::{CodeMetadata, Entity, EntityId, FileEdge, FileId, FileRecord, GraphEdgeKind},
     storage::{
         fragments,
-        graph::Direction,
+        graph::{Direction, RankedHop},
         types::{StorageSearchFilter, StorageSearchHit},
     },
 };
@@ -119,6 +122,39 @@ impl ReadView<'_> {
             .as_ref()
             .map(|_| ())
             .map_err(|error| EngineError::from_report(error.clone()))
+    }
+
+    pub(crate) fn explore_file_paths(&self) -> EngineResult<Vec<(FileId, PathBuf)>> {
+        self.state.files.list_paths()
+    }
+
+    pub(crate) fn explore_symbols(
+        &self,
+        signal: Option<&tokio_util::sync::CancellationToken>,
+    ) -> EngineResult<Vec<(String, FileId, Option<CodeMetadata>)>> {
+        self.state.entities.list_symbol_projection(signal)
+    }
+
+    pub(crate) fn with_edge_priority<T>(
+        &self,
+        priority: impl Fn(bool, &str, &str) -> Option<i64> + Send + 'static,
+        read: impl FnOnce() -> EngineResult<T>,
+    ) -> EngineResult<T> {
+        self.state
+            .graph
+            .as_ref()
+            .map_err(|error| EngineError::from_report(error.clone()))?
+            .with_edge_priority(priority, read)
+            .map_err(graph_error)?
+    }
+
+    pub(crate) fn ranked_hop(&self, frontier: &[&str], limit: usize) -> EngineResult<RankedHop> {
+        self.state
+            .graph
+            .as_ref()
+            .map_err(|error| EngineError::from_report(error.clone()))?
+            .ranked_hop(frontier, limit)
+            .map_err(graph_error)
     }
 
     pub(crate) fn neighborhood<T>(

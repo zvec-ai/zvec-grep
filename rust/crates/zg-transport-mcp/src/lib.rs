@@ -526,10 +526,7 @@ impl ZvecGrepMcpServer {
         .await;
 
         Ok(match result {
-            Ok(reply) => CallToolResult::success(vec![ContentBlock::text(
-                search_format::format_search_result(&reply, preview),
-            )])
-            .into(),
+            Ok(reply) => search_format::search_result(&reply, preview).into(),
             Err(error) if error.code() == EngineError::NOT_FOUND => {
                 return self
                     .setup_state
@@ -963,6 +960,9 @@ pub struct SearchInput {
     /// Include per-hit search trace.
     #[schemars(extend("type" = "boolean"))]
     pub trace: Option<bool>,
+    /// Experimental. Rerank primary hybrid results with budgeted graph evidence on graph-enabled indexes. Defaults to false.
+    #[schemars(extend("type" = "boolean"))]
+    pub graph_rerank: Option<bool>,
     /// Search now or wait for delivered workspace changes to be indexed.
     /// Resident servers cover watcher notifications received before the refresh
     /// barrier; OS notifications delivered later require a subsequent refresh.
@@ -1742,6 +1742,7 @@ impl SearchInput {
             .collect();
         let auto_update =
             self.auto_update || matches!(self.freshness, FreshnessInput::WaitForFresh);
+        let trace = self.trace.unwrap_or(false);
 
         let request = ContextOptions {
             query: None,
@@ -1758,7 +1759,8 @@ impl SearchInput {
             } else {
                 RefreshPolicy::Off
             }),
-            trace: self.trace.unwrap_or(false),
+            trace,
+            graph_rerank: self.graph_rerank,
             prefer_symbol: self.prefer_symbol.unwrap_or(false),
             filter: QueryFilter {
                 file_types: normalize_types(self.file_types, "fileTypes")?,
@@ -2659,9 +2661,32 @@ mod tests {
             modified_after: None,
             modified_before: None,
             trace: Some(true),
+            graph_rerank: None,
             freshness: FreshnessInput::Eventual,
             auto_update: true,
         }
+    }
+
+    #[test]
+    fn graph_reranking_requires_explicit_opt_in_independently_of_trace() {
+        for trace in [false, true] {
+            for enabled in [None, Some(false), Some(true)] {
+                let mut search = input();
+                search.trace = Some(trace);
+                search.graph_rerank = enabled;
+                let request = search.into_request().expect("search request");
+                assert_eq!(request.trace, trace);
+                assert_eq!(request.graph_rerank, enabled);
+            }
+        }
+        let search: SearchInput = serde_json::from_value(serde_json::json!({
+            "root": test_root(), "query": "call chain", "graphRerank": true
+        }))
+        .expect("graph rerank input");
+        assert_eq!(
+            search.into_request().expect("request").graph_rerank,
+            Some(true)
+        );
     }
 
     #[test]

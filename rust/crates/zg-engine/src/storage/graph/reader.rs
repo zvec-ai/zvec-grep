@@ -207,7 +207,7 @@ pub(crate) fn parse_file_endpoint(target: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-fn edge_from_row(row: &Row<'_>) -> rusqlite::Result<FileEdge> {
+pub(super) fn edge_from_row(row: &Row<'_>) -> rusqlite::Result<FileEdge> {
     Ok(FileEdge {
         kind: decode_enum(row.get(0)?)?,
         source: row.get(1)?,
