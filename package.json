@@ -82,5 +82,10 @@
   },
   "optionalDependencies": {
     "node-llama-cpp": "3.18.1"
+  },
+  "overrides": {
+    "@huggingface/transformers": {
+      "sharp": "0.35.4"
+    }
   }
 }
