@@ -606,6 +606,12 @@ fn visit_for_bindings(
         for name in rust_use_bindings(node, source) {
             context.register_import_binding(owner_index, &name);
         }
+        // A glob binds no spelling the walk can list, but it does put the
+        // source module's names in view, which partition needs in order not to
+        // rule the file's own namesakes out.
+        if rust_use_is_glob(node) {
+            context.register_import_glob(owner_index);
+        }
     }
     let line = node.start_position().row + 1;
     let column = node.start_position().column;
@@ -2918,6 +2924,16 @@ fn rust_use_bindings(node: Node<'_>, source: &[u8]) -> Vec<String> {
         }
     }
     names
+}
+
+/// Whether a `use` declaration writes a glob (`use super::*;`,
+/// `use a::{self, *};`), which binds no name the walk can list.
+fn rust_use_is_glob(node: Node<'_>) -> bool {
+    if node.kind() == "use_wildcard" {
+        return true;
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).any(rust_use_is_glob)
 }
 
 /// The clauses of a `use` declaration, with any `pub` / `pub(crate)` /
