@@ -1643,11 +1643,11 @@ async fn followup_innermost_block_wins_regardless_of_declaration_order() {
 }
 
 #[tokio::test]
-async fn review3_impl_block_must_not_steal_function_call() {
+async fn impl_block_does_not_take_a_bare_call_from_a_function() {
     // `impl save` names the type it implements and is a scope, not a value, so
     // the bare `save()` reaches the function declared beside it.
     check_case(Case {
-        name: "review3_impl_block_must_not_steal_function_call",
+        name: "impl_block_does_not_take_a_bare_call_from_a_function",
         files: vec![SourceFile {
             path: "lib.rs",
             source: "pub mod m {\n    pub fn save() -> i32 { 1 }\n    pub struct save { pub value: i32 }\n    impl save {\n        pub fn value(&self) -> i32 { self.value }\n    }\n    pub fn flush() -> i32 { save() }\n}\n",
@@ -1663,11 +1663,11 @@ async fn review3_impl_block_must_not_steal_function_call() {
 }
 
 #[tokio::test]
-async fn review3_union_must_not_steal_function_call() {
+async fn union_item_does_not_take_a_bare_call_from_a_function() {
     // A union declares a type and no constructor, so its spelling lives in the
     // type namespace and never answers a bare call.
     check_case(Case {
-        name: "review3_union_must_not_steal_function_call",
+        name: "union_item_does_not_take_a_bare_call_from_a_function",
         files: vec![SourceFile {
             path: "lib.rs",
             source: "pub mod m {\n    pub fn save() -> i32 { 1 }\n    pub union save { pub value: i32 }\n    pub fn flush() -> i32 { save() }\n}\n",
@@ -1676,6 +1676,67 @@ async fn review3_union_must_not_steal_function_call() {
             operation: "callees",
             symbol: "m::flush",
             expected: json!([{"name":"m::flush","edges":[{"symbol":{"name":"m::save","startLine":2}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn inner_module_does_not_reach_the_file_scope() {
+    // A module's items need `super::` from inside it, so the file-level `save`
+    // is not the target of the `save()` the module writes.
+    check_case(Case {
+        name: "inner_module_does_not_reach_the_file_scope",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub fn save() -> i32 { 1 }\npub mod m {\n    pub fn f() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::f",
+            expected: json!([{"name":"m::f","edges":[]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn glob_import_keeps_the_file_scope_in_view() {
+    // `use super::*;` puts the file's own names in the module's view without
+    // spelling any of them, so the file-level `save` answers the call.
+    check_case(Case {
+        name: "glob_import_keeps_the_file_scope_in_view",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub fn save() -> i32 { 1 }\npub mod m {\n    use super::*;\n    pub fn f() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::f",
+            expected: json!([{"name":"m::f","edges":[{"symbol":{"name":"save","startLine":1}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn single_import_binds_the_name_in_the_module() {
+    // `use super::save;` binds the spelling in this module, so the call reaches
+    // whatever that import names: the file's own table stays out of it and the
+    // cross-file resolver reads the import.
+    check_case(Case {
+        name: "single_import_binds_the_name_in_the_module",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub fn save() -> i32 { 1 }\npub mod m {\n    use super::save;\n    pub fn f() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::f",
+            expected: json!([{"name":"m::f","edges":[{"symbol":{"name":"save","startLine":1}}]}]),
             ..Query::default()
         }],
     })

@@ -234,7 +234,14 @@ pub(crate) struct WalkContext {
     /// an import to that body, so a name a function imports is nearer than the
     /// module's item of the same name: `use crate::other::save;` inside `flush`
     /// makes its `save()` the imported one, which only the resolver can place.
+    /// The record carries no position, so a `use` in a nested block also leaves
+    /// calls outside that block pending: a lost edge rather than a wrong one.
     import_bindings: HashMap<usize, HashSet<String>>,
+    /// Bodies that write a glob `use` (`use super::*;`). A glob states no
+    /// spelling this walk can place, but it does put the surrounding names in
+    /// view, which is why partition may still read the file's own table after
+    /// the walk reaches a module that writes one.
+    import_globs: HashSet<usize>,
     /// Names each entity takes for itself without necessarily binding them to
     /// an indexable target: parameters, and locals whose type the index cannot
     /// spell. A bare call through such a name reaches the local value, never
@@ -297,6 +304,7 @@ impl WalkContext {
             type_namespace_items: HashSet::new(),
             item_extents: HashMap::new(),
             import_bindings: HashMap::new(),
+            import_globs: HashSet::new(),
             shadowed_names: HashMap::new(),
             borrowed_names: HashMap::new(),
             value_aliases: HashMap::new(),
@@ -445,6 +453,15 @@ impl WalkContext {
             .entry(owner)
             .or_default()
             .insert(name.to_owned());
+    }
+
+    /// Records that `owner`'s body writes a glob `use` (`use super::*;`),
+    /// which puts the surrounding names in view without spelling any of them.
+    pub(crate) fn register_import_glob(&mut self, owner: usize) {
+        if !self.collecting {
+            return;
+        }
+        self.import_globs.insert(owner);
     }
 
     /// Records that `owner`'s body takes `name` for a local value or

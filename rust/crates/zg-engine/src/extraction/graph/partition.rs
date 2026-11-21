@@ -185,6 +185,7 @@ pub(crate) fn partition_walk(
         type_namespace_items,
         item_extents,
         import_bindings,
+        import_globs,
         shadowed_names,
         borrowed_names,
         value_aliases,
@@ -236,6 +237,7 @@ pub(crate) fn partition_walk(
                 type_namespace_items: &type_namespace_items,
                 item_extents: &item_extents,
                 import_bindings: &import_bindings,
+                import_globs: &import_globs,
                 file_symbols: &file_symbols,
                 aliases: &aliases,
                 value_aliases: &value_aliases,
@@ -243,7 +245,7 @@ pub(crate) fn partition_walk(
             },
         );
         match resolved_target {
-            Some(target_index) => partitioned.resolved.push(ResolvedNameEdge {
+            InFileTarget::Bound(target_index) => partitioned.resolved.push(ResolvedNameEdge {
                 ref_kind: edge.ref_kind,
                 source_index: edge.owner_index,
                 target_index,
@@ -255,7 +257,7 @@ pub(crate) fn partition_walk(
                 column: edge.column,
                 provenance: EdgeProvenance::FileLocal,
             }),
-            None => partitioned.pending.push(PendingNameRef {
+            InFileTarget::Pending => partitioned.pending.push(PendingNameRef {
                 ref_kind: edge.ref_kind,
                 owner_index: edge.owner_index,
                 ref_name: edge.ref_name,
@@ -269,6 +271,9 @@ pub(crate) fn partition_walk(
                 line: edge.line,
                 column: edge.column,
             }),
+            // The scopes around the call rule out every spelling this file
+            // holds, so there is nothing for the resolver to weigh either.
+            InFileTarget::OutOfReach => {}
         }
     }
     partitioned
@@ -397,6 +402,11 @@ enum BareName {
     /// trait or a type alias is not a value — so the call stays pending
     /// instead of climbing to an outer scope.
     Declared(Option<usize>),
+    /// The nearest module binds no such spelling and writes no glob, so the
+    /// file's own items are not in view: reaching them from there needs
+    /// `super::`. The call stays pending rather than taking a file-level
+    /// namesake the module cannot see.
+    OutOfScope,
 }
 
 /// The item-scope tables a bare call climbs through.
@@ -415,6 +425,9 @@ struct ItemScopes<'a> {
     scoped_symbols: &'a HashMap<usize, HashMap<String, Vec<usize>>>,
     /// The names a `use` in each scope binds.
     import_bindings: &'a HashMap<usize, HashSet<String>>,
+    /// The scopes that write a glob `use`, which states the surrounding names
+    /// are in view without spelling any of them.
+    import_globs: &'a HashSet<usize>,
     /// Containment, target ordinal → containing ordinal.
     enclosing: &'a HashMap<usize, usize>,
 }
@@ -428,7 +441,8 @@ struct ItemScopes<'a> {
 /// trait or a class body is skipped, because its members need a receiver. A
 /// `use` written in one of those bodies is nearer than the items: it binds the
 /// spelling for the calls that see it, and where it points is the resolver's
-/// question.
+/// question. The file's own table belongs to the file scope, so a module
+/// reaches it only through a glob import.
 fn enclosing_bare_name(
     owner: usize,
     name: &str,
@@ -442,11 +456,19 @@ fn enclosing_bare_name(
         item_extents,
         scoped_symbols,
         import_bindings,
+        import_globs,
         enclosing,
     } = scopes;
     let mut current = owner;
+    // A glob `use` on the way out (`use super::*;`) states that the names
+    // around the innermost module are in view without spelling any of them, so
+    // the file's own table stays a candidate once the walk reaches that module.
+    let mut glob_in_view = false;
     // The file node is not an entity, so the walk ends where containment does.
     for _ in 0..64 {
+        if import_globs.contains(&current) {
+            glob_in_view = true;
+        }
         if import_bindings
             .get(&current)
             .is_some_and(|names| names.contains(name))
@@ -480,10 +502,13 @@ fn enclosing_bare_name(
             }
             if module {
                 // The nearest module ends the walk: the items of the modules
-                // around it need `super::`. The file's own table is still read,
-                // because a glob import (`use super::*;`) states what an inner
-                // module sees of it.
-                return BareName::Unbound;
+                // around it need `super::`, and so do the file's own items
+                // unless a glob import states that some of them are in view.
+                return if glob_in_view {
+                    BareName::Unbound
+                } else {
+                    BareName::OutOfScope
+                };
             }
         }
         let Some(&parent) = enclosing.get(&current) else {
@@ -504,6 +529,9 @@ struct InFileTables<'a> {
     type_namespace_items: &'a HashSet<usize>,
     item_extents: &'a HashMap<usize, ItemExtent>,
     import_bindings: &'a HashMap<usize, HashSet<String>>,
+    /// The scopes that write a glob `use`: their file-level namesakes stay in
+    /// view, because the glob cannot say which of them it binds.
+    import_globs: &'a HashSet<usize>,
     file_symbols: &'a HashMap<String, Vec<usize>>,
     aliases: &'a HashMap<(usize, String), Vec<NameEdge>>,
     value_aliases: &'a HashMap<(usize, String), String>,
@@ -512,10 +540,22 @@ struct InFileTables<'a> {
     enclosing: &'a HashMap<usize, usize>,
 }
 
-/// The entity one name reference binds to inside its own file, or `None` when
-/// the file holds no single answer and the reference stays pending for the
-/// cross-file resolver.
-fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> Option<usize> {
+/// What one name reference binds inside its own file.
+enum InFileTarget {
+    /// The in-file entity the reference reaches.
+    Bound(usize),
+    /// The file holds no single answer, so the reference stays pending for the
+    /// cross-file resolver.
+    Pending,
+    /// No spelling of this file can answer the reference from where it stands:
+    /// the nearest module declares none, imports none and writes no glob. The
+    /// walk emits no edge rather than binding a namesake that module cannot
+    /// reach.
+    OutOfReach,
+}
+
+/// The in-file answer for one name reference.
+fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> InFileTarget {
     let InFileTables {
         symbols,
         scoped_symbols,
@@ -524,6 +564,7 @@ fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> 
         type_namespace_items,
         item_extents,
         import_bindings,
+        import_globs,
         file_symbols,
         aliases,
         value_aliases,
@@ -535,15 +576,17 @@ fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> 
         // Imports stay pending because their target is another file by
         // definition, and Declares edges bind a variable to a type name that
         // may live elsewhere — the cross-file resolver consumes all three.
-        GraphEdgeKind::Contains | GraphEdgeKind::Imports | GraphEdgeKind::Declares => None,
-        GraphEdgeKind::Calls if edge.receiver_name.is_some() => None,
+        GraphEdgeKind::Contains | GraphEdgeKind::Imports | GraphEdgeKind::Declares => {
+            InFileTarget::Pending
+        }
+        GraphEdgeKind::Calls if edge.receiver_name.is_some() => InFileTarget::Pending,
         // A construction site (`new X()`) names a type, and which type a
         // bare name denotes is a namespace question: the file's lone
         // same-named class in an unrelated namespace must not answer it
         // (`ui::Paint`'s `new Widget()` is `ui::Widget`, not
         // `legacy::Widget`). Only the cross-file resolver sees the
         // enclosing namespaces, so constructions stay pending.
-        GraphEdgeKind::Calls if edge.constructs.is_some() => None,
+        GraphEdgeKind::Calls if edge.constructs.is_some() => InFileTarget::Pending,
         // A bare call resolves through, in order: the binding its owner's body
         // gave the name *at the call's own position*, the file-level bindings
         // (a module-level `const dispatch = send` is visible to every body in
@@ -551,87 +594,93 @@ fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> 
         // nested spelling an entity declares in its body shadows any file-level
         // name inside it), then the item scopes around the owner — the module's
         // own `save` answers its `flush`, and a nested `fn save` answers the
-        // bodies inside the function that declares it — and finally the
+        // bodies inside the function that declares it — and finally, for a call
+        // no module encloses or one whose modules write a glob import, the
         // file-level table. Members and nested definitions stay out of that
         // last table: a top-level `caller()` naming `run` does not see `A::run`
         // just because the file declares it once. Without better evidence the
         // reference stays pending for the cross-file resolver, which also
         // weighs imports.
         GraphEdgeKind::Calls => {
-            let value_alias = || {
-                value_aliases
-                    .get(&(edge.owner_index, edge.ref_name.clone()))
-                    .or_else(|| {
-                        value_aliases.get(&(super::FILE_SCOPE_INDEX, edge.ref_name.clone()))
-                    })
-            };
-            match alias_at(aliases, edge) {
+            if let Some(bound) = alias_at(aliases, edge) {
                 // A Python body that rebinds a name states it holds no type
                 // the index can place (`client = clients[0]`), but a copy of
                 // another name is evidence of its own: `alias = target` still
                 // reaches `target` through the alias table.
-                Some(bound) if is_python_rebound(bound) => {
-                    value_alias().and_then(|bound| unique_symbol(symbols, bound))
+                if !is_python_rebound(bound) {
+                    // The binding states no value this file can place, so the
+                    // spelled name is not the answer: the resolver reads the
+                    // declared binding at the call's position and can still
+                    // tell a parameter, a nested definition or a later
+                    // reassignment apart from the file's name.
+                    return if states_a_placeable_value(bound) {
+                        unique_in_file(symbols, bound)
+                    } else {
+                        InFileTarget::Pending
+                    };
                 }
-                // The binding states no value this file can place, so the
-                // spelled name is not the answer: the resolver reads the
-                // declared binding at the call's position and can still tell a
-                // parameter, a nested definition or a later reassignment apart
-                // from the file's name.
-                Some(bound) if !states_a_placeable_value(bound) => None,
-                Some(bound) => unique_symbol(symbols, bound),
-                None => match value_alias() {
-                    // A pair the walk recorded without a position of its own
-                    // (`x = y` where the declaration states no type) is the
-                    // only evidence there is.
-                    Some(bound) => unique_symbol(symbols, bound),
-                    None => scoped_symbols
-                        .get(&edge.owner_index)
-                        .and_then(|locals| locals.get(&edge.ref_name))
-                        .and_then(|declared| {
-                            match local_target(
-                                declared,
-                                (edge.line, edge.column),
-                                module_scopes,
-                                type_namespace_items,
-                                item_extents,
-                            ) {
-                                LocalName::Value(index) => Some(index),
-                                LocalName::TypeOnly | LocalName::Hidden => None,
-                            }
-                        })
-                        .or_else(|| {
-                            // A parameter or an untyped local of that name in
-                            // the owner's own body is the value the call
-                            // reaches; no enclosing scope may answer it.
-                            if shadowed {
-                                return None;
-                            }
-                            match enclosing_bare_name(
-                                edge.owner_index,
-                                &edge.ref_name,
-                                (edge.line, edge.column),
-                                ItemScopes {
-                                    module_scopes,
-                                    function_scopes,
-                                    type_namespace_items,
-                                    item_extents,
-                                    scoped_symbols,
-                                    import_bindings,
-                                    enclosing,
-                                },
-                            ) {
-                                BareName::Declared(target) => target,
-                                BareName::Imported => None,
-                                BareName::Unbound => unique_symbol(file_symbols, &edge.ref_name),
-                            }
-                        }),
+            }
+            // A pair the walk recorded without a position of its own (`x = y`
+            // where the declaration states no type) is the only evidence there
+            // is.
+            if let Some(bound) = value_aliases
+                .get(&(edge.owner_index, edge.ref_name.clone()))
+                .or_else(|| value_aliases.get(&(super::FILE_SCOPE_INDEX, edge.ref_name.clone())))
+            {
+                return unique_in_file(symbols, bound);
+            }
+            // A parameter or an untyped local of that name in the owner's own
+            // body is the value the call reaches; no enclosing scope may
+            // answer it.
+            if shadowed {
+                return InFileTarget::Pending;
+            }
+            if let Some(declared) = scoped_symbols
+                .get(&edge.owner_index)
+                .and_then(|locals| locals.get(&edge.ref_name))
+                && let LocalName::Value(index) = local_target(
+                    declared,
+                    (edge.line, edge.column),
+                    module_scopes,
+                    type_namespace_items,
+                    item_extents,
+                )
+            {
+                return InFileTarget::Bound(index);
+            }
+            match enclosing_bare_name(
+                edge.owner_index,
+                &edge.ref_name,
+                (edge.line, edge.column),
+                ItemScopes {
+                    module_scopes,
+                    function_scopes,
+                    type_namespace_items,
+                    item_extents,
+                    scoped_symbols,
+                    import_bindings,
+                    import_globs,
+                    enclosing,
                 },
+            ) {
+                BareName::Declared(Some(target)) => InFileTarget::Bound(target),
+                BareName::Declared(None) | BareName::Imported => InFileTarget::Pending,
+                BareName::OutOfScope => InFileTarget::OutOfReach,
+                BareName::Unbound => unique_in_file(file_symbols, &edge.ref_name),
             }
         }
         GraphEdgeKind::Extends | GraphEdgeKind::Implements => {
-            unique_symbol(symbols, &edge.ref_name)
+            unique_in_file(symbols, &edge.ref_name)
         }
+    }
+}
+
+/// The in-file entity a name reaches, or pending when the table holds none or
+/// more than one.
+fn unique_in_file(symbols: &HashMap<String, Vec<usize>>, name: &str) -> InFileTarget {
+    match unique_symbol(symbols, name) {
+        Some(index) => InFileTarget::Bound(index),
+        None => InFileTarget::Pending,
     }
 }
 
@@ -825,8 +874,8 @@ mod tests {
     fn outer_modules_do_not_answer_bare_calls_in_inner_modules() {
         // `mod outer { fn save() {} mod inner { fn flush() { save() } } }`: an
         // outer module's items need `super::`, so `inner`'s missing `save` must
-        // not fall through to `outer::save` — the resolver's evidence decides,
-        // not a name the call cannot reach.
+        // not fall through to `outer::save` — nor to a namesake outside the
+        // module, which the call cannot reach either.
         let mut context = WalkContext::new();
         let outer = context.next_entity_index();
         context.register_symbol(Some("outer"), outer);
@@ -855,8 +904,43 @@ mod tests {
             graph.resolved.is_empty(),
             "an outer module's function must not answer a bare call in an inner module"
         );
-        assert_eq!(graph.pending.len(), 1);
-        assert_eq!(graph.pending[0].ref_name, "save");
+        assert!(
+            graph.pending.is_empty(),
+            "no spelling the inner module can reach exists, so the call stays unanswered"
+        );
+    }
+
+    #[test]
+    fn glob_import_keeps_the_file_namesakes_in_view() {
+        // `mod inner { use super::*; fn flush() { save() } }` beside a
+        // top-level `save`: the glob states that the file's names are in view
+        // without spelling them, so the file-level namesake still answers.
+        let mut context = WalkContext::new();
+        let file_save = context.next_entity_index();
+        context.register_symbol(Some("save"), file_save);
+        let inner = context.next_entity_index();
+        context.register_symbol(Some("inner"), inner);
+        context.register_module_scope(inner);
+        context.push_scope(inner);
+        let flush = context.next_entity_index();
+        context.register_symbol(Some("flush"), flush);
+        context.register_scoped_symbol(Some("flush"), flush);
+        context.add_contains_edge(flush, 3, 8);
+        context.register_import_glob(inner);
+        context.pop_scope();
+
+        context.add_call_edge(flush, "save", None, None, Some(0), 3, 20);
+
+        let graph = partition_walk(context, (0..2).collect());
+        assert_eq!(
+            graph
+                .resolved
+                .iter()
+                .map(|edge| (edge.source_index, edge.target_index))
+                .collect::<Vec<_>>(),
+            vec![(flush, file_save)]
+        );
+        assert!(graph.pending.is_empty());
     }
 
     #[test]
