@@ -15,6 +15,20 @@ from runtime import cargo_records
 DEFAULT_ARCHITECTURES = "50-virtual;61-virtual;70-virtual;75-virtual;80-virtual;86-real"
 
 
+def build_output(build):
+    """Locate the build-script stdout Cargo keeps for one invocation.
+
+    Cargo writes it as `output` beside the invocation's OUT_DIR, and keeps it
+    on cache hits. The 1.100 build-dir layout groups the invocation under
+    `build/<package>/<hash>/` and moves the same file to `run/stdout`.
+    """
+    parent = Path(build["out_dir"]).parent
+    for candidate in (parent / "output", parent / "run" / "stdout"):
+        if candidate.is_file():
+            return candidate
+    raise RuntimeError(f"Missing primary build output for {parent}")
+
+
 def source_build(messages):
     records = cargo_records(messages)
     if not records or records[-1].get("reason") != "build-finished" or not records[-1].get("success"):
@@ -24,10 +38,10 @@ def source_build(messages):
               and "llama-cpp-sys-2" in record.get("package_id", "")]
     if len(builds) != 1:
         raise RuntimeError("Expected one active llama sys build script in the primary Cargo messages")
-    # Cargo retains build-script stdout beside this invocation's OUT_DIR, also
-    # on cache hits. The pinned sys crate records its verified source here;
-    # custom metadata is not included in Cargo's JSON build-script record.
-    output = Path(builds[0]["out_dir"]).parent / "output"
+    # Cargo retains build-script stdout for this invocation, also on cache
+    # hits. The pinned sys crate records its verified source here; custom
+    # metadata is not included in Cargo's JSON build-script record.
+    output = build_output(builds[0])
     lines = output.read_text(encoding="utf-8").splitlines()
     metadata = {}
     for key in ("source_dir", "source_revision"):
