@@ -68,6 +68,13 @@ type StorageSearchHit = {
 
 const ENTITY_VECTOR_FIELD = "embedding";
 const ENTITY_TEXT_FIELD = "text";
+// The FTS analyzer is fixed when an index is created, so it belongs to the
+// workspace schema, never to a query. "jieba" segments CJK correctly, but it
+// cuts every other script into single characters: a Cyrillic query then
+// matches any document that shares one letter. "standard" follows Unicode
+// word boundaries and is the native default; "jieba" stays available for
+// CJK corpora through --fts-tokenizer.
+const FTS_DEFAULT_TOKENIZER = "standard";
 const ZVEC_LOCK_FILE = "LOCK";
 const NO_MATCH_FILTER = "file_id = '__zvec_grep_no_match__'";
 const ZVEC_UPSERT_BATCH_SIZE = 1024;
@@ -125,7 +132,10 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
         });
       } else {
         this.collection = openZvecCollection(zvecPath, readOnly, "create", () =>
-          ZVecCreateAndOpen(zvecPath, createSchema(options.embedding)),
+          ZVecCreateAndOpen(
+            zvecPath,
+            createSchema(options.embedding, options.ftsTokenizer),
+          ),
         );
       }
     } catch (error) {
@@ -903,6 +913,7 @@ function sleepSync(ms: number): void {
 
 function createSchema(
   embedding: WorkspaceIndexEmbeddingSchema,
+  tokenizerName: string = FTS_DEFAULT_TOKENIZER,
 ): ZVecCollectionSchema {
   return new ZVecCollectionSchema({
     name: "zvec_grep_entities",
@@ -931,7 +942,7 @@ function createSchema(
         nullable: false,
         indexParams: {
           indexType: ZVecIndexType.FTS,
-          tokenizerName: "jieba",
+          tokenizerName,
           filters: ["lowercase"],
         },
       },
