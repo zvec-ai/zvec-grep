@@ -221,7 +221,7 @@ pub(crate) async fn search_workspace_index(
     let fusion_duration = fusion_started.elapsed();
 
     let load_started = Instant::now();
-    // Every recalled entity must be eligible for structural boosts before cutoff.
+    // Load past the cutoff so any recalled code definition can fill a visible code position.
     let hits = load_candidates(fused, limit, plan.trace, storage)?;
     let load_duration = load_started.elapsed();
     let ranking_started = Instant::now();
@@ -1076,8 +1076,8 @@ mod tests {
     async fn promotes_symbol_definition_before_result_cutoff() {
         let reference_file = file(1, "src/plugin.ts", 100);
         let definition_file = file(2, "src/core.ts", 100);
-        let mut reference = entity(&reference_file, "vitest: Vitest");
-        let mut definition = entity(&definition_file, "class Vitest {}");
+        let mut reference = entity(&reference_file, "vitest: Vitest", Content::Code);
+        let mut definition = entity(&definition_file, "class Vitest {}", Content::Code);
         let definition_id = definition.entity.id().clone();
         for (stored, kind, name) in [
             (&mut reference, crate::domain::SymbolType::Value, "vitest"),
@@ -1143,8 +1143,8 @@ mod tests {
     #[tokio::test]
     async fn fuses_fts_and_vector_routes_with_main_compatible_rrf() {
         let file = file(1, "src/lib.rs", 100);
-        let entity_a = entity(&file, "alpha entity");
-        let entity_b = entity(&file, "beta entity");
+        let entity_a = entity(&file, "alpha entity", Content::Code);
+        let entity_b = entity(&file, "beta entity", Content::Code);
         let a_fts = hit(&entity_a, 0, StorageSearchPath::Fts, 9.0);
         let b_fts = hit(&entity_b, 0, StorageSearchPath::Fts, 8.0);
         let b_vector = hit(&entity_b, 1, StorageSearchPath::Vector, 0.9);
@@ -1210,7 +1210,7 @@ mod tests {
 
     #[test]
     fn keeps_best_recall_evidence_separate_for_each_route() {
-        let owner = entity(&file(1, "src/lib.rs", 100), "source");
+        let owner = entity(&file(1, "src/lib.rs", 100), "source", Content::Code);
         let first = hit(&owner, 0, StorageSearchPath::Fts, 3.0).hit;
         let later = hit(&owner, 1, StorageSearchPath::Fts, 2.0).hit;
         let improved = hit(&owner, 1, StorageSearchPath::Fts, 4.0).hit;
@@ -1258,8 +1258,8 @@ mod tests {
     #[tokio::test]
     async fn loads_reordered_recall_candidates_once_before_rule_ranking() {
         let source = file(1, "src/lib.rs", 100);
-        let selected = entity(&source, "selected source");
-        let discarded = entity(&source, "discarded source");
+        let selected = entity(&source, "selected source", Content::Code);
+        let discarded = entity(&source, "discarded source", Content::Code);
         let discarded_id = discarded.entity.id().clone();
         let mut vector = (0..205)
             .map(|index| hit(&selected, index, StorageSearchPath::Vector, 1.0))
@@ -1346,9 +1346,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fills_missing_fusion_positions_with_loaded_documents() {
+        let file = file(1, "tests/guide.md", 100);
+        let removed = entity(&file, "removed section", Content::Text);
+        let guide = entity(&file, "guide section", Content::Text);
+        let mut storage = pushdown_storage();
+        storage.fts.insert(
+            "guide".into(),
+            vec![
+                hit(&removed, 0, StorageSearchPath::Fts, 2.0),
+                hit(&guide, 0, StorageSearchPath::Fts, 1.0),
+            ],
+        );
+        storage
+            .entities
+            .insert(guide.entity.id().as_str().into(), guide);
+        let mut request = plan(vec![SearchRoute {
+            mode: SearchRouteMode::Fts,
+            query: "guide".into(),
+        }]);
+        request.limit = Some(1);
+        let result = search_workspace_index(Path::new("/workspace"), request, &storage, &[])
+            .await
+            .expect("search");
+        let [hit] = result.hits.as_slice() else {
+            panic!("expected the surviving document");
+        };
+        let trace = hit.trace.as_ref().expect("trace");
+        assert_eq!((hit.rank, trace.fusion.rank), (1, 2));
+        assert_eq!(hit.score.to_bits(), trace.fusion.score.to_bits());
+        assert!(trace.ranking.is_none());
+        assert!(trace.final_selection.returned_by_limit);
+        assert_eq!(trace.final_selection.cutoff_rank, 1);
+    }
+
+    #[tokio::test]
     async fn skips_missing_entities_but_rejects_mismatched_fragment_ownership() {
         let source = file(1, "src/lib.rs", 100);
-        let stored = entity(&source, "source");
+        let stored = entity(&source, "source", Content::Code);
         for missing in [true, false] {
             let mut storage = pushdown_storage();
             let mut recalled = hit(&stored, 0, StorageSearchPath::Fts, 1.0);
@@ -1381,7 +1416,7 @@ mod tests {
     #[test]
     fn skips_missing_fragments_without_discarding_other_evidence() {
         let source = file(1, "src/lib.rs", 100);
-        let stored = entity(&source, "source");
+        let stored = entity(&source, "source", Content::Code);
         let retained = hit(&stored, 0, StorageSearchPath::Fts, 2.0);
         let removed = hit(&stored, 1, StorageSearchPath::Fts, 1.0);
         for keep_fragment in [false, true] {
@@ -1425,7 +1460,7 @@ mod tests {
     #[tokio::test]
     async fn multiple_models_are_rejected_before_query_embedding() {
         let source = file(1, "src/service.rs", 200);
-        let owner = entity(&source, "Service implementation");
+        let owner = entity(&source, "Service implementation", Content::Code);
         let storage = FixtureStorage {
             paths_only: false,
             forbid_enumeration: false,
@@ -1465,8 +1500,8 @@ mod tests {
     async fn pushes_file_and_symbol_filters_into_storage() {
         let source = file(1, "src/service.rs", 200);
         let docs = file(2, "docs/service.md", 200);
-        let source_entity = entity(&source, "Service implementation");
-        let docs_entity = entity(&docs, "Service documentation");
+        let source_entity = entity(&source, "Service implementation", Content::Code);
+        let docs_entity = entity(&docs, "Service documentation", Content::Text);
         let filters = Arc::new(Mutex::new(Vec::new()));
         let storage = FixtureStorage {
             paths_only: false,
@@ -2289,12 +2324,11 @@ mod tests {
         .expect("file")
     }
 
-    fn entity(file: &FileRecord, content: &str) -> StoredEntity {
+    fn entity(file: &FileRecord, text: &str, content_kind: fn(String) -> Content) -> StoredEntity {
         let source_range = Range::Text(
-            TextRange::from_coordinates(0, content.len(), 1, 1, 0, content.len())
-                .expect("source range"),
+            TextRange::from_coordinates(0, text.len(), 1, 1, 0, text.len()).expect("source range"),
         );
-        let content = Content::Text(content.to_owned());
+        let content = content_kind(text.to_owned());
         let id = EntityId::new(file.id(), &content, source_range).expect("entity id");
         let fragment = EntityFragment {
             id: FragmentId::new(&id, 0),

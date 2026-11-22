@@ -43,6 +43,38 @@ pub(super) fn hit(
     rank: usize,
     metadata: Option<CodeMetadata>,
 ) -> SearchHit {
+    fixture_hit(
+        id,
+        file_id,
+        path,
+        score,
+        rank,
+        Content::Code("source".into()),
+        metadata,
+    )
+}
+
+fn document(id: &str, file_id: u32, path: &str, score: f64, rank: usize) -> SearchHit {
+    fixture_hit(
+        id,
+        file_id,
+        path,
+        score,
+        rank,
+        Content::Text("source".into()),
+        None,
+    )
+}
+
+fn fixture_hit(
+    id: &str,
+    file_id: u32,
+    path: &str,
+    score: f64,
+    rank: usize,
+    content: Content,
+    metadata: Option<CodeMetadata>,
+) -> SearchHit {
     let id = EntityId::from_string(id.to_owned());
     let fragment = EntityFragment {
         id: FragmentId::new(&id, 0),
@@ -53,7 +85,7 @@ pub(super) fn hit(
             id,
             FileId::new(file_id),
             Range::Full,
-            Content::Text("source".into()),
+            content,
             metadata.map(EntityMetadata::Code),
             vec![fragment],
         )
@@ -104,6 +136,81 @@ fn run(query: &str, hits: Vec<SearchHit>, filter: &QueryFilter, limit: usize) ->
         1.0,
         limit,
     )
+}
+
+#[test]
+fn documents_keep_fusion_order_and_scores_across_paths_and_repeated_files() {
+    let candidates = vec![
+        document("intro", 1, "tests/guide.md", 0.016, 1),
+        document("details", 1, "tests/guide.md", 0.015, 2),
+        document("notes", 2, "widget.txt", 0.014, 3),
+    ];
+    let out = run("widget", candidates, &QueryFilter::default(), 2);
+    assert_eq!(out.len(), 2);
+    for (hit, (id, rank, score)) in out.iter().zip([("intro", 1, 0.016), ("details", 2, 0.015)]) {
+        assert_eq!(hit.entity.id().as_str(), id);
+        assert_eq!((hit.rank, hit.score), (rank, score));
+        let trace = hit.trace.as_ref().expect("trace");
+        assert_eq!((trace.fusion.rank, trace.fusion.score), (rank, score));
+        assert!(trace.ranking.is_none());
+        assert!(trace.final_selection.returned_by_limit);
+        assert_eq!(trace.final_selection.cutoff_rank, 2);
+    }
+}
+
+#[test]
+fn mixed_results_promote_a_definition_from_below_cutoff_into_a_code_position() {
+    let candidates = vec![
+        document("guide", 1, "tests/guide.md", 1.0, 1),
+        hit("usage", 2, "src/client.rs", 0.95, 2, None),
+        document("notes", 3, "notes.txt", 0.9, 3),
+        hit(
+            "definition",
+            4,
+            "src/lib.rs",
+            0.8,
+            4,
+            Some(code(SymbolType::Function, "loadWidget", None)),
+        ),
+    ];
+    let out = run("loadWidget", candidates.clone(), &QueryFilter::default(), 3);
+    assert_eq!(
+        out.iter()
+            .map(|hit| (hit.entity.id().as_str(), hit.rank))
+            .collect::<Vec<_>>(),
+        [("guide", 1), ("definition", 2), ("notes", 3)]
+    );
+    for index in [0, 2] {
+        assert_eq!(out[index].score, candidates[index].score);
+        assert!(out[index].trace.as_ref().expect("trace").ranking.is_none());
+    }
+    let trace = out[1].trace.as_ref().expect("trace");
+    assert_eq!((trace.fusion.rank, trace.fusion.score), (4, 0.8));
+    assert_eq!(trace.ranking.as_ref().expect("code ranking").rank, 2);
+    assert!(trace.final_selection.returned_by_limit);
+    assert_eq!(trace.final_selection.cutoff_rank, 3);
+
+    let out = run("loadWidget", candidates, &QueryFilter::default(), 1);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].entity.id().as_str(), "guide");
+}
+
+#[test]
+fn documents_do_not_affect_code_dependency_or_diversity_factors() {
+    let candidates = vec![
+        hit("first", 1, "vendor/lib.rs", 1.0, 1, None),
+        document("guide", 2, "docs/guide.md", 0.95, 2),
+        hit("second", 1, "vendor/lib.rs", 0.9, 3, None),
+    ];
+    let out = run("behavior", candidates, &QueryFilter::default(), 5);
+    assert_eq!(out.len(), 3);
+    let trace = out[2].trace.as_ref().expect("trace");
+    let ranking = trace.ranking.as_ref().expect("code ranking");
+    assert_eq!(out[2].entity.id().as_str(), "second");
+    assert_eq!(ranking.path_factor, 1.0);
+    assert_eq!(ranking.diversity_factor, 1.0);
+    assert_eq!(ranking.rank, 3);
+    assert_eq!(trace.final_selection.cutoff_rank, 5);
 }
 
 #[test]
