@@ -18,6 +18,7 @@ import {
   stageComponentPayload,
   stageZvecRuntime,
   verifyTarballSize,
+  workspaceDir,
 } from "./npm-package-core.mjs";
 
 const manifest = loadReleaseManifest();
@@ -520,8 +521,10 @@ messages = pathlib.Path(sys.argv[2])
     assert.equal(result.status, 0, result.stdout + result.stderr);
   };
   for (const [index, source] of [cached, cached, override].entries()) {
-    const result = spawnSync("cargo", ["build", "--locked", "--offline", "--message-format=json"], {
-      cwd: project, env: { ...process.env, CARGO_TARGET_DIR: target, ZG_TEST_SOURCE_DIR: source },
+    // Use the release workspace's pinned Cargo to build the temporary crate.
+    const result = spawnSync("cargo", ["build", "--manifest-path", join(project, "Cargo.toml"),
+      "--locked", "--offline", "--message-format=json"], {
+      cwd: workspaceDir, env: { ...process.env, CARGO_TARGET_DIR: target, ZG_TEST_SOURCE_DIR: source },
       encoding: "utf8", timeout: 120_000,
     });
     assert.ifError(result.error);
