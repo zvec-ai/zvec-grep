@@ -76,7 +76,7 @@ pub(super) fn apply(scored: &mut [Scored], weight: f64) {
     }
 }
 
-fn interval(range: Range) -> Option<(u64, u64)> {
+pub(super) fn interval(range: Range) -> Option<(u64, u64)> {
     match range {
         Range::Byte(range) => Some((range.start_offset(), range.end_offset())),
         Range::Text(range) => Some((
@@ -88,7 +88,7 @@ fn interval(range: Range) -> Option<(u64, u64)> {
     .filter(|(start, end)| start < end)
 }
 
-fn overlaps(a: Range, b: Range) -> bool {
+pub(super) fn overlaps(a: Range, b: Range) -> bool {
     match (interval(a), interval(b)) {
         (Some((a0, a1)), Some((b0, b1))) => a0 < b1 && b0 < a1,
         _ => true,

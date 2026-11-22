@@ -1,4 +1,6 @@
 //! Query-local structural signals; source text references are not name matches.
+use std::collections::HashSet;
+
 use super::Policy;
 use crate::domain::{CodeMetadata, SymbolType};
 
@@ -6,7 +8,9 @@ use crate::domain::{CodeMetadata, SymbolType};
 // These independent features may all apply at once.
 #[allow(clippy::struct_excessive_bools)]
 pub(super) struct QueryFeatures {
-    query_tokens: std::collections::HashSet<String>,
+    query_tokens: HashSet<String>,
+    scope_names: HashSet<String>,
+    file_stems: HashSet<String>,
     pub(super) paths: Vec<String>,
     explicit_names: Vec<String>,
     pub(super) usages: bool,
@@ -46,6 +50,7 @@ impl QueryFeatures {
         );
         explicit_names.sort();
         explicit_names.dedup();
+        let (scope_names, file_stems) = function_anchor_names(query);
         let requested_kind = [
             ("class", SymbolType::Class),
             ("function", SymbolType::Function),
@@ -79,6 +84,8 @@ impl QueryFeatures {
                 .filter(|s| s.contains(['/', '\\', '.']))
                 .map(str::to_owned)
                 .collect(),
+            scope_names,
+            file_stems,
             explicit_names,
             requested_kind,
             usages: ["usage", "usages", "callers", "references"]
@@ -253,14 +260,35 @@ impl QueryFeatures {
         (best.0, best.1, definition)
     }
 
+    pub(super) fn names_function_file_or_scope(&self, path: &str, scope: Option<&str>) -> bool {
+        if scope.is_some_and(|scope| {
+            let leaf = scope.rsplit("::").next().unwrap_or(scope);
+            self.scope_names
+                .contains(leaf.rsplit('.').next().unwrap_or(leaf))
+        }) {
+            return true;
+        }
+        let path = path.replace('\\', "/");
+        self.paths.iter().any(|query| {
+            let literal = query
+                .trim_start_matches(['(', '[', '{'])
+                .trim_end_matches([')', ']', '}', '.', '?', '!', ':', '`', '\'', '"']);
+            path_matches(&path, literal)
+        }) || (!self.file_stems.is_empty()
+            && std::path::Path::new(&path)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| self.file_stems.contains(&normalized_stem(stem))))
+    }
+
     /// Match query terms against the file stem and nearby directories, once per term.
     pub(super) fn path_affinity(&self, path: &str) -> f64 {
         let normalized = path.replace('\\', "/");
-        if self.paths.iter().any(|query| {
-            let query = query.replace('\\', "/");
-            let query = query.strip_prefix("./").unwrap_or(&query);
-            normalized == query || normalized.ends_with(&format!("/{query}"))
-        }) {
+        if self
+            .paths
+            .iter()
+            .any(|query| path_matches(&normalized, query))
+        {
             return 1.0;
         }
         let parts = normalized.split('/').collect::<Vec<_>>();
@@ -300,6 +328,53 @@ impl QueryFeatures {
             .sum::<f64>();
         sum / count_as_f64(query_tokens.len()).max(1.0)
     }
+}
+
+fn function_anchor_names(query: &str) -> (HashSet<String>, HashSet<String>) {
+    // A capitalized first word in a sentence is often just prose.
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut scope_names: HashSet<String> = query
+        .split(|c| !is_word(c))
+        .filter(|word| !word.is_empty())
+        .enumerate()
+        .filter(|(index, word)| {
+            word.contains('_')
+                || word.chars().skip(1).any(char::is_uppercase)
+                || ((*index > 0 || query.trim() == *word) && word.starts_with(char::is_uppercase))
+        })
+        .map(|(_, word)| word.to_owned())
+        .collect();
+    scope_names.extend(
+        query
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|word| !word.is_empty() && word.chars().all(is_word))
+            .map(str::to_owned),
+    );
+    let file_stems = scope_names
+        .iter()
+        .filter(|word| word.chars().count() >= 3)
+        .map(|word| normalized_stem(word))
+        .filter(|stem| !stem.is_empty())
+        .collect();
+    (scope_names, file_stems)
+}
+
+fn normalized_stem(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn path_matches(normalized: &str, query: &str) -> bool {
+    let query = query.replace('\\', "/");
+    let query = query.strip_prefix("./").unwrap_or(&query);
+    normalized == query
+        || normalized
+            .strip_suffix(query)
+            .is_some_and(|prefix| prefix.ends_with('/'))
 }
 
 fn count_as_f64(count: usize) -> f64 {

@@ -22,6 +22,11 @@ struct Candidate {
     rank: usize,
 }
 
+const BEFORE_FUNCTION_ANCHORS: Policy = Policy {
+    anchored_functions: false,
+    ..Policy::CURRENT
+};
+
 #[test]
 #[ignore = "requires local fixed candidate snapshots"]
 fn replay_rule_ablation() {
@@ -61,6 +66,7 @@ fn replay_rule_ablation() {
             },
         ),
         ("all", Policy::CURRENT),
+        ("no_function_anchors", BEFORE_FUNCTION_ANCHORS),
         (
             "no_weak",
             Policy {
@@ -86,6 +92,7 @@ fn replay_rule_ablation() {
             "path_weak_intent",
             Policy {
                 support_weight: 0.0,
+                anchored_functions: false,
                 ..Policy::CURRENT
             },
         ),

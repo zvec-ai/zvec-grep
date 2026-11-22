@@ -472,6 +472,143 @@ fn path_affinity_respects_components_and_portable_separators() {
 }
 
 #[test]
+fn function_anchors_match_complete_paths_stems_and_scope_components() {
+    let query = QueryFeatures::new("How does sentPacketHistory use Router.Dial?");
+    assert!(query.names_function_file_or_scope(r"src\sent_packet_history.go", None));
+    assert!(query.names_function_file_or_scope("http.go", Some("pkg::client.Router")));
+    assert!(!query.names_function_file_or_scope("sent_packet_history_test.go", Some("MyRouter")));
+    assert!(!query.names_function_file_or_scope("src/how.go", Some("router")));
+    assert!(
+        !QueryFeatures::new("how does packet history work")
+            .names_function_file_or_scope("src/history.go", Some("packet"))
+    );
+    assert!(QueryFeatures::new("Semaphore").names_function_file_or_scope("semaphore.rs", None));
+    let path = QueryFeatures::new(r"Read the functions in src\dispatch.ts?");
+    assert!(path.names_function_file_or_scope("project/src/dispatch.ts", None));
+    assert!(!path.names_function_file_or_scope("project/other/dispatch.ts", None));
+    assert!(
+        QueryFeatures::new("methods of `worker`")
+            .names_function_file_or_scope("src/worker.c", None)
+    );
+}
+
+fn with_range(mut hit: SearchHit, start: u64, end: u64) -> SearchHit {
+    hit.entity = Entity::new(
+        hit.entity.id().clone(),
+        hit.entity.file_id(),
+        Range::Byte(crate::domain::ByteRange::new(start, end).expect("byte range")),
+        hit.entity.content().clone(),
+        hit.entity.metadata().cloned(),
+        hit.entity.fragments().to_vec(),
+    )
+    .expect("entity with range");
+    hit
+}
+
+#[test]
+fn only_independent_anchored_functions_keep_their_scores() {
+    let scoped = |kind, name| Some(code(kind, name, Some("net::Router")));
+    let function = SymbolType::Function;
+    let path = "src/dispatch.rs";
+    let candidates = vec![
+        with_range(
+            hit("lead", 1, path, 1.0, 1, scoped(function, "first")),
+            0,
+            10,
+        ),
+        with_range(
+            hit("sibling", 1, path, 0.9, 2, scoped(function, "next")),
+            10,
+            20,
+        ),
+        with_range(
+            hit("overlap", 1, path, 0.85, 3, scoped(function, "nested")),
+            12,
+            18,
+        ),
+        with_range(
+            hit("duplicate", 1, path, 0.84, 4, scoped(function, "first")),
+            25,
+            30,
+        ),
+        with_range(
+            hit(
+                "field",
+                1,
+                path,
+                0.83,
+                5,
+                scoped(SymbolType::Value, "field"),
+            ),
+            31,
+            32,
+        ),
+        hit(
+            "unknown-range",
+            1,
+            path,
+            0.82,
+            6,
+            scoped(function, "unknown"),
+        ),
+        with_range(hit("other-file", 2, "lib.rs", 0.8, 7, None), 0, 7),
+    ];
+    let out = run("methods of Router", candidates, &QueryFilter::default(), 7);
+    let ids: Vec<_> = out.iter().map(|hit| hit.entity.id().as_str()).collect();
+    assert_eq!(&ids[..3], ["lead", "sibling", "other-file"]);
+    let trace = |index: usize| {
+        out[index]
+            .trace
+            .as_ref()
+            .expect("search trace")
+            .ranking
+            .as_ref()
+            .expect("ranking trace")
+    };
+    assert_eq!(
+        (trace(1).file_count_at_selection, trace(1).diversity_factor),
+        (1, 1.0)
+    );
+    for (index, _) in out.iter().enumerate().skip(3) {
+        let r = trace(index);
+        assert!(r.file_count_at_selection >= 2);
+        assert_eq!(
+            r.diversity_factor,
+            1.0 / (1.0 + 0.5 * f64::from(r.file_count_at_selection))
+        );
+    }
+}
+
+#[test]
+fn unknown_selected_range_prevents_later_waivers() {
+    let named = Some(code(SymbolType::Function, "send", None));
+    let out = run(
+        "inspect `dispatch.rs`",
+        vec![
+            hit("whole", 1, "dispatch.rs", 1.0, 1, None),
+            with_range(hit("function", 1, "dispatch.rs", 0.8, 2, named), 2, 6),
+            hit("other", 2, "another.rs", 0.1, 3, None),
+        ],
+        &QueryFilter::default(),
+        3,
+    );
+    let r = out
+        .iter()
+        .find(|h| h.entity.id().as_str() == "function")
+        .expect("returned function")
+        .trace
+        .as_ref()
+        .expect("search trace")
+        .ranking
+        .as_ref()
+        .expect("ranking trace");
+    assert_eq!(
+        (r.file_count_at_selection, r.diversity_factor),
+        (1, 1.0 / 1.5)
+    );
+}
+
+#[test]
 fn file_support_requires_independent_definitions_and_is_bounded() {
     let mut candidates = vec![
         hit(
