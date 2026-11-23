@@ -3,9 +3,12 @@ mod paths;
 mod query;
 mod support;
 
-use std::collections::HashMap;
+use std::{cmp::Ordering, collections::HashMap};
 
-use super::pipeline::{ResolvedSearchRoute, SearchHit};
+use super::{
+    pipeline::{ResolvedSearchRoute, SearchHit},
+    stage_trace::StageTraceCollector,
+};
 use crate::{
     api::context::{options::QueryFilter, result::SearchRankingTrace},
     domain::{ContentKind, EntityMetadata, FileId},
@@ -68,8 +71,17 @@ pub(super) fn rank(
     filter: &QueryFilter,
     maximum_rrf: f64,
     limit: usize,
+    observation: Option<&mut StageTraceCollector>,
 ) -> Vec<SearchHit> {
-    rank_with_policy(hits, routes, filter, maximum_rrf, limit, Policy::CURRENT)
+    rank_with_policy(
+        hits,
+        routes,
+        filter,
+        maximum_rrf,
+        limit,
+        Policy::CURRENT,
+        observation,
+    )
 }
 
 fn rank_with_policy(
@@ -79,21 +91,37 @@ fn rank_with_policy(
     maximum_rrf: f64,
     limit: usize,
     policy: Policy,
+    observation: Option<&mut StageTraceCollector>,
 ) -> Vec<SearchHit> {
     let result_count = limit.min(hits.len());
     let is_code = |hit: &SearchHit| hit.entity.content().kind() == ContentKind::Code;
+    // Stage diagnostics also report static ranks below the result cutoff.
+    let slot_count = if observation.is_some() {
+        hits.len()
+    } else {
+        result_count
+    };
     let code_ranks: Vec<_> = hits
         .iter()
-        .take(result_count)
+        .take(slot_count)
         .enumerate()
         .filter_map(|(index, hit)| is_code(hit).then_some(index + 1))
         .collect();
 
     // Only the visible positions are fixed. Any recalled code hit can fill them.
     let mut ranked_code = Vec::new();
-    if !code_ranks.is_empty() {
+    let visible = code_ranks.partition_point(|rank| *rank <= result_count);
+    if visible > 0 {
         let code = hits.extract_if(.., |hit| is_code(hit)).collect();
-        ranked_code = rank_code(code, routes, filter, maximum_rrf, &code_ranks, policy);
+        let (query, scored) = score_code(code, routes, filter, maximum_rrf, policy);
+        if let Some(observation) = observation {
+            let mut order = scored.iter().collect::<Vec<_>>();
+            order.sort_by(|a, b| compare(a, b, a.static_score, b.static_score));
+            for (item, &rank) in order.into_iter().zip(&code_ranks) {
+                observation.static_rank(&item.hit, rank);
+            }
+        }
+        ranked_code = select(scored, &query, &code_ranks[..visible], policy);
     }
     let mut ranked_code = ranked_code.into_iter().peekable();
     let mut documents = hits.into_iter();
@@ -113,14 +141,13 @@ fn rank_with_policy(
         .collect()
 }
 
-fn rank_code(
+fn score_code(
     hits: Vec<SearchHit>,
     routes: &[ResolvedSearchRoute],
     filter: &QueryFilter,
     maximum_rrf: f64,
-    code_ranks: &[usize],
     policy: Policy,
-) -> Vec<SearchHit> {
+) -> (QueryFeatures, Vec<Scored>) {
     let mut queries = routes.iter().map(|r| r.query.as_str()).collect::<Vec<_>>();
     queries.sort_unstable();
     queries.dedup();
@@ -168,7 +195,14 @@ fn rank_code(
     if policy.support_weight > 0.0 {
         support::apply(&mut scored, policy.support_weight);
     }
-    select(scored, &query, code_ranks, policy)
+    (query, scored)
+}
+
+fn compare(a: &Scored, b: &Scored, a_score: f64, b_score: f64) -> Ordering {
+    b_score
+        .total_cmp(&a_score)
+        .then_with(|| a.hit.rank.cmp(&b.hit.rank))
+        .then_with(|| a.hit.entity.id().as_str().cmp(b.hit.entity.id().as_str()))
 }
 
 fn select(
@@ -197,12 +231,7 @@ fn select(
         let best = scored
             .iter()
             .enumerate()
-            .min_by(|(_, a), (_, b)| {
-                effective(b)
-                    .total_cmp(&effective(a))
-                    .then_with(|| a.hit.rank.cmp(&b.hit.rank))
-                    .then_with(|| a.hit.entity.id().as_str().cmp(b.hit.entity.id().as_str()))
-            })
+            .min_by(|(_, a), (_, b)| compare(a, b, effective(a), effective(b)))
             .map_or(0, |(index, _)| index);
         let mut item = scored.swap_remove(best);
         let count = selected_per_file.entry(item.hit.file.id()).or_default();
