@@ -118,8 +118,8 @@ The option is rejected outside `--index`. For automatic indexing and
 refreshes as well, set `ZVEC_GREP_EMBEDDING_CONCURRENCY=<n>`. Transformers/ORT clamps
 positive integers to its supported range. Explicit zero is rejected for every
 backend. Explicit CLI/API index settings take precedence over this environment
-variable, followed by the legacy
-`ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` for llama.cpp indexing, then backend defaults.
+variable, followed by `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` as the llama.cpp
+indexing fallback, then backend defaults.
 Invalid environment values warn and select the automatic default. These overrides
 do not configure a separate query worker and are not persisted in workspace settings.
 Direct and Server indexing use the same engine boundary; restart the Server after
@@ -133,15 +133,19 @@ For llama.cpp, C is the concurrent context limit on CPU, Metal and CUDA:
   batch can use up to C contexts internally. Separate operations have independent
   batch admission and can execute concurrently through the shared context pool;
   this does not serialize all Server requests.
-- Server startup captures `ZVEC_GREP_LLAMA_SERVER_CONTEXTS` (default 1) as a
+- Server startup captures `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` (default 1) as a
   hard limit on executing llama.cpp contexts across all models and devices in
-  that Server. Requests retain the CLI/API > index environment > legacy > default
-  precedence above, then are capped to the Server limit. The effective value is
-  reported through progress/logging. Each operation's batches share its own C
+  that Server. The general index environment and client C cannot enlarge this
+  capacity. Index requests retain the CLI/API > index environment > llama.cpp
+  environment > default precedence above, then are capped to the Server limit.
+  The effective value is reported through progress/logging. Each operation's
+  batches share its own C
   allowance; different C values reuse the same model/device runtime. Omitted
-  request C defaults to 1 unless the index environment supplies another default.
-- `ZVEC_GREP_LLAMA_THREADS` sets **CPU threads per context**, for indexing and
-  queries. The default is `max(1, floor(available_logical_cpus / 2 / pool_capacity))`.
+  index C uses the general index default when set, otherwise the configured
+  llama.cpp capacity. Query concurrency keeps its own default.
+- `ZVEC_GREP_LLAMA_THREADS_PER_CONTEXT` sets **CPU threads per context** in both
+  Direct and Server mode, for indexing and queries. The default is
+  `max(1, floor(available_logical_cpus / 2 / pool_capacity))`.
   In Server mode, capacity is the startup limit, not an individual request's C;
   requests never change thread configuration. GPU contexts always use one native
   CPU helper thread, including when this CPU override is set. Invalid environment

@@ -6,8 +6,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::models::ModelError;
 
-pub(crate) const THREADS_ENV: &str = "ZVEC_GREP_LLAMA_THREADS";
-pub(crate) const SERVER_CONTEXTS_ENV: &str = "ZVEC_GREP_LLAMA_SERVER_CONTEXTS";
+pub(crate) const THREADS_PER_CONTEXT_ENV: &str = "ZVEC_GREP_LLAMA_THREADS_PER_CONTEXT";
+pub(crate) const CONTEXT_PARALLELISM_ENV: &str = "ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM";
 
 #[derive(Clone, Copy)]
 pub(crate) struct LlamaSettings {
@@ -24,8 +24,8 @@ fn positive(value: &str) -> Option<usize> {
     value.parse::<usize>().ok().filter(|value| *value > 0)
 }
 
-fn configured(name: &str) -> Option<usize> {
-    match std::env::var(name) {
+fn configured(name: &str, value: Result<String, std::env::VarError>) -> Option<usize> {
+    match value {
         Ok(value) => positive(&value).or_else(|| {
             tracing::warn!(
                 environment = name,
@@ -46,19 +46,37 @@ fn configured(name: &str) -> Option<usize> {
 
 impl LlamaSettings {
     pub(crate) fn capture() -> Self {
-        let threads = configured(THREADS_ENV).and_then(|value| {
+        Self::from_environment(
+            |name| std::env::var(name),
+            std::thread::available_parallelism().map_or(1, usize::from),
+        )
+    }
+
+    fn from_environment(
+        mut environment: impl FnMut(&str) -> Result<String, std::env::VarError>,
+        hardware_threads: usize,
+    ) -> Self {
+        let threads = configured(
+            THREADS_PER_CONTEXT_ENV,
+            environment(THREADS_PER_CONTEXT_ENV),
+        )
+        .and_then(|value| {
             i32::try_from(value).ok().or_else(|| {
                 tracing::warn!(
-                    environment = THREADS_ENV,
+                    environment = THREADS_PER_CONTEXT_ENV,
                     "Thread count exceeds native limit; using default"
                 );
                 None
             })
         });
         Self {
-            server_contexts: configured(SERVER_CONTEXTS_ENV).unwrap_or(1),
+            server_contexts: configured(
+                CONTEXT_PARALLELISM_ENV,
+                environment(CONTEXT_PARALLELISM_ENV),
+            )
+            .unwrap_or(1),
             threads,
-            hardware_threads: std::thread::available_parallelism().map_or(1, usize::from),
+            hardware_threads,
         }
     }
 

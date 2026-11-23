@@ -91,7 +91,7 @@ metadata and must use separate output directories.
 
 `--server-concurrency C` selects resident runtime behavior and fixes the pool
 capacity with `ZVEC_GREP_EMBEDDING_CONCURRENCY` for ORT and
-`ZVEC_GREP_LLAMA_SERVER_CONTEXTS` for llama.cpp. Omit it for direct mode, where
+`ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` for llama.cpp. Omit it for direct mode, where
 each measured C controls session/context count. `--ort-thread-budget T`
 sets `ZVEC_GREP_ORT_THREAD_BUDGET`; omission uses the production automatic default.
 Ambient C/T overrides are cleared. Use separate output directories for different
@@ -313,8 +313,9 @@ an end-to-end indexing/storage/retrieval benchmark.
 
 For llama.cpp, C always controls context concurrency. `--server-concurrency N`
 sets the fixed Server context capacity; requests are capped to N and share the
-same pool. Direct mode sizes the pool from C. `ZVEC_GREP_LLAMA_THREADS` can fix
-CPU threads per context; otherwise the default is half the available logical
+same pool. Direct mode sizes the pool from C. In both modes,
+`ZVEC_GREP_LLAMA_THREADS_PER_CONTEXT` can fix CPU threads per context;
+otherwise the default is half the available logical
 CPUs divided by pool capacity, floored and at least one. CUDA/Metal use one CPU
 helper thread per context. The runner records both llama.cpp environment settings
 and rejects resume with changed settings. Results from the earlier CPU-thread-

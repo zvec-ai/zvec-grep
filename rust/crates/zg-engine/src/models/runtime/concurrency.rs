@@ -2,10 +2,10 @@
 
 use std::env;
 
+use super::llama_config::CONTEXT_PARALLELISM_ENV;
 use crate::models::{EmbeddingCatalogEntry, ModelError, get_embedding_model_catalog_entry};
 
 pub(crate) const EMBEDDING_CONCURRENCY_ENV: &str = "ZVEC_GREP_EMBEDDING_CONCURRENCY";
-const LEGACY_LLAMA_ENV: &str = "ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM";
 pub(crate) const LOCAL_CONCURRENCY_CAP: usize = 8;
 
 pub(crate) fn is_llama(reference: &str) -> bool {
@@ -61,7 +61,7 @@ fn resolve_override(
     let mut name = EMBEDDING_CONCURRENCY_ENV;
     let mut value = environment(name).unwrap_or_default();
     if value.trim().is_empty() && is_llama(reference) {
-        name = LEGACY_LLAMA_ENV;
+        name = CONTEXT_PARALLELISM_ENV;
         value = environment(name).unwrap_or_default();
     }
     let value = value.trim();

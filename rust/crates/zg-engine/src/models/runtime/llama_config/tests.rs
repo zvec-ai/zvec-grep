@@ -19,6 +19,54 @@ fn defaults_divide_half_the_available_cpus_by_capacity() {
 }
 
 #[test]
+fn environment_reuses_context_parallelism_and_fixes_threads_in_both_modes() {
+    let settings = LlamaSettings::from_environment(
+        |name| match name {
+            "ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM" => Ok("4".to_owned()),
+            "ZVEC_GREP_LLAMA_THREADS_PER_CONTEXT" => Ok("3".to_owned()),
+            // The index request default must not enlarge Server capacity.
+            "ZVEC_GREP_EMBEDDING_CONCURRENCY" => Ok("8".to_owned()),
+            _ => Err(std::env::VarError::NotPresent),
+        },
+        16,
+    );
+    let server = settings.resources(settings.server_contexts);
+    assert_eq!(server.contexts, 4);
+    assert_eq!(server.cpu_threads, 3);
+    for requested in [1, 2, 8] {
+        let direct = settings.resources(requested);
+        assert_eq!(direct.contexts, requested);
+        assert_eq!(direct.cpu_threads, 3);
+    }
+}
+
+#[test]
+fn absent_or_invalid_environment_keeps_automatic_threads_and_one_server_context() {
+    for value in [None, Some("0"), Some("-1"), Some("invalid")] {
+        let settings = LlamaSettings::from_environment(
+            |_| {
+                value
+                    .map(str::to_owned)
+                    .ok_or(std::env::VarError::NotPresent)
+            },
+            16,
+        );
+        assert_eq!(settings.server_contexts, 1);
+        assert_eq!(settings.threads, None);
+        assert_eq!(settings.resources(4).cpu_threads, 2);
+    }
+    let settings = LlamaSettings::from_environment(
+        |name| match name {
+            "ZVEC_GREP_LLAMA_THREADS_PER_CONTEXT" => Ok("2147483648".to_owned()),
+            _ => Err(std::env::VarError::NotPresent),
+        },
+        16,
+    );
+    assert_eq!(settings.threads, None);
+    assert_eq!(settings.resources(1).cpu_threads, 8);
+}
+
+#[test]
 fn overrides_require_positive_integers() {
     assert_eq!(positive(" 4 "), Some(4));
     for value in [

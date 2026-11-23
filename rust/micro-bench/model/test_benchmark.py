@@ -313,7 +313,7 @@ class WorkflowTests(unittest.TestCase):
                 for command in (base,changed_length+["--smoke"],base+["--smoke","--ort-thread-budget","2"]):
                     with patch.object(sys,"argv",command),self.assertRaisesRegex(RuntimeError,"configuration changed"):
                         suite.main()
-                for name in ("ZVEC_GREP_LLAMA_THREADS", "ZVEC_GREP_LLAMA_SERVER_CONTEXTS"):
+                for name in ("ZVEC_GREP_LLAMA_THREADS_PER_CONTEXT", "ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM"):
                     changed = "2" if os.environ.get(name) != "2" else "1"
                     with patch.dict(os.environ,{name:changed}),patch.object(sys,"argv",base+["--smoke"]),self.assertRaisesRegex(RuntimeError,"configuration changed"):
                         suite.main()

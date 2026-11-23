@@ -565,9 +565,10 @@ Index embedding concurrency:
   is accepted only with --index and is never saved in workspace settings.
   llama.cpp: C is concurrent contexts on CPU/Metal/CUDA, default 1.
     Direct pools use the operation's C. Server execution across all llama.cpp
-    models/devices is capped by ZVEC_GREP_LLAMA_SERVER_CONTEXTS (default 1).
+    models/devices is capped by ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM (default 1).
     Client C limits its own operation and cannot enlarge Server capacity.
-    ZVEC_GREP_LLAMA_THREADS fixes CPU threads per context. Default:
+    ZVEC_GREP_LLAMA_THREADS_PER_CONTEXT fixes CPU threads per context in both
+    Direct and Server mode. Default:
     max(1, floor(available logical CPUs / 2 / pool capacity)). GPU contexts
     use one CPU helper thread. Server capacity and thread settings require
     restart; client C changes neither. Batch packing is managed internally.
@@ -960,7 +961,7 @@ Embedding concurrency:
     CPU/CUDA default to 1. Client index overrides only limit pool execution;
     they cannot expand Server capacity. Queries share the same model pool.
     Other backends retain their index-only defaults and override precedence.
-  CLI/API index setting, this variable, legacy llama.cpp index setting, then defaults.
+  CLI/API index setting, this variable, llama.cpp context setting, then defaults.
   Invalid values warn and use defaults. Restart the Server after environment changes.
   These settings are not persisted in workspace configuration.
 
@@ -973,9 +974,10 @@ State:
 
 Advanced:
   ZVEC_GREP_METAL_KEEP_RESIDENCY       Set to 1 to keep llama.cpp Metal residency enabled (advanced)
-  ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM  Legacy index-only llama.cpp fallback after the index concurrency variable
-  ZVEC_GREP_LLAMA_THREADS            CPU compute threads per llama.cpp context
-  ZVEC_GREP_LLAMA_SERVER_CONTEXTS    Server-wide executing llama.cpp context limit (default 1)
+  ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM  llama.cpp context capacity (default 1)
+    Direct index fallback after ZVEC_GREP_EMBEDDING_CONCURRENCY;
+    fixed Server execution limit across llama.cpp models/devices.
+  ZVEC_GREP_LLAMA_THREADS_PER_CONTEXT  CPU threads per context in Direct and Server mode
   NO_COLOR                             Disable automatic terminal colors; --color overrides it
 
 Agent integration paths:
