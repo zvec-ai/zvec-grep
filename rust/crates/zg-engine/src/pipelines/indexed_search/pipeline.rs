@@ -1318,12 +1318,10 @@ mod tests {
             .expect("search trace")
             .graph
             .expect("graph trace");
-        assert!(
-            trace
-                .rejected
-                .iter()
-                .any(|entry| entry.entity.entity_id == fixture.id(1))
-        );
+        let filtered: usize = trace.layers.iter().map(|layer| layer.filtered).sum();
+        assert!(filtered >= 2);
+        assert_eq!(trace.rejected.len(), 1);
+        assert_eq!(trace.rejected[0].entity.entity_id, fixture.id(1));
         assert!(
             !trace
                 .added

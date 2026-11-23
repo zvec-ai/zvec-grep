@@ -63,10 +63,7 @@ pub(super) fn expand(
     trace: bool,
 ) -> EngineResult<Expansion> {
     let started = Instant::now();
-    let mut result = Expansion {
-        relevance: Some(Relevance::default()),
-        ..Expansion::default()
-    };
+    let mut result = Expansion::default();
     check_cancelled(graph.signal)?;
     let outcome = graph.storage.read_snapshot(|view| {
         view.ensure_graph()?;
@@ -85,7 +82,6 @@ pub(super) fn expand(
             return Err(error);
         }
         result.trace.error = Some(error.to_string());
-        result.relevance = None;
     }
     result.trace.duration_micros = micros(started);
     Ok(result)
@@ -140,9 +136,6 @@ fn hydrate(
     filter: Option<&StorageSearchFilter>,
     endpoints: &mut HashMap<EntityId, Endpoint>,
 ) -> EngineResult<()> {
-    if ids.is_empty() {
-        return Ok(());
-    }
     let files = view.visible_endpoint_files(&ids)?;
     let entities = view.fetch_entities(&ids)?;
     for id in ids {
