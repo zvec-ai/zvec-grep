@@ -60,7 +60,9 @@ indexing concurrency overrides so `default` uses the backend default:
 
 - llama.cpp uses C concurrent contexts on CPU, Metal and CUDA. Calls from one
   operation share its C allowance; Server requests are capped by the fixed startup
-  context capacity. CPU threads per context are configured independently.
+  context capacity. Each operation admits one batch at a time, independent of C;
+  production indexing therefore uses one caller. CPU threads per context are
+  configured independently.
 - Transformers/ONNX uses C sessions in direct mode. Resident mode fixes pool
   capacity at server startup and caps request C to that capacity. All Sessions
   share the process-global intra-op pool configured by T. The runtime selects Q.
@@ -96,6 +98,13 @@ Ambient C/T overrides are cleared. Use separate output directories for different
 server capacities and T values. `--clients K` fixes caller count independently of
 production admission; omit it for the production workload. These controls are
 fingerprinted and validated against observed results.
+
+The fixed-shape case sends all clients through one operation lease. For llama.cpp,
+`--clients K` therefore measures K callers waiting for that operation's single
+batch admission slot; each admitted batch can still use C contexts. It does not
+simulate K independent Server requests, which acquire separate operation leases.
+Compare versions with identical clients and thread settings before attributing
+latency changes to native execution.
 
 Reports record session count, global intra-op configuration, effective execution
 concurrency, admission and native batch shape. They never multiply shared thread

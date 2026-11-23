@@ -91,6 +91,10 @@ impl EmbeddingModel for RetainedWorkModel {
         &self.info
     }
 
+    fn admission_concurrency(&self, _execution: usize) -> usize {
+        1
+    }
+
     async fn embed(
         &self,
         _inputs: &[Vec<Content>],
@@ -146,7 +150,12 @@ async fn native_work_retains_admission_and_runtime_after_caller_is_dropped() {
 
 #[tokio::test]
 async fn native_work_retains_admission_after_cancellation_or_failure_until_settled() {
-    for fail in [false, true] {
+    for (reference, requested, fail) in [
+        ("local/all-minilm-l6-v2", 1, false),
+        ("local/all-minilm-l6-v2", 1, true),
+        ("local/embeddinggemma-300m", 8, false),
+        ("local/embeddinggemma-300m", 8, true),
+    ] {
         let fixture = Arc::new(RetainedWorkModel {
             info: ConcurrentFixtureModel::new().info,
             work: StdMutex::default(),
@@ -158,11 +167,13 @@ async fn native_work_retains_admission_after_cancellation_or_failure_until_settl
         });
         let lease = manager
             .acquire(ModelRuntimeRequest::new(
-                "local/all-minilm-l6-v2",
+                reference,
                 ModelConfig::default(),
-                Some(1),
+                Some(requested),
             ))
             .expect("runtime");
+        assert_eq!(lease.execution_concurrency(), requested);
+        assert_eq!(lease.admission_concurrency(), 1);
         let permits = Arc::clone(&lease.operation.permits);
         let inputs = [vec![Content::Text("fixture".into())]];
         let signal = CancellationToken::new();
@@ -1395,9 +1406,9 @@ fn transformer_direct_pool_size_follows_requested_concurrency() {
 }
 
 #[test]
-fn llama_direct_context_capacity_follows_c_on_cpu_and_cuda() {
+fn llama_direct_context_capacity_follows_c_with_one_batch_on_every_device() {
     let manager = ModelRuntimeManager::new();
-    for device in [Device::Cpu, Device::Cuda] {
+    for device in [Device::Cpu, Device::Metal, Device::Cuda] {
         for requested in [1, 2, 4, 8, 24] {
             let lease = manager
                 .acquire(ModelRuntimeRequest::new(
@@ -1411,10 +1422,8 @@ fn llama_direct_context_capacity_follows_c_on_cpu_and_cuda() {
                 .expect("metadata only");
             assert_eq!(lease.execution_concurrency(), requested);
             assert_eq!(lease.concurrency_defaults().maximum, requested);
-            assert_eq!(
-                lease.index_batch_concurrency(Some(requested)),
-                Some(requested)
-            );
+            assert_eq!(lease.admission_concurrency(), 1);
+            assert_eq!(lease.index_batch_concurrency(Some(requested)), Some(1));
         }
     }
 }
@@ -1439,7 +1448,7 @@ fn llama_server_caps_requests_reuses_runtimes_and_shares_capacity_across_models(
     };
     manager.enable_server_mode().expect("server startup");
     let mut retained = Vec::new();
-    for device in [Device::Cpu, Device::Cuda] {
+    for device in [Device::Cpu, Device::Metal, Device::Cuda] {
         for reference in ["local/embeddinggemma-300m", "local/qwen3-embedding-0.6b"] {
             let request = |c| {
                 ModelRuntimeRequest::new(
@@ -1456,21 +1465,82 @@ fn llama_server_caps_requests_reuses_runtimes_and_shares_capacity_across_models(
                 let next = manager.acquire(request(Some(requested))).expect("request");
                 assert!(Arc::ptr_eq(&first.entry, &next.entry));
                 assert_eq!(next.execution_concurrency(), requested.min(4));
-                assert_eq!(
-                    next.index_batch_concurrency(Some(requested)),
-                    Some(requested.min(4))
-                );
+                assert_eq!(next.admission_concurrency(), 1);
+                assert_eq!(next.index_batch_concurrency(Some(requested)), Some(1));
                 assert_eq!(next.concurrency_defaults().maximum, 4);
             }
             retained.push(first);
         }
     }
     let resources = recorded.lock().expect("recorded resources");
-    assert_eq!(resources.len(), 4);
+    assert_eq!(resources.len(), 6);
     for other in resources.iter() {
         assert!(Arc::ptr_eq(&resources[0], other));
         assert_eq!(other.contexts, 4);
         assert_eq!(other.cpu_threads, 2);
+    }
+}
+
+#[tokio::test]
+async fn llama_single_batch_admission_is_per_operation_and_recovers_after_cancellation() {
+    for server in [false, true] {
+        let mut manager = ModelRuntimeManager::new();
+        if server {
+            Arc::get_mut(&mut manager.inner)
+                .expect("unshared manager")
+                .llama_settings
+                .server_contexts = 4;
+            manager.enable_server_mode().expect("server startup");
+        }
+        let request = || {
+            ModelRuntimeRequest::new(
+                "local/embeddinggemma-300m",
+                ModelConfig {
+                    device: Some(Device::Cpu),
+                    ..Default::default()
+                },
+                Some(8),
+            )
+        };
+        let first = manager.acquire(request()).expect("first operation");
+        let second = manager.acquire(request()).expect("second operation");
+        assert!(Arc::ptr_eq(&first.entry, &second.entry));
+        assert!(!Arc::ptr_eq(
+            &first.operation.permits,
+            &second.operation.permits
+        ));
+        assert_eq!(first.execution_concurrency(), if server { 4 } else { 8 });
+        assert_eq!(first.admission_concurrency(), 1);
+        let first_batch = first
+            .acquire_operation_permit(None)
+            .await
+            .expect("first batch");
+        let signal = CancellationToken::new();
+        let mut queued = Box::pin(first.acquire_operation_permit(Some(&signal)));
+        assert!(futures_util::poll!(&mut queued).is_pending());
+
+        let mut independent = Box::pin(second.acquire_operation_permit(None));
+        let std::task::Poll::Ready(Ok(second_batch)) = futures_util::poll!(&mut independent) else {
+            panic!("another operation must not wait for the first operation's batch");
+        };
+        assert_eq!(first.operation.permits.available_permits(), 0);
+        assert_eq!(second.operation.permits.available_permits(), 0);
+        signal.cancel();
+        assert_eq!(
+            queued.await.expect_err("cancel queued batch").code(),
+            crate::EngineError::CANCELLED
+        );
+        assert_eq!(first.operation.permits.available_permits(), 0);
+        drop(first_batch);
+        let recovered = first
+            .acquire_operation_permit(None)
+            .await
+            .expect("admission recovers after cancellation");
+        assert_eq!(first.operation.permits.available_permits(), 0);
+        drop(recovered);
+        drop(second_batch);
+        assert_eq!(first.operation.permits.available_permits(), 1);
+        assert_eq!(second.operation.permits.available_permits(), 1);
     }
 }
 

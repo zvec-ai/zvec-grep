@@ -95,7 +95,9 @@ fn transformer_limits_are_resolved_by_the_backend_and_other_policies_are_preserv
         Some(usize::MAX)
     );
     assert_eq!(local_runtime_limit(transformers, None), None);
-    assert_eq!(batch_concurrency(llama, Some(24)), Some(24));
+    for requested in [None, Some(1), Some(2), Some(4), Some(8), Some(24)] {
+        assert_eq!(batch_concurrency(llama, requested), Some(1));
+    }
     assert_eq!(batch_concurrency(transformers, Some(24)), Some(24));
     assert_eq!(batch_concurrency(transformers, Some(0)), Some(1));
     let bekko = "local/bekko-256-int8";

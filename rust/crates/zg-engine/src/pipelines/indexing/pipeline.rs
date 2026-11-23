@@ -3055,6 +3055,22 @@ mod tests {
         assert_eq!(automatic.maximum, 2);
     }
 
+    #[test]
+    fn llama_index_batch_policy_keeps_one_batch_with_multiple_contexts() {
+        let manager = crate::models::ModelRuntimeManager::new();
+        let lease = manager
+            .acquire(crate::models::ModelRuntimeRequest::new(
+                "local/embeddinggemma-300m",
+                crate::domain::model::ModelConfig::default(),
+                Some(8),
+            ))
+            .expect("metadata only");
+        let policy = resolve_index_batch_policy(Some(8), &lease).expect("batch policy");
+        assert_eq!(policy.initial, 1);
+        assert_eq!(policy.maximum, 1);
+        assert_eq!(lease.execution_concurrency(), 8);
+    }
+
     impl DrainingFailureModel {
         fn new() -> Self {
             Self {

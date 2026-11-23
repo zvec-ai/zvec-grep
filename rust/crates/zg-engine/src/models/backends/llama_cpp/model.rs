@@ -344,6 +344,12 @@ impl EmbeddingModel for LlamaCppEmbeddingModel {
         requested.max(1).min(self.resources.contexts)
     }
 
+    fn admission_concurrency(&self, _execution: usize) -> usize {
+        // One operation submits one batch at a time; that batch can use its C
+        // contexts. Independent operation leases still share the context pool.
+        1
+    }
+
     async fn prepare(&self, options: EmbeddingPrepareOptions) -> Result<(), ModelError> {
         self.ensure_loaded(
             options.on_progress,

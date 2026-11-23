@@ -282,9 +282,11 @@ async fn verifies_gguf_in_modelscope_cache() {
 }
 
 #[test]
-fn cli_concurrency_controls_batch_workers() {
+fn production_batch_workers_follow_backend_admission() {
     for (reference, requested, expected) in [
-        ("local/embeddinggemma-300m", Some(4), 4),
+        ("local/embeddinggemma-300m", None, 1),
+        ("local/embeddinggemma-300m", Some(4), 1),
+        ("local/qwen3-embedding-0.6b", Some(8), 1),
         ("local/potion-code-16m-v2", Some(24), 24),
         ("local/potion-code-16m-v2", None, 2),
     ] {

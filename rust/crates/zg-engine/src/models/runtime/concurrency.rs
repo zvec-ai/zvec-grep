@@ -92,11 +92,11 @@ pub(crate) fn local_runtime_limit(reference: &str, requested: Option<usize>) -> 
     }
 }
 
-/// Fallback before device-specific admission is available. llama.cpp applies
-/// fixed context capacity and per-operation limits inside its shared pool.
+/// Index admission is independent of the native execution budget. A llama.cpp
+/// batch can use multiple contexts, so each operation submits one batch at a time.
 pub(crate) fn batch_concurrency(reference: &str, requested: Option<usize>) -> Option<usize> {
     if is_llama(reference) {
-        Some(requested.unwrap_or(1).max(1))
+        Some(1)
     } else if is_transformers(reference) {
         requested.map(|value| value.max(1))
     } else if is_bekko(reference) {

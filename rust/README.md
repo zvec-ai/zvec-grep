@@ -129,6 +129,10 @@ For llama.cpp, C is the concurrent context limit on CPU, Metal and CUDA:
 
 - Direct mode sizes the context pool from the operation's C (default 1).
   Pools are local to that process; independent Direct processes do not share resources.
+- Each operation admits one embedding batch at a time, independently of C. That
+  batch can use up to C contexts internally. Separate operations have independent
+  batch admission and can execute concurrently through the shared context pool;
+  this does not serialize all Server requests.
 - Server startup captures `ZVEC_GREP_LLAMA_SERVER_CONTEXTS` (default 1) as a
   hard limit on executing llama.cpp contexts across all models and devices in
   that Server. Requests retain the CLI/API > index environment > legacy > default
