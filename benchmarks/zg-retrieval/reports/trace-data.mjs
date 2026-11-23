@@ -17,13 +17,13 @@ function cachedSummary(side, name) {
   );
 }
 
-function validateCalls(calls, tasks, repetitions) {
+function validateCalls(calls, tasks, repetitions, modes) {
   assert.ok(Array.isArray(calls), "Stage calls must be an array");
   const known = new Set(tasks.map(({ id }) => id));
   const groups = new Map();
   for (const call of calls) {
     assert.ok(known.has(call.task_id), "Unknown stage task");
-    assert.ok(MODES.includes(call.mode), "Unknown stage mode");
+    assert.ok(modes.includes(call.mode), "Unknown stage mode");
     assert.ok(
       ["formal", "diagnostic", "unavailable"].includes(call.qualification),
       "Unknown stage qualification",
@@ -67,7 +67,7 @@ function validateCalls(calls, tasks, repetitions) {
   }
   const expected = Array.from({ length: repetitions }, (_, index) => index + 1);
   for (const task of tasks)
-    for (const mode of MODES)
+    for (const mode of modes)
       assert.ok(
         groups.has(`${task.id}/${mode}`),
         "Incomplete stage task/mode matrix",
@@ -80,7 +80,7 @@ function validateCalls(calls, tasks, repetitions) {
     );
 }
 
-function buildSide(side, name, definitions, repetitions) {
+function buildSide(side, name, definitions, repetitions, modes) {
   const tasks = definitions.map((task) => ({
     ...task,
     variants: {},
@@ -110,7 +110,7 @@ function buildSide(side, name, definitions, repetitions) {
       }
       return { summary, tasks };
     }
-    validateCalls(trace.calls, tasks, repetitions);
+    validateCalls(trace.calls, tasks, repetitions, modes);
     const rebuilt = summarizeGoldStages(trace.calls);
     validateGoldStageSummary(rebuilt);
     if (trace.summary)
@@ -165,29 +165,41 @@ function buildSide(side, name, definitions, repetitions) {
   }
 }
 
-export async function buildTraceData({ baseline, candidate, metadata = {} }) {
+export async function buildTraceData({
+  baseline,
+  candidate,
+  metadata = {},
+  graphPair = false,
+}) {
+  const modes = graphPair ? ["hybrid"] : MODES;
   const suite = await loadSuite();
   const definitions = [
     {
       name: "zg",
       id: "sweqa",
       label: "SWE-QA20",
-      tasks: suite.lock.tasks.map((task) => {
-        const pair = suite.qa_pairs[task.task_id];
-        return {
-          id: task.task_id,
-          query: task.query,
-          corpus: task.repository,
-          qualification: pair.scoring_eligible
-            ? "formal"
-            : pair.diagnostic_eligible
-              ? "diagnostic"
-              : "unavailable",
-        };
-      }),
+      tasks: suite.lock.tasks
+        .filter(
+          (task) =>
+            !graphPair ||
+            candidate.reports.zg.expected_task_ids.includes(task.task_id),
+        )
+        .map((task) => {
+          const pair = suite.qa_pairs[task.task_id];
+          return {
+            id: task.task_id,
+            query: task.query,
+            corpus: task.repository,
+            qualification: pair.scoring_eligible
+              ? "formal"
+              : pair.diagnostic_eligible
+                ? "diagnostic"
+                : "unavailable",
+          };
+        }),
     },
     ...(await Promise.all(
-      PILOT_NAMES.map(async (name) => {
+      (graphPair ? [] : PILOT_NAMES).map(async (name) => {
         const pilot = await loadPilot(name);
         return {
           name,
@@ -206,14 +218,27 @@ export async function buildTraceData({ baseline, candidate, metadata = {} }) {
   return {
     meta: {
       ...metadata,
+      ...(graphPair ? { kind: "graph-rerank-pair", modes } : {}),
       limit: suite.protocol.limit,
       repetitions: suite.protocol.repetitions,
     },
     suites: definitions.map(({ name, id, label, tasks }) => ({
       id,
       label,
-      baseline: buildSide(baseline, name, tasks, suite.protocol.repetitions),
-      candidate: buildSide(candidate, name, tasks, suite.protocol.repetitions),
+      baseline: buildSide(
+        baseline,
+        name,
+        tasks,
+        suite.protocol.repetitions,
+        modes,
+      ),
+      candidate: buildSide(
+        candidate,
+        name,
+        tasks,
+        suite.protocol.repetitions,
+        modes,
+      ),
     })),
   };
 }

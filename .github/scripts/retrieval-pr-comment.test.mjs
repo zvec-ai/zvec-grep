@@ -627,10 +627,19 @@ test("the trusted publisher renders Head graph pairs and rejects substituted ide
     untrusted_markdown: "[click](https://example.invalid)",
   };
   const x = await fixture(t);
+  x.artifacts.push({
+    ...traceArtifact,
+    id: 789,
+    name: "graph-rerank-trace.html",
+  });
   await x.write("comparison/summary.json", payload);
   await publish(x);
   const body = x.messages()[0][1].body;
   assert.match(body, /Head graphRerank: off → on/);
+  assert.match(
+    body,
+    /Download graphRerank off\/on Gold stage HTML.*artifacts\/789/,
+  );
   assert.match(body, /graph-on.*Entity/);
   assert.doesNotMatch(body, /example.invalid/);
   assert.equal(

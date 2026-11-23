@@ -152,7 +152,9 @@ test("Head graph pairs reuse the candidate package without changing base/head th
   assert.match(graph, /if: inputs\.graph_rerank_pair/);
   assert.match(graph, /needs: candidate/);
   assert.match(graph, /name: package-retrieval-head-candidate/);
-  assert.match(graph, /--graph-rerank-pair/);
+  assert.match(graph, /--graph-rerank-pair --gold-stages/);
+  assert.match(graph, /name: graph-rerank-trace\.html/);
+  assert.match(graph, /archive: false/);
   assert.match(graph, /\.\/\.github\/actions\/retrieval-authorize/);
   assert.match(graph, /name: retrieval-head-graph-pair/);
   assert.doesNotMatch(graph, /secrets\.|: write/);

@@ -62,6 +62,12 @@ pub(crate) fn search_result(reply: &ContextResult, preview: SearchPreview) -> Ca
             "timings": reply.diagnostics.timings,
         }));
     }
+    if !reply.stage_traces.is_empty() {
+        result.meta = Some(rmcp::model::MetaObject(serde_json::Map::from_iter([(
+            "zg_stage_trace".to_owned(),
+            serde_json::json!(reply.stage_traces),
+        )])));
+    }
     result
 }
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,6 +11,7 @@ import {
   auditGraphCalls,
   compareGraphReports,
   graphPairMarkdown,
+  writeGraphTrace,
 } from "../engines/zg/graph-pair.mjs";
 import {
   scoreQaRetrieval,
@@ -25,6 +26,10 @@ import {
 } from "../metrics/files.mjs";
 import { summarizeMeasurements } from "../metrics/measurements.mjs";
 import { validateZgReport } from "../reports/validation.mjs";
+
+import { goldPaths } from "../core/gold-stage-capture.mjs";
+import { scoreGoldStages } from "../metrics/gold-stages.mjs";
+import { writeGoldStages } from "../reports/gold-stages.mjs";
 
 const suite = await loadSuite();
 const task = suite.lock.tasks.find((task) => task.task_id === "xarray:46");
@@ -68,6 +73,7 @@ test("graph pair audit rejects fallback, changed ordinary recall, tampering and 
     graph_pair: GRAPH_PAIR,
     tasks: [task.task_id],
     corpus_root: "/corpus",
+    gold_stages: true,
   };
   const calls = [];
   for (const call of graphCallPlan([task], suite.protocol)) {
@@ -88,6 +94,7 @@ test("graph pair audit rejects fallback, changed ordinary recall, tampering and 
       raw_path: `raw/${task.task_slug}-${call.arm}-full-${call.repetition}.json`,
     };
     const response = {
+      _meta: { zg_stage_trace: [emptyStageCapture()] },
       structuredContent: {
         searchTrace: [
           {
@@ -127,6 +134,7 @@ test("graph pair audit rejects fallback, changed ordinary recall, tampering and 
     );
   }
   await writeJson(join(directory, on.raw_path), {
+    _meta: { zg_stage_trace: [emptyStageCapture()] },
     structuredContent: {
       searchTrace: [
         {
@@ -257,5 +265,75 @@ test("graph reports reuse Gold scoring and validation without weakening the defa
     () =>
       compareGraphReports(off, otherIndex, { suite, candidateCommit: commit }),
     /share the same indexes/,
+  );
+});
+
+function emptyStageCapture() {
+  return {
+    version: 1,
+    group_id: "Q1",
+    limit: 10,
+    watched_paths: goldPaths(suite.qa_pairs[task.task_id]),
+    index_observed: true,
+    index_read_ms: 1,
+    routes: {
+      fts: {
+        attempts: [{ depth: 32, returned_fragments: 0 }],
+        unique_fragments: 0,
+      },
+      vector: {
+        attempts: [{ depth: 32, returned_fragments: 0 }],
+        unique_fragments: 0,
+      },
+    },
+    sizes: { merged: 0, fused: 0, loaded: 0, selected: 0 },
+    files: {},
+  };
+}
+
+test("graph stage HTML uses separate complete Hybrid captures and rejects missing observations", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "zg-graph-stages-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const calls = Array.from({ length: 5 }, (_, index) =>
+    scoreGoldStages({
+      capture: emptyStageCapture(),
+      pair: suite.qa_pairs[task.task_id],
+      items: [],
+      taskId: task.task_id,
+      mode: "hybrid",
+      repetition: index + 1,
+      qualification: "diagnostic",
+    }),
+  );
+  assert.ok(calls.every((call) => call.state === "observed"));
+  await writeGoldStages(directory, calls, "graph-off-gold-stages.json");
+  await writeGoldStages(directory, calls, "graph-on-gold-stages.json");
+  await writeGraphTrace(directory, armReport(false), armReport(true), {});
+  const html = await readFile(
+    join(directory, "graph-rerank-trace.html"),
+    "utf8",
+  );
+  const data = JSON.parse(/id="trace-data">([\s\S]*?)<\/script>/.exec(html)[1]);
+  assert.equal(data.meta.kind, "graph-rerank-pair");
+  assert.deepEqual(data.meta.modes, ["hybrid"]);
+  assert.equal(data.suites.length, 1);
+  for (const side of ["baseline", "candidate"]) {
+    const result = data.suites[0][side];
+    assert.equal(result.summary.observed_calls, 5);
+    assert.deepEqual(Object.keys(result.tasks[0].variants), ["hybrid"]);
+  }
+  await writeGoldStages(
+    directory,
+    calls.map((call) => ({ ...call, state: "unobserved" })),
+    "graph-on-gold-stages.json",
+  );
+  await assert.rejects(
+    writeGraphTrace(directory, armReport(false), armReport(true), {}),
+    /incomplete stage/,
+  );
+  await writeGoldStages(directory, calls.slice(1), "graph-on-gold-stages.json");
+  await assert.rejects(
+    writeGraphTrace(directory, armReport(false), armReport(true), {}),
+    /invalid graph stage/,
   );
 });

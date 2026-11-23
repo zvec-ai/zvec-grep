@@ -79,8 +79,17 @@ jobs:
             --output "$RUNNER_TEMP/graph-pair" \
             --corpus "$RUNNER_TEMP/graph-corpus" \
             --model-cache "$RUNNER_TEMP/model-cache" \
-            --candidate-commit "$CANDIDATE_COMMIT" --graph-rerank-pair
+            --candidate-commit "$CANDIDATE_COMMIT" --graph-rerank-pair --gold-stages
           cat "$RUNNER_TEMP/graph-pair/graph-rerank.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve graph pair stage trace HTML
+        if: ${{ always() && steps.access.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: graph-rerank-trace.html
+          path: ${{ runner.temp }}/graph-pair/graph-rerank-trace.html
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
       - name: Preserve graph pair report and evidence
         if: ${{ always() && steps.access.outcome == 'success' }}
         uses: actions/upload-artifact@v7

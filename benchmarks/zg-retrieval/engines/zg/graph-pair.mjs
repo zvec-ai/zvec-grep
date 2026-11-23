@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { writeFile } from "node:fs/promises";
+import { readStageTrace } from "../../core/gold-stage-capture.mjs";
+import { buildTraceData } from "../../reports/trace-data.mjs";
+import { renderGoldTrace } from "../../reports/trace-html.mjs";
 import { join } from "node:path";
 import { readJson, fileHash } from "../../core/lib.mjs";
 import { summarizeQaRetrieval } from "../../metrics/entities.mjs";
@@ -105,6 +109,34 @@ export async function auditGraphCalls(directory, manifest, calls, suite) {
       fused: trace.fused,
       ordinary_pool: trace.ordinary_pool,
     };
+    if (manifest.gold_stages) {
+      const capture = readStageTrace(response);
+      assert.ok(
+        capture && !(capture instanceof Error),
+        "missing graph stage capture",
+      );
+      assert.equal(
+        capture.index_observed,
+        true,
+        "graph index stage unavailable",
+      );
+      assert.equal(capture.limit, 10, "wrong stage limit");
+      // Final ranks are the experimental outcome. All earlier observations must agree.
+      ordinary.stages = {
+        routes: capture.routes,
+        files: Object.fromEntries(
+          Object.entries(capture.files).map(([path, entities]) => [
+            path,
+            Object.fromEntries(
+              Object.entries(entities).map(([id, entity]) => {
+                const { final_rank, ...beforeRanking } = entity;
+                return [id, beforeRanking];
+              }),
+            ),
+          ]),
+        ),
+      };
+    }
     if (pairs.has(identity))
       assert.deepEqual(
         ordinary,
@@ -228,4 +260,33 @@ export function graphPairMarkdown(result) {
     "Latency includes trace collection and fixed-session cache effects; it is not a controlled speed comparison.",
   );
   return lines.join("\n") + "\n";
+}
+
+export async function writeGraphTrace(directory, off, on, metadata) {
+  const sides = await Promise.all(
+    ["off", "on"].map(async (arm, index) => {
+      const trace = await readJson(
+        join(directory, `graph-${arm}-gold-stages.json`),
+      );
+      assert.ok(
+        trace.calls.length > 0 &&
+          trace.calls.every((call) => call.state === "observed"),
+        `graph-${arm} has incomplete stage evidence`,
+      );
+      return { reports: { zg: index === 0 ? off : on }, traces: { zg: trace } };
+    }),
+  );
+  const data = await buildTraceData({
+    baseline: sides[0],
+    candidate: sides[1],
+    metadata,
+    graphPair: true,
+  });
+  for (const suite of data.suites)
+    for (const side of [suite.baseline, suite.candidate])
+      assert.equal(side.error, undefined, "invalid graph stage report");
+  await writeFile(
+    join(directory, "graph-rerank-trace.html"),
+    await renderGoldTrace(data),
+  );
 }

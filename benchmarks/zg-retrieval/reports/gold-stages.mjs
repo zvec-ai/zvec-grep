@@ -77,9 +77,13 @@ export function validateGoldStageSummary(summary) {
   };
 }
 
-export async function writeGoldStages(directory, calls) {
+export async function writeGoldStages(
+  directory,
+  calls,
+  filename = "gold-stages.json",
+) {
   const summary = summarizeGoldStages(calls);
-  await writeJson(join(directory, "gold-stages.json"), { summary, calls });
+  await writeJson(join(directory, filename), { summary, calls });
   return summary;
 }
 

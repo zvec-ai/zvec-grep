@@ -38,6 +38,7 @@ import {
   graphCallPlan,
   compareGraphReports,
   graphPairMarkdown,
+  writeGraphTrace,
 } from "./graph-pair.mjs";
 
 const MCP_CLIENT_PACKAGE = "@modelcontextprotocol/client@2.0.0";
@@ -800,6 +801,21 @@ export async function main(args = process.argv.slice(2)) {
       join(options.output, "graph-rerank.md"),
       graphPairMarkdown(report),
     );
+    if (options.goldStages) {
+      const version = {
+        repository: process.env.GITHUB_REPOSITORY,
+        commit: options.candidateCommit,
+      };
+      await writeGraphTrace(options.output, off, on, {
+        baseline: version,
+        candidate: version,
+        run_url:
+          process.env.GITHUB_ACTIONS === "true"
+            ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
+            : undefined,
+        note: "Fresh Hybrid graphRerank off/on pairs share one graph-enabled index. Gold, ordinary recall and Top K are unchanged. Stage capture is enabled in both arms.",
+      });
+    }
     console.log(`Graph pair: ${join(options.output, "graph-rerank.md")}`);
     return;
   }

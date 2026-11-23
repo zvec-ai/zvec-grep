@@ -36,7 +36,13 @@ identities. Missing graph support, graph faults and invalid pairs fail the
 experiment instead of receiving an empty-result score. The original three-mode
 regression artifacts remain separate. Retain `retrieval-head-graph-pair` for raw
 requests/responses, index audits, `graph-off.json`, `graph-on.json` and the paired
-summary. These are fresh retrieval calls, not rescoring the historical offline B
+summary. Stage capture is enabled on both arms. Their sidecars remain separate as
+`graph-off-gold-stages.json` and `graph-on-gold-stages.json`; the standalone
+`graph-rerank-trace.html` artifact compares each Gold across index, FTS/Vector
+recall, merge, fusion, loading and actual Top 10. Its version selector means
+graphRerank off/on on the same candidate commit. The actual rank includes graph
+reranking in the enabled arm. Both arms must have complete observed captures,
+and their pre-ranking observations must agree. These are fresh retrieval calls, not rescoring the historical offline B
 experiment. Timing includes trace overhead and session cache effects.
 
 The graph table is included in Actions comparison reports. Automatic PR comments
@@ -59,6 +65,7 @@ The PR comment shows File/Entity quality tables and a **download link to `retrie
 
 | Artifact | Contents |
 | --- | --- |
+| `graph-rerank-trace.html` | Head Hybrid graphRerank off/on Gold stage comparison with separate arm evidence. |
 | `retrieval-trace.html` | Interactive stage trace for paired runs; select suite, question, baseline/candidate and repetition. |
 | `retrieval-comparison` | Paired `summary.md` and `summary.json`; exact scores and deltas remain in JSON. |
 | `retrieval-results` | Single-version combined summary across all four suites. |

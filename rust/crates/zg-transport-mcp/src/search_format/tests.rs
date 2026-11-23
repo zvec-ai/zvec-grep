@@ -31,6 +31,48 @@ fn fixtures() -> Vec<McpSearchPresentationCase> {
     .expect("captured Node.js MCP fixtures")
 }
 
+#[test]
+fn stage_metadata_preserves_search_text_and_stays_absent_when_disabled() {
+    let mut reply: ContextResult =
+        serde_json::from_value(fixtures().remove(0).result).expect("result");
+    reply
+        .diagnostics
+        .search_trace
+        .push(zg_engine::api::context::result::GroupSearchTrace {
+            group_id: "Q1".into(),
+            recall: Vec::new(),
+            fused: Vec::new(),
+            ordinary_pool: Vec::new(),
+            graph: None,
+            selected: Vec::new(),
+        });
+    let plain = super::search_result(&reply, SearchPreview::Full);
+    assert!(plain.structured_content.is_some());
+    assert!(plain.meta.is_none());
+    assert!(
+        serde_json::to_value(&reply)
+            .expect("result JSON")
+            .get("stage_traces")
+            .is_none()
+    );
+    let traces = serde_json::json!([
+        { "version": 1, "group_id": "Q1", "limit": 2, "watched_paths": ["missing.rs"],
+          "index_observed": true, "index_read_ms": 0.5, "routes": {},
+          "sizes": { "merged": 0, "fused": 0, "loaded": 0, "selected": 0 }, "files": {} },
+        { "version": 1, "group_id": "Q2", "limit": 3, "watched_paths": [],
+          "index_observed": false, "index_read_ms": 0.0, "routes": {},
+          "sizes": { "merged": 0, "fused": 0, "loaded": 0, "selected": 0 }, "files": {} }
+    ]);
+    reply.stage_traces = serde_json::from_value(traces.clone()).expect("typed traces");
+    let observed = super::search_result(&reply, SearchPreview::Full);
+    assert_eq!(observed.content, plain.content);
+    assert_eq!(observed.structured_content, plain.structured_content);
+    let wire = serde_json::to_value(&observed).expect("MCP result");
+    assert_eq!(wire["_meta"]["zg_stage_trace"], traces);
+    let decoded: rmcp::model::CallToolResult = serde_json::from_value(wire).expect("MCP decode");
+    assert_eq!(decoded, observed);
+}
+
 fn cli_output(result: &ContextResult, preview: PreviewMode) -> String {
     let mut bytes = Vec::new();
     write_context_with_options(

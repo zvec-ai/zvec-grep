@@ -511,6 +511,7 @@ export function commentBody({
   serverUrl,
   repository,
   traceArtifactId,
+  graphTraceArtifactId,
 }) {
   const runUrl = `${serverUrl}/${repository}/actions/runs/${run.id}/attempts/${run.run_attempt}`;
   let result;
@@ -533,6 +534,12 @@ export function commentBody({
         },
       ),
     );
+    if (result.graph_rerank && positiveInteger(graphTraceArtifactId))
+      body.push(
+        "",
+        `[Download graphRerank off/on Gold stage HTML](${serverUrl}/${repository}/actions/runs/${run.id}/artifacts/${graphTraceArtifactId}) · Fresh paired calls, Hybrid only.`,
+        "",
+      );
   } else {
     const version = (side) => {
       const { repository: repo, commit } = request[side];
@@ -647,6 +654,7 @@ export async function publish({ github, context, core, directory }) {
     return;
   }
   let traceArtifactId;
+  let graphTraceArtifactId;
   if (run.conclusion === "success") {
     try {
       const artifacts = await github.paginate(
@@ -654,6 +662,14 @@ export async function publish({ github, context, core, directory }) {
         { ...context.repo, run_id: run.id, per_page: 100 },
       );
       // Build the URL from GitHub metadata, never artifact-provided Markdown or URLs.
+      graphTraceArtifactId = artifacts.find(
+        (artifact) =>
+          artifact.name === "graph-rerank-trace.html" &&
+          artifact.expired === false &&
+          positiveInteger(artifact.id) &&
+          artifact.workflow_run?.id === run.id &&
+          artifact.workflow_run?.head_sha === run.head_sha,
+      )?.id;
       traceArtifactId = artifacts.find(
         (artifact) =>
           artifact.name === "retrieval-trace.html" &&
@@ -675,6 +691,7 @@ export async function publish({ github, context, core, directory }) {
     serverUrl: context.serverUrl,
     repository,
     traceArtifactId,
+    graphTraceArtifactId,
   });
   // Recheck after reading artifacts/comments so a push during publication
   // cannot knowingly replace the current PR's result with an older version.

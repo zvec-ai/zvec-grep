@@ -218,8 +218,13 @@ fn build_context_result(
     let mut routes = Vec::new();
     let mut search_trace = Vec::new();
     let mut graph_errors = Vec::new();
+    let mut stage_traces = Vec::new();
     for (group, search) in groups.iter().zip(searches) {
         timings.extend(search.timings);
+        if let Some(mut trace) = search.stage_trace {
+            trace.group_id.clone_from(&group.id);
+            stage_traces.push(trace);
+        }
         routes.extend(
             search
                 .routes
@@ -252,6 +257,7 @@ fn build_context_result(
             path: workspace.layout().storage_dir().to_path_buf(),
         }),
         items,
+        stage_traces,
         group_results: groups
             .iter()
             .zip(group_items)
@@ -729,6 +735,7 @@ mod tests {
             timings: Vec::new(),
             trace: None,
             graph_error: None,
+            stage_trace: None,
         };
         let request = normalize_context_request(&ContextOptions {
             query: Some("source".into()),
@@ -891,6 +898,7 @@ mod tests {
         };
         let search = SearchPlanResult {
             routes: Vec::new(),
+            stage_trace: None,
             hits: vec![SearchHit {
                 entity: Entity::new(id, source.id(), source_range, content, None, vec![fragment])
                     .expect("entity"),

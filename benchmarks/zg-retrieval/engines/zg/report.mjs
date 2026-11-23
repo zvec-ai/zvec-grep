@@ -695,7 +695,13 @@ export async function aggregate(
         }
       }
     }
-    report.gold_stages = await writeGoldStages(directory, calls);
+    report.gold_stages = await writeGoldStages(
+      directory,
+      calls,
+      graphPair
+        ? `graph-${graphRerank ? "on" : "off"}-gold-stages.json`
+        : "gold-stages.json",
+    );
   }
   const stem = graphPair ? `graph-${graphRerank ? "on" : "off"}` : "report";
   await writeFile(
