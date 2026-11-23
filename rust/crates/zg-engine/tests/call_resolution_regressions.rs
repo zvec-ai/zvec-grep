@@ -1368,3 +1368,151 @@ async fn python_ambiguous_member_write_does_not_fall_back_to_a_base() {
     })
     .await;
 }
+
+// PR 435 review: `client = other` copies the value `other` holds, so the
+// receiver reads that type from the assignment on instead of keeping the
+// annotation the parameter stated for the whole body.
+#[tokio::test]
+async fn review435_receiver_alias_takes_the_target_type() {
+    check_case(Case {
+        name: "review435_receiver_alias_takes_the_target_type",
+        files: vec![SourceFile {
+            path: "use.py",
+            source: "class Left:\n    def work(self):\n        return 'left'\n\nclass Right:\n    def work(self):\n        return 'right'\n\ndef run(client: Left, other: Right):\n    client = other\n    return client.work()\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "run",
+            expected: json!([{"name": "run", "edges": [
+                {"symbol": {"name": "Right::work"}, "line": 11}
+            ]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 435 review: a copy of a name the body states no type for leaves the
+// receiver undecided; the parameter's annotation described the value it held
+// before the assignment, not the one it holds after.
+#[tokio::test]
+async fn review435_unknown_alias_clears_the_parameter_annotation() {
+    check_case(Case {
+        name: "review435_unknown_alias_clears_the_parameter_annotation",
+        files: vec![SourceFile {
+            path: "use.py",
+            source: "class Left:\n    def work(self):\n        return 'left'\n\nclass Right:\n    def work(self):\n        return 'right'\n\ndef run(client: Left, replacement):\n    client = replacement\n    return client.work()\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "run",
+            expected: json!([{"name": "run", "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 435 review: a Python method does not read class-body names as lexical
+// bindings, so a member it assigns from such a name holds no type of the
+// class body's making.
+#[tokio::test]
+async fn review435_class_body_names_are_not_method_bindings() {
+    check_case(Case {
+        name: "review435_class_body_names_are_not_method_bindings",
+        files: vec![SourceFile {
+            path: "use.py",
+            source: "class Left:\n    def work(self):\n        return 'left'\n\nclass Runner:\n    client = Left()\n\n    def __init__(self):\n        self.actual = client\n\n    def run(self):\n        return self.actual.work()\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "Runner::run",
+            expected: json!([{"name": "Runner::run", "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 435 review: `self.client = None` writes the member without stating a
+// type. The write keeps the base's member from answering, but it states nothing
+// the call can bind to.
+#[tokio::test]
+async fn review435_none_write_blocks_inherited_member_type() {
+    check_case(Case {
+        name: "review435_none_write_blocks_inherited_member_type",
+        files: vec![SourceFile {
+            path: "use.py",
+            source: "class Left:\n    def work(self):\n        return 'left'\n\nclass Base:\n    def __init__(self):\n        self.client = Left()\n\nclass Child(Base):\n    def __init__(self):\n        self.client = None\n\n    def run(self):\n        return self.client.work()\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "Child::run",
+            expected: json!([{"name": "Child::run", "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 435 review: a name a branch rebinds holds either value after the branch,
+// so the member assigned from it stays undecided.
+#[tokio::test]
+async fn review435_branch_write_leaves_the_parameter_undecided() {
+    check_case(Case {
+        name: "review435_branch_write_leaves_the_parameter_undecided",
+        files: vec![SourceFile {
+            path: "use.py",
+            source: "class Left:\n    def work(self):\n        return 'left'\n\nclass Right:\n    def work(self):\n        return 'right'\n\nclass Runner:\n    def run(self, client: Left, flag, other: Right):\n        if flag:\n            client = other\n        self.client = client\n        return self.client.work()\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "Runner::run",
+            expected: json!([{"name": "Runner::run", "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 435 review: a nested function captures `self`, so the member it reads is
+// the one the enclosing class states rather than a member of the function.
+#[tokio::test]
+async fn review435_nested_helper_reads_the_enclosing_class_member() {
+    check_case(Case {
+        name: "review435_nested_helper_reads_the_enclosing_class_member",
+        files: vec![SourceFile {
+            path: "use.py",
+            source: "class Left:\n    def work(self):\n        return 'left'\n\nclass Runner:\n    def __init__(self):\n        self.client = Left()\n\n    def run(self):\n        def helper():\n            return self.client.work()\n\n        return helper()\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "Runner::run::helper",
+            expected: json!([{"name": "Runner::run::helper", "edges": [
+                {"symbol": {"name": "Left::work"}, "line": 11}
+            ]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 435 review: `self = replacements[0]` no longer names this class's
+// instance, so the member path does not fall back to the enclosing class.
+#[tokio::test]
+async fn review435_rebound_self_stays_undecided() {
+    check_case(Case {
+        name: "review435_rebound_self_stays_undecided",
+        files: vec![SourceFile {
+            path: "use.py",
+            source: "class Left:\n    def work(self):\n        return 'left'\n\nclass Right:\n    def work(self):\n        return 'right'\n\nclass Runner:\n    def __init__(self):\n        self.client = Left()\n\n    def run(self, replacements):\n        self = replacements[0]\n        return self.client.work()\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "Runner::run",
+            expected: json!([{"name": "Runner::run", "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}

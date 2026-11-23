@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::domain::{EdgeProvenance, GraphEdgeKind, PreprocessorDirective};
 
-use super::{Constructs, NameEdge, WalkContext, WalkEdge};
+use super::{Constructs, NameEdge, PYTHON_NONE_TYPE, PYTHON_UNBOUND_TYPE, WalkContext, WalkEdge};
 
 /// A name reference resolved against this file's own symbol table.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -140,6 +140,12 @@ fn alias_at<'a>(
 /// call's position and can tell the two apart.
 fn states_a_placeable_value(bound: &str) -> bool {
     !(bound == "?" || bound.starts_with("typeof "))
+}
+
+/// Whether a binding is the sentinel a Python body writes when it rebinds a
+/// name to a value it cannot place or states only the name's absence.
+fn is_python_rebound(bound: &str) -> bool {
+    matches!(bound, PYTHON_UNBOUND_TYPE | PYTHON_NONE_TYPE)
 }
 
 /// The entity the file declares exactly once under `name`; two same-named
@@ -346,20 +352,30 @@ fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> 
         // naming `run` does not see `A::run` just because the file declares it
         // once. Without better evidence the reference stays pending for the
         // cross-file resolver, which also weighs imports.
-        GraphEdgeKind::Calls => match alias_at(aliases, edge) {
-            // The binding states no value this file can place, so the spelled
-            // name is not the answer: the resolver reads the declared binding
-            // at the call's position and can still tell a parameter, a nested
-            // definition or a later reassignment apart from the file's name.
-            Some(bound) if !states_a_placeable_value(bound) => None,
-            Some(bound) => unique_symbol(symbols, bound),
-            None => {
-                let value_alias = value_aliases
+        GraphEdgeKind::Calls => {
+            let value_alias = || {
+                value_aliases
                     .get(&(edge.owner_index, edge.ref_name.clone()))
                     .or_else(|| {
                         value_aliases.get(&(super::FILE_SCOPE_INDEX, edge.ref_name.clone()))
-                    });
-                match value_alias {
+                    })
+            };
+            match alias_at(aliases, edge) {
+                // A Python body that rebinds a name states it holds no type
+                // the index can place (`client = clients[0]`), but a copy of
+                // another name is evidence of its own: `alias = target` still
+                // reaches `target` through the alias table.
+                Some(bound) if is_python_rebound(bound) => {
+                    value_alias().and_then(|bound| unique_symbol(symbols, bound))
+                }
+                // The binding states no value this file can place, so the
+                // spelled name is not the answer: the resolver reads the
+                // declared binding at the call's position and can still tell a
+                // parameter, a nested definition or a later reassignment apart
+                // from the file's name.
+                Some(bound) if !states_a_placeable_value(bound) => None,
+                Some(bound) => unique_symbol(symbols, bound),
+                None => match value_alias() {
                     // A pair the walk recorded without a position of its own
                     // (`x = y` where the declaration states no type) is the
                     // only evidence there is.
@@ -373,9 +389,9 @@ fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> 
                                 .then(|| unique_symbol(file_symbols, &edge.ref_name))
                                 .flatten()
                         }),
-                }
+                },
             }
-        },
+        }
         GraphEdgeKind::Extends | GraphEdgeKind::Implements => {
             unique_symbol(symbols, &edge.ref_name)
         }

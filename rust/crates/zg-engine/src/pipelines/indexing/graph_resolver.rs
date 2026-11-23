@@ -36,7 +36,7 @@ use crate::domain::{
     EdgeProvenance, FileFormat, GraphEdgeKind, SymbolType, formats_for_path,
     reference_compatible_with,
 };
-use crate::extraction::PYTHON_UNBOUND_TYPE;
+use crate::extraction::{PYTHON_NONE_TYPE, PYTHON_UNBOUND_TYPE};
 use crate::storage::graph::{
     DeclaredBinding, ImportReference, NameIndexEntry, Resolution, StoredPendingRef,
 };
@@ -2855,38 +2855,41 @@ fn receiver_path_type(
         };
         return Ok(step_type(marker, &inner_type));
     }
-    if let Some(bound) = declared_receiver_type(store, snapshot, stored, receiver, caches)? {
-        // A member read the extraction could not type states the type stating
-        // it: `member_of:(ParserState,fontset)` is what `ParserState` says
-        // `fontset` holds.
-        if member_step(&bound).is_some() {
-            return resolve_member_steps(store, snapshot, stored, bound, caches, depth);
+    match declared_receiver_type(store, snapshot, stored, receiver, caches)? {
+        // The body rebound the name to a value it cannot type. The name holds
+        // no type, and the scopes below must not claim it back: `self =
+        // objects[0]` no longer names this class's instance.
+        ReceiverBinding::Undecided => return Ok(None),
+        ReceiverBinding::Known(bound) => {
+            // A member read the extraction could not type states the type stating
+            // it: `member_of:(ParserState,fontset)` is what `ParserState` says
+            // `fontset` holds.
+            if member_step(&bound).is_some() {
+                return resolve_member_steps(store, snapshot, stored, bound, caches, depth);
+            }
+            // A loop or a placeholder declaration binds what the range or path it
+            // was taken from holds, which is only known once that is read.
+            if let Some((marker, inner)) = step_marker(&bound) {
+                let Some(inner_type) =
+                    receiver_path_type(store, snapshot, stored, inner, caches, depth + 1)?
+                else {
+                    return Ok(None);
+                };
+                return Ok(step_type(marker, &inner_type));
+            }
+            // The spelling keeps the declarator's decorations: a pointer answers a
+            // subscript with what it points at, and the step that reads the value
+            // decides what the name itself denotes.
+            return Ok(Some(bound));
         }
-        // A loop or a placeholder declaration binds what the range or path it
-        // was taken from holds, which is only known once that is read.
-        if let Some((marker, inner)) = step_marker(&bound) {
-            let Some(inner_type) =
-                receiver_path_type(store, snapshot, stored, inner, caches, depth + 1)?
-            else {
-                return Ok(None);
-            };
-            return Ok(step_type(marker, &inner_type));
-        }
-        // The spelling keeps the declarator's decorations: a pointer answers a
-        // subscript with what it points at, and the step that reads the value
-        // decides what the name itself denotes.
-        return Ok(Some(bound));
+        ReceiverBinding::Absent => {}
     }
     // `self` and `cls` hold the enclosing class: a member read through them is
     // a member that class or one of its bases states.
     if is_self_receiver(&stored.language, receiver) {
         return Ok(snapshot
             .entity_record(&stored.reference.owner_id)
-            .and_then(|owner| {
-                enclosing_scopes(&owner.qualified_name)
-                    .first()
-                    .map(|scope| (*scope).to_owned())
-            }));
+            .and_then(|owner| enclosing_class_scope(snapshot, &owner.qualified_name)));
     }
     let Some((base, member)) = receiver.rsplit_once('.') else {
         return Ok(None);
@@ -2976,6 +2979,21 @@ fn member_step(text: &str) -> Option<(&str, &str)> {
     None
 }
 
+/// What the call site's own body states for one name.
+///
+/// The three answers are not one scale: a body that states nothing leaves the
+/// enclosing class and the translation unit to answer, while a body that
+/// rebound the name to a value it cannot type answers on its own — with "no
+/// type" — and nothing below it may claim the name back.
+enum ReceiverBinding {
+    /// The body declares nothing of that name.
+    Absent,
+    /// The body holds a value whose type the index cannot name.
+    Undecided,
+    /// The body holds a value of one stated type.
+    Known(String),
+}
+
 /// The type the call site's own body or enclosing class states for one name.
 ///
 /// # Errors
@@ -2986,7 +3004,7 @@ fn declared_receiver_type(
     stored: &StoredPendingRef,
     receiver: &str,
     caches: &mut RuleCaches,
-) -> crate::EngineResult<Option<String>> {
+) -> crate::EngineResult<ReceiverBinding> {
     let reference = &stored.reference;
     let local = {
         let bindings = match caches.declared_bindings.entry(reference.owner_id.clone()) {
@@ -3000,14 +3018,17 @@ fn declared_receiver_type(
             .next_back() // bindings are line-ordered; the latest earlier one shadows
     };
     match local {
-        // The body rebound the name to a value the index cannot place, which
-        // shadows the annotation instead of leaving it in effect.
-        Some(bound) if bound == PYTHON_UNBOUND_TYPE => return Ok(None),
-        Some(bound) => return Ok(Some(bound)),
+        // The body rebound the name to a value the index cannot place or
+        // stated only its absence, which shadows the annotation instead of
+        // leaving it in effect.
+        Some(bound) if matches!(bound.as_str(), PYTHON_UNBOUND_TYPE | PYTHON_NONE_TYPE) => {
+            return Ok(ReceiverBinding::Undecided);
+        }
+        Some(bound) => return Ok(ReceiverBinding::Known(bound)),
         None => {}
     }
     if let Some(binding) = translation_unit_binding(store, snapshot, stored, receiver, caches)? {
-        return Ok(Some(binding));
+        return Ok(ReceiverBinding::Known(binding));
     }
     // A Python name the body does not declare is a module-level name, never an
     // attribute of `self`: the language has no unqualified member lookup, so
@@ -3015,9 +3036,38 @@ fn declared_receiver_type(
     // own value even when the class states a member of that name. The class's
     // member bindings answer member reads (`self.index.…`) only.
     if stored.language == "python" {
-        return Ok(None);
+        return Ok(ReceiverBinding::Absent);
     }
-    member_type_of(store, snapshot, stored, receiver, caches)
+    Ok(
+        match member_type_of(store, snapshot, stored, receiver, caches)? {
+            Some(bound) => ReceiverBinding::Known(bound),
+            None => ReceiverBinding::Absent,
+        },
+    )
+}
+
+/// The nearest scope around `qualified_name` that names a class.
+///
+/// A nested function is a scope of its own but not a type: the `self` a
+/// `def helper()` inside `Runner::run` captures is `Runner`'s instance, so the
+/// search steps over the function scopes instead of answering with the
+/// function's own name.
+fn enclosing_class_scope(snapshot: &ResolutionSnapshot, qualified_name: &str) -> Option<String> {
+    enclosing_scopes(qualified_name)
+        .into_iter()
+        .find(|scope| declares_a_type(snapshot, scope))
+        .map(str::to_owned)
+}
+
+/// Whether one scope spelled exactly `scope` declares a type. A method spells
+/// a scope of its own (`Runner::run`), and only the declaration tells the two
+/// apart.
+fn declares_a_type(snapshot: &ResolutionSnapshot, scope: &str) -> bool {
+    let tail = scope.rsplit("::").next().unwrap_or(scope);
+    snapshot.lookup_candidates(tail).is_some_and(|hits| {
+        hits.iter()
+            .any(|hit| hit.qualified_name == scope && hit.declares_type)
+    })
 }
 
 /// What the bindings of one class state for a member name.
@@ -3044,15 +3094,25 @@ enum MemberBinding {
 /// execution: assignments that state different types leave the member undecided
 /// instead of choosing the one written last, and a write the extraction could
 /// not type (the [`PYTHON_UNBOUND_TYPE`] sentinel) decides nothing either.
+///
+/// A write of `None` (the [`PYTHON_NONE_TYPE`] sentinel) is the member's
+/// absence, not an unreadable value: the class still declares the name — so a
+/// base's member of that name is not the answer — but the write states no type,
+/// which leaves a write that does state one in charge of it.
 fn member_binding_type(bindings: &[DeclaredBinding], name: &str, language: &str) -> MemberBinding {
     let mut found: Option<String> = None;
+    let mut written = false;
     for binding in bindings.iter().filter(|binding| binding.name == name) {
         if language != "python" {
             found = Some(binding.bound_type.clone());
             continue;
         }
+        written = true;
         if binding.bound_type == PYTHON_UNBOUND_TYPE {
             return MemberBinding::Undecided;
+        }
+        if binding.bound_type == PYTHON_NONE_TYPE {
+            continue;
         }
         match &found {
             Some(previous) if previous != &binding.bound_type => {
@@ -3064,6 +3124,7 @@ fn member_binding_type(bindings: &[DeclaredBinding], name: &str, language: &str)
     }
     match found {
         Some(bound) => MemberBinding::Known(bound),
+        None if written => MemberBinding::Undecided,
         None => MemberBinding::Absent,
     }
 }
@@ -4846,7 +4907,7 @@ mod language_gate_tests {
 #[cfg(test)]
 mod member_evidence_tests {
     use super::{MemberBinding, member_binding_type, member_step};
-    use crate::extraction::PYTHON_UNBOUND_TYPE;
+    use crate::extraction::{PYTHON_NONE_TYPE, PYTHON_UNBOUND_TYPE};
     use crate::storage::graph::DeclaredBinding;
 
     fn binding(name: &str, bound_type: &str) -> DeclaredBinding {
@@ -4920,6 +4981,28 @@ mod member_evidence_tests {
         assert_eq!(
             member_binding_type(&bindings, "service", "python"),
             MemberBinding::Undecided
+        );
+    }
+
+    #[test]
+    fn python_none_write_declares_the_member_without_a_type() {
+        // `self.service = None` writes the member without stating a type: the
+        // class owns the name, so a base's member is not the answer, but no
+        // type answers it either.
+        let bindings = vec![binding("service", PYTHON_NONE_TYPE)];
+        assert_eq!(
+            member_binding_type(&bindings, "service", "python"),
+            MemberBinding::Undecided
+        );
+        // An optional member — `None` in the constructor, the real value in a
+        // configuration method — is still typed by the write that states one.
+        let bindings = vec![
+            binding("service", PYTHON_NONE_TYPE),
+            binding("service", "Right"),
+        ];
+        assert_eq!(
+            member_binding_type(&bindings, "service", "python"),
+            MemberBinding::Known("Right".to_owned())
         );
     }
 }

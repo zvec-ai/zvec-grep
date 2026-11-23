@@ -16,7 +16,7 @@ use super::vocabulary::{
     CALLEE_FIELDS, COMMON_CALL_TYPES, HeritageVocabulary, heritage_vocabulary_for,
     import_vocabulary_for,
 };
-use super::{Constructs, FILE_SCOPE_INDEX, PYTHON_UNBOUND_TYPE, WalkContext};
+use super::{Constructs, FILE_SCOPE_INDEX, PYTHON_NONE_TYPE, PYTHON_UNBOUND_TYPE, WalkContext};
 
 const MAX_CALLEE_TEXT_CHARS: usize = 180;
 
@@ -613,9 +613,6 @@ fn visit_for_bindings(
 ) {
     let binding = declaration_binding_of(node, source, format, context);
     let alias = alias_target_of(node, source, format);
-    // `alias = target` names the value it holds, and the alias table carries
-    // that name; the initializer is read, so it states no absence below.
-    let states_an_alias = alias.is_some();
     let mut shadowed = Vec::new();
     shadowing_names_of(node, source, format, &mut shadowed);
     for name in shadowed {
@@ -707,15 +704,24 @@ fn visit_for_bindings(
         // `client = clients[0]` states that the name no longer holds what the
         // parameter declared. The index cannot place the value, so the name
         // holds no type from this line on rather than keeping the annotation
-        // the parameter stated for the whole body. A value the walk did place
-        // (`alias = target`) is evidence of its own, read from the alias table.
-        if !states_an_alias
-            && node.child_by_field_name("right").is_none_or(|right| {
-                python_value_type(right, source, context, &HashMap::new()).is_none()
+        // the parameter stated for the whole body.
+        //
+        // `client = other` is a copy of a name the body already types, and the
+        // copy holds that type: a receiver reads `other`'s type from this line
+        // on. A copy of a name the body states no type for leaves the name as
+        // undecided as any other value the index cannot place — the annotation
+        // described what the name held before the assignment, not after it.
+        let copied = node
+            .child_by_field_name("right")
+            .filter(|right| right.kind() == "identifier")
+            .and_then(|right| {
+                context
+                    .declared_type_at(owner_index, node_text(right, source), line, column)
+                    .map(str::to_owned)
             })
-        {
-            context.add_declare_binding(owner_index, name, PYTHON_UNBOUND_TYPE, line, column, None);
-        }
+            .filter(|bound| !matches!(bound.as_str(), PYTHON_UNBOUND_TYPE | PYTHON_NONE_TYPE));
+        let bound = copied.as_deref().unwrap_or(PYTHON_UNBOUND_TYPE);
+        context.add_declare_binding(owner_index, name, bound, line, column, None);
         return;
     }
     for child in named_children(node) {
@@ -746,24 +752,35 @@ fn collect_python_self_members(
     let class_name = class_node
         .child_by_field_name("name")
         .map(|name| node_text(name, source).to_owned());
-    // The methods sit in the class body beside the bindings the class states
+    // The methods sit in the class body beside the statements the class writes
     // outside them, so the body is the level that holds both.
     let Some(class_body) = class_node.child_by_field_name("body") else {
         return;
     };
-    // Bindings the class body states outside a method hold for every method.
-    let mut annotated = HashMap::new();
     let scope = class_name.as_deref();
     for child in named_children(class_body) {
         let Some(inner) = python_inner_definition(child) else {
-            visit_python_self_members(child, owner_index, scope, source, context, &mut annotated);
+            // A name a class body binds is not a lexical binding of the
+            // methods: `client = Left()` beside a method that writes
+            // `self.actual = client` states nothing about `actual`, because
+            // the method reads a module-level `client`, not this one.
+            visit_python_self_members(
+                child,
+                owner_index,
+                scope,
+                source,
+                context,
+                &mut HashMap::new(),
+            );
             continue;
         };
         // A nested class states `self` for its own members.
         if inner.kind() != "function_definition" {
             continue;
         }
-        let mut method = python_annotated_parameters(inner, source, &annotated);
+        // The method binds the names it declares itself, and reads every other
+        // name from the module, never from the class body beside it.
+        let mut method = python_annotated_parameters(inner, source, &HashMap::new());
         // `self` and `cls` name the instance the method is written on, so a
         // value read through them states a member of this class
         // (`self.state.fontset`). A parameter that annotates the name keeps
@@ -819,14 +836,24 @@ fn visit_python_self_members(
             // write is kept without a type rather than dropped: dropping it
             // would leave the earlier type in effect, and a base class's
             // member is not the answer for a name the class writes itself.
+            //
+            // `self.client = None` is the same write with a different meaning:
+            // the class still chooses what the member holds, so a base's
+            // member is not the answer, but the value states no type at all.
+            // That keeps an optional member — `None` here, the real value in
+            // another method — typed by the write that states one.
             None => {
                 if let Some(member) = python_self_member_target(node, source, annotated, class_name)
-                    && !python_states_none(node.child_by_field_name("right"), source)
                 {
+                    let bound = if python_states_none(node.child_by_field_name("right"), source) {
+                        PYTHON_NONE_TYPE
+                    } else {
+                        PYTHON_UNBOUND_TYPE
+                    };
                     context.add_declare_binding(
                         owner_index,
                         member,
-                        PYTHON_UNBOUND_TYPE,
+                        bound,
                         node.start_position().row + 1,
                         node.start_position().column,
                         None,
@@ -839,8 +866,33 @@ fn visit_python_self_members(
         rebind_python_value(node, source, context, annotated);
     }
     for child in named_children(node) {
+        // A branch states its names for its own body only: `if flag: client =
+        // Right()` leaves `client` holding either value afterwards, so the
+        // name no longer states one type. Walking the branch on a copy and
+        // keeping only the names both states agree on keeps the parameter's
+        // annotation when no branch rebinds it and drops it when one does.
+        if python_states_branches(child) {
+            let before = annotated.clone();
+            let mut branch = before.clone();
+            visit_python_self_members(child, owner_index, class_name, source, context, &mut branch);
+            for name in before.keys().chain(branch.keys()) {
+                if before.get(name) != branch.get(name) {
+                    annotated.remove(name);
+                }
+            }
+            continue;
+        }
         visit_python_self_members(child, owner_index, class_name, source, context, annotated);
     }
+}
+
+/// Whether a node states names for a body that may or may not run: a branch,
+/// a loop or a handler leaves the names it rebinds holding either value.
+fn python_states_branches(node: Node<'_>) -> bool {
+    matches!(
+        node.kind(),
+        "if_statement" | "for_statement" | "while_statement" | "try_statement" | "match_statement"
+    )
 }
 
 /// The annotated parameters of one function, on top of the annotations the
