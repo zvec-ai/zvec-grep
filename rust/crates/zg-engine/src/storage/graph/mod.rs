@@ -24,6 +24,8 @@ pub(crate) use types::*;
 /// Errors at the graph persistence boundary.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
+    #[error("graph query was cancelled")]
+    Cancelled,
     #[error("SQLite graph operation failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("invalid graph metadata: {0}")]

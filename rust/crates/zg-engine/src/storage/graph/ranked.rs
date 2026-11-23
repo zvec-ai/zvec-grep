@@ -1,9 +1,11 @@
 use rusqlite::{StatementStatus, functions::FunctionFlags, params};
+use tokio_util::sync::CancellationToken;
 
 use crate::domain::FileEdge;
 
 use super::{Result, SqliteGraphStorage, reader::edge_from_row};
 
+#[derive(Debug)]
 pub(crate) struct RankedHop {
     pub rows: Vec<(usize, i64, FileEdge)>,
     pub rows_considered: usize,
@@ -36,7 +38,37 @@ impl SqliteGraphStorage {
 
     /// Return at most the remaining hop budget of rows. SQLite computes local
     /// priorities before the limit, so count that work separately.
-    pub(crate) fn ranked_hop(&self, frontier: &[&str], limit: usize) -> Result<RankedHop> {
+    pub(crate) fn ranked_hop(
+        &self,
+        frontier: &[&str],
+        limit: usize,
+        signal: Option<&CancellationToken>,
+    ) -> Result<RankedHop> {
+        if signal.is_some_and(CancellationToken::is_cancelled) {
+            return Err(super::Error::Cancelled);
+        }
+        if let Some(signal) = signal {
+            let signal = signal.clone();
+            // Scheduling may inspect far more rows than the returned edge budget.
+            self.connection
+                .progress_handler(1_000, Some(move || signal.is_cancelled()));
+        }
+        let result = self.select_hop(frontier, limit);
+        if signal.is_some() {
+            self.connection.progress_handler(0, None::<fn() -> bool>);
+        }
+        match result {
+            Err(super::Error::Sqlite(error))
+                if error.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted)
+                    && signal.is_some_and(CancellationToken::is_cancelled) =>
+            {
+                Err(super::Error::Cancelled)
+            }
+            result => result,
+        }
+    }
+
+    fn select_hop(&self, frontier: &[&str], limit: usize) -> Result<RankedHop> {
         let mut stmt = self.connection.prepare(RANKED_HOP)?;
         let frontier = serde_json::to_string(frontier)?;
         let mut rows = stmt.query(params![frontier, limit])?;
@@ -123,6 +155,91 @@ mod tests {
     use super::*;
     use crate::domain::GraphEdgeKind;
     use serde_json::json;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    fn high_fanout_graph() -> SqliteGraphStorage {
+        let graph = SqliteGraphStorage::in_memory().expect("graph");
+        graph
+            .connection
+            .execute(
+                "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 1000)
+             INSERT INTO edges (file_id, source, target, kind, status, provenance)
+             SELECT 1, 'caller-' || x, 'seed', 'calls', 'resolved', 'file_local' FROM n",
+                [],
+            )
+            .expect("callers");
+        graph
+    }
+
+    #[test]
+    fn ranked_hop_cancels_during_sql_and_removes_its_progress_handler() {
+        let graph = high_fanout_graph();
+        let signal = CancellationToken::new();
+        let cancel = signal.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        graph
+            .with_edge_priority(
+                move |_, _, _| {
+                    if observed.fetch_add(1, Ordering::Relaxed) == 0 {
+                        cancel.cancel();
+                    }
+                    None
+                },
+                || {
+                    let error = graph
+                        .ranked_hop(&["seed"], 600, Some(&signal))
+                        .expect_err("cancel while SQLite schedules callers");
+                    assert!(matches!(error, super::super::Error::Cancelled));
+                    assert!((1..1000).contains(&calls.load(Ordering::Relaxed)));
+                    assert_eq!(
+                        graph
+                            .ranked_hop(&["seed"], 1, None)
+                            .expect("reuse connection")
+                            .rows
+                            .len(),
+                        1
+                    );
+                    let next = CancellationToken::new();
+                    assert_eq!(
+                        graph
+                            .ranked_hop(&["seed"], 1, Some(&next))
+                            .expect("new request")
+                            .rows
+                            .len(),
+                        1
+                    );
+                },
+            )
+            .expect("priority callback");
+        assert!(matches!(
+            graph.ranked_hop(&[], 1, Some(&signal)),
+            Err(super::super::Error::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn sqlite_interrupt_without_request_cancellation_remains_a_storage_error() {
+        let graph = high_fanout_graph();
+        let signal = CancellationToken::new();
+        let interrupt = graph.connection.get_interrupt_handle();
+        graph.with_edge_priority(
+            move |_, _, _| {
+                interrupt.interrupt();
+                None
+            },
+            || {
+                let error = graph.ranked_hop(&["seed"], 600, Some(&signal))
+                    .expect_err("unrelated interruption");
+                assert!(matches!(error, super::super::Error::Sqlite(error)
+                    if error.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted)));
+                assert!(!signal.is_cancelled());
+            },
+        ).expect("priority callback");
+    }
 
     #[test]
     fn ranked_hop_prioritizes_incoming_probes_and_preserves_selected_payloads() {
@@ -146,7 +263,7 @@ mod tests {
                 |inheritance, _, neighbor| (inheritance || neighbor == "caller-69").then_some(0),
                 || {
                     let selected = graph
-                        .ranked_hop(&["seed", "isolated"], 2)
+                        .ranked_hop(&["seed", "isolated"], 2, None)
                         .expect("ranked hop");
                     assert_eq!(selected.rows_considered, 74);
                     assert_eq!(selected.rows.len(), 2);
@@ -158,7 +275,7 @@ mod tests {
                     assert_eq!(call.line, Some(70));
                     assert_eq!(call.column, Some(4));
                     assert_eq!(call.metadata["payload"], json!([70, "中文"]));
-                    let full = graph.ranked_hop(&["seed"], 100).expect("all edges");
+                    let full = graph.ranked_hop(&["seed"], 100, None).expect("all edges");
                     assert_eq!(full.rows.len(), 74);
                     assert_eq!(
                         full.rows
@@ -169,14 +286,14 @@ mod tests {
                     );
                     assert!(
                         graph
-                            .ranked_hop(&["seed"], 0)
+                            .ranked_hop(&["seed"], 0, None)
                             .expect("zero budget")
                             .rows
                             .is_empty()
                     );
                     assert!(
                         graph
-                            .ranked_hop(&["isolated"], 10)
+                            .ranked_hop(&["isolated"], 10, None)
                             .expect("isolated")
                             .rows
                             .is_empty()

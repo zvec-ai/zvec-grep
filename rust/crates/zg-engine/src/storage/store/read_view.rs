@@ -148,12 +148,17 @@ impl ReadView<'_> {
             .map_err(graph_error)?
     }
 
-    pub(crate) fn ranked_hop(&self, frontier: &[&str], limit: usize) -> EngineResult<RankedHop> {
+    pub(crate) fn ranked_hop(
+        &self,
+        frontier: &[&str],
+        limit: usize,
+        signal: Option<&tokio_util::sync::CancellationToken>,
+    ) -> EngineResult<RankedHop> {
         self.state
             .graph
             .as_ref()
             .map_err(|error| EngineError::from_report(error.clone()))?
-            .ranked_hop(frontier, limit)
+            .ranked_hop(frontier, limit, signal)
             .map_err(graph_error)
     }
 

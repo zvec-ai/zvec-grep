@@ -966,7 +966,7 @@ fn timing(name: &str, duration: std::time::Duration) -> TimingEntry {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::{HashMap, HashSet},
+        collections::{BTreeMap, BTreeSet, HashMap, HashSet},
         path::{Path, PathBuf},
         sync::{Arc, Mutex},
     };
@@ -1068,6 +1068,7 @@ mod tests {
         call(id(2), id(3), 4);
         call(id(0), id(0), 5);
         call(id(4), id(5), 6);
+        call(id(0), id(4), 8);
         let contained = 211;
         for index in 6..contained {
             for line in 10..18 {
@@ -1293,6 +1294,14 @@ mod tests {
         assert_eq!(trace.edge_kinds, graph_expand::ALL_EDGES);
         assert_eq!(trace.seeds.len(), 2);
         assert_eq!(trace.layers.len(), 3);
+        assert_eq!(
+            trace.edges.len(),
+            trace
+                .layers
+                .iter()
+                .map(|layer| layer.edges_read - layer.filtered - layer.invisible)
+                .sum::<usize>()
+        );
         assert!(trace.added.len() <= 200);
         let work = trace.work.expect("work");
         assert!(work.edge_rows_read <= 1500);
@@ -1367,6 +1376,158 @@ mod tests {
                 .iter()
                 .any(|entry| entry.entity.entity_id == fixture.id(1))
         );
+        assert!(
+            trace
+                .edges
+                .iter()
+                .all(|edge| { edge.caller_id != fixture.id(1) && edge.callee_id != fixture.id(1) })
+        );
+    }
+
+    fn walk_trace_paths(
+        node: &str,
+        mass: f64,
+        depth: usize,
+        neighbors: &BTreeMap<&str, BTreeSet<&str>>,
+        scores: &mut BTreeMap<String, f64>,
+    ) {
+        if depth == 3 {
+            return;
+        }
+        let Some(targets) = neighbors.get(node) else {
+            return;
+        };
+        let mass = mass / f64::from(u32::try_from(targets.len()).expect("fixture degree"));
+        for target in targets {
+            *scores.entry(target.to_string()).or_default() += mass * [1.0, 0.5, 0.25][depth];
+            walk_trace_paths(target, mass, depth + 1, neighbors, scores);
+        }
+    }
+
+    fn replay_graph_scores(
+        trace: &crate::api::context::result::GroupSearchTrace,
+    ) -> BTreeMap<String, f64> {
+        let graph = trace.graph.as_ref().expect("graph trace");
+        let mut neighbors = BTreeMap::<&str, BTreeSet<&str>>::new();
+        for edge in &graph.edges {
+            if edge.caller_id != edge.callee_id {
+                neighbors
+                    .entry(&edge.caller_id)
+                    .or_default()
+                    .insert(&edge.callee_id);
+                neighbors
+                    .entry(&edge.callee_id)
+                    .or_default()
+                    .insert(&edge.caller_id);
+            }
+        }
+        let seed_scores: HashMap<_, _> = trace
+            .fused
+            .iter()
+            .map(|candidate| (candidate.entity_id.as_str(), candidate.score))
+            .collect();
+        let mut scores = BTreeMap::new();
+        // Enumerate each seed's paths independently of the production aggregate walk.
+        for seed in &graph.seeds {
+            walk_trace_paths(seed, seed_scores[seed.as_str()], 0, &neighbors, &mut scores);
+        }
+        scores
+    }
+
+    #[tokio::test]
+    async fn graph_scores_can_be_replayed_from_the_serialized_response() {
+        let fixture = GraphFixture::new();
+        let result = fixture.search(GraphFixture::request(), true).await;
+        let json =
+            serde_json::to_vec(&result.trace.expect("search trace")).expect("serialize trace");
+        let trace: crate::api::context::result::GroupSearchTrace =
+            serde_json::from_slice(&json).expect("response trace");
+        let graph = trace.graph.as_ref().expect("graph trace");
+        assert_eq!(
+            graph
+                .edges
+                .iter()
+                .filter(|edge| {
+                    edge.caller_id == fixture.id(0) && edge.callee_id == fixture.id(4)
+                })
+                .count(),
+            2
+        );
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|edge| edge.caller_id == edge.callee_id)
+        );
+        let scores = replay_graph_scores(&trace);
+        let candidates: BTreeSet<_> = trace
+            .ordinary_pool
+            .iter()
+            .map(|entity| entity.entity_id.as_str())
+            .chain(
+                graph
+                    .added
+                    .iter()
+                    .map(|candidate| candidate.entity.entity_id.as_str()),
+            )
+            .collect();
+        let normalizer: f64 = candidates
+            .iter()
+            .map(|id| scores.get(*id).copied().unwrap_or(0.0))
+            .sum();
+        let ordinary_normalizer: f64 = (1..=trace.ordinary_pool.len())
+            .map(|rank| 1.0 / (60.0 + f64::from(u32::try_from(rank).expect("fixture rank"))))
+            .sum();
+        assert!(normalizer > 0.0);
+        for hit in &trace.selected {
+            let ranking = hit.trace.graph_ranking.as_ref().expect("graph ranking");
+            let raw = scores.get(&hit.entity_id).copied().unwrap_or(0.0);
+            assert!((raw - ranking.graph_raw_score).abs() < 1e-12);
+            assert!((normalizer - ranking.graph_normalizer).abs() < 1e-12);
+            let graph_score = raw / normalizer;
+            let ordinary_score = 1.0
+                / (60.0 + f64::from(u32::try_from(ranking.ordinary_rank).expect("rank")))
+                / ordinary_normalizer;
+            assert!((graph_score - ranking.graph_score).abs() < 1e-12);
+            assert!((ordinary_score - ranking.ordinary_score).abs() < 1e-12);
+            assert!((ordinary_score.midpoint(graph_score) - ranking.score).abs() < 1e-12);
+        }
+        let mut missing_seed_edges = trace.clone();
+        missing_seed_edges
+            .graph
+            .as_mut()
+            .expect("graph")
+            .edges
+            .retain(|edge| {
+                !((edge.caller_id == fixture.id(0) && edge.callee_id == fixture.id(4))
+                    || (edge.caller_id == fixture.id(4) && edge.callee_id == fixture.id(0)))
+            });
+        let incomplete = replay_graph_scores(&missing_seed_edges);
+        assert!(trace.selected.iter().any(|hit| {
+            (incomplete.get(&hit.entity_id).copied().unwrap_or(0.0) - scores[&hit.entity_id]).abs()
+                > 1e-6
+        }));
+    }
+
+    #[test]
+    fn cancellation_inside_sql_keeps_the_engine_cancelled_error_code() {
+        let fixture = GraphFixture::new();
+        let signal = CancellationToken::new();
+        let cancel = signal.clone();
+        let error = fixture
+            .graph
+            .read_snapshot(|view| {
+                view.with_edge_priority(
+                    move |_, _, _| {
+                        cancel.cancel();
+                        None
+                    },
+                    || view.ranked_hop(&[fixture.id(0)], 600, Some(&signal)),
+                )
+            })
+            .expect_err("cancel from a running SQLite priority callback");
+        assert!(signal.is_cancelled());
+        assert_eq!(error.code(), EngineError::CANCELLED);
     }
 
     #[tokio::test]

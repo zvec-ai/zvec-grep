@@ -267,7 +267,7 @@ pub(super) fn walk(
                 });
                 let ids: Vec<_> = frontier.iter().map(EntityId::as_str).collect();
                 let started = Instant::now();
-                let hop = view.ranked_hop(&ids, limit - work.edge_rows_read)?;
+                let hop = view.ranked_hop(&ids, limit - work.edge_rows_read, signal)?;
                 work.index_edge_micros += micros(started);
                 *work.sqlite_edge_rows_considered.get_or_insert(0) += hop.rows_considered;
                 *work.sqlite_vm_steps.get_or_insert(0) += hop.vm_steps;
@@ -382,6 +382,9 @@ impl Traversal {
             }
             let kind = edge.kind;
             let evidence = edge_trace(edge, &self.endpoints);
+            if self.trace {
+                result.trace.edges.push(evidence.clone());
+            }
             if matches!(kind, GraphEdgeKind::Calls | GraphEdgeKind::Contains) {
                 self.observed
                     .entry(source.clone())

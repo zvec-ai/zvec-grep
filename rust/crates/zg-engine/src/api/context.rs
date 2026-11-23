@@ -657,6 +657,9 @@ pub mod result {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub edge_kinds: Vec<GraphEdgeKind>,
         pub seeds: Vec<String>,
+        /// Visible, filter-matching edge reads, including repeated reads and self-loops.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub edges: Vec<GraphCallTrace>,
         pub layers: Vec<GraphLayerTrace>,
         pub added: Vec<GraphCandidateTrace>,
         pub reached_ordinary: Vec<String>,

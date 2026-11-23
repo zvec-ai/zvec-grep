@@ -508,11 +508,16 @@ honor `limit`; graph-added entities influence scores but are not returned.
 With `trace: true`, MCP structured content includes `searchTrace` and stage
 `timings`. Trace records recall attempts, loaded candidates, graph witnesses and
 work counts. Each selected hit preserves ordinary rule scores in `ranking` and
-final graph-assisted scores in `graph_ranking`. The `graph_expand` timing includes
+final graph-assisted scores in `graph_ranking`. Each graph trace's `edges` lists
+all visible, filter-matching edge reads with their original direction and location,
+including edges between seeds and edges through candidates outside the retained pool.
+To replay graph scores, deduplicate undirected endpoint pairs, discard self-loops,
+and start from the seed RRF scores in `fused`. Normalize over `ordinary_pool` and
+graph `added` candidates. The `graph_expand` timing includes
 priority preparation and index work; `graph_ranking` measures propagation and
 final selection. Without an eligible seed or graph-enabled index, ordinary ranking
 is preserved. Graph read failures are reported alongside ordinary results;
-cancellation aborts the request.
+cancellation interrupts SQLite scheduling as well as traversal and aborts the request.
 
 This version indexes text and code with one embedding model per workspace. Choose
 it with `zg --index --embedding <model>` or set a default with
