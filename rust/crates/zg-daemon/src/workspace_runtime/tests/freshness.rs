@@ -131,6 +131,45 @@ async fn explicit_counts_are_forwarded_without_entering_runtime_status_cache() {
     engine.close();
 }
 
+#[test]
+fn overlapping_status_requests_both_return_ready() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let workspace = tempdir().expect("workspace");
+        let root = workspace.path().canonicalize().expect("root");
+        let engine = empty_search_engine(&root).await;
+        let (manager, _sender) = fixture(Arc::new(RecordingExecutor::default()));
+        let options = InfoOptions {
+            root: Some(root),
+            include_status: true,
+            include_counts: false,
+        };
+
+        let (release, wait) = std::sync::mpsc::channel();
+        let blocker = tokio::task::spawn_blocking(move || wait.recv());
+        let mut first = std::pin::pin!(manager.info(&engine, options.clone()));
+        let mut second = std::pin::pin!(manager.info(&engine, options));
+        assert!(futures::poll!(&mut first).is_pending());
+        assert!(futures::poll!(&mut second).is_pending());
+        release.send(()).expect("release blocking thread");
+        blocker.await.expect("blocking task").expect("released");
+
+        let (first, second) = tokio::join!(first, second);
+        for result in [first, second] {
+            assert_eq!(
+                result.expect("status inspection").index_status(),
+                zg_engine::api::info::result::IndexStatus::Ready,
+            );
+        }
+        manager.shutdown_all().await.expect("shutdown");
+        engine.close();
+    });
+}
+
 #[tokio::test]
 async fn watcher_does_not_recreate_a_deleted_workspace_index() {
     let workspace = tempdir().expect("workspace");
