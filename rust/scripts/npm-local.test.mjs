@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
-import { chmod, lstat, mkdtemp, mkdir, readFile, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdtemp, mkdir, readFile, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -492,6 +492,8 @@ test("CUDA fallback uses the primary Cargo source record, including cached build
     await writeFile(join(directory, "CMakeLists.txt"), "# source path fixture\n");
   }
   await mkdir(join(project, "src"));
+  // Use the release toolchain's build-script output layout in this temporary crate.
+  await copyFile(new URL("../rust-toolchain.toml", import.meta.url), join(project, "rust-toolchain.toml"));
   await writeFile(join(project, "Cargo.toml"),
     '[package]\nname = "llama-cpp-sys-2"\nversion = "0.0.0"\nedition = "2021"\nlinks = "llama"\n');
   await writeFile(join(project, "Cargo.lock"),
