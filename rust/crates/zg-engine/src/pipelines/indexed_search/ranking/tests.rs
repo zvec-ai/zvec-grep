@@ -103,6 +103,7 @@ fn run(query: &str, hits: Vec<SearchHit>, filter: &QueryFilter, limit: usize) ->
         filter,
         1.0,
         limit,
+        None,
     )
 }
 
@@ -527,6 +528,7 @@ fn file_support_requires_independent_definitions_and_is_bounded() {
         1.0,
         3,
         policy,
+        None,
     );
     assert_eq!(out[0].entity.id().as_str(), "definition");
     let ranking = out[0]
@@ -547,7 +549,15 @@ fn file_support_requires_independent_definitions_and_is_bounded() {
         candidates[2].entity.fragments().to_vec(),
     )
     .expect("entity");
-    let out = rank_with_policy(candidates, &routes, &QueryFilter::default(), 1.0, 3, policy);
+    let out = rank_with_policy(
+        candidates,
+        &routes,
+        &QueryFilter::default(),
+        1.0,
+        3,
+        policy,
+        None,
+    );
     assert!(out.iter().all(|hit| {
         hit.trace
             .as_ref()

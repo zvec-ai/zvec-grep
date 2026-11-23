@@ -1097,6 +1097,7 @@ mod output_tests {
             coverage: ContextCoverage::RankedSample,
             workspace_index: None,
             group_results: vec![],
+            stage_traces: vec![],
             diagnostics: ContextDiagnostics::default(),
             items: vec![indexed_item()],
         }
