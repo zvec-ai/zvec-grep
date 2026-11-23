@@ -1,12 +1,12 @@
-//! Shared ownership and dispatch of physical embedding batches.
+//! Shared context ownership and dispatch of independent embedding inputs.
 use std::collections::{BTreeMap, VecDeque};
 
 use super::{
-    Arc, AtomicBool, CancellationToken, Condvar, Duration, EmbeddingResult, LlamaBatchPlan,
-    LlamaContextPool, LlamaContextProfile, LlamaContextWorker, LlamaExecutionBackend,
-    LlamaExecutionBudget, LlamaModel, LlamaResources, LlamaWorkerJob, LlamaWorkerLease,
-    LlamaWorkerMessage, LlamaWorkerResponse, ModelError, Ordering, PoisonError, PreparedLlamaBatch,
-    PreparedLlamaInput, StdMutex, check_cancelled, llama_context_worker,
+    Arc, AtomicBool, CancellationToken, Condvar, Duration, EmbeddingResult, LlamaContextPool,
+    LlamaContextProfile, LlamaContextWorker, LlamaExecutionBackend, LlamaExecutionBudget,
+    LlamaModel, LlamaResources, LlamaWorkerJob, LlamaWorkerLease, LlamaWorkerMessage,
+    LlamaWorkerResponse, ModelError, Ordering, PoisonError, PreparedLlamaBatch, PreparedLlamaInput,
+    StdMutex, check_cancelled, llama_batch_capacity, llama_context_worker,
     llama_micro_batch_capacity, lock_llama_mutex, mpsc, thread,
 };
 
@@ -197,24 +197,27 @@ struct LlamaBatchExecution {
 }
 
 impl LlamaBatchExecution {
-    fn context_profile(&self, plan: &LlamaBatchPlan) -> LlamaContextProfile {
-        // Capacity belongs to this physical batch, not the longest input
-        // elsewhere in the application call.
-        LlamaContextProfile {
+    fn context_profile(
+        &self,
+        input: &PreparedLlamaInput,
+    ) -> Result<LlamaContextProfile, ModelError> {
+        if input.tokens.is_empty() || input.tokens.len() > self.context_size as usize {
+            return Err(ModelError::invalid_argument(
+                "llama.cpp embedding input must fit the nonempty context",
+            ));
+        }
+        let capacity = llama_batch_capacity(input.tokens.len(), self.context_size)?;
+        // Each input owns a job; another input's length must not inflate its KV.
+        Ok(LlamaContextProfile {
             context_size: if self.architecture == "qwen3" {
-                plan.token_capacity.max(256).min(self.context_size)
+                capacity.max(256).min(self.context_size)
             } else {
                 self.context_size
             },
-            batch_capacity: plan.token_capacity,
-            micro_batch_capacity: llama_micro_batch_capacity(
-                &self.architecture,
-                plan.token_capacity,
-                self.budget.batch_tokens,
-            ),
-            sequence_capacity: plan.sequence_capacity,
+            batch_capacity: capacity,
+            micro_batch_capacity: llama_micro_batch_capacity(&self.architecture, capacity),
             threads: self.budget.threads,
-        }
+        })
     }
 }
 
@@ -228,11 +231,9 @@ fn collect_completed(
         if let Some(result) = pending[index].try_receive() {
             drop(pending.swap_remove(index));
             match result {
-                Ok(output) => {
-                    for (index, vector) in output {
-                        if let Some(target) = vectors.get_mut(index) {
-                            *target = Some(vector);
-                        }
+                Ok((index, vector)) => {
+                    if let Some(target) = vectors.get_mut(index) {
+                        *target = Some(vector);
                     }
                 }
                 Err(error) => {
@@ -285,20 +286,21 @@ impl LlamaContextPool {
                 ModelError::internal("Unable to read llama.cpp model architecture")
                     .with_cause(error)
             })?;
-        let budget = LlamaExecutionBudget::resolve(
-            &architecture,
-            self.backend,
-            execution_concurrency,
-            &self.resources,
-        );
+        let budget =
+            LlamaExecutionBudget::resolve(self.backend, execution_concurrency, &self.resources);
         let execution = LlamaBatchExecution {
             architecture,
             context_size,
             budget,
             concurrency: execution_concurrency,
         };
-        let plan = LlamaBatchPlan::new(&inputs, context_size, budget.batch_tokens)?;
-        let mut batches = VecDeque::from(plan.into_batches(inputs));
+        let mut inputs = inputs
+            .into_iter()
+            .map(|input| {
+                let profile = execution.context_profile(&input)?;
+                Ok((input, profile))
+            })
+            .collect::<Result<VecDeque<_>, ModelError>>()?;
         let operation = self.register_operation(budget.contexts, scope);
         let completion = Arc::clone(&self.completion);
         // Declared after operation so unwinding drains jobs before unregistering.
@@ -314,7 +316,7 @@ impl LlamaContextPool {
             {
                 failure = Some(error);
             }
-            while failure.is_none() && !batches.is_empty() && pending.len() < budget.contexts {
+            while failure.is_none() && !inputs.is_empty() && pending.len() < budget.contexts {
                 let leased = if pending.is_empty() {
                     self.lease_worker(&operation, signal).map(Some)
                 } else {
@@ -328,8 +330,8 @@ impl LlamaContextPool {
                         break;
                     }
                 };
-                let inputs = batches.pop_front().expect("planned batch");
-                match self.dispatch_batch(lease, inputs, &execution, signal) {
+                let (input, profile) = inputs.pop_front().expect("prepared input");
+                match self.dispatch_input(lease, input, profile, &execution, signal) {
                     Ok(job) => pending.push(job),
                     Err(error) => {
                         failure = Some(error);
@@ -359,20 +361,15 @@ impl LlamaContextPool {
         Ok(EmbeddingResult { vectors, truncated })
     }
 
-    fn dispatch_batch<'a>(
+    fn dispatch_input<'a>(
         &self,
         lease: LlamaWorkerLease<'a>,
-        inputs: Vec<PreparedLlamaInput>,
+        input: PreparedLlamaInput,
+        profile: LlamaContextProfile,
         execution: &LlamaBatchExecution,
         signal: Option<&CancellationToken>,
     ) -> Result<PendingJob<'a>, ModelError> {
         check_cancelled(signal)?;
-        let plan = LlamaBatchPlan::new(
-            &inputs,
-            execution.context_size,
-            execution.budget.batch_tokens,
-        )?;
-        let profile = execution.context_profile(&plan);
         tracing::debug!(
             architecture = execution.architecture,
             gpu = self.backend.is_gpu(),
@@ -380,17 +377,14 @@ impl LlamaContextPool {
             execution_concurrency = execution.concurrency,
             desired_threads = profile.threads,
             desired_contexts = execution.budget.contexts,
-            desired_batch_token_budget = ?execution.budget.batch_tokens,
             desired_context_tokens = profile.context_size,
             desired_batch_tokens = profile.batch_capacity,
             desired_micro_batch_tokens = profile.micro_batch_capacity,
-            desired_sequences = profile.sequence_capacity,
             "llama.cpp embedding execution budget"
         );
         let (sender, receiver) = mpsc::sync_channel(1);
         let job = LlamaWorkerJob {
-            inputs,
-            plan,
+            input,
             profile,
             signal: signal.cloned(),
             response: LlamaResponseSender {

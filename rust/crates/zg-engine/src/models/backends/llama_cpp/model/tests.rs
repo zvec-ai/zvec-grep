@@ -81,24 +81,67 @@ fn worker_responses_preserve_failure_codes_and_metadata() {
 
 #[test]
 fn cancellation_after_native_completion_does_not_request_cpu_fallback() {
-    let inputs = vec![PreparedLlamaInput {
+    let input = PreparedLlamaInput {
         index: 0,
         tokens: vec![LlamaToken::new(7); 32],
-    }];
-    let plan = LlamaBatchPlan::new(&inputs, 2_048, Some(128)).expect("plan");
+    };
     let signal = CancellationToken::new();
     let mut calls = 0;
-    let error = plan
-        .execute(&inputs, Some(&signal), |batch| {
-            calls += 1;
-            signal.cancel();
-            Ok(vec![vec![1.0]; batch.len()])
-        })
-        .expect_err("cancellation after inference must propagate");
+    let error = infer_single_sequence(&input, Some(&signal), |_| {
+        calls += 1;
+        signal.cancel();
+        Ok(vec![1.0])
+    })
+    .expect_err("cancellation after inference must propagate");
     assert_eq!(calls, 1);
     assert_eq!(error.code(), crate::EngineError::CANCELLED);
     assert!(error.should_fail_fast());
     assert!(!should_fallback_to_cpu(true, &error));
+}
+
+#[test]
+fn single_sequence_inference_preserves_the_input_and_result_identity() {
+    let input = PreparedLlamaInput {
+        index: 7,
+        tokens: vec![LlamaToken::new(3); 513],
+    };
+    let result = infer_single_sequence(&input, None, |tokens| {
+        assert_eq!(tokens, input.tokens);
+        Ok(vec![0.25, 0.75])
+    })
+    .expect("one input");
+    assert_eq!(result, (7, vec![0.25, 0.75]));
+}
+
+#[test]
+fn cancelled_single_sequence_never_starts_native_inference() {
+    let signal = CancellationToken::new();
+    signal.cancel();
+    let input = PreparedLlamaInput {
+        index: 0,
+        tokens: vec![LlamaToken::new(3)],
+    };
+    let error = infer_single_sequence(&input, Some(&signal), |_| panic!("must not infer"))
+        .expect_err("cancelled");
+    assert_eq!(error.code(), crate::EngineError::CANCELLED);
+}
+
+#[test]
+fn single_sequence_native_failure_preserves_its_error_and_allows_retry() {
+    let input = PreparedLlamaInput {
+        index: 2,
+        tokens: vec![LlamaToken::new(3)],
+    };
+    let error = infer_single_sequence(&input, None, |_| {
+        Err(ModelError::invalid_argument("invalid native tokens").with_cause("fixture"))
+    })
+    .expect_err("native failure");
+    assert_eq!(error.cause(), Some("fixture"));
+    assert!(!should_fallback_to_cpu(true, &error));
+    assert_eq!(
+        infer_single_sequence(&input, None, |_| Ok(vec![1.0])).expect("retry"),
+        (2, vec![1.0])
+    );
 }
 
 #[test]
@@ -158,12 +201,8 @@ fn pins_main_compatible_sources_and_cache_name() {
 #[test]
 fn native_parameters_use_fixed_threads_per_context() {
     for count in [1, 2, 4, 8, 24] {
-        let budget = LlamaExecutionBudget::resolve(
-            "gemma-embedding",
-            LlamaExecutionBackend::Cpu,
-            count,
-            &test_resources(8),
-        );
+        let budget =
+            LlamaExecutionBudget::resolve(LlamaExecutionBackend::Cpu, count, &test_resources(8));
         assert_eq!(budget.threads, 2);
         assert_eq!(budget.contexts, count.min(8));
         let params = llama_context_params(
@@ -172,14 +211,13 @@ fn native_parameters_use_fixed_threads_per_context() {
                 context_size: 2_048,
                 batch_capacity: 128,
                 micro_batch_capacity: 128,
-                sequence_capacity: 4,
                 threads: budget.threads,
             },
         );
         assert_eq!(params.n_threads(), 2);
         assert_eq!(params.n_threads_batch(), 2);
         assert_eq!(params.n_batch(), 128);
-        assert_eq!(params.n_seq_max(), 4);
+        assert_eq!(params.n_seq_max(), 1);
     }
 }
 
@@ -196,7 +234,6 @@ fn context_profile_requires_matching_fixed_threads() {
         context_size: 8_192,
         batch_capacity: 8_192,
         micro_batch_capacity: 256,
-        sequence_capacity: 1,
         threads: 1,
     };
     for threads in [1, 2, 4, 8] {
@@ -212,7 +249,6 @@ fn context_profile_requires_recreation_for_each_capacity_growth() {
         context_size: 512,
         batch_capacity: 256,
         micro_batch_capacity: 128,
-        sequence_capacity: 4,
         threads: 1,
     };
     for desired in [
@@ -228,29 +264,23 @@ fn context_profile_requires_recreation_for_each_capacity_growth() {
             micro_batch_capacity: 256,
             ..current
         },
-        LlamaContextProfile {
-            sequence_capacity: 8,
-            ..current
-        },
     ] {
         assert!(!current.can_reuse_for(desired), "desired={desired:?}");
     }
 }
 
 #[test]
-fn qwen_context_reuses_larger_sequence_and_batch_capacity_for_short_queries() {
+fn qwen_context_reuses_larger_batch_capacity_for_short_queries() {
     let current = LlamaContextProfile {
         context_size: 8_192,
         batch_capacity: 8_192,
         micro_batch_capacity: 2_048,
-        sequence_capacity: 8,
         threads: 1,
     };
     let query = LlamaContextProfile {
         context_size: 256,
         batch_capacity: 128,
         micro_batch_capacity: 128,
-        sequence_capacity: 1,
         threads: 1,
     };
     assert!(current.can_reuse_for(query));
@@ -268,7 +298,6 @@ fn qwen_context_recreates_when_long_inputs_need_a_lower_micro_batch_budget() {
         context_size: 8_192,
         batch_capacity: 8_192,
         micro_batch_capacity: 2_048,
-        sequence_capacity: 8,
         threads: 1,
     };
     for batch_capacity in [512, 8_192] {
@@ -276,7 +305,6 @@ fn qwen_context_recreates_when_long_inputs_need_a_lower_micro_batch_budget() {
             context_size: batch_capacity,
             batch_capacity,
             micro_batch_capacity: 256,
-            sequence_capacity: 1,
             threads: 1,
         };
         assert!(!current.can_reuse_for(reduced));
@@ -290,13 +318,11 @@ fn gemma_context_reuses_capacity_when_the_whole_batch_fits_the_lower_tier() {
         context_size: 2_048,
         batch_capacity: 1_024,
         micro_batch_capacity: 1_024,
-        sequence_capacity: 16,
         threads: 1,
     };
     let reduced = LlamaContextProfile {
         batch_capacity: 128,
         micro_batch_capacity: 128,
-        sequence_capacity: 4,
         ..current
     };
     assert!(current.can_reuse_for(reduced));
@@ -306,35 +332,10 @@ fn gemma_context_reuses_capacity_when_the_whole_batch_fits_the_lower_tier() {
 fn embeddinggemma_micro_batch_covers_long_inputs_without_changing_qwen() {
     for tokens in [1, 32, 255, 256, 257, 1_024, 2_048] {
         let batch = llama_batch_capacity(tokens, 2_048).expect("batch capacity");
-        let gemma = llama_micro_batch_capacity("gemma-embedding", batch, None);
+        let gemma = llama_micro_batch_capacity("gemma-embedding", batch);
         assert_eq!(gemma, batch);
         assert!(usize::try_from(gemma).expect("micro batch") >= tokens);
-        assert_eq!(
-            llama_micro_batch_capacity("qwen3", batch, None),
-            batch.min(256)
-        );
-        assert_eq!(
-            llama_micro_batch_capacity("qwen3", batch, Some(1_024)),
-            batch.min(1_024)
-        );
-    }
-}
-
-#[test]
-fn multisequence_batching_keeps_cpu_and_cuda_on_single_sequence_jobs() {
-    for architecture in ["gemma-embedding", "qwen3"] {
-        for backend in [
-            LlamaExecutionBackend::Cpu,
-            LlamaExecutionBackend::Cuda,
-            LlamaExecutionBackend::OtherGpu,
-        ] {
-            assert_eq!(
-                LlamaExecutionBudget::resolve(architecture, backend, 1, &test_resources(8))
-                    .batch_tokens
-                    .is_some(),
-                backend == LlamaExecutionBackend::OtherGpu
-            );
-        }
+        assert_eq!(llama_micro_batch_capacity("qwen3", batch), batch.min(256));
     }
 }
 
@@ -481,18 +482,7 @@ fn assert_gemma_context_limit(
             .iter()
             .all(|worker| !worker.busy.load(Ordering::Acquire))
     );
-    let packing = LlamaExecutionBudget::resolve(
-        "gemma-embedding",
-        loaded.contexts.backend,
-        concurrency,
-        &loaded.contexts.resources,
-    )
-    .batch_tokens;
-    let physical_batches = LlamaBatchPlan::new(inputs, 2_048, packing)
-        .expect("physical batch plan")
-        .into_batches(inputs.to_vec())
-        .len();
-    assert_eq!(state.workers.len(), concurrency.min(physical_batches));
+    assert_eq!(state.workers.len(), concurrency.min(inputs.len()));
 }
 
 fn assert_context_worker_ownership(loaded: &LoadedLlamaModel) {

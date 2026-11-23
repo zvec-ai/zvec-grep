@@ -213,7 +213,7 @@ async fn qwen_batches_preserve_vectors_and_kv_isolation(device: Device) {
         let cpu_reference =
             (!loaded.gpu).then(|| qwen_individual_reference(&loaded, &inputs, concurrency));
         let expected = cpu_reference.as_ref().unwrap_or(&expected);
-        // Submit out of index order so both batch planning and output reordering
+        // Submit out of index order so input dispatch and output reordering
         // must preserve each sequence's own pooled embedding.
         let reordered = [6, 2, 0, 7, 3, 5, 1, 4]
             .into_iter()
@@ -228,7 +228,7 @@ async fn qwen_batches_preserve_vectors_and_kv_isolation(device: Device) {
         assert_embedding_close(&result[0], &result[5]);
 
         // The same context must clear prior sequence KV before a short query,
-        // then accept another multi-sequence call without stale positions.
+        // then accept another batch of independent inputs without stale positions.
         let query = qwen_infer(&loaded, vec![inputs[0].clone()], concurrency);
         assert_embedding_close(&query[0], &expected[0]);
         let repeated = qwen_infer(&loaded, inputs.clone(), concurrency);
@@ -251,8 +251,8 @@ async fn qwen_batches_preserve_vectors_and_kv_isolation(device: Device) {
 }
 
 fn assert_qwen_sequence_isolation(loaded: &LoadedLlamaModel, inputs: &[PreparedLlamaInput]) {
-    // Both pairs fit the fixed 256-token packing budget and must isolate
-    // the target when another sequence's token values change.
+    // A target must stay unchanged when another input's token values change,
+    // including when independent jobs reuse the same context.
     for target in [0, 3] {
         let mut pair = vec![inputs[target].clone(), inputs[1].clone()];
         pair[0].index = 0;

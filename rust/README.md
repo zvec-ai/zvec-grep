@@ -153,10 +153,9 @@ For llama.cpp, C is the concurrent context limit on CPU, Metal and CUDA:
 - Contexts share model weights, are created on demand, and release native buffers
   after 30 idle seconds. Qwen KV capacity follows each job's token requirements,
   preserving the catalog's maximum input length.
-- Gemma/Qwen sequences are packed internally on Metal, independently of C.
-  CPU and CUDA use one sequence per native job; CUDA packing remains disabled
-  because it failed the T4 embedding-equivalence checks. Cancellation/error paths
-  drain submitted work before returning its slots.
+- CPU, Metal and CUDA process one complete input per native job. An embedding
+  batch dispatches its inputs across the available contexts. Cancellation/error
+  paths drain submitted work before returning its slots.
 
 Transformers/ORT shares a bounded runtime between indexing and queries for the
 same model, cache and device:

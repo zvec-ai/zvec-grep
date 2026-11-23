@@ -44,8 +44,6 @@ use crate::models::{
     },
 };
 
-mod batching;
-use batching::LlamaBatchPlan;
 mod policy;
 use crate::models::runtime::llama_config::LlamaResources;
 use policy::{LlamaExecutionBackend, LlamaExecutionBudget};
@@ -123,11 +121,10 @@ enum LlamaWorkerMessage {
 }
 
 type IndexedEmbedding = (usize, Vec<f32>);
-type LlamaWorkerResponse = Result<Vec<IndexedEmbedding>, ModelError>;
+type LlamaWorkerResponse = Result<IndexedEmbedding, ModelError>;
 
 struct LlamaWorkerJob {
-    inputs: Vec<PreparedLlamaInput>,
-    plan: LlamaBatchPlan,
+    input: PreparedLlamaInput,
     profile: LlamaContextProfile,
     signal: Option<CancellationToken>,
     response: LlamaResponseSender,
@@ -149,7 +146,6 @@ struct LlamaContextProfile {
     context_size: u32,
     batch_capacity: u32,
     micro_batch_capacity: u32,
-    sequence_capacity: u32,
     threads: i32,
 }
 
@@ -164,7 +160,6 @@ impl LlamaContextProfile {
             // Long causal inputs must honor a reduced micro-batch budget.
             && (self.micro_batch_capacity == desired.micro_batch_capacity
                 || desired.batch_capacity <= desired.micro_batch_capacity)
-            && self.sequence_capacity >= desired.sequence_capacity
     }
 }
 
@@ -716,7 +711,6 @@ fn llama_context_worker(
                 active_context_tokens = active.context_size,
                 active_batch_tokens = active.batch_capacity,
                 active_micro_batch_tokens = active.micro_batch_capacity,
-                active_sequences = active.sequence_capacity,
                 active_threads = active.threads,
                 worker_contexts = 1,
                 "llama.cpp active context profile"
@@ -754,13 +748,12 @@ fn llama_context_params(architecture: &str, profile: LlamaContextProfile) -> Lla
     let params = LlamaContextParams::default()
         .with_n_ctx(NonZeroU32::new(profile.context_size))
         .with_n_batch(profile.batch_capacity)
-        .with_n_seq_max(profile.sequence_capacity)
+        .with_n_seq_max(1)
         .with_n_ubatch(profile.micro_batch_capacity)
         .with_n_threads(profile.threads)
         .with_n_threads_batch(profile.threads)
         .with_embeddings(true);
-    // Share the token capacity across independent sequence IDs. Dividing n_ctx
-    // into fixed per-sequence slices would shorten otherwise valid inputs.
+    // Each context processes one complete input at a time.
     if matches!(architecture, "gemma-embedding" | "qwen3") {
         params.with_kv_unified(true)
     } else {
@@ -768,62 +761,50 @@ fn llama_context_params(architecture: &str, profile: LlamaContextProfile) -> Lla
     }
 }
 
-fn llama_micro_batch_capacity(
-    architecture: &str,
-    batch_capacity: u32,
-    token_budget: Option<usize>,
-) -> u32 {
+fn llama_micro_batch_capacity(architecture: &str, batch_capacity: u32) -> u32 {
     if architecture == "gemma-embedding" {
         // The non-causal encoder must process the whole input in one physical
         // batch. Splitting at 256 tokens triggers a native assertion.
         batch_capacity.max(1)
     } else {
-        // Causal models split long inputs across physical batches. The internal
-        // token budget controls this working set independently of context count.
-        let limit = token_budget.map_or(256, |budget| u32::try_from(budget).unwrap_or(u32::MAX));
-        batch_capacity.clamp(1, limit.max(1))
+        // Causal models split a long input across physical batches.
+        batch_capacity.clamp(1, 256)
     }
 }
 
 fn run_llama_worker_job(
     context: &mut LlamaContext<'_>,
     job: &LlamaWorkerJob,
-) -> Result<Vec<(usize, Vec<f32>)>, ModelError> {
-    job.plan
-        .execute(&job.inputs, job.signal.as_ref(), |inputs| {
-            context.clear_kv_cache();
-            // The second argument is sequence IDs per token, not sequences per batch.
-            let mut batch = LlamaBatch::new(inputs.iter().map(|input| input.tokens.len()).sum(), 1);
-            for (sequence, input) in inputs.iter().enumerate() {
-                let sequence = i32::try_from(sequence).map_err(|error| {
-                    ModelError::internal("Too many llama.cpp embedding sequences").with_cause(error)
-                })?;
-                // Embedding mode requires all token outputs, including LAST
-                // pooling. Let the native pooling choose each sequence's result.
-                batch
-                    .add_sequence(&input.tokens, sequence, true)
-                    .map_err(|error| {
-                        ModelError::internal("Unable to prepare llama.cpp embedding batch")
-                            .with_cause(error)
-                    })?;
-            }
-            context.decode(&mut batch).map_err(|error| {
-                ModelError::internal("llama.cpp embedding inference failed").with_cause(error)
-            })?;
-            // Reading the first sequence synchronizes native execution. Retain the
-            // worker lease until all outputs have been copied, including cancellation.
-            (0..inputs.len())
-                .map(|sequence| {
-                    context
-                        .embeddings_seq_ith(i32::try_from(sequence).expect("validated sequence ID"))
-                        .map(<[f32]>::to_vec)
-                        .map_err(|error| {
-                            ModelError::internal("Unable to read llama.cpp embedding output")
-                                .with_cause(error)
-                        })
-                })
-                .collect()
-        })
+) -> LlamaWorkerResponse {
+    infer_single_sequence(&job.input, job.signal.as_ref(), |tokens| {
+        context.clear_kv_cache();
+        let mut batch = LlamaBatch::new(tokens.len(), 1);
+        batch.add_sequence(tokens, 0, true).map_err(|error| {
+            ModelError::internal("Unable to prepare llama.cpp embedding batch").with_cause(error)
+        })?;
+        context.decode(&mut batch).map_err(|error| {
+            ModelError::internal("llama.cpp embedding inference failed").with_cause(error)
+        })?;
+        // Reading the embedding synchronizes native execution. Keep the worker
+        // lease until the output is copied, including cancellation paths.
+        context
+            .embeddings_seq_ith(0)
+            .map(<[f32]>::to_vec)
+            .map_err(|error| {
+                ModelError::internal("Unable to read llama.cpp embedding output").with_cause(error)
+            })
+    })
+}
+
+fn infer_single_sequence(
+    input: &PreparedLlamaInput,
+    signal: Option<&CancellationToken>,
+    infer: impl FnOnce(&[LlamaToken]) -> Result<Vec<f32>, ModelError>,
+) -> LlamaWorkerResponse {
+    check_cancelled(signal)?;
+    let vector = infer(&input.tokens)?;
+    check_cancelled(signal)?;
+    Ok((input.index, vector))
 }
 
 fn llama_batch_capacity(token_count: usize, context_size: u32) -> Result<u32, ModelError> {

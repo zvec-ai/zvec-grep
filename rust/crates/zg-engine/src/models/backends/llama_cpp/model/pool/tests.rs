@@ -180,93 +180,80 @@ fn cancellation_response_keeps_its_structured_error_and_notifies_waiters() {
 }
 
 #[test]
-fn each_physical_job_sizes_qwen_kv_from_its_own_tokens() {
-    let inputs = [32, 8_192, 64, 64]
-        .into_iter()
-        .enumerate()
-        .map(|(index, length)| PreparedLlamaInput {
-            index,
-            tokens: vec![LlamaToken::new(7); length],
-        })
-        .collect::<Vec<_>>();
-    let budget = LlamaExecutionBudget::resolve(
-        "qwen3",
+fn each_input_sizes_its_own_context_on_every_backend() {
+    for backend in [
+        LlamaExecutionBackend::Cpu,
+        LlamaExecutionBackend::Cuda,
         LlamaExecutionBackend::OtherGpu,
-        4,
-        &test_resources(4),
-    );
-    let execution = LlamaBatchExecution {
-        architecture: "qwen3".to_owned(),
-        context_size: 8_192,
-        budget,
-        concurrency: 4,
-    };
-    let batches = LlamaBatchPlan::new(&inputs, 8_192, budget.batch_tokens)
-        .expect("plan")
-        .into_batches(inputs);
-    let profiles = batches
-        .iter()
-        .map(|inputs| {
-            execution.context_profile(
-                &LlamaBatchPlan::new(inputs, 8_192, budget.batch_tokens).expect("physical batch"),
-            )
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        profiles
-            .iter()
-            .map(|profile| profile.context_size)
-            .collect::<Vec<_>>(),
-        [256, 8_192, 256]
-    );
-    assert_eq!(
-        profiles
-            .iter()
-            .map(|profile| profile.sequence_capacity)
-            .collect::<Vec<_>>(),
-        [1, 1, 2]
-    );
-    assert_eq!(
-        profiles
-            .iter()
-            .map(|profile| profile.micro_batch_capacity)
-            .collect::<Vec<_>>(),
-        [32, 256, 128]
-    );
+    ] {
+        for architecture in ["qwen3", "gemma-embedding"] {
+            let context_size = if architecture == "qwen3" {
+                8_192
+            } else {
+                2_048
+            };
+            let budget = LlamaExecutionBudget::resolve(backend, 4, &test_resources(4));
+            assert_eq!(budget.contexts, 4);
+            let execution = LlamaBatchExecution {
+                architecture: architecture.to_owned(),
+                context_size,
+                budget,
+                concurrency: 4,
+            };
+            let profiles = [32, context_size as usize, 64, 64]
+                .into_iter()
+                .enumerate()
+                .map(|(index, length)| {
+                    execution
+                        .context_profile(&PreparedLlamaInput {
+                            index,
+                            tokens: vec![LlamaToken::new(7); length],
+                        })
+                        .expect("single input profile")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                profiles
+                    .iter()
+                    .map(|profile| profile.context_size)
+                    .collect::<Vec<_>>(),
+                if architecture == "qwen3" {
+                    vec![256, 8_192, 256, 256]
+                } else {
+                    vec![2_048; 4]
+                }
+            );
+            assert_eq!(
+                profiles
+                    .iter()
+                    .map(|profile| profile.micro_batch_capacity)
+                    .collect::<Vec<_>>(),
+                if architecture == "qwen3" {
+                    vec![32, 256, 64, 64]
+                } else {
+                    vec![32, 2_048, 64, 64]
+                }
+            );
+        }
+    }
 }
 
 #[test]
-fn cuda_keeps_whole_sequences_in_separate_jobs_without_reducing_context_budget() {
-    let inputs = [32, 8_192, 64, 64]
-        .into_iter()
-        .enumerate()
-        .map(|(index, length)| PreparedLlamaInput {
-            index,
-            tokens: vec![LlamaToken::new(7); length],
-        })
-        .collect::<Vec<_>>();
-    let budget =
-        LlamaExecutionBudget::resolve("qwen3", LlamaExecutionBackend::Cuda, 4, &test_resources(4));
-    assert_eq!(budget.contexts, 4);
+fn invalid_input_lengths_are_rejected_before_dispatch() {
     let execution = LlamaBatchExecution {
         architecture: "qwen3".to_owned(),
-        context_size: 8_192,
-        budget,
+        context_size: 256,
+        budget: LlamaExecutionBudget::resolve(LlamaExecutionBackend::Cpu, 4, &test_resources(4)),
         concurrency: 4,
     };
-    let batches = LlamaBatchPlan::new(&inputs, 8_192, budget.batch_tokens)
-        .expect("CUDA plan")
-        .into_batches(inputs.clone());
-    assert_eq!(batches.len(), inputs.len());
-    for (batch, expected) in batches.iter().zip(&inputs) {
-        assert_eq!(batch.len(), 1);
-        assert_eq!(batch[0].index, expected.index);
-        assert_eq!(batch[0].tokens, expected.tokens);
-        let plan = LlamaBatchPlan::new(batch, 8_192, budget.batch_tokens).expect("single job");
-        let profile = execution.context_profile(&plan);
-        assert_eq!(profile.sequence_capacity, 1);
-        assert!(profile.context_size as usize >= expected.tokens.len());
-        assert!(profile.micro_batch_capacity <= 256);
+    for length in [0, 257] {
+        let error = execution
+            .context_profile(&PreparedLlamaInput {
+                index: 0,
+                tokens: vec![LlamaToken::new(7); length],
+            })
+            .expect_err("invalid input length");
+        assert!(!should_fallback_to_cpu(true, &error));
     }
 }
 

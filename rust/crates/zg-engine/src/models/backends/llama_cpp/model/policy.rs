@@ -28,26 +28,14 @@ impl LlamaExecutionBackend {
 pub(super) struct LlamaExecutionBudget {
     pub(super) contexts: usize,
     pub(super) threads: i32,
-    pub(super) batch_tokens: Option<usize>,
 }
 
 impl LlamaExecutionBudget {
     pub(super) fn resolve(
-        architecture: &str,
         backend: LlamaExecutionBackend,
         requested: usize,
         resources: &LlamaResources,
     ) -> Self {
-        let batch_tokens = if backend == LlamaExecutionBackend::OtherGpu {
-            match architecture {
-                "gemma-embedding" => Some(128),
-                "qwen3" => Some(256),
-                _ => None,
-            }
-        } else {
-            // CUDA multi-sequence packing did not pass T4 equivalence checks.
-            None
-        };
         Self {
             contexts: requested.max(1).min(resources.contexts),
             threads: if backend.is_gpu() {
@@ -55,7 +43,6 @@ impl LlamaExecutionBudget {
             } else {
                 resources.cpu_threads
             },
-            batch_tokens,
         }
     }
 }
