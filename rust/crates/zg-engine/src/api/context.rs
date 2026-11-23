@@ -68,6 +68,10 @@ pub mod options {
         /// Explicit refresh policy; absent preserves the legacy auto-update behavior.
         #[serde(default)]
         pub refresh: Option<RefreshPolicy>,
+        /// Compare the workspace with the queried index and report drift in the result.
+        /// In-process only. Resident callers track indexing status separately.
+        #[serde(skip)]
+        pub inspect_index_status: bool,
         pub trace: bool,
         pub prefer_symbol: bool,
         /// Temporary filter over indexed files; does not alter workspace selection.
@@ -158,6 +162,7 @@ pub mod options {
                 limit: None,
                 auto_update: true,
                 refresh: None,
+                inspect_index_status: false,
                 trace: false,
                 prefer_symbol: false,
                 filter: QueryFilter::default(),

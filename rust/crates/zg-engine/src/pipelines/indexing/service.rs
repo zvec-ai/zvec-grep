@@ -22,11 +22,14 @@ use crate::{
         },
         info::{
             InfoOptions, InfoResult,
-            result::{IndexCompatibility, InfoSource, WorkspaceIndexInfo, WorkspaceIndexPolicy},
+            result::{
+                IndexCompatibility, IndexStats, InfoSource, WorkspaceIndexInfo,
+                WorkspaceIndexPolicy,
+            },
         },
     },
     domain::{
-        IndexDescriptor, IndexState, Workspace, WorkspaceLayout,
+        FileRecord, IndexDescriptor, IndexState, Workspace, WorkspaceLayout,
         model::{Device, EncryptedApiKey, ModelConfig},
     },
     models::{
@@ -56,6 +59,7 @@ use super::{
     input_budget::embedding_input_budget,
     pipeline::{
         IndexEmbeddingRuntime, IndexingContext, get_workspace_index_status, index_workspace,
+        workspace_index_status_from_files,
     },
 };
 
@@ -427,6 +431,24 @@ impl WorkspaceIndexService {
             || status.files_failed > 0)
     }
 
+    pub(in crate::pipelines) async fn detailed_status(
+        &self,
+        workspace: &Workspace,
+        stored_files: impl Future<Output = Result<Vec<FileRecord>, EngineError>>,
+        signal: Option<CancellationToken>,
+    ) -> Result<IndexStats, EngineError> {
+        let started = std::time::Instant::now();
+        tracing::debug!("starting workspace index status scan");
+        let stats =
+            workspace_index_status_from_files(workspace, stored_files, &self.scanner, signal, true)
+                .await?;
+        tracing::debug!(
+            elapsed_us = started.elapsed().as_micros(),
+            "checked workspace index status"
+        );
+        Ok(stats)
+    }
+
     pub(crate) async fn info(&self, options: InfoOptions) -> Result<InfoResult, EngineError> {
         let requested_root = resolve_directory(options.root.as_deref())?;
         let Some((source_root, layout)) = find_nearest_workspace(&requested_root)? else {
@@ -474,25 +496,25 @@ impl WorkspaceIndexService {
                     .is_some_and(IndexDescriptor::graph_indexing),
                 storage_path: workspace.layout().index_dir().to_path_buf(),
             })?;
-            let status =
-                get_workspace_index_status(&workspace, &storage, &self.scanner, None, true)
-                    .await
-                    .and_then(|mut status| {
-                        if options.include_counts {
-                            #[cfg(test)]
-                            {
-                                self.fragment_count_reads
-                                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                                if self.fail_fragment_count {
-                                    return Err(EngineError::storage_failure(
-                                        "injected fragment count failure",
-                                    ));
-                                }
+            let status = self
+                .detailed_status(&workspace, async { storage.list_files() }, None)
+                .await
+                .and_then(|mut status| {
+                    if options.include_counts {
+                        #[cfg(test)]
+                        {
+                            self.fragment_count_reads
+                                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                            if self.fail_fragment_count {
+                                return Err(EngineError::storage_failure(
+                                    "injected fragment count failure",
+                                ));
                             }
-                            status.fragments_indexed = Some(storage.count_fragments()?);
                         }
-                        Ok(status)
-                    });
+                        status.fragments_indexed = Some(storage.count_fragments()?);
+                    }
+                    Ok(status)
+                });
             let close = storage.close();
             let status = status?;
             close?;

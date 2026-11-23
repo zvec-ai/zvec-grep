@@ -243,12 +243,14 @@ async fn fts_queries_borrow_writer_without_credentials_but_wait_does_not() -> Te
     std::fs::remove_file(fixture.root.path().join(".zvec-grep/credentials.key"))?;
     for policy in [RefreshPolicy::Off, RefreshPolicy::Background] {
         let mut query = fixture.query(policy);
+        query.inspect_index_status = policy == RefreshPolicy::Off;
         query.api_key = None;
         query.allow_remote = false;
         query.lock_timeout_ms = Some(100);
         let result =
             tokio::time::timeout(Duration::from_secs(2), fixture.engine.context(query)).await??;
         assert_eq!(result.items[0].relative_path, PathBuf::from("anchor.txt"));
+        assert_eq!(result.indexing.is_some(), policy == RefreshPolicy::Off);
         assert!(!update.is_finished());
     }
     let mut query = fixture.query(RefreshPolicy::Wait);

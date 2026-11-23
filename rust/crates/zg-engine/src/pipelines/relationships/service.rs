@@ -75,21 +75,7 @@ pub(crate) async fn query(
         if !workspace.index_enabled() || !directory_exists(workspace.layout().index_dir())? {
             return Err(missing_index());
         }
-        let graph_enabled = workspace
-            .index()
-            .descriptor()
-            .is_some_and(IndexDescriptor::graph_indexing);
-        let storage = match read_sessions {
-            Some(cache) => cache.acquire(
-                &layout,
-                workspace.layout().index_dir(),
-                workspace
-                    .storage_generation()
-                    .expect("published index generation"),
-                graph_enabled,
-            )?,
-            None => ReadSessionLease::open(workspace.layout().index_dir(), graph_enabled)?,
-        };
+        let storage = ReadSessionLease::for_workspace(&workspace, read_sessions.as_ref())?;
         let result = run(storage.storage());
         let close = storage.close();
         let result = result?;

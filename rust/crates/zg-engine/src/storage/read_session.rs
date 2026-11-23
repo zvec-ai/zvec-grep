@@ -13,7 +13,7 @@ use std::{
 
 use crate::{
     EngineError, EngineResult,
-    domain::WorkspaceLayout,
+    domain::{IndexDescriptor, Workspace, WorkspaceLayout},
     workspace::lock::{LockGuard, LockMode, can_retain_read_cache, try_acquire_file_lock},
 };
 
@@ -273,7 +273,29 @@ impl CacheInner {
 }
 
 impl ReadSessionLease {
-    pub(crate) fn open(storage_home: &Path, graph_enabled: bool) -> EngineResult<Self> {
+    pub(crate) fn for_workspace(
+        workspace: &Workspace,
+        cache: Option<&ReadSessionCache>,
+    ) -> EngineResult<Self> {
+        let layout = workspace.layout();
+        let graph_enabled = workspace
+            .index()
+            .descriptor()
+            .is_some_and(IndexDescriptor::graph_indexing);
+        match cache {
+            Some(cache) => cache.acquire(
+                layout,
+                layout.index_dir(),
+                workspace
+                    .storage_generation()
+                    .expect("published index generation"),
+                graph_enabled,
+            ),
+            None => Self::open(layout.index_dir(), graph_enabled),
+        }
+    }
+
+    fn open(storage_home: &Path, graph_enabled: bool) -> EngineResult<Self> {
         Ok(Self {
             session: Arc::new(ReadSession {
                 storage: IndexStore::open(WorkspaceIndexStorageOptions::ReadOnly {
