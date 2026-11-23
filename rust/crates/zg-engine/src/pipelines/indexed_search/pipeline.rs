@@ -1363,8 +1363,13 @@ mod tests {
             assert_eq!(results(&plain.hits), results(&observed.hits));
             let capture = observed.stage_trace.expect("stage trace");
             for hit in &observed.hits {
-                let entry = &capture.files[hit.file.relative_path().to_str().expect("path")]
-                    [hit.entity.id().as_str()];
+                let path = hit
+                    .file
+                    .relative_path()
+                    .to_str()
+                    .expect("path")
+                    .replace(std::path::MAIN_SEPARATOR, "/");
+                let entry = &capture.files[&path][hit.entity.id().as_str()];
                 assert_eq!(entry.stages.final_rank, Some(hit.rank));
                 assert!(entry.stages.loaded_rrf_rank.is_some());
                 assert!(entry.stages.static_rank.is_some());
