@@ -685,6 +685,7 @@ fn search_file(
             results: &mut collected,
             options: &request.options.matching,
             count: 0,
+            source_matches: None,
             count_truncated,
         };
         match decoded {
@@ -703,16 +704,17 @@ fn search_file(
     Ok(())
 }
 
-struct MatchSink<'a> {
+struct MatchSink<'a, 's> {
     signal: Option<&'a tokio_util::sync::CancellationToken>,
     matcher: &'a RegexMatcher,
     results: &'a mut LexicalMatchBuilder,
     options: &'a crate::api::context::options::RgOptions,
     count: usize,
+    source_matches: Option<&'a mut extracted::SourceMatches<'s>>,
     count_truncated: &'a AtomicBool,
 }
 
-impl Sink for MatchSink<'_> {
+impl Sink for MatchSink<'_, '_> {
     type Error = io::Error;
 
     fn matched(
@@ -771,9 +773,10 @@ impl Sink for MatchSink<'_> {
                 }
                 selections.push(found);
                 multiline
-                    && self.options.max_count.is_none_or(|maximum| {
-                        selections.len() <= maximum.saturating_sub(self.count)
-                    })
+                    && (self.source_matches.is_some()
+                        || self.options.max_count.is_none_or(|maximum| {
+                            selections.len() <= maximum.saturating_sub(self.count)
+                        }))
             })
             .map_err(io::Error::other)?;
         let text = std::str::from_utf8(bytes).ok();
@@ -792,7 +795,7 @@ impl Sink for MatchSink<'_> {
     }
 }
 
-impl MatchSink<'_> {
+impl MatchSink<'_, '_> {
     fn record(
         &mut self,
         text: Option<(&str, &[usize])>,
@@ -800,14 +803,6 @@ impl MatchSink<'_> {
         line_offset: usize,
         first: grep::matcher::Match,
     ) -> io::Result<bool> {
-        if self
-            .options
-            .max_count
-            .is_some_and(|maximum| self.count >= maximum)
-        {
-            self.count_truncated.store(true, Ordering::Relaxed);
-            return Ok(false);
-        }
         let Some((text, line_starts)) = text else {
             return Ok(true);
         };
@@ -850,6 +845,19 @@ impl MatchSink<'_> {
             crate::utils::text_range_from_offsets(text, line_starts, content_start, content_end)
                 .map_err(io::Error::other)?,
         )?;
+        if let Some(positions) = &mut self.source_matches
+            && !positions.observe(content_range)?
+        {
+            return Ok(true);
+        }
+        if self
+            .options
+            .max_count
+            .is_some_and(|maximum| self.count >= maximum)
+        {
+            self.count_truncated.store(true, Ordering::Relaxed);
+            return Ok(false);
+        }
         let match_ranges = self
             .match_ranges(text, line_starts, content_start, content_end)?
             .into_iter()

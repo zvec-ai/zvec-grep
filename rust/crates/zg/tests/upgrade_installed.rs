@@ -88,6 +88,56 @@ fn backups(path: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+#[test]
+fn explicit_launcher_migrates_native_paths_and_legacy_launchers_idempotently() {
+    let fixture = Fixture::new();
+    let old = fixture.path("old install/bin/zg");
+    let path = fixture.write(".claude.json", &serde_json::to_string_pretty(&json!({
+        "mcpServers": {
+            "zvec-grep": { "command": old, "args": ["--server", "--stdio"], "env": { "CUSTOM": "preserved" } },
+            "legacy": { "command": "zg", "args": ["server", "--stdio"] },
+            "array": { "command": ["zg", "server", "--stdio"] },
+            "unrelated": { "command": "other", "args": [] }
+        }
+    })).expect("configuration"));
+    let launcher = Path::new(env!("CARGO_BIN_EXE_zg"));
+    let run = || {
+        fixture
+            .command()
+            .args(["--install", "--upgrade-installed", "--launcher"])
+            .arg(launcher)
+            .output()
+            .expect("upgrade")
+    };
+    success(&run());
+    let updated: Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("config")).expect("JSON");
+    assert_eq!(
+        updated["mcpServers"]["zvec-grep"]["command"],
+        launcher.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        updated["mcpServers"]["zvec-grep"]["env"]["CUSTOM"],
+        "preserved"
+    );
+    assert_eq!(updated["mcpServers"]["unrelated"]["command"], "other");
+    assert_eq!(
+        updated["mcpServers"]["legacy"]["command"],
+        launcher.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        updated["mcpServers"]["legacy"]["args"],
+        json!(["--server", "--stdio"])
+    );
+    assert_eq!(
+        updated["mcpServers"]["array"]["command"],
+        json!([launcher, "--server", "--stdio"])
+    );
+    assert_eq!(backups(&path).len(), 1);
+    success(&run());
+    assert_eq!(backups(&path).len(), 1);
+}
+
 fn read_json(path: &Path) -> Value {
     serde_json::from_str(&fs::read_to_string(path).expect("read")).expect("JSON")
 }

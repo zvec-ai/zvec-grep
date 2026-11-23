@@ -625,6 +625,9 @@ pub mod result {
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     pub struct RgDiagnostics {
+        /// Sources skipped because no usable extraction index is available.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub unindexed_files: Vec<PathBuf>,
         pub backend: String,
         pub command: PathBuf,
         pub args: Vec<String>,

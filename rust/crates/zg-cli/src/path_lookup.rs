@@ -74,6 +74,7 @@ pub fn write_path_lookup_with_terminals(
                 options,
                 diagnostics_terminal,
             )?;
+            crate::render::write_unindexed_warning(&mut diagnostics, result)?;
             write_current_text(&mut writer, result, options, stdout_terminal)?;
             if result.coverage == ContextCoverage::RgTruncated {
                 write_warning(

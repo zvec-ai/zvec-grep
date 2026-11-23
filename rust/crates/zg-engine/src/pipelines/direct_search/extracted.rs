@@ -5,12 +5,13 @@ use crate::{
         ContentRange, ContextContentRole, ContextItem, ContextItemKind, ContextItemStatus,
         MatchedBy,
     },
-    domain::{Content, Entity, FileRecord, IndexDescriptor},
+    domain::{Content, Entity, IndexDescriptor},
     lexical::{
         extracted::{ExtractedFileState, ExtractedMatcher},
         types::LexicalSearchRequest,
     },
     pipelines::{
+        freshness::file_freshness_status,
         indexed_search::writer::WriterContexts,
         read_access::{ReadSource, acquire_read_source},
     },
@@ -23,18 +24,29 @@ use std::{
     sync::atomic::Ordering,
 };
 
+#[derive(Default)]
+pub(super) struct SearchResult {
+    pub items: Vec<ContextItem>,
+    pub truncated: bool,
+    pub unavailable: Vec<PathBuf>,
+}
+
 pub(super) async fn search(
     paths: Vec<PathBuf>,
     request: &LexicalSearchRequest,
     timeout_ms: Option<u64>,
     writers: &WriterContexts,
-) -> EngineResult<(Vec<ContextItem>, bool)> {
+) -> EngineResult<SearchResult> {
     let mut workspaces = BTreeMap::new();
+    let mut result = SearchResult::default();
     for path in paths {
         let absolute = std::path::absolute(&path)
             .map_err(|e| EngineError::from_io("resolve extracted source path", &e))?;
-        let (root, layout) = find_nearest_workspace(absolute.parent().unwrap_or(&absolute))?
-            .ok_or_else(|| missing_index(&absolute))?;
+        let Some((root, layout)) = find_nearest_workspace(absolute.parent().unwrap_or(&absolute))?
+        else {
+            result.unavailable.push(absolute);
+            continue;
+        };
         workspaces
             .entry(root)
             .or_insert_with(|| (layout, Vec::new()))
@@ -42,8 +54,6 @@ pub(super) async fn search(
             .push(absolute);
     }
     let wait = LockWait::new(request.signal.as_ref(), timeout_ms)?;
-    let mut items = Vec::new();
-    let mut truncated = false;
     for (root, (layout, paths)) in workspaces {
         let source =
             acquire_read_source(&root, &layout, &wait, "extracted.rg", Some(writers), |_| {
@@ -51,56 +61,20 @@ pub(super) async fn search(
             })
             .await?;
         let request = request.clone();
-        let (mut found, limited) = tokio::task::spawn_blocking(move || {
-            let run = |storage: &IndexStore| {
-                let files = storage
-                    .list_files()?
-                    .into_iter()
-                    .map(|file| (root.join(file.relative_path()), file))
-                    .collect::<BTreeMap<_, _>>();
-                let search_root = request.root.as_deref().unwrap_or(&root);
-                let matcher = ExtractedMatcher::new(search_root, &request)?;
-                let mut items = Vec::new();
-                for path in paths {
-                    let file = files
-                        .get(&path)
-                        .filter(|file| file.index_status().is_indexed())
-                        .ok_or_else(|| missing_index(&path))?;
-                    let (file, mut entities) = storage.read_snapshot(|view| {
-                        let file = view
-                            .fetch_files(&[file.id()])?
-                            .remove(&file.id())
-                            .filter(|file| file.index_status().is_indexed())
-                            .ok_or_else(|| missing_index(&path))?;
-                        let entities = view.entities_for_file(file.id())?;
-                        Ok((file, entities))
-                    })?;
-                    entities.sort_by_key(|entity| {
-                        entity.source_range().byte_offsets().map(|(start, _)| start)
-                    });
-                    let mut state = ExtractedFileState::default();
-                    for entity in entities {
-                        if let Some(item) =
-                            search_entity(&matcher, &request, &path, &file, &entity, &mut state)?
-                        {
-                            items.push(item);
-                        }
-                        if state.stopped {
-                            break;
-                        }
-                    }
-                }
-                Ok((items, matcher.truncated.load(Ordering::Relaxed)))
-            };
+        let mut found = tokio::task::spawn_blocking(move || {
+            let run = |storage: &IndexStore| search_store(storage, &root, &paths, &request);
             let _lock = match source {
                 ReadSource::Writer { lease, .. } => return run(&lease.session.storage),
                 ReadSource::Read(lock) => lock,
             };
-            let workspace =
-                read_workspace_manifest(&root, &layout)?.ok_or_else(|| missing_index(&root))?;
-            if !workspace.index_enabled() {
-                return Err(missing_index(&root));
-            }
+            let Some(workspace) = read_workspace_manifest(&root, &layout)?
+                .filter(crate::domain::Workspace::index_enabled)
+            else {
+                return Ok(SearchResult {
+                    unavailable: paths,
+                    ..SearchResult::default()
+                });
+            };
             let graph = workspace
                 .index()
                 .descriptor()
@@ -114,14 +88,69 @@ pub(super) async fn search(
         })
         .await
         .map_err(|e| EngineError::internal(format!("Extracted search worker failed: {e}")))??;
-        items.append(&mut found);
-        truncated |= limited;
+        result.items.append(&mut found.items);
+        result.unavailable.append(&mut found.unavailable);
+        result.truncated |= found.truncated;
     }
     wait.check_cancelled()?;
-    Ok((items, truncated))
+    Ok(result)
 }
 
-fn missing_index(path: &Path) -> EngineError {
+fn search_store(
+    storage: &IndexStore,
+    root: &Path,
+    paths: &[PathBuf],
+    request: &LexicalSearchRequest,
+) -> EngineResult<SearchResult> {
+    let files = storage
+        .list_files()?
+        .into_iter()
+        .map(|file| (root.join(file.relative_path()), file))
+        .collect::<BTreeMap<_, _>>();
+    let search_root = request.root.as_deref().unwrap_or(root);
+    let matcher = ExtractedMatcher::new(search_root, request)?;
+    let mut result = SearchResult::default();
+    for path in paths {
+        let Some(file) = files
+            .get(path)
+            .filter(|file| file.index_status().is_indexed())
+        else {
+            result.unavailable.push(path.clone());
+            continue;
+        };
+        let snapshot = storage.read_snapshot(|view| {
+            let Some(file) = view
+                .fetch_files(&[file.id()])?
+                .remove(&file.id())
+                .filter(|file| file.index_status().is_indexed())
+            else {
+                return Ok(None);
+            };
+            let entities = view.entities_for_file(file.id())?;
+            Ok(Some((file, entities)))
+        })?;
+        let Some((file, mut entities)) = snapshot else {
+            result.unavailable.push(path.clone());
+            continue;
+        };
+        let status = file_freshness_status(root, &file);
+        entities.sort_by_key(|entity| entity.source_range().byte_offsets().map(|(start, _)| start));
+        let mut state = ExtractedFileState::default();
+        for entity in entities {
+            if let Some(item) = search_entity(&matcher, request, path, status, &entity, &mut state)?
+            {
+                result.items.push(item);
+            }
+            if state.stopped {
+                break;
+            }
+        }
+    }
+    result.truncated = matcher.truncated.load(Ordering::Relaxed);
+    Ok(result)
+}
+
+pub(super) fn missing_index(path: &Path) -> EngineError {
     EngineError::not_found(format!(
         "PDF extraction index unavailable for {}; run `zg --index` in its workspace first",
         path.display()
@@ -132,7 +161,7 @@ fn search_entity(
     matcher: &ExtractedMatcher,
     request: &LexicalSearchRequest,
     path: &Path,
-    file: &FileRecord,
+    status: ContextItemStatus,
     entity: &Entity,
     state: &mut ExtractedFileState,
 ) -> EngineResult<Option<ContextItem>> {
@@ -141,7 +170,11 @@ fn search_entity(
     };
     let source = entity.source_range();
     let project = |span| ContentRange::project_text(&source, text, span);
-    let hits = matcher.search(text, state)?;
+    let start = source
+        .byte_offsets()
+        .ok_or_else(|| EngineError::internal("Extracted entity has no source offsets"))?
+        .0;
+    let hits = matcher.search(text, start, state)?;
     if hits.is_empty() {
         return Ok(None);
     }
@@ -212,7 +245,7 @@ fn search_entity(
         content: text[start..end].to_owned(),
         outline: None,
         content_role: Some(ContextContentRole::Source),
-        status: freshness(path, file),
+        status,
         score: None,
         matched_by: MatchedBy::Lexical,
         metadata: None,
@@ -223,20 +256,4 @@ fn search_entity(
         selection_reason: None,
         coverage_group: None,
     }))
-}
-fn freshness(path: &Path, file: &FileRecord) -> ContextItemStatus {
-    let fresh = std::fs::metadata(path).is_ok_and(|metadata| {
-        let modified = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .and_then(|duration| u64::try_from(duration.as_millis()).ok());
-        metadata.len() == file.snapshot().size_bytes
-            && modified == file.snapshot().modified_epoch_ms
-    });
-    if fresh {
-        ContextItemStatus::Fresh
-    } else {
-        ContextItemStatus::PossiblyStale
-    }
 }

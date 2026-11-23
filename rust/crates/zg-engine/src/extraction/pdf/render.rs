@@ -8,65 +8,17 @@ use liteparse::{
     stages,
     types::{OutlineTarget, Page},
 };
-use std::{collections::HashMap, path::PathBuf, sync::OnceLock};
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 
 pub(super) struct RenderedPage {
     pub page: Page,
     pub tables: Vec<[f64; 4]>,
-    pub image: Option<LayoutImage>,
-}
-
-fn runtime() -> Result<stages::Library, PdfExtractionError> {
-    static LOADED: OnceLock<Result<(), String>> = OnceLock::new();
-    LOADED
-        .get_or_init(|| {
-            let path = runtime_path(
-                std::env::var_os("PDFIUM_LIB_PATH").map(PathBuf::from),
-                &std::env::current_exe().map_err(|e| e.to_string())?,
-            )?;
-            zg_pdfium::load(&path)
-        })
-        .as_ref()
-        .map_err(|e| {
-            PdfExtractionError::Runtime(EngineError::internal(format!(
-                "Cannot load LiteParse PDFium: {e}"
-            )))
-        })?;
-    stages::Library::try_init().map_err(|e| {
-        PdfExtractionError::Runtime(EngineError::internal(format!(
-            "Cannot initialize LiteParse PDFium: {e}"
-        )))
-    })
-}
-
-fn runtime_path(
-    explicit: Option<PathBuf>,
-    executable: &std::path::Path,
-) -> Result<PathBuf, String> {
-    let name = if cfg!(target_os = "macos") {
-        "libpdfium.dylib"
-    } else if cfg!(windows) {
-        "pdfium.dll"
-    } else {
-        "libpdfium.so"
-    };
-    if let Some(directory) = explicit {
-        return Ok(directory.join(name));
-    }
-    // macOS can report npm's global bin/zg symlink. Locate libraries relative
-    // to the real executable, as the ORT loader does, not the global prefix.
-    let executable = executable.canonicalize().map_err(|e| e.to_string())?;
-    let directory = executable.parent().ok_or("Executable has no parent")?;
-    [
-        directory.join(name),
-        directory.join("../lib").join(name),
-        directory.join("..").join(name),
-    ]
-    .into_iter()
-    .find(|p| p.is_file())
-    .ok_or_else(|| format!("Missing packaged {name}"))
+    pub image: Result<Option<LayoutImage>, String>,
 }
 
 pub(super) fn document_error(e: impl std::fmt::Display) -> PdfExtractionError {
@@ -77,10 +29,15 @@ pub(super) fn produce(
     bytes: &[u8],
     sender: &Sender<RenderedPage>,
     signal: &CancellationToken,
+    layout_disabled: &AtomicBool,
 ) -> Result<Vec<OutlineTarget>, PdfExtractionError> {
     check(signal)?;
     let parser = assembly::parser();
-    let library = runtime()?;
+    let library = zg_pdfium::acquire().map_err(|error| {
+        PdfExtractionError::Runtime(EngineError::internal(format!(
+            "Cannot load LiteParse PDFium: {error}"
+        )))
+    })?;
     check(signal)?;
     let document = library
         .load_document_from_bytes(bytes, None)
@@ -124,23 +81,24 @@ pub(super) fn produce(
                 page.page_number
             )));
         }
-        let image = if page
-            .text_items
-            .iter()
-            .any(|item| !item.text.trim().is_empty())
+        let image = if !layout_disabled.load(Ordering::Relaxed)
+            && page
+                .text_items
+                .iter()
+                .any(|item| !item.text.trim().is_empty())
         {
-            let native = document
-                .page(i32::try_from(page.page_number - 1).map_err(document_error)?)
-                .map_err(document_error)?;
-            let (w, h) = dimensions(width, height);
-            let rgb = zg_pdfium::render_rgb(&native, w, h).map_err(document_error)?;
-            Some(LayoutImage {
-                width: usize::try_from(w).map_err(document_error)?,
-                height: usize::try_from(h).map_err(document_error)?,
-                rgb: rgb.into(),
-            })
+            (|| {
+                let index = i32::try_from(page.page_number - 1).map_err(|e| e.to_string())?;
+                let native = document.page(index).map_err(|e| e.to_string())?;
+                let rendered = zg_pdfium::render_rgb(&native, 1.5).map_err(|e| e.to_string())?;
+                Ok(Some(LayoutImage {
+                    width: rendered.width,
+                    height: rendered.height,
+                    rgb: rendered.rgb.into(),
+                }))
+            })()
         } else {
-            None
+            Ok(None)
         };
         let tables = guards.remove(&page.page_number).unwrap_or_default();
         sender
@@ -153,19 +111,3 @@ pub(super) fn produce(
     }
     Ok(outline)
 }
-
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "Positive finite page dimensions are clamped to 1600 pixels"
-)]
-fn dimensions(width: f64, height: f64) -> (i32, i32) {
-    let scale = 1.5_f64.min(1600.0 / width.max(height));
-    (
-        (width * scale).ceil().clamp(1.0, 1600.0) as i32,
-        (height * scale).ceil().clamp(1.0, 1600.0) as i32,
-    )
-}
-
-#[cfg(test)]
-#[path = "render_tests.rs"]
-mod tests;

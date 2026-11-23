@@ -5844,6 +5844,7 @@ version = "0.3.1"
 dependencies = [
  "liteparse-pdfium",
  "liteparse-pdfium-sys",
+ "tempfile",
 ]
 
 [[package]]

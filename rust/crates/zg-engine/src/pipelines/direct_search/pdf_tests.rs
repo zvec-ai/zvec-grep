@@ -19,11 +19,19 @@ fn fixture_with_pages(texts: &[&[(u32, &str)]]) -> tempfile::TempDir {
     fixture_with_files(texts, &["manual.pdf"])
 }
 
+fn fixture_with_files(texts: &[&[(u32, &str)]], names: &[&str]) -> tempfile::TempDir {
+    fixture_with_offsets(texts, names, &[])
+}
+
 #[expect(
     clippy::too_many_lines,
-    reason = "One persisted fixture includes canonical entities and intentionally unrelated FTS projections"
+    reason = "Persisted fixture covers source mappings and FTS projections"
 )]
-fn fixture_with_files(texts: &[&[(u32, &str)]], names: &[&str]) -> tempfile::TempDir {
+fn fixture_with_offsets(
+    texts: &[&[(u32, &str)]],
+    names: &[&str],
+    offsets: &[usize],
+) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("workspace");
     let root = dir.path();
     let layout = WorkspaceLayout::new(root.join(".zvec-grep")).expect("layout");
@@ -50,9 +58,13 @@ fn fixture_with_files(texts: &[&[(u32, &str)]], names: &[&str]) -> tempfile::Tem
             id,
             SourcePath::new(*name).expect("path"),
             FileSnapshot {
-                size_bytes: 32,
-                modified_epoch_ms: None,
-                content_hash: Some("fixture".into()),
+                size_bytes: fs::metadata(root.join(name))
+                    .expect("valid test fixture")
+                    .len(),
+                modified_epoch_ms: Some(0),
+                content_hash: Some(crate::utils::sha256_hex(
+                    &fs::read(root.join(name)).expect("valid test fixture"),
+                )),
             },
             FileIndexStatus::NotIndexed,
         )
@@ -83,7 +95,7 @@ fn fixture_with_files(texts: &[&[(u32, &str)]], names: &[&str]) -> tempfile::Tem
                 });
             }
             let range = Range::Pdf(Arc::new(PdfSourceMap {
-                markdown_start: start,
+                markdown_start: offsets.get(index).copied().unwrap_or(start),
                 text_len: text.len(),
                 parts,
             }));
@@ -411,8 +423,10 @@ async fn pdf_rg_preserves_regex_case_context_limits_and_file_filters() {
 async fn pdf_rg_requires_extraction_index_without_raw_fallback() {
     let dir = tempfile::tempdir().expect("workspace");
     fs::write(dir.path().join("raw.pdf"), "%PDF-1.7\nneedle").expect("fixture");
+    let mut request = options(dir.path(), "needle");
+    request.rg_paths = vec!["raw.pdf".into()];
     let error = DirectSearchService::new()
-        .context(options(dir.path(), "needle"))
+        .context(request)
         .await
         .expect_err("needs index");
     assert!(error.to_string().contains("zg --index"));
@@ -502,13 +516,18 @@ async fn pdf_rg_borrows_published_writer_and_excludes_failed_files() {
         .storage
         .mark_file_failed(&file, "page 2 failed")
         .expect("failure marker");
-    assert!(
-        service
-            .context(request.clone())
-            .await
-            .expect_err("old entities are not visible")
-            .to_string()
-            .contains("zg --index")
+    let result = service
+        .context(request.clone())
+        .await
+        .expect("skip failed extraction");
+    assert!(result.items.is_empty(), "old entities are not visible");
+    assert_eq!(
+        result
+            .diagnostics
+            .rg
+            .expect("valid test fixture")
+            .unindexed_files,
+        [dir.path().join("manual.pdf")]
     );
     writer.retire().await;
     assert_eq!(
@@ -520,4 +539,162 @@ async fn pdf_rg_borrows_published_writer_and_excludes_failed_files() {
         EngineError::RESOURCE_BUSY
     );
     writer.session.storage.close().expect("close writer");
+}
+
+#[tokio::test]
+async fn unindexed_pdf_does_not_hide_text_or_filename_fallback_results() {
+    let dir = tempfile::tempdir().expect("valid test fixture");
+    fs::write(dir.path().join("README.md"), "recovery calls missing.go\n")
+        .expect("valid test fixture");
+    fs::write(dir.path().join("raw.pdf"), "%PDF-1.7\nrecovery missing.go")
+        .expect("valid test fixture");
+    let service = DirectSearchService::new();
+    for paths in [vec![], vec![PathBuf::from(".")]] {
+        let mut request = options(dir.path(), "recovery");
+        request.file_types.clear();
+        request.rg_paths = paths;
+        let result = service.context(request).await.expect("valid test fixture");
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].relative_path, Path::new("README.md"));
+        assert_eq!(
+            result
+                .diagnostics
+                .rg
+                .expect("valid test fixture")
+                .unindexed_files
+                .len(),
+            1
+        );
+    }
+    let result = crate::pipelines::path_search::lookup(
+        &service,
+        crate::api::paths::PathsOptions {
+            root: Some(dir.path().into()),
+            query: "missing.go".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("valid test fixture");
+    let crate::api::paths::PathLookupResult::Text(result) = result else {
+        panic!("literal fallback")
+    };
+    assert_eq!(result.items.len(), 1);
+    assert_eq!(
+        result
+            .diagnostics
+            .rg
+            .as_ref()
+            .expect("valid test fixture")
+            .unindexed_files
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn mixed_pdf_index_coverage_preserves_available_hits_and_propagates_cancellation() {
+    let dir = fixture();
+    fs::write(dir.path().join("unindexed.pdf"), "%PDF-1.7\nRecovery").expect("valid test fixture");
+    let service = DirectSearchService::new();
+    let mut request = options(dir.path(), "Recovery");
+    request.file_types.clear();
+    let result = service
+        .context(request.clone())
+        .await
+        .expect("valid test fixture");
+    assert!(
+        result
+            .items
+            .iter()
+            .any(|item| item.relative_path == Path::new("a.md"))
+    );
+    assert!(
+        result
+            .items
+            .iter()
+            .any(|item| item.relative_path == Path::new("manual.pdf"))
+    );
+    assert_eq!(
+        result
+            .diagnostics
+            .rg
+            .expect("valid test fixture")
+            .unindexed_files,
+        [dir.path().join("unindexed.pdf")]
+    );
+    let token = tokio_util::sync::CancellationToken::new();
+    token.cancel();
+    request.signal = Some(token);
+    assert_eq!(
+        service
+            .context(request)
+            .await
+            .expect_err("expected failure")
+            .code(),
+        EngineError::CANCELLED
+    );
+}
+
+#[tokio::test]
+async fn overlapping_pdf_entities_do_not_consume_max_count_twice() {
+    let dir = fixture_with_offsets(
+        &[&[(2, "hit\n")], &[(2, "hit\n"), (21, "hit\n")]],
+        &["manual.pdf"],
+        &[0, 0],
+    );
+    let mut request = options(dir.path(), "hit");
+    request.rg_options.max_count = Some(2);
+    let result = DirectSearchService::new()
+        .context(request)
+        .await
+        .expect("valid test fixture");
+    // Equal-start entities can be loaded in either order. The two source
+    // matches must survive exactly once, whether grouped into one item or two.
+    let mut positions = result
+        .items
+        .iter()
+        .flat_map(|item| &item.match_ranges)
+        .map(|range| range.start_byte_offset().expect("source offset"))
+        .collect::<Vec<_>>();
+    positions.sort_unstable();
+    assert_eq!(positions, [0, 4]);
+    let mut pages = result
+        .items
+        .iter()
+        .flat_map(|item| match &item.range {
+            ContentRange::Pdf { pages, .. } => pages.clone(),
+            _ => panic!("PDF range expected"),
+        })
+        .collect::<Vec<_>>();
+    pages.sort_unstable();
+    pages.dedup();
+    assert_eq!(pages, [2, 21]);
+}
+
+#[tokio::test]
+async fn pdf_rg_checks_content_hash_when_metadata_differs() {
+    let dir = fixture();
+    let service = DirectSearchService::new();
+    let result = service
+        .context(options(dir.path(), "Recovery"))
+        .await
+        .expect("valid test fixture");
+    assert!(
+        result
+            .items
+            .iter()
+            .all(|item| item.status == ContextItemStatus::Fresh)
+    );
+    fs::write(dir.path().join("manual.pdf"), "%PDF-1.7\nchanged").expect("valid test fixture");
+    let result = service
+        .context(options(dir.path(), "Recovery"))
+        .await
+        .expect("valid test fixture");
+    assert!(
+        result
+            .items
+            .iter()
+            .all(|item| item.status == ContextItemStatus::PossiblyStale)
+    );
 }

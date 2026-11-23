@@ -70,6 +70,11 @@ async fn pdf_native_layout_smoke() {
         .await
         .expect("valid test fixture");
     let elapsed = started.elapsed();
+    assert!(
+        result.warnings.is_empty(),
+        "real layout smoke must not silently fall back: {:?}",
+        result.warnings
+    );
     assert!(!result.text.text.is_empty());
     result
         .source_map
@@ -122,6 +127,7 @@ fn source(pieces: &[(u32, &str)]) -> PdfMarkdownSource {
         });
     }
     PdfMarkdownSource {
+        warnings: Vec::new(),
         source_map: PdfSourceMap {
             markdown_start: 0,
             text_len: text.len(),

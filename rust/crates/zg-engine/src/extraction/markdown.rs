@@ -1,31 +1,19 @@
 use crate::{
     EngineError,
     domain::{Content, EntityMetadata, FileFormat, MarkdownMetadata, Range},
-    utils::line_byte_offsets,
 };
 
 use super::{
-    ChunkOptions, ExtractedEntity, TextRange, TextSource, chunk_options_for_metadata,
-    chunking::text_fragments, text::extract_plain_text_entities, validate_formats,
+    ChunkOptions, ExtractedEntity, TextSource, chunk_options_for_metadata,
+    chunking::text_fragments,
+    sectioning::{Heading, Section, split_sections},
+    source_map::{SourceMap, TextSourceMap},
+    text::extract_plain_text_entities,
+    validate_formats,
 };
 
 const DEFAULT_MARKDOWN_CHUNK_CHARS: usize = 3_600;
 const DEFAULT_MARKDOWN_CHUNK_OVERLAP_CHARS: usize = 540;
-
-#[derive(Clone, Debug)]
-struct Heading {
-    level: usize,
-    text: String,
-    line_index: usize,
-}
-
-#[derive(Clone, Debug)]
-struct Section {
-    heading: Option<Heading>,
-    start_index: usize,
-    end_index: usize,
-    breadcrumb: Vec<String>,
-}
 
 pub(super) fn extract(
     source: &TextSource,
@@ -37,7 +25,8 @@ pub(super) fn extract(
     validate_formats(&source.formats)?;
     let (max_chars, overlap_chars) = resolve_options(options)?;
     let lines = source.text.split('\n').collect::<Vec<_>>();
-    let headings = scan_headings(&lines);
+    let source_map = TextSourceMap::new(&source.text);
+    let headings = scan_headings(&lines, source_map.line_starts());
     if headings.is_empty() {
         return Ok(extract_plain_text_entities(
             source,
@@ -45,20 +34,16 @@ pub(super) fn extract(
             overlap_chars,
         ));
     }
-    let line_offsets = line_byte_offsets(&source.text);
-    let entities = build_sections(&headings, &lines)
+    let entities = split_sections(&source.text, &headings)?
         .into_iter()
         .enumerate()
         .map(|(index, section)| {
             let metadata = markdown_metadata(&section);
             let (content_max, content_overlap) =
                 chunk_options_for_metadata(max_chars, overlap_chars, Some(&metadata));
-            let range = section_range(
-                &lines,
-                &line_offsets,
-                section.start_index,
-                section.end_index,
-            );
+            let range = source_map
+                .map_range(section.range)
+                .expect("section coordinates refer to source text");
             let content = crate::utils::slice_text(
                 &source.text,
                 range.start_byte_offset(),
@@ -106,7 +91,7 @@ fn resolve_options(options: ChunkOptions) -> Result<(usize, usize), EngineError>
     Ok((max_chars, overlap_chars))
 }
 
-fn scan_headings(lines: &[&str]) -> Vec<Heading> {
+fn scan_headings(lines: &[&str], line_offsets: &[usize]) -> Vec<Heading> {
     let mut headings = Vec::new();
     let mut fence = None;
     let mut index = 0;
@@ -135,8 +120,9 @@ fn scan_headings(lines: &[&str]) -> Vec<Heading> {
         if let Some((level, text)) = parse_atx_heading(line) {
             headings.push(Heading {
                 level,
-                text,
-                line_index: index,
+                title: text,
+                start: line_offsets[index],
+                previous_end: preceding_section_end(line_offsets[index]),
             });
             index += 1;
             continue;
@@ -147,8 +133,9 @@ fn scan_headings(lines: &[&str]) -> Vec<Heading> {
             if !next.is_empty() && next.chars().all(|character| character == '=') {
                 headings.push(Heading {
                     level: 1,
-                    text: line.trim().to_owned(),
-                    line_index: index,
+                    title: line.trim().to_owned(),
+                    start: line_offsets[index],
+                    previous_end: preceding_section_end(line_offsets[index]),
                 });
                 index += 2;
                 continue;
@@ -156,8 +143,9 @@ fn scan_headings(lines: &[&str]) -> Vec<Heading> {
             if !next.is_empty() && next.chars().all(|character| character == '-') {
                 headings.push(Heading {
                     level: 2,
-                    text: line.trim().to_owned(),
-                    line_index: index,
+                    title: line.trim().to_owned(),
+                    start: line_offsets[index],
+                    previous_end: preceding_section_end(line_offsets[index]),
                 });
                 index += 2;
                 continue;
@@ -184,58 +172,20 @@ fn parse_atx_heading(line: &str) -> Option<(usize, String)> {
     (!text.is_empty()).then_some((level, text))
 }
 
-fn build_sections(headings: &[Heading], lines: &[&str]) -> Vec<Section> {
-    let mut stack: Vec<&Heading> = Vec::new();
-    let mut sections = Vec::new();
-    let first = &headings[0];
-    if first.line_index > 0 && !lines[..first.line_index].join("\n").trim().is_empty() {
-        sections.push(Section {
-            heading: None,
-            start_index: 0,
-            end_index: first.line_index - 1,
-            breadcrumb: Vec::new(),
-        });
-    }
-
-    for (index, heading) in headings.iter().enumerate() {
-        while stack.last().is_some_and(|item| item.level >= heading.level) {
-            stack.pop();
-        }
-        sections.push(Section {
-            heading: Some(heading.clone()),
-            start_index: heading.line_index,
-            end_index: headings
-                .get(index + 1)
-                .map_or(lines.len() - 1, |next| next.line_index - 1),
-            breadcrumb: stack.iter().map(|item| item.text.clone()).collect(),
-        });
-        stack.push(heading);
-    }
-    sections
+fn preceding_section_end(heading_start: usize) -> usize {
+    // Preserve the existing Markdown contract: omit only the LF before a
+    // heading, retaining any CR and all other whitespace in the prior section.
+    heading_start.saturating_sub(1)
 }
 
-fn section_range(
-    lines: &[&str],
-    line_offsets: &[usize],
-    start_index: usize,
-    end_index: usize,
-) -> TextRange {
-    TextRange::from_coordinates(
-        line_offsets[start_index],
-        line_offsets[end_index] + lines[end_index].len(),
-        start_index + 1,
-        end_index + 1,
-        0,
-        lines[end_index].len(),
-    )
-    .expect("section coordinates refer to source lines")
-}
-
-fn markdown_metadata(section: &Section) -> EntityMetadata {
+fn markdown_metadata(section: &Section<'_>) -> EntityMetadata {
     EntityMetadata::Markdown(MarkdownMetadata {
-        heading: section.heading.as_ref().map(|heading| heading.text.clone()),
+        heading: section
+            .heading
+            .as_ref()
+            .map(|heading| heading.title.clone()),
         level: section.heading.as_ref().map(|heading| heading.level),
-        scope: (!section.breadcrumb.is_empty()).then(|| section.breadcrumb.join("::")),
+        scope: (!section.ancestors.is_empty()).then(|| section.ancestors.join("::")),
     })
 }
 
@@ -247,6 +197,125 @@ mod tests {
 
     use super::super::{ChunkOptions, test_source};
     use super::extract;
+
+    fn extraction_snapshot(
+        entities: &[crate::extraction::ExtractedEntity],
+        maximum: usize,
+    ) -> Vec<serde_json::Value> {
+        entities
+            .iter()
+            .map(|entity| {
+                let id = crate::domain::EntityId::new(
+                    crate::domain::FileId::new(42),
+                    &entity.content,
+                    &entity.source_range,
+                )
+                .expect("entity ID");
+                let Content::Text(text) = &entity.content else {
+                    panic!("text entity expected");
+                };
+                let fragments = entity
+                    .fragments
+                    .iter()
+                    .map(|fragment| {
+                        let content = match fragment.range {
+                            Range::Full => text.clone(),
+                            Range::Byte(range) => crate::utils::slice_text(
+                                text,
+                                usize::try_from(range.start_offset()).expect("start"),
+                                usize::try_from(range.end_offset()).expect("end"),
+                            )
+                            .expect("fragment text")
+                            .to_owned(),
+                            Range::Text(_) | Range::Pdf(_) => {
+                                panic!("entity-relative range expected")
+                            }
+                        };
+                        serde_json::json!({
+                            "range": fragment.range,
+                            "embedding": crate::extraction::vector_content_for_fragment(
+                                &Content::Text(content), entity.metadata.as_ref(), Some(maximum)
+                            ),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                serde_json::json!({
+                    "index": entity.index,
+                    "id": id.as_str(),
+                    "range": entity.source_range,
+                    "content": entity.content,
+                    "metadata": entity.metadata,
+                    "fragments": fragments,
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn preserves_markdown_extraction_snapshots() {
+        // These snapshots cover the externally observable extraction contract,
+        // including exact whitespace, coordinates, IDs, and embedding inputs.
+        let fixtures = [
+            "前言 😀\n\n# Parent #\nintro\n## Child\nchild 😀\n#### Deep\nnested\n## Child\nrepeat\nSibling\n=======\nbody\n",
+            "# Parent\n## Child\nChild two\n---------\nbody",
+            "  \n\n# Title\n\n```md\n# Hidden\n```\n~~~\n## Hidden\n~~~\n## Visible\nlast\n",
+            "plain text 😀 without headings\n\nA long line that must be split into multiple retrieval chunks without losing its original source coordinates.\n",
+        ];
+        let mut snapshots = Vec::new();
+        for fixture in fixtures {
+            for newline in ["\n", "\r\n"] {
+                let source = test_source(
+                    FileFormat::Markdown,
+                    "README.md",
+                    &fixture.replace('\n', newline),
+                );
+                let mut outputs = Vec::new();
+                for (maximum, overlap) in [(64, 8), (3_600, 540)] {
+                    let options = ChunkOptions {
+                        max_chunk_chars: Some(maximum),
+                        chunk_overlap_chars: Some(overlap),
+                    };
+                    let entities = extract(&source, options).expect("markdown extraction");
+                    assert_eq!(
+                        entities,
+                        crate::extraction::extract(&source, options).expect("search extraction")
+                    );
+                    for output in [
+                        crate::extraction::extract_for_indexing(&source, options),
+                        crate::extraction::extract_without_graph(&source, options),
+                    ] {
+                        let output = output.expect("indexing extraction");
+                        assert_eq!(entities, output.fragments);
+                        assert!(output.graph.is_none());
+                    }
+                    outputs.push(extraction_snapshot(&entities, maximum));
+                }
+                // Workspace builds enable serde_json's preserve_order through
+                // the CLI. Canonicalize objects so feature unification cannot
+                // change snapshots captured by an engine-only test build.
+                let mut snapshot = serde_json::to_value(outputs).expect("extraction snapshot");
+                snapshot.sort_all_objects();
+                snapshots.push(crate::utils::sha256_hex(
+                    &serde_json::to_vec(&snapshot).expect("serialize extraction snapshot"),
+                ));
+            }
+        }
+        // Captured from the original Markdown extractor before sharing sectioning.
+        // Each fixture contributes LF and CRLF snapshots, in that order.
+        assert_eq!(
+            snapshots,
+            [
+                "ec2046eeaa03c9cc02586968731535d3885467ae405608dcda1517ca3c82b2b8",
+                "79561b1ef4aa9988ee9a9a87c8a12a9269995989b1112d7b057dd73a11601a5d",
+                "ea77d848d828a4343f62e2fa4e82ddbbc4ecd0f01c554977ce40ae10dbb07e55",
+                "c1bafcf851120886910a928101260ff72e709bc76622d5c692d5f1809d370b7c",
+                "f05e7f56903b0fa704e62b2208e911a993aa51708b004a510f128e096c657a03",
+                "f843e792d43671f923aaf76908525c53f837b9c804e0e43cb3882233b6eafd30",
+                "e56c797be8d9d028c8111c8b82b864c5563034325c1663d839a1210d601c2bfb",
+                "6e9b2e22aedf49f936c2411281a5a88aedfc5a28b9da2d114feb8a4cc2a30d07",
+            ]
+        );
+    }
 
     #[test]
     fn handles_heading_styles_fences_hierarchy_and_windows() {

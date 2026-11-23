@@ -7,7 +7,9 @@ mod image;
 mod markdown;
 pub(crate) mod pdf;
 mod preparation;
+mod sectioning;
 mod service;
+mod source_map;
 mod spi;
 mod text;
 

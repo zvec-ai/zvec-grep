@@ -52,14 +52,18 @@ impl PreparedSource {
             super::extract_without_graph(source, options)
         }
     }
-    fn warning(&self) -> Option<String> {
-        match self {
-            Self::Pdf(source) if source.text.text.trim().is_empty() => Some(format!(
+    fn warnings(&self) -> Vec<String> {
+        let Self::Pdf(source) = self else {
+            return Vec::new();
+        };
+        let mut warnings = source.warnings.clone();
+        if source.text.text.trim().is_empty() {
+            warnings.push(format!(
                 "{}: no searchable native text remained after PDF extraction; OCR is not enabled",
                 source.text.relative_path.display()
-            )),
-            _ => None,
+            ));
         }
+        warnings
     }
 }
 
@@ -218,7 +222,7 @@ impl ExtractionPort for ExtractionOperation<'_> {
                 Err(ExtractionError::Dependency(error))
             }
             Ok(source) => {
-                if let Some(warning) = source.warning() {
+                for warning in source.warnings() {
                     let mut warnings = self
                         .warnings
                         .lock()

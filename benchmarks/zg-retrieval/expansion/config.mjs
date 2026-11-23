@@ -25,6 +25,7 @@ export const PILOT_SUITES = {
     breakdownBy: "dataset",
     indexTimeoutMinutes: 180,
     report: {
+      comparison: "BEIR",
       title: "BEIR / four datasets (test)",
       overview: "BEIR / four datasets",
       note: [
@@ -45,6 +46,7 @@ export const PILOT_SUITES = {
     breakdownBy: null,
     indexTimeoutMinutes: 300,
     report: {
+      comparison: "DuRetrieval",
       title: "DuRetrieval (C-MTEB dev)",
       overview: "DuRetrieval / Chinese web search",
       note: [
@@ -74,6 +76,7 @@ export const PILOT_SUITES = {
       C: "c",
     },
     report: {
+      comparison: "Quarry",
       title: "Quarry / eight languages (preimage)",
       overview: "Quarry / eight languages",
       note: [

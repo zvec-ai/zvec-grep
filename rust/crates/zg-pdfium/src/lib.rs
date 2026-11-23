@@ -1,24 +1,22 @@
 //! Safe raster allocation and packaged-library loading for `LiteParse`'s `PDFium`.
 
 use liteparse_pdfium::{Bitmap, Page, PdfiumError};
-use std::path::Path;
+mod runtime;
+pub use runtime::acquire;
 
-/// Load the same patched `PDFium` used for native extraction.
-///
-/// # Errors
-/// Returns the loader's error when the library or a required symbol is missing.
-pub fn load(path: &Path) -> Result<(), String> {
-    liteparse_pdfium_sys::dynamic::load(path)
+/// Packed RGB raster with its actual, bounded dimensions.
+pub struct RenderedRgb {
+    pub width: usize,
+    pub height: usize,
+    pub rgb: Vec<u8>,
 }
 
 /// Render a page with annotations into packed RGB pixels for layout inference.
 ///
 /// # Errors
 /// Returns an error on invalid dimensions or failed bitmap allocation.
-pub fn render_rgb(page: &Page<'_, '_>, width: i32, height: i32) -> Result<Vec<u8>, PdfiumError> {
-    if width <= 0 || height <= 0 || width > 1600 || height > 1600 {
-        return Err(PdfiumError::OperationFailed);
-    }
+pub fn render_rgb(page: &Page<'_, '_>, scale: f64) -> Result<RenderedRgb, PdfiumError> {
+    let (width, height) = dimensions(f64::from(page.width()), f64::from(page.height()), scale)?;
     // SAFETY: Page borrows a live Library holding PDFium's process-wide lock.
     // The bitmap is used and dropped here, before that page/lock can be dropped.
     let bitmap = unsafe {
@@ -49,5 +47,48 @@ pub fn render_rgb(page: &Page<'_, '_>, width: i32, height: i32) -> Result<Vec<u8
     for row in bitmap.buffer().chunks_exact(stride) {
         rgb.extend_from_slice(&row[..width * 3]);
     }
-    Ok(rgb)
+    Ok(RenderedRgb { width, height, rgb })
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "Positive finite dimensions are capped before conversion"
+)]
+fn dimensions(width: f64, height: f64, scale: f64) -> Result<(i32, i32), PdfiumError> {
+    if ![width, height, scale]
+        .into_iter()
+        .all(|value| value.is_finite() && value > 0.0)
+    {
+        return Err(PdfiumError::OperationFailed);
+    }
+    let scale = scale.min(1600.0 / width.max(height));
+    Ok((
+        (width * scale).ceil().clamp(1.0, 1600.0) as i32,
+        (height * scale).ceil().clamp(1.0, 1600.0) as i32,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn raster_dimensions_preserve_scale_and_bound_allocation() {
+        assert_eq!(
+            dimensions(612.0, 792.0, 1.5).expect("valid test fixture"),
+            (918, 1188)
+        );
+        assert_eq!(
+            dimensions(2400.0, 1200.0, 1.5).expect("valid test fixture"),
+            (1600, 800)
+        );
+        assert_eq!(
+            dimensions(0.1, 0.1, 1.5).expect("valid test fixture"),
+            (1, 1)
+        );
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(dimensions(invalid, 792.0, 1.5).is_err());
+            assert!(dimensions(612.0, invalid, 1.5).is_err());
+            assert!(dimensions(612.0, 792.0, invalid).is_err());
+        }
+    }
 }

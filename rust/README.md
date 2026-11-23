@@ -592,11 +592,14 @@ users need no Python, PDF viewer, or system PDFium installation.
 
 Run `zg --index`, then `zg "How does recovery work?" -t pdf` or
 `zg --rg -F "recovery" -t pdf`. PDF rg searches the indexed entity text, retaining
-literal/regex, case, context and file-filter behavior within each entity. A PDF
-without a usable extraction index produces an error directing you to index it;
-raw PDF bytes and metadata are never searched as a fallback.
+literal/regex, case, context and file-filter behavior within each entity. Directory and workspace searches skip PDFs without a usable extraction index
+and report one indexing hint, while ordinary text results remain available. An
+explicitly requested unindexed PDF returns an actionable error. Raw PDF bytes
+and metadata are never searched as a fallback. Overlapping entity matches are
+deduplicated by source position before applying the per-file `-m` limit.
 
-Results show the file, physical `pages` (one-based), `kind: text/native`, and text.
+Results show the file, physical `pages` (one-based), and text. `--preview detail` also shows
+`Kind: text/native`.
 Query pages cover the whole entity; rg pages cover the actual matches, excluding
 context-only pages. The default `--preview short` follows Markdown preview rules.
 `full` returns the complete PDF entity; `detail` also groups boxes under `Page N:`
@@ -607,6 +610,9 @@ clipping, or quantization. Separate regions are retained without exposing block
 identifiers. Text-to-page/block provenance is preserved. For a scaled preview,
 scale x/width by displayed width ÷ page width and y/height by displayed height ÷ page height.
 
+PP-S loading or inference failures, and rendering failures on individual pages,
+fall back to native text with a warning. Invalid predictions are discarded before
+filtering any text. PDFium remains required for native parsing.
 A file either commits its complete extraction or fails. Other files continue
 indexing, and failures identify the file. PDFs with no searchable native text
 produce a warning and zero entities. OCR, image understanding, precise table or
@@ -955,6 +961,17 @@ every driver/runtime failure can be caught and retried on CPU.
 
 See [npm distribution](npm/README.md) for the complete layout, OS/backend
 support matrix, runtime dependencies, and publication policy.
+
+## Standalone installation
+
+The [GitHub Releases installers](standalone/README.md) install complete native
+bundles without Node/npm. Re-run the installer to upgrade, or select a tagged
+version. On Unix, versioned programs live in `~/.zvec-grep/dist` and `~/.local/bin/zg` links
+through the `current` package symlink; PATH setup is printed for the user to apply. The installers
+preserve user data and coordinate
+upgrades with the local daemon. CUDA still requires compatible host runtime
+libraries. The installer endpoints become available after the first standalone
+release is published by the updated workflow.
 
 ## Local npm installation
 

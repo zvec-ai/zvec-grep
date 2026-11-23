@@ -127,13 +127,25 @@ impl DirectSearchService {
             },
         };
         let mut reply = self.lexical.search(&root, &request).await?;
-        let (extracted_items, extracted_truncated) = extracted::search(
+        let extracted = extracted::search(
             std::mem::take(&mut reply.extracted_paths),
             &request,
             options.lock_timeout_ms,
             &self.writers,
         )
         .await?;
+        if !request.paths_selected {
+            for path in &extracted.unavailable {
+                if request.paths.iter().any(|selected| {
+                    let selected = root.join(selected);
+                    selected == *path
+                        || (selected.is_file()
+                            && matches!((selected.canonicalize(), path.canonicalize()), (Ok(left), Ok(right)) if left == right))
+                }) {
+                    return Err(extracted::missing_index(path));
+                }
+            }
+        }
         let structure_started = Instant::now();
         let enrichment = structure_file_limit.map(|file_limit| {
             enrich_lexical_matches_with_structure(
@@ -152,10 +164,13 @@ impl DirectSearchService {
         );
         merge_extracted_items(
             &mut result,
-            extracted_items,
-            extracted_truncated,
+            extracted.items,
+            extracted.truncated,
             request.limit,
         );
+        if let Some(rg) = &mut result.diagnostics.rg {
+            rg.unindexed_files = extracted.unavailable;
+        }
         if let Some(duration) = structure_duration {
             result.diagnostics.timings.push(TimingEntry {
                 name: "structure_enrichment".to_owned(),
@@ -312,6 +327,7 @@ fn context_from_lexical(
             empty_reason,
             index: None,
             rg: Some(RgDiagnostics {
+                unindexed_files: Vec::new(),
                 backend: reply.diagnostics.backend,
                 command: reply.diagnostics.command,
                 args: reply.diagnostics.args,

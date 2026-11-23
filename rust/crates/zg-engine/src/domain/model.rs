@@ -85,6 +85,11 @@ pub enum ModelProgress {
         model_ref: String,
         message: String,
     },
+    /// Optional model work ended with a fallback, rather than a usable model.
+    Skipped {
+        model_ref: String,
+        message: String,
+    },
     Ready {
         model_ref: String,
     },

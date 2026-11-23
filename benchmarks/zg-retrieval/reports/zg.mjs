@@ -1,4 +1,5 @@
 import { ZG_MODES } from "./validation.mjs";
+import { goldStagesMarkdown } from "./gold-stages.mjs";
 
 const display = (value) => (Number.isFinite(value) ? value.toFixed(4) : "N/A");
 
@@ -170,5 +171,6 @@ export function markdownReport(report) {
         (reason) => `- ${reason.replaceAll("\n", " ")}`,
       ),
     );
+  lines.push(...goldStagesMarkdown(report.gold_stages));
   return lines.join("\n") + "\n";
 }

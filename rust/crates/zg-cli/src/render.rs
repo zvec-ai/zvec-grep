@@ -203,7 +203,6 @@ pub(crate) fn write_pdf_rg_preview(
             .collect::<Vec<_>>()
             .join(",")
     )?;
-    writeln!(writer, "  kind: text/native")?;
     if item.status == zg_engine::api::context::result::ContextItemStatus::PossiblyStale {
         writeln!(writer, "  status: possibly_stale")?;
     }
@@ -249,7 +248,7 @@ fn lexical_content_ranges(item: &ContextItem) -> impl Iterator<Item = (usize, us
 pub fn write_context_status(mut writer: impl Write, result: &ContextResult) -> io::Result<()> {
     use zg_engine::api::context::result::ContextSource;
     if result.source != ContextSource::Index {
-        return Ok(());
+        return write_unindexed_warning(&mut writer, result);
     }
     let has_drift =
         result.freshness.as_deref() == Some("possibly_stale") || result.has_stale_items();
@@ -282,6 +281,22 @@ pub fn write_context_status(mut writer: impl Write, result: &ContextResult) -> i
     Ok(())
 }
 
+pub(crate) fn write_unindexed_warning(
+    writer: &mut impl Write,
+    result: &ContextResult,
+) -> io::Result<()> {
+    if let Some(rg) = &result.diagnostics.rg
+        && !rg.unindexed_files.is_empty()
+    {
+        writeln!(
+            writer,
+            "Warning: skipped {} files without an extraction index; run `zg --index` in their workspace to search them.",
+            rg.unindexed_files.len()
+        )?;
+    }
+    Ok(())
+}
+
 /// Writes concise terminal freshness diagnostics, preserving redirected output.
 ///
 /// # Errors
@@ -297,7 +312,7 @@ pub fn write_context_status_with_options(
         return write_context_status(writer, result);
     }
     if result.source != ContextSource::Index {
-        return Ok(());
+        return write_unindexed_warning(&mut writer, result);
     }
     let has_drift =
         result.freshness.as_deref() == Some("possibly_stale") || result.has_stale_items();
@@ -790,6 +805,7 @@ Options:
   --yes                             Install detected agents without prompting
   --force                           Replace conflicting unmanaged configuration
   --upgrade-installed              Migrate existing integrations without installing new ones
+  --launcher PATH                  Use a stable absolute executable with --upgrade-installed
   --dry-run                        Preview migration without writing files
 
 Upgrade scans existing entries in known user configuration files.
@@ -1225,7 +1241,7 @@ mod output_tests {
                 assert!(!output.contains("Boxes:"));
                 assert!(!output.contains("box:"));
                 assert!(output.contains("pages: 2,4"));
-                assert!(output.contains("kind: text/native\n"));
+                assert!(!output.contains("kind: text/native\n"));
                 assert!(!output.contains("source:"));
             }
             assert!(output.contains("line15"));

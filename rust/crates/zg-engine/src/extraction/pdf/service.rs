@@ -1,17 +1,19 @@
-use super::{PdfMarkdownSource, assembly, filter, render};
+use super::{PdfMarkdownSource, assembly, enhancement::Enhancement, render};
 use crate::{
     EngineError,
     domain::{SourcePath, model::ModelProgress},
     models::{LayoutModelConfig, LayoutOptions, ModelError, ModelRuntimeManager},
 };
 use async_trait::async_trait;
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::{Arc, atomic::AtomicBool},
+    time::Instant,
+};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
 pub(crate) enum PdfExtractionError {
     Document(EngineError),
-    Model(ModelError),
     Runtime(EngineError),
 }
 impl From<EngineError> for PdfExtractionError {
@@ -19,21 +21,14 @@ impl From<EngineError> for PdfExtractionError {
         Self::Document(e)
     }
 }
-impl From<ModelError> for PdfExtractionError {
-    fn from(e: ModelError) -> Self {
-        Self::Model(e)
-    }
-}
 impl PdfExtractionError {
     pub(crate) fn should_abort(&self) -> bool {
         match self {
-            Self::Model(e) => e.code() == EngineError::CANCELLED,
             Self::Document(e) | Self::Runtime(e) => e.code() == EngineError::CANCELLED,
         }
     }
     pub(crate) fn disables_pdf(&self) -> bool {
         match self {
-            Self::Model(e) => e.should_fail_fast() && !self.should_abort(),
             Self::Runtime(_) => !self.should_abort(),
             Self::Document(_) => false,
         }
@@ -41,7 +36,6 @@ impl PdfExtractionError {
     pub(crate) fn into_engine_error(self) -> EngineError {
         match self {
             Self::Document(e) | Self::Runtime(e) => e,
-            Self::Model(e) => e.into_engine_error(),
         }
     }
 }
@@ -60,10 +54,15 @@ pub(crate) trait PdfExtractionPort: Send + Sync {
 pub(crate) struct PdfExtractionService {
     models: ModelRuntimeManager,
     config: LayoutModelConfig,
+    layout_disabled: Arc<AtomicBool>,
 }
 impl PdfExtractionService {
     pub(crate) fn new(models: ModelRuntimeManager, config: LayoutModelConfig) -> Self {
-        Self { models, config }
+        Self {
+            models,
+            config,
+            layout_disabled: Arc::new(AtomicBool::new(false)),
+        }
     }
 }
 
@@ -83,8 +82,20 @@ impl PdfExtractionPort for PdfExtractionService {
         // inference image exist; no page handle crosses an async suspension.
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
         let worker_token = worker_signal.clone();
-        let worker =
-            tokio::task::spawn_blocking(move || render::produce(&bytes, &sender, &worker_token));
+        let disabled = Arc::clone(&self.layout_disabled);
+        let worker = tokio::task::spawn_blocking(move || {
+            render::produce(&bytes, &sender, &worker_token, &disabled)
+        });
+        let mut enhancement = Enhancement {
+            disabled: &self.layout_disabled,
+            path: &path,
+            options: LayoutOptions {
+                signal: Some(signal.clone()),
+                on_progress: on_progress.clone(),
+                ..LayoutOptions::default()
+            },
+            warnings: Vec::new(),
+        };
         let mut pages = Vec::new();
         let mut layout = None;
         let operation = async {
@@ -95,34 +106,21 @@ impl PdfExtractionPort for PdfExtractionService {
                     next = receiver.recv() => next,
                 };
                 let Some(mut page) = next else { break; };
-                let regions = if let Some(image) = page.image {
+                enhancement.apply(&mut page, |image| async {
                     if layout.is_none() {
-                        let model = self.models.acquire_layout(self.config.clone())?;
+                        let model = self.models.acquire_layout(self.config.clone()).map_err(ModelError::shared)?;
                         model.prepare(LayoutOptions {
                             signal: Some(signal.clone()),
                             on_progress: on_progress.clone(),
                             ..LayoutOptions::default()
-                        }).await?;
+                        }).await.map_err(ModelError::shared)?;
                         layout = Some(model);
                     }
-                    let width = f64::from(u32::try_from(image.width).map_err(|_| EngineError::internal("PDF raster width overflow"))?);
-                    let height = f64::from(u32::try_from(image.height).map_err(|_| EngineError::internal("PDF raster height overflow"))?);
                     layout.as_ref().expect("prepared layout").detect(image, LayoutOptions {
                         signal: Some(signal.clone()),
                         ..LayoutOptions::default()
-                    }).await?.into_iter().map(|r| filter::Region {
-                        kind: r.kind,
-                        bounds: std::array::from_fn(|i| f64::from(r.bounds[i]) * if i % 2 == 0 {
-                            f64::from(page.page.page_width) / width
-                        } else {
-                            f64::from(page.page.page_height) / height
-                        }),
-                    }).collect()
-                } else {
-                    Vec::new()
-                };
-                check(&signal)?;
-                filter::apply(&mut page.page, regions, &page.tables);
+                    }).await
+                }).await?;
                 pages.push(page.page);
             }
             Ok::<(), PdfExtractionError>(())
@@ -137,9 +135,10 @@ impl PdfExtractionPort for PdfExtractionService {
         operation?;
         let bookmarks = produced?;
         check(&signal)?;
+        let warnings = enhancement.warnings;
         let page_count = pages.len();
         let assembly_signal = signal.clone();
-        let result = tokio::task::spawn_blocking(move || {
+        let mut result = tokio::task::spawn_blocking(move || {
             assembly::finish(pages, bookmarks, path, &assembly_signal)
         })
         .await
@@ -150,6 +149,7 @@ impl PdfExtractionPort for PdfExtractionService {
             elapsed_ms = start.elapsed().as_millis(),
             "PDF native/layout extraction completed"
         );
+        result.warnings = warnings;
         Ok(result)
     }
 }

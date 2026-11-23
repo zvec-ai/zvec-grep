@@ -20,3 +20,6 @@ unsafe_code = "allow"
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 unwrap_used = "deny"
+
+[dev-dependencies]
+tempfile.workspace = true

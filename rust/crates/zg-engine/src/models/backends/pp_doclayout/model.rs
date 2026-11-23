@@ -146,27 +146,26 @@ impl LayoutModel for PpDocLayoutModel {
                     .map_err(inference_error)?;
                 let rows = output
                     .get("fetch_name_0")
-                    .ok_or_else(|| ModelError::internal("PP-S has no detection output"))?;
+                    .ok_or_else(|| ModelError::internal("PP-S has no detection output").shared())?;
                 let (shape, values) = rows.try_extract_tensor::<f32>().map_err(inference_error)?;
                 if shape.len() != 2 || shape[1] != 6 || values.len() % 6 != 0 {
-                    return Err(ModelError::internal("Unexpected PP-S output shape"));
+                    return Err(ModelError::internal("Unexpected PP-S output shape").shared());
                 }
                 let count = output
                     .get("fetch_name_1")
-                    .ok_or_else(|| ModelError::internal("PP-S has no detection count"))?;
+                    .ok_or_else(|| ModelError::internal("PP-S has no detection count").shared())?;
                 let (_, count) = count.try_extract_tensor::<i32>().map_err(inference_error)?;
                 let count = count
                     .first()
                     .copied()
                     .and_then(|count| usize::try_from(count).ok())
                     .filter(|count| *count <= values.len() / 6)
-                    .ok_or_else(|| ModelError::internal("Invalid PP-S detection count"))?;
+                    .ok_or_else(|| ModelError::internal("Invalid PP-S detection count").shared())?;
                 check_cancelled(options.signal.as_ref())?;
                 decode(&values[..count * 6], image.width, image.height)
             })
             .await
             .map_err(ModelError::shared)?
-            .map_err(ModelError::shared)
     }
 }
 
@@ -265,5 +264,7 @@ fn check_cancelled(signal: Option<&CancellationToken>) -> Result<(), ModelError>
 }
 
 fn inference_error(error: impl std::fmt::Display) -> ModelError {
-    ModelError::internal("PP-S ONNX inference failed").with_cause(error)
+    ModelError::internal("PP-S ONNX inference failed")
+        .with_cause(error)
+        .shared()
 }

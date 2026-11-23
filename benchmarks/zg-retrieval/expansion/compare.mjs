@@ -6,6 +6,8 @@ import { parseArgs } from "node:util";
 import { loadSuite } from "../core/lib.mjs";
 import { validateIndexCounts } from "../core/index-counts.mjs";
 import { validateIndexSettings } from "../core/index-settings.mjs";
+import { buildTraceData } from "../reports/trace-data.mjs";
+import { renderGoldTrace } from "../reports/trace-html.mjs";
 import { indexSettingsComparisonMarkdown } from "../reports/index-settings.mjs";
 import { QA_SCORING } from "../core/suite.mjs";
 import { buildCombined } from "./combined.mjs";
@@ -13,6 +15,7 @@ import {
   PILOT_FILE_RECALL_METRICS,
   PILOT_NAMES,
   PILOT_QA_SCORING,
+  PILOT_SUITES,
 } from "./config.mjs";
 import { compareReports } from "../reports/compare.mjs";
 import { QUALITY_METRICS } from "../reports/ci.mjs";
@@ -24,6 +27,10 @@ import {
 
 const MODES = ["hybrid", "fts", "vector"];
 const identity = (repository, commit) => ({ repository, commit });
+const SUITE_TITLES = [
+  ["sweqa", "SWE-QA20"],
+  ...PILOT_NAMES.map((name) => [name, PILOT_SUITES[name].report.comparison]),
+];
 
 export const QA_DIAGNOSTICS = {
   file: {
@@ -269,7 +276,7 @@ function indexCountComparison(pair) {
   return `Indexed corpus: **${cell("entities")} Entities · ${cell("fragments")} Fragments**.`;
 }
 
-export function markdownVersionComparison(result) {
+export function markdownVersionComparison(result, { traceUrl } = {}) {
   const server = result.server_url ?? "https://github.com";
   const version = (side) => {
     const value = result[side];
@@ -284,7 +291,7 @@ export function markdownVersionComparison(result) {
     "",
     `**${result.status === "success" ? "✅ Complete" : "❌ Failed / incomplete"}** · Baseline ${version("baseline")} · Candidate ${version("candidate")}`,
     "",
-    "Scores are percentages. Different values show **baseline → candidate**; identical values are shown once. Both versions use the same queries, Gold and local embedding models, with five calls per question and mode.",
+    "Quality scores are percentages. Different values show **baseline → candidate**; identical values are shown once. Both versions use the same queries, Gold and local embedding models, with five calls per question and mode.",
     "Indexed corpus totals count each independently built index once; modes and repetitions do not multiply them. N/A means the count was not recorded.",
     "ZG input limits are per embedding input, not measured token use. Fragment length and overlap budgets use UTF-16 units, before metadata allowance. Missing settings are N/A.",
   ];
@@ -298,12 +305,7 @@ export function markdownVersionComparison(result) {
       mrr_at_10: "file_mrr_at_10",
       ndcg_at_10: "ndcg_at_10",
     };
-    for (const [suite, title] of [
-      ["sweqa", "SWE-QA20"],
-      ["beir", "BEIR"],
-      ["duretrieval", "DuRetrieval"],
-      ["quarry", "Quarry"],
-    ]) {
+    for (const [suite, title] of SUITE_TITLES) {
       const qa = suite === "sweqa" && hasQa;
       const pilotQa = result.rows.some(
         (row) => row.suite === suite && row.entity_diagnostic,
@@ -366,9 +368,45 @@ export function markdownVersionComparison(result) {
             .replace(/[\r\n]+/g, " ")}`,
       ),
     );
+  if (traceUrl) lines.push("", `[Download stage trace (HTML)](${traceUrl})`);
   if (result.run_url)
     lines.push("", `[Full reports and per-call evidence](${result.run_url})`);
   return `${lines.join("\n")}\n`;
+}
+
+export async function readComparisonInput(directory) {
+  const names = ["zg", ...PILOT_NAMES];
+  const json = async (path) => JSON.parse(await readFile(path, "utf8"));
+  return {
+    summary: await json(join(directory, "summary.json")),
+    reports: Object.fromEntries(
+      await Promise.all(
+        names.map(async (name) => [
+          name,
+          await json(join(directory, "reports", `${name}.json`)),
+        ]),
+      ),
+    ),
+    traces: Object.fromEntries(
+      await Promise.all(
+        names.map(async (name) => {
+          try {
+            return [
+              name,
+              await json(
+                join(directory, "reports", `${name}-gold-stages.json`),
+              ),
+            ];
+          } catch (error) {
+            return [
+              name,
+              error.code === "ENOENT" ? null : { error: error.message },
+            ];
+          }
+        }),
+      ),
+    ),
+  };
 }
 
 export async function main(args = process.argv.slice(2)) {
@@ -398,6 +436,8 @@ export async function main(args = process.argv.slice(2)) {
       : null,
   };
   let result;
+  let baseline;
+  let candidate;
   try {
     for (const side of ["baseline", "candidate"]) checkIdentity(metadata[side]);
     const jobs = JSON.parse(env.RETRIEVAL_COMPARISON_JOBS ?? "{}");
@@ -408,30 +448,15 @@ export async function main(args = process.argv.slice(2)) {
           "success",
           `${side}: benchmark job failed or was cancelled`,
         );
-    const read = async (directory) => ({
-      summary: JSON.parse(
-        await readFile(join(directory, "summary.json"), "utf8"),
-      ),
-      reports: Object.fromEntries(
-        await Promise.all(
-          ["zg", ...PILOT_NAMES].map(async (name) => [
-            name,
-            JSON.parse(
-              await readFile(
-                join(directory, "reports", `${name}.json`),
-                "utf8",
-              ),
-            ),
-          ]),
-        ),
-      ),
-    });
-    result = await compareRuns(
-      await read(values.baseline),
-      await read(values.candidate),
-      metadata,
-    );
+    [baseline, candidate] = await Promise.all([
+      readComparisonInput(values.baseline),
+      readComparisonInput(values.candidate),
+    ]);
+    result = await compareRuns(baseline, candidate, metadata);
   } catch (error) {
+    // Rejected bundles must not be displayed under the requested commit IDs.
+    baseline = undefined;
+    candidate = undefined;
     result = {
       schema_version: 1,
       kind: "retrieval-version-comparison",
@@ -446,9 +471,29 @@ export async function main(args = process.argv.slice(2)) {
     join(values.output, "summary.json"),
     `${JSON.stringify(result, null, 2)}\n`,
   );
+  const trace = await buildTraceData({
+    baseline,
+    candidate,
+    metadata: {
+      ...metadata,
+      ...(result.status !== "success"
+        ? {
+            note: "Comparison incomplete. Missing or invalid evidence is shown as N/A.",
+          }
+        : {}),
+    },
+  });
+  await writeFile(
+    join(values.output, "retrieval-trace.html"),
+    await renderGoldTrace(trace),
+  );
   await writeFile(
     join(values.output, "summary.md"),
-    markdownVersionComparison(result),
+    markdownVersionComparison(result, {
+      traceUrl: metadata.run_url
+        ? `${metadata.run_url}#artifacts`
+        : "retrieval-trace.html",
+    }),
   );
   if (result.status !== "success") process.exitCode = 1;
 }

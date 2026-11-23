@@ -57,5 +57,10 @@ fn pp_s_preserves_strict_threshold_and_clips_boxes() {
     );
     assert!(decode(&[], 100, 200).expect("empty detections").is_empty());
     assert!(decode(&[23.0, 0.9, 0.0, 0.0, 1.0, 1.0], 100, 200).is_err());
-    assert!(decode(&[2.0, f32::NAN, 0.0, 0.0, 1.0, 1.0], 100, 200).is_err());
+    let invalid_page =
+        decode(&[2.0, f32::NAN, 0.0, 0.0, 1.0, 1.0], 100, 200).expect_err("invalid prediction");
+    assert!(
+        !invalid_page.should_fail_fast(),
+        "page output must not disable later pages"
+    );
 }

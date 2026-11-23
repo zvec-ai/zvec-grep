@@ -114,13 +114,15 @@ def main():
 
         index_args = ["--index", "--embedding", "local/all-minilm-l6-v2", "--model-cache", str(cache), "--device", "cpu"]
         try:
-            out, _ = execute("index-real", index_args)
+            out, err = execute("index-real", index_args)
+            check("using native PDF text without layout filtering" not in err, err)
             check("2 scanned" in out and "0 failed" in out, out)
             out, _ = execute("index-unchanged", ["--index"])
             check("2 unchanged" in out, out)
             for preview in ["none", "short", "full", "detail"]:
                 out, _ = execute("query-" + preview, ["Trace-based Just-in-Time Type Specialization", "-t", "pdf", "--preview", preview, "--limit", "1", "--refresh", "off"])
-                check("paper.pdf" in out and "text/native" in out, out)
+                check("paper.pdf" in out, out)
+                check(("text/native" in out) == (preview == "detail"), out)
                 check(bool(re.search(r"pages:\s*1(?:\D|$)", out, re.I)), out)
                 check(("Boxes:" in out) == (preview == "detail"), out)
                 if preview == "detail":
@@ -149,7 +151,10 @@ def main():
             check("empty.pdf" in out + err and "OCR is not enabled" in out + err, out + err)
             out, _ = execute("query-isolation", ["Orchid recovery", "--preview", "short", "--limit", "3", "--refresh", "off"])
             check("notes.md" in out and "pages.pdf" in out and "broken.pdf" not in out, out)
-            _, err = execute("rg-unavailable", ["--rg", "-F", "Orchid recovery"], (1,))
+            out, err = execute("rg-unavailable", ["--rg", "-F", "Orchid recovery"])
+            check("pages.pdf" in out and "notes.md" in out, out)
+            check("zg --index" in err and "skipped 1" in err, err)
+            _, err = execute("rg-explicit-unavailable", ["--rg", "-F", "Orchid recovery", "broken.pdf"], (1,))
             check("broken.pdf" in err and "zg --index" in err, err)
             out, _ = execute("rg-mixed", ["--rg", "-F", "Orchid recovery", "-g", "!broken.pdf"])
             check("pages.pdf" in out and "notes.md" in out and re.search(r"pages:\s*1\s*\n", out), out)

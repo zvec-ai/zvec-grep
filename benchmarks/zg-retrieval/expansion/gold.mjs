@@ -246,16 +246,28 @@ export async function verifyPilotGoldSources(gold, group) {
   return files;
 }
 
-export function summarizePilotEntity(calls, entry) {
-  return summarizeDiagnosticRetrieval(
-    calls,
-    {
-      file_targets: entry.files.map((file) => ({ ...file, id: file.path })),
-      entity_targets: entry.targets.map((target) => ({
-        ...target,
-        id: target.source_id,
-      })),
-    },
-    { entityByteRanges: true },
+export function pilotQaTargets(entry) {
+  return {
+    file_targets: entry.files.map((file) => ({ ...file, id: file.path })),
+    entity_targets: entry.targets.map((target) => ({
+      ...target,
+      id: target.source_id,
+    })),
+  };
+}
+
+/** ZG strips a UTF-8 BOM before indexing; pilot Gold counts its on-disk bytes. */
+export function indexedSourceOffsets(files) {
+  const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+  return Object.fromEntries(
+    [...files]
+      .filter(([, { bytes }]) => bytes.subarray(0, bom.length).equals(bom))
+      .map(([path]) => [path, bom.length]),
   );
+}
+
+export function summarizePilotEntity(calls, entry) {
+  return summarizeDiagnosticRetrieval(calls, pilotQaTargets(entry), {
+    entityByteRanges: true,
+  });
 }

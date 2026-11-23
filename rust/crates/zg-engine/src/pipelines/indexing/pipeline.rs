@@ -2679,9 +2679,9 @@ mod tests {
         > {
             self.calls.fetch_add(1, Ordering::AcqRel);
             if self.fail.load(Ordering::Acquire) {
-                return Err(ModelError::internal("layout runtime unavailable")
-                    .shared()
-                    .into());
+                return Err(crate::extraction::pdf::PdfExtractionError::Runtime(
+                    EngineError::internal("PDFium runtime unavailable"),
+                ));
             }
             if bytes.ends_with(b"document-failure") {
                 return Err(EngineError::invalid_argument("page 2 could not be parsed").into());
@@ -2714,6 +2714,14 @@ mod tests {
                 source_map
             };
             Ok(crate::extraction::pdf::PdfMarkdownSource {
+                warnings: if bytes.ends_with(b"native-fallback") {
+                    vec![format!(
+                        "{}: page 3: using native PDF text without layout filtering",
+                        path.display()
+                    )]
+                } else {
+                    Vec::new()
+                },
                 text: TextSource {
                     relative_path: path,
                     formats: vec![FileFormat::Pdf],
@@ -2776,7 +2784,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pdf_shared_model_failure_is_isolated_and_recovers_on_next_operation() {
+    async fn pdf_shared_runtime_failure_is_isolated_and_recovers_on_next_operation() {
         let directory = tempdir().expect("valid test fixture");
         for name in ["one.pdf", "two.pdf"] {
             std::fs::write(directory.path().join(name), b"%PDF-1.7\nfixture")
@@ -2826,7 +2834,7 @@ mod tests {
         for (name, bytes) in [
             ("broken.pdf", b"%PDF-1.7\ndocument-failure".as_slice()),
             ("empty.pdf", b"%PDF-1.7\nno-native-text"),
-            ("healthy.pdf", b"%PDF-1.7\nhealthy"),
+            ("healthy.pdf", b"%PDF-1.7\nnative-fallback"),
         ] {
             std::fs::write(directory.path().join(name), bytes).expect("fixture");
         }
@@ -2860,9 +2868,21 @@ mod tests {
         assert_eq!(result.entities_created, 2);
         assert_eq!(result.failed_files[0].path, Path::new("broken.pdf"));
         assert!(result.failed_files[0].reason.contains("page 2"));
-        assert_eq!(result.warnings.len(), 1);
-        assert!(result.warnings[0].contains("empty.pdf"));
-        assert!(result.warnings[0].contains("no searchable native text"));
+        assert_eq!(result.warnings.len(), 2);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("empty.pdf")
+                    && warning.contains("no searchable native text"))
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("healthy.pdf")
+                    && warning.contains("without layout filtering"))
+        );
         let files = storage.list_files().expect("files");
         assert_eq!(
             files

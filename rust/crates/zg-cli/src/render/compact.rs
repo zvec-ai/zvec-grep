@@ -81,7 +81,6 @@ pub(super) fn write_item_preview(
                 .collect::<Vec<_>>()
                 .join(",")
         )?;
-        writeln!(writer, "{} text/native", theme.metadata_label("kind:"))?;
     }
     match &item.metadata {
         Some(EntityMetadata::Code(code)) => {

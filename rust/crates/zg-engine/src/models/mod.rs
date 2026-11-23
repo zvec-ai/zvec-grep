@@ -23,7 +23,7 @@ pub(crate) use runtime::{batch_concurrency, resolve_index_concurrency};
 pub(crate) use spi::{
     EmbeddingConcurrencyDefaults, EmbeddingOptions, EmbeddingPrepareOptions, ModelProgressReporter,
 };
-pub(crate) use spi::{LayoutImage, LayoutKind, LayoutModelConfig, LayoutOptions};
+pub(crate) use spi::{LayoutImage, LayoutKind, LayoutModelConfig, LayoutOptions, LayoutRegion};
 
 #[cfg(test)]
 mod tests;

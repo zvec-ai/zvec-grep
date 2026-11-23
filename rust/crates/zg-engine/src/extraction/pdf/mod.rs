@@ -11,6 +11,7 @@ use crate::{
 use super::{ChunkOptions, ExtractedEntity, TextSource, markdown};
 
 mod assembly;
+mod enhancement;
 mod filter;
 mod render;
 mod service;
@@ -22,6 +23,7 @@ pub(crate) use service::{PdfExtractionPort, PdfExtractionService};
 pub(crate) struct PdfMarkdownSource {
     pub text: TextSource,
     pub source_map: PdfSourceMap,
+    pub warnings: Vec<String>,
 }
 
 pub(super) fn extract(

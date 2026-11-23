@@ -116,6 +116,7 @@ pub(super) fn finish(
         source_map.validate(&text)?;
     }
     Ok(PdfMarkdownSource {
+        warnings: Vec::new(),
         text: TextSource {
             relative_path: path,
             formats: vec![FileFormat::Pdf],

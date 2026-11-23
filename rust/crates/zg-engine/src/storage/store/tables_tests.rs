@@ -57,6 +57,7 @@ fn pdf_markdown_search_round_trip_keeps_pages_and_blocks() {
     let split = text.find("continuation").expect("split");
     let extracted = extract_without_graph(
         &PdfMarkdownSource {
+            warnings: Vec::new(),
             text: TextSource {
                 relative_path: SourcePath::new("manual.pdf").expect("path"),
                 formats: vec![crate::domain::FileFormat::Pdf],
