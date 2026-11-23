@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
-import { chmod, lstat, mkdtemp, mkdir, readFile, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdtemp, mkdir, readFile, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,7 +18,6 @@ import {
   stageComponentPayload,
   stageZvecRuntime,
   verifyTarballSize,
-  workspaceDir,
 } from "./npm-package-core.mjs";
 
 const manifest = loadReleaseManifest();
@@ -493,6 +492,8 @@ test("CUDA fallback uses the primary Cargo source record, including cached build
     await writeFile(join(directory, "CMakeLists.txt"), "# source path fixture\n");
   }
   await mkdir(join(project, "src"));
+  // This temporary project is outside the repository's toolchain scope.
+  await copyFile(new URL("../rust-toolchain.toml", import.meta.url), join(project, "rust-toolchain.toml"));
   await writeFile(join(project, "Cargo.toml"),
     '[package]\nname = "llama-cpp-sys-2"\nversion = "0.0.0"\nedition = "2021"\nlinks = "llama"\n');
   await writeFile(join(project, "Cargo.lock"),
@@ -521,10 +522,8 @@ messages = pathlib.Path(sys.argv[2])
     assert.equal(result.status, 0, result.stdout + result.stderr);
   };
   for (const [index, source] of [cached, cached, override].entries()) {
-    // Use the release workspace's pinned Cargo to build the temporary crate.
-    const result = spawnSync("cargo", ["build", "--manifest-path", join(project, "Cargo.toml"),
-      "--locked", "--offline", "--message-format=json"], {
-      cwd: workspaceDir, env: { ...process.env, CARGO_TARGET_DIR: target, ZG_TEST_SOURCE_DIR: source },
+    const result = spawnSync("cargo", ["build", "--locked", "--offline", "--message-format=json"], {
+      cwd: project, env: { ...process.env, CARGO_TARGET_DIR: target, ZG_TEST_SOURCE_DIR: source },
       encoding: "utf8", timeout: 120_000,
     });
     assert.ifError(result.error);
@@ -533,18 +532,34 @@ messages = pathlib.Path(sys.argv[2])
     const records = result.stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line));
     if (index === 1) assert.ok(records.some((r) => r.reason === "compiler-artifact" && r.fresh));
     inspect(String.raw`
-source, revision = fallback.source_build(messages)
-assert source == pathlib.Path(sys.argv[3]), (source, sys.argv[3])
-assert revision == sys.argv[4]
-command = fallback.configure(source, source / "build", source / "cuda", fallback.DEFAULT_ARCHITECTURES)
-assert command[command.index("-S") + 1] == str(source)
+build = next(r for r in fallback.cargo_records(messages) if r.get("reason") == "build-script-executed")
+directory = pathlib.Path(build["out_dir"]).parent
+outputs = [directory / "output", directory / "run" / "stdout"]
+actual = next(output for output in outputs if output.is_file())
+# Replay the real metadata in both Cargo layouts, restoring it before the next
+# build so Cargo's cache behavior is still exercised by Cargo itself.
+for output in outputs:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if output != actual:
+        actual.rename(output)
+    try:
+        source, revision = fallback.source_build(messages)
+        assert source == pathlib.Path(sys.argv[3]), (source, sys.argv[3])
+        assert revision == sys.argv[4]
+        command = fallback.configure(source, source / "build", source / "cuda", fallback.DEFAULT_ARCHITECTURES)
+        assert command[command.index("-S") + 1] == str(source)
+    finally:
+        if output != actual:
+            output.rename(actual)
 `, source, revision);
   }
   inspect(String.raw`
 records = fallback.cargo_records(messages)
 build = next(r for r in records if r.get("reason") == "build-script-executed")
-output = pathlib.Path(build["out_dir"]).parent / "output"
-original = output.read_text(encoding="utf-8")
+directory = pathlib.Path(build["out_dir"]).parent
+outputs = [directory / "output", directory / "run" / "stdout"]
+actual = next(output for output in outputs if output.is_file())
+original = actual.read_text(encoding="utf-8")
 def reject(expected):
     try:
         fallback.source_build(messages)
@@ -552,16 +567,27 @@ def reject(expected):
         assert expected in str(error), str(error)
     else:
         raise AssertionError("invalid primary source accepted")
-for text, error in [
-    ("cargo:source_revision=" + "a" * 40, "source_dir"),
-    (original + "\ncargo:source_dir=/stale\n", "source_dir"),
-    (original.replace(sys.argv[3], "relative/source"), "source is unavailable"),
-    (original.replace(sys.argv[3], str(output.parent / "missing")), "source is unavailable"),
-    (original.replace(sys.argv[4], "not-a-revision"), "source_revision"),
-]:
-    output.write_text(text, encoding="utf-8")
-    reject(error)
-output.write_text(original, encoding="utf-8")
+actual.unlink()
+reject("Missing or ambiguous build-script stdout")
+for output in outputs:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    for text, error in [
+        ("cargo:source_revision=" + "a" * 40, "source_dir"),
+        (original + "\ncargo:source_dir=/stale\n", "source_dir"),
+        (original + "\ncargo:source_revision=" + "a" * 40, "source_revision"),
+        (original.replace(sys.argv[3], "relative/source"), "source is unavailable"),
+        (original.replace(sys.argv[3], str(directory / "missing")), "source is unavailable"),
+        (original.replace(sys.argv[4], "not-a-revision"), "source_revision"),
+    ]:
+        output.write_text(text, encoding="utf-8")
+        reject(error)
+    output.unlink()
+for output in outputs:
+    output.write_text(original, encoding="utf-8")
+reject("Missing or ambiguous build-script stdout")
+for output in outputs:
+    output.unlink()
+actual.write_text(original, encoding="utf-8")
 for changed, error in [
     (records[:-1], "finish successfully"),
     ([*records[:-1], {"reason": "build-finished", "success": False}], "finish successfully"),
