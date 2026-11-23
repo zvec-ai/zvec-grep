@@ -1,0 +1,1442 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Retrieval trace</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #1b3034;
+        --muted: #657a7e;
+        --teal: #08796e;
+        --teal-bg: #eaf5f2;
+        --line: #dce6e4;
+        --paper: #fff;
+        --back: #f4f7f6;
+        --warm: #9c6325;
+        --warm-bg: #fff4e5;
+        --red: #a54b48;
+        --red-bg: #fff0ee;
+        --mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--back);
+        color: var(--ink);
+        font-family:
+          Inter,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          "PingFang SC",
+          "Microsoft YaHei",
+          sans-serif;
+        font-size: 14px;
+        line-height: 1.55;
+      }
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+      button,
+      summary,
+      select {
+        cursor: pointer;
+      }
+      button {
+        color: inherit;
+      }
+      button:focus-visible,
+      input:focus-visible,
+      select:focus-visible,
+      summary:focus-visible,
+      a:focus-visible {
+        outline: 3px solid #69beb1;
+        outline-offset: 3px;
+      }
+      a {
+        color: var(--teal);
+        text-decoration: none;
+      }
+      a:hover {
+        text-decoration: underline;
+      }
+      h1,
+      h2,
+      h3,
+      p {
+        margin: 0;
+      }
+      h1 {
+        font-size: 32px;
+        letter-spacing: -1px;
+        font-weight: 720;
+        line-height: 1.2;
+      }
+      h2 {
+        font-size: 19px;
+        letter-spacing: -0.3px;
+      }
+      h3 {
+        font-size: 15px;
+      }
+      small,
+      .muted {
+        color: var(--muted);
+      }
+      code {
+        font-family: var(--mono);
+        font-size: 0.9em;
+      }
+      .page {
+        max-width: 1440px;
+        margin: auto;
+        padding: 36px 40px 48px;
+      }
+      .masthead {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 24px;
+      }
+      .eyebrow {
+        font-size: 10px;
+        letter-spacing: 2px;
+        color: var(--teal);
+        font-weight: 750;
+        margin-bottom: 9px;
+      }
+      .title-line {
+        display: flex;
+        gap: 14px;
+        align-items: center;
+      }
+      .preview {
+        font-size: 11px;
+        letter-spacing: 0.3px;
+        border: 1px solid #c5dcd5;
+        border-radius: 5px;
+        padding: 3px 8px;
+        color: var(--teal);
+        white-space: nowrap;
+      }
+      .subtitle {
+        font-size: 14px;
+        color: var(--muted);
+        margin-top: 10px;
+      }
+      .run-source {
+        text-align: right;
+        font-size: 12px;
+        line-height: 1.8;
+        padding-top: 17px;
+      }
+      .versions {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .tabs {
+        display: flex;
+        gap: 6px;
+        margin-top: 28px;
+        border-bottom: 1px solid var(--line);
+        padding-bottom: 0;
+        overflow: auto;
+      }
+      .suite-tab {
+        border: 0;
+        background: none;
+        white-space: nowrap;
+        padding: 12px 19px 14px;
+        color: var(--muted);
+        border-bottom: 3px solid transparent;
+        font-weight: 650;
+      }
+      .suite-tab[aria-selected="true"] {
+        border-color: var(--teal);
+        color: var(--teal);
+      }
+      .tab-count {
+        font-size: 11px;
+        background: #e8eeec;
+        border-radius: 5px;
+        padding: 2px 6px;
+        margin-left: 7px;
+        font-weight: 500;
+      }
+      .suite-tab[aria-selected="true"] .tab-count {
+        background: #d9eee7;
+      }
+      .overview {
+        background: var(--paper);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 22px 24px 16px;
+        margin-top: 22px;
+        box-shadow: 0 2px 4px #153e2b03;
+      }
+      .section-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 17px;
+      }
+      .heading-note {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 5px;
+      }
+      .segment {
+        display: inline-flex;
+        background: #f0f4f2;
+        padding: 3px;
+        border: 1px solid #e1e9e5;
+        border-radius: 7px;
+        flex-shrink: 0;
+      }
+      .segment button {
+        padding: 6px 13px;
+        border: 0;
+        background: none;
+        border-radius: 5px;
+        font-size: 12px;
+        color: var(--muted);
+        font-weight: 600;
+      }
+      .segment button[aria-pressed="true"] {
+        color: var(--teal);
+        background: white;
+        box-shadow: 0 1px 4px #254d3c16;
+      }
+      .table-wrap {
+        overflow: auto;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        text-align: left;
+      }
+      .stage-table {
+        table-layout: fixed;
+        font-size: 14px;
+      }
+      .stage-table th:first-child {
+        width: 45%;
+      }
+      .stage-table th {
+        background: #f5f8f7;
+        color: var(--muted);
+        font-size: 11px;
+        letter-spacing: 0.35px;
+        padding: 10px 15px;
+        font-weight: 650;
+      }
+      .stage-table th:not(:first-child),
+      .stage-table td:not(:first-child) {
+        text-align: right;
+      }
+      .stage-table td {
+        padding: 11px 15px;
+        border-bottom: 1px solid #e8eeeb;
+        font-variant-numeric: tabular-nums;
+      }
+      .stage-table tbody tr:last-child {
+        background: #edf6f2;
+      }
+      .stage-table tbody tr:last-child td {
+        border-bottom: 0;
+      }
+      .stage-table .extra-row:last-child {
+        background: none;
+      }
+      .stage-label {
+        font-weight: 500;
+      }
+      .stage-no {
+        font-family: var(--mono);
+        font-size: 10px;
+        color: #89a29d;
+        margin-right: 12px;
+      }
+      .cell {
+        white-space: nowrap;
+        font-size: 14px;
+        font-weight: 650;
+      }
+      .cell .baseline {
+        font-size: 12px;
+        color: #93a09e;
+        font-weight: 450;
+      }
+      .cell .arrow {
+        color: #a2b5b0;
+        font-weight: 450;
+        margin: 0 7px;
+      }
+      .dash {
+        color: #9eafaa;
+      }
+      .unknown {
+        font-size: 10px;
+        color: var(--warm);
+        display: block;
+        font-weight: 500;
+      }
+      .overview-foot {
+        display: flex;
+        align-items: flex-start;
+        gap: 20px;
+        justify-content: space-between;
+        padding-top: 12px;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .more-stages {
+        margin-top: 15px;
+        border-top: 1px solid var(--line);
+        padding-top: 11px;
+      }
+      .more-stages summary {
+        font-size: 12px;
+        color: var(--teal);
+        font-weight: 600;
+      }
+      .more-stages .table-wrap {
+        margin-top: 10px;
+      }
+      .explanation {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 10px;
+        line-height: 1.8;
+      }
+      .detail-heading {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin: 30px 0 14px;
+      }
+      .detail-heading .line {
+        height: 1px;
+        background: var(--line);
+        flex: 1;
+      }
+      .detail-heading small {
+        font-size: 12px;
+      }
+      .inspector {
+        display: grid;
+        grid-template-columns: 260px minmax(0, 1fr);
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        overflow: hidden;
+        align-items: start;
+        min-height: 750px;
+      }
+      .task-nav {
+        border-right: 1px solid var(--line);
+        background: #fbfcfb;
+        align-self: stretch;
+      }
+      .search-box {
+        padding: 17px;
+        border-bottom: 1px solid var(--line);
+      }
+      .search-box input {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 9px 10px;
+        background: white;
+        font-size: 12px;
+      }
+      .list-caption {
+        font-size: 10px;
+        color: var(--muted);
+        margin-top: 9px;
+        display: flex;
+        justify-content: space-between;
+      }
+      .task-list {
+        max-height: 820px;
+        overflow: auto;
+        padding: 7px;
+      }
+      .task-button {
+        display: block;
+        width: 100%;
+        border: 1px solid transparent;
+        background: transparent;
+        text-align: left;
+        border-radius: 6px;
+        padding: 12px 11px;
+        margin-bottom: 3px;
+      }
+      .task-button:hover {
+        background: #f0f5f2;
+      }
+      .task-button[aria-current="true"] {
+        background: var(--teal-bg);
+        border-color: #c8e3d9;
+        box-shadow: inset 3px 0 var(--teal);
+      }
+      .task-top {
+        display: flex;
+        gap: 7px;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .task-id {
+        font-family: var(--mono);
+        font-size: 11px;
+        font-weight: 650;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 170px;
+      }
+      .task-order {
+        font-family: var(--mono);
+        font-size: 10px;
+        color: #899c96;
+      }
+      .task-title {
+        margin-top: 6px;
+        font-size: 12px;
+        line-height: 1.6;
+        color: #5e7375;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }
+      .task-excluded {
+        font-size: 10px;
+        color: var(--warm);
+        margin-top: 6px;
+      }
+      .question {
+        min-width: 0;
+        padding: 24px;
+      }
+      .question-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-bottom: 11px;
+      }
+      .question-head code {
+        font-size: 12px;
+        font-weight: 650;
+        overflow-wrap: anywhere;
+      }
+      .badge {
+        font-size: 10px;
+        border-radius: 4px;
+        padding: 3px 6px;
+        white-space: nowrap;
+        line-height: 1.3;
+        font-weight: 550;
+      }
+      .badge.neutral {
+        color: var(--muted);
+        background: #eef2f0;
+      }
+      .badge.good {
+        color: var(--teal);
+        background: var(--teal-bg);
+      }
+      .badge.warn {
+        color: var(--warm);
+        background: var(--warm-bg);
+      }
+      .badge.loss {
+        color: var(--red);
+        background: var(--red-bg);
+      }
+      .query {
+        font-size: 17px;
+        line-height: 1.6;
+        letter-spacing: -0.2px;
+        max-width: 950px;
+        font-weight: 560;
+        overflow-wrap: anywhere;
+      }
+      .question-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 7px 18px;
+        margin-top: 9px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .callout {
+        background: var(--warm-bg);
+        border-left: 3px solid #e7bd7d;
+        padding: 10px 12px;
+        font-size: 12px;
+        margin: 14px 0;
+      }
+      .question-stage {
+        margin-top: 23px;
+      }
+      .mini-heading {
+        display: flex;
+        gap: 16px;
+        justify-content: space-between;
+        align-items: center;
+        margin: 0 0 10px;
+      }
+      .mini-heading small {
+        font-size: 11px;
+      }
+      .question-stage .stage-table th:first-child {
+        width: 48%;
+      }
+      .question-stage .stage-table {
+        font-size: 12px;
+      }
+      .question-stage .stage-table td {
+        padding: 9px 12px;
+      }
+      .question-stage .stage-table .cell {
+        font-size: 12px;
+      }
+      .question-stage .stage-table .baseline {
+        font-size: 11px;
+      }
+      .question-stage .stage-no {
+        display: none;
+      }
+      .trace-detail {
+        border-top: 1px solid var(--line);
+        padding-top: 20px;
+        margin-top: 24px;
+      }
+      .detail-controls {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        flex-wrap: wrap;
+      }
+      .rep-control {
+        font-size: 11px;
+        color: var(--muted);
+        display: flex;
+        align-items: center;
+        gap: 7px;
+      }
+      .rep-control select {
+        font-size: 11px;
+        color: var(--ink);
+        border: 1px solid var(--line);
+        background: white;
+        border-radius: 5px;
+        padding: 6px 24px 6px 8px;
+      }
+      .flow {
+        display: flex;
+        align-items: stretch;
+        gap: 6px;
+        margin: 15px 0 17px;
+        overflow: auto;
+        padding-bottom: 3px;
+      }
+      .flow-node {
+        background: #f6f9f7;
+        border: 1px solid #e5ece8;
+        border-radius: 7px;
+        min-width: 95px;
+        padding: 9px 11px;
+        flex: 1;
+      }
+      .flow-node:last-child {
+        background: var(--teal-bg);
+        border-color: #cee4dc;
+      }
+      .flow-node strong {
+        display: block;
+        font-size: 20px;
+        line-height: 1.2;
+        font-weight: 650;
+        letter-spacing: -0.4px;
+      }
+      .flow-node span {
+        display: block;
+        font-size: 10px;
+        color: var(--muted);
+        margin-top: 4px;
+        white-space: nowrap;
+      }
+      .flow-arrow {
+        align-self: center;
+        color: #b1c1b9;
+        font-size: 14px;
+      }
+      .flow-note {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: -10px;
+        margin-bottom: 21px;
+      }
+      .target-toolbar {
+        display: flex;
+        justify-content: space-between;
+        gap: 15px;
+        align-items: center;
+        margin-bottom: 11px;
+      }
+      .target-toolbar h3 {
+        font-size: 14px;
+      }
+      .target-table {
+        font-size: 11px;
+        min-width: 670px;
+      }
+      .target-table th {
+        padding: 9px 8px;
+        background: #f5f8f7;
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .target-table td {
+        padding: 10px 8px;
+        border-bottom: 1px solid #e6eeea;
+        vertical-align: middle;
+        font-variant-numeric: tabular-nums;
+      }
+      .target-table th:first-child {
+        width: 35%;
+      }
+      .target-table th:not(:first-child),
+      .target-table td:not(:first-child) {
+        text-align: center;
+      }
+      .target-name {
+        font-size: 11px;
+        font-weight: 600;
+        word-break: break-word;
+        line-height: 1.5;
+      }
+      .target-path {
+        font-family: var(--mono);
+        font-size: 10px;
+        color: var(--muted);
+        margin-top: 3px;
+        word-break: break-all;
+        line-height: 1.4;
+      }
+      .target-qualifier {
+        margin-top: 5px;
+      }
+      .hit {
+        color: var(--teal);
+      }
+      .miss {
+        color: #8c9d96;
+        font-size: 10px;
+      }
+      .rank {
+        display: inline-block;
+        min-width: 23px;
+        border-radius: 4px;
+        padding: 2px 5px;
+        color: #466860;
+        background: #f0f5f2;
+        font-family: var(--mono);
+        font-size: 11px;
+      }
+      .rank.final {
+        color: var(--teal);
+        background: #e2f2e9;
+        font-weight: 650;
+      }
+      .rank.out {
+        background: #f6f5f2;
+        color: #8c8c7d;
+      }
+      .rank-info {
+        margin-top: 12px;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .rank-info summary {
+        color: #607d74;
+      }
+      .rank-info p {
+        margin-top: 7px;
+        line-height: 1.8;
+      }
+      .empty {
+        padding: 32px 20px;
+        text-align: center;
+        background: #f8faf8;
+        border: 1px dashed var(--line);
+        border-radius: 7px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .foot {
+        margin-top: 22px;
+        color: #81938b;
+        font-size: 11px;
+        display: flex;
+        justify-content: space-between;
+        gap: 20px;
+      }
+      .provenance {
+        margin-top: 24px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .provenance summary {
+        font-size: 12px;
+      }
+      .provenance p {
+        margin-top: 10px;
+        overflow-wrap: anywhere;
+      }
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+      @media (max-width: 1050px) {
+        .page {
+          padding: 26px 22px;
+        }
+        .inspector {
+          grid-template-columns: 220px minmax(0, 1fr);
+        }
+        .question {
+          padding: 20px;
+        }
+        .stage-table th:first-child {
+          width: 46%;
+        }
+        .cell {
+          font-size: 13px;
+        }
+        .cell .arrow {
+          margin: 0 4px;
+        }
+        .question-stage .stage-table th:first-child {
+          width: 42%;
+        }
+        .question-stage .stage-table th,
+        .question-stage .stage-table td {
+          padding-left: 8px;
+          padding-right: 8px;
+        }
+        .query {
+          font-size: 16px;
+        }
+        .flow-node {
+          min-width: 82px;
+          padding: 9px;
+        }
+        .target-table {
+          min-width: 650px;
+        }
+      }
+      @media (max-width: 760px) {
+        .page {
+          padding: 22px 14px;
+        }
+        .masthead {
+          display: block;
+        }
+        h1 {
+          font-size: 28px;
+        }
+        .run-source {
+          text-align: left;
+          padding-top: 14px;
+        }
+        .tabs {
+          margin-top: 20px;
+        }
+        .suite-tab {
+          padding: 10px 11px;
+        }
+        .overview {
+          padding: 17px 14px;
+        }
+        .section-top {
+          align-items: flex-start;
+        }
+        .stage-table {
+          min-width: 570px;
+        }
+        .overview-foot {
+          display: block;
+        }
+        .overview-foot span {
+          display: block;
+          margin-top: 4px;
+        }
+        .inspector {
+          display: block;
+        }
+        .task-nav {
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+        .search-box {
+          padding: 12px 14px;
+        }
+        .task-list {
+          display: flex;
+          gap: 7px;
+          max-height: none;
+          overflow: auto;
+          padding: 8px 12px;
+        }
+        .task-button {
+          min-width: 210px;
+          max-width: 210px;
+          margin: 0;
+        }
+        .question {
+          padding: 19px 14px;
+        }
+        .question-stage .stage-table {
+          min-width: 530px;
+        }
+        .detail-heading small {
+          font-size: 10px;
+        }
+        .flow {
+          gap: 4px;
+        }
+        .flow-node {
+          min-width: 86px;
+        }
+        .foot {
+          display: block;
+        }
+        .foot span {
+          display: block;
+          margin-top: 6px;
+        }
+      }
+      @media print {
+        body {
+          background: white;
+        }
+        .page {
+          padding: 0;
+        }
+        .tabs,
+        .task-nav,
+        .detail-controls,
+        .more-stages > summary {
+          display: none;
+        }
+        .inspector {
+          display: block;
+        }
+        .overview,
+        .inspector {
+          box-shadow: none;
+          break-inside: avoid;
+        }
+        .table-wrap {
+          overflow: visible;
+        }
+        .target-table {
+          min-width: 0;
+        }
+        .question {
+          padding: 18px;
+        }
+        .flow {
+          overflow: visible;
+        }
+        .task-list {
+          max-height: none;
+        }
+      }
+
+      .recall-summary {
+        margin-top: 21px;
+        margin-bottom: 2px;
+      }
+      .recall-title {
+        color: var(--muted);
+        font-size: 11px;
+        margin-bottom: 10px;
+      }
+      .recall-values {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 18px;
+        max-width: 630px;
+        margin: 0;
+      }
+      .recall-metric {
+        min-width: 0;
+        text-align: center;
+      }
+      .recall-metric dt {
+        font-size: 16px;
+        color: var(--muted);
+        font-weight: 500;
+        margin-bottom: 4px;
+      }
+      .recall-metric dd {
+        font-size: 30px;
+        font-weight: 720;
+        line-height: 1.3;
+        font-variant-numeric: tabular-nums;
+        letter-spacing: -0.6px;
+        margin: 0;
+      }
+      @media (max-width: 600px) {
+        .recall-values {
+          gap: 8px;
+        }
+        .recall-metric dt {
+          font-size: 13px;
+        }
+        .recall-metric dd {
+          font-size: 23px;
+          letter-spacing: -0.4px;
+        }
+      }
+      .overview-controls {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .version-control {
+        margin: 14px 0 0;
+      }
+      .capture-note {
+        margin: 12px 0;
+        color: var(--warm);
+        font-size: 12px;
+      }
+      .cell .baseline .unknown {
+        color: var(--warm);
+      }
+      .comparison-values {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 7px;
+      }
+      .comparison-value {
+        display: inline-block;
+      }
+      .overview-controls [hidden] {
+        display: none;
+      }
+      @media (max-width: 760px) {
+        .section-top {
+          flex-wrap: wrap;
+        }
+        .overview-controls {
+          justify-content: flex-start;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <noscript
+        ><p>
+          Enable JavaScript to browse this standalone trace report.
+        </p></noscript
+      >
+      <header class="masthead">
+        <div>
+          <div class="eyebrow">ZG · RETRIEVAL-ONLY</div>
+          <div class="title-line">
+            <h1>Retrieval trace</h1>
+            <span class="preview">Stage diagnostics</span>
+          </div>
+          <p class="subtitle">
+            Follow Gold coverage from the index to the final search results.
+          </p>
+        </div>
+        <div class="run-source" id="run-source"></div>
+      </header>
+      <p id="source-note" class="heading-note" hidden></p>
+      <nav class="tabs" id="suite-tabs" aria-label="Evaluation suite"></nav>
+      <section class="overview" aria-labelledby="overview-title">
+        <div class="section-top">
+          <div>
+            <h2 id="overview-title">Stage overview</h2>
+            <p class="heading-note" id="overview-note"></p>
+          </div>
+          <div class="overview-controls">
+            <label class="rep-control" id="qualification-control" hidden
+              >Gold status
+              <select id="qualification"></select
+            ></label>
+            <div class="segment" id="level-tabs" aria-label="Gold level">
+              <button type="button" data-level="entity" aria-pressed="true">
+                Entity Gold</button
+              ><button type="button" data-level="file" aria-pressed="false">
+                File Gold
+              </button>
+            </div>
+          </div>
+        </div>
+        <div class="table-wrap" id="aggregate-table"></div>
+        <div class="overview-foot">
+          <span
+            >Baseline → candidate · Equal values appear once · Missing
+            observations are N/A.</span
+          ><span id="count-note"></span>
+        </div>
+        <details class="more-stages">
+          <summary>More intermediate stages</summary>
+          <div class="table-wrap" id="aggregate-more"></div>
+        </details>
+        <p class="explanation" id="ranking-note"></p>
+      </section>
+      <div class="detail-heading">
+        <h2>Question traces</h2>
+        <div class="line"></div>
+        <small>Original query · Gold targets · Stage ranks</small>
+      </div>
+      <section class="inspector" aria-label="Question trace browser">
+        <aside class="task-nav">
+          <div class="search-box">
+            <label class="sr-only" for="task-search"
+              >Search questions, queries or corpora</label
+            ><input
+              id="task-search"
+              type="search"
+              placeholder="Search questions, queries or corpora…"
+            />
+            <div class="list-caption">
+              <span id="task-count"></span><span>Select a question</span>
+            </div>
+          </div>
+          <div id="task-list" class="task-list" aria-label="Questions"></div>
+        </aside>
+        <article class="question" id="question" aria-live="polite"></article>
+      </section>
+      <details class="provenance">
+        <summary>Sources and interpretation</summary>
+        <div id="provenance"></div>
+      </details>
+      <footer class="foot">
+        <span>Stage diagnostics explain Gold coverage and ranking changes.</span
+        ><span>Standalone HTML · No external resources</span>
+      </footer>
+    </main>
+    <script type="application/json" id="trace-data">
+      __TRACE_DATA__
+    </script>
+    <script>
+      "use strict";
+      const DATA = JSON.parse(
+        document.getElementById("trace-data").textContent,
+      );
+      const MODES = ["fts", "vector", "hybrid"];
+      const SIDES = ["baseline", "candidate"];
+      const MODE_LABEL = { fts: "FTS", vector: "Vector", hybrid: "Hybrid" };
+      const SIDE_LABEL = { baseline: "Baseline", candidate: "Candidate" };
+      const ROWS = [
+        ["index", "Gold covered by index"],
+        ["fts", "Gold recalled by FTS"],
+        ["vector", "Gold recalled by Vector"],
+        ["rrf_top10", "Before rule ranking (RRF)"],
+        ["actual_top10", "After rule ranking (actual)"],
+      ];
+      const EXTRA = [
+        ["recall", "Gold in recall pool (union)"],
+        ["merged", "After candidate merge"],
+        ["fused", "After RRF fusion"],
+        ["loaded", "After entity loading"],
+      ];
+      const state = {
+        suite: DATA.suites[0]?.id,
+        level: "entity",
+        task: null,
+        mode: "hybrid",
+        side: "candidate",
+        repetition: 1,
+        search: "",
+        qualification: "diagnostic",
+      };
+      const $ = (id) => document.getElementById(id);
+      const esc = (value) =>
+        String(value ?? "").replace(
+          /[&<>"']/g,
+          (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[c],
+        );
+      const number = (value) =>
+        Number.isFinite(value) ? String(Number(value.toFixed(6))) : "N/A";
+      const suite = () => DATA.suites.find((s) => s.id === state.suite);
+      const activeRoute = (mode, key) =>
+        !(
+          (mode === "fts" && key === "vector") ||
+          (mode === "vector" && key === "fts")
+        );
+      const included = (t) =>
+        ["diagnostic", "formal"].includes(t?.qualification);
+      const tasksFor = (s, side) => s?.[side]?.tasks ?? [];
+      function tasks(s = suite()) {
+        const entries = new Map();
+        for (const side of SIDES)
+          for (const t of tasksFor(s, side)) entries.set(t.id, t);
+        return [...entries.values()];
+      }
+      const task = (side = state.side) =>
+        tasksFor(suite(), side).find((t) => t.id === state.task);
+      const question = () =>
+        task() ?? task(state.side === "candidate" ? "baseline" : "candidate");
+      function qualifications() {
+        const available = new Set(
+          SIDES.flatMap((side) =>
+            (suite()?.[side]?.summary?.groups ?? []).map(
+              (g) => g.qualification,
+            ),
+          ),
+        );
+        return ["diagnostic", "formal"].filter((q) => available.has(q));
+      }
+      function aggregateGroup(mode, side) {
+        return suite()?.[side]?.summary?.groups?.find(
+          (g) =>
+            g.mode === mode &&
+            g.level === state.level &&
+            g.qualification === state.qualification,
+        );
+      }
+      function countValue(group, key) {
+        if (!group || group.targets === 0) return "N/A";
+        const c = group.stages?.[key];
+        if (
+          !c ||
+          !Number.isFinite(c.covered) ||
+          !Number.isFinite(c.unknown) ||
+          c.unknown >= group.targets
+        )
+          return "N/A";
+        return `${number(c.covered)}/${number(group.targets)}${c.unknown ? ` (${number(c.unknown)} unknown)` : ""}`;
+      }
+      function comparisonCell(baseline, candidate, key, mode) {
+        if (!activeRoute(mode, key)) return '<span class="dash">—</span>';
+        const before = countValue(baseline, key),
+          after = countValue(candidate, key);
+        const format = (value) =>
+          esc(value).replace(
+            / (\([^)]* unknown\))$/,
+            '<span class="unknown">$1</span>',
+          );
+        if (before === after)
+          return `<span class="cell">${format(after)}</span>`;
+        return `<span class="cell comparison-values"><span class="comparison-value baseline">${format(before)}</span><span class="arrow">→</span><span class="comparison-value">${format(after)}</span></span>`;
+      }
+      function stageTable(getGroup, rows = ROWS) {
+        return `<table class="stage-table"><thead><tr><th scope="col">Stage</th>${MODES.map((m) => `<th scope="col">${MODE_LABEL[m]}</th>`).join("")}</tr></thead><tbody>${rows.map(([key, label], i) => `<tr${rows === EXTRA ? ' class="extra-row"' : ""}><td class="stage-label"><span class="stage-no">${String(i + 1).padStart(2, "0")}</span>${esc(label)}</td>${MODES.map((mode) => `<td>${comparisonCell(getGroup(mode, "baseline"), getGroup(mode, "candidate"), key, mode)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+      }
+      function safeRunUrl() {
+        try {
+          const u = new URL(DATA.meta.run_url);
+          return u.protocol === "https:" ? u.href : null;
+        } catch {
+          return null;
+        }
+      }
+      function renderHeader() {
+        const m = DATA.meta,
+          url = safeRunUrl();
+        $("source-note").hidden = !m.note;
+        $("source-note").textContent = m.note ?? "";
+        $("run-source").innerHTML =
+          `${url ? `<a href="${esc(url)}" target="_blank" rel="noreferrer">Source evaluation run ↗</a>` : '<span class="muted">Run link unavailable</span>'}<div class="versions">${esc(m.baseline?.commit?.slice(0, 8) ?? "N/A")} → ${esc(m.candidate?.commit?.slice(0, 8) ?? "N/A")}</div>`;
+        $("ranking-note").textContent =
+          `Both ranking rows select Top K from the same loaded candidate pool (K = ${m.limit ?? "N/A"}). Before: RRF order. After: static rules and same-file decay, then selection.`;
+        $("provenance").innerHTML =
+          `${m.note ? `<p>${esc(m.note)}</p>` : ""}<p>${url ? `<a href="${esc(url)}" target="_blank" rel="noreferrer">Open source evaluation</a> · ` : ""}Baseline <code>${esc(m.baseline?.repository)}@${esc(m.baseline?.commit ?? "N/A")}</code> · Candidate <code>${esc(m.candidate?.repository)}@${esc(m.candidate?.commit ?? "N/A")}</code></p><p>Average each question's repeated observations before summing coverage. Each question's Gold is counted once in the denominator. Per-call ranks retain the selected observation's original positions. N/A means missing or unknown; — means the route did not run. Questions without Gold annotations are not counted as zero recall.</p><p>One returned Entity may cover several Gold targets. This report traces annotated Gold, not every non-Gold candidate. Stage capture can add latency; compare normal search latency with capture disabled on both versions.</p>`;
+      }
+      function renderTabs() {
+        $("suite-tabs").innerHTML = DATA.suites
+          .map(
+            (s) =>
+              `<button class="suite-tab" type="button" data-suite="${esc(s.id)}" aria-selected="${s.id === state.suite}">${esc(s.label)}<span class="tab-count">${tasks(s).length} questions</span></button>`,
+          )
+          .join("");
+        document
+          .querySelectorAll("[data-level]")
+          .forEach((b) =>
+            b.setAttribute(
+              "aria-pressed",
+              String(b.dataset.level === state.level),
+            ),
+          );
+        const qs = qualifications();
+        if (!qs.includes(state.qualification))
+          state.qualification = qs[0] ?? "diagnostic";
+        $("qualification-control").hidden = qs.length < 2;
+        $("qualification").innerHTML = qs
+          .map(
+            (q) =>
+              `<option value="${q}"${q === state.qualification ? " selected" : ""}>${q}</option>`,
+          )
+          .join("");
+      }
+      function captureNote(side) {
+        const s = suite()?.[side],
+          summary = s?.summary;
+        if (s?.error) return `${SIDE_LABEL[side]}: ${s.error}`;
+        if (!summary) return `${SIDE_LABEL[side]}: stage capture unavailable.`;
+        const messages = [];
+        if (summary.observed_calls !== summary.calls)
+          messages.push(
+            `${SIDE_LABEL[side]}: ${number(summary.observed_calls)}/${number(summary.calls)} verified captures; ${number(summary.invalid_calls)} invalid. Unverified coverage is unknown.`,
+          );
+        if (
+          !s.tasks?.some((t) =>
+            Object.values(t.variants ?? {}).some((v) => v.length),
+          )
+        )
+          messages.push(`${SIDE_LABEL[side]}: per-call trace unavailable.`);
+        return messages.join(" ");
+      }
+      function renderOverview() {
+        const s = suite();
+        $("overview-title").textContent =
+          `${s?.label ?? "No suites"} · Stage overview`;
+        $("overview-note").textContent =
+          `${state.level === "entity" ? "Entity" : "File"} Gold · ${state.qualification}`;
+        $("aggregate-table").innerHTML =
+          stageTable(aggregateGroup) +
+          SIDES.map(captureNote)
+            .filter(Boolean)
+            .map((note) => `<p class="capture-note">${esc(note)}</p>`)
+            .join("");
+        $("aggregate-more").innerHTML = stageTable(aggregateGroup, EXTRA);
+        const counts = SIDES.map((side) =>
+          number(aggregateGroup("hybrid", side)?.targets),
+        );
+        $("count-note").textContent =
+          `${counts[0] === counts[1] ? counts[1] : counts.join(" → ")} Gold targets · Counted once per question`;
+      }
+      function renderList() {
+        const all = tasks(),
+          q = state.search.toLowerCase().trim();
+        const filtered = all.filter(
+          (t) =>
+            !q ||
+            [t.id, t.query, t.corpus, t.title].some((v) =>
+              String(v ?? "")
+                .toLowerCase()
+                .includes(q),
+            ),
+        );
+        $("task-count").textContent =
+          `${filtered.length} / ${all.length} questions`;
+        $("task-list").innerHTML = filtered.length
+          ? filtered
+              .map(
+                (t) =>
+                  `<button type="button" class="task-button" data-task="${esc(t.id)}" aria-current="${state.task === t.id}"><div class="task-top"><span class="task-id" title="${esc(t.id)}">${esc(t.id)}</span><span class="task-order">${String(all.indexOf(t) + 1).padStart(2, "0")}</span></div><div class="task-title">${esc(t.title || t.query || "Original query unavailable")}</div>${!included(t) ? '<div class="task-excluded">Excluded from aggregate</div>' : ""}</button>`,
+              )
+              .join("")
+          : '<div class="empty">No matching questions.</div>';
+      }
+      function getVariant(t, mode = state.mode) {
+        return t?.variants?.[mode]?.find((v) =>
+          v.repetitions.includes(state.repetition),
+        );
+      }
+      function repetitions(t) {
+        return [
+          ...new Set(
+            (t?.variants?.[state.mode] ?? []).flatMap((v) => v.repetitions),
+          ),
+        ].sort((a, b) => a - b);
+      }
+      function renderQuestion() {
+        const t = question(),
+          selected = task();
+        if (!t) {
+          $("question").innerHTML =
+            '<div class="empty">No per-question trace is available.</div>';
+          return;
+        }
+        const modeReps = repetitions(selected);
+        if (!modeReps.includes(state.repetition))
+          state.repetition = modeReps[0] ?? 1;
+        const qualification = selected?.qualification;
+        const qual = included(selected)
+          ? `<span class="badge neutral">${esc(qualification)}</span>`
+          : `<span class="badge warn">${selected ? "Excluded from aggregate" : `${SIDE_LABEL[state.side]} unavailable`}</span>`;
+        const recall = MODES.map((m) => {
+          const g = selected?.groups?.[m]?.[state.level],
+            v = g?.stages?.actual_top10;
+          const value =
+            g?.targets > 0 && v && v.unknown === 0 && Number.isFinite(v.covered)
+              ? `${((v.covered / g.targets) * 100).toFixed(2)}%`
+              : "N/A";
+          return `<div class="recall-metric"><dt>${MODE_LABEL[m]}</dt><dd>${value}</dd></div>`;
+        }).join("");
+        const baselineQuery = task("baseline")?.query,
+          candidateQuery = task("candidate")?.query;
+        const queryWarning =
+          baselineQuery && candidateQuery && baselineQuery !== candidateQuery
+            ? '<div class="callout">Original queries differ between versions. The selected version is shown below; this is not a like-for-like query comparison.</div>'
+            : "";
+        $("question").innerHTML =
+          `<div class="question-head"><code>${esc(t.id)}</code>${qual}</div><div class="segment version-control" aria-label="Trace version">${SIDES.map((side) => `<button type="button" data-side="${side}" aria-pressed="${side === state.side}">${SIDE_LABEL[side]}</button>`).join("")}</div>${queryWarning}<h3 class="query">${esc(t.query || "Original query unavailable")}</h3><div class="question-meta"><span>${esc(t.corpus || suite()?.label)}</span><span>Original query</span></div><section class="recall-summary" aria-label="Per-question recall"><div class="recall-title">${SIDE_LABEL[state.side]} · ${state.level === "entity" ? "Entity" : "File"} Recall · Actual results</div><dl class="recall-values">${recall}</dl></section>${selected && !included(selected) ? `<div class="callout">This question is excluded from the aggregate. ${esc(selected.excludedReason || "Available observations are retained below.")}</div>` : ""}<section class="question-stage"><div class="mini-heading"><h3>Stage coverage for this question</h3><small>Mean per question · baseline → candidate</small></div><div class="table-wrap">${stageTable((mode, side) => task(side)?.groups?.[mode]?.[state.level])}</div></section><section class="trace-detail"><div class="detail-controls"><div class="segment" aria-label="Search mode">${MODES.map((m) => `<button type="button" data-mode="${m}" aria-pressed="${m === state.mode}">${MODE_LABEL[m]}</button>`).join("")}</div><label class="rep-control" for="repetition">${SIDE_LABEL[state.side]} call <select id="repetition"${modeReps.length ? "" : " disabled"}>${modeReps.length ? modeReps.map((n) => `<option value="${n}"${n === state.repetition ? " selected" : ""}>Repetition ${n}</option>`).join("") : "<option>No capture</option>"}</select></label></div><div id="call-detail"></div></section>`;
+        renderCall(selected);
+      }
+      function routeCount(v, key) {
+        const r = v?.routes?.[key];
+        return r ? number(r.unique_fragments) : "N/A";
+      }
+      function routeDepth(v, key) {
+        const a = v?.routes?.[key]?.attempts ?? [];
+        return a.length ? a.map((x) => number(x.depth)).join(" / ") : "N/A";
+      }
+      function renderFlow(v) {
+        const route =
+          state.mode === "hybrid"
+            ? `${routeCount(v, "fts")} + ${routeCount(v, "vector")}`
+            : routeCount(v, state.mode);
+        const nodes = [
+          [route, "Recalled fragments"],
+          [number(v.sizes?.merged), "Merged"],
+          [number(v.sizes?.fused), "RRF fusion"],
+          [number(v.sizes?.loaded), "Loaded entities"],
+          [number(v.sizes?.selected), "Final results"],
+        ];
+        return `<div class="flow">${nodes.map(([n, l], i) => `${i ? '<span class="flow-arrow" aria-hidden="true">→</span>' : ""}<div class="flow-node"><strong>${n}</strong><span>${l}</span></div>`).join("")}</div><p class="flow-note">${state.mode !== "vector" ? `FTS depth ${routeDepth(v, "fts")}` : ""}${state.mode === "hybrid" ? " · " : ""}${state.mode !== "fts" ? `Vector depth ${routeDepth(v, "vector")}` : ""} · Counts are candidates, not Gold targets.</p>`;
+      }
+      function rankCell(t, key) {
+        if (!activeRoute(state.mode, key)) return '<span class="dash">—</span>';
+        const value = t.ranks?.[key];
+        if (value === "miss") return '<span class="miss">Miss</span>';
+        if (!Number.isFinite(value))
+          return '<span class="muted">Unknown</span>';
+        const klass =
+          key === "selected"
+            ? " final"
+            : value > DATA.meta.limit && ["loaded", "static"].includes(key)
+              ? " out"
+              : "";
+        return `<span class="rank${klass}">${value}</span>`;
+      }
+      function deltaBadge(t) {
+        const a = t.coverage?.rrf_top10,
+          b = t.coverage?.actual_top10;
+        if (a === false && b === true)
+          return '<span class="badge good">Entered</span>';
+        if (a === true && b === false)
+          return '<span class="badge loss">Exited</span>';
+        if (a === true && b === true)
+          return '<span class="badge neutral">Retained</span>';
+        return "";
+      }
+      function renderCall(t) {
+        const v = getVariant(t);
+        if (!v) {
+          $("call-detail").innerHTML =
+            '<div class="empty">No trace was captured for this call.</div>';
+          return;
+        }
+        const targets = (v.targets ?? []).filter(
+          (x) => x.level === state.level,
+        );
+        const table = targets.length
+          ? `<div class="table-wrap"><table class="target-table"><thead><tr><th scope="col">Gold target</th><th scope="col">Index</th><th scope="col">FTS<br>Fragment rank</th><th scope="col">Vector<br>Fragment rank</th><th scope="col">RRF<br>Loaded rank</th><th scope="col">Static rules<br>Rank</th><th scope="col">Final<br>Rank</th></tr></thead><tbody>${targets.map((x) => `<tr><td><div class="target-name">${esc(x.symbol || x.path)}</div>${x.symbol ? `<div class="target-path">${esc(x.path)}</div>` : ""}${x.level === "entity" ? `<div class="target-path">ID: ${esc(x.id)}</div>` : ""}<div class="target-qualifier">${deltaBadge(x)}</div></td><td>${x.coverage?.index === true ? '<span class="hit">Covered</span>' : x.coverage?.index === false ? '<span class="miss">Not covered</span>' : '<span class="muted">Unknown</span>'}</td>${["fts", "vector", "loaded", "static", "selected"].map((key) => `<td>${rankCell(x, key)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`
+          : `<div class="empty">No ${state.level === "entity" ? "Entity" : "File"} Gold annotations are available for this question. This is not zero recall.</div>`;
+        $("call-detail").innerHTML =
+          `${v.state !== "observed" ? `<p class="capture-note">Capture ${esc(v.state ?? "unavailable")}. Unknown observations are not misses.</p>` : ""}${renderFlow(v)}<div class="target-toolbar"><h3>Gold target details <small>· ${targets.length} targets</small></h3></div>${table}<details class="rank-info"><summary>Rank interpretation</summary><p>${SIDE_LABEL[state.side]}, repetition ${state.repetition}. FTS and Vector show recall fragment ranks. RRF shows the loaded Entity candidate pool before rules. Static rules shows ranking before same-file decay. Final rank is the actual returned position.</p><p>Entered / Exited compares the RRF Top K with the actual Top K after rules (K = ${esc(DATA.meta.limit ?? "N/A")}). Miss means no target matched at that stage; Unknown means no reliable observation. Ranks retain their original positions.</p></details>`;
+      }
+      function renderAll() {
+        renderTabs();
+        renderOverview();
+        renderList();
+        renderQuestion();
+      }
+      $("suite-tabs").addEventListener("click", (e) => {
+        const b = e.target.closest("[data-suite]");
+        if (!b) return;
+        state.suite = b.dataset.suite;
+        state.task = tasks()[0]?.id;
+        state.search = "";
+        state.repetition = 1;
+        $("task-search").value = "";
+        renderAll();
+      });
+      $("level-tabs").addEventListener("click", (e) => {
+        const b = e.target.closest("[data-level]");
+        if (!b) return;
+        state.level = b.dataset.level;
+        renderTabs();
+        renderOverview();
+        renderQuestion();
+      });
+      $("qualification").addEventListener("change", (e) => {
+        state.qualification = e.target.value;
+        renderOverview();
+      });
+      $("task-search").addEventListener("input", (e) => {
+        state.search = e.target.value;
+        renderList();
+      });
+      $("task-list").addEventListener("click", (e) => {
+        const b = e.target.closest("[data-task]");
+        if (!b) return;
+        state.task = b.dataset.task;
+        state.repetition = 1;
+        renderList();
+        renderQuestion();
+      });
+      $("question").addEventListener("click", (e) => {
+        const side = e.target.closest("[data-side]");
+        if (side) {
+          state.side = side.dataset.side;
+          renderQuestion();
+          return;
+        }
+        const mode = e.target.closest("[data-mode]");
+        if (!mode) return;
+        state.mode = mode.dataset.mode;
+        renderQuestion();
+      });
+      $("question").addEventListener("change", (e) => {
+        if (e.target.id !== "repetition") return;
+        state.repetition = Number(e.target.value);
+        renderCall(task());
+      });
+      state.task = tasks()[0]?.id;
+      renderHeader();
+      renderAll();
+    </script>
+  </body>
+</html>

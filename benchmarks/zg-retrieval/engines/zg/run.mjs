@@ -29,6 +29,7 @@ import {
   inside,
 } from "../../core/lib.mjs";
 import { embeddingRuntime } from "../../core/embedding.mjs";
+import { stageTraceEnvironment } from "../../core/gold-stage-capture.mjs";
 import { aggregate } from "./report.mjs";
 import { NativeIndexProductError, snapshotIndex } from "./snapshot.mjs";
 
@@ -272,6 +273,7 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
     modes,
     preview: protocol.preview,
     planned_calls: planned.length,
+    ...(options.goldStages ? { gold_stages: true } : {}),
     invalid_reasons: [],
     preparation_status: "pending",
     stage_availability: "pending",
@@ -438,7 +440,13 @@ async function runRepository({ suite, repo, tasks, candidate, options }) {
       command: command[0],
       args: command.slice(1),
       cwd: root,
-      env,
+      env: {
+        ...env,
+        ...stageTraceEnvironment(
+          options.goldStages,
+          tasks.map((task) => suite.qa_pairs[task.task_id]),
+        ),
+      },
       stderr: "pipe",
     });
     let mcpStderr = "";
@@ -685,6 +693,7 @@ export async function main(args = process.argv.slice(2)) {
       repository: { type: "string" },
       tasks: { type: "string" },
       "model-cache": { type: "string" },
+      "gold-stages": { type: "boolean", default: false },
       "candidate-commit": { type: "string", default: "unrecorded" },
     },
   });
@@ -714,6 +723,7 @@ export async function main(args = process.argv.slice(2)) {
       values["model-cache"] ?? join(values.output, "model-cache"),
     ),
     candidateCommit: values["candidate-commit"],
+    goldStages: values["gold-stages"],
     runId: new Date().toISOString(),
   };
   await mkdir(options.output, { recursive: false }); // Never overwrite a prior run.

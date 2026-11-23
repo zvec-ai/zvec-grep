@@ -152,7 +152,7 @@ function validateItems(items) {
   }
 }
 
-function entityMatch(item, targets, entityByteRanges) {
+export function entityMatch(item, targets, entityByteRanges) {
   const sameFile = targets.filter((target) => target.path === item.path);
   if (item.range?.kind !== "text")
     return { hits: [], possible: sameFile.map((target) => target.id) };
@@ -257,6 +257,11 @@ function metricsFromRanks(targets, found, unknown, ndcg) {
   return result;
 }
 
+// A group completes at its latest member rank. The first complete group wins.
+export function evidenceCompletionRank(groups, memberRank) {
+  return Math.min(...groups.map((group) => Math.max(...group.map(memberRank))));
+}
+
 function evidenceSetMetrics(items, targets, entityByteRanges, ndcg) {
   const members = [];
   const alternatives = targets.map((target, targetIndex) => {
@@ -317,19 +322,11 @@ function evidenceSetMetrics(items, targets, entityByteRanges, ndcg) {
   const found = new Map(),
     uncertain = new Map();
   for (const [index, target] of targets.entries()) {
-    // AND within a set: completion is its latest required member.
-    // OR across alternatives: the earliest complete set determines the rank.
     const completion = (includePossible) =>
-      Math.min(
-        ...alternatives[index].map((set) =>
-          Math.max(
-            ...set.map((id) =>
-              Math.min(
-                definite.get(id) ?? Infinity,
-                includePossible ? (possible.get(id) ?? Infinity) : Infinity,
-              ),
-            ),
-          ),
+      evidenceCompletionRank(alternatives[index], (id) =>
+        Math.min(
+          definite.get(id) ?? Infinity,
+          includePossible ? (possible.get(id) ?? Infinity) : Infinity,
         ),
       );
     const knownRank = completion(false),
@@ -346,7 +343,7 @@ function evidenceSetMetrics(items, targets, entityByteRanges, ndcg) {
   return metricsFromRanks(targets, found, unknown, ndcg);
 }
 
-function eligibility(pair) {
+export function qaEligibility(pair) {
   if (!pair)
     return {
       status: "unavailable",
@@ -377,7 +374,7 @@ function eligibility(pair) {
 
 /** Score only public evidence. Diagnostic labels never authorize formal totals. */
 export function scoreQaRetrieval(items, pair, options) {
-  return scoreRetrieval(items, pair, eligibility(pair), options);
+  return scoreRetrieval(items, pair, qaEligibility(pair), options);
 }
 
 function scoreRetrieval(
@@ -448,7 +445,7 @@ export function publicQaItems(items) {
 
 /** A metric receives one question vote only when all five observations are known. */
 export function summarizeRepeatedQaRetrieval(calls, pair, options) {
-  return summarizeRepeatedRetrieval(calls, pair, eligibility(pair), options);
+  return summarizeRepeatedRetrieval(calls, pair, qaEligibility(pair), options);
 }
 
 /** Pilot labels support diagnostics only; they do not assert a QA review. */
