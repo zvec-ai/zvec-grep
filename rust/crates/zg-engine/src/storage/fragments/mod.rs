@@ -18,8 +18,8 @@ use super::{
         StorageSearchPath,
     },
     zvec::{
-        collect_entity_ids, corrupt, doc_key, fetch_map, native, open_collection, quote, scalar,
-        string_field, u32_field, write_docs,
+        WRITE_BATCH, collect_entity_ids, corrupt, doc_key, fetch_map, native, open_collection,
+        quote, scalar, string_field, u32_field, write_docs,
     },
 };
 use crate::{
@@ -173,6 +173,22 @@ impl Fragments {
             }
         }
         Ok(count)
+    }
+
+    /// Read only the identities of live projections for a diagnostic's watched files.
+    pub(super) fn projected_fragments(&self, keys: &[&str]) -> EngineResult<HashSet<String>> {
+        let mut projected = HashSet::new();
+        for index in self.indexes.values() {
+            for batch in keys.chunks(WRITE_BATCH) {
+                for doc in native(
+                    index.fetch_with_options(batch, Some(&["document_id"]), false),
+                    "fetch diagnostic fragment identities",
+                )? {
+                    projected.insert(string_field(&doc, "document_id")?);
+                }
+            }
+        }
+        Ok(projected)
     }
 
     pub(super) fn flush(&self) -> EngineResult<()> {
