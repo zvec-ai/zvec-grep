@@ -11,4 +11,4 @@ mod store;
 pub(crate) mod types;
 mod zvec;
 
-pub(crate) use store::{IndexStore, ReadView, ResolutionSnapshot};
+pub(crate) use store::{IndexStore, IndexedSourceFile, ReadView, ResolutionSnapshot};
