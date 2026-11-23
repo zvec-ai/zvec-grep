@@ -596,7 +596,7 @@ pub mod result {
         pub graph_errors: Vec<String>,
     }
 
-    #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+    #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
     pub struct GroupSearchTrace {
         pub group_id: String,
         pub recall: Vec<RecallAttemptTrace>,
@@ -700,7 +700,7 @@ pub mod result {
         pub path: Vec<GraphCallTrace>,
     }
 
-    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
     pub struct GraphLayerTrace {
         pub depth: usize,
         pub expanded: Vec<String>,

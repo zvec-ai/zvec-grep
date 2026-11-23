@@ -197,7 +197,7 @@ fn build_context_result(
     workspace: &Workspace,
     request: &NormalizedContextRequest,
     groups: &[NormalizedContextGroup],
-    mut searches: Vec<SearchPlanResult>,
+    searches: Vec<SearchPlanResult>,
 ) -> Result<ContextResult, EngineError> {
     let group_items = searches
         .iter()
@@ -213,30 +213,31 @@ fn build_context_result(
         group_items.iter().flatten().cloned().collect(),
         &coverage_groups,
     );
-    let timings = searches
-        .iter()
-        .flat_map(|search| search.timings.iter().cloned())
-        .collect();
     let hits_returned = items.len();
-    let search_trace = groups
-        .iter()
-        .zip(&mut searches)
-        .filter_map(|(group, search)| {
-            let mut trace = search.trace.take()?;
-            trace.group_id.clone_from(&group.id);
-            Some(trace)
-        })
-        .collect();
-    let graph_errors = groups
-        .iter()
-        .zip(&mut searches)
-        .filter_map(|(group, search)| {
+    let mut timings = Vec::new();
+    let mut routes = Vec::new();
+    let mut search_trace = Vec::new();
+    let mut graph_errors = Vec::new();
+    for (group, search) in groups.iter().zip(searches) {
+        timings.extend(search.timings);
+        routes.extend(
             search
-                .graph_error
-                .take()
-                .map(|error| format!("{}: {error}", group.id))
-        })
-        .collect();
+                .routes
+                .into_iter()
+                .map(|route| IndexRouteDiagnostics {
+                    id: route.id,
+                    mode: route.mode,
+                    query: route.query,
+                }),
+        );
+        if let Some(mut trace) = search.trace {
+            trace.group_id.clone_from(&group.id);
+            search_trace.push(trace);
+        }
+        if let Some(error) = search.graph_error {
+            graph_errors.push(format!("{}: {error}", group.id));
+        }
+    }
 
     Ok(ContextResult {
         freshness: None,
@@ -273,15 +274,7 @@ fn build_context_result(
                         role: group.role,
                     })
                     .collect(),
-                routes: searches
-                    .into_iter()
-                    .flat_map(|search| search.routes)
-                    .map(|route| IndexRouteDiagnostics {
-                        id: route.id,
-                        mode: route.mode,
-                        query: route.query,
-                    })
-                    .collect(),
+                routes,
             }),
             rg: None,
             structure: None,

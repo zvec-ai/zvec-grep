@@ -9,8 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     EngineError, EngineResult,
     api::context::result::{
-        GraphCallTrace, GraphCandidateTrace, GraphExpansionTrace, GraphLayerTrace,
-        GraphRejectedTrace, GraphRejection, GraphWorkTrace, RecallEntityTrace,
+        GraphCallTrace, GraphExpansionTrace, GraphRejection, RecallEntityTrace,
     },
     domain::{Entity, EntityId, EntityMetadata, FileEdge, FileRecord, GraphEdgeKind, Range},
     storage::{
@@ -57,14 +56,13 @@ struct Endpoint {
     rejection: Option<GraphRejection>,
 }
 
-type Parent = Option<(EntityId, GraphCallTrace)>;
-
 pub(super) fn expand(
     graph: GraphSearch<'_>,
     hits: &[SearchHit],
     filter: Option<&StorageSearchFilter>,
     trace: bool,
 ) -> EngineResult<Expansion> {
+    let started = Instant::now();
     let mut result = Expansion {
         relevance: Some(Relevance::default()),
         ..Expansion::default()
@@ -82,15 +80,15 @@ pub(super) fn expand(
             &mut result,
         )
     });
-    match outcome {
-        Ok(()) => Ok(result),
-        Err(error) if error.code() == EngineError::CANCELLED => Err(error),
-        Err(error) => {
-            result.trace.error = Some(error.to_string());
-            result.relevance = None;
-            Ok(result)
+    if let Err(error) = outcome {
+        if error.code() == EngineError::CANCELLED {
+            return Err(error);
         }
+        result.trace.error = Some(error.to_string());
+        result.relevance = None;
     }
+    result.trace.duration_micros = micros(started);
+    Ok(result)
 }
 
 fn micros(started: Instant) -> u64 {
@@ -133,25 +131,6 @@ fn edge_trace(edge: FileEdge, endpoints: &HashMap<EntityId, Endpoint>) -> GraphC
         callee_id: edge.target,
         line: edge.line,
         column: edge.column,
-    }
-}
-
-fn witness(
-    id: &EntityId,
-    entity: &RecallEntityTrace,
-    visited: &HashMap<EntityId, Parent>,
-) -> GraphCandidateTrace {
-    let mut path = Vec::new();
-    let mut seed = id;
-    while let Some((parent, edge)) = &visited[seed] {
-        path.push(edge.clone());
-        seed = parent;
-    }
-    path.reverse();
-    GraphCandidateTrace {
-        entity: entity.clone(),
-        seed_id: seed.as_str().to_owned(),
-        path,
     }
 }
 

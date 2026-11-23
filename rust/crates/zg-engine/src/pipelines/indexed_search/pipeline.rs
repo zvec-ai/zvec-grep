@@ -208,14 +208,7 @@ pub(crate) async fn search_workspace_index(
 
     let recall_started = Instant::now();
     let mut candidates = HashMap::new();
-    let mut trace = plan.trace.then(|| GroupSearchTrace {
-        group_id: String::new(),
-        recall: Vec::new(),
-        fused: Vec::new(),
-        ordinary_pool: Vec::new(),
-        graph: None,
-        selected: Vec::new(),
-    });
+    let mut trace = plan.trace.then(GroupSearchTrace::default);
     if has_searchable_files && limit > 0 {
         collect_adaptive_recall(
             &routes,
@@ -244,8 +237,14 @@ pub(crate) async fn search_workspace_index(
             .map(|hit| recall_entity(&hit.entity, &hit.file))
             .collect();
     }
-    let (graph_timing, mut expansion) =
-        expand_pool(graph, &hits, filter.as_ref(), plan.trace)?.unzip();
+    let mut expansion = graph
+        .map(|graph| graph_expand::expand(graph, &hits, filter.as_ref(), plan.trace))
+        .transpose()?;
+    let graph_timing = expansion.as_ref().map(|result| TimingEntry {
+        name: "graph_expand".into(),
+        duration_micros: result.trace.duration_micros,
+        count: result.trace.error.is_none().then_some(result.added as u64),
+    });
     let graph_error = expansion
         .as_ref()
         .and_then(|result| result.trace.error.clone());
@@ -310,27 +309,6 @@ fn rank_candidates(
         None
     };
     Ok((hits, ranking_timing, graph_timing))
-}
-
-fn expand_pool(
-    graph: Option<GraphSearch<'_>>,
-    hits: &[SearchHit],
-    filter: Option<&StorageSearchFilter>,
-    trace: bool,
-) -> Result<Option<(TimingEntry, graph_expand::Expansion)>, EngineError> {
-    let Some(graph) = graph else {
-        return Ok(None);
-    };
-    let started = Instant::now();
-    let mut expansion = graph_expand::expand(graph, hits, filter, trace)?;
-    let mut timing = timing("graph_expand", started.elapsed());
-    expansion.trace.duration_micros = timing.duration_micros;
-    timing.count = expansion
-        .trace
-        .error
-        .is_none()
-        .then_some(expansion.added as u64);
-    Ok(Some((timing, expansion)))
 }
 
 fn selected_trace(hits: &[SearchHit]) -> Vec<SelectedEntityTrace> {
@@ -1051,60 +1029,36 @@ mod tests {
         let mut edges = Vec::new();
         let id = |index: usize| entities[index].id().as_str().to_owned();
         let bridge = format!("f{}", file_id.get());
-        let mut call = |source, target, line| {
+        let mut edge = |kind, source, target, line| {
             edges.push(FileEdge {
-                kind: GraphEdgeKind::Calls,
+                kind,
                 source,
                 target,
                 line: Some(line),
                 column: Some(0),
                 provenance: EdgeProvenance::FileLocal,
-                metadata: std::collections::BTreeMap::new(),
+                metadata: BTreeMap::new(),
             });
         };
-        call(bridge.clone(), id(0), 1);
-        call(bridge, id(1), 2);
-        call(id(1), id(2), 3);
-        call(id(2), id(3), 4);
-        call(id(0), id(0), 5);
-        call(id(4), id(5), 6);
-        call(id(0), id(4), 8);
+        edge(GraphEdgeKind::Calls, bridge.clone(), id(0), 1);
+        edge(GraphEdgeKind::Calls, bridge, id(1), 2);
+        edge(GraphEdgeKind::Calls, id(1), id(2), 3);
+        edge(GraphEdgeKind::Calls, id(2), id(3), 4);
+        edge(GraphEdgeKind::Calls, id(0), id(0), 5);
+        edge(GraphEdgeKind::Calls, id(4), id(5), 6);
+        edge(GraphEdgeKind::Calls, id(0), id(4), 8);
         let contained = 211;
         for index in 6..contained {
             for line in 10..18 {
-                call(id(0), id(index), line);
+                edge(GraphEdgeKind::Calls, id(0), id(index), line);
             }
         }
-        call(id(5), id(212), 30);
-        call(id(212), id(213), 31);
-        call(id(213), id(214), 32);
-        edges.push(FileEdge {
-            kind: GraphEdgeKind::Extends,
-            source: id(3),
-            target: id(0),
-            line: Some(20),
-            column: Some(0),
-            provenance: EdgeProvenance::FileLocal,
-            metadata: std::collections::BTreeMap::new(),
-        });
-        edges.push(FileEdge {
-            kind: GraphEdgeKind::Contains,
-            source: id(4),
-            target: id(contained),
-            line: Some(21),
-            column: Some(0),
-            provenance: EdgeProvenance::FileLocal,
-            metadata: std::collections::BTreeMap::new(),
-        });
-        edges.push(FileEdge {
-            kind: GraphEdgeKind::Contains,
-            source: id(1),
-            target: id(6),
-            line: Some(33),
-            column: Some(0),
-            provenance: EdgeProvenance::FileLocal,
-            metadata: std::collections::BTreeMap::new(),
-        });
+        edge(GraphEdgeKind::Calls, id(5), id(212), 30);
+        edge(GraphEdgeKind::Calls, id(212), id(213), 31);
+        edge(GraphEdgeKind::Calls, id(213), id(214), 32);
+        edge(GraphEdgeKind::Extends, id(3), id(0), 20);
+        edge(GraphEdgeKind::Contains, id(4), id(contained), 21);
+        edge(GraphEdgeKind::Contains, id(1), id(6), 33);
         edges
     }
 

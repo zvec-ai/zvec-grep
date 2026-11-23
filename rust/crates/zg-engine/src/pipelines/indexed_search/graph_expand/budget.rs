@@ -7,17 +7,18 @@ use std::{
 };
 
 use crate::{
-    api::context::result::{GraphBudgetTrace, GraphRetainedPathTrace},
-    domain::{FileId, SymbolType},
+    api::context::result::{
+        GraphBudgetTrace, GraphCandidateTrace, GraphLayerTrace, GraphRejectedTrace,
+        GraphRetainedPathTrace, GraphWorkTrace,
+    },
+    domain::{FileEdge, FileId, SymbolType},
 };
 
 use super::{
     ALL_EDGES, CancellationToken, ENDPOINT_BATCH, Endpoint, EngineResult, EntityId, Expansion,
-    GraphCallTrace, GraphEdgeKind, GraphLayerTrace, GraphRejectedTrace, GraphRejection,
-    GraphWorkTrace, MAX_HOPS, Parent, ReadView, SearchHit, StorageSearchFilter, check_cancelled,
-    edge_trace, hydrate, micros, neighbor, seed_frontier, witness,
+    GraphCallTrace, GraphEdgeKind, GraphRejection, MAX_HOPS, ReadView, SearchHit,
+    StorageSearchFilter, check_cancelled, edge_trace, hydrate, micros, neighbor, seed_frontier,
 };
-use crate::domain::FileEdge;
 
 const HOP_LIMITS: [usize; MAX_HOPS] = [600, 1050, 1500];
 const CANDIDATE_LIMIT: usize = 200;
@@ -54,6 +55,12 @@ struct PathGroup<'a> {
     anchor: &'a EntityId,
     seed: &'a EntityId,
     steps: Vec<&'a Observed>,
+}
+
+struct Visit {
+    parent: Option<(EntityId, GraphCallTrace)>,
+    depth: usize,
+    support: BTreeSet<EntityId>,
 }
 
 impl Priority {
@@ -200,11 +207,11 @@ impl Priority {
             .is_some_and(|(left, right)| left.file == right.file)
     }
 
-    fn score(&self, id: &EntityId, parents: &HashMap<EntityId, Parent>) -> usize {
+    fn score(&self, id: &EntityId, visited: &HashMap<EntityId, Visit>) -> usize {
         let matching = self.nodes.get(id.as_str());
         let mut path_terms = HashSet::new();
         let mut step = id;
-        while let Some((parent, _)) = &parents[step] {
+        while let Some((parent, _)) = &visited[step].parent {
             if let Some(facts) = self.nodes.get(parent.as_str()) {
                 path_terms.extend(facts.terms.iter());
             }
@@ -260,8 +267,8 @@ pub(super) fn walk(
                 }
                 frontier.sort_by_key(|id| {
                     (
-                        Reverse(reached.support[id].len()),
-                        best_rank(&reached.support[id], &ranks),
+                        Reverse(reached.visited[id].support.len()),
+                        best_rank(&reached.visited[id].support, &ranks),
                         id.clone(),
                     )
                 });
@@ -300,9 +307,7 @@ pub(super) fn walk(
 
 struct Traversal {
     endpoints: HashMap<EntityId, Endpoint>,
-    parents: HashMap<EntityId, Parent>,
-    depth: HashMap<EntityId, usize>,
-    support: HashMap<EntityId, BTreeSet<EntityId>>,
+    visited: HashMap<EntityId, Visit>,
     observed: HashMap<EntityId, Vec<Observed>>,
     reached_ordinary: BTreeSet<String>,
     rejected: HashSet<EntityId>,
@@ -317,11 +322,18 @@ impl Traversal {
     ) -> Self {
         Self {
             endpoints,
-            parents: seeds.iter().cloned().map(|id| (id, None)).collect(),
-            depth: seeds.iter().cloned().map(|id| (id, 0)).collect(),
-            support: seeds
+            visited: seeds
                 .iter()
-                .map(|id| (id.clone(), BTreeSet::from([id.clone()])))
+                .map(|id| {
+                    (
+                        id.clone(),
+                        Visit {
+                            parent: None,
+                            depth: 0,
+                            support: BTreeSet::from([id.clone()]),
+                        },
+                    )
+                })
                 .collect(),
             observed: HashMap::new(),
             reached_ordinary: BTreeSet::new(),
@@ -341,15 +353,11 @@ impl Traversal {
     ) -> EngineResult<Vec<EntityId>> {
         let mut layer = GraphLayerTrace {
             depth,
-            expanded: Vec::new(),
             edges_read: rows.len(),
-            already_visited: 0,
-            filtered: 0,
-            invisible: 0,
-            reached: Vec::new(),
+            ..GraphLayerTrace::default()
         };
         let mut expanded = BTreeSet::new();
-        let mut next = BTreeMap::<EntityId, BTreeSet<EntityId>>::new();
+        let mut next = BTreeMap::<EntityId, Visit>::new();
         for (position, id, edge) in rows {
             check_cancelled(signal)?;
             let source = &frontier[position];
@@ -395,22 +403,21 @@ impl Traversal {
                         edge: evidence.clone(),
                     });
             }
-            if self.depth.contains_key(&target) {
+            if self.visited.contains_key(&target) {
                 layer.already_visited += 1;
                 continue;
             }
-            let sources = next.entry(target.clone()).or_insert_with(|| {
-                self.parents
-                    .insert(target, Some((source.clone(), evidence)));
-                BTreeSet::new()
+            let visit = next.entry(target).or_insert_with(|| Visit {
+                parent: Some((source.clone(), evidence)),
+                depth,
+                support: BTreeSet::new(),
             });
-            sources.extend(self.support[source].iter().cloned());
+            visit
+                .support
+                .extend(self.visited[source].support.iter().cloned());
         }
         let frontier: Vec<_> = next.keys().cloned().collect();
-        for (id, sources) in next {
-            self.depth.insert(id.clone(), depth);
-            self.support.insert(id, sources);
-        }
+        self.visited.extend(next);
         if self.trace {
             layer.expanded = expanded.into_iter().collect();
             layer.reached = frontier.iter().map(|id| id.as_str().to_owned()).collect();
@@ -430,7 +437,7 @@ impl Traversal {
     ) {
         let started = Instant::now();
         let mut candidates: Vec<_> = self
-            .depth
+            .visited
             .keys()
             .filter(|id| {
                 self.endpoints[*id].entity.is_some() && !priority.ordinary.contains(id.as_str())
@@ -439,20 +446,20 @@ impl Traversal {
             .collect();
         let scores: HashMap<_, _> = candidates
             .iter()
-            .map(|id| (id.clone(), priority.score(id, &self.parents)))
+            .map(|id| (id.clone(), priority.score(id, &self.visited)))
             .collect();
         candidates.sort_by_key(|id| {
             (
                 Reverse(scores[id]),
-                Reverse(self.support[id].len()),
-                self.depth[id],
-                best_rank(&self.support[id], ranks),
+                Reverse(self.visited[id].support.len()),
+                self.visited[id].depth,
+                best_rank(&self.visited[id].support, ranks),
                 id.clone(),
             )
         });
         let long: Vec<_> = candidates
             .iter()
-            .filter(|id| self.depth[*id] >= 2 && scores[*id] > 0)
+            .filter(|id| self.visited[*id].depth >= 2 && scores[*id] > 0)
             .take(PATH_LIMIT)
             .cloned()
             .collect();
@@ -490,19 +497,7 @@ impl Traversal {
             result.trace.edge_kinds = ALL_EDGES.to_vec();
             result.trace.seeds = seeds.iter().map(|id| id.as_str().to_owned()).collect();
             result.trace.reached_ordinary = self.reached_ordinary.iter().cloned().collect();
-            result.trace.added = selected
-                .iter()
-                .map(|id| {
-                    witness(
-                        id,
-                        self.endpoints[id]
-                            .entity
-                            .as_ref()
-                            .expect("selected candidate"),
-                        &self.parents,
-                    )
-                })
-                .collect();
+            result.trace.added = selected.iter().map(|id| self.witness(id)).collect();
             result.trace.work = Some(work);
             result.trace.budget = Some(GraphBudgetTrace {
                 edge_limit: HOP_LIMITS[MAX_HOPS - 1],
@@ -510,6 +505,24 @@ impl Traversal {
                 reached_pool: reached_pool.expect("trace enabled"),
                 retained_paths: paths,
             });
+        }
+    }
+
+    fn witness(&self, id: &EntityId) -> GraphCandidateTrace {
+        let mut path = Vec::new();
+        let mut seed = id;
+        while let Some((parent, edge)) = &self.visited[seed].parent {
+            path.push(edge.clone());
+            seed = parent;
+        }
+        path.reverse();
+        GraphCandidateTrace {
+            entity: self.endpoints[id]
+                .entity
+                .clone()
+                .expect("selected candidate"),
+            seed_id: seed.as_str().to_owned(),
+            path,
         }
     }
 }
