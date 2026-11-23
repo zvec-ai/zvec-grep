@@ -28,6 +28,7 @@ import {
   summarizeRepeatedQuality,
 } from "../../metrics/repetitions.mjs";
 import { markdownReport } from "../../reports/zg.mjs";
+import { auditGraphCalls } from "./graph-pair.mjs";
 import { readStageTrace } from "../../core/gold-stage-capture.mjs";
 import { scoreGoldStages } from "../../metrics/gold-stages.mjs";
 import { writeGoldStages } from "../../reports/gold-stages.mjs";
@@ -81,9 +82,14 @@ function goldStageQualification(pair) {
   return status === "scored" ? "formal" : status;
 }
 
-export async function aggregate(directory, { expectedTasks } = {}) {
+export async function aggregate(
+  directory,
+  { expectedTasks, graphRerank } = {},
+) {
   directory = resolve(directory);
   const suite = await loadSuite();
+  const graphPair = graphRerank !== undefined;
+  const modeSet = graphPair ? ["hybrid"] : suite.protocol.modes;
   const expected =
     expectedTasks ?? suite.lock.tasks.map((task) => task.task_id);
   const errors = [],
@@ -118,6 +124,14 @@ export async function aggregate(directory, { expectedTasks } = {}) {
         .map(JSON.parse);
     } catch (error) {
       invalid.push(`missing/invalid call log: ${error.message}`);
+    }
+    if (graphPair) {
+      try {
+        await auditGraphCalls(runDirectory, manifest, calls, suite);
+      } catch (error) {
+        invalid.push(`graph pair audit: ${error.message}`);
+      }
+      calls = calls.filter((call) => call.graph_rerank === graphRerank);
     }
     // A completed call log alone is not proof of a valid frozen experiment.
     if (manifest.preparation_status === "ready") {
@@ -254,7 +268,6 @@ export async function aggregate(directory, { expectedTasks } = {}) {
         "preparation did not succeed and no complete product preparation failure was recorded",
       );
     }
-    const modeSet = suite.protocol.modes;
     if (objectHash(manifest.modes ?? null) !== objectHash(modeSet))
       invalid.push("mode selection differs from frozen three-mode protocol");
     if (manifest.preview !== suite.protocol.preview)
@@ -263,7 +276,7 @@ export async function aggregate(directory, { expectedTasks } = {}) {
       manifest.tasks.length * modeSet.length * suite.protocol.repetitions;
     if (
       calls.length !== plannedCount ||
-      manifest.planned_calls !== plannedCount
+      manifest.planned_calls !== plannedCount * (graphPair ? 2 : 1)
     )
       invalid.push("incomplete planned call matrix");
     if (
@@ -349,6 +362,7 @@ export async function aggregate(directory, { expectedTasks } = {}) {
           : { [call.mode]: [task.query] }),
         limit: suite.protocol.limit,
         ...suite.protocol.request,
+        ...(graphPair ? { trace: true, graphRerank } : {}),
       };
       if (
         call.request?.name !== "zvec_grep_search" ||
@@ -367,7 +381,7 @@ export async function aggregate(directory, { expectedTasks } = {}) {
       try {
         assert.equal(
           call.raw_path,
-          `raw/${task.task_slug}-${call.mode}-${call.preview}-${call.repetition}.json`,
+          `raw/${task.task_slug}-${graphPair ? call.arm : call.mode}-${call.preview}-${call.repetition}.json`,
           "raw response reused or mapped to the wrong call",
         );
         const path = join(runDirectory, call.raw_path);
@@ -459,7 +473,7 @@ export async function aggregate(directory, { expectedTasks } = {}) {
     );
   }
   for (const id of expected)
-    for (const mode of suite.protocol.modes)
+    for (const mode of modeSet)
       if (
         !observations.some(
           (row) =>
@@ -596,7 +610,7 @@ export async function aggregate(directory, { expectedTasks } = {}) {
     validQuality.map((row) => `${row.task_id}/${row.mode}`),
   );
   const modeReports = Object.fromEntries(
-    suite.protocol.modes.map((mode) => {
+    modeSet.map((mode) => {
       const rows = validQuality.filter((row) => row.mode === mode);
       return [
         mode,
@@ -631,6 +645,7 @@ export async function aggregate(directory, { expectedTasks } = {}) {
   );
   const report = {
     schema_version: 7,
+    ...(graphPair ? { graph_rerank: graphRerank } : {}),
     file_retrieval_contract: FILE_RETRIEVAL_CONTRACT,
     preview: suite.protocol.preview,
     quality_repetition: suite.protocol.quality_repetition,
@@ -659,7 +674,7 @@ export async function aggregate(directory, { expectedTasks } = {}) {
     for (const taskId of expected) {
       const pair = suite.qa_pairs[taskId];
       const qualification = goldStageQualification(pair);
-      for (const mode of suite.protocol.modes) {
+      for (const mode of modeSet) {
         for (
           let repetition = 1;
           repetition <= suite.protocol.repetitions;
@@ -682,12 +697,14 @@ export async function aggregate(directory, { expectedTasks } = {}) {
     }
     report.gold_stages = await writeGoldStages(directory, calls);
   }
+  const stem = graphPair ? `graph-${graphRerank ? "on" : "off"}` : "report";
   await writeFile(
-    join(directory, "scores.jsonl"),
+    join(directory, graphPair ? `${stem}-scores.jsonl` : "scores.jsonl"),
     observations.map((row) => JSON.stringify(row)).join("\n") + "\n",
   );
-  await writeJson(join(directory, "report.json"), report);
-  await writeFile(join(directory, "report.md"), markdownReport(report));
+  await writeJson(join(directory, `${stem}.json`), report);
+  if (!graphPair)
+    await writeFile(join(directory, "report.md"), markdownReport(report));
   return report;
 }
 

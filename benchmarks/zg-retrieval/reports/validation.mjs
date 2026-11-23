@@ -291,8 +291,9 @@ function validateQualityRow(row, label) {
 export function validateZgReport(
   report,
   label = "ZG",
-  { suite, allowPartial = false } = {},
+  { suite, allowPartial = false, graphPair = false } = {},
 ) {
+  const expectedModes = graphPair ? ["hybrid"] : ZG_MODES;
   const hasQa =
     Object.hasOwn(report, "qa_gold") ||
     Object.hasOwn(report, "qa_scoring") ||
@@ -424,12 +425,12 @@ export function validateZgReport(
   const modes = uniqueStrings(Object.keys(report.modes), `${label}: modes`);
   assert.deepEqual(
     modes,
-    [...ZG_MODES].sort(),
+    [...expectedModes].sort(),
     `${label}: all three modes are required`,
   );
   assert.equal(
     report.observed_calls,
-    ids.length * ZG_MODES.length * 5,
+    ids.length * expectedModes.length * 5,
     `${label}: incomplete call matrix`,
   );
   assert.ok(Array.isArray(report.tasks), `${label}: missing task rows`);
@@ -510,7 +511,7 @@ export function validateZgReport(
   }
   assert.equal(
     seen.size,
-    ids.length * ZG_MODES.length,
+    ids.length * expectedModes.length,
     `${label}: missing task/mode coverage`,
   );
   if (partial)
@@ -523,7 +524,7 @@ export function validateZgReport(
     `${label}: product error count differs from measurement evidence`,
   );
   if (hasQa)
-    for (const mode of ZG_MODES) {
+    for (const mode of expectedModes) {
       const expected =
         report.quality_score_valid || partial
           ? summarizeQaRetrieval(
@@ -536,5 +537,5 @@ export function validateZgReport(
         `${label}: ${mode} QA aggregate differs from scored cases`,
       );
     }
-  return { ids, modes: [...ZG_MODES], rows, invalidRows };
+  return { ids, modes: [...expectedModes], rows, invalidRows };
 }

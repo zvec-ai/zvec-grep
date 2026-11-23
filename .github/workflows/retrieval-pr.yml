@@ -72,4 +72,5 @@ jobs:
       baseline_repository: ${{ inputs.baseline_repository || github.event.pull_request.base.repo.full_name }}
       candidate_ref: ${{ inputs.candidate_sha || github.event.pull_request.head.sha }}
       candidate_repository: ${{ inputs.candidate_repository || github.event.pull_request.head.repo.full_name }}
+      graph_rerank_pair: ${{ github.event_name == 'pull_request' }}
     # Model secrets are intentionally not forwarded to automatic PR runs.

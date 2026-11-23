@@ -15,6 +15,9 @@ on:
       candidate_repository:
         required: true
         type: string
+      graph_rerank_pair:
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -38,8 +41,60 @@ jobs:
       artifact_prefix: retrieval-head
       gold_stages: true
 
+  graph-rerank:
+    name: Head graphRerank paired SWE-QA20
+    if: inputs.graph_rerank_pair
+    needs: candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      RETRIEVAL_EMBEDDING: local
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/retrieval-authorize
+        id: access
+      - uses: actions/download-artifact@v8
+        with:
+          name: package-retrieval-head-candidate
+          path: ${{ runner.temp }}/package
+      - name: Verify Head package
+        env:
+          CANDIDATE_COMMIT: ${{ inputs.candidate_ref }}
+        run: |
+          node benchmarks/shared/rust-package-cache.mjs verify \
+            --directory "$RUNNER_TEMP/package" --commit "$CANDIDATE_COMMIT"
+      - uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/model-cache
+          key: retrieval-sweqa-potion-code-16m-v2-v1-${{ runner.os }}-${{ runner.arch }}
+      - name: Pair graphRerank off and on against shared graph indexes
+        env:
+          CANDIDATE_COMMIT: ${{ inputs.candidate_ref }}
+        run: |
+          node benchmarks/zg-retrieval/run.mjs \
+            --package "$RUNNER_TEMP/package/candidate.tgz" \
+            --output "$RUNNER_TEMP/graph-pair" \
+            --corpus "$RUNNER_TEMP/graph-corpus" \
+            --model-cache "$RUNNER_TEMP/model-cache" \
+            --candidate-commit "$CANDIDATE_COMMIT" --graph-rerank-pair
+          cat "$RUNNER_TEMP/graph-pair/graph-rerank.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve graph pair report and evidence
+        if: ${{ always() && steps.access.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: retrieval-head-graph-pair
+          path: |
+            ${{ runner.temp }}/graph-pair/
+            !${{ runner.temp }}/graph-pair/consumer/**
+            !${{ runner.temp }}/graph-pair/**/runtime-home/**
+          if-no-files-found: warn
+          retention-days: 14
+
   compare:
-    needs: [baseline, candidate]
+    needs: [baseline, candidate, graph-rerank]
     if: always() && !cancelled()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -59,6 +114,13 @@ jobs:
         with:
           name: retrieval-head-results
           path: ${{ runner.temp }}/retrieval-comparison-input/head
+      - name: Download Head graph pairs
+        if: inputs.graph_rerank_pair
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: retrieval-head-graph-pair
+          path: ${{ runner.temp }}/retrieval-comparison-input/graph
       - name: Compare validated base and head reports
         env:
           RETRIEVAL_BASELINE_COMMIT: ${{ inputs.baseline_ref }}
@@ -70,6 +132,7 @@ jobs:
           node benchmarks/zg-retrieval/expansion/compare.mjs \
             --baseline "$RUNNER_TEMP/retrieval-comparison-input/base" \
             --candidate "$RUNNER_TEMP/retrieval-comparison-input/head" \
+            ${{ inputs.graph_rerank_pair && format('--head-graph {0}/retrieval-comparison-input/graph', runner.temp) || '' }} \
             --output "$RUNNER_TEMP/retrieval-comparison"
       - name: Publish comparison
         if: always()

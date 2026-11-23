@@ -8,6 +8,10 @@ import {
 } from "../../benchmarks/zg-retrieval/expansion/compare.mjs";
 import { QUALITY_METRICS } from "../../benchmarks/zg-retrieval/reports/ci.mjs";
 import { QA_SCORING } from "../../benchmarks/zg-retrieval/core/suite.mjs";
+import {
+  GRAPH_PAIR,
+  FOCUS_TASKS,
+} from "../../benchmarks/zg-retrieval/engines/zg/graph-pair.mjs";
 import { validateIndexCounts } from "../../benchmarks/zg-retrieval/core/index-counts.mjs";
 import { validateIndexSettings } from "../../benchmarks/zg-retrieval/core/index-settings.mjs";
 import { pilotCorpusIds } from "../../benchmarks/zg-retrieval/expansion/datasets.mjs";
@@ -21,9 +25,12 @@ import {
 // Read only the trusted checkout's frozen corpus definitions, never artifact paths.
 const trustedJson = (path) =>
   JSON.parse(readFileSync(new URL(path, import.meta.url), "utf8"));
+const sweqaSource = trustedJson(
+  "../../benchmarks/zg-retrieval/data/source.lock.json",
+);
 const expectedCorpusIds = {
-  sweqa: trustedJson("../../benchmarks/zg-retrieval/data/source.lock.json")
-    .repositories.map(({ repository, commit }) => `${repository}@${commit}`)
+  sweqa: sweqaSource.repositories
+    .map(({ repository, commit }) => `${repository}@${commit}`)
     .sort(),
   ...Object.fromEntries(
     PILOT_NAMES.map((name) => [
@@ -152,6 +159,85 @@ function validateDiagnostic(
     scores.metric_task_counts[metric] = count;
   }
   return { eligible_tasks: eligible, [level]: scores };
+}
+
+function validateGraphPair(report, candidateCommit, harnessCommit) {
+  assert.ok(["success", "failed"].includes(report.status));
+  if (report.status === "failed")
+    return {
+      status: "failed",
+      error: "Head graph experiment incomplete; see the run artifacts.",
+    };
+  assert.equal(report.kind, "head-graph-rerank-comparison");
+  assert.equal(report.schema_version, 1);
+  assert.equal(report.candidate_commit, candidateCommit);
+  assert.equal(report.harness_commit, harnessCommit);
+  assert.deepEqual(report.protocol, GRAPH_PAIR);
+  assert.deepEqual(report.qa_scoring, QA_SCORING);
+  const all = sweqaSource.tasks.map((task) => task.task_id);
+  assert.equal(report.paired_calls, all.length * 5);
+  const scopes = {};
+  for (const [name, ids] of [
+    ["all", all],
+    ["focus", all.filter((id) => FOCUS_TASKS.includes(id))],
+  ]) {
+    const scope = report.scopes[name];
+    assert.deepEqual(scope.task_ids, ids);
+    scopes[name] = { task_ids: ids };
+    for (const arm of ["off", "on"]) {
+      const summary = scope[arm];
+      assert.equal(summary.planned_tasks, ids.length);
+      const unavailable = summary.unavailable_tasks.map(({ task_id }) => {
+        assert.ok(ids.includes(task_id));
+        return { task_id };
+      });
+      assert.equal(
+        new Set(unavailable.map((task) => task.task_id)).size,
+        unavailable.length,
+      );
+      const checked = {
+        planned_tasks: ids.length,
+        unavailable_tasks: unavailable,
+      };
+      for (const qualification of ["formal", "diagnostic"]) {
+        const file = validateDiagnostic(
+          summary[qualification],
+          "file",
+          QA_DIAGNOSTICS.file,
+          ids.length,
+        );
+        const entity = validateDiagnostic(
+          summary[qualification],
+          "entity",
+          QA_DIAGNOSTICS.entity,
+          ids.length,
+        );
+        assert.equal(file.eligible_tasks, entity.eligible_tasks);
+        checked[qualification] = { ...file, entity: entity.entity };
+      }
+      scopes[name][arm] = checked;
+    }
+  }
+  const measurements = {};
+  for (const arm of ["off", "on"]) {
+    const sample = report.measurements[arm];
+    assert.equal(sample.latency_sample_count, all.length * 5);
+    const checked = {};
+    for (const metric of ["latency_ms_mean", "latency_ms_p50"]) {
+      assert.ok(Number.isFinite(sample[metric]) && sample[metric] >= 0);
+      checked[metric] = sample[metric];
+    }
+    measurements[arm] = checked;
+  }
+  return {
+    schema_version: 1,
+    kind: report.kind,
+    status: "success",
+    candidate_commit: candidateCommit,
+    protocol: GRAPH_PAIR,
+    scopes,
+    measurements,
+  };
 }
 
 export function validateComparison(report, request) {
@@ -385,6 +471,15 @@ export function validateComparison(report, request) {
     ...(report.index_settings === undefined
       ? {}
       : { index_settings: indexSettings }),
+    ...(report.graph_rerank === undefined
+      ? {}
+      : {
+          graph_rerank: validateGraphPair(
+            report.graph_rerank,
+            request.candidate.commit,
+            report.harness_commit,
+          ),
+        }),
     rows,
     errors: [],
   };

@@ -6,6 +6,15 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { publish, validateComparison } from "./retrieval-pr-comment.mjs";
 import { QA_SCORING } from "../../benchmarks/zg-retrieval/core/suite.mjs";
+import { loadSuite } from "../../benchmarks/zg-retrieval/core/lib.mjs";
+import {
+  GRAPH_PAIR,
+  FOCUS_TASKS,
+} from "../../benchmarks/zg-retrieval/engines/zg/graph-pair.mjs";
+import {
+  scoreQaRetrieval,
+  summarizeQaRetrieval,
+} from "../../benchmarks/zg-retrieval/metrics/entities.mjs";
 import { summarizeIndexCounts } from "../../benchmarks/zg-retrieval/core/index-counts.mjs";
 import { summarizeIndexSettings } from "../../benchmarks/zg-retrieval/core/index-settings.mjs";
 import { pilotCorpusIds } from "../../benchmarks/zg-retrieval/expansion/datasets.mjs";
@@ -571,6 +580,87 @@ test("later results and failed-job reruns update one bot comment", async (t) => 
     ["create", "update"],
   );
   assert.match(x.messages()[1][1].body, /zg-retrieval-run:123:2/);
+});
+
+test("the trusted publisher renders Head graph pairs and rejects substituted identities and scores", async (t) => {
+  const suite = await loadSuite();
+  const all = suite.lock.tasks.map((task) => task.task_id);
+  const qa = (ids) =>
+    summarizeQaRetrieval(
+      ids.map((id) => ({
+        task_id: id,
+        status: "scored",
+        qa_retrieval: scoreQaRetrieval([], suite.qa_pairs[id]),
+      })),
+    );
+  const payload = structuredClone(report);
+  payload.graph_rerank = {
+    schema_version: 1,
+    kind: "head-graph-rerank-comparison",
+    status: "success",
+    candidate_commit: head,
+    harness_commit: report.harness_commit,
+    protocol: GRAPH_PAIR,
+    qa_scoring: QA_SCORING,
+    paired_calls: 100,
+    scopes: Object.fromEntries(
+      [
+        ["all", all],
+        ["focus", all.filter((id) => FOCUS_TASKS.includes(id))],
+      ].map(([name, ids]) => [
+        name,
+        { task_ids: ids, off: qa(ids), on: qa(ids) },
+      ]),
+    ),
+    measurements: {
+      off: {
+        latency_sample_count: 100,
+        latency_ms_mean: 10,
+        latency_ms_p50: 8,
+      },
+      on: {
+        latency_sample_count: 100,
+        latency_ms_mean: 12,
+        latency_ms_p50: 10,
+      },
+    },
+    untrusted_markdown: "[click](https://example.invalid)",
+  };
+  const x = await fixture(t);
+  await x.write("comparison/summary.json", payload);
+  await publish(x);
+  const body = x.messages()[0][1].body;
+  assert.match(body, /Head graphRerank: off → on/);
+  assert.match(body, /graph-on.*Entity/);
+  assert.doesNotMatch(body, /example.invalid/);
+  assert.equal(
+    Object.hasOwn(
+      validateComparison(payload, request).graph_rerank,
+      "untrusted_markdown",
+    ),
+    false,
+  );
+  for (const mutate of [
+    (graph) => {
+      graph.candidate_commit = base;
+    },
+    (graph) => {
+      graph.protocol = { ...GRAPH_PAIR, limit: 50 };
+    },
+    (graph) => {
+      graph.scopes.focus.task_ids = all;
+    },
+    (graph) => {
+      graph.scopes.all.on.diagnostic.entity.recall_at_10 = 2;
+    },
+    (graph) => {
+      graph.measurements.on.latency_sample_count = 99;
+    },
+  ]) {
+    const invalid = structuredClone(payload);
+    mutate(invalid.graph_rerank);
+    assert.throws(() => validateComparison(invalid, request));
+  }
 });
 
 test("the publisher renders diagnostic scores while preserving validated counts", async (t) => {

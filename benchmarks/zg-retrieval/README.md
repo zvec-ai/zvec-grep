@@ -12,6 +12,43 @@ Compare FTS, Vector and Hybrid search on four frozen suites. Each request uses t
 
 All runs include all three modes. Paired runs use the same harness and configured local models, build separate fresh indexes, and enable stage capture on both versions. They do not run answering-agent E2E tests or receive remote model credentials.
 
+### Head graphRerank pairs
+
+Automatic PR comparisons additionally run SWE-QA20 on the Head package with
+`--graph-rerank-pair`. The existing base/head Hybrid, FTS and Vector regressions
+keep their original requests and indexes. The additional experiment builds one
+fresh graph-enabled index per pinned repository and shares it between explicit
+`graphRerank:false` and `true` Hybrid calls. Both arms use the original questions,
+`local/potion-code-16m-v2`, `limit:10`, full preview and five repetitions, with
+trace enabled, updates disabled and alternating off/on order per repetition.
+The experiment protocol is `sweqa20-head-graph-rerank-pair-v1`.
+
+All 20 questions run; existing Gold eligibility and scoring decide which can be
+scored. Reports show the full suite and the seven focus cases separately:
+SQLFluff 2, xarray 46, SymPy 38, Astropy 38, Matplotlib 37, Conan 19 and Django 21.
+Existing File/Entity containment scoring, Gold, per-question averaging and
+Recall@1/5/10, Hit, MRR and nDCG definitions are unchanged. No Precision metric or
+@50/@100 result is inferred from these Top-10 requests.
+
+The scorer checks hashed raw responses, the complete 100-pair matrix, actual
+graph execution, unchanged ordinary recall/pools and shared index/model/package
+identities. Missing graph support, graph faults and invalid pairs fail the
+experiment instead of receiving an empty-result score. The original three-mode
+regression artifacts remain separate. Retain `retrieval-head-graph-pair` for raw
+requests/responses, index audits, `graph-off.json`, `graph-on.json` and the paired
+summary. These are fresh retrieval calls, not rescoring the historical offline B
+experiment. Timing includes trace overhead and session cache effects.
+
+The graph table is included in Actions comparison reports. Automatic PR comments
+can render it once the trusted publisher update is on the default branch; until
+then the PR description and Actions artifacts supply the table. Manual version
+comparisons retain their existing default; reusable callers can opt in with
+`graph_rerank_pair:true`.
+
+Run the graph experiment locally using the same package, corpus and cache flags
+as the normal runner, adding `--graph-rerank-pair`. Use a new output directory and
+fresh corpus checkout; do not reuse a previously indexed checkout.
+
 Manual and comment runs require maintain/admin access for both the original actor and the re-run actor. See [benchmark setup](../README.md) for repository configuration. The [PR result publisher](../../.github/workflows/retrieval-pr-comment.yml) must be merged into the default branch before it can update comments; it ignores cancelled or outdated runs.
 
 ## Read the results
