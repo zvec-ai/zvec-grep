@@ -76,6 +76,39 @@ fn file_at(storage: &IndexStore, path: &str) -> (FileRecord, FixtureEntity) {
 }
 
 #[test]
+fn indexed_sources_reads_only_requested_existing_files_in_writers_and_readers() {
+    let directory = tempfile::tempdir().expect("workspace");
+    let storage = open(directory.path(), false);
+    let (watched, entry) = file_at(&storage, "src/watched.rs");
+    storage
+        .replace_fixture_file(&watched, std::slice::from_ref(&entry))
+        .expect("index watched file");
+    let (other, other_entry) = file_at(&storage, "src/other.rs");
+    storage
+        .replace_fixture_file(&other, &[other_entry])
+        .expect("index other file");
+    let paths = HashSet::from([
+        watched.relative_path().to_path_buf(),
+        PathBuf::from("missing.rs"),
+    ]);
+    let check = |store: &IndexStore| {
+        let sources = store.indexed_sources(&paths).expect("watched sources");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].id, watched.id());
+        assert_eq!(sources[0].path, watched.relative_path().as_path());
+        assert_eq!(
+            sources[0].entities,
+            vec![(entry.entity.id().clone(), entry.entity.source_range(), true)]
+        );
+    };
+    check(&storage);
+    storage.close().expect("close writer");
+    let reader = open(directory.path(), true);
+    check(&reader);
+    reader.close().expect("close reader");
+}
+
+#[test]
 #[expect(
     clippy::too_many_lines,
     reason = "Compare FTS and ANN across the same complete metadata fixture"

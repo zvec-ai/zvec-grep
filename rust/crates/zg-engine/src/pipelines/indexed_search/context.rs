@@ -183,7 +183,7 @@ fn build_context_result(
     workspace: &Workspace,
     request: &NormalizedContextRequest,
     groups: &[NormalizedContextGroup],
-    searches: Vec<SearchPlanResult>,
+    mut searches: Vec<SearchPlanResult>,
 ) -> Result<ContextResult, EngineError> {
     let group_items = searches
         .iter()
@@ -204,6 +204,16 @@ fn build_context_result(
         .flat_map(|search| search.timings.iter().cloned())
         .collect();
     let hits_returned = items.len();
+    let stage_traces = searches
+        .iter_mut()
+        .zip(groups)
+        .filter_map(|(search, group)| {
+            search.stage_trace.take().map(|mut trace| {
+                trace.group_id.clone_from(&group.id);
+                trace
+            })
+        })
+        .collect();
 
     Ok(ContextResult {
         freshness: None,
@@ -218,6 +228,7 @@ fn build_context_result(
             path: workspace.layout().storage_dir().to_path_buf(),
         }),
         items,
+        stage_traces,
         group_results: groups
             .iter()
             .zip(group_items)
@@ -747,6 +758,7 @@ mod tests {
             routes: Vec::new(),
             hits: vec![hit.clone()],
             timings: Vec::new(),
+            stage_trace: None,
         };
         let request = normalize_context_request(&ContextOptions {
             query: Some("source".into()),
@@ -917,6 +929,7 @@ mod tests {
         };
         let search = SearchPlanResult {
             routes: Vec::new(),
+            stage_trace: None,
             hits: vec![SearchHit {
                 entity: Entity::new(id, source.id(), source_range, content, None, vec![fragment])
                     .expect("entity"),

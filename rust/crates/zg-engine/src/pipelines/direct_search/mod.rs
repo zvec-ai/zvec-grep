@@ -323,6 +323,7 @@ fn context_from_lexical(
         workspace_index: None,
         items,
         group_results: Vec::new(),
+        stage_traces: Vec::new(),
         diagnostics: ContextDiagnostics {
             empty_reason,
             index: None,
