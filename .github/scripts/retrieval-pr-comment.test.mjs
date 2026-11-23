@@ -654,6 +654,9 @@ test("the trusted publisher renders Head graph pairs and rejects substituted ide
       graph.scopes.all.on.diagnostic.entity.recall_at_10 = 2;
     },
     (graph) => {
+      graph.scopes.all.on.formal.eligible_tasks = 1;
+    },
+    (graph) => {
       graph.measurements.on.latency_sample_count = 99;
     },
   ]) {

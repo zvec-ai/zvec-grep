@@ -8,6 +8,7 @@ import {
 } from "../../benchmarks/zg-retrieval/expansion/compare.mjs";
 import { QUALITY_METRICS } from "../../benchmarks/zg-retrieval/reports/ci.mjs";
 import { QA_SCORING } from "../../benchmarks/zg-retrieval/core/suite.mjs";
+import { qaEligibility } from "../../benchmarks/zg-retrieval/metrics/entities.mjs";
 import {
   GRAPH_PAIR,
   FOCUS_TASKS,
@@ -28,6 +29,9 @@ const trustedJson = (path) =>
 const sweqaSource = trustedJson(
   "../../benchmarks/zg-retrieval/data/source.lock.json",
 );
+const sweqaQa = trustedJson(
+  "../../benchmarks/zg-retrieval/gold/qa-pairs-v1.json",
+).tasks;
 const expectedCorpusIds = {
   sweqa: sweqaSource.repositories
     .map(({ repository, commit }) => `${repository}@${commit}`)
@@ -195,6 +199,12 @@ function validateGraphPair(report, candidateCommit, harnessCommit) {
         new Set(unavailable.map((task) => task.task_id)).size,
         unavailable.length,
       );
+      assert.deepEqual(
+        unavailable.map((task) => task.task_id).sort(),
+        ids
+          .filter((id) => qaEligibility(sweqaQa[id]).status === "unavailable")
+          .sort(),
+      );
       const checked = {
         planned_tasks: ids.length,
         unavailable_tasks: unavailable,
@@ -213,6 +223,15 @@ function validateGraphPair(report, candidateCommit, harnessCommit) {
           ids.length,
         );
         assert.equal(file.eligible_tasks, entity.eligible_tasks);
+        assert.equal(
+          file.eligible_tasks,
+          ids.filter(
+            (id) =>
+              qaEligibility(sweqaQa[id]).status ===
+              (qualification === "formal" ? "scored" : "diagnostic"),
+          ).length,
+          "Graph qualification differs from trusted Gold",
+        );
         checked[qualification] = { ...file, entity: entity.entity };
       }
       scopes[name][arm] = checked;
