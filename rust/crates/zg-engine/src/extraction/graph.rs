@@ -194,18 +194,20 @@ impl ItemExtent {
     }
 }
 
-/// Mutable state carried through a single AST walk.
-#[derive(Debug)]
-pub(crate) struct WalkContext {
-    resolved_edges: Vec<WalkEdge>,
-    name_edges: Vec<NameEdge>,
-    scope_stack: Vec<usize>,
-    symbols: HashMap<String, Vec<usize>>,
-    /// Symbols declared at file top level. A bare call may only bind to these
-    /// from the file scope: `symbols` also holds members and nested
-    /// definitions, and a member is not visible to a top-level caller that
-    /// never received a receiver of its container's type.
-    file_symbols: HashMap<String, Vec<usize>>,
+/// The tables a Rust bare call reads while it climbs out of its own body.
+///
+/// Rust scopes names by item and by block rather than by the file alone, so
+/// partition needs several views at once: which entities are modules and which
+/// are function bodies, which items hold a spelling only in the type namespace,
+/// the block that directly contains each item, the names a `use` binds, and the
+/// globs that put names in view without spelling them. They are kept together
+/// because every one of them answers the same question — what a bare call at
+/// one position reaches — and a change to that answer touches several at once.
+///
+/// Other languages leave this empty: their bare calls are read from the file's
+/// own tables and the resolver's scope rules.
+#[derive(Debug, Default)]
+pub(crate) struct RustScopeTables {
     /// Symbols each containing entity declares directly in its body, the
     /// innermost-scope shadow table: a call inside `outer` that names
     /// `work` binds the nested `outer::work` before any file-level name.
@@ -221,14 +223,15 @@ pub(crate) struct WalkContext {
     /// nested inside it (`fn outer() { fn save() {} fn inner() { save() } }`),
     /// so partition reads its table while climbing towards the module.
     function_scopes: HashSet<usize>,
-    /// Rust items that hold a spelling in the type namespace only (`trait
-    /// save`, `type save = ..`, `enum save`). A bare call names a value, so
-    /// such a spelling never answers it: beside `fn save` the function keeps
-    /// the call, and a spelling only the type namespace holds stays pending.
+    /// Items that hold a spelling in the type namespace only (`trait save`,
+    /// `type save = ..`, `enum save`, an `impl` block, a named-field `struct`).
+    /// A bare call names a value, so such a spelling never answers it: beside
+    /// `fn save` the function keeps the call, and a spelling only the type
+    /// namespace holds stays pending.
     type_namespace_items: HashSet<usize>,
-    /// The block that directly contains each Rust item. A function's item
-    /// table is nearer than the module's, but only while the block that
-    /// declares the item is still open at the call site.
+    /// The block that directly contains each item. A function's item table is
+    /// nearer than the module's, but only while the block that declares the
+    /// item is still open at the call site.
     item_extents: HashMap<usize, ItemExtent>,
     /// Names a `use` declaration binds in the body that writes it. Rust scopes
     /// an import to that body, so a name a function imports is nearer than the
@@ -242,6 +245,22 @@ pub(crate) struct WalkContext {
     /// view, which is why partition may still read the file's own table after
     /// the walk reaches a module that writes one.
     import_globs: HashSet<usize>,
+}
+
+/// Mutable state carried through a single AST walk.
+#[derive(Debug)]
+pub(crate) struct WalkContext {
+    resolved_edges: Vec<WalkEdge>,
+    name_edges: Vec<NameEdge>,
+    scope_stack: Vec<usize>,
+    symbols: HashMap<String, Vec<usize>>,
+    /// Symbols declared at file top level. A bare call may only bind to these
+    /// from the file scope: `symbols` also holds members and nested
+    /// definitions, and a member is not visible to a top-level caller that
+    /// never received a receiver of its container's type.
+    file_symbols: HashMap<String, Vec<usize>>,
+    /// The Rust item and block tables a bare call reads.
+    rust_scopes: RustScopeTables,
     /// Names each entity takes for itself without necessarily binding them to
     /// an indexable target: parameters, and locals whose type the index cannot
     /// spell. A bare call through such a name reaches the local value, never
@@ -298,13 +317,7 @@ impl WalkContext {
             scope_stack: Vec::new(),
             symbols: HashMap::new(),
             file_symbols: HashMap::new(),
-            scoped_symbols: HashMap::new(),
-            module_scopes: HashSet::new(),
-            function_scopes: HashSet::new(),
-            type_namespace_items: HashSet::new(),
-            item_extents: HashMap::new(),
-            import_bindings: HashMap::new(),
-            import_globs: HashSet::new(),
+            rust_scopes: RustScopeTables::default(),
             shadowed_names: HashMap::new(),
             borrowed_names: HashMap::new(),
             value_aliases: HashMap::new(),
@@ -386,7 +399,8 @@ impl WalkContext {
         let Some(owner) = self.current_scope_index() else {
             return;
         };
-        self.scoped_symbols
+        self.rust_scopes
+            .scoped_symbols
             .entry(owner)
             .or_default()
             .entry(name.to_owned())
@@ -402,7 +416,7 @@ impl WalkContext {
         if !self.collecting {
             return;
         }
-        self.module_scopes.insert(index);
+        self.rust_scopes.module_scopes.insert(index);
     }
 
     /// Records that `index` is a Rust function: the items its body declares
@@ -413,7 +427,7 @@ impl WalkContext {
         if !self.collecting {
             return;
         }
-        self.function_scopes.insert(index);
+        self.rust_scopes.function_scopes.insert(index);
     }
 
     /// Records that `index` is a Rust item the value namespace does not hold
@@ -424,7 +438,7 @@ impl WalkContext {
         if !self.collecting {
             return;
         }
-        self.type_namespace_items.insert(index);
+        self.rust_scopes.type_namespace_items.insert(index);
     }
 
     /// Records the block that directly contains `index`. Item scopes read it
@@ -439,7 +453,9 @@ impl WalkContext {
         if !self.collecting {
             return;
         }
-        self.item_extents.insert(index, ItemExtent { start, end });
+        self.rust_scopes
+            .item_extents
+            .insert(index, ItemExtent { start, end });
     }
 
     /// Records that a `use` declaration in `owner`'s body binds `name` there.
@@ -449,7 +465,8 @@ impl WalkContext {
         if !self.collecting || name.is_empty() {
             return;
         }
-        self.import_bindings
+        self.rust_scopes
+            .import_bindings
             .entry(owner)
             .or_default()
             .insert(name.to_owned());
@@ -461,7 +478,7 @@ impl WalkContext {
         if !self.collecting {
             return;
         }
-        self.import_globs.insert(owner);
+        self.rust_scopes.import_globs.insert(owner);
     }
 
     /// Records that `owner`'s body takes `name` for a local value or
@@ -509,7 +526,7 @@ impl WalkContext {
     /// The per-entity local name tables partition consults before the
     /// file-level one.
     pub(crate) fn scoped_symbols(&self) -> &HashMap<usize, HashMap<String, Vec<usize>>> {
-        &self.scoped_symbols
+        &self.rust_scopes.scoped_symbols
     }
 
     /// Entity indices in this file that declare `name`, if any.

@@ -3485,25 +3485,78 @@ fn descendants_within(node: Node<'_>, max_depth: usize) -> Vec<Node<'_>> {
 /// `use crate::other::save;` binds `save`, `use crate::other::save as write;`
 /// binds `write`, and a brace group binds one name per clause. A glob
 /// (`use super::*;`) states no spelling this reader can place.
+///
+/// The clauses are read by their tree shape rather than by cutting the
+/// declaration's text: `use_as_clause` states the alias, a `scoped_use_list`
+/// states the module its `self` entries name, and a `use_wildcard` names
+/// nothing. Comments and line breaks inside the declaration therefore cannot
+/// shift which name a clause binds.
 fn rust_use_bindings(node: Node<'_>, source: &[u8]) -> Vec<String> {
     let mut names = Vec::new();
-    for clause in rust_use_clause(node_text(node, source)).split([',', '{', '}']) {
-        let clause = clause.trim().trim_end_matches(';').trim();
-        let words: Vec<&str> = clause.split_whitespace().collect();
-        let name = match words.as_slice() {
-            // `crate::other::save as write` binds the alias.
-            [.., "as", alias] => *alias,
-            _ => words.last().copied().unwrap_or_default(),
-        };
-        // A path keeps its last segment; a glob or an empty clause names
-        // nothing.
-        let name = name.rsplit("::").next().unwrap_or(name);
-        let name = name.strip_prefix("r#").unwrap_or(name);
-        if !name.is_empty() && name.chars().all(|ch| ch.is_alphanumeric() || ch == '_') {
-            names.push(name.to_owned());
-        }
+    if let Some(argument) = node.child_by_field_name("argument") {
+        collect_rust_use_bindings(argument, "", source, &mut names);
     }
     names
+}
+
+/// Collects the names one clause of a `use` declaration binds.
+///
+/// `module` is the spelling a `self` entry names: the brace group of
+/// `use a::b::{self, c};` is written on `a::b`, so its `self` binds `b` — the
+/// module itself, never the keyword.
+fn collect_rust_use_bindings(node: Node<'_>, module: &str, source: &[u8], names: &mut Vec<String>) {
+    match node.kind() {
+        // `use a::b as c;` binds the alias; `as _` binds nothing.
+        "use_as_clause" => {
+            if let Some(alias) = node.child_by_field_name("alias") {
+                push_rust_use_name(node_text(alias, source), names);
+            }
+        }
+        "scoped_use_list" => {
+            let module = node
+                .child_by_field_name("path")
+                .map(|path| rust_use_last_segment(path, source))
+                .unwrap_or_default();
+            if let Some(list) = node.child_by_field_name("list") {
+                for clause in named_children(list) {
+                    collect_rust_use_bindings(clause, &module, source, names);
+                }
+            }
+        }
+        "use_list" => {
+            for clause in named_children(node) {
+                collect_rust_use_bindings(clause, module, source, names);
+            }
+        }
+        // A glob brings names into view without spelling any of them.
+        "use_wildcard" => {}
+        "self" => push_rust_use_name(module, names),
+        _ => push_rust_use_name(&rust_use_last_segment(node, source), names),
+    }
+}
+
+/// The name a `use` path refers to: the segment after the last `::`, which is
+/// what the declaration binds (`use crate::other::save;` binds `save`).
+fn rust_use_last_segment(node: Node<'_>, source: &[u8]) -> String {
+    node.child_by_field_name("name").map_or_else(
+        || node_text(node, source).to_owned(),
+        |name| node_text(name, source).to_owned(),
+    )
+}
+
+/// Records one spelling a `use` clause binds.
+///
+/// A clause binds nothing when it names no identifier: `as _` discards the
+/// import, and a path segment that is empty (a trailing `::`) or spelled with
+/// punctuation names nothing this reader can place.
+fn push_rust_use_name(name: &str, names: &mut Vec<String>) {
+    let name = name.strip_prefix("r#").unwrap_or(name);
+    if name.is_empty() || name == "_" {
+        return;
+    }
+    if name.chars().all(|ch| ch.is_alphanumeric() || ch == '_') {
+        names.push(name.to_owned());
+    }
 }
 
 /// Whether a `use` declaration writes a glob (`use super::*;`,
@@ -3514,22 +3567,6 @@ fn rust_use_is_glob(node: Node<'_>) -> bool {
     }
     let mut cursor = node.walk();
     node.named_children(&mut cursor).any(rust_use_is_glob)
-}
-
-/// The clauses of a `use` declaration, with any `pub` / `pub(crate)` /
-/// `pub(in path)` visibility before the keyword dropped:
-/// `pub(crate) use a::b as c;` yields `a::b as c;`.
-fn rust_use_clause(text: &str) -> &str {
-    for (index, keyword) in text.match_indices("use") {
-        let before = text[..index].chars().next_back();
-        let after = text[index + keyword.len()..].chars().next();
-        if before.is_none_or(|ch| ch.is_whitespace() || ch == ')')
-            && after.is_some_and(char::is_whitespace)
-        {
-            return &text[index + keyword.len()..];
-        }
-    }
-    text
 }
 
 /// Reduces a normalized `use` declaration to its module path: drops a leading
@@ -3801,6 +3838,41 @@ mod tests {
                     .all(|edge| !matches!(edge.ref_name.as_str(), "hidden" | "local")),
                 "{format:?}"
             );
+        }
+    }
+
+    #[test]
+    fn rust_use_bindings_read_the_clause_shape() {
+        for (source, expected) in [
+            ("use crate::other::save;", vec!["save"]),
+            ("use crate::other::save as write;", vec!["write"]),
+            (
+                "use crate::other::{save, write as store};",
+                vec!["save", "store"],
+            ),
+            // A `self` entry names the module the group is written on.
+            ("use crate::other::{self, save};", vec!["other", "save"]),
+            ("use super::{self};", vec!["super"]),
+            // A glob and a discarded alias bind nothing.
+            ("use crate::other::*;", vec![]),
+            ("use crate::other::{self, *};", vec!["other"]),
+            ("use crate::other::save as _;", vec![]),
+            // Comments and line breaks inside the declaration are not clauses.
+            (
+                "pub(crate) use crate::other::{\n    // the writer\n    save /* the writer */,\n};",
+                vec!["save"],
+            ),
+        ] {
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&tree_sitter_rust::LANGUAGE.into())
+                .expect("fixture grammar");
+            let tree = parser.parse(source, None).expect("fixture syntax tree");
+            let declaration = tree.root_node().named_child(0).expect("use declaration");
+            assert_eq!(declaration.kind(), "use_declaration", "{source}");
+            let bound = rust_use_bindings(declaration, source.as_bytes());
+            let bound: Vec<&str> = bound.iter().map(String::as_str).collect();
+            assert_eq!(bound, expected, "{source}");
         }
     }
 

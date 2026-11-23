@@ -18,7 +18,8 @@ use std::collections::{HashMap, HashSet};
 use crate::domain::{EdgeProvenance, GraphEdgeKind, PreprocessorDirective};
 
 use super::{
-    Constructs, ItemExtent, NameEdge, PYTHON_NONE_TYPE, PYTHON_UNBOUND_TYPE, WalkContext, WalkEdge,
+    Constructs, ItemExtent, NameEdge, PYTHON_NONE_TYPE, PYTHON_UNBOUND_TYPE, RustScopeTables,
+    WalkContext, WalkEdge,
 };
 
 /// A name reference resolved against this file's own symbol table.
@@ -179,13 +180,7 @@ pub(crate) fn partition_walk(
         name_edges,
         symbols,
         file_symbols,
-        scoped_symbols,
-        module_scopes,
-        function_scopes,
-        type_namespace_items,
-        item_extents,
-        import_bindings,
-        import_globs,
+        rust_scopes,
         shadowed_names,
         borrowed_names,
         value_aliases,
@@ -231,13 +226,7 @@ pub(crate) fn partition_walk(
             shadowed_at_site(&edge, &enclosing, &shadowed_names, &borrowed_names),
             InFileTables {
                 symbols: &symbols,
-                scoped_symbols: &scoped_symbols,
-                module_scopes: &module_scopes,
-                function_scopes: &function_scopes,
-                type_namespace_items: &type_namespace_items,
-                item_extents: &item_extents,
-                import_bindings: &import_bindings,
-                import_globs: &import_globs,
+                rust: &rust_scopes,
                 file_symbols: &file_symbols,
                 aliases: &aliases,
                 value_aliases: &value_aliases,
@@ -353,21 +342,15 @@ enum LocalName {
 /// Of the visible items the nearest wins: `{ fn save() {} fn inner() { save() } }`
 /// written inside `fn outer` that also declares a `save` reaches the block's
 /// own item, whichever of the two declarations comes later in the text.
-fn local_target(
-    declared: &[usize],
-    call: (usize, usize),
-    module_scopes: &HashSet<usize>,
-    type_namespace_items: &HashSet<usize>,
-    item_extents: &HashMap<usize, ItemExtent>,
-) -> LocalName {
+fn local_target(declared: &[usize], call: (usize, usize), rust: &RustScopeTables) -> LocalName {
     let mut saw_value = false;
     let mut visible: Option<(usize, Option<ItemExtent>)> = None;
     for &index in declared.iter().rev() {
-        if module_scopes.contains(&index) || type_namespace_items.contains(&index) {
+        if rust.module_scopes.contains(&index) || rust.type_namespace_items.contains(&index) {
             continue;
         }
         saw_value = true;
-        let extent = item_extents.get(&index).copied();
+        let extent = rust.item_extents.get(&index).copied();
         if extent.is_some_and(|extent| !extent.contains(call.0, call.1)) {
             continue;
         }
@@ -409,56 +392,27 @@ enum BareName {
     OutOfScope,
 }
 
-/// The item-scope tables a bare call climbs through.
-#[derive(Clone, Copy)]
-struct ItemScopes<'a> {
-    /// Which entities are modules and which are function bodies: the two
-    /// scopes whose direct items answer a bare call.
-    module_scopes: &'a HashSet<usize>,
-    function_scopes: &'a HashSet<usize>,
-    /// Items whose spelling lives in the type namespace only.
-    type_namespace_items: &'a HashSet<usize>,
-    /// The block that directly contains each item, so a closed block's item
-    /// does not answer a call the enclosing scope should.
-    item_extents: &'a HashMap<usize, ItemExtent>,
-    /// The items each scope declares directly, by spelling.
-    scoped_symbols: &'a HashMap<usize, HashMap<String, Vec<usize>>>,
-    /// The names a `use` in each scope binds.
-    import_bindings: &'a HashMap<usize, HashSet<String>>,
-    /// The scopes that write a glob `use`, which states the surrounding names
-    /// are in view without spelling any of them.
-    import_globs: &'a HashSet<usize>,
-    /// Containment, target ordinal → containing ordinal.
-    enclosing: &'a HashMap<usize, usize>,
-}
-
 /// What the modules and function bodies around `owner` say about `name`.
 ///
-/// Bare scope holds a module's items for every body written inside it, and a
-/// function's items for the bodies nested in it: `mod storage` answers its
-/// `flush`, and `fn outer` answers the `save()` its nested `inner` writes. An
-/// outer module never answers — reaching it needs `super::` — and an `impl`, a
-/// trait or a class body is skipped, because its members need a receiver. A
-/// `use` written in one of those bodies is nearer than the items: it binds the
-/// spelling for the calls that see it, and where it points is the resolver's
-/// question. The file's own table belongs to the file scope, so a module
-/// reaches it only through a glob import.
+/// The climb starts at the call's own owner, whose table answers whatever kind
+/// of entity it is: the entities written beside a call are the values that body
+/// can name. Farther out only a module or a function body is a scope worth
+/// reading — bare scope holds a module's items for every body written inside
+/// it, and a function's items for the bodies nested in it: `mod storage`
+/// answers its `flush`, and `fn outer` answers the `save()` its nested `inner`
+/// writes. An outer module never answers — reaching it needs `super::` — and an
+/// `impl`, a trait or a class body is skipped, because its members need a
+/// receiver. A `use` written in one of those bodies is nearer than the items: it
+/// binds the spelling for the calls that see it, and where it points is the
+/// resolver's question. The file's own table belongs to the file scope, so a
+/// module reaches it only through a glob import.
 fn enclosing_bare_name(
     owner: usize,
     name: &str,
     call: (usize, usize),
-    scopes: ItemScopes<'_>,
+    rust: &RustScopeTables,
+    enclosing: &HashMap<usize, usize>,
 ) -> BareName {
-    let ItemScopes {
-        module_scopes,
-        function_scopes,
-        type_namespace_items,
-        item_extents,
-        scoped_symbols,
-        import_bindings,
-        import_globs,
-        enclosing,
-    } = scopes;
     let mut current = owner;
     // A glob `use` on the way out (`use super::*;`) states that the names
     // around the innermost module are in view without spelling any of them, so
@@ -466,31 +420,27 @@ fn enclosing_bare_name(
     let mut glob_in_view = false;
     // The file node is not an entity, so the walk ends where containment does.
     for _ in 0..64 {
-        if import_globs.contains(&current) {
+        if rust.import_globs.contains(&current) {
             glob_in_view = true;
         }
-        if import_bindings
+        if rust
+            .import_bindings
             .get(&current)
             .is_some_and(|names| names.contains(name))
         {
             return BareName::Imported;
         }
-        let module = module_scopes.contains(&current);
-        if module || function_scopes.contains(&current) {
-            if let Some(declared) = scoped_symbols
+        let module = rust.module_scopes.contains(&current);
+        if module || rust.function_scopes.contains(&current) || current == owner {
+            if let Some(declared) = rust
+                .scoped_symbols
                 .get(&current)
                 .and_then(|names| names.get(name))
             {
-                match local_target(
-                    declared,
-                    call,
-                    module_scopes,
-                    type_namespace_items,
-                    item_extents,
-                ) {
+                match local_target(declared, call, rust) {
                     LocalName::Value(index) => return BareName::Declared(Some(index)),
                     // Only the type namespace spells the name here. A module
-                    // ends the walk; a function body does not, because the
+                    // ends the walk; any other body does not, because the
                     // outer scope's value namespace is still in view.
                     LocalName::TypeOnly if module => return BareName::Declared(None),
                     // Either only the type namespace spells the name here, or
@@ -523,15 +473,8 @@ fn enclosing_bare_name(
 #[derive(Clone, Copy)]
 struct InFileTables<'a> {
     symbols: &'a HashMap<String, Vec<usize>>,
-    scoped_symbols: &'a HashMap<usize, HashMap<String, Vec<usize>>>,
-    module_scopes: &'a HashSet<usize>,
-    function_scopes: &'a HashSet<usize>,
-    type_namespace_items: &'a HashSet<usize>,
-    item_extents: &'a HashMap<usize, ItemExtent>,
-    import_bindings: &'a HashMap<usize, HashSet<String>>,
-    /// The scopes that write a glob `use`: their file-level namesakes stay in
-    /// view, because the glob cannot say which of them it binds.
-    import_globs: &'a HashSet<usize>,
+    /// The Rust item and block tables a bare call climbs through.
+    rust: &'a RustScopeTables,
     file_symbols: &'a HashMap<String, Vec<usize>>,
     aliases: &'a HashMap<(usize, String), Vec<NameEdge>>,
     value_aliases: &'a HashMap<(usize, String), String>,
@@ -558,13 +501,7 @@ enum InFileTarget {
 fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> InFileTarget {
     let InFileTables {
         symbols,
-        scoped_symbols,
-        module_scopes,
-        function_scopes,
-        type_namespace_items,
-        item_extents,
-        import_bindings,
-        import_globs,
+        rust,
         file_symbols,
         aliases,
         value_aliases,
@@ -635,33 +572,12 @@ fn in_file_target(edge: &NameEdge, shadowed: bool, tables: InFileTables<'_>) -> 
             if shadowed {
                 return InFileTarget::Pending;
             }
-            if let Some(declared) = scoped_symbols
-                .get(&edge.owner_index)
-                .and_then(|locals| locals.get(&edge.ref_name))
-                && let LocalName::Value(index) = local_target(
-                    declared,
-                    (edge.line, edge.column),
-                    module_scopes,
-                    type_namespace_items,
-                    item_extents,
-                )
-            {
-                return InFileTarget::Bound(index);
-            }
             match enclosing_bare_name(
                 edge.owner_index,
                 &edge.ref_name,
                 (edge.line, edge.column),
-                ItemScopes {
-                    module_scopes,
-                    function_scopes,
-                    type_namespace_items,
-                    item_extents,
-                    scoped_symbols,
-                    import_bindings,
-                    import_globs,
-                    enclosing,
-                },
+                rust,
+                enclosing,
             ) {
                 BareName::Declared(Some(target)) => InFileTarget::Bound(target),
                 BareName::Declared(None) | BareName::Imported => InFileTarget::Pending,

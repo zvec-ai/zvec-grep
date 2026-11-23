@@ -1723,6 +1723,51 @@ async fn glob_import_keeps_the_file_scope_in_view() {
 }
 
 #[tokio::test]
+async fn grouped_import_with_a_comment_still_binds_the_name() {
+    // The brace group is read by its tree shape, so a comment beside the
+    // clause cannot hide the spelling: `use super::{save /* … */};` still
+    // binds `save` in `m`, and the call written there reaches the import.
+    // Without the binding nothing in `m` spells the name, so the call would
+    // leave no edge at all.
+    check_case(Case {
+        name: "grouped_import_with_a_comment_still_binds_the_name",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub fn save() -> i32 { 1 }\npub mod m {\n    use super::{save /* the outer one */};\n    pub fn f() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::f",
+            expected: json!([{"name":"m::f","edges":[{"symbol":{"name":"save","startLine":1}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn grouped_import_keeps_the_module_entry_beside_a_name() {
+    // `use super::{self, save};` binds two spellings: `self` names the module
+    // the group is written on, and `save` keeps its own segment. Reading the
+    // group by shape tells them apart, so the call still reaches the file's
+    // `save` instead of a module spelled `self`.
+    check_case(Case {
+        name: "grouped_import_keeps_the_module_entry_beside_a_name",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub fn save() -> i32 { 1 }\npub mod m {\n    use super::{self, save};\n    pub fn f() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::f",
+            expected: json!([{"name":"m::f","edges":[{"symbol":{"name":"save","startLine":1}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn single_import_binds_the_name_in_the_module() {
     // `use super::save;` binds the spelling in this module, so the call reaches
     // whatever that import names: the file's own table stays out of it and the
