@@ -700,43 +700,7 @@ fn visit_for_bindings(
         }
         return;
     }
-    if format == FileFormat::Python
-        && node.kind() == "assignment"
-        && let Some(left) = node
-            .child_by_field_name("left")
-            .filter(|left| left.kind() == "identifier")
-    {
-        let name = node_text(left, source);
-        // `client: Left = …` states the type beside the name, whatever value
-        // the body stores in it.
-        if let Some(bound) = node
-            .child_by_field_name("type")
-            .and_then(|ty| python_annotation_name(ty, source))
-        {
-            context.add_declare_binding(owner_index, name, &bound, line, column, None);
-            return;
-        }
-        // `client = clients[0]` states that the name no longer holds what the
-        // parameter declared. The index cannot place the value, so the name
-        // holds no type from this line on rather than keeping the annotation
-        // the parameter stated for the whole body.
-        //
-        // `client = other` is a copy of a name the body already types, and the
-        // copy holds that type: a receiver reads `other`'s type from this line
-        // on. A copy of a name the body states no type for leaves the name as
-        // undecided as any other value the index cannot place — the annotation
-        // described what the name held before the assignment, not after it.
-        let copied = node
-            .child_by_field_name("right")
-            .filter(|right| right.kind() == "identifier")
-            .and_then(|right| {
-                context
-                    .declared_type_at(owner_index, node_text(right, source), line, column)
-                    .map(str::to_owned)
-            })
-            .filter(|bound| !matches!(bound.as_str(), PYTHON_UNBOUND_TYPE | PYTHON_NONE_TYPE));
-        let bound = copied.as_deref().unwrap_or(PYTHON_UNBOUND_TYPE);
-        context.add_declare_binding(owner_index, name, bound, line, column, None);
+    if collect_python_assignment(node, owner_index, source, format, context, line, column) {
         return;
     }
     for child in named_children(node) {
@@ -745,6 +709,60 @@ fn visit_for_bindings(
         }
         visit_for_bindings(child, owner_index, source, format, context, boundary);
     }
+}
+
+/// Records what a Python assignment states about the name it writes, if the
+/// node is one.
+fn collect_python_assignment(
+    node: Node<'_>,
+    owner_index: usize,
+    source: &[u8],
+    format: FileFormat,
+    context: &mut WalkContext,
+    line: usize,
+    column: usize,
+) -> bool {
+    if format != FileFormat::Python || node.kind() != "assignment" {
+        return false;
+    }
+    let Some(left) = node
+        .child_by_field_name("left")
+        .filter(|left| left.kind() == "identifier")
+    else {
+        return false;
+    };
+    let name = node_text(left, source);
+    // `client: Left = …` states the type beside the name, whatever value
+    // the body stores in it.
+    if let Some(bound) = node
+        .child_by_field_name("type")
+        .and_then(|ty| python_annotation_name(ty, source))
+    {
+        context.add_declare_binding(owner_index, name, &bound, line, column, None);
+        return true;
+    }
+    // `client = clients[0]` states that the name no longer holds what the
+    // parameter declared. The index cannot place the value, so the name
+    // holds no type from this line on rather than keeping the annotation
+    // the parameter stated for the whole body.
+    //
+    // `client = other` is a copy of a name the body already types, and the
+    // copy holds that type: a receiver reads `other`'s type from this line
+    // on. A copy of a name the body states no type for leaves the name as
+    // undecided as any other value the index cannot place — the annotation
+    // described what the name held before the assignment, not after it.
+    let copied = node
+        .child_by_field_name("right")
+        .filter(|right| right.kind() == "identifier")
+        .and_then(|right| {
+            context
+                .declared_type_at(owner_index, node_text(right, source), line, column)
+                .map(str::to_owned)
+        })
+        .filter(|bound| !matches!(bound.as_str(), PYTHON_UNBOUND_TYPE | PYTHON_NONE_TYPE));
+    let bound = copied.as_deref().unwrap_or(PYTHON_UNBOUND_TYPE);
+    context.add_declare_binding(owner_index, name, bound, line, column, None);
+    true
 }
 
 /// Records what a Python class's `self.<member> = <value>` assignments state
