@@ -1366,17 +1366,9 @@ impl WorkspaceWatcherFactoryPort for BufferedWatcherFactory {
     }
 }
 
-#[tokio::test]
-async fn waiting_for_existing_job_flushes_events_buffered_during_that_job() {
-    let workspace = tempdir().expect("workspace");
-    let root = workspace.path().canonicalize().expect("root");
-    let (started, mut jobs) = mpsc::unbounded_channel();
-    let executor = Arc::new(GatedExecutor {
-        started,
-        release: tokio::sync::Semaphore::new(1),
-    });
+fn buffered_watcher() -> (Arc<BufferedWatcher>, mpsc::UnboundedReceiver<()>) {
     let (sender, receiver) = mpsc::channel(8);
-    let (flushed, mut barriers) = mpsc::unbounded_channel();
+    let (flushed, barriers) = mpsc::unbounded_channel();
     let watcher = Arc::new(BufferedWatcher {
         session: ManualWatchSession {
             receiver: Arc::new(tokio::sync::Mutex::new(receiver)),
@@ -1386,6 +1378,84 @@ async fn waiting_for_existing_job_flushes_events_buffered_during_that_job() {
         pending: AtomicBool::new(false),
         flushed,
     });
+    (watcher, barriers)
+}
+
+#[tokio::test]
+async fn waited_rebuild_drains_buffered_workspace_changes_before_returning() {
+    let workspace = tempdir().expect("workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let engine = empty_search_engine(&root).await;
+    let (started, mut jobs) = mpsc::unbounded_channel();
+    let executor = Arc::new(GatedExecutor {
+        started,
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let (watcher, _barriers) = buffered_watcher();
+    let manager = WorkspaceRuntimeManager::new(
+        executor.clone(),
+        Arc::new(BufferedWatcherFactory(watcher.clone())),
+        SchedulerConfig::default(),
+    );
+    let options = IndexOptions {
+        root: Some(root.clone()),
+        rebuild: true,
+        ..IndexOptions::default()
+    };
+    let runtime = manager.runtime(root.clone(), &options).expect("runtime");
+    manager
+        .ensure_watching(Arc::clone(&runtime))
+        .await
+        .expect("watcher");
+    let mut rebuild = tokio::spawn({
+        let manager = manager.clone();
+        async move { manager.submit_index(options, true).await }
+    });
+    assert!(jobs.recv().await.expect("manual job").rebuild);
+    watcher.pending.store(true, Ordering::Release);
+    executor.release.add_permits(1);
+
+    tokio::select! {
+        job = jobs.recv() => assert_eq!(
+            job.expect("watch job").changes,
+            [IndexChange::Upsert("during-index.txt".into())]
+        ),
+        _ = &mut rebuild => panic!("rebuild returned with a buffered workspace change"),
+    }
+    assert!(!rebuild.is_finished());
+    executor.release.add_permits(1);
+    rebuild.await.expect("wait task").expect("rebuilt");
+    let snapshot = manager.runtime_snapshot(&root);
+    assert_eq!(snapshot.indexed_revision, snapshot.dirty_revision);
+    let info = manager
+        .info(
+            &engine,
+            InfoOptions {
+                root: Some(root),
+                include_status: true,
+                include_counts: false,
+            },
+        )
+        .await
+        .expect("immediate status");
+    assert_eq!(
+        info.index_status(),
+        zg_engine::api::info::result::IndexStatus::Ready
+    );
+    manager.shutdown_all().await.expect("shutdown");
+    engine.close();
+}
+
+#[tokio::test]
+async fn waiting_for_existing_job_flushes_events_buffered_during_that_job() {
+    let workspace = tempdir().expect("workspace");
+    let root = workspace.path().canonicalize().expect("root");
+    let (started, mut jobs) = mpsc::unbounded_channel();
+    let executor = Arc::new(GatedExecutor {
+        started,
+        release: tokio::sync::Semaphore::new(1),
+    });
+    let (watcher, mut barriers) = buffered_watcher();
     let manager = WorkspaceRuntimeManager::new(
         executor.clone(),
         Arc::new(BufferedWatcherFactory(watcher.clone())),

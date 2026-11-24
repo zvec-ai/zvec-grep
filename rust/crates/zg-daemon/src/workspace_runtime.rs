@@ -404,11 +404,13 @@ impl WorkspaceRuntimeManager {
                 .await;
             if let Err(error) = self.ensure_watching(Arc::clone(&runtime)).await {
                 warn!(%error, "index completed with pending watcher configuration");
+            } else if let Err(error) = self.flush_watcher(&runtime).await {
+                warn!(%error, "could not flush pending workspace changes after indexing");
             }
-            self.inner
-                .scheduler
-                .wait_for_root_idle(&runtime.canonical_root)
-                .await;
+            // A filesystem event buffered during a rebuild can still be waiting for
+            // debounce after the manual writer exits. Apply the admitted watch jobs
+            // and their status invalidations before the next readiness inspection.
+            runtime.settle_jobs(&self.inner.scheduler, None).await;
         }
         Ok(RuntimeIndexSubmission {
             job: completed.job,
