@@ -7,6 +7,8 @@ matcher and binary policy as other files (`-a` explicitly enables binary search)
 With an index, PDFs use canonical extracted text when available.
 
 The coordinator owns requested scope, result ordering, and final limits. The
+global output bound counts matching records before entity grouping, across both
+ordinary files and extracted sources; requested context does not consume it. The
 extracted reader returns hits and files without a usable index. Those files are
 searched as raw content with an indexing hint, including explicitly requested
 files. Index access failures also fall back to raw search, with a warning that

@@ -50,6 +50,7 @@ pub(crate) enum ManifestState {
         source_root: PathBuf,
         actual_version: Option<u32>,
         reason: String,
+        rebuild_settings: Option<Box<Workspace>>,
     },
 }
 
@@ -59,7 +60,9 @@ impl ManifestState {
         match self {
             Self::Missing => Ok(None),
             Self::Current(manifest) => Ok(Some(*manifest)),
-            Self::RebuildRequired { .. } if rebuild => Ok(None),
+            Self::RebuildRequired {
+                rebuild_settings, ..
+            } if rebuild => Ok(rebuild_settings.map(|workspace| *workspace)),
             Self::RebuildRequired {
                 source_root,
                 reason,
@@ -98,6 +101,7 @@ pub(crate) fn inspect_workspace_manifest(
             return Ok(ManifestState::RebuildRequired {
                 source_root: source_root.to_path_buf(),
                 actual_version: None,
+                rebuild_settings: None,
                 reason: format!(
                     "workspace index '{}' has no manifest",
                     layout.index_dir().display(),
@@ -112,6 +116,7 @@ pub(crate) fn inspect_workspace_manifest(
             return Ok(ManifestState::RebuildRequired {
                 source_root: source_root.to_path_buf(),
                 actual_version: None,
+                rebuild_settings: None,
                 reason: format!(
                     "invalid workspace manifest '{}': {error}",
                     layout.manifest_path().display()
@@ -120,9 +125,20 @@ pub(crate) fn inspect_workspace_manifest(
         }
     };
     if let Some(reason) = version_mismatch(version) {
+        // v2 has the same settings schema. Reuse only validated configuration
+        // during an explicit rebuild; ordinary readers still reject its data.
+        let rebuild_settings = if version == 2 {
+            serde_json::from_slice::<ManifestFields>(&bytes)
+                .ok()
+                .and_then(|fields| fields.into_workspace(source_root, layout).ok())
+                .map(Box::new)
+        } else {
+            None
+        };
         return Ok(ManifestState::RebuildRequired {
             source_root: source_root.to_path_buf(),
             actual_version: Some(version),
+            rebuild_settings,
             reason: format!(
                 "workspace manifest '{}': {reason}",
                 layout.manifest_path().display()
@@ -136,6 +152,7 @@ pub(crate) fn inspect_workspace_manifest(
             return Ok(ManifestState::RebuildRequired {
                 source_root: source_root.to_path_buf(),
                 actual_version: Some(version),
+                rebuild_settings: None,
                 reason: format!(
                     "invalid workspace manifest '{}': {error}",
                     layout.manifest_path().display()
@@ -150,6 +167,7 @@ pub(crate) fn inspect_workspace_manifest(
             return Ok(ManifestState::RebuildRequired {
                 source_root: source_root.to_path_buf(),
                 actual_version: Some(version),
+                rebuild_settings: None,
                 reason: format!(
                     "invalid workspace manifest '{}': {error}",
                     layout.manifest_path().display()
@@ -1330,6 +1348,53 @@ mod tests {
             assert!(diagnostics.contains("zg --index --rebuild"));
             fs::write(layout.manifest_path(), &bytes).expect("restore current manifest");
         }
+    }
+
+    #[test]
+    fn v2_settings_are_available_only_for_an_explicit_rebuild() {
+        let directory = tempdir().expect("workspace");
+        let layout = WorkspaceLayout::new(directory.path().join(".zvec-grep")).expect("layout");
+        let manifest = fixture_manifest(&layout);
+        write_workspace_manifest(layout.manifest_path(), &manifest).expect("manifest");
+        let mut value = serde_json::to_value(&manifest).expect("JSON");
+        value["indexVersion"] = 2.into();
+        fs::write(layout.manifest_path(), value.to_string()).expect("v2 manifest");
+        assert_eq!(
+            read_workspace_manifest(directory.path(), &layout)
+                .expect_err("rebuild required")
+                .code(),
+            EngineError::INDEX_INCOMPATIBLE
+        );
+        let saved = inspect_workspace_manifest(directory.path(), &layout)
+            .expect("inspect")
+            .into_workspace(true)
+            .expect("read settings")
+            .expect("saved configuration");
+        assert_eq!(saved.index_version(), 2);
+        assert_eq!(saved.index(), manifest.index());
+        assert_eq!(saved.scan(), manifest.scan());
+        // Unknown versions and malformed settings must never be reused.
+        for version in [1, super::super::CURRENT_INDEX_VERSION + 1] {
+            value["indexVersion"] = version.into();
+            fs::write(layout.manifest_path(), value.to_string()).expect("unknown version");
+            assert!(
+                inspect_workspace_manifest(directory.path(), &layout)
+                    .expect("inspect")
+                    .into_workspace(true)
+                    .expect("rebuild")
+                    .is_none()
+            );
+        }
+        value["indexVersion"] = 2.into();
+        value["scan"] = serde_json::Value::Null;
+        fs::write(layout.manifest_path(), value.to_string()).expect("invalid settings");
+        assert!(
+            inspect_workspace_manifest(directory.path(), &layout)
+                .expect("inspect")
+                .into_workspace(true)
+                .expect("rebuild")
+                .is_none()
+        );
     }
 
     #[test]

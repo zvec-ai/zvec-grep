@@ -8,7 +8,7 @@ use crate::{
     domain::{Content, Entity, IndexDescriptor, WorkspaceLayout},
     lexical::{
         extracted::{ExtractedFileState, ExtractedMatcher},
-        types::LexicalSearchRequest,
+        types::{LexicalMatch, LexicalSearchRequest},
     },
     pipelines::{
         freshness::file_freshness_status,
@@ -26,10 +26,20 @@ use std::{
 
 #[derive(Default)]
 pub(super) struct SearchResult {
-    pub items: Vec<ContextItem>,
+    pub matches: Vec<EntityMatches>,
     pub truncated: bool,
     pub unavailable: Vec<PathBuf>,
     pub warnings: Vec<String>,
+}
+
+/// Keep individual matches until the coordinator applies the shared output bound.
+pub(super) struct EntityMatches {
+    pub relative_path: PathBuf,
+    pub source_start: u64,
+    pub hits: Vec<LexicalMatch>,
+    path: PathBuf,
+    status: ContextItemStatus,
+    entity: Entity,
 }
 
 pub(super) fn enabled(root: &Path) -> EngineResult<bool> {
@@ -103,7 +113,7 @@ pub(super) async fn search(
                 continue;
             }
         };
-        result.items.append(&mut found.items);
+        result.matches.append(&mut found.matches);
         result.unavailable.append(&mut found.unavailable);
         result.truncated |= found.truncated;
     }
@@ -194,9 +204,23 @@ fn search_store(
         entities.sort_by_key(|entity| entity.source_range().byte_offsets().map(|(start, _)| start));
         let mut state = ExtractedFileState::default();
         for entity in entities {
-            if let Some(item) = search_entity(&matcher, request, path, status, &entity, &mut state)?
-            {
-                result.items.push(item);
+            if let Content::Text(text) | Content::Code(text) = entity.content() {
+                let source_start = entity
+                    .source_range()
+                    .byte_offsets()
+                    .ok_or_else(|| EngineError::internal("Extracted entity has no source offsets"))?
+                    .0;
+                let hits = matcher.search(text, source_start, &mut state)?;
+                if !hits.is_empty() {
+                    result.matches.push(EntityMatches {
+                        relative_path: path.strip_prefix(search_root).unwrap_or(path).to_path_buf(),
+                        source_start,
+                        hits,
+                        path: path.clone(),
+                        status,
+                        entity,
+                    });
+                }
             }
             if state.stopped {
                 break;
@@ -207,27 +231,33 @@ fn search_store(
     Ok(result)
 }
 
-fn search_entity(
-    matcher: &ExtractedMatcher,
+pub(super) fn context_items(
+    matches: Vec<EntityMatches>,
     request: &LexicalSearchRequest,
-    path: &Path,
-    status: ContextItemStatus,
-    entity: &Entity,
-    state: &mut ExtractedFileState,
-) -> EngineResult<Option<ContextItem>> {
+) -> EngineResult<Vec<ContextItem>> {
+    matches
+        .into_iter()
+        .map(|matched| context_item(request, matched))
+        .collect()
+}
+
+fn context_item(
+    request: &LexicalSearchRequest,
+    matches: EntityMatches,
+) -> EngineResult<ContextItem> {
+    let EntityMatches {
+        entity,
+        hits,
+        path,
+        relative_path,
+        status,
+        ..
+    } = matches;
     let (Content::Text(text) | Content::Code(text)) = entity.content() else {
-        return Ok(None);
+        return Err(EngineError::internal("Extracted match has no text"));
     };
     let source = entity.source_range();
     let project = |span| ContentRange::project_text(&source, text, span);
-    let start = source
-        .byte_offsets()
-        .ok_or_else(|| EngineError::internal("Extracted entity has no source offsets"))?
-        .0;
-    let hits = matcher.search(text, start, state)?;
-    if hits.is_empty() {
-        return Ok(None);
-    }
     let lines = crate::utils::line_byte_offsets(text);
     let mut windows: Vec<std::ops::Range<usize>> = Vec::new();
     for matched in &hits {
@@ -252,7 +282,6 @@ fn search_entity(
     }
     let start = windows.first().expect("matched window").start;
     let end = windows.last().expect("matched window").end;
-    let root = request.root.as_deref().unwrap_or_else(|| Path::new("."));
     let selection = ContentRange::project_selections(
         &source,
         text,
@@ -274,11 +303,11 @@ fn search_entity(
     } else {
         selection.clone()
     };
-    Ok(Some(ContextItem {
+    Ok(ContextItem {
         kind: ContextItemKind::LexicalMatch,
         rank: 0,
-        absolute_path: path.to_path_buf(),
-        relative_path: path.strip_prefix(root).unwrap_or(path).to_path_buf(),
+        absolute_path: path,
+        relative_path,
         range,
         excerpt_range: Some(selection),
         content_range: project(start..end)?,
@@ -305,5 +334,5 @@ fn search_entity(
         query_groups: Vec::new(),
         selection_reason: None,
         coverage_group: None,
-    }))
+    })
 }

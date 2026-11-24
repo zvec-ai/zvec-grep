@@ -136,16 +136,18 @@ impl DirectSearchService {
             },
         };
         let mut reply = self.lexical.search(&root, &request).await?;
-        let extracted = extracted::search(
+        let mut extracted = extracted::search(
             std::mem::take(&mut reply.extracted_paths),
             &request,
             options.lock_timeout_ms,
             &self.writers,
         )
         .await?;
-        index_warnings.extend(extracted.warnings);
         self.include_raw_fallback(&root, &request, &extracted.unavailable, &mut reply)
             .await?;
+        limit_matches(&mut reply, &mut extracted.matches, request.limit);
+        index_warnings.extend(extracted.warnings);
+        let extracted_items = extracted::context_items(extracted.matches, &request)?;
         let structure_started = Instant::now();
         let enrichment = structure_file_limit.map(|file_limit| {
             enrich_lexical_matches_with_structure(
@@ -162,12 +164,7 @@ impl DirectSearchService {
             enrichment,
             use_entity_ranges,
         );
-        merge_extracted_items(
-            &mut result,
-            extracted.items,
-            extracted.truncated,
-            request.limit,
-        );
+        merge_extracted_items(&mut result, extracted_items, extracted.truncated);
         if let Some(rg) = &mut result.diagnostics.rg {
             rg.unindexed_files = extracted.unavailable;
             index_warnings.sort();
@@ -217,11 +214,70 @@ impl DirectSearchService {
     }
 }
 
+/// Count matching records before entity grouping, including ordinary/raw files.
+fn limit_matches(
+    reply: &mut LexicalSearchReply,
+    extracted: &mut Vec<extracted::EntityMatches>,
+    limit: Option<usize>,
+) {
+    enum MatchIndex {
+        File(usize),
+        Entity(usize),
+    }
+    let Some(limit) = limit else {
+        return;
+    };
+    let mut order = reply
+        .matches
+        .iter()
+        .enumerate()
+        .map(|(index, matched)| {
+            (
+                matched.relative_path(),
+                matched.range.start_byte_offset() as u64,
+                MatchIndex::File(index),
+            )
+        })
+        .collect::<Vec<_>>();
+    for (index, matched) in extracted.iter().enumerate() {
+        order.extend(matched.hits.iter().map(|hit| {
+            (
+                matched.relative_path.as_path(),
+                matched
+                    .source_start
+                    .saturating_add(hit.range.start_byte_offset() as u64),
+                MatchIndex::Entity(index),
+            )
+        }));
+    }
+    order.sort_by(|left, right| left.0.cmp(right.0).then(left.1.cmp(&right.1)));
+    let truncated = order.len() > limit;
+    let mut keep_files = vec![false; reply.matches.len()];
+    let mut keep_entities = vec![0; extracted.len()];
+    for (_, _, matched) in order.into_iter().take(limit) {
+        match matched {
+            MatchIndex::File(index) => keep_files[index] = true,
+            MatchIndex::Entity(index) => keep_entities[index] += 1,
+        }
+    }
+    let mut keep = keep_files.into_iter();
+    reply
+        .matches
+        .retain(|_| keep.next().expect("one flag per match"));
+    for (matched, count) in extracted.iter_mut().zip(keep_entities) {
+        matched.hits.truncate(count);
+    }
+    extracted.retain(|matched| !matched.hits.is_empty());
+    if truncated {
+        reply.coverage = LexicalCoverage::Truncated;
+        reply.diagnostics.truncated = true;
+    }
+}
+
 fn merge_extracted_items(
     result: &mut ContextResult,
     extracted_items: Vec<ContextItem>,
     extracted_truncated: bool,
-    limit: Option<usize>,
 ) {
     result.items.extend(extracted_items);
     result.items.sort_by(|left, right| {
@@ -231,12 +287,7 @@ fn merge_extracted_items(
                 .cmp(&right.range.start_byte_offset()),
         )
     });
-    let truncated = extracted_truncated
-        || result.coverage == ContextCoverage::RgTruncated
-        || limit.is_some_and(|limit| result.items.len() > limit);
-    if let Some(limit) = limit {
-        result.items.truncate(limit);
-    }
+    let truncated = extracted_truncated || result.coverage == ContextCoverage::RgTruncated;
     for (i, item) in result.items.iter_mut().enumerate() {
         item.rank = i + 1;
     }

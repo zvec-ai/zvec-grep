@@ -420,6 +420,111 @@ async fn pdf_rg_preserves_regex_case_context_limits_and_file_filters() {
 }
 
 #[tokio::test]
+async fn pdf_global_limit_counts_hits_before_entity_grouping() {
+    let dir = fixture_with_pages(&[
+        &[(1, "hit hit first\n"), (2, "hit second\n")],
+        &[(3, "hit third\n")],
+    ]);
+    let service = DirectSearchService::new();
+    for limit in 1..=4 {
+        let mut request = options(dir.path(), "hit");
+        request.limit = Some(limit);
+        let result = service.context(request).await.expect("limited search");
+        let selected = result
+            .items
+            .iter()
+            .flat_map(ContextItem::visible_content)
+            .flat_map(|(_, content)| content.lines())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            selected,
+            ["hit hit first", "hit second", "hit third"][..limit.min(3)]
+        );
+        assert_eq!(
+            result.coverage,
+            if limit < 3 {
+                ContextCoverage::RgTruncated
+            } else {
+                ContextCoverage::RgExhaustive
+            }
+        );
+        assert_eq!(result.items.len(), if limit <= 2 { 1 } else { 2 });
+        let expected_pages = if limit == 1 { vec![1] } else { vec![1, 2] };
+        assert!(
+            matches!(&result.items[0].range, ContentRange::Pdf { pages, .. } if pages == &expected_pages)
+        );
+    }
+    // Inverted matches have no highlight ranges but still consume the bound.
+    let mut request = options(dir.path(), "absent");
+    request.rg_options.invert_match = true;
+    request.limit = Some(1);
+    let result = service.context(request).await.expect("inverted limit");
+    assert_eq!(result.items.len(), 1);
+    assert_eq!(result.items[0].content, "hit hit first\n");
+    assert!(result.items[0].match_ranges.is_empty());
+    assert_eq!(result.coverage, ContextCoverage::RgTruncated);
+}
+
+#[tokio::test]
+async fn pdf_global_limit_is_shared_with_text_and_raw_fallback() {
+    let dir = fixture_with_pages(&[&[(2, "hit pdf first\nhit pdf second\n")]]);
+    fs::write(dir.path().join("a.md"), "hit markdown\n").expect("text");
+    fs::write(dir.path().join("z.pdf"), "%PDF-1.7\nhit raw\n").expect("unindexed pdf");
+    let service = DirectSearchService::new();
+    for limit in 1..=4 {
+        let mut request = options(dir.path(), "hit");
+        request.file_types.clear();
+        request.limit = Some(limit);
+        let result = service.context(request).await.expect("mixed search");
+        let selected = result
+            .items
+            .iter()
+            .flat_map(ContextItem::visible_content)
+            .flat_map(|(_, content)| content.lines())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            selected,
+            ["hit markdown", "hit pdf first", "hit pdf second", "hit raw"][..limit]
+        );
+        assert_eq!(
+            result.coverage,
+            if limit < 4 {
+                ContextCoverage::RgTruncated
+            } else {
+                ContextCoverage::RgExhaustive
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn v2_index_falls_back_to_raw_pdf_without_losing_text_matches() {
+    let dir = fixture();
+    let path = dir.path().join(".zvec-grep/manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("manifest")).expect("JSON");
+    manifest["indexVersion"] = 2.into();
+    fs::write(path, manifest.to_string()).expect("v2");
+    fs::write(dir.path().join("manual.pdf"), "%PDF-1.7\nRecovery raw\n").expect("raw pdf");
+    let mut request = options(dir.path(), "Recovery");
+    request.file_types.clear();
+    let result = DirectSearchService::new()
+        .context(request)
+        .await
+        .expect("raw fallback");
+    assert_eq!(result.items.len(), 2);
+    assert!(
+        result
+            .items
+            .iter()
+            .all(|item| matches!(item.range, ContentRange::Text { .. }))
+    );
+    let warnings = &result.diagnostics.rg.expect("diagnostics").index_warnings;
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("unsupported index version 2"));
+}
+
+#[tokio::test]
 async fn pdf_rg_without_workspace_index_searches_raw_files() {
     let dir = tempfile::tempdir().expect("workspace");
     fs::write(dir.path().join("raw.pdf"), "%PDF-1.7\nneedle").expect("fixture");

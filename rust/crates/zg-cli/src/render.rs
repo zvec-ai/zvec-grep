@@ -191,7 +191,7 @@ pub(crate) fn write_pdf_rg_preview(
     item: &ContextItem,
     color: bool,
 ) -> io::Result<()> {
-    let ContentRange::Pdf { pages, .. } = &item.range else {
+    let ContentRange::Pdf { pages, .. } = item.excerpt_range.as_ref().unwrap_or(&item.range) else {
         return Ok(());
     };
     writeln!(
@@ -285,19 +285,21 @@ pub(crate) fn write_unindexed_warning(
     writer: &mut impl Write,
     result: &ContextResult,
 ) -> io::Result<()> {
-    if let Some(rg) = &result.diagnostics.rg {
-        if !rg.unindexed_files.is_empty() {
-            writeln!(
-                writer,
-                "Warning: searching {} files as raw content because no usable extraction index is available; run `zg --index` in their workspace to search extracted text.",
-                rg.unindexed_files.len()
-            )?;
-        }
-        for warning in &rg.index_warnings {
-            writeln!(writer, "Warning: {warning}")?;
-        }
+    for warning in rg_warnings(result) {
+        writeln!(writer, "Warning: {warning}")?;
     }
     Ok(())
+}
+
+/// Search fallback diagnostics shared by terminal and MCP presentation.
+pub fn rg_warnings(result: &ContextResult) -> impl Iterator<Item = String> + '_ {
+    result.diagnostics.rg.iter().flat_map(|rg| {
+        let unavailable = (!rg.unindexed_files.is_empty()).then(|| format!(
+            "searching {} files as raw content because no usable extraction index is available; run `zg --index` in their workspace to search extracted text.",
+            rg.unindexed_files.len()
+        ));
+        unavailable.into_iter().chain(rg.index_warnings.iter().cloned())
+    })
 }
 
 /// Writes concise terminal freshness diagnostics, preserving redirected output.
@@ -679,10 +681,10 @@ Enter to confirm, and Esc to exit. Remote models require data authorization.
 CLI searches wait for the complete index, including in --mode server.
 Non-interactive searches never create an index; run zg --index first.
 Model changes require --rebuild. Failed files are recorded; successful files
-remain searchable after a rebuild. Compatible indexes reuse their stored model,
-including --rebuild without --embedding. Rebuilding an incompatible index uses
---embedding, environment, configured default, or the workspace recommendation;
-provide desired scan rules again.
+remain searchable after a rebuild. Rebuilds reuse readable stored settings,
+including v2 embedding, scan and graph configuration; explicit options override
+them. If settings cannot be read, supply them again; model selection otherwise
+uses environment, configured default, or the workspace recommendation.
 
 Environment:
   ZVEC_GREP_MODE         Default client mode: direct, server, or auto

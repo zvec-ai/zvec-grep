@@ -629,7 +629,9 @@ produce a warning and zero entities. OCR, image understanding, precise table or
 formula reconstruction, `--read`, and `--show` are outside this release.
 
 The index format is now version 3. Existing incompatible indexes require
-`zg --index --rebuild`; preserve any explicit embedding selection when rebuilding.
+`zg --index --rebuild`. Rebuilding a readable v2 index preserves its embedding,
+scan and graph settings; explicit options override saved settings. Unreadable
+settings must be supplied again.
 PDFs unchanged since indexing reuse their saved entities and provenance.
 
 ## Remote embedding authorization

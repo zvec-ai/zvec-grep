@@ -3040,6 +3040,7 @@ mod tests {
         let models = ModelRuntimeManager::new();
         let mut options = empty_index_options(directory.path());
         options.scan.globs = Some(vec!["sources/**".into()]);
+        options.graph_indexing = Some(true);
         options.embedding.as_mut().expect("local model").cache_dir =
             Some(directory.path().join("model-cache"));
         let result = service
@@ -3109,12 +3110,13 @@ mod tests {
             .index(
                 &models,
                 IndexOptions {
+                    root: options.root.clone(),
                     rebuild: true,
-                    ..options
+                    ..IndexOptions::default()
                 },
             )
             .await
-            .expect("rebuild uses explicitly supplied configuration");
+            .expect("v2 rebuild inherits saved configuration without overrides");
         let rebuilt = super::read_workspace_manifest(
             layout.storage_dir().parent().expect("source root"),
             &layout,
@@ -3124,6 +3126,7 @@ mod tests {
         assert_eq!(rebuilt.index_version(), super::CURRENT_INDEX_VERSION);
         assert_eq!(rebuilt.source_root(), manifest.source_root());
         assert_eq!(rebuilt.scan(), manifest.scan());
+        assert!(graph_indexing_enabled(&rebuilt));
         assert_eq!(
             rebuilt
                 .index()
