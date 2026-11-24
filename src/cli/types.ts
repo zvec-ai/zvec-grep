@@ -40,6 +40,8 @@ export type CliOptions = {
   color?: ColorMode;
   home?: string;
   embedding?: string;
+  /** FTS analyzer baked into a new index at creation time. */
+  ftsTokenizer?: string;
   modelCacheDir?: string;
   device?: "auto" | "cpu" | "metal" | "vulkan" | "cuda";
   apiKey?: string;

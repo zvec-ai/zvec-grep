@@ -979,3 +979,17 @@ test("timing helpers aggregate entries and concurrent work", async () => {
   );
   assert.ok(entries.some((entry) => entry.name === "parallel"));
 });
+
+test("index fts tokenizer is parsed, validated and index-only", () => {
+  const parsed = parseArgs(["--index", "--fts-tokenizer", "jieba", "."]);
+  assert.equal(parsed.options.ftsTokenizer, "jieba");
+  assert.equal(parseArgs(["--index", "."]).options.ftsTokenizer, undefined);
+  assert.throws(
+    () => parseArgs(["--index", "--fts-tokenizer", "icu", "."]),
+    /--fts-tokenizer must be one of/,
+  );
+  assert.throws(
+    () => parseArgs(["--fts-tokenizer", "jieba", "query"]),
+    /--fts-tokenizer can only be used with/,
+  );
+});

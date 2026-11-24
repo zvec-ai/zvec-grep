@@ -203,6 +203,8 @@ Embedding options:
   --model-cache <path>              Local model cache directory
   --device <device>                 auto, cpu, metal, vulkan, cuda
   --embedding-concurrency <n>       Embedding concurrency limit (index only)
+  --fts-tokenizer <name>            FTS analyzer baked into a new or rebuilt index: standard (default), jieba (CJK words), ngram, whitespace
+                                    jieba also indexes the spaces between query terms, so any two-word query then matches every document
   --allow-remote                    Allow Remote Embedding for this command only
 
 Index concurrency limits llama.cpp contexts, Transformers.js calls in flight,
