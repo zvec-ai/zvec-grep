@@ -26,7 +26,7 @@ use crate::{
         },
     },
     domain::{
-        IndexDescriptor, IndexState, Workspace, WorkspaceLayout,
+        FtsConfig, IndexDescriptor, IndexState, Workspace, WorkspaceLayout,
         model::{Device, EncryptedApiKey, ModelConfig},
     },
     models::{
@@ -116,16 +116,18 @@ impl WorkspaceIndexService {
                 .await?,
         );
         // Check the on-disk version before any recovery or storage mutation.
-        let existing = load_index_workspace(&requested_root, &layout, &options)?;
+        let manifest = inspect_workspace_manifest(&requested_root, &layout)?;
+        let new_workspace = matches!(manifest, ManifestState::Missing);
+        let existing = index_workspace_from_manifest(&requested_root, manifest, &options)?;
         let previous_fts = existing
             .as_ref()
             .and_then(|workspace| workspace.index().descriptor())
             .map(IndexDescriptor::fts);
-        let base_fts = match &previous_fts {
-            Some(config) => config.clone(),
-            None => crate::config::fts_defaults()?,
+        let fts = match &previous_fts {
+            Some(config) => options.fts.apply(config)?,
+            None if new_workspace => crate::config::fts_for_new_index(&options.fts)?,
+            None => options.fts.apply(&FtsConfig::jieba_lowercase())?,
         };
-        let fts = options.fts.apply(&base_fts)?;
         if options.rebuild || previous_fts.is_none() || !options.fts.is_empty() {
             crate::storage::validate_fts(&fts)?;
         }
@@ -575,19 +577,20 @@ pub(crate) async fn resolve_index_embedding(
 ) -> Result<crate::api::index::embedding::EmbeddingSelection, EngineError> {
     let root = resolve_directory(options.root.as_deref())?;
     let layout = WorkspaceLayout::new(root.join(".zvec-grep"))?;
-    let existing = load_index_workspace(&root, &layout, &options)?;
+    let manifest = inspect_workspace_manifest(&root, &layout)?;
+    let existing = index_workspace_from_manifest(&root, manifest, &options)?;
     options.scan.normalize_ignore_paths(&root)?;
     let scan = resolve_scan(existing.as_ref().map(Workspace::scan), &options)?;
     crate::file_selection::ScanPolicy::new(&root, &scan)?;
     embedding_policy::select(&root, &scan, existing.as_ref(), &options).await
 }
 
-fn load_index_workspace(
+fn index_workspace_from_manifest(
     root: &Path,
-    layout: &WorkspaceLayout,
+    manifest: ManifestState,
     options: &IndexOptions,
 ) -> Result<Option<Workspace>, EngineError> {
-    let existing = inspect_workspace_manifest(root, layout)?.into_workspace(options.rebuild)?;
+    let existing = manifest.into_workspace(options.rebuild)?;
     // Recheck after admission: a queued refresh must not become a first build.
     if options.require_existing_index && !existing.as_ref().is_some_and(Workspace::index_enabled) {
         return Err(missing_refresh_index(root));

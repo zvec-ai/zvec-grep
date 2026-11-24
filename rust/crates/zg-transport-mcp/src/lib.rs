@@ -976,7 +976,7 @@ pub struct IndexInput {
     /// FTS language preset from built-ins or the server user's `fts-languages.json`. Explicit FTS fields override it; changes require rebuild.
     #[schemars(length(min = 1, max = 64))]
     pub fts_lang: Option<String>,
-    /// Full-text tokenizer for this workspace. Omitted keeps saved analysis or global defaults; the built-in default is jieba. Changes require rebuild.
+    /// Full-text tokenizer for this workspace. With no FTS settings, new workspaces use standard + lowercase. Filter-only or parameter-only settings inherit jieba if no tokenizer is otherwise configured. Existing indexes keep their saved analysis or historical jieba + lowercase. Changes require rebuild.
     pub fts_tokenizer: Option<String>,
     /// Ordered native full-text filter names replacing the saved list. An empty list disables filters.
     pub fts_filters: Option<Vec<String>>,

@@ -64,7 +64,7 @@ impl<'de> Deserialize<'de> for IndexDescriptor {
             #[serde(default)]
             graph_indexing: bool,
             // Released indexes without analysis metadata use the historical defaults.
-            #[serde(default)]
+            #[serde(default = "FtsConfig::jieba_lowercase")]
             fts: FtsConfig,
         }
 
@@ -366,7 +366,7 @@ mod tests {
         encoded.as_object_mut().expect("object").remove("fts");
         let legacy: IndexDescriptor =
             serde_json::from_value(encoded.clone()).expect("legacy descriptor");
-        assert_eq!(legacy.fts(), FtsConfig::default());
+        assert_eq!(legacy.fts(), FtsConfig::jieba_lowercase());
         encoded["fts"] = serde_json::json!({
             "tokenizer": "standard", "filters": ["lowercase", "stemmer"],
             "extraParams": {"stemmer_lang": "russian"}

@@ -34,16 +34,30 @@ pub(crate) fn read() -> Result<Value, EngineError> {
 /// # Errors
 /// Returns configuration I/O or validation errors.
 pub fn fts_defaults() -> Result<FtsConfig, EngineError> {
-    fts_from_config(&read()?)
+    fts_for_new_index(&FtsConfigUpdate::default())
 }
 
-fn fts_from_config(config: &Value) -> Result<FtsConfig, EngineError> {
-    let Some(value) = config.get("defaults").and_then(|value| value.get("fts")) else {
+pub(crate) fn fts_for_new_index(options: &FtsConfigUpdate) -> Result<FtsConfig, EngineError> {
+    if let Some(global) = configured_fts(read()?.pointer("/defaults/fts"))? {
+        return options.apply(&global);
+    }
+    if options.is_empty() {
         return Ok(FtsConfig::default());
+    }
+    // Partial FTS options keep their historical base when no tokenizer was selected.
+    options.apply(&FtsConfig::jieba_lowercase())
+}
+
+fn configured_fts(value: Option<&Value>) -> Result<Option<FtsConfig>, EngineError> {
+    let Some(value) = value else {
+        return Ok(None);
     };
     let update: FtsConfigUpdate = serde_json::from_value(value.clone())
         .map_err(|error| EngineError::invalid_argument(format!("invalid defaults.fts: {error}")))?;
-    update.apply(&FtsConfig::default())
+    if update.is_empty() {
+        return Ok(None);
+    }
+    update.apply(&FtsConfig::jieba_lowercase()).map(Some)
 }
 
 /// Updates defaults for new indexes, retaining fields omitted by the caller.
@@ -182,8 +196,7 @@ fn parse_defaults(fields: &Map<String, Value>) -> Result<Option<Value>, EngineEr
             parsed.insert(name.to_owned(), json!(value));
         }
     }
-    if let Some(value) = fields.get("fts") {
-        let config = fts_from_config(&json!({"defaults": {"fts": value}}))?;
+    if let Some(config) = configured_fts(fields.get("fts"))? {
         parsed.insert(
             "fts".to_owned(),
             serde_json::to_value(config)
@@ -559,8 +572,8 @@ fn update_at(path: &Path, changes: Value) -> Result<(), EngineError> {
     let sets_fts = changes.pointer("/defaults/fts").is_some();
     merge(&mut value, changes);
     let value = parse_global_config(&value)?;
-    if sets_fts {
-        crate::storage::validate_fts(&fts_from_config(&value)?)?;
+    if sets_fts && let Some(config) = configured_fts(value.pointer("/defaults/fts"))? {
+        crate::storage::validate_fts(&config)?;
     }
     let bytes = serde_json::to_vec_pretty(&value)
         .map_err(|error| EngineError::internal(error.to_string()))?;
@@ -588,6 +601,23 @@ fn merge(target: &mut Value, patch: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fts_global_settings_distinguish_omitted_and_explicit_empty_fields() {
+        let parse = |fts| {
+            parse_global_config(&json!({"version": 1, "defaults": {"fts": fts}}))
+                .expect("valid config")
+        };
+        assert!(parse(json!({})).pointer("/defaults/fts").is_none());
+        assert_eq!(
+            parse(json!({"filters": []}))["defaults"]["fts"],
+            json!({"tokenizer": "jieba", "filters": [], "extraParams": {}})
+        );
+        assert_eq!(
+            parse(json!({"extraParams": {}}))["defaults"]["fts"],
+            json!({"tokenizer": "jieba", "filters": ["lowercase"], "extraParams": {}})
+        );
+    }
 
     #[test]
     fn model_cache_skips_unusable_workspace_preferences() {

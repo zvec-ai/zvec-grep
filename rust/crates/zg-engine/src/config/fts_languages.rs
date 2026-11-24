@@ -132,7 +132,7 @@ pub(crate) fn builtins() -> BTreeMap<String, LanguagePreset> {
         "zh".into(),
         LanguagePreset {
             name: "zh".into(),
-            config: FtsConfig::default(),
+            config: FtsConfig::jieba_lowercase(),
             source: None,
         },
     );

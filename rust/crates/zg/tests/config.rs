@@ -187,7 +187,7 @@ fn fts_language_snapshots_are_stable_across_mapping_edits_in_both_modes() {
         };
         assert_eq!(
             analysis(),
-            json!({"tokenizer":"jieba","filters":["lowercase"],"extraParams":{}}),
+            json!({"tokenizer":"standard","filters":["lowercase"],"extraParams":{}}),
             "omission must not select the overridden zh preset"
         );
         let before = fs::read(&path).expect("manifest bytes");
@@ -261,6 +261,64 @@ fn fts_language_snapshots_are_stable_across_mapping_edits_in_both_modes() {
         assert!(!invalid.status.success());
         assert!(String::from_utf8_lossy(&invalid.stderr).contains("fts-languages.json"));
         assert_eq!(fs::read(&path).expect("unchanged manifest"), before);
+    }
+}
+
+#[test]
+fn fts_upgrade_preserves_historical_analysis_on_refresh_and_rebuild() {
+    for mode in ["direct", "server"] {
+        let fixture = Fixture::new();
+        let _cleanup = ServerCleanup(&fixture);
+        if mode == "server" {
+            fixture.success(&[
+                "--server",
+                "on",
+                "--listen",
+                &format!("127.0.0.1:{}", available_port()),
+            ]);
+        }
+        // A filter-only request still creates the same native Jieba index as older binaries.
+        fixture.success(&[
+            "--index",
+            "--mode",
+            mode,
+            "--embedding",
+            "local/potion-code-16m-v2",
+            "--fts-filter",
+            "lowercase",
+        ]);
+        let home = fixture.root.path().join(".zvec-grep");
+        let historical = json!({"tokenizer":"jieba","filters":["lowercase"],"extraParams":{}});
+        for (file, pointer) in [
+            ("manifest.json", "/index/descriptor"),
+            ("index/schema.json", ""),
+        ] {
+            let path = home.join(file);
+            let mut record: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).expect("metadata")).expect("JSON");
+            assert_eq!(
+                record
+                    .pointer_mut(pointer)
+                    .expect("descriptor")
+                    .as_object_mut()
+                    .expect("fields")
+                    .remove("fts"),
+                Some(historical.clone())
+            );
+            fs::write(path, record.to_string()).expect("pre-FTS metadata");
+        }
+        fixture.success(&["--config", "fts", "set", "--fts-lang", "en"]);
+        fs::write(fixture.root.path().join("note.md"), "").expect("empty source");
+        fixture.success(&["--index", "--mode", mode]);
+        let status = fixture.success(&["--status", "--mode", mode]);
+        assert!(
+            String::from_utf8_lossy(&status.stdout).contains("tokenizer=jieba filters=lowercase")
+        );
+        fixture.success(&["--index", "--rebuild", "--mode", mode]);
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(home.join("manifest.json")).expect("manifest"))
+                .expect("JSON");
+        assert_eq!(manifest["index"]["descriptor"]["fts"], historical);
     }
 }
 
@@ -774,7 +832,7 @@ fn config_merges_settings_and_index_consumes_model_defaults() {
     let status = fixture.success(&["--status", "--mode", "direct"]);
     assert!(
         String::from_utf8_lossy(&status.stdout)
-            .contains("  FTS         tokenizer=jieba filters=lowercase")
+            .contains("  FTS         tokenizer=standard filters=lowercase")
     );
 }
 

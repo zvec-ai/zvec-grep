@@ -45,12 +45,13 @@ in-process; its v2 request shape is unchanged.
 Compatible existing indexes retain their stored model, including during
 `--rebuild` without `--embedding`; supply a model explicitly to switch it.
 
-Full-text analysis is configurable per workspace. The built-in defaults remain
-`jieba`, filters `["lowercase"]`, and an empty extra-parameter object. Configure
-defaults for new indexes, or override individual fields for one workspace:
+Full-text analysis is configurable per workspace. A new workspace with no FTS
+options or global FTS defaults uses `standard`, filters `["lowercase"]`, and
+an empty extra-parameter object. Use `--fts-lang zh` for Chinese word segmentation.
+Configure defaults for new indexes, or override individual fields for one workspace:
 
 ```sh
-zg --config fts set --fts-tokenizer standard --fts-filter lowercase
+zg --config fts set --fts-lang zh
 zg --index /path/to/russian-docs --fts-tokenizer standard \
   --fts-filter lowercase,stemmer --fts-extra-params '{"stemmer_lang":"russian"}'
 ```
@@ -70,8 +71,10 @@ Global defaults are stored under `defaults.fts` in `~/.zvec-grep/config.json`:
 }
 ```
 
-For a new index, explicit fields override global defaults and then built-in
-defaults. Existing indexes retain their saved analysis for queries, automatic
+For a new index, explicit fields override the selected preset and global defaults.
+For compatibility, setting only filters or extra parameters (globally or per
+workspace) uses `jieba` when no preset or tokenizer supplies a tokenizer.
+Existing indexes retain their saved analysis for queries, automatic
 refreshes, incremental updates, and ordinary `--rebuild`. Changing a saved setting
 requires both the explicit FTS option and `--rebuild`. Updating global defaults
 does not change existing indexes. `zg --status` reports the saved analysis.

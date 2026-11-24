@@ -1080,7 +1080,7 @@ async fn public_engine_persists_searches_updates_and_drops_real_storage() -> Tes
         .fts
         .as_ref()
         .expect("FTS info");
-    assert_eq!(fts.tokenizer, "jieba");
+    assert_eq!(fts.tokenizer, "jieba", "the fixture has a pre-FTS manifest");
     assert_eq!(fts.filters, ["lowercase"]);
     assert_eq!(info.status.as_ref().expect("status").files_indexed, 3);
     assert_eq!(

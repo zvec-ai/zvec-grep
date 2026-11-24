@@ -537,7 +537,7 @@ Index options:
   --rebuild                         Rebuild the existing index
   --graph[=true|false]               Enable or disable graph indexing; omitted keeps saved setting
   --fts-lang <name>                  Expand an FTS language preset; explicit FTS fields override it
-  --fts-tokenizer <name>             Native tokenizer name (default: jieba)
+  --fts-tokenizer <name>             Native tokenizer name for this workspace
   --fts-filter <filters>             Ordered comma-separated native filter names; empty clears
   --fts-extra-params <json>           JSON object of analysis parameters; {} clears
   --drop                            Permanently remove the workspace index
@@ -550,10 +550,13 @@ index requires --rebuild, for example: zg --index --rebuild --graph.
 
 Dropping an index runs immediately without a confirmation prompt.
 
-FTS settings apply to the whole workspace index. New indexes use explicit options,
-then global FTS defaults, then jieba + lowercase with no extra parameters.
+FTS settings apply to the whole workspace index. Without FTS options or global
+FTS defaults, a new workspace uses standard + lowercase with no extra parameters.
+Explicit fields override the selected preset and global defaults. Setting only
+filters or extra parameters uses jieba if no tokenizer is otherwise configured.
 Existing indexes retain their saved analysis, including during --rebuild without
-FTS options. Changing any saved setting requires --rebuild. Supplied filters and
+FTS options. Historical indexes without FTS metadata use jieba + lowercase.
+Changing any saved setting requires --rebuild. Supplied filters and
 extra parameters replace the complete list/object. Indexing and querying use the
 same saved analysis; zg --status reports the effective configuration.
 
@@ -694,7 +697,7 @@ use their stored model.
 
 FTS options:
   --fts-lang <name>                  Built-in language or user-defined preset; list with fts langs
-  --fts-tokenizer <name>             Native tokenizer name (default: jieba)
+  --fts-tokenizer <name>             Native tokenizer name for new workspaces
   --fts-filter <filters>             Ordered comma-separated native filter names; empty clears
   --fts-extra-params <json>           Parameter object, e.g. stemmer_lang or cut_mode; {} clears
 
@@ -703,6 +706,8 @@ the previous value; omitted fields are preserved. FTS defaults apply only to new
 workspace indexes. Existing indexes retain their analysis, including during an
 ordinary rebuild. Use zg --index --rebuild with FTS options to change it.
 These defaults are saved under defaults.fts (tokenizer, filters, extraParams).
+With no FTS settings, new workspaces use standard + lowercase. Setting only
+filters or extra parameters uses jieba if no tokenizer is otherwise configured.
 
 Language presets are expanded before explicit FTS fields are applied. zh uses
 jieba + lowercase; other built-in languages, including en/de/fr/es/pt/ru, use

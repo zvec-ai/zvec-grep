@@ -18,7 +18,7 @@ pub struct FtsConfig {
 impl Default for FtsConfig {
     fn default() -> Self {
         Self {
-            tokenizer: "jieba".into(),
+            tokenizer: "standard".into(),
             filters: vec!["lowercase".into()],
             extra_params: Map::new(),
         }
@@ -64,6 +64,15 @@ impl FtsConfigUpdate {
 }
 
 impl FtsConfig {
+    /// Historical analysis for indexes created before FTS settings were persisted.
+    pub(crate) fn jieba_lowercase() -> Self {
+        Self {
+            tokenizer: "jieba".into(),
+            filters: vec!["lowercase".into()],
+            extra_params: Map::new(),
+        }
+    }
+
     /// Checks that analyzer names can be passed to the native string API.
     /// # Errors
     /// Returns an error for blank names or embedded null bytes.

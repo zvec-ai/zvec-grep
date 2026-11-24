@@ -81,7 +81,7 @@ pub(crate) struct IndexedSourceFile {
 struct SchemaRecord {
     path_encoding: PathEncoding,
     embeddings: Vec<EmbeddingModelInfo>,
-    #[serde(default)]
+    #[serde(default = "crate::domain::FtsConfig::jieba_lowercase")]
     fts: crate::domain::FtsConfig,
 }
 

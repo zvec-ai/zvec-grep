@@ -643,25 +643,32 @@ fn open(path: &Path, read_only: bool) -> IndexStore {
 #[test]
 fn legacy_storage_uses_historical_fts_and_rejects_analyzer_changes() {
     let root = tempfile::tempdir().expect("storage");
-    open(root.path(), false).close().expect("close");
+    let open_writer = |fts| {
+        IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
+            storage_path: root.path().to_owned(),
+            graph_enabled: false,
+            embeddings: vec![schema()],
+            fts,
+        })
+    };
+    let historical = crate::domain::FtsConfig::jieba_lowercase();
+    open_writer(historical.clone())
+        .expect("create Jieba index")
+        .close()
+        .expect("close");
     let path = root.path().join("schema.json");
     let mut record: serde_json::Value = read_json(&path).expect("schema");
     record.as_object_mut().expect("object").remove("fts");
     let legacy = serde_json::to_vec(&record).expect("legacy schema");
     fs::write(&path, &legacy).expect("historical metadata");
     open(root.path(), true).close().expect("legacy reader");
-    open(root.path(), false).close().expect("legacy writer");
-    let error = IndexStore::open(WorkspaceIndexStorageOptions::ReadWrite {
-        storage_path: root.path().to_owned(),
-        graph_enabled: false,
-        embeddings: vec![schema()],
-        fts: crate::domain::FtsConfig {
-            tokenizer: "standard".into(),
-            ..Default::default()
-        },
-    })
-    .err()
-    .expect("incompatible writer");
+    open_writer(historical)
+        .expect("legacy writer")
+        .close()
+        .expect("close");
+    let error = open_writer(crate::domain::FtsConfig::default())
+        .err()
+        .expect("incompatible writer");
     assert!(error.message().contains("FTS configuration changed"));
     assert_eq!(fs::read(path).expect("unchanged schema"), legacy);
 }

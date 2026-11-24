@@ -27,7 +27,9 @@ fn fts_languages_builtin_presets_expand_without_creating_a_file() {
             assert!(preset.config.extra_params["stemmer_lang"].is_string());
         }
     }
-    assert_eq!(presets["zh"].config, FtsConfig::default());
+    assert_eq!(presets["zh"].config.tokenizer, "jieba");
+    assert_eq!(presets["zh"].config.filters, ["lowercase"]);
+    assert!(presets["zh"].config.extra_params.is_empty());
     for (name, language) in [("en", "english"), ("nl", "dutch"), ("ru", "russian")] {
         let config = &presets[name].config;
         config.validate().expect("valid preset");
@@ -41,7 +43,7 @@ fn fts_languages_builtin_presets_expand_without_creating_a_file() {
         update
             .apply(&presets["ru"].config)
             .expect("replace Russian analysis"),
-        FtsConfig::default()
+        presets["zh"].config
     );
     assert!(!path.exists());
 }
