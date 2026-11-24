@@ -92,13 +92,17 @@ materialized corpus files are run-local inputs; only hashes and selected
 original query/qrel records are checked in.
 
 To compare Blink Multilingual and Bekko on CPU, build one local Rust package
-and run the following from the repository root. Use a fresh output path for
-each run and install the selected suite's pinned PyArrow requirement first.
+and run the following from the repository root. Both suites verify the downloaded
+files against their source locks before materializing a fresh corpus.
 
 ```sh
+retrieval_work="$(mktemp -d)"
 for suite in beir duretrieval; do
+  venv="$retrieval_work/$suite-venv"
+  python3 -m venv "$venv"
+  "$venv/bin/python" -m pip install -r "benchmarks/zg-retrieval/expansion/requirements-$suite.txt"
   for model in blink-multilingual-64m bekko-256-int8; do
-    RETRIEVAL_EMBEDDING="local/$model" node benchmarks/zg-retrieval/expansion/run.mjs \
+    PATH="$venv/bin:$PATH" RETRIEVAL_EMBEDDING="local/$model" node benchmarks/zg-retrieval/expansion/run.mjs \
       --suite "$suite" --package rust/dist/npm --output "$retrieval_work/$suite-$model" \
       --model-cache "$retrieval_work/model-cache" --candidate-commit "$(git rev-parse HEAD)"
   done
@@ -108,6 +112,9 @@ done
 Compare the `vector` row in each `report.json` for File/Entity Recall@1/5/10
 and MCP mean/median latency. Sum `index_seconds` for full index wall time.
 Precache both models when comparing indexing performance.
+
+The [November 2026 Blink and Bekko comparison](blink-multilingual-bekko.md)
+records paired vector recall, query latency and full indexing time for these pilots.
 
 ## Gold and scoring
 
