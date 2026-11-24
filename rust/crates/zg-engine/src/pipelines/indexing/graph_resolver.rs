@@ -315,6 +315,33 @@ impl ResolutionSweep {
     }
 }
 
+/// Whether the body owning the reference binds `name` itself at that
+/// position: a parameter or a local the body declares before the call owns
+/// the spelling there, so a bare call reads that binding rather than the
+/// member or function the name also spells elsewhere.
+///
+/// The binding's scope end keeps the evidence local: a name declared in a
+/// sibling block that has already closed is not in scope at the call site.
+fn local_binding_shadows(
+    store: &IndexStore,
+    stored: &StoredPendingRef,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<bool> {
+    let reference = &stored.reference;
+    let bindings = match caches.declared_bindings.entry(reference.owner_id.clone()) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => entry.insert(store.declared_bindings(&reference.owner_id)?),
+    };
+    Ok(bindings.iter().any(|binding| {
+        binding.name == stored.name_tail
+            && (binding.line as usize, binding.column as usize)
+                <= (reference.line, reference.column)
+            && binding
+                .scope_end
+                .is_none_or(|end| (reference.line, reference.column) < end)
+    }))
+}
+
 /// Runs the path and binding rules in precedence order, then hands the
 /// reference to the name rules.
 ///
@@ -361,26 +388,9 @@ fn classify(
     if stored.language == "go"
         && stored.reference.ref_kind == GraphEdgeKind::Calls
         && stored.reference.receiver_name.is_none()
+        && local_binding_shadows(store, stored, caches)?
     {
-        let bindings = match caches
-            .declared_bindings
-            .entry(stored.reference.owner_id.clone())
-        {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => {
-                entry.insert(store.declared_bindings(&stored.reference.owner_id)?)
-            }
-        };
-        if bindings.iter().any(|binding| {
-            binding.name == stored.name_tail
-                && (binding.line as usize, binding.column as usize)
-                    <= (stored.reference.line, stored.reference.column)
-                && binding
-                    .scope_end
-                    .is_none_or(|end| (stored.reference.line, stored.reference.column) < end)
-        }) {
-            return Ok(Outcome::Deferred);
-        }
+        return Ok(Outcome::Deferred);
     }
     if is_unresolvable_import(snapshot, stored, &mut caches.module_paths) {
         return Ok(Outcome::Failed);
@@ -487,7 +497,7 @@ fn name_hits<'s>(
     // A name a nearer scope also declares binds to that declaration: the
     // enclosing namespace is searched before the workspace.
     let visible = enclosing_scope_hits(snapshot, stored, callable);
-    Ok(Some(prefer_definitions(visible)))
+    Ok(Some(prefer_definitions(snapshot, visible)))
 }
 
 /// Runs the name-index rules: receivers, qualified names, uniqueness, and the
@@ -547,13 +557,11 @@ fn classify_names(
             rule: Rule::Receiver,
         });
     }
-    if let Some(resolution) = resolve_implicit_this_member(store, snapshot, stored, caches)? {
+    if let Some(outcome) = resolve_implicit_this_member(store, snapshot, stored, caches)? {
         // A bare call written in a class body reads the class's own members
-        // through the implicit `this` before the namespaces around it.
-        return Ok(Outcome::Resolved {
-            resolution,
-            rule: Rule::Receiver,
-        });
+        // through the implicit `this` before the namespaces around it — unless
+        // the body binds that name itself, which leaves the call unresolved.
+        return Ok(outcome);
     }
     if let Some(resolution) = resolve_object_member(store, snapshot, stored, caches)? {
         // The receiver is an object literal whose own property table says
@@ -1143,13 +1151,20 @@ fn language_compatible_formats(
 /// The pair therefore also needs agreement on the parameters themselves, and
 /// when that evidence is missing both candidates stay, leaving the reference
 /// ambiguous instead of pointing at the wrong implementation.
+/// Two files may also declare one class name, and their members are different
+/// members: a body in the namesake class supersedes nothing in the class the
+/// reference names, so the pair needs the same declaring class as well.
 /// Call this after the language gate, never on the whole name index: shrinking
 /// the shared set would let an unrelated language's definition erase the only
 /// candidate a reference can bind.
-fn prefer_definitions<T: Borrow<NameIndexEntry>>(hits: Vec<T>) -> Vec<T> {
-    /// One definition's evidence: its counted parameters and the normalized
-    /// parameter list that tells its overload apart.
-    type Evidence = (Option<u32>, Option<String>);
+fn prefer_definitions<T: Borrow<NameIndexEntry>>(
+    snapshot: &ResolutionSnapshot,
+    hits: Vec<T>,
+) -> Vec<T> {
+    /// One definition's evidence: its counted parameters, the normalized
+    /// parameter list that tells its overload apart and the file declaring the
+    /// class it belongs to.
+    type Evidence = (Option<u32>, Option<String>, Option<u32>);
     // Without a bodyless declaration there is nothing to supersede. Most
     // names only have definitions; avoid rebuilding their parameter map for
     // every reference to the same name.
@@ -1163,7 +1178,11 @@ fn prefer_definitions<T: Borrow<NameIndexEntry>>(hits: Vec<T>) -> Vec<T> {
             defined
                 .entry(hit.qualified_name.clone())
                 .or_default()
-                .push((hit.arity, hit.parameters.clone()));
+                .push((
+                    hit.arity,
+                    hit.parameters.clone(),
+                    member_class_file(snapshot, hit),
+                ));
         }
     }
     if defined.is_empty() {
@@ -1172,19 +1191,35 @@ fn prefer_definitions<T: Borrow<NameIndexEntry>>(hits: Vec<T>) -> Vec<T> {
     hits.into_iter()
         .filter(|hit| {
             let hit: &NameIndexEntry = hit.borrow();
-            !hit.is_declaration
-                || !defined.get(&hit.qualified_name).is_some_and(|definitions| {
-                    definitions.iter().any(|(arity, parameters)| {
-                        same_symbol(
-                            hit.arity,
-                            hit.parameters.as_deref(),
-                            *arity,
-                            parameters.as_deref(),
-                        )
-                    })
-                })
+            if !hit.is_declaration {
+                return true;
+            }
+            let Some(definitions) = defined.get(&hit.qualified_name) else {
+                return true;
+            };
+            let declaring = member_class_file(snapshot, hit);
+            !definitions.iter().any(|(arity, parameters, defined_in)| {
+                same_symbol(
+                    hit.arity,
+                    hit.parameters.as_deref(),
+                    *arity,
+                    parameters.as_deref(),
+                ) && !matches!(
+                    (declaring, *defined_in),
+                    (Some(declared), Some(defined)) if declared != defined
+                )
+            })
         })
         .collect()
+}
+
+/// The file declaring the class a member's qualified name spells, when the
+/// workspace places one there. Two classes may share a qualified name, and the
+/// members of one are not the members of the other; a spelling with no class
+/// in it (`foo`, `ns::foo`) leaves the identity to the qualified name alone.
+fn member_class_file(snapshot: &ResolutionSnapshot, hit: &NameIndexEntry) -> Option<u32> {
+    let (scope, _) = hit.qualified_name.rsplit_once("::")?;
+    class_declaration_file(snapshot, scope, Some(hit.file_id))
 }
 
 /// Whether one qualified name's declaration and definition describe the same
@@ -1686,7 +1721,7 @@ fn bind_in_module(
     // A module may hold a prototype and the definition of one symbol; the
     // definition stands for both, so the uniqueness check below must not see
     // two candidates for it.
-    let scoped = prefer_definitions(scoped);
+    let scoped = prefer_definitions(snapshot, scoped);
     if let [hit] = scoped.as_slice() {
         return Some(Resolution {
             ref_id: stored.id,
@@ -1744,7 +1779,7 @@ fn follow_overwrite<'a>(
         .iter()
         .filter(|candidate| candidate.file_id == hit.file_id)
         .collect();
-    match prefer_definitions(scoped).as_slice() {
+    match prefer_definitions(snapshot, scoped).as_slice() {
         [target] => Some(*target),
         _ => None,
     }
@@ -1767,7 +1802,7 @@ fn follow_alias<'a>(
         .iter()
         .filter(|candidate| candidate.file_id == hit.file_id)
         .collect();
-    match prefer_definitions(scoped).as_slice() {
+    match prefer_definitions(snapshot, scoped).as_slice() {
         [target] => Some(*target),
         _ => None,
     }
@@ -2467,9 +2502,14 @@ fn member_resolution(stored: &StoredPendingRef, hit: &NameIndexEntry) -> Resolut
 /// caller orders by precedence: the receiver's own class first, then its
 /// bases by distance. The closest scope declaring the member decides, since
 /// an override hides the declaration its base would contribute — the one
-/// declaration there binds, while several (overloads this rule cannot
-/// separate) leave the call to the rules below rather than binding an
-/// ancestor the override replaced.
+/// member there binds, while several (overloads this rule cannot separate)
+/// leave the call to the rules below rather than binding an ancestor the
+/// override replaced.
+///
+/// A class read through a header and an implementation file offers both
+/// spellings of one member, and the pair is one symbol: it is settled before
+/// the overload count, which would otherwise see two members accepting the
+/// same call and decline.
 fn bind_nearest_member(
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
@@ -2478,10 +2518,10 @@ fn bind_nearest_member(
 ) -> Option<Resolution> {
     for scope in scopes {
         let found = declarations_in(snapshot, hits, scope);
-        match found.as_slice() {
-            [] => {}
-            [hit] => return Some(member_resolution(stored, hit)),
-            _ => return choose_overload(stored, &found),
+        match found.len() {
+            0 => {}
+            1 => return Some(member_resolution(stored, found[0])),
+            _ => return choose_overload(stored, &prefer_definitions(snapshot, found)),
         }
     }
     None
@@ -2761,20 +2801,28 @@ fn resolve_receiver_typed(
 /// brings in is a member of the class itself, which outranks anything the
 /// hierarchy walk would find under the same spelling.
 ///
+/// A binding the body declares at the call site outranks the member, though:
+/// `S::run(std::function<void()> cb)` calling `cb()` calls the parameter, not
+/// `S::cb`. What such a binding holds is not in the graph, so the call stays
+/// unresolved instead of naming the member the spelling coincides with.
+///
 /// # Errors
 /// Propagates graph storage failures of the inheritance walk.
 fn resolve_implicit_this_member(
     store: &IndexStore,
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
-    _caches: &mut RuleCaches,
-) -> crate::EngineResult<Option<Resolution>> {
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<Option<Outcome>> {
     let reference = &stored.reference;
     if reference.ref_kind != GraphEdgeKind::Calls
         || reference.receiver_name.is_some()
         || !matches!(stored.language.as_str(), "c" | "cpp")
     {
         return Ok(None);
+    }
+    if local_binding_shadows(store, stored, caches)? {
+        return Ok(Some(Outcome::Deferred));
     }
     // A call site outside any class scope has no implicit `this`; one owned by
     // a namespace function (`ns::helper`) has no class to read first either,
@@ -2795,12 +2843,16 @@ fn resolve_implicit_this_member(
     if callable.is_empty() {
         return Ok(None);
     }
-    Ok(bind_nearest_member(
+    let resolution = bind_nearest_member(
         snapshot,
         stored,
         &callable,
         &owner_class_scopes(store, snapshot, stored)?,
-    ))
+    );
+    Ok(resolution.map(|resolution| Outcome::Resolved {
+        resolution,
+        rule: Rule::Receiver,
+    }))
 }
 
 /// A bare call a using-declaration of the owner's class brings into scope.
@@ -3730,8 +3782,19 @@ fn type_root_scope_in(
         .lookup_candidates(tail)
         .map(|hits| hits.iter().collect::<Vec<&NameIndexEntry>>())
     {
-        Some(hits) if global => Some(global_spelled_under(&hits, &head)),
-        Some(hits) if head.contains("::") => Some(spelled_under(&hits, &head)),
+        Some(hits) if global => {
+            // The spelling states the name exactly, but it still states no
+            // file: two classes may spell one qualified name, and only the one
+            // the unit's includes reach answers its calls.
+            let hits = global_spelled_under(&hits, &head);
+            Some(unit_visible_hits(store, snapshot, stored, hits, caches)?)
+        }
+        Some(hits) if head.contains("::") => {
+            // A qualified spelling names one class by scope alone, so the same
+            // visibility the bare name reads decides between namesakes.
+            let hits = spelled_under(&hits, &head);
+            Some(unit_visible_hits(store, snapshot, stored, hits, caches)?)
+        }
         Some(hits) => {
             // A class the call is written in answers the name before the
             // namespaces around it do; the enclosing-scope reading applies
@@ -4208,7 +4271,7 @@ fn resolve_object_member(
         .iter()
         .filter(|candidate| candidate.file_id == holder.file_id)
         .collect();
-    Ok(match prefer_definitions(scoped).as_slice() {
+    Ok(match prefer_definitions(snapshot, scoped).as_slice() {
         [target] => Some(Resolution {
             ref_id: stored.id,
             target_id: target.entity_id.clone(),
@@ -4248,7 +4311,7 @@ fn unique_receiver<'a>(
     receiver: &str,
 ) -> Option<&'a NameIndexEntry> {
     let receivers = snapshot.lookup_candidates(receiver)?;
-    let preferred = prefer_definitions(receivers.iter().collect());
+    let preferred = prefer_definitions(snapshot, receivers.iter().collect());
     match preferred.as_slice() {
         [holder] => Some(*holder),
         _ => None,
@@ -4305,7 +4368,7 @@ fn imported_binding_target<'a>(
         .iter()
         .filter(|hit| hit.file_id == target_file)
         .collect();
-    Ok(match prefer_definitions(scoped).as_slice() {
+    Ok(match prefer_definitions(snapshot, scoped).as_slice() {
         [hit] => Some(*hit),
         _ => None,
     })
@@ -4384,6 +4447,7 @@ fn collect_base_scopes(
                 // Hidden candidates must not turn an ambiguous base name into
                 // a seemingly unique ancestor.
                 let candidates = prefer_definitions(
+                    snapshot,
                     snapshot
                         .lookup_candidates(&lookup)
                         .unwrap_or_default()
@@ -4466,7 +4530,7 @@ fn class_entity_in(
         .filter(|hit| file_hint == Some(hit.file_id))
         .collect();
     let matched = if in_file.is_empty() { matched } else { in_file };
-    let matched = prefer_definitions(matched);
+    let matched = prefer_definitions(snapshot, matched);
     if let [hit] = matched.as_slice() {
         return Some(hit.entity_id.clone());
     }
