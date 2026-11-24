@@ -68,7 +68,15 @@ impl Fixture {
     }
 
     fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_zg"));
+        self.command_with_executable(env!("CARGO_BIN_EXE_zg"), args)
+    }
+
+    fn command_with_executable(
+        &self,
+        executable: impl AsRef<std::ffi::OsStr>,
+        args: &[&str],
+    ) -> Command {
+        let mut command = Command::new(executable);
         for (key, _) in std::env::vars_os() {
             if key.to_string_lossy().starts_with("ZVEC_GREP_") {
                 command.env_remove(key);
@@ -706,14 +714,10 @@ fn metal_startup_reexec_depends_on_the_query_and_environment() {
     // The separate executable-path pinning step can re-exec a symlinked Cargo target.
     let executable = fs::canonicalize(env!("CARGO_BIN_EXE_zg")).expect("physical executable");
     let command = |args: &[&str]| {
-        let mut command = Command::new(&executable);
+        let mut command = fixture.command_with_executable(&executable, args);
         command
             .args(["--mode", "direct"])
-            .args(args)
-            .current_dir(fixture.root.path())
-            .env("ZVEC_GREP_HOME", fixture.user.path())
             .env_remove("GGML_METAL_NO_RESIDENCY")
-            .env_remove("ZVEC_GREP_METAL_KEEP_RESIDENCY")
             .env("DYLD_PRINT_LIBRARIES", "1");
         command
     };
