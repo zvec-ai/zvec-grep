@@ -72,8 +72,8 @@ Global defaults are stored under `defaults.fts` in `~/.zvec-grep/config.json`:
 ```
 
 For a new index, explicit fields override the selected preset and global defaults.
-For compatibility, setting only filters or extra parameters (globally or per
-workspace) uses `jieba` when no preset or tokenizer supplies a tokenizer.
+Setting only filters or extra parameters inherits the global tokenizer, or
+uses `standard` if the global configuration also omits the tokenizer.
 Existing indexes retain their saved analysis for queries, automatic
 refreshes, incremental updates, and ordinary `--rebuild`. Changing a saved setting
 requires both the explicit FTS option and `--rebuild`. Updating global defaults

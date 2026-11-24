@@ -125,7 +125,7 @@ impl WorkspaceIndexService {
             .map(IndexDescriptor::fts);
         let fts = match &previous_fts {
             Some(config) => options.fts.apply(config)?,
-            None if new_workspace => crate::config::fts_for_new_index(&options.fts)?,
+            None if new_workspace => options.fts.apply(&crate::config::fts_defaults()?)?,
             None => options.fts.apply(&FtsConfig::jieba_lowercase())?,
         };
         if options.rebuild || previous_fts.is_none() || !options.fts.is_empty() {

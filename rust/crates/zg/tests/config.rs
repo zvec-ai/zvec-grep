@@ -265,6 +265,52 @@ fn fts_language_snapshots_are_stable_across_mapping_edits_in_both_modes() {
 }
 
 #[test]
+fn fts_partial_options_inherit_the_tokenizer_in_new_workspaces() {
+    for mode in ["direct", "server"] {
+        let fixture = Fixture::new();
+        let _cleanup = ServerCleanup(&fixture);
+        if mode == "server" {
+            fixture.success(&[
+                "--server",
+                "on",
+                "--listen",
+                &format!("127.0.0.1:{}", available_port()),
+            ]);
+        }
+        for global in [None, Some("whitespace")] {
+            if let Some(tokenizer) = global {
+                fixture.success(&["--config", "fts", "set", "--fts-tokenizer", tokenizer]);
+            }
+            for (option, value, filters) in [
+                ("--fts-filter", "", json!([])),
+                ("--fts-extra-params", "{}", json!(["lowercase"])),
+            ] {
+                let workspace = TempDir::new().expect("new workspace");
+                fixture.success(&[
+                    "--index",
+                    workspace.path().to_str().expect("workspace path"),
+                    "--mode",
+                    mode,
+                    "--embedding",
+                    "local/potion-code-16m-v2",
+                    option,
+                    value,
+                ]);
+                let manifest: serde_json::Value = serde_json::from_slice(
+                    &fs::read(workspace.path().join(".zvec-grep/manifest.json")).expect("manifest"),
+                )
+                .expect("JSON");
+                assert_eq!(
+                    manifest["index"]["descriptor"]["fts"],
+                    json!({"tokenizer": global.unwrap_or("standard"), "filters": filters, "extraParams": {}}),
+                    "{mode} {option} with global tokenizer {global:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn fts_upgrade_preserves_historical_analysis_on_refresh_and_rebuild() {
     for mode in ["direct", "server"] {
         let fixture = Fixture::new();
@@ -277,15 +323,15 @@ fn fts_upgrade_preserves_historical_analysis_on_refresh_and_rebuild() {
                 &format!("127.0.0.1:{}", available_port()),
             ]);
         }
-        // A filter-only request still creates the same native Jieba index as older binaries.
+        // Create the same native Jieba index that older binaries used.
         fixture.success(&[
             "--index",
             "--mode",
             mode,
             "--embedding",
             "local/potion-code-16m-v2",
-            "--fts-filter",
-            "lowercase",
+            "--fts-tokenizer",
+            "jieba",
         ]);
         let home = fixture.root.path().join(".zvec-grep");
         let historical = json!({"tokenizer":"jieba","filters":["lowercase"],"extraParams":{}});

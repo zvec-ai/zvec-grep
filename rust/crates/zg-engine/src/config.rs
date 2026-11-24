@@ -34,18 +34,7 @@ pub(crate) fn read() -> Result<Value, EngineError> {
 /// # Errors
 /// Returns configuration I/O or validation errors.
 pub fn fts_defaults() -> Result<FtsConfig, EngineError> {
-    fts_for_new_index(&FtsConfigUpdate::default())
-}
-
-pub(crate) fn fts_for_new_index(options: &FtsConfigUpdate) -> Result<FtsConfig, EngineError> {
-    if let Some(global) = configured_fts(read()?.pointer("/defaults/fts"))? {
-        return options.apply(&global);
-    }
-    if options.is_empty() {
-        return Ok(FtsConfig::default());
-    }
-    // Partial FTS options keep their historical base when no tokenizer was selected.
-    options.apply(&FtsConfig::jieba_lowercase())
+    Ok(configured_fts(read()?.pointer("/defaults/fts"))?.unwrap_or_default())
 }
 
 fn configured_fts(value: Option<&Value>) -> Result<Option<FtsConfig>, EngineError> {
@@ -57,7 +46,7 @@ fn configured_fts(value: Option<&Value>) -> Result<Option<FtsConfig>, EngineErro
     if update.is_empty() {
         return Ok(None);
     }
-    update.apply(&FtsConfig::jieba_lowercase()).map(Some)
+    update.apply(&FtsConfig::default()).map(Some)
 }
 
 /// Updates defaults for new indexes, retaining fields omitted by the caller.
@@ -611,11 +600,11 @@ mod tests {
         assert!(parse(json!({})).pointer("/defaults/fts").is_none());
         assert_eq!(
             parse(json!({"filters": []}))["defaults"]["fts"],
-            json!({"tokenizer": "jieba", "filters": [], "extraParams": {}})
+            json!({"tokenizer": "standard", "filters": [], "extraParams": {}})
         );
         assert_eq!(
             parse(json!({"extraParams": {}}))["defaults"]["fts"],
-            json!({"tokenizer": "jieba", "filters": ["lowercase"], "extraParams": {}})
+            json!({"tokenizer": "standard", "filters": ["lowercase"], "extraParams": {}})
         );
     }
 

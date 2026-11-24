@@ -553,7 +553,7 @@ Dropping an index runs immediately without a confirmation prompt.
 FTS settings apply to the whole workspace index. Without FTS options or global
 FTS defaults, a new workspace uses standard + lowercase with no extra parameters.
 Explicit fields override the selected preset and global defaults. Setting only
-filters or extra parameters uses jieba if no tokenizer is otherwise configured.
+filters or extra parameters inherits the global tokenizer, which defaults to standard.
 Existing indexes retain their saved analysis, including during --rebuild without
 FTS options. Historical indexes without FTS metadata use jieba + lowercase.
 Changing any saved setting requires --rebuild. Supplied filters and
@@ -706,8 +706,8 @@ the previous value; omitted fields are preserved. FTS defaults apply only to new
 workspace indexes. Existing indexes retain their analysis, including during an
 ordinary rebuild. Use zg --index --rebuild with FTS options to change it.
 These defaults are saved under defaults.fts (tokenizer, filters, extraParams).
-With no FTS settings, new workspaces use standard + lowercase. Setting only
-filters or extra parameters uses jieba if no tokenizer is otherwise configured.
+The initial defaults are standard + lowercase. Updating only filters or extra
+parameters preserves the configured tokenizer.
 
 Language presets are expanded before explicit FTS fields are applied. zh uses
 jieba + lowercase; other built-in languages, including en/de/fr/es/pt/ru, use
