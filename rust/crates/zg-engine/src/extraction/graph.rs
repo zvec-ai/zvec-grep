@@ -53,6 +53,27 @@ use crate::domain::{GraphEdgeKind, PreprocessorDirective};
 /// allocated by [`WalkContext::next_entity_index`].
 pub(crate) const FILE_SCOPE_INDEX: usize = usize::MAX;
 
+/// The bound type extraction records for a Python name a body rebinds to a
+/// value the index cannot place (`client = clients[0]`, `self.client = client`).
+///
+/// The write shadows what an earlier declaration stated — a parameter's
+/// annotation, a member's previous assignment — so the name holds no type from
+/// that line on. The resolver reads the sentinel as "stated, but undecided":
+/// the answer is not the type the name no longer holds, and a base class's
+/// member is not the answer either.
+pub(crate) const PYTHON_UNBOUND_TYPE: &str = "[[python_unbound]]";
+
+/// The bound type extraction records for a Python member a class writes as
+/// `None` (`self.client = None`).
+///
+/// The write is a declaration of the member — the class chooses what the name
+/// holds, so a base class's member of the same name is not the answer — but it
+/// states no type. It differs from [`PYTHON_UNBOUND_TYPE`], which leaves the
+/// member undecided even beside a write that does state a type: an optional
+/// member (`__init__` writes `None`, another method stores the real value) is
+/// still typed by the write that states one.
+pub(crate) const PYTHON_NONE_TYPE: &str = "[[python_none]]";
+
 /// An edge whose both endpoints are known at walk time. Only `contains`
 /// qualifies: the target entity is created during the same walk, so its index
 /// is available from the scope stack. Positions use one-based lines and
@@ -525,6 +546,28 @@ impl WalkContext {
             line,
             column,
         });
+    }
+
+    /// The type `owner_index` has stated for `name` at one point of its body:
+    /// the last declaration written before the position, which is what a copy
+    /// (`client = other`) takes with it.
+    pub(crate) fn declared_type_at(
+        &self,
+        owner_index: usize,
+        name: &str,
+        line: usize,
+        column: usize,
+    ) -> Option<&str> {
+        self.name_edges
+            .iter()
+            .rev()
+            .find(|edge| {
+                edge.ref_kind == GraphEdgeKind::Declares
+                    && edge.owner_index == owner_index
+                    && edge.ref_name == name
+                    && (edge.line, edge.column) < (line, column)
+            })
+            .and_then(|edge| edge.bound_type.as_deref())
     }
 
     pub(crate) fn add_scoped_binding(
