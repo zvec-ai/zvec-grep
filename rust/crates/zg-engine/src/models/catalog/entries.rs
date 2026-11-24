@@ -605,9 +605,8 @@ const CATALOG: &[EmbeddingCatalogEntry] = &[
         dimension: 256,
         metric: EmbeddingMetric::Cosine,
         normalize: true,
-        // The upstream tokenizer has no truncation limit. Use the same ZG
-        // input budget as Bekko for long documents.
-        max_input_tokens: 32_768,
+        // ZG sets an input budget for this unbounded upstream tokenizer.
+        max_input_tokens: 1_024,
         max_batch_size: 256,
         default_concurrency: 2,
         query_prefix: None,
@@ -632,7 +631,7 @@ const CATALOG: &[EmbeddingCatalogEntry] = &[
         vocabulary_size: 200_000,
         dimension: 256,
         metric: EmbeddingMetric::Cosine,
-        max_input_tokens: 32_768,
+        max_input_tokens: 1_024,
         max_batch_size: 32,
     }),
 ];

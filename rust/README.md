@@ -10,7 +10,7 @@ its separate checks.
 The Rust catalog includes `local/bekko-256-int8`.
 Select it with `zg --index --embedding local/bekko-256-int8 --device cpu`.
 Mean pooling and the 256-dimensional normalized output remain FP32.
-Queries and documents have no prefix or special tokens, with a 32,768-token limit.
+Queries and documents have no prefix or special tokens, with a 1,024-token limit.
 The Rust Bekko backend (`bekko`) reads the quantized table and per-token scales
 directly from the pinned ONNX file; inference runs on the shared CPU pool
 without an ONNX session or padded batches. It retains unknown tokens and
@@ -29,8 +29,9 @@ their vector dimensions match. The legacy TypeScript catalog is unchanged.
 
 Select Blink Multilingual with `zg --index --embedding local/blink-multilingual-64m --device cpu`.
 The Model2Vec backend loads the [pinned FP32 weights and tokenizer](https://huggingface.co/minishlab/blink-multilingual-64M/tree/a7198ef875b9a756b8b641ab064542f7408e50f3)
-and produces normalized 256-dimensional embeddings. ZG applies a 32,768-token
-input budget to this model.
+and produces normalized 256-dimensional embeddings. ZG applies a 1,024-token
+input budget to this model. Rebuild older Blink and Bekko indexes to apply
+the new fragment sizes across the entire corpus.
 
 New indexes without `--embedding`, `ZVEC_GREP_EMBEDDING`, or a configured default
 select Potion Code for code-heavy workspaces and Bekko for text-heavy workspaces.

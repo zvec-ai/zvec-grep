@@ -98,7 +98,7 @@ fn bekko_catalog_preserves_pinned_assets_and_public_limits() {
             entry.max_batch_size,
             entry.max_input_tokens
         ),
-        (200_000, 256, 32, 32_768)
+        (200_000, 256, 32, 1_024)
     );
     assert_eq!(
         entry.download.hugging_face.revision,

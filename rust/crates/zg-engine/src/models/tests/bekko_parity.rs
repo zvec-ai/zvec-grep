@@ -136,7 +136,8 @@ pub(super) async fn assert_onnx_parity(native: &dyn EmbeddingModel) {
             compare(native, &onnx, &inputs, purpose).await;
             vectors += inputs.len();
         }
-        for count in [32_767, 32_768, 32_769] {
+        let limit = native.info().max_input_tokens().expect("Bekko input limit");
+        for count in [limit - 1, limit, limit + 1] {
             let inputs = [vec![Content::Text(vec!["hello"; count].join(" "))]];
             compare(native, &onnx, &inputs, purpose).await;
             let actual = native
@@ -151,7 +152,7 @@ pub(super) async fn assert_onnx_parity(native: &dyn EmbeddingModel) {
                 .expect("boundary");
             assert_eq!(
                 actual.truncated,
-                if count > 32_768 { vec![0] } else { vec![] }
+                if count > limit { vec![0] } else { vec![] }
             );
             vectors += 1;
         }
