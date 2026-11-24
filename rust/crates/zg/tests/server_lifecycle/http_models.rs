@@ -3,12 +3,15 @@ use super::*;
 struct HttpModelServer {
     server: EmbeddingServer,
     requests: Arc<Mutex<Vec<serde_json::Value>>>,
+    authorizations: Arc<Mutex<Vec<Option<String>>>>,
 }
 
 impl HttpModelServer {
-    fn start(bearer: bool, single_input: bool) -> std::io::Result<Self> {
+    fn start(single_input: bool) -> std::io::Result<Self> {
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let authorizations = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&requests);
+        let captured_auth = Arc::clone(&authorizations);
         let server = EmbeddingServer::start_with_handler(move |mut stream, _| {
             let (headers, request) = read_embedding_request(&stream)?;
             assert!(headers.starts_with("POST /v1/embeddings HTTP/1.1\r\n"));
@@ -16,8 +19,7 @@ impl HttpModelServer {
                 .lines()
                 .filter_map(|line| line.split_once(':'))
                 .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
-                .map(|(_, value)| value.trim());
-            assert_eq!(authorization, bearer.then_some("Bearer fixture-secret"));
+                .map(|(_, value)| value.trim().to_owned());
             assert!(request.get("dimensions").is_none());
             assert!(request.get("encoding_format").is_none());
             let inputs = if single_input {
@@ -41,13 +43,30 @@ impl HttpModelServer {
                 })
                 .collect::<Vec<_>>();
             captured.lock().expect("requests").push(request);
+            captured_auth
+                .lock()
+                .expect("authorizations")
+                .push(authorization);
             write_embedding_response(&mut stream, &json!({"data": data}))
         })?;
-        Ok(Self { server, requests })
+        Ok(Self {
+            server,
+            requests,
+            authorizations,
+        })
     }
 
     fn request_count(&self) -> usize {
         self.server.requests.load(Ordering::SeqCst)
+    }
+
+    fn last_authorization(&self) -> Option<String> {
+        self.authorizations
+            .lock()
+            .expect("authorizations")
+            .last()
+            .cloned()
+            .flatten()
     }
 }
 
@@ -77,7 +96,7 @@ fn configured_http_models_survive_config_removal_and_daemon_restart() -> Result<
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
     let home = TempDir::new()?;
     let workspace = TempDir::new()?;
-    let embedding = HttpModelServer::start(false, false)?;
+    let embedding = HttpModelServer::start(false)?;
     std::fs::write(
         workspace.path().join("sample.md"),
         "# Authentication\n\nA token authenticates each request.\n",
@@ -87,9 +106,13 @@ fn configured_http_models_survive_config_removal_and_daemon_restart() -> Result<
     let config_path = config_dir.join("config.json");
     let config = json!({"version": 1, "models": {"http/fixture": {
         "endpoint": format!("http://{}/v1", embedding.server.address),
-        "http": {"model": "uncataloged-fixture-model", "dimension": 4,
-            "maxInputTokens": 128, "maxBatchSize": 2, "auth": "none",
-            "queryPrefix": "query: ", "documentPrefix": "document: "}
+        "model": "uncataloged-fixture-model",
+        "dimension": 4,
+        "maxInputTokens": 128,
+        "maxBatchSize": 2,
+        "auth": "none",
+        "queryPrefix": "query: ",
+        "documentPrefix": "document: "
     }}});
     std::fs::write(&config_path, serde_json::to_vec(&config)?)?;
     let configure = |command: &mut Command| {
@@ -128,6 +151,7 @@ fn configured_http_models_survive_config_removal_and_daemon_restart() -> Result<
         "--api-key",
         "explicit-secret-must-not-be-saved",
     ])?);
+    assert_eq!(embedding.last_authorization(), None);
     let manifest_path = workspace.path().join(".zvec-grep/manifest.json");
     let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
     let saved = &manifest["index"]["descriptor"]["embeddingConfigs"]["http/fixture"];
@@ -141,11 +165,11 @@ fn configured_http_models_survive_config_removal_and_daemon_restart() -> Result<
 
     // Global edits cannot silently change the vector space of an existing index.
     let mut changed = config.clone();
-    changed["models"]["http/fixture"]["http"]["model"] = "different-model".into();
-    changed["models"]["http/fixture"]["http"]["dimension"] = 8.into();
-    changed["models"]["http/fixture"]["http"]["documentPrefix"] = "different: ".into();
-    changed["models"]["http/fixture"]["http"]["queryPrefix"] = "other: ".into();
-    changed["models"]["http/fixture"]["http"]["metric"] = "dot_product".into();
+    changed["models"]["http/fixture"]["model"] = "different-model".into();
+    changed["models"]["http/fixture"]["dimension"] = 8.into();
+    changed["models"]["http/fixture"]["documentPrefix"] = "different: ".into();
+    changed["models"]["http/fixture"]["queryPrefix"] = "other: ".into();
+    changed["models"]["http/fixture"]["metric"] = "dot_product".into();
     changed["models"]["http/fixture"]["endpoint"] = "http://127.0.0.1:1/v1".into();
     std::fs::write(&config_path, serde_json::to_vec(&changed)?)?;
     assert_command_success(&run(&[
@@ -197,6 +221,7 @@ fn configured_http_models_survive_config_removal_and_daemon_restart() -> Result<
         assert_command_success(&output);
         assert!(String::from_utf8_lossy(&output.stdout).contains("sample.md"));
         assert!(embedding.request_count() > previous);
+        assert_eq!(embedding.last_authorization(), None);
         assert_eq!(
             embedding
                 .requests
@@ -253,7 +278,7 @@ fn configured_http_models_survive_config_removal_and_daemon_restart() -> Result<
     drop(requests);
     // An explicit rebuild is the boundary for selecting a replacement definition.
     let mut replacement = config;
-    replacement["models"]["http/fixture"]["http"]["model"] = "replacement-model".into();
+    replacement["models"]["http/fixture"]["model"] = "replacement-model".into();
     std::fs::write(&config_path, serde_json::to_vec(&replacement)?)?;
     assert_command_success(&run(&[
         "--index",
@@ -280,11 +305,17 @@ fn configured_http_models_survive_config_removal_and_daemon_restart() -> Result<
 }
 
 #[test]
-fn bearer_http_model_uses_env_reference_and_single_input() -> Result<(), Box<dyn Error>> {
+#[expect(
+    clippy::too_many_lines,
+    reason = "Verify env fallback, encrypted indexing save, temporary query override, and CLI-to-daemon forwarding"
+)]
+fn bearer_http_model_honors_api_key_precedence_persistence_and_daemon_forwarding()
+-> Result<(), Box<dyn Error>> {
+    let _permit = server_test_permit();
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_zg"));
     let home = TempDir::new()?;
     let workspace = TempDir::new()?;
-    let embedding = HttpModelServer::start(true, true)?;
+    let embedding = HttpModelServer::start(true)?;
     std::fs::write(
         workspace.path().join("sample.md"),
         "# Tokens\n\nTokens authorize requests.\n",
@@ -296,20 +327,25 @@ fn bearer_http_model_uses_env_reference_and_single_input() -> Result<(), Box<dyn
         &config_path,
         serde_json::to_vec(&json!({"version": 1, "models": {"http/fixture": {
             "endpoint": format!("http://{}/v1/embeddings", embedding.server.address),
-            "http": {"model": "uncataloged-fixture-model", "dimension": 4,
-                "maxInputTokens": 128, "auth": "bearer", "apiKeyEnv": "ZG_HTTP_FIXTURE_KEY",
-                "singleInput": true, "queryPrefix": "query: ", "documentPrefix": "document: "}
+            "model": "uncataloged-fixture-model",
+            "dimension": 4,
+            "maxInputTokens": 128,
+            "auth": "bearer",
+            "apiKeyEnv": "ZG_HTTP_FIXTURE_KEY",
+            "singleInput": true,
+            "queryPrefix": "query: ",
+            "documentPrefix": "document: "
         }}}))?,
     )?;
-    let run = |args: &[&str], authenticated: bool| -> std::io::Result<Output> {
+    let run = |args: &[&str], env_key: Option<&str>| -> std::io::Result<Output> {
         let mut command = Command::new(&binary);
         configure_command(&mut command, home.path(), workspace.path());
-        if authenticated {
-            command.env("ZG_HTTP_FIXTURE_KEY", "fixture-secret");
+        if let Some(key) = env_key {
+            command.env("ZG_HTTP_FIXTURE_KEY", key);
         }
         command.args(args).output()
     };
-    let args = [
+    let index_args = [
         "--index",
         "--mode",
         "direct",
@@ -317,10 +353,23 @@ fn bearer_http_model_uses_env_reference_and_single_input() -> Result<(), Box<dyn
         "http/fixture",
         "--allow-remote",
     ];
-    assert!(!run(&args, false)?.status.success());
+    // Missing key fails without falling back to ZVEC_GREP_API_KEY.
+    assert!(!run(&index_args, None)?.status.success());
     assert_eq!(embedding.request_count(), 0);
-    assert_command_success(&run(&args, true)?);
-    std::fs::remove_file(&config_path)?;
+
+    // apiKeyEnv works as fallback and leaves no credentials.key on disk.
+    assert_command_success(&run(&index_args, Some("env-secret"))?);
+    assert_eq!(
+        embedding.last_authorization().as_deref(),
+        Some("Bearer env-secret")
+    );
+    let manifest_path = workspace.path().join(".zvec-grep/manifest.json");
+    let manifest_text = std::fs::read_to_string(&manifest_path)?;
+    assert!(manifest_text.contains("ZG_HTTP_FIXTURE_KEY"));
+    assert!(!manifest_text.contains("env-secret"));
+    assert!(!workspace.path().join(".zvec-grep/credentials.key").exists());
+
+    // Query --api-key overrides apiKeyEnv temporarily and does not persist.
     assert_command_success(&run(
         &[
             "--mode",
@@ -330,13 +379,117 @@ fn bearer_http_model_uses_env_reference_and_single_input() -> Result<(), Box<dyn
             "--refresh",
             "off",
             "--allow-remote",
+            "--api-key",
+            "query-temp-secret",
         ],
-        true,
+        Some("env-secret"),
     )?);
-    let manifest = std::fs::read_to_string(workspace.path().join(".zvec-grep/manifest.json"))?;
-    assert!(manifest.contains("ZG_HTTP_FIXTURE_KEY"));
-    assert!(!manifest.contains("fixture-secret"));
+    assert_eq!(
+        embedding.last_authorization().as_deref(),
+        Some("Bearer query-temp-secret")
+    );
     assert!(!workspace.path().join(".zvec-grep/credentials.key").exists());
-    assert!(embedding.request_count() >= 2);
+
+    // Indexing via daemon with --api-key overrides the daemon's apiKeyEnv and saves encrypted.
+    let (mut daemon, _) = start_server(&binary, &home, "full", None, |command| {
+        configure_command(command, home.path(), workspace.path());
+        command.env("ZG_HTTP_FIXTURE_KEY", "env-secret");
+    })?;
+    std::fs::write(
+        workspace.path().join("sample.md"),
+        "# Tokens\n\nUpdated token rules authorize requests.\n",
+    )?;
+    assert_command_success(&run(
+        &[
+            "--index",
+            "--mode",
+            "server",
+            "--allow-remote",
+            "--api-key",
+            "indexed-saved-secret",
+        ],
+        None,
+    )?);
+    assert_eq!(
+        embedding.last_authorization().as_deref(),
+        Some("Bearer indexed-saved-secret")
+    );
+    assert_command_success(&daemon.stop()?);
+    let manifest_text = std::fs::read_to_string(&manifest_path)?;
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_text)?;
+    assert!(
+        manifest["index"]["descriptor"]["embeddingConfigs"]["http/fixture"]["apiKey"].is_object()
+    );
+    assert!(!manifest_text.contains("indexed-saved-secret"));
+    assert!(workspace.path().join(".zvec-grep/credentials.key").exists());
+
+    // After removing global config and restarting the daemon without apiKeyEnv,
+    // saved encrypted credentials serve queries, query --api-key overrides them
+    // temporarily across the daemon boundary, and saved credentials remain intact.
+    std::fs::remove_file(&config_path)?;
+    let (mut daemon, _) = start_server(&binary, &home, "full", None, |command| {
+        configure_command(command, home.path(), workspace.path());
+    })?;
+    assert_command_success(&run(
+        &[
+            "--mode",
+            "server",
+            "--vector",
+            "tokens",
+            "--refresh",
+            "off",
+            "--allow-remote",
+        ],
+        None,
+    )?);
+    assert_eq!(
+        embedding.last_authorization().as_deref(),
+        Some("Bearer indexed-saved-secret")
+    );
+    assert_command_success(&run(
+        &[
+            "--mode",
+            "server",
+            "--vector",
+            "tokens",
+            "--refresh",
+            "off",
+            "--allow-remote",
+            "--api-key",
+            "server-query-override",
+        ],
+        None,
+    )?);
+    assert_eq!(
+        embedding.last_authorization().as_deref(),
+        Some("Bearer server-query-override")
+    );
+    assert_command_success(&run(
+        &[
+            "--mode",
+            "server",
+            "--vector",
+            "tokens",
+            "--refresh",
+            "off",
+            "--allow-remote",
+        ],
+        None,
+    )?);
+    assert_eq!(
+        embedding.last_authorization().as_deref(),
+        Some("Bearer indexed-saved-secret")
+    );
+    assert_command_success(&daemon.stop()?);
+
+    // Consent preflight rejects unauthorized runs without reading credentials or contacting the server.
+    let previous = embedding.request_count();
+    let denied = run(
+        &["--mode", "direct", "--vector", "tokens", "--refresh", "off"],
+        None,
+    )?;
+    assert!(!denied.status.success());
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("authorization required"));
+    assert_eq!(embedding.request_count(), previous);
     Ok(())
 }

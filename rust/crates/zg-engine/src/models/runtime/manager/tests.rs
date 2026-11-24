@@ -1563,5 +1563,17 @@ fn http_runtime_cache_tracks_the_entire_descriptor() {
         let changed = acquire(serde_json::from_value(changed).expect("valid test fixture"));
         assert!(!Arc::ptr_eq(&first.entry, &changed.entry), "{field}");
     }
+    let mut bearer: ModelConfig = serde_json::from_value(serde_json::json!({
+        "endpoint": "https://example.test/v1/embeddings",
+        "apiKey": "secret-a",
+        "http": {"model": "served-model", "dimension": 3, "maxInputTokens": 128, "auth": "bearer"}
+    }))
+    .expect("valid test fixture");
+    let bearer_a = acquire(bearer.clone());
+    let bearer_a_reused = acquire(bearer.clone());
+    assert!(Arc::ptr_eq(&bearer_a.entry, &bearer_a_reused.entry));
+    bearer.api_key = Some("secret-b".to_owned());
+    let bearer_b = acquire(bearer);
+    assert!(!Arc::ptr_eq(&bearer_a.entry, &bearer_b.entry));
     manager.close();
 }

@@ -759,17 +759,14 @@ async fn http_setup_selects_and_authorizes_without_generic_credentials() {
         .expect("valid test fixture");
     std::fs::write(&path, json!({"version": 1, "defaults": {"embedding": "http/anonymous"},
         "models": {
-            "http/anonymous": {"endpoint": "http://127.0.0.1:8080/v1", "http": {
-                "model": "served", "dimension": 3, "maxInputTokens": 128, "auth": "none"}},
-            "http/private": {"endpoint": "http://127.0.0.1:8080/v1", "http": {
-                "model": "served", "dimension": 3, "maxInputTokens": 128, "auth": "bearer", "apiKeyEnv": "ZG_HTTP_MCP_MISSING_KEY"}}
+            "http/anonymous": {"endpoint": "http://127.0.0.1:8080/v1",
+                "model": "served", "dimension": 3, "maxInputTokens": 128, "auth": "none"},
+            "http/private": {"endpoint": "http://127.0.0.1:8080/v1",
+                "model": "served", "dimension": 3, "maxInputTokens": 128, "auth": "bearer", "apiKeyEnv": "ZG_HTTP_MCP_MISSING_KEY"}
         }}).to_string()).expect("valid test fixture");
     let engine = ZvecGrep::new();
     let setup = engine
-        .index_setup(IndexSetupOptions {
-            credential_available: true,
-            ..Default::default()
-        })
+        .index_setup(IndexSetupOptions::default())
         .await
         .expect("valid test fixture");
     let root = tempfile::tempdir().expect("valid test fixture");
@@ -784,15 +781,20 @@ async fn http_setup_selects_and_authorizes_without_generic_credentials() {
     let choices = schema["properties"]["model"]["oneOf"]
         .as_array()
         .expect("valid test fixture");
+    assert!(choices.iter().any(|c| c["const"] == "http/anonymous"));
+    assert!(!choices.iter().any(|c| c["const"] == "http/private"));
+    let with_key = engine
+        .index_setup(IndexSetupOptions {
+            credential_available: true,
+            ..Default::default()
+        })
+        .await
+        .expect("valid test fixture");
     assert!(
-        choices
+        with_key
+            .models
             .iter()
-            .any(|choice| choice["const"] == "http/anonymous")
-    );
-    assert!(
-        !choices
-            .iter()
-            .any(|choice| choice["const"] == "http/private")
+            .any(|c| c.reference == "http/private" && c.available())
     );
     let options = IndexOptions {
         root: Some(root.path().into()),
@@ -817,7 +819,7 @@ async fn http_setup_selects_and_authorizes_without_generic_credentials() {
     assert!(approved.api_key.is_none());
     assert!(
         authorization::index_authorization(&approved)
-            .expect("valid test fixture")
+            .expect("preflight")
             .is_none()
     );
     engine.close();

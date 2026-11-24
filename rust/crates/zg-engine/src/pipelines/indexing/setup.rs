@@ -72,31 +72,7 @@ pub(crate) async fn index_setup(mut options: IndexSetupOptions) -> Result<IndexS
                 .map(|download| download.artifacts.iter().map(|a| a.size).sum()),
         });
     }
-    if let Some(configured) = config["models"].as_object() {
-        for reference in configured
-            .keys()
-            .filter(|reference| reference.starts_with("http/"))
-        {
-            let runtime = config::http_model(&config, reference)?.expect("configured model");
-            let descriptor = runtime.http.expect("validated descriptor");
-            let credential_available = match descriptor.auth {
-                crate::domain::model::HttpAuth::None => true,
-                crate::domain::model::HttpAuth::Bearer => descriptor
-                    .api_key_env
-                    .as_deref()
-                    .and_then(|name| std::env::var(name).ok())
-                    .is_some_and(|value| !value.trim().is_empty()),
-            };
-            models.push(EmbeddingChoice {
-                reference: reference.clone(),
-                local: false,
-                downloaded: false,
-                configured: true,
-                credential_available,
-                download_bytes: None,
-            });
-        }
-    }
+    models.extend(http_model_choices(&config, options.credential_available)?);
     let recommended = selection
         .as_ref()
         .and_then(|selection| selection.analysis.as_ref())
@@ -110,6 +86,43 @@ pub(crate) async fn index_setup(mut options: IndexSetupOptions) -> Result<IndexS
         supports_embedding_defaults: true,
         selection,
     })
+}
+
+fn http_model_choices(
+    config: &serde_json::Value,
+    request_credential_available: bool,
+) -> Result<Vec<EmbeddingChoice>, EngineError> {
+    let mut choices = Vec::new();
+    let Some(configured) = config["models"].as_object() else {
+        return Ok(choices);
+    };
+    for reference in configured
+        .keys()
+        .filter(|reference| reference.starts_with("http/"))
+    {
+        let runtime = config::http_model(config, reference)?.expect("configured model");
+        let descriptor = runtime.http.expect("validated descriptor");
+        let credential_available = match descriptor.auth {
+            crate::domain::model::HttpAuth::None => true,
+            crate::domain::model::HttpAuth::Bearer => {
+                request_credential_available
+                    || descriptor
+                        .api_key_env
+                        .as_deref()
+                        .and_then(|name| std::env::var(name).ok())
+                        .is_some_and(|value| !value.trim().is_empty())
+            }
+        };
+        choices.push(EmbeddingChoice {
+            reference: reference.clone(),
+            local: false,
+            downloaded: false,
+            configured: true,
+            credential_available,
+            download_bytes: None,
+        });
+    }
+    Ok(choices)
 }
 
 fn sort_choices(models: &mut [EmbeddingChoice], default: Option<&str>, recommended: &str) {

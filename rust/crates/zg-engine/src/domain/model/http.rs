@@ -65,16 +65,16 @@ impl HttpEmbeddingConfig {
             ));
         }
         match (self.auth, self.api_key_env.as_deref()) {
-            (HttpAuth::None, None) => {}
+            (HttpAuth::None | HttpAuth::Bearer, None) => {}
             (HttpAuth::Bearer, Some(name)) if valid_env_name(name) => {}
             (HttpAuth::None, Some(_)) => {
                 return Err(EngineError::invalid_argument(
                     "HTTP auth none must not specify apiKeyEnv",
                 ));
             }
-            _ => {
+            (HttpAuth::Bearer, Some(_)) => {
                 return Err(EngineError::invalid_argument(
-                    "HTTP bearer auth requires apiKeyEnv containing an environment variable name",
+                    "HTTP apiKeyEnv must be a valid environment variable name",
                 ));
             }
         }

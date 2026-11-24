@@ -827,7 +827,7 @@ async fn select_query_index(
         };
         if !model.available() && model.reference.starts_with("http/") {
             return Err(EngineError::invalid_argument(
-                "Set the environment variable named by this HTTP model's apiKeyEnv before selecting it",
+                "Pass --api-key or set the environment variable named by this HTTP model's apiKeyEnv before selecting it",
             ).into());
         }
         if !model.available()

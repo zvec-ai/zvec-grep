@@ -180,16 +180,16 @@ impl IndexDescriptor {
                         "HTTP model descriptor is missing from index metadata",
                     )
                 })?;
-                if config.api_key.is_some() {
-                    return Err(EngineError::invalid_argument(
-                        "HTTP model credentials must be supplied by apiKeyEnv",
-                    ));
-                }
                 let http = config.http.as_ref().ok_or_else(|| {
                     EngineError::invalid_argument(
                         "HTTP model descriptor is missing from index metadata",
                     )
                 })?;
+                if http.auth == crate::domain::model::HttpAuth::None && config.api_key.is_some() {
+                    return Err(EngineError::invalid_argument(
+                        "HTTP model with auth none cannot store an API key",
+                    ));
+                }
                 http.model_info(&reference)?
                     .ensure_index_compatible(model)?;
                 let endpoint = config.endpoint.as_deref().ok_or_else(|| {

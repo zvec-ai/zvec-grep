@@ -54,9 +54,14 @@ impl HttpEmbeddingModel {
         let authorization = match descriptor.auth {
             HttpAuth::None => None,
             HttpAuth::Bearer => {
-                let name = descriptor.api_key_env.as_deref().ok_or_else(missing_key)?;
-                let key = std::env::var(name).map_err(|_| missing_key())?;
-                if key.trim().is_empty() {
+                let key = if let Some(key) = options.api_key.as_deref() {
+                    key.to_owned()
+                } else {
+                    let name = descriptor.api_key_env.as_deref().ok_or_else(missing_key)?;
+                    std::env::var(name).map_err(|_| missing_key())?
+                };
+                let key = key.trim();
+                if key.is_empty() {
                     return Err(missing_key());
                 }
                 let mut header =
@@ -142,7 +147,8 @@ fn invalid_endpoint() -> ModelError {
 fn missing_key() -> ModelError {
     ModelError::new(
         EngineError::PERMISSION_DENIED,
-        "HTTP embedding bearer authentication requires a valid key in its named environment variable",
+        "HTTP embedding bearer authentication requires a valid API key via --api-key or apiKeyEnv",
         None,
-    ).shared()
+    )
+    .shared()
 }

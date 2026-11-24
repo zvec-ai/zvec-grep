@@ -150,10 +150,18 @@ fn descriptor() -> HttpEmbeddingConfig {
 }
 
 fn options(endpoint: &str, http: HttpEmbeddingConfig) -> ModelConfig {
+    options_with_key(endpoint, http, Some("generic-key-must-never-be-used"))
+}
+
+fn options_with_key(
+    endpoint: &str,
+    http: HttpEmbeddingConfig,
+    api_key: Option<&str>,
+) -> ModelConfig {
     ModelConfig {
         endpoint: Some(endpoint.to_owned()),
         http: Some(http),
-        api_key: Some("generic-key-must-never-be-used".into()),
+        api_key: api_key.map(str::to_owned),
         ..ModelConfig::default()
     }
 }
@@ -271,8 +279,8 @@ async fn single_input_optional_fields_and_trace_headers_are_explicit() {
     }
 }
 
-#[test]
-fn bearer_credentials_are_validated_and_redacted() {
+#[tokio::test]
+async fn bearer_credentials_are_validated_and_redacted() {
     const CHILD: &str = "ZG_HTTP_BACKEND_AUTH_TEST_CHILD";
     const KEY: &str = "ZG_HTTP_BACKEND_AUTH_TEST_KEY";
     if std::env::var_os(CHILD).is_none() {
@@ -296,25 +304,67 @@ fn bearer_credentials_are_validated_and_redacted() {
         );
         return;
     }
-    let endpoint = "http://localhost/v1/embeddings";
     let mut config = descriptor();
     config.auth = HttpAuth::Bearer;
     config.api_key_env = Some(KEY.into());
-    let model = HttpEmbeddingModel::new("http/alias", options(endpoint, config.clone()))
-        .expect("named credentials");
-    assert!(!format!("{model:?}").contains("named-fixture-secret"));
-    for env in [
-        "ZG_HTTP_BACKEND_AUTH_TEST_EMPTY",
-        "ZG_HTTP_BACKEND_AUTH_TEST_INVALID",
-        "ZG_HTTP_BACKEND_AUTH_TEST_MISSING",
+
+    // Explicit api_key takes precedence over apiKeyEnv, and falls back when absent.
+    for (explicit, expected_header) in [
+        (
+            Some("explicit-fixture-secret"),
+            "Bearer explicit-fixture-secret",
+        ),
+        (None, "Bearer named-fixture-secret"),
     ] {
-        config.api_key_env = Some(env.into());
-        let error = HttpEmbeddingModel::new("http/alias", options(endpoint, config.clone()))
-            .expect_err("invalid bearer key");
+        let mut server = MockServer::start(Reply::Complete(200, vec![], success())).await;
+        let model = HttpEmbeddingModel::new(
+            "http/alias",
+            options_with_key(&server.endpoint, config.clone(), explicit),
+        )
+        .expect("bearer credentials");
+        assert!(!format!("{model:?}").contains("explicit-fixture-secret"));
+        assert!(!format!("{model:?}").contains("named-fixture-secret"));
+        model
+            .embed(&inputs(), EmbeddingOptions::default())
+            .await
+            .expect("embedding");
+        let request = server.request().await;
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some(expected_header)
+        );
+    }
+
+    let endpoint = "http://localhost/v1/embeddings";
+    // Invalid explicit keys fail without falling back to a valid apiKeyEnv.
+    for invalid_explicit in ["", "   ", "invalid\nheader"] {
+        let error = HttpEmbeddingModel::new(
+            "http/alias",
+            options_with_key(endpoint, config.clone(), Some(invalid_explicit)),
+        )
+        .expect_err("invalid explicit bearer key");
         assert_eq!(error.code(), EngineError::PERMISSION_DENIED);
         assert!(error.should_fail_fast());
         assert!(!error.is_retryable());
-        assert!(!format!("{error:?}").contains("generic-key-must-never-be-used"));
+        assert!(!format!("{error:?}").contains("invalid\nheader"));
+    }
+
+    // Without an explicit key, missing/empty/invalid apiKeyEnv and omitted apiKeyEnv fail.
+    for env in [
+        Some("ZG_HTTP_BACKEND_AUTH_TEST_EMPTY"),
+        Some("ZG_HTTP_BACKEND_AUTH_TEST_INVALID"),
+        Some("ZG_HTTP_BACKEND_AUTH_TEST_MISSING"),
+        None,
+    ] {
+        config.api_key_env = env.map(str::to_owned);
+        let error = HttpEmbeddingModel::new(
+            "http/alias",
+            options_with_key(endpoint, config.clone(), None),
+        )
+        .expect_err("invalid bearer env key");
+        assert_eq!(error.code(), EngineError::PERMISSION_DENIED);
+        assert!(error.should_fail_fast());
+        assert!(!error.is_retryable());
         assert!(!format!("{error:?}").contains("invalid\nheader"));
     }
 }
