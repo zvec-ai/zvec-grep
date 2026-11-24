@@ -1833,3 +1833,246 @@ async fn single_import_binds_the_name_in_the_module() {
     })
     .await;
 }
+
+// PR 450 review: the specifier is written once, in the header, while the body
+// that carries the call sites spells the member plainly. The two spellings are
+// one member, so a call through the base answers for the overriding body too —
+// and an override that repeats only `override` is virtual the same way.
+#[tokio::test]
+async fn review450_virtual_status_crosses_the_declaration_and_its_body() {
+    check_case(Case {
+        name: "review450_virtual_status_crosses_the_declaration_and_its_body",
+        files: vec![
+            SourceFile {
+                path: "base.h",
+                source: "struct Base {\n  virtual void Func();\n};\n",
+            },
+            SourceFile {
+                path: "base.cc",
+                source: "#include \"base.h\"\nvoid Base::Func() {}\n",
+            },
+            SourceFile {
+                path: "derived.h",
+                source: "#include \"base.h\"\nstruct Derived : Base {\n  void Func() override {}\n};\nstruct Mid : Base {\n  void Func() override;\n};\n",
+            },
+            SourceFile {
+                path: "mid.cc",
+                source: "#include \"derived.h\"\nvoid Mid::Func() {}\n",
+            },
+            SourceFile {
+                path: "caller.cc",
+                source: "#include \"derived.h\"\nvoid Test(Base& cls) { cls.Func(); }\nvoid Other(Mid& cls) { cls.Func(); }\n",
+            },
+        ],
+        queries: vec![
+            Query {
+                operation: "callers",
+                symbol: "Derived::Func",
+                expected: json!([{
+                    "name": "Derived::Func", "filePath": "derived.h", "startLine": 3,
+                    "edges": [{"symbol": {"name": "Test", "startLine": 2}, "line": 2}],
+                }]),
+                ..Query::default()
+            },
+            Query {
+                operation: "callers",
+                symbol: "Mid::Func",
+                expected: json!([{
+                    "name": "Mid::Func", "filePath": "mid.cc", "startLine": 2,
+                    // `Other` is the call the `override` spelling alone would
+                    // have dropped; `Test` reaches this body the same way it
+                    // reaches `Derived::Func`, through the virtual `Base::Func`.
+                    "edges": [
+                        {"symbol": {"name": "Other", "startLine": 3}, "line": 3},
+                        {"symbol": {"name": "Test", "startLine": 2}, "line": 2},
+                    ],
+                }]),
+                ..Query::default()
+            },
+        ],
+    })
+    .await;
+}
+
+// PR 450 review: the header declares `S::f`, `f.cc` defines it, and `S::run`
+// calls it. Both spellings of one member reach the overload count, so the pair
+// is settled first and the call binds instead of staying ambiguous.
+#[tokio::test]
+async fn review450_member_pairing_precedes_overload_choice() {
+    check_case(Case {
+        name: "review450_member_pairing_precedes_overload_choice",
+        files: vec![
+            SourceFile {
+                path: "s.h",
+                source: "struct S {\n  void f();\n  void run();\n};\n",
+            },
+            SourceFile {
+                path: "f.cc",
+                source: "#include \"s.h\"\nvoid S::f() {}\n",
+            },
+            SourceFile {
+                path: "run.cc",
+                source: "#include \"s.h\"\nvoid S::run() { f(); }\n",
+            },
+        ],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "S::run",
+            expected: json!([{
+                "name": "S::run", "filePath": "run.cc", "startLine": 2,
+                "edges": [{"symbol": {"name": "S::f", "filePath": "f.cc"}, "line": 2}],
+            }]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 450 review: the parameter owns `cb` at the call site, so `cb()` reaches
+// the function value the caller passed and not the member of the same name. The
+// graph holds no target for an indirect call, which stays unresolved.
+#[tokio::test]
+async fn review450_parameter_binding_outranks_the_implicit_member() {
+    check_case(Case {
+        name: "review450_parameter_binding_outranks_the_implicit_member",
+        files: vec![SourceFile {
+            path: "member.cc",
+            source: "struct S {\n  void cb();\n  void run(std::function<void()> cb) { cb(); }\n};\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "S::run",
+            expected: json!([{"name": "S::run", "filePath": "member.cc", "startLine": 3, "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 450 review: `Base::Func()` names the base implementation directly, so the
+// body it is written in is not a caller of the override dispatch that reaches
+// it from a `Base&` or `Derived&`.
+#[tokio::test]
+async fn review450_qualified_base_call_is_not_an_inherited_caller() {
+    check_case(Case {
+        name: "review450_qualified_base_call_is_not_an_inherited_caller",
+        files: vec![SourceFile {
+            path: "qualify.cc",
+            source: "struct Base {\n  virtual void Func() {}\n};\nstruct Derived : Base {\n  void Func() override { Base::Func(); }\n};\n",
+        }],
+        queries: vec![Query {
+            operation: "callers",
+            symbol: "Derived::Func",
+            expected: json!([{"name": "Derived::Func", "filePath": "qualify.cc", "startLine": 5, "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 450 review: the unit includes `shared_state.h`, whose class declares
+// `GetMutex`; the body that implements it sits outside that closure, so the
+// declaration decides which member the call names and the body of that class
+// and signature stands for it. A namesake class in a file the unit never pulls
+// in declares members of its own and answers nothing here.
+#[tokio::test]
+async fn review450_member_declaration_outside_the_include_closure() {
+    check_case(Case {
+        name: "review450_member_declaration_outside_the_include_closure",
+        files: vec![
+            SourceFile {
+                path: "shared_state.h",
+                source: "namespace rocksdb {\nclass Mutex;\nclass SharedState {\n public:\n  Mutex* GetMutex();\n};\n}\n",
+            },
+            SourceFile {
+                path: "shared_state.cc",
+                source: "#include \"shared_state.h\"\nnamespace rocksdb {\nMutex* SharedState::GetMutex() { return nullptr; }\n}\n",
+            },
+            SourceFile {
+                path: "bench.cc",
+                source: "namespace rocksdb {\nclass Mutex;\nclass SharedState {\n public:\n  Mutex* GetMutex() { return nullptr; }\n};\n}\n",
+            },
+            SourceFile {
+                path: "caller.cc",
+                source: "#include \"shared_state.h\"\nvoid run(rocksdb::SharedState* shared) { shared->GetMutex(); }\n",
+            },
+        ],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "run",
+            expected: json!([{
+                "name": "run", "filePath": "caller.cc", "startLine": 2,
+                "edges": [{
+                    "symbol": {"name": "rocksdb::SharedState::GetMutex", "filePath": "shared_state.cc"},
+                    "line": 2,
+                }],
+            }]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 450 review: `rocksdb::SharedState* shared` at namespace scope takes the
+// qualified-spelling branch, and the qualified spelling still names no file:
+// only the class the unit includes answers its calls.
+#[tokio::test]
+async fn review450_qualified_type_name_respects_the_unit() {
+    check_case(Case {
+        name: "review450_qualified_type_name_respects_the_unit",
+        files: vec![
+            SourceFile {
+                path: "shared_state.h",
+                source: "namespace rocksdb {\nclass Mutex;\nclass SharedState {\n public:\n  Mutex* GetMutex();\n};\n}\n",
+            },
+            SourceFile {
+                path: "bench.cc",
+                source: "namespace rocksdb {\nclass Mutex;\nclass SharedState {\n public:\n  Mutex* GetMutex() { return nullptr; }\n};\n}\n",
+            },
+            SourceFile {
+                path: "caller.cc",
+                source: "#include \"shared_state.h\"\nstatic rocksdb::SharedState* shared = nullptr;\nvoid run() { shared->GetMutex(); }\n",
+            },
+        ],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "run",
+            expected: json!([{
+                "name": "run", "filePath": "caller.cc", "startLine": 3,
+                "edges": [{
+                    "symbol": {"name": "rocksdb::SharedState::GetMutex", "filePath": "shared_state.h"},
+                    "line": 3,
+                }],
+            }]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 450 follow-up: `I::f()` has a body while `I::f(int)` is pure virtual, so the
+// qualified name alone would let the body hide the declaration and its callers.
+// Overloads are told apart by their parameters, which keeps the declaration.
+#[tokio::test]
+async fn review450_declaration_only_overloads_stay_in_the_result() {
+    check_case(Case {
+        name: "review450_declaration_only_overloads_stay_in_the_result",
+        files: vec![SourceFile {
+            path: "overload.cc",
+            source: "struct I {\n  virtual void f(int) = 0;\n  void f() {}\n};\nvoid run(I& i) { i.f(1); }\n",
+        }],
+        queries: vec![Query {
+            operation: "callers",
+            symbol: "I::f",
+            expected: json!([
+                {
+                    "name": "I::f", "filePath": "overload.cc", "startLine": 2,
+                    "edges": [{"symbol": {"name": "run", "startLine": 5}, "line": 5}],
+                },
+                {"name": "I::f", "filePath": "overload.cc", "startLine": 3, "edges": []},
+            ]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
