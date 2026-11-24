@@ -598,11 +598,15 @@ users need no Python, PDF viewer, or system PDFium installation.
 
 Run `zg --index`, then `zg "How does recovery work?" -t pdf` or
 `zg --rg -F "recovery" -t pdf`. PDF rg searches the indexed entity text, retaining
-literal/regex, case, context and file-filter behavior within each entity. Directory and workspace searches skip PDFs without a usable extraction index
-and report one indexing hint, while ordinary text results remain available. An
-explicitly requested unindexed PDF returns an actionable error. Raw PDF bytes
-and metadata are never searched as a fallback. Overlapping entity matches are
-deduplicated by source position before applying the per-file `-m` limit.
+literal/regex, case, context and file-filter behavior within each entity. Stale
+extraction remains searchable with `possibly_stale`; its pages refer to the indexed
+version. Without a workspace index, rg searches original files, including PDFs,
+with its usual binary policy (`-a` enables binary search). Within an indexed
+workspace, PDFs without usable extraction fall back to raw-file search with a
+warning. Index read failures report their cause and also fall back; rg never
+builds or refreshes an index. Raw matches use file line numbers, not PDF pages.
+Overlapping entity matches are deduplicated by source position before applying
+the per-file `-m` limit.
 
 Results show the file, physical `pages` (one-based), and text. `--preview detail` also shows
 `Kind: text/native`.

@@ -633,9 +633,12 @@ pub mod result {
 
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     pub struct RgDiagnostics {
-        /// Sources skipped because no usable extraction index is available.
+        /// Sources searched as raw files because their extraction index is unavailable.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub unindexed_files: Vec<PathBuf>,
+        /// Index access failures that caused raw-file fallback, without hiding the cause.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub index_warnings: Vec<String>,
         pub backend: String,
         pub command: PathBuf,
         pub args: Vec<String>,

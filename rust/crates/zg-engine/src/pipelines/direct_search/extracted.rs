@@ -5,7 +5,7 @@ use crate::{
         ContentRange, ContextContentRole, ContextItem, ContextItemKind, ContextItemStatus,
         MatchedBy,
     },
-    domain::{Content, Entity, IndexDescriptor},
+    domain::{Content, Entity, IndexDescriptor, WorkspaceLayout},
     lexical::{
         extracted::{ExtractedFileState, ExtractedMatcher},
         types::LexicalSearchRequest,
@@ -29,6 +29,38 @@ pub(super) struct SearchResult {
     pub items: Vec<ContextItem>,
     pub truncated: bool,
     pub unavailable: Vec<PathBuf>,
+    pub warnings: Vec<String>,
+}
+
+pub(super) fn enabled(root: &Path) -> EngineResult<bool> {
+    let start = if root.is_file() {
+        root.parent().unwrap_or(root)
+    } else {
+        root
+    };
+    let Some((root, layout)) = find_nearest_workspace(start)? else {
+        return Ok(false);
+    };
+    Ok(read_workspace_manifest(&root, &layout)?.is_some_and(|workspace| workspace.index_enabled()))
+}
+
+pub(super) fn index_warning(path: &Path, error: EngineError) -> EngineResult<String> {
+    match error.code() {
+        EngineError::STORAGE_FAILURE
+        | EngineError::INDEX_INCOMPATIBLE
+        | EngineError::NOT_FOUND
+        | EngineError::PERMISSION_DENIED
+        | EngineError::RESOURCE_BUSY
+        | EngineError::RESOURCE_CLOSED => Ok(format!(
+            "Cannot read extraction index for {}: {error}{}; searching raw files instead.",
+            path.display(),
+            error
+                .help()
+                .map(|help| format!(" ({help})"))
+                .unwrap_or_default()
+        )),
+        _ => Err(error),
+    }
 }
 
 pub(super) async fn search(
@@ -42,10 +74,17 @@ pub(super) async fn search(
     for path in paths {
         let absolute = std::path::absolute(&path)
             .map_err(|e| EngineError::from_io("resolve extracted source path", &e))?;
-        let Some((root, layout)) = find_nearest_workspace(absolute.parent().unwrap_or(&absolute))?
-        else {
-            result.unavailable.push(absolute);
-            continue;
+        let (root, layout) = match find_nearest_workspace(absolute.parent().unwrap_or(&absolute)) {
+            Ok(Some(workspace)) => workspace,
+            Ok(None) => {
+                result.unavailable.push(absolute);
+                continue;
+            }
+            Err(error) => {
+                result.warnings.push(index_warning(&absolute, error)?);
+                result.unavailable.push(absolute);
+                continue;
+            }
         };
         workspaces
             .entry(root)
@@ -55,45 +94,63 @@ pub(super) async fn search(
     }
     let wait = LockWait::new(request.signal.as_ref(), timeout_ms)?;
     for (root, (layout, paths)) in workspaces {
-        let source =
-            acquire_read_source(&root, &layout, &wait, "extracted.rg", Some(writers), |_| {
-                Ok(Some(()))
-            })
-            .await?;
-        let request = request.clone();
-        let mut found = tokio::task::spawn_blocking(move || {
-            let run = |storage: &IndexStore| search_store(storage, &root, &paths, &request);
-            let _lock = match source {
-                ReadSource::Writer { lease, .. } => return run(&lease.session.storage),
-                ReadSource::Read(lock) => lock,
-            };
-            let Some(workspace) = read_workspace_manifest(&root, &layout)?
-                .filter(crate::domain::Workspace::index_enabled)
-            else {
-                return Ok(SearchResult {
-                    unavailable: paths,
-                    ..SearchResult::default()
-                });
-            };
-            let graph = workspace
-                .index()
-                .descriptor()
-                .is_some_and(IndexDescriptor::graph_indexing);
-            let lease = ReadSessionLease::open(workspace.layout().index_dir(), graph)?;
-            let result = run(lease.storage());
-            let close = lease.close();
-            let result = result?;
-            close?;
-            Ok::<_, EngineError>(result)
-        })
-        .await
-        .map_err(|e| EngineError::internal(format!("Extracted search worker failed: {e}")))??;
+        let mut found = match search_workspace(&root, layout, &paths, request, &wait, writers).await
+        {
+            Ok(found) => found,
+            Err(error) => {
+                result.warnings.push(index_warning(&root, error)?);
+                result.unavailable.extend(paths);
+                continue;
+            }
+        };
         result.items.append(&mut found.items);
         result.unavailable.append(&mut found.unavailable);
         result.truncated |= found.truncated;
     }
     wait.check_cancelled()?;
     Ok(result)
+}
+
+async fn search_workspace(
+    root: &Path,
+    layout: WorkspaceLayout,
+    paths: &[PathBuf],
+    request: &LexicalSearchRequest,
+    wait: &LockWait<'_>,
+    writers: &WriterContexts,
+) -> EngineResult<SearchResult> {
+    let source = acquire_read_source(root, &layout, wait, "extracted.rg", Some(writers), |_| {
+        Ok(Some(()))
+    })
+    .await?;
+    let (root, paths, request) = (root.to_path_buf(), paths.to_vec(), request.clone());
+    tokio::task::spawn_blocking(move || {
+        let run = |storage: &IndexStore| search_store(storage, &root, &paths, &request);
+        let _lock = match source {
+            ReadSource::Writer { lease, .. } => return run(&lease.session.storage),
+            ReadSource::Read(lock) => lock,
+        };
+        let Some(workspace) = read_workspace_manifest(&root, &layout)?
+            .filter(crate::domain::Workspace::index_enabled)
+        else {
+            return Ok(SearchResult {
+                unavailable: paths,
+                ..SearchResult::default()
+            });
+        };
+        let graph = workspace
+            .index()
+            .descriptor()
+            .is_some_and(IndexDescriptor::graph_indexing);
+        let lease = ReadSessionLease::open(workspace.layout().index_dir(), graph)?;
+        let result = run(lease.storage());
+        let close = lease.close();
+        let result = result?;
+        close?;
+        Ok(result)
+    })
+    .await
+    .map_err(|e| EngineError::internal(format!("Extracted search worker failed: {e}")))?
 }
 
 fn search_store(
@@ -148,13 +205,6 @@ fn search_store(
     }
     result.truncated = matcher.truncated.load(Ordering::Relaxed);
     Ok(result)
-}
-
-pub(super) fn missing_index(path: &Path) -> EngineError {
-    EngineError::not_found(format!(
-        "PDF extraction index unavailable for {}; run `zg --index` in its workspace first",
-        path.display()
-    ))
 }
 
 fn search_entity(

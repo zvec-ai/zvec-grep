@@ -626,11 +626,13 @@ fn collect_extracted_source(
     request: &LexicalSearchRequest,
     paths: &Mutex<Vec<PathBuf>>,
 ) -> Result<bool, EngineError> {
-    if !path.file_name().is_some_and(|name| {
-        crate::domain::FileFormat::from_file_name(name)
-            .iter()
-            .any(|format| format.requires_extracted_search())
-    }) {
+    if !request.defer_extracted_sources
+        || !path.file_name().is_some_and(|name| {
+            crate::domain::FileFormat::from_file_name(name)
+                .iter()
+                .any(|format| format.requires_extracted_search())
+        })
+    {
         return Ok(false);
     }
     if request.options.max_file_size_bytes != Some(0) {

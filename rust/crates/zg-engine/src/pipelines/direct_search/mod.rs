@@ -102,12 +102,21 @@ impl DirectSearchService {
             .map_or((options.rg_paths, None), |(paths, limit)| {
                 (paths, Some(limit))
             });
+        let mut index_warnings = Vec::new();
+        let defer_extracted_sources = match extracted::enabled(&root) {
+            Ok(enabled) => enabled,
+            Err(error) => {
+                index_warnings.push(extracted::index_warning(&root, error)?);
+                false
+            }
+        };
         let request = LexicalSearchRequest {
             signal: options.signal.clone(),
             root: Some(root.clone()),
             patterns: normalized.patterns,
             pattern_files: options.rg_options.pattern_files.clone(),
             paths_selected: use_entity_ranges,
+            defer_extracted_sources,
             paths,
             limit: options.limit,
             options: LexicalOptions {
@@ -134,18 +143,9 @@ impl DirectSearchService {
             &self.writers,
         )
         .await?;
-        if !request.paths_selected {
-            for path in &extracted.unavailable {
-                if request.paths.iter().any(|selected| {
-                    let selected = root.join(selected);
-                    selected == *path
-                        || (selected.is_file()
-                            && matches!((selected.canonicalize(), path.canonicalize()), (Ok(left), Ok(right)) if left == right))
-                }) {
-                    return Err(extracted::missing_index(path));
-                }
-            }
-        }
+        index_warnings.extend(extracted.warnings);
+        self.include_raw_fallback(&root, &request, &extracted.unavailable, &mut reply)
+            .await?;
         let structure_started = Instant::now();
         let enrichment = structure_file_limit.map(|file_limit| {
             enrich_lexical_matches_with_structure(
@@ -170,6 +170,9 @@ impl DirectSearchService {
         );
         if let Some(rg) = &mut result.diagnostics.rg {
             rg.unindexed_files = extracted.unavailable;
+            index_warnings.sort();
+            index_warnings.dedup();
+            rg.index_warnings = index_warnings;
         }
         if let Some(duration) = structure_duration {
             result.diagnostics.timings.push(TimingEntry {
@@ -180,6 +183,38 @@ impl DirectSearchService {
         }
         Ok(result)
     }
+
+    async fn include_raw_fallback(
+        &self,
+        root: &Path,
+        request: &LexicalSearchRequest,
+        paths: &[PathBuf],
+        reply: &mut LexicalSearchReply,
+    ) -> EngineResult<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        // These files passed the original walker filters. Reuse the ordinary
+        // matcher and binary policy, with no extraction loop.
+        let fallback = self
+            .lexical
+            .search(
+                root,
+                &LexicalSearchRequest {
+                    paths: paths.to_vec(),
+                    paths_selected: true,
+                    defer_extracted_sources: false,
+                    ..request.clone()
+                },
+            )
+            .await?;
+        reply.matches.extend(fallback.matches);
+        if fallback.coverage == LexicalCoverage::Truncated {
+            reply.coverage = LexicalCoverage::Truncated;
+            reply.diagnostics.truncated = true;
+        }
+        Ok(())
+    }
 }
 
 fn merge_extracted_items(
@@ -188,35 +223,33 @@ fn merge_extracted_items(
     extracted_truncated: bool,
     limit: Option<usize>,
 ) {
-    if !extracted_items.is_empty() || extracted_truncated {
-        result.items.extend(extracted_items);
-        result.items.sort_by(|left, right| {
-            left.relative_path.cmp(&right.relative_path).then(
-                left.range
-                    .start_byte_offset()
-                    .cmp(&right.range.start_byte_offset()),
-            )
-        });
-        let truncated = extracted_truncated
-            || result.coverage == ContextCoverage::RgTruncated
-            || limit.is_some_and(|limit| result.items.len() > limit);
-        if let Some(limit) = limit {
-            result.items.truncate(limit);
-        }
-        for (i, item) in result.items.iter_mut().enumerate() {
-            item.rank = i + 1;
-        }
-        result.coverage = if truncated {
-            ContextCoverage::RgTruncated
-        } else {
-            ContextCoverage::RgExhaustive
-        };
-        if let Some(rg) = &mut result.diagnostics.rg {
-            rg.truncated = truncated;
-        }
-        if !result.items.is_empty() {
-            result.diagnostics.empty_reason = None;
-        }
+    result.items.extend(extracted_items);
+    result.items.sort_by(|left, right| {
+        left.relative_path.cmp(&right.relative_path).then(
+            left.range
+                .start_byte_offset()
+                .cmp(&right.range.start_byte_offset()),
+        )
+    });
+    let truncated = extracted_truncated
+        || result.coverage == ContextCoverage::RgTruncated
+        || limit.is_some_and(|limit| result.items.len() > limit);
+    if let Some(limit) = limit {
+        result.items.truncate(limit);
+    }
+    for (i, item) in result.items.iter_mut().enumerate() {
+        item.rank = i + 1;
+    }
+    result.coverage = if truncated {
+        ContextCoverage::RgTruncated
+    } else {
+        ContextCoverage::RgExhaustive
+    };
+    if let Some(rg) = &mut result.diagnostics.rg {
+        rg.truncated = truncated;
+    }
+    if !result.items.is_empty() {
+        result.diagnostics.empty_reason = None;
     }
 }
 
@@ -329,6 +362,7 @@ fn context_from_lexical(
             index: None,
             rg: Some(RgDiagnostics {
                 unindexed_files: Vec::new(),
+                index_warnings: Vec::new(),
                 backend: reply.diagnostics.backend,
                 command: reply.diagnostics.command,
                 args: reply.diagnostics.args,

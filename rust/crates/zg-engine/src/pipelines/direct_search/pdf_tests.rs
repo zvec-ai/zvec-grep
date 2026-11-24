@@ -420,16 +420,25 @@ async fn pdf_rg_preserves_regex_case_context_limits_and_file_filters() {
 }
 
 #[tokio::test]
-async fn pdf_rg_requires_extraction_index_without_raw_fallback() {
+async fn pdf_rg_without_workspace_index_searches_raw_files() {
     let dir = tempfile::tempdir().expect("workspace");
     fs::write(dir.path().join("raw.pdf"), "%PDF-1.7\nneedle").expect("fixture");
     let mut request = options(dir.path(), "needle");
     request.rg_paths = vec!["raw.pdf".into()];
-    let error = DirectSearchService::new()
+    let result = DirectSearchService::new()
         .context(request)
         .await
-        .expect_err("needs index");
-    assert!(error.to_string().contains("zg --index"));
+        .expect("raw search");
+    assert_eq!(result.items.len(), 1);
+    let item = &result.items[0];
+    assert_eq!(item.content, "needle");
+    assert_eq!(item.range.start_line(), Some(2));
+    assert!(matches!(item.range, ContentRange::Text { .. }));
+    assert!(item.pdf_boxes.is_empty());
+    let diagnostics = result.diagnostics.rg.expect("rg diagnostics");
+    assert!(diagnostics.unindexed_files.is_empty());
+    assert!(diagnostics.index_warnings.is_empty());
+    assert!(!dir.path().join(".zvec-grep").exists());
 }
 
 #[tokio::test]
@@ -519,7 +528,7 @@ async fn pdf_rg_borrows_published_writer_and_excludes_failed_files() {
     let result = service
         .context(request.clone())
         .await
-        .expect("skip failed extraction");
+        .expect("search raw file after failed extraction");
     assert!(result.items.is_empty(), "old entities are not visible");
     assert_eq!(
         result
@@ -529,15 +538,32 @@ async fn pdf_rg_borrows_published_writer_and_excludes_failed_files() {
             .unindexed_files,
         [dir.path().join("manual.pdf")]
     );
-    writer.retire().await;
-    assert_eq!(
-        service
-            .context(request)
-            .await
-            .expect_err("retired writer")
-            .code(),
-        EngineError::RESOURCE_BUSY
+    request.query = Some("metadata-only".into());
+    let result = service
+        .context(request.clone())
+        .await
+        .expect("failed file fallback");
+    assert_eq!(result.items.len(), 1);
+    assert!(matches!(result.items[0].range, ContentRange::Text { .. }));
+    assert!(
+        result
+            .diagnostics
+            .rg
+            .expect("rg diagnostics")
+            .index_warnings
+            .is_empty()
     );
+    writer.retire().await;
+    let result = service.context(request).await.expect("busy index fallback");
+    assert_eq!(result.items.len(), 1);
+    assert!(matches!(result.items[0].range, ContentRange::Text { .. }));
+    let warnings = result
+        .diagnostics
+        .rg
+        .expect("rg diagnostics")
+        .index_warnings;
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("lock"), "{warnings:?}");
     writer.session.storage.close().expect("close writer");
 }
 
@@ -554,8 +580,9 @@ async fn unindexed_pdf_does_not_hide_text_or_filename_fallback_results() {
         request.file_types.clear();
         request.rg_paths = paths;
         let result = service.context(request).await.expect("valid test fixture");
-        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items.len(), 2);
         assert_eq!(result.items[0].relative_path, Path::new("README.md"));
+        assert_eq!(result.items[1].relative_path, Path::new("raw.pdf"));
         assert_eq!(
             result
                 .diagnostics
@@ -563,7 +590,7 @@ async fn unindexed_pdf_does_not_hide_text_or_filename_fallback_results() {
                 .expect("valid test fixture")
                 .unindexed_files
                 .len(),
-            1
+            0
         );
     }
     let result = crate::pipelines::path_search::lookup(
@@ -579,7 +606,7 @@ async fn unindexed_pdf_does_not_hide_text_or_filename_fallback_results() {
     let crate::api::paths::PathLookupResult::Text(result) = result else {
         panic!("literal fallback")
     };
-    assert_eq!(result.items.len(), 1);
+    assert_eq!(result.items.len(), 2);
     assert_eq!(
         result
             .diagnostics
@@ -588,7 +615,7 @@ async fn unindexed_pdf_does_not_hide_text_or_filename_fallback_results() {
             .expect("valid test fixture")
             .unindexed_files
             .len(),
-        1
+        0
     );
 }
 
@@ -615,6 +642,13 @@ async fn mixed_pdf_index_coverage_preserves_available_hits_and_propagates_cancel
             .iter()
             .any(|item| item.relative_path == Path::new("manual.pdf"))
     );
+    let raw = result
+        .items
+        .iter()
+        .find(|item| item.relative_path == Path::new("unindexed.pdf"))
+        .expect("raw fallback included");
+    assert!(matches!(raw.range, ContentRange::Text { .. }));
+    assert!(raw.pdf_boxes.is_empty());
     assert_eq!(
         result
             .diagnostics
@@ -680,6 +714,7 @@ async fn pdf_rg_checks_content_hash_when_metadata_differs() {
         .context(options(dir.path(), "Recovery"))
         .await
         .expect("valid test fixture");
+    assert_eq!(result.items.len(), 2);
     assert!(
         result
             .items
@@ -691,10 +726,106 @@ async fn pdf_rg_checks_content_hash_when_metadata_differs() {
         .context(options(dir.path(), "Recovery"))
         .await
         .expect("valid test fixture");
+    assert_eq!(result.items.len(), 2, "stale extraction remains searchable");
     assert!(
         result
             .items
             .iter()
             .all(|item| item.status == ContextItemStatus::PossiblyStale)
     );
+    assert!(
+        result
+            .items
+            .iter()
+            .all(|item| matches!(item.range, ContentRange::Pdf { .. }))
+    );
+    assert!(
+        result
+            .diagnostics
+            .rg
+            .expect("rg diagnostics")
+            .unindexed_files
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn pdf_raw_fallback_preserves_binary_policy_filters_and_limits() {
+    let dir = fixture();
+    fs::write(
+        dir.path().join("0raw.pdf"),
+        "%PDF-1.7\nRecovery raw\nRecovery again\n",
+    )
+    .expect("raw PDF");
+    fs::write(
+        dir.path().join("binary.pdf"),
+        b"%PDF-1.7\n\0Recovery binary\n",
+    )
+    .expect("binary PDF");
+    let service = DirectSearchService::new();
+    let mut request = options(dir.path(), "Recovery");
+    request.file_types.clear();
+    request.limit = Some(1);
+    let result = service.context(request).await.expect("merged limit");
+    assert_eq!(result.items.len(), 1);
+    assert_eq!(result.items[0].relative_path, Path::new("0raw.pdf"));
+    assert_eq!(result.items[0].rank, 1);
+    assert_eq!(result.coverage, ContextCoverage::RgTruncated);
+
+    let mut request = options(dir.path(), "Recovery");
+    request.globs = vec!["!manual.pdf".into()];
+    request.rg_options.max_count = Some(1);
+    let result = service.context(request).await.expect("filtered fallback");
+    assert_eq!(result.items.len(), 1);
+    assert_eq!(result.items[0].relative_path, Path::new("0raw.pdf"));
+
+    let mut request = options(dir.path(), "Recovery");
+    request.rg_paths = vec!["binary.pdf".into()];
+    assert!(
+        service
+            .context(request.clone())
+            .await
+            .expect("binary skipped")
+            .items
+            .is_empty()
+    );
+    request.rg_options.text = true;
+    let result = service.context(request).await.expect("explicit text mode");
+    assert_eq!(result.items.len(), 1);
+    assert!(matches!(result.items[0].range, ContentRange::Text { .. }));
+    assert!(result.items[0].content.contains("Recovery binary"));
+}
+
+#[tokio::test]
+async fn unreadable_pdf_index_warns_and_preserves_raw_and_ordinary_matches() {
+    for corrupt_manifest in [true, false] {
+        let dir = fixture();
+        let layout = WorkspaceLayout::new(dir.path().join(".zvec-grep")).expect("layout");
+        fs::write(dir.path().join("manual.pdf"), "%PDF-1.7\nRecovery raw").expect("raw PDF");
+        if corrupt_manifest {
+            fs::write(layout.manifest_path(), "not json").expect("corrupt manifest");
+        } else {
+            fs::remove_dir_all(layout.index_dir()).expect("remove index data");
+        }
+        let mut request = options(dir.path(), "Recovery");
+        request.file_types.clear();
+        let result = DirectSearchService::new()
+            .context(request)
+            .await
+            .expect("raw fallback");
+        assert_eq!(result.items.len(), 2);
+        assert_eq!(result.items[0].relative_path, Path::new("a.md"));
+        assert_eq!(result.items[1].relative_path, Path::new("manual.pdf"));
+        assert!(
+            result
+                .items
+                .iter()
+                .all(|item| matches!(item.range, ContentRange::Text { .. }))
+        );
+        let diagnostics = result.diagnostics.rg.expect("rg diagnostics");
+        assert_eq!(diagnostics.index_warnings.len(), 1);
+        assert!(diagnostics.index_warnings[0].contains("Cannot read extraction index"));
+        assert!(diagnostics.index_warnings[0].contains("raw files"));
+        assert!(!diagnostics.index_warnings[0].contains("possibly_stale"));
+    }
 }

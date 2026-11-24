@@ -15,6 +15,9 @@ pub(crate) struct LexicalSearchRequest {
     /// An empty preselected file list means no files, rather than the whole root.
     #[serde(skip)]
     pub paths_selected: bool,
+    /// Let the coordinator search extracted sources through an available index.
+    #[serde(skip)]
+    pub defer_extracted_sources: bool,
     pub limit: Option<usize>,
     pub options: LexicalOptions,
 }
@@ -54,7 +57,7 @@ pub(crate) struct LexicalSearchReply {
     pub root: PathBuf,
     pub coverage: LexicalCoverage,
     pub matches: Vec<LexicalMatch>,
-    /// Sources whose searchable text must be read from indexed entities.
+    /// Sources deferred to the coordinator for indexed text or raw fallback.
     pub extracted_paths: Vec<PathBuf>,
     pub diagnostics: LexicalDiagnostics,
 }

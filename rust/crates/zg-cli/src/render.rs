@@ -285,14 +285,17 @@ pub(crate) fn write_unindexed_warning(
     writer: &mut impl Write,
     result: &ContextResult,
 ) -> io::Result<()> {
-    if let Some(rg) = &result.diagnostics.rg
-        && !rg.unindexed_files.is_empty()
-    {
-        writeln!(
-            writer,
-            "Warning: skipped {} files without an extraction index; run `zg --index` in their workspace to search them.",
-            rg.unindexed_files.len()
-        )?;
+    if let Some(rg) = &result.diagnostics.rg {
+        if !rg.unindexed_files.is_empty() {
+            writeln!(
+                writer,
+                "Warning: searching {} files as raw content because no usable extraction index is available; run `zg --index` in their workspace to search extracted text.",
+                rg.unindexed_files.len()
+            )?;
+        }
+        for warning in &rg.index_warnings {
+            writeln!(writer, "Warning: {warning}")?;
+        }
     }
     Ok(())
 }
