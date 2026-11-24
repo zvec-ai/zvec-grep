@@ -317,6 +317,7 @@ same pool. Direct mode sizes the pool from C. In both modes,
 `ZVEC_GREP_LLAMA_THREADS_PER_CONTEXT` can fix CPU threads per context;
 otherwise the default is half the available logical
 CPUs divided by pool capacity, floored and at least one. CUDA/Metal use one CPU
-helper thread per context. The runner records both llama.cpp environment settings
-and rejects resume with changed settings. Results from the earlier CPU-thread-
-budget implementation are not comparable at the same C without matching resources.
+helper thread per context. Resume checks include `--server-concurrency` and
+`ZVEC_GREP_LLAMA_THREADS_PER_CONTEXT`, excluding the unused ambient context override.
+Results from the earlier CPU-thread-budget implementation are not comparable at
+the same C without matching resources.

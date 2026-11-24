@@ -38,6 +38,11 @@ impl ModelComputeRuntime {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_test(capacity: usize) -> Self {
+        Self::with_capacity(capacity)
+    }
+
     pub(crate) async fn run<F, T>(&self, task: F) -> Result<T, ModelError>
     where
         F: FnOnce() -> T + Send + 'static,

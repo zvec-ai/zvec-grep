@@ -4,11 +4,11 @@ use std::{
     num::NonZeroU32,
     path::{Path, PathBuf},
     sync::{
-        Arc, Condvar, Mutex as StdMutex, MutexGuard as StdMutexGuard, PoisonError,
+        Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard, PoisonError,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
-    thread::{self, JoinHandle},
+    thread,
     time::Duration,
 };
 
@@ -103,8 +103,7 @@ struct LlamaContextPool {
     model: Arc<LlamaModel>,
     backend: LlamaExecutionBackend,
     resources: Arc<LlamaResources>,
-    state: StdMutex<LlamaContextPoolState>,
-    changed: Condvar,
+    state: Arc<StdMutex<LlamaContextPoolState>>,
     completion: Arc<pool::CompletionSignal>,
 }
 
@@ -112,7 +111,6 @@ struct LlamaContextWorker {
     busy: AtomicBool,
     failed: AtomicBool,
     sender: mpsc::Sender<LlamaWorkerMessage>,
-    join: StdMutex<Option<JoinHandle<()>>>,
 }
 
 enum LlamaWorkerMessage {
@@ -163,10 +161,9 @@ impl LlamaContextProfile {
     }
 }
 
-struct LlamaWorkerLease<'a> {
-    pool: &'a LlamaContextPool,
+struct LlamaWorkerLease {
+    operation: Arc<pool::LlamaOperationLease>,
     worker: Arc<LlamaContextWorker>,
-    operation_id: usize,
 }
 
 impl LlamaCppEmbeddingModel {
@@ -362,70 +359,50 @@ impl EmbeddingModel for LlamaCppEmbeddingModel {
         options: EmbeddingOptions,
     ) -> Result<EmbeddingResult, ModelError> {
         validate_inputs(&self.info, inputs)?;
-        let on_progress = options.on_progress.clone();
+        check_cancelled(options.signal.as_ref())?;
+        let texts = inputs
+            .iter()
+            .map(|input| {
+                let text = input_text(input)?;
+                if text.contains('\0') {
+                    return Err(ModelError::invalid_argument(
+                        "llama.cpp embedding input must not contain NUL bytes",
+                    ));
+                }
+                Ok(format_text(&text, options.purpose, self.entry.format))
+            })
+            .collect::<Result<Vec<_>, ModelError>>()?;
         let model = self
             .ensure_loaded(
-                options.on_progress,
+                options.on_progress.clone(),
                 options.signal.as_ref(),
                 options.execution_lease.clone(),
             )
             .await
             .map_err(|error| embed_error(self.entry, error))?;
-        let purpose = options.purpose;
-        let texts = inputs
-            .iter()
-            .map(|input| Ok(format_text(&input_text(input)?, purpose, self.entry.format)))
-            .collect::<Result<Vec<_>, ModelError>>()?;
-        let entry = self.entry;
-        let signal = options.signal;
-        let execution_concurrency = options.execution_concurrency;
-        let scope = options.execution_scope;
-        let scope_for_first_attempt = scope.clone();
-        let execution_lease = options.execution_lease;
-        let lease_for_first_attempt = execution_lease.clone();
-        let loaded = Arc::clone(&model);
-        let texts_for_first_attempt = texts.clone();
-        let signal_for_first_attempt = signal.clone();
         let first = self
-            .compute_runtime
-            .run(move || {
-                let _lease = lease_for_first_attempt;
-                embed_texts(
-                    &loaded,
-                    &texts_for_first_attempt,
-                    entry,
-                    execution_concurrency,
-                    scope_for_first_attempt,
-                    signal_for_first_attempt.as_ref(),
-                )
-            })
-            .await?;
+            .embed_texts(Arc::clone(&model), texts.clone(), &options)
+            .await;
         let result = match first {
             Ok(result) => result,
             Err(error) if should_fallback_to_cpu(model.gpu, &error) => {
-                // Cancellation can arrive while native inference is finishing.
-                // It must not replace the shared GPU runtime with a CPU model.
-                check_cancelled(signal.as_ref()).map_err(|error| embed_error(entry, error))?;
+                // Cancellation must never replace a shared GPU runtime.
+                check_cancelled(options.signal.as_ref())
+                    .map_err(|error| embed_error(self.entry, error))?;
                 let cpu = self
-                    .fallback_to_cpu(model, on_progress, &error, execution_lease.clone())
+                    .fallback_to_cpu(
+                        model,
+                        options.on_progress.clone(),
+                        &error,
+                        options.execution_lease.clone(),
+                    )
                     .await
-                    .map_err(|fallback| embed_error(entry, fallback))?;
-                self.compute_runtime
-                    .run(move || {
-                        let _lease = execution_lease;
-                        embed_texts(
-                            &cpu,
-                            &texts,
-                            entry,
-                            execution_concurrency,
-                            scope,
-                            signal.as_ref(),
-                        )
-                    })
-                    .await?
-                    .map_err(|error| embed_error(entry, error))?
+                    .map_err(|fallback| embed_error(self.entry, fallback))?;
+                self.embed_texts(cpu, texts, &options)
+                    .await
+                    .map_err(|error| embed_error(self.entry, error))?
             }
-            Err(error) => return Err(embed_error(entry, error)),
+            Err(error) => return Err(embed_error(self.entry, error)),
         };
         validate_result(&self.info, inputs.len(), &result)?;
         Ok(result)
@@ -433,7 +410,7 @@ impl EmbeddingModel for LlamaCppEmbeddingModel {
 }
 
 fn should_fallback_to_cpu(gpu: bool, error: &ModelError) -> bool {
-    gpu && error.code() == crate::EngineError::INTERNAL
+    gpu && error.is_native_backend_failure() && error.code() == crate::EngineError::INTERNAL
 }
 
 fn load_model_with_fallback(
@@ -605,14 +582,44 @@ fn report_warning(
     }
 }
 
-fn embed_texts(
+impl LlamaCppEmbeddingModel {
+    async fn embed_texts(
+        &self,
+        loaded: Arc<LoadedLlamaModel>,
+        texts: Vec<String>,
+        options: &EmbeddingOptions,
+    ) -> Result<EmbeddingResult, ModelError> {
+        let model = Arc::clone(&loaded);
+        let signal = options.signal.clone();
+        let execution_lease = options.execution_lease.clone();
+        let entry = self.entry;
+        let (prepared, context_size) = self
+            .compute_runtime
+            .run(move || {
+                let _lease = execution_lease;
+                prepare_texts(&model, &texts, entry, signal.as_ref())
+            })
+            .await??;
+        loaded
+            .contexts
+            .run_with_lease(
+                prepared,
+                context_size,
+                options.execution_concurrency,
+                options.execution_scope.clone(),
+                options.signal.as_ref(),
+                options.execution_lease.clone(),
+            )
+            .await
+    }
+}
+
+fn prepare_texts(
     loaded: &LoadedLlamaModel,
     texts: &[String],
     entry: LlamaCppConfig,
-    execution_concurrency: usize,
-    scope: Option<Arc<()>>,
     signal: Option<&CancellationToken>,
-) -> Result<EmbeddingResult, ModelError> {
+) -> Result<(PreparedLlamaBatch, u32), ModelError> {
     check_cancelled(signal)?;
     let context_size = entry
         .context_size
@@ -645,13 +652,7 @@ fn embed_texts(
         }
         inputs.push(PreparedLlamaInput { index, tokens });
     }
-    loaded.contexts.run(
-        PreparedLlamaBatch { inputs, truncated },
-        context_size_u32,
-        execution_concurrency,
-        scope,
-        signal,
-    )
+    Ok((PreparedLlamaBatch { inputs, truncated }, context_size_u32))
 }
 
 fn llama_context_worker(
@@ -740,7 +741,9 @@ fn create_llama_context(
             llama_context_params(&architecture, profile),
         )
         .map_err(|error| {
-            ModelError::internal("Unable to create llama.cpp embedding context").with_cause(error)
+            ModelError::internal("Unable to create llama.cpp embedding context")
+                .with_cause(error)
+                .native_backend()
         })
 }
 
@@ -783,7 +786,9 @@ fn run_llama_worker_job(
             ModelError::internal("Unable to prepare llama.cpp embedding batch").with_cause(error)
         })?;
         context.decode(&mut batch).map_err(|error| {
-            ModelError::internal("llama.cpp embedding inference failed").with_cause(error)
+            ModelError::internal("llama.cpp embedding inference failed")
+                .with_cause(error)
+                .native_backend()
         })?;
         // Reading the embedding synchronizes native execution. Keep the worker
         // lease until the output is copied, including cancellation paths.
@@ -791,7 +796,9 @@ fn run_llama_worker_job(
             .embeddings_seq_ith(0)
             .map(<[f32]>::to_vec)
             .map_err(|error| {
-                ModelError::internal("Unable to read llama.cpp embedding output").with_cause(error)
+                ModelError::internal("Unable to read llama.cpp embedding output")
+                    .with_cause(error)
+                    .native_backend()
             })
     })
 }

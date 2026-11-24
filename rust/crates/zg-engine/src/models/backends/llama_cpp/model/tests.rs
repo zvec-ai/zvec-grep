@@ -39,16 +39,49 @@ fn cancelled_model_preparation_is_rejected() {
 
 #[test]
 fn only_gpu_backend_failures_trigger_cpu_fallback() {
-    let backend_failure = ModelError::internal("native backend failed");
+    let backend_failure = ModelError::internal("native backend failed").native_backend();
     assert!(should_fallback_to_cpu(true, &backend_failure));
     assert!(!should_fallback_to_cpu(false, &backend_failure));
     for error in [
         ModelError::cancelled("operation cancelled"),
+        ModelError::internal("tokenizer failure"),
+        ModelError::internal("context worker stopped"),
         ModelError::invalid_argument("invalid input"),
         ModelError::unsupported("unsupported input"),
         ModelError::storage_failure("model storage unavailable"),
     ] {
         assert!(!should_fallback_to_cpu(true, &error), "{error:?}");
+    }
+}
+
+#[tokio::test]
+async fn nul_input_is_rejected_without_loading_or_replacing_the_runtime() {
+    let cache = tempfile::tempdir().expect("isolated cache");
+    let model = LlamaCppEmbeddingModel::new(
+        entry("local/embeddinggemma-300m"),
+        ModelConfig {
+            cache_dir: Some(cache.path().to_owned()),
+            device: Some(Device::Metal),
+            ..ModelConfig::default()
+        },
+        ModelComputeRuntime::for_test(2),
+        test_resources(8),
+    );
+    for concurrency in [1, 8] {
+        let error = model
+            .embed(
+                &[vec![Content::Text("invalid\0input".to_owned())]],
+                EmbeddingOptions {
+                    execution_concurrency: concurrency,
+                    ..EmbeddingOptions::default()
+                },
+            )
+            .await
+            .expect_err("invalid input");
+        assert_eq!(error.code(), crate::EngineError::INVALID_ARGUMENT);
+        assert!(!should_fallback_to_cpu(true, &error));
+        assert!(model.state.lock().await.is_none());
+        assert_eq!(std::fs::read_dir(cache.path()).expect("cache").count(), 0);
     }
 }
 
@@ -406,7 +439,7 @@ async fn embeddinggemma_batches_preserve_vectors_and_context_limits(device: Devi
             _ => LlamaExecutionBackend::OtherGpu,
         }
     );
-    assert_context_worker_ownership(&loaded);
+    assert_context_worker_ownership(&loaded).await;
     let inputs = gemma_batch_fixture(&loaded.model);
     assert_eq!(inputs[4].tokens.len(), 2_048);
     let prepared = || PreparedLlamaBatch {
@@ -430,17 +463,19 @@ async fn embeddinggemma_batches_preserve_vectors_and_context_limits(device: Devi
                 None,
                 None,
             )
+            .await
             .expect("individual inference");
         expected.push(result.vectors[0].clone());
     }
     assert_embedding_close(&expected[0], &expected[5]);
     if loaded.gpu {
-        assert_gemma_sequence_isolation(&loaded, &inputs);
+        assert_gemma_sequence_isolation(&loaded, &inputs).await;
     }
     for concurrency in [1, 2, 4, 8] {
         let result = loaded
             .contexts
             .run(prepared(), 2_048, concurrency, None, None)
+            .await
             .expect("batched inference");
         assert_eq!(result.truncated, [4]);
         for (index, (actual, expected)) in result.vectors.iter().zip(&expected).enumerate() {
@@ -463,10 +498,11 @@ async fn embeddinggemma_batches_preserve_vectors_and_context_limits(device: Devi
                 None,
                 None,
             )
+            .await
             .expect("reuse after batch");
         assert_embedding_close(&result.vectors[0], &expected[0]);
     }
-    assert_gemma_batch_failure_recovery(&loaded, &inputs, &expected);
+    assert_gemma_batch_failure_recovery(&loaded, &inputs, &expected).await;
 }
 
 fn assert_gemma_context_limit(
@@ -485,11 +521,12 @@ fn assert_gemma_context_limit(
     assert_eq!(state.workers.len(), concurrency.min(inputs.len()));
 }
 
-fn assert_context_worker_ownership(loaded: &LoadedLlamaModel) {
+async fn assert_context_worker_ownership(loaded: &LoadedLlamaModel) {
     let operation = loaded.contexts.register_operation(1, None);
     let first = loaded
         .contexts
         .lease_worker(&operation, None)
+        .await
         .expect("first lease");
     assert!(first.worker.busy.load(Ordering::Acquire));
     let signal = CancellationToken::new();
@@ -498,6 +535,7 @@ fn assert_context_worker_ownership(loaded: &LoadedLlamaModel) {
         loaded
             .contexts
             .lease_worker(&operation, Some(&signal))
+            .await
             .is_err()
     );
     assert!(first.worker.busy.load(Ordering::Acquire));
@@ -506,11 +544,12 @@ fn assert_context_worker_ownership(loaded: &LoadedLlamaModel) {
     let next = loaded
         .contexts
         .lease_worker(&operation, None)
+        .await
         .expect("released worker");
     assert!(Arc::ptr_eq(&original, &next.worker));
 }
 
-fn assert_cpu_two_context_pool(
+async fn assert_cpu_two_context_pool(
     loaded: &LoadedLlamaModel,
     inputs: &[PreparedLlamaInput],
     context_size: u32,
@@ -534,9 +573,11 @@ fn assert_cpu_two_context_pool(
         );
         let expected = fresh
             .run(prepared(), context_size, concurrency / 2, None, None)
+            .await
             .expect("same-T fresh CPU oracle");
         let result = pool
             .run(prepared(), context_size, concurrency, None, None)
+            .await
             .expect("two-context CPU inference");
         assert_eq!(result.vectors.len(), inputs.len());
         for (actual, expected) in result.vectors.iter().zip(&expected.vectors) {
@@ -544,13 +585,23 @@ fn assert_cpu_two_context_pool(
         }
         {
             let operation = pool.register_operation(2, None);
-            let first = pool.lease_worker(&operation, None).expect("first context");
-            let second = pool.lease_worker(&operation, None).expect("second context");
+            let first = pool
+                .lease_worker(&operation, None)
+                .await
+                .expect("first context");
+            let second = pool
+                .lease_worker(&operation, None)
+                .await
+                .expect("second context");
             assert!(!Arc::ptr_eq(&first.worker, &second.worker));
             assert_eq!(lock_llama_mutex(&pool.state).workers.len(), 2);
             let cancelled = CancellationToken::new();
             cancelled.cancel();
-            assert!(pool.lease_worker(&operation, Some(&cancelled)).is_err());
+            assert!(
+                pool.lease_worker(&operation, Some(&cancelled))
+                    .await
+                    .is_err()
+            );
             assert!(first.worker.busy.load(Ordering::Acquire));
             assert!(second.worker.busy.load(Ordering::Acquire));
         }
@@ -564,6 +615,7 @@ fn assert_cpu_two_context_pool(
                 None,
                 Some(&cancelled),
             )
+            .await
             .expect_err("cancelled request");
         assert_eq!(error.code(), crate::EngineError::CANCELLED);
         let mut invalid = inputs[..2].to_vec();
@@ -579,6 +631,7 @@ fn assert_cpu_two_context_pool(
                 None,
                 None
             )
+            .await
             .is_err()
         );
         assert!(
@@ -589,6 +642,7 @@ fn assert_cpu_two_context_pool(
         );
         let recovered = pool
             .run(prepared(), context_size, concurrency, None, None)
+            .await
             .expect("recovery after cancellation and invalid tokens");
         for (actual, expected) in recovered.vectors.iter().zip(&expected.vectors) {
             assert_embedding_close(actual, expected);
@@ -621,7 +675,7 @@ async fn cached_embeddinggemma_cpu_two_contexts_preserve_vectors_and_recover() {
         .into_iter()
         .take(4)
         .collect::<Vec<_>>();
-    assert_cpu_two_context_pool(&loaded, &inputs, 2_048);
+    assert_cpu_two_context_pool(&loaded, &inputs, 2_048).await;
 }
 
 fn gemma_batch_fixture(model: &LlamaModel) -> Vec<PreparedLlamaInput> {
@@ -672,12 +726,12 @@ fn assert_embedding_close(actual: &[f32], expected: &[f32]) {
     );
 }
 
-fn assert_gemma_sequence_isolation(loaded: &LoadedLlamaModel, inputs: &[PreparedLlamaInput]) {
+async fn assert_gemma_sequence_isolation(loaded: &LoadedLlamaModel, inputs: &[PreparedLlamaInput]) {
     for target in [0, 6] {
         let mut pair = vec![inputs[target].clone(), inputs[1].clone()];
         pair[0].index = 0;
         pair[1].index = 1;
-        let infer = |inputs| {
+        let infer = async |inputs| {
             loaded
                 .contexts
                 .run(
@@ -690,12 +744,13 @@ fn assert_gemma_sequence_isolation(loaded: &LoadedLlamaModel, inputs: &[Prepared
                     None,
                     None,
                 )
+                .await
                 .expect("sequence isolation inference")
                 .vectors
         };
-        let before = infer(pair.clone());
+        let before = infer(pair.clone()).await;
         pair[1].tokens.reverse();
-        let after = infer(pair);
+        let after = infer(pair).await;
         // Changing an unrelated sequence must not affect the target embedding.
         let difference = before[0]
             .iter()
@@ -708,7 +763,7 @@ fn assert_gemma_sequence_isolation(loaded: &LoadedLlamaModel, inputs: &[Prepared
     }
 }
 
-fn assert_gemma_batch_failure_recovery(
+async fn assert_gemma_batch_failure_recovery(
     loaded: &LoadedLlamaModel,
     inputs: &[PreparedLlamaInput],
     expected: &[Vec<f32>],
@@ -723,6 +778,7 @@ fn assert_gemma_batch_failure_recovery(
         loaded
             .contexts
             .run(prepared(), 2_048, 3, None, Some(&signal))
+            .await
             .is_err()
     );
     // Invalid native tokens return an error without poisoning the leased context.
@@ -742,11 +798,13 @@ fn assert_gemma_batch_failure_recovery(
                 None,
                 None
             )
+            .await
             .is_err()
     );
     let result = loaded
         .contexts
         .run(prepared(), 2_048, 3, None, None)
+        .await
         .expect("recover after failure");
     for (actual, expected) in result.vectors.iter().zip(expected) {
         assert_embedding_close(actual, expected);
@@ -810,6 +868,7 @@ async fn embeddinggemma_handles_long_inputs_and_reuse(device: Device) {
         loaded
             .contexts
             .run(prepared(257), 2_048, 4, None, Some(&cancelled))
+            .await
             .is_err()
     );
     let mut first: Option<Vec<f32>> = None;
@@ -819,6 +878,7 @@ async fn embeddinggemma_handles_long_inputs_and_reuse(device: Device) {
         let result = loaded
             .contexts
             .run(prepared(length), 2_048, 4, None, None)
+            .await
             .expect("full-sequence encoder inference");
         assert!(result.truncated.is_empty());
         assert_eq!(result.vectors.len(), 1);
@@ -1092,4 +1152,98 @@ async fn cached_qwen3_runs_real_llama_cpp_inference() {
     assert_eq!(result.vectors[0].len(), 1_024);
     assert!(result.vectors[0].iter().all(|value| value.is_finite()));
     assert!(result.truncated.is_empty());
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "requires cached Gemma/Qwen GGUFs and Metal; validates shared GPU state after invalid input"]
+async fn cached_metal_invalid_input_preserves_shared_gpu_runtime() {
+    invalid_input_preserves_shared_gpu_runtime(Device::Metal).await;
+}
+
+#[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "cuda"))]
+#[tokio::test]
+#[ignore = "requires cached Gemma/Qwen GGUFs and CUDA; validates shared GPU state after invalid input"]
+async fn cached_cuda_invalid_input_preserves_shared_gpu_runtime() {
+    invalid_input_preserves_shared_gpu_runtime(Device::Cuda).await;
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(any(target_os = "linux", target_os = "windows"), feature = "cuda")
+))]
+async fn invalid_input_preserves_shared_gpu_runtime(device: Device) {
+    init_llama_test_logs();
+    let cache = env::var_os("ZVEC_GREP_TEST_MODEL_CACHE")
+        .map(PathBuf::from)
+        .expect("model cache");
+    for reference in ["local/embeddinggemma-300m", "local/qwen3-embedding-0.6b"] {
+        let model = LlamaCppEmbeddingModel::new(
+            entry(reference),
+            ModelConfig {
+                cache_dir: Some(cache.clone()),
+                device: Some(device),
+                ..ModelConfig::default()
+            },
+            ModelComputeRuntime::for_test(2),
+            test_resources(8),
+        );
+        let original = model
+            .ensure_loaded(None, None, None)
+            .await
+            .expect("GPU model");
+        assert!(original.gpu, "fixture must actually use GPU");
+        let inputs = vec![vec![Content::Text("find authentication middleware".to_owned())]; 2];
+        let mut expected: Option<Vec<f32>> = None;
+        for concurrency in [1, 8, 1] {
+            let error = model
+                .embed(
+                    &[vec![Content::Text("bad\0input".to_owned())]],
+                    EmbeddingOptions {
+                        execution_concurrency: concurrency,
+                        ..EmbeddingOptions::default()
+                    },
+                )
+                .await
+                .expect_err("invalid input");
+            assert_eq!(error.code(), crate::EngineError::INVALID_ARGUMENT);
+            let cancelled = CancellationToken::new();
+            cancelled.cancel();
+            assert_eq!(
+                model
+                    .embed(
+                        &inputs,
+                        EmbeddingOptions {
+                            execution_concurrency: concurrency,
+                            signal: Some(cancelled),
+                            ..EmbeddingOptions::default()
+                        }
+                    )
+                    .await
+                    .expect_err("cancelled input")
+                    .code(),
+                crate::EngineError::CANCELLED
+            );
+            let result = model
+                .embed(
+                    &inputs,
+                    EmbeddingOptions {
+                        execution_concurrency: concurrency,
+                        ..EmbeddingOptions::default()
+                    },
+                )
+                .await
+                .expect("valid request after invalid input");
+            let current = model.state.lock().await.clone().expect("cached runtime");
+            assert!(current.gpu);
+            assert!(
+                Arc::ptr_eq(&original, &current),
+                "input errors must not replace the shared GPU model"
+            );
+            if let Some(expected) = &expected {
+                assert_embedding_close(&result.vectors[0], expected);
+            }
+            expected = Some(result.vectors[0].clone());
+        }
+    }
 }

@@ -269,6 +269,12 @@ class WorkflowTests(unittest.TestCase):
             self.assertFalse((folder / "result.json").exists())
 
     def test_resume_preserves_failed_rounds_and_rejects_configuration_changes(self):
+        self._check_resume_configuration(None)
+
+    def test_server_resume_preserves_failed_rounds_and_rejects_configuration_changes(self):
+        self._check_resume_configuration(4)
+
+    def _check_resume_configuration(self, server_concurrency):
         info = dict(binary_sha256="binary",source_sha256={"source":"hash"},cargo_lock_sha256="lock",
                     features=[],build_profile={},rustc="rustc",build_environment={},ort={},machine={})
         models = [dict(model="local/test",backend="model2vec",max_input_tokens=32,max_batch_size=1)]
@@ -277,6 +283,8 @@ class WorkflowTests(unittest.TestCase):
             base = ["suite","--build-json",str(root/"build"),"--cache",str(root/"cache"),
                     "--output",str(root/"results"),"--devices","cpu","--embedding-concurrency","1",
                     "--lengths","32","--batch-sizes","1","--cooldown","0"]
+            if server_concurrency is not None:
+                base += ["--server-concurrency",str(server_concurrency)]
             def fake_run(args,budget,env,info):
                 self.assertEqual(args.rounds,1)
                 case = dict(model=args.model,device=args.device,budget=budget,
@@ -293,8 +301,8 @@ class WorkflowTests(unittest.TestCase):
                 publish_round(dest, record, [], [], {})
                 return False
             with patch.object(suite,"environment",return_value=({},info)),patch.object(suite,"inventory",return_value=models),patch.object(suite,"run",side_effect=fake_run) as run,patch("builtins.print"):
-                for _ in range(2):
-                    with patch.object(sys,"argv",base+["--smoke"]),self.assertRaises(SystemExit) as caught:
+                for contexts in ("1", "8"):
+                    with patch.dict(os.environ,{"ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM":contexts}),patch.object(sys,"argv",base+["--smoke"]),self.assertRaises(SystemExit) as caught:
                         suite.main()
                     self.assertEqual(caught.exception.code,1)
                 self.assertEqual(run.call_count,1)
@@ -310,13 +318,14 @@ class WorkflowTests(unittest.TestCase):
 
                 changed_length = list(base)
                 changed_length[changed_length.index("--lengths")+1] = "16"
-                for command in (base,changed_length+["--smoke"],base+["--smoke","--ort-thread-budget","2"]):
+                for command in (base,changed_length+["--smoke"],base+["--smoke","--ort-thread-budget","2"],
+                                base+["--smoke","--server-concurrency","2"]):
                     with patch.object(sys,"argv",command),self.assertRaisesRegex(RuntimeError,"configuration changed"):
                         suite.main()
-                for name in ("ZVEC_GREP_LLAMA_THREADS_PER_CONTEXT", "ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM"):
-                    changed = "2" if os.environ.get(name) != "2" else "1"
-                    with patch.dict(os.environ,{name:changed}),patch.object(sys,"argv",base+["--smoke"]),self.assertRaisesRegex(RuntimeError,"configuration changed"):
-                        suite.main()
+                name = "ZVEC_GREP_LLAMA_THREADS_PER_CONTEXT"
+                changed = "2" if os.environ.get(name) != "2" else "1"
+                with patch.dict(os.environ,{name:changed}),patch.object(sys,"argv",base+["--smoke"]),self.assertRaisesRegex(RuntimeError,"configuration changed"):
+                    suite.main()
                 info["source_sha256"]["source"] = "changed"
                 with patch.object(sys,"argv",base+["--smoke"]),self.assertRaisesRegex(RuntimeError,"configuration changed"):
                     suite.main()

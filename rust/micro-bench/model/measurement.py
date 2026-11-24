@@ -74,7 +74,7 @@ def experiment_config(args, info, models):
                     ("OMP_NUM_THREADS", "OMP_THREAD_LIMIT", "OMP_DYNAMIC", "OMP_WAIT_POLICY", "KMP_BLOCKTIME",
                      "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
                      "RAYON_NUM_THREADS", "TOKENIZERS_PARALLELISM", "CUDA_VISIBLE_DEVICES",
-                     "ZVEC_GREP_LLAMA_THREADS_PER_CONTEXT", "ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM")})
+                     "ZVEC_GREP_LLAMA_THREADS_PER_CONTEXT")})
 
 
 def resource_summary(samples, logical_cpus):

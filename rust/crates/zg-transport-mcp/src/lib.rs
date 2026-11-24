@@ -1025,8 +1025,12 @@ pub struct IndexInput {
     #[serde(rename = "follow", alias = "followSymlinks")]
     #[schemars(extend("type" = "boolean"))]
     pub follow_symlinks: Option<bool>,
-    /// Index-only concurrency: ORT sessions, llama.cpp contexts, or remote requests. ORT direct mode sets the session count. In server mode, limits this operation's session use within the startup-configured pool; omitted uses pool capacity.
-    /// Must be positive. ORT caps requests above pool capacity; it never resizes server pools or changes their shared CPU thread budget. llama.cpp is capped at eight.
+    /// Positive index-only concurrency: llama.cpp contexts, ORT sessions, or remote requests.
+    /// Direct mode sizes local pools from this value; ORT caps sessions to hardware concurrency.
+    /// Server requests are capped by startup capacity without resizing pools or changing threads.
+    /// llama.cpp server capacity: `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM` (default 1).
+    /// Omitted values use `ZVEC_GREP_EMBEDDING_CONCURRENCY`, then (llama.cpp only)
+    /// `ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM`, then backend defaults; never persisted.
     #[schemars(range(min = 1), extend("type" = "integer"))]
     pub embedding_concurrency: Option<usize>,
     /// Include bounded skipped-file diagnostics after completion.
