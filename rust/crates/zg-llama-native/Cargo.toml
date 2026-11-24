@@ -11,16 +11,8 @@ publish.workspace = true
 libloading = "0.8.9"
 llama-cpp-sys-2.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
-libc = "0.2.189"
-
 [dev-dependencies]
 tempfile.workspace = true
-
-[[test]]
-name = "metal_startup"
-# libtest starts worker threads before calling tests; exercise real process startup.
-harness = false
 
 # The engine retains the workspace's unsafe-code prohibition. This small FFI
 # boundary uses the exact same sys revision and registry as llama-cpp-2.

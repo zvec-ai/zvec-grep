@@ -4556,7 +4556,6 @@ dependencies = [
  "zg-daemon",
  "zg-daemon-protocol",
  "zg-engine",
- "zg-llama-native",
  "zg-testkit",
  "zvec-rust",
  "zvec-rust-build",
@@ -4709,7 +4708,6 @@ dependencies = [
 name = "zg-llama-native"
 version = "0.3.1"
 dependencies = [
- "libc",
  "libloading 0.8.9",
  "llama-cpp-sys-2",
  "tempfile",

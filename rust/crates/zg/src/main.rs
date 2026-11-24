@@ -179,7 +179,8 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
     }
     let lexical_only = matches!(&plan, CliPlan::Files { .. })
         || matches!(&plan, CliPlan::Query { request, .. } if request.rg);
-    if !lexical_only {
+    #[cfg(target_os = "macos")]
+    if may_initialize_metal(&plan) {
         install_darwin_metal_residency_mitigation()?;
     }
     // Emit after a possible re-exec so macOS prints each warning only once.
@@ -239,25 +240,73 @@ fn execute_plan_with_runtime(
 }
 
 #[cfg(target_os = "macos")]
+fn may_initialize_metal(plan: &CliPlan) -> bool {
+    use zg_engine::api::context::options::{ContextRouteMode, RefreshPolicy};
+
+    match plan {
+        CliPlan::Query {
+            mode,
+            request,
+            path_lookup,
+            prompt_for_missing_index,
+            ..
+        } => {
+            if *mode == ClientMode::Server || *path_lookup || request.rg {
+                return false;
+            }
+            // Positional and hybrid queries both include a vector route. Background
+            // refresh becomes off when auto mode falls back to a direct query.
+            let read_only_fts = request.query.is_none()
+                && request.queries.is_empty()
+                && !request.routes.is_empty()
+                && request
+                    .routes
+                    .iter()
+                    .all(|route| route.mode == ContextRouteMode::Fts)
+                && matches!(
+                    request.refresh,
+                    Some(RefreshPolicy::Off | RefreshPolicy::Background)
+                );
+            *prompt_for_missing_index || !read_only_fts
+        }
+        CliPlan::Index {
+            mode, operation, ..
+        } => *mode != ClientMode::Server && matches!(operation, IndexOperation::Build(_)),
+        // A launcher or stdio bridge starts a separate server-run process.
+        CliPlan::Server(ServerPlan::Run(_)) => true,
+        CliPlan::Server(
+            ServerPlan::Stdio(_) | ServerPlan::On(_) | ServerPlan::Off(_) | ServerPlan::Status(_),
+        )
+        | CliPlan::Files { .. }
+        | CliPlan::Relationships { .. }
+        | CliPlan::Status { .. }
+        | CliPlan::Auth(_)
+        | CliPlan::Config(_)
+        | CliPlan::Install(_)
+        | CliPlan::Standalone(_)
+        | CliPlan::Uninstall(_)
+        | CliPlan::Help(_)
+        | CliPlan::Version => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn install_darwin_metal_residency_mitigation() -> io::Result<()> {
-    if zg_llama_native::try_set_metal_residency_default() {
+    if std::env::var_os("GGML_METAL_NO_RESIDENCY").is_some()
+        || std::env::var_os("ZVEC_GREP_METAL_KEEP_RESIDENCY").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+    {
         return Ok(());
     }
 
-    // A native initializer may already have started threads. Set the default
-    // in a fresh process image when changing the current environment is unsafe.
+    // Native libraries may already have started work. Supply the default to
+    // the new process image without modifying the current process environment.
     let executable = std::env::current_exe()?;
     let error = Command::new(executable)
         .args(std::env::args_os().skip(1))
         .env("GGML_METAL_NO_RESIDENCY", "1")
         .exec();
     Err(error)
-}
-
-#[cfg(not(target_os = "macos"))]
-#[allow(clippy::unnecessary_wraps)]
-fn install_darwin_metal_residency_mitigation() -> io::Result<()> {
-    Ok(())
 }
 
 async fn execute_plan(plan: CliPlan) -> Result<ExitCode, Box<dyn Error>> {
@@ -275,6 +324,7 @@ async fn execute_plan(plan: CliPlan) -> Result<ExitCode, Box<dyn Error>> {
             home,
             request,
             path_lookup,
+            prompt_for_missing_index,
             output,
         } => {
             Box::pin(execute_request(
@@ -282,6 +332,7 @@ async fn execute_plan(plan: CliPlan) -> Result<ExitCode, Box<dyn Error>> {
                 home.as_deref(),
                 *request,
                 path_lookup,
+                prompt_for_missing_index,
                 output,
             ))
             .await
@@ -576,6 +627,7 @@ async fn execute_request(
     home: Option<&Path>,
     mut request: ContextOptions,
     path_lookup: bool,
+    prompt_for_missing_index: bool,
     output: zg_cli::OutputOptions,
 ) -> Result<(), Box<dyn Error>> {
     if path_lookup {
@@ -616,7 +668,9 @@ async fn execute_request(
     match execute_context(request.clone(), server, home, output).await {
         Err(error) if is_engine_error(error.as_ref(), EngineError::NOT_FOUND) => {
             // Probing first would block searches that can borrow an active writer.
-            if !ensure_query_index(&mut request, server, home, output).await? {
+            if !ensure_query_index(&mut request, server, home, prompt_for_missing_index, output)
+                .await?
+            {
                 return Err(error);
             }
             authorize_query(&mut request, server, home).await?;
@@ -688,6 +742,7 @@ async fn ensure_query_index(
     request: &mut ContextOptions,
     server: bool,
     home: Option<&Path>,
+    prompt_for_missing_index: bool,
     output: zg_cli::OutputOptions,
 ) -> Result<bool, Box<dyn Error>> {
     use zg_engine::api::info::{InfoOptions, result::WorkspaceIndexPolicy};
@@ -717,7 +772,7 @@ async fn ensure_query_index(
         )
         .into());
     }
-    if !io::stdin().is_terminal() || !zg_cli::stderr_supports_ansi() {
+    if !prompt_for_missing_index {
         return Err(EngineError::not_found(format!(
             "No index found in {}. Run `zg --index --embedding <model>` to build it, then retry the query. Run `zg --help models` to list supported models.",
             zg_cli::output_path(&info.root).display()
@@ -1537,6 +1592,31 @@ fn init_daemon_tracing(log: zg_daemon::rolling_log::RollingLog, debug: bool) {
         .with_writer(move || log.writer())
         .with_env_filter(filter)
         .try_init();
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn metal_startup_follows_the_process_that_runs_the_model() {
+    for (args, expected) in [
+        (&["--server", "run"][..], true),
+        (&["--server", "on"], false),
+        (&["--server", "--stdio"], false),
+        (&["--index", "--mode", "direct"], true),
+        (&["--index", "--mode", "auto"], true),
+        (&["--index", "--mode", "server"], false),
+        (&["--index", "--drop", "--mode", "direct"], false),
+        (&["--mode", "server", "--vector", "needle"], false),
+        (&["--mode", "auto", "--vector", "needle"], true),
+        (&["--mode", "direct", "needle"], true),
+        (&["--mode", "direct", "src/main.rs"], false),
+    ] {
+        let arguments = std::iter::once("zg").chain(args.iter().copied());
+        let plan = Cli::try_parse_from(arguments)
+            .expect("parse")
+            .into_plan(std::env::temp_dir())
+            .expect("plan");
+        assert_eq!(may_initialize_metal(&plan), expected, "{args:?}");
+    }
 }
 
 #[cfg(test)]
