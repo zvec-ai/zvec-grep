@@ -1228,3 +1228,562 @@ async fn rust_glob_imports_respect_local_types_and_explicit_imports() {
         }).await;
     }
 }
+
+// A decorated class reaches the binding scan as its decorator's wrapper, and a
+// member one method writes is read by the methods beside it: the step is
+// stated as `member_of:(<type>,<member>)` and the resolver walks it.
+#[tokio::test]
+async fn python_self_member_chain_reaches_the_decorated_class_member() {
+    check_case(Case {
+        name: "python_self_member_chain_reaches_the_decorated_class_member",
+        files: vec![SourceFile {
+            path: "shapes.py",
+            source: "class Fonts:\n    def render_glyph(self):\n        return 1\n\n@dataclass\nclass ParserState:\n    def __init__(self, fontset: Fonts):\n        self.fontset = fontset\n\n@dataclass\nclass Char:\n    def __init__(self, state: ParserState):\n        self.inner = state.fontset\n\n    def render(self):\n        return self.inner.render_glyph()\n",
+        }],
+        queries: vec![
+            Query {
+                operation: "callees",
+                symbol: "render",
+                expected: json!([{"name": "Char::render", "edges": [
+                    {"symbol": {"name": "Fonts::render_glyph"}, "line": 16}
+                ]}]),
+                ..Query::default()
+            },
+            Query {
+                operation: "callers",
+                symbol: "render_glyph",
+                expected: json!([{"name": "Fonts::render_glyph", "edges": [
+                    {"symbol": {"name": "Char::render"}}
+                ]}]),
+                ..Query::default()
+            },
+        ],
+    })
+    .await;
+}
+
+// A bare name of a Python body is the parameter the body declares, not the
+// class member another method stated under the same name.
+#[tokio::test]
+async fn python_bare_parameter_does_not_read_the_class_member() {
+    check_case(Case {
+        name: "python_bare_parameter_does_not_read_the_class_member",
+        files: vec![SourceFile {
+            path: "parser.py",
+            source: "class Index:\n    def create_variables(self):\n        return 1\n\nclass Parser:\n    def __init__(self):\n        self.index = Index()\n\n    def run(self, index):\n        return index.create_variables()\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "run",
+            expected: json!([{"name": "Parser::run", "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn review_type_namespace_item_must_not_steal_function_call() {
+    // `pub trait save` shares `save`'s spelling but not its namespace: a bare
+    // call names a value, so only the function may answer it.
+    check_case(Case {
+        name: "review_type_namespace_item_must_not_steal_function_call",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() {}\n    pub trait save {}\n    pub fn flush() { save(); }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::flush",
+            expected: json!([{"name":"m::flush","edges":[{"symbol":{"name":"m::save","startLine":2}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// A member a body writes with a value the index cannot place no longer holds
+// what an earlier write stated, so the call through it stays undecided instead
+// of answering with the type the constructor's first line named.
+#[tokio::test]
+async fn python_unknown_member_write_invalidates_the_earlier_type() {
+    check_case(Case {
+        name: "python_unknown_member_write_invalidates_the_earlier_type",
+        files: vec![SourceFile {
+            path: "use.py",
+            source: "class Left:\n    def work(self):\n        return 'left'\n\nclass Right:\n    def work(self):\n        return 'right'\n\nclass Runner:\n    def __init__(self, client):\n        self.client = Left()\n        self.client = client\n\n    def run(self):\n        return self.client.work()\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "Runner::run",
+            expected: json!([{"name": "Runner::run", "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// `client: Left` states the parameter, and `client = clients[0]` takes it back:
+// the element a container holds is not the annotated type.
+#[tokio::test]
+async fn python_parameter_reassignment_invalidates_its_annotation() {
+    check_case(Case {
+        name: "python_parameter_reassignment_invalidates_its_annotation",
+        files: vec![SourceFile {
+            path: "use.py",
+            source: "class Left:\n    def work(self):\n        return 'left'\n\nclass Right:\n    def work(self):\n        return 'right'\n\ndef run(client: Left, clients):\n    client = clients[0]\n    return client.work()\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "run",
+            expected: json!([{"name": "run", "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// A union arm the reader cannot name (`right.Right` is a module) is no evidence
+// that the arm it can name is the only shape the value takes.
+#[tokio::test]
+async fn python_union_with_an_unreadable_arm_stays_undecided() {
+    check_case(Case {
+        name: "python_union_with_an_unreadable_arm_stays_undecided",
+        files: vec![
+            SourceFile {
+                path: "right.py",
+                source: "class Right:\n    def send(self):\n        return 'right'\n",
+            },
+            SourceFile {
+                path: "use.py",
+                source: "import right\nclass Left:\n    def send(self):\n        return 'left'\n\ndef run(client: Left | right.Right):\n    return client.send()\n",
+            },
+        ],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "run",
+            expected: json!([{"name": "run", "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// A subclass that writes the member without stating one type decides its own
+// answer; the base's member of the same name is a different declaration.
+#[tokio::test]
+async fn python_ambiguous_member_write_does_not_fall_back_to_a_base() {
+    check_case(Case {
+        name: "python_ambiguous_member_write_does_not_fall_back_to_a_base",
+        files: vec![SourceFile {
+            path: "use.py",
+            source: "class Left:\n    def work(self):\n        return 'left'\n\nclass Right:\n    def work(self):\n        return 'right'\n\nclass Other:\n    def work(self):\n        return 'other'\n\nclass Base:\n    def __init__(self):\n        self.client = Left()\n\nclass Child(Base):\n    def __init__(self):\n        self.client = Right()\n\n    def switch(self):\n        self.client = Other()\n\n    def run(self):\n        return self.client.work()\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "Child::run",
+            expected: json!([{"name": "Child::run", "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 435 review: `client = other` copies the value `other` holds, so the
+// receiver reads that type from the assignment on instead of keeping the
+// annotation the parameter stated for the whole body.
+#[tokio::test]
+async fn review435_receiver_alias_takes_the_target_type() {
+    check_case(Case {
+        name: "review435_receiver_alias_takes_the_target_type",
+        files: vec![SourceFile {
+            path: "use.py",
+            source: "class Left:\n    def work(self):\n        return 'left'\n\nclass Right:\n    def work(self):\n        return 'right'\n\ndef run(client: Left, other: Right):\n    client = other\n    return client.work()\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "run",
+            expected: json!([{"name": "run", "edges": [
+                {"symbol": {"name": "Right::work"}, "line": 11}
+            ]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 435 review: a copy of a name the body states no type for leaves the
+// receiver undecided; the parameter's annotation described the value it held
+// before the assignment, not the one it holds after.
+#[tokio::test]
+async fn review435_unknown_alias_clears_the_parameter_annotation() {
+    check_case(Case {
+        name: "review435_unknown_alias_clears_the_parameter_annotation",
+        files: vec![SourceFile {
+            path: "use.py",
+            source: "class Left:\n    def work(self):\n        return 'left'\n\nclass Right:\n    def work(self):\n        return 'right'\n\ndef run(client: Left, replacement):\n    client = replacement\n    return client.work()\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "run",
+            expected: json!([{"name": "run", "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 435 review: a Python method does not read class-body names as lexical
+// bindings, so a member it assigns from such a name holds no type of the
+// class body's making.
+#[tokio::test]
+async fn review435_class_body_names_are_not_method_bindings() {
+    check_case(Case {
+        name: "review435_class_body_names_are_not_method_bindings",
+        files: vec![SourceFile {
+            path: "use.py",
+            source: "class Left:\n    def work(self):\n        return 'left'\n\nclass Runner:\n    client = Left()\n\n    def __init__(self):\n        self.actual = client\n\n    def run(self):\n        return self.actual.work()\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "Runner::run",
+            expected: json!([{"name": "Runner::run", "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 435 review: `self.client = None` writes the member without stating a
+// type. The write keeps the base's member from answering, but it states nothing
+// the call can bind to.
+#[tokio::test]
+async fn review435_none_write_blocks_inherited_member_type() {
+    check_case(Case {
+        name: "review435_none_write_blocks_inherited_member_type",
+        files: vec![SourceFile {
+            path: "use.py",
+            source: "class Left:\n    def work(self):\n        return 'left'\n\nclass Base:\n    def __init__(self):\n        self.client = Left()\n\nclass Child(Base):\n    def __init__(self):\n        self.client = None\n\n    def run(self):\n        return self.client.work()\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "Child::run",
+            expected: json!([{"name": "Child::run", "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 435 review: a name a branch rebinds holds either value after the branch,
+// so the member assigned from it stays undecided.
+#[tokio::test]
+async fn review435_branch_write_leaves_the_parameter_undecided() {
+    check_case(Case {
+        name: "review435_branch_write_leaves_the_parameter_undecided",
+        files: vec![SourceFile {
+            path: "use.py",
+            source: "class Left:\n    def work(self):\n        return 'left'\n\nclass Right:\n    def work(self):\n        return 'right'\n\nclass Runner:\n    def run(self, client: Left, flag, other: Right):\n        if flag:\n            client = other\n        self.client = client\n        return self.client.work()\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "Runner::run",
+            expected: json!([{"name": "Runner::run", "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 435 review: a nested function captures `self`, so the member it reads is
+// the one the enclosing class states rather than a member of the function.
+#[tokio::test]
+async fn review435_nested_helper_reads_the_enclosing_class_member() {
+    check_case(Case {
+        name: "review435_nested_helper_reads_the_enclosing_class_member",
+        files: vec![SourceFile {
+            path: "use.py",
+            source: "class Left:\n    def work(self):\n        return 'left'\n\nclass Runner:\n    def __init__(self):\n        self.client = Left()\n\n    def run(self):\n        def helper():\n            return self.client.work()\n\n        return helper()\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "Runner::run::helper",
+            expected: json!([{"name": "Runner::run::helper", "edges": [
+                {"symbol": {"name": "Left::work"}, "line": 11}
+            ]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+// PR 435 review: `self = replacements[0]` no longer names this class's
+// instance, so the member path does not fall back to the enclosing class.
+#[tokio::test]
+async fn review435_rebound_self_stays_undecided() {
+    check_case(Case {
+        name: "review435_rebound_self_stays_undecided",
+        files: vec![SourceFile {
+            path: "use.py",
+            source: "class Left:\n    def work(self):\n        return 'left'\n\nclass Right:\n    def work(self):\n        return 'right'\n\nclass Runner:\n    def __init__(self):\n        self.client = Left()\n\n    def run(self, replacements):\n        self = replacements[0]\n        return self.client.work()\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "Runner::run",
+            expected: json!([{"name": "Runner::run", "edges": []}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn review_nested_block_item_must_not_leak_into_sibling_item() {
+    // The `save` inside the block ends with that block; the sibling `inner`
+    // written after it reaches the module's own `save`, not that one.
+    check_case(Case {
+        name: "review_nested_block_item_must_not_leak_into_sibling_item",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() -> i32 { 1 }\n    pub fn outer() -> i32 {\n        { fn save() -> i32 { 2 } }\n        fn inner() -> i32 { save() }\n        inner()\n    }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "inner",
+            expected: json!([{"name":"m::outer::inner","edges":[{"symbol":{"name":"m::save","startLine":2}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn followup_named_field_struct_must_not_steal_value_call() {
+    // A struct with named fields declares no constructor value, so `struct
+    // save` beside `fn save` leaves the call to the function. A tuple struct
+    // or a unit struct does declare one, and those stay value candidates.
+    check_case(Case {
+        name: "followup_named_field_struct_must_not_steal_value_call",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() -> i32 { 1 }\n    pub struct save { pub value: i32 }\n    pub fn flush() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::flush",
+            expected: json!([{"name":"m::flush","edges":[{"symbol":{"name":"m::save","startLine":2}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn followup_innermost_block_must_win_over_later_outer_item() {
+    // Both the inner block and `outer`'s body hold a `save` in view at the
+    // call site. The block that lies inside the other is the nearer one, so
+    // the call leaves `outer` to the inner definition even though `outer`'s
+    // own `save` is written later in the text.
+    check_case(Case {
+        name: "followup_innermost_block_must_win_over_later_outer_item",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() -> i32 { 0 }\n    pub fn outer() -> i32 {\n        let result = {\n            fn save() -> i32 { 1 }\n            fn inner() -> i32 { save() }\n            inner()\n        };\n        fn save() -> i32 { 2 }\n        result\n    }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "inner",
+            expected: json!([{"name":"m::outer::inner","edges":[{"symbol":{"name":"m::outer::save","startLine":5}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn followup_block_end_position_is_exclusive() {
+    // Tree-sitter's `end_position` points one past the block's last byte, so
+    // a call written directly after the closing brace is outside that block
+    // and reaches the module's own `save`.
+    check_case(Case {
+        name: "followup_block_end_position_is_exclusive",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() -> i32 { 1 }\n    pub fn outer() -> i32 {\n        {fn save() -> i32 {2}}save()\n    }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::outer",
+            expected: json!([{"name":"m::outer","edges":[{"symbol":{"name":"m::save","startLine":2}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn followup_innermost_block_wins_regardless_of_declaration_order() {
+    // The same call with `outer`'s own `save` written before the inner block:
+    // the nearer block still answers it, so the innermost block decides the
+    // target and the two declarations keep their relative text order.
+    check_case(Case {
+        name: "followup_innermost_block_wins_regardless_of_declaration_order",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() -> i32 { 0 }\n    pub fn outer() -> i32 {\n        fn save() -> i32 { 2 }\n        let result = {\n            fn save() -> i32 { 1 }\n            fn inner() -> i32 { save() }\n            inner()\n        };\n        result\n    }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "inner",
+            expected: json!([{"name":"m::outer::inner","edges":[{"symbol":{"name":"m::outer::save","startLine":6}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn impl_block_does_not_take_a_bare_call_from_a_function() {
+    // `impl save` names the type it implements and is a scope, not a value, so
+    // the bare `save()` reaches the function declared beside it.
+    check_case(Case {
+        name: "impl_block_does_not_take_a_bare_call_from_a_function",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() -> i32 { 1 }\n    pub struct save { pub value: i32 }\n    impl save {\n        pub fn value(&self) -> i32 { self.value }\n    }\n    pub fn flush() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::flush",
+            expected: json!([{"name":"m::flush","edges":[{"symbol":{"name":"m::save","startLine":2}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn union_item_does_not_take_a_bare_call_from_a_function() {
+    // A union declares a type and no constructor, so its spelling lives in the
+    // type namespace and never answers a bare call.
+    check_case(Case {
+        name: "union_item_does_not_take_a_bare_call_from_a_function",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub mod m {\n    pub fn save() -> i32 { 1 }\n    pub union save { pub value: i32 }\n    pub fn flush() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::flush",
+            expected: json!([{"name":"m::flush","edges":[{"symbol":{"name":"m::save","startLine":2}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn inner_module_does_not_reach_the_file_scope() {
+    // A module's items need `super::` from inside it, so the file-level `save`
+    // is not the target of the `save()` the module writes.
+    check_case(Case {
+        name: "inner_module_does_not_reach_the_file_scope",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub fn save() -> i32 { 1 }\npub mod m {\n    pub fn f() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::f",
+            expected: json!([{"name":"m::f","edges":[]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn glob_import_keeps_the_file_scope_in_view() {
+    // `use super::*;` puts the file's own names in the module's view without
+    // spelling any of them, so the file-level `save` answers the call.
+    check_case(Case {
+        name: "glob_import_keeps_the_file_scope_in_view",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub fn save() -> i32 { 1 }\npub mod m {\n    use super::*;\n    pub fn f() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::f",
+            expected: json!([{"name":"m::f","edges":[{"symbol":{"name":"save","startLine":1}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn grouped_import_with_a_comment_still_binds_the_name() {
+    // The brace group is read by its tree shape, so a comment beside the
+    // clause cannot hide the spelling: `use super::{save /* … */};` still
+    // binds `save` in `m`, and the call written there reaches the import.
+    // Without the binding nothing in `m` spells the name, so the call would
+    // leave no edge at all.
+    check_case(Case {
+        name: "grouped_import_with_a_comment_still_binds_the_name",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub fn save() -> i32 { 1 }\npub mod m {\n    use super::{save /* the outer one */};\n    pub fn f() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::f",
+            expected: json!([{"name":"m::f","edges":[{"symbol":{"name":"save","startLine":1}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn grouped_import_keeps_the_module_entry_beside_a_name() {
+    // `use super::{self, save};` binds two spellings: `self` names the module
+    // the group is written on, and `save` keeps its own segment. Reading the
+    // group by shape tells them apart, so the call still reaches the file's
+    // `save` instead of a module spelled `self`.
+    check_case(Case {
+        name: "grouped_import_keeps_the_module_entry_beside_a_name",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub fn save() -> i32 { 1 }\npub mod m {\n    use super::{self, save};\n    pub fn f() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::f",
+            expected: json!([{"name":"m::f","edges":[{"symbol":{"name":"save","startLine":1}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn single_import_binds_the_name_in_the_module() {
+    // `use super::save;` binds the spelling in this module, so the call reaches
+    // whatever that import names: the file's own table stays out of it and the
+    // cross-file resolver reads the import.
+    check_case(Case {
+        name: "single_import_binds_the_name_in_the_module",
+        files: vec![SourceFile {
+            path: "lib.rs",
+            source: "pub fn save() -> i32 { 1 }\npub mod m {\n    use super::save;\n    pub fn f() -> i32 { save() }\n}\n",
+        }],
+        queries: vec![Query {
+            operation: "callees",
+            symbol: "m::f",
+            expected: json!([{"name":"m::f","edges":[{"symbol":{"name":"save","startLine":1}}]}]),
+            ..Query::default()
+        }],
+    })
+    .await;
+}
