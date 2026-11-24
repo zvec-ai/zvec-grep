@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 export const REMOTE_EMBEDDING_MODEL = "qwen/qwen3.7-text-embedding";
 
 export function embeddingModel(configuredModel, profile = "local") {
+  if (/^local\/[a-z0-9][a-z0-9.-]*$/.test(profile)) return profile;
   assert.ok(
     ["local", "remote"].includes(profile),
     `unknown embedding profile: ${profile}`,

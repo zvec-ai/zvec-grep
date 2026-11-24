@@ -116,6 +116,8 @@ node benchmarks/zg-retrieval/report.mjs "$retrieval_work/results"
 
 Add `--repository reflex-dev/reflex` or `--tasks reflex:6` for a subset smoke run. All three modes still execute; standalone `report.mjs` and CI require the complete 20-question suite.
 
+To compare local embeddings on SWE-QA20 and Quarry20, set `RETRIEVAL_EMBEDDING=local/blink-code-16m` for the runner and report commands. Repeat with `local/potion-code-16m-v2`, the same package, and fresh output and corpus directories. Both suites record the selected model. Compare their `vector` rows for File and Entity Recall@K and MCP call latency.
+
 <details>
 <summary>Remote embedding</summary>
 

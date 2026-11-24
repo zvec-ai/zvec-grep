@@ -19,7 +19,7 @@ const MAIN_CATALOG_SOURCE_REVISION: &str = "8d0d5e277f37d897e83749cdaa0e9c07f5e9
 fn is_post_typescript_freeze(reference: &str) -> bool {
     matches!(
         reference,
-        "local/bekko-256-int8" | "qwen/qwen3.7-text-embedding-flash"
+        "local/bekko-256-int8" | "local/blink-code-16m" | "qwen/qwen3.7-text-embedding-flash"
     )
 }
 

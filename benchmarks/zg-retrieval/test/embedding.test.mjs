@@ -25,9 +25,12 @@ test("embedding profile keeps the configured local model or selects Qwen remotel
 test("the selected model is part of the frozen SWE-QA protocol identity", async () => {
   const local = await loadSuite({ embedding: "local" });
   const remote = await loadSuite({ embedding: "remote" });
+  const blink = await loadSuite({ embedding: "local/blink-code-16m" });
   assert.equal(local.protocol.model, "local/potion-code-16m-v2");
   assert.equal(remote.protocol.model, REMOTE_EMBEDDING_MODEL);
   assert.notEqual(local.identity.protocol, remote.identity.protocol);
+  assert.equal(blink.protocol.model, "local/blink-code-16m");
+  assert.notEqual(local.identity.protocol, blink.identity.protocol);
 });
 
 test("remote embedding uses one explicit HTTPS endpoint for indexing and MCP consent", () => {

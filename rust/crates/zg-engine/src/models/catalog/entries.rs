@@ -130,6 +130,19 @@ const POTION_CODE_ARTIFACTS: &[ArtifactConfig] = &[
     },
 ];
 
+const BLINK_CODE_ARTIFACTS: &[ArtifactConfig] = &[
+    ArtifactConfig {
+        path: "model.safetensors",
+        size: 64_000_088,
+        sha256: "0ed06d11fb406a1292d0d06841742dc67292879edc25154217e29e546c901248",
+    },
+    ArtifactConfig {
+        path: "tokenizer.json",
+        size: 1_127_262,
+        sha256: "5116184a64255f886cc76724b2ef45bc060b690efe72c4e147ebec6380a7f383",
+    },
+];
+
 const MULTILINGUAL_E5_ARTIFACTS: &[ArtifactConfig] = &[
     ArtifactConfig {
         path: "config.json",
@@ -222,7 +235,7 @@ const NOMIC_ARTIFACTS: &[ArtifactConfig] = &[
     },
 ];
 
-const CATALOG: [EmbeddingCatalogEntry; 16] = [
+const CATALOG: &[EmbeddingCatalogEntry] = &[
     EmbeddingCatalogEntry::LlamaCpp(LlamaCppConfig {
         reference: "local/embeddinggemma-300m",
         provider: "local",
@@ -572,6 +585,32 @@ const CATALOG: [EmbeddingCatalogEntry; 16] = [
         max_input_tokens: 8_192,
         max_batch_size: 2,
     }),
+    EmbeddingCatalogEntry::Model2Vec(Model2VecConfig {
+        reference: "local/blink-code-16m",
+        provider: "local",
+        model: "blink-code-16m",
+        repo: "minishlab/blink-code-16M",
+        revision: "787395537cf55f6768cd3c5c5c186739331f7ef6",
+        download: &ArtifactDownloadConfig {
+            hugging_face: ArtifactSourceConfig {
+                repo: "minishlab/blink-code-16M",
+                revision: "787395537cf55f6768cd3c5c5c186739331f7ef6",
+            },
+            model_scope: None,
+            artifacts: BLINK_CODE_ARTIFACTS,
+        },
+        model_file: "model.safetensors",
+        embedding_tensor: "embeddings",
+        tokenizer_file: "tokenizer.json",
+        dimension: 256,
+        metric: EmbeddingMetric::Cosine,
+        normalize: true,
+        max_input_tokens: 1_024,
+        max_batch_size: 256,
+        default_concurrency: 2,
+        query_prefix: None,
+        document_prefix: None,
+    }),
     EmbeddingCatalogEntry::Bekko(BekkoConfig {
         reference: "local/bekko-256-int8",
         provider: "local",
@@ -637,6 +676,7 @@ mod tests {
                 "local/jina-embeddings-v2-base-code",
                 "local/gte-modernbert-base",
                 "local/nomic-embed-text-v1.5",
+                "local/blink-code-16m",
                 "local/bekko-256-int8",
             ]
         );
