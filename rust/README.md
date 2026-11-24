@@ -66,7 +66,7 @@ use the same parsing; managed `--rg` retains its pattern/path syntax.
 
 Indexed searches return results in reciprocal rank fusion (RRF) order within
 each query group by default. Set `ZVEC_GREP_ENABLE_RULE_RANKING=1` to enable
-static scoring rules and the penalty for repeated hits from the same file.
+static scoring rules and the same-file penalty for code hits.
 For direct mode, set it on the `zg` command. For server and MCP searches,
 restart the server with the variable set. Existing indexes work in either mode.
 
@@ -537,6 +537,11 @@ handling, and path normalization retain the Rust CLI's existing semantics.
 Explicit `--hybrid`, `--fts`, `--vector`, `--fuse`, symbol options, `--trace`, and
 `--refresh` retain their indexed behavior. Text questions, URLs, and glob patterns
 do not trigger automatic path lookup.
+
+In indexed search, `--trace` shows each hit's rank (`#1`, `#2`, …) and `score=`.
+All hits show the raw RRF score by default. When rule ranking is enabled, code
+hits show the rule-ranking score. Use the displayed rank for the final order.
+The trace's `fusion.score` gives the raw RRF score for every hit.
 
 Managed `zg --rg` preserves literal pattern whitespace and supports empty
 patterns with `-e ''`. Matching options include fixed strings (`-F`), case

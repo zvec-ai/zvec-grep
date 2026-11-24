@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     EngineError, EngineResult,
-    domain::{Entity, EntityMetadata, FileId, FileIndexStatus, FileRecord, Language},
+    domain::{
+        Entity, EntityId, EntityMetadata, FileId, FileIndexStatus, FileRecord, Language, Range,
+    },
     utils::{
         atomic_write as write_record, directory_exists, ensure_directory, file_exists,
         reject_symlink, sync_directory,
@@ -66,6 +68,12 @@ struct StoreState {
 pub(crate) struct IndexStore {
     shared: Mutex<Option<Arc<SharedStore>>>,
     read_only: bool,
+}
+
+pub(crate) struct IndexedSourceFile {
+    pub(crate) id: FileId,
+    pub(crate) path: PathBuf,
+    pub(crate) entities: Vec<(EntityId, Range, bool)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -310,6 +318,44 @@ impl IndexStore {
 
     pub(crate) fn list_file_paths(&self) -> EngineResult<Vec<(FileId, PathBuf)>> {
         self.read(|state| state.files.list_paths())
+    }
+
+    pub(crate) fn indexed_sources(
+        &self,
+        paths: &HashSet<PathBuf>,
+    ) -> EngineResult<Vec<IndexedSourceFile>> {
+        self.read(|state| {
+            let mut watched = Vec::new();
+            for (id, path) in state.files.lookup_paths(paths)? {
+                let ids = state.entities.list_ids_for_file(id)?;
+                let ids = ids
+                    .into_iter()
+                    .map(EntityId::from_string)
+                    .collect::<Vec<_>>();
+                let entities = state.entities.fetch(&ids)?;
+                if entities.len() != ids.len() {
+                    return Err(corrupt("diagnostic entity lookup was incomplete"));
+                }
+                let keys = entities
+                    .values()
+                    .flat_map(Entity::fragments)
+                    .map(|fragment| fragment.id.as_str())
+                    .collect::<Vec<_>>();
+                let projected = state.fragments.projected_fragments(&keys)?;
+                let entities = entities
+                    .into_values()
+                    .map(|entity| {
+                        let searchable = entity
+                            .fragments()
+                            .iter()
+                            .any(|fragment| projected.contains(fragment.id.as_str()));
+                        (entity.id().clone(), entity.source_range(), searchable)
+                    })
+                    .collect();
+                watched.push(IndexedSourceFile { id, path, entities });
+            }
+            Ok(watched)
+        })
     }
 
     pub(crate) fn list_file_attributes(&self) -> EngineResult<Vec<StoredFileAttributes>> {

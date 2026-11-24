@@ -1,10 +1,15 @@
 # Rule ranking
 
 Indexed search uses reciprocal rank fusion (RRF) order and scores by default.
-With `ZVEC_GREP_ENABLE_RULE_RANKING=1`, the shared engine scores the entire
-recalled entity pool and applies same-file decay before the result limit.
-Set the variable on the direct CLI process or on the server handling CLI and MCP
-queries. All other values leave rule ranking disabled.
+With `--prefer-symbol`, hits from an exact-symbol recall route win RRF ties, then
+entity ID breaks any remaining ties.
+
+Set `ZVEC_GREP_ENABLE_RULE_RANKING=1` on the direct CLI process or on the server
+handling CLI and MCP queries. Only that value enables rule ranking. Non-code
+entities keep their fusion positions among loaded hits and their raw RRF scores.
+The engine fills visible code positions by ranking all recalled, loaded
+`ContentKind::Code` entities, including those below the cutoff and those without
+symbol metadata. Rule ranking runs when at least one visible position holds code.
 
 The policy normalizes RRF by the maximum possible score for the enabled routes,
 adds bounded symbol/definition bonuses, and applies the minimum applicable path
@@ -30,13 +35,13 @@ bonuses are capped at 1.25 in the normalized RRF scale.
 
 Path roles use workspace-relative components and explicit filename patterns.
 Test/example/dependency intent and narrowly targeted include globs can waive a
-role penalty. A common dependency penalty is neutralized when all candidates
+role penalty. A common dependency penalty is neutralized when all code candidates
 are dependency code. Neither `dist/` nor `.d.ts` alone implies generated code.
 
 Final selection is greedy: after each selected entity, remaining entities from
 the same file receive a soft factor of `1 / (1 + 0.5 * selected_count)`. There is
-no hard per-file cap. A single-file pool skips this selection penalty. Context
-group coverage is handled outside this module.
+no hard per-file cap. A code pool from a single file skips this selection
+penalty. Context group coverage is handled outside this module.
 
 Before selection, a file's representative definition can gain up to 0.15 from
 at most two additional definitions. Support must have name or path evidence,
@@ -45,12 +50,13 @@ ranges cannot supply support. The support term uses bounded base scores and
 the same path prior; it does not sum every fragment in a large file. It is an
 extra term after the static bonus cap.
 
-With rule ranking enabled, `score` is the rule selection score. The trace
-preserves the original `fusion` rank and score. The optional `ranking` field
-records the policy identifier, query features, name match/bonus, definition
-bonus, path roles/exemptions, static score, positive `path_bonus`,
-`file_support_bonus`, `file_support_count`, selected file count, diversity
-factor, and group-local final rank.
+When rule ranking is enabled, `score` is the rule selection score for code hits.
+Use `rank` for order in mixed results because code and non-code scores use
+different scales. The trace preserves the original `fusion` rank and score for
+all hits. For ranked code hits, `ranking` records the policy identifier, query
+features, name match/bonus, definition bonus, path roles/exemptions, static score,
+positive `path_bonus`, `file_support_bonus`, `file_support_count`, selected file
+count, diversity factor, and group-local final rank.
 `path_overrides` lists roles exempted by query/scope, including those not present
 on a particular hit. Without trace, detailed explanation strings are not built.
 Serialized traces may omit `ranking`. Within a ranking trace, omitted
@@ -66,7 +72,7 @@ path exceptions, deterministic ties, and dynamic file diversity. Validate
 weight changes by language and query intent; file-only labels can overstate
 the benefit of spreading results across files.
 
-An opt-in ignored test replays local CLI candidate snapshots through this same
+An opt-in ignored test replays local code candidate snapshots through this same
 scorer. Set `ZG_RANK_REPLAY` to the snapshot directory and explicitly run
 `replay_rule_ablation` with `--ignored`. The variable is read only by the test;
 production direct/server behavior cannot be changed through it. Internal policy

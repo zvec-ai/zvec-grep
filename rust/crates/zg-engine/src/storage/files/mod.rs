@@ -1,7 +1,7 @@
 //! Source file identities, snapshots, and indexing status.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
 };
 use zvec_rust::{Collection, CollectionSchema, DataType, Doc, SearchQuery};
@@ -12,18 +12,20 @@ use super::{
     },
     types::StoredFileAttributes,
     zvec::{
-        corrupt, doc_key, fetch_map, native, open_collection, scalar, string_field, u32_field,
-        wildcard_string, write_docs,
+        corrupt, doc_key, fetch_map, native, open_collection, quote, scalar, string_field,
+        u32_field, wildcard_string, write_docs,
     },
 };
 use crate::{
     EngineError, EngineResult,
-    domain::{DirectoryId, FileId, FileIndexStatus, FileRecord},
+    domain::{DirectoryId, FileId, FileIndexStatus, FileRecord, SourcePath},
 };
 
 mod codec;
 mod ids;
 use ids::FileIds;
+
+const PATH_LOOKUP_BATCH: usize = 256;
 
 pub(super) struct Files {
     collection: Collection,
@@ -83,6 +85,56 @@ impl Files {
         iterator
             .map(|doc| decode_file_path_doc(&native(doc, "read source path")?))
             .collect()
+    }
+
+    /// Look up existing native paths through the exact-path index, without allocating IDs.
+    pub(super) fn lookup_paths(
+        &self,
+        paths: &HashSet<PathBuf>,
+    ) -> EngineResult<Vec<(FileId, PathBuf)>> {
+        let requested = paths
+            .iter()
+            .map(|path| {
+                let path = SourcePath::new(path)?;
+                Ok((path_key(&path)?, path))
+            })
+            .collect::<EngineResult<BTreeMap<_, _>>>()?;
+        let keys = requested.keys().collect::<Vec<_>>();
+        let mut found = BTreeMap::new();
+        let mut found_keys = HashSet::new();
+        for batch in keys.chunks(PATH_LOOKUP_BATCH) {
+            // One row per path is valid; the extra row exposes duplicate identities
+            // instead of silently truncating an overfull result.
+            let mut query = native(
+                SearchQuery::scalar(i32::try_from(batch.len() + 1).expect("path batch fits i32")),
+                "create exact path query",
+            )?;
+            let values = batch.iter().map(|key| quote(key)).collect::<Vec<_>>();
+            native(
+                query.set_filter(&format!("path_key IN ({})", values.join(","))),
+                "filter exact source paths",
+            )?;
+            native(
+                query.set_output_fields(&["file_id", "path", "path_key"]),
+                "project source path identities",
+            )?;
+            native(query.set_include_vector(false), "omit source vectors")?;
+            for doc in native(self.collection.query(&query), "query exact source paths")? {
+                let key = string_field(&doc, "path_key")?;
+                let (id, path) = decode_file_path_doc(&doc)?;
+                if batch
+                    .binary_search_by(|expected| expected.as_str().cmp(key.as_str()))
+                    .is_err()
+                    || requested.get(&key).map(SourcePath::as_path) != Some(path.as_path())
+                {
+                    return Err(corrupt("source path query returned a conflicting identity"));
+                }
+                if found.insert(id, path).is_some() || !found_keys.insert(key) {
+                    return Err(corrupt("source path query returned duplicate identities"));
+                }
+            }
+        }
+        Ok(found.into_iter().collect())
     }
 
     pub(super) fn list_attributes(&self) -> EngineResult<Vec<StoredFileAttributes>> {

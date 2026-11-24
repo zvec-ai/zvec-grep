@@ -17,6 +17,9 @@ on:
       artifact_prefix:
         default: retrieval
         type: string
+      gold_stages:
+        default: false
+        type: boolean
     secrets:
       QWEN_EMBEDDING_API_KEY:
         required: false
@@ -35,6 +38,10 @@ on:
         options:
           - local
           - remote
+      gold_stages:
+        description: Capture Gold coverage at search stages in all four suites
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -157,7 +164,8 @@ jobs:
             --output "$RUNNER_TEMP/sweqa" \
             --corpus "$RUNNER_TEMP/corpus" \
             --model-cache "$RUNNER_TEMP/model-cache" \
-            --candidate-commit "${{ needs.package-candidate.outputs.candidate-commit }}"
+            --candidate-commit "${{ needs.package-candidate.outputs.candidate-commit }}" \
+            ${{ inputs.gold_stages && '--gold-stages' || '' }}
       - name: Build the SWE-QA20 conclusion report
         if: ${{ always() && steps.access.outcome == 'success' }}
         run: |
@@ -183,6 +191,7 @@ jobs:
             ${{ runner.temp }}/sweqa/summary.json
             ${{ runner.temp }}/sweqa/summary.md
             ${{ runner.temp }}/sweqa/scores.jsonl
+            ${{ runner.temp }}/sweqa/gold-stages.json
           if-no-files-found: warn
           retention-days: 14
       - name: Preserve SWE-QA20 public evidence
@@ -243,7 +252,8 @@ jobs:
             --package "$RUNNER_TEMP/package/candidate.tgz" \
             --output "$RUNNER_TEMP/beir" \
             --model-cache "$RUNNER_TEMP/beir-model-cache" \
-            --candidate-commit "${{ needs.package-candidate.outputs.candidate-commit }}"
+            --candidate-commit "${{ needs.package-candidate.outputs.candidate-commit }}" \
+            ${{ inputs.gold_stages && '--gold-stages' || '' }}
       - name: Publish BEIR results for this job
         if: ${{ always() && steps.access.outcome == 'success' }}
         run: |
@@ -260,6 +270,7 @@ jobs:
           path: |
             ${{ runner.temp }}/beir/report.json
             ${{ runner.temp }}/beir/report.md
+            ${{ runner.temp }}/beir/gold-stages.json
           if-no-files-found: warn
           retention-days: 14
       - name: Preserve BEIR public evidence
@@ -319,7 +330,8 @@ jobs:
             --package "$RUNNER_TEMP/package/candidate.tgz" \
             --output "$RUNNER_TEMP/duretrieval" \
             --model-cache "$RUNNER_TEMP/duretrieval-model-cache" \
-            --candidate-commit "${{ needs.package-candidate.outputs.candidate-commit }}"
+            --candidate-commit "${{ needs.package-candidate.outputs.candidate-commit }}" \
+            ${{ inputs.gold_stages && '--gold-stages' || '' }}
       - name: Publish DuRetrieval results for this job
         if: ${{ always() && steps.access.outcome == 'success' }}
         run: |
@@ -336,6 +348,7 @@ jobs:
           path: |
             ${{ runner.temp }}/duretrieval/report.json
             ${{ runner.temp }}/duretrieval/report.md
+            ${{ runner.temp }}/duretrieval/gold-stages.json
           if-no-files-found: warn
           retention-days: 14
       - name: Preserve DuRetrieval public evidence
@@ -388,7 +401,8 @@ jobs:
             --package "$RUNNER_TEMP/package/candidate.tgz" \
             --output "$RUNNER_TEMP/quarry" \
             --model-cache "$RUNNER_TEMP/quarry-model-cache" \
-            --candidate-commit "${{ needs.package-candidate.outputs.candidate-commit }}"
+            --candidate-commit "${{ needs.package-candidate.outputs.candidate-commit }}" \
+            ${{ inputs.gold_stages && '--gold-stages' || '' }}
       - name: Publish Quarry results for this job
         if: ${{ always() && steps.access.outcome == 'success' }}
         run: |
@@ -405,6 +419,7 @@ jobs:
           path: |
             ${{ runner.temp }}/quarry/report.json
             ${{ runner.temp }}/quarry/report.md
+            ${{ runner.temp }}/quarry/gold-stages.json
           if-no-files-found: warn
           retention-days: 14
       - name: Preserve Quarry public evidence

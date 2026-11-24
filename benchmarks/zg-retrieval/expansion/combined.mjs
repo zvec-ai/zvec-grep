@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { readJson, writeJson } from "../core/io.mjs";
@@ -368,8 +368,14 @@ export async function main(args = process.argv.slice(2)) {
   const output = resolve(values.output);
   await mkdir(output, { recursive: true });
   await mkdir(join(output, "reports"), { recursive: true });
-  for (const [name, report] of Object.entries(reports))
+  for (const [name, report] of Object.entries(reports)) {
     await writeJson(join(output, "reports", `${name}.json`), report);
+    const trace = await maybeRead(
+      join(dirname(values[name]), "gold-stages.json"),
+    );
+    // Replace earlier evidence even when this run did not capture stages.
+    await writeJson(join(output, "reports", `${name}-gold-stages.json`), trace);
+  }
   await writeJson(join(output, "summary.json"), result);
   await writeFile(join(output, "summary.md"), markdownCombined(result));
   if (result.status !== "success") process.exitCode = 1;

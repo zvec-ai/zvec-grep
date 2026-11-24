@@ -8,6 +8,15 @@ import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { fileHash, run, writeJson } from "../core/io.mjs";
 import { embeddingRuntime } from "../core/embedding.mjs";
+import {
+  stageTraceEnvironment,
+  readStageTrace,
+} from "../core/gold-stage-capture.mjs";
+import { scoreGoldStages } from "../metrics/gold-stages.mjs";
+import {
+  goldStagesMarkdown,
+  writeGoldStages,
+} from "../reports/gold-stages.mjs";
 import { scoreFileRetrieval } from "../metrics/files.mjs";
 import { scoreNdcg } from "../metrics/ndcg.mjs";
 import {
@@ -16,7 +25,12 @@ import {
 } from "../metrics/repetitions.mjs";
 import { summarizeQaRetrieval } from "../metrics/entities.mjs";
 import { QA_ENTITY_METRICS, qaPercentCell } from "../reports/zg.mjs";
-import { summarizePilotEntity, verifyPilotGoldSources } from "./gold.mjs";
+import {
+  indexedSourceOffsets,
+  pilotQaTargets,
+  summarizePilotEntity,
+  verifyPilotGoldSources,
+} from "./gold.mjs";
 import {
   locateFullEntity,
   parseVisibleResponse,
@@ -313,6 +327,7 @@ export function markdownPilotReport(report) {
         `- \`${String(failure.task_id).replaceAll("`", "")}\`: ${String(failure.reason).replaceAll(/\r?\n/g, " ")}`,
       );
   }
+  lines.push(...goldStagesMarkdown(report.gold_stages));
   return `${lines.join("\n")}\n`;
 }
 
@@ -340,6 +355,11 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
   await mkdir(evidence, { recursive: true });
   const root = resolve(group.root);
   const goldSources = await verifyPilotGoldSources(pilot.gold, group);
+  if (options.goldStages) {
+    const offsets = indexedSourceOffsets(goldSources);
+    if (Object.keys(offsets).length)
+      report.gold_stage_source_offsets[group.id] = offsets;
+  }
   const indexTimeoutMs = pilot.config.indexTimeoutMinutes * 60_000;
   const home = join(evidence, "runtime-home");
   const opencode = join(evidence, "opencode.json");
@@ -454,7 +474,13 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
       command: command[0],
       args: command.slice(1),
       cwd: root,
-      env,
+      env: {
+        ...env,
+        ...stageTraceEnvironment(
+          options.goldStages,
+          group.tasks.map((task) => pilotQaTargets(pilot.gold.tasks[task.id])),
+        ),
+      },
       stderr: "pipe",
     });
     client = new mcp.Client({ name: "zg-retrieval-pilots", version: "1.0.0" });
@@ -516,6 +542,11 @@ async function runGroup(pilot, group, candidate, options, report, mcp) {
             };
           }
           const latency = performance.now() - started;
+          if (options.goldStages)
+            options.stageCaptures.set(
+              `${task.id}/${mode}/${repetition}`,
+              readStageTrace(response),
+            );
           const raw = join(
             evidence,
             "raw",
@@ -619,6 +650,7 @@ export async function main(args = process.argv.slice(2)) {
       package: { type: "string" },
       output: { type: "string" },
       "model-cache": { type: "string" },
+      "gold-stages": { type: "boolean", default: false },
       "candidate-commit": { type: "string", default: "unrecorded" },
     },
   });
@@ -631,6 +663,8 @@ export async function main(args = process.argv.slice(2)) {
   await mkdir(output, { recursive: false });
   const options = {
     output,
+    goldStages: values["gold-stages"],
+    stageCaptures: new Map(),
     modelCache: resolve(values["model-cache"] ?? join(output, "model-cache")),
   };
   await mkdir(options.modelCache, { recursive: true });
@@ -654,6 +688,7 @@ export async function main(args = process.argv.slice(2)) {
     rows: [],
     failures: [],
     index_seconds: {},
+    ...(options.goldStages ? { gold_stage_source_offsets: {} } : {}),
     index_counts: summarizeIndexCounts(
       pilotCorpusIds(pilot).map((id) => ({
         id,
@@ -735,6 +770,35 @@ export async function main(args = process.argv.slice(2)) {
     console.error(`${pilot.name}: ${error.stack}`);
   }
   fillMissingRows(pilot, report);
+  if (options.goldStages) {
+    const calls = [];
+    for (const row of report.rows) {
+      const pair = pilotQaTargets(pilot.gold.tasks[row.task_id]);
+      for (let repetition = 1; repetition <= REPETITIONS; repetition++) {
+        const call = row.calls.find((item) => item.repetition === repetition);
+        const capture =
+          row.group_integrity === "verified" && call?.status === "success"
+            ? options.stageCaptures.get(
+                `${row.task_id}/${row.mode}/${repetition}`,
+              )
+            : null;
+        calls.push(
+          scoreGoldStages({
+            capture,
+            pair,
+            items: call?.items ?? [],
+            taskId: row.task_id,
+            mode: row.mode,
+            repetition,
+            qualification: "diagnostic",
+            useBytes: true,
+            sourceOffsets: report.gold_stage_source_offsets[row.corpus_id],
+          }),
+        );
+      }
+    }
+    report.gold_stages = await writeGoldStages(output, calls);
+  }
   await writeReport(output, report, pilot);
   console.log(`Report: ${join(output, "report.md")}`);
   if (report.status !== "success") process.exitCode = 1;
