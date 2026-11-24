@@ -532,6 +532,12 @@ Explicit `--hybrid`, `--fts`, `--vector`, `--fuse`, symbol options, `--trace`, a
 `--refresh` retain their indexed behavior. Text questions, URLs, and glob patterns
 do not trigger automatic path lookup.
 
+In indexed search, `--trace` shows each hit's rank (`#1`, `#2`, …) and `score=`.
+Code hits show the rule-ranking score. Other hits show the raw reciprocal rank
+fusion (RRF) score. These scores use different scales, so use the displayed
+rank for the final order. The trace's `fusion.score` gives the raw RRF score
+for either kind of hit.
+
 Managed `zg --rg` preserves literal pattern whitespace and supports empty
 patterns with `-e ''`. Matching options include fixed strings (`-F`), case
 selection (`-i`, `-s`, `-S`, with the last option winning), word/whole-line

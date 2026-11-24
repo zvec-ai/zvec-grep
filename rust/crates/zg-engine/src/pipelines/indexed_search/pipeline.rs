@@ -147,12 +147,14 @@ struct RecallRoute {
     route: ResolvedSearchRoute,
     filter: Option<StorageSearchFilter>,
     vector_route_id: Option<String>,
+    is_symbol_recall: bool,
 }
 
 struct Candidate {
     id: EntityId,
     file_id: FileId,
     sources: HashSet<SearchRouteMode>,
+    matched_symbol_recall: bool,
     recall: Vec<SearchRecallTrace>,
     evidence: Vec<InternalEvidence>,
     score: f64,
@@ -426,7 +428,7 @@ fn collect_adaptive_recall(
             if let Some(observation) = observation.as_deref_mut() {
                 observation.recall(&route.route.id, depth, &hits);
             }
-            add_recall_hits(candidates, &hits, &route.route)?;
+            add_recall_hits(candidates, &hits, route)?;
         }
         if candidates.len() >= target || !saturated || depth >= RECALL_MAX_DEPTH {
             return Ok(());
@@ -447,6 +449,7 @@ fn build_recall_routes(
             vector_route_id: (route.mode == SearchRouteMode::Vector).then(|| route.id.clone()),
             route,
             filter: filter.cloned(),
+            is_symbol_recall: false,
         })
         .collect::<Vec<_>>();
     if prefer_symbol {
@@ -475,6 +478,7 @@ fn build_recall_routes(
                 },
                 filter: Some(symbol_filter),
                 vector_route_id: None,
+                is_symbol_recall: true,
             });
         }
     }
@@ -484,8 +488,9 @@ fn build_recall_routes(
 fn add_recall_hits(
     candidates: &mut HashMap<EntityId, Candidate>,
     hits: &[StorageSearchHit],
-    route: &ResolvedSearchRoute,
+    recall_route: &RecallRoute,
 ) -> Result<(), EngineError> {
+    let route = &recall_route.route;
     // Increasing top-k can change its prefix, including which fragments appear there.
     for (index, hit) in hits.iter().enumerate() {
         let rank = index + 1;
@@ -495,6 +500,7 @@ fn add_recall_hits(
                 id: hit.entity_id.clone(),
                 file_id: hit.file_id,
                 sources: HashSet::new(),
+                matched_symbol_recall: false,
                 recall: Vec::new(),
                 evidence: Vec::new(),
                 score: 0.0,
@@ -506,6 +512,7 @@ fn add_recall_hits(
             ));
         }
         candidate.sources.insert(route.mode);
+        candidate.matched_symbol_recall |= recall_route.is_symbol_recall;
         if let Some(existing) = candidate.evidence.iter_mut().find(|evidence| {
             evidence.path == route.mode
                 && evidence.route_id == route.id
@@ -573,6 +580,7 @@ fn fuse_candidates(candidates: HashMap<EntityId, Candidate>) -> Vec<Candidate> {
         right
             .score
             .total_cmp(&left.score)
+            .then_with(|| right.matched_symbol_recall.cmp(&left.matched_symbol_recall))
             .then_with(|| left.id.as_str().cmp(right.id.as_str()))
     });
     for (index, candidate) in fused.iter_mut().enumerate() {
@@ -901,8 +909,9 @@ mod tests {
     use crate::{
         EngineResult,
         domain::{
-            ByteRange, Content, Entity, EntityFragment, EntityId, FileCategory, FileFormat, FileId,
-            FileIndexStatus, FileRecord, FileSnapshot, FragmentId, GlobRule, Range, TextRange,
+            ByteRange, CodeMetadata, Content, Entity, EntityFragment, EntityId, EntityMetadata,
+            FileCategory, FileFormat, FileId, FileIndexStatus, FileRecord, FileSnapshot,
+            FragmentId, GlobRule, Range, SymbolType, TextRange,
             model::{EmbeddingMetric, EmbeddingModelInfo},
         },
         file_selection::GlobMatcher,
@@ -1154,43 +1163,19 @@ mod tests {
     async fn promotes_symbol_definition_before_result_cutoff() {
         let reference_file = file(1, "src/plugin.ts", 100);
         let definition_file = file(2, "src/core.ts", 100);
-        let mut reference = entity(&reference_file, "vitest: Vitest", Content::Code);
-        let mut definition = entity(&definition_file, "class Vitest {}", Content::Code);
+        let reference = symbol_entity(
+            &reference_file,
+            "vitest: Vitest",
+            SymbolType::Value,
+            "vitest",
+        );
+        let definition = symbol_entity(
+            &definition_file,
+            "class Vitest {}",
+            SymbolType::Class,
+            "Vitest",
+        );
         let definition_id = definition.entity.id().clone();
-        for (stored, kind, name) in [
-            (&mut reference, crate::domain::SymbolType::Value, "vitest"),
-            (&mut definition, crate::domain::SymbolType::Class, "Vitest"),
-        ] {
-            stored.entity = Entity::new(
-                stored.entity.id().clone(),
-                stored.entity.file_id(),
-                stored.entity.source_range(),
-                stored.entity.content().clone(),
-                Some(crate::domain::EntityMetadata::Code(
-                    crate::domain::CodeMetadata {
-                        symbol_type: Some(kind),
-                        symbol_name: Some(name.to_owned()),
-                        scope: None,
-                        signature: None,
-                        documentation: None,
-                        visibility: None,
-                        language: None,
-                        arity: None,
-                        is_exported: false,
-                        is_declaration: false,
-                        package: None,
-                        has_internal_linkage: false,
-                        declares_type: false,
-                        alias_of: None,
-                        object_members: Vec::new(),
-                        overwritten_by: None,
-                        exported_as: Vec::new(),
-                    },
-                )),
-                stored.entity.fragments().to_vec(),
-            )
-            .expect("entity");
-        }
         let mut storage = pushdown_storage();
         storage.files = vec![reference_file, definition_file];
         storage.fts.insert(
@@ -1216,6 +1201,100 @@ mod tests {
             .await
             .expect("search");
         assert_eq!(result.hits[0].entity.id(), &definition_id);
+    }
+
+    #[tokio::test]
+    async fn prefer_symbol_breaks_only_rrf_ties_in_mixed_results() {
+        let doc_file = file(1, "guide.md", 100);
+        let code_file = file(2, "src/widget.ts", 100);
+        let doc = entity(&doc_file, "Widget guide", Content::Text);
+        let symbol = symbol_entity(
+            &code_file,
+            "function loadWidget() {}",
+            SymbolType::Function,
+            "loadWidget",
+        );
+        let doc_id = doc.entity.id().clone();
+        let symbol_id = symbol.entity.id().clone();
+        assert!(doc_id.as_str() < symbol_id.as_str());
+
+        let mut storage = pushdown_storage();
+        storage.files = vec![doc_file, code_file];
+        storage.vector = vec![hit(&doc, 0, StorageSearchPath::Vector, 0.9)];
+        storage.fts.insert(
+            "loadWidget".to_owned(),
+            vec![hit(&symbol, 0, StorageSearchPath::Fts, 5.0)],
+        );
+        storage.entities = HashMap::from([
+            (doc_id.as_str().to_owned(), doc),
+            (symbol_id.as_str().to_owned(), symbol),
+        ]);
+        let model = FixtureModel::new();
+        let vector = SearchRoute {
+            mode: SearchRouteMode::Vector,
+            query: "loadWidget".to_owned(),
+        };
+        let fts = SearchRoute {
+            mode: SearchRouteMode::Fts,
+            query: "loadWidget".to_owned(),
+        };
+        let guide = SearchRoute {
+            mode: SearchRouteMode::Vector,
+            query: "widget guide".to_owned(),
+        };
+        let first = 1.0 / (super::RRF_K + 1.0);
+        for (case, routes, prefer_symbol, expected, doc_rrf) in [
+            (
+                "symbol wins tie",
+                vec![vector.clone()],
+                true,
+                &symbol_id,
+                first,
+            ),
+            (
+                "ordinary routes keep ID order",
+                vec![vector.clone(), fts],
+                false,
+                &doc_id,
+                first,
+            ),
+            (
+                "higher document RRF wins",
+                vec![vector, guide],
+                true,
+                &doc_id,
+                first + first,
+            ),
+        ] {
+            let mut request = plan(routes);
+            request.prefer_symbol = prefer_symbol;
+            for (limit, trace) in [(1, false), (2, true)] {
+                request.limit = Some(limit);
+                request.trace = trace;
+                let result = search_workspace_index(
+                    Path::new("/workspace"),
+                    request.clone(),
+                    &storage,
+                    &[&model],
+                )
+                .await
+                .expect("mixed search");
+                assert_eq!(result.hits.len(), limit, "{case}");
+                assert_eq!(result.hits[0].entity.id(), expected, "{case}");
+                if trace {
+                    for hit in &result.hits {
+                        let fusion = &hit.trace.as_ref().expect("hit trace").fusion;
+                        let expected_rrf = if hit.entity.id() == &doc_id {
+                            doc_rrf
+                        } else {
+                            first
+                        };
+                        assert_eq!(fusion.rank, hit.rank, "{case}");
+                        assert_eq!(fusion.score.to_bits(), expected_rrf.to_bits(), "{case}");
+                    }
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -1419,24 +1498,26 @@ mod tests {
         let first = hit(&owner, 0, StorageSearchPath::Fts, 3.0).hit;
         let later = hit(&owner, 1, StorageSearchPath::Fts, 2.0).hit;
         let improved = hit(&owner, 1, StorageSearchPath::Fts, 4.0).hit;
-        let route = super::ResolvedSearchRoute {
-            id: "first".into(),
-            mode: SearchRouteMode::Fts,
-            query: "first query".into(),
+        let route = |id: &str, query: &str| super::RecallRoute {
+            route: super::ResolvedSearchRoute {
+                id: id.to_owned(),
+                mode: SearchRouteMode::Fts,
+                query: query.to_owned(),
+            },
+            filter: None,
+            vector_route_id: None,
+            is_symbol_recall: false,
         };
+        let first_route = route("first", "first query");
         let mut candidates = HashMap::new();
         for hits in [
             [first.clone(), later.clone()],
             [improved.clone(), first.clone()],
             [first, later],
         ] {
-            super::add_recall_hits(&mut candidates, &hits, &route).expect("recall round");
+            super::add_recall_hits(&mut candidates, &hits, &first_route).expect("recall round");
         }
-        let other_route = super::ResolvedSearchRoute {
-            id: "second".into(),
-            query: "second query".into(),
-            ..route
-        };
+        let other_route = route("second", "second query");
         super::add_recall_hits(
             &mut candidates,
             std::slice::from_ref(&improved),
@@ -1636,6 +1717,7 @@ mod tests {
                 id: stored.entity.id().clone(),
                 file_id: source.id(),
                 sources: std::collections::HashSet::from([SearchRouteMode::Fts]),
+                matched_symbol_recall: false,
                 recall: Vec::new(),
                 evidence: [&retained, &removed]
                     .into_iter()
@@ -2530,6 +2612,24 @@ mod tests {
     }
 
     fn entity(file: &FileRecord, text: &str, content_kind: fn(String) -> Content) -> StoredEntity {
+        stored_entity(file, text, content_kind, None)
+    }
+
+    fn symbol_entity(file: &FileRecord, text: &str, kind: SymbolType, name: &str) -> StoredEntity {
+        let metadata = EntityMetadata::Code(CodeMetadata {
+            symbol_type: Some(kind),
+            symbol_name: Some(name.to_owned()),
+            ..CodeMetadata::default()
+        });
+        stored_entity(file, text, Content::Code, Some(metadata))
+    }
+
+    fn stored_entity(
+        file: &FileRecord,
+        text: &str,
+        content_kind: fn(String) -> Content,
+        metadata: Option<EntityMetadata>,
+    ) -> StoredEntity {
         let source_range = Range::Text(
             TextRange::from_coordinates(0, text.len(), 1, 1, 0, text.len()).expect("source range"),
         );
@@ -2540,8 +2640,15 @@ mod tests {
             range: Range::Full,
         };
         StoredEntity {
-            entity: Entity::new(id, file.id(), source_range, content, None, vec![fragment])
-                .expect("entity"),
+            entity: Entity::new(
+                id,
+                file.id(),
+                source_range,
+                content,
+                metadata,
+                vec![fragment],
+            )
+            .expect("entity"),
             file: file.clone(),
         }
     }

@@ -1,7 +1,9 @@
 # Rule ranking
 
 The shared indexed-search engine uses RRF fusion to assign result positions for
-direct, server, and MCP queries. Non-code entities keep their fusion positions
+direct, server, and MCP queries. With `--prefer-symbol`, hits from an exact-symbol
+recall route win RRF ties, then entity ID breaks any remaining ties.
+Non-code entities keep their fusion positions
 among loaded hits and their raw RRF scores. Positions occupied by code within
 the result limit are filled by ranking all recalled, loaded `ContentKind::Code`
 entities, including those below the cutoff and those without symbol metadata.
