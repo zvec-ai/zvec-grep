@@ -17,7 +17,10 @@ const MAIN_CATALOG_SOURCE_REVISION: &str = "8d0d5e277f37d897e83749cdaa0e9c07f5e9
 // Models added to the Rust catalog after the TypeScript catalog was frozen. They have no
 // counterpart in the historical snapshot, so the oracle stays pinned to that revision.
 fn is_post_typescript_freeze(reference: &str) -> bool {
-    matches!(reference, "local/bekko-256-int8" | "qwen/qwen3.7-text-embedding-flash")
+    matches!(
+        reference,
+        "local/bekko-256-int8" | "qwen/qwen3.7-text-embedding-flash"
+    )
 }
 
 #[test]
