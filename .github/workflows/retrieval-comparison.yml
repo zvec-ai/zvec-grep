@@ -27,6 +27,7 @@ jobs:
       candidate_repository: ${{ inputs.baseline_repository }}
       embedding: local
       artifact_prefix: retrieval-base
+      gold_stages: true
 
   candidate:
     uses: ./.github/workflows/retrieval-only.yml
@@ -35,6 +36,7 @@ jobs:
       candidate_repository: ${{ inputs.candidate_repository }}
       embedding: local
       artifact_prefix: retrieval-head
+      gold_stages: true
 
   compare:
     needs: [baseline, candidate]
@@ -80,7 +82,19 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: retrieval-comparison
-          path: ${{ runner.temp }}/retrieval-comparison/
+          path: |
+            ${{ runner.temp }}/retrieval-comparison/summary.json
+            ${{ runner.temp }}/retrieval-comparison/summary.md
           if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+      - name: Preserve stage trace HTML
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: retrieval-trace.html
+          path: ${{ runner.temp }}/retrieval-comparison/retrieval-trace.html
+          archive: false
+          if-no-files-found: warn
           overwrite: true
           retention-days: 14

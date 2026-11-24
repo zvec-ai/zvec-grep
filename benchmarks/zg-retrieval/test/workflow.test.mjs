@@ -69,7 +69,16 @@ test("Retrieval-only retains its reusable and manual candidate/embedding inputs"
   assert.match(dispatch, /^ {8}type: choice$/m);
   assert.match(dispatch, /^ {10}- local$/m);
   assert.match(dispatch, /^ {10}- remote$/m);
-  assert.equal((dispatch.match(/^ {6}[a-z_]+:$/gm) ?? []).length, 2);
+  const goldStages = block(dispatch, "gold_stages", 6);
+  assert.match(goldStages, /^ {8}type: boolean$/m);
+  assert.match(goldStages, /^ {8}default: false$/m);
+  const reusableGoldStages = block(
+    block(workflow, "workflow_call", 2),
+    "gold_stages",
+    6,
+  );
+  assert.match(reusableGoldStages, /^ {8}type: boolean$/m);
+  assert.equal((dispatch.match(/^ {6}[a-z_]+:$/gm) ?? []).length, 3);
   const files = await readdir(new URL(".github/workflows/", repository));
   assert.deepEqual(
     files.filter((file) => /^retrieval.*\.ya?ml$/.test(file)).sort(),
@@ -158,6 +167,7 @@ test("version comparison keeps artifact namespaces separate and uses local model
     assert.match(source, /uses: \.\/\.github\/workflows\/retrieval-only\.yml/);
     assert.match(source, /embedding: local/);
     assert.ok(source.includes(`artifact_prefix: ${prefix}`));
+    assert.match(source, /^ {6}gold_stages: true$/m);
   }
   assert.doesNotMatch(
     comparisonWorkflow,
@@ -168,6 +178,26 @@ test("version comparison keeps artifact namespaces separate and uses local model
   assert.match(compare, /name: retrieval-base-results/);
   assert.match(compare, /name: retrieval-head-results/);
   assert.match(compare, /name: retrieval-comparison/);
+  const uploads = steps(compare).filter((entry) =>
+    entry.includes("uses: actions/upload-artifact@"),
+  );
+  const summary = uploads.find((entry) =>
+    /name: retrieval-comparison\n/.test(entry),
+  );
+  assert.match(summary, /retrieval-comparison\/summary\.json/);
+  assert.match(summary, /retrieval-comparison\/summary\.md/);
+  assert.doesNotMatch(
+    summary,
+    /retrieval-trace\.html|path:.*retrieval-comparison\/$/m,
+  );
+  const trace = uploads.find((entry) =>
+    /name: retrieval-trace\.html\n/.test(entry),
+  );
+  assert.match(trace, /if: always\(\)/);
+  assert.match(trace, /path:.*retrieval-comparison\/retrieval-trace\.html/);
+  assert.match(trace, /^\s+archive: false$/m);
+  assert.match(trace, /retention-days: 14/);
+  assert.match(trace, /if-no-files-found: warn/);
   assert.match(workflow, /retrieval-results\/reports\//);
 });
 
@@ -227,7 +257,14 @@ test("the four suites run in independent jobs using one candidate package", asyn
     entry.includes("node benchmarks/zg-retrieval/run.mjs"),
   );
   assert.ok(runner);
-  assert.doesNotMatch(runner, /--(?:modes|preview)\b|RETRIEVAL_MODES|inputs\./);
+  assert.doesNotMatch(
+    runner,
+    /--(?:modes|preview)\b|RETRIEVAL_MODES|inputs\.(?!gold_stages\b)/,
+  );
+  for (const suite of ["sweqa", "beir", "duretrieval", "quarry"]) {
+    assert.match(jobs[suite], /inputs\.gold_stages && '--gold-stages'/);
+    assert.match(jobs[suite], /gold-stages\.json/);
+  }
   assert.doesNotMatch(runner, /--repository\b/);
   assert.match(jobs["quality-contract"], /uses: actions\/setup-python@/);
   assert.match(jobs.sweqa, /needs: \[authorize, package-candidate\]/);

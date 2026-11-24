@@ -8,6 +8,7 @@ import { summarizeNdcg } from "../metrics/summary.mjs";
 import { summarizeQaRetrieval } from "../metrics/entities.mjs";
 import { validateZgReport, ZG_MODES } from "./validation.mjs";
 import { qaRetrievalMarkdown } from "./zg.mjs";
+import { goldStagesMarkdown } from "./gold-stages.mjs";
 import { indexSettingsMarkdown } from "./index-settings.mjs";
 import {
   summarizeIndexCounts,
@@ -292,6 +293,7 @@ export async function buildCiSummary({
     preview: "full",
     index_counts: indexCounts,
     index_settings: indexSettings,
+    ...(zg?.gold_stages ? { gold_stages: zg.gold_stages } : {}),
     ...(rows.some((row) => row.qa_retrieval)
       ? { qa_gold: suite.qa_gold, qa_scoring: suite.qa_scoring }
       : {}),
@@ -360,6 +362,7 @@ export function markdownCiSummary(result) {
       result.rows.map((row) => [row.label, row.qa_retrieval]),
       result.rows[0]?.expected_questions,
     ),
+    ...goldStagesMarkdown(result.gold_stages),
   );
   if (result.tasks?.length) {
     lines.push(

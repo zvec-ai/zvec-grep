@@ -3,6 +3,8 @@
 pub use options::ContextOptions;
 pub use result::ContextResult;
 
+pub mod stage_trace;
+
 /// Options accepted by [`crate::ZvecGrep::context`].
 pub mod options {
     pub use crate::domain::{FileCategory, FileFormat, GlobRule, SymbolType};
@@ -416,6 +418,9 @@ pub mod result {
         pub workspace_index: Option<ContextWorkspaceIndex>,
         pub items: Vec<ContextItem>,
         pub group_results: Vec<ContextGroupResult>,
+        /// Opt-in stage observations for the caller, separate from displayed results.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub stage_traces: Vec<super::stage_trace::StageTrace>,
         pub diagnostics: ContextDiagnostics,
     }
 
@@ -485,6 +490,7 @@ pub mod result {
     #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
     pub struct ContextItem {
         pub kind: ContextItemKind,
+        /// One-based position in the final result order.
         pub rank: usize,
         pub absolute_path: PathBuf,
         pub relative_path: PathBuf,
@@ -503,6 +509,8 @@ pub mod result {
         pub outline: Option<String>,
         pub content_role: Option<ContextContentRole>,
         pub status: ContextItemStatus,
+        /// Indexed code hits carry their rule-ranking score. Other indexed hits carry their
+        /// raw reciprocal rank fusion (RRF) score. Use `rank` to order mixed results.
         pub score: Option<f64>,
         pub matched_by: MatchedBy,
         pub metadata: Option<EntityMetadata>,

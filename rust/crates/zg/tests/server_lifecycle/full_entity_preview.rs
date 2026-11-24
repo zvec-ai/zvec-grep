@@ -3,6 +3,7 @@ use zg_daemon_protocol::{DaemonCommand, DaemonReply, ExecutionResult};
 use zg_engine::api::context::{
     ContextOptions,
     options::{ContextRoute, ContextRouteMode, RefreshPolicy},
+    result::{EntityMetadata, MarkdownMetadata},
 };
 
 fn fixtures() -> Vec<(&'static str, String, String, String)> {
@@ -20,6 +21,16 @@ fn fixtures() -> Vec<(&'static str, String, String, String)> {
                 paragraph.repeat(200),
             ),
             "# Neighbor after\n\nexcludedafter\n".into(),
+        ),
+        (
+            "nested-crlf.md",
+            "前言 😀\r\n\r\n# Parent\r\nparent intro\r\n\r\n## Neighbor before\r\nexcludedbefore\r\n\r\n".into(),
+            format!(
+                "Complete entity\n---------------\n\nentitybegin 😀\n\n{}quasarneedle\n\n{}entityend\n\n",
+                paragraph.repeat(200),
+                paragraph.repeat(200),
+            ).replace('\n', "\r\n"),
+            "## Complete entity\r\n\r\nexcludedafter\r\n".into(),
         ),
         (
             "long.ts",
@@ -107,7 +118,7 @@ fn verify_fragmented_entities(listen: &str, root: &Path) -> Result<(), Box<dyn E
             mode: ContextRouteMode::Fts,
             query: "quasarneedle".into(),
         }],
-        limit: Some(2),
+        limit: Some(fixtures().len()),
         auto_update: false,
         refresh: Some(RefreshPolicy::Off),
         ..ContextOptions::default()
@@ -127,7 +138,7 @@ fn verify_fragmented_entities(listen: &str, root: &Path) -> Result<(), Box<dyn E
     let ExecutionResult::Success(DaemonReply::Context(result)) = serde_json::from_str(body)? else {
         return Err(format!("unexpected context reply: {body}").into());
     };
-    assert_eq!(result.items.len(), 2);
+    assert_eq!(result.items.len(), fixtures().len());
     for (path, prefix, entity, _) in fixtures() {
         let item = result
             .items
@@ -149,6 +160,20 @@ fn verify_fragmented_entities(listen: &str, root: &Path) -> Result<(), Box<dyn E
             item.content_range.line_count(),
             Some(item.content.lines().count())
         );
+        if path == "nested-crlf.md" {
+            assert_eq!(
+                item.metadata,
+                Some(EntityMetadata::Markdown(MarkdownMetadata {
+                    heading: Some("Complete entity".into()),
+                    level: Some(2),
+                    scope: Some("Parent".into()),
+                }))
+            );
+            assert!(
+                item.content.contains("\r\n"),
+                "CRLF content must be preserved"
+            );
+        }
     }
     Ok(())
 }
