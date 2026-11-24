@@ -266,10 +266,7 @@ async fn search_with_stage_trace(
     }
     let ranking_started = Instant::now();
     if plan.rule_ranking {
-        let maximum_rrf = build_recall_routes(&routes, filter.as_ref(), plan.prefer_symbol)
-            .iter()
-            .map(|_| 1.0 / (RRF_K + 1.0))
-            .sum();
+        let maximum_rrf = maximum_rrf_score(&routes, filter.as_ref(), plan.prefer_symbol);
         hits = super::ranking::rank(
             hits,
             &routes,
@@ -563,6 +560,17 @@ fn add_or_update_recall(recall: &mut Vec<SearchRecallTrace>, next: SearchRecallT
     } else {
         recall.push(next);
     }
+}
+
+fn maximum_rrf_score(
+    routes: &[ResolvedSearchRoute],
+    filter: Option<&StorageSearchFilter>,
+    prefer_symbol: bool,
+) -> f64 {
+    build_recall_routes(routes, filter, prefer_symbol)
+        .iter()
+        .map(|_| 1.0 / (RRF_K + 1.0))
+        .sum()
 }
 
 fn fuse_candidates(candidates: HashMap<EntityId, Candidate>) -> Vec<Candidate> {
