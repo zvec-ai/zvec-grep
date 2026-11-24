@@ -9,8 +9,6 @@ use std::{
     },
 };
 
-#[cfg(target_os = "macos")]
-use std::ffi::OsString;
 #[cfg(unix)]
 use std::{os::unix::process::CommandExt, process::Command};
 
@@ -242,19 +240,15 @@ fn execute_plan_with_runtime(
 
 #[cfg(target_os = "macos")]
 fn install_darwin_metal_residency_mitigation() -> io::Result<()> {
-    if std::env::var_os("GGML_METAL_NO_RESIDENCY").is_some()
-        || std::env::var_os("ZVEC_GREP_METAL_KEEP_RESIDENCY").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
-    {
+    if zg_llama_native::try_set_metal_residency_default() {
         return Ok(());
     }
 
-    // Changing the process environment after Tokio starts is not thread-safe. Re-exec
-    // before building the runtime so llama.cpp observes the same Metal default as main.
+    // A native initializer may already have started threads. Set the default
+    // in a fresh process image when changing the current environment is unsafe.
     let executable = std::env::current_exe()?;
-    let arguments = std::env::args_os().skip(1).collect::<Vec<OsString>>();
     let error = Command::new(executable)
-        .args(arguments)
+        .args(std::env::args_os().skip(1))
         .env("GGML_METAL_NO_RESIDENCY", "1")
         .exec();
     Err(error)

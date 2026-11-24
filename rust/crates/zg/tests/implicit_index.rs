@@ -693,6 +693,30 @@ async fn indexed_cli_queries_do_not_wait_for_incremental_writer() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
+fn direct_startup_loads_the_native_library_once() {
+    let fixture = Fixture::new();
+    // The separate executable-path pinning step can re-exec a symlinked Cargo target.
+    let executable = fs::canonicalize(env!("CARGO_BIN_EXE_zg")).expect("physical executable");
+    let output = success(
+        Command::new(executable)
+            .args(["--status", "--mode", "direct"])
+            .current_dir(fixture.root.path())
+            .env("ZVEC_GREP_HOME", fixture.user.path())
+            .env_remove("GGML_METAL_NO_RESIDENCY")
+            .env_remove("ZVEC_GREP_METAL_KEEP_RESIDENCY")
+            .env("DYLD_PRINT_LIBRARIES", "1")
+            .output()
+            .expect("run direct status"),
+    );
+    let loaded = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .filter(|line| line.ends_with("/libzvec_c_api.dylib"))
+        .count();
+    assert_eq!(loaded, 1, "dyld loads the library once per process image");
+}
+
+#[test]
 fn direct_search_warns_about_unmatched_index_drift_on_stderr() {
     let fixture = Fixture::new();
     fixture.success(&[

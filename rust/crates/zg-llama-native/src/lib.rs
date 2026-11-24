@@ -12,6 +12,11 @@ use std::{
 mod cuda;
 pub use cuda::{check_cuda12_driver, check_cuda13_driver};
 
+#[cfg(target_os = "macos")]
+mod metal;
+#[cfg(target_os = "macos")]
+pub use metal::try_set_metal_residency_default;
+
 static REGISTRY: Mutex<()> = Mutex::new(());
 
 /// Serializes registration with the engine's registry-dependent native calls.

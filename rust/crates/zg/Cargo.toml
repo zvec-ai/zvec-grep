@@ -29,6 +29,9 @@ zg-daemon-protocol = { path = "../zg-daemon-protocol" }
 zg-engine = { path = "../zg-engine" }
 zvec-rust.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+zg-llama-native = { path = "../zg-llama-native" }
+
 [target.'cfg(windows)'.dependencies]
 tempfile.workspace = true
 
