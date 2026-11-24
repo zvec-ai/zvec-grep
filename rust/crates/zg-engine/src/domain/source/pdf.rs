@@ -58,6 +58,16 @@ pub(crate) struct PdfSourceMap {
 }
 
 impl PdfSourceMap {
+    /// Blocks with coordinates, once per (page, id), in first-seen source order.
+    pub(crate) fn blocks_with_boxes(&self) -> impl Iterator<Item = (&PdfBlock, PdfRect)> {
+        let mut seen = BTreeSet::new();
+        self.parts.iter().filter_map(move |part| {
+            let block = &part.block;
+            let bbox = block.bbox?;
+            seen.insert((block.page, block.id)).then_some((block, bbox))
+        })
+    }
+
     pub(crate) fn validate(&self, text: &str) -> EngineResult<()> {
         if self.text_len != text.len()
             || self.markdown_start.checked_add(self.text_len).is_none()

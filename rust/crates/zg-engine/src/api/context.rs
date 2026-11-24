@@ -780,20 +780,14 @@ impl result::PdfBox {
     }
 
     pub(crate) fn from_source(source: &crate::domain::PdfSourceMap) -> Vec<Self> {
-        let mut seen = std::collections::BTreeSet::new();
         source
-            .parts
-            .iter()
-            .filter_map(|part| {
-                let bbox = part.block.bbox?;
-                seen.insert((part.block.page, part.block.id))
-                    .then_some(Self {
-                        page: part.block.page,
-                        block: part.block.id,
-                        page_width: part.block.page_width,
-                        page_height: part.block.page_height,
-                        bbox,
-                    })
+            .blocks_with_boxes()
+            .map(|(block, bbox)| Self {
+                page: block.page,
+                block: block.id,
+                page_width: block.page_width,
+                page_height: block.page_height,
+                bbox,
             })
             .collect()
     }
