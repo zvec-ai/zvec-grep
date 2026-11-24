@@ -333,7 +333,10 @@ def via_function():
     .map(|(symbol, target)| {
         let edges: Vec<_> = target
             .into_iter()
-            .map(|(path, name)| json!({"symbol":{"name":name,"filePath":path}}))
+            .map(|(path, name)| {
+                let path: std::path::PathBuf = path.split('/').collect();
+                json!({"symbol":{"name":name,"filePath":path}})
+            })
             .collect();
         Query {
             operation: "callees",
@@ -396,7 +399,7 @@ async fn python_missing_export_retries_when_the_defining_module_changes() {
             engine.close();
             assert_eq!(indexed.files_failed, 0);
             let edges: Vec<_> = present
-                .then(|| json!({"symbol":{"name":"Foo","filePath":"pkg/leaf.py"}}))
+                .then(|| json!({"symbol":{"name":"Foo","filePath":std::path::Path::new("pkg").join("leaf.py")}}))
                 .into_iter()
                 .collect();
             check_queries(
