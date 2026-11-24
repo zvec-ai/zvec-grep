@@ -107,6 +107,8 @@ pub(crate) struct NameEdge {
     /// Walk-only receiver evidence, never a callable value alias. The stored
     /// Declares edge already identifies the receiver's type for the resolver.
     pub receiver_only: bool,
+    /// Original type lookup site when a Python local copies another binding.
+    pub type_origin: Option<(usize, usize)>,
     /// Last line the binding stays in effect, for a name a loop scopes
     /// (`for (Widget w : ws)`): past that line the name means what the rest of
     /// the body says it means. `None` keeps the binding until the body ends.
@@ -270,7 +272,7 @@ pub(crate) struct WalkContext {
     /// the file-level symbol of the same name.
     shadowed_names: HashMap<usize, HashSet<String>>,
     /// Names introduced by explicit Python imports, including aliases.
-    python_import_names: HashSet<String>,
+    python_import_names: HashMap<String, HashSet<usize>>,
     /// Names a class body imports from another scope (`using First<T>::Run;`).
     /// A bare call of such a name inside that class reaches the imported
     /// member, so the file's own namesake cannot answer it.
@@ -324,7 +326,7 @@ impl WalkContext {
             file_symbols: HashMap::new(),
             rust_scopes: RustScopeTables::default(),
             shadowed_names: HashMap::new(),
-            python_import_names: HashSet::new(),
+            python_import_names: HashMap::new(),
             borrowed_names: HashMap::new(),
             value_aliases: HashMap::new(),
             seen_name_edges: HashSet::new(),
@@ -671,6 +673,7 @@ impl WalkContext {
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
             receiver_only: false,
+            type_origin: None,
             bound_until: None,
             scope_end: None,
             arity,
@@ -710,6 +713,7 @@ impl WalkContext {
             raw_text: None,
             bound_type: Some(bound_type.to_owned()),
             receiver_only: false,
+            type_origin: None,
             bound_until: until,
             scope_end: None,
             arity: None,
@@ -722,23 +726,19 @@ impl WalkContext {
     /// The type `owner_index` has stated for `name` at one point of its body:
     /// the last declaration written before the position, which is what a copy
     /// (`client = other`) takes with it.
-    pub(crate) fn declared_type_at(
+    pub(crate) fn declared_binding_at(
         &self,
         owner_index: usize,
         name: &str,
         line: usize,
         column: usize,
-    ) -> Option<&str> {
-        self.name_edges
-            .iter()
-            .rev()
-            .find(|edge| {
-                edge.ref_kind == GraphEdgeKind::Declares
-                    && edge.owner_index == owner_index
-                    && edge.ref_name == name
-                    && (edge.line, edge.column) < (line, column)
-            })
-            .and_then(|edge| edge.bound_type.as_deref())
+    ) -> Option<&NameEdge> {
+        self.name_edges.iter().rev().find(|edge| {
+            edge.ref_kind == GraphEdgeKind::Declares
+                && edge.owner_index == owner_index
+                && edge.ref_name == name
+                && (edge.line, edge.column) < (line, column)
+        })
     }
 
     pub(crate) fn add_scoped_binding(
@@ -823,6 +823,7 @@ impl WalkContext {
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
             receiver_only: false,
+            type_origin: None,
             bound_until: None,
             scope_end: None,
             arity: None,
@@ -854,6 +855,7 @@ impl WalkContext {
             raw_text: raw_text.map(str::to_owned),
             bound_type: None,
             receiver_only: false,
+            type_origin: None,
             bound_until: None,
             scope_end: None,
             arity: None,
@@ -988,6 +990,7 @@ mod tests {
                 raw_text: Some("dog.bark()".to_owned()),
                 bound_type: None,
                 receiver_only: false,
+                type_origin: None,
                 bound_until: None,
                 scope_end: None,
                 arity: Some(2),

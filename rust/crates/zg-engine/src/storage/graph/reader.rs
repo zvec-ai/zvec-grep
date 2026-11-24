@@ -147,6 +147,9 @@ impl SqliteGraphStorage {
             Ok(DeclaredBinding {
                 name,
                 bound_type: bound_type.to_owned(),
+                type_origin: metadata
+                    .get("type_origin")
+                    .and_then(|value| serde_json::from_value(value.clone()).ok()),
                 raw_text: metadata
                     .get("rawText")
                     .and_then(Value::as_str)

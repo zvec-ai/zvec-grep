@@ -1,8 +1,9 @@
 //! Locate a declared Python receiver type through its importing module.
 
 use super::{
-    ClassScope, IndexStore, NameIndexEntry, ResolutionSnapshot, RuleCaches, StoredPendingRef,
-    binding_holds_at, import_target_file, is_type_scope, without_line_comments,
+    ClassScope, IndexStore, NameIndexEntry, Outcome, ResolutionSnapshot, Rule, RuleCaches,
+    StoredPendingRef, SymbolType, binding_holds_at_ref, import_target_file, is_type_scope,
+    without_line_comments,
 };
 use crate::domain::{EdgeProvenance, EntityId, Range};
 use crate::storage::graph::{ImportReference, Resolution};
@@ -11,12 +12,12 @@ type Position = (usize, usize);
 
 /// In Python the same call syntax can invoke a function or instantiate a class.
 /// Extraction marks imports that are visible past the call owner's local bindings.
-pub(super) fn imported_constructor(
+pub(super) fn imported_call(
     store: &IndexStore,
     snapshot: &ResolutionSnapshot,
     stored: &StoredPendingRef,
     caches: &mut RuleCaches,
-) -> crate::EngineResult<Option<Resolution>> {
+) -> crate::EngineResult<Option<Outcome>> {
     if stored.language != "python" || !stored.reference.metadata.contains_key("python_import_call")
     {
         return Ok(None);
@@ -29,15 +30,62 @@ pub(super) fn imported_constructor(
     else {
         return Ok(None);
     };
-    let (class, imported) = scope(store, snapshot, stored, name, caches)?;
-    Ok(class
-        .filter(|_| imported)
-        .and_then(|class| class.entity)
-        .map(|target_id| Resolution {
-            ref_id: stored.id,
-            target_id,
-            provenance: EdgeProvenance::ImportBound,
-        }))
+    let owner = snapshot.entity_record(&stored.reference.owner_id);
+    let site = LookupSite {
+        scope: owner.map(|entity| entity.qualified_name.as_str()),
+        position: (stored.reference.line, stored.reference.column),
+        eager: owner.is_none_or(|entity| {
+            definition_in_file(
+                snapshot,
+                stored.file_id,
+                &entity.qualified_name,
+                LookupKind::Type,
+            )
+            .is_some()
+        }),
+        kind: LookupKind::Callable,
+    };
+    let (hit, imported) = lookup(store, snapshot, stored.file_id, name, &site, caches)?;
+    if !imported && hit.is_none() {
+        return Ok(None);
+    }
+    if !imported && let Some(hit) = hit {
+        let candidates = snapshot
+            .lookup_candidates(&stored.name_tail)
+            .unwrap_or_default();
+        let local = candidates.iter().filter(|other| {
+            other.file_id == hit.file_id
+                && other.qualified_name == hit.qualified_name
+                && site.kind.accepts(other)
+        });
+        // Keep competing local definitions as candidates, as the ordinary
+        // bare-call resolver does when no import wins.
+        if local.clone().nth(1).is_some() {
+            return Ok(Some(Outcome::Ambiguous(
+                local.map(|candidate| candidate.entity_id.clone()).collect(),
+            )));
+        }
+    }
+    // A visible explicit import owns the call even if its export is missing.
+    // Keep it pending so the defining file can supply the target in a later sweep.
+    Ok(Some(hit.map_or(Outcome::Deferred, |hit| {
+        Outcome::Resolved {
+            resolution: Resolution {
+                ref_id: stored.id,
+                target_id: hit.entity_id.clone(),
+                provenance: if imported {
+                    EdgeProvenance::ImportBound
+                } else {
+                    EdgeProvenance::FileScoped
+                },
+            },
+            rule: if imported {
+                Rule::ImportBound
+            } else {
+                Rule::Unique
+            },
+        }
+    })))
 }
 
 /// The resolved type and whether its identity depends on an import path.
@@ -48,18 +96,31 @@ pub(super) fn scope(
     ty: &str,
     caches: &mut RuleCaches,
 ) -> crate::EngineResult<(Option<ClassScope>, bool)> {
-    let Some(path) = snapshot.file_path(stored.file_id) else {
-        return Ok((None, false));
-    };
     let imports = caches.imports(store, stored.file_id)?;
     let site = lookup_site(snapshot, stored, ty, caches, &imports);
-    let binding = visible_binding(store, snapshot, stored.file_id, ty, &site, &imports, caches)?;
-    match binding {
-        Some(Binding::Local(class)) => {
-            Ok((local_type(snapshot, class, ty).map(class_scope), false))
-        }
-        Some(Binding::Import(import, name)) => Ok((
-            imported_type(store, snapshot, path, import, &name, caches)?.map(class_scope),
+    let (hit, imported) = lookup(store, snapshot, stored.file_id, ty, &site, caches)?;
+    Ok((hit.map(class_scope), imported))
+}
+
+fn lookup<'s>(
+    store: &IndexStore,
+    snapshot: &'s ResolutionSnapshot,
+    file: u32,
+    name: &str,
+    site: &LookupSite<'_>,
+    caches: &mut RuleCaches,
+) -> crate::EngineResult<(Option<&'s NameIndexEntry>, bool)> {
+    let Some(path) = snapshot.file_path(file) else {
+        return Ok((None, false));
+    };
+    let imports = caches.imports(store, file)?;
+    match visible_binding(store, snapshot, file, name, site, &imports, caches)? {
+        Some(Binding::Local(definition)) => Ok((
+            local_definition(snapshot, definition, name, site.kind),
+            false,
+        )),
+        Some(Binding::Import(import, target)) => Ok((
+            imported_definition(store, snapshot, path, import, &target, site.kind, caches)?,
             true,
         )),
         None => Ok((None, false)),
@@ -114,11 +175,11 @@ fn visible_binding<'s, 'i>(
 
     let root = ty.split('.').next().unwrap_or(ty);
     let Some(classes) = snapshot.lookup_candidates(root) else {
-        return Ok(None);
+        return Ok(best.map(|(_, binding)| binding));
     };
     for class in classes
         .iter()
-        .filter(|hit| hit.file_id == file && hit.symbol_type.is_some_and(is_type_scope))
+        .filter(|hit| hit.file_id == file && site.kind.accepts(hit))
     {
         let scope = class
             .qualified_name
@@ -128,7 +189,7 @@ fn visible_binding<'s, 'i>(
         let Some(depth) = site.depth(snapshot, file, scope) else {
             continue;
         };
-        let Some(position) = class_position(store, caches, &class.entity_id)? else {
+        let Some(position) = definition_position(store, caches, &class.entity_id)? else {
             continue;
         };
         if site.can_see(depth, position)
@@ -142,16 +203,18 @@ fn visible_binding<'s, 'i>(
     Ok(best.map(|(_, binding)| binding))
 }
 
-fn local_type<'a>(
+fn local_definition<'a>(
     snapshot: &'a ResolutionSnapshot,
     class: &'a NameIndexEntry,
     ty: &str,
+    kind: LookupKind,
 ) -> Option<&'a NameIndexEntry> {
     match ty.split_once('.') {
-        Some((_, suffix)) => type_in_file(
+        Some((_, suffix)) => definition_in_file(
             snapshot,
             class.file_id,
             &format!("{}::{}", class.qualified_name, suffix.replace('.', "::")),
+            kind,
         ),
         None => Some(class),
     }
@@ -159,12 +222,13 @@ fn local_type<'a>(
 
 /// Follow explicit package exports. Only a from-list can implicitly load its
 /// named child module; plain attribute access does not import a child.
-fn imported_type<'a>(
+fn imported_definition<'a>(
     store: &IndexStore,
     snapshot: &'a ResolutionSnapshot,
     path: &str,
     import: &ImportReference,
     name: &str,
+    kind: LookupKind,
     caches: &mut RuleCaches,
 ) -> crate::EngineResult<Option<&'a NameIndexEntry>> {
     let mut importer = path;
@@ -172,6 +236,7 @@ fn imported_type<'a>(
     let mut name = name.to_owned();
     let mut from_list = is_from_import(import);
     let mut seen = std::collections::HashSet::new();
+    let mut export_position = (usize::MAX, usize::MAX);
     // Bound long forwarding chains, including cycles that grow a dotted name.
     for _ in 0..16 {
         let target = import_target_file(snapshot, "python", importer, &specifier);
@@ -180,34 +245,55 @@ fn imported_type<'a>(
                 return Ok(None);
             };
             if !std::path::Path::new(target_path).ends_with("__init__.py") {
-                return Ok(type_in_file(snapshot, file, &name.replace('.', "::")));
+                return Ok(definition_in_file(
+                    snapshot,
+                    file,
+                    &name.replace('.', "::"),
+                    kind,
+                ));
             }
-            if !seen.insert((file, name.clone())) {
+            if !seen.insert((file, name.clone(), export_position)) {
                 return Ok(None);
             }
             let imports = caches.imports(store, file)?;
             let module = LookupSite {
                 scope: None,
-                position: (usize::MAX, usize::MAX),
-                eager: false,
+                position: export_position,
+                eager: true,
+                kind,
             };
             match visible_binding(store, snapshot, file, &name, &module, &imports, caches)? {
-                Some(Binding::Local(class)) => return Ok(local_type(snapshot, class, &name)),
+                Some(Binding::Local(class)) => {
+                    return Ok(local_definition(snapshot, class, &name, kind));
+                }
                 Some(Binding::Import(next, forwarded)) => {
                     let self_import =
                         import_target_file(snapshot, "python", target_path, &next.specifier)
-                            == Some(file)
-                            && forwarded == name;
+                            == Some(file);
                     importer = target_path;
                     specifier.clone_from(&next.specifier);
                     name = forwarded;
                     from_list = is_from_import(next);
-                    if !self_import {
-                        continue;
-                    }
+                    // A same-package alias captures the binding before this import.
+                    // If none exists there, the from-list may load the named child.
+                    export_position = if self_import {
+                        let (line, column) = next.position;
+                        if column == 0 {
+                            (line.saturating_sub(1) as usize, usize::MAX)
+                        } else {
+                            (line as usize, column as usize - 1)
+                        }
+                    } else {
+                        (usize::MAX, usize::MAX)
+                    };
+                    continue;
                 }
                 None => {}
             }
+        } else if !specifier.starts_with('.')
+            && let Some(hit) = definition_under_source_root(snapshot, &specifier, &name, kind)
+        {
+            return Ok(Some(hit));
         }
         if !from_list {
             return Ok(None);
@@ -220,19 +306,63 @@ fn imported_type<'a>(
         }
         specifier.push_str(child);
         name = rest.to_owned();
+        export_position = (usize::MAX, usize::MAX);
         from_list = false;
     }
     Ok(None)
 }
 
+/// A workspace may put its Python sources under an extra import root. When the
+/// root is unknown, both the declared name and its module path must still match.
+fn definition_under_source_root<'a>(
+    snapshot: &'a ResolutionSnapshot,
+    specifier: &str,
+    name: &str,
+    kind: LookupKind,
+) -> Option<&'a NameIndexEntry> {
+    let module = specifier.replace('.', "/");
+    let file = format!("{module}.py");
+    let init = format!("{module}/__init__.py");
+    let qualified = name.replace('.', "::");
+    let mut hits = snapshot
+        .lookup_candidates(name.rsplit('.').next()?)?
+        .iter()
+        .filter(|hit| {
+            hit.qualified_name == qualified
+                && kind.accepts(hit)
+                && snapshot.file_path(hit.file_id).is_some_and(|path| {
+                    let path = std::path::Path::new(path);
+                    path.ends_with(&file) || path.ends_with(&init)
+                })
+        });
+    let hit = hits.next()?;
+    hits.next().is_none().then_some(hit)
+}
+
 fn is_from_import(import: &ImportReference) -> bool {
-    import
-        .raw_text
-        .as_deref()
-        .is_some_and(|text| text.trim_start().starts_with("from "))
+    import.raw_text.as_deref().is_some_and(|text| {
+        text.trim_start()
+            .strip_prefix("from")
+            .is_some_and(|tail| tail.starts_with(char::is_whitespace) || tail.starts_with('\\'))
+    })
+}
+
+#[derive(Clone, Copy)]
+enum LookupKind {
+    Type,
+    Callable,
+}
+
+impl LookupKind {
+    fn accepts(self, hit: &NameIndexEntry) -> bool {
+        hit.symbol_type.is_some_and(|ty| {
+            is_type_scope(ty) || (matches!(self, Self::Callable) && ty == SymbolType::Function)
+        })
+    }
 }
 
 struct LookupSite<'a> {
+    kind: LookupKind,
     scope: Option<&'a str>,
     position: Position,
     eager: bool,
@@ -252,12 +382,16 @@ fn lookup_site<'a>(
             bindings.iter().rev().find(|binding| {
                 Some(binding.name.as_str()) == stored.reference.receiver_name.as_deref()
                     && binding.bound_type == ty
-                    && binding_holds_at(binding, stored.reference.line)
+                    && binding_holds_at_ref(binding, stored)
             })
         });
     let site = binding.map_or(
         (stored.reference.line, stored.reference.column),
-        |binding| (binding.line as usize, binding.column as usize),
+        |binding| {
+            binding
+                .type_origin
+                .unwrap_or((binding.line as usize, binding.column as usize))
+        },
     );
     // Constructors in function bodies and postponed annotations can use module
     // names bound after the function was defined. Function-local imports still
@@ -280,6 +414,7 @@ fn lookup_site<'a>(
         owner
     };
     LookupSite {
+        kind: LookupKind::Type,
         scope,
         position: site,
         eager,
@@ -298,7 +433,8 @@ impl LookupSite<'_> {
         let Some(scope) = scope else { return Some(0) };
         let suffix = self.scope?.strip_prefix(scope)?;
         if !suffix.is_empty()
-            && (!suffix.starts_with("::") || type_in_file(snapshot, file, scope).is_some())
+            && (!suffix.starts_with("::")
+                || definition_in_file(snapshot, file, scope, LookupKind::Type).is_some())
         {
             return None;
         }
@@ -310,31 +446,28 @@ impl LookupSite<'_> {
     }
 }
 
-fn type_in_file<'a>(
+fn definition_in_file<'a>(
     snapshot: &'a ResolutionSnapshot,
     file: u32,
     qualified: &str,
+    kind: LookupKind,
 ) -> Option<&'a NameIndexEntry> {
     let mut hits = snapshot
         .lookup_candidates(qualified.rsplit("::").next()?)?
         .iter()
-        .filter(|hit| {
-            hit.file_id == file
-                && hit.qualified_name == qualified
-                && hit.symbol_type.is_some_and(is_type_scope)
-        });
+        .filter(|hit| hit.file_id == file && hit.qualified_name == qualified && kind.accepts(hit));
     let hit = hits.next()?;
     hits.next().is_none().then_some(hit)
 }
 
-/// Class positions already live in canonical entities. Read each relevant
-/// local class once per sweep and retain only its source coordinates.
-fn class_position(
+/// Definition positions already live in canonical entities. Read each relevant
+/// local declaration once per sweep and retain only its source coordinates.
+fn definition_position(
     store: &IndexStore,
     caches: &mut RuleCaches,
     id: &str,
 ) -> crate::EngineResult<Option<Position>> {
-    if let Some(position) = caches.python_class_positions.get(id) {
+    if let Some(position) = caches.python_definition_positions.get(id) {
         return Ok(*position);
     }
     let entity_id = EntityId::from_string(id.to_owned());
@@ -343,13 +476,13 @@ fn class_position(
             .fetch_entities(std::slice::from_ref(&entity_id))?
             .get(&entity_id)
             .and_then(|entity| match entity.source_range() {
-                // Python binds the class name after its body finishes.
+                // A class or function statement binds its name when the definition finishes.
                 Range::Text(range) => Some((range.end_line(), range.end_byte_column())),
                 _ => None,
             }))
     })?;
     caches
-        .python_class_positions
+        .python_definition_positions
         .insert(id.to_owned(), position);
     Ok(position)
 }
@@ -359,7 +492,18 @@ fn class_position(
 /// well as its local alias before following a namespace-qualified annotation.
 fn imported_name(statement: &str, specifier: &str, ty: &str) -> Option<String> {
     let statement = without_line_comments(statement, "#");
-    let statement = statement.trim();
+    let normalized;
+    let statement = if statement.contains(['\\', '\n', '\r', '\t']) || statement.contains("  ") {
+        normalized = statement
+            .replace("\\\r\n", " ")
+            .replace("\\\n", " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        normalized.as_str()
+    } else {
+        statement.trim()
+    };
     if let Some(rest) = statement.strip_prefix("from ") {
         let (module, names) = rest.split_once(" import ")?;
         if module.trim() != specifier {

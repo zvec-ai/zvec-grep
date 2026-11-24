@@ -114,6 +114,8 @@ pub(crate) struct DeclaredBinding {
     pub bound_type: String,
     /// Original annotation spelling for Python parameters, including quotes.
     pub raw_text: Option<String>,
+    /// Type lookup position inherited from an earlier Python binding.
+    pub type_origin: Option<(usize, usize)>,
     /// One-based line of the declaring site; rebindings of the same name
     /// shadow earlier ones at later lines.
     pub line: u32,

@@ -283,7 +283,7 @@ struct RuleCaches {
     /// runs once per file per sweep.
     tu_macros: HashMap<u32, MacroTimeline>,
     import_references: HashMap<u32, Arc<[ImportReference]>>,
-    python_class_positions: HashMap<String, Option<(usize, usize)>>,
+    python_definition_positions: HashMap<String, Option<(usize, usize)>>,
     rust_types: rust_types::TypeCache,
     cpp_types: cpp_types::TypeCache,
     javascript_imports: HashMap<u32, Arc<[bindings::JavascriptImport]>>,
@@ -408,11 +408,8 @@ fn classify(
         // later bare-name resolution. Defer instead.
         return Ok(Outcome::Deferred);
     }
-    if let Some(resolution) = python_types::imported_constructor(store, snapshot, stored, caches)? {
-        return Ok(Outcome::Resolved {
-            resolution,
-            rule: Rule::ImportBound,
-        });
+    if let Some(outcome) = python_types::imported_call(store, snapshot, stored, caches)? {
+        return Ok(outcome);
     }
     if let Some(resolution) = resolve_alias_bound(store, snapshot, stored, caches)? {
         // An `as` alias never names an indexed symbol itself, so the bare-name
@@ -3031,7 +3028,7 @@ fn declared_receiver_type(
         };
         bindings
             .iter()
-            .filter(|binding| binding.name == receiver && binding_holds_at(binding, reference.line))
+            .filter(|binding| binding.name == receiver && binding_holds_at_ref(binding, stored))
             .map(|binding| binding.bound_type.clone())
             .next_back() // bindings are line-ordered; the latest earlier one shadows
     };
@@ -3306,6 +3303,15 @@ fn binding_holds_at(binding: &DeclaredBinding, line: usize) -> bool {
         Some(until) => usize::try_from(until).is_ok_and(|last| line <= last),
         None => true,
     }
+}
+
+/// A Python assignment takes effect after its right-hand expression, including
+/// when the read and the subsequent write share a source line.
+fn binding_holds_at_ref(binding: &DeclaredBinding, stored: &StoredPendingRef) -> bool {
+    binding_holds_at(binding, stored.reference.line)
+        && (stored.language != "python"
+            || (binding.line as usize, binding.column as usize)
+                <= (stored.reference.line, stored.reference.column))
 }
 
 /// The class scopes a body reads unqualified names from, in the order the
@@ -4937,6 +4943,7 @@ mod member_evidence_tests {
         DeclaredBinding {
             name: name.to_owned(),
             bound_type: bound_type.to_owned(),
+            type_origin: None,
             raw_text: None,
             line: 1,
             until: None,

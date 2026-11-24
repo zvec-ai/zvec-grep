@@ -251,6 +251,178 @@ def assigned():
 }
 
 #[tokio::test]
+async fn python_binding_sites_survive_imports_copies_and_rebindings() {
+    let files = vec![
+        SourceFile {
+            path: "a.py",
+            source: "class Index:\n    def run(self): pass\n",
+        },
+        SourceFile {
+            path: "pkg/sub.py",
+            source: "class Index:\n    def run(self): pass\ndef work(): pass\n",
+        },
+        SourceFile {
+            path: "pkg/__init__.py",
+            source: "from . import sub as api\nfrom .sub import Index\nclass sub: pass\n",
+        },
+        SourceFile {
+            path: "use.py",
+            source: r"from typing import Optional, Union
+from a import Index
+class Container:
+    from pkg import Index
+    def method(self, y: Index):
+        x = y
+        alias = x
+        return alias.run()
+def copied(y: Index):
+    from pkg import Index
+    x = y
+    return x.run()
+def sub(): pass
+def module_call():
+    from pkg import api as sub
+    return sub.Index()
+class Local: pass
+def local_import():
+    from pkg import Index as Local
+    return Local()
+def rebound(index: Index, values):
+    index, *meta = values
+    return index.run()
+def evaluated(index: Index):
+    index, rest = index.run()
+    return index.run()
+def loop(index: Index, values):
+    for index in values:
+        index.run()
+    return index.run()
+def multi(x: Optional['Later']): return x.run()
+def union(x: Union['Later', None]): return x.run()
+from pkg \
+    import (
+    Index
+    as Later,
+)
+def multiline(x: Later): return x.run()
+def via_function():
+    from pkg.sub import work
+    return work()
+",
+        },
+        SourceFile {
+            path: "order.py",
+            source: "class Index: pass\nfrom pkg import Index\ndef module_import(): return Index()\nfrom pkg import Index as Last\nclass Last: pass\ndef local_wins(): return Last()\n",
+        },
+    ];
+    let queries = [
+        ("Container::method", Some(("pkg/sub.py", "Index::run"))),
+        ("copied", Some(("a.py", "Index::run"))),
+        ("module_call", Some(("pkg/sub.py", "Index"))),
+        ("local_import", Some(("pkg/sub.py", "Index"))),
+        ("module_import", Some(("pkg/sub.py", "Index"))),
+        ("local_wins", Some(("order.py", "Last"))),
+        ("via_function", Some(("pkg/sub.py", "work"))),
+        ("multi", Some(("pkg/sub.py", "Index::run"))),
+        ("union", Some(("pkg/sub.py", "Index::run"))),
+        ("multiline", Some(("pkg/sub.py", "Index::run"))),
+        ("evaluated", Some(("a.py", "Index::run"))),
+        ("rebound", None),
+        ("loop", None),
+    ]
+    .map(|(symbol, target)| {
+        let edges: Vec<_> = target
+            .into_iter()
+            .map(|(path, name)| json!({"symbol":{"name":name,"filePath":path}}))
+            .collect();
+        Query {
+            operation: "callees",
+            symbol,
+            expected: json!([{"name":symbol,"edges":edges}]),
+            ..Query::default()
+        }
+    });
+    check_case(Case {
+        name: "python_binding_sites_survive_imports_copies_and_rebindings",
+        files,
+        queries: queries.into(),
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn python_missing_export_retries_when_the_defining_module_changes() {
+    let dir = tempfile::tempdir().expect("source workspace");
+    let root = dir.path().canonicalize().expect("canonical workspace path");
+    let server = EmbeddingServer::start().expect("mock embedding server");
+    configure_remote_model(&root, server.address).expect("embedding configuration");
+    fs::create_dir(root.join("pkg")).expect("fixture package");
+    fs::write(
+        root.join("pkg/__init__.py"),
+        "from .leaf import Foo as Public\nfrom cycle import Missing\n",
+    )
+    .expect("package exports");
+    fs::create_dir(root.join("cycle")).expect("cycle package");
+    fs::write(root.join("cycle/__init__.py"), "from pkg import Missing\n")
+        .expect("cyclic re-export");
+    fs::write(
+        root.join("other.py"),
+        "class Public: pass\nclass Missing: pass\n",
+    )
+    .expect("unrelated classes");
+    fs::write(root.join("consumer.py"), "from pkg import Public, Missing\ndef create(): return Public()\ndef missing(): return Missing()\n").expect("import consumer");
+    for (step, (source, present)) in [
+        ("# empty module\n", false),
+        ("class Foo: pass\n", true),
+        ("# removed\n", false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        fs::write(root.join("pkg/leaf.py"), source).expect("defining module");
+        for &rebuild in if step == 0 {
+            &[true][..]
+        } else {
+            &[false, true][..]
+        } {
+            let engine = ZvecGrep::new();
+            let mut options = index_options(&root);
+            options.graph_indexing = Some(true);
+            options.rebuild = rebuild;
+            if !options.rebuild {
+                options.changes = vec![WorkspaceChange::Upsert("pkg/leaf.py".into())];
+            }
+            let indexed = engine.index(options).await.expect("index workspace");
+            engine.close();
+            assert_eq!(indexed.files_failed, 0);
+            let edges: Vec<_> = present
+                .then(|| json!({"symbol":{"name":"Foo","filePath":"pkg/leaf.py"}}))
+                .into_iter()
+                .collect();
+            check_queries(
+                &root,
+                "missing export after leaf update",
+                vec![
+                    Query {
+                        operation: "callees",
+                        symbol: "create",
+                        expected: json!([{"name":"create","edges":edges}]),
+                        ..Query::default()
+                    },
+                    Query {
+                        operation: "callees",
+                        symbol: "missing",
+                        expected: json!([{"name":"missing","edges":[]}]),
+                        ..Query::default()
+                    },
+                ],
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn python_receiver_assignment_uses_the_last_recorded_binding() {
     check_case(Case {
         name: "python_receiver_assignment_uses_the_last_recorded_binding",

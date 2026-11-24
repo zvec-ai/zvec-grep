@@ -697,8 +697,17 @@ fn visit_for_bindings(
         } else if format == FileFormat::Python {
             let annotation = node
                 .child_by_field_name("type")
+                .and_then(|ty| python_annotation_leaf(ty, source))
                 .map(|annotation| node_text(annotation, source).to_owned());
-            add_python_receiver_binding(node, owner_index, &name, &bound_type, annotation, context);
+            add_python_receiver_binding(
+                node,
+                owner_index,
+                &name,
+                &bound_type,
+                annotation,
+                None,
+                context,
+            );
         } else {
             let until = binding_scope_end(node);
             context.add_declare_binding(owner_index, &name, &bound_type, line, column, until);
@@ -724,6 +733,7 @@ fn add_python_receiver_binding(
     name: &str,
     bound: &str,
     annotation: Option<String>,
+    origin: Option<(usize, usize)>,
     context: &mut WalkContext,
 ) {
     let start = node.start_position();
@@ -731,6 +741,7 @@ fn add_python_receiver_binding(
     if let Some(binding) = context.name_edges.last_mut() {
         binding.receiver_only = true;
         binding.raw_text = annotation;
+        binding.type_origin = origin;
     }
 }
 
@@ -745,15 +756,19 @@ fn collect_python_assignment(
     line: usize,
     column: usize,
 ) -> bool {
-    if format != FileFormat::Python || node.kind() != "assignment" {
+    if format != FileFormat::Python || !matches!(node.kind(), "assignment" | "for_statement") {
         return false;
     }
-    let Some(left) = node
-        .child_by_field_name("left")
-        .filter(|left| left.kind() == "identifier")
-    else {
+    let Some(left) = node.child_by_field_name("left") else {
         return false;
     };
+    if node.kind() == "for_statement" || left.kind() != "identifier" {
+        // A loop body can introduce further bindings, so keep walking it.
+        if let Some(right) = node.child_by_field_name("right") {
+            clear_python_target(left, right.end_position(), owner_index, source, context);
+        }
+        return false;
+    }
     let name = node_text(left, source);
     // `client: Left = …` states the type beside the name, whatever value
     // the body stores in it.
@@ -761,7 +776,7 @@ fn collect_python_assignment(
         .child_by_field_name("type")
         .and_then(|ty| python_annotation_name(ty, source))
     {
-        add_python_receiver_binding(node, owner_index, name, &bound, None, context);
+        add_python_receiver_binding(node, owner_index, name, &bound, None, None, context);
         return true;
     }
     // `client = clients[0]` states that the name no longer holds what the
@@ -778,17 +793,61 @@ fn collect_python_assignment(
         .child_by_field_name("right")
         .filter(|right| right.kind() == "identifier")
         .and_then(|right| {
-            context
-                .declared_type_at(owner_index, node_text(right, source), line, column)
-                .map(str::to_owned)
+            context.declared_binding_at(owner_index, node_text(right, source), line, column)
         })
-        .filter(|bound| !matches!(bound.as_str(), PYTHON_UNBOUND_TYPE | PYTHON_NONE_TYPE));
-    if let Some(bound) = copied {
-        add_python_receiver_binding(node, owner_index, name, &bound, None, context);
+        .and_then(|binding| {
+            let bound = binding.bound_type.as_deref()?;
+            (!matches!(bound, PYTHON_UNBOUND_TYPE | PYTHON_NONE_TYPE)).then(|| {
+                (
+                    bound.to_owned(),
+                    binding.raw_text.clone(),
+                    binding
+                        .type_origin
+                        .unwrap_or((binding.line, binding.column)),
+                )
+            })
+        });
+    if let Some((bound, annotation, origin)) = copied {
+        add_python_receiver_binding(
+            node,
+            owner_index,
+            name,
+            &bound,
+            annotation,
+            Some(origin),
+            context,
+        );
     } else {
         context.add_declare_binding(owner_index, name, PYTHON_UNBOUND_TYPE, line, column, None);
     }
     true
+}
+
+fn clear_python_target(
+    node: Node<'_>,
+    pos: tree_sitter::Point,
+    owner: usize,
+    source: &[u8],
+    context: &mut WalkContext,
+) {
+    match node.kind() {
+        "identifier" => {
+            context.add_declare_binding(
+                owner,
+                node_text(node, source),
+                PYTHON_UNBOUND_TYPE,
+                pos.row + 1,
+                pos.column,
+                None,
+            );
+        }
+        "pattern_list" | "tuple_pattern" | "list_pattern" | "list_splat_pattern" => {
+            for target in named_children(node) {
+                clear_python_target(target, pos, owner, source, context);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Records what a Python class's `self.<member> = <value>` assignments state
@@ -2555,25 +2614,30 @@ fn python_parameter_binding_of(node: Node<'_>, source: &[u8]) -> Option<(String,
 /// or an optional wrapper. A dotted name keeps its module qualifier for
 /// import resolution. A container such as `list[Node]` describes its elements.
 fn python_annotation_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let leaf = python_annotation_leaf(node, source)?;
+    Some(
+        node_text(leaf, source)
+            .trim_matches(['\'', '"'])
+            .trim()
+            .to_owned(),
+    )
+}
+
+fn python_annotation_leaf<'t>(node: Node<'t>, source: &[u8]) -> Option<Node<'t>> {
     match node.kind() {
         // An annotation is wrapped in a `type` node stating what it declares,
         // and a wrapper spells its shape the same way one level in: the
         // argument of `Optional[…]` and the first arm of a `Union[…]`.
-        "type" | "type_parameter" | "tuple" => python_annotation_name(node.named_child(0)?, source),
-        "identifier" => Some(node_text(node, source).to_owned()),
+        "type" | "type_parameter" | "tuple" => python_annotation_leaf(node.named_child(0)?, source),
+        "identifier" => Some(node),
         "attribute" | "dotted_name" => {
             let name = node_text(node, source);
-            name.split('.')
-                .all(is_plain_identifier)
-                .then(|| name.to_owned())
+            name.split('.').all(is_plain_identifier).then_some(node)
         }
         "string" => {
             let text = node_text(node, source);
             let unquoted = text.trim_matches(['"', '\'']).trim();
-            unquoted
-                .split('.')
-                .all(is_plain_identifier)
-                .then(|| unquoted.to_owned())
+            unquoted.split('.').all(is_plain_identifier).then_some(node)
         }
         // `Client | None` states the value's own type beside the absence of a
         // value, but `Left | Right` states two shapes a call may read through:
@@ -2599,7 +2663,11 @@ fn python_annotation_name(node: Node<'_>, source: &[u8]) -> Option<String> {
 /// The value type a wrapper stands for, when the wrapper holds one value:
 /// `Optional[Client]`, `Union[Client, None]` and `Annotated[Client, …]` all
 /// answer `Client`, while a container answers nothing.
-fn python_wrapped_annotation(wrapper: &str, argument: Node<'_>, source: &[u8]) -> Option<String> {
+fn python_wrapped_annotation<'t>(
+    wrapper: &str,
+    argument: Node<'t>,
+    source: &[u8],
+) -> Option<Node<'t>> {
     let wrapper = wrapper.rsplit('.').next().unwrap_or_default();
     if !matches!(wrapper, "Optional" | "Union" | "Annotated") {
         return None;
@@ -2614,7 +2682,7 @@ fn python_wrapped_annotation(wrapper: &str, argument: Node<'_>, source: &[u8]) -
         "Union" => python_agreed_arm_type(&arguments, source),
         _ => arguments
             .first()
-            .and_then(|first| python_annotation_name(*first, source)),
+            .and_then(|first| python_annotation_leaf(*first, source)),
     }
 }
 
@@ -2624,7 +2692,7 @@ fn python_wrapped_annotation(wrapper: &str, argument: Node<'_>, source: &[u8]) -
 /// the arms that name one must agree; `Left | Right` names two shapes a call
 /// may read through, and picking the arm the source happens to write first
 /// would make the graph depend on the order the annotation is spelled in.
-fn python_union_annotation(node: Node<'_>, source: &[u8]) -> Option<String> {
+fn python_union_annotation<'t>(node: Node<'t>, source: &[u8]) -> Option<Node<'t>> {
     let mut arms = Vec::new();
     python_union_arms(node, &mut arms);
     python_agreed_arm_type(&arms, source)
@@ -2632,8 +2700,8 @@ fn python_union_annotation(node: Node<'_>, source: &[u8]) -> Option<String> {
 
 /// The one type a set of union arms denotes: the arms that name a type must
 /// agree, and `None` states the absence of a value rather than a type.
-fn python_agreed_arm_type(arms: &[Node<'_>], source: &[u8]) -> Option<String> {
-    let mut inferred: Option<String> = None;
+fn python_agreed_arm_type<'t>(arms: &[Node<'t>], source: &[u8]) -> Option<Node<'t>> {
+    let mut inferred: Option<Node<'t>> = None;
     for arm in arms {
         // `None` states that the arm holds no value, not a type a call reaches.
         if python_none_annotation(*arm, source) {
@@ -2643,11 +2711,16 @@ fn python_agreed_arm_type(arms: &[Node<'_>], source: &[u8]) -> Option<String> {
         // is not evidence that the arms it can name are the only shapes the
         // value takes: the annotation stays undecided rather than shrinking to
         // the arms that happen to be spelled out.
-        let name = python_annotation_name(*arm, source)?;
-        match &inferred {
-            Some(previous) if previous != &name => return None,
-            Some(_) => {}
-            None => inferred = Some(name),
+        let leaf = python_annotation_leaf(*arm, source)?;
+        let spelling = |node| node_text(node, source).trim_matches(['\'', '"']).trim();
+        if let Some(previous) = inferred
+            && spelling(previous) != spelling(leaf)
+        {
+            return None;
+        }
+        // An unquoted arm must already exist when the annotation is evaluated.
+        if inferred.is_none() || leaf.kind() != "string" {
+            inferred = Some(leaf);
         }
     }
     inferred
@@ -3694,15 +3767,20 @@ pub(crate) fn collect_import_edge(
         return;
     }
     let owner = if format == FileFormat::Python {
+        let owner = context.current_scope_index().unwrap_or(FILE_SCOPE_INDEX);
         let mut cursor = node.walk();
         for entry in node.children_by_field_name("name", &mut cursor) {
             let local = entry.child_by_field_name("alias").unwrap_or(entry);
             // Plain `import a.b` binds the root package.
             if let Some(root) = node_text(local, source).split('.').next() {
-                context.python_import_names.insert(root.to_owned());
+                context
+                    .python_import_names
+                    .entry(root.to_owned())
+                    .or_default()
+                    .insert(owner);
             }
         }
-        context.current_scope_index().unwrap_or(FILE_SCOPE_INDEX)
+        owner
     } else {
         FILE_SCOPE_INDEX
     };

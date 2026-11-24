@@ -56,6 +56,7 @@ pub(crate) struct PendingNameRef {
     pub bound_until: Option<usize>,
     /// The call starts with an explicitly imported, lexically unshadowed Python name.
     pub python_import_call: bool,
+    pub type_origin: Option<(usize, usize)>,
     /// Exclusive end of a branch/loop-local binding, in source coordinates.
     pub scope_end: Option<(usize, usize)>,
     pub arity: Option<usize>,
@@ -210,23 +211,27 @@ pub(crate) fn partition_walk(
             }
         }
         let python_import_call = context.is_python_import_call(&edge, &enclosing);
-        let resolved_target = in_file_target(
-            &edge,
-            shadowed_at_site(
+        let resolved_target = if python_import_call {
+            InFileTarget::Pending
+        } else {
+            in_file_target(
                 &edge,
-                &enclosing,
-                &context.shadowed_names,
-                &context.borrowed_names,
-            ),
-            InFileTables {
-                symbols: &context.symbols,
-                rust: &context.rust_scopes,
-                file_symbols: &context.file_symbols,
-                aliases: &aliases,
-                value_aliases: &context.value_aliases,
-                enclosing: &enclosing,
-            },
-        );
+                shadowed_at_site(
+                    &edge,
+                    &enclosing,
+                    &context.shadowed_names,
+                    &context.borrowed_names,
+                ),
+                InFileTables {
+                    symbols: &context.symbols,
+                    rust: &context.rust_scopes,
+                    file_symbols: &context.file_symbols,
+                    aliases: &aliases,
+                    value_aliases: &context.value_aliases,
+                    enclosing: &enclosing,
+                },
+            )
+        };
         match resolved_target {
             InFileTarget::Bound(target_index) => partitioned.resolved.push(ResolvedNameEdge {
                 ref_kind: edge.ref_kind,
@@ -247,6 +252,7 @@ pub(crate) fn partition_walk(
                 receiver_name: edge.receiver_name,
                 raw_text: edge.raw_text,
                 python_import_call,
+                type_origin: edge.type_origin,
                 bound_type: edge.bound_type,
                 bound_until: edge.bound_until,
                 scope_end: edge.scope_end,
@@ -275,23 +281,31 @@ impl WalkContext {
         else {
             return false;
         };
-        if !self.python_import_names.contains(root) || self.file_symbols.contains_key(root) {
+        let Some(import_owners) = self.python_import_names.get(root) else {
             return false;
-        }
-        // A local or parameter in the caller or an enclosing function can
-        // shadow the module even when its runtime type is unknown.
-        !std::iter::successors(Some(edge.owner_index), |owner| {
+        };
+        for owner in std::iter::successors(Some(edge.owner_index), |owner| {
             enclosing.get(owner).copied()
-        })
-        .any(|owner| {
-            self.shadowed_names
+        }) {
+            if self
+                .shadowed_names
                 .get(&owner)
                 .is_some_and(|names| names.contains(root))
-                || self
-                    .scoped_symbols()
-                    .get(&owner)
-                    .is_some_and(|symbols| symbols.contains_key(root))
-        })
+            {
+                return false;
+            }
+            if import_owners.contains(&owner) {
+                return true;
+            }
+            if self
+                .scoped_symbols()
+                .get(&owner)
+                .is_some_and(|symbols| symbols.contains_key(root))
+            {
+                return false;
+            }
+        }
+        import_owners.contains(&super::FILE_SCOPE_INDEX)
     }
 }
 
